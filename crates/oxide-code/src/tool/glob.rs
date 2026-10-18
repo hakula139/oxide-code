@@ -10,13 +10,12 @@ use serde::Deserialize;
 use tokio_util::sync::CancellationToken;
 
 use super::{
-    Prepared, SearchRoot, Tool, ToolCtx, ToolMetadata, ToolOutput, ToolResultView, ToolSpec,
-    extract_input_field,
+    NO_FILES_FOUND, Prepared, SearchRoot, Tool, ToolCtx, ToolMetadata, ToolOutput, ToolResultView,
+    ToolSpec, extract_input_field,
 };
 use crate::permission::{PermissionClass, ReadFilter};
 use crate::util::text::plural;
 
-const NO_FILES_FOUND: &str = "No files found";
 const SHOWING_PREFIX: &str = "(Showing ";
 
 const MAX_RESULTS: usize = 100;
@@ -65,7 +64,7 @@ impl Tool for GlobTool {
         metadata: &ToolMetadata,
         _cwd: &Path,
     ) -> Option<ToolResultView> {
-        build_files_view(input, content, metadata)
+        parse_files_view(input, content, metadata)
     }
 
     fn run<'a>(
@@ -102,7 +101,6 @@ fn input_schema() -> serde_json::Value {
 #[derive(Deserialize)]
 struct Input {
     pattern: String,
-    #[serde(default)]
     path: Option<String>,
 }
 
@@ -112,32 +110,31 @@ async fn run(prepared: Prepared, ctx: &ToolCtx, read_filter: ReadFilter) -> Tool
     let Prepared { input: raw, access } = prepared;
     let input: Input = match super::parse_input(raw) {
         Ok(v) => v,
-        Err(e) => return e,
+        Err(msg) => return ToolOutput::error(msg),
     };
 
     let Input { pattern, path } = input;
 
     let workspace = Arc::clone(&ctx.workspace);
     let cancel = ctx.cancel.clone();
-    match tokio::task::spawn_blocking(move || {
+    match super::run_blocking(move || {
         let root = SearchRoot::new(&access, path.as_deref(), workspace)?;
         glob_files(&pattern, &root, &read_filter, &cancel)
     })
     .await
     {
-        Ok(Ok(GlobOutput {
+        Ok(GlobOutput {
             content,
             truncated_total,
-        })) => {
-            let title = glob_title(super::strip_withheld_note(&content));
+        }) => {
+            let title = glob_title(super::strip_search_notes(&content));
             let output = ToolOutput::success(content).with_title(title);
             match truncated_total {
                 Some(total) => output.with_truncated_total(total),
                 None => output,
             }
         }
-        Ok(Err(msg)) => ToolOutput::error(msg),
-        Err(e) => ToolOutput::error(format!("Internal error: {e}")),
+        Err(msg) => ToolOutput::error(msg),
     }
 }
 
@@ -158,8 +155,9 @@ struct GlobOutput {
 }
 
 /// Walks `root`, filters entries against `pattern`, and returns up to `MAX_RESULTS` matches sorted
-/// newest-first by mtime, rendered relative to the root's canonical cwd. Matches `read_filter`
-/// withholds are counted in a trailing note, and the walk stops once `cancel` fires.
+/// newest-first by mtime, rendered relative to the root's canonical cwd. Trailing notes list the
+/// paths the walk could not read and count the matches and unreadable paths `read_filter`
+/// withholds. The walk stops once `cancel` fires.
 ///
 /// `walk_files` skips files matched by `.gitignore` or a global ignore file, so only non-ignored
 /// files reach the matcher. Truncation past `MAX_RESULTS` is announced inline and surfaced
@@ -186,8 +184,9 @@ fn glob_files(
     let glob = compile_glob(pattern)?;
 
     let read_filter = read_filter.walk(base, spelled, workspace);
+    let mut unreadable = Vec::new();
     let mut withheld = 0;
-    let mut matches: Vec<(String, std::time::SystemTime)> = super::walk_files(base, cancel)
+    let entries = super::walk_files(base, cancel, &mut unreadable)
         .filter(|entry| {
             let rel = entry.path().strip_prefix(base).unwrap_or(entry.path());
             glob.is_match(rel)
@@ -196,40 +195,29 @@ fn glob_files(
             let held = read_filter.withholds(entry.path());
             withheld += usize::from(held);
             !held
-        })
-        .map(|entry| {
-            let mtime = super::entry_mtime(&entry);
-            (super::display_path(entry.path(), cwd), mtime)
-        })
-        .collect();
-
-    matches.sort_by_key(|entry| std::cmp::Reverse(entry.1));
-
-    if matches.is_empty() {
-        let mut content = NO_FILES_FOUND.to_owned();
-        super::push_withheld_note(&mut content, withheld);
-        return Ok(GlobOutput {
-            content,
-            truncated_total: None,
         });
-    }
+    let mut matches: Vec<String> = super::newest_first(entries)
+        .iter()
+        .map(|entry| super::display_path(entry.path(), cwd))
+        .collect();
+    withheld += super::withhold_unreadable(&mut unreadable, &read_filter);
 
     let total = matches.len();
     let truncated = total > MAX_RESULTS;
     matches.truncate(MAX_RESULTS);
 
-    let mut content = matches
-        .iter()
-        .map(|(path, _)| path.as_str())
-        .collect::<Vec<_>>()
-        .join("\n");
-
+    let mut content = if matches.is_empty() {
+        NO_FILES_FOUND.to_owned()
+    } else {
+        matches.join("\n")
+    };
     if truncated {
         _ = write!(
             content,
             "\n\n{SHOWING_PREFIX}{MAX_RESULTS} of {total} matches. Use a more specific pattern.)"
         );
     }
+    super::push_unreadable_note(&mut content, &unreadable, cwd);
     super::push_withheld_note(&mut content, withheld);
 
     Ok(GlobOutput {
@@ -263,7 +251,7 @@ fn compile_glob(pattern: &str) -> Result<globset::GlobMatcher, String> {
 
 // ── Result View ──
 
-fn build_files_view(
+fn parse_files_view(
     input: &serde_json::Value,
     content: &str,
     metadata: &ToolMetadata,
@@ -517,13 +505,12 @@ mod tests {
     #[test]
     fn glob_files_modification_time_orders_newest_first() {
         let dir = canonical_tempdir();
-
-        std::fs::write(dir.path().join("old.txt"), "old").unwrap();
-        std::thread::sleep(std::time::Duration::from_millis(50));
-        std::fs::write(dir.path().join("new.txt"), "new").unwrap();
+        testing::create_modified_at(&dir.path().join("a.txt"), 1_000_000);
+        testing::create_modified_at(&dir.path().join("b.txt"), 1_000_060);
 
         let result = glob_in("*.txt", None, dir.path(), &ReadFilter::default()).unwrap();
-        assert_eq!(result.content, "new.txt\nold.txt");
+
+        assert_eq!(result.content, "b.txt\na.txt");
     }
 
     #[test]
@@ -562,7 +549,8 @@ mod tests {
         let dir = canonical_tempdir();
         let err =
             glob_in("*.txt", Some("missing"), dir.path(), &ReadFilter::default()).unwrap_err();
-        assert!(err.starts_with("Cannot access missing: "), "{err}");
+        let cause = std::fs::metadata(dir.path().join("missing")).unwrap_err();
+        assert_eq!(err, format!("Failed to access missing: {cause}"));
 
         std::fs::write(dir.path().join("a.txt"), "").unwrap();
         let err = glob_in("*.txt", Some("a.txt"), dir.path(), &ReadFilter::default()).unwrap_err();
@@ -610,7 +598,7 @@ mod tests {
         );
         assert_eq!(result.truncated_total, None);
         assert_eq!(
-            glob_title(crate::tool::strip_withheld_note(&result.content)),
+            glob_title(crate::tool::strip_search_notes(&result.content)),
             "Found 1 file"
         );
         // The structured view would drop the note, so the text view shows it.
@@ -627,6 +615,60 @@ mod tests {
             result.content,
             indoc! {"
                 No files found
+
+                (1 file withheld by read deny or ask rules)"
+            }
+        );
+    }
+
+    #[test]
+    fn glob_files_lists_a_directory_it_could_not_read_after_the_matches() {
+        let dir = canonical_tempdir();
+        std::fs::write(dir.path().join("a.rs"), "").unwrap();
+        let locked = dir.path().join("locked");
+        std::fs::create_dir(&locked).unwrap();
+        std::fs::write(locked.join("b.rs"), "").unwrap();
+        let _denied = testing::deny_read_access(&locked);
+
+        let result = glob_in("*.rs", None, dir.path(), &ReadFilter::default()).unwrap();
+
+        let cause = std::fs::read_dir(&locked).unwrap_err();
+        assert_eq!(
+            result.content,
+            formatdoc! {"
+                a.rs
+
+                Could not read:
+                  locked: {cause}"
+            }
+        );
+        assert_eq!(
+            glob_title(crate::tool::strip_search_notes(&result.content)),
+            "Found 1 file"
+        );
+        let view = GlobTool::default().result_view(
+            &serde_json::json!({"pattern": "*.rs"}),
+            &result.content,
+            &ToolMetadata::default(),
+            Path::new("/repo"),
+        );
+        assert_eq!(view, None);
+    }
+
+    #[test]
+    fn glob_files_withholds_an_unreadable_directory_a_read_deny_rule_matches() {
+        let dir = canonical_tempdir();
+        std::fs::write(dir.path().join("a.rs"), "").unwrap();
+        let secrets = dir.path().join("secrets");
+        std::fs::create_dir(&secrets).unwrap();
+        let _denied = testing::deny_read_access(&secrets);
+
+        let result = glob_in("*.rs", None, dir.path(), &deny_reads(&["secrets"])).unwrap();
+
+        assert_eq!(
+            result.content,
+            indoc! {"
+                a.rs
 
                 (1 file withheld by read deny or ask rules)"
             }
@@ -859,7 +901,7 @@ mod tests {
 
     #[test]
     fn result_view_path_with_embedded_blank_line_falls_back() {
-        let view = build_files_view(
+        let view = parse_files_view(
             &serde_json::json!({"pattern": "*.rs"}),
             indoc! {"
                 weird

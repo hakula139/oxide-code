@@ -59,7 +59,7 @@ impl Tool for ReadTool {
         cwd: &Path,
     ) -> Option<ToolResultView> {
         let path = display_path(Path::new(extract_input_field(input, "file_path")?), cwd);
-        read_excerpt_view(path, content)
+        parse_excerpt_view(path, content)
     }
 
     fn run<'a>(
@@ -97,9 +97,7 @@ fn input_schema() -> serde_json::Value {
 #[derive(Deserialize)]
 struct Input {
     file_path: String,
-    #[serde(default)]
     offset: Option<usize>,
-    #[serde(default)]
     limit: Option<usize>,
 }
 
@@ -108,7 +106,7 @@ struct Input {
 async fn run(raw: serde_json::Value, ctx: &ToolCtx) -> ToolOutput {
     let input: Input = match super::parse_input(raw) {
         Ok(v) => v,
-        Err(e) => return e,
+        Err(msg) => return ToolOutput::error(msg),
     };
 
     match read_file(&input.file_path, input.offset, input.limit, ctx).await {
@@ -125,8 +123,7 @@ async fn run(raw: serde_json::Value, ctx: &ToolCtx) -> ToolOutput {
 /// with a NUL byte in the first 8 KiB. A leading UTF-8 BOM is stripped before line splitting.
 ///
 /// The excerpt stops after `limit` lines or before `OUTPUT_BUDGET` bytes, and its footer names the
-/// lines shown. Those lines are recorded with the context's
-/// [`FileTracker`](crate::file_tracker::FileTracker) for the Read-before-Edit gate. A relative
+/// lines shown. The context's tracker records those lines for the Read-before-Edit gate. A relative
 /// `path` resolves against the context's cwd.
 async fn read_file(
     path: &str,
@@ -156,7 +153,7 @@ async fn read_file(
     if total_lines == 0 {
         let outcome = ctx
             .tracker
-            .record_read(&key, &bytes, LastView::Full, &ctx.call_id);
+            .record_read(&key, &bytes, LastView::Full, &ctx.tool_use_id);
         return Ok(stub_or(outcome, EMPTY_FILE_MARKER).to_owned());
     }
 
@@ -198,8 +195,14 @@ async fn read_file(
     }
 
     let view = LastView::lines(offset_n, last_shown, total_lines);
-    let outcome = ctx.tracker.record_read(&key, &bytes, view, &ctx.call_id);
+    let outcome = ctx
+        .tracker
+        .record_read(&key, &bytes, view, &ctx.tool_use_id);
     Ok(stub_or(outcome, &output).to_owned())
+}
+
+fn strip_bom(text: &str) -> &str {
+    text.strip_prefix('\u{feff}').unwrap_or(text)
 }
 
 fn stub_or(outcome: RecordRead, body: &str) -> &str {
@@ -209,9 +212,9 @@ fn stub_or(outcome: RecordRead, body: &str) -> &str {
     }
 }
 
-// ── Formatting ──
+// ── Result View ──
 
-fn read_excerpt_view(path: String, content: &str) -> Option<ToolResultView> {
+fn parse_excerpt_view(path: String, content: &str) -> Option<ToolResultView> {
     if content.trim() == EMPTY_FILE_MARKER {
         return Some(ToolResultView::ReadExcerpt {
             path,
@@ -254,10 +257,6 @@ fn parse_read_line(line: &str) -> Option<ReadExcerptLine> {
 fn parse_total_lines_footer(footer: &str) -> Option<usize> {
     let (_, total) = footer.split_once(" of ")?;
     total.strip_suffix(" total)")?.parse().ok()
-}
-
-fn strip_bom(text: &str) -> &str {
-    text.strip_prefix('\u{feff}').unwrap_or(text)
 }
 
 #[cfg(test)]
@@ -585,10 +584,12 @@ mod tests {
 
     #[tokio::test]
     async fn read_file_missing_file_reports_error() {
-        let err = read_file("/nonexistent/path.txt", None, None, &temp_ctx())
-            .await
-            .unwrap_err();
-        assert!(err.contains("Error reading"));
+        let path = "/nonexistent/path.txt";
+
+        let err = read_file(path, None, None, &temp_ctx()).await.unwrap_err();
+
+        let cause = std::fs::metadata(path).unwrap_err();
+        assert_eq!(err, format!("Failed to access {path}: {cause}"));
     }
 
     #[tokio::test]
@@ -671,6 +672,18 @@ mod tests {
             .await
             .unwrap_err();
         assert!(!err.contains("SECRET"), "{err}");
+    }
+
+    // ── strip_bom ──
+
+    #[test]
+    fn strip_bom_removes_bom() {
+        assert_eq!(strip_bom("\u{feff}hello"), "hello");
+    }
+
+    #[test]
+    fn strip_bom_no_bom_unchanged() {
+        assert_eq!(strip_bom("hello"), "hello");
     }
 
     // ── result_view ──
@@ -792,17 +805,5 @@ mod tests {
                 )
                 .is_none()
         );
-    }
-
-    // ── strip_bom ──
-
-    #[test]
-    fn strip_bom_removes_bom() {
-        assert_eq!(strip_bom("\u{feff}hello"), "hello");
-    }
-
-    #[test]
-    fn strip_bom_no_bom_unchanged() {
-        assert_eq!(strip_bom("hello"), "hello");
     }
 }

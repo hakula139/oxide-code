@@ -10,6 +10,7 @@ pub(crate) mod tasks;
 pub(crate) mod write;
 
 use std::borrow::Cow;
+use std::cmp::Reverse;
 use std::fmt::Write as _;
 use std::future::Future;
 use std::path::{Path, PathBuf};
@@ -24,7 +25,7 @@ use tokio_util::sync::CancellationToken;
 
 use self::tasks::Task;
 use crate::file_tracker::{FileTracker, TrackableFileError, validate_trackable_file};
-use crate::permission::{Access, PermissionClass, Workspace};
+use crate::permission::{Access, PermissionClass, WalkFilter, Workspace};
 use crate::util::path::{lexical_normalize, slash_separated};
 use crate::util::text::{ELLIPSIS, plural};
 
@@ -70,15 +71,15 @@ pub(crate) struct ToolCtx {
     pub(crate) workspace: Arc<Workspace>,
     pub(crate) session_id: String,
     pub(crate) tracker: Arc<FileTracker>,
-    /// The tool-use ID the model gave the call, which the tracker attributes the call's records to.
-    pub(crate) call_id: String,
+    /// The ID the model gave the call, which the tracker attributes the call's records to.
+    pub(crate) tool_use_id: String,
     /// Cancelled when the user interrupts the call, so work its dropped future leaves behind, such
     /// as a blocking file walk, stops early.
     pub(crate) cancel: CancellationToken,
 }
 
 impl ToolCtx {
-    pub(crate) fn cwd(&self) -> &Path {
+    fn cwd(&self) -> &Path {
         self.workspace.cwd()
     }
 }
@@ -141,18 +142,18 @@ impl ToolOutput {
         self
     }
 
-    pub(crate) fn with_diff_chunks(mut self, chunks: Vec<DiffChunk>) -> Self {
+    fn with_diff_chunks(mut self, chunks: Vec<DiffChunk>) -> Self {
         self.metadata.diff_chunks = Some(chunks);
         self
     }
 
     /// Records the unbounded match count for a truncated result.
-    pub(crate) fn with_truncated_total(mut self, total: usize) -> Self {
+    fn with_truncated_total(mut self, total: usize) -> Self {
         self.metadata.truncated_total = Some(total);
         self
     }
 
-    pub(crate) fn with_tasks(mut self, tasks: Vec<Task>) -> Self {
+    fn with_tasks(mut self, tasks: Vec<Task>) -> Self {
         self.tasks = Some(tasks);
         self
     }
@@ -322,17 +323,17 @@ pub(crate) trait Tool: Send + Sync {
 
     /// Builds the approval modal's preview of the prepared `input`: the tool name over the
     /// [`Self::summarize_call`] label by default, a diff for edit and write, or `Bash (background)`
-    /// over a background command.
-    fn approval_preview(
-        &self,
-        name: &str,
-        input: &serde_json::Value,
-        cwd: &Path,
-    ) -> ApprovalPreview {
-        ApprovalPreview {
+    /// over a background command. Async because the write preview reads the file it would replace.
+    fn approval_preview<'a>(
+        &'a self,
+        name: &'a str,
+        input: &'a serde_json::Value,
+        cwd: &'a Path,
+    ) -> Pin<Box<dyn Future<Output = ApprovalPreview> + Send + 'a>> {
+        Box::pin(std::future::ready(ApprovalPreview {
             title: pascal_case(name),
             body: ApprovalBody::Command(self.summarize_call(name, input, cwd)),
-        }
+        }))
     }
 
     /// Executes the prepared call. A user cancel can drop the future at any await and cancels
@@ -348,7 +349,7 @@ pub(crate) trait Tool: Send + Sync {
 
 pub(crate) const DEFAULT_TOOL_ICON: &str = "⟡";
 
-pub(crate) fn extract_input_field<'a>(input: &'a serde_json::Value, key: &str) -> Option<&'a str> {
+fn extract_input_field<'a>(input: &'a serde_json::Value, key: &str) -> Option<&'a str> {
     input.get(key).and_then(serde_json::Value::as_str)
 }
 
@@ -437,7 +438,7 @@ impl ToolRegistry {
 
 // ── Output Cap ──
 
-pub(crate) const MAX_OUTPUT_BYTES: usize = 128 * 1024;
+const MAX_OUTPUT_BYTES: usize = 128 * 1024;
 
 const TRUNCATION_OVERHEAD: usize = 80;
 
@@ -455,13 +456,11 @@ pub(crate) async fn run_capped(tool: &dyn Tool, prepared: Prepared, ctx: &ToolCt
 }
 
 /// Trims `content` to fit under [`MAX_OUTPUT_BYTES`], keeping the head and tail and replacing the
-/// middle with a `[N bytes truncated]` marker.
+/// middle with a `... [N bytes truncated, head + tail kept] ...` marker.
 ///
 /// Returns `(content, original_len)`, where `original_len` is `Some` only when truncation fired so
 /// the caller can record the pre-cap size. Skips truncation when the omitted slice is smaller than
 /// the marker, which would otherwise grow the output.
-/// Char-boundary floors keep the returned `String` valid UTF-8 even when the cap lands inside a
-/// multibyte sequence.
 fn cap_output(content: String) -> (String, Option<usize>) {
     if content.len() <= MAX_OUTPUT_BYTES {
         return (content, None);
@@ -491,14 +490,9 @@ fn cap_output(content: String) -> (String, Option<usize>) {
 // ── Input Parsing ──
 
 /// Deserializes a tool's typed input from the raw JSON the agent loop hands us. On failure returns
-/// an "Invalid input: ..." error [`ToolOutput`] that callers hand back to the model as-is.
-#[expect(
-    clippy::result_large_err,
-    reason = "ToolOutput carries the full tool result, \
-              but the Err here is the cold input-validation path, built at most once per tool call"
-)]
-pub(crate) fn parse_input<T: DeserializeOwned>(raw: serde_json::Value) -> Result<T, ToolOutput> {
-    serde_json::from_value(raw).map_err(|e| ToolOutput::error(invalid_input(&e)))
+/// the "Invalid input: ..." message the model reads.
+fn parse_input<T: DeserializeOwned>(raw: serde_json::Value) -> Result<T, String> {
+    serde_json::from_value(raw).map_err(|e| invalid_input(&e))
 }
 
 fn invalid_input(error: &serde_json::Error) -> String {
@@ -535,13 +529,13 @@ impl SearchRoot {
         let spelled = PathBuf::from(path.unwrap_or("."));
         let Some(base) = access.resolved() else {
             return Err(format!(
-                "Cannot access {}: the search root was not resolved.",
+                "Failed to access {}: the search root was not resolved.",
                 display_path(&spelled, cwd)
             ));
         };
         if let Err(e) = std::fs::metadata(&base) {
             return Err(format!(
-                "Cannot access {}: {e}",
+                "Failed to access {}: {e}",
                 display_path(&cwd.join(&spelled), cwd)
             ));
         }
@@ -590,7 +584,7 @@ fn summarize_path_call(
 /// Strips `base` if it's a prefix. When `path == base` the relative path is empty, so this returns
 /// the file name (`foo.rs`). Paths outside `base` render as their full string. Either form is
 /// [`slash_separated`], and lossy UTF-8 conversion is fine since the result is display-only.
-pub(crate) fn display_path(path: &Path, base: &Path) -> String {
+fn display_path(path: &Path, base: &Path) -> String {
     let shown = match path.strip_prefix(base) {
         Ok(rel) if rel.as_os_str().is_empty() => path.file_name().map_or(path, Path::new),
         Ok(rel) => rel,
@@ -602,7 +596,7 @@ pub(crate) fn display_path(path: &Path, base: &Path) -> String {
 /// Returns the trailing filename component, falling back to the input string when no component
 /// can be extracted (root path, non-UTF-8 component). The fallback is what makes this safe to
 /// call on user-supplied path strings.
-pub(crate) fn file_name(path: &str) -> &str {
+fn file_name(path: &str) -> &str {
     Path::new(path)
         .file_name()
         .and_then(|n| n.to_str())
@@ -611,9 +605,9 @@ pub(crate) fn file_name(path: &str) -> &str {
 
 // ── File Target Validation ──
 
-/// Rejects targets the [`FileTracker`](crate::file_tracker::FileTracker) cannot gate, phrasing each
-/// refusal for `verb` (`read`, `edit`, `write`).
-pub(crate) fn validate_file_target(
+/// Rejects targets the [`FileTracker`] cannot gate, phrasing each refusal for `verb` (`read`,
+/// `edit`, `write`).
+fn validate_file_target(
     path: &str,
     metadata: &std::fs::Metadata,
     verb: &str,
@@ -643,7 +637,7 @@ const BINARY_CHECK_SIZE: usize = 8192;
 
 /// Heuristic: a NUL byte in the first 8 KiB marks the file as binary. Git uses the same rule, and
 /// it is cheap enough to run before every text-mode read.
-pub(crate) fn is_binary(bytes: &[u8]) -> bool {
+fn is_binary(bytes: &[u8]) -> bool {
     bytes.iter().take(BINARY_CHECK_SIZE).any(|&b| b == 0)
 }
 
@@ -658,9 +652,12 @@ async fn read_validated(
     shown: &str,
     validate: impl Fn(&std::fs::Metadata) -> Result<(), String>,
 ) -> Result<(std::fs::Metadata, Vec<u8>), String> {
-    let error = |e: std::io::Error| format!("Error reading {shown}: {e}");
-    validate(&tokio::fs::metadata(path).await.map_err(error)?)?;
+    let metadata = tokio::fs::metadata(path)
+        .await
+        .map_err(|e| format!("Failed to access {shown}: {e}"))?;
+    validate(&metadata)?;
 
+    let error = |e: std::io::Error| format!("Failed to read {shown}: {e}");
     let mut options = std::fs::OpenOptions::new();
     options.read(true);
     let mut file = open_no_follow(path, options).await.map_err(error)?;
@@ -707,7 +704,7 @@ async fn write_tracked(
 ) -> std::io::Result<()> {
     let path = path.to_owned();
     ctx.tracker
-        .write_and_record(&ctx.call_id, async move {
+        .write_and_record(&ctx.tool_use_id, async move {
             write_no_follow(&path, &bytes, mode).await?;
             Ok((tracker_key(&path).await, bytes))
         })
@@ -793,7 +790,8 @@ const MAX_WALK_DEPTH: usize = 64;
 
 const VCS_DIRS: &[&str] = &[".bzr", ".git", ".hg", ".jj", ".sl", ".svn"];
 
-/// Recursively walks `base`, yielding regular files only, until `cancel` fires.
+/// Recursively walks `base`, yielding regular files only, until `cancel` fires. Each path the walk
+/// cannot read goes to `unreadable`.
 ///
 /// Honors `.gitignore` and global ignore files, includes hidden entries such as `.github/` so
 /// dotfile config stays searchable, skips VCS metadata directories below `base`, and pins the walk
@@ -801,6 +799,7 @@ const VCS_DIRS: &[&str] = &[".bzr", ".git", ".hg", ".jj", ".sl", ".svn"];
 fn walk_files<'a>(
     base: &Path,
     cancel: &'a CancellationToken,
+    unreadable: &'a mut Vec<Unreadable>,
 ) -> impl Iterator<Item = ignore::DirEntry> + 'a {
     ignore::WalkBuilder::new(base)
         .hidden(false)
@@ -809,21 +808,98 @@ fn walk_files<'a>(
         .max_depth(Some(MAX_WALK_DEPTH))
         .build()
         .take_while(|_| !cancel.is_cancelled())
-        .filter_map(Result::ok)
+        .filter_map(move |entry| match entry {
+            Ok(entry) => Some(entry),
+            Err(e) => {
+                unreadable.extend(Unreadable::from_walk(&e));
+                None
+            }
+        })
         .filter(|e| e.file_type().is_some_and(|ft| ft.is_file()))
 }
 
-/// Reads the entry's modification time for sorting / display.
-///
-/// Falls back to [`SystemTime::UNIX_EPOCH`] when stat fails (entry vanished, permission denied,
-/// platform without mtime). Callers use the result only for ordering, where the epoch sorts
-/// unreadable entries oldest.
-pub(crate) fn entry_mtime(entry: &ignore::DirEntry) -> SystemTime {
+/// A path a search could not read, with the error that stopped it.
+#[cfg_attr(test, derive(Debug, PartialEq, Eq))]
+struct Unreadable {
+    /// The path, unless the walk failed partway through a directory listing without naming it.
+    path: Option<PathBuf>,
+    error: String,
+}
+
+impl Unreadable {
+    /// What walk error `e` failed to read, or `None` when `e` hides nothing from the walk. An ignore
+    /// file that failed to load only loses its rules, and a path that vanished mid-walk holds
+    /// nothing left to search.
+    fn from_walk(e: &ignore::Error) -> Option<Self> {
+        e.depth()?;
+        let (path, cause) = match e {
+            ignore::Error::WithPath { path, err } => (Some(path.clone()), err.as_ref()),
+            _ => (None, e),
+        };
+        let error = match cause.io_error() {
+            Some(io) if io.kind() == std::io::ErrorKind::NotFound => return None,
+            Some(io) => innermost_error(io),
+            None => cause.to_string(),
+        };
+        Some(Self { path, error })
+    }
+
+    /// The file at `path`, whose read failed with `e`.
+    fn from_read(path: &Path, e: &std::io::Error) -> Self {
+        Self {
+            path: Some(path.to_owned()),
+            error: innermost_error(e),
+        }
+    }
+}
+
+/// The text of the error at the bottom of `e`'s source chain, without the context wrapping it.
+fn innermost_error(e: &std::io::Error) -> String {
+    let mut error: &dyn std::error::Error = e;
+    while let Some(source) = error.source() {
+        error = source;
+    }
+    error.to_string()
+}
+
+/// Drops each path in `unreadable` that `read_filter` withholds, so a note never names one, and
+/// returns how many it dropped.
+fn withhold_unreadable(unreadable: &mut Vec<Unreadable>, read_filter: &WalkFilter<'_>) -> usize {
+    let found = unreadable.len();
+    unreadable.retain(|u| {
+        u.path
+            .as_deref()
+            .is_none_or(|path| !read_filter.withholds(path))
+    });
+    found - unreadable.len()
+}
+
+/// `entries` sorted newest first by modification time, keeping walk order among equal times.
+fn newest_first(entries: impl Iterator<Item = ignore::DirEntry>) -> Vec<ignore::DirEntry> {
+    let mut entries: Vec<_> = entries.collect();
+    entries.sort_by_cached_key(|entry| Reverse(entry_mtime(entry)));
+    entries
+}
+
+/// The entry's modification time, or [`SystemTime::UNIX_EPOCH`] when stat fails (entry vanished,
+/// permission denied, platform without mtime), which sorts unreadable entries oldest.
+fn entry_mtime(entry: &ignore::DirEntry) -> SystemTime {
     entry
         .metadata()
         .ok()
         .and_then(|m| m.modified().ok())
         .unwrap_or(SystemTime::UNIX_EPOCH)
+}
+
+// ── Blocking Work ──
+
+/// Runs `work` on the blocking thread pool, reporting a panic that ends it as an error.
+async fn run_blocking<T: Send + 'static>(
+    work: impl FnOnce() -> Result<T, String> + Send + 'static,
+) -> Result<T, String> {
+    tokio::task::spawn_blocking(work)
+        .await
+        .unwrap_or_else(|e| Err(format!("Internal error: {e}")))
 }
 
 // ── Formatting ──
@@ -832,13 +908,13 @@ pub(crate) fn entry_mtime(entry: &ignore::DirEntry) -> SystemTime {
     clippy::cast_precision_loss,
     reason = "MB display loses precision only above 2^53 bytes, far beyond any file size cap"
 )]
-pub(crate) fn bytes_to_mb(bytes: u64) -> f64 {
+fn bytes_to_mb(bytes: u64) -> f64 {
     bytes as f64 / (1024.0 * 1024.0)
 }
 
 /// Caps a line at `max_chars` characters, appending `... [N chars]` with the original length so the
 /// model can decide whether to read more. Borrows when the line already fits.
-pub(crate) fn truncate_line(line: &str, max_chars: usize) -> Cow<'_, str> {
+fn truncate_line(line: &str, max_chars: usize) -> Cow<'_, str> {
     if line.len() <= max_chars {
         return Cow::Borrowed(line);
     }
@@ -856,11 +932,47 @@ pub(crate) fn truncate_line(line: &str, max_chars: usize) -> Cow<'_, str> {
     ))
 }
 
+const NO_FILES_FOUND: &str = "No files found";
+
+/// Most paths a search note names before it counts the rest.
+const MAX_NOTE_PATHS: usize = 10;
+
+/// Appends a search note listing `lines` under `header`. It names at most [`MAX_NOTE_PATHS`] and
+/// counts the rest, so a tree full of failures cannot flood the result.
+fn push_path_note(content: &mut String, header: &str, lines: &[String]) {
+    if lines.is_empty() {
+        return;
+    }
+    _ = write!(content, "\n\n{header}");
+    for line in lines.iter().take(MAX_NOTE_PATHS) {
+        _ = write!(content, "\n  {line}");
+    }
+    if lines.len() > MAX_NOTE_PATHS {
+        let more = lines.len() - MAX_NOTE_PATHS;
+        _ = write!(content, "\n  {ELLIPSIS} and {more} more");
+    }
+}
+
+const UNREADABLE_HEADER: &str = "Could not read:";
+
+/// Appends the note a search tool adds for the paths in `unreadable`, so a search that missed them
+/// does not pass for a complete one. Paths render relative to `cwd`.
+fn push_unreadable_note(content: &mut String, unreadable: &[Unreadable], cwd: &Path) {
+    let lines: Vec<String> = unreadable
+        .iter()
+        .map(|Unreadable { path, error }| match path {
+            Some(path) => format!("{}: {error}", display_path(path, cwd)),
+            None => error.clone(),
+        })
+        .collect();
+    push_path_note(content, UNREADABLE_HEADER, &lines);
+}
+
 const WITHHELD_NOTE_END: &str = "withheld by read deny or ask rules)";
 
 /// Appends the note a search tool adds when read deny or ask rules withheld `count` of the files
 /// it found. The note counts them without naming any.
-pub(crate) fn push_withheld_note(content: &mut String, count: usize) {
+fn push_withheld_note(content: &mut String, count: usize) {
     if count == 0 {
         return;
     }
@@ -868,10 +980,15 @@ pub(crate) fn push_withheld_note(content: &mut String, count: usize) {
     _ = write!(content, "\n\n({count} {word} {WITHHELD_NOTE_END}");
 }
 
-/// `content` without the note [`push_withheld_note`] appended, for parsing the rest.
-pub(crate) fn strip_withheld_note(content: &str) -> &str {
-    match content.rsplit_once("\n\n") {
+/// `content` without the notes [`push_unreadable_note`] and [`push_withheld_note`] appended, for
+/// parsing the rest.
+fn strip_search_notes(content: &str) -> &str {
+    let content = match content.rsplit_once("\n\n") {
         Some((rest, note)) if note.starts_with('(') && note.ends_with(WITHHELD_NOTE_END) => rest,
+        _ => content,
+    };
+    match content.rsplit_once("\n\n") {
+        Some((rest, note)) if note.starts_with(UNREADABLE_HEADER) => rest,
         _ => content,
     }
 }
@@ -882,6 +999,7 @@ pub(crate) fn strip_withheld_note(content: &str) -> &str {
 pub(crate) mod testing {
     use std::path::{Path, PathBuf};
     use std::sync::Arc;
+    use std::time::{Duration, SystemTime};
 
     use tempfile::TempDir;
     use tokio_util::sync::CancellationToken;
@@ -907,7 +1025,7 @@ pub(crate) mod testing {
             workspace: Arc::new(Workspace::new(cwd)),
             session_id: "test-session".to_owned(),
             tracker,
-            call_id: "toolu_test".to_owned(),
+            tool_use_id: "toolu_test".to_owned(),
             cancel: CancellationToken::new(),
         }
     }
@@ -976,6 +1094,81 @@ pub(crate) mod testing {
         #[cfg(windows)]
         std::os::windows::fs::symlink_file(target, link).unwrap();
     }
+
+    /// Creates an empty file at `path`, last modified `secs` seconds after the Unix epoch.
+    pub(crate) fn create_modified_at(path: &Path, secs: u64) {
+        let file = std::fs::File::create(path).unwrap();
+        file.set_modified(SystemTime::UNIX_EPOCH + Duration::from_secs(secs))
+            .unwrap();
+    }
+
+    /// Denies reading the file or directory at `path` until the returned guard drops, which
+    /// restores access so the temp dir can be removed.
+    pub(crate) fn deny_read_access(path: &Path) -> ReadDenied {
+        #[cfg(unix)]
+        let mode = {
+            use std::os::unix::fs::PermissionsExt as _;
+
+            let mode = std::fs::metadata(path).unwrap().permissions().mode();
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o000)).unwrap();
+            mode
+        };
+        // `(RD)` is the right to read a file's data or list a directory.
+        #[cfg(windows)]
+        icacls(path, &["/deny", format!("{EVERYONE}:(RD)").as_str()]);
+        let denied = ReadDenied {
+            path: path.to_owned(),
+            #[cfg(unix)]
+            mode,
+        };
+
+        let readable = if path.is_dir() {
+            std::fs::read_dir(path).is_ok()
+        } else {
+            std::fs::File::open(path).is_ok()
+        };
+        assert!(!readable, "{} stayed readable", path.display());
+        denied
+    }
+
+    /// Read access denied by [`deny_read_access`], restored on drop.
+    pub(crate) struct ReadDenied {
+        path: PathBuf,
+        #[cfg(unix)]
+        mode: u32,
+    }
+
+    impl Drop for ReadDenied {
+        fn drop(&mut self) {
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt as _;
+
+                std::fs::set_permissions(&self.path, std::fs::Permissions::from_mode(self.mode))
+                    .unwrap();
+            }
+            #[cfg(windows)]
+            icacls(&self.path, &["/remove:d", EVERYONE]);
+        }
+    }
+
+    /// The well-known SID of Everyone. A deny entry for it binds the file's owner too.
+    #[cfg(windows)]
+    const EVERYONE: &str = "*S-1-1-0";
+
+    #[cfg(windows)]
+    fn icacls(path: &Path, args: &[&str]) {
+        let output = std::process::Command::new("icacls")
+            .arg(path)
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stdout)
+        );
+    }
 }
 
 #[cfg(test)]
@@ -991,7 +1184,10 @@ mod tests {
     use super::grep::GrepTool;
     use super::read::ReadTool;
     use super::tasks::TasksTool;
-    use super::testing::{canonical_tempdir, ctx, search_root, symlink_file, temp_ctx};
+    use super::testing::{
+        canonical_tempdir, create_modified_at, ctx, deny_read_access, deny_reads, search_root,
+        symlink_file, temp_ctx,
+    };
     use super::write::WriteTool;
     use super::*;
     use crate::permission::rule::Rule;
@@ -1365,13 +1561,15 @@ mod tests {
 
     // ── Tool::approval_preview ──
 
-    #[test]
-    fn approval_preview_default_titles_with_the_tool_name() {
-        let preview = GlobTool::default().approval_preview(
-            "glob",
-            &serde_json::json!({"pattern": "*.rs"}),
-            Path::new("/repo"),
-        );
+    #[tokio::test]
+    async fn approval_preview_default_titles_with_the_tool_name() {
+        let preview = GlobTool::default()
+            .approval_preview(
+                "glob",
+                &serde_json::json!({"pattern": "*.rs"}),
+                Path::new("/repo"),
+            )
+            .await;
         assert_eq!(preview.title, "Glob");
         assert_eq!(preview.body, ApprovalBody::Command("Glob(*.rs)".to_owned()));
     }
@@ -1834,8 +2032,11 @@ mod tests {
     #[test]
     fn search_root_missing_path_is_named_relative_to_cwd() {
         let dir = canonical_tempdir();
+
         let err = search_root(dir.path(), Some("missing")).err().unwrap();
-        assert!(err.starts_with("Cannot access missing: "), "{err}");
+
+        let cause = std::fs::metadata(dir.path().join("missing")).unwrap_err();
+        assert_eq!(err, format!("Failed to access missing: {cause}"));
     }
 
     #[test]
@@ -1844,7 +2045,10 @@ mod tests {
         let err = SearchRoot::new(&Access::None, Some("src"), workspace)
             .err()
             .unwrap();
-        assert_eq!(err, "Cannot access src: the search root was not resolved.");
+        assert_eq!(
+            err,
+            "Failed to access src: the search root was not resolved."
+        );
     }
 
     // ── tracker_key ──
@@ -1938,12 +2142,11 @@ mod tests {
             (8, b"original".as_slice())
         );
         let err = read_validated(&link, "link.txt", accept).await.unwrap_err();
-        assert!(err.starts_with("Error reading link.txt: "), "{err}");
+        #[cfg(unix)]
+        let cause = std::io::Error::from_raw_os_error(nix::errno::Errno::ELOOP as i32);
         #[cfg(windows)]
-        assert!(
-            err.ends_with("the final path component is a symlink"),
-            "{err}"
-        );
+        let cause = "the final path component is a symlink";
+        assert_eq!(err, format!("Failed to read link.txt: {cause}"));
     }
 
     #[cfg(unix)]
@@ -2058,16 +2261,18 @@ mod tests {
         let path = dir.path().join("notes.txt");
         let content = "a compressible line\n".repeat(4096);
         std::fs::write(&path, &content).unwrap();
-        // `compact /EXE` stores the data compressed behind the WOF filter. Skip where the volume
-        // cannot compress.
-        let compacted = std::process::Command::new("compact.exe")
+        // `compact /EXE` stores the data compressed behind the WOF filter, which hides the file's
+        // reparse point from user mode, so the no-follow open keeps its first handle.
+        let compact = std::process::Command::new("compact.exe")
             .args(["/C", "/EXE:XPRESS4K"])
             .arg(&path)
             .output()
-            .is_ok_and(|output| output.status.success());
-        if !compacted {
-            return;
-        }
+            .unwrap();
+        assert!(
+            compact.status.success(),
+            "{}",
+            String::from_utf8_lossy(&compact.stdout)
+        );
 
         let accept = |_: &std::fs::Metadata| Ok(());
         let (_, bytes) = read_validated(&path, "notes.txt", accept).await.unwrap();
@@ -2087,13 +2292,145 @@ mod tests {
             std::fs::write(dir.path().join(name), "").unwrap();
         }
         let cancel = CancellationToken::new();
-        let mut walk = walk_files(dir.path(), &cancel);
+        let mut unreadable = Vec::new();
+        let mut walk = walk_files(dir.path(), &cancel, &mut unreadable);
 
         let first = walk.next();
         cancel.cancel();
 
         assert!(first.is_some(), "an uncancelled walk yields files");
         assert_eq!(walk.count(), 0, "the walk stops at the cancel");
+    }
+
+    #[test]
+    fn walk_files_records_a_directory_it_cannot_read_and_walks_on() {
+        let dir = canonical_tempdir();
+        let readable = dir.path().join("a.txt");
+        std::fs::write(&readable, "").unwrap();
+        let locked = dir.path().join("locked");
+        std::fs::create_dir(&locked).unwrap();
+        std::fs::write(locked.join("b.txt"), "").unwrap();
+        let _denied = deny_read_access(&locked);
+        let mut unreadable = Vec::new();
+
+        let files: Vec<_> = walk_files(dir.path(), &CancellationToken::new(), &mut unreadable)
+            .map(ignore::DirEntry::into_path)
+            .collect();
+
+        let cause = std::fs::read_dir(&locked).unwrap_err().to_string();
+        assert_eq!(files, [readable]);
+        assert_eq!(
+            unreadable,
+            [Unreadable {
+                path: Some(locked),
+                error: cause,
+            }]
+        );
+    }
+
+    // ── Unreadable::from_walk ──
+
+    #[test]
+    fn unreadable_from_walk_keeps_only_errors_that_hide_files() {
+        let denied = || ignore::Error::Io(std::io::Error::other("denied"));
+        let at_depth = |err| ignore::Error::WithDepth {
+            depth: 1,
+            err: Box::new(err),
+        };
+        let cases = [
+            (
+                ignore::Error::WithPath {
+                    path: "locked".into(),
+                    err: Box::new(at_depth(denied())),
+                },
+                Some((Some("locked"), "denied")),
+            ),
+            (at_depth(denied()), Some((None, "denied"))),
+            (
+                ignore::Error::WithPath {
+                    path: "gone".into(),
+                    err: Box::new(at_depth(ignore::Error::Io(
+                        std::io::ErrorKind::NotFound.into(),
+                    ))),
+                },
+                None,
+            ),
+            (
+                ignore::Error::WithPath {
+                    path: ".gitignore".into(),
+                    err: Box::new(denied()),
+                },
+                None,
+            ),
+            (ignore::Error::Partial(vec![denied(), denied()]), None),
+        ];
+
+        for (e, expected) in cases {
+            let expected = expected.map(|(path, error): (Option<&str>, &str)| Unreadable {
+                path: path.map(PathBuf::from),
+                error: error.to_owned(),
+            });
+            assert_eq!(Unreadable::from_walk(&e), expected, "{e}");
+        }
+    }
+
+    // ── withhold_unreadable ──
+
+    #[test]
+    fn withhold_unreadable_drops_and_counts_only_the_paths_the_filter_withholds() {
+        let dir = canonical_tempdir();
+        let root = search_root(dir.path(), None).unwrap();
+        let read_filter = deny_reads(&["secrets"]);
+        let read_filter = read_filter.walk(&root.base, &root.spelled, &root.workspace);
+        let at = |path: Option<&str>| Unreadable {
+            path: path.map(|path| dir.path().join(path)),
+            error: "denied".to_owned(),
+        };
+        let mut unreadable = vec![at(Some("secrets")), at(Some("src")), at(None)];
+
+        let withheld = withhold_unreadable(&mut unreadable, &read_filter);
+
+        assert_eq!(withheld, 1);
+        assert_eq!(unreadable, [at(Some("src")), at(None)]);
+    }
+
+    // ── newest_first ──
+
+    #[test]
+    fn newest_first_orders_by_mtime_and_keeps_input_order_among_ties() {
+        let dir = canonical_tempdir();
+        for (name, secs) in [
+            ("a.txt", 1_000_000),
+            ("b.txt", 1_000_060),
+            ("c.txt", 1_000_000),
+        ] {
+            create_modified_at(&dir.path().join(name), secs);
+        }
+        let mut unreadable = Vec::new();
+        let mut entries: Vec<_> =
+            walk_files(dir.path(), &CancellationToken::new(), &mut unreadable).collect();
+        entries.sort_by_key(|entry| Reverse(entry.file_name().to_owned()));
+
+        let sorted = newest_first(entries.into_iter());
+
+        let names: Vec<_> = sorted
+            .iter()
+            .map(|entry| entry.file_name().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(names, ["b.txt", "c.txt", "a.txt"]);
+    }
+
+    // ── run_blocking ──
+
+    #[tokio::test]
+    async fn run_blocking_reports_a_panic_as_an_internal_error() {
+        let err = run_blocking(|| -> Result<(), String> { panic!("boom") })
+            .await
+            .unwrap_err();
+
+        let (task, message) = err.split_once(" panicked ").unwrap();
+        assert!(task.starts_with("Internal error: task "), "{err}");
+        assert_eq!(message, "with message \"boom\"");
     }
 
     // ── truncate_line ──
@@ -2155,7 +2492,7 @@ mod tests {
                     {note}"
                 }
             );
-            assert_eq!(strip_withheld_note(&content), "a.rs");
+            assert_eq!(strip_search_notes(&content), "a.rs");
         }
 
         let mut content = "a.rs".to_owned();
@@ -2163,10 +2500,97 @@ mod tests {
         assert_eq!(content, "a.rs");
     }
 
-    // ── strip_withheld_note ──
+    // ── push_path_note ──
 
     #[test]
-    fn strip_withheld_note_keeps_content_without_one() {
+    fn push_path_note_names_up_to_the_cap_and_counts_the_rest() {
+        let lines: Vec<String> = (1..=13).map(|i| format!("{i}.rs")).collect();
+        let listed = indoc! {"
+            a.rs
+
+            Header:
+              1.rs
+              2.rs
+              3.rs
+              4.rs
+              5.rs
+              6.rs
+              7.rs
+              8.rs
+              9.rs
+              10.rs"
+        };
+        for (count, expected) in [
+            (10, listed.to_owned()),
+            (13, format!("{listed}\n  ... and 3 more")),
+        ] {
+            let mut content = "a.rs".to_owned();
+
+            push_path_note(&mut content, "Header:", &lines[..count]);
+
+            assert_eq!(content, expected);
+        }
+
+        let mut content = "a.rs".to_owned();
+        push_path_note(&mut content, "Header:", &[]);
+        assert_eq!(content, "a.rs");
+    }
+
+    // ── push_unreadable_note ──
+
+    #[test]
+    fn push_unreadable_note_names_each_path_relative_to_the_cwd() {
+        let cwd = Path::new("/repo");
+        let unreadable = [
+            Unreadable {
+                path: Some(cwd.join("locked")),
+                error: "Permission denied (os error 13)".to_owned(),
+            },
+            Unreadable {
+                path: None,
+                error: "Input/output error (os error 5)".to_owned(),
+            },
+        ];
+        let mut content = "a.rs".to_owned();
+
+        push_unreadable_note(&mut content, &unreadable, cwd);
+
+        assert_eq!(
+            content,
+            indoc! {"
+                a.rs
+
+                Could not read:
+                  locked: Permission denied (os error 13)
+                  Input/output error (os error 5)"
+            }
+        );
+        assert_eq!(strip_search_notes(&content), "a.rs");
+    }
+
+    // ── strip_search_notes ──
+
+    #[test]
+    fn strip_search_notes_strips_both_notes_and_keeps_other_sections() {
+        let notes = indoc! {"
+            a.rs
+
+            (Showing 100 of 120 matches. Use a more specific pattern.)
+
+            Could not read:
+              locked: Permission denied (os error 13)
+
+            (1 file withheld by read deny or ask rules)"
+        };
+        assert_eq!(
+            strip_search_notes(notes),
+            indoc! {"
+                a.rs
+
+                (Showing 100 of 120 matches. Use a more specific pattern.)"
+            }
+        );
+
         for content in [
             "a.rs",
             indoc! {"
@@ -2175,7 +2599,7 @@ mod tests {
                 (Showing 100 of 120 matches. Use a more specific pattern.)"
             },
         ] {
-            assert_eq!(strip_withheld_note(content), content);
+            assert_eq!(strip_search_notes(content), content);
         }
     }
 }

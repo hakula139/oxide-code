@@ -49,20 +49,23 @@ impl Tool for WriteTool {
         summarize_path_call(name, input, "file_path", cwd)
     }
 
-    fn approval_preview(
-        &self,
-        name: &str,
-        input: &serde_json::Value,
-        cwd: &Path,
-    ) -> ApprovalPreview {
-        let content = extract_input_field(input, "content").unwrap_or_default();
-        let current = extract_input_field(input, "file_path")
-            .map(|path| current_text(&cwd.join(path), path))
-            .unwrap_or_default();
-        ApprovalPreview {
-            title: self.summarize_call(name, input, cwd),
-            body: ApprovalBody::Diff(vec![super::edit::synthesize_chunk(&current, content)]),
-        }
+    fn approval_preview<'a>(
+        &'a self,
+        name: &'a str,
+        input: &'a serde_json::Value,
+        cwd: &'a Path,
+    ) -> Pin<Box<dyn Future<Output = ApprovalPreview> + Send + 'a>> {
+        Box::pin(async move {
+            let content = extract_input_field(input, "content").unwrap_or_default();
+            let current = match extract_input_field(input, "file_path") {
+                Some(path) => current_text(&cwd.join(path), path).await,
+                None => String::new(),
+            };
+            ApprovalPreview {
+                title: self.summarize_call(name, input, cwd),
+                body: ApprovalBody::Diff(vec![super::edit::synthesize_chunk(&current, content)]),
+            }
+        })
     }
 
     fn run<'a>(
@@ -76,13 +79,9 @@ impl Tool for WriteTool {
 
 /// The text an overwrite of `path`, spelled `shown`, would replace. A missing file, or one the
 /// write refuses (a symlink, a non-regular or oversized file), previews as empty.
-fn current_text(path: &Path, shown: &str) -> String {
-    let writable = std::fs::symlink_metadata(path)
-        .is_ok_and(|meta| validate_write_target(shown, &meta).is_ok());
-    if !writable {
-        return String::new();
-    }
-    std::fs::read(path)
+async fn current_text(path: &Path, shown: &str) -> String {
+    read_target(path, shown)
+        .await
         .map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
         .unwrap_or_default()
 }
@@ -117,29 +116,29 @@ struct Input {
 async fn run(raw: serde_json::Value, ctx: &ToolCtx) -> ToolOutput {
     let input: Input = match super::parse_input(raw) {
         Ok(v) => v,
-        Err(e) => return e,
+        Err(msg) => return ToolOutput::error(msg),
     };
 
-    match write_file(&input.file_path, &input.content, ctx).await {
-        Ok((content, is_new)) => {
-            let verb = if is_new { "Created" } else { "Updated" };
-            ToolOutput::success(content)
-                .with_title(format!("{verb} {}", super::file_name(&input.file_path)))
-        }
+    let path = &input.file_path;
+    let name = super::file_name(path);
+    match write_file(path, &input.content, ctx).await {
+        Ok(WriteMode::CreateNew) => ToolOutput::success(format!("Successfully created {path}."))
+            .with_title(format!("Created {name}")),
+        Ok(WriteMode::Overwrite) => ToolOutput::success(format!("Successfully updated {path}."))
+            .with_title(format!("Updated {name}")),
         Err(msg) => ToolOutput::error(msg),
     }
 }
 
-/// Returns `(message, is_new)` on success, where `is_new` means the write created the file. A
-/// relative `path` resolves against the context's cwd.
-async fn write_file(path: &str, content: &str, ctx: &ToolCtx) -> Result<(String, bool), String> {
+/// Returns whether the write created the file or overwrote it. A relative `path` resolves against
+/// the context's cwd.
+async fn write_file(path: &str, content: &str, ctx: &ToolCtx) -> Result<WriteMode, String> {
     let file_path = ctx.cwd().join(path);
     let pre_meta = match tokio::fs::symlink_metadata(&file_path).await {
         Ok(meta) => Some(meta),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
-        Err(e) => return Err(format!("Error reading {path}: {e}")),
+        Err(e) => return Err(format!("Failed to access {path}: {e}")),
     };
-    let is_new = pre_meta.is_none();
 
     if let Some(meta) = &pre_meta {
         validate_write_target(path, meta)?;
@@ -152,25 +151,19 @@ async fn write_file(path: &str, content: &str, ctx: &ToolCtx) -> Result<(String,
             .map_err(|e| format!("Failed to create directory {}: {e}", parent.display()))?;
     }
 
-    let mode = if is_new {
-        WriteMode::CreateNew
-    } else {
+    let mode = if pre_meta.is_some() {
         WriteMode::Overwrite
+    } else {
+        WriteMode::CreateNew
     };
     super::write_tracked(ctx, &file_path, content.as_bytes().to_vec(), mode)
         .await
-        .map_err(|e| format!("Failed to write file: {e}"))?;
-
-    let msg = if is_new {
-        format!("Successfully created {path}.")
-    } else {
-        format!("Successfully updated {path}.")
-    };
-    Ok((msg, is_new))
+        .map_err(|e| format!("Failed to write {path}: {e}"))?;
+    Ok(mode)
 }
 
-/// Validates the un-followed `metadata` of an existing target. The gate pinned the path to its
-/// resolved location, so a symlink here appeared afterward and is refused.
+/// Validates an existing target's `metadata`. The gate pinned the path to its resolved location,
+/// so a symlink there appeared afterward and is refused.
 fn validate_write_target(path: &str, metadata: &std::fs::Metadata) -> Result<(), String> {
     if metadata.file_type().is_symlink() {
         return Err(format!(
@@ -181,13 +174,20 @@ fn validate_write_target(path: &str, metadata: &std::fs::Metadata) -> Result<(),
 }
 
 async fn check_gate(path: &Path, shown: &str, tracker: &FileTracker) -> Result<(), String> {
-    let bytes = tokio::fs::read(path)
-        .await
-        .map_err(|e| format!("Error reading {shown}: {e}"))?;
+    let bytes = read_target(path, shown).await?;
     tracker
         .verify_current_content(&super::tracker_key(path).await, &bytes, GatePurpose::Write)
-        .map_err(|e| e.to_string())?;
-    Ok(())
+        .map_err(|e| e.to_string())
+}
+
+/// Reads the existing target `path`, spelled `shown`. The no-follow open refuses a symlink, and
+/// [`validate_write_target`] refuses a non-regular or oversized file.
+async fn read_target(path: &Path, shown: &str) -> Result<Vec<u8>, String> {
+    let (_, bytes) = super::read_validated(path, shown, |metadata| {
+        validate_write_target(shown, metadata)
+    })
+    .await?;
+    Ok(bytes)
 }
 
 #[cfg(test)]
@@ -197,78 +197,95 @@ mod tests {
     use crate::file_tracker::testing::seed_full_read;
     use crate::tool::read::ReadTool;
     use crate::tool::testing::{self, canonical_tempdir, ctx, symlink_file, temp_ctx};
+    use crate::tool::{DiffChunk, DiffLine};
+
+    // ── Fixtures ──
+
+    fn added_line(text: &str) -> ApprovalBody {
+        ApprovalBody::Diff(vec![DiffChunk {
+            old: Vec::new(),
+            new: vec![DiffLine {
+                number: 1,
+                text: text.to_owned(),
+            }],
+        }])
+    }
 
     // ── approval_preview ──
 
-    #[test]
-    fn approval_preview_renders_content_as_an_all_added_diff() {
-        let tool = WriteTool;
-        let preview = tool.approval_preview(
-            "write",
-            &serde_json::json!({
-                "file_path": "/repo/src/new.rs",
-                "content": "fn main() {}",
-            }),
-            Path::new("/repo"),
-        );
+    #[tokio::test]
+    async fn approval_preview_renders_a_new_file_as_an_all_added_diff() {
+        let input = serde_json::json!({
+            "file_path": "/repo/src/new.rs",
+            "content": "fn main() {}",
+        });
+
+        let preview = WriteTool
+            .approval_preview("write", &input, Path::new("/repo"))
+            .await;
 
         assert_eq!(preview.title, "Write(src/new.rs)");
-        let ApprovalBody::Diff(chunks) = preview.body else {
-            panic!("write preview should be a diff");
-        };
-        let chunk = &chunks[0];
-        assert!(chunk.old.is_empty(), "a new file has no removed lines");
-        assert!(chunk.new.iter().any(|l| l.text.contains("fn main() {}")));
+        assert_eq!(preview.body, added_line("fn main() {}"));
     }
 
-    #[test]
-    fn approval_preview_diffs_an_overwrite_against_the_current_content() {
-        let dir = tempfile::tempdir().unwrap();
+    #[tokio::test]
+    async fn approval_preview_without_a_file_path_renders_the_content_as_added() {
+        let input = serde_json::json!({"content": "fn main() {}"});
+
+        let preview = WriteTool
+            .approval_preview("write", &input, Path::new("/repo"))
+            .await;
+
+        assert_eq!(preview.title, "Write");
+        assert_eq!(preview.body, added_line("fn main() {}"));
+    }
+
+    #[tokio::test]
+    async fn approval_preview_diffs_an_overwrite_against_the_current_content() {
+        let dir = canonical_tempdir();
         let path = dir.path().join("notes.txt");
         std::fs::write(&path, "keep\nold line\n").unwrap();
-        let tool = WriteTool;
+        let input = serde_json::json!({
+            "file_path": path,
+            "content": "keep\nnew line\n",
+        });
 
-        let preview = tool.approval_preview(
-            "write",
-            &serde_json::json!({
-                "file_path": path,
-                "content": "keep\nnew line\n",
-            }),
-            dir.path(),
+        let preview = WriteTool
+            .approval_preview("write", &input, dir.path())
+            .await;
+
+        assert_eq!(
+            preview.body,
+            ApprovalBody::Diff(vec![DiffChunk {
+                old: vec![DiffLine {
+                    number: 2,
+                    text: "old line".to_owned(),
+                }],
+                new: vec![DiffLine {
+                    number: 2,
+                    text: "new line".to_owned(),
+                }],
+            }]),
         );
-        let ApprovalBody::Diff(chunks) = preview.body else {
-            panic!("write preview should be a diff");
-        };
-        let removed: Vec<_> = chunks[0].old.iter().map(|l| l.text.as_str()).collect();
-        let added: Vec<_> = chunks[0].new.iter().map(|l| l.text.as_str()).collect();
-        assert_eq!(removed, ["old line"]);
-        assert_eq!(added, ["new line"]);
     }
 
-    #[test]
-    fn approval_preview_does_not_read_through_a_symlink() {
-        let dir = tempfile::tempdir().unwrap();
+    #[tokio::test]
+    async fn approval_preview_does_not_read_through_a_symlink() {
+        let dir = canonical_tempdir();
         let secret = dir.path().join("secret.txt");
         std::fs::write(&secret, "token").unwrap();
         let link = dir.path().join("link.txt");
         symlink_file(&secret, &link);
-        let tool = WriteTool;
+        let input = serde_json::json!({
+            "file_path": link,
+            "content": "new",
+        });
 
-        let preview = tool.approval_preview(
-            "write",
-            &serde_json::json!({
-                "file_path": link,
-                "content": "new",
-            }),
-            dir.path(),
-        );
-        let ApprovalBody::Diff(chunks) = preview.body else {
-            panic!("write preview should be a diff");
-        };
-        assert!(
-            chunks[0].old.is_empty(),
-            "a refused target previews as empty"
-        );
+        let preview = WriteTool
+            .approval_preview("write", &input, dir.path())
+            .await;
+
+        assert_eq!(preview.body, added_line("new"));
     }
 
     // ── run ──
@@ -286,7 +303,10 @@ mod tests {
         let output = testing::run(&WriteTool, input, &ctx(dir.path())).await;
 
         assert!(!output.is_error);
-        assert!(output.content.contains("created"));
+        assert_eq!(
+            output.content,
+            format!("Successfully created {}.", path.display())
+        );
         assert_eq!(output.metadata.title.as_deref(), Some("Created new.txt"));
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "hello world");
     }
@@ -300,7 +320,6 @@ mod tests {
 
     #[tokio::test]
     async fn run_overwrites_existing_file_uses_updated_verb() {
-        // Pins the `Updated` arm. `run_creates_file` covers `Created`.
         let dir = canonical_tempdir();
         let path = dir.path().join("existing.txt");
         std::fs::write(&path, "old").unwrap();
@@ -317,6 +336,10 @@ mod tests {
         .await;
 
         assert!(!output.is_error);
+        assert_eq!(
+            output.content,
+            format!("Successfully updated {}.", path.display())
+        );
         assert_eq!(
             output.metadata.title.as_deref(),
             Some("Updated existing.txt"),
@@ -354,11 +377,11 @@ mod tests {
         let dir = canonical_tempdir();
         let path = dir.path().join("new.txt");
 
-        let (msg, is_new) = write_file(path.to_str().unwrap(), "content", &temp_ctx())
+        let mode = write_file(path.to_str().unwrap(), "content", &temp_ctx())
             .await
             .unwrap();
-        assert!(msg.contains("created"));
-        assert!(is_new);
+
+        assert_eq!(mode, WriteMode::CreateNew);
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "content");
     }
 
@@ -367,10 +390,9 @@ mod tests {
         let dir = canonical_tempdir();
         let ctx = ctx(dir.path());
 
-        let (msg, is_new) = write_file("notes/new.txt", "content", &ctx).await.unwrap();
+        let mode = write_file("notes/new.txt", "content", &ctx).await.unwrap();
 
-        assert_eq!(msg, "Successfully created notes/new.txt.");
-        assert!(is_new);
+        assert_eq!(mode, WriteMode::CreateNew);
         let path = dir.path().join("notes/new.txt");
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "content");
         assert_eq!(
@@ -405,11 +427,11 @@ mod tests {
         let ctx = temp_ctx();
         seed_full_read(&ctx.tracker, &path);
 
-        let (msg, is_new) = write_file(path.to_str().unwrap(), "new content", &ctx)
+        let mode = write_file(path.to_str().unwrap(), "new content", &ctx)
             .await
             .unwrap();
-        assert!(msg.contains("updated"));
-        assert!(!is_new);
+
+        assert_eq!(mode, WriteMode::Overwrite);
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "new content");
     }
 
@@ -605,10 +627,12 @@ mod tests {
         let err = write_file(path.to_str().unwrap(), "overwrite", &ctx)
             .await
             .unwrap_err();
-        assert!(
-            err.contains("Failed to write file"),
-            "expected write-failure error, got: {err}",
-        );
+
+        let cause = std::fs::OpenOptions::new()
+            .write(true)
+            .open(&path)
+            .unwrap_err();
+        assert_eq!(err, format!("Failed to write {}: {cause}", path.display()));
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "original");
     }
 

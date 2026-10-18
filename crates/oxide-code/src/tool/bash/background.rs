@@ -23,6 +23,7 @@ use crate::tool::{
     Prepared, Tool, ToolCtx, ToolOutput, ToolSpec, extract_input_field, parse_input,
 };
 use crate::util::sync::lock_or_recover;
+use crate::util::text::ELLIPSIS;
 
 /// Background shells a session keeps open at once, running or finished.
 const MAX_SHELLS: usize = 16;
@@ -40,12 +41,12 @@ pub(crate) struct BackgroundShell {
 }
 
 impl BackgroundShell {
-    /// The command's first line, followed by `...` when more lines follow.
+    /// The command's first line, followed by [`ELLIPSIS`] when more lines follow.
     pub(crate) fn command_preview(&self) -> String {
         let mut lines = self.command.lines();
         let first = lines.next().unwrap_or_default();
         if lines.next().is_some() {
-            format!("{first} ...")
+            format!("{first} {ELLIPSIS}")
         } else {
             first.to_owned()
         }
@@ -419,16 +420,7 @@ impl BashOutputTool {
     }
 }
 
-#[derive(Deserialize)]
-struct OutputInput {
-    shell_id: String,
-    #[serde(default)]
-    timeout: Option<u64>,
-}
-
 impl Tool for BashOutputTool {
-    /// Read class, since it reads only a shell the session already started and so never needs
-    /// approval. Serial, since a read empties the shell's unread output.
     fn spec(&self) -> ToolSpec {
         ToolSpec {
             name: "bash_output".to_owned(),
@@ -441,24 +433,10 @@ impl Tool for BashOutputTool {
                           such as a server, it lasts the whole timeout. \
                           An unknown ID lists the open shells."
                 .to_owned(),
-            input_schema: serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "shell_id": {
-                        "type": "string",
-                        "description": "The ID bash returned when it started the shell, \
-                                        such as \"shell-1\""
-                    },
-                    "timeout": {
-                        "type": "integer",
-                        "description": "Milliseconds to wait for the command to finish \
-                                        before reading, capped at 600000. \
-                                        Omit or pass 0 to read at once."
-                    }
-                },
-                "required": ["shell_id"]
-            }),
+            input_schema: output_input_schema(),
+            // It reads only a shell the session started, so it never needs approval.
             class: PermissionClass::Read,
+            // A read empties the shell's unread output.
             parallel_safe: false,
         }
     }
@@ -480,28 +458,6 @@ impl Tool for BashOutputTool {
     }
 }
 
-async fn read(shells: &BackgroundShells, raw: serde_json::Value) -> ToolOutput {
-    let input: OutputInput = match parse_input(raw) {
-        Ok(input) => input,
-        Err(e) => return e,
-    };
-    let output = match shells.output(&input.shell_id) {
-        Ok(output) => output,
-        Err(message) => return ToolOutput::error(message),
-    };
-    if let Some(ms) = input.timeout.filter(|&ms| ms > 0) {
-        output
-            .wait(Duration::from_millis(ms).min(MAX_TIMEOUT))
-            .await;
-    }
-
-    let footer = match output.state() {
-        ShellState::Running => "(still running)".to_owned(),
-        ended => format!("({})", ended.describe()),
-    };
-    ToolOutput::success(with_footer(output.take(), &footer))
-}
-
 // ── Bash Stop Tool ──
 
 /// Ends a background shell and every process it started.
@@ -516,13 +472,7 @@ impl BashStopTool {
     }
 }
 
-#[derive(Deserialize)]
-struct StopInput {
-    shell_id: String,
-}
-
 impl Tool for BashStopTool {
-    /// Read class, since it ends only a shell the session started and so never needs approval.
     fn spec(&self) -> ToolSpec {
         ToolSpec {
             name: "bash_stop".to_owned(),
@@ -531,17 +481,8 @@ impl Tool for BashStopTool {
                           Stop a finished shell too once you no longer need its output, \
                           since a session keeps only a limited number of shells open."
                 .to_owned(),
-            input_schema: serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "shell_id": {
-                        "type": "string",
-                        "description": "The ID bash returned when it started the shell, \
-                                        such as \"shell-1\""
-                    }
-                },
-                "required": ["shell_id"]
-            }),
+            input_schema: stop_input_schema(),
+            // It ends only a shell the session started, so it never needs approval.
             class: PermissionClass::Read,
             parallel_safe: false,
         }
@@ -564,10 +505,81 @@ impl Tool for BashStopTool {
     }
 }
 
+// ── Input ──
+
+fn output_input_schema() -> serde_json::Value {
+    serde_json::json!({
+        "type": "object",
+        "properties": {
+            "shell_id": {
+                "type": "string",
+                "description": "The ID bash returned when it started the shell, \
+                                such as \"shell-1\""
+            },
+            "timeout": {
+                "type": "integer",
+                "description": "Milliseconds to wait for the command to finish \
+                                before reading, capped at 600000. \
+                                Omit or pass 0 to read at once."
+            }
+        },
+        "required": ["shell_id"]
+    })
+}
+
+#[derive(Deserialize)]
+struct OutputInput {
+    shell_id: String,
+    timeout: Option<u64>,
+}
+
+fn stop_input_schema() -> serde_json::Value {
+    serde_json::json!({
+        "type": "object",
+        "properties": {
+            "shell_id": {
+                "type": "string",
+                "description": "The ID bash returned when it started the shell, \
+                                such as \"shell-1\""
+            }
+        },
+        "required": ["shell_id"]
+    })
+}
+
+#[derive(Deserialize)]
+struct StopInput {
+    shell_id: String,
+}
+
+// ── Execution ──
+
+async fn read(shells: &BackgroundShells, raw: serde_json::Value) -> ToolOutput {
+    let input: OutputInput = match parse_input(raw) {
+        Ok(input) => input,
+        Err(msg) => return ToolOutput::error(msg),
+    };
+    let output = match shells.output(&input.shell_id) {
+        Ok(output) => output,
+        Err(message) => return ToolOutput::error(message),
+    };
+    if let Some(ms) = input.timeout.filter(|&ms| ms > 0) {
+        output
+            .wait(Duration::from_millis(ms).min(MAX_TIMEOUT))
+            .await;
+    }
+
+    let footer = match output.state() {
+        ShellState::Running => "(still running)".to_owned(),
+        ended => format!("({})", ended.describe()),
+    };
+    ToolOutput::success(with_footer(output.take(), &footer))
+}
+
 async fn stop(shells: &BackgroundShells, raw: serde_json::Value) -> ToolOutput {
     let input: StopInput = match parse_input(raw) {
         Ok(input) => input,
-        Err(e) => return e,
+        Err(msg) => return ToolOutput::error(msg),
     };
     let Shell {
         output,
@@ -647,13 +659,11 @@ mod tests {
     use super::*;
     use crate::protocol::CapturingSink;
     use crate::tool::MAX_OUTPUT_BYTES;
+    use crate::tool::bash::testing::{record_pid, until_gone, until_recorded};
     use crate::tool::bash::{BashTool, OUTPUT_BUDGET};
     use crate::tool::testing::{self, temp_ctx};
 
     // ── Fixtures ──
-
-    /// How long a test descendant waits before it leaves its mark, unless a kill ends it first.
-    const LEAK_DELAY: &str = "2";
 
     /// A registry that reports its list to the returned sink.
     fn shells() -> (Arc<BackgroundShells>, CapturingSink) {
@@ -680,28 +690,13 @@ mod tests {
         testing::run(&BashStopTool::new(Arc::clone(shells)), input, &temp_ctx()).await
     }
 
-    async fn until_exists(path: &Path) {
-        let deadline = Instant::now() + Duration::from_secs(5);
-        while !path.exists() && Instant::now() < deadline {
-            tokio::time::sleep(Duration::from_millis(20)).await;
-        }
-        assert!(path.exists(), "{} never appeared", path.display());
-    }
-
-    /// A command that touches `started` once it runs, then keeps running beside a descendant that
-    /// touches `leaked` after [`LEAK_DELAY`] unless something kills it.
-    fn leaking(started: &Path, leaked: &Path) -> String {
+    /// A command that prints `hi`, then keeps running beside a background `sleep` whose PID it
+    /// records in `pid_file`.
+    fn leaking(pid_file: &Path) -> String {
         format!(
-            "echo hi; touch '{}'; (sleep {LEAK_DELAY} && touch '{}') & sleep 30",
-            started.display(),
-            leaked.display(),
+            "echo hi; sleep 30 & {}; sleep 30",
+            record_pid("$!", pid_file)
         )
-    }
-
-    /// Waits past [`LEAK_DELAY`], then asserts no descendant touched `leaked`.
-    async fn assert_never_leaks(leaked: &Path) {
-        tokio::time::sleep(Duration::from_millis(2_500)).await;
-        assert!(!leaked.exists(), "{} outlived its shell", leaked.display());
     }
 
     /// A pipe whose every read fails.
@@ -787,18 +782,13 @@ mod tests {
     async fn stop_all_ends_every_shell_and_its_descendants_without_a_report() {
         let dir = tempfile::tempdir().unwrap();
         let (shells, sink) = shells();
-        let marks: Vec<_> = (0..2)
-            .map(|n| {
-                let started = dir.path().join(format!("started-{n}"));
-                let leaked = dir.path().join(format!("leaked-{n}"));
-                (started, leaked)
-            })
+        let pid_files: Vec<_> = (0..2)
+            .map(|n| dir.path().join(format!("pid-{n}")))
             .collect();
-        for (started, leaked) in &marks {
-            start(&shells, &leaking(started, leaked)).await;
-        }
-        for (started, _) in &marks {
-            until_exists(started).await;
+        let mut descendants = Vec::new();
+        for pid_file in &pid_files {
+            start(&shells, &leaking(pid_file)).await;
+            descendants.push(until_recorded(pid_file).await);
         }
         let reported = sink.events().len();
 
@@ -806,8 +796,8 @@ mod tests {
 
         assert_eq!(shells.list(), []);
         assert_eq!(sink.events().len(), reported);
-        for (_, leaked) in &marks {
-            assert_never_leaks(leaked).await;
+        for pid in &descendants {
+            until_gone(pid).await;
         }
     }
 
@@ -949,11 +939,10 @@ mod tests {
     #[tokio::test]
     async fn bash_stop_ends_the_tree_and_returns_the_unread_output() {
         let dir = tempfile::tempdir().unwrap();
-        let started = dir.path().join("started");
-        let leaked = dir.path().join("leaked");
+        let pid_file = dir.path().join("pid");
         let (shells, sink) = shells();
-        start(&shells, &leaking(&started, &leaked)).await;
-        until_exists(&started).await;
+        start(&shells, &leaking(&pid_file)).await;
+        let pid = until_recorded(&pid_file).await;
 
         let stopped = stop(&shells, "shell-1").await;
 
@@ -972,18 +961,15 @@ mod tests {
             "{}",
             again.content,
         );
-        assert_never_leaks(&leaked).await;
+        until_gone(&pid).await;
     }
 
     #[tokio::test]
     async fn bash_stop_ends_a_descendant_still_holding_the_pipes_of_a_finished_shell() {
         let dir = tempfile::tempdir().unwrap();
-        let leaked = dir.path().join("leaked");
+        let pid_file = dir.path().join("pid");
         let (shells, _sink) = shells();
-        let command = format!(
-            "(sleep {LEAK_DELAY} && touch '{}') & exit 3",
-            leaked.display()
-        );
+        let command = format!("sleep 30 & {}; exit 3", record_pid("$!", &pid_file));
         start(&shells, &command).await;
 
         let read = output(&shells, "shell-1", 5_000).await;
@@ -995,7 +981,7 @@ mod tests {
             stopped.content,
             "(no new output)\n\n(stopped after it exited with code 3)"
         );
-        assert_never_leaks(&leaked).await;
+        until_gone(&until_recorded(&pid_file).await).await;
     }
 
     #[cfg(unix)]
