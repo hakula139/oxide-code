@@ -167,7 +167,7 @@ fn is_whitespace(grapheme: &str) -> bool {
     grapheme.chars().all(char::is_whitespace)
 }
 
-/// Whether a row may end between `before` and `after` with no whitespace there. CJK text has no
+/// Returns whether a row may end between `before` and `after` without whitespace. CJK text has no
 /// spaces, so a wide grapheme can break from either neighbor unless closing punctuation follows.
 fn breaks_around_wide(before: &str, after: &str) -> bool {
     !is_whitespace(before)

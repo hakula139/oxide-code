@@ -243,7 +243,7 @@ const OX: Names = Names {
 };
 
 impl Names {
-    /// Whether the folded `names` of a path hold one of these names where it takes effect.
+    /// Returns whether the folded `names` of a path hold one of these names where it takes effect.
     fn hold(&self, names: &[&str]) -> bool {
         names.iter().any(|name| self.dirs.contains(name))
             || names.last().is_some_and(|name| self.files.contains(name))

@@ -149,7 +149,8 @@ pub(crate) struct Engine {
     /// The task list the model keeps with the `tasks` tool, which a compaction carries over.
     tasks: Vec<Task>,
     prompt: PromptParts,
-    /// `prompt` changed since the session last recorded it, so the next user message records it.
+    /// Whether `prompt` changed since the session last recorded it, so the next user message
+    /// records it.
     prompt_unrecorded: bool,
     /// Warnings about the instruction files the latest user context load could not read.
     instruction_warnings: Vec<String>,
@@ -164,7 +165,7 @@ pub(crate) struct Engine {
     compaction: CompactionConfig,
     /// The launch directory and the workspace roots every tool call runs in.
     workspace: Arc<Workspace>,
-    /// A TUI is attached, so titles generate in the background.
+    /// Whether a TUI is attached, so titles generate in the background.
     interactive: bool,
     auto_compaction_failures: AutoCompactFailures,
     /// The latest turn's last round usage, `None` when that turn reported none.

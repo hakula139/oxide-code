@@ -1,7 +1,6 @@
-//! Shared `[bar] [number] [separator] [text]` row renderer. Read / grep use the default pipe
-//! separator; Edit-tool diff sides and `/diff` pass `- ` / `+ ` plus a row bg via
-//! [`Renderer::with_style`]. Visibility widened to `pub(in super::super)` so `blocks::git_diff`
-//! can reuse it without relocating.
+//! Shared `[bar] [number] [separator] [text]` row renderer. Read and grep rows use the default
+//! pipe separator, while Edit-tool diff sides and `/diff` pass a `- ` or `+ ` sign and a row bg
+//! through [`Renderer::with_style`].
 
 use ratatui::style::Style;
 use ratatui::text::{Line, Span};
@@ -27,7 +26,7 @@ pub(in super::super) struct Renderer<'a> {
 }
 
 impl<'a> Renderer<'a> {
-    /// Plain numbered rows — pipe separator, no row bg. Used by read / grep.
+    /// Plain numbered rows with the pipe separator and no row bg, as read and grep draw them.
     pub(in super::super) fn new(
         ctx: &'a RenderCtx<'a>,
         border_style: Style,
@@ -43,8 +42,8 @@ impl<'a> Renderer<'a> {
         )
     }
 
-    /// Diff-side variant — caller passes the `- ` / `+ ` sign as separator and a row bg so the
-    /// tint extends across the full terminal width.
+    /// Diff-side rows, with the `- ` or `+ ` sign as the separator and a row bg whose tint spans
+    /// the full terminal width.
     pub(in super::super) fn with_style(
         ctx: &'a RenderCtx<'a>,
         border_style: Style,
@@ -179,13 +178,10 @@ mod tests {
         let long = "a".repeat(MAX_TOOL_OUTPUT_LINE_BYTES + 50);
         renderer.render(&mut out, 1, &long, theme.text());
 
-        let text_span = &out[0].spans[3];
-        assert!(
-            text_span.content.ends_with("..."),
-            "expected ellipsis, got {:?}",
-            text_span.content,
+        assert_eq!(
+            out[0].spans[3].content,
+            format!("{}...", "a".repeat(MAX_TOOL_OUTPUT_LINE_BYTES)),
         );
-        assert!(text_span.content.len() <= MAX_TOOL_OUTPUT_LINE_BYTES + 3);
     }
 
     #[test]
@@ -201,20 +197,16 @@ mod tests {
         let mut out = Vec::new();
         renderer.render(&mut out, 1, "alpha beta gamma", theme.text());
 
-        assert!(out.len() >= 2, "expected wrapped output, got {out:#?}");
-        let cont_text: String = out[1].spans.iter().map(|s| s.content.as_ref()).collect();
-        assert!(
-            cont_text.starts_with(TOOL_BORDER_CONT),
-            "continuation must keep tool border continuation prefix: {cont_text:?}",
-        );
+        let rows: Vec<String> = out.iter().map(ToString::to_string).collect();
+        assert_eq!(rows, ["▎    1 │ alpha", "▎        beta ", "▎        gamma"]);
     }
 
     // ── Renderer::with_style ──
 
     #[test]
     fn with_style_render_uses_custom_separator_in_place_of_pipe() {
-        // Diff path: separator carries `- ` / `+ ` instead of the pipe; text stays a separate
-        // span so the sign can take its own color.
+        // On the diff path the separator carries the `- ` or `+ ` sign, and the text stays a
+        // separate span so the sign can take its own color.
         let theme = Theme::default();
         let ctx = RenderCtx {
             width: 80,
@@ -242,8 +234,8 @@ mod tests {
 
     #[test]
     fn with_style_patches_row_bg_onto_content_spans() {
-        // Bar prefix stays transparent; number / separator / text inherit the row bg, so the
-        // chrome column never tints and the band has no holes.
+        // The bar prefix stays transparent while the number, separator, and text inherit the row
+        // bg, so the chrome column never tints and the band has no holes.
         let theme = Theme::default();
         let ctx = RenderCtx {
             width: 80,
@@ -263,9 +255,9 @@ mod tests {
 
         let row = &out[0];
         assert_eq!(row.spans[0].style.bg, None, "bar prefix must stay clear");
-        assert_eq!(row.spans[1].style.bg, theme.diff_add.bg);
-        assert_eq!(row.spans[2].style.bg, theme.diff_add.bg);
-        assert_eq!(row.spans[3].style.bg, theme.diff_add.bg);
+        assert_eq!(row.spans[1].style.bg, theme.diff_add_row().bg);
+        assert_eq!(row.spans[2].style.bg, theme.diff_add_row().bg);
+        assert_eq!(row.spans[3].style.bg, theme.diff_add_row().bg);
     }
 
     #[test]
@@ -298,7 +290,7 @@ mod tests {
             "trailing pad span must be spaces only, got {:?}",
             last.content,
         );
-        assert_eq!(last.style.bg, theme.diff_del.bg);
+        assert_eq!(last.style.bg, theme.diff_del_row().bg);
     }
 
     #[test]
@@ -315,18 +307,14 @@ mod tests {
         let mut out = Vec::new();
         renderer.render(&mut out, 1, "abc", theme.text());
 
-        let row = &out[0];
-        let total: usize = row.spans.iter().map(|s| s.content.width()).sum();
-        assert!(
-            total < 80,
-            "no-bg row must not pad to width, got total={total}",
-        );
+        let spans: Vec<&str> = out[0].spans.iter().map(|s| s.content.as_ref()).collect();
+        assert_eq!(spans, [TOOL_BORDER_CONT, " 1", " │ ", "abc"]);
     }
 
     #[test]
     fn with_style_wrapped_continuation_keeps_bg_under_text_column() {
-        // Every wrapped line pads to `ctx.width` so the bg stays contiguous; the bar prefix
-        // on continuations stays transparent like the header line.
+        // Every wrapped line pads to `ctx.width` so the bg stays contiguous, and the bar prefix on
+        // continuations stays transparent like the header line.
         let theme = Theme::default();
         let ctx = RenderCtx {
             width: 20,
@@ -344,13 +332,17 @@ mod tests {
         let mut out = Vec::new();
         renderer.render(&mut out, 1, "alpha beta gamma delta", theme.error());
 
-        assert!(out.len() >= 2, "expected wrapped output: {out:#?}");
+        let rows: Vec<String> = out
+            .iter()
+            .map(|line| line.to_string().trim_end().to_owned())
+            .collect();
+        assert_eq!(rows, ["▎    1 - alpha beta", "▎        gamma delta"]);
         for line in &out {
             let total: usize = line.spans.iter().map(|s| s.content.width()).sum();
             assert_eq!(total, 20, "every wrapped row must reach ctx.width");
             assert_eq!(
                 line.spans.last().unwrap().style.bg,
-                theme.diff_del.bg,
+                theme.diff_del_row().bg,
                 "trailing span on every line must carry row bg",
             );
         }

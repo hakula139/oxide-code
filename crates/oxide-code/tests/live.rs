@@ -316,7 +316,7 @@ fn credentials() -> Vec<(&'static str, String)> {
     tokens.chain(header_values).collect()
 }
 
-/// Whether an inherited variable changes what the tests observe. The endpoint, credential,
+/// Returns whether an inherited variable changes what the tests observe. The endpoint, credential,
 /// header, CA, and attribution variables pass through.
 fn is_behavior_var(name: &str) -> bool {
     name.starts_with("OX_") && name != "OX_EXTRA_CA_CERTS"

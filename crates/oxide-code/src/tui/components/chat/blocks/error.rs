@@ -5,8 +5,8 @@ use ratatui::text::Line;
 use super::{ChatBlock, RenderCtx, push_icon_wrapped};
 use crate::tui::glyphs::{ERROR_CONT, ERROR_PREFIX};
 
-/// A fatal agent or API error. Multi-line messages render one logical line per row, the icon
-/// on the first and a width-aligned indent on the rest.
+/// An error shown in the chat, from the engine, a slash command, or the app. Multi-line messages
+/// render one logical line per row, the icon on the first and a width-aligned indent on the rest.
 pub(crate) struct ErrorBlock {
     message: String,
 }
@@ -46,7 +46,7 @@ impl ChatBlock for ErrorBlock {
 #[cfg(test)]
 mod tests {
     use indoc::indoc;
-    use unicode_width::UnicodeWidthStr;
+    use ratatui::text::Span;
 
     use super::*;
     use crate::tui::theme::Theme;
@@ -65,10 +65,17 @@ mod tests {
     fn render_single_line_message_emits_icon_then_body() {
         let theme = Theme::default();
         let block = ErrorBlock::new("boom");
+
         let lines = block.render(&ctx_at(60, &theme));
-        assert_eq!(lines.len(), 1);
-        assert_eq!(lines[0].spans[0].content, ERROR_PREFIX);
-        assert_eq!(lines[0].spans[1].content, "boom");
+
+        let style = theme.error();
+        assert_eq!(
+            lines,
+            [Line::from(vec![
+                Span::styled(ERROR_PREFIX, style),
+                Span::styled("boom", style),
+            ])]
+        );
     }
 
     #[test]
@@ -77,7 +84,7 @@ mod tests {
         // Joining them at render time would collapse the bullets into one wrapped line.
         let theme = Theme::default();
         let block = ErrorBlock::new(indoc! {"
-            Unknown model: `gpt-4`. Supported models:
+            Unknown model: `gpt-4`. Valid:
 
             - `claude-opus-5-5` — Claude Opus 5.5
             - `claude-haiku-5-5` — Claude Haiku 5.5"
@@ -90,7 +97,7 @@ mod tests {
         assert_eq!(
             bodies,
             vec![
-                "Unknown model: `gpt-4`. Supported models:",
+                "Unknown model: `gpt-4`. Valid:",
                 "",
                 "- `claude-opus-5-5` — Claude Opus 5.5",
                 "- `claude-haiku-5-5` — Claude Haiku 5.5",
@@ -104,9 +111,10 @@ mod tests {
         // same column so the message reads as one block.
         let theme = Theme::default();
         let block = ErrorBlock::new("first\nsecond");
+
         let lines = block.render(&ctx_at(60, &theme));
-        let indent = ERROR_PREFIX.width();
-        assert_eq!(lines[0].spans[0].content, ERROR_PREFIX);
-        assert_eq!(lines[1].spans[0].content, " ".repeat(indent));
+
+        let rows: Vec<String> = lines.iter().map(ToString::to_string).collect();
+        assert_eq!(rows, ["✗ first", "  second"]);
     }
 }

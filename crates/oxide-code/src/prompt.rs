@@ -252,7 +252,7 @@ pub(crate) fn system_reminder(body: &str) -> String {
     }
 }
 
-/// Whether `text` is a `<system-reminder>` block, which transcript displays leave out.
+/// Returns whether `text` is a `<system-reminder>` block, which transcript displays leave out.
 pub(crate) fn is_system_reminder(text: &str) -> bool {
     text.starts_with("<system-reminder>")
 }

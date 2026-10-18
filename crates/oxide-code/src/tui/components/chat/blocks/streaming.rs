@@ -11,6 +11,7 @@ use crate::tui::markdown::{complete_blocks_len, render_markdown_chunk};
 ///
 /// Complete top-level markdown blocks are pre-rendered into `rendered`, so each frame only
 /// re-parses the tail from the last block start. The cache is keyed by viewport width.
+#[derive(Default)]
 pub(crate) struct StreamingAssistant {
     buffer: String,
     /// Rendered lines for the complete blocks before `rendered_boundary`.
@@ -23,16 +24,6 @@ pub(crate) struct StreamingAssistant {
 }
 
 impl StreamingAssistant {
-    pub(crate) fn new() -> Self {
-        Self {
-            buffer: String::new(),
-            rendered: Vec::new(),
-            rendered_boundary: 0,
-            after_block: false,
-            cached_width: 0,
-        }
-    }
-
     pub(crate) fn append(&mut self, token: &str) {
         self.buffer.push_str(token);
     }
@@ -48,7 +39,7 @@ impl StreamingAssistant {
         }
     }
 
-    /// Drop the prefix cache so the next render re-parses the buffer with current styles.
+    /// Drops the prefix cache so the next render re-parses the buffer with current styles.
     pub(crate) fn invalidate_cache(&mut self) {
         self.rendered.clear();
         self.rendered_boundary = 0;
@@ -111,14 +102,187 @@ impl StreamingAssistant {
             after_block,
         )
     }
+}
 
-    #[cfg(test)]
-    pub(crate) fn rendered_boundary(&self) -> usize {
-        self.rendered_boundary
+#[cfg(test)]
+mod tests {
+    use indoc::indoc;
+
+    use super::*;
+    use crate::tui::components::chat::blocks::{AssistantText, ChatBlock};
+    use crate::tui::theme::Theme;
+
+    fn ctx_at(width: u16, theme: &Theme) -> RenderCtx<'_> {
+        RenderCtx {
+            width,
+            theme,
+            show_thinking: false,
+        }
     }
 
-    #[cfg(test)]
-    pub(crate) fn cached_width(&self) -> u16 {
-        self.cached_width
+    /// Streams `tokens` into a new turn, advancing the cache after each one as the chat does.
+    fn streamed(tokens: &[&str], ctx: &RenderCtx<'_>) -> StreamingAssistant {
+        let mut streaming = StreamingAssistant::default();
+        for token in tokens {
+            streaming.append(token);
+            streaming.advance_cache(ctx, false);
+        }
+        streaming
+    }
+
+    fn rows(lines: &[Line<'_>]) -> Vec<String> {
+        lines.iter().map(ToString::to_string).collect()
+    }
+
+    // ── take_buffer ──
+
+    #[test]
+    fn take_buffer_returns_the_text_and_drops_the_cache() {
+        let theme = Theme::default();
+        let ctx = ctx_at(80, &theme);
+        let mut streaming = streamed(&["para1\n\npara2\n"], &ctx);
+
+        let text = streaming.take_buffer();
+
+        assert_eq!(text, "para1\n\npara2\n");
+        assert_eq!(rows(streaming.rendered()), [] as [String; 0]);
+        assert_eq!(rows(&streaming.render_tail(&ctx, false)), [] as [String; 0]);
+    }
+
+    // ── invalidate_cache_for_width ──
+
+    #[test]
+    fn invalidate_cache_for_width_drops_the_cache_only_when_the_width_changes() {
+        let theme = Theme::default();
+        let ctx = ctx_at(80, &theme);
+        for (width, cached) in [(80, &["◉ para1"][..]), (40, &[])] {
+            let mut streaming = streamed(&["para1\n\npara2\n"], &ctx);
+
+            streaming.invalidate_cache_for_width(width);
+
+            assert_eq!(rows(streaming.rendered()), cached, "width {width}");
+        }
+    }
+
+    // ── invalidate_cache ──
+
+    #[test]
+    fn invalidate_cache_leaves_the_whole_buffer_to_the_tail() {
+        let theme = Theme::default();
+        let ctx = ctx_at(80, &theme);
+        let mut streaming = streamed(&["para1\n\npara2\n"], &ctx);
+
+        streaming.invalidate_cache();
+
+        assert_eq!(rows(streaming.rendered()), [] as [String; 0]);
+        assert_eq!(
+            rows(&streaming.render_tail(&ctx, false)),
+            ["◉ para1", "  ", "  para2"]
+        );
+    }
+
+    // ── advance_cache ──
+
+    #[test]
+    fn advance_cache_waits_for_a_measured_width() {
+        let theme = Theme::default();
+
+        let streaming = streamed(&["first paragraph\n\nsecond\n"], &ctx_at(0, &theme));
+
+        assert_eq!(streaming.rendered_boundary, 0);
+        assert_eq!(streaming.cached_width, 0);
+    }
+
+    #[test]
+    fn advance_cache_caches_only_the_blocks_a_finished_line_closes() {
+        let theme = Theme::default();
+        let ctx = ctx_at(80, &theme);
+        for (buffer, cached) in [
+            ("no newline here", ""),
+            ("first line\nsecond line", ""),
+            ("para1\n\npartial", ""),
+            ("para1\n\npartial\n", "para1\n\n"),
+            ("p1\n\np2\n\np3\n\np4\n", "p1\n\np2\n\np3\n\n"),
+            // A loose list continues past a blank line until another block starts.
+            ("- item 1\n\n", ""),
+            (
+                "- item 1\n\n- item 2\n\nafter\n",
+                "- item 1\n\n- item 2\n\n",
+            ),
+        ] {
+            let streaming = streamed(&[buffer], &ctx);
+
+            assert_eq!(
+                &streaming.buffer[..streaming.rendered_boundary],
+                cached,
+                "{buffer:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn advance_cache_separates_each_cached_block_from_the_next() {
+        let theme = Theme::default();
+
+        let streaming = streamed(&["para1\n\npara2\n", "\npara3\n"], &ctx_at(80, &theme));
+
+        assert_eq!(rows(streaming.rendered()), ["◉ para1", "  ", "  para2"]);
+        assert_eq!(streaming.cached_width, 80);
+    }
+
+    #[test]
+    fn advance_cache_matches_committed_render_at_every_char() {
+        let body = indoc! {"
+            ```
+            ```
+
+            Here:
+
+            | a | b |
+            | - | - |
+            | 1 | 2 |
+
+            text
+            #tag
+
+            para
+            ```x
+            code
+            ```
+
+            ```c
+            #include <a.h>
+
+            #define X 1
+            - not a bullet
+            ```
+
+            [ref]: https://example.com
+
+            ```
+            ```
+
+            <div>
+            html
+            </div>
+
+            Done.
+        "};
+        let theme = Theme::default();
+        let ctx = ctx_at(80, &theme);
+        let mut streaming = StreamingAssistant::default();
+        for (i, ch) in body.char_indices() {
+            streaming.append(&ch.to_string());
+
+            streaming.advance_cache(&ctx, false);
+
+            let prefix = &body[..i + ch.len_utf8()];
+            let lines = [streaming.rendered(), &streaming.render_tail(&ctx, false)].concat();
+            assert_eq!(
+                lines,
+                AssistantText::new(prefix).render(&ctx),
+                "after {prefix:?}"
+            );
+        }
     }
 }

@@ -40,7 +40,8 @@ pub(super) struct SessionState {
     /// Loaded count on resume (`0` for fresh). `finish_entries` skips the summary when unchanged.
     initial_message_count: u32,
     message_count: u32,
-    /// Latched on first user-text so we don't emit a duplicate title entry.
+    /// Whether the session has seen its first user text, after which no message emits another
+    /// title entry.
     first_user_prompt_seen: bool,
     finished: bool,
     persistence_stopped: bool,

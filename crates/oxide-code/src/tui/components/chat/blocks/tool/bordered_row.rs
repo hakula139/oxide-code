@@ -1,6 +1,5 @@
-//! Shared `[bar] [text]` row primitive for unnumbered chat-block body rows. Numbered rows use the
-//! sibling [`super::numbered_row`]. Visibility is widened to `pub(in super::super)` so
-//! `blocks::git_diff` can reuse it for headers / hunk separators / truncation footers.
+//! Shared `[bar] [text]` row primitive for unnumbered chat-block body rows, such as the `/diff`
+//! headers and footers. Numbered rows use the sibling [`super::numbered_row`].
 
 use ratatui::style::Style;
 use ratatui::text::{Line, Span};
@@ -61,8 +60,7 @@ mod tests {
     }
 
     #[test]
-    fn render_wraps_long_text_under_bar() {
-        // Continuation lines must keep the bar aligned.
+    fn render_wraps_long_text_under_the_bar_in_the_text_style() {
         let theme = Theme::default();
         let ctx = RenderCtx {
             width: 12,
@@ -70,32 +68,7 @@ mod tests {
             show_thinking: true,
         };
         let mut out = Vec::new();
-        render(
-            &mut out,
-            &ctx,
-            theme.tool_border(),
-            "alpha beta gamma",
-            theme.text(),
-        );
 
-        assert!(out.len() >= 2, "expected wrapped output: {out:#?}");
-        let cont_text: String = out[1].spans.iter().map(|s| s.content.as_ref()).collect();
-        assert!(
-            cont_text.starts_with(BAR),
-            "continuation must keep bar prefix: {cont_text:?}",
-        );
-    }
-
-    #[test]
-    fn render_carries_text_style_through_wrap() {
-        // Text style must apply across all wrapped fragments, not just the first.
-        let theme = Theme::default();
-        let ctx = RenderCtx {
-            width: 12,
-            theme: &theme,
-            show_thinking: true,
-        };
-        let mut out = Vec::new();
         render(
             &mut out,
             &ctx,
@@ -104,13 +77,24 @@ mod tests {
             theme.dim(),
         );
 
-        for line in &out {
-            let last = line.spans.last().expect("each row carries a text span");
-            assert_eq!(
-                last.style,
-                theme.dim(),
-                "every wrapped row keeps the text style: {line:?}",
-            );
-        }
+        let (bar, dim) = (theme.tool_border(), theme.dim());
+        let cont = |text| {
+            Line::from(vec![
+                Span::styled(BAR, bar),
+                Span::raw("   "),
+                Span::styled(text, dim),
+            ])
+        };
+        assert_eq!(
+            out,
+            [
+                Line::from(vec![
+                    Span::styled(TOOL_BORDER_CONT, bar),
+                    Span::styled("alpha ", dim),
+                ]),
+                cont("beta "),
+                cont("gamma"),
+            ]
+        );
     }
 }

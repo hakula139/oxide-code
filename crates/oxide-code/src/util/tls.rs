@@ -215,10 +215,10 @@ fn apple_roots() -> Result<HashSet<Vec<u8>>> {
     Ok(roots)
 }
 
-/// Whether the platform verifier rejected the chain with `errSecCertificateValidityPeriodTooLong`,
-/// which it reports only in the message because rustls has no variant for it. Apple reports this
-/// code ahead of untrusted anchor, hostname, extended key usage, and expiry failures, but behind
-/// a revocation.
+/// Returns whether the platform verifier rejected the chain with
+/// `errSecCertificateValidityPeriodTooLong`, which it reports only in the message because rustls
+/// has no variant for it. Apple reports this code ahead of untrusted anchor, hostname, extended key
+/// usage, and expiry failures, but behind a revocation.
 #[cfg(target_os = "macos")]
 fn exceeds_validity_limit(rejection: &Error) -> bool {
     let suffix = format!(": {}", os_status::CERTIFICATE_VALIDITY_PERIOD_TOO_LONG);
@@ -696,8 +696,8 @@ mod tests {
             .unwrap()
     }
 
-    /// Whether `err` carries the Security framework `code` the way the platform verifier reports
-    /// codes that rustls has no variant for.
+    /// Returns whether `err` carries the Security framework `code` the way the platform verifier
+    /// reports codes that rustls has no variant for.
     #[cfg(target_os = "macos")]
     fn has_os_status(err: &Error, code: i32) -> bool {
         matches!(

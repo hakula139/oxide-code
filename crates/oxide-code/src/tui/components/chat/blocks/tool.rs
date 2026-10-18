@@ -1,9 +1,6 @@
-//! Tool call and result blocks. The left-edge bar visually couples a call to its output and
-//! color-codes success / error; this is the only chat block that keeps it, so the bar / border
-//! helpers live here rather than in the trait module.
-//!
-//! Result rendering is per-variant via [`ToolResultView`] — default is truncated text; structured
-//! tools (Edit, Read, Grep, Glob, Tasks) get richer bodies in sibling modules under [`tool`].
+//! Tool call and result blocks. A left-edge bar couples each call to its result and takes the
+//! error color when the tool fails. Each [`ToolResultView`] variant renders its body in a child
+//! module, and unstructured output renders as truncated text.
 
 pub(super) mod bordered_row;
 mod diff;
@@ -74,7 +71,7 @@ impl ChatBlock for ToolCallBlock {
 
 // ── Tool Result ──
 
-/// Tool-call outcome — indicator (✓ / ✗), label, and per-view body.
+/// Tool-call outcome: a ✓ or ✗ indicator, the label, and the per-view body.
 pub(crate) struct ToolResultBlock {
     label: String,
     view: ToolResultView,
@@ -95,8 +92,6 @@ impl ChatBlock for ToolResultBlock {
     fn render(&self, ctx: &RenderCtx<'_>) -> Vec<Line<'static>> {
         let mut out = Vec::new();
         render_status_line(&mut out, ctx, &self.label, self.is_error);
-        // Per-variant body dispatch — each tool's structured renderer owns its own gutter sizing,
-        // truncation footer, and overflow rules. The `Text` arm is the catch-all fallback.
         match &self.view {
             ToolResultView::Text { content } => {
                 text::render(&mut out, ctx, content, &self.label, self.is_error);
@@ -185,6 +180,60 @@ fn truncate_to_bytes(s: &str, max_bytes: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::tool::tasks::TaskStatus;
+    use crate::tool::tasks::testing::task;
+    use crate::tool::{GrepFileGroup, GrepMatchLine};
+
+    // ── ToolResultBlock::render ──
+
+    #[test]
+    fn tool_result_block_render_puts_the_view_body_under_the_status_line() {
+        let theme = Theme::default();
+        let ctx = RenderCtx {
+            width: 80,
+            theme: &theme,
+            show_thinking: false,
+        };
+        let cases = [
+            (
+                ToolResultView::GrepMatches {
+                    groups: vec![GrepFileGroup {
+                        path: "src/main.rs".to_owned(),
+                        lines: vec![GrepMatchLine {
+                            number: 3,
+                            text: "fn main() {}".to_owned(),
+                            is_match: true,
+                        }],
+                    }],
+                    truncated: true,
+                },
+                ["src/main.rs", "3 │ fn main() {}", "... limit reached"].as_slice(),
+            ),
+            (
+                ToolResultView::GlobFiles {
+                    pattern: "*.rs".to_owned(),
+                    files: vec!["a.rs".to_owned()],
+                    total: 1,
+                },
+                ["*.rs (1 of 1)", "a.rs"].as_slice(),
+            ),
+            (
+                ToolResultView::Tasks {
+                    tasks: vec![task("Ship it", TaskStatus::InProgress)],
+                },
+                ["● Ship it"].as_slice(),
+            ),
+        ];
+        for (view, body) in cases {
+            let block = ToolResultBlock::new("label", view, false);
+
+            let rows: Vec<String> = block.render(&ctx).iter().map(ToString::to_string).collect();
+
+            let mut expected = vec![format!("{TOOL_BORDER_PREFIX}{TOOL_SUCCESS} label")];
+            expected.extend(body.iter().map(|text| format!("{TOOL_BORDER_CONT}{text}")));
+            assert_eq!(rows, expected);
+        }
+    }
 
     // ── truncate_to_bytes ──
 
@@ -200,7 +249,7 @@ mod tests {
 
     #[test]
     fn truncate_to_bytes_respects_char_boundary() {
-        // Each `中` is 3 bytes; cutting at byte 5 without `floor_char_boundary` would split a
+        // Each `中` is 3 bytes, so cutting at byte 5 without `floor_char_boundary` would split a
         // codepoint and panic on `&s[..5]`. Rounding down to byte 3 yields one `中` + `...`.
         let input = "中中中中";
         let result = truncate_to_bytes(input, 5);

@@ -103,7 +103,7 @@ fn take_tail(s: &str, budget: usize) -> String {
     s[s.len() - len..].to_owned()
 }
 
-/// Whether a terminal paints `c` as no visible cell: a control or zero-width character.
+/// Returns whether a terminal paints `c` as no visible cell: a control or zero-width character.
 pub(crate) fn is_hidden(c: char) -> bool {
     c.is_control() || c.width().is_none_or(|w| w == 0)
 }

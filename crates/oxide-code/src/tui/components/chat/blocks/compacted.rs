@@ -1,4 +1,4 @@
-//! Post-`/compact` boundary block, and the summary streaming in before it.
+//! Compaction boundary block, and the summary streaming in before it.
 
 use ratatui::style::Modifier;
 use ratatui::text::{Line, Span};
@@ -12,7 +12,7 @@ use crate::tui::wrap::wrap_line;
 /// Header over a summary still streaming in.
 const STREAMING_HEADER: &str = "Summarizing the conversation...";
 
-/// Boundary marker rendered after `/compact`.
+/// Boundary marker where a manual or automatic compaction replaced the earlier messages.
 pub(crate) struct CompactedBlock {
     header: String,
     summary: String,
@@ -106,8 +106,8 @@ mod tests {
         }
     }
 
-    fn header_text(line: &Line<'_>) -> String {
-        line.spans.iter().map(|s| s.content.as_ref()).collect()
+    fn rows(lines: &[Line<'_>]) -> Vec<String> {
+        lines.iter().map(ToString::to_string).collect()
     }
 
     // ── CompactedBlock::new ──
@@ -115,21 +115,20 @@ mod tests {
     #[test]
     fn header_pluralizes_message_count() {
         let one = CompactedBlock::new(1, None, "x");
-        assert!(one.header.contains("1 message →"));
         let many = CompactedBlock::new(7, None, "x");
-        assert!(many.header.contains("7 messages →"));
+
+        assert_eq!(one.header, "Compacted 1 message → 1 summary");
+        assert_eq!(many.header, "Compacted 7 messages → 1 summary");
     }
 
     #[test]
     fn header_includes_focus_when_instructions_present() {
         let block = CompactedBlock::new(4, Some("focus on auth"), "x");
-        assert!(block.header.contains("(focus: focus on auth)"));
-    }
 
-    #[test]
-    fn header_omits_focus_segment_when_no_instructions() {
-        let block = CompactedBlock::new(4, None, "x");
-        assert!(!block.header.contains("focus:"));
+        assert_eq!(
+            block.header,
+            "Compacted 4 messages → 1 summary (focus: focus on auth)"
+        );
     }
 
     // ── CompactedBlock::render ──
@@ -138,20 +137,19 @@ mod tests {
     fn render_first_line_is_bold_header_with_bar_prefix() {
         let theme = Theme::default();
         let block = CompactedBlock::new(4, None, "summary body");
+
         let lines = block.render(&ctx_at(60, &theme));
-        let head = &lines[0];
-        let text = header_text(head);
-        assert!(text.starts_with(TOOL_BORDER_PREFIX), "bar prefix: {text:?}");
-        assert!(
-            text.contains("Compacted 4 messages"),
-            "header text: {text:?}"
-        );
-        // Header span carries BOLD.
-        let header_span = &head.spans[1];
-        assert!(
-            header_span.style.add_modifier.contains(Modifier::BOLD),
-            "header should be bold: {:?}",
-            header_span.style,
+
+        let bar = theme.accent();
+        assert_eq!(
+            lines[0],
+            Line::from(vec![
+                Span::styled(TOOL_BORDER_PREFIX, bar),
+                Span::styled(
+                    "Compacted 4 messages → 1 summary",
+                    bar.add_modifier(Modifier::BOLD),
+                ),
+            ])
         );
     }
 
@@ -159,18 +157,23 @@ mod tests {
     fn render_inserts_gutter_line_between_header_and_body() {
         let theme = Theme::default();
         let block = CompactedBlock::new(4, None, "body line");
+
         let lines = block.render(&ctx_at(60, &theme));
-        assert!(lines.len() >= 3, "header + gutter + body: {lines:?}");
-        let gutter: String = lines[1].spans.iter().map(|s| s.content.as_ref()).collect();
-        assert_eq!(gutter, TOOL_BORDER_PREFIX, "gutter is bar-only");
+
+        assert_eq!(
+            rows(&lines),
+            ["▎ Compacted 4 messages → 1 summary", "▎ ", "▎ body line"]
+        );
     }
 
     #[test]
     fn render_empty_body_emits_header_only() {
         let theme = Theme::default();
         let block = CompactedBlock::new(4, None, "   \n  ");
+
         let lines = block.render(&ctx_at(60, &theme));
-        assert_eq!(lines.len(), 1, "only header: {lines:?}");
+
+        assert_eq!(rows(&lines), ["▎ Compacted 4 messages → 1 summary"]);
     }
 
     #[test]
@@ -184,15 +187,18 @@ mod tests {
                 - Next: tests
             "},
         );
+
         let lines = block.render(&ctx_at(60, &theme));
-        // Body lines start at index 2 (header + gutter).
-        for (i, line) in lines.iter().enumerate().skip(2) {
-            let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
-            assert!(
-                text.starts_with(TOOL_BORDER_PREFIX),
-                "row {i}: bar prefix missing: {text:?}",
-            );
-        }
+
+        assert_eq!(
+            rows(&lines),
+            [
+                "▎ Compacted 4 messages → 1 summary",
+                "▎ ",
+                "▎ - Done: shipped /compact",
+                "▎ - Next: tests",
+            ]
+        );
     }
 
     #[test]
@@ -221,24 +227,22 @@ mod tests {
     }
 
     #[test]
-    fn render_focus_label_appears_in_header() {
-        let theme = Theme::default();
-        let block = CompactedBlock::new(4, Some("the build error"), "body");
-        let lines = block.render(&ctx_at(80, &theme));
-        let text = header_text(&lines[0]);
-        assert!(
-            text.contains("(focus: the build error)"),
-            "header: {text:?}"
-        );
-    }
-
-    #[test]
     fn render_wrapped_header_keeps_bar_accent() {
         let theme = Theme::default();
         let block = CompactedBlock::new(42, Some("focus on a long failing build transcript"), "");
+
         let lines = block.render(&ctx_at(24, &theme));
 
-        assert!(lines.len() > 1, "header should wrap: {lines:?}");
+        assert_eq!(
+            rows(&lines),
+            [
+                "▎ Compacted 42 messages ",
+                "▎ → 1 summary (focus: ",
+                "▎ focus on a long ",
+                "▎ failing build ",
+                "▎ transcript)",
+            ]
+        );
         for (i, line) in lines.iter().enumerate().skip(1) {
             let bar = &line.spans[0];
             assert_eq!(bar.content.as_ref(), "▎", "row {i}: {line:?}");

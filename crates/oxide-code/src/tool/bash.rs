@@ -611,8 +611,8 @@ mod testing {
         }
     }
 
-    /// Whether `pid` names a live process. The tool's own bash checks, since Git Bash on Windows
-    /// numbers its processes apart from Windows.
+    /// Returns whether `pid` names a live process. The tool's own bash checks, since Git Bash on
+    /// Windows numbers its processes apart from Windows.
     async fn alive(pid: &str) -> bool {
         tokio::process::Command::new(bash().unwrap())
             .args(["-c", &format!("kill -0 {pid}")])

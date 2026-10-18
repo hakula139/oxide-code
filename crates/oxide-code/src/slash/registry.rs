@@ -117,8 +117,8 @@ pub(super) trait SlashCommand: Sync {
         Vec::new()
     }
 
-    /// Whether the typed line echoes into chat. A form whose modal is its whole response returns
-    /// `false`, since the echo would sit above nothing.
+    /// Returns whether the typed line echoes into chat. A form whose modal is its whole response
+    /// returns `false`, since the echo would sit above nothing.
     fn echoes_input(&self, _args: &str) -> bool {
         true
     }

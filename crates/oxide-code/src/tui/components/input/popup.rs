@@ -27,8 +27,8 @@ const MAX_VISIBLE_ROWS: usize = 8;
 
 const COLUMN_GAP: usize = 2;
 
-/// Rows of chrome above the row list. One dim horizontal rule frames the popup as a
-/// separate overlay so it doesn't bleed into whatever sits above (welcome, chat, preview).
+/// Rows of chrome above the row list. One dim horizontal rule frames the popup as a separate
+/// overlay so it doesn't bleed into whatever sits above (welcome, chat, preview).
 const CHROME_ROWS: u16 = 1;
 
 /// Mode-tagged so [`super::InputArea`] can format the right Tab-insertion text.
@@ -47,12 +47,12 @@ pub(super) enum PopupMode {
 pub(super) struct PopupRow {
     pub(super) value: Cow<'static, str>,
     pub(super) description: Cow<'static, str>,
-    /// Set in name mode when the typed query matched an alias rather than the canonical name.
+    /// The alias a name-mode query matched, or `None` when it matched the canonical name.
     pub(super) matched_alias: Option<&'static str>,
 }
 
 /// Slash-command autocomplete overlay. Empty `rows` means hidden.
-pub(crate) struct SlashPopup {
+pub(super) struct SlashPopup {
     theme: Theme,
     /// `Some` when visible.
     mode: Option<PopupMode>,
@@ -61,7 +61,7 @@ pub(crate) struct SlashPopup {
 }
 
 impl SlashPopup {
-    pub(crate) fn new(theme: &Theme) -> Self {
+    pub(super) fn new(theme: &Theme) -> Self {
         Self {
             theme: theme.clone(),
             mode: None,
@@ -70,11 +70,12 @@ impl SlashPopup {
         }
     }
 
-    pub(crate) fn set_theme(&mut self, theme: &Theme) {
+    /// Re-skins every subsequent render.
+    pub(super) fn set_theme(&mut self, theme: &Theme) {
         self.theme = theme.clone();
     }
 
-    pub(crate) fn set_state(&mut self, state: Option<&PopupState<'_>>) {
+    pub(super) fn set_state(&mut self, state: Option<&PopupState<'_>>) {
         let (mode, rows) = match state {
             None => (None, Vec::new()),
             Some(PopupState::Name(query)) => (
@@ -91,8 +92,7 @@ impl SlashPopup {
             Some(PopupState::Arg { name, prefix }) => {
                 let completions = complete_arg_for(name, prefix);
                 if completions.is_empty() {
-                    // No curated roster for this command — hide the popup so it doesn't
-                    // intercept Tab / Enter while the user types the arg.
+                    // Without a curated roster the popup hides, leaving Tab and Enter to the arg.
                     (None, Vec::new())
                 } else {
                     (
@@ -123,26 +123,26 @@ impl SlashPopup {
         };
     }
 
-    pub(crate) fn is_visible(&self) -> bool {
+    pub(super) fn is_visible(&self) -> bool {
         !self.rows.is_empty()
     }
 
-    pub(crate) fn mode(&self) -> Option<&PopupMode> {
+    pub(super) fn mode(&self) -> Option<&PopupMode> {
         self.mode.as_ref()
     }
 
-    pub(crate) fn selected(&self) -> Option<&PopupRow> {
+    pub(super) fn selected(&self) -> Option<&PopupRow> {
         self.rows.get(self.selected)
     }
 
-    pub(crate) fn select_next(&mut self) {
+    pub(super) fn select_next(&mut self) {
         if self.rows.is_empty() {
             return;
         }
         self.selected = wrap_next(self.selected, self.rows.len());
     }
 
-    pub(crate) fn select_prev(&mut self) {
+    pub(super) fn select_prev(&mut self) {
         if self.rows.is_empty() {
             return;
         }
@@ -150,7 +150,7 @@ impl SlashPopup {
     }
 
     /// Rows the layout needs, zero when hidden and capped at [`MAX_VISIBLE_ROWS`] plus chrome.
-    pub(crate) fn height(&self) -> u16 {
+    pub(super) fn height(&self) -> u16 {
         let visible = self.rows.len().min(MAX_VISIBLE_ROWS);
         let body = saturating_u16(visible);
         if body == 0 {
@@ -160,7 +160,7 @@ impl SlashPopup {
         }
     }
 
-    pub(crate) fn render(&self, frame: &mut Frame, area: Rect) {
+    pub(super) fn render(&self, frame: &mut Frame<'_>, area: Rect) {
         if self.rows.is_empty() {
             return;
         }
@@ -203,7 +203,7 @@ impl SlashPopup {
         self.selected.saturating_sub(pad).min(max_offset)
     }
 
-    /// Mode-aware left-column label; `None` arm unreachable in practice.
+    /// Mode-aware left-column label. The `None` arm is unreachable in practice.
     fn label(&self, row: &PopupRow) -> String {
         match &self.mode {
             Some(PopupMode::Name) => match row.matched_alias {
@@ -227,11 +227,11 @@ impl SlashPopup {
         let desc_budget = width.saturating_sub(label_width + COLUMN_GAP);
         let desc = truncate_to_width(&row.description, desc_budget);
 
-        let mut spans = vec![Span::styled(label_text, row_style)];
-        let gap = " ".repeat(pad + COLUMN_GAP);
-        spans.push(Span::raw(gap));
-        spans.push(Span::styled(desc, row_style));
-        Line::from(spans)
+        Line::from(vec![
+            Span::styled(label_text, row_style),
+            Span::raw(" ".repeat(pad + COLUMN_GAP)),
+            Span::styled(desc, row_style),
+        ])
     }
 }
 
@@ -289,13 +289,12 @@ mod tests {
             .map(|r| r.value.clone().into_owned())
             .collect();
         // BUILT_INS is alphabetical, so empty-query first row is `archive`.
-        assert_ne!(values, [] as [String; 0]);
         assert_eq!(values[0], "archive");
     }
 
     #[test]
     fn set_state_clamps_selection_when_row_count_shrinks() {
-        // Park selection past the surviving row count — must clamp instead of indexing past end.
+        // The selection sits past the surviving row count and must clamp to it.
         let mut popup = name_popup("");
         let n = popup.rows.len();
         for _ in 0..n - 1 {
@@ -310,11 +309,11 @@ mod tests {
 
     #[test]
     fn set_state_resets_selection_on_mode_transition() {
-        // Mode transition resets selection — new roster is unrelated.
+        // A mode transition resets the selection, since the new roster is unrelated.
         let mut popup = name_popup("");
         popup.select_next();
         popup.select_next();
-        assert!(popup.selected >= 2, "park selection past row 0");
+        assert_eq!(popup.selected, 2);
 
         popup.set_state(Some(&PopupState::Arg {
             name: "model",
@@ -345,8 +344,7 @@ mod tests {
 
     #[test]
     fn set_state_arg_with_empty_roster_stays_hidden() {
-        // /init has no curated arg roster — popup must hide so the user can type the arg
-        // without the popup intercepting Tab / Enter.
+        // `/init` has no curated arg roster, so the popup hides, leaving Tab and Enter to the arg.
         let popup = arg_popup("init", "");
         assert!(!popup.is_visible());
         assert!(popup.mode().is_none());
@@ -396,8 +394,7 @@ mod tests {
 
     #[test]
     fn select_prev_when_not_at_top_moves_up_one_row() {
-        // Pin the non-wrap branch — the decrement path is otherwise dead because select_prev()
-        // from row 0 always wraps.
+        // Pins the decrement branch, since select_prev() from row 0 always takes the wrap branch.
         let mut popup = name_popup("");
         popup.select_next();
         popup.select_next();
@@ -419,17 +416,8 @@ mod tests {
 
     #[test]
     fn height_caps_at_max_visible_rows_plus_chrome() {
-        // Visible rows + the top-border chrome row.
-        let popup = name_popup("");
-        let expected = popup.rows.len().min(MAX_VISIBLE_ROWS) + usize::from(CHROME_ROWS);
-        assert_eq!(usize::from(popup.height()), expected);
-    }
-
-    #[test]
-    fn height_is_zero_when_hidden() {
-        // Chrome must not inflate height when the popup has nothing to show.
-        let popup = popup_with_state(None);
-        assert_eq!(popup.height(), 0);
+        assert_eq!(long_popup(3).height(), 3 + CHROME_ROWS);
+        assert_eq!(long_popup(12).height(), 8 + CHROME_ROWS);
     }
 
     // ── render ──
@@ -463,14 +451,13 @@ mod tests {
 
     #[test]
     fn render_arg_mode_lists_curated_roster_without_slash_prefix() {
-        // Arg-mode rows render bare values (`low`, `medium`, ...) — no leading `/`.
+        // Arg-mode rows render bare values (`low`, `medium`, ...) with no leading `/`.
         let popup = arg_popup("effort", "");
         insta::assert_snapshot!(render_to_backend(&popup, 60));
     }
 
     #[test]
     fn render_arg_mode_prefix_filters_to_subset() {
-        // Pin that arg-mode prefix filtering reaches the renderer (not just the data layer).
         let popup = arg_popup("theme", "m");
         insta::assert_snapshot!(render_to_backend(&popup, 60));
     }
@@ -487,7 +474,7 @@ mod tests {
         popup.select_next();
         let backend = render_to_backend(&popup, 60);
 
-        // Skip the top-border chrome row; data rows start at y = CHROME_ROWS.
+        // Data rows start below the top-border chrome row, at y = CHROME_ROWS.
         let chrome = CHROME_ROWS;
         let selected = backend.buffer().cell(Position::new(0, chrome + 1)).unwrap();
         assert_eq!(selected.fg, theme.text().fg.unwrap());
@@ -508,30 +495,21 @@ mod tests {
 
     #[test]
     fn render_narrow_terminal_truncates_description() {
-        // At 30 cols the description gutter must shrink and wrap through ELLIPSIS rather than
-        // overflowing the row.
+        // At 30 cols the description shrinks and truncates with an ellipsis to fit the row.
         let popup = name_popup("");
         insta::assert_snapshot!(render_to_backend(&popup, 30));
     }
 
     #[test]
     fn render_alias_match_parenthesizes_only_typed_alias() {
-        // No live registry command has aliases yet, but the renderer is the place where the
-        // alias-display rule lives. Drive it via a hand-rolled match list.
-        let mut popup = SlashPopup::new(&theme());
-        popup.mode = Some(PopupMode::Name);
-        popup.rows = vec![PopupRow {
-            value: Cow::Borrowed("clear"),
-            description: Cow::Borrowed("wipe transcript"),
-            matched_alias: Some("new"),
-        }];
+        let popup = name_popup("new");
         insta::assert_snapshot!(render_to_backend(&popup, 60));
     }
 
     #[test]
     fn render_with_only_chrome_room_paints_the_border_and_skips_rows() {
-        // When the layout reserves exactly CHROME_ROWS, the inner area has zero height — the
-        // border still paints, but the row loop is skipped.
+        // With exactly CHROME_ROWS reserved, the inner area has zero height, so the border paints
+        // and the row loop is skipped.
         let popup = name_popup("");
         let width: u16 = 60;
         let mut terminal = Terminal::new(TestBackend::new(width, CHROME_ROWS)).unwrap();
@@ -552,8 +530,7 @@ mod tests {
 
     #[test]
     fn render_hidden_popup_emits_nothing() {
-        // The hidden-popup early-return in render() is otherwise unreached — App's draw method
-        // gates by height(), so the function only fires when the popup chose to be visible.
+        // App's draw gates on height(), so only this test reaches render()'s hidden-popup return.
         let popup = popup_with_state(None);
         let backend = render_to_backend(&popup, 60);
         let buf = backend.buffer();
@@ -567,8 +544,7 @@ mod tests {
 
     #[test]
     fn render_after_scroll_shows_window_starting_at_offset() {
-        // 12 fake rows; advance to row 8 to push the window past the top so `cmd0` is hidden
-        // and `cmd8` is visible — confirms the slice and the offset agree.
+        // Moving to row 8 of 12 scrolls `cmd0` out and `cmd8` in, so the slice and offset agree.
         let mut popup = long_popup(12);
         for _ in 0..8 {
             popup.select_next();
@@ -661,8 +637,8 @@ mod tests {
 
     #[test]
     fn scroll_offset_select_prev_from_top_anchors_at_bottom_window() {
-        // Up-arrow from row 0 wraps to the last row; the bottom-anchored window must clamp to
-        // `len - MAX_VISIBLE_ROWS` (the symmetric case to the wrap-to-top test above).
+        // Up from row 0 wraps to the last row, and the bottom-anchored window clamps to
+        // `len - MAX_VISIBLE_ROWS`, mirroring the wrap-to-top test above.
         let total = MAX_VISIBLE_ROWS + 4;
         let mut p = long_popup(total);
         p.select_prev();

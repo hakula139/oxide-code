@@ -6,6 +6,7 @@ use ratatui::Frame;
 use ratatui::layout::Rect;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
+use unicode_width::UnicodeWidthStr;
 
 use crate::tool::tasks::{Progress, Task, TaskStatus};
 use crate::tui::glyphs::task_marker;
@@ -68,7 +69,7 @@ impl TaskPanel {
         } else {
             0..self.tasks.len()
         };
-        let width = usize::from(area.width).saturating_sub(MARGIN.len());
+        let width = usize::from(area.width).saturating_sub(MARGIN.width());
         let mut lines: Vec<Line<'static>> = self.tasks[shown.clone()]
             .iter()
             .map(|task| {

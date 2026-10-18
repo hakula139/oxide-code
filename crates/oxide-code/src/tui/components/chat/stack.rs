@@ -62,7 +62,7 @@ impl CachedBlock {
         }
     }
 
-    /// Whether the cached lines were rendered at this width and theme epoch.
+    /// Returns whether the cached lines were rendered at this width and theme epoch.
     pub(super) fn is_current(&self, width: u16, theme_epoch: u64) -> bool {
         self.key == Some(RenderKey { width, theme_epoch })
     }
@@ -220,7 +220,7 @@ impl<'a> Stack<'a> {
         self.push(lines);
     }
 
-    /// Whether the bottom row has visible width, so the next block needs a separator.
+    /// Returns whether the bottom row has visible width, so the next block needs a separator.
     pub(super) fn last_has_width(&self) -> bool {
         self.runs.last().is_some_and(|run| last_has_width(run))
     }

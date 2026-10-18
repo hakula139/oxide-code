@@ -65,22 +65,21 @@ const FULL_MIN: u16 = 60;
 const COLLAPSED_MIN: u16 = 40;
 const NARROW_MIN: u16 = 25;
 
-/// Minimum height for the starters / tip block. Below this we drop them so the env / cwd column
-/// centers on its own width rather than reserving space for clipped content.
+/// Minimum height for the starters and tip block. Shorter areas drop the block, so the env and
+/// cwd column centers on its own width.
 const STARTERS_MIN_HEIGHT: u16 = 13;
 
 // ── Snapshot ──
 
-/// Projection of [`LiveSessionInfo`] consumed by [`paint`]; randomized fields are stable per
-/// construction.
+/// Projection of [`LiveSessionInfo`] for [`paint`], with random picks fixed at construction.
 pub(crate) struct WelcomeSnapshot {
-    pub(crate) version: &'static str,
-    pub(crate) model_label: String,
-    pub(crate) effort_label: String,
-    pub(crate) auth_label: &'static str,
-    pub(crate) cwd: String,
-    pub(crate) starters: [Starter; STARTER_PICK],
-    pub(crate) tip: &'static str,
+    version: &'static str,
+    model_label: String,
+    effort_label: String,
+    auth_label: &'static str,
+    cwd: String,
+    starters: [Starter; STARTER_PICK],
+    tip: &'static str,
 }
 
 impl WelcomeSnapshot {
@@ -138,14 +137,13 @@ fn build_lines(
     push_identity(&mut lines, theme, snap, full);
     lines.push(Line::raw(""));
 
-    // Shared column width keeps centered rows on one left edge instead of each row floating.
-    // Starter / tip widths only contribute when the block actually renders, so a height-clipped
-    // area doesn't reserve space for content `Paragraph` will drop.
+    // A shared column width keeps the centered rows on one left edge. Starter and tip widths count
+    // only when that block renders, so a short area reserves no space for rows it drops.
     let env = truncate_to_width(&environment_text(snap, full, with_starters), max_body);
     let cwd = cwd_text(max_body, snap, with_starters);
     let starter_rows = render_starters_block.then(|| starter_rows(&snap.starters));
     let tip_text = render_starters_block.then(|| format!("{TIP_LABEL}{TIP_SEP}{}", snap.tip));
-    // Clamp to area.width — wider columns clip on the right under center alignment.
+    // Clamp to area.width, since wider columns clip on the right under center alignment.
     let column_width =
         column_width(&env, &cwd, starter_rows.as_deref(), tip_text.as_deref()).min(max_body);
 
@@ -233,7 +231,7 @@ fn starter_rows(picked: &[Starter; STARTER_PICK]) -> Vec<(String, String)> {
 
 fn starter_row_width(rows: &[(String, String)]) -> usize {
     rows.iter()
-        .map(|(name, desc)| name.width() + STARTER_GAP.len() + desc.width())
+        .map(|(name, desc)| name.width() + STARTER_GAP.width() + desc.width())
         .max()
         .unwrap_or(0)
 }
@@ -271,7 +269,7 @@ fn push_starter_row(
     theme: &Theme,
     column_width: usize,
 ) {
-    let prefix_width = name.width() + STARTER_GAP.len();
+    let prefix_width = name.width() + STARTER_GAP.width();
     let desc_budget = column_width.saturating_sub(prefix_width);
     let desc = truncate_to_width(desc, desc_budget);
     let pad = column_width.saturating_sub(prefix_width + desc.width());
@@ -298,7 +296,7 @@ fn push_tip(lines: &mut Vec<Line<'static>>, theme: &Theme, tip: &'static str, co
 
 // ── Random Picks ──
 
-// Knuth's MMIX LCG constants — not cryptographic, just enough spread per session.
+// Knuth's MMIX LCG constants, which spread the picks enough per session.
 const LCG_MULT: u64 = 6_364_136_223_846_793_005;
 const LCG_INC: u64 = 1_442_695_040_888_963_407;
 
@@ -329,7 +327,7 @@ fn pick_tip(seed: u64) -> &'static str {
 }
 
 fn hash_seed(s: &str) -> u64 {
-    // FNV-1a 64-bit — cheap and dependency-free.
+    // FNV-1a 64-bit.
     s.bytes().fold(0xcbf2_9ce4_8422_2325, |h, b| {
         (h ^ u64::from(b)).wrapping_mul(0x0000_0100_0000_01b3)
     })

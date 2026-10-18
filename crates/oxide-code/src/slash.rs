@@ -4,7 +4,9 @@
 //! [`registry::SlashCommand`] impls.
 //!
 //! Persistence: commands never write config. Mutations are session-local. Restart returns to the
-//! user-declared config (see `docs/design/slash/commands.md` § Design Decisions 6).
+//! user-declared config.
+//!
+//! Design: `docs/design/slash/commands.md`.
 
 mod archive;
 mod clear;
@@ -60,7 +62,7 @@ pub(crate) fn arg_placeholder_for(cmd_name: &str) -> Option<&'static str> {
     registry::lookup_in(registry::BUILT_INS, cmd_name).and_then(registry::SlashCommand::usage)
 }
 
-/// Whether the typed `/foo args` line should echo into chat history. Unknown commands echo
+/// Returns whether the typed `/foo args` line should echo into chat history. Unknown commands echo
 /// so the dispatcher's error block has the original line for context.
 pub(crate) fn echoes_input(parsed: &Parsed) -> bool {
     registry::lookup_in(registry::BUILT_INS, &parsed.name)
@@ -112,8 +114,8 @@ pub(crate) fn typed_op(parsed: &Parsed) -> Option<Result<Op, String>> {
     Some(op.map_err(|msg| named_error(parsed, &msg)))
 }
 
-/// Whether `parsed` is safe to dispatch mid-turn. `ReadOnly` and `Steering` may run while the
-/// agent is streaming, while the caller defers `Mutating` and rejects `Unknown`.
+/// Returns whether `parsed` is safe to dispatch mid-turn. `ReadOnly` and `Steering` may run while
+/// the agent is streaming, while the caller defers `Mutating` and rejects `Unknown`.
 pub(crate) fn classify(parsed: &Parsed) -> SlashKind {
     classify_in(registry::BUILT_INS, parsed)
 }

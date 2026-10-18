@@ -2,8 +2,9 @@
 //! simple commands it runs and the files its output redirections write, so rules weigh each simple
 //! command on its own. Leading assignments and transparent wrappers are stripped first. A command
 //! the analysis cannot vouch for is opaque: rules may deny it or leave it to ask, but never allow
-//! it. `exec` patterns parse here too, so they read words the way commands do. Design:
-//! `docs/design/tools/permissions.md`.
+//! it. `exec` patterns parse here too, so they read words the way commands do.
+//!
+//! Design: `docs/design/tools/permissions.md`.
 
 use std::path::{Component, Path, PathBuf};
 use std::sync::LazyLock;
@@ -309,10 +310,10 @@ impl Segment {
         self.reads_anything
     }
 
-    /// Whether this may run `rm` with both its recursive and force options before any `--`, in one
-    /// short cluster or two, such as `-rf` or `-R -f`, or as `--recursive` and `--force` or a
-    /// prefix GNU `rm` takes for either. A word that expands, the program name included, may become
-    /// any of them, and GNU `rm` reads options after operands too, so `rm / -rf` counts.
+    /// Returns whether this may run `rm` with both its recursive and force options before any `--`,
+    /// in one short cluster or two, such as `-rf` or `-R -f`, or as `--recursive` and `--force` or
+    /// a prefix GNU `rm` takes for either. A word that expands, the program name included, may
+    /// become any of them, and GNU `rm` reads options after operands too, so `rm / -rf` counts.
     pub(super) fn removes_recursively_by_force(&self) -> bool {
         let (name, args) = self
             .program()
@@ -610,7 +611,7 @@ impl Walk<'_> {
     }
 }
 
-/// Whether `node` runs code no simple command shows: a substitution, or arithmetic, which
+/// Returns whether `node` runs code no simple command shows: a substitution, or arithmetic, which
 /// evaluates a variable's value as an expression that can itself hold a substitution.
 fn runs_hidden_code(node: Node<'_>) -> bool {
     match node.kind() {
@@ -639,7 +640,7 @@ pub(super) fn basename(name: &str) -> &str {
     name.rsplit(['/', '\\']).next().unwrap_or(name)
 }
 
-/// Whether a shell option cluster such as `-c` or `-lc` takes the script as the next word.
+/// Returns whether a shell option cluster such as `-c` or `-lc` takes the script as the next word.
 fn is_command_option(arg: &str) -> bool {
     arg.starts_with('-') && !arg.starts_with("--") && arg.contains('c')
 }
@@ -672,7 +673,7 @@ enum Start {
 }
 
 impl Wrapper {
-    /// Whether `options` run the command in another directory.
+    /// Returns whether `options` run the command in another directory.
     fn changes_dir(&self, options: &[Word<'_>]) -> bool {
         options
             .iter()
@@ -727,7 +728,7 @@ impl Wrapper {
     }
 }
 
-/// Whether `arg` is `option` with its value attached.
+/// Returns whether `arg` is `option` with its value attached.
 fn is_attached(arg: &str, option: &str) -> bool {
     arg.strip_prefix(option).is_some_and(|value| {
         if option.starts_with("--") {
@@ -745,7 +746,7 @@ fn assigned(assignment: &str) -> &str {
         .map_or(assignment, |end| &assignment[..end])
 }
 
-/// Whether `arg` is a `NAME=VALUE` environment assignment.
+/// Returns whether `arg` is a `NAME=VALUE` environment assignment.
 fn is_assignment(arg: &str) -> bool {
     arg.split_once('=').is_some_and(|(name, _)| {
         name.starts_with(|c: char| c == '_' || c.is_ascii_alphabetic())
@@ -1100,8 +1101,8 @@ fn operands(values: &[&str]) -> Vec<(usize, String)> {
     operands
 }
 
-/// Whether a `grep` argument makes it read every file under a directory.
-/// `--directories` and `-d` count whatever their value, since grep accepts `rec` for `recurse`.
+/// Returns whether a `grep` argument makes it read every file under a directory. `--directories`
+/// and `-d` count whatever their value, since grep accepts `rec` for `recurse`.
 fn is_recursive_grep(arg: &str) -> bool {
     match long_option(arg) {
         Some(name) => ["dereference-recursive", "directories", "recursive"]

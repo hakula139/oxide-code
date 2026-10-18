@@ -111,7 +111,7 @@ impl ChatBlock for AssistantThinking {
     }
 }
 
-/// Dims plain spans; leaves explicitly-colored spans at full color.
+/// Dims plain spans and leaves explicitly colored spans at full color.
 fn apply_thinking_style(mut line: Line<'static>, theme: &Theme) -> Line<'static> {
     if line.style.fg.is_some() {
         return line;
@@ -183,21 +183,27 @@ mod tests {
             .iter()
             .find(|l| l.spans.iter().any(|s| s.content.contains("let x = 1;")))
             .expect("fence body line missing from render");
-        assert_eq!(fence_line.style.fg, theme.code.fg);
+        assert_eq!(fence_line.style.fg, theme.code().fg);
     }
 
     // ── AssistantThinking::render ──
 
     #[test]
     fn render_empty_body_emits_header_only() {
-        // Exercised by the zero-delta frame before the first thinking chunk.
+        // Thinking that holds only whitespace renders as the bare header.
         let theme = Theme::default();
         let block = AssistantThinking::new("   \n  ");
+
         let lines = block.render(&ctx_at(60, &theme));
-        assert_eq!(lines.len(), 1, "only the header should render: {lines:?}");
-        let header: String = lines[0].spans.iter().map(|s| s.content.as_ref()).collect();
-        assert!(header.starts_with(THINKING_PREFIX));
-        assert!(header.contains("Thinking..."));
+
+        let style = theme.thinking();
+        assert_eq!(
+            lines,
+            [Line::from(vec![
+                Span::styled(THINKING_PREFIX, style),
+                Span::styled(THINKING_LABEL, style),
+            ])]
+        );
     }
 
     #[test]
@@ -205,13 +211,11 @@ mod tests {
         // Bar-only gutter row separates header from prose without crowding.
         let theme = Theme::default();
         let block = AssistantThinking::new("hello");
+
         let lines = block.render(&ctx_at(60, &theme));
-        assert!(lines.len() >= 3, "header + gutter + body: {lines:?}");
-        let gutter: String = lines[1].spans.iter().map(|s| s.content.as_ref()).collect();
-        assert_eq!(
-            gutter, THINKING_PREFIX,
-            "gutter line carries only the bar prefix",
-        );
+
+        let rows: Vec<String> = lines.iter().map(ToString::to_string).collect();
+        assert_eq!(rows, ["▎ Thinking...", "▎ ", "▎ hello"]);
     }
 
     #[test]
@@ -231,7 +235,7 @@ mod tests {
             .iter()
             .find(|l| l.spans.iter().any(|s| s.content.contains("let x = 1;")))
             .expect("fence body line missing from render");
-        assert_eq!(fence_line.style.fg, theme.code.fg);
+        assert_eq!(fence_line.style.fg, theme.code().fg);
 
         let first_span = fence_line.spans.first().expect("empty fence line");
         assert_eq!(first_span.content, THINKING_PREFIX);
@@ -249,7 +253,7 @@ mod tests {
         ]);
         let out = apply_thinking_style(line, &theme);
         assert_eq!(out.spans[0].style.fg, theme.thinking().fg);
-        assert_eq!(out.spans[1].style.fg, theme.code.fg);
+        assert_eq!(out.spans[1].style.fg, theme.code().fg);
     }
 
     // ── ProgressUpdate::visible ──

@@ -1,6 +1,8 @@
 //! Tool-call approval overlay. Surfaces a gated call's preview and the rule that holds it, and
 //! resolves the blocked agent to `Approve`, `AllowForSession` with a rule the user can edit first,
-//! `Deny`, `DenyWithFeedback` with typed text, or `Abort`. See `docs/design/tools/permissions.md`.
+//! `Deny`, `DenyWithFeedback` with typed text, or `Abort`.
+//!
+//! Design: `docs/design/tools/permissions.md`.
 
 use std::cell::{Cell, RefCell};
 use std::time::{Duration, Instant};

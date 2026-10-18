@@ -102,7 +102,7 @@ impl Selection {
         }
     }
 
-    /// Whether the left button is still down.
+    /// Returns whether the left button is still down.
     pub(super) fn held(&self) -> bool {
         self.pointer.is_some()
     }
@@ -118,7 +118,7 @@ pub(super) struct ClickCounter {
 impl ClickCounter {
     /// A cell for one press, a word for a double click, and a row for a triple click, after which
     /// the count starts over.
-    fn press(&mut self, now: Instant, cell: (u16, u16)) -> Unit {
+    fn press(&mut self, cell: (u16, u16), now: Instant) -> Unit {
         let repeat = self.last.is_some_and(|(at, last_cell)| {
             last_cell == cell && now.duration_since(at) <= MULTI_CLICK_WINDOW
         });
@@ -157,8 +157,8 @@ impl ChatView {
         text
     }
 
-    /// Scrolls one row toward the pointer while a drag holds it past the chat's top or bottom, until
-    /// the view reaches the content's end. Returns whether it scrolled.
+    /// Scrolls one row toward the pointer while a drag holds it past the chat's top or bottom,
+    /// until the view reaches the content's end. Returns whether it scrolled.
     pub(crate) fn tick_selection(&mut self, now: Instant) -> bool {
         let area = self.viewport;
         let (at_top, at_bottom) = (
@@ -227,7 +227,7 @@ impl ChatView {
         if !self.viewport.contains(Position::from(cell)) {
             return;
         }
-        let unit = self.clicks.press(now, cell);
+        let unit = self.clicks.press(cell, now);
         let Some(origin) = self.unit_at(cell, unit) else {
             return;
         };
@@ -308,8 +308,7 @@ impl ChatView {
     }
 
     /// The unit at a screen cell, or `None` when the last paint showed no rows. A cell above the
-    /// chat clamps to the start of its first row, and one below the painted rows to the end of the
-    /// last.
+    /// chat clamps to its first row's start, and one below the painted rows to the last row's end.
     fn unit_at(&self, (x, y): (u16, u16), unit: Unit) -> Option<[Point; 2]> {
         let area = self.viewport;
         let last_row = u16::try_from(self.painted_rows.len())
@@ -354,7 +353,7 @@ impl ChatView {
         if !self.auto_scroll {
             return false;
         }
-        self.scroll_up(0);
+        self.auto_scroll = false;
         true
     }
 }
@@ -381,8 +380,7 @@ fn grapheme_bounds(line: &Line<'_>, col: u16) -> Range<u16> {
         })
 }
 
-/// Columns of the word at `col`, or of the single grapheme there when it is whitespace or a
-/// delimiter.
+/// Columns of the word at `col`, or of the grapheme there if it is whitespace or a delimiter.
 fn word_bounds(line: &Line<'_>, col: u16) -> Range<u16> {
     let cells: Vec<_> = cells(line).collect();
     let end_of = |(x, width, _): (u16, u16, &str)| x.saturating_add(width);
@@ -509,7 +507,7 @@ mod tests {
     }
 
     fn highlighted(buf: &Buffer, x: u16, y: u16) -> bool {
-        buf[(x, y)].bg == Theme::default().selection.bg.unwrap()
+        buf[(x, y)].bg == Theme::default().selection().bg.unwrap()
     }
 
     /// Screen cell where `needle` first shows in `buf`.
@@ -555,12 +553,12 @@ mod tests {
 
         let units: Vec<Unit> = [0, 100, 200, 300]
             .into_iter()
-            .map(|ms| clicks.press(at(ms), (3, 1)))
+            .map(|ms| clicks.press((3, 1), at(ms)))
             .collect();
 
         assert_eq!(units, [Unit::Cell, Unit::Word, Unit::Row, Unit::Cell]);
-        assert_eq!(clicks.press(at(1000), (3, 1)), Unit::Cell, "too slow");
-        assert_eq!(clicks.press(at(1100), (4, 1)), Unit::Cell, "another cell");
+        assert_eq!(clicks.press((3, 1), at(1000)), Unit::Cell, "too slow");
+        assert_eq!(clicks.press((4, 1), at(1100)), Unit::Cell, "another cell");
     }
 
     // ── handle_mouse ──

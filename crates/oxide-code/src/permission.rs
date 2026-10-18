@@ -1,10 +1,12 @@
 //! Tool permission gate. A resolved [`Policy`] (mode plus the deny, ask, and allow rule tiers) and
 //! a [`Target`] describing a tool call resolve to a [`Verdict`] through the pure
 //! [`Policy::verdict`] pipeline: a [`Decision`] of allow / ask / deny and the [`Basis`] that
-//! settled it. Design: `docs/design/tools/permissions.md`.
+//! settled it.
 //!
 //! The gate is the whole safety boundary: oxide-code has no sandbox, so the decision pipeline is
 //! the only thing standing between the model and an unchecked tool call.
+//!
+//! Design: `docs/design/tools/permissions.md`.
 
 pub(crate) mod defaults;
 pub(crate) mod rule;
@@ -234,7 +236,7 @@ impl Workspace {
         &self.roots
     }
 
-    /// Whether the resolved `path` sits inside one of the roots.
+    /// Returns whether the resolved `path` sits inside one of the roots.
     fn contains(&self, path: &Path) -> bool {
         self.roots.iter().any(|root| path.starts_with(root))
     }
@@ -602,15 +604,15 @@ fn fold_name(name: &str) -> String {
         .to_owned()
 }
 
-/// Whether the resolved `dir` may be a workspace root, whose contents auto-allow edits. `/`,
-/// `$HOME`, and the ancestors of `$HOME` may not, since their insides span every dotfile.
+/// Returns whether the resolved `dir` may be a workspace root, whose contents auto-allow edits.
+/// `/`, `$HOME`, and the ancestors of `$HOME` may not, since their insides span every dotfile.
 fn is_workspace(dir: &Path) -> bool {
     let home = std::env::home_dir().map(|home| resolve(&home).unwrap_or(home));
     dir.parent().is_some() && !home.is_some_and(|home| holds(dir, &home))
 }
 
-/// Whether `dir` is `home` or an ancestor of it, compared by identity as well as by spelling. An
-/// alias that `resolve` keeps, such as macOS's case-insensitive `/users/<name>` or the
+/// Returns whether `dir` is `home` or an ancestor of it, compared by identity as well as by
+/// spelling. An alias that `resolve` keeps, such as macOS's case-insensitive `/users/<name>` or the
 /// `/System/Volumes/Data` firmlink, reaches `home` through the same trailing names.
 fn holds(dir: &Path, home: &Path) -> bool {
     home.starts_with(dir)
@@ -620,8 +622,8 @@ fn holds(dir: &Path, home: &Path) -> bool {
         })
 }
 
-/// Whether `path` is a regular file with more than one hard link, one of which may sit outside the
-/// workspace.
+/// Returns whether `path` is a regular file with more than one hard link, one of which may sit
+/// outside the workspace.
 fn is_hard_linked(path: &Path) -> bool {
     #[cfg(unix)]
     {
@@ -1219,9 +1221,9 @@ pub(crate) struct WalkFilter<'a> {
 }
 
 impl WalkFilter<'_> {
-    /// Whether a rule withholds `path`, a file found below the walk's base. The walk follows no
-    /// symlink, so `path` is where the file resolves. The same names below the requested base
-    /// spell it the way the call does.
+    /// Returns whether a rule withholds `path`, a file found below the walk's base. The walk
+    /// follows no symlink, so `path` is where the file resolves. The same names below the requested
+    /// base spell it the way the call does.
     pub(crate) fn withholds(&self, path: &Path) -> bool {
         if self.rules.is_empty() {
             return false;

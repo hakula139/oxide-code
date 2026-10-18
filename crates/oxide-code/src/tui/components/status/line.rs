@@ -2,6 +2,7 @@
 
 use std::path::Path;
 
+use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 use time::OffsetDateTime;
 use unicode_width::UnicodeWidthStr;
@@ -109,102 +110,87 @@ impl StatusLine {
         let span = match segment {
             StatusLineSegment::CurrentDir => non_empty_span(
                 truncate_to_width(state.cwd, MAX_CURRENT_DIR_WIDTH),
-                Self::segment_style(theme, SegmentStyle::Muted),
+                SegmentStyle::Muted.style(theme),
             ),
             StatusLineSegment::GitBranch => state.git_branch.map(|branch| {
                 Span::styled(
                     truncate_to_width(branch, MAX_GIT_BRANCH_WIDTH),
-                    Self::segment_style(theme, SegmentStyle::Accent),
+                    SegmentStyle::Accent.style(theme),
                 )
             }),
             StatusLineSegment::PullRequest => state.pull_request.map(|pr| {
                 hyperlink = Some(pr.url.clone());
-                Span::styled(
-                    format!("#{}", pr.number),
-                    Self::segment_style(theme, SegmentStyle::Accent),
-                )
+                Span::styled(format!("#{}", pr.number), SegmentStyle::Accent.style(theme))
             }),
             StatusLineSegment::PullRequestChecks => state.pull_request.and_then(|pr| {
                 let (label, style) = checks_label(pr.checks?);
                 hyperlink = Some(format!("{}/checks", pr.url));
-                Some(Span::styled(label, Self::segment_style(theme, style)))
+                Some(Span::styled(label, style.style(theme)))
             }),
             StatusLineSegment::PullRequestReview => state.pull_request.and_then(|pr| {
                 let (label, style) = review_label(pr.review?);
                 hyperlink = Some(format!("{}/files", pr.url));
-                Some(Span::styled(label, Self::segment_style(theme, style)))
+                Some(Span::styled(label, style.style(theme)))
             }),
             StatusLineSegment::Model => Some(Span::styled(
                 state.model.to_owned(),
-                Self::segment_style(theme, SegmentStyle::Text),
+                SegmentStyle::Text.style(theme),
             )),
             StatusLineSegment::ModelWithEffort => Some(Span::styled(
                 model_with_effort(state.model, state.effort),
-                Self::segment_style(theme, SegmentStyle::Text),
+                SegmentStyle::Text.style(theme),
             )),
             StatusLineSegment::ContextUsed => state
                 .usage
                 .and_then(context_label)
-                .map(|(label, style)| Span::styled(label, Self::segment_style(theme, style))),
+                .map(|(label, style)| Span::styled(label, style.style(theme))),
             StatusLineSegment::SessionCost => state
                 .usage
                 .and_then(session_cost_label)
-                .map(|label| Span::styled(label, Self::segment_style(theme, SegmentStyle::Muted))),
+                .map(|label| Span::styled(label, SegmentStyle::Muted.style(theme))),
             StatusLineSegment::FiveHourLimit => state
                 .rate_limits
                 .and_then(|limits| rate_limit_label("5h", limits.five_hour))
-                .map(|(label, style)| Span::styled(label, Self::segment_style(theme, style))),
+                .map(|(label, style)| Span::styled(label, style.style(theme))),
             StatusLineSegment::WeeklyLimit => state
                 .rate_limits
                 .and_then(|limits| rate_limit_label("7d", limits.seven_day))
-                .map(|(label, style)| Span::styled(label, Self::segment_style(theme, style))),
+                .map(|(label, style)| Span::styled(label, style.style(theme))),
             StatusLineSegment::PermissionMode => permission_mode_label(state.permission_mode)
-                .map(|(label, style)| Span::styled(label, Self::segment_style(theme, style))),
+                .map(|(label, style)| Span::styled(label, style.style(theme))),
             StatusLineSegment::RunState => Some(state.status_span.clone()),
             StatusLineSegment::QueuedPrompts => (state.queued_prompts > 0).then(|| {
                 Span::styled(
                     format!("Queued: {}", state.queued_prompts),
-                    Self::segment_style(theme, SegmentStyle::Muted),
+                    SegmentStyle::Muted.style(theme),
                 )
             }),
             StatusLineSegment::TaskProgress => state.task_progress.map(|progress| {
                 Span::styled(
                     format!("Tasks: {}/{}", progress.completed, progress.total),
-                    Self::segment_style(theme, SegmentStyle::Muted),
+                    SegmentStyle::Muted.style(theme),
                 )
             }),
             StatusLineSegment::ThreadTitle => state.title.map(|title| {
                 Span::styled(
                     truncate_to_width(title, MAX_TITLE_WIDTH),
-                    Self::segment_style(theme, SegmentStyle::Muted),
+                    SegmentStyle::Muted.style(theme),
                 )
             }),
             StatusLineSegment::SessionId => (!state.session_id.is_empty()).then(|| {
                 Span::styled(
                     format!("ID: {}", id_prefix(state.session_id)),
-                    Self::segment_style(theme, SegmentStyle::Muted),
+                    SegmentStyle::Muted.style(theme),
                 )
             }),
             StatusLineSegment::Theme => theme_label(state.theme_name)
-                .map(|label| Span::styled(label, Self::segment_style(theme, SegmentStyle::Muted))),
+                .map(|label| Span::styled(label, SegmentStyle::Muted.style(theme))),
             StatusLineSegment::CurrentTime => Some(Span::styled(
                 current_time_label(),
-                Self::segment_style(theme, SegmentStyle::Dim),
+                SegmentStyle::Dim.style(theme),
             )),
         }?;
         Some(RenderedSegment::new(segment, span, hyperlink))
-    }
-
-    fn segment_style(theme: &Theme, style: SegmentStyle) -> ratatui::style::Style {
-        match style {
-            SegmentStyle::Text => theme.text(),
-            SegmentStyle::Muted => theme.muted(),
-            SegmentStyle::Dim => theme.dim(),
-            SegmentStyle::Accent => theme.accent(),
-            SegmentStyle::Success => theme.success(),
-            SegmentStyle::Warning => theme.warning(),
-            SegmentStyle::Error => theme.error(),
-        }
     }
 }
 
@@ -213,7 +199,7 @@ pub(super) struct StatusLineState<'a> {
     pub(super) effort: Option<Effort>,
     pub(super) title: Option<&'a str>,
     pub(super) usage: Option<UsageSnapshot>,
-    /// Already tilde-expanded, so the renderer must not substitute `~` again.
+    /// Already shortened with `~` by `tildify`, so the renderer must not substitute it again.
     pub(super) cwd: &'a str,
     pub(super) git_branch: Option<&'a str>,
     pub(super) pull_request: Option<&'a PullRequest>,
@@ -238,6 +224,20 @@ enum SegmentStyle {
     Success,
     Warning,
     Error,
+}
+
+impl SegmentStyle {
+    fn style(self, theme: &Theme) -> Style {
+        match self {
+            Self::Text => theme.text(),
+            Self::Muted => theme.muted(),
+            Self::Dim => theme.dim(),
+            Self::Accent => theme.accent(),
+            Self::Success => theme.success(),
+            Self::Warning => theme.warning(),
+            Self::Error => theme.error(),
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -418,8 +418,7 @@ fn compact_tokens(tokens: u32) -> String {
 }
 
 fn format_cost(cost: f64) -> String {
-    // Switch to two-decimal display once `{cost:.2}` would round up to `$1.00` so the bar reads
-    // `$1.00` instead of `$0.9999` at the boundary.
+    // Two decimals take over once `{cost:.2}` rounds up to `$1.00`, so `$0.9999` reads `$1.00`.
     if cost >= 0.995 {
         format!("${cost:.2}")
     } else {
@@ -1002,8 +1001,10 @@ mod tests {
     // ── format_cost ──
 
     #[test]
-    fn format_cost_uses_cents_for_larger_totals() {
+    fn format_cost_switches_to_cents_where_they_round_up_to_a_dollar() {
         assert_eq!(format_cost(1.234), "$1.23");
+        assert_eq!(format_cost(0.9951), "$1.00");
+        assert_eq!(format_cost(0.9949), "$0.9949");
         assert_eq!(format_cost(0.12345), "$0.1235");
     }
 }

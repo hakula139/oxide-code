@@ -17,7 +17,7 @@ pub(super) struct Boundary {
     pub(super) tasks: Vec<Task>,
     /// The open background shells, which the summary message lists.
     pub(super) shells: Vec<BackgroundShell>,
-    /// The compaction ran on its own, ahead of a prompt.
+    /// Whether the compaction ran on its own, ahead of a prompt.
     pub(super) automatic: bool,
 }
 

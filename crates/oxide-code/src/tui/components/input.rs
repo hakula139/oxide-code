@@ -71,8 +71,7 @@ impl InputArea {
         }
     }
 
-    /// Re-skin subsequent renders. The textarea keeps a cached `Style`, so the previous theme's
-    /// text color would persist if not reapplied here.
+    /// Re-skins every subsequent render, including the textarea's cached text style.
     pub(crate) fn set_theme(&mut self, theme: &Theme) {
         self.theme = theme.clone();
         self.textarea.set_style(theme.text());
@@ -120,7 +119,7 @@ impl InputArea {
         self.popup.height()
     }
 
-    pub(crate) fn render_popup(&self, frame: &mut Frame, area: Rect) {
+    pub(crate) fn render_popup(&self, frame: &mut Frame<'_>, area: Rect) {
         self.popup.render(frame, area);
     }
 }
@@ -139,7 +138,7 @@ impl InputArea {
         }
     }
 
-    pub(crate) fn render(&self, frame: &mut Frame, area: Rect) {
+    pub(crate) fn render(&self, frame: &mut Frame<'_>, area: Rect) {
         let block = Block::default()
             .borders(Borders::TOP | Borders::BOTTOM)
             .border_style(self.theme.border_focused())
@@ -229,9 +228,8 @@ impl InputArea {
 
         match key.code {
             KeyCode::Enter => {
-                // Native Kitty protocol: terminal reports SHIFT directly.
-                // VS Code / Cursor keybinding: Shift+Enter sends \x1b\r (ESC CR),
-                // which crossterm parses as Alt+Enter.
+                // Kitty reports SHIFT directly. VS Code and Cursor send Shift+Enter as `\x1b\r`
+                // (ESC CR), which crossterm parses as Alt+Enter.
                 if key
                     .modifiers
                     .intersects(KeyModifiers::SHIFT | KeyModifiers::ALT)
@@ -330,7 +328,7 @@ impl InputArea {
     }
 
     fn refresh_popup(&mut self) {
-        // Only the single-line case can be a slash command; multi-line buffers close the popup.
+        // Only a single line can be a slash command, so a multi-line buffer closes the popup.
         let state = match self.textarea.lines() {
             [single] => popup_state(single),
             _ => None,
@@ -368,16 +366,25 @@ impl InputArea {
         if self.is_empty() {
             return None;
         }
-        let trimmed = self.textarea.lines().join("\n").trim().to_owned();
+        let submission = trim_blank_edges(&self.textarea.lines().join("\n")).to_owned();
 
         self.set_text("");
         self.popup.set_state(None);
 
-        Some(Action::Submit(trimmed))
+        Some(Action::Submit(submission))
     }
 }
 
-// ── Free Functions ──
+// ── Helpers ──
+
+/// Drops `text`'s trailing whitespace and leading blank lines, keeping the first line's indent.
+fn trim_blank_edges(text: &str) -> &str {
+    let text = text.trim_end();
+    let start = text.find(|c: char| !c.is_whitespace()).map_or(0, |first| {
+        text[..first].rfind('\n').map_or(0, |newline| newline + 1)
+    });
+    &text[start..]
+}
 
 fn format_completion(mode: &PopupMode, value: &str) -> String {
     match mode {
@@ -397,7 +404,7 @@ fn ghost_text_from_state(state: &PopupState<'_>, usage: Option<&str>) -> Option<
     Some(normalize_placeholder(usage?))
 }
 
-/// Normalize a `usage()` syntax fragment to a single bracketed token. Strips one optional layer
+/// Normalizes a `usage()` syntax fragment to a single bracketed token. Strips one optional layer
 /// each of `[...]` and `<...>` so `[<id>]`, `<id>`, and `[id]` all render as `[id]`.
 fn normalize_placeholder(usage: &str) -> String {
     let inner = usage.trim();
@@ -512,8 +519,8 @@ mod tests {
         let idle = input.handle_event(&key(KeyCode::Char('d'), KeyModifiers::CONTROL));
         assert_eq!(idle, InputOutcome::Action(Action::Op(Op::Shutdown)));
 
-        // Busy Ctrl+D is a no-op even with an empty buffer — a habitual
-        // EOF press shouldn't tear down an in-flight turn.
+        // Busy Ctrl+D is a no-op even with an empty buffer, so a habitual EOF press can't tear
+        // down an in-flight turn.
         input.set_enabled(false);
         let busy = input.handle_event(&key(KeyCode::Char('d'), KeyModifiers::CONTROL));
         assert_eq!(busy, InputOutcome::Consumed);
@@ -521,10 +528,8 @@ mod tests {
 
     #[test]
     fn handle_event_ctrl_d_with_content_is_a_noop_in_idle_and_busy() {
-        // Pressing Ctrl+D mid-prompt must not discard the typed text —
-        // matches bash / zsh / Codex behavior. Applies in both idle
-        // and busy states since typing flows into the buffer in both
-        // (busy presses queue a follow-up).
+        // Ctrl+D mid-prompt keeps the typed text, as in bash, zsh, and Codex. Typing reaches the
+        // buffer while busy too, so the same holds in both states.
         let mut input = test_input();
         input.textarea.input(Event::Key(KeyEvent::new(
             KeyCode::Char('h'),
@@ -550,8 +555,8 @@ mod tests {
 
     #[test]
     fn handle_event_disabled_empty_enter_is_silent() {
-        // Submit's empty-buffer guard short-circuits, so a stray Enter
-        // mid-turn produces no action even though the textarea now accepts typing during busy.
+        // Submit's empty-buffer guard short-circuits, so a stray Enter mid-turn produces no action
+        // even though the textarea accepts typing while busy.
         let mut input = test_input();
         input.set_enabled(false);
         let outcome = input.handle_event(&key(KeyCode::Enter, KeyModifiers::NONE));
@@ -674,8 +679,7 @@ mod tests {
 
     #[test]
     fn handle_event_alt_enter_inserts_newline() {
-        // VS Code / Cursor keybinding sends \x1b\r for Shift+Enter,
-        // which crossterm parses as ALT+Enter.
+        // VS Code and Cursor send Shift+Enter as `\x1b\r`, which crossterm parses as Alt+Enter.
         let mut input = test_input();
         input.textarea.input(Event::Key(KeyEvent::new(
             KeyCode::Char('a'),
@@ -708,8 +712,7 @@ mod tests {
 
     // ── handle_event: popup ──
 
-    /// Drive the input into a popup-visible state by typing a `/`,
-    /// so popup-key tests start from a known fixture.
+    /// An input with the popup open after typing `/`.
     fn input_with_popup() -> InputArea {
         let mut input = test_input();
         input.handle_event(&key(KeyCode::Char('/'), KeyModifiers::NONE));
@@ -743,8 +746,7 @@ mod tests {
 
     #[test]
     fn handle_event_popup_visible_passes_unhandled_keys_to_textarea() {
-        // Char keys are not popup nav — they fall through to the
-        // textarea so refining the query keeps working.
+        // Char keys fall through the popup to the textarea, so typing keeps refining the query.
         let mut input = input_with_popup();
         let outcome = input.handle_event(&key(KeyCode::Char('h'), KeyModifiers::NONE));
         assert_eq!(outcome, InputOutcome::Consumed);
@@ -754,8 +756,7 @@ mod tests {
 
     #[test]
     fn handle_event_popup_visible_ignores_non_key_events() {
-        // Resize and other non-key events reach handle_event when
-        // routed directly; popup must let them pass without panicking.
+        // Non-key events such as a resize can reach handle_event, and the open popup ignores them.
         let mut input = input_with_popup();
         let outcome = input.handle_event(&Event::Resize(80, 24));
         assert_eq!(outcome, InputOutcome::Ignored);
@@ -764,8 +765,8 @@ mod tests {
 
     #[test]
     fn handle_event_popup_tab_in_name_mode_inserts_slash_name_and_space() {
-        // First alphabetical row is `clear` (no arg roster); Tab writes `/clear ` and the popup
-        // hides on reclassification — arg mode with an empty roster yields no rows.
+        // The first row, `/archive`, has no arg roster, so the popup hides once Tab writes
+        // `/archive ` and the line turns into an arg-mode query with no rows.
         let mut input = input_with_popup();
         let selected = selected_value(&input);
         let outcome = input.handle_event(&key(KeyCode::Tab, KeyModifiers::NONE));
@@ -1129,25 +1130,15 @@ mod tests {
     }
 
     #[test]
-    fn submit_trims_whitespace() {
+    fn submit_trims_blank_edges_and_keeps_the_first_line_indent() {
         let mut input = test_input();
-        input.textarea.input(Event::Key(KeyEvent::new(
-            KeyCode::Char(' '),
-            KeyModifiers::NONE,
-        )));
-        input.textarea.input(Event::Key(KeyEvent::new(
-            KeyCode::Char('a'),
-            KeyModifiers::NONE,
-        )));
-        input.textarea.input(Event::Key(KeyEvent::new(
-            KeyCode::Char(' '),
-            KeyModifiers::NONE,
-        )));
+        input.set_text("\n  \n    fn main() {}\n  done  \n\n");
 
         let outcome = input.handle_event(&key(KeyCode::Enter, KeyModifiers::NONE));
+
         assert_eq!(
             outcome,
-            InputOutcome::Action(Action::Submit("a".to_owned())),
+            InputOutcome::Action(Action::Submit("    fn main() {}\n  done".to_owned())),
         );
     }
 

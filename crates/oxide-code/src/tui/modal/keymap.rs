@@ -26,8 +26,8 @@ impl KeyChord {
         }
     }
 
-    /// Whether `event` presses this key. A character needs Ctrl held exactly when the chord does,
-    /// while any other key matches whatever modifiers are held.
+    /// Returns whether `event` presses this key. A character needs Ctrl held exactly when the chord
+    /// does, while any other key matches whatever modifiers are held.
     fn matches(self, event: &KeyEvent) -> bool {
         event.code == self.code
             && (!matches!(self.code, KeyCode::Char(_))

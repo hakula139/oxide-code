@@ -34,8 +34,8 @@ impl ResponseAccumulator {
         }
     }
 
-    /// Whether a content block has started, after which a retry would repeat what the consumer
-    /// already showed.
+    /// Returns whether a content block has started, after which a retry would repeat what the
+    /// consumer already showed.
     pub(super) fn content_started(&self) -> bool {
         !self.blocks.is_empty()
     }
@@ -143,7 +143,7 @@ enum BlockAccumulator {
         id: String,
         name: String,
         json_buf: String,
-        /// A `server_tool_use` call, which the API runs itself.
+        /// Whether this is a `server_tool_use` call, which the API runs itself.
         server: bool,
     },
     ServerToolResult {
