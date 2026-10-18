@@ -508,16 +508,25 @@ impl fmt::Display for Unreachable {
 /// the kernel would: at a symlink loop, a directory it cannot search, or a file that more
 /// components follow.
 fn resolve(path: &Path) -> Result<PathBuf, Unreachable> {
-    let absolute = std::path::absolute(path).map_err(|error| Unreachable::Component {
+    let mut absolute = std::path::absolute(path).map_err(|error| Unreachable::Component {
         at: path.to_path_buf(),
         error,
     })?;
+    if requires_directory(path) {
+        absolute.push("");
+    }
     let mut resolved = PathBuf::new();
     let mut pending = Vec::new();
     enqueue(&absolute, &mut resolved, &mut pending);
     let mut hops = 0;
 
     while let Some(name) = pending.pop() {
+        if name == "." {
+            if !resolved.is_dir() {
+                resolved.push("");
+            }
+            continue;
+        }
         if name == ".." {
             _ = resolved.pop();
             continue;
@@ -529,15 +538,11 @@ fn resolve(path: &Path) -> Result<PathBuf, Unreachable> {
                 if hops > MAX_SYMLINK_HOPS {
                     return Err(Unreachable::Loop(resolved));
                 }
-                let target = match std::fs::read_link(&resolved) {
-                    Ok(target) => target,
-                    Err(error) => {
-                        return Err(Unreachable::Component {
-                            at: resolved,
-                            error,
-                        });
-                    }
-                };
+                let target =
+                    std::fs::read_link(&resolved).map_err(|error| Unreachable::Component {
+                        at: resolved.clone(),
+                        error,
+                    })?;
                 _ = resolved.pop();
                 enqueue(&target, &mut resolved, &mut pending);
             }
@@ -558,7 +563,14 @@ fn resolve(path: &Path) -> Result<PathBuf, Unreachable> {
     }
 
     #[cfg(windows)]
-    let resolved = long_names(resolved, Path::canonicalize);
+    let resolved = {
+        let directory = requires_directory(&resolved);
+        let mut resolved = long_names(resolved, Path::canonicalize);
+        if directory {
+            resolved.push("");
+        }
+        resolved
+    };
     Ok(resolved)
 }
 
@@ -597,7 +609,8 @@ fn respell(existing: &Path, long: &Path) -> PathBuf {
 }
 
 /// Pushes the components of `path` onto the `pending` stack so they pop in order, first restarting
-/// `resolved` at the root when `path` is absolute.
+/// `resolved` at the root when `path` is absolute. A final `.` preserves the directory constraint
+/// that [`Path::components`] drops from trailing separators and `/.`.
 fn enqueue(path: &Path, resolved: &mut PathBuf, pending: &mut Vec<OsString>) {
     if path.has_root() {
         *resolved = path
@@ -605,11 +618,22 @@ fn enqueue(path: &Path, resolved: &mut PathBuf, pending: &mut Vec<OsString>) {
             .take_while(|c| matches!(c, Component::Prefix(_) | Component::RootDir))
             .collect();
     }
+    if requires_directory(path) {
+        pending.push(OsString::from("."));
+    }
     pending.extend(path.components().rev().filter_map(|c| match c {
         Component::ParentDir => Some(OsString::from("..")),
         Component::Normal(name) => Some(name.to_owned()),
         Component::Prefix(_) | Component::RootDir | Component::CurDir => None,
     }));
+}
+
+fn requires_directory(path: &Path) -> bool {
+    path.as_os_str()
+        .as_encoded_bytes()
+        .rsplit(|byte| std::path::is_separator(char::from(*byte)))
+        .next()
+        .is_some_and(|last| last.is_empty() || last == b".")
 }
 
 fn folded_names(path: &Path) -> Vec<String> {
@@ -1616,6 +1640,63 @@ mod tests {
             assert!(!is_workspace(&base.join("up/home")));
             assert!(is_workspace(&base.join("up/repo")));
         });
+    }
+
+    // ── resolve ──
+
+    #[test]
+    fn resolve_preserves_directory_constraints() {
+        let (_dir, cwd) = temp_cwd();
+        std::fs::write(cwd.join("notes"), "original").unwrap();
+        std::fs::create_dir(cwd.join("folder")).unwrap();
+
+        for suffix in ["/", "/."] {
+            let error = resolve(&cwd.join(format!("notes{suffix}"))).unwrap_err();
+            assert!(matches!(error, Unreachable::Component { error, .. }
+                if error.kind() == io::ErrorKind::NotADirectory));
+            let directory = resolve(&cwd.join(format!("folder{suffix}"))).unwrap();
+            assert_eq!(directory.as_os_str(), cwd.join("folder").as_os_str());
+            let missing = resolve(&cwd.join(format!("missing{suffix}"))).unwrap();
+            let mut expected = cwd.join("missing").into_os_string();
+            expected.push(std::path::MAIN_SEPARATOR_STR);
+            assert_eq!(missing.as_os_str(), expected);
+        }
+    }
+
+    #[test]
+    fn resolve_preserves_directory_constraints_in_symlink_targets() {
+        let (_dir, cwd) = temp_cwd();
+        std::fs::write(cwd.join("notes"), "original").unwrap();
+        symlink_file(Path::new("notes/"), &cwd.join("file-link"));
+        symlink_dir(Path::new("missing/"), &cwd.join("missing-link"));
+
+        let error = resolve(&cwd.join("file-link")).unwrap_err();
+        assert!(matches!(error, Unreachable::Component { error, .. }
+            if error.kind() == io::ErrorKind::NotADirectory));
+        let missing = resolve(&cwd.join("missing-link")).unwrap();
+        let mut expected = cwd.join("missing").into_os_string();
+        expected.push(std::path::MAIN_SEPARATOR_STR);
+        assert_eq!(missing.as_os_str(), expected);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn resolve_preserves_directory_constraints_on_verbatim_paths() {
+        let (_dir, cwd) = temp_cwd();
+        std::fs::write(cwd.join("notes"), "original").unwrap();
+        let verbatim = std::fs::canonicalize(&cwd).unwrap();
+
+        for suffix in ["\\", "\\."] {
+            let file = PathBuf::from(format!("{}\\notes{suffix}", verbatim.display()));
+            let error = resolve(&file).unwrap_err();
+            assert!(matches!(error, Unreachable::Component { error, .. }
+                if error.kind() == io::ErrorKind::NotADirectory));
+            let path = PathBuf::from(format!("{}\\missing{suffix}", verbatim.display()));
+            let missing = resolve(&path).unwrap();
+            let mut expected = verbatim.join("missing").into_os_string();
+            expected.push(std::path::MAIN_SEPARATOR_STR);
+            assert_eq!(missing.as_os_str(), expected);
+        }
     }
 
     // ── Access::for_path ──

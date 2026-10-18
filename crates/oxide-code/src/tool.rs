@@ -1485,6 +1485,31 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn prepare_keeps_directory_only_paths_from_reading_or_overwriting_files() {
+        let dir = canonical_tempdir();
+        let ctx = ctx(dir.path());
+        let path = dir.path().join("notes");
+        std::fs::write(&path, "original").unwrap();
+        let read = testing::run(&ReadTool, serde_json::json!({"file_path": "notes"}), &ctx).await;
+        assert!(!read.is_error, "{}", read.content);
+
+        for name in ["notes/", "notes/.", "missing/", "missing/."] {
+            let read = testing::run(&ReadTool, serde_json::json!({"file_path": name}), &ctx).await;
+            assert!(read.is_error, "{name}: {}", read.content);
+            let write = testing::run(
+                &WriteTool,
+                serde_json::json!({"file_path": name, "content": "replacement"}),
+                &ctx,
+            )
+            .await;
+            assert!(write.is_error, "{name}: {}", write.content);
+
+            assert_eq!(std::fs::read_to_string(&path).unwrap(), "original");
+            assert!(!dir.path().join("missing").is_file());
+        }
+    }
+
     #[cfg(unix)]
     #[test]
     fn prepare_follows_a_symlink_out_of_the_workspace_to_its_target() {
