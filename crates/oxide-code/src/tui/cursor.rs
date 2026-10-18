@@ -21,11 +21,13 @@ mod tests {
     #[test]
     fn place_clamped_within_area_keeps_raw_x() {
         let mut terminal = Terminal::new(TestBackend::new(20, 1)).unwrap();
+
         terminal
             .draw(|frame| {
                 place_clamped(frame, 5, 0, Rect::new(0, 0, 20, 1));
             })
             .unwrap();
+
         let pos = terminal.get_cursor_position().unwrap();
         assert_eq!((pos.x, pos.y), (5, 0));
     }
@@ -33,11 +35,13 @@ mod tests {
     #[test]
     fn place_clamped_past_right_edge_pulls_back_inside() {
         let mut terminal = Terminal::new(TestBackend::new(20, 1)).unwrap();
+
         terminal
             .draw(|frame| {
                 place_clamped(frame, 30, 0, Rect::new(0, 0, 20, 1));
             })
             .unwrap();
+
         let pos = terminal.get_cursor_position().unwrap();
         assert_eq!((pos.x, pos.y), (19, 0));
     }
@@ -46,11 +50,13 @@ mod tests {
     fn place_clamped_in_offset_area_anchors_relative_to_right_edge() {
         // The area spans columns 5 through 14.
         let mut terminal = Terminal::new(TestBackend::new(20, 1)).unwrap();
+
         terminal
             .draw(|frame| {
                 place_clamped(frame, 100, 0, Rect::new(5, 0, 10, 1));
             })
             .unwrap();
+
         let pos = terminal.get_cursor_position().unwrap();
         assert_eq!((pos.x, pos.y), (14, 0));
     }

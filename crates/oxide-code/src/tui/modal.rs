@@ -373,7 +373,9 @@ mod tests {
         fn height(&self, _w: u16, _max: u16) -> u16 {
             1
         }
+
         fn render(&self, _f: &mut Frame<'_>, _a: Rect, _t: &Theme) {}
+
         fn handle_key(&mut self, _e: &KeyEvent) -> ModalKey {
             ModalKey::Consumed
         }
@@ -547,7 +549,9 @@ mod tests {
         // A silent close surfaces as `Some(Cancelled)` so the App can tell it from a consumed key.
         let mut stack = ModalStack::default();
         stack.push(Box::new(ScriptedModal::new(ModalAction::Cancelled)));
+
         let outcome = stack.handle_key(&KeyEvent::from(KeyCode::Char('c')));
+
         assert!(matches!(outcome, Some(ModalAction::Cancelled)));
         assert!(!stack.is_active());
     }
@@ -558,7 +562,9 @@ mod tests {
         let mut modal = ScriptedModal::new(ModalAction::Cancelled);
         modal.cancel_action = Some(ModalAction::Dispatch(Action::Op(Op::Interrupt)));
         stack.push(Box::new(modal));
+
         let outcome = stack.handle_key(&KeyEvent::from(KeyCode::Char('c')));
+
         assert!(matches!(
             outcome,
             Some(ModalAction::Dispatch(Action::Op(Op::Interrupt)))
@@ -600,8 +606,10 @@ mod tests {
         modal.captures_esc = true;
         stack.push(Box::new(modal));
 
-        assert!(stack.handle_key(&KeyEvent::from(KeyCode::Esc)).is_none());
+        let outcome = stack.handle_key(&KeyEvent::from(KeyCode::Esc));
+        assert!(outcome.is_none());
         assert!(stack.is_active());
+
         let outcome = stack.handle_key(&KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL));
         assert!(matches!(
             outcome,
@@ -617,7 +625,9 @@ mod tests {
         stack.push(Box::new(ScriptedModal::new(ModalAction::Dispatch(
             action.clone(),
         ))));
+
         let outcome = stack.handle_key(&KeyEvent::from(KeyCode::Char('s')));
+
         assert!(
             matches!(outcome, Some(ModalAction::Dispatch(a)) if a == action),
             "submit must surface the modal's Action unchanged",
@@ -633,6 +643,7 @@ mod tests {
         stack.push(Box::new(modal));
 
         let outcome = stack.handle_key(&KeyEvent::from(KeyCode::Char('p')));
+
         assert!(
             matches!(
                 outcome,
@@ -658,7 +669,9 @@ mod tests {
         // `x` because ScriptedModal consumes `c` as its own cancel sentinel.
         let mut stack = ModalStack::default();
         stack.push(Box::new(ScriptedModal::new(ModalAction::Cancelled)));
+
         let outcome = stack.handle_key(&KeyEvent::from(KeyCode::Char('x')));
+
         assert!(outcome.is_none(), "non-cancel key must not pop the stack");
         assert!(stack.is_active());
     }
@@ -672,13 +685,14 @@ mod tests {
         let mut top = ScriptedModal::new(ModalAction::Cancelled);
         top.declared_height = 5;
         stack.push(Box::new(top));
-
         assert_eq!(
             stack.height(80, 40),
             5 + TOP_BORDER_HEIGHT,
             "top modal's height wins (plus border)",
         );
+
         let outcome = stack.handle_key(&KeyEvent::from(KeyCode::Char('s')));
+
         assert!(matches!(outcome, Some(ModalAction::Cancelled)));
         assert!(stack.is_active(), "inner modal still active");
         assert_eq!(
@@ -700,6 +714,7 @@ mod tests {
         assert_eq!(stack.height(80, 40), 3 + TOP_BORDER_HEIGHT, "parent height");
 
         let outcome = stack.handle_key(&KeyEvent::from(KeyCode::Char('h')));
+
         assert!(outcome.is_none(), "Push must not surface a ModalAction");
         assert_eq!(
             stack.height(80, 40),
@@ -735,6 +750,7 @@ mod tests {
             );
 
             stack.handle_key(&exit_key);
+
             assert_eq!(
                 counter.load(Ordering::Relaxed),
                 1,
