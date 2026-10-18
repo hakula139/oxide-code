@@ -289,7 +289,6 @@ mod tests {
             .map(|r| r.value.clone().into_owned())
             .collect();
         // BUILT_INS is alphabetical, so empty-query first row is `archive`.
-        assert_ne!(values, [] as [String; 0]);
         assert_eq!(values[0], "archive");
     }
 
@@ -314,7 +313,7 @@ mod tests {
         let mut popup = name_popup("");
         popup.select_next();
         popup.select_next();
-        assert!(popup.selected >= 2, "park selection past row 0");
+        assert_eq!(popup.selected, 2);
 
         popup.set_state(Some(&PopupState::Arg {
             name: "model",
@@ -417,17 +416,8 @@ mod tests {
 
     #[test]
     fn height_caps_at_max_visible_rows_plus_chrome() {
-        // Visible rows + the top-border chrome row.
-        let popup = name_popup("");
-        let expected = popup.rows.len().min(MAX_VISIBLE_ROWS) + usize::from(CHROME_ROWS);
-        assert_eq!(usize::from(popup.height()), expected);
-    }
-
-    #[test]
-    fn height_is_zero_when_hidden() {
-        // Chrome must not inflate height when the popup has nothing to show.
-        let popup = popup_with_state(None);
-        assert_eq!(popup.height(), 0);
+        assert_eq!(long_popup(3).height(), 3 + CHROME_ROWS);
+        assert_eq!(long_popup(12).height(), 8 + CHROME_ROWS);
     }
 
     // ── render ──

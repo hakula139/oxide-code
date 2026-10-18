@@ -156,19 +156,25 @@ mod tests {
 
     #[test]
     fn push_icon_wrapped_short_text_single_line() {
+        let icon_style = Style::default().fg(Color::Red);
         let mut out = Vec::new();
+
         push_icon_wrapped(
             &mut out,
             USER_PROMPT_PREFIX,
-            Style::default().fg(Color::Red),
+            icon_style,
             "hello",
             Style::default(),
             80,
         );
-        assert_eq!(out.len(), 1);
-        assert_eq!(out[0].spans.len(), 2);
-        assert_eq!(out[0].spans[0].content, USER_PROMPT_PREFIX);
-        assert_eq!(out[0].spans[1].content, "hello");
+
+        assert_eq!(
+            out,
+            [Line::from(vec![
+                Span::styled(USER_PROMPT_PREFIX, icon_style),
+                Span::raw("hello"),
+            ])]
+        );
     }
 
     #[test]
@@ -234,14 +240,12 @@ mod tests {
     #[test]
     fn bar_continuation_prefix_preserves_bar_position_and_style() {
         let style = Style::default().fg(Color::Blue);
+
         let result = bar_continuation_prefix("  ▎   ", style);
 
-        let text: String = result.iter().map(|s| s.content.as_ref()).collect();
-        assert_eq!(text, "  ▎   ");
-        let bar = result
-            .iter()
-            .find(|s| s.content == BAR)
-            .expect("bar span present");
-        assert_eq!(bar.style, style);
+        assert_eq!(
+            result,
+            [Span::raw("  "), Span::styled(BAR, style), Span::raw("   ")]
+        );
     }
 }

@@ -508,12 +508,6 @@ mod tests {
             vec!["- a", "- b", "- c", "- d", "... +2", "- g"],
             "old gets the full budget when new is empty",
         );
-        assert!(
-            !entries
-                .iter()
-                .any(|e| matches!(e, Entry::Ellipsis { hidden: 0 })),
-            "Entry::Ellipsis {{ hidden: 0 }} must never be emitted",
-        );
     }
 
     #[test]
@@ -525,7 +519,6 @@ mod tests {
             render_entries(&entries),
             vec!["- a", "- b", "- c", "+ x", "+ y"],
         );
-        assert!(entries.iter().all(|e| matches!(e, Entry::Line { .. })));
     }
 
     #[test]

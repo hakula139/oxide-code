@@ -46,7 +46,7 @@ impl ChatBlock for ErrorBlock {
 #[cfg(test)]
 mod tests {
     use indoc::indoc;
-    use unicode_width::UnicodeWidthStr;
+    use ratatui::text::Span;
 
     use super::*;
     use crate::tui::theme::Theme;
@@ -65,10 +65,17 @@ mod tests {
     fn render_single_line_message_emits_icon_then_body() {
         let theme = Theme::default();
         let block = ErrorBlock::new("boom");
+
         let lines = block.render(&ctx_at(60, &theme));
-        assert_eq!(lines.len(), 1);
-        assert_eq!(lines[0].spans[0].content, ERROR_PREFIX);
-        assert_eq!(lines[0].spans[1].content, "boom");
+
+        let style = theme.error();
+        assert_eq!(
+            lines,
+            [Line::from(vec![
+                Span::styled(ERROR_PREFIX, style),
+                Span::styled("boom", style),
+            ])]
+        );
     }
 
     #[test]
@@ -104,9 +111,10 @@ mod tests {
         // same column so the message reads as one block.
         let theme = Theme::default();
         let block = ErrorBlock::new("first\nsecond");
+
         let lines = block.render(&ctx_at(60, &theme));
-        let indent = ERROR_PREFIX.width();
-        assert_eq!(lines[0].spans[0].content, ERROR_PREFIX);
-        assert_eq!(lines[1].spans[0].content, " ".repeat(indent));
+
+        let rows: Vec<String> = lines.iter().map(ToString::to_string).collect();
+        assert_eq!(rows, ["✗ first", "  second"]);
     }
 }

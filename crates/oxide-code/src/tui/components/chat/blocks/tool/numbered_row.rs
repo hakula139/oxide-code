@@ -178,13 +178,10 @@ mod tests {
         let long = "a".repeat(MAX_TOOL_OUTPUT_LINE_BYTES + 50);
         renderer.render(&mut out, 1, &long, theme.text());
 
-        let text_span = &out[0].spans[3];
-        assert!(
-            text_span.content.ends_with("..."),
-            "expected ellipsis, got {:?}",
-            text_span.content,
+        assert_eq!(
+            out[0].spans[3].content,
+            format!("{}...", "a".repeat(MAX_TOOL_OUTPUT_LINE_BYTES)),
         );
-        assert!(text_span.content.len() <= MAX_TOOL_OUTPUT_LINE_BYTES + 3);
     }
 
     #[test]
@@ -200,12 +197,8 @@ mod tests {
         let mut out = Vec::new();
         renderer.render(&mut out, 1, "alpha beta gamma", theme.text());
 
-        assert!(out.len() >= 2, "expected wrapped output, got {out:#?}");
-        let cont_text: String = out[1].spans.iter().map(|s| s.content.as_ref()).collect();
-        assert!(
-            cont_text.starts_with(TOOL_BORDER_CONT),
-            "continuation must keep tool border continuation prefix: {cont_text:?}",
-        );
+        let rows: Vec<String> = out.iter().map(ToString::to_string).collect();
+        assert_eq!(rows, ["▎    1 │ alpha", "▎        beta ", "▎        gamma"]);
     }
 
     // ── Renderer::with_style ──
@@ -262,9 +255,9 @@ mod tests {
 
         let row = &out[0];
         assert_eq!(row.spans[0].style.bg, None, "bar prefix must stay clear");
-        assert_eq!(row.spans[1].style.bg, theme.diff_add.bg);
-        assert_eq!(row.spans[2].style.bg, theme.diff_add.bg);
-        assert_eq!(row.spans[3].style.bg, theme.diff_add.bg);
+        assert_eq!(row.spans[1].style.bg, theme.diff_add_row().bg);
+        assert_eq!(row.spans[2].style.bg, theme.diff_add_row().bg);
+        assert_eq!(row.spans[3].style.bg, theme.diff_add_row().bg);
     }
 
     #[test]
@@ -297,7 +290,7 @@ mod tests {
             "trailing pad span must be spaces only, got {:?}",
             last.content,
         );
-        assert_eq!(last.style.bg, theme.diff_del.bg);
+        assert_eq!(last.style.bg, theme.diff_del_row().bg);
     }
 
     #[test]
@@ -314,12 +307,8 @@ mod tests {
         let mut out = Vec::new();
         renderer.render(&mut out, 1, "abc", theme.text());
 
-        let row = &out[0];
-        let total: usize = row.spans.iter().map(|s| s.content.width()).sum();
-        assert!(
-            total < 80,
-            "no-bg row must not pad to width, got total={total}",
-        );
+        let spans: Vec<&str> = out[0].spans.iter().map(|s| s.content.as_ref()).collect();
+        assert_eq!(spans, [TOOL_BORDER_CONT, " 1", " │ ", "abc"]);
     }
 
     #[test]
@@ -343,13 +332,17 @@ mod tests {
         let mut out = Vec::new();
         renderer.render(&mut out, 1, "alpha beta gamma delta", theme.error());
 
-        assert!(out.len() >= 2, "expected wrapped output: {out:#?}");
+        let rows: Vec<String> = out
+            .iter()
+            .map(|line| line.to_string().trim_end().to_owned())
+            .collect();
+        assert_eq!(rows, ["▎    1 - alpha beta", "▎        gamma delta"]);
         for line in &out {
             let total: usize = line.spans.iter().map(|s| s.content.width()).sum();
             assert_eq!(total, 20, "every wrapped row must reach ctx.width");
             assert_eq!(
                 line.spans.last().unwrap().style.bg,
-                theme.diff_del.bg,
+                theme.diff_del_row().bg,
                 "trailing span on every line must carry row bg",
             );
         }

@@ -1001,8 +1001,10 @@ mod tests {
     // ── format_cost ──
 
     #[test]
-    fn format_cost_uses_cents_for_larger_totals() {
+    fn format_cost_switches_to_cents_where_they_round_up_to_a_dollar() {
         assert_eq!(format_cost(1.234), "$1.23");
+        assert_eq!(format_cost(0.9951), "$1.00");
+        assert_eq!(format_cost(0.9949), "$0.9949");
         assert_eq!(format_cost(0.12345), "$0.1235");
     }
 }

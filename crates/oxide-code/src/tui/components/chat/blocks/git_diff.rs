@@ -180,8 +180,10 @@ fn max_line_number_width(text: &str) -> usize {
 #[cfg(test)]
 mod tests {
     use indoc::indoc;
+    use ratatui::text::Span;
 
     use super::*;
+    use crate::tui::glyphs::TOOL_BORDER_CONT;
     use crate::tui::theme::Theme;
 
     fn ctx_at(width: u16, theme: &Theme) -> RenderCtx<'_> {
@@ -291,12 +293,19 @@ mod tests {
             +new line
              context
         "});
+
         let lines = block.render(&ctx_at(80, &theme));
-        // path + hunk header + del + add + ctx = 5
-        assert_eq!(lines.len(), 5, "{lines:#?}");
-        let ctx_row = &lines[4];
-        let body: String = ctx_row.spans.iter().map(|s| s.content.as_ref()).collect();
-        assert!(body.contains("context"), "ctx row missing body: {body:?}");
+
+        assert_eq!(
+            body_rows(&lines),
+            [
+                "foo.rs",
+                "@@ -1,3 +1,3 @@",
+                "1 - old line",
+                "1 + new line",
+                "2 │ context",
+            ]
+        );
     }
 
     #[test]
@@ -309,8 +318,10 @@ mod tests {
             --- a/foo.rs
             +++ b/foo.rs
         "});
+
         let lines = block.render(&ctx_at(80, &theme));
-        assert_eq!(lines.len(), 1, "only path header should remain: {lines:#?}");
+
+        assert_eq!(body_rows(&lines), ["foo.rs"]);
     }
 
     #[test]
@@ -394,7 +405,7 @@ mod tests {
         let bgs: Vec<_> = add_row.spans.iter().map(|s| s.style.bg).collect();
         assert_eq!(bgs[0], None, "bar prefix must stay clear");
         assert!(
-            bgs.iter().skip(1).any(|bg| *bg == theme.diff_add.bg),
+            bgs.iter().skip(1).any(|bg| *bg == theme.diff_add_row().bg),
             "expected diff_add_row bg on inner spans, got {bgs:?}",
         );
     }
@@ -415,7 +426,7 @@ mod tests {
             .expect("del row present");
         let bgs: Vec<_> = del_row.spans.iter().map(|s| s.style.bg).collect();
         assert!(
-            bgs.iter().skip(1).any(|bg| *bg == theme.diff_del.bg),
+            bgs.iter().skip(1).any(|bg| *bg == theme.diff_del_row().bg),
             "expected diff_del_row bg on inner spans, got {bgs:?}",
         );
     }
@@ -433,7 +444,8 @@ mod tests {
         for line in &lines {
             for span in &line.spans {
                 assert!(
-                    span.style.bg != theme.diff_add.bg && span.style.bg != theme.diff_del.bg,
+                    span.style.bg != theme.diff_add_row().bg
+                        && span.style.bg != theme.diff_del_row().bg,
                     "untracked section must not paint diff bgs: {line:?}",
                 );
             }
@@ -451,10 +463,16 @@ mod tests {
 
             (truncated: 12.3 KB more)
         "});
+
         let lines = block.render(&ctx_at(80, &theme));
-        let footer = lines.last().expect("non-empty render");
-        let text: String = footer.spans.iter().map(|s| s.content.as_ref()).collect();
-        assert!(text.contains("truncated"), "footer text: {text:?}");
+
+        assert_eq!(
+            lines.last(),
+            Some(&Line::from(vec![
+                Span::styled(TOOL_BORDER_CONT, theme.tool_border()),
+                Span::styled("(truncated: 12.3 KB more)", theme.dim()),
+            ]))
+        );
     }
 
     #[test]
@@ -525,7 +543,8 @@ mod tests {
         assert!(body_text.contains("corrupt-no-marker"), "{body_text:?}");
         for span in &corrupt_row.spans {
             assert!(
-                span.style.bg != theme.diff_add.bg && span.style.bg != theme.diff_del.bg,
+                span.style.bg != theme.diff_add_row().bg
+                    && span.style.bg != theme.diff_del_row().bg,
                 "defensive row must not paint diff bgs: {corrupt_row:?}",
             );
         }

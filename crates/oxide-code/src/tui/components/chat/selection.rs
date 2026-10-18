@@ -507,7 +507,7 @@ mod tests {
     }
 
     fn highlighted(buf: &Buffer, x: u16, y: u16) -> bool {
-        buf[(x, y)].bg == Theme::default().selection.bg.unwrap()
+        buf[(x, y)].bg == Theme::default().selection().bg.unwrap()
     }
 
     /// Screen cell where `needle` first shows in `buf`.

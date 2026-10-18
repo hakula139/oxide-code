@@ -66,6 +66,10 @@ mod tests {
         }
     }
 
+    fn rows(lines: &[Line<'_>]) -> Vec<String> {
+        lines.iter().map(ToString::to_string).collect()
+    }
+
     // ── render ──
 
     #[test]
@@ -92,10 +96,13 @@ mod tests {
         // Silently dropping empty payloads would mask call-site bugs.
         let theme = Theme::default();
         let block = SystemMessageBlock::new("");
+
         let lines = block.render(&ctx_at(60, &theme));
-        assert_eq!(lines.len(), 1);
-        assert_eq!(lines[0].spans.len(), 1);
-        assert_eq!(lines[0].spans[0].content, TOOL_BORDER_PREFIX);
+
+        assert_eq!(
+            lines,
+            [Line::from(Span::styled(TOOL_BORDER_PREFIX, theme.accent()))]
+        );
     }
 
     #[test]
@@ -106,9 +113,10 @@ mod tests {
             alpha
             beta
         "});
+
         let lines = block.render(&ctx_at(60, &theme));
-        assert_eq!(lines.len(), 2);
-        assert_eq!(lines[1].spans[1].content, "beta");
+
+        assert_eq!(rows(&lines), ["▎ alpha", "▎ beta"]);
     }
 
     #[test]
@@ -116,8 +124,13 @@ mod tests {
         // Wrapped continuation lines must re-emit the bar so the block reads as one visual unit.
         let theme = Theme::default();
         let block = SystemMessageBlock::new("alpha beta gamma delta epsilon zeta");
+
         let lines = block.render(&ctx_at(16, &theme));
-        assert!(lines.len() >= 2, "expected wrap, got {lines:#?}");
+
+        assert_eq!(
+            rows(&lines),
+            ["▎ alpha beta ", "▎ gamma delta ", "▎ epsilon zeta"]
+        );
         for (i, line) in lines.iter().enumerate() {
             let head = &line.spans[0];
             let content = head.content.as_ref();
@@ -136,15 +149,17 @@ mod tests {
         let block = SystemMessageBlock::new(
             "first really long line of text\nsecond really long line of text",
         );
+
         let lines = block.render(&ctx_at(20, &theme));
-        let bodies: Vec<String> = lines
-            .iter()
-            .map(|l| l.spans.iter().map(|s| s.content.as_ref()).collect())
-            .collect();
-        let joined = bodies.join("\n");
-        assert!(joined.contains("first"));
-        assert!(joined.contains("second"));
-        // Each logical line wraps to >= 2 visual rows at width 20.
-        assert!(lines.len() >= 4, "expected ≥ 4 wrapped rows: {bodies:#?}");
+
+        assert_eq!(
+            rows(&lines),
+            [
+                "▎ first really long ",
+                "▎ line of text",
+                "▎ second really long",
+                "▎ line of text",
+            ]
+        );
     }
 }

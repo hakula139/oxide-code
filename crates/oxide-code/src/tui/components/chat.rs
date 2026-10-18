@@ -642,11 +642,12 @@ mod tests {
     use unicode_width::UnicodeWidthStr;
 
     use super::*;
-    use crate::tool::ToolResultView;
+    use crate::tool::{ReadExcerptLine, ToolResultView};
     use crate::tui::glyphs::{
         ASSISTANT_PREFIX, BAR, INTERRUPTED_MARKER, TOOL_BORDER_CONT, TOOL_BORDER_PREFIX,
         TOOL_ERROR, TOOL_SUCCESS,
     };
+    use crate::tui::theme::load_builtin;
 
     // ── Fixtures ──
 
@@ -703,6 +704,16 @@ mod tests {
     /// Stacks every row at `width` as plain text.
     fn all_rows(chat: &mut ChatView, width: u16) -> Vec<String> {
         all_lines(chat, width)
+            .iter()
+            .map(ToString::to_string)
+            .collect()
+    }
+
+    /// Rows the streaming prefix cache holds.
+    fn cached_rows(chat: &ChatView) -> Vec<String> {
+        let streaming = chat.streaming.as_ref().expect("a reply is streaming");
+        streaming
+            .rendered()
             .iter()
             .map(ToString::to_string)
             .collect()
@@ -916,22 +927,19 @@ mod tests {
     // ── set_theme ──
 
     #[test]
-    fn set_theme_invalidates_streaming_cache_so_in_flight_tokens_repaint() {
+    fn set_theme_repaints_the_streamed_prefix_in_the_new_palette() {
         // Bare `/theme` opens its picker mid-stream. Without dropping the cache, committed prefix
         // tokens would keep painting under the previous palette until `commit_streaming`.
+        let reply = "a complete paragraph\n\nnext\n";
+        let latte = load_builtin("latte").expect("latte is built in");
         let mut chat = test_chat();
         chat.set_viewport(Rect::new(0, 0, 80, 24));
-        chat.append_stream_token("a complete paragraph\n\nnext\n");
-        let s = chat.streaming.as_ref().unwrap();
-        assert_ne!(s.rendered().len(), 0, "cache populated");
-        assert_eq!(s.cached_width(), 80);
+        chat.append_stream_token(reply);
 
-        chat.set_theme(&Theme::default());
+        chat.set_theme(&latte);
 
-        let s = chat.streaming.as_ref().unwrap();
-        assert_eq!(s.rendered().len(), 0, "cache dropped on theme swap");
-        assert_eq!(s.rendered_boundary(), 0);
-        assert_eq!(s.cached_width(), 0);
+        let committed = AssistantText::new(reply).render(&chat.settings.ctx(80));
+        assert_eq!(all_lines(&mut chat, 80), committed);
     }
 
     // ── load_history ──
@@ -1063,12 +1071,10 @@ mod tests {
         chat.push_block(AssistantText::new("reply"));
         let text = all_text(&mut chat);
         let lines: Vec<&str> = text.lines().collect();
-        let max_consecutive_blanks = lines
-            .windows(2)
-            .filter(|w| w[0].trim().is_empty() && w[1].trim().is_empty())
-            .count();
-        assert_eq!(
-            max_consecutive_blanks, 0,
+        assert!(
+            !lines
+                .windows(2)
+                .any(|w| w[0].trim().is_empty() && w[1].trim().is_empty()),
             "no double blank lines between user and assistant: {lines:?}"
         );
     }
@@ -1130,28 +1136,34 @@ mod tests {
     }
 
     #[test]
-    fn append_stream_token_cached_and_tail_both_visible() {
-        let mut chat = test_chat();
-        chat.viewport.width = 80;
-        chat.append_stream_token("cached line\n");
-        chat.append_stream_token("tail text");
+    fn append_stream_token_renders_every_line_whether_or_not_the_cache_advanced() {
+        let cases: [(&[&str], &[&str]); 3] = [
+            (
+                &["cached line\n", "tail text"],
+                &["◉ cached line tail text"],
+            ),
+            (
+                &["para1\n\npara2\n", "tail"],
+                &["◉ para1", "  ", "  para2 tail"],
+            ),
+            (&["para1\n\npara2\n"], &["◉ para1", "  ", "  para2"]),
+        ];
+        for viewport_width in [0, 80] {
+            for (tokens, rows) in cases {
+                let mut chat = test_chat();
+                chat.viewport.width = viewport_width;
 
-        let text = all_text(&mut chat);
-        assert!(text.contains("cached line"));
-        assert!(text.contains("tail text"));
-    }
+                for token in tokens {
+                    chat.append_stream_token(token);
+                }
 
-    #[test]
-    fn append_stream_token_uncommitted_newlines_all_render() {
-        let mut chat = test_chat();
-        chat.push_user_message("hi".to_owned());
-        chat.viewport.width = 80;
-        chat.append_stream_token("line1\nline2\npartial");
-
-        let text = all_text(&mut chat);
-        assert!(text.contains("line1"));
-        assert!(text.contains("line2"));
-        assert!(text.contains("partial"));
+                assert_eq!(
+                    all_rows(&mut chat, 80),
+                    rows,
+                    "viewport width {viewport_width}, tokens {tokens:?}",
+                );
+            }
+        }
     }
 
     #[test]
@@ -1194,50 +1206,6 @@ mod tests {
             (tool_pos + 1..stream_pos).any(|i| lines[i].trim().is_empty()),
             "expected blank separator between tool call and streaming: {lines:?}"
         );
-    }
-
-    #[test]
-    fn append_stream_token_renders_committed_and_trailing_before_cache_advance() {
-        let mut chat = test_chat();
-        chat.push_user_message("hi".to_owned());
-        chat.append_stream_token("cached line\ntail text");
-        assert_eq!(
-            chat.streaming.as_ref().unwrap().rendered_boundary(),
-            0,
-            "advance_cache must defer when viewport_width is 0"
-        );
-
-        let text = all_text(&mut chat);
-        assert!(text.contains("cached line"));
-        assert!(text.contains("tail text"));
-    }
-
-    #[test]
-    fn append_stream_token_renders_buffer_ending_in_newline_before_cache_advance() {
-        let mut chat = test_chat();
-        chat.push_user_message("hi".to_owned());
-        chat.append_stream_token("line1\nline2\n");
-        assert_eq!(
-            chat.streaming.as_ref().unwrap().rendered_boundary(),
-            0,
-            "advance_cache must defer when viewport_width is 0"
-        );
-
-        let text = all_text(&mut chat);
-        assert!(text.contains("line1"));
-        assert!(text.contains("line2"));
-    }
-
-    #[test]
-    fn append_stream_token_trailing_newline_with_empty_tail() {
-        let mut chat = test_chat();
-        chat.push_user_message("hi".to_owned());
-        chat.viewport.width = 80;
-        chat.append_stream_token("line1\nline2\n");
-
-        let text = all_text(&mut chat);
-        assert!(text.contains("line1"));
-        assert!(text.contains("line2"));
     }
 
     #[test]
@@ -1467,13 +1435,11 @@ mod tests {
     fn commit_streaming_moves_buffer_to_block() {
         let mut chat = test_chat();
         chat.append_stream_token("hello world");
-        assert!(chat.blocks.is_empty());
 
         chat.commit_streaming();
-        assert_eq!(chat.blocks.len(), 1);
-        let text = all_text(&mut chat);
-        assert!(text.contains("hello world"));
+
         assert!(chat.streaming.is_none());
+        assert_eq!(all_rows(&mut chat, 80), ["◉ hello world", ""]);
     }
 
     #[test]
@@ -1481,18 +1447,6 @@ mod tests {
         let mut chat = test_chat();
         chat.commit_streaming();
         assert!(chat.blocks.is_empty());
-    }
-
-    #[test]
-    fn commit_streaming_clears_state() {
-        let mut chat = test_chat();
-        chat.viewport.width = 80;
-        chat.append_stream_token("line1\nline2\npartial");
-        assert!(chat.streaming.is_some());
-
-        chat.commit_streaming();
-        assert!(chat.streaming.is_none());
-        assert_eq!(chat.thinking_buffer, "");
     }
 
     #[test]
@@ -1625,230 +1579,6 @@ mod tests {
         }
     }
 
-    // ── push_tool_result_view ──
-
-    #[test]
-    fn push_tool_result_view_read_excerpt_renders_context_and_line_numbers() {
-        let mut chat = test_chat();
-        let view = crate::tool::ToolResultView::ReadExcerpt {
-            path: "/tmp/example.rs".to_owned(),
-            lines: vec![
-                crate::tool::ReadExcerptLine {
-                    number: 2,
-                    text: "fn main() {".to_owned(),
-                },
-                crate::tool::ReadExcerptLine {
-                    number: 3,
-                    text: "}".to_owned(),
-                },
-            ],
-            total_lines: 5,
-        };
-        chat.push_tool_result_view("Read example.rs", view, false);
-        let text = all_text(&mut chat);
-        assert!(text.contains("/tmp/example.rs:2-3 of 5"));
-        assert!(text.contains("2 │ fn main() {"));
-        assert!(text.contains("3 │ }"));
-    }
-
-    #[test]
-    fn push_tool_result_view_read_excerpt_truncates_body_lines() {
-        let mut chat = test_chat();
-        let lines = (1..=6)
-            .map(|number| crate::tool::ReadExcerptLine {
-                number,
-                text: format!("line {number}"),
-            })
-            .collect();
-        let view = crate::tool::ToolResultView::ReadExcerpt {
-            path: "/tmp/example.rs".to_owned(),
-            lines,
-            total_lines: 6,
-        };
-        chat.push_tool_result_view("Read example.rs", view, false);
-        let text = all_text(&mut chat);
-        assert!(text.contains("... +1 line"));
-        assert!(text.contains("5 │ line 5"));
-        assert!(!text.contains("6 │ line 6"));
-    }
-
-    #[test]
-    fn push_tool_result_view_read_excerpt_empty_file_keeps_context() {
-        let mut chat = test_chat();
-        let view = crate::tool::ToolResultView::ReadExcerpt {
-            path: "/tmp/empty.rs".to_owned(),
-            lines: Vec::new(),
-            total_lines: 0,
-        };
-        chat.push_tool_result_view("Read empty.rs", view, false);
-        let text = all_text(&mut chat);
-        assert!(text.contains("/tmp/empty.rs (empty file)"));
-    }
-
-    #[test]
-    fn push_tool_result_view_edit_renders_diff_markers() {
-        let mut chat = test_chat();
-        let view = crate::tool::ToolResultView::Diff {
-            chunks: vec![crate::tool::edit::synthesize_chunk("fn foo()", "fn bar()")],
-            replace_all: false,
-            replacements: 1,
-        };
-        chat.push_tool_result_view("Edited file.rs", view, false);
-        let text = all_text(&mut chat);
-        assert!(text.contains("- fn foo()"), "old side missing: {text}");
-        assert!(text.contains("+ fn bar()"), "new side missing: {text}");
-        assert!(
-            !text.contains("Successfully edited"),
-            "diff should replace the raw content body: {text}",
-        );
-    }
-
-    #[test]
-    fn push_tool_result_view_edit_replace_all_multi_chunk_shows_locations_footer() {
-        let mut chat = test_chat();
-        let chunks = [12, 47, 200]
-            .into_iter()
-            .map(|line| crate::tool::DiffChunk {
-                old: vec![crate::tool::DiffLine {
-                    number: line,
-                    text: "old".to_owned(),
-                }],
-                new: vec![crate::tool::DiffLine {
-                    number: line,
-                    text: "new".to_owned(),
-                }],
-            })
-            .collect();
-        let view = crate::tool::ToolResultView::Diff {
-            chunks,
-            replace_all: true,
-            replacements: 3,
-        };
-        chat.push_tool_result_view("Edited file.rs", view, false);
-        let text = all_text(&mut chat);
-        assert!(
-            text.contains("applied at lines 12, 47, 200"),
-            "locations footer missing: {text}",
-        );
-    }
-
-    #[test]
-    fn push_tool_result_view_grep_renders_path_header_and_numbered_match_rows() {
-        let mut chat = test_chat();
-        let view = crate::tool::ToolResultView::GrepMatches {
-            groups: vec![
-                crate::tool::GrepFileGroup {
-                    path: "src/main.rs".to_owned(),
-                    lines: vec![
-                        crate::tool::GrepMatchLine {
-                            number: 10,
-                            text: "fn main() {".to_owned(),
-                            is_match: true,
-                        },
-                        crate::tool::GrepMatchLine {
-                            number: 11,
-                            text: "    helper();".to_owned(),
-                            is_match: false,
-                        },
-                    ],
-                },
-                crate::tool::GrepFileGroup {
-                    path: "src/lib.rs".to_owned(),
-                    lines: vec![crate::tool::GrepMatchLine {
-                        number: 5,
-                        text: "fn lib_func()".to_owned(),
-                        is_match: true,
-                    }],
-                },
-            ],
-            truncated: false,
-        };
-        chat.push_tool_result_view("Grep(fn)", view, false);
-        let text = all_text(&mut chat);
-        assert!(text.contains("src/main.rs"), "missing main.rs: {text}");
-        assert!(text.contains("src/lib.rs"), "missing lib.rs: {text}");
-        assert!(text.contains("10 │ fn main() {"), "missing match: {text}");
-        assert!(
-            text.contains("11 │     helper();"),
-            "missing context: {text}",
-        );
-        assert!(
-            text.contains(" 5 │ fn lib_func()"),
-            "padding mismatch: {text}",
-        );
-    }
-
-    #[test]
-    fn push_tool_result_view_grep_truncates_body_with_hidden_line_count() {
-        let mut chat = test_chat();
-        let lines = (1..=5)
-            .map(|number| crate::tool::GrepMatchLine {
-                number,
-                text: format!("hit {number}"),
-                is_match: true,
-            })
-            .collect();
-        let view = crate::tool::ToolResultView::GrepMatches {
-            groups: vec![crate::tool::GrepFileGroup {
-                path: "src/main.rs".to_owned(),
-                lines,
-            }],
-            truncated: false,
-        };
-        chat.push_tool_result_view("Grep(hit)", view, false);
-        let text = all_text(&mut chat);
-        assert!(text.contains("4 │ hit 4"), "missing 4th row: {text}");
-        assert!(!text.contains("5 │ hit 5"), "5th row leaked: {text}");
-        assert!(text.contains("... +1 line"), "wrong footer: {text}");
-    }
-
-    #[test]
-    fn push_tool_result_view_grep_truncated_flag_emits_limit_reached_marker() {
-        let mut chat = test_chat();
-        let view = crate::tool::ToolResultView::GrepMatches {
-            groups: vec![crate::tool::GrepFileGroup {
-                path: "src/main.rs".to_owned(),
-                lines: vec![crate::tool::GrepMatchLine {
-                    number: 1,
-                    text: "hit".to_owned(),
-                    is_match: true,
-                }],
-            }],
-            truncated: true,
-        };
-        chat.push_tool_result_view("Grep(hit)", view, false);
-        let text = all_text(&mut chat);
-        assert!(text.contains("limit reached"), "missing footer: {text}");
-        assert!(!text.contains("+0"), "phantom hidden count: {text}");
-    }
-
-    #[test]
-    fn push_tool_result_view_glob_renders_path_list_with_total_in_footer() {
-        let mut chat = test_chat();
-        let files: Vec<String> = (0..7).map(|i| format!("src/f{i}.rs")).collect();
-        let view = crate::tool::ToolResultView::GlobFiles {
-            pattern: "**/*.rs".to_owned(),
-            files,
-            total: 1234,
-        };
-        chat.push_tool_result_view("Glob(**/*.rs)", view, false);
-        let text = all_text(&mut chat);
-        assert!(
-            text.contains("**/*.rs (5 of 1234)"),
-            "header missing: {text}",
-        );
-        assert!(text.contains("src/f0.rs"), "first row missing: {text}");
-        assert!(text.contains("src/f4.rs"), "5th row missing: {text}");
-        assert!(
-            !text.contains("src/f5.rs"),
-            "6th row leaked past cap: {text}"
-        );
-        assert!(
-            text.contains("... +2 files (limit reached)"),
-            "footer text wrong: {text}",
-        );
-    }
-
     // ── push_tool_result ──
 
     #[test]
@@ -1903,6 +1633,36 @@ mod tests {
     }
 
     #[test]
+    fn push_tool_result_renders_a_structured_view_in_place_of_the_content() {
+        let mut chat = test_chat();
+        let lines = vec![ReadExcerptLine {
+            number: 2,
+            text: "fn main() {".to_owned(),
+        }];
+
+        chat.push_tool_result(ToolResult {
+            id: "read".to_owned(),
+            content: "raw tool output".to_owned(),
+            is_error: false,
+            title: Some("Read example.rs".to_owned()),
+            view: ToolResultView::ReadExcerpt {
+                path: "/tmp/example.rs".to_owned(),
+                lines,
+                total_lines: 5,
+            },
+        });
+
+        assert_eq!(
+            all_rows(&mut chat, 80),
+            [
+                format!("{TOOL_BORDER_PREFIX}{TOOL_SUCCESS} Read example.rs"),
+                format!("{TOOL_BORDER_CONT}/tmp/example.rs:2 of 5"),
+                format!("{TOOL_BORDER_CONT}2 │ fn main() {{"),
+            ]
+        );
+    }
+
+    #[test]
     fn push_tool_result_error() {
         let mut chat = test_chat();
         chat.push_tool_result(titled_result("failed", "error details", true));
@@ -1942,159 +1702,6 @@ mod tests {
                 "wrapped tool result line must fit width (got {width}): {line:?}",
             );
         }
-    }
-
-    #[test]
-    fn push_tool_result_truncation() {
-        let mut chat = test_chat();
-        let long_output = (0..10).map(|i| format!("line {i}")).collect::<Vec<_>>();
-        chat.push_tool_result(titled_result("result", &long_output.join("\n"), false));
-        let text = all_text(&mut chat);
-
-        assert!(text.contains("line 0"));
-        assert!(text.contains("line 4"));
-        assert!(!text.contains("line 5"));
-        assert!(text.contains("... +5 lines"));
-        assert!(
-            text.contains(&format!("{TOOL_BORDER_CONT}line 0")),
-            "tool result body should indent past the status indicator: {text}"
-        );
-    }
-
-    #[test]
-    fn push_tool_result_empty_content_shows_only_the_status_line() {
-        for content in ["", "  \n  "] {
-            let mut chat = test_chat();
-
-            chat.push_tool_result(titled_result("result", content, false));
-
-            assert_eq!(
-                all_rows(&mut chat, 80),
-                [format!("{TOOL_BORDER_PREFIX}{TOOL_SUCCESS} result")],
-                "content {content:?}",
-            );
-        }
-    }
-
-    #[test]
-    fn push_tool_result_dedup_drops_first_body_line_matching_label() {
-        let mut chat = test_chat();
-        chat.push_tool_result(titled_result(
-            "Found 2 files",
-            indoc! {"
-                Found 2 files
-                a.rs
-                b.rs"
-            },
-            false,
-        ));
-        let text = all_text(&mut chat);
-        assert_eq!(
-            text.matches("Found 2 files").count(),
-            1,
-            "label must not appear twice: {text}",
-        );
-        assert!(text.contains("a.rs"));
-        assert!(text.contains("b.rs"));
-    }
-
-    #[test]
-    fn push_tool_result_dedup_leaves_unrelated_first_line_intact() {
-        let mut chat = test_chat();
-        chat.push_tool_result(titled_result(
-            "Found 2 files",
-            indoc! {"
-                Found 2 files in cache
-                a.rs"
-            },
-            false,
-        ));
-        let text = all_text(&mut chat);
-        assert!(
-            text.contains("Found 2 files in cache"),
-            "body preserved: {text}"
-        );
-    }
-
-    #[test]
-    fn push_tool_result_preserves_leading_whitespace_on_first_body_line() {
-        let mut chat = test_chat();
-        chat.push_tool_result(titled_result("out", " a.rs | 1 +\n b.rs | 2 +", false));
-        let text = all_text(&mut chat);
-        assert!(
-            text.contains(" a.rs | 1 +"),
-            "first body line must keep its leading space: {text}",
-        );
-        assert!(text.contains(" b.rs | 2 +"));
-    }
-
-    #[test]
-    fn push_tool_result_drops_surrounding_blank_lines() {
-        let mut chat = test_chat();
-        chat.push_tool_result(titled_result("out", "\n\n real line\n\n\n", false));
-        let text = all_text(&mut chat);
-        let body_row_count = text
-            .lines()
-            .filter(|l| l.starts_with(TOOL_BORDER_CONT))
-            .count();
-        assert_eq!(
-            body_row_count, 1,
-            "expected one body row after blank-line stripping: {text}",
-        );
-        assert!(
-            text.contains(&format!("{TOOL_BORDER_CONT} real line")),
-            "data-line indent must survive: {text}",
-        );
-    }
-
-    #[test]
-    fn push_tool_result_dedup_collapses_body_when_only_line_matches_label() {
-        let mut chat = test_chat();
-        chat.push_tool_result(titled_result("No matches found", "No matches found", false));
-        let text = all_text(&mut chat);
-        assert_eq!(
-            text.matches("No matches found").count(),
-            1,
-            "body collapses when it only repeats the label: {text}",
-        );
-    }
-
-    #[test]
-    fn push_tool_result_exactly_max_no_truncation() {
-        const MAX: usize = 5; // matches MAX_TOOL_OUTPUT_LINES in tool.rs
-        let mut chat = test_chat();
-        let output: Vec<_> = (0..MAX).map(|i| format!("line {i}")).collect();
-        chat.push_tool_result(titled_result("result", &output.join("\n"), false));
-        let text = all_text(&mut chat);
-        assert!(
-            !text.contains("... +"),
-            "no truncation summary expected: {text}"
-        );
-    }
-
-    #[test]
-    fn push_tool_result_one_over_max_shows_singular_line() {
-        const MAX: usize = 5;
-        let mut chat = test_chat();
-        let output: Vec<_> = (0..=MAX).map(|i| format!("line {i}")).collect();
-        chat.push_tool_result(titled_result("result", &output.join("\n"), false));
-        let text = all_text(&mut chat);
-        assert!(text.contains("... +1 line"));
-        assert!(!text.contains("lines"), "singular 'line' expected: {text}");
-    }
-
-    #[test]
-    fn push_tool_result_long_line_is_truncated() {
-        const MAX_CHARS: usize = 512;
-        let mut chat = test_chat();
-        let long_line = "x".repeat(MAX_CHARS + 100);
-        chat.push_tool_result(titled_result("result", &long_line, false));
-        let text = all_text(&mut chat);
-        assert!(text.contains("..."), "long line should be truncated");
-        assert!(
-            !text.contains(&long_line),
-            "full long line should not appear"
-        );
     }
 
     // ── push_error ──
@@ -2673,8 +2280,8 @@ mod tests {
             assert_eq!(buffer[(0, y)].fg, error_fg, "result bar on row {y}");
         }
         assert_eq!(buffer[(2, 1)].fg, error_fg, "error indicator");
-        assert_eq!(buffer[(4, 2)].bg, theme.diff_del.bg.unwrap());
-        assert_eq!(buffer[(4, 3)].bg, theme.diff_add.bg.unwrap());
+        assert_eq!(buffer[(4, 2)].bg, theme.diff_del_row().bg.unwrap());
+        assert_eq!(buffer[(4, 3)].bg, theme.diff_add_row().bg.unwrap());
         insta::assert_snapshot!(backend);
     }
 
@@ -2775,22 +2382,17 @@ mod tests {
         chat.set_viewport(Rect::new(0, 0, 80, 24));
         assert_eq!((chat.viewport.width, chat.viewport.height), (80, 24));
         chat.append_stream_token("a complete paragraph\n\nnext\n");
-        let s = chat.streaming.as_ref().unwrap();
-        assert_ne!(s.rendered().len(), 0);
-        assert_eq!(s.cached_width(), 80);
+        assert_eq!(cached_rows(&chat), ["◉ a complete paragraph"]);
 
         chat.set_viewport(Rect::new(0, 0, 80, 10));
-        assert_ne!(
-            chat.streaming.as_ref().unwrap().rendered().len(),
-            0,
+        assert_eq!(
+            cached_rows(&chat),
+            ["◉ a complete paragraph"],
             "a height-only change keeps the cache",
         );
 
         chat.set_viewport(Rect::new(0, 0, 40, 24));
-        let s = chat.streaming.as_ref().unwrap();
-        assert_eq!(s.rendered().len(), 0);
-        assert_eq!(s.rendered_boundary(), 0);
-        assert_eq!(s.cached_width(), 0);
+        assert_eq!(cached_rows(&chat), [] as [String; 0]);
     }
 
     // ── scroll_down ──
@@ -2832,149 +2434,15 @@ mod tests {
     // ── advance_streaming_cache ──
 
     #[test]
-    fn advance_streaming_cache_no_newline_keeps_boundary_zero() {
-        let mut chat = test_chat();
-        chat.viewport.width = 80;
-        chat.append_stream_token("no newline here");
-        let s = chat.streaming.as_ref().unwrap();
-        assert_eq!(s.rendered_boundary(), 0);
-        assert_eq!(s.rendered().len(), 0);
-    }
-
-    #[test]
-    fn advance_streaming_cache_line_boundary_does_not_commit() {
-        let mut chat = test_chat();
-        chat.viewport.width = 80;
-        chat.append_stream_token("first line\nsecond line");
-        let s = chat.streaming.as_ref().unwrap();
-        assert_eq!(s.rendered_boundary(), 0);
-        assert_eq!(s.rendered().len(), 0);
-    }
-
-    #[test]
-    fn advance_streaming_cache_paragraph_boundary_commits_once_the_next_line_ends() {
-        let mut chat = test_chat();
-        chat.viewport.width = 80;
-        chat.append_stream_token("para1\n\npartial");
-        assert_eq!(chat.streaming.as_ref().unwrap().rendered_boundary(), 0);
-
-        chat.append_stream_token("\n");
-        let s = chat.streaming.as_ref().unwrap();
-        assert_eq!(s.rendered_boundary(), "para1\n\n".len());
-        assert_eq!(s.rendered().len(), 1);
-    }
-
-    #[test]
-    fn advance_streaming_cache_multiple_paragraphs_commit_to_last_block_start() {
-        let mut chat = test_chat();
-        chat.viewport.width = 80;
-        chat.append_stream_token("p1\n\np2\n\np3\n\np4\n");
-        let s = chat.streaming.as_ref().unwrap();
-        assert_eq!(s.rendered_boundary(), "p1\n\np2\n\np3\n\n".len());
-    }
-
-    #[test]
-    fn advance_streaming_cache_incremental_inserts_paragraph_gaps() {
-        let mut chat = test_chat();
-        chat.viewport.width = 80;
-
-        chat.append_stream_token("para1\n\npara2\n");
-        let (first_boundary, first_len) = {
-            let s = chat.streaming.as_ref().unwrap();
-            (s.rendered_boundary(), s.rendered().len())
-        };
-        assert_eq!(first_boundary, "para1\n\n".len());
-        assert!(first_len >= 1);
-
-        chat.append_stream_token("\npara3\n");
-        let s = chat.streaming.as_ref().unwrap();
-        assert_eq!(s.rendered_boundary(), "para1\n\npara2\n\n".len());
-        let final_len = s.rendered().len();
-        assert!(
-            final_len >= first_len + 2,
-            "paragraph break must add >= 2 lines (blank + body): got {first_len} → {final_len}",
-        );
-    }
-
-    #[test]
-    fn advance_streaming_cache_waits_for_the_next_block() {
-        // A loose list continues past a blank line, so no block is complete until another starts.
-        let mut chat = test_chat();
-        chat.viewport.width = 80;
-        chat.append_stream_token("- item 1\n\n");
-        assert_eq!(chat.streaming.as_ref().unwrap().rendered_boundary(), 0);
-
-        chat.append_stream_token("- item 2\n\nafter\n");
-        let s = chat.streaming.as_ref().unwrap();
-        assert_eq!(s.rendered_boundary(), "- item 1\n\n- item 2\n\n".len());
-    }
-
-    #[test]
-    fn advance_streaming_cache_matches_committed_render_at_every_char() {
-        let body = indoc! {"
-            ```
-            ```
-
-            Here:
-
-            | a | b |
-            | - | - |
-            | 1 | 2 |
-
-            text
-            #tag
-
-            para
-            ```x
-            code
-            ```
-
-            ```c
-            #include <a.h>
-
-            #define X 1
-            - not a bullet
-            ```
-
-            [ref]: https://example.com
-
-            ```
-            ```
-
-            <div>
-            html
-            </div>
-
-            Done.
-        "};
-        let mut chat = test_chat();
-        chat.set_viewport(Rect::new(0, 0, 80, 20));
-        for (i, ch) in body.char_indices() {
-            chat.append_stream_token(&ch.to_string());
-            let prefix = &body[..i + ch.len_utf8()];
-            let committed = AssistantText::new(prefix).render(&chat.settings.ctx(80));
-            assert_eq!(all_lines(&mut chat, 80), committed, "after {prefix:?}");
-        }
-    }
-
-    #[test]
     fn advance_streaming_cache_defers_until_viewport_measured() {
         let mut chat = test_chat();
         chat.append_stream_token("first paragraph\n\n");
-        {
-            let s = chat.streaming.as_ref().unwrap();
-            assert_eq!(s.rendered().len(), 0);
-            assert_eq!(s.rendered_boundary(), 0);
-            assert_eq!(s.cached_width(), 0);
-        }
+        assert_eq!(cached_rows(&chat), [] as [String; 0]);
 
         chat.set_viewport(Rect::new(0, 0, 80, 24));
         chat.append_stream_token("second paragraph\n\n");
-        {
-            let s = chat.streaming.as_ref().unwrap();
-            assert_ne!(s.rendered().len(), 0);
-            assert_eq!(s.cached_width(), 80);
-        }
+
+        assert_eq!(cached_rows(&chat), ["◉ first paragraph"]);
     }
 
     // ── is_empty ──

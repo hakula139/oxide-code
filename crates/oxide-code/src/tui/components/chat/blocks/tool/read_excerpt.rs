@@ -81,7 +81,69 @@ fn context_label(path: &str, lines: &[ReadExcerptLine], total_lines: usize) -> S
 
 #[cfg(test)]
 mod tests {
+    use std::ops::RangeInclusive;
+
     use super::*;
+    use crate::tui::theme::Theme;
+
+    fn render_rows(path: &str, lines: &[ReadExcerptLine], total_lines: usize) -> Vec<String> {
+        let theme = Theme::default();
+        let ctx = RenderCtx {
+            width: 80,
+            theme: &theme,
+            show_thinking: false,
+        };
+        let mut out = Vec::new();
+        render(&mut out, &ctx, path, lines, total_lines, false);
+        out.iter().map(ToString::to_string).collect()
+    }
+
+    /// Excerpt lines numbered `numbers`, each reading `line {number}`.
+    fn excerpt(numbers: RangeInclusive<usize>) -> Vec<ReadExcerptLine> {
+        numbers
+            .map(|number| ReadExcerptLine {
+                number,
+                text: format!("line {number}"),
+            })
+            .collect()
+    }
+
+    // ── render ──
+
+    #[test]
+    fn render_numbers_rows_under_the_path_and_range_header() {
+        let rows = render_rows("/tmp/example.rs", &excerpt(9..=10), 12);
+
+        assert_eq!(
+            rows,
+            [
+                "▎   /tmp/example.rs:9-10 of 12",
+                "▎    9 │ line 9",
+                "▎   10 │ line 10",
+            ]
+        );
+    }
+
+    #[test]
+    fn render_caps_rows_and_counts_the_hidden_ones() {
+        for (extra, footer) in [(1, "... +1 line"), (2, "... +2 lines")] {
+            let total = MAX_TOOL_OUTPUT_LINES + extra;
+
+            let rows = render_rows("/tmp/example.rs", &excerpt(1..=total), total);
+
+            let mut expected = vec![format!("▎   /tmp/example.rs:1-{total}")];
+            expected.extend((1..=MAX_TOOL_OUTPUT_LINES).map(|n| format!("▎   {n} │ line {n}")));
+            expected.push(format!("▎   {footer}"));
+            assert_eq!(rows, expected, "{extra} extra lines");
+        }
+    }
+
+    #[test]
+    fn render_empty_file_keeps_only_the_header() {
+        let rows = render_rows("/tmp/empty.rs", &[], 0);
+
+        assert_eq!(rows, ["▎   /tmp/empty.rs (empty file)"]);
+    }
 
     // ── context_label ──
 

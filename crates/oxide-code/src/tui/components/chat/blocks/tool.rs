@@ -180,6 +180,60 @@ fn truncate_to_bytes(s: &str, max_bytes: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::tool::tasks::TaskStatus;
+    use crate::tool::tasks::testing::task;
+    use crate::tool::{GrepFileGroup, GrepMatchLine};
+
+    // ── ToolResultBlock::render ──
+
+    #[test]
+    fn tool_result_block_render_puts_the_view_body_under_the_status_line() {
+        let theme = Theme::default();
+        let ctx = RenderCtx {
+            width: 80,
+            theme: &theme,
+            show_thinking: false,
+        };
+        let cases = [
+            (
+                ToolResultView::GrepMatches {
+                    groups: vec![GrepFileGroup {
+                        path: "src/main.rs".to_owned(),
+                        lines: vec![GrepMatchLine {
+                            number: 3,
+                            text: "fn main() {}".to_owned(),
+                            is_match: true,
+                        }],
+                    }],
+                    truncated: true,
+                },
+                ["src/main.rs", "3 │ fn main() {}", "... limit reached"].as_slice(),
+            ),
+            (
+                ToolResultView::GlobFiles {
+                    pattern: "*.rs".to_owned(),
+                    files: vec!["a.rs".to_owned()],
+                    total: 1,
+                },
+                ["*.rs (1 of 1)", "a.rs"].as_slice(),
+            ),
+            (
+                ToolResultView::Tasks {
+                    tasks: vec![task("Ship it", TaskStatus::InProgress)],
+                },
+                ["● Ship it"].as_slice(),
+            ),
+        ];
+        for (view, body) in cases {
+            let block = ToolResultBlock::new("label", view, false);
+
+            let rows: Vec<String> = block.render(&ctx).iter().map(ToString::to_string).collect();
+
+            let mut expected = vec![format!("{TOOL_BORDER_PREFIX}{TOOL_SUCCESS} label")];
+            expected.extend(body.iter().map(|text| format!("{TOOL_BORDER_CONT}{text}")));
+            assert_eq!(rows, expected);
+        }
+    }
 
     // ── truncate_to_bytes ──
 
