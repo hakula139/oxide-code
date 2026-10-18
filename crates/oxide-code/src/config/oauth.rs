@@ -169,8 +169,9 @@ struct Store<'a> {
     lock: PathBuf,
 }
 
-impl Store<'static> {
-    fn locate(login: Login) -> Result<Self> {
+impl<'a> Store<'a> {
+    /// `keychain` holds the Claude Code login ahead of its file. The oxide-code login ignores it.
+    fn locate(login: Login, keychain: Option<&'a dyn Keychain>) -> Result<Self> {
         match login {
             Login::Ox => {
                 let dir = app_dir(XdgBase::Data).context(
@@ -189,7 +190,7 @@ impl Store<'static> {
                 )?;
                 Ok(Self {
                     login,
-                    keychain: SYSTEM_KEYCHAIN,
+                    keychain,
                     file: home.join(".claude").join(".credentials.json"),
                     lock: home.join(".claude.lock"),
                 })
@@ -226,24 +227,25 @@ impl Store<'_> {
 
 /// Stores tokens from `/login` as the oxide-code login.
 pub(super) async fn save_login(tokens: &TokenResponse) -> Result<()> {
-    Store::locate(Login::Ox)?.save(tokens).await
+    Store::locate(Login::Ox, None)?.save(tokens).await
 }
 
 /// Removes the oxide-code login, returning whether one was stored. Claude Code's store stays.
 pub(crate) async fn delete_login() -> Result<bool> {
-    Store::locate(Login::Ox)?.delete().await
+    Store::locate(Login::Ox, None)?.delete().await
 }
 
 // ── Token Loading ──
 
-/// Loads the login's access token, refreshing it near expiry. The Claude Code login reads the
-/// macOS Keychain first, then `~/.claude/.credentials.json`. The oxide-code login reads
+/// Loads the login's access token, refreshing it near expiry. The Claude Code login reads
+/// `keychain` first, then `~/.claude/.credentials.json`. The oxide-code login reads
 /// `$XDG_DATA_HOME/ox/credentials.json`.
 pub(super) async fn load_token(
     login: Login,
+    keychain: ClaudeCodeKeychain,
     extra_ca_certs: Option<&Path>,
 ) -> Result<String, LoginError> {
-    let store = Store::locate(login).map_err(|e| LoginError::Unreadable(login, e))?;
+    let store = Store::locate(login, keychain.0).map_err(|e| LoginError::Unreadable(login, e))?;
     load_token_from(&store, OAUTH_TOKEN_URL, extra_ca_certs).await
 }
 
@@ -386,6 +388,18 @@ mod os_status {
 const SYSTEM_KEYCHAIN: Option<&dyn Keychain> = Some(&SystemKeychain);
 #[cfg(not(target_os = "macos"))]
 const SYSTEM_KEYCHAIN: Option<&dyn Keychain> = None;
+
+/// Where [`load_token`] looks for the Claude Code login before `~/.claude/.credentials.json`.
+#[derive(Clone, Copy)]
+pub(crate) struct ClaudeCodeKeychain(Option<&'static dyn Keychain>);
+
+impl ClaudeCodeKeychain {
+    /// The macOS login Keychain, and none on other platforms.
+    pub(crate) const SYSTEM: Self = Self(SYSTEM_KEYCHAIN);
+    /// No Keychain, so only the credentials file holds the login.
+    #[cfg(test)]
+    pub(crate) const NONE: Self = Self(None);
+}
 
 #[cfg(target_os = "macos")]
 struct SystemKeychain;
@@ -673,16 +687,19 @@ mod tests {
     #[test]
     fn locate_keeps_each_login_in_its_own_tool_s_directory() {
         let (home, data) = (abs("/home/user"), abs("/data"));
+        let keychain = FakeKeychain::empty();
         let (ox, default_ox, claude_code) = temp_env::with_vars(
             [
                 (HOME_VAR, Some(home.as_str())),
                 ("XDG_DATA_HOME", Some(data.as_str())),
             ],
             || {
-                let ox = Store::locate(Login::Ox).unwrap();
-                let default_ox =
-                    temp_env::with_var_unset("XDG_DATA_HOME", || Store::locate(Login::Ox).unwrap());
-                (ox, default_ox, Store::locate(Login::ClaudeCode).unwrap())
+                let ox = Store::locate(Login::Ox, Some(&keychain)).unwrap();
+                let default_ox = temp_env::with_var_unset("XDG_DATA_HOME", || {
+                    Store::locate(Login::Ox, None).unwrap()
+                });
+                let claude_code = Store::locate(Login::ClaudeCode, Some(&keychain)).unwrap();
+                (ox, default_ox, claude_code)
             },
         );
 
@@ -699,7 +716,7 @@ mod tests {
             Path::new(&home).join(".claude").join(".credentials.json")
         );
         assert_eq!(claude_code.lock, Path::new(&home).join(".claude.lock"));
-        assert_eq!(claude_code.keychain.is_some(), cfg!(target_os = "macos"));
+        assert!(claude_code.keychain.is_some());
     }
 
     // ── delete_login ──
@@ -736,7 +753,6 @@ mod tests {
 
     // ── load_token ──
 
-    #[cfg(not(target_os = "macos"))]
     #[tokio::test]
     async fn load_token_resolves_credentials_relative_to_home() {
         let home = tempfile::tempdir().unwrap();
@@ -751,7 +767,11 @@ mod tests {
 
         let token = temp_env::async_with_vars(
             [(HOME_VAR, Some(home.path().to_string_lossy().into_owned()))],
-            async { load_token(Login::ClaudeCode, None).await.unwrap() },
+            async {
+                load_token(Login::ClaudeCode, ClaudeCodeKeychain::NONE, None)
+                    .await
+                    .unwrap()
+            },
         )
         .await;
         assert_eq!(token, "token-from-home");

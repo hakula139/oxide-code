@@ -28,6 +28,7 @@ use self::compaction::{AutoCompactionConfig, CompactionConfig};
 use self::gateway::{GatewayCompat, GatewaySnapshot};
 use self::load::Loaded;
 use self::merge::Origins;
+use self::oauth::ClaudeCodeKeychain;
 use self::provenance::{Provenance, Source, Sourced};
 use self::schema::{FileConfig, PermissionTable, TierTable};
 use crate::model::ModelSpec;
@@ -552,7 +553,7 @@ async fn resolve_auth(
     let resolved = auth::resolve(
         auth::explicit_credentials(file_api_key),
         base_url,
-        auth::stored_login(extra_ca_certs),
+        auth::stored_login(ClaudeCodeKeychain::SYSTEM, extra_ca_certs),
     )
     .await;
     let (auth, signed_out_notice) = match resolved {

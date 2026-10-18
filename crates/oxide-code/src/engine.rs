@@ -27,7 +27,7 @@ use crate::client::anthropic::Client;
 use crate::config::auth::{self, Auth, AuthSource};
 use crate::config::compaction::CompactionConfig;
 use crate::config::login::PendingLogin;
-use crate::config::oauth;
+use crate::config::oauth::{self, ClaudeCodeKeychain};
 use crate::config::{Config, Effort};
 use crate::file_tracker::FileTracker;
 use crate::message::{ContentBlock, Message};
@@ -122,6 +122,8 @@ pub(crate) struct Engine {
     client: Client,
     /// Where `/login` exchanges its authorization code, a mock server in tests.
     oauth_token_url: String,
+    /// The Keychain `/logout` checks for the Claude Code login before its file, none in tests.
+    claude_code_keychain: ClaudeCodeKeychain,
     tools: Arc<ToolRegistry>,
     store: SessionStore,
     session: SessionHandle,
@@ -193,6 +195,7 @@ impl Engine {
         Ok(Self {
             client,
             oauth_token_url: oauth::OAUTH_TOKEN_URL.to_owned(),
+            claude_code_keychain: ClaudeCodeKeychain::SYSTEM,
             tools,
             store,
             session,
@@ -735,12 +738,13 @@ impl Engine {
             .auth_source()
             .is_none_or(|source| source == AuthSource::OxLogin)
         {
-            let fallback = auth::claude_code_login(self.client.extra_ca_certs())
-                .await
-                .unwrap_or_else(|e| {
-                    fallback_error = Some(format!("{e:#}"));
-                    None
-                });
+            let fallback =
+                auth::claude_code_login(self.claude_code_keychain, self.client.extra_ca_certs())
+                    .await
+                    .unwrap_or_else(|e| {
+                        fallback_error = Some(format!("{e:#}"));
+                        None
+                    });
             self.client.set_auth(fallback);
         }
         sink.emit(
@@ -3621,7 +3625,6 @@ mod tests {
         .await;
     }
 
-    #[cfg(not(target_os = "macos"))]
     #[tokio::test]
     async fn logout_falls_back_to_the_claude_code_login_or_stays_signed_out() {
         with_pinned_home(async {
