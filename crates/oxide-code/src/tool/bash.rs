@@ -193,6 +193,16 @@ fn resolve_timeout(millis: Option<u64>) -> Duration {
 
 /// Runs `command` in the context's cwd, with [`SESSION_ID_VAR`] set to its session ID.
 async fn execute(command: &str, timeout: Duration, ctx: &ToolCtx) -> ToolOutput {
+    execute_until(command, timeout, tokio::time::sleep(timeout), ctx).await
+}
+
+/// [`execute`], timing out once `deadline` completes. The timeout message reports `timeout`.
+async fn execute_until(
+    command: &str,
+    timeout: Duration,
+    deadline: impl Future<Output = ()>,
+    ctx: &ToolCtx,
+) -> ToolOutput {
     let mut shell = match ShellTree::spawn(command, ctx) {
         Ok(shell) => shell,
         Err(e) => {
@@ -209,16 +219,19 @@ async fn execute(command: &str, timeout: Duration, ctx: &ToolCtx) -> ToolOutput 
 
     // One deadline covers the exit and the pipe drain, so a backgrounded descendant that holds the
     // pipes open cannot stretch the call past the timeout.
-    let finished = tokio::time::timeout(timeout, async {
-        tokio::join!(
-            shell.wait(),
-            stdout_capture.drain(&mut stdout),
-            stderr_capture.drain(&mut stderr),
-        )
-    })
-    .await;
+    let finished = tokio::select! {
+        biased;
+        finished = async {
+            tokio::join!(
+                shell.wait(),
+                stdout_capture.drain(&mut stdout),
+                stderr_capture.drain(&mut stderr),
+            )
+        } => Some(finished),
+        () = deadline => None,
+    };
 
-    let Ok((status, stdout_read, stderr_read)) = finished else {
+    let Some((status, stdout_read, stderr_read)) = finished else {
         // Killing the tree closes its pipe ends, so the grace drain only waits on a holder that
         // escaped it.
         shell.kill().await;
@@ -550,6 +563,60 @@ impl Drop for ShellTree {
     }
 }
 
+// ── Testing ──
+
+#[cfg(test)]
+mod processes {
+    use std::path::Path;
+    use std::process::Stdio;
+    use std::time::{Duration, Instant};
+
+    use super::bash;
+
+    /// A command that records the PID `pid`, such as `$!` or `$$`, in `pid_file`. The rename
+    /// publishes the PID whole.
+    pub(super) fn record(pid: &str, pid_file: &Path) -> String {
+        let pid_file = pid_file.display();
+        format!("echo {pid} > '{pid_file}.tmp' && mv '{pid_file}.tmp' '{pid_file}'")
+    }
+
+    /// The PID [`record`] writes to `pid_file`, once it appears. Spawning bash on a loaded Windows
+    /// runner can take several seconds.
+    pub(super) async fn until_recorded(pid_file: &Path) -> String {
+        let deadline = Instant::now() + Duration::from_secs(20);
+        while !pid_file.exists() {
+            assert!(
+                Instant::now() < deadline,
+                "no PID in {}",
+                pid_file.display()
+            );
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        std::fs::read_to_string(pid_file).unwrap().trim().to_owned()
+    }
+
+    /// Waits until no process has `pid`, failing if one still does after a deadline.
+    pub(super) async fn until_gone(pid: &str) {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while alive(pid).await {
+            assert!(Instant::now() < deadline, "process {pid} is still alive");
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    }
+
+    /// Whether `pid` names a live process. The tool's own bash checks, since Git Bash on Windows
+    /// numbers its processes apart from Windows.
+    async fn alive(pid: &str) -> bool {
+        tokio::process::Command::new(bash().unwrap())
+            .args(["-c", &format!("kill -0 {pid}")])
+            .stderr(Stdio::null())
+            .status()
+            .await
+            .unwrap()
+            .success()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -649,26 +716,16 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn run_timeout_keeps_partial_output() {
-        // The timeout leaves bash ample time to print before the kill, even under parallel load.
+    async fn run_times_out_after_the_input_timeout() {
         let output = run(
             &Arc::default(),
-            serde_json::json!({
-                "command": "echo started; sleep 10",
-                "timeout": 1_000
-            }),
+            serde_json::json!({"command": "sleep 30", "timeout": 1}),
             &temp_ctx(),
         )
         .await;
-        assert!(output.is_error);
-        assert_eq!(
-            output.content,
-            indoc! {"
-                started
 
-                Command timed out after 1000 ms"
-            }
-        );
+        assert!(output.is_error);
+        assert_eq!(output.content, "Command timed out after 1 ms");
     }
 
     // ── resolve_timeout ──
@@ -788,28 +845,21 @@ mod tests {
 
     #[tokio::test]
     async fn execute_timeout_kills_backgrounded_children() {
-        // Without the tree kill, a detached descendant outlives the timeout and touches the marker
-        // file. The marker's absence proves the whole tree was killed.
         let dir = tempfile::tempdir().unwrap();
-        let marker = dir.path().join("leaked");
-        let marker_str = marker.to_str().unwrap();
+        let pid_file = dir.path().join("pid");
+        let command = format!(
+            "sleep 30 & {}; sleep 30",
+            processes::record("$!", &pid_file)
+        );
+        let started = async {
+            processes::until_recorded(&pid_file).await;
+        };
 
-        let command = format!("(sleep 1 && touch '{marker_str}') & sleep 5");
-        let start = std::time::Instant::now();
-        let output = execute(&command, Duration::from_millis(100), &temp_ctx()).await;
+        let output = execute_until(&command, Duration::from_secs(60), started, &temp_ctx()).await;
+
         assert!(output.is_error, "expected timeout");
-        assert_eq!(output.content, "Command timed out after 100 ms");
-        assert!(
-            start.elapsed() < Duration::from_millis(500),
-            "timeout did not return promptly",
-        );
-
-        // Give any leaked background process enough wallclock to touch the file.
-        tokio::time::sleep(Duration::from_millis(1_500)).await;
-        assert!(
-            !marker.exists(),
-            "backgrounded descendant was not killed: marker file was created",
-        );
+        assert_eq!(output.content, "Command timed out after 60000 ms");
+        processes::until_gone(&processes::until_recorded(&pid_file).await).await;
     }
 
     #[tokio::test]
@@ -817,32 +867,18 @@ mod tests {
         // The shell either still runs or has exited while a descendant holds its pipes.
         for tail in ["sleep 30", "echo done"] {
             let dir = tempfile::tempdir().unwrap();
-            let started = dir.path().join("started");
-            let leaked = dir.path().join("leaked");
-            let command = format!(
-                "(touch '{started}'; sleep 1 && touch '{leaked}') & {tail}",
-                started = started.display(),
-                leaked = leaked.display(),
-            );
-
+            let pid_file = dir.path().join("pid");
+            let command = format!("sleep 30 & {}; {tail}", processes::record("$!", &pid_file));
             let ctx = temp_ctx();
             let mut call = Box::pin(execute(&command, DEFAULT_TIMEOUT, &ctx));
-            // Spawning bash on a loaded Windows runner can take several seconds.
-            let deadline = std::time::Instant::now() + Duration::from_secs(20);
-            while !started.exists() && std::time::Instant::now() < deadline {
-                let still_running = tokio::time::timeout(Duration::from_millis(20), call.as_mut())
-                    .await
-                    .is_err();
-                assert!(still_running, "{tail}: command finished before the cancel");
-            }
-            assert!(started.exists(), "{tail}: command never started");
+
+            let pid = tokio::select! {
+                output = &mut call => panic!("{tail}: finished before the cancel: {}", output.content),
+                pid = processes::until_recorded(&pid_file) => pid,
+            };
             drop(call);
 
-            tokio::time::sleep(Duration::from_millis(1_500)).await;
-            assert!(
-                !leaked.exists(),
-                "{tail}: backgrounded descendant outlived the cancel",
-            );
+            processes::until_gone(&pid).await;
         }
     }
 
@@ -865,15 +901,19 @@ mod tests {
 
     #[tokio::test]
     async fn execute_timeout_covers_background_pipe_holders() {
-        // The backgrounded `sleep` holds the pipes open past bash's exit. The timeout leaves bash
-        // ample time to print first, even under parallel load.
-        let start = std::time::Instant::now();
-        let output = execute(
-            "sleep 5 & echo done",
-            Duration::from_millis(1_000),
-            &temp_ctx(),
-        )
-        .await;
+        // The backgrounded `sleep` holds the pipes open past bash's exit, so only a deadline that
+        // covers the drain ends the call before the `sleep` does.
+        let dir = tempfile::tempdir().unwrap();
+        let pid_file = dir.path().join("pid");
+        let command = format!(
+            "sleep 30 & echo done; {}",
+            processes::record("$$", &pid_file)
+        );
+        let exited = async {
+            processes::until_gone(&processes::until_recorded(&pid_file).await).await;
+        };
+
+        let output = execute_until(&command, Duration::from_secs(60), exited, &temp_ctx()).await;
 
         assert!(output.is_error, "expected timeout");
         assert_eq!(
@@ -881,12 +921,8 @@ mod tests {
             indoc! {"
                 done
 
-                Command timed out after 1000 ms"
+                Command timed out after 60000 ms"
             }
-        );
-        assert!(
-            start.elapsed() < Duration::from_secs(3),
-            "timeout did not cover pipe collection",
         );
     }
 

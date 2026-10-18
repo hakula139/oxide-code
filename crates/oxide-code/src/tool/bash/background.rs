@@ -659,13 +659,10 @@ mod tests {
     use super::*;
     use crate::protocol::CapturingSink;
     use crate::tool::MAX_OUTPUT_BYTES;
-    use crate::tool::bash::{BashTool, OUTPUT_BUDGET};
+    use crate::tool::bash::{BashTool, OUTPUT_BUDGET, processes};
     use crate::tool::testing::{self, temp_ctx};
 
     // ── Fixtures ──
-
-    /// How long a test descendant waits before it leaves its mark, unless a kill ends it first.
-    const LEAK_DELAY: &str = "2";
 
     /// A registry that reports its list to the returned sink.
     fn shells() -> (Arc<BackgroundShells>, CapturingSink) {
@@ -692,28 +689,13 @@ mod tests {
         testing::run(&BashStopTool::new(Arc::clone(shells)), input, &temp_ctx()).await
     }
 
-    async fn until_exists(path: &Path) {
-        let deadline = Instant::now() + Duration::from_secs(5);
-        while !path.exists() && Instant::now() < deadline {
-            tokio::time::sleep(Duration::from_millis(20)).await;
-        }
-        assert!(path.exists(), "{} never appeared", path.display());
-    }
-
-    /// A command that touches `started` once it runs, then keeps running beside a descendant that
-    /// touches `leaked` after [`LEAK_DELAY`] unless something kills it.
-    fn leaking(started: &Path, leaked: &Path) -> String {
+    /// A command that prints `hi`, then keeps running beside a background `sleep` whose PID it
+    /// records in `pid_file`.
+    fn leaking(pid_file: &Path) -> String {
         format!(
-            "echo hi; touch '{}'; (sleep {LEAK_DELAY} && touch '{}') & sleep 30",
-            started.display(),
-            leaked.display(),
+            "echo hi; sleep 30 & {}; sleep 30",
+            processes::record("$!", pid_file)
         )
-    }
-
-    /// Waits past [`LEAK_DELAY`], then asserts no descendant touched `leaked`.
-    async fn assert_never_leaks(leaked: &Path) {
-        tokio::time::sleep(Duration::from_millis(2_500)).await;
-        assert!(!leaked.exists(), "{} outlived its shell", leaked.display());
     }
 
     /// A pipe whose every read fails.
@@ -799,18 +781,13 @@ mod tests {
     async fn stop_all_ends_every_shell_and_its_descendants_without_a_report() {
         let dir = tempfile::tempdir().unwrap();
         let (shells, sink) = shells();
-        let marks: Vec<_> = (0..2)
-            .map(|n| {
-                let started = dir.path().join(format!("started-{n}"));
-                let leaked = dir.path().join(format!("leaked-{n}"));
-                (started, leaked)
-            })
+        let pid_files: Vec<_> = (0..2)
+            .map(|n| dir.path().join(format!("pid-{n}")))
             .collect();
-        for (started, leaked) in &marks {
-            start(&shells, &leaking(started, leaked)).await;
-        }
-        for (started, _) in &marks {
-            until_exists(started).await;
+        let mut descendants = Vec::new();
+        for pid_file in &pid_files {
+            start(&shells, &leaking(pid_file)).await;
+            descendants.push(processes::until_recorded(pid_file).await);
         }
         let reported = sink.events().len();
 
@@ -818,8 +795,8 @@ mod tests {
 
         assert_eq!(shells.list(), []);
         assert_eq!(sink.events().len(), reported);
-        for (_, leaked) in &marks {
-            assert_never_leaks(leaked).await;
+        for pid in &descendants {
+            processes::until_gone(pid).await;
         }
     }
 
@@ -961,11 +938,10 @@ mod tests {
     #[tokio::test]
     async fn bash_stop_ends_the_tree_and_returns_the_unread_output() {
         let dir = tempfile::tempdir().unwrap();
-        let started = dir.path().join("started");
-        let leaked = dir.path().join("leaked");
+        let pid_file = dir.path().join("pid");
         let (shells, sink) = shells();
-        start(&shells, &leaking(&started, &leaked)).await;
-        until_exists(&started).await;
+        start(&shells, &leaking(&pid_file)).await;
+        let pid = processes::until_recorded(&pid_file).await;
 
         let stopped = stop(&shells, "shell-1").await;
 
@@ -984,18 +960,15 @@ mod tests {
             "{}",
             again.content,
         );
-        assert_never_leaks(&leaked).await;
+        processes::until_gone(&pid).await;
     }
 
     #[tokio::test]
     async fn bash_stop_ends_a_descendant_still_holding_the_pipes_of_a_finished_shell() {
         let dir = tempfile::tempdir().unwrap();
-        let leaked = dir.path().join("leaked");
+        let pid_file = dir.path().join("pid");
         let (shells, _sink) = shells();
-        let command = format!(
-            "(sleep {LEAK_DELAY} && touch '{}') & exit 3",
-            leaked.display()
-        );
+        let command = format!("sleep 30 & {}; exit 3", processes::record("$!", &pid_file));
         start(&shells, &command).await;
 
         let read = output(&shells, "shell-1", 5_000).await;
@@ -1007,7 +980,7 @@ mod tests {
             stopped.content,
             "(no new output)\n\n(stopped after it exited with code 3)"
         );
-        assert_never_leaks(&leaked).await;
+        processes::until_gone(&processes::until_recorded(&pid_file).await).await;
     }
 
     #[cfg(unix)]
