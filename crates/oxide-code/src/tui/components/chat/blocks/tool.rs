@@ -11,14 +11,12 @@ mod text;
 
 use ratatui::style::Style;
 use ratatui::text::{Line, Span};
-use unicode_width::UnicodeWidthStr;
 
-use super::rows::{MAX_ROW_BYTES, NumberedRows, body_row, truncate_to_bytes};
-use super::{ChatBlock, RenderCtx, bar_continuation_prefix};
+use super::rows::wrapped_row;
+use super::{ChatBlock, RenderCtx};
 use crate::tool::ToolResultView;
 use crate::tui::glyphs::{TOOL_BORDER_CONT, TOOL_BORDER_PREFIX, TOOL_ERROR, TOOL_SUCCESS};
 use crate::tui::theme::Theme;
-use crate::tui::wrap::wrap_line;
 
 const MAX_TOOL_OUTPUT_LINES: usize = 5;
 
@@ -41,20 +39,15 @@ impl ToolCallBlock {
 
 impl ChatBlock for ToolCallBlock {
     fn render(&self, ctx: &RenderCtx<'_>) -> Vec<Line<'static>> {
-        let border_style = ctx.theme.tool_border();
-        let cont_prefix = bar_continuation_prefix(TOOL_BORDER_CONT, border_style);
-        let line = Line::from(vec![
-            Span::styled(TOOL_BORDER_PREFIX.to_owned(), border_style),
+        let mut out = Vec::new();
+        status_row(
+            &mut out,
+            ctx,
+            ctx.theme.tool_border(),
             Span::styled(self.icon.clone(), ctx.theme.tool_icon()),
-            Span::raw(" "),
             Span::styled(self.label.clone(), ctx.theme.text()),
-        ]);
-        wrap_line(
-            line,
-            usize::from(ctx.width),
-            TOOL_BORDER_CONT.width(),
-            Some(&cont_prefix),
-        )
+        );
+        out
     }
 
     fn standalone(&self) -> bool {
@@ -138,20 +131,30 @@ fn render_status_line(
     } else {
         (TOOL_SUCCESS, ctx.theme.success())
     };
-    let border_style = border_style_for(ctx.theme, is_error);
-    let cont_prefix = bar_continuation_prefix(TOOL_BORDER_CONT, border_style);
-    let line = Line::from(vec![
-        Span::styled(TOOL_BORDER_PREFIX.to_owned(), border_style),
+    status_row(
+        out,
+        ctx,
+        border_style_for(ctx.theme, is_error),
         Span::styled(indicator, indicator_style),
-        Span::raw(" "),
         Span::styled(label.to_owned(), ctx.theme.muted()),
+    );
+}
+
+/// Emits a tool call or result status line, whose wrapped rows continue under the body text.
+fn status_row(
+    out: &mut Vec<Line<'static>>,
+    ctx: &RenderCtx<'_>,
+    border_style: Style,
+    marker: Span<'static>,
+    label: Span<'static>,
+) {
+    let line = Line::from(vec![
+        Span::styled(TOOL_BORDER_PREFIX, border_style),
+        marker,
+        Span::raw(" "),
+        label,
     ]);
-    out.extend(wrap_line(
-        line,
-        usize::from(ctx.width),
-        TOOL_BORDER_CONT.width(),
-        Some(&cont_prefix),
-    ));
+    wrapped_row(out, ctx, line, TOOL_BORDER_CONT, border_style);
 }
 
 fn border_style_for(theme: &Theme, is_error: bool) -> Style {

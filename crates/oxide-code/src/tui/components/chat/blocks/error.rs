@@ -2,7 +2,8 @@
 
 use ratatui::text::Line;
 
-use super::{ChatBlock, RenderCtx, push_icon_wrapped};
+use super::rows::prefixed_row;
+use super::{ChatBlock, RenderCtx};
 use crate::tui::glyphs::{ERROR_CONT, ERROR_PREFIX};
 
 /// An error shown in the chat, from the engine, a slash command, or the app. Multi-line messages
@@ -22,12 +23,11 @@ impl ErrorBlock {
 impl ChatBlock for ErrorBlock {
     fn render(&self, ctx: &RenderCtx<'_>) -> Vec<Line<'static>> {
         let style = ctx.theme.error();
-        let width = usize::from(ctx.width);
 
         let mut out = Vec::new();
         for (i, body_line) in self.message.lines().enumerate() {
             let prefix = if i == 0 { ERROR_PREFIX } else { ERROR_CONT };
-            push_icon_wrapped(&mut out, prefix, style, body_line, style, width);
+            prefixed_row(&mut out, ctx, prefix, style, body_line, style);
         }
         out
     }

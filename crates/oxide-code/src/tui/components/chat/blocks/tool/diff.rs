@@ -3,8 +3,11 @@
 use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 
-use super::{NumberedRows, RenderCtx, TOOL_BORDER_CONT, border_style_for};
+use super::border_style_for;
 use crate::tool::{DiffChunk, DiffLine};
+use crate::tui::components::chat::blocks::RenderCtx;
+use crate::tui::components::chat::blocks::rows::NumberedRows;
+use crate::tui::glyphs::TOOL_BORDER_CONT;
 
 const MAX_DIFF_BODY_LINES: usize = 20;
 const MAX_LOCATIONS_DISPLAYED: usize = 8;

@@ -100,35 +100,29 @@ mod tests {
     // ── CompactedBlock::render ──
 
     #[test]
-    fn render_first_line_is_bold_header_with_bar_prefix() {
-        let theme = Theme::default();
-        let block = CompactedBlock::new(4, None, "summary body");
-
-        let lines = block.render(&ctx_at(60, &theme));
-
-        let bar = theme.accent();
-        assert_eq!(
-            lines[0],
-            Line::from(vec![
-                Span::styled(TOOL_BORDER_PREFIX, bar),
-                Span::styled(
-                    "Compacted 4 messages → 1 summary",
-                    bar.add_modifier(Modifier::BOLD),
-                ),
-            ])
-        );
-    }
-
-    #[test]
-    fn render_inserts_gutter_line_between_header_and_body() {
+    fn render_paints_a_bold_header_and_accent_gutter_over_a_plain_text_body() {
         let theme = Theme::default();
         let block = CompactedBlock::new(4, None, "body line");
 
         let lines = block.render(&ctx_at(60, &theme));
 
+        let bar = theme.accent();
         assert_eq!(
-            rows(&lines),
-            ["▎ Compacted 4 messages → 1 summary", "▎ ", "▎ body line"]
+            lines,
+            [
+                Line::from(vec![
+                    Span::styled(TOOL_BORDER_PREFIX, bar),
+                    Span::styled(
+                        "Compacted 4 messages → 1 summary",
+                        bar.add_modifier(Modifier::BOLD),
+                    ),
+                ]),
+                Line::from(Span::styled(TOOL_BORDER_PREFIX, bar)),
+                Line::from(vec![
+                    Span::styled(TOOL_BORDER_PREFIX, bar),
+                    Span::styled("body line", theme.text()),
+                ]),
+            ]
         );
     }
 

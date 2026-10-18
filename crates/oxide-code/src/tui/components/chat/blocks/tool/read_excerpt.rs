@@ -3,10 +3,11 @@
 use ratatui::text::{Line, Span};
 use unicode_width::UnicodeWidthStr;
 
-use super::{
-    MAX_TOOL_OUTPUT_LINES, NumberedRows, RenderCtx, TOOL_BORDER_CONT, body_row, border_style_for,
-};
+use super::{MAX_TOOL_OUTPUT_LINES, border_style_for};
 use crate::tool::ReadExcerptLine;
+use crate::tui::components::chat::blocks::RenderCtx;
+use crate::tui::components::chat::blocks::rows::{NumberedRows, body_row};
+use crate::tui::glyphs::TOOL_BORDER_CONT;
 
 pub(super) fn render(
     out: &mut Vec<Line<'static>>,

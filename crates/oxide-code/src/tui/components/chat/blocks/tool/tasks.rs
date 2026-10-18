@@ -2,10 +2,10 @@
 
 use ratatui::text::Line;
 
-use super::{
-    MAX_ROW_BYTES, MAX_TOOL_OUTPUT_LINES, RenderCtx, body_row, border_style_for, truncate_to_bytes,
-};
+use super::{MAX_TOOL_OUTPUT_LINES, border_style_for};
 use crate::tool::tasks::Task;
+use crate::tui::components::chat::blocks::RenderCtx;
+use crate::tui::components::chat::blocks::rows::{MAX_ROW_BYTES, body_row, truncate_to_bytes};
 use crate::tui::components::tasks::{hidden_summary, row_text, window};
 
 pub(super) fn render(

@@ -55,7 +55,7 @@ impl ChatBlock for GitDiffBlock {
                     &mut out,
                     ctx,
                     border,
-                    header.to_owned(),
+                    header,
                     ctx.theme.text().add_modifier(Modifier::BOLD),
                 );
                 old_left = 0;
@@ -65,11 +65,11 @@ impl ChatBlock for GitDiffBlock {
                 new_ln = new.start;
                 old_left = old.count;
                 new_left = new.count;
-                body_row(&mut out, ctx, border, line.to_owned(), ctx.theme.dim());
+                body_row(&mut out, ctx, border, line, ctx.theme.dim());
             } else if line.is_empty() {
                 old_left = 0;
                 new_left = 0;
-                body_row(&mut out, ctx, border, String::new(), ctx.theme.dim());
+                body_row(&mut out, ctx, border, "", ctx.theme.dim());
             } else if old_left == 0 && new_left == 0 {
                 if is_file_header(line) {
                     continue;
@@ -83,7 +83,7 @@ impl ChatBlock for GitDiffBlock {
                 } else {
                     ctx.theme.text()
                 };
-                body_row(&mut out, ctx, border, line.to_owned(), style);
+                body_row(&mut out, ctx, border, line, style);
             } else if let Some(text) = line.strip_prefix('+') {
                 add.render(&mut out, new_ln, text, ctx.theme.text());
                 new_ln += 1;
@@ -99,7 +99,7 @@ impl ChatBlock for GitDiffBlock {
                 old_left = old_left.saturating_sub(1);
                 new_left = new_left.saturating_sub(1);
             } else {
-                body_row(&mut out, ctx, border, line.to_owned(), ctx.theme.dim());
+                body_row(&mut out, ctx, border, line, ctx.theme.dim());
             }
         }
         out

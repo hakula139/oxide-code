@@ -27,11 +27,9 @@ use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 use unicode_width::UnicodeWidthStr;
 
-use self::rows::bar_row;
-use crate::tui::glyphs::BAR;
+use self::rows::prefixed_row;
 use crate::tui::markdown::render_markdown;
 use crate::tui::theme::Theme;
-use crate::tui::wrap::wrap_line;
 
 // ── Trait ──
 
@@ -86,22 +84,6 @@ pub(super) trait ChatBlock {
 
 // ── Shared Helpers ──
 
-/// Icon-prefixed line with continuation indent aligned to text start.
-fn push_icon_wrapped(
-    out: &mut Vec<Line<'static>>,
-    prefix: &str,
-    prefix_style: Style,
-    text: &str,
-    text_style: Style,
-    width: usize,
-) {
-    let line = Line::from(vec![
-        Span::styled(prefix.to_owned(), prefix_style),
-        Span::styled(text.to_owned(), text_style),
-    ]);
-    out.extend(wrap_line(line, width, prefix.width(), None));
-}
-
 /// Styles of a [`bar_section`]. Body spans without a color take `body`.
 struct SectionStyles {
     bar: Style,
@@ -119,7 +101,7 @@ fn bar_section(
     body: &str,
 ) -> Vec<Line<'static>> {
     let mut out = Vec::new();
-    bar_row(&mut out, ctx, prefix, styles.bar, header, styles.header);
+    prefixed_row(&mut out, ctx, prefix, styles.bar, header, styles.header);
     if body.trim().is_empty() {
         return out;
     }
@@ -158,23 +140,6 @@ fn prepend_markdown_prefix(
     line
 }
 
-/// Continuation prefix that keeps the shared left bar styled after wrapping.
-fn bar_continuation_prefix(prefix: &str, bar_style: Style) -> Vec<Span<'static>> {
-    let bar_pos = prefix.find(BAR).expect("prefix must contain bar glyph");
-    let left = &prefix[..bar_pos];
-    let right = &prefix[bar_pos + BAR.len()..];
-
-    let mut spans = Vec::with_capacity(3);
-    if !left.is_empty() {
-        spans.push(Span::raw(left.to_owned()));
-    }
-    spans.push(Span::styled(BAR, bar_style));
-    if !right.is_empty() {
-        spans.push(Span::raw(right.to_owned()));
-    }
-    spans
-}
-
 pub(super) fn last_has_width(lines: &[Line<'_>]) -> bool {
     lines.last().is_some_and(|l| l.width() > 0)
 }
@@ -184,72 +149,6 @@ mod tests {
     use ratatui::style::{Color, Style};
 
     use super::*;
-    use crate::tui::glyphs::USER_PROMPT_PREFIX;
-
-    // ── push_icon_wrapped ──
-
-    #[test]
-    fn push_icon_wrapped_short_text_single_line() {
-        let icon_style = Style::default().fg(Color::Red);
-        let mut out = Vec::new();
-
-        push_icon_wrapped(
-            &mut out,
-            USER_PROMPT_PREFIX,
-            icon_style,
-            "hello",
-            Style::default(),
-            80,
-        );
-
-        assert_eq!(
-            out,
-            [Line::from(vec![
-                Span::styled(USER_PROMPT_PREFIX, icon_style),
-                Span::raw("hello"),
-            ])]
-        );
-    }
-
-    #[test]
-    fn push_icon_wrapped_wraps_long_text_with_indent() {
-        let text_style = Style::default().fg(Color::Green);
-        let mut out = Vec::new();
-
-        push_icon_wrapped(
-            &mut out,
-            USER_PROMPT_PREFIX,
-            Style::default(),
-            "one two three four five six seven",
-            text_style,
-            16,
-        );
-
-        let row = |lead, text| Line::from(vec![Span::raw(lead), Span::styled(text, text_style)]);
-        assert_eq!(
-            out,
-            [
-                row(USER_PROMPT_PREFIX, "one two three "),
-                row("  ", "four five six "),
-                row("  ", "seven"),
-            ]
-        );
-    }
-
-    #[test]
-    fn push_icon_wrapped_uses_display_width_not_bytes() {
-        let mut out = Vec::new();
-        push_icon_wrapped(
-            &mut out,
-            USER_PROMPT_PREFIX,
-            Style::default(),
-            "你好 世界 再见",
-            Style::default(),
-            12,
-        );
-        let rows: Vec<String> = out.iter().map(ToString::to_string).collect();
-        assert_eq!(rows, ["❯ 你好 世界 ", "  再见"]);
-    }
 
     // ── fill_plain_spans ──
 
@@ -297,20 +196,6 @@ mod tests {
             Line::from(vec![Span::styled("◉ ", prefix_style), Span::raw("content")])
                 .style(line_style)
                 .centered()
-        );
-    }
-
-    // ── bar_continuation_prefix ──
-
-    #[test]
-    fn bar_continuation_prefix_preserves_bar_position_and_style() {
-        let style = Style::default().fg(Color::Blue);
-
-        let result = bar_continuation_prefix("  ▎   ", style);
-
-        assert_eq!(
-            result,
-            [Span::raw("  "), Span::styled(BAR, style), Span::raw("   ")]
         );
     }
 }

@@ -4,8 +4,10 @@
 use ratatui::text::Line;
 use unicode_width::UnicodeWidthStr;
 
-use super::{MAX_TOOL_OUTPUT_LINES, NumberedRows, RenderCtx, body_row, border_style_for};
+use super::{MAX_TOOL_OUTPUT_LINES, border_style_for};
 use crate::tool::GrepFileGroup;
+use crate::tui::components::chat::blocks::RenderCtx;
+use crate::tui::components::chat::blocks::rows::{NumberedRows, body_row};
 
 pub(super) fn render(
     out: &mut Vec<Line<'static>>,
@@ -38,13 +40,7 @@ pub(super) fn render(
         if emitted >= visible_rows {
             break;
         }
-        body_row(
-            out,
-            ctx,
-            border_style,
-            group.path.clone(),
-            ctx.theme.muted(),
-        );
+        body_row(out, ctx, border_style, &group.path, ctx.theme.muted());
         emitted += 1;
 
         for line in &group.lines {

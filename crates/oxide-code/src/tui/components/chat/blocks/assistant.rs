@@ -173,15 +173,27 @@ mod tests {
     }
 
     #[test]
-    fn render_inserts_gutter_line_between_header_and_body() {
-        // Bar-only gutter row separates header from prose without crowding.
+    fn render_paints_header_gutter_and_plain_body_in_the_thinking_style() {
         let theme = Theme::default();
         let block = AssistantThinking::new("hello");
 
         let lines = block.render(&ctx_at(60, &theme));
 
-        let rows: Vec<String> = lines.iter().map(ToString::to_string).collect();
-        assert_eq!(rows, ["▎ Thinking...", "▎ ", "▎ hello"]);
+        let style = theme.thinking();
+        assert_eq!(
+            lines,
+            [
+                Line::from(vec![
+                    Span::styled(THINKING_PREFIX, style),
+                    Span::styled(THINKING_LABEL, style),
+                ]),
+                Line::from(Span::styled(THINKING_PREFIX, style)),
+                Line::from(vec![
+                    Span::styled(THINKING_PREFIX, style),
+                    Span::styled("hello", style),
+                ]),
+            ]
+        );
     }
 
     #[test]

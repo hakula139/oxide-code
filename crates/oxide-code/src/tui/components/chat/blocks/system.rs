@@ -3,7 +3,7 @@
 
 use ratatui::text::{Line, Span};
 
-use super::rows::bar_row;
+use super::rows::prefixed_row;
 use super::{ChatBlock, RenderCtx};
 use crate::tui::glyphs::TOOL_BORDER_PREFIX;
 
@@ -28,7 +28,7 @@ impl ChatBlock for SystemMessageBlock {
         let bar_style = ctx.theme.accent();
         let mut out = Vec::new();
         for body_line in self.text.lines() {
-            bar_row(
+            prefixed_row(
                 &mut out,
                 ctx,
                 TOOL_BORDER_PREFIX,
@@ -78,15 +78,16 @@ mod tests {
             second
             third
         "});
+
         let lines = block.render(&ctx_at(60, &theme));
-        assert_eq!(lines.len(), 3);
-        for (i, expected) in ["first", "second", "third"].iter().enumerate() {
-            assert_eq!(lines[i].spans.len(), 2, "row {i}: bar + body");
-            assert_eq!(lines[i].spans[0].content, TOOL_BORDER_PREFIX);
-            assert_eq!(lines[i].spans[0].style, theme.accent());
-            assert_eq!(lines[i].spans[1].content, *expected);
-            assert_eq!(lines[i].spans[1].style, theme.text());
-        }
+
+        let row = |text| {
+            Line::from(vec![
+                Span::styled(TOOL_BORDER_PREFIX, theme.accent()),
+                Span::styled(text, theme.text()),
+            ])
+        };
+        assert_eq!(lines, [row("first"), row("second"), row("third")]);
     }
 
     #[test]
