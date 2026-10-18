@@ -169,7 +169,8 @@ async fn async_main(offset_error: Option<IndeterminateOffset>) -> Result<Exit> {
         .then(|| tui::theme::resolve_theme(&config.theme))
         .transpose()?;
     let snapshot = config.snapshot();
-    for notice in snapshot.notices() {
+    let theme_notices = theme.iter().flat_map(|resolved| &resolved.notices);
+    for notice in snapshot.notices().iter().chain(theme_notices) {
         warn!("{notice}");
     }
 
@@ -224,10 +225,19 @@ async fn async_main(offset_error: Option<IndeterminateOffset>) -> Result<Exit> {
     let startup = Startup {
         git_branch,
         picker,
+        theme_notices: theme.notices,
         title,
         unarchived,
     };
-    driver::tui::run(engine, &theme, snapshot, show_thinking, startup, &drifted).await
+    driver::tui::run(
+        engine,
+        &theme.theme,
+        snapshot,
+        show_thinking,
+        startup,
+        &drifted,
+    )
+    .await
 }
 
 // ── Session Helpers ──

@@ -16,32 +16,39 @@ use anyhow::{Context, Result, bail};
 use ratatui::style::Modifier;
 use serde::Deserialize;
 use syntect::highlighting::{Theme as SyntaxTheme, ThemeSet};
-use tracing::warn;
 
 use super::{Slot, Theme, builtin, color::parse_color};
 use crate::config::ThemeConfig;
 
 // ── Resolution ──
 
+/// A theme resolved from `[tui.theme]`, with one notice for each override it ignored.
+#[derive(Debug)]
+pub(crate) struct ResolvedTheme {
+    pub(crate) theme: Theme,
+    pub(crate) notices: Vec<String>,
+}
+
 /// Resolves the `[tui.theme]` base and applies its per-slot overrides. An unknown or unreadable
-/// base is an error, while a bad override, including a malformed patch, warns and keeps the base
-/// value so the TUI still launches.
-pub(crate) fn resolve_theme(config: &ThemeConfig) -> Result<Theme> {
+/// base is an error, while a bad override, including a malformed patch, keeps the base value and
+/// adds a notice for the caller to report, so the TUI still launches.
+pub(crate) fn resolve_theme(config: &ThemeConfig) -> Result<ResolvedTheme> {
     let base_name = config.base.as_str();
     let body = load_base_body(base_name)?;
     let mut theme =
         parse_theme(&body).with_context(|| format!("parsing base theme {base_name:?}"))?;
 
+    let mut notices = Vec::new();
     for (slot_name, patch) in &config.overrides {
         if let Err(e) = patch_slot(&mut theme, slot_name, patch) {
-            warn!(
-                slot = slot_name.as_str(),
-                error = format!("{e:#}"),
-                "ignoring theme override, keeping the base value",
-            );
+            let reason = format!("{e:#}");
+            notices.push(format!(
+                "Ignored the `{slot_name}` theme override: {}",
+                reason.trim_end(),
+            ));
         }
     }
-    Ok(theme)
+    Ok(ResolvedTheme { theme, notices })
 }
 
 /// Theme bodies hold one line per slot, so a larger file is not a theme.
@@ -233,7 +240,7 @@ fn mocha_line(slot: &str) -> &'static str {
             line.strip_prefix(slot)
                 .is_some_and(|rest| rest.starts_with(" ="))
         })
-        .unwrap_or_default()
+        .expect("mocha.toml sets every slot")
 }
 
 /// `ThemeFile` deserialization and its `into_theme` converter, which wraps each slot's parse error
@@ -297,11 +304,18 @@ mod tests {
         }
     }
 
+    /// The theme `config` resolves to, after checking that it ignored no override.
+    fn resolved(config: &ThemeConfig) -> Theme {
+        let ResolvedTheme { theme, notices } = resolve_theme(config).unwrap();
+        assert_eq!(notices, [] as [String; 0], "{config:?}");
+        theme
+    }
+
     // ── resolve_theme: base resolution ──
 
     #[test]
     fn resolve_theme_named_builtin_loads_that_palette() {
-        let t = resolve_theme(&config("latte", "")).unwrap();
+        let t = resolved(&config("latte", ""));
         assert_eq!(t.text.fg, Some(Color::Rgb(0x4c, 0x4f, 0x69)));
     }
 
@@ -349,7 +363,7 @@ mod tests {
         let body = builtin::MOCHA.replace(r##"error = "#f38ba8""##, r##"error = "#ff0000""##);
         std::fs::write(&path, body).unwrap();
 
-        let t = resolve_theme(&config(&path.to_string_lossy(), "")).unwrap();
+        let t = resolved(&config(&path.to_string_lossy(), ""));
         assert_eq!(t.error.fg, Some(Color::Rgb(0xff, 0x00, 0x00)));
     }
 
@@ -375,7 +389,7 @@ mod tests {
     #[test]
     fn resolve_theme_bare_string_override_patches_only_fg() {
         // Mocha's accent is bold blue, so the override must replace the fg and keep the bold.
-        let t = resolve_theme(&config("mocha", r##"accent = "#ff0000""##)).unwrap();
+        let t = resolved(&config("mocha", r##"accent = "#ff0000""##));
         assert_eq!(t.accent.fg, Some(Color::Rgb(0xff, 0x00, 0x00)));
         assert_eq!(t.accent.bg, None);
         assert!(
@@ -386,152 +400,114 @@ mod tests {
 
     #[test]
     fn resolve_theme_inline_override_clears_modifier_with_false() {
-        let t = resolve_theme(&config("mocha", "accent = { bold = false }")).unwrap();
+        let t = resolved(&config("mocha", "accent = { bold = false }"));
         assert_eq!(t.accent.fg, Some(Color::Rgb(0x89, 0xb4, 0xfa)));
         assert!(!t.accent.modifiers.contains(Modifier::BOLD));
     }
 
     #[test]
     fn resolve_theme_inline_override_can_add_a_modifier() {
-        let t = resolve_theme(&config("mocha", "success = { italic = true }")).unwrap();
+        let t = resolved(&config("mocha", "success = { italic = true }"));
         assert!(t.success.modifiers.contains(Modifier::ITALIC));
         assert_eq!(t.success.fg, Some(Color::Rgb(0xa6, 0xe3, 0xa1)));
     }
 
     #[test]
-    fn resolve_theme_unknown_slot_in_override_warns_and_resolves() {
-        install_permissive_global_subscriber();
-        let t = resolve_theme(&config("mocha", r##"purple_thing = "#ff0000""##))
-            .expect("unknown slot should warn, not error");
-        assert_eq!(t.error.fg, Some(Color::Rgb(0xf3, 0x8b, 0xa8)));
-    }
+    fn resolve_theme_unknown_slot_override_keeps_the_base_with_a_notice() {
+        let ResolvedTheme { theme, notices } =
+            resolve_theme(&config("mocha", r##"purple_thing = "#ff0000""##)).unwrap();
 
-    #[test]
-    fn resolve_theme_unknown_slot_emits_tracing_warn_with_slot_name() {
-        use std::io;
-        use std::sync::{Arc, Mutex};
-
-        use tracing_subscriber::fmt::{self, MakeWriter};
-
-        #[derive(Clone)]
-        struct Capture(Arc<Mutex<Vec<u8>>>);
-
-        impl io::Write for Capture {
-            fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-                self.0.lock().unwrap().extend_from_slice(buf);
-                Ok(buf.len())
-            }
-            fn flush(&mut self) -> io::Result<()> {
-                Ok(())
-            }
-        }
-
-        impl<'a> MakeWriter<'a> for Capture {
-            type Writer = Self;
-            fn make_writer(&'a self) -> Self::Writer {
-                self.clone()
-            }
-        }
-
-        install_permissive_global_subscriber();
-
-        let buf = Arc::new(Mutex::new(Vec::<u8>::new()));
-        let subscriber = fmt::Subscriber::builder()
-            .with_writer(Capture(Arc::clone(&buf)))
-            .with_max_level(tracing::Level::WARN)
-            .finish();
-
-        tracing::subscriber::with_default(subscriber, || {
-            resolve_theme(&config("mocha", r##"purple_thing = "#ff0000""##))
-                .expect("warn-and-fallback shouldn't error");
-        });
-
-        let captured = String::from_utf8(buf.lock().unwrap().clone()).unwrap();
-        assert!(
-            captured.contains("purple_thing"),
-            "warn output must name the slot: {captured:?}",
-        );
-        assert!(
-            captured.to_ascii_uppercase().contains("WARN"),
-            "warn level must reach the writer: {captured:?}",
+        assert_eq!(theme.error.fg, Some(Color::Rgb(0xf3, 0x8b, 0xa8)));
+        assert_eq!(
+            notices,
+            [r#"Ignored the `purple_thing` theme override: unknown slot "purple_thing""#]
         );
     }
 
     #[test]
-    fn resolve_theme_invalid_color_in_override_warns_and_keeps_base() {
-        install_permissive_global_subscriber();
-        let t = resolve_theme(&config("mocha", r#"error = "not-a-color""#))
-            .expect("bad color should warn, not error");
-        assert_eq!(t.error.fg, Some(Color::Rgb(0xf3, 0x8b, 0xa8)));
+    fn resolve_theme_invalid_color_override_keeps_the_base_with_a_notice() {
+        let ResolvedTheme { theme, notices } =
+            resolve_theme(&config("mocha", r#"error = "not-a-color""#)).unwrap();
+
+        assert_eq!(theme.error.fg, Some(Color::Rgb(0xf3, 0x8b, 0xa8)));
+        assert_eq!(
+            notices,
+            [format!(
+                "Ignored the `error` theme override: unknown color \"not-a-color\": \
+                 {COLOR_FORMATS_HINT}"
+            )]
+        );
     }
 
     #[test]
-    fn resolve_theme_malformed_patch_warns_and_keeps_base() {
-        install_permissive_global_subscriber();
-        let t = resolve_theme(&config(
+    fn resolve_theme_malformed_patches_keep_the_base_with_a_notice_each() {
+        let ResolvedTheme { theme, notices } = resolve_theme(&config(
             "mocha",
             indoc! {r##"
                 error = 5
                 accent = { fg = "#ff0000", glow = true }
             "##},
         ))
-        .expect("a malformed patch should warn, not error");
-        assert_eq!(t.error.fg, Some(Color::Rgb(0xf3, 0x8b, 0xa8)));
-        assert_eq!(t.accent.fg, Some(Color::Rgb(0x89, 0xb4, 0xfa)));
-    }
+        .unwrap();
 
-    #[test]
-    fn resolve_theme_inline_override_with_bad_fg_warns_and_keeps_base() {
-        install_permissive_global_subscriber();
-        let t = resolve_theme(&config("mocha", r#"accent = { fg = "not-a-color" }"#))
-            .expect("bad inline fg should warn, not error");
-        assert_eq!(t.accent.fg, Some(Color::Rgb(0x89, 0xb4, 0xfa)));
-        assert!(
-            t.accent.modifiers.contains(Modifier::BOLD),
-            "base modifiers preserved on warn-fallback",
+        assert_eq!(theme.error.fg, Some(Color::Rgb(0xf3, 0x8b, 0xa8)));
+        assert_eq!(theme.accent.fg, Some(Color::Rgb(0x89, 0xb4, 0xfa)));
+        let reason = "expected a color string or a table of fg, bg, and modifier flags: \
+                      data did not match any variant of untagged enum SlotPatch";
+        assert_eq!(
+            notices,
+            [
+                format!("Ignored the `accent` theme override: {reason}"),
+                format!("Ignored the `error` theme override: {reason}"),
+            ]
         );
     }
 
     #[test]
-    fn resolve_theme_inline_override_with_bad_bg_warns_and_keeps_base() {
-        install_permissive_global_subscriber();
-        let t = resolve_theme(&config("mocha", r#"diff_add = { bg = "not-a-color" }"#))
-            .expect("bad inline bg should warn, not error");
-        assert_eq!(t.diff_add.bg, Some(Color::Rgb(0x2a, 0x3a, 0x37)));
+    fn resolve_theme_inline_override_with_bad_fg_keeps_the_base_with_a_notice() {
+        let ResolvedTheme { theme, notices } =
+            resolve_theme(&config("mocha", r#"accent = { fg = "not-a-color" }"#)).unwrap();
+
+        assert_eq!(theme.accent.fg, Some(Color::Rgb(0x89, 0xb4, 0xfa)));
+        assert!(
+            theme.accent.modifiers.contains(Modifier::BOLD),
+            "base modifiers preserved on fallback",
+        );
+        assert_eq!(
+            notices,
+            [format!(
+                "Ignored the `accent` theme override: fg: unknown color \"not-a-color\": \
+                 {COLOR_FORMATS_HINT}"
+            )]
+        );
+    }
+
+    #[test]
+    fn resolve_theme_inline_override_with_bad_bg_keeps_the_base_with_a_notice() {
+        let ResolvedTheme { theme, notices } =
+            resolve_theme(&config("mocha", r#"diff_add = { bg = "not-a-color" }"#)).unwrap();
+
+        assert_eq!(theme.diff_add.bg, Some(Color::Rgb(0x2a, 0x3a, 0x37)));
+        assert_eq!(
+            notices,
+            [format!(
+                "Ignored the `diff_add` theme override: bg: unknown color \"not-a-color\": \
+                 {COLOR_FORMATS_HINT}"
+            )]
+        );
     }
 
     #[test]
     fn resolve_theme_multiple_overrides_apply_independently() {
-        let t = resolve_theme(&config(
+        let t = resolved(&config(
             "mocha",
             indoc! {r##"
                 error = "#ff0000"
                 success = "#00ff00"
             "##},
-        ))
-        .unwrap();
+        ));
         assert_eq!(t.error.fg, Some(Color::Rgb(0xff, 0x00, 0x00)));
         assert_eq!(t.success.fg, Some(Color::Rgb(0x00, 0xff, 0x00)));
-    }
-
-    /// Installs a permissive global tracing subscriber so the warn callsite in `resolve_theme`
-    /// registers as `Interest::Always`, whichever test fires it first. Without it, parallel tests
-    /// racing the default no-op subscriber lock the callsite's `Interest` cache to `Never`, after
-    /// which a per-test `with_default` capture sees nothing.
-    fn install_permissive_global_subscriber() {
-        use std::sync::OnceLock;
-
-        use tracing_subscriber::fmt;
-
-        static INIT: OnceLock<()> = OnceLock::new();
-        INIT.get_or_init(|| {
-            _ = tracing::subscriber::set_global_default(
-                fmt::Subscriber::builder()
-                    .with_writer(std::io::sink)
-                    .with_max_level(tracing::Level::WARN)
-                    .finish(),
-            );
-        });
     }
 
     // ── patch_slot ──
