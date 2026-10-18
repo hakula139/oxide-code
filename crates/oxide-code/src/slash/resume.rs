@@ -559,7 +559,7 @@ mod tests {
     use crate::session::entry::TitleInfo;
     use crate::session::store::set_archived_at;
     use crate::session::store::testing::{listed_ids, seed_test_session, test_store};
-    use crate::slash::{stamped_id, test_session_info, with_isolated_xdg};
+    use crate::slash::testing::{stamped_id, test_session_info, with_isolated_xdg};
     use crate::tui::modal::chrome::HINT_SEPARATOR;
     use crate::tui::modal::testing::render_rows;
 

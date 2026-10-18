@@ -172,12 +172,13 @@ pub(crate) struct PromptTooLong {
 pub(crate) mod testing {
     use super::{RateLimitWindow, RateLimits};
 
-    /// Limits with the five-hour window 42% spent and no seven-day window.
+    /// Limits with the five-hour window 42% spent and no seven-day window. The window resets at
+    /// 2100-01-01, so it stays in the future while tests run.
     pub(crate) fn five_hour_limit() -> RateLimits {
         RateLimits {
             five_hour: Some(RateLimitWindow {
                 utilization: 0.42,
-                resets_at: 1_760_000_000,
+                resets_at: 4_102_444_800,
             }),
             seven_day: None,
         }

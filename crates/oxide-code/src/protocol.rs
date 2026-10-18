@@ -350,8 +350,7 @@ pub(crate) trait EventSink: Send + Sync {
     }
 }
 
-/// Delivers to the frontend holding the receiver. The channel is unbounded, so the sender never
-/// waits on or drops events for a frontend that falls behind.
+/// Delivers to the frontend holding the receiver.
 impl EventSink for mpsc::UnboundedSender<Event> {
     fn send(&self, event: Event) -> Result<()> {
         mpsc::UnboundedSender::send(self, event)

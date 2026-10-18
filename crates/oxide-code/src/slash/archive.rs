@@ -122,7 +122,7 @@ mod tests {
     use super::*;
     use crate::session::store::testing::{listed_ids, seed_test_session};
     use crate::session::store::{SessionStore, set_archived_at};
-    use crate::slash::{stamped_id, test_session_info, with_isolated_xdg};
+    use crate::slash::testing::{stamped_id, test_session_info, with_isolated_xdg};
 
     fn seed_saved(store: &SessionStore, session_id: &str) {
         seed_test_session(

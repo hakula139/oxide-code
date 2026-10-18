@@ -153,7 +153,7 @@ mod tests {
     use std::path::PathBuf;
 
     use super::*;
-    use crate::slash::test_session_info;
+    use crate::slash::testing::test_session_info;
     use crate::tui::modal::Modal;
     use crate::tui::modal::testing::render_rows;
     use crate::util::path::testing::HOME_VAR;

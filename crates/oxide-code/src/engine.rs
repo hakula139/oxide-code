@@ -246,6 +246,7 @@ impl Engine {
     /// lists the tracked files that changed on disk since the resumed session read them.
     pub(crate) fn spawn(self, drifted: &[PathBuf]) -> EngineHandle {
         let (ops, op_rx) = mpsc::channel(OP_CHANNEL_CAP);
+        // Unbounded, so the engine never waits on or drops events for a frontend that falls behind.
         let (sink, events) = mpsc::unbounded_channel();
         self.shells.attach(Arc::new(sink.clone()));
         self.emit_session_start(&sink, drifted);

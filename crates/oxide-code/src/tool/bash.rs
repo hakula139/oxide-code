@@ -634,7 +634,7 @@ mod tests {
     use super::testing::{record_pid, until_gone, until_recorded};
     use super::*;
     use crate::tool::MAX_OUTPUT_BYTES;
-    use crate::tool::testing::{self, temp_ctx};
+    use crate::tool::testing::{self, bash_preview, temp_ctx};
     #[cfg(unix)]
     use crate::tool::testing::{canonical_tempdir, ctx};
 
@@ -676,15 +676,13 @@ mod tests {
             )
             .await;
 
-        assert_eq!(foreground.title, "Bash");
+        assert_eq!(foreground, bash_preview("cargo test"));
         assert_eq!(
-            foreground.body,
-            ApprovalBody::Command("cargo test".to_owned())
-        );
-        assert_eq!(background.title, "Bash (background)");
-        assert_eq!(
-            background.body,
-            ApprovalBody::Command("cargo watch".to_owned())
+            background,
+            ApprovalPreview {
+                title: "Bash (background)".to_owned(),
+                body: ApprovalBody::Command("cargo watch".to_owned()),
+            }
         );
     }
 

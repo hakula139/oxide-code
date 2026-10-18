@@ -72,7 +72,7 @@ mod tests {
 
     #[test]
     fn execute_opens_the_overview_modal() {
-        let info = crate::slash::test_session_info();
+        let info = crate::slash::testing::test_session_info();
         let outcome = HelpCmd.execute("", &SlashContext::new(&info, None));
         outcome.unwrap().into_modal();
     }

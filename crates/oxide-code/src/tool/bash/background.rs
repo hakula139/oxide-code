@@ -614,6 +614,8 @@ fn with_footer(mut content: String, footer: &str) -> String {
     content
 }
 
+// ── Testing ──
+
 #[cfg(test)]
 pub(crate) mod testing {
     use std::sync::Arc;

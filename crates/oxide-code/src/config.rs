@@ -766,7 +766,7 @@ mod tests {
     use super::*;
     use crate::permission::{Access, Decision, PermissionClass};
     use crate::util::path::testing::HOME_VAR;
-    use crate::util::tls::TEST_CA_PEM;
+    use crate::util::tls::testing::TEST_CA_PEM;
 
     // ── ConfigSnapshot::notices ──
 

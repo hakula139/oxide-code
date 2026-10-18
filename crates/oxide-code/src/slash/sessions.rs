@@ -30,7 +30,7 @@ pub(super) fn resolve_error_message(error: ResolveError) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::slash::test_session_info;
+    use crate::slash::testing::test_session_info;
 
     // ── open_store ──
 

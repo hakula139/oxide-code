@@ -33,8 +33,6 @@ mod sessions;
 mod status;
 mod theme;
 
-#[cfg(test)]
-pub(crate) use context::testing::test_session_info;
 pub(crate) use context::{LiveSessionInfo, SlashContext};
 pub(crate) use matcher::MatchedCommand;
 pub(crate) use parser::{Parsed, PopupState, parse_slash, popup_state, unescape_literal};
@@ -127,24 +125,32 @@ fn classify_in(commands: &[&dyn registry::SlashCommand], parsed: &Parsed) -> Sla
     }
 }
 
-/// Session ID with every byte set to `byte`, in the hyphenated UUID form real session IDs use.
-#[cfg(test)]
-pub(crate) fn stamped_id(byte: u8) -> String {
-    uuid::Uuid::from_bytes([byte; 16]).to_string()
-}
+// ── Testing ──
 
-/// Runs `f` with a fresh `XDG_DATA_HOME` so `SessionStore::open` lands in a private tempdir.
-/// Hands the directory back so callers can layer extra stores beneath the same root.
 #[cfg(test)]
-pub(crate) fn with_isolated_xdg<R>(f: impl FnOnce(&std::path::Path) -> R) -> R {
-    let dir = tempfile::tempdir().unwrap();
-    temp_env::with_var("XDG_DATA_HOME", Some(dir.path().as_os_str()), || {
-        f(dir.path())
-    })
+pub(crate) mod testing {
+    use std::path::Path;
+
+    pub(crate) use super::context::testing::test_session_info;
+
+    /// Session ID with every byte set to `byte`, in the hyphenated UUID form real session IDs use.
+    pub(crate) fn stamped_id(byte: u8) -> String {
+        uuid::Uuid::from_bytes([byte; 16]).to_string()
+    }
+
+    /// Runs `f` with `XDG_DATA_HOME` set to a fresh temp dir, so `SessionStore::open` lands there,
+    /// and passes `f` the dir so it can add stores beneath it.
+    pub(crate) fn with_isolated_xdg<R>(f: impl FnOnce(&Path) -> R) -> R {
+        let dir = tempfile::tempdir().unwrap();
+        temp_env::with_var("XDG_DATA_HOME", Some(dir.path().as_os_str()), || {
+            f(dir.path())
+        })
+    }
 }
 
 #[cfg(test)]
 mod tests {
+    use super::testing::test_session_info;
     use super::*;
     use crate::protocol::ResumeTarget;
     use crate::slash::registry::testing::FakeCmd;

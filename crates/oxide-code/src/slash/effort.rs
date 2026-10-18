@@ -78,7 +78,7 @@ mod tests {
     use super::*;
     use crate::protocol::{ConfigPick, Op};
     use crate::slash::registry::testing::run_execute;
-    use crate::slash::test_session_info;
+    use crate::slash::testing::test_session_info;
 
     // ── EffortCmd::name ──
 
