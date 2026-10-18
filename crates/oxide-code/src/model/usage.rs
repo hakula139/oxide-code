@@ -1,4 +1,5 @@
-//! Per-request token counts, which pricing and auto-compaction read and session files record.
+//! Per-request token counts, which pricing, auto-compaction, and the status line read, and session
+//! files record.
 
 use serde::{Deserialize, Serialize};
 

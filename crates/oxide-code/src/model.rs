@@ -342,20 +342,21 @@ mod tests {
         // 50K input + 50K cache reads + 1M output stays within Haiku's base card: Fable
         // $0.50 + $0.0125 + $50, Opus $0.20 + $0.01 + $20, Sonnet $0.10 + $0.005 + $10, and Haiku
         // $0.005 + $0.0005 + $0.50.
+        let usage = TokenUsage {
+            cache_read_input_tokens: 50_000,
+            ..TokenUsage::new(50_000, 1_000_000)
+        };
+
         for (id, expected) in [
             ("claude-fable-5-1", 50.5125),
             ("claude-opus-5-5", 20.21),
             ("claude-sonnet-5-5", 10.105),
             ("claude-haiku-5-5", 0.5055),
         ] {
-            let usage = TokenUsage {
-                cache_read_input_tokens: 50_000,
-                ..TokenUsage::new(50_000, 1_000_000)
-            };
-
             let cost = cost_rates(id)
                 .unwrap()
                 .estimate_usd(usage, PromptCacheTtl::FiveMin);
+
             assert!((cost - expected).abs() < 1e-9, "{id}: {cost} vs {expected}");
         }
     }
