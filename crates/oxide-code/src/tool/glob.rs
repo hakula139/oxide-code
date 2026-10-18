@@ -507,13 +507,12 @@ mod tests {
     #[test]
     fn glob_files_modification_time_orders_newest_first() {
         let dir = canonical_tempdir();
-
-        std::fs::write(dir.path().join("old.txt"), "old").unwrap();
-        std::thread::sleep(std::time::Duration::from_millis(50));
-        std::fs::write(dir.path().join("new.txt"), "new").unwrap();
+        testing::create_modified_at(&dir.path().join("a.txt"), 1_000_000);
+        testing::create_modified_at(&dir.path().join("b.txt"), 1_000_060);
 
         let result = glob_in("*.txt", None, dir.path(), &ReadFilter::default()).unwrap();
-        assert_eq!(result.content, "new.txt\nold.txt");
+
+        assert_eq!(result.content, "b.txt\na.txt");
     }
 
     #[test]

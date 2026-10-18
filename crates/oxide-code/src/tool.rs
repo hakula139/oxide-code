@@ -893,6 +893,7 @@ fn strip_withheld_note(content: &str) -> &str {
 pub(crate) mod testing {
     use std::path::{Path, PathBuf};
     use std::sync::Arc;
+    use std::time::{Duration, SystemTime};
 
     use tempfile::TempDir;
     use tokio_util::sync::CancellationToken;
@@ -987,6 +988,13 @@ pub(crate) mod testing {
         #[cfg(windows)]
         std::os::windows::fs::symlink_file(target, link).unwrap();
     }
+
+    /// Creates an empty file at `path`, last modified `secs` seconds after the Unix epoch.
+    pub(crate) fn create_modified_at(path: &Path, secs: u64) {
+        let file = std::fs::File::create(path).unwrap();
+        file.set_modified(SystemTime::UNIX_EPOCH + Duration::from_secs(secs))
+            .unwrap();
+    }
 }
 
 #[cfg(test)]
@@ -1002,7 +1010,9 @@ mod tests {
     use super::grep::GrepTool;
     use super::read::ReadTool;
     use super::tasks::TasksTool;
-    use super::testing::{canonical_tempdir, ctx, search_root, symlink_file, temp_ctx};
+    use super::testing::{
+        canonical_tempdir, create_modified_at, ctx, search_root, symlink_file, temp_ctx,
+    };
     use super::write::WriteTool;
     use super::*;
     use crate::permission::rule::Rule;
@@ -2076,16 +2086,18 @@ mod tests {
         let path = dir.path().join("notes.txt");
         let content = "a compressible line\n".repeat(4096);
         std::fs::write(&path, &content).unwrap();
-        // `compact /EXE` stores the data compressed behind the WOF filter. Skip where the volume
-        // cannot compress.
-        let compacted = std::process::Command::new("compact.exe")
+        // `compact /EXE` stores the data compressed behind the WOF filter, which hides the file's
+        // reparse point from user mode, so the no-follow open keeps its first handle.
+        let compact = std::process::Command::new("compact.exe")
             .args(["/C", "/EXE:XPRESS4K"])
             .arg(&path)
             .output()
-            .is_ok_and(|output| output.status.success());
-        if !compacted {
-            return;
-        }
+            .unwrap();
+        assert!(
+            compact.status.success(),
+            "{}",
+            String::from_utf8_lossy(&compact.stdout)
+        );
 
         let accept = |_: &std::fs::Metadata| Ok(());
         let (_, bytes) = read_validated(&path, "notes.txt", accept).await.unwrap();
@@ -2119,11 +2131,12 @@ mod tests {
     #[test]
     fn newest_first_orders_by_mtime_and_keeps_input_order_among_ties() {
         let dir = canonical_tempdir();
-        let base = SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_000_000);
-        for (name, offset) in [("a.txt", 0), ("b.txt", 60), ("c.txt", 0)] {
-            let file = std::fs::File::create(dir.path().join(name)).unwrap();
-            file.set_modified(base + std::time::Duration::from_secs(offset))
-                .unwrap();
+        for (name, secs) in [
+            ("a.txt", 1_000_000),
+            ("b.txt", 1_000_060),
+            ("c.txt", 1_000_000),
+        ] {
+            create_modified_at(&dir.path().join(name), secs);
         }
         let mut entries: Vec<_> = walk_files(dir.path(), &CancellationToken::new()).collect();
         entries.sort_by_key(|entry| Reverse(entry.file_name().to_owned()));
