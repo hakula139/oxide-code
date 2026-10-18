@@ -17,7 +17,6 @@ use anyhow::{Result, anyhow};
 use serde::Serialize;
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
-use tracing::warn;
 
 use self::abort::{Inbox, TurnAbort};
 use self::compact_boundary::Boundary;
@@ -79,11 +78,11 @@ pub(crate) struct EngineTask(JoinHandle<Option<String>>);
 
 impl EngineTask {
     /// Waits until the engine has finalized the live session, returning the write failure if any.
+    /// Resumes the panic of an engine that panicked, since it never finalized the session.
     pub(crate) async fn join(self) -> Option<String> {
-        self.0.await.unwrap_or_else(|e| {
-            warn!("engine task failed: {e}");
-            None
-        })
+        self.0
+            .await
+            .unwrap_or_else(|e| std::panic::resume_unwind(e.into_panic()))
     }
 }
 
@@ -1152,10 +1151,11 @@ mod tests {
     // ── EngineTask::join ──
 
     #[tokio::test]
-    async fn join_ends_a_panicked_engine_without_a_write_failure() {
+    #[should_panic(expected = "engine bug")]
+    async fn join_resumes_the_panic_of_a_panicked_engine() {
         let task = EngineTask(tokio::spawn(async { panic!("engine bug") }));
 
-        assert_eq!(task.join().await, None);
+        task.join().await;
     }
 
     // ── new ──
