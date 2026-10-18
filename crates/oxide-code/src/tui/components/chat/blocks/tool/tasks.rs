@@ -38,8 +38,6 @@ pub(super) fn render(
 
 #[cfg(test)]
 mod tests {
-    use ratatui::style::Style;
-
     use super::*;
     use crate::tool::tasks::TaskStatus;
     use crate::tool::tasks::testing::{plan, task};

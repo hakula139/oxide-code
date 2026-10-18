@@ -45,7 +45,7 @@ pub(super) fn render(
 
     let hidden = output_lines.len() - visible.len();
     if let Some(footer) = hidden_footer(hidden, "line", "lines", false) {
-        body_row(out, ctx, border_style, footer, text_style);
+        body_row(out, ctx, border_style, footer, ctx.theme.dim());
     }
 }
 

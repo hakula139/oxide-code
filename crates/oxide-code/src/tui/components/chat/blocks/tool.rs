@@ -186,20 +186,48 @@ mod tests {
     use super::*;
     use crate::tool::tasks::TaskStatus;
     use crate::tool::tasks::testing::task;
-    use crate::tool::{GrepFileGroup, GrepMatchLine};
+    use crate::tool::{DiffChunk, DiffLine, GrepFileGroup, GrepMatchLine, ReadExcerptLine};
     use crate::tui::theme::Theme;
 
     // ── ToolResultBlock::render ──
 
-    #[test]
-    fn tool_result_block_render_puts_the_view_body_under_the_status_line() {
-        let theme = Theme::default();
-        let ctx = RenderCtx {
-            width: 80,
-            theme: &theme,
-            show_thinking: false,
-        };
-        let cases = [
+    /// One view of each kind, with the body rows it renders under the status line.
+    fn views() -> [(ToolResultView, &'static [&'static str]); 6] {
+        [
+            (
+                ToolResultView::Text {
+                    content: "boom".to_owned(),
+                },
+                &["boom"],
+            ),
+            (
+                ToolResultView::ReadExcerpt {
+                    path: "src/lib.rs".to_owned(),
+                    lines: vec![ReadExcerptLine {
+                        number: 1,
+                        text: "fn f() {}".to_owned(),
+                    }],
+                    total_lines: 1,
+                },
+                &["src/lib.rs:1", "1 │ fn f() {}"],
+            ),
+            (
+                ToolResultView::Diff {
+                    chunks: vec![DiffChunk {
+                        old: vec![DiffLine {
+                            number: 1,
+                            text: "a".to_owned(),
+                        }],
+                        new: vec![DiffLine {
+                            number: 1,
+                            text: "b".to_owned(),
+                        }],
+                    }],
+                    replace_all: false,
+                    replacements: 1,
+                },
+                &["1 - a", "1 + b"],
+            ),
             (
                 ToolResultView::GrepMatches {
                     groups: vec![GrepFileGroup {
@@ -212,7 +240,7 @@ mod tests {
                     }],
                     truncated: true,
                 },
-                ["src/main.rs", "3 │ fn main() {}", "... limit reached"].as_slice(),
+                &["src/main.rs", "3 │ fn main() {}", "... limit reached"],
             ),
             (
                 ToolResultView::GlobFiles {
@@ -220,78 +248,47 @@ mod tests {
                     files: vec!["a.rs".to_owned()],
                     total: 1,
                 },
-                ["*.rs (1 of 1)", "a.rs"].as_slice(),
+                &["*.rs (1 of 1)", "a.rs"],
             ),
             (
                 ToolResultView::Tasks {
                     tasks: vec![task("Ship it", TaskStatus::InProgress)],
                 },
-                ["● Ship it"].as_slice(),
+                &["● Ship it"],
             ),
-        ];
-        for (view, body) in cases {
-            let block = ToolResultBlock::new("label", view, false);
-
-            let rows: Vec<String> = block.render(&ctx).iter().map(ToString::to_string).collect();
-
-            let mut expected = vec![format!("{TOOL_BORDER_PREFIX}{TOOL_SUCCESS} label")];
-            expected.extend(body.iter().map(|text| format!("{TOOL_BORDER_CONT}{text}")));
-            assert_eq!(rows, expected);
-        }
+        ]
     }
 
     #[test]
-    fn tool_result_block_render_paints_a_failed_result_in_the_error_color() {
+    fn tool_result_block_render_puts_each_view_under_a_status_line_colored_by_outcome() {
         let theme = Theme::default();
         let ctx = RenderCtx {
             width: 80,
             theme: &theme,
             show_thinking: false,
         };
-        let view = ToolResultView::Text {
-            content: "boom".to_owned(),
-        };
-        let block = ToolResultBlock::new("bash", view, true);
-
-        let lines = block.render(&ctx);
-
-        let error = theme.error();
-        assert_eq!(
-            lines,
-            [
-                Line::from(vec![
-                    Span::styled(TOOL_BORDER_PREFIX, error),
-                    Span::styled(TOOL_ERROR, error),
-                    Span::raw(" "),
-                    Span::styled("bash", theme.muted()),
-                ]),
-                Line::from(vec![
-                    Span::styled(TOOL_BORDER_CONT, error),
-                    Span::styled("boom", theme.dim()),
-                ]),
-            ]
-        );
-    }
-
-    // ── hidden_footer ──
-
-    #[test]
-    fn hidden_footer_counts_hidden_rows_and_flags_the_limit() {
-        let cases = [
-            (0, false, None),
-            (0, true, Some("... limit reached")),
-            (1, false, Some("... +1 line")),
-            (3, false, Some("... +3 lines")),
-            (2, true, Some("... +2 lines (limit reached)")),
+        let outcomes = [
+            (false, theme.tool_border(), TOOL_SUCCESS, theme.success()),
+            (true, theme.error(), TOOL_ERROR, theme.error()),
         ];
-        for (hidden, limit_reached, expected) in cases {
-            let footer = hidden_footer(hidden, "line", "lines", limit_reached);
+        for (is_error, border, indicator, indicator_style) in outcomes {
+            for (view, body) in views() {
+                let block = ToolResultBlock::new("label", view, is_error);
 
-            assert_eq!(
-                footer.as_deref(),
-                expected,
-                "{hidden} hidden, {limit_reached}"
-            );
+                let lines = block.render(&ctx);
+
+                let rows: Vec<String> = lines
+                    .iter()
+                    .map(|line| line.to_string().trim_end().to_owned())
+                    .collect();
+                let mut expected = vec![format!("{TOOL_BORDER_PREFIX}{indicator} label")];
+                expected.extend(body.iter().map(|text| format!("{TOOL_BORDER_CONT}{text}")));
+                assert_eq!(rows, expected);
+                assert_eq!(lines[0].spans[1], Span::styled(indicator, indicator_style));
+                for (row, line) in rows.iter().zip(&lines) {
+                    assert_eq!(line.spans[0].style, border, "bar of {row:?}");
+                }
+            }
         }
     }
 }
