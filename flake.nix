@@ -120,17 +120,11 @@
           );
 
         nodeHooks = {
-          dprint-write = {
-            enable = true;
-            name = "dprint";
-            entry = nodeHook "dprint-write" "dprint fmt";
-            files = "\\.md$";
-          };
           prettier-write = {
             enable = true;
             name = "prettier";
             entry = nodeHook "prettier-write" "prettier --write --ignore-unknown";
-            files = "\\.(json|jsonc|ya?ml)$";
+            files = "\\.(json|jsonc|md|ya?ml)$";
           };
           taplo-write = {
             enable = true;

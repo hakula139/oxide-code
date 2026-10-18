@@ -153,21 +153,21 @@ The flat sections array gets transformed into the block layout actually sent to 
 
 **First-party base URL** (`api.anthropic.com`), global cache active:
 
-| # | Content                          | `cache_control`                          |
-| - | -------------------------------- | ---------------------------------------- |
-| 0 | Billing / attribution header     | -                                        |
-| 1 | Identity prefix                  | -                                        |
-| 2 | Static sections joined (`\n\n`)  | `{ type: "ephemeral", scope: "global" }` |
-| 3 | Dynamic sections joined (`\n\n`) | -                                        |
+| #   | Content                          | `cache_control`                          |
+| --- | -------------------------------- | ---------------------------------------- |
+| 0   | Billing / attribution header     | -                                        |
+| 1   | Identity prefix                  | -                                        |
+| 2   | Static sections joined (`\n\n`)  | `{ type: "ephemeral", scope: "global" }` |
+| 3   | Dynamic sections joined (`\n\n`) | -                                        |
 
 **Third-party base URL** (gateway, self-hosted, anything else), default scope:
 
-| # | Content                          | `cache_control`         |
-| - | -------------------------------- | ----------------------- |
-| 0 | Billing / attribution header     | -                       |
-| 1 | Identity prefix                  | -                       |
-| 2 | Static sections joined (`\n\n`)  | `{ type: "ephemeral" }` |
-| 3 | Dynamic sections joined (`\n\n`) | -                       |
+| #   | Content                          | `cache_control`         |
+| --- | -------------------------------- | ----------------------- |
+| 0   | Billing / attribution header     | -                       |
+| 1   | Identity prefix                  | -                       |
+| 2   | Static sections joined (`\n\n`)  | `{ type: "ephemeral" }` |
+| 3   | Dynamic sections joined (`\n\n`) | -                       |
 
 Omitting the `scope` field is deliberate: org is the absent-field default, and the resulting wire shape is what the Anthropic SDK ships for non-global ephemeral caches.
 

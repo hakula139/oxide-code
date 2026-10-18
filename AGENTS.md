@@ -21,7 +21,7 @@ ox -p "<prompt>"                            # Headless: run one turn and print t
 ├── .gitignore                              # Build output and local tool state kept out of Git
 ├── .markdownlint-cli2.jsonc                # Markdown lint rules
 ├── .prettierignore                         # The pnpm lockfile, which Prettier skips
-├── .prettierrc                             # Prettier settings for JSON and YAML
+├── .prettierrc                             # Prettier settings for JSON, Markdown, and YAML
 ├── .taplo.toml                             # TOML formatter settings
 ├── .vscode/                                # Shared VS Code settings
 ├── about.hbs                               # Plain-text third-party notice template
@@ -35,13 +35,12 @@ ox -p "<prompt>"                            # Headless: run one turn and print t
 ├── cspell.json                             # Spell checker settings
 ├── deny.toml                               # Dependency license, advisory, source, and ban policy
 ├── docs/                                   # User guides, conventions, design specs, and research notes
-├── dprint.json                             # Markdown formatter settings
 ├── flake.nix                               # Nix flake for the dev shell, pre-commit hooks, checks, and packages
 ├── Formula/                                # Homebrew formula, served from this repo as a tap
 ├── licenses/                               # Licenses for bundled syntax definitions and themes
 ├── package.json                            # Node formatters, linters, and spell checker run through pnpm
 ├── package.nix                             # Nix package for `ox`
-├── pnpm-workspace.yaml                     # Build approvals and dependency overrides for pnpm
+├── pnpm-workspace.yaml                     # Dependency overrides for pnpm
 ├── RELEASING.md                            # Release procedure, versioning, and stability surface
 ├── rust-toolchain.toml                     # Pinned Rust release
 ├── scripts/                                # Release helpers and pre-commit checks
