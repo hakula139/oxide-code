@@ -1,6 +1,6 @@
 # Development
 
-Learn how to set up the development environment, what the pre-commit hooks check, how the toolchain is pinned, how Nix files are styled, what debug info dev builds keep, and what CI runs. For other ways to build `ox`, see [Installation](../guide/install.md).
+Learn how to set up the development environment, what the pre-commit hooks check, how the toolchain is pinned, how Nix files are styled, what debug info dev builds keep, what CI runs, and how to treat a failing check. For other ways to build `ox`, see [Installation](../guide/install.md).
 
 ## Dev Shell
 
@@ -73,3 +73,9 @@ CI runs on pushes to `main`, pull requests, and manual dispatch, and the release
 | Nix Build        | The package build on Linux and macOS, which runs the tests and `ox --version` |
 
 No job runs a plain `cargo build`, so run it locally for a quick compile check. See [RELEASING.md](../../RELEASING.md) for the release workflow.
+
+## Failing Checks
+
+Fix the cause of a failing hook, lint, test, or CI job. Skipped tests, `--skip` or `--exclude` flags, ignore and allowlist entries, `continue-on-error`, `|| true`, retries, and special cases for one path or commit only hide the failure. A test that cannot run in some environment, such as the Nix build sandbox, must be restructured until it can, as [Hermetic Tests](testing.md#hermetic-tests) describes.
+
+Keep an ignore or allowlist entry only when it is the design, such as a license the project accepts, an advisory with no fix, or a generated file that a formatter must skip, and give the reason in the PR that adds it.
