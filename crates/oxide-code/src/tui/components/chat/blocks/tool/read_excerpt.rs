@@ -2,7 +2,6 @@
 
 use ratatui::style::Style;
 use ratatui::text::Line;
-use unicode_width::UnicodeWidthStr;
 
 use super::{MAX_TOOL_OUTPUT_LINES, hidden_footer};
 use crate::tool::ReadExcerptLine;
@@ -24,12 +23,8 @@ pub(super) fn render(
     }
 
     let visible = &lines[..lines.len().min(MAX_TOOL_OUTPUT_LINES)];
-    let line_number_width = visible
-        .iter()
-        .map(|line| line.number.to_string().width())
-        .max()
-        .unwrap_or(1);
-    let rows = NumberedRows::new(ctx, border_style, line_number_width);
+    let max_number = visible.iter().map(|line| line.number).max().unwrap_or(0);
+    let rows = NumberedRows::new(ctx, border_style, max_number);
 
     for line in visible {
         rows.render(out, line.number, &line.text, ctx.theme.text());

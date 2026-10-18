@@ -15,6 +15,13 @@ use super::registry::{SlashCommand, SlashOutcome};
 
 const MAX_BYTES: usize = 64 * 1024;
 
+/// Heading over the untracked file list, which the diff block dims.
+pub(crate) const UNTRACKED_HEADING: &str = "Untracked files:";
+
+/// Start of the footer [`truncate`] appends, which the diff block splits off since the cut can
+/// land inside a hunk.
+pub(crate) const TRUNCATION_FOOTER: &str = "(Truncated ";
+
 pub(super) struct DiffCmd;
 
 impl SlashCommand for DiffCmd {
@@ -78,7 +85,7 @@ fn format_diff(tracked: &str, untracked: &str) -> String {
             .map(|line| format!("  {line}"))
             .collect::<Vec<_>>()
             .join("\n");
-        format!("Untracked files:\n{lines}")
+        format!("{UNTRACKED_HEADING}\n{lines}")
     };
     join_sections(&[tracked, &untracked])
 }
@@ -116,6 +123,8 @@ fn has_head(cwd: &Path) -> bool {
 /// Runs `git diff` with the output shape the diff block parses, whatever the user's git config.
 fn run_git_diff_in(cwd: &Path, extra: &[&str]) -> Result<String> {
     let mut args = vec![
+        "-c",
+        "diff.suppressBlankEmpty=false",
         "diff",
         "--no-color",
         "--no-ext-diff",
@@ -171,10 +180,16 @@ fn truncate(mut s: String, full_hint: &str) -> String {
     s.truncate(cut);
     _ = write!(
         s,
-        "\n\n(Truncated {}. Run {full_hint} for the full output.)",
+        "\n\n{TRUNCATION_FOOTER}{}. Run {full_hint} for the full output.)",
         format_size(dropped),
     );
     s
+}
+
+/// Cuts `diff` as `/diff` does after the first commit.
+#[cfg(test)]
+pub(crate) fn truncate_for_display(diff: String) -> String {
+    truncate(diff, full_diff_hint(true))
 }
 
 /// `"N B"`, `"N.N KB"`, or `"N.N MB"` (integer-truncated decimal).
@@ -442,17 +457,20 @@ mod tests {
     // ── run_git_diff_in ──
 
     #[test]
-    fn run_git_diff_in_pins_prefixes_and_color_against_user_config() {
+    fn run_git_diff_in_pins_the_output_shape_against_user_config() {
         let (_dir, repo) = fresh_repo();
-        std::fs::write(repo.join("a.txt"), "first\n").unwrap();
+        std::fs::write(repo.join("a.txt"), "first\n\nthird\n").unwrap();
         git_setup(&repo, &["add", "a.txt"]);
         git_setup(&repo, &["commit", "--quiet", "-m", "init"]);
-        std::fs::write(repo.join("a.txt"), "second\n").unwrap();
+        std::fs::write(repo.join("a.txt"), "first\n\nTHIRD\n").unwrap();
         git_setup(&repo, &["config", "diff.noprefix", "true"]);
+        git_setup(&repo, &["config", "diff.suppressBlankEmpty", "true"]);
         git_setup(&repo, &["config", "color.ui", "always"]);
 
         let body = run_git_diff_in(&repo, &["HEAD"]).unwrap();
+
         assert!(body.starts_with("diff --git a/a.txt b/a.txt\n"), "{body}");
+        assert!(body.contains(" first\n \n-third\n"), "{body:?}");
         assert!(
             body.contains(indoc! {"
 
