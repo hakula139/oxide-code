@@ -116,8 +116,8 @@ pub(super) struct ClickCounter {
 }
 
 impl ClickCounter {
-    /// A cell for one press, a word for a double click, and a row for a triple click, after which
-    /// the count starts over.
+    /// Counts a press at `cell` and returns what it selects: a cell for one press, a word for a
+    /// double click, and a row for a triple click, after which the count starts over.
     fn press(&mut self, cell: (u16, u16), now: Instant) -> Unit {
         let repeat = self.last.is_some_and(|(at, last_cell)| {
             last_cell == cell && now.duration_since(at) <= MULTI_CLICK_WINDOW
@@ -280,9 +280,9 @@ impl ChatView {
         self.selected_text()
     }
 
-    /// The selected text, one line per row with trailing whitespace trimmed, or `None` when the
-    /// selection holds only whitespace. Renders the stale blocks the selection covers first, such
-    /// as a block pushed since the last frame.
+    /// Renders the stale blocks the selection covers, such as a block pushed since the last frame,
+    /// then returns the selected text, one line per row with trailing whitespace trimmed, or `None`
+    /// when the selection holds only whitespace.
     fn selected_text(&mut self) -> Option<String> {
         let width = self.viewport.width;
         let live = self.render_live(width);

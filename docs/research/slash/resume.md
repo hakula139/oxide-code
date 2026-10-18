@@ -81,19 +81,17 @@ Three aliases for one overlay, plus a CLI-only listing subcommand.
 
 1. **Direct plus exploratory split.** `/resume` opens the picker, `/resume <id>` resolves directly. CLI keeps `-c` / `--continue` for the direct latest path. Claude Code and Codex both converged on this independently.
 
-2. **Cwd-default plus `--all` widens.** The existing `ox --continue` resolver already does this. All three reference CLIs converge here because users almost always want their own project.
+2. **Cwd-default plus `--all` widens.** This is how the `ox --continue` resolver works. All three reference CLIs converge here because users almost always want their own project.
 
-3. **In-process re-init.** Claude Code and Codex both swap state without forking. Avoids the alt-screen flash of process exit-and-relaunch. Reuses the `roll`-style helper already shipped for `/clear`.
+3. **In-process re-init.** Claude Code and Codex both swap state without forking. Avoids the alt-screen flash of process exit-and-relaunch. Reuses the `roll` pattern from `/clear`.
 
 4. **Page size around 25-50.** Codex's 25 with near-bottom prefetch and Claude Code's 50 with `visibleCount * 3` both work. Pick the size that gives one screenful plus headroom.
 
-5. **Date grouping (`Today` / `Yesterday` / date).** Opencode's idea. Easier to scan than a flat mtime list once you have more than a screenful, and free with relative-time formatting infra.
+5. **Substring search only.** Codex and opencode both provide plain substring search, which handles typical session counts.
 
-6. **Substring search only in v1.** Claude Code's agentic search is novel but expensive. Codex and opencode both ship plain substring and it works.
+6. **Listing budget on `ox --list`.** oxide-code caps listings at 30 sessions by default, with `--limit 0` opting into an unbounded listing.
 
-7. **Listing budget on `ox --list`.** oxide-code caps listings at 30 sessions by default, with `--limit 0` opting into an unbounded listing.
-
-8. **Footer key-hint line.** All three pickers use a one-row footer for discoverability. Stick to the `Enter to confirm  ·  Esc to cancel` shape and add `/ to search` etc.
+7. **Footer key-hint line.** All three pickers use a one-row footer for discoverability. Stick to the `Enter to confirm  ·  Esc to cancel` shape and add `/ to search` etc.
 
 ## Patterns Not Adopted
 
@@ -101,7 +99,7 @@ Three aliases for one overlay, plus a CLI-only listing subcommand.
 
 2. **Agentic AI search.** API call per query, latency, cost, opacity.
 
-3. **Worktree-tree expansion (`▼` / `▶`).** Adds a navigation axis. Date-grouped flat list reads cleaner, and users who care about worktree separation can filter by typing the path.
+3. **Worktree-tree expansion (`▼` / `▶`).** Adds a navigation axis. A flat list reads cleaner, and users who care about worktree separation can filter by typing the path.
 
 4. **Cross-project copy-to-clipboard gate.** Claude Code refuses to resume from another cwd in-process. oxide-code's store already supports cross-project resume via path or `--all`, so the picker should mirror that and resume directly on pick.
 
@@ -111,4 +109,6 @@ Three aliases for one overlay, plus a CLI-only listing subcommand.
 
 7. **Process exit / relaunch.** In-process replacement preserves the process and terminal state, avoids an alt-screen exit or relaunch flash, and reuses the `roll` pattern from `/clear`.
 
-8. **Preview pane.** Claude Code's preview is genuinely useful but doubles the picker's layout complexity (split-pane, focus model, scrollback).
+8. **Preview pane.** Claude Code's preview is useful but doubles the picker's layout complexity (split-pane, focus model, scrollback).
+
+9. **Date grouping (`Today` / `Yesterday` / date).** opencode groups rows by date. The [design](../../design/slash/resume.md#out-of-scope) explains why a flat list is sufficient.

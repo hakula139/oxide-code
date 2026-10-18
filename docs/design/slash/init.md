@@ -24,7 +24,7 @@ Both prompts share one rubric: include only information an agent would otherwise
 ## Out of Scope
 
 - **Enforcing the diff.** A guard scoped to the `/init` turn could require approval for edits to instruction files, ensuring the approval preview shows the diff regardless of what the model does. This requires per-turn state in the permission gate, tracked in [#261](https://github.com/hakula139/oxide-code/issues/261).
-- **Other frontends.** `/init` runs only in the TUI. `--no-tui` rejects slash commands, and `-p` sends `/init` to the model as plain text.
+- **Other frontends.** `/init` runs only in the TUI. The `--no-tui` REPL rejects it like every command without a typed form, and `-p` sends `/init` to the model as plain text.
 
 ## Sources
 

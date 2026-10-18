@@ -89,7 +89,7 @@ Dedicated `compaction` agent, anchored re-summarization via `<previous-summary>`
 
 ## Patterns Worth Borrowing for oxide-code
 
-1. **Free-text custom instructions.** `/compact <instructions>` lets the user steer the summary. Matches the existing `/rename <title>` / `/model <id>` typed-arg shape, and Claude Code's experience says it noticeably improves recall.
+1. **Free-text custom instructions.** `/compact <instructions>` lets the user steer the summary. Matches the typed-argument shape used by `/rename <title>` and `/model <id>`.
 
 2. **Synthetic `role: user` message carrying the summary.** All three CLIs converge on this. Sidesteps two API constraints (assistant can't lead a turn, system is one-shot at the prefix) and keeps the next turn shape exactly like a fresh first prompt.
 
@@ -101,7 +101,7 @@ Dedicated `compaction` agent, anchored re-summarization via `<previous-summary>`
 
 6. **`summary_prefix` framing on the synthesized message.** Without a prefix the next turn often redundantly asks "what would you like me to do?". Codex and Claude Code both prep the model to _use_ the summary directly.
 
-7. **Refuse mid-turn.** All three CLIs treat manual compaction as a between-turns operation. oxide-code's existing `Mutating` classification already encodes this.
+7. **Refuse mid-turn.** All three CLIs treat manual compaction as a between-turns operation. This is encoded by oxide-code's `Mutating` classification.
 
 8. **Surface a post-compact boundary block.** oxide-code's dedicated `CompactedBlock` fits a `Compacted X messages → 1 summary` header plus rendered summary markdown.
 
@@ -115,7 +115,7 @@ Dedicated `compaction` agent, anchored re-summarization via `<previous-summary>`
 
 4. **Partial / range compaction (Claude Code).** Adds a message-selector UI, a dual-direction summarizer, and a transcript splice.
 
-5. **Synthetic auto-continue (opencode).** Quietly inserts a fake "Continue if you have next steps..." after auto-compact. oxide-code should land the summary and wait for the user. Surprises beat conveniences here.
+5. **Synthetic auto-continue (opencode).** Quietly inserts a fake "Continue if you have next steps..." after auto-compact. oxide-code lands the summary and waits for the user, since a turn nobody asked for would surprise them.
 
 6. **Pre-flight `count_tokens` API call.** Every reference CLI uses last assistant `usage.total_tokens` plus tail estimate and accepts the ~2-5% drift. The extra round-trip isn't worth it.
 

@@ -224,7 +224,7 @@ impl ModalStack {
     }
 }
 
-/// No modifier besides Shift, which terminals report on uppercase letters.
+/// Returns whether the key has no modifier but Shift, which terminals report on uppercase letters.
 pub(crate) fn is_plain_char(event: &KeyEvent) -> bool {
     event.modifiers.is_empty() || event.modifiers == KeyModifiers::SHIFT
 }

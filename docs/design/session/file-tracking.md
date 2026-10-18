@@ -14,13 +14,13 @@ The `FileTracker` is a per-session `Arc<Mutex<HashMap>>` shared across tool call
 
 3. **Persist the tracker on session finish, verify on resume.** `Entry::FileSnapshot` stores the tracker state in JSONL, and each snapshot names the tool call that recorded it. On resume, a snapshot is discarded when its call has no result left in the repaired transcript, since the model cannot see that content. Of the rest, the newest snapshot per path is selected, regular files at or below the tracked-file size cap are rehashed, survivors restore into the in-memory tracker, and paths that fail the rehash are surfaced so the user can re-Read before mutating.
 
-4. **Per-session scope.** Tracker created with the session, dropped on finish. No cross-process sharing.
+4. **Per-session scope.** The tracker starts and ends with its session, and no other process shares it.
 
 5. **Edit needs any Read, and Write needs every line.** The gate reflects how each tool uses the file:
 
    - Edit anchors on an exact `old_string`, and the content hash already rules out staleness, so any Read of the current content clears it, as in Claude Code.
    - Write replaces the whole file, so it needs every line of the current content read. Coverage is the union of the line windows shown under one content hash, so paging through a long file in several Reads counts, and changed content starts over.
-   - Read stops before the dispatcher's byte cap and reports the lines it actually showed, so a truncated view never counts as full.
+   - Read stops before the dispatcher's byte cap and reports the lines it showed, so a truncated view never counts as full.
 
 6. **`Arc<Mutex<HashMap>>` for tracker state.** The tracker mutates on every Read / Write / Edit. Routing each update through an actor message would force ten-plus round-trips per turn, while lock contention on a small struct with no I/O costs microseconds.
 

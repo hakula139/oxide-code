@@ -253,8 +253,9 @@ pub(super) async fn resolve(
     stored.await.map_err(ResolveError::SignedOut)
 }
 
-/// The stored login to fall back on: oxide-code's own, then Claude Code's. A login that exists but
-/// fails ends the search, so a broken oxide-code login never quietly yields to another account.
+/// Loads the stored login to fall back on, trying oxide-code's own before Claude Code's. A login
+/// that exists but fails ends the search, so a broken oxide-code login never quietly yields to
+/// another account.
 pub(super) async fn stored_login(
     keychain: ClaudeCodeKeychain,
     extra_ca_certs: Option<&Path>,
@@ -280,8 +281,8 @@ where
     Err(LoginError::Missing)
 }
 
-/// The Claude Code login, which takes over once `/logout` removes the oxide-code login. `None`
-/// when Claude Code stores no login, and an error when its login exists but fails.
+/// Loads the Claude Code login, which takes over once `/logout` removes the oxide-code login.
+/// Returns `None` when Claude Code stores no login, and an error when its login exists but fails.
 pub(crate) async fn claude_code_login(
     keychain: ClaudeCodeKeychain,
     extra_ca_certs: Option<&Path>,

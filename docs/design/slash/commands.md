@@ -6,7 +6,7 @@ Client-side command surface: `/help`, `/clear`, `/model`, `/status`, and friends
 
 18 built-ins: `/archive`, `/clear`, `/compact`, `/config`, `/delete`, `/diff`, `/effort`, `/help`, `/init`, `/login`, `/logout`, `/mode`, `/model`, `/rename`, `/resume`, `/status`, `/theme`, `/unarchive`.
 
-- `/clear` rolls the session UUID and clears chat + file tracker.
+- `/clear` rolls the session UUID and clears the chat and the file tracker.
 - `/compact` compresses the visible transcript into a summary and resets the continuation chain.
 - `/model` swaps the active model mid-session via `Engine::set_model`.
 - `/effort` sets an explicit effort tier.
@@ -29,15 +29,15 @@ Client-side command surface: `/help`, `/clear`, `/model`, `/status`, and friends
 
 4. **Two-column popup, plain rows.** Name left, description right. Filter ranks name-prefix > alias-prefix > name-substring > alias-substring, alphabetical within each tier. Names accept `:` and `.`, so namespaced names such as `/plugin:cmd` parse.
 
-5. **Mid-session model + effort swap via `&mut Client`.** Both `/model <id>` and `/effort <level>` return `Forward(Action::Op(Op::SetModel(pick)))`, the same payload both modals emit, so the typed-arg path and the modals share one resolver. The `ConfigPick` names a model, with an optional effort, or an effort alone, so every pick sets at least one axis. Each request reads the client's active model and effort, so betas and `output_config` pick up the swap. `Engine::set_model` also re-resolves the compaction threshold for the new model. Bare `/model` (combined picker) and bare `/effort` (slider) are also mutating because their submit path emits `Op::SetModel`, so both forms refuse mid-turn. See [modals.md](modals.md).
+5. **Swap the model and effort mid-session via `&mut Client`.** Both `/model <id>` and `/effort <level>` return `Forward(Action::Op(Op::SetModel(pick)))`, the same payload both modals emit, so the typed-arg path and the modals share one resolver. The `ConfigPick` names a model, with an optional effort, or an effort alone, so every pick sets at least one axis. Each request reads the client's active model and effort, so betas and `output_config` pick up the swap. `Engine::set_model` also re-resolves the compaction threshold for the new model. See [modals.md](modals.md).
 
 6. **Slash commands never write user config files.** State is session-only, so a restart reverts to the configured values. Session commands should feel reversible, and any write that outlives the session requires an explicit user action.
 
 7. **Aliases resolve to canonical but display by surface.** `/clear` is canonical, while `/new` and `/reset` are aliases. The popup shows only the alias the user typed.
 
-8. **No `/quit` or `/exit`.** Ctrl+C x2 / Ctrl+D already exit.
+8. **No `/quit` or `/exit`.** Pressing Ctrl+C twice or Ctrl+D exits.
 
-9. **Read-only kv views go through one shared modal primitive.** `/status`, `/config`, and `/help` all open a [`KvOverview`](modals.md) with title + sectioned label-value rows + footer. The modal is the response, so the typed `> /foo` line stays out of chat history (see decision 14).
+9. **Read-only kv views go through one shared modal primitive.** `/status`, `/config`, and `/help` all open a [`KvOverview`](modals.md) with a title, sectioned label-value rows, and a footer. The modal is the response, so the typed `> /foo` line stays out of chat history (see decision 14).
 
 10. **Built-in commands only.** `BUILT_INS` is the entire registry, with no discovery of user-defined commands. Skills as commands are tracked in [#163](https://github.com/hakula139/oxide-code/issues/163).
 
@@ -55,7 +55,7 @@ Client-side command surface: `/help`, `/clear`, `/model`, `/status`, and friends
 
 - **`/clear`**: Send-first ordering. Forward `Op::Clear` first, drop chat history only on success. `Event::SessionTitleUpdated` carries the originating session ID so a slow Haiku title call straddling `/clear` doesn't repaint the cleared session.
 
-- **`/compact`**: Refuses mid-turn, streams a summarization request, writes a compact boundary plus synthetic continuation message, resets the file tracker, and keeps queued prompts for the post-compact turn. Full design: [compact.md](compact.md).
+- **`/compact`**: Refuses mid-turn, streams a summarization request, writes a compact boundary and a synthetic continuation message, resets the file tracker, and keeps queued prompts for the post-compact turn. Full design: [compact.md](compact.md).
 
 - **`/init`**: With an instruction file at the project root or in its `.claude/` directory, returns `Forward(Action::Op(Op::Prompt(..)))` with a body asking the model to propose its changes as a diff before it edits. With none, opens a picker whose choice forwards the prompt that creates that file. The expanded body is invisible in the live session but recorded in JSONL for resume. Full design: [init.md](init.md).
 
@@ -77,11 +77,11 @@ Client-side command surface: `/help`, `/clear`, `/model`, `/status`, and friends
 
 - **`/diff`**: The lone printer. Pushes uncommitted git changes plus untracked files into chat as a diff block, capped at 64 KB on a UTF-8 boundary, or a `Working tree clean` system message when there are none. After the first commit it uses `git diff HEAD`. Before the first commit it combines `git diff --cached` and `git diff` because `HEAD` does not exist yet. Modal output would crop without scrollback, so the diff earns its place in the transcript.
 
-- **`/rename`**: Bare opens a single-line title editor pre-filled with the current title, and `/rename <title>` applies directly. Both forms build their `Op::Rename` through `command::rename`, which keeps the title's first non-blank line and truncates it to the 80-column cap that first-prompt titles share, and the editor stops taking input at that cap. Both lock out AI title generation for the rest of the session so a slow Haiku call can't overwrite the user's pick. `classify` is always `Mutating`. Bare suppresses echo because the modal is the response, while the typed form echoes so chat records the rename. See [modals.md](modals.md).
+- **`/rename`**: Bare opens a single-line title editor pre-filled with the current title, and `/rename <title>` applies directly. Both forms build their `Op::Rename` through `command::rename`, which keeps the title's first non-blank line and truncates it to the 80-column cap that first-prompt titles share, and the editor stops taking input at that cap. Both lock out AI title generation for the rest of the session so a slow Haiku call can't overwrite the user's pick. `classify` is always `Mutating`. See [modals.md](modals.md).
 
-- **`/resume`** (alias `/continue`): Bare opens a searchable session picker ([modals.md](modals.md)), which forwards `Op::Resume` with the chosen session file. `/resume <id-prefix>` forwards the prefix, which the engine resolves through a current-project-first lookup that widens to all projects on a miss. Both forms refuse mid-turn. Bare suppresses echo while typed-arg echoes. Full design: [resume.md](resume.md).
+- **`/resume`** (alias `/continue`): Bare opens a searchable session picker ([modals.md](modals.md)), which forwards `Op::Resume` with the chosen session file. `/resume <id-prefix>` forwards the prefix, which the engine resolves through a current-project-first lookup that widens to all projects on a miss. Both forms refuse mid-turn. Full design: [resume.md](resume.md).
 
-- **`/delete`**: Typed-arg only, while bare returns a friendly redirect. Picker entry is Ctrl+D inside `/resume`. Both push `ConfirmDeleteSessionModal` ([modals.md](modals.md)), which runs `session::saved::delete` on the session's file on Y / Enter and emits a `Deleted session {id}: {title}` line in chat. Live-session refusal is layered across the picker filter, the resolver, and the store-layer bail.
+- **`/delete`**: Typed-arg only, and bare explains the missing argument. The picker entry is Ctrl+D inside `/resume`. Both push `ConfirmDeleteSessionModal` ([modals.md](modals.md)), which runs `session::saved::delete` on the session's file on Y / Enter and emits a `Deleted session {id}: {title}` line in chat. Live-session refusal is layered across the picker filter, the resolver, and the store-layer bail.
 
 - **`/archive`** / **`/unarchive`**: Bare `/archive` forwards `Op::Archive`. The engine appends an `Archive` entry to the live session, then rolls like `/clear` and emits `SessionRolled { archived: true }`, which the chat answers with a note naming the archived session. A session without messages has no file, so archiving one reports an error and stays put. The typed forms resolve a saved session other than the live one and call `session::saved::set_archived` on its file synchronously, the same operation as the `/resume` picker's Ctrl+X, printing a confirmation, or a note when the session already has that state. `/archive <prefix>` refuses a prefix that matches only the live session and points at bare `/archive`, while `/unarchive` on the live session prints a no-op note. Both are `Mutating`. `/unarchive` is typed-arg only, and its bare form points at the picker's Ctrl+A view, where Ctrl+X unarchives the highlighted session.
 
@@ -95,7 +95,7 @@ Client-side command surface: `/help`, `/clear`, `/model`, `/status`, and friends
 - `crates/oxide-code/src/session/resolver.rs`: `resolve_prefix_to_info` checks the current project first, widens the search on a miss, and returns a typed `ResolveError` that the CLI prints as is and slash commands rephrase. `resolve_saved_prefix` distinguishes live-only matches for `/archive`, `/unarchive`, and `/delete`.
 - `crates/oxide-code/src/session/saved.rs`: `set_archived` and `delete`, shared by the typed commands and the `/resume` picker, which refuse the live session and word each failure for the user.
 - `crates/oxide-code/src/session/store.rs`: `delete_at`, which refuses to delete the live session at the filesystem boundary, and `set_archived_at`.
-- `crates/oxide-code/src/slash.rs`: dispatch, `typed_op`, `SlashOutcome`, and shared test fixtures (`stamped_id`, `with_isolated_xdg`).
+- `crates/oxide-code/src/slash.rs`: dispatch, `typed_op`, and shared test fixtures (`stamped_id`, `with_isolated_xdg`).
 - `crates/oxide-code/src/slash/archive.rs`: `ArchiveCmd` and `UnarchiveCmd`.
 - `crates/oxide-code/src/slash/clear.rs`: `ClearCmd` sends first.
 - `crates/oxide-code/src/slash/config.rs`: `/config` row builder plus sectioned `KvOverview` constructor.
@@ -110,7 +110,7 @@ Client-side command surface: `/help`, `/clear`, `/model`, `/status`, and friends
 - `crates/oxide-code/src/slash/login.rs`: `LoginCmd` and `LogoutCmd`.
 - `crates/oxide-code/src/slash/mode.rs`: `ModeCmd` plus `ModePicker`.
 - `crates/oxide-code/src/slash/model.rs`: `ModelCmd`.
-- `crates/oxide-code/src/slash/picker.rs`: combined model + effort picker modal.
+- `crates/oxide-code/src/slash/picker.rs`: combined model and effort picker modal.
 - `crates/oxide-code/src/slash/registry.rs`: `SlashCommand` trait, `BUILT_INS`, `SlashKind`, `SlashOutcome`.
 - `crates/oxide-code/src/slash/rename.rs`: `RenameCmd` plus `RenameModal` editor.
 - `crates/oxide-code/src/slash/resume.rs`: `ResumeCmd` plus `ResumePicker` (see `resume.md`).

@@ -108,7 +108,8 @@ impl ChatBlock for GitDiffBlock {
 
 // ── Diff Parsing ──
 
-/// Extended header lines between `diff --git` and the first `@@`, covered by the path row.
+/// Returns whether `line` is an extended header between `diff --git` and the first `@@`, which
+/// the path row covers.
 fn is_file_header(line: &str) -> bool {
     [
         "index ",

@@ -147,7 +147,7 @@ The hash covers the entire serialized body (messages, tools, metadata, model, th
 
 The Bun binary performs a global find-and-replace of `cch=` values across the entire serialized request body, including historical tool results. If any tool result in the conversation contains a `cch=XXXXX` string (e.g., from reading proxy logs or session JSONL files), the substitution rewrites those historical bytes on every turn, changing the conversation prefix and permanently invalidating the prompt cache. This wastes 30-50K+ tokens per turn and never self-heals. Tracked as [anthropics/claude-code#40652](https://github.com/anthropics/claude-code/issues/40652), partially mitigated in v2.1.90-91.
 
-oxide-code avoids this entirely: we serialize with `serde_json`, replace only the first occurrence via `str::replacen`, and never mutate historical message content.
+oxide-code avoids this: it serializes with `serde_json`, replaces only the first occurrence via `str::replacen`, and never mutates historical message content.
 
 ### 4. Client Identity Headers
 
@@ -251,9 +251,9 @@ Anthropic silently dropped the default ephemeral-cache TTL from 1 hour to 5 minu
 
 Accepted values: `"5m"` (server default, equivalent to omitting the field) and `"1h"` (opt-in at higher write premium). No beta header is required because the field is GA.
 
-**oxide-code default.** `prompt_cache_ttl = "1h"`. The hit-rate recovery on real agent sessions (tool-use loops, resumed conversations) dominates the write premium, so 1 hour is the right safe default. Users opt down via `[client].prompt_cache_ttl = "5m"` or `OX_PROMPT_CACHE_TTL=5m`.
+**oxide-code default.** `prompt_cache_ttl = "1h"`. The hit-rate recovery on real agent sessions (tool-use loops, resumed conversations) dominates the write premium, so 1 hour is the default. Users opt down via `[client].prompt_cache_ttl = "5m"` or `OX_PROMPT_CACHE_TTL=5m`.
 
-Invalidation order (from the Anthropic caching docs) is `tools → system → messages`: any change at a level busts that level and every level after it. oxide-code sends two breakpoints with the configured TTL. The first sits on the static system-prompt prefix block (scope-gated on 1 P / 3 P per the previous section). The second sits on the last content block of the final message, without `scope`, so each turn reads the previous turn's transcript from cache. The prompt context is built once per session, which keeps that prefix stable from turn to turn. Compaction summaries are one-off requests that no later request extends, so they skip the second breakpoint.
+Invalidation order (from the Anthropic caching docs) is `tools → system → messages`: any change at a level busts that level and every level after it. oxide-code sends two breakpoints with the configured TTL. The first sits on the static system-prompt prefix block (with `scope: "global"` only on first-party base URLs, as [oxide-code Gating](#oxide-code-gating) describes). The second sits on the last content block of the final message, without `scope`, so each turn reads the previous turn's transcript from cache. The prompt context is built once per session, which keeps that prefix stable from turn to turn. Compaction summaries are one-off requests that no later request extends, so they skip the second breakpoint.
 
 ### `thinking.display`
 
