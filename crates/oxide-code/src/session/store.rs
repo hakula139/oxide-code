@@ -869,23 +869,37 @@ mod tests {
         assert!(err.contains("session not found"), "got: {err}");
     }
 
-    #[tokio::test]
-    async fn open_append_at_allows_concurrent_resumes_without_blocking() {
+    #[test]
+    fn open_append_at_opens_beside_a_live_writer_and_both_append() {
         let dir = tempfile::tempdir().unwrap();
         let store = test_store(dir.path());
-        let _writer_a = store.create(&sample_header("concurrent"), &[]).unwrap();
+        let mut writer_a = store.create(&sample_header("concurrent"), &[]).unwrap();
+        let path = test_session_file(dir.path(), "concurrent");
+        let (from_a, from_b) = (Uuid::new_v4(), Uuid::new_v4());
 
-        let start = std::time::Instant::now();
-        let writer_b = open_append_at(&test_session_file(dir.path(), "concurrent"));
-        let elapsed = start.elapsed();
+        let mut writer_b = open_append_at(&path).unwrap();
+        writer_a
+            .append(&[sample_message_entry(from_a, "from a")])
+            .unwrap();
+        writer_b
+            .append(&[sample_message_entry(from_b, "from b")])
+            .unwrap();
 
+        let content = fs::read_to_string(&path).unwrap();
+        let entries: Vec<Entry> = content
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
         assert!(
-            writer_b.is_ok(),
-            "second resume should succeed immediately, got {writer_b:?}"
-        );
-        assert!(
-            elapsed < std::time::Duration::from_millis(200),
-            "open_append_at should not block on a concurrent writer: {elapsed:?}"
+            matches!(
+                entries.as_slice(),
+                [
+                    Entry::Header { .. },
+                    Entry::Message { uuid: first, .. },
+                    Entry::Message { uuid: second, .. },
+                ] if *first == from_a && *second == from_b
+            ),
+            "got: {entries:?}"
         );
     }
 
