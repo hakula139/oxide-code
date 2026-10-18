@@ -156,10 +156,6 @@ jobs:
         run: cargo doc --locked --no-deps
 
       - name: Test
-        # crossterm writes ANSI sequences to its writer only on a VT console or with `TERM` set, and
-        # the runner has no console.
-        env:
-          TERM: xterm-256color
         run: cargo test --locked
 
   coverage:

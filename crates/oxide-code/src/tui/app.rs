@@ -17,6 +17,7 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, Result};
 use crossterm::event::{Event as CrosstermEvent, EventStream};
 use futures::{Stream, StreamExt};
+use ratatui::Terminal;
 use tokio::sync::mpsc;
 
 use super::clipboard::{Clipboard, Environment};
@@ -27,7 +28,7 @@ use super::components::tasks::TaskPanel;
 use super::git_probes::GitProbes;
 use super::modal::{Modal, ModalStack};
 use super::now;
-use super::terminal::Tui;
+use super::terminal::{Tui, TuiBackend};
 use super::theme::Theme;
 use crate::permission::Mode;
 use crate::protocol::{Event, Interaction, Op};
@@ -180,13 +181,13 @@ impl App {
         self.run_with_events(terminal, EventStream::new()).await
     }
 
-    async fn run_with_events<W, S>(
+    async fn run_with_events<B, S>(
         &mut self,
-        terminal: &mut ratatui::Terminal<ratatui::prelude::CrosstermBackend<W>>,
+        terminal: &mut Terminal<B>,
         mut crossterm_events: S,
     ) -> Result<()>
     where
-        W: std::io::Write,
+        B: TuiBackend,
         S: Stream<Item = std::io::Result<CrosstermEvent>> + Unpin,
     {
         let mut tick = tokio::time::interval(TICK_INTERVAL);
@@ -243,12 +244,13 @@ mod tests {
 
     use crossterm::event::{KeyCode, KeyModifiers};
 
-    use super::testing::{crossterm_test_terminal, rendered_text, test_app, test_session_info};
+    use super::testing::{rendered_text, test_app, test_session_info};
     use super::*;
     use crate::tui::components::status::{Status, TICKS_PER_FRAME};
     use crate::tui::git_probes::GitUpdate;
     use crate::tui::glyphs::SPINNER_FRAMES;
-    use crate::tui::testing::key_event;
+    use crate::tui::terminal::testing::capture_terminal;
+    use crate::tui::testing::{buffer_rows, key_event};
 
     // ── App::new ──
 
@@ -321,7 +323,7 @@ mod tests {
         app.status_bar.set_status(Status::ExitArmed { until });
         app.dirty = false;
 
-        let (mut terminal, _buf) = crossterm_test_terminal(60, 8);
+        let mut terminal = capture_terminal(60, 8);
         let closer = tokio::spawn(async move {
             tokio::time::sleep(TICK_INTERVAL * 2).await;
             drop(event_tx);
@@ -346,7 +348,7 @@ mod tests {
         app.status_bar.set_status(Status::Streaming);
         app.dirty = false;
 
-        let (mut terminal, buf) = crossterm_test_terminal(60, 8);
+        let mut terminal = capture_terminal(60, 8);
         let frame = TICK_INTERVAL * u32::try_from(TICKS_PER_FRAME).unwrap();
         let driver = tokio::spawn(async move {
             tokio::time::sleep(frame).await;
@@ -361,14 +363,20 @@ mod tests {
         .unwrap();
         driver.await.unwrap();
 
-        let painted = String::from_utf8_lossy(&buf.lock().unwrap()).into_owned();
-        assert!(painted.contains(SPINNER_FRAMES[1]), "{painted:?}");
+        let status = &buffer_rows(terminal.backend().buffer())[0];
+        assert_eq!(
+            status.trim_end(),
+            format!(
+                "  test-model (high) │ {} Streaming · Esc to interrupt",
+                SPINNER_FRAMES[1],
+            ),
+        );
     }
 
     #[tokio::test(start_paused = true)]
     async fn run_with_events_pumps_crossterm_and_engine_events_through_select() {
         let (mut app, _rx, event_tx) = test_app(None);
-        let (mut terminal, _buf) = crossterm_test_terminal(60, 8);
+        let mut terminal = capture_terminal(60, 8);
 
         let key = Ok(key_event(KeyCode::Char('x'), KeyModifiers::NONE));
         let stream = futures::stream::iter(vec![key]).chain(futures::stream::pending());
@@ -396,7 +404,7 @@ mod tests {
         app.git_probes
             .inject(GitUpdate::Branch(Some("feat/x".to_owned())));
 
-        let (mut terminal, _buf) = crossterm_test_terminal(60, 8);
+        let mut terminal = capture_terminal(60, 8);
         let closer = tokio::spawn(async move {
             tokio::time::sleep(TICK_INTERVAL * 2).await;
             drop(event_tx);
@@ -416,7 +424,7 @@ mod tests {
     #[tokio::test]
     async fn run_with_events_returns_terminal_read_errors() {
         let (mut app, _rx, _event_tx) = test_app(None);
-        let (mut terminal, _buf) = crossterm_test_terminal(60, 8);
+        let mut terminal = capture_terminal(60, 8);
         let stream = futures::stream::iter(vec![Err(io::Error::other("tty gone"))]);
 
         let err = app
@@ -430,7 +438,7 @@ mod tests {
     #[tokio::test]
     async fn run_with_events_quits_when_the_terminal_stream_ends() {
         let (mut app, _rx, _event_tx) = test_app(None);
-        let (mut terminal, _buf) = crossterm_test_terminal(60, 8);
+        let mut terminal = capture_terminal(60, 8);
 
         tokio::time::timeout(
             Duration::from_secs(5),

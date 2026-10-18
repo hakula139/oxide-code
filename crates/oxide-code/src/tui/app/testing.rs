@@ -1,14 +1,12 @@
 //! Test-only [`App`] fixtures shared by the app, dispatch, event, and render tests.
 
-use std::io::{self, Write};
 use std::sync::{Arc, Mutex};
 
 use crossterm::event::{KeyCode, KeyEvent};
+use ratatui::Terminal;
 use ratatui::backend::TestBackend;
 use ratatui::layout::Rect;
-use ratatui::prelude::CrosstermBackend;
 use ratatui::text::{Line, Span};
-use ratatui::{Terminal, TerminalOptions, Viewport};
 use tokio::sync::mpsc;
 
 use super::{App, AppHistory};
@@ -125,35 +123,6 @@ impl crate::tui::modal::Modal for KeyLogModal {
         self.0.lock().unwrap().push(event.code);
         crate::tui::modal::ModalKey::Consumed
     }
-}
-
-#[derive(Clone)]
-pub(super) struct SharedWriter(Arc<Mutex<Vec<u8>>>);
-
-impl Write for SharedWriter {
-    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-        self.0.lock().unwrap().extend_from_slice(buf);
-        Ok(buf.len())
-    }
-
-    fn flush(&mut self) -> io::Result<()> {
-        Ok(())
-    }
-}
-
-pub(super) fn crossterm_test_terminal(
-    width: u16,
-    height: u16,
-) -> (
-    Terminal<CrosstermBackend<SharedWriter>>,
-    Arc<Mutex<Vec<u8>>>,
-) {
-    let buf = Arc::new(Mutex::new(Vec::new()));
-    let backend = CrosstermBackend::new(SharedWriter(buf.clone()));
-    let opts = TerminalOptions {
-        viewport: Viewport::Fixed(Rect::new(0, 0, width, height)),
-    };
-    (Terminal::with_options(backend, opts).unwrap(), buf)
 }
 
 pub(super) fn render_app(app: &mut App, width: u16, height: u16) -> TestBackend {

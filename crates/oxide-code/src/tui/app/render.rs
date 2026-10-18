@@ -2,21 +2,19 @@
 //! preview, modal, and input bands, plus the copy and jump-to-bottom overlays, status-line
 //! hyperlinks, and OSC 52 clipboard writes.
 
-use std::io::Write as _;
-
 use anyhow::Result;
-use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Paragraph};
+use ratatui::{Frame, Terminal};
 
 use super::App;
 use crate::tui::components::status::StatusBar;
 use crate::tui::components::welcome::{self, WelcomeSnapshot};
 use crate::tui::glyphs::{NEWLINE_GLYPH, USER_PROMPT_PREFIX, USER_PROMPT_PREFIX_WIDTH};
 use crate::tui::saturating_u16;
-use crate::tui::terminal::{synchronized_update, write_status_hyperlinks};
+use crate::tui::terminal::{TuiBackend, synchronized_update, write_status_hyperlinks};
 use crate::tui::theme::Theme;
 use crate::util::text::{center_truncate_to_width, truncate_to_width};
 
@@ -36,10 +34,7 @@ const JUMP_PILL_MIN_WIDTH: u16 = 25;
 const JUMP_LABEL_FULL_MIN_WIDTH: usize = 40;
 
 impl App {
-    pub(super) fn render<W: std::io::Write>(
-        &mut self,
-        terminal: &mut ratatui::Terminal<ratatui::prelude::CrosstermBackend<W>>,
-    ) -> Result<()> {
+    pub(super) fn render<B: TuiBackend>(&mut self, terminal: &mut Terminal<B>) -> Result<()> {
         synchronized_update(terminal, |terminal| {
             terminal.draw(|frame| self.draw_frame(frame))?;
             self.emit_status_hyperlinks(terminal)?;
@@ -48,10 +43,7 @@ impl App {
     }
 
     /// Writes a queued OSC 52 copy, which the terminal applies to the system clipboard.
-    fn emit_pending_clipboard<W: std::io::Write>(
-        &mut self,
-        terminal: &mut ratatui::Terminal<ratatui::prelude::CrosstermBackend<W>>,
-    ) -> Result<()> {
+    fn emit_pending_clipboard<B: TuiBackend>(&mut self, terminal: &mut Terminal<B>) -> Result<()> {
         if let Some(sequence) = self.pending_clipboard.take() {
             terminal.backend_mut().write_all(sequence.as_bytes())?;
         }
@@ -59,10 +51,7 @@ impl App {
     }
 
     /// Replays captured status links as OSC 8 envelopes over the drawn frame.
-    fn emit_status_hyperlinks<W: std::io::Write>(
-        &mut self,
-        terminal: &mut ratatui::Terminal<ratatui::prelude::CrosstermBackend<W>>,
-    ) -> Result<()> {
+    fn emit_status_hyperlinks<B: TuiBackend>(&mut self, terminal: &mut Terminal<B>) -> Result<()> {
         let links = self.status_bar.take_pending_hyperlinks();
         if !links.is_empty() {
             write_status_hyperlinks(terminal.backend_mut(), &links)?;
@@ -279,38 +268,36 @@ mod tests {
     use crate::tui::action::Action;
     use crate::tui::app::CopyNotice;
     use crate::tui::app::testing::{
-        FakeModal, crossterm_test_terminal, five_hour_limit, long_chat_block,
-        push_answerable_approval, render_app, rendered_text, test_app,
+        FakeModal, five_hour_limit, long_chat_block, push_answerable_approval, render_app,
+        rendered_text, test_app,
     };
     use crate::tui::components::status::StatusBar;
     use crate::tui::components::status::testing::status_bar_init;
     use crate::tui::git_probes::GitUpdate;
+    use crate::tui::terminal::testing::{BEGIN_SYNC, END_SYNC, FLUSH, FRAME, capture_terminal};
     use crate::tui::testing::{buffer_rows, key_event};
 
     // ── render ──
 
-    const BEGIN_SYNC: &[u8] = b"\x1b[?2026h";
-    const END_SYNC: &[u8] = b"\x1b[?2026l";
-
-    fn index_of(haystack: &[u8], needle: &[u8]) -> Option<usize> {
-        haystack.windows(needle.len()).position(|w| w == needle)
-    }
-
     #[test]
-    fn render_brackets_frame_with_sync_update_bytes() {
+    fn render_draws_the_frame_inside_a_synchronized_update() {
         let (mut app, _rx, _event_tx) = test_app(None);
-        let (mut terminal, buf) = crossterm_test_terminal(60, 8);
+        let mut terminal = capture_terminal(60, 8);
 
         app.render(&mut terminal).unwrap();
 
-        let bytes = buf.lock().unwrap();
-        let begin = index_of(&bytes, BEGIN_SYNC).expect("BeginSynchronizedUpdate emitted");
-        let end = index_of(&bytes, END_SYNC).expect("EndSynchronizedUpdate emitted");
-        assert!(begin < end, "sync update must bracket the rendered frame");
+        assert_eq!(
+            terminal.backend().bytes(),
+            [BEGIN_SYNC, FRAME, END_SYNC, FLUSH].concat()
+        );
+        assert_eq!(
+            buffer_rows(terminal.backend().buffer()),
+            buffer_rows(render_app(&mut app, 60, 8).buffer()),
+        );
     }
 
     #[test]
-    fn render_replays_status_hyperlinks_inside_the_synchronized_update() {
+    fn render_replays_status_hyperlinks_over_the_frame_inside_the_synchronized_update() {
         let (mut app, _rx, _event_tx) = test_app(None);
         app.apply_git_update(GitUpdate::PullRequest(Some(
             crate::util::git::PullRequest {
@@ -320,33 +307,47 @@ mod tests {
                 review: None,
             },
         )));
-        let (mut terminal, buf) = crossterm_test_terminal(120, 8);
+        let mut terminal = capture_terminal(120, 8);
 
         app.render(&mut terminal).unwrap();
 
-        let bytes = buf.lock().unwrap();
-        let link = index_of(&bytes, b"\x1b]8;;https://example.com/pull/7").expect("OSC 8 emitted");
-        let end = index_of(&bytes, END_SYNC).expect("EndSynchronizedUpdate emitted");
-        assert!(link < end, "sync update must bracket the status links");
+        let urls: Vec<&str> = app
+            .status_links
+            .iter()
+            .map(|link| link.url.as_str())
+            .collect();
+        assert_eq!(urls, ["https://example.com/pull/7"]);
+        let mut envelope = Vec::new();
+        write_status_hyperlinks(&mut envelope, &app.status_links).unwrap();
+        assert_eq!(
+            terminal.backend().bytes(),
+            [BEGIN_SYNC, FRAME, &envelope, END_SYNC, FLUSH].concat(),
+        );
     }
 
     #[test]
     fn render_writes_a_queued_clipboard_copy_once_inside_the_synchronized_update() {
         let (mut app, _rx, _event_tx) = test_app(None);
-        let (mut terminal, buf) = crossterm_test_terminal(60, 8);
+        let mut terminal = capture_terminal(60, 8);
         app.pending_clipboard = Some("\x1b]52;c;eA==\x07".to_owned());
 
         app.render(&mut terminal).unwrap();
-        let first = std::mem::take(&mut *buf.lock().unwrap());
         app.render(&mut terminal).unwrap();
 
-        let copy = index_of(&first, b"\x1b]52;c;eA==\x07").expect("OSC 52 written");
-        let end = index_of(&first, END_SYNC).expect("EndSynchronizedUpdate emitted");
-        assert!(copy < end, "sync update must bracket the copy");
         assert_eq!(
-            index_of(&buf.lock().unwrap(), b"\x1b]52"),
-            None,
-            "written once"
+            terminal.backend().bytes(),
+            [
+                BEGIN_SYNC,
+                FRAME,
+                b"\x1b]52;c;eA==\x07",
+                END_SYNC,
+                FLUSH,
+                BEGIN_SYNC,
+                FRAME,
+                END_SYNC,
+                FLUSH
+            ]
+            .concat(),
         );
     }
 
@@ -374,12 +375,11 @@ mod tests {
     #[test]
     fn emit_status_hyperlinks_is_a_noop_when_no_links_pending() {
         let (mut app, _rx, _event_tx) = test_app(None);
-        let (mut terminal, bytes) = crossterm_test_terminal(80, 24);
+        let mut terminal = capture_terminal(80, 24);
+
         app.emit_status_hyperlinks(&mut terminal).unwrap();
-        assert!(
-            bytes.lock().unwrap().is_empty(),
-            "no bytes written for a no-link frame",
-        );
+
+        assert_eq!(terminal.backend().bytes(), b"");
     }
 
     // ── draw_frame ──
