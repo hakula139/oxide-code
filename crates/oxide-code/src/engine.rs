@@ -21,7 +21,7 @@ use tokio::task::{JoinError, JoinHandle};
 use self::abort::{AbortResult, Inbox, TurnAbort};
 use self::compact_boundary::Boundary;
 use self::compaction::{AutoCompact, AutoCompactFailures};
-use self::turn::{TurnOutcome, TurnReport};
+use self::turn::{TurnContext, TurnOutcome, TurnReport};
 use crate::client::TokenUsage;
 use crate::client::anthropic::Client;
 use crate::config::auth::{self, Auth, AuthSource};
@@ -360,15 +360,17 @@ impl Engine {
             tracker: Arc::clone(&self.file_tracker),
         };
         let TurnOutcome { mut report, result } = turn::agent_turn(
-            &self.client,
-            &self.tools,
+            TurnContext {
+                client: &self.client,
+                tools: &self.tools,
+                prompt: &self.prompt,
+                sink,
+                session: &self.session,
+                max_tool_rounds: self.max_tool_rounds,
+            },
             &mut self.messages,
-            &self.prompt,
-            sink,
-            &self.session,
             ops,
             &mut inbox,
-            self.max_tool_rounds,
             &mut dispatch_ctx,
         )
         .await;
