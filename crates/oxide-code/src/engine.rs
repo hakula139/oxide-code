@@ -473,6 +473,7 @@ impl Engine {
         self.refresh_prompt(sink).await;
         self.reset_context_usage(sink);
         self.emit_usage_update(sink);
+        sink.emit(Event::SessionReady, "session-ready");
         TurnEnd::Completed
     }
 
@@ -544,6 +545,7 @@ impl Engine {
         );
         report_finalize_failure(sink, outcome.finalize_failure);
         self.emit_session_start(sink, &[]);
+        sink.emit(Event::SessionReady, "session-ready");
     }
 
     /// Finalizes the live session and continues `target`. On failure the live session stays.
@@ -573,6 +575,7 @@ impl Engine {
         );
         report_finalize_failure(sink, outcome.finalize_failure);
         self.emit_session_start(sink, &outcome.drifted_paths);
+        sink.emit(Event::SessionReady, "session-ready");
     }
 
     /// Finalizes the live session and swaps to the one `target` names. A prefix must match one
@@ -648,6 +651,8 @@ impl Engine {
             Some(pick) => self.client.set_effort(pick),
             None => self.client.effort(),
         };
+        self.auto_compaction_failures.reset(sink);
+        self.emit_usage_update(sink);
         sink.emit(
             Event::ConfigChanged {
                 model: self.client.model().clone(),
@@ -657,8 +662,6 @@ impl Engine {
             },
             "config-changed",
         );
-        self.auto_compaction_failures.reset(sink);
-        self.emit_usage_update(sink);
     }
 
     /// Switches the permission mode for later calls.
@@ -894,9 +897,7 @@ impl TurnEnd {
                 Event::ConfigChanged { effort: None, .. },
             ) => Some(Self::Failed),
             (Op::Prompt(_), Event::TurnComplete)
-            | (Op::Compact { .. }, Event::SessionCompacted { .. })
-            | (Op::Resume { .. }, Event::SessionResumed { .. })
-            | (Op::Clear, Event::SessionRolled { .. })
+            | (Op::Clear | Op::Compact { .. } | Op::Resume { .. }, Event::SessionReady)
             | (Op::Rename { .. }, Event::SessionTitleUpdated { .. })
             | (Op::SetModel { .. }, Event::ConfigChanged { .. })
             | (Op::SetMode(_), Event::ModeChanged(_)) => Some(Self::Completed),
@@ -1609,13 +1610,13 @@ mod tests {
                 .await
                 .unwrap();
             next_matching(&mut handle.events, |event| {
-                matches!(event, Event::SessionCompacted { .. }).then_some(())
+                matches!(event, Event::SessionReady).then_some(())
             })
             .await;
             submit(&mut handle, "after").await;
             handle.ops.send(Op::Clear).await.unwrap();
             next_matching(&mut handle.events, |event| {
-                matches!(event, Event::SessionRolled { .. }).then_some(())
+                matches!(event, Event::SessionReady).then_some(())
             })
             .await;
             let fresh = submit(&mut handle, "fresh").await;
@@ -2475,9 +2476,10 @@ mod tests {
                 },
                 Event::AutoCompactionResumed,
                 Event::UsageUpdated(usage),
+                Event::SessionReady,
             ] = events.as_slice()
             else {
-                panic!("expected the summary, compaction, resume, then cost: {events:?}");
+                panic!("expected the summary, compaction, resume, cost, then the end: {events:?}");
             };
             assert_eq!(streamed, "manual summary");
             assert_eq!(focus, "focus");
@@ -2823,7 +2825,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn clear_reports_the_finalize_failure_and_instruction_warnings_after_rolling() {
+    async fn clear_reports_the_finalize_failure_and_instruction_warnings_before_it_ends() {
         with_pinned_home(async {
             let server = MockServer::start().await;
             let dir = tempfile::tempdir().unwrap();
@@ -2845,6 +2847,7 @@ mod tests {
                         },
                         Event::Error(failure),
                         Event::Notice(notice),
+                        Event::SessionReady,
                     ] if failure == "Previous session write failed: \
                                      session writer task has stopped. \
                                      Conversation history may be incomplete."
@@ -2891,6 +2894,7 @@ mod tests {
                             archived: false,
                             ..
                         },
+                        Event::SessionReady,
                     ]
                 ),
                 "{cleared:?}",
@@ -2899,8 +2903,11 @@ mod tests {
             assert!(
                 matches!(
                     resumed.as_slice(),
-                    [Event::AutoCompactionResumed, Event::SessionResumed { id, .. }]
-                        if *id == target_id
+                    [
+                        Event::AutoCompactionResumed,
+                        Event::SessionResumed { id, .. },
+                        Event::SessionReady,
+                    ] if *id == target_id
                 ),
                 "{resumed:?}",
             );
@@ -3084,7 +3091,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn resume_reports_the_old_session_finalize_failure_after_switching() {
+    async fn resume_reports_the_old_session_finalize_failure_before_it_ends() {
         with_pinned_home(async {
             let server = MockServer::start().await;
             let dir = tempfile::tempdir().unwrap();
@@ -3101,8 +3108,11 @@ mod tests {
             assert!(
                 matches!(
                     events.as_slice(),
-                    [Event::SessionResumed { id, .. }, Event::Error(msg)]
-                        if *id == target_id
+                    [
+                        Event::SessionResumed { id, .. },
+                        Event::Error(msg),
+                        Event::SessionReady,
+                    ] if *id == target_id
                             && msg == "Previous session write failed: \
                                        session writer task has stopped. \
                                        Conversation history may be incomplete."
@@ -3366,9 +3376,9 @@ mod tests {
                 matches!(
                     events.as_slice(),
                     [
-                        Event::ConfigChanged { .. },
                         Event::AutoCompactionResumed,
                         Event::UsageUpdated(_),
+                        Event::ConfigChanged { .. },
                     ]
                 ),
                 "{events:?}",
@@ -3760,7 +3770,8 @@ mod tests {
             (&prompt, failed.clone(), Some(TurnEnd::Failed)),
             (&prompt, compacted(true), None),
             (&prompt, notice.clone(), None),
-            (&compact, compacted(false), Some(TurnEnd::Completed)),
+            (&compact, compacted(false), None),
+            (&compact, Event::SessionReady, Some(TurnEnd::Completed)),
             (&compact, Event::Cancelled, Some(TurnEnd::Cancelled)),
             (&compact, Event::TurnComplete, None),
             (
@@ -3771,11 +3782,13 @@ mod tests {
                     unarchived: false,
                     history: Vec::new(),
                 },
-                Some(TurnEnd::Completed),
+                None,
             ),
+            (&resume, Event::SessionReady, Some(TurnEnd::Completed)),
             (&resume, failed.clone(), Some(TurnEnd::Failed)),
             (&Op::Clear, notice.clone(), None),
-            (&Op::Clear, rolled.clone(), Some(TurnEnd::Completed)),
+            (&Op::Clear, rolled, None),
+            (&Op::Clear, Event::SessionReady, Some(TurnEnd::Completed)),
             (
                 &rename,
                 Event::SessionTitleUpdated {
@@ -3817,7 +3830,7 @@ mod tests {
                 Some(TurnEnd::Completed),
             ),
             (&set_mode, notice.clone(), None),
-            (&Op::Archive, rolled, None),
+            (&Op::Archive, Event::SessionReady, None),
         ] {
             assert_eq!(TurnEnd::of(op, &event), end, "{op:?} then {event:?}");
         }

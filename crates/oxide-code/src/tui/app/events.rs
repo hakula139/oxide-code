@@ -81,6 +81,8 @@ impl App {
                 instructions.as_deref(),
                 automatic,
             ),
+            // The TUI settles at the swap event, since it renders the events that follow in order.
+            Event::SessionReady => {}
             Event::ConfigChanged {
                 model,
                 effort,
@@ -900,6 +902,22 @@ mod tests {
         let text = rendered_text(&mut app, 100, 12);
         assert!(text.contains("Archived session aaaa1111."), "{text}");
         assert!(!text.contains("old prompt"), "{text}");
+    }
+
+    #[test]
+    fn handle_session_ready_after_a_roll_keeps_the_queue_waiting() {
+        let (mut app, mut rx, _event_tx) = test_app(None);
+        app.pending_prompts
+            .push_back("queued before clear".to_owned());
+
+        app.handle_engine_event(Event::SessionRolled {
+            id: "rolled-session".to_owned(),
+            archived: false,
+        });
+        app.handle_engine_event(Event::SessionReady);
+
+        assert_eq!(app.pending_prompts, ["queued before clear"]);
+        assert_eq!(rx.try_recv().ok(), None);
     }
 
     #[test]

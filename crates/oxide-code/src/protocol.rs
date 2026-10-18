@@ -196,6 +196,10 @@ pub(crate) enum Event {
         instructions: Option<String>,
         automatic: bool,
     },
+    /// Ends an [`Op::Clear`], [`Op::Archive`], [`Op::Resume`], or [`Op::Compact`] that replaced the
+    /// transcript. Follows every event that reports the new transcript's state, such as its usage
+    /// and notices.
+    SessionReady,
     /// Live config after an [`Op::SetModel`]. `effort` is the resolved value. `requested_effort`
     /// is the user's pick, surfaced when an unknown model drops it.
     ConfigChanged {
@@ -584,6 +588,7 @@ mod tests {
             Event::SessionRolled { .. } => "session_rolled",
             Event::SessionResumed { .. } => "session_resumed",
             Event::SessionCompacted { .. } => "session_compacted",
+            Event::SessionReady => "session_ready",
             Event::ConfigChanged { .. } => "config_changed",
             Event::ModeChanged(_) => "mode_changed",
             Event::LoginStarted { .. } => "login_started",
@@ -695,6 +700,7 @@ mod tests {
                 instructions: Some("focus".to_owned()),
                 automatic: true,
             },
+            Event::SessionReady,
             Event::ConfigChanged {
                 model: ModelSpec::resolve("claude-opus-5-5".to_owned()),
                 effort: Some(Effort::High),

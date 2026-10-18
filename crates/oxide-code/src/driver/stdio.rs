@@ -222,7 +222,7 @@ impl StdioSink {
                 writeln!(stderr, "{notice}")?;
             }
             Event::ModeChanged(mode) => writeln!(stderr, "Using {mode} mode")?,
-            // TUI-only events have no stdio surface to update.
+            // TUI-only events and the `SessionReady` marker have no stdio surface to update.
             Event::PromptDrained(_)
             | Event::UsageUpdated(_)
             | Event::RateLimitsUpdated(_)
@@ -236,7 +236,8 @@ impl StdioSink {
             | Event::SignedOut { .. }
             | Event::ApprovalRequested { .. }
             | Event::SessionRulesUpdated(_)
-            | Event::BackgroundShellsUpdated(_) => {}
+            | Event::BackgroundShellsUpdated(_)
+            | Event::SessionReady => {}
             Event::TurnComplete => {
                 writeln!(stdout)?;
             }
@@ -344,14 +345,17 @@ mod tests {
     use std::path::Path;
 
     use indoc::indoc;
+    use wiremock::MockServer;
 
     use super::*;
     use crate::client::{RateLimitWindow, RateLimits};
     use crate::config::compaction::AutoCompactionConfig;
+    use crate::engine::testing::{engine, with_pinned_home};
     use crate::permission::defaults::Shipped;
     use crate::permission::rule::Rule;
     use crate::permission::{Access, Mode, PermissionClass, Policy, Tier, Workspace};
     use crate::protocol::{CapturingSink, FailingSink};
+    use crate::session::store::testing::test_store;
     use crate::tool::bash::background::testing::shells_in_each_state;
     use crate::tool::tasks::TaskStatus;
     use crate::tool::tasks::testing::{plan, task};
@@ -460,12 +464,16 @@ mod tests {
     #[tokio::test]
     async fn render_op_waits_for_the_terminal_event_of_its_own_op() {
         let (tx, mut events) = mpsc::unbounded_channel();
-        let notice = Event::Error("Session write failed".to_owned());
-        let rolled = Event::SessionRolled {
-            id: "next".to_owned(),
-            archived: false,
-        };
-        for event in [notice.clone(), rolled.clone(), Event::TurnComplete] {
+        let cleared = [
+            Event::SessionRolled {
+                id: "next".to_owned(),
+                archived: false,
+            },
+            Event::Error("Previous session write failed: disk full".to_owned()),
+            Event::Notice("Skipped instruction file /repo/CLAUDE.md: permission denied".to_owned()),
+            Event::SessionReady,
+        ];
+        for event in cleared.iter().cloned().chain([Event::TurnComplete]) {
             tx.send(event).unwrap();
         }
         drop(tx);
@@ -476,8 +484,52 @@ mod tests {
         let end = render_op(&mut events, &sink, &ops, &Op::Clear, &mut approver).await;
 
         assert_eq!(end, Some(TurnEnd::Completed));
-        assert_eq!(sink.events(), [notice, rolled]);
+        assert_eq!(sink.events(), cleared);
         assert_eq!(events.try_recv().ok(), Some(Event::TurnComplete));
+    }
+
+    #[tokio::test]
+    async fn render_op_renders_what_the_engine_reports_after_a_clear_before_returning() {
+        with_pinned_home(async {
+            let server = MockServer::start().await;
+            let dir = tempfile::tempdir().unwrap();
+            let engine = engine(server.uri(), &test_store(dir.path()), dir.path()).await;
+            let instructions = dir.path().join("CLAUDE.md");
+            std::fs::write(&instructions, b"\xff\xfe").unwrap();
+            let mut handle = engine.spawn(&[]);
+            handle.ops.send(Op::Clear).await.unwrap();
+            let sink = CapturingSink::new();
+            let mut approver = fixed(Decision::Deny);
+
+            let end = render_op(
+                &mut handle.events,
+                &sink,
+                &handle.ops,
+                &Op::Clear,
+                &mut approver,
+            )
+            .await;
+
+            assert_eq!(end, Some(TurnEnd::Completed));
+            let warning = format!(
+                "Skipped instruction file {}: stream did not contain valid UTF-8",
+                instructions.display(),
+            );
+            assert!(
+                matches!(
+                    sink.events().as_slice(),
+                    [
+                        Event::SessionRolled { .. },
+                        Event::Notice(notice),
+                        Event::SessionReady,
+                    ] if *notice == warning
+                ),
+                "{:?}",
+                sink.events(),
+            );
+            handle.shutdown().await.unwrap();
+        })
+        .await;
     }
 
     #[tokio::test]
