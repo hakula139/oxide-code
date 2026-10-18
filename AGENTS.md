@@ -75,6 +75,7 @@ Run after implementation and before review:
 cargo fmt --all --check                               # Check formatting
 cargo build                                           # Build
 cargo clippy --all-targets -- -D warnings             # Lint (pedantic, zero warnings)
+cargo doc --no-deps                                   # Check doc links
 cargo llvm-cov                                        # Run tests and check coverage
 cargo deny check licenses advisories sources bans     # Check dependencies when they change
 pnpm format                                           # Check Markdown, TOML, JSON, and YAML formatting

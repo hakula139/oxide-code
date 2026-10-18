@@ -22,6 +22,15 @@ mod_module_files = "warn"
 todo = "warn"
 unwrap_used = "warn"
 
+[workspace.lints.rustdoc]
+bare_urls = "deny"
+broken_footnote = "deny"
+broken_intra_doc_links = "deny"
+invalid_codeblock_attributes = "deny"
+invalid_html_tags = "deny"
+invalid_rust_codeblocks = "deny"
+private_intra_doc_links = "deny"
+
 [workspace.dependencies]
 anyhow = "1"
 arboard = { version = "3.7", default-features = false, features = ["wayland-data-control"] }
