@@ -77,7 +77,7 @@ cargo clippy --all-targets -- -D warnings             # Lint (pedantic, zero war
 cargo doc --no-deps                                   # Check rustdoc lints
 cargo llvm-cov                                        # Run tests and check coverage
 cargo deny check licenses advisories sources bans     # Check dependencies when they change
-pnpm format                                           # Check Markdown, TOML, JSON, and YAML formatting
+pnpm format                                           # Check JSON, Markdown, and YAML formatting
 pnpm lint                                             # Lint Markdown
 pnpm spellcheck                                       # Spell check
 ```

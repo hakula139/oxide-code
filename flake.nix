@@ -77,6 +77,7 @@
           };
           check-added-large-files.enable = true;
           check-yaml.enable = true;
+          taplo.enable = true;
 
           nixfmt.enable = true;
           deadnix.enable = true;
@@ -125,12 +126,6 @@
             name = "prettier";
             entry = nodeHook "prettier-write" "prettier --write --ignore-unknown";
             files = "\\.(json|jsonc|md|ya?ml)$";
-          };
-          taplo-write = {
-            enable = true;
-            name = "taplo";
-            entry = nodeHook "taplo-write" "taplo format";
-            files = "\\.toml$";
           };
 
           cspell = {

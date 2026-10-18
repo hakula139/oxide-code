@@ -1,14 +1,11 @@
 {
   "private": true,
   "scripts": {
-    "format": "pnpm format:prettier && pnpm format:toml",
-    "format:prettier": "prettier --check \"**/*.{json,jsonc,md,yaml,yml}\"",
-    "format:toml": "taplo format --check",
+    "format": "prettier --check \"**/*.{json,jsonc,md,yaml,yml}\"",
     "lint": "markdownlint-cli2 \"**/*.md\"",
     "spellcheck": "git ls-files | cspell --no-progress --file-list stdin"
   },
   "devDependencies": {
-    "@taplo/cli": "^0.7.0",
     "cspell": "^10.3.6",
     "markdownlint-cli2": "^0.23.3",
     "prettier": "^3.9.9"

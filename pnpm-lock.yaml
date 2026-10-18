@@ -12,9 +12,6 @@ importers:
 
   .:
     devDependencies:
-      '@taplo/cli':
-        specifier: ^0.7.0
-        version: 0.7.0
       cspell:
         specifier: ^10.3.6
         version: 10.3.6
@@ -276,10 +273,6 @@ packages:
   '@sindresorhus/merge-streams@4.0.0':
     resolution: {integrity: sha512-tlqY9xq5ukxTUZBmoOp+m61cqwQD5pHJtFY3Mn8CA8ps6yghLH/Hw8UPdqg4OLmFW3IFlcXnQNmo/dh8HzXYIQ==}
     engines: {node: '>=18'}
-
-  '@taplo/cli@0.7.0':
-    resolution: {integrity: sha512-Ck3zFhQhIhi02Hl6T4ZmJsXdnJE+wXcJz5f8klxd4keRYgenMnip3JDPMGDRLbnC/2iGd8P0sBIQqI3KxfVjBg==}
-    hasBin: true
 
   '@types/debug@4.1.13':
     resolution: {integrity: sha512-KSVgmQmzMwPlmtljOomayoR89W4FynCAi3E8PPs7vmDVPe84hT+vGPKkJfThkmXs0x0jAaa9U8uW8bbfyS2fWw==}
@@ -961,8 +954,6 @@ snapshots:
       fastq: 1.20.1
 
   '@sindresorhus/merge-streams@4.0.0': {}
-
-  '@taplo/cli@0.7.0': {}
 
   '@types/debug@4.1.13':
     dependencies:
