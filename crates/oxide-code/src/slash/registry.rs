@@ -74,15 +74,13 @@ impl SlashOutcome {
 /// `Mutating` and rejects `Unknown` while a stream is in flight.
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) enum SlashKind {
-    /// Pure local read (chat output / modal open). Safe to run during streaming.
+    /// Pure local read (chat output / modal open).
     ReadOnly,
     /// Forwards an op the engine applies to the in-flight turn, such as a permission mode switch.
     Steering,
     /// Touches session state or forwards an op that races the in-flight client.
-    /// Refused until the agent is idle.
     Mutating,
-    /// Returned only by the free dispatcher when the name doesn't resolve. Trait impls never
-    /// produce this variant.
+    /// Returned only by the free dispatcher when the name doesn't resolve.
     Unknown,
 }
 
@@ -93,7 +91,7 @@ pub(crate) struct ArgCompletion {
     pub(crate) description: Cow<'static, str>,
 }
 
-/// Locally-dispatched `/name args` command. Each impl owns its display metadata.
+/// A locally dispatched `/name args` command.
 pub(super) trait SlashCommand: Sync {
     fn name(&self) -> &'static str;
 
@@ -112,7 +110,8 @@ pub(super) trait SlashCommand: Sync {
         None
     }
 
-    /// Curated arg suggestions, prefix-filtered and ranked. Empty → no autocomplete.
+    /// Curated arg suggestions, matching ASCII case-insensitively with prefix matches before other
+    /// substring matches. An empty result disables autocomplete.
     fn complete_arg(&self, _prefix: &str) -> Vec<ArgCompletion> {
         Vec::new()
     }

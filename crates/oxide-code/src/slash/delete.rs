@@ -1,6 +1,6 @@
-//! `/delete <id-prefix>` is the direct typed-arg form for session deletion. Bare `/delete` is
-//! rejected because "what gets deleted?" is ambiguous. The picker form (`/resume` then Ctrl+D on
-//! a row) is the discoverable path. Both forms share [`super::confirm::ConfirmDeleteSessionModal`].
+//! `/delete <id-prefix>` deletes a saved session through the
+//! [`ConfirmDeleteSessionModal`] that Ctrl+D in the `/resume` picker also opens. Bare `/delete`
+//! names no session, so it errors.
 
 use std::path::Path;
 
@@ -108,8 +108,6 @@ mod tests {
 
     #[test]
     fn classify_is_always_mutating() {
-        // Both forms touch SessionStore. Typed-arg pushes a modal that performs the delete, bare
-        // emits an error block. Mutating keeps both idle-gated.
         assert_eq!(DeleteCmd.classify(""), SlashKind::Mutating);
         assert_eq!(DeleteCmd.classify("ab"), SlashKind::Mutating);
     }
@@ -174,8 +172,6 @@ mod tests {
 
     #[test]
     fn execute_widens_to_other_projects_when_current_project_misses() {
-        // Pin the widening path: scoped resolution misses, the all-projects retry finds the
-        // target. Without widening the user would see "No session matching" for a real session.
         with_isolated_xdg(|dir| {
             let sessions_dir = dir.join("ox").join("sessions");
             std::fs::create_dir_all(&sessions_dir).unwrap();
@@ -200,7 +196,7 @@ mod tests {
 
     #[test]
     fn execute_then_confirm_deletes_the_file_the_prefix_matched() {
-        // A renamed file keeps its header id, so deleting by that id would unlink whichever file
+        // A renamed file keeps its header ID, so deleting by that ID would unlink whichever file
         // is named after it.
         with_isolated_xdg(|_| {
             let store = open_store(&test_session_info()).unwrap();
@@ -241,7 +237,7 @@ mod tests {
 
     #[test]
     fn execute_with_live_id_prefix_returns_distinct_live_session_error() {
-        // The resolver drops the live id from its matches, so a prefix that matches only the live
+        // The resolver drops the live ID from its matches, so a prefix that matches only the live
         // session gets its own explanation.
         with_isolated_xdg(|_| {
             let store = open_store(&test_session_info()).unwrap();
@@ -267,7 +263,6 @@ mod tests {
 
     #[test]
     fn execute_with_live_id_prefix_returns_other_match_when_one_exists() {
-        // The live session and another session both match the prefix, so the other one wins.
         with_isolated_xdg(|_| {
             let store = open_store(&test_session_info()).unwrap();
             let live_id = "test-session";
@@ -322,8 +317,6 @@ mod tests {
 
     #[test]
     fn metadata_line_includes_tildified_project_when_cwd_is_non_empty() {
-        // The wrapper's only contribution over the shared formatter is the always-show-project
-        // rule (the picker hides project in scoped mode, the confirm modal always shows it).
         let info = SessionInfo {
             session_id: stamped_id(0xab),
             path: std::path::PathBuf::new(),

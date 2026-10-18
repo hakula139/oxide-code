@@ -67,10 +67,8 @@ struct PathGlob {
     folded: GlobSet,
 }
 
-/// Which tier a match is being evaluated for, selecting how commands, symlinked paths, and name
-/// spellings match. Allow widens, so it matches conservatively. Deny and ask hold calls back, so
-/// they match aggressively. Naming the discipline at every match keeps this security-critical
-/// asymmetry legible.
+/// The tier a match is evaluated for, selecting how commands, symlinked paths, and name spellings
+/// match. Naming it at every match keeps the allow / deny asymmetry legible.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum MatchDiscipline {
     /// Every simple command of a command that is not opaque must match its named words, each

@@ -1,8 +1,5 @@
-//! Slash-popup match-and-rank. Filters a registry slice against a typed query (leading `/`
-//! stripped) and returns ranked rows for the popup renderer.
-//!
-//! Ranking: name-prefix → alias-prefix → name-substring → alias-substring, alphabetical within
-//! each tier. Empty query returns the registry in declared order.
+//! Slash-popup matching, which ranks the commands a typed query matches by name prefix → alias
+//! prefix → name substring → alias substring, alphabetically within each tier.
 
 use super::registry::SlashCommand;
 

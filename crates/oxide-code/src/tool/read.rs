@@ -116,15 +116,12 @@ async fn run(raw: serde_json::Value, ctx: &ToolCtx) -> ToolOutput {
     }
 }
 
-/// Reads `path` as text and returns a tab-separated `LINENO\tTEXT` excerpt.
+/// Reads `path`, resolved against the context's cwd, as a `LINENO\tTEXT` excerpt of at most
+/// `limit` lines and [`OUTPUT_BUDGET`] bytes, and records the lines shown in the context's tracker
+/// for the Read-before-Edit gate. A footer names those lines when the excerpt leaves lines out.
 ///
-/// Refuses directories, non-regular files (FIFO / socket / device, which can report `len() == 0`
-/// and would otherwise bypass the size gate), files larger than `MAX_TRACKED_FILE_SIZE`, and files
-/// with a NUL byte in the first 8 KiB. A leading UTF-8 BOM is stripped before line splitting.
-///
-/// The excerpt stops after `limit` lines or before `OUTPUT_BUDGET` bytes, and its footer names the
-/// lines shown. The context's tracker records those lines for the Read-before-Edit gate. A relative
-/// `path` resolves against the context's cwd.
+/// Refuses directories, non-regular files, files over the tracked size cap, and binary files, and
+/// strips a leading UTF-8 BOM.
 async fn read_file(
     path: &str,
     offset: Option<usize>,
@@ -288,7 +285,6 @@ mod tests {
 
     #[tokio::test]
     async fn run_records_full_read_in_tracker() {
-        // A no-args read populates the tracker as Full so a follow-up Edit clears the gate.
         let dir = canonical_tempdir();
         let path = dir.path().join("test.txt");
         std::fs::write(&path, "hello\n").unwrap();

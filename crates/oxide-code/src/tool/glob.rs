@@ -154,14 +154,10 @@ struct GlobOutput {
     truncated_total: Option<usize>,
 }
 
-/// Walks `root`, filters entries against `pattern`, and returns up to `MAX_RESULTS` matches sorted
-/// newest-first by mtime, rendered relative to the root's canonical cwd. Trailing notes list the
-/// paths the walk could not read and count the matches and unreadable paths `read_filter`
-/// withholds. The walk stops once `cancel` fires.
-///
-/// `walk_files` skips files matched by `.gitignore` or a global ignore file, so only non-ignored
-/// files reach the matcher. Truncation past `MAX_RESULTS` is announced inline and surfaced
-/// separately on `truncated_total` for the structured view.
+/// Lists up to [`MAX_RESULTS`] files under `root` that match `pattern`, newest first and relative
+/// to the root's canonical cwd, until `cancel` fires. Trailing notes name the paths the walk could
+/// not read and count the matches and unreadable paths `read_filter` withholds. A truncated list
+/// says so inline and reports its total on `truncated_total`.
 fn glob_files(
     pattern: &str,
     root: &SearchRoot,

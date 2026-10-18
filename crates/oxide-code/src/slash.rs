@@ -1,10 +1,6 @@
-//! Slash-command surface.
-//!
-//! [`parse_slash`] detects commands, and [`dispatch`] runs them through the registry of
-//! [`registry::SlashCommand`] impls.
-//!
-//! Persistence: commands never write config. Mutations are session-local. Restart returns to the
-//! user-declared config.
+//! Slash commands: [`parse_slash`] detects them, and [`dispatch`] runs them through the registry of
+//! [`registry::SlashCommand`] impls. No command writes the config files, so a setting one changes
+//! reverts on restart.
 //!
 //! Design: `docs/design/slash/commands.md`.
 
@@ -47,8 +43,8 @@ pub(crate) fn filter_built_ins(query: &str) -> Vec<MatchedCommand> {
     matcher::filter_and_rank(query, registry::BUILT_INS)
 }
 
-/// Typed-arg completions for `cmd_name`, prefix-filtered. Returns empty for unknown commands
-/// or commands without a curated roster.
+/// Curated arg completions for `cmd_name`, matching ASCII case-insensitively with prefix matches
+/// before other substring matches. Unknown commands and commands without a roster return no rows.
 pub(crate) fn complete_arg_for(cmd_name: &str, prefix: &str) -> Vec<ArgCompletion> {
     registry::lookup_in(registry::BUILT_INS, cmd_name)
         .map(|cmd| cmd.complete_arg(prefix))
@@ -112,8 +108,7 @@ pub(crate) fn typed_op(parsed: &Parsed) -> Option<Result<Op, String>> {
     Some(op.map_err(|msg| named_error(parsed, &msg)))
 }
 
-/// Returns whether `parsed` is safe to dispatch mid-turn. `ReadOnly` and `Steering` may run while
-/// the agent is streaming, while the caller defers `Mutating` and rejects `Unknown`.
+/// Returns the [`SlashKind`] that decides whether `parsed` may dispatch mid-turn.
 pub(crate) fn classify(parsed: &Parsed) -> SlashKind {
     classify_in(registry::BUILT_INS, parsed)
 }

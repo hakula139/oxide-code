@@ -1,6 +1,6 @@
-//! `/rename` sets the session title manually. Bare opens a modal pre-filled with the current
-//! title. `/rename <title>` applies immediately. Suppresses AI title generation for the rest of
-//! the session so a slow Haiku response can't overwrite the user's pick.
+//! `/rename` sets the session title, from a modal pre-filled with the current title or directly
+//! as `/rename <title>`. A manual title stops AI titles for the rest of the session, so a late
+//! one cannot overwrite it.
 
 use crossterm::event::{KeyCode, KeyEvent};
 use ratatui::Frame;
@@ -270,8 +270,6 @@ mod tests {
         let modal = RenameModal::new(Some("ab"));
         let width: u16 = 40;
         let mut terminal = Terminal::new(TestBackend::new(width, 5)).unwrap();
-        // Render the modal into an oversized terminal but pass a 1-row Rect so the input row is
-        // entirely off-screen. `place_cursor` should bail without panicking.
         terminal
             .draw(|frame| modal.render(frame, Rect::new(0, 0, width, 1), &theme))
             .expect("short-area render must not panic");
