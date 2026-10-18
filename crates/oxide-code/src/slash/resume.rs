@@ -29,7 +29,7 @@ use crate::tui::modal::searchable_list::{SearchableItem, SearchableList};
 use crate::tui::modal::{Modal, ModalAction, ModalKey};
 use crate::tui::theme::Theme;
 use crate::util::path::tildify;
-use crate::util::text::truncate_to_width;
+use crate::util::text::{plural, truncate_to_width};
 
 // ── Constants ──
 
@@ -443,12 +443,7 @@ impl ResumePicker {
             (true, true) => format!("{matched} matching in the {loaded} most recent"),
             (true, false) => format!("{matched} / {loaded} matching"),
             (false, true) => format!("{loaded} most recent {kind}sessions"),
-            (false, false) => {
-                format!(
-                    "{loaded} {kind}session{}",
-                    if loaded == 1 { "" } else { "s" }
-                )
-            }
+            (false, false) => format!("{loaded} {kind}{}", plural(loaded, "session", "sessions")),
         };
 
         let mut status = vec![count];
