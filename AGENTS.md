@@ -14,7 +14,8 @@ ox -p "<prompt>"                            # Headless: run one turn and print t
 
 ```text
 .
-├── .agents/                                # Agent skills (release procedure)
+├── .agents/                                # Agent skills for the release procedure
+├── .claude/                                # Link to the agent skills for Claude Code
 ├── .cspell/                                # Project spelling dictionary
 ├── .envrc                                  # Loads the dev shell through direnv
 ├── .github/                                # CI and release workflows, the shared Nix setup action, issue forms, PR template, and Renovate and Dependabot configs
