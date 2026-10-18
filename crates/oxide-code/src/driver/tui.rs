@@ -24,7 +24,7 @@ pub(crate) struct Startup {
     /// One notice per `[tui.theme]` override the theme ignored, shown after the config notices.
     pub(crate) theme_notices: Vec<String>,
     pub(crate) title: Option<String>,
-    /// Resuming the session unarchived it.
+    /// Whether resuming the session unarchived it.
     pub(crate) unarchived: bool,
 }
 

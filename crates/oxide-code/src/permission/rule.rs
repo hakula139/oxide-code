@@ -2,13 +2,15 @@
 //! lists of a [`crate::permission::Policy`].
 //!
 //! `exec` patterns are one simple command whose words match a command's words, with a lone `*` as
-//! the only wildcard. `read` and `edit` patterns are gitignore-style globs anchored at `~/`, `/`, or
-//! each anchor directory of the [`crate::permission::Workspace`]. `net` patterns are host globs and
-//! `mcp` patterns `server/tool` globs. The pattern `*` covers the whole class.
+//! the only wildcard. `read` and `edit` patterns are gitignore-style globs anchored at `~/`, `/`,
+//! or each anchor directory of the [`crate::permission::Workspace`]. `net` patterns are host globs
+//! and `mcp` patterns `server/tool` globs. The pattern `*` covers the whole class.
 //!
 //! Allow rules widen what runs, so they match conservatively, and deny and ask rules hold calls
-//! back, so they match aggressively (see [`MatchDiscipline`]). Matching a command narrows the ways a
-//! rule can be fooled, but it is not a security boundary (see `docs/design/tools/permissions.md`).
+//! back, so they match aggressively (see [`MatchDiscipline`]). Matching a command narrows the ways
+//! a rule can be fooled, but it is not a security boundary.
+//!
+//! Design: `docs/design/tools/permissions.md`.
 
 use std::path::{Path, PathBuf};
 
@@ -147,7 +149,7 @@ impl Rule {
         &self.source
     }
 
-    /// Whether this rule matches a call in `class` with `target` under `discipline`.
+    /// Returns whether this rule matches a call in `class` with `target` under `discipline`.
     pub(super) fn matches(
         &self,
         class: PermissionClass,
@@ -188,8 +190,8 @@ impl Rule {
         }
     }
 
-    /// Whether this `exec` rule allows `segment`, one simple command of a command that is not
-    /// opaque.
+    /// Returns whether this `exec` rule allows `segment`, one simple command of a command that is
+    /// not opaque.
     pub(super) fn allows(&self, segment: &Segment) -> bool {
         match &self.pattern {
             Pattern::Any => self.class == PermissionClass::Exec,
@@ -260,7 +262,7 @@ impl From<Rule> for RuleSpec {
     }
 }
 
-/// Whether `c` paints as one visible cell or more, or is a plain space.
+/// Returns whether `c` paints as one visible cell or more, or is a plain space.
 fn paints_as_itself(c: char) -> bool {
     c == ' ' || !(c.is_whitespace() || is_hidden(c))
 }
@@ -292,8 +294,8 @@ fn quote(word: &str) -> String {
     }
 }
 
-/// Whether a deny or ask pattern holds `segment` by its named words, its program words, or its
-/// program words with the program's directory dropped.
+/// Returns whether a deny or ask pattern holds `segment` by its named words, its program words, or
+/// its program words with the program's directory dropped.
 fn segment_held(pattern: &[PatternWord], segment: &Segment) -> bool {
     words_held(pattern, segment.named())
         || words_held(pattern, segment.program())
@@ -302,7 +304,7 @@ fn segment_held(pattern: &[PatternWord], segment: &Segment) -> bool {
             .is_some_and(|bare| words_held(pattern, &bare))
 }
 
-/// Whether an allow `pattern` matches all of `words`. A trailing `*` matches whatever words
+/// Returns whether an allow `pattern` matches all of `words`. A trailing `*` matches whatever words
 /// remain, and every other pattern word matches one literal word, equal to it, since a word that
 /// expands or globs can become several.
 fn words_allowed(pattern: &[PatternWord], words: &[ShellWord]) -> bool {
@@ -320,8 +322,8 @@ fn words_allowed(pattern: &[PatternWord], words: &[ShellWord]) -> bool {
     }
 }
 
-/// Whether a deny or ask `pattern` holds `words`: its first word matches the first of them, and
-/// each later literal word matches one of the rest, in order, with every `*` left out. A
+/// Returns whether a deny or ask `pattern` holds `words`: its first word matches the first of them,
+/// and each later literal word matches one of the rest, in order, with every `*` left out. A
 /// program's options can sit between the words a pattern names, as in `git -c a=b push`, so the
 /// rest need not be adjacent.
 fn words_held(pattern: &[PatternWord], words: &[ShellWord]) -> bool {
@@ -338,9 +340,9 @@ fn words_held(pattern: &[PatternWord], words: &[ShellWord]) -> bool {
         })
 }
 
-/// Whether one deny or ask pattern word matches `word`. The two compare folded, so `RM` matches
-/// `rm` as a case-insensitive file system runs it, and a word that expands or globs matches any
-/// pattern word, since it may become that word when the command runs.
+/// Returns whether one deny or ask pattern word matches `word`. The two compare folded, so `RM`
+/// matches `rm` as a case-insensitive file system runs it, and a word that expands or globs matches
+/// any pattern word, since it may become that word when the command runs.
 fn word_held(pattern_word: &PatternWord, word: &ShellWord) -> bool {
     match pattern_word {
         PatternWord::Literal(text) => {
@@ -430,8 +432,8 @@ impl PathGlob {
         })
     }
 
-    /// Whether this glob matches a path target under `discipline`, given the target's spellings as
-    /// [`Target::Path`] holds them.
+    /// Returns whether this glob matches a path target under `discipline`, given the target's
+    /// spellings as [`Target::Path`] holds them.
     fn is_match(
         &self,
         canonical: &str,

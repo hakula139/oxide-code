@@ -346,8 +346,8 @@ pub(crate) struct Config {
     pub(crate) permission: Policy,
     /// The launch directory and the workspace roots the tools run in.
     pub(crate) workspace: Workspace,
-    /// Opts adaptive thinking into summarized text. The request's `thinking` field derives from
-    /// this plus the model.
+    /// Whether adaptive thinking opts into summarized text. The request's `thinking` field
+    /// derives from this plus the model.
     pub(crate) show_thinking: bool,
     pub(crate) show_welcome: bool,
     pub(crate) status_line: Vec<StatusLineSegment>,
@@ -713,8 +713,8 @@ fn is_loopback_url(url: &reqwest::Url) -> bool {
     )
 }
 
-/// Whether `base_url` points at Anthropic's production or staging host. Gates the stored-login
-/// fallback, body-side `cache_control.scope = "global"`, and the billing block's `cch` hash.
+/// Returns whether `base_url` points at Anthropic's production or staging host. Gates the
+/// stored-login fallback, body-side `cache_control.scope = "global"`, and the billing `cch` hash.
 pub(crate) fn is_first_party_base_url(base_url: &str) -> bool {
     reqwest::Url::parse(base_url)
         .ok()

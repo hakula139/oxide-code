@@ -36,9 +36,9 @@ pub(super) struct MarkdownRenderer<I> {
     width: usize,
     pub(super) lines: Vec<Line<'static>>,
 
-    /// Set after a block ends, so the next block opener emits a blank separator before its content.
+    /// Whether the next block opener emits a blank separator first, set when a block ends.
     pub(super) needs_newline: bool,
-    /// Set while the last line collects inline spans, so `finish_line` wraps it exactly once.
+    /// Whether the last line still collects inline spans, so `finish_line` wraps it exactly once.
     line_open: bool,
 
     /// Block-prefix stack. Each entry holds the spans prepended to every line inside that block
@@ -725,7 +725,7 @@ const TABLE_STACKED_HANG: usize = 2;
 /// Widest word a column keeps whole, so a long path or URL wraps instead of stacking the table.
 const TABLE_MAX_WORD_WIDTH: usize = 30;
 
-/// Whether `html` is a `<br>` tag in any of its spellings, such as `<br/>` or `<BR />`.
+/// Returns whether `html` is a `<br>` tag in any of its spellings, such as `<br/>` or `<BR />`.
 fn is_line_break_tag(html: &str) -> bool {
     let tag = html.trim().to_ascii_lowercase();
     tag.strip_prefix("<br")

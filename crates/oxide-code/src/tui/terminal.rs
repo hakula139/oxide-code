@@ -169,7 +169,7 @@ fn build_status_hyperlink_envelope(links: &[StatusHyperlink]) -> io::Result<Vec<
 /// Background-thread panic reports waiting for [`restore`] to print them.
 #[derive(Default)]
 struct DeferredPanics {
-    /// Set by [`restore`]. From then on panics print through the original hook.
+    /// Whether [`restore`] has run, after which panics print through the original hook.
     restored: bool,
     reports: Vec<String>,
 }

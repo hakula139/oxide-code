@@ -1,8 +1,9 @@
 //! Session actor that owns [`SessionState`] and its writer. Each `recv()` wakeup drains the queued
 //! [`SessionCmd`]s into one batch and appends it in one write, so an isolated write flushes at once
 //! with no interval timer. `/compact` and `/archive` end their batch so a failed one can be
-//! unqueued, and cmds after a compact see its committed synthetic root. See
-//! `docs/design/session/persistence.md`.
+//! unqueued, and cmds after a compact see its committed synthetic root.
+//!
+//! Design: `docs/design/session/persistence.md`.
 
 use std::sync::Arc;
 

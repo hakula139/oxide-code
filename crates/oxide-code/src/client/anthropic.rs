@@ -77,11 +77,12 @@ pub(crate) struct Client {
     /// User-set output cap. `None` defers to [`ModelSpec::resolve_max_tokens`].
     max_tokens: Option<u32>,
     prompt_cache_ttl: PromptCacheTtl,
-    /// Opts adaptive thinking into summarized text.
+    /// Whether adaptive thinking opts into summarized text.
     show_thinking: bool,
     session_id: String,
     device_id: String,
-    /// Limits `scope: "global"` and `cch` to the Anthropic API, as Claude Code does.
+    /// Whether the client talks to the Anthropic API, which alone gets `scope: "global"` and
+    /// `cch`, as in Claude Code.
     is_first_party: bool,
 }
 

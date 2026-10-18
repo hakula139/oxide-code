@@ -94,7 +94,7 @@ struct CopyNotice {
 pub(crate) struct AppHistory {
     pub(crate) interactions: Vec<Interaction>,
     pub(crate) title: Option<String>,
-    /// Resuming the session unarchived it, so the chat opens with a note saying so.
+    /// Whether resuming the session unarchived it, so the chat opens with a note saying so.
     pub(crate) unarchived: bool,
 }
 

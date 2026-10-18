@@ -52,9 +52,10 @@ pub(super) struct SharedState {
     flush_failure_surfaced: AtomicBool,
     persistence_stop_surfaced: AtomicBool,
     actor_gone_surfaced: AtomicBool,
-    /// Set by [`SessionHandle::set_manual_title`] before it sends the title, so no AI title or
-    /// `FirstPrompt` title follows a `/rename`. The title generator checks it before appending,
-    /// and the actor checks again on arrival, since a `/rename` can land in between.
+    /// Whether a `/rename` titled the session. [`SessionHandle::set_manual_title`] sets it before
+    /// it sends the title, so no AI title or `FirstPrompt` title follows. The title generator
+    /// checks it before appending, and the actor checks again on arrival, since a `/rename` can
+    /// land in between.
     manual_title_set: AtomicBool,
     /// Most recent flush error, threaded into actor-gone messages so the user sees the I/O cause.
     last_flush_failure: std::sync::Mutex<Option<String>>,
@@ -335,7 +336,7 @@ pub(crate) struct ResumedSession {
     pub(crate) handle: SessionHandle,
     pub(crate) transcript: LoadedTranscript,
     pub(crate) title: Option<String>,
-    /// The session was archived, so resuming it appended an entry unarchiving it.
+    /// Whether the session was archived, so resuming it appended an entry unarchiving it.
     pub(crate) unarchived: bool,
     /// Persisted tracker snapshots passed to `FileTracker::restore_verified` so the
     /// Read-before-Edit gate clears for files that still match disk.

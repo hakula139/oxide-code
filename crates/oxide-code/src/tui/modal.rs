@@ -52,9 +52,9 @@ pub(crate) trait Modal: Send {
         None
     }
 
-    /// Whether Esc reaches [`Self::handle_key`] in place of the universal cancel, for a modal that
-    /// handles Esc itself, either backing out of its current step or dismissing through its own
-    /// key table. Ctrl+C still cancels. Default false.
+    /// Returns whether Esc reaches [`Self::handle_key`] in place of the universal cancel, for a
+    /// modal that handles Esc itself, either backing out of its current step or dismissing through
+    /// its own key table. Ctrl+C still cancels. Default false.
     fn captures_esc(&self) -> bool {
         false
     }
@@ -301,7 +301,7 @@ pub(crate) mod testing {
         pub(crate) cancel_action: Option<ModalAction>,
         /// Child that `on_push_key` pushes, once. Pressing the key without a child panics.
         pub(crate) push_child: Option<Box<dyn Modal>>,
-        /// Returned from [`Modal::captures_esc`].
+        /// Whether the modal claims Esc through [`Modal::captures_esc`].
         pub(crate) captures_esc: bool,
         pub(crate) declared_height: u16,
         /// Shared so a test can read the count after the modal moves into the stack.

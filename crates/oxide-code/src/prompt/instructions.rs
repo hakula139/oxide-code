@@ -118,7 +118,7 @@ async fn load_files(slots: Vec<Slot>) -> (Vec<InstructionFile>, Vec<String>) {
     (files, warnings)
 }
 
-/// Whether a read failed because the path names no file, as when a parent is a regular file.
+/// Returns whether a read failed since the path names no file, as when a parent is a regular file.
 fn is_absent(e: &io::Error) -> bool {
     matches!(
         e.kind(),

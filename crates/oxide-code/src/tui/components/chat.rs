@@ -339,7 +339,7 @@ impl ChatView {
         self.blocks.len()
     }
 
-    /// Whether the tail block is an [`ErrorBlock`].
+    /// Returns whether the tail block is an [`ErrorBlock`].
     #[cfg(test)]
     pub(crate) fn last_is_error(&self) -> bool {
         self.blocks
@@ -609,14 +609,14 @@ impl ChatView {
         }
     }
 
-    /// Whether streaming tokens continue the last committed assistant turn.
+    /// Returns whether streaming tokens continue the last committed assistant turn.
     fn streaming_continues_turn(&self) -> bool {
         self.blocks
             .last()
             .is_some_and(|b| b.block().continues_assistant_turn())
     }
 
-    /// Whether the chat shows nothing: no committed block, reply, thinking, or summary.
+    /// Returns whether the chat shows nothing: no committed block, reply, thinking, or summary.
     pub(crate) fn is_empty(&self) -> bool {
         self.blocks.is_empty()
             && self.streaming.is_none()

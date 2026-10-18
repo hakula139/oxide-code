@@ -27,7 +27,7 @@ pub(crate) struct ModelInfo {
     /// The API's own default when a request omits `output_config.effort`. Sent explicitly so the
     /// UI shows the level the request actually runs at.
     pub(crate) default_effort: Effort,
-    /// Accepts `thinking.display = "updates"`.
+    /// Whether the model accepts `thinking.display = "updates"`.
     pub(crate) progress_updates: bool,
     /// First-party Claude API token prices in USD per million tokens.
     pub(crate) cost_rates: TokenCostRates,

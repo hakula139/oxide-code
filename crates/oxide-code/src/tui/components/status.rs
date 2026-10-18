@@ -75,7 +75,7 @@ pub(crate) enum Status {
 }
 
 impl Status {
-    /// Whether work is in flight, which the bar marks with an animated spinner.
+    /// Returns whether work is in flight, which the bar marks with an animated spinner.
     const fn is_busy(&self) -> bool {
         matches!(
             self,

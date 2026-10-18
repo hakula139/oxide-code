@@ -44,7 +44,7 @@ pub(super) fn build_billing_header(version: &str, fingerprint: &str, hashed: boo
     }
 }
 
-/// Whether `attribution` carries the placeholder [`inject_cch`] fills.
+/// Returns whether `attribution` carries the placeholder [`inject_cch`] fills.
 pub(super) fn is_hashed(attribution: &str) -> bool {
     attribution.contains(CCH_PLACEHOLDER)
 }

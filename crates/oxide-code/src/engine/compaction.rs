@@ -416,8 +416,8 @@ fn drop_oldest_rounds(transcript: &[Message], target: u32) -> Option<Vec<Message
     )
 }
 
-/// Whether `message` holds a server tool result whose call an earlier reply made. A `pause_turn`,
-/// or a client call beside the server call, defers its result to the next reply.
+/// Returns whether `message` holds a server tool result whose call an earlier reply made. A
+/// `pause_turn`, or a client call beside the server call, defers its result to the next reply.
 fn answers_an_earlier_call(message: &Message) -> bool {
     let calls: HashSet<&str> = message
         .content

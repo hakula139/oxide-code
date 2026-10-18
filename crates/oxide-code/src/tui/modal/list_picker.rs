@@ -26,7 +26,7 @@ pub(crate) trait PickerItem {
         None
     }
 
-    /// Whether this row is the currently-active item (drawn with a `✓` marker).
+    /// Returns whether this row is the currently-active item (drawn with a `✓` marker).
     fn is_active(&self) -> bool {
         false
     }

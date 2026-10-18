@@ -73,7 +73,7 @@ pub(super) trait ChatBlock {
         true
     }
 
-    /// Whether this block is committed assistant prose, so a fresh streaming buffer can
+    /// Returns whether this block is committed assistant prose, so a fresh streaming buffer can
     /// continue its turn without inserting a separator.
     fn continues_assistant_turn(&self) -> bool {
         false

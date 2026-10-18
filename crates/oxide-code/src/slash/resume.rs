@@ -263,9 +263,9 @@ enum Notice {
 pub(crate) struct ResumePicker {
     store: SessionStore,
     list: SearchableList<SessionRow>,
-    /// `false` = current project, `true` = every project.
+    /// Whether the list covers every project.
     all: bool,
-    /// `false` = active sessions, `true` = archived ones.
+    /// Whether the list shows only archived sessions.
     archived: bool,
     dismissal: Dismissal,
     local_offset: UtcOffset,
@@ -273,7 +273,7 @@ pub(crate) struct ResumePicker {
     live_session_id: String,
     /// Rows loaded into the list, at most [`DEFAULT_SESSION_LIST_LIMIT`].
     loaded: usize,
-    /// More sessions in scope follow the loaded rows.
+    /// Whether more sessions in scope follow the loaded rows.
     more: bool,
     /// Last reload's failure, surfaced inline so failures don't disguise themselves as "no
     /// sessions found". Cleared on the next successful reload.

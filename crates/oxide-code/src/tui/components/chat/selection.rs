@@ -102,7 +102,7 @@ impl Selection {
         }
     }
 
-    /// Whether the left button is still down.
+    /// Returns whether the left button is still down.
     pub(super) fn held(&self) -> bool {
         self.pointer.is_some()
     }
