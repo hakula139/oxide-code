@@ -252,6 +252,8 @@ fn preview_line(prompt: &str, theme: &Theme, body_width: usize) -> Line<'static>
 
 #[cfg(test)]
 mod tests {
+    use std::fmt::Write as _;
+
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
     use indoc::indoc;
     use ratatui::Terminal;
@@ -274,8 +276,10 @@ mod tests {
     use crate::tui::components::status::StatusBar;
     use crate::tui::components::status::testing::status_bar_init;
     use crate::tui::git_probes::GitUpdate;
+    use crate::tui::now;
     use crate::tui::terminal::testing::{BEGIN_SYNC, END_SYNC, FLUSH, FRAME, capture_terminal};
     use crate::tui::testing::{buffer_rows, key_event};
+    use crate::util::git::PullRequest;
 
     // ── render ──
 
@@ -299,14 +303,12 @@ mod tests {
     #[test]
     fn render_replays_status_hyperlinks_over_the_frame_inside_the_synchronized_update() {
         let (mut app, _rx, _event_tx) = test_app(None);
-        app.apply_git_update(GitUpdate::PullRequest(Some(
-            crate::util::git::PullRequest {
-                number: 7,
-                url: "https://example.com/pull/7".to_owned(),
-                checks: None,
-                review: None,
-            },
-        )));
+        app.apply_git_update(GitUpdate::PullRequest(Some(PullRequest {
+            number: 7,
+            url: "https://example.com/pull/7".to_owned(),
+            checks: None,
+            review: None,
+        })));
         let mut terminal = capture_terminal(120, 8);
 
         app.render(&mut terminal).unwrap();
@@ -353,8 +355,6 @@ mod tests {
 
     #[test]
     fn render_repaints_when_chat_content_grows_past_viewport() {
-        use std::fmt::Write as _;
-
         // Content pushed in the same handler tick must land before a post-paint re-clamp.
         let (mut app, _rx, _event_tx) = test_app(None);
         let mut body = String::new();
@@ -534,7 +534,7 @@ mod tests {
             app.copy_notice = Some(CopyNotice {
                 text: text.to_owned(),
                 failed,
-                until: std::time::Instant::now(),
+                until: now(),
             });
             let backend = render_app(&mut app, 60, 10);
 
@@ -560,7 +560,7 @@ mod tests {
         app.copy_notice = Some(CopyNotice {
             text: "Not copied: Terminal.app ignores OSC 52. Fn-drag to select.".to_owned(),
             failed: true,
-            until: std::time::Instant::now(),
+            until: now(),
         });
 
         let text = rendered_text(&mut app, 60, 10);

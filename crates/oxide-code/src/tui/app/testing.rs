@@ -1,12 +1,14 @@
 //! Test-only [`App`] fixtures shared by the app, dispatch, event, and render tests.
 
+use std::fmt::Write as _;
 use std::sync::{Arc, Mutex};
 
 use crossterm::event::{KeyCode, KeyEvent};
-use ratatui::Terminal;
 use ratatui::backend::TestBackend;
 use ratatui::layout::Rect;
 use ratatui::text::{Line, Span};
+use ratatui::widgets::Paragraph;
+use ratatui::{Frame, Terminal};
 use tokio::sync::mpsc;
 
 use super::{App, AppHistory};
@@ -16,6 +18,8 @@ use crate::protocol::{Event, Op};
 use crate::slash::{self, LiveSessionInfo};
 use crate::tool::{ApprovalBody, ApprovalPreview};
 use crate::tui::clipboard::{self, Clipboard, Environment};
+use crate::tui::modal::approval::ApprovalModal;
+use crate::tui::modal::{Modal, ModalKey};
 use crate::tui::testing::buffer_rows;
 use crate::tui::theme::Theme;
 
@@ -93,35 +97,34 @@ impl FakeModal {
     }
 }
 
-impl crate::tui::modal::Modal for FakeModal {
+impl Modal for FakeModal {
     fn height(&self, _width: u16, _max_height: u16) -> u16 {
         1
     }
 
-    fn render(&self, frame: &mut ratatui::Frame<'_>, area: Rect, theme: &Theme) {
-        use ratatui::widgets::Paragraph;
+    fn render(&self, frame: &mut Frame<'_>, area: Rect, theme: &Theme) {
         let line = Line::from(Span::styled(self.title.clone(), theme.text()));
         frame.render_widget(Paragraph::new(line).style(theme.surface()), area);
     }
 
-    fn handle_key(&mut self, _event: &KeyEvent) -> crate::tui::modal::ModalKey {
-        crate::tui::modal::ModalKey::Consumed
+    fn handle_key(&mut self, _event: &KeyEvent) -> ModalKey {
+        ModalKey::Consumed
     }
 }
 
 /// Modal that records the code of every key it receives.
 pub(super) struct KeyLogModal(pub(super) Arc<Mutex<Vec<KeyCode>>>);
 
-impl crate::tui::modal::Modal for KeyLogModal {
+impl Modal for KeyLogModal {
     fn height(&self, _width: u16, _max_height: u16) -> u16 {
         1
     }
 
-    fn render(&self, _frame: &mut ratatui::Frame<'_>, _area: Rect, _theme: &Theme) {}
+    fn render(&self, _frame: &mut Frame<'_>, _area: Rect, _theme: &Theme) {}
 
-    fn handle_key(&mut self, event: &KeyEvent) -> crate::tui::modal::ModalKey {
+    fn handle_key(&mut self, event: &KeyEvent) -> ModalKey {
         self.0.lock().unwrap().push(event.code);
-        crate::tui::modal::ModalKey::Consumed
+        ModalKey::Consumed
     }
 }
 
@@ -137,8 +140,6 @@ pub(super) fn rendered_text(app: &mut App, width: u16, height: u16) -> String {
 }
 
 pub(super) fn long_chat_block() -> String {
-    use std::fmt::Write as _;
-
     let mut body = String::new();
     for i in 0..30 {
         _ = writeln!(body, "line {i:02} of a long chat block");
@@ -148,7 +149,7 @@ pub(super) fn long_chat_block() -> String {
 
 /// Pushes a Bash approval past its type-ahead guard, so it answers keys at once.
 pub(super) fn push_answerable_approval(app: &mut App, command: &str) {
-    let mut modal = crate::tui::modal::approval::ApprovalModal::new(
+    let mut modal = ApprovalModal::new(
         "call-1".to_owned(),
         ApprovalPreview {
             title: "Bash".to_owned(),

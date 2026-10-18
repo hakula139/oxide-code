@@ -4,6 +4,7 @@
 use std::time::Instant;
 
 use indoc::formatdoc;
+use tracing::{debug, warn};
 
 use super::{App, COPY_NOTICE_DURATION, CopyNotice};
 use crate::config::auth::AuthSource;
@@ -127,7 +128,7 @@ impl App {
             self.pending_prompts.pop_front();
             self.forwarded_prompts -= 1;
         } else {
-            tracing::warn!("drained prompt {text:?} does not lead the forwarded queue");
+            warn!("drained prompt {text:?} does not lead the forwarded queue");
         }
         self.chat.push_user_message(text);
     }
@@ -317,7 +318,7 @@ impl App {
                 {url}"
             },
             Err(e) => {
-                tracing::debug!("failed to open the browser: {e}");
+                debug!("failed to open the browser: {e}");
                 formatdoc! {"
                     Could not open the browser. Sign in at this URL in a browser on this machine:
                     {url}"
@@ -488,9 +489,8 @@ mod tests {
     use std::path::Path;
     use std::time::Duration;
 
-    use tokio::sync::mpsc::error::TryRecvError;
-
     use indoc::indoc;
+    use tokio::sync::mpsc::error::TryRecvError;
 
     use super::*;
     use crate::config::compaction::test_thresholds;
@@ -508,6 +508,7 @@ mod tests {
     use crate::tui::app::testing::{five_hour_limit, rendered_text, test_app};
     use crate::tui::clipboard::CopyError;
     use crate::tui::glyphs::INTERRUPTED_MARKER;
+    use crate::util::git::PullRequest;
 
     fn bash_call_start(id: &str, command: &str) -> Event {
         Event::ToolCallStart(ToolCall {
@@ -1951,14 +1952,12 @@ mod tests {
         app.apply_git_update(GitUpdate::Branch(Some("main".to_owned())));
         assert!(!app.dirty, "unchanged branch skips the repaint");
 
-        app.apply_git_update(GitUpdate::PullRequest(Some(
-            crate::util::git::PullRequest {
-                number: 7,
-                url: "https://example.com/pull/7".to_owned(),
-                checks: None,
-                review: None,
-            },
-        )));
+        app.apply_git_update(GitUpdate::PullRequest(Some(PullRequest {
+            number: 7,
+            url: "https://example.com/pull/7".to_owned(),
+            checks: None,
+            review: None,
+        })));
         assert!(app.dirty, "new pull request repaints");
     }
 

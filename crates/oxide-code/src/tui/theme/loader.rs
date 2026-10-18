@@ -19,6 +19,7 @@ use syntect::highlighting::{Theme as SyntaxTheme, ThemeSet};
 
 use super::{Slot, Theme, builtin, color::parse_color};
 use crate::config::ThemeConfig;
+use crate::util::path::expand_user;
 
 // ── Resolution ──
 
@@ -60,7 +61,7 @@ fn load_base_body(name: &str) -> Result<String> {
     if let Some(body) = builtin::lookup(name) {
         return Ok(body.to_owned());
     }
-    let path = crate::util::path::expand_user(name).with_context(|| format!("theme {name:?}"))?;
+    let path = expand_user(name).with_context(|| format!("theme {name:?}"))?;
     let unreadable = || {
         format!(
             "theme {name:?}: not a built-in name and failed to read as file {}",
@@ -88,8 +89,8 @@ fn load_base_body(name: &str) -> Result<String> {
 
 /// Applies one override patch. Errors on unknown slot name, a malformed patch, or a bad color.
 fn patch_slot(theme: &mut Theme, slot_name: &str, patch: &toml::Value) -> Result<()> {
-    let slot = slot_for_name(theme, slot_name)
-        .ok_or_else(|| anyhow::anyhow!("unknown slot {slot_name:?}"))?;
+    let slot =
+        slot_for_name(theme, slot_name).with_context(|| format!("unknown slot {slot_name:?}"))?;
     let patch = SlotPatch::deserialize(patch.clone())
         .context("expected a color string or a table of fg, bg, and modifier flags")?;
     if matches!(&patch, SlotPatch::Inline(inline) if inline.is_empty()) {
@@ -291,8 +292,8 @@ mod tests {
     use indoc::{formatdoc, indoc};
     use ratatui::style::Color;
 
-    use super::super::builtin;
     use super::*;
+    use crate::tui::theme::SLOT_NAMES;
 
     const COLOR_FORMATS_HINT: &str = "expected hex (#rrggbb), ANSI name (red, bright_blue, ...), \
                                       indexed (ansi:0..255), or reset";
@@ -540,12 +541,12 @@ mod tests {
             bg: None,
             modifiers: Modifier::empty(),
         };
-        for &target in super::super::SLOT_NAMES {
+        for &target in SLOT_NAMES {
             let mut patched = Theme::default();
             let original = patched.clone();
             *slot_for_name(&mut patched, target)
                 .unwrap_or_else(|| panic!("unknown slot {target:?}")) = sentinel;
-            for &other in super::super::SLOT_NAMES {
+            for &other in SLOT_NAMES {
                 let mut p = patched.clone();
                 let mut o = original.clone();
                 let post = *slot_for_name(&mut p, other).expect("slot must exist");

@@ -14,6 +14,7 @@ use base64::engine::general_purpose::STANDARD;
 use tokio::io::AsyncWriteExt as _;
 use tokio::process::Command;
 use tokio::sync::mpsc;
+use tracing::debug;
 
 use crate::util::env;
 use crate::util::sync::lock_or_recover;
@@ -261,10 +262,10 @@ fn settle(
     tmux: Option<&Result<TmuxLoad, String>>,
 ) -> Result<Delivery, CopyError> {
     if let Some(Err(error)) = native {
-        tracing::debug!("native clipboard write failed: {error}");
+        debug!("native clipboard write failed: {error}");
     }
     if let Some(Err(error)) = tmux {
-        tracing::debug!("tmux load-buffer failed: {error}");
+        debug!("tmux load-buffer failed: {error}");
     }
     if matches!(native, Some(Ok(()))) || matches!(tmux, Some(Ok(TmuxLoad::Forwarded))) {
         return Ok(Delivery::Copied);

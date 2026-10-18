@@ -8,7 +8,8 @@ use crossterm::event::{
     MouseEvent, MouseEventKind,
 };
 use ratatui::layout::Position;
-use tokio::sync::mpsc;
+use tokio::sync::mpsc::error::TrySendError;
+use tracing::{debug, warn};
 
 use super::{App, EXIT_WINDOW};
 use crate::protocol::Op;
@@ -116,7 +117,7 @@ impl App {
             return false;
         };
         if let Err(e) = (self.open_browser)(&link.url) {
-            tracing::debug!("failed to open the browser: {e}");
+            debug!("failed to open the browser: {e}");
             let message = format!(
                 "Could not open the browser. Open {} in a browser.",
                 link.url
@@ -239,9 +240,9 @@ impl App {
         }
     }
 
-    fn surface_send_error(&mut self, e: &mpsc::error::TrySendError<Op>) {
+    fn surface_send_error(&mut self, e: &TrySendError<Op>) {
         match e {
-            mpsc::error::TrySendError::Closed(_) => {
+            TrySendError::Closed(_) => {
                 self.chat
                     .push_error("The engine stopped unexpectedly. Restart `ox` to recover.");
                 self.input.set_enabled(false);
@@ -249,12 +250,12 @@ impl App {
             }
             // An approval decision is a control-plane reply the engine is waiting for, so a
             // dropped one leaves the turn blocked until the user cancels it.
-            mpsc::error::TrySendError::Full(Op::Resolve { .. }) => {
+            TrySendError::Full(Op::Resolve { .. }) => {
                 self.chat.push_error(
                     "Approval could not be delivered. Press Esc to cancel the blocked turn.",
                 );
             }
-            mpsc::error::TrySendError::Full(_) => {
+            TrySendError::Full(_) => {
                 self.chat
                     .push_error("The engine is busy, so the request was dropped. Try again.");
             }
@@ -304,7 +305,7 @@ impl App {
             }
             self.apply_theme(&preview);
         } else {
-            tracing::warn!(
+            warn!(
                 name,
                 "PreviewTheme: unknown built-in, so the picker roster drifted"
             );
@@ -319,7 +320,7 @@ impl App {
             self.chat
                 .push_system_message(format!("Theme set to {name}"));
         } else {
-            tracing::warn!(
+            warn!(
                 name,
                 "SwapTheme: unknown built-in, so the picker roster drifted"
             );
@@ -392,7 +393,7 @@ impl App {
             let prompt = slash::unescape_literal(queued).to_owned();
             match self.ops.try_send(Op::Queue(prompt)) {
                 Ok(()) => self.forwarded_prompts += 1,
-                Err(mpsc::error::TrySendError::Full(_)) => break,
+                Err(TrySendError::Full(_)) => break,
                 Err(e) => {
                     self.surface_send_error(&e);
                     break;

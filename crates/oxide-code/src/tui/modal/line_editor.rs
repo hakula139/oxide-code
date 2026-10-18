@@ -10,6 +10,7 @@ use ratatui::text::{Line, Span};
 use ratatui_textarea::{CursorMove, TextArea};
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
+use crate::tui::cursor::place_clamped;
 use crate::tui::saturating_u16;
 use crate::tui::theme::Theme;
 use crate::util::text::take_head;
@@ -102,7 +103,7 @@ impl LineEditor {
     pub(crate) fn place_cursor(&self, frame: &mut Frame<'_>, area: Rect, y: u16) {
         let column = saturating_u16(self.visible(area.width).1);
         let raw_x = area.x.saturating_add(PROMPT_WIDTH).saturating_add(column);
-        crate::tui::cursor::place_clamped(frame, raw_x, y, area);
+        place_clamped(frame, raw_x, y, area);
     }
 
     /// The text shown in a `width`-column row and the cursor's column within it. The shown slice
