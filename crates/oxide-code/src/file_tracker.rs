@@ -307,6 +307,8 @@ pub(crate) enum TrackableFileError {
     TooLarge { size: u64, max: u64 },
 }
 
+/// Checks that `metadata` names a regular file within [`MAX_TRACKED_FILE_SIZE`]. A FIFO, socket,
+/// or device can report `len() == 0`, so the size check alone would let it through.
 pub(crate) fn validate_trackable_file(metadata: &Metadata) -> Result<(), TrackableFileError> {
     let file_type = metadata.file_type();
     if file_type.is_dir() {

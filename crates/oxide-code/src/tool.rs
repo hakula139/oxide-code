@@ -233,7 +233,7 @@ pub(crate) struct GrepMatchLine {
 /// What a pending approval shows the user, rendered by the tool so the modal only displays it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct ApprovalPreview {
-    /// Tool display label, e.g. `Bash(cargo test)` or `Write(src/main.rs)`.
+    /// Tool display label, such as `Bash(cargo test)` or `Write(src/main.rs)`.
     pub(crate) title: String,
     pub(crate) body: ApprovalBody,
 }
@@ -314,8 +314,8 @@ pub(crate) trait Tool: Send + Sync {
         None
     }
 
-    /// Builds the approval modal's preview of `input`, by default the tool name over its
-    /// [`Self::summarize_call`] label. Async because the write preview reads the file it replaces.
+    /// Builds the approval modal's preview of `input`, by default the tool name over its label from
+    /// [`Self::summarize_call`]. Async because the write preview reads the file it would replace.
     fn approval_preview<'a>(
         &'a self,
         name: &'a str,
@@ -442,9 +442,9 @@ pub(crate) async fn run_capped(tool: &dyn Tool, prepared: Prepared, ctx: &ToolCt
     output
 }
 
-/// Trims `content` to fit under [`MAX_OUTPUT_BYTES`], replacing the middle with a
-/// `... [N bytes truncated, head + tail kept] ...` marker, and returns the original length when it
-/// trims. A slice smaller than the marker stays, since cutting it would grow the output.
+/// Cuts `content` longer than [`MAX_OUTPUT_BYTES`] to its head and tail, at most half the cap each,
+/// around a `... [N bytes truncated, head + tail kept] ...` marker, and returns the original length
+/// when it cuts. A middle shorter than the marker stays, since cutting it would grow the output.
 fn cap_output(content: String) -> (String, Option<usize>) {
     if content.len() <= MAX_OUTPUT_BYTES {
         return (content, None);
@@ -544,7 +544,7 @@ async fn tracker_key(path: &Path) -> PathBuf {
 }
 
 /// Renders a `Name(path)` summary for a call of the tool registered as `name`, showing the
-/// `path_key` field relative to `cwd`, or the bare label when that field is absent.
+/// `path_key` field relative to `cwd`, or the bare label when that field is absent or not a string.
 fn summarize_path_call(
     name: &str,
     input: &serde_json::Value,
@@ -800,7 +800,7 @@ struct Unreadable {
 }
 
 impl Unreadable {
-    /// What walk error `e` failed to read, or `None` when `e` hides nothing from the walk. An ignore
+    /// What walk error `e` failed to read, or `None` if `e` hides nothing from the walk. An ignore
     /// file that failed to load only loses its rules, and a path that vanished mid-walk holds
     /// nothing left to search.
     fn from_walk(e: &ignore::Error) -> Option<Self> {

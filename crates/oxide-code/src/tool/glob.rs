@@ -156,8 +156,8 @@ struct GlobOutput {
 
 /// Lists up to [`MAX_RESULTS`] files under `root` that match `pattern`, newest first and relative
 /// to the root's canonical cwd, until `cancel` fires. Trailing notes name the paths the walk could
-/// not read and count those `read_filter` withholds. A truncated list says so inline and reports
-/// its total on `truncated_total`.
+/// not read and count the matches and unreadable paths `read_filter` withholds. A truncated list
+/// says so inline and reports its total on `truncated_total`.
 fn glob_files(
     pattern: &str,
     root: &SearchRoot,

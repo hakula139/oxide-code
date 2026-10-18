@@ -1,4 +1,4 @@
-//! Combined model + effort picker for bare `/model`. Both axes commit through one [`Op::SetModel`].
+//! Model and effort picker for bare `/model`. Both axes commit through one [`Op::SetModel`].
 
 use crossterm::event::{KeyCode, KeyEvent};
 use ratatui::Frame;

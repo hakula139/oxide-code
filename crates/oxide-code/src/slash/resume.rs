@@ -1052,8 +1052,8 @@ mod tests {
 
     #[test]
     fn footer_hints_follow_esc_with_the_status_and_hide_row_actions_without_rows() {
-        // Three permutations: 1 + current project (singular + scoped), 0 + all projects after
-        // Tab (zero plural + widened), 2 + current project (plural + scoped).
+        // Three cases: one session in the current project (singular, scoped), none in all projects
+        // after Tab (zero plural, widened), and two in the current project (plural, scoped).
         let (_dir, store) = isolated_store();
         seed_session(
             &store,

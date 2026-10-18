@@ -118,7 +118,7 @@ async fn run(raw: serde_json::Value, ctx: &ToolCtx) -> ToolOutput {
 
 /// Reads `path`, resolved against the context's cwd, as a `LINENO\tTEXT` excerpt of at most
 /// `limit` lines and [`OUTPUT_BUDGET`] bytes, and records the lines shown in the context's tracker
-/// for the Read-before-Edit gate. A footer names those lines when the excerpt stops early.
+/// for the Read-before-Edit gate. A footer names those lines when the excerpt leaves lines out.
 ///
 /// Refuses directories, non-regular files, files over the tracked size cap, and binary files, and
 /// strips a leading UTF-8 BOM.

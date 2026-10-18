@@ -874,8 +874,7 @@ fn unquote_word(text: &str, leading: bool) -> Option<(String, bool)> {
     Some((value, glob))
 }
 
-/// A double-quoted string's value: a backslash escapes only `$`, `` ` ``, `"`, `\`, and a line
-/// break.
+/// A double-quoted string's value: a backslash escapes only `$`, `` ` ``, `"`, `\`, and newlines.
 fn unquote_double(inner: &str) -> String {
     let mut value = String::with_capacity(inner.len());
     let mut chars = inner.chars().peekable();

@@ -34,7 +34,7 @@ pub(super) struct ConfirmDeleteSessionModal {
     path: PathBuf,
     session_id: String,
     display_title: String,
-    /// Pre-formatted metadata, such as `14 msgs · 2 hours ago`.
+    /// Pre-formatted metadata, such as `abcd1234 · 2 hours ago · 14 msgs`.
     metadata: String,
     live_session_id: String,
     /// Sticky error from a failed delete attempt. Kept until a deliberate confirm or cancel key.
@@ -107,7 +107,7 @@ impl Modal for ConfirmDeleteSessionModal {
     }
 
     fn handle_key(&mut self, event: &KeyEvent) -> ModalKey {
-        // The modal stack handles Esc and Ctrl+C. Any other key leaves `error` in place.
+        // The modal stack handles Esc and Ctrl+C.
         match event.code {
             KeyCode::Char('y' | 'Y') if is_plain_char(event) => {
                 self.error = None;

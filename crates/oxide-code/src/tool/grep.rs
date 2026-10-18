@@ -1515,7 +1515,6 @@ mod tests {
 
     #[test]
     fn grep_files_count_mode_summary_first() {
-        // Pin summary as the first line so the renderer's title-strip removes it.
         let dir = canonical_tempdir();
         std::fs::write(dir.path().join("a.txt"), "match\n").unwrap();
         std::fs::write(dir.path().join("b.txt"), "match\n").unwrap();
