@@ -807,7 +807,11 @@ mod tests {
         app.handle_crossterm_event(&key_event(KeyCode::Enter, KeyModifiers::NONE));
 
         assert!(!app.input.popup_visible(), "submit clears popup");
-        assert!(!app.chat.last_is_error(), "/help must not push an error");
+        assert_eq!(
+            app.chat.last_error_text(),
+            None,
+            "/help must not push an error"
+        );
         assert_eq!(
             rx.try_recv(),
             Err(TryRecvError::Empty),
@@ -1065,10 +1069,7 @@ mod tests {
             "slash command must not flip input to streaming",
         );
         assert_eq!(app.status_bar.status(), &Status::Idle);
-        assert!(
-            !app.chat.last_is_error(),
-            "/help must not produce an error block",
-        );
+        assert_eq!(app.chat.last_error_text(), None);
         assert_eq!(rx.try_recv(), Err(TryRecvError::Empty));
     }
 
@@ -1079,7 +1080,16 @@ mod tests {
 
         assert_eq!(app.chat.entry_count(), 2);
         assert!(app.input.is_enabled());
-        assert!(app.chat.last_is_error());
+        assert_eq!(
+            app.chat.last_error_text(),
+            Some(
+                "Unknown command: /no-such. \
+                 Available: /archive, /clear, /compact, /config, /delete, /diff, \
+                 /effort, /help, /init, /login, /logout, /mode, /model, /rename, \
+                 /resume, /status, /theme, /unarchive. \
+                 Use //no-such to send the literal text."
+            ),
+        );
         assert_eq!(rx.try_recv(), Err(TryRecvError::Empty));
     }
 
@@ -1091,7 +1101,7 @@ mod tests {
         assert_eq!(app.chat.entry_count(), 1, "only the user message");
         assert!(!app.input.is_enabled(), "streaming disables input");
         assert_eq!(app.status_bar.status(), &Status::Streaming);
-        assert!(!app.chat.last_is_error());
+        assert_eq!(app.chat.last_error_text(), None);
         let forwarded = rx.recv().await.expect("forwarded action");
         assert!(matches!(
             forwarded,
@@ -1152,9 +1162,9 @@ mod tests {
         );
         // User message pushed before try_send, error block after.
         assert_eq!(app.chat.entry_count(), 2);
-        assert!(
-            app.chat.last_is_error(),
-            "closed-channel error should be the final block"
+        assert_eq!(
+            app.chat.last_error_text(),
+            Some("The engine stopped unexpectedly. Restart `ox` to recover."),
         );
     }
 
@@ -1365,7 +1375,7 @@ mod tests {
         );
         // Only the original "active" prompt: /help is modal-only and suppresses its own echo.
         assert_eq!(app.chat.entry_count(), 1);
-        assert!(!app.chat.last_is_error());
+        assert_eq!(app.chat.last_error_text(), None);
         assert!(app.modals.is_active(), "/help opens a modal");
     }
 
@@ -1527,7 +1537,16 @@ mod tests {
 
         assert!(app.pending_prompts.is_empty());
         assert_eq!(rx.try_recv(), Err(TryRecvError::Empty));
-        assert!(app.chat.last_is_error());
+        assert_eq!(
+            app.chat.last_error_text(),
+            Some(
+                "Unknown command: /nope. \
+                 Available: /archive, /clear, /compact, /config, /delete, /diff, \
+                 /effort, /help, /init, /login, /logout, /mode, /model, /rename, \
+                 /resume, /status, /theme, /unarchive. \
+                 Use //nope to send the literal text."
+            ),
+        );
     }
 
     #[tokio::test]

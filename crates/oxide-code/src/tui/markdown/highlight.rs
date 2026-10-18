@@ -131,6 +131,7 @@ mod tests {
     use super::*;
     use crate::tui::theme::load_builtin;
 
+    /// Joins each row's raw span text. `Line::to_string` would drop a line ending left in a span.
     fn all_text(lines: &[Line<'_>]) -> String {
         lines
             .iter()
@@ -186,6 +187,13 @@ mod tests {
             "},
             &Theme::default(),
         );
+        assert_eq!(all_text(&lines), "fn a() {}\nfn b() {}");
+    }
+
+    #[test]
+    fn highlight_code_crlf_input_drops_both_line_end_bytes() {
+        let lines = highlight_code("rust", "fn a() {}\r\nfn b() {}\r\n", &Theme::default());
+
         assert_eq!(all_text(&lines), "fn a() {}\nfn b() {}");
     }
 

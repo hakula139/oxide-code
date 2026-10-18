@@ -911,7 +911,8 @@ mod tests {
         Theme::default()
     }
 
-    /// Renders `input` at `width` and joins each row's spans, with `width == 0` disabling wrapping.
+    /// Renders `input` at `width` and joins each row's raw span text, with `width == 0` disabling
+    /// wrapping. `Line::to_string` would drop a line ending left in a span.
     fn rendered_text_at_width(input: &str, width: usize) -> Vec<String> {
         render_markdown(input, &theme(), width)
             .lines

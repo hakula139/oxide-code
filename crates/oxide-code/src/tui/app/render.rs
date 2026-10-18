@@ -5,10 +5,11 @@
 use std::io::Write as _;
 
 use anyhow::Result;
+use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
-use ratatui::style::Style;
+use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::Paragraph;
+use ratatui::widgets::{Block, Paragraph};
 
 use super::App;
 use crate::tui::components::status::StatusBar;
@@ -70,7 +71,7 @@ impl App {
         Ok(())
     }
 
-    pub(super) fn draw_frame(&mut self, frame: &mut ratatui::Frame<'_>) {
+    pub(super) fn draw_frame(&mut self, frame: &mut Frame<'_>) {
         // The status bar and one chat row stay visible. The modal, or else the input and its
         // popup, outranks the queued-prompt preview, and the preview the task panel.
         let modal_max = frame
@@ -90,10 +91,7 @@ impl App {
         let preview_height = self.preview_height().min(spare);
         let tasks_height = self.tasks.height().min(spare - preview_height);
         // Pre-fill with surface bg so unpainted gaps inherit the theme.
-        frame.render_widget(
-            ratatui::widgets::Block::default().style(self.theme.surface()),
-            frame.area(),
-        );
+        frame.render_widget(Block::default().style(self.theme.surface()), frame.area());
         let [status, chat, tasks, preview, modal, popup, input] = Layout::vertical([
             Constraint::Length(StatusBar::HEIGHT),
             Constraint::Min(MIN_CHAT_HEIGHT),
@@ -149,10 +147,10 @@ impl App {
         }
         let visible = self.pending_prompts.len().min(PREVIEW_VISIBLE);
         let overflow = usize::from(self.pending_prompts.len() > PREVIEW_VISIBLE);
-        u16::try_from(visible + overflow).unwrap_or(u16::MAX)
+        saturating_u16(visible + overflow)
     }
 
-    fn render_preview(&self, frame: &mut ratatui::Frame<'_>, area: ratatui::layout::Rect) {
+    fn render_preview(&self, frame: &mut Frame<'_>, area: Rect) {
         let body_width = usize::from(area.width)
             .saturating_sub(usize::from(USER_PROMPT_PREFIX_WIDTH))
             .saturating_sub(1);
@@ -169,15 +167,12 @@ impl App {
                 self.theme.dim(),
             )));
         }
-        frame.render_widget(
-            ratatui::widgets::Paragraph::new(lines).style(self.theme.surface()),
-            area,
-        );
+        frame.render_widget(Paragraph::new(lines).style(self.theme.surface()), area);
     }
 
     /// Shows the outcome of the last copy at the chat's bottom-left corner, in the width the
     /// jump-to-bottom pill of `jump_width` cells leaves, keeping a cell between them.
-    fn render_copy_notice(&self, frame: &mut ratatui::Frame<'_>, area: Rect, jump_width: u16) {
+    fn render_copy_notice(&self, frame: &mut Frame<'_>, area: Rect, jump_width: u16) {
         let Some(notice) = &self.copy_notice else {
             return;
         };
@@ -257,8 +252,6 @@ fn jump_overlay_label(new_count: u32, width: usize) -> String {
 
 /// Renders a queued prompt as a dim ghost, capped at `body_width` columns.
 fn preview_line(prompt: &str, theme: &Theme, body_width: usize) -> Line<'static> {
-    use ratatui::style::Modifier;
-
     let flat = prompt.replace('\n', NEWLINE_GLYPH);
     let display = truncate_to_width(&flat, body_width);
     let style = theme.queued().add_modifier(Modifier::DIM);

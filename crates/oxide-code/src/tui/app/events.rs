@@ -601,7 +601,10 @@ mod tests {
             "Session write failed: disk full".to_owned(),
         ));
 
-        assert!(app.chat.last_is_error());
+        assert_eq!(
+            app.chat.last_error_text(),
+            Some("Session write failed: disk full")
+        );
         assert_eq!(app.status_bar.title(), Some("First prompt"));
         assert!(app.input.is_enabled());
     }
@@ -1710,13 +1713,20 @@ mod tests {
         app.handle_engine_event(Event::Retrying(
             "HTTP 529 overloaded_error. Retrying in 1 s (retry 1 of 5).".to_owned(),
         ));
-        assert!(!app.chat.last_is_error(), "a retry is not an error block");
+        assert_eq!(
+            app.chat.last_error_text(),
+            None,
+            "a retry is not an error block"
+        );
         let notice = "Skipped instruction file /repo/CLAUDE.md: Permission denied";
         app.handle_engine_event(Event::Notice(notice.to_owned()));
         assert_eq!(app.chat.last_system_text(), Some(notice));
         app.handle_engine_event(Event::Error("Session write failed: disk full".to_owned()));
 
-        assert!(app.chat.last_is_error(), "error entry appended");
+        assert_eq!(
+            app.chat.last_error_text(),
+            Some("Session write failed: disk full")
+        );
         assert_eq!(app.status_bar.status(), &Status::Streaming);
         assert!(!app.input.is_enabled());
         assert_eq!(
@@ -1736,7 +1746,7 @@ mod tests {
         app.dispatch_action(Action::Submit("boom".to_owned()));
         app.handle_engine_event(Event::TurnFailed("API blew up".to_owned()));
 
-        assert!(app.chat.last_is_error(), "error entry appended");
+        assert_eq!(app.chat.last_error_text(), Some("API blew up"));
         assert_eq!(app.status_bar.status(), &Status::Idle);
         assert!(app.input.is_enabled());
     }
@@ -1782,7 +1792,10 @@ mod tests {
             "Auto-compaction failed: summarizer down. The prompt was not sent.".to_owned(),
         ));
 
-        assert!(app.chat.last_is_error());
+        assert_eq!(
+            app.chat.last_error_text(),
+            Some("Auto-compaction failed: summarizer down. The prompt was not sent.")
+        );
         assert_eq!(app.status_bar.status(), &Status::Idle);
         assert!(app.input.is_enabled());
         assert_eq!(

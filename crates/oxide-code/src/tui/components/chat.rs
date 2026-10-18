@@ -339,12 +339,6 @@ impl ChatView {
         self.blocks.len()
     }
 
-    /// Returns whether the tail block is an [`ErrorBlock`].
-    #[cfg(test)]
-    pub(crate) fn last_is_error(&self) -> bool {
-        self.last_error_text().is_some()
-    }
-
     /// Returns the error text of the tail block, if it is an [`ErrorBlock`].
     #[cfg(test)]
     pub(crate) fn last_error_text(&self) -> Option<&str> {
@@ -1666,30 +1660,6 @@ mod tests {
         assert_eq!(chat.viewport.width, 80);
     }
 
-    // ── last_is_error ──
-
-    #[test]
-    fn last_is_error_false_for_non_error_blocks() {
-        let mut chat = test_chat();
-        chat.push_user_message("hello".to_owned());
-        assert!(!chat.last_is_error());
-
-        chat.push_tool_call(call("$", "ls"));
-        assert!(!chat.last_is_error());
-
-        chat.push_tool_result(titled_result("failed", "boom", true));
-        assert!(
-            !chat.last_is_error(),
-            "failed tool result is not an error marker"
-        );
-    }
-
-    #[test]
-    fn last_is_error_false_when_no_blocks() {
-        let chat = test_chat();
-        assert!(!chat.last_is_error());
-    }
-
     // ── last_error_text ──
 
     #[test]
@@ -1699,6 +1669,30 @@ mod tests {
         chat.push_error("boom");
 
         assert_eq!(chat.last_error_text(), Some("boom"));
+    }
+
+    #[test]
+    fn last_error_text_is_none_for_other_blocks() {
+        let mut chat = test_chat();
+        chat.push_user_message("hello".to_owned());
+        assert_eq!(chat.last_error_text(), None);
+
+        chat.push_tool_call(call("$", "ls"));
+        assert_eq!(chat.last_error_text(), None);
+
+        chat.push_tool_result(titled_result("failed", "boom", true));
+        assert_eq!(
+            chat.last_error_text(),
+            None,
+            "a failed tool result is no error block"
+        );
+    }
+
+    #[test]
+    fn last_error_text_is_none_without_blocks() {
+        let chat = test_chat();
+
+        assert_eq!(chat.last_error_text(), None);
     }
 
     // ── last_system_text ──
