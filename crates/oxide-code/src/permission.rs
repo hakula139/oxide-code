@@ -480,7 +480,8 @@ const MAX_SYMLINK_HOPS: usize = 40;
 /// the kernel does. Every existing symlink is followed, a dangling one included since `open`
 /// follows it too, and `..` steps back from wherever the walk stands. Past the first missing
 /// component nothing exists yet, so the rest applies as `create_dir_all` builds it. `None` when a
-/// symlink loop or an unreadable component leaves the location unknown.
+/// symlink loop or an unreachable component, such as one under a file or an unreadable directory,
+/// leaves the location unknown.
 fn resolve(path: &Path) -> Option<PathBuf> {
     let mut resolved = PathBuf::new();
     let mut pending = Vec::new();
@@ -513,17 +514,17 @@ fn resolve(path: &Path) -> Option<PathBuf> {
     }
 
     #[cfg(windows)]
-    let resolved = long_names(resolved);
+    let resolved = long_names(resolved, Path::canonicalize);
     Some(resolved)
 }
 
-/// `path` with its existing part spelled the way the file system opens it: 8.3 short names in full
+/// `path` with its existing part spelled as `canonicalize` names it, with 8.3 short names in full
 /// and NTFS stream suffixes dropped, so `GIT~1` and `.git::$INDEX_ALLOCATION` compare as `.git`.
 #[cfg(windows)]
-fn long_names(path: PathBuf) -> PathBuf {
+fn long_names(path: PathBuf, canonicalize: impl Fn(&Path) -> std::io::Result<PathBuf>) -> PathBuf {
     path.ancestors()
         .find_map(|existing| {
-            let long = std::fs::canonicalize(existing).ok()?;
+            let long = canonicalize(existing).ok()?;
             let mut spelled = respell(existing, &long);
             spelled.extend(path.strip_prefix(existing).ok()?);
             Some(spelled)
@@ -1927,68 +1928,24 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn for_path_unreadable_dir_followed_by_dot_dot_is_not_resolved_lexically() {
-        // The kernel cannot step through `locked` either, so the target keeps its spelling for the
-        // tool to fail on and never auto-allows as `link/x`.
-        use std::os::unix::fs::PermissionsExt;
-
+    fn for_path_dot_dot_past_an_unreachable_component_is_not_resolved_lexically() {
+        // The kernel cannot step through the file `notes` either, so the target keeps its
+        // spelling and never auto-allows as `link/x`.
         let (_dir, cwd) = temp_cwd();
         let (_outside_dir, outside) = temp_cwd();
         std::os::unix::fs::symlink(&outside, cwd.join("link")).unwrap();
-        let locked = cwd.join("locked");
-        std::fs::create_dir(&locked).unwrap();
-        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o000)).unwrap();
-        let enforced = std::fs::read_dir(&locked).is_err();
+        std::fs::write(cwd.join("notes"), "").unwrap();
 
-        let target = Access::for_path("locked/sub/../../link/x", &Workspace::new(&cwd));
-        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755)).unwrap();
-        if !enforced {
-            return;
-        }
+        let target = Access::for_path("notes/sub/../../link/x", &Workspace::new(&cwd));
+
         assert_eq!(
             resolved(&target),
             (
-                cwd.join("locked/sub/../../link/x").as_path(),
+                cwd.join("notes/sub/../../link/x").as_path(),
                 None,
                 Zone::Outside
             ),
         );
-    }
-
-    #[cfg(windows)]
-    #[test]
-    fn for_path_short_names_compare_as_the_long_names_they_open_as() {
-        let (_dir, cwd) = temp_cwd();
-        std::fs::create_dir(cwd.join(".git")).unwrap();
-        std::fs::create_dir(cwd.join("secrets-store")).unwrap();
-        std::fs::write(cwd.join(r"secrets-store\key"), "").unwrap();
-        // Short names exist only where the volume generates them, as the system drive does.
-        if !cwd.join("GIT~1").exists() || !cwd.join("SECRET~1").exists() {
-            return;
-        }
-
-        let target = Access::for_path(r"GIT~1\config", &Workspace::new(&cwd));
-        assert_eq!(
-            resolved(&target),
-            (
-                &*cwd.join(r".git\config"),
-                Some(Path::new(r".git\config")),
-                Zone::Workspace,
-            )
-        );
-        assert_eq!(protected(&target), [Shipped::Git]);
-        let p = policy(Mode::Manual, &[(EDIT, "secrets-store")], &[], &[]);
-        assert_eq!(decide(&p, EDIT, &target), Decision::Ask);
-        let target = Access::for_path(r"SECRET~1\key", &Workspace::new(&cwd));
-        assert_eq!(decide(&p, EDIT, &target), Decision::Deny);
-
-        // A cwd spelled short is still the home directory, which is never a workspace.
-        let home = cwd.join("home-directory");
-        std::fs::create_dir(&home).unwrap();
-        temp_env::with_var(HOME_VAR, Some(&home), || {
-            let target = Access::for_path("notes.md", &Workspace::new(&cwd.join("HOME-D~1")));
-            assert_eq!(resolved(&target).2, Zone::Outside);
-        });
     }
 
     #[cfg(windows)]
@@ -2008,6 +1965,46 @@ mod tests {
         let p = policy(Mode::Manual, &[(EDIT, "secrets-store/key")], &[], &[]);
         let target = Access::for_path(r"secrets-store\key::$DATA", &Workspace::new(&cwd));
         assert_eq!(decide(&p, EDIT, &target), Decision::Deny);
+
+        // A cwd spelled another way is still the home directory, which is never a workspace.
+        let home = cwd.join("home-directory");
+        std::fs::create_dir(&home).unwrap();
+        temp_env::with_var(HOME_VAR, Some(&home), || {
+            let cwd = cwd.join("home-directory::$INDEX_ALLOCATION");
+            let target = Access::for_path("notes.md", &Workspace::new(&cwd));
+            assert_eq!(resolved(&target).2, Zone::Outside);
+        });
+    }
+
+    // ── long_names ──
+
+    #[cfg(windows)]
+    #[test]
+    fn long_names_spells_short_names_in_full_and_keeps_the_missing_tail() {
+        let canonicalize = |path: &Path| {
+            [
+                (r"C:\repo\GIT~1", r"\\?\C:\repo\.git"),
+                (r"C:\repo\SECRET~1\key", r"\\?\C:\repo\secrets-store\key"),
+                (r"S:\GIT~1", r"\\?\C:\work\repo\.git"),
+            ]
+            .into_iter()
+            .find(|(short, _)| path == Path::new(short))
+            .map(|(_, long)| PathBuf::from(long))
+            .ok_or_else(|| std::io::Error::from(std::io::ErrorKind::NotFound))
+        };
+
+        for (path, expected) in [
+            (r"C:\repo\GIT~1\config", r"C:\repo\.git\config"),
+            (r"C:\repo\SECRET~1\key", r"C:\repo\secrets-store\key"),
+            (r"S:\GIT~1\config", r"C:\work\repo\.git\config"),
+            (r"C:\new\notes.md", r"C:\new\notes.md"),
+        ] {
+            assert_eq!(
+                long_names(PathBuf::from(path), canonicalize),
+                Path::new(expected),
+                "{path}",
+            );
+        }
     }
 
     // ── Basis ──
