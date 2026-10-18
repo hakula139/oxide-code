@@ -19,6 +19,24 @@ const MAX_SSE_FRAME_BYTES: usize = 8 * 1024 * 1024;
 #[cfg(test)]
 const MAX_SSE_FRAME_BYTES: usize = 4 * 1024;
 
+/// Runs [`stream_sse`] until it ends or the receiver drops, then forwards any failure on `tx`.
+/// Racing `closed` stops an in-flight request or retry backoff once the consumer is gone.
+pub(super) async fn forward_sse(
+    http: reqwest::Client,
+    request: MessagesRequest,
+    model: String,
+    tx: mpsc::Sender<Result<ResponseEvent>>,
+) {
+    tokio::select! {
+        result = stream_sse(&http, &request, &model, &tx) => {
+            if let Err(e) = result {
+                _ = tx.send(Err(e)).await;
+            }
+        }
+        () = tx.closed() => {}
+    }
+}
+
 /// Drives the streaming `/v1/messages` request and forwards its [`ResponseEvent`]s on `tx`,
 /// retrying an attempt that fails before any content block arrives. Each retry forwards a
 /// [`ResponseEvent::Retrying`] notice first. `model` is the id the request names, which the
@@ -28,7 +46,7 @@ const MAX_SSE_FRAME_BYTES: usize = 4 * 1024;
 /// for transport / HTTP failures, an in-band `error` event, a stream that ends before
 /// `message_stop`, and the frame-size guard. Single malformed frames are logged and skipped so
 /// they do not poison the rest of the turn.
-pub(super) async fn stream_sse(
+async fn stream_sse(
     http: &reqwest::Client,
     request: &MessagesRequest,
     model: &str,
@@ -200,6 +218,7 @@ pub(super) fn parse_sse_frame(frame: &str) -> Result<Option<StreamEvent>> {
 mod tests {
     use std::io::{Read, Write};
     use std::net::{TcpListener, TcpStream};
+    use std::time::Duration;
 
     use indoc::{formatdoc, indoc};
     use wiremock::matchers::{method, path};
@@ -301,6 +320,22 @@ mod tests {
         base_url
     }
 
+    /// Answers one connection with `body` under a longer declared length, then holds the
+    /// connection open until the client hangs up, like a stream stalled mid-reply. Returns the
+    /// base URL.
+    fn serve_stalled(body: &str) -> String {
+        let response = raw_sse_response(body, body.len() + 1);
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let base_url = format!("http://{}", listener.local_addr().unwrap());
+        std::thread::spawn(move || {
+            let (mut socket, _) = listener.accept().unwrap();
+            read_request(&mut socket);
+            socket.write_all(response.as_bytes()).unwrap();
+            while socket.read(&mut [0; 64]).is_ok_and(|read| read > 0) {}
+        });
+        base_url
+    }
+
     /// Reads a request through its `{}` body, so closing the socket after the reply sends no reset.
     fn read_request(socket: &mut TcpStream) {
         let mut request = Vec::new();
@@ -346,6 +381,29 @@ mod tests {
             }],
             ..Response::default()
         })
+    }
+
+    // ── forward_sse ──
+
+    #[tokio::test(start_paused = true)]
+    async fn forward_sse_ends_a_stalled_stream_once_the_receiver_drops() {
+        let request = messages_request(format!("{}/v1/messages", serve_stalled(MESSAGE_START)));
+        let (tx, mut rx) = mpsc::channel(64);
+        let forwarding = tokio::spawn(forward_sse(
+            reqwest::Client::new(),
+            request,
+            "claude-opus-5-5".to_owned(),
+            tx,
+        ));
+        let first = rx.recv().await.map(Result::unwrap);
+
+        drop(rx);
+        let ended = tokio::time::timeout(Duration::from_secs(1), forwarding).await;
+
+        assert_eq!(first, Some(START_USAGE));
+        ended
+            .expect("forward_sse ends once the receiver drops")
+            .unwrap();
     }
 
     // ── stream_sse ──

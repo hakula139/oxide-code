@@ -38,7 +38,7 @@ use crate::tool::ToolDefinition;
 use crate::util::tls::apply_extra_ca_certs;
 
 use betas::{compute_betas, conversation_cache_control, static_prefix_cache_control};
-use sse::stream_sse;
+use sse::forward_sse;
 use wire::{
     CacheControl, ContextManagement, CreateMessageRequest, OutputConfig, RequestMessages,
     RequestMetadata, SystemBlock,
@@ -258,19 +258,7 @@ impl Client {
         let http = self.http.clone();
         let betas = compute_betas(model, thinking.as_ref(), auth.kind(), true).join(",");
         let request = self.messages_request(betas, body, auth)?;
-        let model_id = model.id().to_owned();
-
-        // Racing `closed` stops an in-flight request or retry backoff once the consumer is gone.
-        tokio::spawn(async move {
-            tokio::select! {
-                result = stream_sse(&http, &request, &model_id, &tx) => {
-                    if let Err(e) = result {
-                        _ = tx.send(Err(e)).await;
-                    }
-                }
-                () = tx.closed() => {}
-            }
-        });
+        tokio::spawn(forward_sse(http, request, model.id().to_owned(), tx));
 
         Ok(rx)
     }
@@ -1419,30 +1407,6 @@ mod tests {
             "Anthropic API rate limited (HTTP 429): Too many requests. Retry after 120 s.",
         );
         assert_eq!(server.received_requests().await.unwrap().len(), 1);
-    }
-
-    #[tokio::test]
-    async fn stream_message_receiver_dropped_mid_stream_does_not_deadlock() {
-        let server = MockServer::start().await;
-        Mock::given(method("POST"))
-            .and(path("/v1/messages"))
-            .respond_with(
-                ResponseTemplate::new(200)
-                    .insert_header("content-type", "text/event-stream")
-                    .set_body_string(text_stream_body("", "Hi"))
-                    .set_delay(Duration::from_millis(50)),
-            )
-            .mount(&server)
-            .await;
-
-        let client = test_client(server.uri(), api_key(), TEST_MODEL);
-        let mut rx = client
-            .stream_message(&[Message::user("hi")], &[], None, &[])
-            .unwrap();
-        _ = rx.recv().await;
-        drop(rx);
-        // Give the background task time to observe the closed channel so any panic surfaces here.
-        tokio::time::sleep(Duration::from_millis(80)).await;
     }
 
     #[test]
