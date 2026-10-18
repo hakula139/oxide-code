@@ -430,8 +430,8 @@ const MAX_OUTPUT_BYTES: usize = 128 * 1024;
 
 const TRUNCATION_OVERHEAD: usize = 80;
 
-/// Runs the prepared call on `tool` and caps its content at [`MAX_OUTPUT_BYTES`], recording the
-/// pre-cap length in `metadata.truncated_bytes`. This backs up the row caps each tool applies.
+/// Runs the prepared call on `tool`, applying [`cap_output`] after each tool's row caps.
+/// Records the original length in `metadata.truncated_bytes` when truncated.
 pub(crate) async fn run_capped(tool: &dyn Tool, prepared: Prepared, ctx: &ToolCtx) -> ToolOutput {
     let mut output = tool.run(prepared, ctx).await;
     let (content, original_len) = cap_output(output.content);
@@ -442,9 +442,9 @@ pub(crate) async fn run_capped(tool: &dyn Tool, prepared: Prepared, ctx: &ToolCt
     output
 }
 
-/// Cuts `content` longer than [`MAX_OUTPUT_BYTES`] to its head and tail, at most half the cap each,
-/// around a `... [N bytes truncated, head + tail kept] ...` marker, and returns the original length
-/// when it cuts. A middle shorter than the marker stays, since cutting it would grow the output.
+/// Truncates content above [`MAX_OUTPUT_BYTES`], keeping roughly half that many bytes from each end
+/// at UTF-8 boundaries plus an omission marker. Returns the original length when truncated.
+/// Leaves content unchanged if the omitted middle is shorter than [`TRUNCATION_OVERHEAD`] bytes.
 fn cap_output(content: String) -> (String, Option<usize>) {
     if content.len() <= MAX_OUTPUT_BYTES {
         return (content, None);

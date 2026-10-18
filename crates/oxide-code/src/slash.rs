@@ -43,8 +43,8 @@ pub(crate) fn filter_built_ins(query: &str) -> Vec<MatchedCommand> {
     matcher::filter_and_rank(query, registry::BUILT_INS)
 }
 
-/// Typed-arg completions for `cmd_name` that start with `prefix`, empty for an unknown command or
-/// one without a curated roster.
+/// Curated arg completions for `cmd_name`, matching ASCII case-insensitively with prefix matches
+/// before other substring matches. Unknown commands and commands without a roster return no rows.
 pub(crate) fn complete_arg_for(cmd_name: &str, prefix: &str) -> Vec<ArgCompletion> {
     registry::lookup_in(registry::BUILT_INS, cmd_name)
         .map(|cmd| cmd.complete_arg(prefix))

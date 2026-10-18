@@ -110,7 +110,8 @@ pub(super) trait SlashCommand: Sync {
         None
     }
 
-    /// Curated arg suggestions, prefix-filtered and ranked. Empty → no autocomplete.
+    /// Curated arg suggestions, matching ASCII case-insensitively with prefix matches before other
+    /// substring matches. An empty result disables autocomplete.
     fn complete_arg(&self, _prefix: &str) -> Vec<ArgCompletion> {
         Vec::new()
     }
