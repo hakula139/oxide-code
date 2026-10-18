@@ -18,10 +18,6 @@ result-*
 # OS files
 .DS_Store
 
-# Environment
-.env
-.env.local
-
 # Editor / assistant local settings
 .agents/plans
 .claude/agent-memory-local
