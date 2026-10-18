@@ -658,11 +658,10 @@ mod tests {
     #[test]
     fn handle_key_empty_stack_delivers_nothing() {
         let mut stack = ModalStack::default();
-        assert!(
-            stack
-                .handle_key(&KeyEvent::from(KeyCode::Char('s')))
-                .is_none()
-        );
+
+        let outcome = stack.handle_key(&KeyEvent::from(KeyCode::Char('s')));
+
+        assert!(outcome.is_none());
         assert!(!stack.is_active());
     }
 

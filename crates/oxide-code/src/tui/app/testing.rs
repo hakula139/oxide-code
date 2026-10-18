@@ -3,9 +3,7 @@
 use std::io::{self, Write};
 use std::sync::{Arc, Mutex};
 
-use crossterm::event::{
-    Event as CrosstermEvent, KeyCode, KeyEvent, KeyModifiers, MouseEvent, MouseEventKind,
-};
+use crossterm::event::{KeyCode, KeyEvent};
 use ratatui::backend::TestBackend;
 use ratatui::layout::Rect;
 use ratatui::prelude::CrosstermBackend;
@@ -81,19 +79,6 @@ pub(super) fn five_hour_limit() -> RateLimits {
         }),
         seven_day: None,
     }
-}
-
-pub(super) fn mouse_event(kind: MouseEventKind) -> CrosstermEvent {
-    mouse_event_at(kind, 0, 0)
-}
-
-pub(super) fn mouse_event_at(kind: MouseEventKind, column: u16, row: u16) -> CrosstermEvent {
-    CrosstermEvent::Mouse(MouseEvent {
-        kind,
-        column,
-        row,
-        modifiers: KeyModifiers::NONE,
-    })
 }
 
 /// Minimal modal for layout tests: paints `title` on its only row, ignores keys.

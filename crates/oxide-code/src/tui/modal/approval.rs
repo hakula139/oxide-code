@@ -1083,10 +1083,8 @@ mod tests {
     fn unrecognized_keys_consume_silently() {
         let mut modal = command_modal("ls");
         for code in [KeyCode::Char('z'), KeyCode::Tab] {
-            assert!(matches!(
-                modal.handle_key(&KeyEvent::from(code)),
-                ModalKey::Consumed
-            ));
+            let outcome = modal.handle_key(&KeyEvent::from(code));
+            assert!(matches!(outcome, ModalKey::Consumed));
         }
     }
 
@@ -1164,11 +1162,9 @@ mod tests {
         let mut modal = granted_modal("cargo test");
         modal.handle_key(&KeyEvent::from(KeyCode::Char('a')));
         render_to_string(&modal, 60, modal.height(60, 40));
+        let outcome = modal.handle_key(&KeyEvent::from(KeyCode::Enter));
         assert!(
-            matches!(
-                modal.handle_key(&KeyEvent::from(KeyCode::Enter)),
-                ModalKey::Consumed
-            ),
+            matches!(outcome, ModalKey::Consumed),
             "an Enter typed right behind the `a` must not grant the rule"
         );
 
@@ -1266,11 +1262,9 @@ mod tests {
         let editing = render_to_string(&modal, 60, modal.height(60, 40));
         assert!(editing.contains(FEEDBACK_LABEL), "{editing}");
         assert!(editing.contains("[Enter] deny with feedback"), "{editing}");
+        let outcome = modal.handle_key(&KeyEvent::from(KeyCode::Enter));
         assert!(
-            matches!(
-                modal.handle_key(&KeyEvent::from(KeyCode::Enter)),
-                ModalKey::Consumed
-            ),
+            matches!(outcome, ModalKey::Consumed),
             "an empty answer submits nothing"
         );
 

@@ -171,10 +171,8 @@ mod tests {
     fn submitted(current: Mode, keys: &[KeyCode]) -> Option<Op> {
         let mut picker = ModePicker::new(current);
         for &code in keys {
-            assert!(matches!(
-                picker.handle_key(&KeyEvent::from(code)),
-                ModalKey::Consumed
-            ));
+            let outcome = picker.handle_key(&KeyEvent::from(code));
+            assert!(matches!(outcome, ModalKey::Consumed));
         }
         match picker.handle_key(&KeyEvent::from(KeyCode::Enter)) {
             ModalKey::Submitted(ModalAction::Dispatch(Action::Op(op))) => Some(op),

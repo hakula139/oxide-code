@@ -33,16 +33,6 @@ impl KeyChord {
             && (!matches!(self.code, KeyCode::Char(_))
                 || event.modifiers.contains(KeyModifiers::CONTROL) == self.ctrl)
     }
-
-    #[cfg(test)]
-    pub(crate) fn event(self) -> KeyEvent {
-        let modifiers = if self.ctrl {
-            KeyModifiers::CONTROL
-        } else {
-            KeyModifiers::NONE
-        };
-        KeyEvent::new(self.code, modifiers)
-    }
 }
 
 impl fmt::Display for KeyChord {
@@ -93,11 +83,6 @@ impl<A: Copy, V> Keymap<A, V> {
         self.actions.iter().filter_map(move |entry| {
             (entry.label)(view).map(|label| (entry.action, format!("{} {label}", entry.key)))
         })
-    }
-
-    #[cfg(test)]
-    pub(crate) fn actions(&self) -> &[KeyAction<A, V>] {
-        self.actions
     }
 }
 
