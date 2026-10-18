@@ -6,6 +6,7 @@ use super::rows::prefixed_row;
 use super::{ChatBlock, RenderCtx};
 use crate::tui::glyphs::{USER_PROMPT_CONT, USER_PROMPT_PREFIX};
 use crate::tui::wrap::expand_tabs;
+use crate::util::text::trim_blank_edges;
 
 /// A user-typed message.
 pub(crate) struct UserMessage {
@@ -24,7 +25,7 @@ impl ChatBlock for UserMessage {
         let text_style = ctx.theme.text();
 
         let mut out = Vec::new();
-        for (i, text_line) in self.text.trim().lines().enumerate() {
+        for (i, text_line) in trim_blank_edges(&self.text).lines().enumerate() {
             let prefix = if i == 0 {
                 USER_PROMPT_PREFIX
             } else {
@@ -58,5 +59,16 @@ mod tests {
         let lines = UserMessage::new("a\tb\n\tc").render(&ctx_at(40, &theme));
         let rows: Vec<String> = lines.iter().map(ToString::to_string).collect();
         assert_eq!(rows, ["❯ a   b", "      c"]);
+    }
+
+    #[test]
+    fn render_keeps_the_first_line_indent_and_drops_blank_edges() {
+        let theme = Theme::default();
+
+        let lines = UserMessage::new("\n    fn main() {\n        body\n    }\n\n")
+            .render(&ctx_at(40, &theme));
+
+        let rows: Vec<String> = lines.iter().map(ToString::to_string).collect();
+        assert_eq!(rows, ["❯     fn main() {", "          body", "      }"]);
     }
 }

@@ -1,5 +1,5 @@
-//! Text helpers: display-width-aware truncation, count-based pluralization, sentence joining, and
-//! escaping for terminal output.
+//! Text helpers: display-width-aware truncation, count-based pluralization, sentence joining,
+//! blank-edge trimming, and escaping for terminal output.
 
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
@@ -31,6 +31,15 @@ pub(crate) fn join_sentences(text: &str, next: &str) -> String {
         ". "
     };
     format!("{text}{separator}{next}")
+}
+
+/// Drops `text`'s trailing whitespace and leading blank lines, keeping the first line's indent.
+pub(crate) fn trim_blank_edges(text: &str) -> &str {
+    let text = text.trim_end();
+    let start = text.find(|c: char| !c.is_whitespace()).map_or(0, |first| {
+        text[..first].rfind('\n').map_or(0, |newline| newline + 1)
+    });
+    &text[start..]
 }
 
 /// Truncates `s` to `max_width` display columns between grapheme clusters, appending
@@ -162,6 +171,22 @@ mod tests {
         ] {
             assert_eq!(join_sentences(text, "Retry later."), expected);
         }
+    }
+
+    // ── trim_blank_edges ──
+
+    #[test]
+    fn trim_blank_edges_keeps_the_indent_of_the_first_line_with_text() {
+        assert_eq!(
+            trim_blank_edges("\n \t\n    fn main() {}\n  done \n\n"),
+            "    fn main() {}\n  done",
+        );
+        assert_eq!(trim_blank_edges("  single"), "  single");
+    }
+
+    #[test]
+    fn trim_blank_edges_empties_all_blank_text() {
+        assert_eq!(trim_blank_edges(" \n\t\n "), "");
     }
 
     // ── truncate_to_width ──
