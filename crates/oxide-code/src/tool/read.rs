@@ -589,7 +589,7 @@ mod tests {
         let err = read_file(path, None, None, &temp_ctx()).await.unwrap_err();
 
         let cause = std::fs::metadata(path).unwrap_err();
-        assert_eq!(err, format!("Failed to read {path}: {cause}"));
+        assert_eq!(err, format!("Failed to access {path}: {cause}"));
     }
 
     #[tokio::test]

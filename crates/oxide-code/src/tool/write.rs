@@ -180,7 +180,8 @@ async fn check_gate(path: &Path, shown: &str, tracker: &FileTracker) -> Result<(
         .map_err(|e| e.to_string())
 }
 
-/// Reads the existing target `path`, spelled `shown`, if [`validate_write_target`] accepts it.
+/// Reads the existing target `path`, spelled `shown`. The no-follow open refuses a symlink, and
+/// [`validate_write_target`] refuses a non-regular or oversized file.
 async fn read_target(path: &Path, shown: &str) -> Result<Vec<u8>, String> {
     let (_, bytes) = super::read_validated(path, shown, |metadata| {
         validate_write_target(shown, metadata)

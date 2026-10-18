@@ -652,9 +652,12 @@ async fn read_validated(
     shown: &str,
     validate: impl Fn(&std::fs::Metadata) -> Result<(), String>,
 ) -> Result<(std::fs::Metadata, Vec<u8>), String> {
-    let error = |e: std::io::Error| format!("Failed to read {shown}: {e}");
-    validate(&tokio::fs::metadata(path).await.map_err(error)?)?;
+    let metadata = tokio::fs::metadata(path)
+        .await
+        .map_err(|e| format!("Failed to access {shown}: {e}"))?;
+    validate(&metadata)?;
 
+    let error = |e: std::io::Error| format!("Failed to read {shown}: {e}");
     let mut options = std::fs::OpenOptions::new();
     options.read(true);
     let mut file = open_no_follow(path, options).await.map_err(error)?;
