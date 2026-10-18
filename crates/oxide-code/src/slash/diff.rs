@@ -469,15 +469,12 @@ mod tests {
     #[test]
     fn run_git_in_propagates_stderr_on_failure() {
         let (_dir, repo) = fresh_repo();
-        let err = with_isolated_git_env(|| run_git_in(&repo, &["cat-file", "-t", "deadbeef"]))
-            .unwrap_err();
-        let msg = format!("{err:#}");
-        let has_sha = msg.contains("deadbeef");
-        let has_not_valid = msg.to_ascii_lowercase().contains("not a valid");
-        assert!(
-            has_sha || has_not_valid,
-            "expected git error to surface, got: {msg}",
-        );
+        let args = ["cat-file", "-t", "deadbeef"];
+        let stderr = isolated_git(&repo).args(args).output().unwrap().stderr;
+
+        let err = with_isolated_git_env(|| run_git_in(&repo, &args)).unwrap_err();
+
+        assert_eq!(format!("{err:#}"), String::from_utf8_lossy(&stderr).trim());
     }
 
     // ── git_output ──
