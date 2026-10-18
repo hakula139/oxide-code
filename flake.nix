@@ -50,13 +50,14 @@
           overlays = [ rust-overlay.overlays.default ];
         };
 
-        rustToolchain = (pkgs.rust-bin.fromRustupToolchainFile ./rust-toolchain.toml).override {
-          extensions = [
+        rustToolchain = pkgs.rust-bin.fromRustupToolchainFile ./rust-toolchain.toml;
+        rustDevToolchain = rustToolchain.override (prev: {
+          extensions = prev.extensions ++ [
             "llvm-tools-preview"
             "rust-analyzer"
             "rust-src"
           ];
-        };
+        });
 
         oxide-code = pkgs.callPackage ./package.nix {
           rustPlatform = pkgs.makeRustPlatform {
@@ -156,17 +157,19 @@
         devShells.default = pkgs.mkShell {
           name = "oxide-code-dev";
 
-          packages =
-            preCommit.enabledPackages
-            ++ [ rustToolchain ]
-            ++ (with pkgs; [
-              cargo-deny
-              cargo-llvm-cov
-              cargo-mutants
-              git-cliff
-              nodejs_24
-              pnpm
-            ]);
+          # The rustfmt hook puts the plain toolchain on PATH, so the dev toolchain must come first.
+          packages = [
+            rustDevToolchain
+          ]
+          ++ preCommit.enabledPackages
+          ++ (with pkgs; [
+            cargo-deny
+            cargo-llvm-cov
+            cargo-mutants
+            git-cliff
+            nodejs_24
+            pnpm
+          ]);
 
           # git-hooks.nix stores a hooks path relative to the main checkout, which linked worktrees
           # can't resolve (cachix/git-hooks.nix#688), so commits there would skip the hooks.
