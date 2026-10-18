@@ -66,7 +66,7 @@ impl PickerItem for ModelRow {
 
 pub(super) struct ModelEffortPicker {
     list: ListPicker<ModelRow>,
-    /// Active model at open. Compared on submit to detect a model-axis change.
+    /// Active model at open.
     active_model: String,
     /// Active effort at open. A model swap carries it over, so it seeds every row's effort axis.
     active_effort: Option<Effort>,
@@ -75,7 +75,7 @@ pub(super) struct ModelEffortPicker {
 }
 
 impl ModelEffortPicker {
-    /// Infallible because every catalog row has an effort axis. A session on an id outside the
+    /// Infallible because every catalog row has an effort axis. A session on an ID outside the
     /// catalog opens on the default model's row.
     pub(super) fn new(info: &LiveSessionInfo) -> Self {
         let model = &info.config.model;

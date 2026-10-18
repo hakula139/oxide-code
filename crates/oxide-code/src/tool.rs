@@ -147,7 +147,6 @@ impl ToolOutput {
         self
     }
 
-    /// Records the unbounded match count for a truncated result.
     fn with_truncated_total(mut self, total: usize) -> Self {
         self.metadata.truncated_total = Some(total);
         self
@@ -231,14 +230,11 @@ pub(crate) struct GrepMatchLine {
 
 // ── Approval Preview ──
 
-/// What a pending approval shows the user. The body is pre-rendered by the tool's gate seam so the
-/// modal stays display-only.
+/// What a pending approval shows the user, rendered by the tool so the modal only displays it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct ApprovalPreview {
     /// Tool display label, e.g. `Bash(cargo test)` or `Write(src/main.rs)`.
     pub(crate) title: String,
-    /// Body lines: an edit / write diff or the command string, capped to a display height when the
-    /// modal flattens it for render.
     pub(crate) body: ApprovalBody,
 }
 
@@ -254,13 +250,10 @@ pub(crate) enum ApprovalBody {
 
 // ── Tool Trait ──
 
-/// A tool that the agent can invoke.
-///
-/// Per-instance metadata (spec, icon, input summary) lives on the trait, so adding a tool means
-/// editing only its module.
+/// A tool the agent can invoke.
 pub(crate) trait Tool: Send + Sync {
-    /// The tool's name, description, schema, permission class, and parallel safety. The class has
-    /// no default, so a new tool cannot silently inherit a permissive one.
+    /// The tool's spec. Its permission class has no default, so a new tool cannot inherit a
+    /// permissive one.
     fn spec(&self) -> ToolSpec;
 
     /// The input field naming the file this call acts on, if any, which the default
@@ -321,9 +314,8 @@ pub(crate) trait Tool: Send + Sync {
         None
     }
 
-    /// Builds the approval modal's preview of the prepared `input`: the tool name over the
-    /// [`Self::summarize_call`] label by default, a diff for edit and write, or `Bash (background)`
-    /// over a background command. Async because the write preview reads the file it would replace.
+    /// Builds the approval modal's preview of `input`, by default the tool name over its
+    /// [`Self::summarize_call`] label. Async because the write preview reads the file it replaces.
     fn approval_preview<'a>(
         &'a self,
         name: &'a str,
@@ -368,11 +360,8 @@ fn pascal_case(name: &str) -> String {
 
 // ── Tool Registry ──
 
-/// Owns the set of [`Tool`]s available to the agent, each with the spec it registered with, and
-/// dispatches calls by name.
-///
-/// The registry is built once at session start with the tools the model is allowed to invoke.
-/// Lookups are linear over a small `Vec` (registry size is fixed at < 10), so no map is needed.
+/// The [`Tool`]s available to the agent, each with the spec it registered with, looked up by name.
+/// The set is small and fixed, so lookups scan a `Vec`.
 pub(crate) struct ToolRegistry {
     tools: Vec<(ToolSpec, Box<dyn Tool>)>,
 }
@@ -411,9 +400,8 @@ impl ToolRegistry {
         )
     }
 
-    /// Resolves the structured result view for a tool call, with paths relative to `cwd`. Errors
-    /// short-circuit to [`ToolResultView::Text`] regardless of the tool's preference, so failure
-    /// messages render consistently across the chat. Unknown tool names also fall back to text.
+    /// Resolves the result view for a tool call, with paths relative to `cwd`. Errors and unknown
+    /// tools render as [`ToolResultView::Text`].
     pub(crate) fn result_view(
         &self,
         name: &str,
@@ -442,9 +430,8 @@ const MAX_OUTPUT_BYTES: usize = 128 * 1024;
 
 const TRUNCATION_OVERHEAD: usize = 80;
 
-/// Runs the prepared call on `tool` and enforces the [`MAX_OUTPUT_BYTES`] byte safety net on its
-/// content, recording the pre-cap length on `metadata.truncated_bytes` if trimming fired. Per-tool
-/// row caps run inside each tool, so this is the last-line defense against pathological output.
+/// Runs the prepared call on `tool` and caps its content at [`MAX_OUTPUT_BYTES`], recording the
+/// pre-cap length in `metadata.truncated_bytes`. This backs up the row caps each tool applies.
 pub(crate) async fn run_capped(tool: &dyn Tool, prepared: Prepared, ctx: &ToolCtx) -> ToolOutput {
     let mut output = tool.run(prepared, ctx).await;
     let (content, original_len) = cap_output(output.content);
@@ -455,12 +442,9 @@ pub(crate) async fn run_capped(tool: &dyn Tool, prepared: Prepared, ctx: &ToolCt
     output
 }
 
-/// Trims `content` to fit under [`MAX_OUTPUT_BYTES`], keeping the head and tail and replacing the
-/// middle with a `... [N bytes truncated, head + tail kept] ...` marker.
-///
-/// Returns `(content, original_len)`, where `original_len` is `Some` only when truncation fired so
-/// the caller can record the pre-cap size. Skips truncation when the omitted slice is smaller than
-/// the marker, which would otherwise grow the output.
+/// Trims `content` to fit under [`MAX_OUTPUT_BYTES`], replacing the middle with a
+/// `... [N bytes truncated, head + tail kept] ...` marker, and returns the original length when it
+/// trims. A slice smaller than the marker stays, since cutting it would grow the output.
 fn cap_output(content: String) -> (String, Option<usize>) {
     if content.len() <= MAX_OUTPUT_BYTES {
         return (content, None);
@@ -489,8 +473,7 @@ fn cap_output(content: String) -> (String, Option<usize>) {
 
 // ── Input Parsing ──
 
-/// Deserializes a tool's typed input from the raw JSON the agent loop hands us. On failure returns
-/// the "Invalid input: ..." message the model reads.
+/// Deserializes a tool's typed input, or returns the `Invalid input: ...` message the model reads.
 fn parse_input<T: DeserializeOwned>(raw: serde_json::Value) -> Result<T, String> {
     serde_json::from_value(raw).map_err(|e| invalid_input(&e))
 }
@@ -560,12 +543,8 @@ async fn tracker_key(path: &Path) -> PathBuf {
     )
 }
 
-/// Renders a `Name(path)` summary for a call of the tool registered as `name` whose primary
-/// argument is a filesystem path.
-///
-/// `path_key` names the JSON field to extract from `input` (e.g. `"file_path"`, `"path"`).
-/// Falls back to the bare tool label when the field is absent or non-string. The path renders
-/// through [`display_path`] so it appears relative to `cwd`.
+/// Renders a `Name(path)` summary for a call of the tool registered as `name`, showing the
+/// `path_key` field relative to `cwd`, or the bare label when that field is absent.
 fn summarize_path_call(
     name: &str,
     input: &serde_json::Value,
@@ -579,11 +558,8 @@ fn summarize_path_call(
     }
 }
 
-/// Renders `path` for chat display.
-///
-/// Strips `base` if it's a prefix. When `path == base` the relative path is empty, so this returns
-/// the file name (`foo.rs`). Paths outside `base` render as their full string. Either form is
-/// [`slash_separated`], and lossy UTF-8 conversion is fine since the result is display-only.
+/// Renders `path` for chat display, relative to `base` when under it, as its file name when it is
+/// `base` itself, and in full otherwise.
 fn display_path(path: &Path, base: &Path) -> String {
     let shown = match path.strip_prefix(base) {
         Ok(rel) if rel.as_os_str().is_empty() => path.file_name().map_or(path, Path::new),
@@ -593,9 +569,7 @@ fn display_path(path: &Path, base: &Path) -> String {
     slash_separated(shown)
 }
 
-/// Returns the trailing filename component, falling back to the input string when no component
-/// can be extracted (root path, non-UTF-8 component). The fallback is what makes this safe to
-/// call on user-supplied path strings.
+/// Returns the trailing file name of `path`, or `path` itself when it has none or it is not UTF-8.
 fn file_name(path: &str) -> &str {
     Path::new(path)
         .file_name()
@@ -635,8 +609,7 @@ fn validate_file_target(
 
 const BINARY_CHECK_SIZE: usize = 8192;
 
-/// Heuristic: a NUL byte in the first 8 KiB marks the file as binary. Git uses the same rule, and
-/// it is cheap enough to run before every text-mode read.
+/// Returns whether `bytes` hold a NUL in the first 8 KiB, which Git takes to mean binary.
 fn is_binary(bytes: &[u8]) -> bool {
     bytes.iter().take(BINARY_CHECK_SIZE).any(|&b| b == 0)
 }
@@ -1098,7 +1071,7 @@ pub(crate) mod testing {
         CanonicalTempDir { _dir: dir, path }
     }
 
-    /// A symlink to a file. Windows needs Developer Mode or admin rights for it, which CI has.
+    /// Creates a symlink to a file. Windows needs Developer Mode or admin rights, which CI has.
     pub(crate) fn symlink_file(target: &Path, link: &Path) {
         #[cfg(unix)]
         std::os::unix::fs::symlink(target, link).unwrap();
@@ -1253,7 +1226,6 @@ mod tests {
 
     #[test]
     fn tool_catalog_classes_and_parallel_safety_match_each_tool() {
-        // Only the file reads and searches may run alongside each other.
         let catalog: Vec<_> = all_tools()
             .iter()
             .map(|t| {
@@ -1444,8 +1416,6 @@ mod tests {
 
     #[test]
     fn spec_class_rules_cover_every_tool_in_the_class() {
-        // Rules address classes: a `read` deny must stop grep and glob from dumping the file it
-        // names, and an `edit` deny must stop write as well as edit.
         let dir = canonical_tempdir();
         std::fs::write(dir.path().join(".env"), "SECRET=1").unwrap();
         let deny = [
@@ -1525,8 +1495,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn prepare_follows_a_symlink_out_of_the_workspace_to_its_target() {
-        // A link inside the cwd that points elsewhere must resolve to where the call lands, so the
-        // edit gate sees an outside path and the tool opens that same path.
+        // The edit gate must see the outside path that the tool then opens.
         let dir = canonical_tempdir();
         let (cwd, outside) = (dir.path().join("repo"), dir.path().join("outside"));
         std::fs::create_dir(&cwd).unwrap();

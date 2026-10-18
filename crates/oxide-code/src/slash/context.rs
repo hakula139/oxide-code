@@ -7,10 +7,8 @@ use crate::config::ConfigSnapshot;
 use crate::permission::rule::Rule;
 use crate::tool::bash::background::BackgroundShell;
 
-/// Live snapshot of the running session handed to every slash command. Built at TUI startup and
-/// kept current from engine events, so commands always see the current model, effort, session id,
-/// and theme. Distinct from [`crate::session::entry::SessionInfo`], which is the
-/// persisted JSONL record consumed by `--list`.
+/// Snapshot of the running session handed to every slash command, kept current from engine
+/// events. The saved record `--list` reads is [`crate::session::entry::SessionInfo`].
 pub(crate) struct LiveSessionInfo {
     pub(crate) cwd: String,
     /// The real path behind the display `cwd`, for the status bar's git probes, `/diff`, and the

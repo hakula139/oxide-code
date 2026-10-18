@@ -59,8 +59,7 @@ impl SlashCommand for ResumeCmd {
     }
 
     fn classify(&self, _args: &str) -> SlashKind {
-        // Mutating in both forms: bare opens a picker that submits a Resume op, and typed-arg
-        // forwards one directly. The engine drops mid-turn ops, so both forms wait for idle.
+        // Both forms send a `Resume` op, which the engine drops mid-turn, so both wait for idle.
         SlashKind::Mutating
     }
 
@@ -93,12 +92,9 @@ struct SessionRow {
     local_offset: UtcOffset,
     title: String,
     /// `0` when no `Summary` line was found, as in a session that never finalized.
-    /// Rendered as "N msgs" so the user can see session weight at a glance.
     message_count: u32,
     git_branch: Option<String>,
-    /// `Some` only when the picker scope is widened to all projects, so the metadata column can
-    /// surface the project path for disambiguation. Scoped picks already share a project, so
-    /// painting it would be noise.
+    /// `Some` only when the picker spans every project, where the path tells rows apart.
     project: Option<String>,
     haystack: String,
 }
@@ -107,8 +103,7 @@ impl SessionRow {
     fn from_info(info: SessionInfo, local_offset: UtcOffset, show_project: bool) -> Self {
         let title = display_title(&info);
         let project_path = tildify(Path::new(&info.cwd));
-        // Project participates in search only when the user can see it. In scoped mode every row
-        // shares the same project, so substring-matching against it just confuses the filter.
+        // The project is searchable only when shown, since every scoped row shares it.
         let haystack = if show_project {
             format!("{} {} {}", info.session_id, title, project_path)
         } else {
@@ -141,7 +136,7 @@ impl SessionRow {
 }
 
 impl SearchableItem for SessionRow {
-    /// Each row paints a title, a metadata line, and a blank line that separates sessions.
+    // Each row paints a title, a metadata line, and a blank line that separates sessions.
     const ROW_HEIGHT: u16 = 3;
 
     fn haystack(&self) -> Cow<'_, str> {
@@ -420,9 +415,8 @@ impl ResumePicker {
         }
     }
 
-    /// Builds and pushes the [`ConfirmDeleteSessionModal`] for the cursor row. No-op (key
-    /// consumed silently) when the list is empty, so an accidental Ctrl+D with no row selected
-    /// doesn't surface anything misleading.
+    /// Opens the [`ConfirmDeleteSessionModal`] for the cursor row, or consumes the key when the
+    /// list is empty.
     fn start_delete_confirm(&self) -> ModalKey {
         let Some(row) = self.list.selected() else {
             return ModalKey::Consumed;
@@ -492,7 +486,6 @@ impl Modal for ResumePicker {
         };
         self.list.render(frame, list_area, theme);
 
-        // Load error owns the footer when set, so failure doesn't look like "0 sessions".
         match (&self.load_error, &self.notice) {
             (Some(err), _) | (None, Some(Notice::Error(err))) => render_footer_text(
                 frame,
@@ -542,7 +535,7 @@ impl Modal for ResumePicker {
             .then_some(ModalAction::Dispatch(Action::Op(Op::Shutdown)))
     }
 
-    /// Esc dispatches through [`ACTIONS`], so its key and hint stay in one table.
+    // Esc dispatches through `ACTIONS`, so its key and hint stay in one table.
     fn captures_esc(&self) -> bool {
         true
     }
@@ -598,8 +591,6 @@ mod tests {
 
     #[test]
     fn classify_is_always_mutating() {
-        // Both forms reach the engine (typed-arg → Forward, picker → modal-submitted Resume),
-        // and mid-turn ops get dropped, so neither may run while busy.
         assert_eq!(ResumeCmd.classify(""), SlashKind::Mutating);
         assert_eq!(ResumeCmd.classify("   "), SlashKind::Mutating);
         assert_eq!(ResumeCmd.classify("ab"), SlashKind::Mutating);
@@ -715,8 +706,6 @@ mod tests {
 
     #[test]
     fn from_info_in_scoped_mode_omits_project_from_haystack_and_metadata() {
-        // Every row in the current scope shares the project, so showing it would add noise and
-        // let the substring filter match on it.
         let info = raw_session_info(
             stamped_id(0xab),
             "/work/oxide",
@@ -818,7 +807,7 @@ mod tests {
 
     #[test]
     fn render_metadata_includes_msg_count_and_git_branch_when_present() {
-        // The full picker row: id · time · N msgs · branch · project, in both `1 msg` and
+        // The full picker row: ID · time · N msgs · branch · project, in both `1 msg` and
         // `5 msgs` forms.
         let info = raw_session_info_full(
             stamped_id(0xab),
@@ -914,8 +903,6 @@ mod tests {
 
     #[test]
     fn new_filters_out_live_session_to_block_self_resume() {
-        // Critical invariant: the live session id never appears as a row, so the user can't
-        // submit a Resume that would race the open append-writer.
         let (_dir, store) = isolated_store();
         let live_id = stamped_id(0x11);
         seed_session(
@@ -1004,7 +991,6 @@ mod tests {
 
     #[test]
     fn reload_sets_load_error_and_clears_rows_when_list_paged_fails() {
-        // `load_error` lets the footer tell a failed load apart from "0 sessions".
         let (dir, store) = isolated_store();
         let project_dir = crate::session::store::testing::test_project_dir(dir.path());
         std::fs::remove_dir_all(&project_dir).unwrap();
@@ -1410,8 +1396,7 @@ mod tests {
 
     #[test]
     fn handle_key_tab_widens_scope_to_other_project_sessions_and_preserves_query() {
-        // Tab widens the scoped picker and keeps the typed filter, while the live session stays
-        // out of the widened rows so the user can't resume it.
+        // The live session stays out of the widened rows.
         let dir = tempfile::tempdir().unwrap();
         let store = test_store(dir.path());
         seed_session(
@@ -1518,8 +1503,6 @@ mod tests {
 
     #[test]
     fn handle_key_unrecognized_keys_are_consumed_without_side_effects() {
-        // An unhandled bare key such as Insert and an unbound Ctrl chord are both absorbed, with
-        // neither editing the filter or moving the cursor.
         let (_dir, store) = isolated_store();
         seed_session(
             &store,
@@ -1576,8 +1559,6 @@ mod tests {
 
     #[test]
     fn handle_key_ctrl_d_with_no_rows_consumes_silently_instead_of_pushing() {
-        // No selection → no row identity to confirm against. Better to consume than to surface a
-        // confused-looking "delete (nothing)?" modal.
         let (_dir, store) = isolated_store();
         let mut picker = ResumePicker::new(store, "live-session-id".to_owned());
 
@@ -1864,8 +1845,6 @@ mod tests {
 
     #[test]
     fn on_focus_regained_preserves_cursor_when_row_is_still_present() {
-        // Cancelling a delete leaves the user on the row they were inspecting, since the reload
-        // re-seeks after `replace_items` resets the cursor to row 0.
         let (_dir, store) = isolated_store();
         for (byte, title) in [(0x11_u8, "first"), (0x22, "second"), (0x33, "third")] {
             seed_session(

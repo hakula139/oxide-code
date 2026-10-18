@@ -1,5 +1,4 @@
-//! Destructive-action confirm modal scoped to session deletion. Generalize when a second use
-//! case lands.
+//! The confirm modal for deleting a saved session.
 
 use std::path::PathBuf;
 
@@ -35,8 +34,7 @@ pub(super) struct ConfirmDeleteSessionModal {
     path: PathBuf,
     session_id: String,
     display_title: String,
-    /// Pre-formatted metadata ("14 msgs · 2 hours ago"). Caller builds it so the modal stays
-    /// decoupled from `time::OffsetDateTime` formatting.
+    /// Pre-formatted metadata, such as `14 msgs · 2 hours ago`.
     metadata: String,
     live_session_id: String,
     /// Sticky error from a failed delete attempt. Kept until a deliberate confirm or cancel key.
@@ -62,8 +60,8 @@ impl ConfirmDeleteSessionModal {
         }
     }
 
-    /// Deletes the session file. On Ok, pop and emit a chat-stream confirmation. On Err, stay open
-    /// with a sticky inline error.
+    /// Deletes the session file, submitting a chat confirmation on success and keeping the modal
+    /// open with the error on failure.
     fn confirm(&mut self) -> ModalKey {
         match saved::delete(&self.path, &self.session_id, &self.live_session_id) {
             Ok(()) => ModalKey::Submitted(ModalAction::SystemMessage(format!(
@@ -109,9 +107,7 @@ impl Modal for ConfirmDeleteSessionModal {
     }
 
     fn handle_key(&mut self, event: &KeyEvent) -> ModalKey {
-        // Esc and Ctrl+C are intercepted at the stack level. Sticky error stays visible until the
-        // user makes a deliberate Y / N / Enter choice, so a stray arrow key or modifier-only
-        // event can't wipe the only diagnostic from a failed delete.
+        // The modal stack handles Esc and Ctrl+C. Any other key leaves `error` in place.
         match event.code {
             KeyCode::Char('y' | 'Y') if is_plain_char(event) => {
                 self.error = None;
@@ -302,11 +298,7 @@ mod tests {
 
     #[test]
     fn handle_key_confirm_failure_latches_error_until_a_deliberate_y_or_n_choice() {
-        // Same-id-as-live triggers delete_at's refusal, so the modal stays on screen with the
-        // error visible. Stray keys (arrows, unrecognized chars, modifier events) must leave the
-        // latch, which only Y / Enter (re-attempt) or N (cancel) clears. This pins the diagnostic
-        // against a stray-keystroke race that would otherwise leave the user with no explanation
-        // for why the row reappeared after delete.
+        // Deleting the live session fails, so the modal stays open with the error.
         let (_dir, store) = isolated_store();
         let live_id = format!("{:0<36}", "abcd1234");
         seed_test_session(
@@ -337,15 +329,13 @@ mod tests {
             ),
         );
 
-        // Stray keys must not wipe the latch.
         for stray in [KeyCode::Char('x'), KeyCode::Up, KeyCode::Down, KeyCode::Tab] {
             let outcome = modal.handle_key(&KeyEvent::from(stray));
             assert!(matches!(outcome, ModalKey::Consumed), "{stray:?}");
             assert!(modal.error.is_some(), "{stray:?} must not clear the latch");
         }
 
-        // A deliberate Y clears the latch before re-running confirm, and the retry re-latches a
-        // fresh diagnostic from the same refusal.
+        // The retry clears the error, and the same refusal sets it again.
         let outcome = modal.handle_key(&KeyEvent::from(KeyCode::Char('y')));
         assert!(matches!(outcome, ModalKey::Consumed));
         assert!(modal.error.is_some(), "fresh failure re-latches");

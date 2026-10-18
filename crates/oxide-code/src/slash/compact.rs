@@ -1,6 +1,5 @@
-//! `/compact [instructions]` compresses the conversation into a summary. Bare runs the default
-//! rubric. Trailing text becomes user-supplied focus instructions appended to the rubric.
-//! Always [`SlashKind::Mutating`], so it is refused mid-turn while the in-flight reply finishes.
+//! `/compact [instructions]` compresses the conversation into a summary, appending any trailing
+//! text to the rubric as focus instructions.
 
 use super::context::SlashContext;
 use super::registry::{SlashCommand, SlashKind, SlashOutcome};

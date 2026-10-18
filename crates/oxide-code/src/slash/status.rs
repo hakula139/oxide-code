@@ -1,5 +1,4 @@
-//! `/status` opens a read-only [`KvOverview`] of the live session's model, effort, cwd, session
-//! ID, auth source, version, and runtime settings.
+//! `/status` opens a read-only [`KvOverview`] of the live session and its runtime settings.
 
 use super::context::{LiveSessionInfo, SlashContext};
 use super::registry::{SlashCommand, SlashOutcome};

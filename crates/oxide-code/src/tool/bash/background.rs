@@ -86,9 +86,8 @@ impl ShellState {
 
 // ── Registry ──
 
-/// The session's background shells. The `bash` tools start, read, and stop them, and the engine
-/// ends them all with the session. A shell stays open, running or finished, until one of those
-/// ends it.
+/// The session's background shells. Each stays open, running or finished, until `bash_stop` stops
+/// it or the session ends.
 #[derive(Default)]
 pub(crate) struct BackgroundShells {
     registry: Mutex<Registry>,
@@ -639,7 +638,6 @@ pub(crate) mod testing {
         }
     }
 
-    /// Three listed shells: one running, one exited, one killed.
     pub(crate) fn shells_in_each_state() -> Vec<BackgroundShell> {
         vec![
             shell("shell-1", "cargo watch", ShellState::Running),

@@ -130,8 +130,8 @@ async fn run(raw: serde_json::Value, ctx: &ToolCtx) -> ToolOutput {
     }
 }
 
-/// Returns whether the write created the file or overwrote it. A relative `path` resolves against
-/// the context's cwd.
+/// Writes `content` to `path`, resolved against the context's cwd, and returns the [`WriteMode`]
+/// the write took.
 async fn write_file(path: &str, content: &str, ctx: &ToolCtx) -> Result<WriteMode, String> {
     let file_path = ctx.cwd().join(path);
     let pre_meta = match tokio::fs::symlink_metadata(&file_path).await {
@@ -470,7 +470,6 @@ mod tests {
 
     #[tokio::test]
     async fn write_file_after_external_modification_is_rejected() {
-        // Read, then overwrite to simulate an external editor. The drift rehash surfaces the error.
         let dir = canonical_tempdir();
         let path = dir.path().join("existing.txt");
         std::fs::write(&path, "old content").unwrap();
@@ -639,8 +638,8 @@ mod tests {
     #[cfg(unix)]
     #[tokio::test]
     async fn write_file_fails_when_parent_creation_is_denied() {
-        // Missing parent under a read-only ancestor: pre-stat hits ENOENT so control reaches
-        // `create_dir_all`, which then denies. Ancestor stays empty for tempdir cleanup.
+        // The missing target passes the stat, so the read-only ancestor denies `create_dir_all`.
+        // It stays empty, so the temp dir still cleans up.
         use std::os::unix::fs::PermissionsExt;
 
         let dir = canonical_tempdir();

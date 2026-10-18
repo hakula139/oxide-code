@@ -232,9 +232,8 @@ struct GrepParams<'a> {
 }
 
 fn grep_files(params: &GrepParams<'_>) -> Result<String, String> {
-    // Patterns are line-oriented: the regex matches against each line individually, so `^` / `$`
-    // anchor to line boundaries without needing the multi-line flag. Compiled-program and DFA
-    // size caps keep adversarial patterns (e.g., catastrophic alternations) from OOMing.
+    // Each line is matched alone, so `^` and `$` anchor at line boundaries without the multi-line
+    // flag. The size limits keep an adversarial pattern from exhausting memory.
     let re = regex::RegexBuilder::new(params.pattern)
         .case_insensitive(params.case_insensitive)
         .size_limit(REGEX_SIZE_LIMIT)
@@ -776,7 +775,6 @@ mod tests {
 
     #[test]
     fn grep_title_with_context_counts_matches_only() {
-        // Context lines share the `path:NUM` prefix but must not be counted.
         let dir = canonical_tempdir();
         std::fs::write(
             dir.path().join("test.txt"),
@@ -889,11 +887,9 @@ mod tests {
         let mut p = params("ccc", dir.path());
         p.context = 1;
         let result = grep_files(&p).unwrap();
-        // Context lines use the `-` separator, and the match uses `:`.
         assert!(result.contains("test.txt:2-bbb"));
         assert!(result.contains("test.txt:3:ccc"));
         assert!(result.contains("test.txt:4-ddd"));
-        // Lines outside context range should not appear.
         assert!(!result.contains("aaa"));
         assert!(!result.contains("eee"));
     }
@@ -1576,8 +1572,6 @@ mod tests {
 
     #[test]
     fn result_view_non_content_mode_falls_back_to_text() {
-        // files_with_matches / count have a summary header that GrepMatches doesn't model, so the
-        // text fallback keeps the "Found N ..." line visible.
         for mode in ["files_with_matches", "count"] {
             let input = serde_json::json!({"pattern": "fn", "output_mode": mode});
             let view = GrepTool::default().result_view(
@@ -1605,7 +1599,6 @@ mod tests {
 
     #[test]
     fn parse_content_view_groups_consecutive_lines_with_context_and_separator() {
-        // Groups by path, splits match (`:`) from context (`-`), accepts `--`, opens a second file.
         let content = indoc! {r#"
             src/main.rs:10:fn main() {
             src/main.rs:11-    println!("hi");
@@ -1697,7 +1690,6 @@ mod tests {
 
     #[test]
     fn parse_content_view_falls_back_on_invalid_line() {
-        // Any unrecognized row makes the whole view fall back to text, so none is silently dropped.
         assert!(parse_content_view("src/main.rs:1:hit\nunexpected line").is_none());
     }
 
@@ -1720,7 +1712,6 @@ mod tests {
 
     #[test]
     fn parse_match_line_skips_path_internal_colons_without_digit_separator() {
-        // Path-internal `:` without digits (e.g., Windows `C:foo`) skips to the next `:NUM`.
         let (path, m) = parse_match_line("C:foo:42:body").unwrap();
         assert_eq!(path, "C:foo");
         assert_eq!(m.number, 42);

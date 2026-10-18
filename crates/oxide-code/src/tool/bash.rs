@@ -280,9 +280,8 @@ async fn execute_until(
         content.push_str(NO_OUTPUT_MARKER);
     }
 
-    // A nonzero exit stays in the body because commands like `grep` (1 on no match) and `test`
-    // probes signal through their exit code. Reserving `is_error` for spawn, pipe, and timeout
-    // failures keeps the model from treating those probes as hard failures.
+    // A nonzero exit stays a success because probes such as `grep` (1 on no match) and `test`
+    // signal through it, so `is_error` marks only spawn, pipe, and timeout failures.
     Ok(ToolOutput::success(content))
 }
 
@@ -546,7 +545,7 @@ impl ShellTree {
         }
     }
 
-    /// Signals the group and says whether to signal it again. `killpg` fails once no member it
+    /// Signals the group and returns whether to signal it again. `killpg` fails once no member it
     /// may signal is alive: `EPERM` when only zombies or members it cannot signal remain, `ESRCH`
     /// once the group is gone.
     fn signal(&mut self, deadline: Instant) -> bool {
@@ -587,8 +586,8 @@ mod testing {
         format!("echo {pid} > '{pid_file}.tmp' && mv '{pid_file}.tmp' '{pid_file}'")
     }
 
-    /// The PID [`record_pid`] writes to `pid_file`, once it appears. Spawning bash on a loaded
-    /// Windows runner can take several seconds.
+    /// Waits for the PID [`record_pid`] writes to `pid_file` and returns it. Spawning bash on a
+    /// loaded Windows runner can take several seconds.
     pub(super) async fn until_recorded(pid_file: &Path) -> String {
         let deadline = Instant::now() + Duration::from_secs(20);
         while !pid_file.exists() {
@@ -652,8 +651,8 @@ mod tests {
 
     #[test]
     fn prepare_missing_command_is_none() {
-        // A call with no `command` field falls to `None`, which only a tool-wide rule matches, so a
-        // malformed bash call cannot slip past a command-specific allow.
+        // Only a tool-wide rule matches `None`, so a malformed call cannot slip past a
+        // command-specific allow.
         let prepared = BashTool::default().prepare(serde_json::json!({}), &temp_ctx());
         assert!(matches!(prepared.access, Access::None));
     }

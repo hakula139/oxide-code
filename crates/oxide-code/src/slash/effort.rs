@@ -176,7 +176,6 @@ mod tests {
 
     #[test]
     fn execute_explicit_level_on_no_tier_model_errors_with_recovery_hint() {
-        // Without this, the pick silently resolves to None and confuses the user.
         let err = run_execute_with_model("custom-model", "xhigh").unwrap_err();
 
         assert_eq!(err, NO_TIER_ERROR);

@@ -107,7 +107,8 @@ const RUBRIC: &str = indoc! {"
     If a `README.md`, `.cursor/rules/`, `.cursorrules`, or `.github/copilot-instructions.md` exists, extract the load-bearing parts (commands, conventions, gotchas) and merge them into the instructions without duplication. Skip prose that restates language defaults."
 };
 
-/// Asks the model to create `file` at `root`, for a project with no instruction file yet.
+/// The prompt asking the model to create `file` at `root`, for a project with no instruction
+/// file yet.
 fn create_prompt(root: &Path, file: &str) -> String {
     let root = root.display();
     formatdoc! {"
@@ -125,8 +126,8 @@ fn create_prompt(root: &Path, file: &str) -> String {
     }
 }
 
-/// Asks the model to propose changes to the `existing` instruction files at `root` as a diff, and
-/// to apply them only once the user confirms.
+/// The prompt asking the model to propose changes to the `existing` instruction files at `root`
+/// as a diff, and to apply them only once the user confirms.
 fn update_prompt(root: &Path, existing: &[PathBuf]) -> String {
     let root = root.display();
     let files = existing

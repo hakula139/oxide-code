@@ -204,7 +204,6 @@ mod tests {
 
     #[test]
     fn build_modal_tildifies_extra_ca_certs_path() {
-        // Pin HOME so the test is deterministic regardless of the runner env.
         temp_env::with_var(HOME_VAR, Some("/tmp/oxide-fake-home"), || {
             let mut info = test_session_info();
             info.config.extra_ca_certs = Some(PathBuf::from("/tmp/oxide-fake-home/certs/corp.pem"));

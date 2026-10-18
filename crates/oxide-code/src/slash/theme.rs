@@ -437,7 +437,6 @@ mod tests {
 
     #[test]
     fn handle_key_enter_on_unchanged_cursor_returns_cancelled() {
-        // Enter without moving behaves like Esc, since there is nothing to commit.
         let mut p = picker_with_active("mocha");
         let outcome = p.handle_key(&KeyEvent::from(KeyCode::Enter));
         assert!(matches!(outcome, ModalKey::Cancelled));

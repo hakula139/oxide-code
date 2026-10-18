@@ -1,5 +1,4 @@
-//! `/help` opens a read-only [`KvOverview`] of every registered command. Aliases follow the
-//! canonical name in parentheses, then the optional `usage()` placeholder.
+//! `/help` opens a read-only [`KvOverview`] of every registered command.
 
 use std::fmt::Write as _;
 

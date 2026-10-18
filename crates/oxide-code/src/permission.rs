@@ -3,8 +3,7 @@
 //! [`Policy::verdict`] pipeline: a [`Decision`] of allow / ask / deny and the [`Basis`] that
 //! settled it.
 //!
-//! The gate is the whole safety boundary: oxide-code has no sandbox, so the decision pipeline is
-//! the only thing standing between the model and an unchecked tool call.
+//! oxide-code has no sandbox, so this gate is the whole safety boundary around a tool call.
 //!
 //! Design: `docs/design/tools/permissions.md`.
 
@@ -37,12 +36,12 @@ use crate::util::path::{expand_user, lexical_normalize};
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub(crate) enum Mode {
-    /// Ask about every call the rules leave open.
+    /// Asks about every call the rules leave open.
     #[default]
     Manual,
     /// Read-only analysis: every edit, exec, and net call is denied.
     Plan,
-    /// Run every call the rules leave open. Deny and ask rules still hold.
+    /// Runs every call the rules leave open. Deny and ask rules still hold.
     Yolo,
 }
 
@@ -918,7 +917,7 @@ impl Policy {
         self.verdict(class, target).decision
     }
 
-    /// Resolves a call to a [`Verdict`]. Pure and synchronous: no I/O, no async, no classifier.
+    /// Resolves a call to a [`Verdict`] without I/O.
     ///
     /// Order, stopping at the first match:
     /// 1. A deny rule denies, in every mode.

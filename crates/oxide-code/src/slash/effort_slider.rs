@@ -1,5 +1,4 @@
-//! The horizontal Speed ↔ Intelligence slider that bare `/effort` opens. The typed
-//! `/effort <level>` switches directly in [`super::effort::EffortCmd`].
+//! The horizontal Speed ↔ Intelligence slider that bare `/effort` opens.
 
 use crossterm::event::{KeyCode, KeyEvent};
 use ratatui::Frame;
@@ -51,12 +50,12 @@ pub(super) fn tier_color(level: Effort) -> Color {
 pub(super) struct EffortSlider {
     /// Cursor index into [`Effort::ALL`].
     selected: usize,
-    /// Effort at modal open. Submit short-circuits when unchanged.
+    /// Effort at modal open.
     initial: Effort,
 }
 
 impl EffortSlider {
-    /// `None` when the active model has no effort tier. The caller errors before opening.
+    /// `None` when the active model has no effort tier.
     pub(super) fn new(info: &LiveSessionInfo) -> Option<Self> {
         let initial = info.config.model.resolve_effort(info.config.effort)?;
         let selected = Effort::ALL
@@ -311,7 +310,6 @@ mod tests {
 
     #[test]
     fn handle_key_enter_with_no_change_returns_cancelled() {
-        // Enter without moving behaves like Esc, since there is nothing to dispatch.
         let mut s = slider_for("claude-opus-5-5", Some(Effort::High));
         let outcome = s.handle_key(&KeyEvent::from(KeyCode::Enter));
         assert!(matches!(outcome, ModalKey::Cancelled));
@@ -332,8 +330,7 @@ mod tests {
 
     #[test]
     fn handle_key_unhandled_key_is_consumed_without_state_change() {
-        // ModalStack intercepts Esc and Ctrl+C. Every other key, such as Up, Tab, or a letter
-        // besides h / l, falls through to `Consumed` and leaves the cursor put.
+        // ModalStack handles Esc and Ctrl+C before the slider sees them.
         let mut s = slider_for("claude-opus-5-5", Some(Effort::Medium));
         let before = s.selected;
         for code in [KeyCode::Up, KeyCode::Down, KeyCode::Tab, KeyCode::Char('q')] {
