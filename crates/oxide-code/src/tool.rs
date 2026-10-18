@@ -25,7 +25,7 @@ use tokio_util::sync::CancellationToken;
 
 use self::tasks::Task;
 use crate::file_tracker::{FileTracker, TrackableFileError, validate_trackable_file};
-use crate::permission::{Access, PermissionClass, Workspace};
+use crate::permission::{Access, PermissionClass, WalkFilter, Workspace};
 use crate::util::path::{lexical_normalize, slash_separated};
 use crate::util::text::{ELLIPSIS, plural};
 
@@ -827,17 +827,20 @@ struct Unreadable {
 }
 
 impl Unreadable {
-    /// What walk error `e` failed to read, or `None` when `e` reports an ignore file that failed to
-    /// load. Such a file only loses its rules, so it hides nothing from the walk.
+    /// What walk error `e` failed to read, or `None` when `e` hides nothing from the walk. An ignore
+    /// file that failed to load only loses its rules, and a path that vanished mid-walk holds
+    /// nothing left to search.
     fn from_walk(e: &ignore::Error) -> Option<Self> {
         e.depth()?;
         let (path, cause) = match e {
             ignore::Error::WithPath { path, err } => (Some(path.clone()), err.as_ref()),
             _ => (None, e),
         };
-        let error = cause
-            .io_error()
-            .map_or_else(|| cause.to_string(), innermost_error);
+        let error = match cause.io_error() {
+            Some(io) if io.kind() == std::io::ErrorKind::NotFound => return None,
+            Some(io) => innermost_error(io),
+            None => cause.to_string(),
+        };
         Some(Self { path, error })
     }
 
@@ -857,6 +860,18 @@ fn innermost_error(e: &std::io::Error) -> String {
         error = source;
     }
     error.to_string()
+}
+
+/// Drops each path in `unreadable` that `read_filter` withholds, so a note never names one, and
+/// returns how many it dropped.
+fn withhold_unreadable(unreadable: &mut Vec<Unreadable>, read_filter: &WalkFilter<'_>) -> usize {
+    let found = unreadable.len();
+    unreadable.retain(|u| {
+        u.path
+            .as_deref()
+            .is_none_or(|path| !read_filter.withholds(path))
+    });
+    found - unreadable.len()
 }
 
 /// `entries` sorted newest first by modification time, keeping walk order among equal times.
@@ -1089,7 +1104,7 @@ pub(crate) mod testing {
 
     /// Denies reading the file or directory at `path` until the returned guard drops, which
     /// restores access so the temp dir can be removed.
-    pub(crate) fn deny_read(path: &Path) -> ReadDenied {
+    pub(crate) fn deny_read_access(path: &Path) -> ReadDenied {
         #[cfg(unix)]
         let mode = {
             use std::os::unix::fs::PermissionsExt as _;
@@ -1101,6 +1116,11 @@ pub(crate) mod testing {
         // `(RD)` is the right to read a file's data or list a directory.
         #[cfg(windows)]
         icacls(path, &["/deny", format!("{EVERYONE}:(RD)").as_str()]);
+        let denied = ReadDenied {
+            path: path.to_owned(),
+            #[cfg(unix)]
+            mode,
+        };
 
         let readable = if path.is_dir() {
             std::fs::read_dir(path).is_ok()
@@ -1108,14 +1128,10 @@ pub(crate) mod testing {
             std::fs::File::open(path).is_ok()
         };
         assert!(!readable, "{} stayed readable", path.display());
-        ReadDenied {
-            path: path.to_owned(),
-            #[cfg(unix)]
-            mode,
-        }
+        denied
     }
 
-    /// Read access denied by [`deny_read`], restored on drop.
+    /// Read access denied by [`deny_read_access`], restored on drop.
     pub(crate) struct ReadDenied {
         path: PathBuf,
         #[cfg(unix)]
@@ -1169,7 +1185,8 @@ mod tests {
     use super::read::ReadTool;
     use super::tasks::TasksTool;
     use super::testing::{
-        canonical_tempdir, create_modified_at, ctx, deny_read, search_root, symlink_file, temp_ctx,
+        canonical_tempdir, create_modified_at, ctx, deny_read_access, deny_reads, search_root,
+        symlink_file, temp_ctx,
     };
     use super::write::WriteTool;
     use super::*;
@@ -2293,7 +2310,7 @@ mod tests {
         let locked = dir.path().join("locked");
         std::fs::create_dir(&locked).unwrap();
         std::fs::write(locked.join("b.txt"), "").unwrap();
-        let _denied = deny_read(&locked);
+        let _denied = deny_read_access(&locked);
         let mut unreadable = Vec::new();
 
         let files: Vec<_> = walk_files(dir.path(), &CancellationToken::new(), &mut unreadable)
@@ -2314,15 +2331,11 @@ mod tests {
     // ── Unreadable::from_walk ──
 
     #[test]
-    fn unreadable_from_walk_keeps_traversal_failures_and_drops_ignore_file_errors() {
+    fn unreadable_from_walk_keeps_only_errors_that_hide_files() {
         let denied = || ignore::Error::Io(std::io::Error::other("denied"));
         let at_depth = |err| ignore::Error::WithDepth {
             depth: 1,
             err: Box::new(err),
-        };
-        let loop_error = ignore::Error::Loop {
-            ancestor: "a".into(),
-            child: "a/b".into(),
         };
         let cases = [
             (
@@ -2335,13 +2348,12 @@ mod tests {
             (at_depth(denied()), Some((None, "denied"))),
             (
                 ignore::Error::WithPath {
-                    path: "a/b".into(),
-                    err: Box::new(at_depth(loop_error)),
+                    path: "gone".into(),
+                    err: Box::new(at_depth(ignore::Error::Io(
+                        std::io::ErrorKind::NotFound.into(),
+                    ))),
                 },
-                Some((
-                    Some("a/b"),
-                    "File system loop found: a/b points to an ancestor a",
-                )),
+                None,
             ),
             (
                 ignore::Error::WithPath {
@@ -2360,6 +2372,26 @@ mod tests {
             });
             assert_eq!(Unreadable::from_walk(&e), expected, "{e}");
         }
+    }
+
+    // ── withhold_unreadable ──
+
+    #[test]
+    fn withhold_unreadable_drops_and_counts_only_the_paths_the_filter_withholds() {
+        let dir = canonical_tempdir();
+        let root = search_root(dir.path(), None).unwrap();
+        let read_filter = deny_reads(&["secrets"]);
+        let read_filter = read_filter.walk(&root.base, &root.spelled, &root.workspace);
+        let at = |path: Option<&str>| Unreadable {
+            path: path.map(|path| dir.path().join(path)),
+            error: "denied".to_owned(),
+        };
+        let mut unreadable = vec![at(Some("secrets")), at(Some("src")), at(None)];
+
+        let withheld = withhold_unreadable(&mut unreadable, &read_filter);
+
+        assert_eq!(withheld, 1);
+        assert_eq!(unreadable, [at(Some("src")), at(None)]);
     }
 
     // ── newest_first ──

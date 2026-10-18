@@ -156,8 +156,8 @@ struct GlobOutput {
 
 /// Walks `root`, filters entries against `pattern`, and returns up to `MAX_RESULTS` matches sorted
 /// newest-first by mtime, rendered relative to the root's canonical cwd. Trailing notes list the
-/// paths the walk could not read and count the matches `read_filter` withholds. The walk stops
-/// once `cancel` fires.
+/// paths the walk could not read and count the matches and unreadable paths `read_filter`
+/// withholds. The walk stops once `cancel` fires.
 ///
 /// `walk_files` skips files matched by `.gitignore` or a global ignore file, so only non-ignored
 /// files reach the matcher. Truncation past `MAX_RESULTS` is announced inline and surfaced
@@ -200,6 +200,7 @@ fn glob_files(
         .iter()
         .map(|entry| super::display_path(entry.path(), cwd))
         .collect();
+    withheld += super::withhold_unreadable(&mut unreadable, &read_filter);
 
     let total = matches.len();
     let truncated = total > MAX_RESULTS;
@@ -627,7 +628,7 @@ mod tests {
         let locked = dir.path().join("locked");
         std::fs::create_dir(&locked).unwrap();
         std::fs::write(locked.join("b.rs"), "").unwrap();
-        let _denied = testing::deny_read(&locked);
+        let _denied = testing::deny_read_access(&locked);
 
         let result = glob_in("*.rs", None, dir.path(), &ReadFilter::default()).unwrap();
 
@@ -644,6 +645,33 @@ mod tests {
         assert_eq!(
             glob_title(crate::tool::strip_search_notes(&result.content)),
             "Found 1 file"
+        );
+        let view = GlobTool::default().result_view(
+            &serde_json::json!({"pattern": "*.rs"}),
+            &result.content,
+            &ToolMetadata::default(),
+            Path::new("/repo"),
+        );
+        assert_eq!(view, None);
+    }
+
+    #[test]
+    fn glob_files_withholds_an_unreadable_directory_a_read_deny_rule_matches() {
+        let dir = canonical_tempdir();
+        std::fs::write(dir.path().join("a.rs"), "").unwrap();
+        let secrets = dir.path().join("secrets");
+        std::fs::create_dir(&secrets).unwrap();
+        let _denied = testing::deny_read_access(&secrets);
+
+        let result = glob_in("*.rs", None, dir.path(), &deny_reads(&["secrets"])).unwrap();
+
+        assert_eq!(
+            result.content,
+            indoc! {"
+                a.rs
+
+                (1 file withheld by read deny or ask rules)"
+            }
         );
     }
 

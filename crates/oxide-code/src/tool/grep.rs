@@ -290,7 +290,7 @@ struct CollectedFiles {
     skipped_large: Vec<(PathBuf, u64)>,
     /// Paths the walk could not read.
     unreadable: Vec<Unreadable>,
-    /// Files a `read` deny or ask rule withheld.
+    /// Files and unreadable paths a `read` deny or ask rule withheld.
     withheld: usize,
 }
 
@@ -348,6 +348,7 @@ fn collect_files(
         .into_iter()
         .map(ignore::DirEntry::into_path)
         .collect();
+    withheld += super::withhold_unreadable(&mut unreadable, read_filter);
 
     CollectedFiles {
         files,
@@ -1127,7 +1128,10 @@ mod tests {
         std::fs::write(locked.join("b.rs"), "hit\n").unwrap();
         let secret = dir.path().join("secret.rs");
         std::fs::write(&secret, "hit\n").unwrap();
-        let _denied = [testing::deny_read(&locked), testing::deny_read(&secret)];
+        let _denied = [
+            testing::deny_read_access(&locked),
+            testing::deny_read_access(&secret),
+        ];
 
         let result = grep_files(&params("hit", dir.path())).unwrap();
 
@@ -1147,6 +1151,35 @@ mod tests {
             grep_title(crate::tool::strip_search_notes(&result)),
             "1 match"
         );
+        let view = GrepTool::default().result_view(
+            &serde_json::json!({"pattern": "hit"}),
+            &result,
+            &ToolMetadata::default(),
+            Path::new("/repo"),
+        );
+        assert_eq!(view, None);
+    }
+
+    #[test]
+    fn grep_files_withholds_an_unreadable_directory_a_read_deny_rule_matches() {
+        let dir = canonical_tempdir();
+        std::fs::write(dir.path().join("a.rs"), "hit\n").unwrap();
+        let secrets = dir.path().join("secrets");
+        std::fs::create_dir(&secrets).unwrap();
+        let _denied = testing::deny_read_access(&secrets);
+        let mut p = params("hit", dir.path());
+        p.read_filter = deny_reads(&["secrets"]);
+
+        let result = grep_files(&p).unwrap();
+
+        assert_eq!(
+            result,
+            indoc! {"
+                a.rs:1:hit
+
+                (1 file withheld by read deny or ask rules)"
+            }
+        );
     }
 
     #[test]
@@ -1154,7 +1187,7 @@ mod tests {
         let dir = canonical_tempdir();
         let secret = dir.path().join("secret.rs");
         std::fs::write(&secret, "hit\n").unwrap();
-        let _denied = testing::deny_read(&secret);
+        let _denied = testing::deny_read_access(&secret);
 
         let result = grep_files(&params("hit", dir.path())).unwrap();
 
@@ -1177,7 +1210,7 @@ mod tests {
         let dir = canonical_tempdir();
         let secret = dir.path().join("secret.txt");
         std::fs::write(&secret, "x").unwrap();
-        let _denied = testing::deny_read(&secret);
+        let _denied = testing::deny_read_access(&secret);
         let files = [dir.path().join("gone.txt"), secret.clone()];
         let cancel = CancellationToken::new();
         let mut unreadable = Vec::new();
