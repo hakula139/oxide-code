@@ -142,7 +142,7 @@ async fn headless_rejected_request_preserves_branch_and_user_message() {
     assert!(init.status.success(), "{init:?}");
 
     let data_dir = dir.path().join("data");
-    let output = tokio::process::Command::new(env!("CARGO_BIN_EXE_ox"))
+    let output = tokio::process::Command::from(ox())
         .args(["-p", "hello"])
         .current_dir(dir.path())
         .env("HOME", dir.path())
@@ -231,7 +231,7 @@ async fn headless_mode_flag_overrides_the_configured_mode() {
     )
     .unwrap();
 
-    let output = tokio::process::Command::new(env!("CARGO_BIN_EXE_ox"))
+    let output = tokio::process::Command::from(ox())
         .args(["-p", "list the files", "--mode", "plan"])
         .current_dir(dir.path())
         .env("HOME", dir.path())
