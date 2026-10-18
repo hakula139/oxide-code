@@ -31,9 +31,9 @@ const COLUMN_GAP: usize = 2;
 /// overlay so it doesn't bleed into whatever sits above (welcome, chat, preview).
 const CHROME_ROWS: u16 = 1;
 
-/// Mode-tagged so [`super::InputArea`] can format the right Tab-insertion text.
+/// What the rows complete: a command name, or an argument of the named command.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(super) enum PopupMode {
+enum PopupMode {
     Name,
     /// Owned because the name comes from the live input buffer.
     Arg {
@@ -44,18 +44,22 @@ pub(super) enum PopupMode {
 /// One popup row. `value` is the bare token (command name or arg value). The renderer adds
 /// `/` and any matched-alias suffix in name mode.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(super) struct PopupRow {
-    pub(super) value: Cow<'static, str>,
-    pub(super) description: Cow<'static, str>,
+struct PopupRow {
+    value: Cow<'static, str>,
+    description: Cow<'static, str>,
     /// The alias a name-mode query matched, or `None` when it matched the canonical name.
-    pub(super) matched_alias: Option<&'static str>,
+    matched_alias: Option<&'static str>,
 }
 
-/// Slash-command autocomplete overlay. Empty `rows` means hidden.
+/// Slash-command autocomplete overlay, hidden while `list` is `None`.
 pub(super) struct SlashPopup {
     theme: Theme,
-    /// `Some` when visible.
-    mode: Option<PopupMode>,
+    list: Option<PopupList>,
+}
+
+/// A visible popup's list. `rows` is never empty, and `selected` indexes into it.
+struct PopupList {
+    mode: PopupMode,
     rows: Vec<PopupRow>,
     selected: usize,
 }
@@ -64,9 +68,7 @@ impl SlashPopup {
     pub(super) fn new(theme: &Theme) -> Self {
         Self {
             theme: theme.clone(),
-            mode: None,
-            rows: Vec::new(),
-            selected: 0,
+            list: None,
         }
     }
 
@@ -76,94 +78,55 @@ impl SlashPopup {
     }
 
     pub(super) fn set_state(&mut self, state: Option<&PopupState<'_>>) {
-        let (mode, rows) = match state {
-            None => (None, Vec::new()),
-            Some(PopupState::Name(query)) => (
-                Some(PopupMode::Name),
-                filter_built_ins(query)
-                    .into_iter()
-                    .map(|m| PopupRow {
-                        value: Cow::Borrowed(m.name),
-                        description: Cow::Borrowed(m.description),
-                        matched_alias: m.matched_alias,
-                    })
-                    .collect(),
-            ),
-            Some(PopupState::Arg { name, prefix }) => {
-                let completions = complete_arg_for(name, prefix);
-                if completions.is_empty() {
-                    // Without a curated roster the popup hides, leaving Tab and Enter to the arg.
-                    (None, Vec::new())
-                } else {
-                    (
-                        Some(PopupMode::Arg {
-                            name: (*name).to_owned(),
-                        }),
-                        completions
-                            .into_iter()
-                            .map(|c| PopupRow {
-                                value: c.value,
-                                description: c.description,
-                                matched_alias: None,
-                            })
-                            .collect(),
-                    )
-                }
-            }
-        };
-        // Mode transitions reset to row 0 (rosters are unrelated). Intra-mode query / prefix
-        // changes clamp instead so the cursor sticks.
-        let mode_changed = self.mode != mode;
-        self.mode = mode;
-        self.rows = rows;
-        self.selected = if mode_changed {
-            0
-        } else {
-            self.selected.min(self.rows.len().saturating_sub(1))
-        };
+        let mut list = state.and_then(PopupList::new);
+        // Mode transitions, including a switch to another command's args, reset to row 0 since
+        // the rosters are unrelated. Query or prefix changes clamp instead, so the cursor sticks.
+        if let (Some(old), Some(new)) = (&self.list, &mut list)
+            && old.mode == new.mode
+        {
+            new.selected = old.selected.min(new.rows.len() - 1);
+        }
+        self.list = list;
     }
 
     pub(super) fn is_visible(&self) -> bool {
-        !self.rows.is_empty()
+        self.list.is_some()
     }
 
-    pub(super) fn mode(&self) -> Option<&PopupMode> {
-        self.mode.as_ref()
-    }
-
-    pub(super) fn selected(&self) -> Option<&PopupRow> {
-        self.rows.get(self.selected)
+    /// Returns the command line the selected row completes to: `/{name}` in name mode, or
+    /// `/{cmd} {value}` in arg mode.
+    pub(super) fn completion(&self) -> Option<String> {
+        let list = self.list.as_ref()?;
+        let value = &list.rows[list.selected].value;
+        Some(match &list.mode {
+            PopupMode::Name => format!("/{value}"),
+            PopupMode::Arg { name } => format!("/{name} {value}"),
+        })
     }
 
     pub(super) fn select_next(&mut self) {
-        if self.rows.is_empty() {
-            return;
+        if let Some(list) = &mut self.list {
+            list.selected = wrap_next(list.selected, list.rows.len());
         }
-        self.selected = wrap_next(self.selected, self.rows.len());
     }
 
     pub(super) fn select_prev(&mut self) {
-        if self.rows.is_empty() {
-            return;
+        if let Some(list) = &mut self.list {
+            list.selected = wrap_prev(list.selected, list.rows.len());
         }
-        self.selected = wrap_prev(self.selected, self.rows.len());
     }
 
     /// Rows the layout needs, zero when hidden and capped at [`MAX_VISIBLE_ROWS`] plus chrome.
     pub(super) fn height(&self) -> u16 {
-        let visible = self.rows.len().min(MAX_VISIBLE_ROWS);
-        let body = saturating_u16(visible);
-        if body == 0 {
-            0
-        } else {
-            body.saturating_add(CHROME_ROWS)
-        }
+        self.list.as_ref().map_or(0, |list| {
+            saturating_u16(list.rows.len().min(MAX_VISIBLE_ROWS)).saturating_add(CHROME_ROWS)
+        })
     }
 
     pub(super) fn render(&self, frame: &mut Frame<'_>, area: Rect) {
-        if self.rows.is_empty() {
+        let Some(list) = &self.list else {
             return;
-        }
+        };
         let block = Block::default()
             .borders(Borders::TOP)
             .border_style(self.theme.border_unfocused())
@@ -174,44 +137,21 @@ impl SlashPopup {
             return;
         }
         let width = usize::from(inner.width);
-        let offset = self.scroll_offset();
-        let visible = self.rows.len().min(MAX_VISIBLE_ROWS);
-        let window = &self.rows[offset..offset + visible];
+        let offset = list.scroll_offset();
+        let visible = list.rows.len().min(MAX_VISIBLE_ROWS);
+        let window = &list.rows[offset..offset + visible];
         // Cache labels so width measurement and row rendering can't drift.
-        let labels: Vec<String> = window.iter().map(|r| self.label(r)).collect();
+        let labels: Vec<String> = window.iter().map(|r| list.mode.label(r)).collect();
         let label_width = labels.iter().map(|l| l.width()).max().unwrap_or(0);
         let lines: Vec<Line<'static>> = window
             .iter()
             .zip(labels)
             .enumerate()
             .map(|(i, (r, label))| {
-                self.render_row(r, label, offset + i == self.selected, label_width, width)
+                self.render_row(r, label, offset + i == list.selected, label_width, width)
             })
             .collect();
         frame.render_widget(Paragraph::new(lines).style(self.theme.surface()), inner);
-    }
-
-    /// First visible match index. Centered-cursor scroll: the selected row sits at the visual
-    /// middle once it leaves the top half, then anchors at the bottom near the end of the list.
-    fn scroll_offset(&self) -> usize {
-        let total = self.rows.len();
-        if total <= MAX_VISIBLE_ROWS {
-            return 0;
-        }
-        let pad = MAX_VISIBLE_ROWS / 2;
-        let max_offset = total - MAX_VISIBLE_ROWS;
-        self.selected.saturating_sub(pad).min(max_offset)
-    }
-
-    /// Mode-aware left-column label. The `None` arm is unreachable in practice.
-    fn label(&self, row: &PopupRow) -> String {
-        match &self.mode {
-            Some(PopupMode::Name) => match row.matched_alias {
-                Some(alias) => format!("/{} ({alias})", row.value),
-                None => format!("/{}", row.value),
-            },
-            Some(PopupMode::Arg { .. }) | None => row.value.to_string(),
-        }
     }
 
     fn render_row(
@@ -232,6 +172,69 @@ impl SlashPopup {
             Span::raw(" ".repeat(pad + COLUMN_GAP)),
             Span::styled(desc, row_style),
         ])
+    }
+}
+
+impl PopupMode {
+    /// Left-column label. Name mode adds the `/` and parenthesizes a matched alias.
+    fn label(&self, row: &PopupRow) -> String {
+        match self {
+            Self::Name => match row.matched_alias {
+                Some(alias) => format!("/{} ({alias})", row.value),
+                None => format!("/{}", row.value),
+            },
+            Self::Arg { .. } => row.value.to_string(),
+        }
+    }
+}
+
+impl PopupList {
+    /// Lists the rows `state` matches, or returns `None` when it matches none. An arg without a
+    /// curated roster matches none, which leaves Tab and Enter to the arg.
+    fn new(state: &PopupState<'_>) -> Option<Self> {
+        let (mode, rows): (_, Vec<_>) = match state {
+            PopupState::Name(query) => (
+                PopupMode::Name,
+                filter_built_ins(query)
+                    .into_iter()
+                    .map(|m| PopupRow {
+                        value: Cow::Borrowed(m.name),
+                        description: Cow::Borrowed(m.description),
+                        matched_alias: m.matched_alias,
+                    })
+                    .collect(),
+            ),
+            PopupState::Arg { name, prefix } => (
+                PopupMode::Arg {
+                    name: (*name).to_owned(),
+                },
+                complete_arg_for(name, prefix)
+                    .into_iter()
+                    .map(|c| PopupRow {
+                        value: c.value,
+                        description: c.description,
+                        matched_alias: None,
+                    })
+                    .collect(),
+            ),
+        };
+        (!rows.is_empty()).then_some(Self {
+            mode,
+            rows,
+            selected: 0,
+        })
+    }
+
+    /// First visible match index. Centered-cursor scroll: the selected row sits at the visual
+    /// middle once it leaves the top half, then anchors at the bottom near the end of the list.
+    fn scroll_offset(&self) -> usize {
+        let total = self.rows.len();
+        if total <= MAX_VISIBLE_ROWS {
+            return 0;
+        }
+        let pad = MAX_VISIBLE_ROWS / 2;
+        let max_offset = total - MAX_VISIBLE_ROWS;
+        self.selected.saturating_sub(pad).min(max_offset)
     }
 }
 
@@ -260,6 +263,10 @@ mod tests {
         popup_with_state(Some(&PopupState::Arg { name, prefix }))
     }
 
+    fn list(popup: &SlashPopup) -> &PopupList {
+        popup.list.as_ref().expect("popup visible")
+    }
+
     fn render_to_backend(popup: &SlashPopup, width: u16) -> TestBackend {
         let height = popup.height().max(1);
         let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
@@ -281,30 +288,49 @@ mod tests {
     #[test]
     fn set_state_name_empty_query_lists_full_registry_in_presentation_order() {
         let popup = name_popup("");
-        assert!(popup.is_visible());
-        assert_eq!(popup.mode(), Some(&PopupMode::Name));
-        let values: Vec<String> = popup
-            .rows
-            .iter()
-            .map(|r| r.value.clone().into_owned())
-            .collect();
-        // BUILT_INS is alphabetical, so empty-query first row is `archive`.
-        assert_eq!(values[0], "archive");
+
+        let list = list(&popup);
+        let values: Vec<&str> = list.rows.iter().map(|r| r.value.as_ref()).collect();
+        assert_eq!(list.mode, PopupMode::Name);
+        assert_eq!(
+            values,
+            [
+                "archive",
+                "clear",
+                "compact",
+                "config",
+                "delete",
+                "diff",
+                "effort",
+                "help",
+                "init",
+                "login",
+                "logout",
+                "mode",
+                "model",
+                "rename",
+                "resume",
+                "status",
+                "theme",
+                "unarchive",
+            ]
+        );
     }
 
     #[test]
     fn set_state_clamps_selection_when_row_count_shrinks() {
         // The selection sits past the surviving row count and must clamp to it.
         let mut popup = name_popup("");
-        let n = popup.rows.len();
+        let n = list(&popup).rows.len();
         for _ in 0..n - 1 {
             popup.select_next();
         }
-        assert_eq!(popup.selected, n - 1);
+        assert_eq!(list(&popup).selected, n - 1);
 
         popup.set_state(Some(&PopupState::Name("help")));
-        assert_eq!(popup.rows.len(), 1);
-        assert_eq!(popup.selected, 0);
+
+        assert_eq!(list(&popup).rows.len(), 1);
+        assert_eq!(list(&popup).selected, 0);
     }
 
     #[test]
@@ -313,33 +339,58 @@ mod tests {
         let mut popup = name_popup("");
         popup.select_next();
         popup.select_next();
-        assert_eq!(popup.selected, 2);
+        assert_eq!(list(&popup).selected, 2);
 
         popup.set_state(Some(&PopupState::Arg {
             name: "model",
             prefix: "",
         }));
-        assert!(matches!(popup.mode(), Some(PopupMode::Arg { .. })));
-        assert_eq!(popup.selected, 0, "mode transition resets selection");
+
+        assert!(matches!(list(&popup).mode, PopupMode::Arg { .. }));
+        assert_eq!(list(&popup).selected, 0, "mode transition resets selection");
+    }
+
+    #[test]
+    fn set_state_resets_selection_on_switch_to_another_commands_args() {
+        let mut popup = arg_popup("model", "");
+        popup.select_next();
+        popup.select_next();
+        assert_eq!(list(&popup).selected, 2);
+
+        popup.set_state(Some(&PopupState::Arg {
+            name: "effort",
+            prefix: "",
+        }));
+
+        assert_eq!(popup.completion().as_deref(), Some("/effort low"));
     }
 
     #[test]
     fn set_state_intra_mode_query_change_preserves_selection_via_clamp() {
         let mut popup = name_popup("");
         popup.select_next();
-        let parked = popup.selected;
+        let parked = list(&popup).selected;
         assert!(parked > 0, "selection past row 0");
 
         popup.set_state(Some(&PopupState::Name("")));
-        assert_eq!(popup.selected, parked, "same mode preserves selection");
+
+        assert_eq!(
+            list(&popup).selected,
+            parked,
+            "same mode preserves selection"
+        );
     }
 
     #[test]
     fn set_state_arg_with_curated_roster_populates_arg_mode() {
         let popup = arg_popup("model", "");
-        assert!(popup.is_visible());
-        assert!(matches!(popup.mode(), Some(PopupMode::Arg { name }) if name == "model"));
-        assert_ne!(popup.rows, []);
+
+        assert_eq!(
+            list(&popup).mode,
+            PopupMode::Arg {
+                name: "model".to_owned()
+            }
+        );
     }
 
     #[test]
@@ -347,7 +398,6 @@ mod tests {
         // `/init` has no curated arg roster, so the popup hides, leaving Tab and Enter to the arg.
         let popup = arg_popup("init", "");
         assert!(!popup.is_visible());
-        assert!(popup.mode().is_none());
     }
 
     #[test]
@@ -356,20 +406,28 @@ mod tests {
         assert!(!popup.is_visible());
     }
 
-    // ── selected ──
+    // ── completion ──
 
     #[test]
-    fn selected_picks_row_at_index() {
-        let mut popup = name_popup("");
-        popup.select_next();
-        let row = popup.selected().expect("popup visible");
-        assert_eq!(row.value, popup.rows[1].value);
+    fn completion_in_name_mode_is_the_slash_command() {
+        let popup = name_popup("hel");
+
+        assert_eq!(popup.completion().as_deref(), Some("/help"));
     }
 
     #[test]
-    fn selected_hidden_popup_has_no_selection() {
+    fn completion_in_arg_mode_follows_the_command_with_the_selected_value() {
+        let mut popup = arg_popup("effort", "");
+        popup.select_next();
+
+        assert_eq!(popup.completion().as_deref(), Some("/effort medium"));
+    }
+
+    #[test]
+    fn completion_of_a_hidden_popup_completes_nothing() {
         let popup = popup_with_state(None);
-        assert!(popup.selected().is_none());
+
+        assert_eq!(popup.completion(), None);
     }
 
     // ── select_next / select_prev ──
@@ -377,19 +435,23 @@ mod tests {
     #[test]
     fn select_next_wraps_at_bottom() {
         let mut popup = name_popup("");
-        let n = popup.rows.len();
+        let n = list(&popup).rows.len();
+
         for _ in 0..n {
             popup.select_next();
         }
-        assert_eq!(popup.selected, 0, "wrap from last back to first");
+
+        assert_eq!(list(&popup).selected, 0, "wrap from last back to first");
     }
 
     #[test]
     fn select_prev_wraps_at_top() {
         let mut popup = name_popup("");
-        let n = popup.rows.len();
+        let n = list(&popup).rows.len();
+
         popup.select_prev();
-        assert_eq!(popup.selected, n - 1, "wrap from first up to last");
+
+        assert_eq!(list(&popup).selected, n - 1, "wrap from first up to last");
     }
 
     #[test]
@@ -398,18 +460,21 @@ mod tests {
         let mut popup = name_popup("");
         popup.select_next();
         popup.select_next();
-        assert_eq!(popup.selected, 2);
+        assert_eq!(list(&popup).selected, 2);
 
         popup.select_prev();
-        assert_eq!(popup.selected, 1);
+
+        assert_eq!(list(&popup).selected, 1);
     }
 
     #[test]
-    fn select_next_on_empty_popup_is_a_noop() {
+    fn select_next_and_prev_leave_a_hidden_popup_hidden() {
         let mut popup = popup_with_state(None);
+
         popup.select_next();
         popup.select_prev();
-        assert_eq!(popup.selected, 0);
+
+        assert!(!popup.is_visible());
     }
 
     // ── height ──
@@ -425,14 +490,17 @@ mod tests {
     fn long_popup(n: usize) -> SlashPopup {
         // Hand-rolled list keeps the test independent of registry growth.
         let mut p = SlashPopup::new(&theme());
-        p.mode = Some(PopupMode::Name);
-        p.rows = (0..n)
-            .map(|i| PopupRow {
-                value: Cow::Owned(format!("cmd{i}")),
-                description: Cow::Borrowed("desc"),
-                matched_alias: None,
-            })
-            .collect();
+        p.list = Some(PopupList {
+            mode: PopupMode::Name,
+            rows: (0..n)
+                .map(|i| PopupRow {
+                    value: Cow::Owned(format!("cmd{i}")),
+                    description: Cow::Borrowed("desc"),
+                    matched_alias: None,
+                })
+                .collect(),
+            selected: 0,
+        });
         p
     }
 
@@ -563,7 +631,7 @@ mod tests {
         let mut p = long_popup(5);
         p.select_next();
         p.select_next();
-        assert_eq!(p.scroll_offset(), 0);
+        assert_eq!(list(&p).scroll_offset(), 0);
     }
 
     #[test]
@@ -571,17 +639,17 @@ mod tests {
         // Boundary: total == MAX_VISIBLE_ROWS hits the `<=` early-return. Tightening the boundary
         // pins the invariant for the only case where the edge matters.
         let mut p = long_popup(MAX_VISIBLE_ROWS);
-        while p.selected < MAX_VISIBLE_ROWS - 1 {
+        while list(&p).selected < MAX_VISIBLE_ROWS - 1 {
             p.select_next();
         }
-        assert_eq!(p.scroll_offset(), 0);
+        assert_eq!(list(&p).scroll_offset(), 0);
     }
 
     #[test]
     fn scroll_offset_anchors_at_top_while_cursor_in_first_half() {
         let mut p = long_popup(MAX_VISIBLE_ROWS + 4);
         for _ in 0..MAX_VISIBLE_ROWS / 2 {
-            assert_eq!(p.scroll_offset(), 0);
+            assert_eq!(list(&p).scroll_offset(), 0);
             p.select_next();
         }
     }
@@ -594,7 +662,11 @@ mod tests {
         for _ in 0..=(MAX_VISIBLE_ROWS / 2) {
             p.select_next();
         }
-        assert_eq!(p.scroll_offset(), 1, "cursor at pad + 1 → offset = 1");
+        assert_eq!(
+            list(&p).scroll_offset(),
+            1,
+            "cursor at pad + 1 → offset = 1"
+        );
     }
 
     #[test]
@@ -608,7 +680,7 @@ mod tests {
         for _ in 0..=(pad + 1) {
             p.select_next();
         }
-        let visible_row = p.selected - p.scroll_offset();
+        let visible_row = list(&p).selected - list(&p).scroll_offset();
         assert_eq!(visible_row, pad, "cursor must sit at the visual middle row");
     }
 
@@ -618,10 +690,10 @@ mod tests {
         // row stays visible while the cursor advances within the bottom-anchored window.
         let total = MAX_VISIBLE_ROWS + 4;
         let mut p = long_popup(total);
-        while p.selected < total - 1 {
+        while list(&p).selected < total - 1 {
             p.select_next();
         }
-        assert_eq!(p.scroll_offset(), total - MAX_VISIBLE_ROWS);
+        assert_eq!(list(&p).scroll_offset(), total - MAX_VISIBLE_ROWS);
     }
 
     #[test]
@@ -631,8 +703,12 @@ mod tests {
         for _ in 0..total {
             p.select_next();
         }
-        assert_eq!(p.selected, 0, "wrap to row 0");
-        assert_eq!(p.scroll_offset(), 0, "wrap snaps the window back to top");
+        assert_eq!(list(&p).selected, 0, "wrap to row 0");
+        assert_eq!(
+            list(&p).scroll_offset(),
+            0,
+            "wrap snaps the window back to top"
+        );
     }
 
     #[test]
@@ -642,7 +718,7 @@ mod tests {
         let total = MAX_VISIBLE_ROWS + 4;
         let mut p = long_popup(total);
         p.select_prev();
-        assert_eq!(p.selected, total - 1, "wrap to last row");
-        assert_eq!(p.scroll_offset(), total - MAX_VISIBLE_ROWS);
+        assert_eq!(list(&p).selected, total - 1, "wrap to last row");
+        assert_eq!(list(&p).scroll_offset(), total - MAX_VISIBLE_ROWS);
     }
 }

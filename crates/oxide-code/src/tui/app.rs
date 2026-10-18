@@ -22,7 +22,7 @@ use tokio::sync::mpsc;
 use super::clipboard::{Clipboard, Environment};
 use super::components::chat::ChatView;
 use super::components::input::InputArea;
-use super::components::status::{StatusBar, StatusHyperlink};
+use super::components::status::{StatusBar, StatusBarInit, StatusHyperlink};
 use super::components::tasks::TaskPanel;
 use super::git_probes::GitProbes;
 use super::modal::{Modal, ModalStack};
@@ -116,11 +116,13 @@ impl App {
         }
         let mut status_bar = StatusBar::new(
             theme,
-            session_info.config.status_line.clone(),
-            session_info.config.model.short_display_name().to_owned(),
-            session_info.config.effort,
-            session_info.cwd.clone(),
-            git_branch,
+            StatusBarInit {
+                segments: session_info.config.status_line.clone(),
+                model: session_info.config.model.short_display_name().to_owned(),
+                effort: session_info.config.effort,
+                cwd: session_info.cwd.clone(),
+                git_branch,
+            },
         );
         status_bar.set_title(history.title);
         let git_probes = GitProbes::new(

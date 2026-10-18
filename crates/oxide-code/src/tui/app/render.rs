@@ -283,6 +283,7 @@ mod tests {
         push_answerable_approval, render_app, rendered_text, test_app,
     };
     use crate::tui::components::status::StatusBar;
+    use crate::tui::components::status::testing::status_bar_init;
     use crate::tui::git_probes::GitUpdate;
     use crate::tui::testing::key_event;
 
@@ -394,16 +395,12 @@ mod tests {
         let (mut app, _rx, _event_tx) = test_app(None);
         app.status_bar = StatusBar::new(
             &app.theme,
-            vec![
+            status_bar_init(vec![
                 StatusLineSegment::QueuedPrompts,
                 StatusLineSegment::FiveHourLimit,
                 StatusLineSegment::SessionId,
                 StatusLineSegment::Theme,
-            ],
-            "test-model".to_owned(),
-            None,
-            "~/test".to_owned(),
-            None,
+            ]),
         );
         app.pending_prompts.push_back("next".to_owned());
 
@@ -650,11 +647,10 @@ mod tests {
         let (mut app, _rx, _event_tx) = test_app(None);
         app.status_bar = StatusBar::new(
             &app.theme,
-            vec![StatusLineSegment::Model, StatusLineSegment::TaskProgress],
-            "test-model".to_owned(),
-            None,
-            "~/test".to_owned(),
-            None,
+            status_bar_init(vec![
+                StatusLineSegment::Model,
+                StatusLineSegment::TaskProgress,
+            ]),
         );
         app.dispatch_action(Action::Submit("active".to_owned()));
         push_ls_call(&mut app);

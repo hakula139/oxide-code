@@ -8,8 +8,10 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 use unicode_width::UnicodeWidthStr;
 
+use super::LEFT_MARGIN;
 use crate::tool::tasks::{Progress, Task, TaskStatus};
 use crate::tui::glyphs::task_marker;
+use crate::tui::saturating_u16;
 use crate::tui::theme::Theme;
 use crate::util::text::truncate_to_width;
 
@@ -18,9 +20,6 @@ const GAP_ROWS: u16 = 1;
 
 /// Task rows the panel shows at most, the last one summarizing the tasks a longer list hides.
 const MAX_ROWS: usize = 6;
-
-/// Left margin that lines rows up with the chat blocks above.
-const MARGIN: &str = "  ";
 
 #[derive(Debug, Default)]
 pub(crate) struct TaskPanel {
@@ -50,7 +49,7 @@ impl TaskPanel {
         if self.tasks.is_empty() {
             return 0;
         }
-        let rows = u16::try_from(self.tasks.len().min(MAX_ROWS)).unwrap_or(u16::MAX);
+        let rows = saturating_u16(self.tasks.len().min(MAX_ROWS));
         GAP_ROWS + rows
     }
 
@@ -69,12 +68,12 @@ impl TaskPanel {
         } else {
             0..self.tasks.len()
         };
-        let width = usize::from(area.width).saturating_sub(MARGIN.width());
+        let width = usize::from(area.width).saturating_sub(LEFT_MARGIN.width());
         let mut lines: Vec<Line<'static>> = self.tasks[shown.clone()]
             .iter()
             .map(|task| {
                 Line::from(vec![
-                    Span::raw(MARGIN),
+                    Span::raw(LEFT_MARGIN),
                     Span::styled(
                         truncate_to_width(&row_text(task), width),
                         theme.task_style(task.status),
@@ -84,7 +83,7 @@ impl TaskPanel {
             .collect();
         if let Some(summary) = hidden_summary(&self.tasks, &shown) {
             lines.push(Line::from(Span::styled(
-                truncate_to_width(&format!("{MARGIN}{summary}"), usize::from(area.width)),
+                truncate_to_width(&format!("{LEFT_MARGIN}{summary}"), usize::from(area.width)),
                 theme.dim(),
             )));
         }
