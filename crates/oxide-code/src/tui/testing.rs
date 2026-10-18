@@ -1,8 +1,7 @@
 //! Test-only input and render fixtures shared across the TUI's test modules.
 
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers, MouseEvent, MouseEventKind};
-use ratatui::buffer::Buffer;
-use unicode_width::UnicodeWidthStr;
+use ratatui::buffer::{Buffer, CellWidth};
 
 /// Returns the crossterm `Event` the event loop receives for `code` pressed with `modifiers`.
 pub(super) fn key_event(code: KeyCode, modifiers: KeyModifiers) -> Event {
@@ -29,12 +28,12 @@ pub(super) fn buffer_rows(buffer: &Buffer) -> Vec<String> {
             let mut row = String::new();
             let mut covered = 0;
             for x in buffer.area.left()..buffer.area.right() {
-                let symbol = buffer[(x, y)].symbol();
+                let cell = &buffer[(x, y)];
                 if covered > 0 {
                     covered -= 1;
                 } else {
-                    row.push_str(symbol);
-                    covered = symbol.width().saturating_sub(1);
+                    row.push_str(cell.symbol());
+                    covered = cell.cell_width().saturating_sub(1);
                 }
             }
             row
@@ -42,7 +41,6 @@ pub(super) fn buffer_rows(buffer: &Buffer) -> Vec<String> {
         .collect()
 }
 
-#[cfg(test)]
 mod tests {
     use ratatui::layout::Rect;
     use ratatui::style::Style;
@@ -52,12 +50,12 @@ mod tests {
     // ── buffer_rows ──
 
     #[test]
-    fn buffer_rows_skip_the_cell_a_wide_symbol_covers() {
-        let mut buffer = Buffer::empty(Rect::new(3, 1, 4, 2));
-        buffer.set_string(3, 1, "界ab", Style::default());
+    fn buffer_rows_read_an_offset_area_and_skip_the_cells_wide_symbols_cover() {
+        let mut buffer = Buffer::empty(Rect::new(3, 1, 6, 2));
+        buffer.set_string(3, 1, "界ｶﾞa", Style::default());
 
         let rows = buffer_rows(&buffer);
 
-        assert_eq!(rows, ["界ab", "    "]);
+        assert_eq!(rows, ["界ｶﾞa ", "      "]);
     }
 }

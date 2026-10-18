@@ -180,7 +180,9 @@ mod tests {
             .unwrap();
 
         let buffer = terminal.backend().buffer();
-        assert_eq!(buffer_rows(buffer), ["            ", "! permiss..."]);
+        let rows = buffer_rows(buffer);
+        let rows: Vec<&str> = rows.iter().map(|row| row.trim_end()).collect();
+        assert_eq!(rows, ["", "! permiss..."]);
         assert_eq!(buffer[(0, 1)].fg, theme.error().fg.unwrap());
     }
 }

@@ -234,7 +234,7 @@ fn is_universal_cancel(event: &KeyEvent) -> bool {
         || (event.code == KeyCode::Char('c') && event.modifiers.contains(KeyModifiers::CONTROL))
 }
 
-// ── Test Fixtures ──
+// ── Testing ──
 
 #[cfg(test)]
 pub(crate) mod testing {
@@ -250,10 +250,10 @@ pub(crate) mod testing {
     use super::*;
     use crate::tui::testing::buffer_rows;
 
-    /// Renders `modal` at the height it asks for at `width`, ending each row with a newline.
-    pub(crate) fn render_modal(modal: &dyn Modal, width: u16) -> String {
+    /// Renders `modal` at `width` and the height it requests.
+    pub(crate) fn rendered_text(modal: &dyn Modal, width: u16) -> String {
         let height = modal.height(width, u16::MAX);
-        format!("{}\n", render_rows(modal, width, height).join("\n"))
+        render_rows(modal, width, height).join("\n")
     }
 
     /// Renders `modal` into a `width` x `height` buffer and returns each row as displayed.
