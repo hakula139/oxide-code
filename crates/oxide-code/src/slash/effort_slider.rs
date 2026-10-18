@@ -196,10 +196,6 @@ mod tests {
         Effort::ALL[s.selected]
     }
 
-    fn key(code: KeyCode) -> KeyEvent {
-        KeyEvent::from(code)
-    }
-
     // ── EffortSlider::new ──
 
     #[test]
@@ -270,7 +266,7 @@ mod tests {
         };
 
         let x_low = active_x(&s);
-        s.handle_key(&key(KeyCode::Right));
+        s.handle_key(&KeyEvent::from(KeyCode::Right));
         let x_medium = active_x(&s);
         assert!(
             x_medium > x_low,
@@ -284,32 +280,32 @@ mod tests {
     fn handle_key_right_arrow_advances_selected_within_supported() {
         let mut s = slider_for("claude-opus-5-5", Some(Effort::Low));
         let before = s.selected;
-        s.handle_key(&key(KeyCode::Right));
+        s.handle_key(&KeyEvent::from(KeyCode::Right));
         assert_eq!(s.selected, before + 1);
     }
 
     #[test]
     fn handle_key_right_arrow_at_top_clamps_without_panicking() {
         let mut s = slider_for("claude-opus-5-5", Some(Effort::Max));
-        s.handle_key(&key(KeyCode::Right));
+        s.handle_key(&KeyEvent::from(KeyCode::Right));
         assert_eq!(selected_level(&s), Effort::Max, "must stay clamped");
     }
 
     #[test]
     fn handle_key_left_arrow_retreats_selected_until_low() {
         let mut s = slider_for("claude-opus-5-5", Some(Effort::Medium));
-        s.handle_key(&key(KeyCode::Left));
+        s.handle_key(&KeyEvent::from(KeyCode::Left));
         assert_eq!(selected_level(&s), Effort::Low);
-        s.handle_key(&key(KeyCode::Left));
+        s.handle_key(&KeyEvent::from(KeyCode::Left));
         assert_eq!(selected_level(&s), Effort::Low, "stays clamped");
     }
 
     #[test]
     fn handle_key_vim_keys_mirror_arrow_navigation() {
         let mut s = slider_for("claude-opus-5-5", Some(Effort::Low));
-        s.handle_key(&key(KeyCode::Char('l')));
+        s.handle_key(&KeyEvent::from(KeyCode::Char('l')));
         assert_eq!(selected_level(&s), Effort::Medium);
-        s.handle_key(&key(KeyCode::Char('h')));
+        s.handle_key(&KeyEvent::from(KeyCode::Char('h')));
         assert_eq!(selected_level(&s), Effort::Low);
     }
 
@@ -317,15 +313,15 @@ mod tests {
     fn handle_key_enter_with_no_change_returns_cancelled() {
         // Enter without moving behaves like Esc, since there is nothing to dispatch.
         let mut s = slider_for("claude-opus-5-5", Some(Effort::High));
-        let outcome = s.handle_key(&key(KeyCode::Enter));
+        let outcome = s.handle_key(&KeyEvent::from(KeyCode::Enter));
         assert!(matches!(outcome, ModalKey::Cancelled));
     }
 
     #[test]
     fn handle_key_enter_after_change_emits_set_model_with_effort_only() {
         let mut s = slider_for("claude-opus-5-5", Some(Effort::Low));
-        s.handle_key(&key(KeyCode::Right));
-        let outcome = s.handle_key(&key(KeyCode::Enter));
+        s.handle_key(&KeyEvent::from(KeyCode::Right));
+        let outcome = s.handle_key(&KeyEvent::from(KeyCode::Enter));
         match outcome {
             ModalKey::Submitted(ModalAction::Dispatch(Action::Op(Op::SetModel(pick)))) => {
                 assert_eq!(pick, ConfigPick::Effort(Effort::Medium));
@@ -341,7 +337,7 @@ mod tests {
         let mut s = slider_for("claude-opus-5-5", Some(Effort::Medium));
         let before = s.selected;
         for code in [KeyCode::Up, KeyCode::Down, KeyCode::Tab, KeyCode::Char('q')] {
-            let outcome = s.handle_key(&key(code));
+            let outcome = s.handle_key(&KeyEvent::from(code));
             assert!(
                 matches!(outcome, ModalKey::Consumed),
                 "{code:?} must be consumed"

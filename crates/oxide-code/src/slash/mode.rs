@@ -168,16 +168,15 @@ mod tests {
     use crate::slash::registry::testing::run_execute;
     use crate::tui::modal::testing::render_rows;
 
-    fn key(code: KeyCode) -> KeyEvent {
-        KeyEvent::from(code)
-    }
-
     fn submitted(current: Mode, keys: &[KeyCode]) -> Option<Op> {
         let mut picker = ModePicker::new(current);
         for &code in keys {
-            assert!(matches!(picker.handle_key(&key(code)), ModalKey::Consumed));
+            assert!(matches!(
+                picker.handle_key(&KeyEvent::from(code)),
+                ModalKey::Consumed
+            ));
         }
-        match picker.handle_key(&key(KeyCode::Enter)) {
+        match picker.handle_key(&KeyEvent::from(KeyCode::Enter)) {
             ModalKey::Submitted(ModalAction::Dispatch(Action::Op(op))) => Some(op),
             ModalKey::Cancelled => None,
             other => panic!("expected a submit or a cancel, got {other:?}"),

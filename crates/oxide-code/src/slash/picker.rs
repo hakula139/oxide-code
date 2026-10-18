@@ -250,10 +250,6 @@ mod tests {
         ModelEffortPicker::new(&info)
     }
 
-    fn key(code: KeyCode) -> KeyEvent {
-        KeyEvent::from(code)
-    }
-
     fn submitted_pick(outcome: ModalKey) -> ConfigPick {
         match outcome {
             ModalKey::Submitted(ModalAction::Dispatch(Action::Op(Op::SetModel(pick)))) => pick,
@@ -288,7 +284,7 @@ mod tests {
         assert!(!row.is_active);
         assert_eq!(p.shown_effort(), Some(Effort::Medium), "Opus 5.5 default");
 
-        p.handle_key(&key(KeyCode::Char('1')));
+        p.handle_key(&KeyEvent::from(KeyCode::Char('1')));
         assert_eq!(p.shown_effort(), Some(Effort::High), "Fable 5.1 default");
     }
 
@@ -338,7 +334,7 @@ mod tests {
     #[test]
     fn render_pins_the_effort_row_and_footer_below_a_scrolled_list() {
         let mut p = picker();
-        p.handle_key(&key(KeyCode::Char('4')));
+        p.handle_key(&KeyEvent::from(KeyCode::Char('4')));
 
         let rows = render_rows(&p, 80, 8);
 
@@ -363,7 +359,7 @@ mod tests {
     #[test]
     fn handle_key_numeric_jump_routes_cursor_to_matching_row() {
         let mut p = picker();
-        p.handle_key(&key(KeyCode::Char('4')));
+        p.handle_key(&KeyEvent::from(KeyCode::Char('4')));
         let row = p.list.selected().expect("selected row");
         assert_eq!(row.info.id, "claude-haiku-5-5");
     }
@@ -371,45 +367,45 @@ mod tests {
     #[test]
     fn handle_key_right_and_left_walk_the_full_ladder_with_wrap() {
         let mut p = picker();
-        p.handle_key(&key(KeyCode::Right));
+        p.handle_key(&KeyEvent::from(KeyCode::Right));
         assert_eq!(p.shown_effort(), Some(Effort::Xhigh));
-        p.handle_key(&key(KeyCode::Right));
-        p.handle_key(&key(KeyCode::Right));
+        p.handle_key(&KeyEvent::from(KeyCode::Right));
+        p.handle_key(&KeyEvent::from(KeyCode::Right));
         assert_eq!(p.shown_effort(), Some(Effort::Low), "Right wraps past max");
-        p.handle_key(&key(KeyCode::Left));
+        p.handle_key(&KeyEvent::from(KeyCode::Left));
         assert_eq!(p.shown_effort(), Some(Effort::Max), "Left wraps past low");
     }
 
     #[test]
     fn handle_key_effort_pick_survives_cursor_moves() {
         let mut p = picker();
-        p.handle_key(&key(KeyCode::Left));
-        p.handle_key(&key(KeyCode::Down));
+        p.handle_key(&KeyEvent::from(KeyCode::Left));
+        p.handle_key(&KeyEvent::from(KeyCode::Down));
         assert_eq!(p.shown_effort(), Some(Effort::Medium));
     }
 
     #[test]
     fn handle_key_enter_with_no_changes_returns_cancelled() {
         let mut p = picker();
-        let outcome = p.handle_key(&key(KeyCode::Enter));
+        let outcome = p.handle_key(&KeyEvent::from(KeyCode::Enter));
         assert!(matches!(outcome, ModalKey::Cancelled));
     }
 
     #[test]
     fn handle_key_enter_after_effort_round_trip_returns_cancelled() {
         let mut p = picker();
-        p.handle_key(&key(KeyCode::Right));
-        p.handle_key(&key(KeyCode::Left));
-        let outcome = p.handle_key(&key(KeyCode::Enter));
+        p.handle_key(&KeyEvent::from(KeyCode::Right));
+        p.handle_key(&KeyEvent::from(KeyCode::Left));
+        let outcome = p.handle_key(&KeyEvent::from(KeyCode::Enter));
         assert!(matches!(outcome, ModalKey::Cancelled));
     }
 
     #[test]
     fn handle_key_enter_after_model_change_emits_swap_with_model_only() {
         let mut p = picker();
-        p.handle_key(&key(KeyCode::Down));
+        p.handle_key(&KeyEvent::from(KeyCode::Down));
 
-        let pick = submitted_pick(p.handle_key(&key(KeyCode::Enter)));
+        let pick = submitted_pick(p.handle_key(&KeyEvent::from(KeyCode::Enter)));
 
         assert_eq!(pick, model_only("claude-sonnet-5-5"));
     }
@@ -417,9 +413,9 @@ mod tests {
     #[test]
     fn handle_key_enter_after_effort_change_emits_swap_with_effort_only() {
         let mut p = picker();
-        p.handle_key(&key(KeyCode::Right));
+        p.handle_key(&KeyEvent::from(KeyCode::Right));
 
-        let pick = submitted_pick(p.handle_key(&key(KeyCode::Enter)));
+        let pick = submitted_pick(p.handle_key(&KeyEvent::from(KeyCode::Enter)));
 
         assert_eq!(pick, ConfigPick::Effort(Effort::Xhigh));
     }
@@ -427,10 +423,10 @@ mod tests {
     #[test]
     fn handle_key_enter_after_model_and_effort_changes_emits_swap_with_both() {
         let mut p = picker();
-        p.handle_key(&key(KeyCode::Down));
-        p.handle_key(&key(KeyCode::Right));
+        p.handle_key(&KeyEvent::from(KeyCode::Down));
+        p.handle_key(&KeyEvent::from(KeyCode::Right));
 
-        let pick = submitted_pick(p.handle_key(&key(KeyCode::Enter)));
+        let pick = submitted_pick(p.handle_key(&KeyEvent::from(KeyCode::Enter)));
 
         assert_eq!(
             pick,
@@ -446,7 +442,7 @@ mod tests {
         // The highlighted row's default is what a model-only swap resolves to, so it is not sent.
         let mut p = picker_on_unknown_model();
 
-        let pick = submitted_pick(p.handle_key(&key(KeyCode::Enter)));
+        let pick = submitted_pick(p.handle_key(&KeyEvent::from(KeyCode::Enter)));
 
         assert_eq!(pick, model_only("claude-opus-5-5"));
     }

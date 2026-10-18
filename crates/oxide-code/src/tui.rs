@@ -15,6 +15,8 @@ mod markdown;
 pub(crate) mod modal;
 mod pending_calls;
 pub(crate) mod terminal;
+#[cfg(test)]
+mod testing;
 pub(crate) mod theme;
 pub(crate) mod viewport;
 mod wrap;

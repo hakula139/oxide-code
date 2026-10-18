@@ -448,12 +448,13 @@ mod tests {
     use crate::protocol::{ConfigPick, Decision, Event, ResumeTarget};
     use crate::tool::{ApprovalBody, ApprovalPreview};
     use crate::tui::app::testing::{
-        FakeModal, KeyLogModal, OP_CHANNEL_CAPACITY, key_event, long_chat_block, mouse_event,
-        mouse_event_at, push_answerable_approval, render_app, rendered_text, test_app,
-        test_app_with, test_session_info,
+        FakeModal, KeyLogModal, OP_CHANNEL_CAPACITY, long_chat_block, mouse_event, mouse_event_at,
+        push_answerable_approval, render_app, rendered_text, test_app, test_app_with,
+        test_session_info,
     };
     use crate::tui::components::status::StatusHyperlink;
     use crate::tui::modal::testing::ScriptedModal;
+    use crate::tui::testing::key_event;
 
     // ── Fixtures ──
 

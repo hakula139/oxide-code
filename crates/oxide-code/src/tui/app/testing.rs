@@ -83,10 +83,6 @@ pub(super) fn five_hour_limit() -> RateLimits {
     }
 }
 
-pub(super) fn key_event(code: KeyCode, modifiers: KeyModifiers) -> CrosstermEvent {
-    CrosstermEvent::Key(KeyEvent::new(code, modifiers))
-}
-
 pub(super) fn mouse_event(kind: MouseEventKind) -> CrosstermEvent {
     mouse_event_at(kind, 0, 0)
 }

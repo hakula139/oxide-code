@@ -136,14 +136,6 @@ mod tests {
     use crate::session::store::testing::{seed_test_session, test_store};
     use crate::tui::modal::testing::render_rows;
 
-    fn key(code: KeyCode) -> KeyEvent {
-        KeyEvent::from(code)
-    }
-
-    fn modified_key(code: KeyCode, modifiers: KeyModifiers) -> KeyEvent {
-        KeyEvent::new(code, modifiers)
-    }
-
     fn isolated_store() -> (tempfile::TempDir, SessionStore) {
         let dir = tempfile::tempdir().unwrap();
         let store = test_store(dir.path());
@@ -227,7 +219,7 @@ mod tests {
         let mut modal = seed_modal(&store, "abcd1234", "Fix auth flow");
         let id_to_delete = modal.session_id.clone();
 
-        let outcome = modal.handle_key(&key(KeyCode::Char('y')));
+        let outcome = modal.handle_key(&KeyEvent::from(KeyCode::Char('y')));
         let ModalKey::Submitted(ModalAction::SystemMessage(msg)) = outcome else {
             panic!("Y must Submit(SystemMessage), got {outcome:?}");
         };
@@ -246,7 +238,7 @@ mod tests {
     fn handle_key_enter_press_is_an_alias_for_y_and_runs_delete() {
         let (_dir, store) = isolated_store();
         let mut modal = seed_modal(&store, "abcd1234", "Fix auth flow");
-        let outcome = modal.handle_key(&key(KeyCode::Enter));
+        let outcome = modal.handle_key(&KeyEvent::from(KeyCode::Enter));
         assert!(matches!(
             outcome,
             ModalKey::Submitted(ModalAction::SystemMessage(_)),
@@ -258,7 +250,7 @@ mod tests {
     fn handle_key_uppercase_y_also_confirms() {
         let (_dir, store) = isolated_store();
         let mut modal = seed_modal(&store, "abcd1234", "Fix auth");
-        let outcome = modal.handle_key(&key(KeyCode::Char('Y')));
+        let outcome = modal.handle_key(&KeyEvent::from(KeyCode::Char('Y')));
         assert!(matches!(
             outcome,
             ModalKey::Submitted(ModalAction::SystemMessage(_)),
@@ -272,8 +264,8 @@ mod tests {
         let id_kept = modal.session_id.clone();
 
         for event in [
-            modified_key(KeyCode::Char('y'), KeyModifiers::CONTROL),
-            modified_key(KeyCode::Enter, KeyModifiers::CONTROL),
+            KeyEvent::new(KeyCode::Char('y'), KeyModifiers::CONTROL),
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::CONTROL),
         ] {
             assert!(matches!(modal.handle_key(&event), ModalKey::Consumed));
         }
@@ -293,7 +285,7 @@ mod tests {
         let mut modal = seed_modal(&store, "abcd1234", "Fix auth flow");
         let id_kept = modal.session_id.clone();
 
-        let outcome = modal.handle_key(&key(KeyCode::Char('n')));
+        let outcome = modal.handle_key(&KeyEvent::from(KeyCode::Char('n')));
         assert!(
             matches!(outcome, ModalKey::Cancelled),
             "N must Cancel, got {outcome:?}"
@@ -332,7 +324,7 @@ mod tests {
             live_id.clone(),
         );
 
-        let outcome = modal.handle_key(&key(KeyCode::Char('y')));
+        let outcome = modal.handle_key(&KeyEvent::from(KeyCode::Char('y')));
         assert!(matches!(outcome, ModalKey::Consumed));
         assert_eq!(
             modal.error.as_deref(),
@@ -347,14 +339,14 @@ mod tests {
 
         // Stray keys must not wipe the latch.
         for stray in [KeyCode::Char('x'), KeyCode::Up, KeyCode::Down, KeyCode::Tab] {
-            let outcome = modal.handle_key(&key(stray));
+            let outcome = modal.handle_key(&KeyEvent::from(stray));
             assert!(matches!(outcome, ModalKey::Consumed), "{stray:?}");
             assert!(modal.error.is_some(), "{stray:?} must not clear the latch");
         }
 
         // A deliberate Y clears the latch before re-running confirm, and the retry re-latches a
         // fresh diagnostic from the same refusal.
-        let outcome = modal.handle_key(&key(KeyCode::Char('y')));
+        let outcome = modal.handle_key(&KeyEvent::from(KeyCode::Char('y')));
         assert!(matches!(outcome, ModalKey::Consumed));
         assert!(modal.error.is_some(), "fresh failure re-latches");
     }
@@ -363,7 +355,7 @@ mod tests {
     fn handle_key_unrecognized_keys_consume_silently_without_running_delete() {
         let (_dir, store) = isolated_store();
         let mut modal = seed_modal(&store, "abcd1234", "Fix auth flow");
-        let outcome = modal.handle_key(&key(KeyCode::Char('z')));
+        let outcome = modal.handle_key(&KeyEvent::from(KeyCode::Char('z')));
         assert!(matches!(outcome, ModalKey::Consumed));
         assert!(
             !store.list().unwrap().is_empty(),

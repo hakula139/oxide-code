@@ -160,17 +160,9 @@ mod tests {
 
     use super::*;
 
-    fn key(code: KeyCode) -> KeyEvent {
-        KeyEvent::from(code)
-    }
-
-    fn ctrl(c: char) -> KeyEvent {
-        KeyEvent::new(KeyCode::Char(c), KeyModifiers::CONTROL)
-    }
-
     fn type_str(editor: &mut LineEditor, text: &str) {
         for c in text.chars() {
-            editor.handle_key(&key(KeyCode::Char(c)));
+            editor.handle_key(&KeyEvent::from(KeyCode::Char(c)));
         }
     }
 
@@ -197,11 +189,11 @@ mod tests {
         let mut editor = LineEditor::new("hello world").with_max_width(5);
         assert_eq!(editor.text(), "hello");
 
-        assert!(!editor.handle_key(&key(KeyCode::Char('x'))));
+        assert!(!editor.handle_key(&KeyEvent::from(KeyCode::Char('x'))));
         assert_eq!(editor.text(), "hello", "insert at the cap is dropped");
 
-        assert!(editor.handle_key(&key(KeyCode::Backspace)));
-        assert!(editor.handle_key(&key(KeyCode::Char('!'))));
+        assert!(editor.handle_key(&KeyEvent::from(KeyCode::Backspace)));
+        assert!(editor.handle_key(&KeyEvent::from(KeyCode::Char('!'))));
         assert_eq!(editor.text(), "hell!", "room freed by a delete is usable");
     }
 
@@ -210,8 +202,8 @@ mod tests {
         let mut editor = LineEditor::new("界界界").with_max_width(5);
         assert_eq!(editor.text(), "界界");
 
-        assert!(!editor.handle_key(&key(KeyCode::Char('界'))));
-        assert!(editor.handle_key(&key(KeyCode::Char('a'))));
+        assert!(!editor.handle_key(&KeyEvent::from(KeyCode::Char('界'))));
+        assert!(editor.handle_key(&KeyEvent::from(KeyCode::Char('a'))));
         assert_eq!(
             editor.text(),
             "界界a",
@@ -234,12 +226,12 @@ mod tests {
     #[test]
     fn handle_key_inserts_at_the_cursor_after_moving_it() {
         let mut editor = LineEditor::new("acd");
-        editor.handle_key(&key(KeyCode::Left));
-        editor.handle_key(&key(KeyCode::Left));
-        assert!(editor.handle_key(&key(KeyCode::Char('b'))));
+        editor.handle_key(&KeyEvent::from(KeyCode::Left));
+        editor.handle_key(&KeyEvent::from(KeyCode::Left));
+        assert!(editor.handle_key(&KeyEvent::from(KeyCode::Char('b'))));
         assert_eq!(editor.text(), "abcd");
 
-        editor.handle_key(&ctrl('a'));
+        editor.handle_key(&KeyEvent::new(KeyCode::Char('a'), KeyModifiers::CONTROL));
         type_str(&mut editor, ">");
         assert_eq!(editor.text(), ">abcd", "Ctrl+A jumps to the start");
     }
@@ -247,7 +239,7 @@ mod tests {
     #[test]
     fn handle_key_supports_readline_word_deletion() {
         let mut editor = LineEditor::new("fix auth bug");
-        assert!(editor.handle_key(&ctrl('w')));
+        assert!(editor.handle_key(&KeyEvent::new(KeyCode::Char('w'), KeyModifiers::CONTROL)));
         assert_eq!(editor.text(), "fix auth ");
     }
 
@@ -255,12 +247,12 @@ mod tests {
     fn handle_key_never_inserts_control_chords_or_line_breaks() {
         let mut editor = LineEditor::new("ab");
         for event in [
-            ctrl('g'),
-            ctrl('m'),
-            key(KeyCode::Enter),
+            KeyEvent::new(KeyCode::Char('g'), KeyModifiers::CONTROL),
+            KeyEvent::new(KeyCode::Char('m'), KeyModifiers::CONTROL),
+            KeyEvent::from(KeyCode::Enter),
             KeyEvent::new(KeyCode::Enter, KeyModifiers::SHIFT),
-            key(KeyCode::Tab),
-            key(KeyCode::Char('\n')),
+            KeyEvent::from(KeyCode::Tab),
+            KeyEvent::from(KeyCode::Char('\n')),
             KeyEvent::new(KeyCode::Char('x'), KeyModifiers::ALT),
         ] {
             assert!(!editor.handle_key(&event), "{event:?} must not edit");
@@ -273,7 +265,7 @@ mod tests {
     #[test]
     fn paste_inserts_at_the_cursor_with_line_breaks_collapsed() {
         let mut editor = LineEditor::new("[]");
-        editor.handle_key(&key(KeyCode::Left));
+        editor.handle_key(&KeyEvent::from(KeyCode::Left));
         assert!(editor.paste("\nfix\r\nauth\n\tflow\n"));
         assert_eq!(editor.text(), "[fix auth flow]");
     }
@@ -323,16 +315,16 @@ mod tests {
         let mut editor = LineEditor::new("abcdefghijklmnopqrstuvwxyz");
         assert_eq!(shown(&editor), ("/ rstuvwxyz".to_owned(), 11));
 
-        editor.handle_key(&ctrl('a'));
+        editor.handle_key(&KeyEvent::new(KeyCode::Char('a'), KeyModifiers::CONTROL));
         assert_eq!(shown(&editor), ("/ abcdefghi".to_owned(), 2));
 
         for _ in 0..10 {
-            editor.handle_key(&key(KeyCode::Right));
+            editor.handle_key(&KeyEvent::from(KeyCode::Right));
         }
         assert_eq!(shown(&editor), ("/ bcdefghij".to_owned(), 11));
 
         for _ in 0..5 {
-            editor.handle_key(&key(KeyCode::Left));
+            editor.handle_key(&KeyEvent::from(KeyCode::Left));
         }
         assert_eq!(
             shown(&editor),
@@ -347,7 +339,7 @@ mod tests {
         assert_eq!(shown(&editor).0, "/ rstuvwxyz");
 
         for _ in 0..5 {
-            editor.handle_key(&key(KeyCode::Backspace));
+            editor.handle_key(&KeyEvent::from(KeyCode::Backspace));
         }
         assert_eq!(shown(&editor), ("/ mnopqrstu".to_owned(), 11));
     }
@@ -386,7 +378,7 @@ mod tests {
             "wide glyphs count twice"
         );
 
-        editor.handle_key(&key(KeyCode::Left));
+        editor.handle_key(&KeyEvent::from(KeyCode::Left));
         assert_eq!(cursor_x(&editor, 20), PROMPT_WIDTH + 2);
     }
 }

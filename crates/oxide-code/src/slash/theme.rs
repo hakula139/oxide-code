@@ -217,10 +217,6 @@ mod tests {
     use crate::slash::registry::testing::run_execute;
     use crate::tui::modal::testing::render_rows;
 
-    fn key(code: KeyCode) -> KeyEvent {
-        KeyEvent::from(code)
-    }
-
     fn picker_with_active(name: &str) -> ThemePicker {
         ThemePicker::new(name)
     }
@@ -387,7 +383,7 @@ mod tests {
     fn handle_key_down_and_j_emit_preview_for_next_row_without_popping() {
         for code in [KeyCode::Down, KeyCode::Char('j')] {
             let mut p = picker_with_active("mocha");
-            let outcome = p.handle_key(&key(code));
+            let outcome = p.handle_key(&KeyEvent::from(code));
             match outcome {
                 ModalKey::Preview(ModalAction::Dispatch(Action::PreviewTheme { name })) => {
                     assert_eq!(name, "macchiato", "{code:?} from mocha lands on macchiato");
@@ -402,7 +398,7 @@ mod tests {
         // From the first row they wrap to the last via `select_prev`.
         for code in [KeyCode::Up, KeyCode::Char('k')] {
             let mut p = picker_with_active("mocha");
-            let outcome = p.handle_key(&key(code));
+            let outcome = p.handle_key(&KeyEvent::from(code));
             match outcome {
                 ModalKey::Preview(ModalAction::Dispatch(Action::PreviewTheme { name })) => {
                     assert_eq!(
@@ -419,7 +415,7 @@ mod tests {
     #[test]
     fn handle_key_numeric_jump_emits_preview_for_target_row() {
         let mut p = picker_with_active("mocha");
-        let outcome = p.handle_key(&key(KeyCode::Char('4')));
+        let outcome = p.handle_key(&KeyEvent::from(KeyCode::Char('4')));
         match outcome {
             ModalKey::Preview(ModalAction::Dispatch(Action::PreviewTheme { name })) => {
                 assert_eq!(name, "latte", "row 4 is latte");
@@ -435,7 +431,7 @@ mod tests {
         let past_end = char::from_digit(u32::try_from(BUILT_IN.len()).unwrap() + 1, 10)
             .expect("roster fits in a single digit");
         let mut p = picker_with_active("mocha");
-        let outcome = p.handle_key(&key(KeyCode::Char(past_end)));
+        let outcome = p.handle_key(&KeyEvent::from(KeyCode::Char(past_end)));
         assert!(matches!(outcome, ModalKey::Consumed));
     }
 
@@ -443,15 +439,15 @@ mod tests {
     fn handle_key_enter_on_unchanged_cursor_returns_cancelled() {
         // Enter without moving behaves like Esc, since there is nothing to commit.
         let mut p = picker_with_active("mocha");
-        let outcome = p.handle_key(&key(KeyCode::Enter));
+        let outcome = p.handle_key(&KeyEvent::from(KeyCode::Enter));
         assert!(matches!(outcome, ModalKey::Cancelled));
     }
 
     #[test]
     fn handle_key_enter_after_cursor_move_emits_swap_for_new_theme() {
         let mut p = picker_with_active("mocha");
-        p.handle_key(&key(KeyCode::Down)); // → macchiato
-        let outcome = p.handle_key(&key(KeyCode::Enter));
+        p.handle_key(&KeyEvent::from(KeyCode::Down)); // → macchiato
+        let outcome = p.handle_key(&KeyEvent::from(KeyCode::Enter));
         match outcome {
             ModalKey::Submitted(ModalAction::Dispatch(Action::SwapTheme { name })) => {
                 assert_eq!(name, "macchiato");
@@ -464,7 +460,7 @@ mod tests {
     fn handle_key_other_keys_are_consumed_and_modal_stays_open() {
         let mut p = picker_with_active("mocha");
         for code in [KeyCode::Tab, KeyCode::Char('x'), KeyCode::Char('0')] {
-            let outcome = p.handle_key(&key(code));
+            let outcome = p.handle_key(&KeyEvent::from(code));
             assert!(
                 matches!(outcome, ModalKey::Consumed),
                 "{code:?} must be consumed",

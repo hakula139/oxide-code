@@ -378,14 +378,6 @@ mod tests {
     use super::*;
     use crate::protocol::Op;
 
-    fn key(c: char) -> KeyEvent {
-        KeyEvent::from(KeyCode::Char(c))
-    }
-
-    fn key_with_mods(code: KeyCode, modifiers: KeyModifiers) -> KeyEvent {
-        KeyEvent::new(code, modifiers)
-    }
-
     /// Modal that keeps every default hook.
     struct BareModal;
 
@@ -406,7 +398,7 @@ mod tests {
         let mut stack = ModalStack::default();
         stack.push(Box::new(BareModal));
 
-        let outcome = stack.handle_key(&key_with_mods(KeyCode::Esc, KeyModifiers::NONE));
+        let outcome = stack.handle_key(&KeyEvent::from(KeyCode::Esc));
 
         assert!(
             matches!(outcome, Some(ModalAction::Cancelled)),
@@ -567,7 +559,7 @@ mod tests {
         // A silent close surfaces as `Some(Cancelled)` so the App can tell it from a consumed key.
         let mut stack = ModalStack::default();
         stack.push(Box::new(ScriptedModal::new(ModalAction::Cancelled)));
-        let outcome = stack.handle_key(&key('c'));
+        let outcome = stack.handle_key(&KeyEvent::from(KeyCode::Char('c')));
         assert!(matches!(outcome, Some(ModalAction::Cancelled)));
         assert!(!stack.is_active());
     }
@@ -578,7 +570,7 @@ mod tests {
         let mut modal = ScriptedModal::new(ModalAction::Cancelled);
         modal.cancel_action = Some(ModalAction::Dispatch(Action::Op(Op::Interrupt)));
         stack.push(Box::new(modal));
-        let outcome = stack.handle_key(&key('c'));
+        let outcome = stack.handle_key(&KeyEvent::from(KeyCode::Char('c')));
         assert!(matches!(
             outcome,
             Some(ModalAction::Dispatch(Action::Op(Op::Interrupt)))
@@ -589,8 +581,8 @@ mod tests {
     #[test]
     fn handle_key_universal_cancel_pops_before_the_modal_sees_the_key() {
         for cancel in [
-            key_with_mods(KeyCode::Esc, KeyModifiers::NONE),
-            key_with_mods(KeyCode::Char('c'), KeyModifiers::CONTROL),
+            KeyEvent::from(KeyCode::Esc),
+            KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL),
         ] {
             let mut stack = ModalStack::default();
             let mut modal = ScriptedModal::new(ModalAction::Cancelled);
@@ -620,13 +612,9 @@ mod tests {
         modal.captures_esc = true;
         stack.push(Box::new(modal));
 
-        assert!(
-            stack
-                .handle_key(&key_with_mods(KeyCode::Esc, KeyModifiers::NONE))
-                .is_none()
-        );
+        assert!(stack.handle_key(&KeyEvent::from(KeyCode::Esc)).is_none());
         assert!(stack.is_active());
-        let outcome = stack.handle_key(&key_with_mods(KeyCode::Char('c'), KeyModifiers::CONTROL));
+        let outcome = stack.handle_key(&KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL));
         assert!(matches!(
             outcome,
             Some(ModalAction::Dispatch(Action::Op(Op::Interrupt)))
@@ -641,7 +629,7 @@ mod tests {
         stack.push(Box::new(ScriptedModal::new(ModalAction::Dispatch(
             action.clone(),
         ))));
-        let outcome = stack.handle_key(&key('s'));
+        let outcome = stack.handle_key(&KeyEvent::from(KeyCode::Char('s')));
         assert!(
             matches!(outcome, Some(ModalAction::Dispatch(a)) if a == action),
             "submit must surface the modal's Action unchanged",
@@ -656,7 +644,7 @@ mod tests {
         modal.preview_action = ModalAction::Dispatch(Action::Op(Op::Interrupt));
         stack.push(Box::new(modal));
 
-        let outcome = stack.handle_key(&key('p'));
+        let outcome = stack.handle_key(&KeyEvent::from(KeyCode::Char('p')));
         assert!(
             matches!(
                 outcome,
@@ -670,7 +658,11 @@ mod tests {
     #[test]
     fn handle_key_empty_stack_delivers_nothing() {
         let mut stack = ModalStack::default();
-        assert!(stack.handle_key(&key('s')).is_none());
+        assert!(
+            stack
+                .handle_key(&KeyEvent::from(KeyCode::Char('s')))
+                .is_none()
+        );
         assert!(!stack.is_active());
     }
 
@@ -679,7 +671,7 @@ mod tests {
         // `x` because ScriptedModal consumes `c` as its own cancel sentinel.
         let mut stack = ModalStack::default();
         stack.push(Box::new(ScriptedModal::new(ModalAction::Cancelled)));
-        let outcome = stack.handle_key(&key_with_mods(KeyCode::Char('x'), KeyModifiers::NONE));
+        let outcome = stack.handle_key(&KeyEvent::from(KeyCode::Char('x')));
         assert!(outcome.is_none(), "non-cancel key must not pop the stack");
         assert!(stack.is_active());
     }
@@ -699,7 +691,7 @@ mod tests {
             5 + TOP_BORDER_HEIGHT,
             "top modal's height wins (plus border)",
         );
-        let outcome = stack.handle_key(&key('s'));
+        let outcome = stack.handle_key(&KeyEvent::from(KeyCode::Char('s')));
         assert!(matches!(outcome, Some(ModalAction::Cancelled)));
         assert!(stack.is_active(), "inner modal still active");
         assert_eq!(
@@ -720,7 +712,7 @@ mod tests {
         stack.push(Box::new(parent));
         assert_eq!(stack.height(80, 40), 3 + TOP_BORDER_HEIGHT, "parent height");
 
-        let outcome = stack.handle_key(&key('h'));
+        let outcome = stack.handle_key(&KeyEvent::from(KeyCode::Char('h')));
         assert!(outcome.is_none(), "Push must not surface a ModalAction");
         assert_eq!(
             stack.height(80, 40),
@@ -734,16 +726,13 @@ mod tests {
         use std::sync::atomic::Ordering;
 
         for (label, exit_key) in [
-            (
-                "Esc universal-cancel",
-                key_with_mods(KeyCode::Esc, KeyModifiers::NONE),
-            ),
+            ("Esc universal-cancel", KeyEvent::from(KeyCode::Esc)),
             (
                 "Ctrl+C universal-cancel",
-                key_with_mods(KeyCode::Char('c'), KeyModifiers::CONTROL),
+                KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL),
             ),
-            ("modal Cancelled", key('c')),
-            ("modal Submitted", key('s')),
+            ("modal Cancelled", KeyEvent::from(KeyCode::Char('c'))),
+            ("modal Submitted", KeyEvent::from(KeyCode::Char('s'))),
         ] {
             let parent = ScriptedModal::new(ModalAction::Cancelled);
             let counter = Arc::clone(&parent.focus_regained_count);
