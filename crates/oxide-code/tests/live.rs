@@ -9,6 +9,9 @@ use std::process::{Command, Output, Stdio};
 use serde_json::Value;
 use tempfile::TempDir;
 
+#[path = "support/env.rs"]
+mod env;
+
 const DEFAULT_MODEL: &str = "claude-haiku-5-5";
 const DEFAULT_THINKING_MODEL: &str = "claude-opus-5-5";
 const CREDENTIAL_VARS: [&str; 3] = [
@@ -233,16 +236,11 @@ impl Live {
 
     fn ox(&self, model: &str) -> Command {
         let mut command = Command::new(env!("CARGO_BIN_EXE_ox"));
-        for (name, _) in std::env::vars_os() {
-            if name.to_str().is_some_and(is_behavior_var) {
-                command.env_remove(name);
-            }
-        }
+        env::remove_inherited(&mut command, env::is_ox_setting);
         command
             .current_dir(self.cwd())
-            // Without `USER`, ox skips the Claude Code login in the macOS Keychain.
-            .env_remove("USER")
             .env("HOME", self.root.path().join("home"))
+            .env("USERPROFILE", self.root.path().join("home"))
             .env("ANTHROPIC_MODEL", model)
             .env("XDG_CONFIG_HOME", self.root.path().join("config"))
             .env("XDG_DATA_HOME", self.root.path().join("data"))
@@ -313,11 +311,6 @@ fn credentials() -> Vec<(&'static str, String)> {
         .filter(|value| value.len() >= MIN_SECRET_HEADER_LEN)
         .map(|value| ("ANTHROPIC_CUSTOM_HEADERS", value.to_owned()));
     tokens.chain(header_values).collect()
-}
-
-/// Returns whether an inherited variable changes what the tests observe.
-fn is_behavior_var(name: &str) -> bool {
-    name.starts_with("OX_") && name != "OX_EXTRA_CA_CERTS"
 }
 
 fn env_or(name: &str, default: &str) -> String {

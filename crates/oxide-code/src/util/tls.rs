@@ -34,12 +34,12 @@ use {
 /// The roots an HTTP client verifies servers against. Tests substitute roots that read no system
 /// store.
 pub(crate) trait Trust: Send + Sync {
-    /// Configures `builder` to verify servers against these roots.
+    /// Configures `builder` to verify servers against these roots, possibly replacing its TLS
+    /// options. Set TLS options before calling this method only when they may be replaced.
     fn apply(&self, builder: ClientBuilder) -> Result<ClientBuilder>;
 }
 
-/// The platform trust store, plus the PEM bundle at the path when one is set. On macOS a bundle
-/// comes with a TLS configuration of its own, which replaces the TLS options set on the builder.
+/// The platform trust store, plus the PEM bundle at the path when one is set.
 pub(crate) struct PlatformTrust(pub(crate) Option<PathBuf>);
 
 impl Trust for PlatformTrust {
@@ -511,7 +511,7 @@ pub(crate) mod testing {
 
     impl Trust for NoRoots {
         fn apply(&self, builder: ClientBuilder) -> Result<ClientBuilder> {
-            Ok(builder.tls_certs_only([]))
+            Ok(builder.no_proxy().tls_certs_only([]))
         }
     }
 }
