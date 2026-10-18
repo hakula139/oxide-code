@@ -1,10 +1,11 @@
 //! `grep` tool body in content mode: per-file groups of line-numbered match rows, where context
 //! lines render dim.
 
+use ratatui::style::Style;
 use ratatui::text::Line;
 use unicode_width::UnicodeWidthStr;
 
-use super::{MAX_TOOL_OUTPUT_LINES, border_style_for};
+use super::{MAX_TOOL_OUTPUT_LINES, hidden_footer};
 use crate::tool::GrepFileGroup;
 use crate::tui::components::chat::blocks::RenderCtx;
 use crate::tui::components::chat::blocks::rows::{NumberedRows, body_row};
@@ -12,15 +13,13 @@ use crate::tui::components::chat::blocks::rows::{NumberedRows, body_row};
 pub(super) fn render(
     out: &mut Vec<Line<'static>>,
     ctx: &RenderCtx<'_>,
+    border_style: Style,
     groups: &[GrepFileGroup],
     truncated: bool,
-    is_error: bool,
 ) {
     if groups.is_empty() {
         return;
     }
-
-    let border_style = border_style_for(ctx.theme, is_error);
 
     // Budget spans both path headers and match rows.
     let total_rows: usize = groups.iter().map(|g| 1 + g.lines.len()).sum();
@@ -57,24 +56,8 @@ pub(super) fn render(
         }
     }
 
-    if let Some(text) = footer_text(hidden, truncated) {
-        body_row(out, ctx, border_style, text, ctx.theme.dim());
-    }
-}
-
-/// Footer combining TUI-side row hiding and grep's `head_limit` cap, if either applies.
-fn footer_text(hidden: usize, truncated: bool) -> Option<String> {
-    match (hidden, truncated) {
-        (0, false) => None,
-        (0, true) => Some("... limit reached".to_owned()),
-        (n, false) => {
-            let noun = if n == 1 { "line" } else { "lines" };
-            Some(format!("... +{n} {noun}"))
-        }
-        (n, true) => {
-            let noun = if n == 1 { "line" } else { "lines" };
-            Some(format!("... +{n} {noun} (limit reached)"))
-        }
+    if let Some(footer) = hidden_footer(hidden, "line", "lines", truncated) {
+        body_row(out, ctx, border_style, footer, ctx.theme.dim());
     }
 }
 
@@ -107,7 +90,7 @@ mod tests {
             show_thinking: true,
         };
         let mut out = Vec::new();
-        render(&mut out, &ctx, groups, truncated, false);
+        render(&mut out, &ctx, theme.tool_border(), groups, truncated);
         out.iter().map(ToString::to_string).collect()
     }
 
@@ -130,7 +113,7 @@ mod tests {
         ];
         let mut out = Vec::new();
 
-        render(&mut out, &ctx, &groups, false, false);
+        render(&mut out, &ctx, theme.tool_border(), &groups, false);
 
         let rows: Vec<String> = out.iter().map(ToString::to_string).collect();
         assert_eq!(
@@ -190,32 +173,6 @@ mod tests {
                 "▎   f4.rs",
                 "▎   ... +1 line",
             ]
-        );
-    }
-
-    // ── footer_text ──
-
-    #[test]
-    fn footer_text_no_hidden_no_truncation_is_none() {
-        assert_eq!(footer_text(0, false), None);
-    }
-
-    #[test]
-    fn footer_text_truncated_only_names_limit() {
-        assert_eq!(footer_text(0, true), Some("... limit reached".to_owned()));
-    }
-
-    #[test]
-    fn footer_text_hidden_uses_singular_or_plural() {
-        assert_eq!(footer_text(1, false), Some("... +1 line".to_owned()));
-        assert_eq!(footer_text(3, false), Some("... +3 lines".to_owned()));
-    }
-
-    #[test]
-    fn footer_text_hidden_and_truncated_combines_both() {
-        assert_eq!(
-            footer_text(2, true),
-            Some("... +2 lines (limit reached)".to_owned()),
         );
     }
 }

@@ -1,13 +1,12 @@
 //! Edit-tool diff body: a unified `-` / `+` layout of the [`DiffChunk`]s.
 
 use ratatui::style::Style;
-use ratatui::text::{Line, Span};
+use ratatui::text::Line;
 
-use super::border_style_for;
 use crate::tool::{DiffChunk, DiffLine};
 use crate::tui::components::chat::blocks::RenderCtx;
-use crate::tui::components::chat::blocks::rows::NumberedRows;
-use crate::tui::glyphs::TOOL_BORDER_CONT;
+use crate::tui::components::chat::blocks::rows::{NumberedRows, body_row};
+use crate::util::text::plural;
 
 const MAX_DIFF_BODY_LINES: usize = 20;
 const MAX_LOCATIONS_DISPLAYED: usize = 8;
@@ -16,16 +15,11 @@ const NO_CHANGE_MARKER: &str = "(no change)";
 pub(super) fn render(
     out: &mut Vec<Line<'static>>,
     ctx: &RenderCtx<'_>,
+    border_style: Style,
     chunks: &[DiffChunk],
-    is_error: bool,
 ) {
-    let border_style = border_style_for(ctx.theme, is_error);
-
     if !any_chunk_has_content(chunks) {
-        out.push(Line::from(vec![
-            Span::styled(TOOL_BORDER_CONT.to_owned(), border_style),
-            Span::styled(NO_CHANGE_MARKER, ctx.theme.dim()),
-        ]));
+        body_row(out, ctx, border_style, NO_CHANGE_MARKER, ctx.theme.dim());
         return;
     }
 
@@ -74,11 +68,9 @@ fn render_chunk_body(
                 line,
             } => add_renderer.render(out, line.number, &line.text, text_style),
             Entry::Ellipsis { hidden } => {
-                let noun = if hidden == 1 { "line" } else { "lines" };
-                out.push(Line::from(vec![
-                    Span::styled(TOOL_BORDER_CONT.to_owned(), border_style),
-                    Span::styled(format!("... {hidden} {noun} hidden"), ctx.theme.dim()),
-                ]));
+                let noun = plural(hidden, "line", "lines");
+                let text = format!("... {hidden} {noun} hidden");
+                body_row(out, ctx, border_style, text, ctx.theme.dim());
             }
         }
     }
@@ -110,18 +102,9 @@ fn render_locations_footer(
     } else {
         String::new()
     };
-    let label = if locations.len() == 1 {
-        "line"
-    } else {
-        "lines"
-    };
-    out.push(Line::from(vec![
-        Span::styled(TOOL_BORDER_CONT.to_owned(), border_style),
-        Span::styled(
-            format!("applied at {label} {list}{suffix}"),
-            ctx.theme.dim(),
-        ),
-    ]));
+    let noun = plural(locations.len(), "line", "lines");
+    let text = format!("applied at {noun} {list}{suffix}");
+    body_row(out, ctx, border_style, text, ctx.theme.dim());
 }
 
 fn any_chunk_has_content(chunks: &[DiffChunk]) -> bool {
@@ -254,7 +237,12 @@ mod tests {
     fn render_no_change_marker_when_all_chunks_empty_after_trim() {
         let theme = Theme::default();
         let mut out = Vec::new();
-        render(&mut out, &ctx(&theme), &[chunk_of(&[], &[])], false);
+        render(
+            &mut out,
+            &ctx(&theme),
+            theme.tool_border(),
+            &[chunk_of(&[], &[])],
+        );
         assert_eq!(out.len(), 1);
         let text: String = out[0].spans.iter().map(|s| s.content.as_ref()).collect();
         assert!(text.ends_with("(no change)"), "unexpected body: {text:?}");
@@ -267,8 +255,8 @@ mod tests {
         render(
             &mut out,
             &ctx(&theme),
+            theme.tool_border(),
             &[chunk_of(&["foo"], &["bar"])],
-            false,
         );
         let texts = rendered_texts(&out);
         assert!(
@@ -309,7 +297,12 @@ mod tests {
             }],
         };
         let mut out = Vec::new();
-        render(&mut out, &ctx(&theme), &[chunk_a, chunk_b], false);
+        render(
+            &mut out,
+            &ctx(&theme),
+            theme.tool_border(),
+            &[chunk_a, chunk_b],
+        );
         let texts = rendered_texts(&out);
         assert_eq!(
             texts.iter().filter(|t| t.contains("12 - foo")).count(),
@@ -397,6 +390,22 @@ mod tests {
         let mut out = Vec::new();
         render_locations_footer(&mut out, &ctx, &[], theme.tool_border());
         assert_eq!(out, []);
+    }
+
+    #[test]
+    fn render_locations_footer_wraps_under_the_bar_in_a_narrow_chat() {
+        let theme = Theme::default();
+        let ctx = RenderCtx {
+            width: 24,
+            theme: &theme,
+            show_thinking: true,
+        };
+        let mut out = Vec::new();
+
+        render_locations_footer(&mut out, &ctx, &[12, 47, 200], theme.tool_border());
+
+        let rows: Vec<String> = out.iter().map(ToString::to_string).collect();
+        assert_eq!(rows, ["▎   applied at lines 12,", "▎   47, 200"]);
     }
 
     // ── any_chunk_has_content ──

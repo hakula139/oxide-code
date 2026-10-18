@@ -16,7 +16,7 @@ use super::rows::wrapped_row;
 use super::{ChatBlock, RenderCtx};
 use crate::tool::ToolResultView;
 use crate::tui::glyphs::{TOOL_BORDER_CONT, TOOL_BORDER_PREFIX, TOOL_ERROR, TOOL_SUCCESS};
-use crate::tui::theme::Theme;
+use crate::util::text::plural;
 
 const MAX_TOOL_OUTPUT_LINES: usize = 5;
 
@@ -76,34 +76,39 @@ impl ToolResultBlock {
 
 impl ChatBlock for ToolResultBlock {
     fn render(&self, ctx: &RenderCtx<'_>) -> Vec<Line<'static>> {
+        let border_style = if self.is_error {
+            ctx.theme.error()
+        } else {
+            ctx.theme.tool_border()
+        };
         let mut out = Vec::new();
-        render_status_line(&mut out, ctx, &self.label, self.is_error);
+        self.render_status_line(&mut out, ctx, border_style);
         match &self.view {
             ToolResultView::Text { content } => {
-                text::render(&mut out, ctx, content, &self.label, self.is_error);
+                text::render(&mut out, ctx, border_style, content, &self.label);
             }
             ToolResultView::ReadExcerpt {
                 path,
                 lines,
                 total_lines,
             } => {
-                read_excerpt::render(&mut out, ctx, path, lines, *total_lines, self.is_error);
+                read_excerpt::render(&mut out, ctx, border_style, path, lines, *total_lines);
             }
             ToolResultView::Diff { chunks, .. } => {
-                diff::render(&mut out, ctx, chunks, self.is_error);
+                diff::render(&mut out, ctx, border_style, chunks);
             }
             ToolResultView::GrepMatches { groups, truncated } => {
-                grep::render(&mut out, ctx, groups, *truncated, self.is_error);
+                grep::render(&mut out, ctx, border_style, groups, *truncated);
             }
             ToolResultView::GlobFiles {
                 pattern,
                 files,
                 total,
             } => {
-                glob::render(&mut out, ctx, pattern, files, *total, self.is_error);
+                glob::render(&mut out, ctx, border_style, pattern, files, *total);
             }
             ToolResultView::Tasks { tasks } => {
-                tasks::render(&mut out, ctx, tasks, self.is_error);
+                tasks::render(&mut out, ctx, border_style, tasks);
             }
         }
         out
@@ -118,27 +123,29 @@ impl ChatBlock for ToolResultBlock {
     }
 }
 
-// ── Shared Helpers ──
-
-fn render_status_line(
-    out: &mut Vec<Line<'static>>,
-    ctx: &RenderCtx<'_>,
-    label: &str,
-    is_error: bool,
-) {
-    let (indicator, indicator_style) = if is_error {
-        (TOOL_ERROR, ctx.theme.error())
-    } else {
-        (TOOL_SUCCESS, ctx.theme.success())
-    };
-    status_row(
-        out,
-        ctx,
-        border_style_for(ctx.theme, is_error),
-        Span::styled(indicator, indicator_style),
-        Span::styled(label.to_owned(), ctx.theme.muted()),
-    );
+impl ToolResultBlock {
+    fn render_status_line(
+        &self,
+        out: &mut Vec<Line<'static>>,
+        ctx: &RenderCtx<'_>,
+        border_style: Style,
+    ) {
+        let (indicator, indicator_style) = if self.is_error {
+            (TOOL_ERROR, ctx.theme.error())
+        } else {
+            (TOOL_SUCCESS, ctx.theme.success())
+        };
+        status_row(
+            out,
+            ctx,
+            border_style,
+            Span::styled(indicator, indicator_style),
+            Span::styled(self.label.clone(), ctx.theme.muted()),
+        );
+    }
 }
+
+// ── Shared Helpers ──
 
 /// Emits a tool call or result status line, whose wrapped rows continue under the body text.
 fn status_row(
@@ -157,11 +164,20 @@ fn status_row(
     wrapped_row(out, ctx, line, TOOL_BORDER_CONT, border_style);
 }
 
-fn border_style_for(theme: &Theme, is_error: bool) -> Style {
-    if is_error {
-        theme.error()
-    } else {
-        theme.tool_border()
+/// Footer counting the rows a body hides and flagging a tool-side result limit, as in
+/// `... +3 lines (limit reached)`, or `None` when neither applies.
+fn hidden_footer(
+    hidden: usize,
+    singular: &str,
+    plural_form: &str,
+    limit_reached: bool,
+) -> Option<String> {
+    let noun = plural(hidden, singular, plural_form);
+    match (hidden, limit_reached) {
+        (0, false) => None,
+        (0, true) => Some("... limit reached".to_owned()),
+        (n, false) => Some(format!("... +{n} {noun}")),
+        (n, true) => Some(format!("... +{n} {noun} (limit reached)")),
     }
 }
 
@@ -171,6 +187,7 @@ mod tests {
     use crate::tool::tasks::TaskStatus;
     use crate::tool::tasks::testing::task;
     use crate::tool::{GrepFileGroup, GrepMatchLine};
+    use crate::tui::theme::Theme;
 
     // ── ToolResultBlock::render ──
 
@@ -220,6 +237,61 @@ mod tests {
             let mut expected = vec![format!("{TOOL_BORDER_PREFIX}{TOOL_SUCCESS} label")];
             expected.extend(body.iter().map(|text| format!("{TOOL_BORDER_CONT}{text}")));
             assert_eq!(rows, expected);
+        }
+    }
+
+    #[test]
+    fn tool_result_block_render_paints_a_failed_result_in_the_error_color() {
+        let theme = Theme::default();
+        let ctx = RenderCtx {
+            width: 80,
+            theme: &theme,
+            show_thinking: false,
+        };
+        let view = ToolResultView::Text {
+            content: "boom".to_owned(),
+        };
+        let block = ToolResultBlock::new("bash", view, true);
+
+        let lines = block.render(&ctx);
+
+        let error = theme.error();
+        assert_eq!(
+            lines,
+            [
+                Line::from(vec![
+                    Span::styled(TOOL_BORDER_PREFIX, error),
+                    Span::styled(TOOL_ERROR, error),
+                    Span::raw(" "),
+                    Span::styled("bash", theme.muted()),
+                ]),
+                Line::from(vec![
+                    Span::styled(TOOL_BORDER_CONT, error),
+                    Span::styled("boom", theme.dim()),
+                ]),
+            ]
+        );
+    }
+
+    // ── hidden_footer ──
+
+    #[test]
+    fn hidden_footer_counts_hidden_rows_and_flags_the_limit() {
+        let cases = [
+            (0, false, None),
+            (0, true, Some("... limit reached")),
+            (1, false, Some("... +1 line")),
+            (3, false, Some("... +3 lines")),
+            (2, true, Some("... +2 lines (limit reached)")),
+        ];
+        for (hidden, limit_reached, expected) in cases {
+            let footer = hidden_footer(hidden, "line", "lines", limit_reached);
+
+            assert_eq!(
+                footer.as_deref(),
+                expected,
+                "{hidden} hidden, {limit_reached}"
+            );
         }
     }
 }
