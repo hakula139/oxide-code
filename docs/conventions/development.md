@@ -72,6 +72,8 @@ CI runs on pushes to `main`, pull requests, and manual dispatch, and the release
 | Coverage         | The test suite under `cargo llvm-cov`, uploaded to Codecov                    |
 | Nix Build        | The package build on Linux and macOS, which runs the tests and `ox --version` |
 
+Branch protection requires only the CI Result job and Codecov's `codecov/patch` status. CI Result fails when any job in its `needs` fails or is cancelled, so list each new job there.
+
 No job runs a plain `cargo build`, so run it locally for a quick compile check. See [RELEASING.md](../../RELEASING.md) for the release workflow.
 
 ## Failing Checks

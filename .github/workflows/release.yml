@@ -179,7 +179,6 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       actions: write
-      checks: read
       contents: write
       issues: write
       pull-requests: write
@@ -222,7 +221,6 @@ jobs:
           # A rerun rebuilds this commit on the current main and replaces the earlier push.
           git push --force origin "$branch"
 
-          setting='Enable "Allow GitHub Actions to create and approve pull requests" in Settings > Actions > General, then rerun this job.'
           if [[ -z "$(gh pr list --head "$branch" --state open --json number --jq '.[].number')" ]] &&
             ! gh pr create --base main --head "$branch" --title "$title" --assignee hakula139 --label chore \
               --body-file - <<EOF
@@ -235,7 +233,7 @@ jobs:
           - [x] The Release workflow rendered the formula from the checksums its build jobs produced.
           EOF
           then
-            echo "::error::Could not open the formula PR. $setting"
+            echo '::error::Could not open the formula PR. Enable "Allow GitHub Actions to create and approve pull requests" in Settings > Actions > General, then rerun this job.'
             exit 1
           fi
 
@@ -244,12 +242,10 @@ jobs:
 
           sha=$(git rev-parse HEAD)
           for _ in {1..30}; do
-            names=$(gh api "repos/$GITHUB_REPOSITORY/commits/$sha/check-runs" --jq '.check_runs[].name')
-            if grep -qx 'Rust Check' <<< "$names" && grep -qx 'Node Check' <<< "$names" &&
-              grep -qx 'Nix Flake Check' <<< "$names"; then
+            if [[ -n "$(gh run list --workflow ci.yml --commit "$sha" --event workflow_dispatch --json databaseId --jq '.[].databaseId')" ]]; then
               exit 0
             fi
             sleep 10
           done
-          echo "::error::The dispatched CI run reported no required checks on $sha. $setting"
+          echo "::error::The dispatched CI run did not start on $sha."
           exit 1
