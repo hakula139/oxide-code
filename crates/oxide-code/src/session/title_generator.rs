@@ -50,7 +50,8 @@ const SYSTEM_PROMPT: &str = indoc! {r#"
 
 /// Spawns a task that asks Haiku for a title, appends it to `session`, and emits
 /// `SessionTitleUpdated` through `sink`. `session` owns the task, so finalizing it aborts the
-/// request. A failure only warns, so the first-prompt title stays.
+/// request. A generation failure only warns, so the first-prompt title stays, while an append
+/// failure surfaces as a session write error.
 pub(crate) fn spawn<S>(client: Client, session: SessionHandle, sink: S, first_prompt: String)
 where
     S: EventSink + Clone + Send + 'static,
