@@ -235,7 +235,7 @@ enum Direction {
 mod tests {
     use super::*;
     use crate::model::ModelSpec;
-    use crate::slash::test_session_info;
+    use crate::slash::testing::test_session_info;
     use crate::tui::modal::testing::render_rows;
 
     /// `test_session_info` ships Opus 5.5 active at `high`.

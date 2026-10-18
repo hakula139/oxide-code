@@ -92,7 +92,7 @@ mod tests {
     use crate::session::store::SessionStore;
     use crate::session::store::testing::seed_test_session;
     use crate::slash::registry::SlashCommand;
-    use crate::slash::{stamped_id, test_session_info, with_isolated_xdg};
+    use crate::slash::testing::{stamped_id, test_session_info, with_isolated_xdg};
 
     // ── DeleteCmd::name ──
 

@@ -254,8 +254,6 @@ fn write_preview(out: &mut impl Write, preview: &ApprovalPreview, basis: &Basis)
 
 #[cfg(test)]
 mod tests {
-    use std::path::Path;
-
     use indoc::{formatdoc, indoc};
     use wiremock::matchers::{method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -266,27 +264,13 @@ mod tests {
         engine, mount_reply, mount_tool_call_once, panic_message, panicked_engine, request_bodies,
         with_pinned_home,
     };
-    use crate::permission::{Access, Mode, PermissionClass, Policy, Tier, Workspace};
-    use crate::protocol::CapturingSink;
+    use crate::permission::testing::exec_grant;
+    use crate::permission::{Mode, PermissionClass, Tier};
+    use crate::protocol::testing::CapturingSink;
     use crate::session::store::testing::test_store;
     use crate::tool::bash::BashTool;
+    use crate::tool::testing::bash_preview;
     use crate::tool::{DiffChunk, DiffLine, ToolRegistry};
-
-    fn bash_preview(command: &str) -> ApprovalPreview {
-        ApprovalPreview {
-            title: "Bash".to_owned(),
-            body: ApprovalBody::Command(command.to_owned()),
-        }
-    }
-
-    fn bash_grant(command: &str) -> SessionGrant {
-        Policy::default()
-            .session_grant(
-                PermissionClass::Exec,
-                &Access::for_command(command, &Workspace::new(Path::new("/repo"))),
-            )
-            .unwrap()
-    }
 
     /// Runs one `decide` over `input`, returning the decision and what the prompter wrote.
     async fn decide(input: &str, grant: Option<&SessionGrant>) -> (Decision, String) {
@@ -315,7 +299,7 @@ mod tests {
             mount_reply(&server, "reply").await;
             let dir = tempfile::tempdir().unwrap();
             let engine = engine(server.uri(), &test_store(dir.path()), dir.path()).await;
-            let sink = CapturingSink::new();
+            let sink = CapturingSink::default();
             let input: &[u8] = b"\n   \nhello\n";
 
             let exit = Box::pin(drive(engine.spawn(&[]), &sink, input, true))
@@ -346,7 +330,7 @@ mod tests {
             let store = test_store(dir.path());
             let engine = engine(server.uri(), &store, dir.path()).await;
             let session_id = engine.session_id().to_owned();
-            let sink = CapturingSink::new();
+            let sink = CapturingSink::default();
             let input: &[u8] = indoc! {b"
                 first
                 /resume zzzz
@@ -404,7 +388,7 @@ mod tests {
             let dir = tempfile::tempdir().unwrap();
             let engine = engine(server.uri(), &test_store(dir.path()), dir.path()).await;
             let first_id = engine.session_id().to_owned();
-            let sink = CapturingSink::new();
+            let sink = CapturingSink::default();
             let log = (1..=150)
                 .map(|n| format!("request {n} served in 12 ms."))
                 .collect::<Vec<_>>()
@@ -477,7 +461,7 @@ mod tests {
             let server = MockServer::start().await;
             let dir = tempfile::tempdir().unwrap();
             let engine = engine(server.uri(), &test_store(dir.path()), dir.path()).await;
-            let sink = CapturingSink::new();
+            let sink = CapturingSink::default();
             let input: &[u8] = indoc! {b"
                 /model gpt-4
                 /model
@@ -535,7 +519,7 @@ mod tests {
 
             let exit = Box::pin(drive(
                 engine.spawn(&[]),
-                &CapturingSink::new(),
+                &CapturingSink::default(),
                 input.as_bytes(),
                 true,
             ))
@@ -571,7 +555,7 @@ mod tests {
 
             let exit = Box::pin(drive(
                 engine.spawn(&[]),
-                &CapturingSink::new(),
+                &CapturingSink::default(),
                 input.as_bytes(),
                 false,
             ))
@@ -597,7 +581,13 @@ mod tests {
     async fn drive_hands_back_the_panic_of_an_engine_that_stops() {
         let input: &[u8] = b"hello\n";
 
-        let result = Box::pin(drive(panicked_engine(), &CapturingSink::new(), input, true)).await;
+        let result = Box::pin(drive(
+            panicked_engine(),
+            &CapturingSink::default(),
+            input,
+            true,
+        ))
+        .await;
 
         let panic = result.unwrap_err().downcast::<EnginePanic>().unwrap();
         assert_eq!(panic_message(panic), "engine bug");
@@ -654,7 +644,7 @@ mod tests {
 
     #[tokio::test]
     async fn decide_allows_the_suggested_or_an_edited_rule_for_the_session() {
-        let grant = bash_grant("cargo test");
+        let grant = exec_grant("cargo test");
         let allowed = |pattern: &str| Decision::AllowForSession {
             rule: Box::new(Rule::parse(PermissionClass::Exec, pattern).unwrap()),
         };

@@ -118,7 +118,7 @@ mod tests {
     use super::*;
     use crate::protocol::Op;
     use crate::slash::registry::testing::run_execute;
-    use crate::slash::test_session_info;
+    use crate::slash::testing::test_session_info;
     use crate::tui::modal::testing::render_rows;
 
     // ── RenameCmd::name ──

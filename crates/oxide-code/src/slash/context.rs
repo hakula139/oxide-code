@@ -44,6 +44,8 @@ impl<'a> SlashContext<'a> {
     }
 }
 
+// ── Testing ──
+
 #[cfg(test)]
 pub(crate) mod testing {
     use std::path::PathBuf;

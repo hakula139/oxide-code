@@ -6,8 +6,9 @@
 
 use std::path::PathBuf;
 
-use anyhow::Result;
+use anyhow::{Result, anyhow};
 use serde::{Deserialize, Serialize};
+use tokio::sync::mpsc;
 
 use crate::client::RateLimits;
 use crate::config::Effort;
@@ -127,9 +128,9 @@ impl ConfigPick {
 /// Token and cost snapshot for status-line rendering.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub(crate) struct UsageSnapshot {
-    /// Cache-aware input total: `input + cache_creation + cache_read`. Drives the context-pressure
-    /// percentage and auto-compaction threshold. `None` after a compaction, manual or automatic,
-    /// until the next request reports usage, which hides the context segment.
+    /// Input tokens of the latest request, cache writes and reads included. `None` after a
+    /// compaction, manual or automatic, until the next request reports usage, which hides the
+    /// context segment.
     pub(crate) context_tokens: Option<u32>,
     /// Active model context window. `None` hides the percentage.
     pub(crate) context_window: Option<u32>,
@@ -324,10 +325,9 @@ pub(crate) enum Interaction {
 
 // ── Event Sink ──
 
-/// Transport from the engine to a frontend. Implementations must be cheap to clone-by-`&` (the
-/// loop calls `send` on a hot path) and tolerate dropped events without panicking. Call sites use
-/// [`Self::emit`] for one-shot or user-facing events (logs on drop). Raw [`Self::send`] with
-/// `_ = ` is reserved for per-token streaming where dropping a single event is harmless.
+/// Transport from the engine to a frontend. `send` runs for every streamed token, so it must be
+/// cheap, and it must not panic once the frontend is gone. Discard its error with `_ =` only for
+/// streamed text, where losing a token is harmless.
 pub(crate) trait EventSink: Send + Sync {
     fn send(&self, event: Event) -> Result<()>;
 
@@ -339,8 +339,7 @@ pub(crate) trait EventSink: Send + Sync {
         }
     }
 
-    /// Surfaces a session-writer failure as a single user-visible [`Event::Error`].
-    /// No-op when `failure` is `None`.
+    /// Surfaces a session-writer failure, if any, as one [`Event::Error`].
     fn session_write_error(&self, failure: Option<&str>) {
         if let Some(failure) = failure {
             self.emit(
@@ -351,68 +350,99 @@ pub(crate) trait EventSink: Send + Sync {
     }
 }
 
+/// Delivers to the frontend holding the receiver.
+impl EventSink for mpsc::UnboundedSender<Event> {
+    fn send(&self, event: Event) -> Result<()> {
+        mpsc::UnboundedSender::send(self, event)
+            .map_err(|_| anyhow!("the frontend stopped reading events"))
+    }
+}
+
 /// The message that reports a session-writer failure.
 pub(crate) fn session_write_failed(failure: &str) -> String {
     format!("Session write failed: {failure}")
 }
 
-// ── Test Fixtures ──
-
-/// Channel pair whose `recv()` stays pending forever.
-#[cfg(test)]
-pub(crate) fn inert_op_channel() -> (
-    tokio::sync::mpsc::Sender<Op>,
-    tokio::sync::mpsc::Receiver<Op>,
-) {
-    tokio::sync::mpsc::channel(1)
-}
+// ── Testing ──
 
 #[cfg(test)]
-#[derive(Clone, Default)]
-pub(crate) struct CapturingSink(std::sync::Arc<std::sync::Mutex<Vec<Event>>>);
+pub(crate) mod testing {
+    use std::sync::{Arc, Mutex};
 
-#[cfg(test)]
-impl CapturingSink {
-    pub(crate) fn new() -> Self {
-        Self::default()
+    use anyhow::{Result, bail};
+    use serde_json::json;
+
+    use super::{Event, EventSink, ToolCall, ToolResult};
+    use crate::tool::ToolResultView;
+
+    /// An [`EventSink`] that keeps every event it receives. Clones share one log.
+    #[derive(Clone, Default)]
+    pub(crate) struct CapturingSink(Arc<Mutex<Vec<Event>>>);
+
+    impl CapturingSink {
+        pub(crate) fn events(&self) -> Vec<Event> {
+            self.0.lock().unwrap().clone()
+        }
     }
 
-    pub(crate) fn events(&self) -> Vec<Event> {
-        self.0.lock().unwrap().clone()
+    impl EventSink for CapturingSink {
+        fn send(&self, event: Event) -> Result<()> {
+            self.0.lock().unwrap().push(event);
+            Ok(())
+        }
     }
-}
 
-#[cfg(test)]
-impl EventSink for CapturingSink {
-    fn send(&self, event: Event) -> Result<()> {
-        self.0.lock().unwrap().push(event);
-        Ok(())
+    /// An [`EventSink`] whose `send` always fails, as it does once the frontend is gone.
+    pub(crate) struct FailingSink;
+
+    impl EventSink for FailingSink {
+        fn send(&self, _event: Event) -> Result<()> {
+            bail!("sink closed")
+        }
     }
-}
 
-/// An [`EventSink`] whose `send` always fails, for exercising the fail-closed paths that depend on
-/// a control-plane event reaching the frontend.
-#[cfg(test)]
-pub(crate) struct FailingSink;
+    /// The `bash` call `t1` that runs `ls`.
+    pub(crate) fn ls_call() -> ToolCall {
+        ToolCall {
+            id: "t1".to_owned(),
+            name: "bash".to_owned(),
+            input: json!({"command": "ls"}),
+            icon: "$".to_owned(),
+            label: "ls".to_owned(),
+        }
+    }
 
-#[cfg(test)]
-impl EventSink for FailingSink {
-    fn send(&self, _event: Event) -> Result<()> {
-        anyhow::bail!("sink closed")
+    /// A result whose view shows `content` as plain text.
+    pub(crate) fn text_result(
+        id: &str,
+        content: &str,
+        is_error: bool,
+        title: Option<&str>,
+    ) -> ToolResult {
+        ToolResult {
+            id: id.to_owned(),
+            content: content.to_owned(),
+            is_error,
+            title: title.map(ToOwned::to_owned),
+            view: ToolResultView::Text {
+                content: content.to_owned(),
+            },
+        }
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use std::path::Path;
-
     use serde_json::json;
 
+    use super::testing::{ls_call, text_result};
     use super::*;
-    use crate::client::RateLimitWindow;
-    use crate::permission::{Access, PermissionClass, Policy, Tier, Workspace};
+    use crate::client::testing::five_hour_limit;
+    use crate::permission::testing::exec_grant;
+    use crate::permission::{PermissionClass, Tier};
     use crate::tool::bash::background::testing::shells_in_each_state;
     use crate::tool::tasks::testing::plan;
+    use crate::tool::testing::bash_preview;
     use crate::tool::{
         ApprovalBody, DiffChunk, DiffLine, GrepFileGroup, GrepMatchLine, ReadExcerptLine,
     };
@@ -428,16 +458,6 @@ mod tests {
                 text: "new".to_owned(),
             }],
         }]
-    }
-
-    fn ls_call() -> ToolCall {
-        ToolCall {
-            id: "t1".to_owned(),
-            name: "bash".to_owned(),
-            input: json!({"command": "ls"}),
-            icon: "$".to_owned(),
-            label: "ls".to_owned(),
-        }
     }
 
     fn ls_result(view: ToolResultView) -> ToolResult {
@@ -626,25 +646,6 @@ mod tests {
         }
     }
 
-    fn five_hour_limit() -> RateLimits {
-        RateLimits {
-            five_hour: Some(RateLimitWindow {
-                utilization: 0.42,
-                resets_at: 1_760_000_000,
-            }),
-            seven_day: None,
-        }
-    }
-
-    fn cargo_test_grant() -> SessionGrant {
-        Policy::default()
-            .session_grant(
-                PermissionClass::Exec,
-                &Access::for_command("cargo test", &Workspace::new(Path::new("/repo"))),
-            )
-            .unwrap()
-    }
-
     /// One approval per [`ApprovalBody`] variant, each held by a different basis.
     fn approval_requests() -> [Event; 2] {
         [
@@ -659,15 +660,12 @@ mod tests {
             },
             Event::ApprovalRequested {
                 id: "t3".to_owned(),
-                preview: ApprovalPreview {
-                    title: "Bash".to_owned(),
-                    body: ApprovalBody::Command("cargo test".to_owned()),
-                },
+                preview: bash_preview("cargo test"),
                 basis: Basis::Rule {
                     tier: Tier::Ask,
                     rule: Rule::parse(PermissionClass::Exec, "cargo *").unwrap(),
                 },
-                grant: Some(Box::new(cargo_test_grant())),
+                grant: Some(Box::new(exec_grant("cargo test"))),
             },
         ]
     }
@@ -680,13 +678,7 @@ mod tests {
             Event::ProgressUpdate("Reading.".to_owned()),
             Event::Retrying("Retrying in 1 s.".to_owned()),
             Event::ToolCallStart(ls_call()),
-            Event::ToolCallEnd(ToolResult {
-                is_error: true,
-                title: None,
-                ..ls_result(ToolResultView::Text {
-                    content: "ok".to_owned(),
-                })
-            }),
+            Event::ToolCallEnd(text_result("t1", "ok", true, None)),
             Event::PromptDrained("next".to_owned()),
             Event::TurnComplete,
             Event::TurnFailed("boom".to_owned()),
@@ -944,5 +936,17 @@ mod tests {
                 },
             }),
         );
+    }
+
+    // ── EventSink for UnboundedSender ──
+
+    #[test]
+    fn unbounded_sender_send_fails_once_the_frontend_drops_the_receiver() {
+        let (tx, rx) = mpsc::unbounded_channel();
+        drop(rx);
+
+        let err = EventSink::send(&tx, Event::TurnComplete).unwrap_err();
+
+        assert_eq!(err.to_string(), "the frontend stopped reading events");
     }
 }

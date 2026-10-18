@@ -199,6 +199,7 @@ mod tests {
 
     use super::*;
     use crate::message::Replay;
+    use crate::protocol::testing;
     use crate::session::post_compact::synthesize_post_compact_message;
     use crate::tool::bash::BashTool;
     use crate::tool::edit::EditTool;
@@ -258,15 +259,7 @@ mod tests {
     }
 
     fn text_result(id: &str, content: &str, is_error: bool) -> Interaction {
-        Interaction::ToolResult(ToolResult {
-            id: id.to_owned(),
-            content: content.to_owned(),
-            is_error,
-            title: None,
-            view: ToolResultView::Text {
-                content: content.to_owned(),
-            },
-        })
+        Interaction::ToolResult(testing::text_result(id, content, is_error, None))
     }
 
     fn compact_info() -> CompactInfo {

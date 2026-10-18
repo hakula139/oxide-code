@@ -262,6 +262,8 @@ fn stderr_summary(stderr: &[u8]) -> String {
     truncate_to_width(line.trim(), MAX_WIDTH)
 }
 
+// ── Testing ──
+
 #[cfg(test)]
 pub(crate) mod testing {
     use std::path::Path;

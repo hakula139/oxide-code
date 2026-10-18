@@ -100,19 +100,6 @@ impl EnginePanic {
     }
 }
 
-/// [`EventSink`] feeding [`EngineHandle::events`]. The channel is unbounded, so the engine never
-/// waits on or drops events for a frontend that falls behind.
-#[derive(Clone)]
-struct ChannelSink(mpsc::UnboundedSender<Event>);
-
-impl EventSink for ChannelSink {
-    fn send(&self, event: Event) -> Result<()> {
-        self.0
-            .send(event)
-            .map_err(|_| anyhow!("the frontend stopped reading events"))
-    }
-}
-
 // ── Engine ──
 
 /// The tool registry and the background shells its `bash` tools share with the engine.
@@ -259,8 +246,8 @@ impl Engine {
     /// lists the tracked files that changed on disk since the resumed session read them.
     pub(crate) fn spawn(self, drifted: &[PathBuf]) -> EngineHandle {
         let (ops, op_rx) = mpsc::channel(OP_CHANNEL_CAP);
-        let (event_tx, events) = mpsc::unbounded_channel();
-        let sink = ChannelSink(event_tx);
+        // Unbounded, so the engine never waits on or drops events for a frontend that falls behind.
+        let (sink, events) = mpsc::unbounded_channel();
         self.shells.attach(Arc::new(sink.clone()));
         self.emit_session_start(&sink, drifted);
         let task = EngineTask(tokio::spawn(self.run(sink, op_rx)));
@@ -268,7 +255,11 @@ impl Engine {
     }
 
     /// Serves ops until `Shutdown` or the op channel closes, then finalizes the live session.
-    async fn run(mut self, sink: ChannelSink, mut ops: mpsc::Receiver<Op>) -> Option<String> {
+    async fn run(
+        mut self,
+        sink: mpsc::UnboundedSender<Event>,
+        mut ops: mpsc::Receiver<Op>,
+    ) -> Option<String> {
         while let Some(op) = ops.recv().await {
             match op {
                 Op::Prompt(text) => {
@@ -999,7 +990,7 @@ mod tests {
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
     use super::testing::{
-        MODEL, SESSION_CONTEXT, engine, mount_reply, mount_stalled_reply_once,
+        MODEL, SESSION_CONTEXT, engine, inert_ops, mount_reply, mount_stalled_reply_once,
         mount_tool_call_once, panic_message, request_bodies, service_log, system_prompt,
         tool_heavy_transcript, until_requested, with_pinned_home,
     };
@@ -1015,7 +1006,7 @@ mod tests {
     use crate::model::ResolvedModelId;
     use crate::permission::rule::Rule;
     use crate::permission::{Mode, PermissionClass, Workspace};
-    use crate::protocol::CapturingSink;
+    use crate::protocol::testing::CapturingSink;
     use crate::session::post_compact::synthesize_post_compact_message;
     use crate::session::store::testing::{test_session_file, test_store};
     use crate::tool::bash::background::ShellState;
@@ -2076,8 +2067,8 @@ mod tests {
             let store = test_store(dir.path());
             let mut engine = engine(server.uri(), &store, dir.path()).await;
             let today = engine.prompt.seen.date.clone();
-            let sink = CapturingSink::new();
-            let (_ops_tx, mut ops) = crate::protocol::inert_op_channel();
+            let sink = CapturingSink::default();
+            let mut ops = inert_ops();
 
             let end = engine.submit_prompt("first", &sink, &mut ops).await;
             assert_eq!(end, TurnEnd::Completed);
@@ -2126,8 +2117,8 @@ mod tests {
             mount_reply(&server, "reply").await;
             let dir = tempfile::tempdir().unwrap();
             let mut engine = engine(server.uri(), &test_store(dir.path()), dir.path()).await;
-            let sink = CapturingSink::new();
-            let (_ops_tx, mut ops) = crate::protocol::inert_op_channel();
+            let sink = CapturingSink::default();
+            let mut ops = inert_ops();
             let warning = write_unreadable_instructions(dir.path());
 
             engine.submit_prompt("broken", &sink, &mut ops).await;
@@ -2157,8 +2148,8 @@ mod tests {
             mount_reply(&server, "reply").await;
             let dir = tempfile::tempdir().unwrap();
             let mut engine = engine(server.uri(), &test_store(dir.path()), dir.path()).await;
-            let sink = CapturingSink::new();
-            let (_ops_tx, mut ops) = crate::protocol::inert_op_channel();
+            let sink = CapturingSink::default();
+            let mut ops = inert_ops();
 
             for text in ["first", "second"] {
                 engine.submit_prompt(text, &sink, &mut ops).await;
@@ -2195,8 +2186,8 @@ mod tests {
             let mut engine = engine(server.uri(), &test_store(dir.path()), dir.path())
                 .await
                 .with_tools(ToolRegistry::new(vec![Box::new(TasksTool)]));
-            let sink = CapturingSink::new();
-            let (_ops_tx, mut ops) = crate::protocol::inert_op_channel();
+            let sink = CapturingSink::default();
+            let mut ops = inert_ops();
 
             let end = engine.submit_prompt("plan it", &sink, &mut ops).await;
 
@@ -2233,10 +2224,10 @@ mod tests {
             let mut engine = engine(server.uri(), &test_store(dir.path()), dir.path())
                 .await
                 .with_tools(ToolRegistry::new(vec![Box::new(TasksTool)]));
-            let (_ops_tx, mut ops) = crate::protocol::inert_op_channel();
+            let mut ops = inert_ops();
 
             let end = engine
-                .submit_prompt("plan it", &CapturingSink::new(), &mut ops)
+                .submit_prompt("plan it", &CapturingSink::default(), &mut ops)
                 .await;
 
             assert_eq!(end, TurnEnd::Completed);
@@ -2257,10 +2248,10 @@ mod tests {
                 .await
                 .with_tools(ToolRegistry::new(vec![Box::new(TasksTool)]));
             engine.max_tool_rounds = Some(1);
-            let (_ops_tx, mut ops) = crate::protocol::inert_op_channel();
+            let mut ops = inert_ops();
 
             let end = engine
-                .submit_prompt("plan it", &CapturingSink::new(), &mut ops)
+                .submit_prompt("plan it", &CapturingSink::default(), &mut ops)
                 .await;
 
             assert_eq!(end, TurnEnd::Failed);
@@ -2282,8 +2273,8 @@ mod tests {
             engine.displayed_usage = engine.last_usage;
             engine.total_estimated_cost_usd = 1.23;
             engine.auto_compaction_failures = AutoCompactFailures::new(2);
-            let sink = CapturingSink::new();
-            let (_ops_tx, mut ops) = crate::protocol::inert_op_channel();
+            let sink = CapturingSink::default();
+            let mut ops = inert_ops();
 
             let end = engine.submit_prompt("five", &sink, &mut ops).await;
 
@@ -2356,8 +2347,8 @@ mod tests {
             engine.compaction = CompactionConfig::with_threshold_for_test(50_000);
             engine.messages = tool_heavy_transcript();
             engine.last_usage = Some(TokenUsage::new(50_000, 1));
-            let sink = CapturingSink::new();
-            let (_ops_tx, mut ops) = crate::protocol::inert_op_channel();
+            let sink = CapturingSink::default();
+            let mut ops = inert_ops();
 
             let end = engine.submit_prompt("five", &sink, &mut ops).await;
 
@@ -2401,7 +2392,7 @@ mod tests {
             engine.compaction = CompactionConfig::with_threshold_for_test(50_000);
             engine.messages = tool_heavy_transcript();
             engine.last_usage = Some(TokenUsage::new(50_000, 1));
-            let sink = CapturingSink::new();
+            let sink = CapturingSink::default();
             let (ops_tx, mut ops) = mpsc::channel(1);
             ops_tx.try_send(Op::SetMode(Mode::Plan)).unwrap();
 
@@ -2421,8 +2412,8 @@ mod tests {
             let dir = tempfile::tempdir().unwrap();
             let mut engine = engine(server.uri(), &test_store(dir.path()), dir.path()).await;
             engine.client.set_auth(None);
-            let sink = CapturingSink::new();
-            let (_ops_tx, mut ops) = crate::protocol::inert_op_channel();
+            let sink = CapturingSink::default();
+            let mut ops = inert_ops();
 
             let end = engine.submit_prompt("hello", &sink, &mut ops).await;
 
@@ -2454,8 +2445,8 @@ mod tests {
             engine.displayed_usage = Some(TokenUsage::new(90_000, 9));
             engine.total_estimated_cost_usd = 1.23;
             engine.auto_compaction_failures = AutoCompactFailures::new(3);
-            let sink = CapturingSink::new();
-            let (_ops_tx, mut ops) = crate::protocol::inert_op_channel();
+            let sink = CapturingSink::default();
+            let mut ops = inert_ops();
 
             let end = engine
                 .compact(&sink, &mut ops, Some("focus".to_owned()))
@@ -2518,9 +2509,11 @@ mod tests {
             let session_id = engine.session_id().to_owned();
             engine.messages = tool_heavy_transcript();
             engine.tasks = plan();
-            let (_ops_tx, mut ops) = crate::protocol::inert_op_channel();
+            let mut ops = inert_ops();
 
-            let end = engine.compact(&CapturingSink::new(), &mut ops, None).await;
+            let end = engine
+                .compact(&CapturingSink::default(), &mut ops, None)
+                .await;
 
             assert_eq!(end, TurnEnd::Completed);
             assert_eq!(
@@ -2533,10 +2526,10 @@ mod tests {
             );
             assert_eq!(engine.tasks, plan());
 
-            engine.clear(&CapturingSink::new()).await;
+            engine.clear(&CapturingSink::default()).await;
             let compacted = store.find_session_path(&session_id).unwrap();
             engine
-                .resume(&CapturingSink::new(), ResumeTarget::Path(compacted))
+                .resume(&CapturingSink::default(), ResumeTarget::Path(compacted))
                 .await;
 
             assert_eq!(engine.session_id(), session_id);
@@ -2555,9 +2548,11 @@ mod tests {
             let mut engine = engine(server.uri(), &store, dir.path()).await;
             engine.messages = tool_heavy_transcript();
             start_shell(&engine.shells, "sleep 30");
-            let (_ops_tx, mut ops) = crate::protocol::inert_op_channel();
+            let mut ops = inert_ops();
 
-            let end = engine.compact(&CapturingSink::new(), &mut ops, None).await;
+            let end = engine
+                .compact(&CapturingSink::default(), &mut ops, None)
+                .await;
 
             assert_eq!(end, TurnEnd::Completed);
             assert_eq!(
@@ -2580,7 +2575,7 @@ mod tests {
             mount_reply(&server, "summary").await;
             let dir = tempfile::tempdir().unwrap();
             let mut engine = engine(server.uri(), &test_store(dir.path()), dir.path()).await;
-            let sink = CapturingSink::new();
+            let sink = CapturingSink::default();
             let (ops_tx, mut ops) = mpsc::channel(1);
 
             engine.messages = vec![Message::user("too short")];
@@ -2642,8 +2637,8 @@ mod tests {
             let mut engine = engine(server.uri(), &test_store(dir.path()), dir.path()).await;
             engine.client.set_auth(None);
             engine.messages = tool_heavy_transcript();
-            let sink = CapturingSink::new();
-            let (_ops_tx, mut ops) = crate::protocol::inert_op_channel();
+            let sink = CapturingSink::default();
+            let mut ops = inert_ops();
 
             let end = engine.compact(&sink, &mut ops, None).await;
 
@@ -2669,7 +2664,7 @@ mod tests {
             let dir = tempfile::tempdir().unwrap();
             let mut engine = engine(server.uri(), &test_store(dir.path()), dir.path()).await;
             engine.messages = tool_heavy_transcript();
-            let sink = CapturingSink::new();
+            let sink = CapturingSink::default();
             let (ops_tx, mut ops) = mpsc::channel(2);
             ops_tx.try_send(Op::SetMode(Mode::Plan)).unwrap();
             ops_tx.try_send(Op::Interrupt).unwrap();
@@ -2689,7 +2684,7 @@ mod tests {
             let dir = tempfile::tempdir().unwrap();
             let mut engine = engine(base_url, &test_store(dir.path()), dir.path()).await;
             engine.messages = tool_heavy_transcript();
-            let sink = CapturingSink::new();
+            let sink = CapturingSink::default();
             let (ops_tx, mut ops) = mpsc::channel(1);
             let interrupt_once_streaming = async {
                 while sink.events().is_empty() {
@@ -2765,8 +2760,8 @@ mod tests {
             engine.messages = tool_heavy_transcript();
             engine.displayed_usage = Some(TokenUsage::new(50_000, 1));
             engine.total_estimated_cost_usd = 1.23;
-            let sink = CapturingSink::new();
-            let (_ops_tx, mut ops) = crate::protocol::inert_op_channel();
+            let sink = CapturingSink::default();
+            let mut ops = inert_ops();
 
             let end = engine.compact(&sink, &mut ops, None).await;
 
@@ -2811,7 +2806,7 @@ mod tests {
             let dir = tempfile::tempdir().unwrap();
             let store = test_store(dir.path());
             let mut engine = engine(server.uri(), &store, dir.path()).await;
-            let sink = CapturingSink::new();
+            let sink = CapturingSink::default();
             let target_id = finished_session(&store).await;
             engine.messages = vec![Message::user("before clear")];
             let rule = Rule::parse(PermissionClass::Exec, "cargo test *").unwrap();
@@ -2850,7 +2845,7 @@ mod tests {
             let mut engine = engine(server.uri(), &test_store(dir.path()), dir.path()).await;
             engine.session = handle::testing::dead("dead");
             let warning = write_unreadable_instructions(dir.path());
-            let sink = CapturingSink::new();
+            let sink = CapturingSink::default();
 
             engine.clear(&sink).await;
 
@@ -2884,7 +2879,7 @@ mod tests {
             let dir = tempfile::tempdir().unwrap();
             init_fixture_repo(dir.path());
             let mut engine = engine(server.uri(), &test_store(dir.path()), dir.path()).await;
-            let sink = CapturingSink::new();
+            let sink = CapturingSink::default();
 
             engine.clear(&sink).await;
             let cleared = header_branch(&engine, dir.path()).await;
@@ -2917,8 +2912,8 @@ mod tests {
             let mut engine = engine(server.uri(), &store, dir.path()).await;
             let target_id = finished_session(&store).await;
             let target_path = store.find_session_path(&target_id).unwrap();
-            let clear_sink = CapturingSink::new();
-            let resume_sink = CapturingSink::new();
+            let clear_sink = CapturingSink::default();
+            let resume_sink = CapturingSink::default();
 
             engine.auto_compaction_failures = AutoCompactFailures::new(3);
             engine.clear(&clear_sink).await;
@@ -2977,15 +2972,15 @@ mod tests {
                 .await
                 .with_tools(ToolRegistry::new(vec![Box::new(TasksTool)]));
             let planned_id = engine.session_id().to_owned();
-            let (_ops_tx, mut ops) = crate::protocol::inert_op_channel();
+            let mut ops = inert_ops();
             engine
-                .submit_prompt("plan it", &CapturingSink::new(), &mut ops)
+                .submit_prompt("plan it", &CapturingSink::default(), &mut ops)
                 .await;
 
-            engine.clear(&CapturingSink::new()).await;
+            engine.clear(&CapturingSink::default()).await;
             assert_eq!(engine.tasks, []);
 
-            let sink = CapturingSink::new();
+            let sink = CapturingSink::default();
             let planned_path = store.find_session_path(&planned_id).unwrap();
             engine.resume(&sink, ResumeTarget::Path(planned_path)).await;
             assert_eq!(engine.tasks, plan());
@@ -3014,11 +3009,11 @@ mod tests {
             let target_path = store.find_session_path(&target_id).unwrap();
 
             start_shell(&engine.shells, "sleep 30");
-            engine.clear(&CapturingSink::new()).await;
+            engine.clear(&CapturingSink::default()).await;
             let after_clear = engine.shells.list();
             start_shell(&engine.shells, "sleep 30");
             engine
-                .resume(&CapturingSink::new(), ResumeTarget::Path(target_path))
+                .resume(&CapturingSink::default(), ResumeTarget::Path(target_path))
                 .await;
 
             assert_eq!(after_clear, []);
@@ -3037,7 +3032,7 @@ mod tests {
             let store = test_store(dir.path());
             let mut engine = engine(server.uri(), &store, dir.path()).await;
             let live_id = engine.session.session_id().to_owned();
-            let sink = CapturingSink::new();
+            let sink = CapturingSink::default();
 
             engine.archive(&sink).await;
             assert_eq!(engine.session.session_id(), live_id);
@@ -3073,8 +3068,8 @@ mod tests {
             let store = test_store(dir.path());
             let mut engine = engine(server.uri(), &store, dir.path()).await;
             let recorded_id = engine.session.session_id().to_owned();
-            let sink = CapturingSink::new();
-            let (_ops_tx, mut ops) = crate::protocol::inert_op_channel();
+            let sink = CapturingSink::default();
+            let mut ops = inert_ops();
             engine.submit_prompt("first", &sink, &mut ops).await;
             engine.clear(&sink).await;
 
@@ -3103,7 +3098,7 @@ mod tests {
             let store = test_store(dir.path());
             let mut engine = engine(server.uri(), &store, dir.path()).await;
             let interrupted_id = engine.session_id().to_owned();
-            let sink = CapturingSink::new();
+            let sink = CapturingSink::default();
             let (ops_tx, mut ops) = mpsc::channel(1);
             ops_tx.send(Op::Interrupt).await.unwrap();
             engine.submit_prompt("write a story", &sink, &mut ops).await;
@@ -3148,7 +3143,7 @@ mod tests {
             let target_id = finished_session(&store).await;
             let mut engine = engine(server.uri(), &store, dir.path()).await;
             engine.session = handle::testing::dead("dead");
-            let sink = CapturingSink::new();
+            let sink = CapturingSink::default();
 
             let target_path = store.find_session_path(&target_id).unwrap();
             engine.resume(&sink, ResumeTarget::Path(target_path)).await;
@@ -3190,7 +3185,7 @@ mod tests {
             let rule = Rule::parse(PermissionClass::Exec, "cargo test *").unwrap();
             engine.policy.allow_for_session(rule.clone());
             start_shell(&engine.shells, "sleep 30");
-            let sink = CapturingSink::new();
+            let sink = CapturingSink::default();
 
             engine
                 .resume(&sink, ResumeTarget::Path("missing-target.jsonl".into()))
@@ -3230,7 +3225,7 @@ mod tests {
             let dir = tempfile::tempdir().unwrap();
             let mut engine = engine(server.uri(), &test_store(dir.path()), dir.path()).await;
             let live_id = engine.session.session_id().to_owned();
-            let sink = CapturingSink::new();
+            let sink = CapturingSink::default();
 
             engine.rename(&sink, "Fix login".to_owned()).await;
             assert!(engine.session.manual_title_set());
@@ -3269,8 +3264,8 @@ mod tests {
             mount_reply(&server, "reply").await;
             let dir = tempfile::tempdir().unwrap();
             let mut engine = engine(server.uri(), &test_store(dir.path()), dir.path()).await;
-            let sink = CapturingSink::new();
-            let (_ops_tx, mut ops) = crate::protocol::inert_op_channel();
+            let sink = CapturingSink::default();
+            let mut ops = inert_ops();
 
             engine.submit_prompt("first", &sink, &mut ops).await;
             engine.set_model(&sink, sonnet_pick());
@@ -3317,8 +3312,8 @@ mod tests {
                 .await;
             let dir = tempfile::tempdir().unwrap();
             let mut engine = engine(server.uri(), &test_store(dir.path()), dir.path()).await;
-            let sink = CapturingSink::new();
-            let (_ops_tx, mut ops) = crate::protocol::inert_op_channel();
+            let sink = CapturingSink::default();
+            let mut ops = inert_ops();
 
             engine.submit_prompt("first", &sink, &mut ops).await;
             engine.set_model(&sink, sonnet_pick());
@@ -3350,7 +3345,7 @@ mod tests {
             let dir = tempfile::tempdir().unwrap();
             let mut engine = engine(server.uri(), &test_store(dir.path()), dir.path()).await;
             let mut config = test_config(server.uri(), api_key(), "custom-model");
-            let sink = CapturingSink::new();
+            let sink = CapturingSink::default();
             let unwindowed = CompactionConfig::default_for_test(&config.model, 16_000);
             assert!(!unwindowed.auto.enabled, "precondition: no window");
             let mut resolved = Vec::new();
@@ -3401,7 +3396,7 @@ mod tests {
             engine.auto_compaction_failures = AutoCompactFailures::new(3);
             engine.last_usage = Some(TokenUsage::new(100_000, 1));
             engine.total_estimated_cost_usd = 1.23;
-            let sink = CapturingSink::new();
+            let sink = CapturingSink::default();
 
             engine.set_model(&sink, ConfigPick::Effort(Effort::Xhigh));
 
@@ -3439,7 +3434,7 @@ mod tests {
             let server = MockServer::start().await;
             let dir = tempfile::tempdir().unwrap();
             let mut engine = engine(server.uri(), &test_store(dir.path()), dir.path()).await;
-            let sink = CapturingSink::new();
+            let sink = CapturingSink::default();
 
             engine.set_mode(&sink, Mode::Yolo);
 
@@ -3462,7 +3457,7 @@ mod tests {
             mount_reply(&server, "reply").await;
             let dir = tempfile::tempdir().unwrap();
             let mut engine = engine(server.uri(), &test_store(dir.path()), dir.path()).await;
-            let sink = CapturingSink::new();
+            let sink = CapturingSink::default();
             let (tx, mut ops) = mpsc::channel(1);
             tx.try_send(Op::SetMode(Mode::Plan)).unwrap();
 
@@ -3573,7 +3568,7 @@ mod tests {
             let server = MockServer::start().await;
             let dir = tempfile::tempdir().unwrap();
             let mut engine = engine(server.uri(), &test_store(dir.path()), dir.path()).await;
-            let sink = CapturingSink::new();
+            let sink = CapturingSink::default();
             let (ops_tx, mut ops) = mpsc::channel(2);
             ops_tx.try_send(Op::SetMode(Mode::Plan)).unwrap();
             ops_tx.try_send(Op::Interrupt).unwrap();
@@ -3594,7 +3589,7 @@ mod tests {
             let server = MockServer::start().await;
             let dir = tempfile::tempdir().unwrap();
             let mut engine = engine(server.uri(), &test_store(dir.path()), dir.path()).await;
-            let sink = CapturingSink::new();
+            let sink = CapturingSink::default();
             let ox_login = || Auth::new(AuthSource::OxLogin, "ox-token");
 
             engine.adopt_login(&sink, ox_login());
@@ -3641,7 +3636,7 @@ mod tests {
             let file = store_ox_login(data.path());
             temp_env::async_with_vars([("XDG_DATA_HOME", Some(data.path()))], async {
                 let mut engine = engine(server.uri(), &test_store(dir.path()), dir.path()).await;
-                let sink = CapturingSink::new();
+                let sink = CapturingSink::default();
 
                 engine.logout(&sink).await;
 
@@ -3677,7 +3672,7 @@ mod tests {
                 engine
                     .client
                     .set_auth(Some(Auth::new(AuthSource::OxLogin, "ox-token")));
-                let sink = CapturingSink::new();
+                let sink = CapturingSink::default();
                 let claude_code_file = std::env::home_dir()
                     .unwrap()
                     .join(".claude")
@@ -3730,7 +3725,7 @@ mod tests {
             std::fs::create_dir_all(data.path().join("ox").join("credentials.json")).unwrap();
             temp_env::async_with_vars([("XDG_DATA_HOME", Some(data.path()))], async {
                 let mut engine = engine(server.uri(), &test_store(dir.path()), dir.path()).await;
-                let sink = CapturingSink::new();
+                let sink = CapturingSink::default();
 
                 engine.logout(&sink).await;
 
@@ -3880,7 +3875,7 @@ mod tests {
 
     #[test]
     fn report_abort_shows_cancel_and_failure_but_keeps_shutdown_silent() {
-        let sink = CapturingSink::new();
+        let sink = CapturingSink::default();
 
         assert_eq!(
             report_abort(&sink, TurnAbort::Cancelled, "label"),

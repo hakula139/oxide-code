@@ -6,8 +6,6 @@ use std::path::Path;
 use std::{cell::Cell, collections::HashSet, fmt, sync::Arc};
 
 use anyhow::{Context, Result, bail};
-#[cfg(test)]
-use indoc::indoc;
 use reqwest::ClientBuilder;
 use rustls::pki_types::CertificateDer;
 use rustls::pki_types::pem::PemObject;
@@ -480,24 +478,27 @@ fn evaluation_error(code: isize, description: &str) -> Error {
     Error::InvalidCertificate(reason)
 }
 
-// ── Test Fixtures ──
+// ── Testing ──
 
-/// Self-signed throwaway P-256 cert generated once with `openssl req -x509 ...`. Embedding
-/// keeps tests hermetic and never touches the network. 100-year validity so tests do not rot.
 #[cfg(test)]
-pub(crate) const TEST_CA_PEM: &str = indoc! {"
-    -----BEGIN CERTIFICATE-----
-    MIIBhzCCAS2gAwIBAgIUSHnI8j4asiQCYFCLHv+mTjaH7PIwCgYIKoZIzj0EAwIw
-    GDEWMBQGA1UEAwwNb3hpZGUtdGVzdC1jYTAgFw0yNjA1MTMwOTM1NTNaGA8yMTI2
-    MDQxOTA5MzU1M1owGDEWMBQGA1UEAwwNb3hpZGUtdGVzdC1jYTBZMBMGByqGSM49
-    AgEGCCqGSM49AwEHA0IABPPm0pogMrzkQroL61zCV3BzVH25tmWvt6c1OK5pT7Yy
-    tOXqTKKLiqUbpsJW6XzankZ6E8LsI9mwuzXhsQYmGE+jUzBRMB0GA1UdDgQWBBQC
-    hrBBOk1wizWiQQQtrpIDMACA8DAfBgNVHSMEGDAWgBQChrBBOk1wizWiQQQtrpID
-    MACA8DAPBgNVHRMBAf8EBTADAQH/MAoGCCqGSM49BAMCA0gAMEUCIFiHH199T6Sd
-    F2u46c+5D9+pdwYEd1dAgP+a21dwLwo3AiEAyn5ssAPGMPmSP8lKLRLuH+cFNEVQ
-    PyBNMput8iNe6eE=
-    -----END CERTIFICATE-----
-"};
+pub(crate) mod testing {
+    use indoc::indoc;
+
+    /// A self-signed P-256 CA, valid for 100 years.
+    pub(crate) const TEST_CA_PEM: &str = indoc! {"
+        -----BEGIN CERTIFICATE-----
+        MIIBhzCCAS2gAwIBAgIUSHnI8j4asiQCYFCLHv+mTjaH7PIwCgYIKoZIzj0EAwIw
+        GDEWMBQGA1UEAwwNb3hpZGUtdGVzdC1jYTAgFw0yNjA1MTMwOTM1NTNaGA8yMTI2
+        MDQxOTA5MzU1M1owGDEWMBQGA1UEAwwNb3hpZGUtdGVzdC1jYTBZMBMGByqGSM49
+        AgEGCCqGSM49AwEHA0IABPPm0pogMrzkQroL61zCV3BzVH25tmWvt6c1OK5pT7Yy
+        tOXqTKKLiqUbpsJW6XzankZ6E8LsI9mwuzXhsQYmGE+jUzBRMB0GA1UdDgQWBBQC
+        hrBBOk1wizWiQQQtrpIDMACA8DAfBgNVHSMEGDAWgBQChrBBOk1wizWiQQQtrpID
+        MACA8DAPBgNVHRMBAf8EBTADAQH/MAoGCCqGSM49BAMCA0gAMEUCIFiHH199T6Sd
+        F2u46c+5D9+pdwYEd1dAgP+a21dwLwo3AiEAyn5ssAPGMPmSP8lKLRLuH+cFNEVQ
+        PyBNMput8iNe6eE=
+        -----END CERTIFICATE-----
+    "};
+}
 
 #[cfg(test)]
 mod tests {
@@ -507,11 +508,13 @@ mod tests {
     #[cfg(target_os = "macos")]
     use std::sync::Mutex;
 
+    use indoc::indoc;
     use rustls::pki_types::PrivateKeyDer;
     use tempfile::NamedTempFile;
     #[cfg(target_os = "macos")]
     use time::macros::datetime;
 
+    use super::testing::TEST_CA_PEM;
     use super::*;
 
     // ── Fixtures ──

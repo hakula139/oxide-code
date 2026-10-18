@@ -71,7 +71,7 @@ mod tests {
     use super::*;
     use crate::file_tracker::LastView;
     use crate::message::{ContentBlock, Message};
-    use crate::protocol::{CapturingSink, FailingSink};
+    use crate::protocol::testing::{CapturingSink, FailingSink};
     use crate::session::handle;
     use crate::session::store::testing::test_store;
     use crate::tool::tasks::testing::plan;
@@ -109,7 +109,7 @@ mod tests {
             "toolu_test",
         );
         let mut messages = fake_transcript();
-        let sink = CapturingSink::new();
+        let sink = CapturingSink::default();
 
         let compacted = replace_session_with_summary(
             &session,
@@ -144,7 +144,7 @@ mod tests {
         tracker.record_read(&path, b"old", LastView::Full, "toolu_test");
         let original = fake_transcript();
         let mut messages = original.clone();
-        let sink = CapturingSink::new();
+        let sink = CapturingSink::default();
 
         let compacted = replace_session_with_summary(
             &session,

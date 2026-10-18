@@ -6,7 +6,7 @@ Conventions for tests, their environment, timing, coverage, mutation testing, an
 
 - Unit tests live in a `#[cfg(test)] mod tests` in the file they test.
 - The crate is binary-only, so tests in `tests/` cannot import its modules. That directory is for end-to-end tests that run the `ox` binary through `CARGO_BIN_EXE_ox`, as `tests/cli.rs` does. Test cross-module behavior in the module that composes those modules, such as `engine` tests that run a full turn against a mock server.
-- Share fixtures across test modules as `#[cfg(test)] pub(crate)` items in the module that owns what they build, often in a `testing` child module that can construct private fields.
+- Share fixtures across test modules from a `#[cfg(test)] mod testing` child of the module that owns what they build, so they can construct private fields. Give the child its own `use` imports and the narrowest [visibility](rust.md#visibility) its callers allow. Put an inline child under a `// ── Testing ──` banner, and declare a file-backed one with the other child modules. A test-only constructor on the type itself, such as `TokenUsage::new`, stays an `#[cfg(test)]` method in the type's `impl`.
 
 ## Grouping and Naming
 

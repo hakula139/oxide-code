@@ -240,7 +240,7 @@ impl Modal for InitPicker {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::slash::test_session_info;
+    use crate::slash::testing::test_session_info;
     use crate::tui::modal::testing::render_rows;
 
     fn execute_in(project_root: &Path) -> SlashOutcome {

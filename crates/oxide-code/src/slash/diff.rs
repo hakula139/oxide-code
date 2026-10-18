@@ -202,7 +202,7 @@ mod tests {
     use tempfile::TempDir;
 
     use super::*;
-    use crate::slash::test_session_info;
+    use crate::slash::testing::test_session_info;
     use crate::util::git::testing::{isolated_git, with_isolated_git_env};
 
     fn git_setup(cwd: &Path, args: &[&str]) {

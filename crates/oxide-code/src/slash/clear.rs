@@ -34,7 +34,7 @@ impl SlashCommand for ClearCmd {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::slash::test_session_info;
+    use crate::slash::testing::test_session_info;
 
     // ── ClearCmd::name ──
 

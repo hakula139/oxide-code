@@ -668,7 +668,7 @@ mod tests {
 
     use super::*;
     use crate::util::path::testing::{HOME_VAR, abs};
-    use crate::util::tls::TEST_CA_PEM;
+    use crate::util::tls::testing::TEST_CA_PEM;
 
     // ── OAuthCredential::expires_at_ms ──
 

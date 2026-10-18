@@ -106,6 +106,8 @@ pub(crate) fn slash_separated(path: &Path) -> String {
     path.to_string_lossy().replace(std::path::is_separator, "/")
 }
 
+// ── Testing ──
+
 #[cfg(test)]
 pub(crate) mod testing {
     /// The variable [`std::env::home_dir`] reads first, so tests can point it at a fixture.

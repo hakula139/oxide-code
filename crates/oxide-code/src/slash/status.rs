@@ -89,7 +89,7 @@ mod tests {
     use super::*;
     use crate::permission::PermissionClass;
     use crate::permission::rule::Rule;
-    use crate::slash::test_session_info;
+    use crate::slash::testing::test_session_info;
     use crate::tool::bash::background::testing::shells_in_each_state;
     use crate::tui::modal::Modal;
     use crate::tui::modal::testing::render_rows;

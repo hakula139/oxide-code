@@ -253,6 +253,8 @@ pub(crate) fn latest(messages: &[Message]) -> Option<Vec<Task>> {
     None
 }
 
+// ── Testing ──
+
 #[cfg(test)]
 pub(crate) mod testing {
     use super::{Task, TaskStatus};

@@ -486,7 +486,7 @@ mod tests {
     use super::*;
     use crate::engine::testing::{EchoTool, dispatch_with, inert_ops};
     use crate::permission::{Basis, Mode, PermissionClass};
-    use crate::protocol::CapturingSink;
+    use crate::protocol::testing::{CapturingSink, FailingSink};
     use crate::tool::bash::BashTool;
     #[cfg(unix)]
     use crate::tool::read::ReadTool;
@@ -656,7 +656,7 @@ mod tests {
             Box::new(AskingTool),
             Box::new(EchoTool),
         ]);
-        let sink = CapturingSink::new();
+        let sink = CapturingSink::default();
         let mut dispatch_ctx = dispatch_with(Mode::Manual, &[], &[], Path::new("/repo"));
         let (tx, mut rx) = mpsc::channel::<Op>(1);
         tx.try_send(Op::Interrupt).unwrap();
@@ -711,7 +711,7 @@ mod tests {
             Box::new(RendezvousTool(Arc::new(Barrier::new(2)))),
             Box::new(EchoTool),
         ]);
-        let sink = CapturingSink::new();
+        let sink = CapturingSink::default();
         let mut dispatch_ctx = dispatch_with(Mode::Manual, &[], &["*"], Path::new("/repo"));
         let calls = vec![
             call("tool_1", "meet", json!({"v": 1})),
@@ -783,7 +783,7 @@ mod tests {
             Box::new(RendezvousTool(Arc::new(Barrier::new(1)))),
             Box::new(HangTool(started_tx)),
         ]);
-        let sink = CapturingSink::new();
+        let sink = CapturingSink::default();
         let mut dispatch_ctx = dispatch_with(Mode::Manual, &[], &[], Path::new("/repo"));
         let (tx, mut rx) = mpsc::channel::<Op>(1);
         let calls = vec![
@@ -831,7 +831,7 @@ mod tests {
     #[tokio::test]
     async fn run_tool_round_reports_the_list_only_a_successful_tasks_call_sets() {
         let tools = ToolRegistry::new(vec![Box::new(TasksTool)]);
-        let sink = CapturingSink::new();
+        let sink = CapturingSink::default();
         let mut dispatch_ctx = dispatch_with(Mode::Manual, &[], &[], Path::new("/repo"));
         let both_in_progress = json!({"tasks": [
             {"content": "Fix the parser", "status": "in_progress"},
@@ -883,7 +883,7 @@ mod tests {
     async fn gate_allow_proceeds_without_an_approval_event() {
         // `echo` is an exec-class tool, so `manual` asks unless a class-wide allow clears it.
         let tools = ToolRegistry::new(vec![Box::new(EchoTool)]);
-        let sink = CapturingSink::new();
+        let sink = CapturingSink::default();
         let mut dispatch_ctx = dispatch_with(Mode::Manual, &[], &["*"], Path::new("/repo"));
 
         let gate = gate_call(
@@ -905,7 +905,7 @@ mod tests {
     #[tokio::test]
     async fn gate_deny_rule_short_circuits_to_a_synthetic_denial() {
         let tools = ToolRegistry::new(vec![Box::new(EchoTool)]);
-        let sink = CapturingSink::new();
+        let sink = CapturingSink::default();
         let mut dispatch_ctx = dispatch_with(Mode::Manual, &["*"], &[], Path::new("/repo"));
 
         let denial = gate_call(
@@ -938,7 +938,7 @@ mod tests {
     #[tokio::test]
     async fn gate_ask_emits_event_and_approve_proceeds() {
         let tools = ToolRegistry::new(vec![Box::new(EchoTool)]);
-        let sink = CapturingSink::new();
+        let sink = CapturingSink::default();
         let mut dispatch_ctx = dispatch_with(Mode::Manual, &[], &[], Path::new("/repo"));
         let (tx, mut rx) = mpsc::channel::<Op>(1);
         tx.try_send(Op::Resolve {
@@ -977,7 +977,7 @@ mod tests {
     #[tokio::test]
     async fn gate_allow_for_session_runs_later_calls_the_rule_covers_unasked() {
         let tools = ToolRegistry::new(vec![Box::new(BashTool::default())]);
-        let sink = CapturingSink::new();
+        let sink = CapturingSink::default();
         let mut dispatch_ctx = dispatch_with(Mode::Manual, &[], &[], Path::new("/repo"));
         let rule = Rule::parse(PermissionClass::Exec, "cargo test *").unwrap();
         let (tx, mut rx) = mpsc::channel::<Op>(1);
@@ -1049,7 +1049,7 @@ mod tests {
             ("echo", json!({}), (PermissionClass::Exec, "*")),
         ] {
             let rule = Rule::parse(class, pattern).unwrap();
-            let sink = CapturingSink::new();
+            let sink = CapturingSink::default();
             let mut dispatch_ctx = dispatch_with(Mode::Manual, &[], &[], Path::new("/repo"));
             let (tx, mut rx) = mpsc::channel::<Op>(1);
             tx.try_send(Op::Resolve {
@@ -1112,7 +1112,7 @@ mod tests {
             "tool_1",
             "echo",
             json!({}),
-            &crate::protocol::FailingSink,
+            &FailingSink,
             &mut rx,
             &mut dispatch_ctx,
         )
@@ -1131,7 +1131,7 @@ mod tests {
     #[tokio::test]
     async fn gate_ask_deny_decision_yields_a_synthetic_denial() {
         let tools = ToolRegistry::new(vec![Box::new(EchoTool)]);
-        let sink = CapturingSink::new();
+        let sink = CapturingSink::default();
         let mut dispatch_ctx = dispatch_with(Mode::Manual, &[], &[], Path::new("/repo"));
         let (tx, mut rx) = mpsc::channel::<Op>(1);
         tx.try_send(Op::Resolve {
@@ -1167,7 +1167,7 @@ mod tests {
         // An unknown tool has no permission class, so a class-wide deny must not catch it, and
         // the model reads why the call failed.
         let tools = ToolRegistry::new(vec![]);
-        let sink = CapturingSink::new();
+        let sink = CapturingSink::default();
         let mut dispatch_ctx = dispatch_with(Mode::Manual, &["*"], &[], Path::new("/repo"));
 
         let output = gate_call(
@@ -1205,7 +1205,7 @@ mod tests {
             "tool_1",
             "read",
             json!({"file_path": "link.txt"}),
-            &CapturingSink::new(),
+            &CapturingSink::default(),
             &mut inert_ops(),
             &mut dispatch_ctx,
         )
@@ -1245,7 +1245,7 @@ mod tests {
             ("out_of_extra", extra.join("to-outside.md"), true),
             ("outside", outside.join("new.md"), true),
         ] {
-            let sink = CapturingSink::new();
+            let sink = CapturingSink::default();
             let (tx, mut rx) = mpsc::channel::<Op>(1);
             tx.try_send(Op::Resolve {
                 id: id.to_owned(),
@@ -1294,7 +1294,7 @@ mod tests {
             "tool_1",
             &mut rx,
             &mut Inbox::default(),
-            &CapturingSink::new(),
+            &CapturingSink::default(),
         )
         .await
         .expect("matching decision resolves");
@@ -1312,7 +1312,7 @@ mod tests {
         })
         .unwrap();
         let mut inbox = Inbox::default();
-        let sink = CapturingSink::new();
+        let sink = CapturingSink::default();
 
         let decision = await_approval("tool_1", &mut rx, &mut inbox, &sink)
             .await
@@ -1337,7 +1337,7 @@ mod tests {
                 "tool_1",
                 &mut rx,
                 &mut Inbox::default(),
-                &CapturingSink::new(),
+                &CapturingSink::default(),
             )
             .await
             .expect_err("interrupt / shutdown abort the wait");

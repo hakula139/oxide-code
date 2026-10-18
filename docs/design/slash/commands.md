@@ -95,7 +95,7 @@ Client-side command surface: `/help`, `/clear`, `/model`, `/status`, and friends
 - `crates/oxide-code/src/session/resolver.rs`: `resolve_prefix_to_info` checks the current project first, widens the search on a miss, and returns a typed `ResolveError` that the CLI prints as is and slash commands rephrase. `resolve_saved_prefix` distinguishes live-only matches for `/archive`, `/unarchive`, and `/delete`.
 - `crates/oxide-code/src/session/saved.rs`: `set_archived` and `delete`, shared by the typed commands and the `/resume` picker, which refuse the live session and word each failure for the user.
 - `crates/oxide-code/src/session/store.rs`: `delete_at`, which refuses to delete the live session at the filesystem boundary, and `set_archived_at`.
-- `crates/oxide-code/src/slash.rs`: dispatch, `typed_op`, and shared test fixtures (`stamped_id`, `with_isolated_xdg`).
+- `crates/oxide-code/src/slash.rs`: dispatch, `typed_op`, and the shared test fixtures in `slash::testing`.
 - `crates/oxide-code/src/slash/archive.rs`: `ArchiveCmd` and `UnarchiveCmd`.
 - `crates/oxide-code/src/slash/clear.rs`: `ClearCmd` sends first.
 - `crates/oxide-code/src/slash/config.rs`: `/config` row builder plus sectioned `KvOverview` constructor.

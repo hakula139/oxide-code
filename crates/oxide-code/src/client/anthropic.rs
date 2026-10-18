@@ -495,6 +495,7 @@ mod tests {
     use crate::client::{Response, StopReason, TokenUsage};
     use crate::config::auth::{Auth, AuthSource};
     use crate::config::{Effort, PromptCacheTtl};
+    use crate::util::tls::testing::TEST_CA_PEM;
 
     // ── Fixtures ──
 
@@ -641,8 +642,7 @@ mod tests {
         // `util::tls` covers the handshake through a bundle, so this checks only that a valid one
         // builds a client with the platform's real trust services.
         let pem = tempfile::NamedTempFile::new().unwrap();
-        std::io::Write::write_all(&mut pem.as_file(), crate::util::tls::TEST_CA_PEM.as_bytes())
-            .unwrap();
+        std::io::Write::write_all(&mut pem.as_file(), TEST_CA_PEM.as_bytes()).unwrap();
         let mut cfg = test_config(OFFLINE_URL, api_key(), TEST_MODEL);
         cfg.extra_ca_certs = Some(pem.path().to_path_buf());
         Client::new(&cfg, None, DEVICE_ID.to_owned()).expect("valid CA bundle must build a client");

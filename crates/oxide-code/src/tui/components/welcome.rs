@@ -340,7 +340,7 @@ mod tests {
 
     use super::*;
     use crate::config::Effort;
-    use crate::slash::test_session_info;
+    use crate::slash::testing::test_session_info;
 
     const TEST_SEED: u64 = 0x00C0_FFEE;
 

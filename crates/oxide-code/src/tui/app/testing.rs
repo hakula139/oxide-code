@@ -65,7 +65,7 @@ pub(super) fn test_app_with(
 /// The slash fixture on `test-model`, an unknown id whose display name falls back to the literal
 /// id, keeping insta snapshots stable.
 pub(super) fn test_session_info() -> LiveSessionInfo {
-    let mut info = slash::test_session_info();
+    let mut info = slash::testing::test_session_info();
     info.config.model = ModelSpec::resolve("test-model".to_owned());
     info
 }
