@@ -16,7 +16,7 @@ Conventions for comments, docstrings, documentation, commit and PR text, and str
 
 - The first `//!` line in each `.rs` file describes the file's responsibility.
 - A `///` doc states the contract callers need, such as invariants, units, ownership, or errors. Default to one line, using more only when the contract requires it. Omit docs that merely restate the item name or implementation.
-- Write docs in the third person. A doc on a function with effects, or on a variant that names an action, says what it does. A doc on a pure function may instead name the value it returns, but a predicate's doc says `Returns whether ...`. Other docs say what the item is, and a boolean field's doc starts with `Whether`. A clap flag's doc is its `--help` text, so it gives a command.
+- Write docs in the third person. A doc on a function, or on a variant that names an action, says what it does, though a pure function's doc may name the value it returns. A predicate's doc starts with `Returns whether`, and a boolean field's starts with `Whether`. Other docs say what the item is. A clap flag's doc is its `--help` text, so it gives a command.
 - A module doc points to its design doc in a closing ``Design: `docs/design/<area>/<doc>.md`.`` line.
 
 ## Prose

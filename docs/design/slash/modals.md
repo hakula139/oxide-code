@@ -37,14 +37,12 @@ Bracketed pastes reach `Modal::handle_paste`, which defaults to a no-op. Text fi
 The modal implementation uses these shared components:
 
 - `tui/modal` defines the trait, key outcome, and `ModalStack` manager.
-- Generic primitives sit alongside `tui/modal`: `list_picker` (cursor + render for selection lists), `kv_overview` (sectioned read-only kv table), and `searchable_list` (substring filter for the `/resume` picker).
+- Generic primitives sit alongside `tui/modal`: `list_picker` (cursor and rendering for selection lists), `kv_overview` (sectioned read-only kv table), and `searchable_list` (substring filter for the `/resume` picker).
 - `chrome` supplies the shared title header and hint footer. `render_footer` joins hint fragments such as `CONFIRM_HINTS` with `HINT_SEPARATOR` and cuts the tail on a narrow row, so callers list the essential hints first. `line_editor` is the single-line text field behind `/rename`, the picker search query, and the approval rule and feedback editors, built on `ratatui-textarea` so readline keys work and Ctrl chords never insert letters.
 - `keymap` binds a modal's named actions to keys and footer labels. `Keymap::action_for` dispatches a key and `Keymap::hints` renders the footer from the same entries, so the `/resume` picker's keys and hints cannot drift apart.
 - Lists scroll through `tui::viewport`, whose window settles at render time from the height the modal was granted.
 
-Concrete modals embed these primitives.
-
-The modals:
+The modals embed these primitives:
 
 - **Combined `/model + /effort` picker** (over `ListPicker`).
 - **`/effort` slider**: Bare `/effort` Speed ↔ Intelligence slider.
@@ -57,7 +55,7 @@ The modals:
 - **Approval modal**: Approve-or-deny gate the App pushes when the agent asks to run a gated tool call.
 - **`/status`, `/config`, `/help`**: Read-only overviews that each command file assembles from `KvSection`s and shows in a `KvOverview`.
 
-App owns `ModalStack` and runs the key gate first inside `handle_crossterm_event`, so an active modal sees every key before any other component. `apply_modal_action` then dispatches the result through the same `App::dispatch_action` path as a keyboard action.
+App owns `ModalStack` and runs the key gate first inside `handle_crossterm_event`, so an active modal sees every key before any other component. `apply_modal_action` applies the result. A `ModalAction::Dispatch` follows the same `App::dispatch_action` path as a keyboard action.
 
 ## Design Decisions
 
@@ -75,7 +73,7 @@ App owns `ModalStack` and runs the key gate first inside `handle_crossterm_event
 
 7. **Bare `/model` and bare `/effort` open separate modals.** Threading both bare forms through one modal would force a single-axis decision through a two-axis interface. `/model` keeps the multi-axis combined picker (model and effort cycle together), while `/effort` gets its own single-axis slider. Typed-arg `/model <id>` and `/effort <level>` keep direct-switch behavior for scripting and power users.
 
-8. **`ListPicker` is a state + render primitive.** Concrete pickers embed it and forward keys to it. This keeps list selection apart from what Enter dispatches, with no callbacks. `/model + /effort`, `/mode`, `/theme`, and `/init` build on it.
+8. **`ListPicker` handles state and rendering.** Concrete pickers embed it and forward keys to it. This keeps list selection apart from what Enter dispatches, with no callbacks. `/model + /effort`, `/mode`, `/theme`, and `/init` build on it.
 
 9. **Read-only kv overviews share `KvOverview`.** `/status`, `/config`, and `/help` all build the same shape of a title, sectioned rows, and a footer, so the layout, key handling, and dismiss live in one place. Per-command files supply only the sections, with their rows and headings, and a thin constructor, so a new overview is a `Vec<KvSection>` away.
 

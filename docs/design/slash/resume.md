@@ -33,7 +33,7 @@ The picker wraps [`SearchableList`](modals.md) and adds these controls and displ
 
 2. **Alias `continue`.** Matches the `--continue` / `-c` CLI flag, so both surfaces use the same word.
 
-3. **`classify` is always `Mutating`.** Both bare and typed-arg refuse mid-turn, since the picker eventually submits a `Op::Resume`, and allowing it mid-stream would interleave a session swap with an in-flight response, which the read-only fast path exists to rule out.
+3. **`classify` is always `Mutating`.** Both bare and typed-arg refuse mid-turn, since the picker eventually submits an `Op::Resume`, and allowing it mid-stream would interleave a session swap with an in-flight response, which the read-only fast path exists to rule out.
 
 4. **Mid-session re-init uses `roll_into`.** The in-process swap preserves the process and terminal state, avoids an alt-screen exit or relaunch flash, and reuses the `roll` pattern from `/clear`. It clears modals, rolls back any theme preview, and discards queued prompts.
 
@@ -71,21 +71,19 @@ The picker wraps [`SearchableList`](modals.md) and adds these controls and displ
 
 ## Per-Component Notes
 
-- **`ResumePicker`**: Wraps `SearchableList<SessionRow>` plus a footer row. Loads rows from `SessionStore::list_paged`. Dispatches keys through `ACTIONS`, whose entries bind each `PickerAction` to a key and label: Enter resumes, Esc dismisses, Ctrl+X archives or unarchives, Ctrl+D opens the delete confirmation, Tab toggles `all`, Ctrl+A toggles `archived`, and Ctrl+U clears the query. The toggles rebuild while preserving the query, and other unbound keys edit it through the shared `LineEditor`.
+- **`ResumePicker`**: Each `ACTIONS` entry binds a `PickerAction` to its key and label, and keys no entry binds edit the query through the shared `LineEditor`.
 
-- **`SearchableList<T>`**: Owns the query editor, items, filtered visible index, cursor, and viewport. The substring filter recomputes whenever the query changes, through `set_query` or an `edit_query` keystroke, and resets the cursor to the top. The viewport sizes itself from the height each render grants, and paging steps by the rows last shown. `SearchableItem::haystack` returns the composite filter source. `render(width, is_cursor, theme)` paints one or more `Line`s per row.
+- **`SessionRow`**: A query matches the ID and title, plus the project when the all-projects view shows it.
 
-- **`SessionRow`**: Carries the full ID, session file path, title-or-`(untitled)`, `last_active_at`, message count, optional git branch, and (in all-projects mode) the tildified project path. `haystack` joins the ID and title, plus the project when visible. `render` paints a two-line title plus dim metadata block under a fixed width budget. The metadata line is built via the shared `session::display::format_metadata_line` helper so the confirm-delete modal can reuse the same shape.
+- **`SessionStore::list_paged`**: Takes a `ListScope` with project and archive flags.
 
-- **`SessionStore::list_paged`**: Takes a `ListScope` with project and archive flags. `ListPage::has_more()` reports whether a matching session follows the page, for the `--list` footer and the picker's `more not loaded` note.
+- **`/resume <id>` resolver**: `resolve_saved_prefix` skips the live session, and a prefix that matches only the live session fails the resume with a message saying so.
 
-- **`/resume <id>` resolver**: `Engine::roll_into` calls `resolve_saved_prefix`, which runs the prefix lookup against the current project, then retries across all projects on miss, skipping the live session. A prefix without a unique match, or one that matches only the live session, fails the resume with a message saying why.
+- **`Op::Resume`**: The engine resolves the target and owns the `roll_into` call, so the slash command never touches the session store or handle.
 
-- **`Op::Resume`**: `target` is a `ResumeTarget`, either the `Path` of the session file the picker chose or the ID `Prefix` the user typed. The engine resolves the target and owns the `roll_into` call, so the slash command never touches the session store or handle.
+- **`Event::SessionResumed`**: Carries the history already projected for display, so the TUI renders it without a tool registry.
 
-- **`Event::SessionResumed`**: Carries the ID, title, unarchived flag, and transcript projected for display, so the TUI renders it without a tool registry. `StdioSink` prints the resumed ID prefix and title on stderr, plus a note when the resume unarchived the session.
-
-- **`apply_session_resumed` (TUI)**: Swaps the session ID, repaints the title, clears the chat and replays the history through `ChatView::load_history`, notes an unarchived session, drops queued prompts with a system message giving their count, and clears the modal stack. At `SessionReady`, `apply_session_ready` returns to idle and submits the queue head, or only returns to idle after a cancel that lost the race to the swap. While the resume runs, `Status::Resuming` holds queued prompts, and a failed resume returns to idle with them still queued.
+- **`apply_session_resumed` (TUI)**: While the resume runs, `Status::Resuming` holds queued prompts, and a failed resume returns to idle with them still queued. At `SessionReady`, the TUI returns to idle and submits the queue head, or only returns to idle after a cancel that lost the race to the swap.
 
 ## Out of Scope
 

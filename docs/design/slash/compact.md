@@ -6,7 +6,7 @@ Companions: [commands.md](commands.md), [session/persistence.md](../session/pers
 
 ## Implementation
 
-`slash/compact` hosts `CompactCmd`, which forwards the op `command::compact` parses, the same typed form the bare REPL runs. Bare or whitespace-only args become `None`, and non-empty args trim into a `Some(instructions)` that the agent loop forwards verbatim into the summarization request. Both shapes echo the input line and forward `Op::Compact { instructions }`. The classifier is always `Mutating`, so the input is refused mid-turn (the in-flight reply is allowed to finish first).
+`slash/compact` hosts `CompactCmd`, listed as `/compact [<instructions>]` with the description `Compress conversation context into a summary` and no aliases. It forwards the op parsed by `command::compact`, using the same typed form as the bare REPL. Bare or whitespace-only args become `None`, and non-empty args trim into a `Some(instructions)` that the agent loop forwards verbatim into the summarization request. Both shapes echo the input line and forward `Op::Compact { instructions }`. The classifier is always `Mutating`, so the input is refused mid-turn (the in-flight reply is allowed to finish first).
 
 `engine/compaction` owns the summarization request:
 
@@ -54,7 +54,7 @@ While the summary streams, the TUI shows it below the chat under a `Summarizing 
 
 7. **Synthetic post-compact user message with `parent_uuid: None`.** Materializing the summary as a `role: user` `Message` is the converged answer across all three reference CLIs, since assistant messages can't lead a turn and system blocks are special-cased at the prefix. Setting `parent_uuid: None` on the synthetic head lets the `chain` walker stop at the boundary with no special case in `chain.rs`. The synthetic message body is `SUMMARY_PREFIX + "\n\n" + summary`, where `SUMMARY_PREFIX` is a curated re-entry framing taken from the Codex template that tells the next-turn model to _use_ the summary and continue without re-asking what to do. When the session keeps a [task list](../tools/tasks.md) or open [background shells](../tools/background-shells.md), a `<system-reminder>` block after the summary lists each, since the `tasks` and `bash` calls behind them are gone.
 
-8. **`Entry::Compact` JSONL boundary.** Carries `summary`, `pre_message_count`, optional `instructions`, the task list as `tasks` when it holds any, and `timestamp`. It is written immediately before the synthetic post-compact `Entry::Message`. The loader treats the compact entry as a chain reset, keeps `CompactInfo` for resume display, and only accepts messages that belong to the new tail.
+8. **`Entry::Compact` JSONL boundary.** The compact entry is written immediately before the synthetic post-compact `Entry::Message`. The loader treats it as a chain reset, keeps `CompactInfo` for resume display, and only accepts messages that belong to the new tail.
 
 9. **Preserve session identity.** All three reference CLIs converged on this. `/clear` rolls because intent resets, while `/compact` preserves because intent is retained and context is compressed. The JSONL file, session ID, project, and title all carry through unchanged. The chain reset is purely an in-memory or replay concern.
 
@@ -80,8 +80,6 @@ While the summary streams, the TUI shows it below the chat under a `Summarizing 
 
 ## Per-Component Notes
 
-- **`CompactCmd`**: `name = "compact"`, no aliases. `description = "Compress conversation context into a summary"`. `usage() = Some("[<instructions>]")`. `classify` is always `Mutating`. `echoes_input` uses the trait default of `true`. `execute` returns `SlashOutcome::Forward(Action::Op(command::compact(args)))`, which trims the args into `instructions`, or `None` when nothing is left.
-
 - **`Event::SummaryToken(text)`**, **`Event::SummaryDiscarded`**: The summary in flight and its discard. Manual and automatic compaction emit both, and the TUI renders the stream below the chat with `CompactedBlock::render_streaming`.
 
 - **`Event::SessionCompacted { summary, pre_count, instructions, automatic }`**: Emitted post-success. `summary` is the rendered body, `pre_count` is for the count header, `instructions` becomes the header's `(focus: ...)` suffix, and `automatic` is false for `/compact` and true for auto-compaction. The TUI repaints from it, and `StdioSink` prints a `Compacted N messages into summary` line to stderr (`Auto-compacted` when automatic).
@@ -90,7 +88,7 @@ While the summary streams, the TUI shows it below the chat under a `Summarizing 
 
 - **`SUMMARIZATION_USER_RUBRIC`**, **`SUMMARY_PREFIX`**: Two `&'static str` constants. The rubric is the terse list (intent, decisions, code paths touched, current state, next step) and ends by asking for text only. The prefix is the next-turn framing prepended to the synthetic message.
 
-- **`Entry::Compact`**: Variant on the internally tagged `Entry` enum, tagged `"type": "compact"`. Fields: `summary: String`, `pre_message_count: u32`, `instructions: Option<String>`, `tasks: Vec<Task>`, `timestamp: OffsetDateTime`.
+- **`Entry::Compact`**: Variant on the internally tagged `Entry` enum, tagged `"type": "compact"`. Fields: `summary: String`, `pre_message_count: u32`, `instructions: Option<String>`, `tasks: Vec<Task>` (omitted when empty), and `timestamp: OffsetDateTime`.
 
 - **`CompactedBlock`**: Chat block with an accent-bar surface, a `Compacted N messages → 1 summary` header (with a `(focus: ...)` suffix when instructions were given), and the summary body rendered as Markdown, with no footer. `CompactedBlock::render_streaming` renders the summary in flight under a `Summarizing the conversation...` header.
 

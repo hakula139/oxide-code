@@ -252,7 +252,7 @@ The stdio sink escapes control characters other than tabs and line breaks in mod
 
 9. **Decision on the op channel.** Routing approvals through `ops` and the `ModalStack` reuses the turn loop's cancel / quit / queue semantics, so approvals need no second channel or control-flow path.
 
-10. **Every decision names its basis.** Carrying the basis with the decision lets the denial, the approval prompt, the headless feedback, and the debug log all name the same rule, so neither the model nor the user has to guess which rule fired, and the user knows which pattern to change.
+10. **Every decision names its basis.** Carrying the basis with the decision lets the denial, the approval prompt, the headless feedback, and the debug log all name the same rule, so the model and the user can see which rule fired, and the user knows which pattern to change.
 
 11. **Mode switches wait for the next gated call.** A switch mid-turn changes how the remaining calls are weighed without revisiting calls that already passed the gate, which would mean cancelling a running command or a pending approval. Confirming on receipt keeps the status line honest about the mode the next call meets.
 

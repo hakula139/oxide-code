@@ -142,7 +142,8 @@ impl LineEditor {
     }
 }
 
-/// Keys the textarea maps to a line break or an indent, neither of which fits a one-line field.
+/// Returns whether the textarea maps the key to a line break or an indent, neither of which fits
+/// a one-line field.
 fn is_blocked_key(event: &KeyEvent) -> bool {
     match event.code {
         KeyCode::Enter | KeyCode::Tab | KeyCode::Char('\n' | '\r') => true,

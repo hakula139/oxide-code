@@ -61,7 +61,7 @@ On Unix, session files are created with mode `0600`.
 
 ## Session Lifecycle
 
-### Actor + Batched Writes
+### Actor and Batched Writes
 
 The on-disk file is owned by a single `tokio::spawn`-ed actor task. The rest of the program holds a `SessionHandle` that forwards operations as `SessionCmd` over a bounded mpsc channel, with each cmd carrying a oneshot ack. The actor's loop awaits the first cmd, drains any queued commands with `try_recv()`, then appends the batch in one write.
 
@@ -146,7 +146,7 @@ Listings sort rows and render them as follows:
 
 ## Design Decisions
 
-1. **JSONL, append-only, one file per session.** A crash loses at most the batch it interrupts, and readers can stream the file line by line.
+1. **JSONL, append-only, one file per session.** A process crash loses at most the batch in progress, and readers can stream the file line by line.
 2. **Per-project subdirectory.** Listings stay scoped, and `--all` opts into cross-project view.
 3. **`{epoch}-{uuid}.jsonl` naming.** Timestamp prefix for `ls` order, UUID suffix for lookup.
 4. **Explicit entry schema.** A tagged union of entries, a `parent_uuid` DAG, and a header `version`.

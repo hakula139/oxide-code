@@ -135,7 +135,7 @@ async fn pump_events(
     ))
 }
 
-/// In-band equivalents of HTTP 529 and 500.
+/// Returns whether an in-band error is the equivalent of HTTP 529 or 500.
 fn is_transient(error: &ApiError) -> bool {
     matches!(error.error_type.as_str(), "overloaded_error" | "api_error")
 }

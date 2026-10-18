@@ -81,13 +81,13 @@ Three aliases for one overlay, plus a CLI-only listing subcommand.
 
 1. **Direct plus exploratory split.** `/resume` opens the picker, `/resume <id>` resolves directly. CLI keeps `-c` / `--continue` for the direct latest path. Claude Code and Codex both converged on this independently.
 
-2. **Cwd-default plus `--all` widens.** The existing `ox --continue` resolver already does this. All three reference CLIs converge here because users almost always want their own project.
+2. **Cwd-default plus `--all` widens.** This is how the `ox --continue` resolver works. All three reference CLIs converge here because users almost always want their own project.
 
-3. **In-process re-init.** Claude Code and Codex both swap state without forking. Avoids the alt-screen flash of process exit-and-relaunch. Reuses the `roll`-style helper already shipped for `/clear`.
+3. **In-process re-init.** Claude Code and Codex both swap state without forking. Avoids the alt-screen flash of process exit-and-relaunch. Reuses the `roll` pattern from `/clear`.
 
 4. **Page size around 25-50.** Codex's 25 with near-bottom prefetch and Claude Code's 50 with `visibleCount * 3` both work. Pick the size that gives one screenful plus headroom.
 
-5. **Substring search only in v1.** Claude Code's agentic search is novel but expensive. Codex and opencode both ship plain substring and it works.
+5. **Substring search only.** Codex and opencode both provide plain substring search, which handles typical session counts.
 
 6. **Listing budget on `ox --list`.** oxide-code caps listings at 30 sessions by default, with `--limit 0` opting into an unbounded listing.
 
@@ -111,4 +111,4 @@ Three aliases for one overlay, plus a CLI-only listing subcommand.
 
 8. **Preview pane.** Claude Code's preview is useful but doubles the picker's layout complexity (split-pane, focus model, scrollback).
 
-9. **Date grouping (`Today` / `Yesterday` / date).** opencode groups rows by date, but a flat mtime list reads fine at 30 rows, and each row's relative time already encodes recency.
+9. **Date grouping (`Today` / `Yesterday` / date).** opencode groups rows by date. The [design](../../design/slash/resume.md#out-of-scope) explains why a flat list is sufficient.

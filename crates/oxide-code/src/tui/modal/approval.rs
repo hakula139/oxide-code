@@ -612,7 +612,7 @@ fn error_lines(error: &str, width: u16, style: Style) -> Vec<Line<'static>> {
     )
 }
 
-/// Whitespace that renders as blank cells. Other control whitespace (`\r`, `\n`) is escaped.
+/// Returns whether `c` renders as blank cells. Other control whitespace (`\r`, `\n`) is escaped.
 fn is_blank(c: char) -> bool {
     c == '\t' || (c.is_whitespace() && !c.is_control())
 }

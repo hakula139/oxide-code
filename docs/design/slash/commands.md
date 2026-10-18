@@ -29,7 +29,7 @@ Client-side command surface: `/help`, `/clear`, `/model`, `/status`, and friends
 
 4. **Two-column popup, plain rows.** Name left, description right. Filter ranks name-prefix > alias-prefix > name-substring > alias-substring, alphabetical within each tier. Names accept `:` and `.`, so namespaced names such as `/plugin:cmd` parse.
 
-5. **Mid-session model + effort swap via `&mut Client`.** Both `/model <id>` and `/effort <level>` return `Forward(Action::Op(Op::SetModel(pick)))`, the same payload both modals emit, so the typed-arg path and the modals share one resolver. The `ConfigPick` names a model, with an optional effort, or an effort alone, so every pick sets at least one axis. Each request reads the client's active model and effort, so betas and `output_config` pick up the swap. `Engine::set_model` also re-resolves the compaction threshold for the new model. See [modals.md](modals.md).
+5. **Swap the model and effort mid-session via `&mut Client`.** Both `/model <id>` and `/effort <level>` return `Forward(Action::Op(Op::SetModel(pick)))`, the same payload both modals emit, so the typed-arg path and the modals share one resolver. The `ConfigPick` names a model, with an optional effort, or an effort alone, so every pick sets at least one axis. Each request reads the client's active model and effort, so betas and `output_config` pick up the swap. `Engine::set_model` also re-resolves the compaction threshold for the new model. See [modals.md](modals.md).
 
 6. **Slash commands never write user config files.** State is session-only, so a restart reverts to the configured values. Session commands should feel reversible, and any write that outlives the session requires an explicit user action.
 
