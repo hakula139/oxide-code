@@ -151,7 +151,7 @@ impl ModelSpec {
         &self.id
     }
 
-    /// `None` for ids outside the catalog.
+    /// The catalog row, `None` for ids outside the catalog.
     pub(crate) fn info(&self) -> Option<&'static ModelInfo> {
         self.info
     }
@@ -182,18 +182,18 @@ impl ModelSpec {
         })
     }
 
-    /// `None` for unknown ids, which disables auto-compaction.
+    /// The context window in tokens, `None` for unknown ids, which disables auto-compaction.
     pub(crate) fn context_window(&self) -> Option<u32> {
         self.info.map(|_| CONTEXT_WINDOW)
     }
 
-    /// Human-facing label. Falls back to the raw id when the model is unknown.
+    /// The catalog name, or the raw id for an unknown model.
     pub(crate) fn display_name(&self) -> &str {
         self.info.map_or(&self.id, |info| info.display_name)
     }
 
-    /// Width-constrained variant for the status bar. Drops the `Claude ` family prefix. Falls
-    /// back to the raw id when the model is unknown.
+    /// The status bar label: the catalog name without its `Claude ` prefix, or the raw id for an
+    /// unknown model.
     pub(crate) fn short_display_name(&self) -> &str {
         self.info.map_or(&self.id, |info| {
             info.display_name
