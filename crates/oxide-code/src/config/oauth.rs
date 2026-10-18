@@ -380,7 +380,7 @@ fn is_expired(expires_at_ms: u64) -> bool {
 /// Claude Code's macOS Keychain entry, holding the same JSON document as the credentials file.
 trait Keychain: Sync {
     /// The stored JSON, `None` when the entry does not exist or cannot be read for a reason other
-    /// than [`LoginError::KeychainDenied`], the only error it returns.
+    /// than `LoginError::KeychainDenied`, the only error it returns.
     fn read(&self) -> Result<Option<String>, LoginError>;
     fn write(&self, json: &str) -> Result<()>;
 }
