@@ -3,7 +3,7 @@
 
 use std::path::Path;
 #[cfg(target_os = "macos")]
-use std::{cell::Cell, collections::HashSet, sync::Arc};
+use std::{cell::Cell, collections::HashSet, fmt, sync::Arc};
 
 use anyhow::{Context, Result, bail};
 #[cfg(test)]
@@ -40,10 +40,18 @@ pub(crate) fn apply_extra_ca_certs(
     builder: ClientBuilder,
     path: Option<&Path>,
 ) -> Result<ClientBuilder> {
+    apply_extra_ca_certs_with(builder, path, trust_extra_cas)
+}
+
+fn apply_extra_ca_certs_with(
+    builder: ClientBuilder,
+    path: Option<&Path>,
+    trust: impl FnOnce(ClientBuilder, Vec<CertificateDer<'static>>) -> Result<ClientBuilder>,
+) -> Result<ClientBuilder> {
     let Some(path) = path else {
         return Ok(builder);
     };
-    trust_extra_cas(builder, load_extra_ca_certs(path)?)
+    trust(builder, load_extra_ca_certs(path)?)
         .with_context(|| format!("failed to trust extra CA bundle at {}", path.display()))
 }
 
@@ -95,8 +103,18 @@ fn trust_extra_cas(
     builder: ClientBuilder,
     certs: Vec<CertificateDer<'static>>,
 ) -> Result<ClientBuilder> {
+    let trust: Arc<dyn AppleTrust> = Arc::new(SecurityFramework);
+    trust_extra_cas_with(builder, certs, &trust)
+}
+
+#[cfg(target_os = "macos")]
+fn trust_extra_cas_with(
+    builder: ClientBuilder,
+    certs: Vec<CertificateDer<'static>>,
+    trust: &Arc<dyn AppleTrust>,
+) -> Result<ClientBuilder> {
     let provider = Arc::new(rustls::crypto::aws_lc_rs::default_provider());
-    let verifier = ExtraCaVerifier::new(certs, &provider)?;
+    let verifier = ExtraCaVerifier::new(certs, &provider, trust)?;
     let mut config = ClientConfig::builder_with_provider(provider)
         .with_safe_default_protocol_versions()?
         .dangerous()
@@ -123,7 +141,7 @@ mod os_status {
 #[derive(Debug)]
 struct ExtraCaVerifier {
     /// Trusts the system roots and every bundle CA.
-    platform: PlatformVerifier,
+    platform: Box<dyn ServerCertVerifier>,
     exempt: ExemptAnchors,
 }
 
@@ -131,18 +149,23 @@ struct ExtraCaVerifier {
 impl ExtraCaVerifier {
     /// Exempts the bundle CAs other than Apple's built-in roots, or none when those roots cannot
     /// be read.
-    fn new(bundle: Vec<CertificateDer<'static>>, provider: &Arc<CryptoProvider>) -> Result<Self> {
-        let exempt = match apple_roots() {
+    fn new(
+        bundle: Vec<CertificateDer<'static>>,
+        provider: &Arc<CryptoProvider>,
+        trust: &Arc<dyn AppleTrust>,
+    ) -> Result<Self> {
+        let exempt = match trust.roots() {
             Ok(roots) => ExemptAnchors::new(
                 bundle.iter().filter(|cert| !roots.contains(cert.as_ref())),
                 provider,
+                Arc::clone(trust),
             )?,
             Err(e) => {
                 warn!("keeping Apple's validity limit for extra CAs: {e:#}");
-                ExemptAnchors::new([], provider)?
+                ExemptAnchors::new([], provider, Arc::clone(trust))?
             }
         };
-        let platform = PlatformVerifier::new_with_extra_roots(bundle, Arc::clone(provider))?;
+        let platform = trust.verifier(bundle, Arc::clone(provider))?;
         Ok(Self { platform, exempt })
     }
 }
@@ -200,21 +223,6 @@ impl ServerCertVerifier for ExtraCaVerifier {
     }
 }
 
-/// The DER encodings of Apple's built-in roots. CAs installed in a keychain belong to the admin
-/// and user trust settings domains instead.
-#[cfg(target_os = "macos")]
-fn apple_roots() -> Result<HashSet<Vec<u8>>> {
-    let roots: HashSet<_> = TrustSettings::new(Domain::System)
-        .iter()
-        .context("failed to read the system trust settings")?
-        .map(|cert| cert.to_der())
-        .collect();
-    if roots.is_empty() {
-        bail!("the system trust settings list no root certificates");
-    }
-    Ok(roots)
-}
-
 /// Returns whether the platform verifier rejected the chain with
 /// `errSecCertificateValidityPeriodTooLong`, which it reports only in the message because rustls
 /// has no variant for it. Apple reports this code ahead of untrusted anchor, hostname, extended key
@@ -234,10 +242,6 @@ fn exceeds_validity_limit(rejection: &Error) -> bool {
 #[cfg(target_os = "macos")]
 const SERVER_AUTH_OID: &[u8] = &[0x2b, 0x06, 0x01, 0x05, 0x05, 0x07, 0x03, 0x01];
 
-/// `kCFAbsoluteTimeIntervalSince1970`, the Unix time of Core Foundation's 2001 epoch.
-#[cfg(target_os = "macos")]
-const CF_EPOCH_UNIX_SECS: u64 = 978_307_200;
-
 /// The bundle CAs whose chains may exceed the validity limit.
 #[cfg(target_os = "macos")]
 #[derive(Debug)]
@@ -245,6 +249,7 @@ struct ExemptAnchors {
     webpki: RootCertStore,
     apple: Vec<SecCertificate>,
     algorithms: WebPkiSupportedAlgorithms,
+    trust: Arc<dyn AppleTrust>,
 }
 
 #[cfg(target_os = "macos")]
@@ -252,6 +257,7 @@ impl ExemptAnchors {
     fn new<'a>(
         anchors: impl IntoIterator<Item = &'a CertificateDer<'static>>,
         provider: &CryptoProvider,
+        trust: Arc<dyn AppleTrust>,
     ) -> Result<Self> {
         let mut webpki = RootCertStore::empty();
         let mut apple = Vec::new();
@@ -263,6 +269,7 @@ impl ExemptAnchors {
             webpki,
             apple,
             algorithms: provider.signature_verification_algorithms,
+            trust,
         })
     }
 
@@ -287,7 +294,16 @@ impl ExemptAnchors {
         )?;
         verify_server_name(&cert, server_name)?;
         self.require_server_auth(end_entity, intermediates, now)?;
-        self.evaluate_basic(end_entity, intermediates, ocsp_response, now)
+        self.trust.evaluate(&BasicEvaluation {
+            end_entity,
+            intermediates,
+            anchors: &self.apple,
+            anchors_only: true,
+            revocation: RevocationPolicy::USE_ANY_METHOD_AVAILABLE
+                | RevocationPolicy::NETWORK_ACCESS_DISABLED,
+            ocsp_response,
+            verify_date: now,
+        })
     }
 
     /// webpki's server check accepts a leaf without the extended key usage extension, which Apple
@@ -314,67 +330,6 @@ impl ExemptAnchors {
             })
             .map_err(|_| Error::InvalidCertificate(CertificateError::InvalidPurpose))
     }
-
-    /// Evaluates the chain with the Security framework under the basic X.509 policy and a
-    /// revocation policy, anchored only at these CAs. This keeps Apple's chain, expiry, trust
-    /// setting, and revocation checks without the TLS policy that carries the validity limit.
-    /// Revocation relies on the stapled OCSP response and trustd's cache because a network fetch
-    /// would block the handshake on the responder.
-    fn evaluate_basic(
-        &self,
-        end_entity: &CertificateDer<'_>,
-        intermediates: &[CertificateDer<'_>],
-        ocsp_response: &[u8],
-        now: UnixTime,
-    ) -> Result<(), Error> {
-        let general = |e: security_framework::base::Error| Error::General(e.to_string());
-        let chain = std::iter::once(end_entity)
-            .chain(intermediates)
-            .map(|cert| SecCertificate::from_der(cert))
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(|_| Error::InvalidCertificate(CertificateError::BadEncoding))?;
-        let revocation = SecPolicy::create_revocation(
-            RevocationPolicy::USE_ANY_METHOD_AVAILABLE | RevocationPolicy::NETWORK_ACCESS_DISABLED,
-        )
-        .map_err(general)?;
-        let mut trust =
-            SecTrust::create_with_certificates(&chain, &[SecPolicy::create_x509(), revocation])
-                .map_err(general)?;
-        let since_cf_epoch = now
-            .as_secs()
-            .checked_sub(CF_EPOCH_UNIX_SECS)
-            .ok_or(Error::FailedToGetCurrentTime)?;
-        #[expect(
-            clippy::cast_precision_loss,
-            reason = "seconds since 2001 stay far below 2^53, which f64 holds exactly"
-        )]
-        let since_cf_epoch = since_cf_epoch as f64;
-        trust
-            .set_trust_verify_date(&CFDate::new(since_cf_epoch))
-            .map_err(general)?;
-        if !ocsp_response.is_empty() {
-            trust
-                .set_trust_ocsp_response(std::iter::once(ocsp_response))
-                .map_err(general)?;
-        }
-        trust
-            .set_anchor_certificates(&self.apple)
-            .map_err(general)?;
-        trust
-            .set_trust_anchor_certificates_only(true)
-            .map_err(general)?;
-
-        trust.evaluate_with_error().map_err(|e| {
-            let reason = if e.code() == os_status::CERTIFICATE_REVOKED as isize {
-                CertificateError::Revoked
-            } else {
-                let message: Box<dyn std::error::Error + Send + Sync> =
-                    format!("{}: {}", e.description(), e.code()).into();
-                CertificateError::Other(OtherError(Arc::from(message)))
-            };
-            Error::InvalidCertificate(reason)
-        })
-    }
 }
 
 /// Requires the `serverAuth` usage of the leaf and applies webpki's if-present rule to the CAs
@@ -395,6 +350,134 @@ impl webpki::ExtendedKeyUsageValidator for LeafServerAuth {
         };
         webpki::ExtendedKeyUsageValidator::validate(&usage, purposes)
     }
+}
+
+// ── AppleTrust ──
+
+/// `kCFAbsoluteTimeIntervalSince1970`, the Unix time of Core Foundation's 2001 epoch.
+#[cfg(target_os = "macos")]
+const CF_EPOCH_UNIX_SECS: u64 = 978_307_200;
+
+/// The Security framework services behind [`ExtraCaVerifier`]. Tests fake them because the Nix
+/// build sandbox blocks trustd, which they rely on.
+#[cfg(target_os = "macos")]
+trait AppleTrust: fmt::Debug + Send + Sync {
+    /// Returns the DER encodings of Apple's built-in roots.
+    fn roots(&self) -> Result<HashSet<Vec<u8>>>;
+
+    /// Returns the platform verifier, trusting `extra_roots` on top of the system trust store.
+    fn verifier(
+        &self,
+        extra_roots: Vec<CertificateDer<'static>>,
+        provider: Arc<CryptoProvider>,
+    ) -> Result<Box<dyn ServerCertVerifier>>;
+
+    /// Evaluates the chain, failing with the rustls error that describes the rejection.
+    fn evaluate(&self, evaluation: &BasicEvaluation<'_>) -> Result<(), Error>;
+}
+
+/// A chain for the Security framework to evaluate under the basic X.509 policy, which keeps Apple's
+/// chain, expiry, trust setting, and revocation checks without the TLS policy that carries the
+/// validity limit.
+#[cfg(target_os = "macos")]
+#[derive(Debug)]
+struct BasicEvaluation<'a> {
+    end_entity: &'a CertificateDer<'a>,
+    intermediates: &'a [CertificateDer<'a>],
+    anchors: &'a [SecCertificate],
+    /// Trusts only `anchors`, ignoring the system roots and keychains.
+    anchors_only: bool,
+    /// Revocation relies on the stapled OCSP response and trustd's cache, since a network fetch
+    /// would block the handshake on the responder.
+    revocation: RevocationPolicy,
+    ocsp_response: &'a [u8],
+    verify_date: UnixTime,
+}
+
+#[cfg(target_os = "macos")]
+#[derive(Debug)]
+struct SecurityFramework;
+
+#[cfg(target_os = "macos")]
+impl AppleTrust for SecurityFramework {
+    /// Returns the roots in the system trust settings domain, since CAs installed in a keychain
+    /// belong to the admin and user domains.
+    fn roots(&self) -> Result<HashSet<Vec<u8>>> {
+        let roots: HashSet<_> = TrustSettings::new(Domain::System)
+            .iter()
+            .context("failed to read the system trust settings")?
+            .map(|cert| cert.to_der())
+            .collect();
+        if roots.is_empty() {
+            bail!("the system trust settings list no root certificates");
+        }
+        Ok(roots)
+    }
+
+    fn verifier(
+        &self,
+        extra_roots: Vec<CertificateDer<'static>>,
+        provider: Arc<CryptoProvider>,
+    ) -> Result<Box<dyn ServerCertVerifier>> {
+        let verifier = PlatformVerifier::new_with_extra_roots(extra_roots, provider)?;
+        Ok(Box::new(verifier))
+    }
+
+    fn evaluate(&self, evaluation: &BasicEvaluation<'_>) -> Result<(), Error> {
+        let general = |e: security_framework::base::Error| Error::General(e.to_string());
+        let chain = std::iter::once(evaluation.end_entity)
+            .chain(evaluation.intermediates)
+            .map(|cert| SecCertificate::from_der(cert))
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|_| Error::InvalidCertificate(CertificateError::BadEncoding))?;
+        let revocation = SecPolicy::create_revocation(evaluation.revocation).map_err(general)?;
+        let mut trust =
+            SecTrust::create_with_certificates(&chain, &[SecPolicy::create_x509(), revocation])
+                .map_err(general)?;
+        let since_cf_epoch = evaluation
+            .verify_date
+            .as_secs()
+            .checked_sub(CF_EPOCH_UNIX_SECS)
+            .ok_or(Error::FailedToGetCurrentTime)?;
+        #[expect(
+            clippy::cast_precision_loss,
+            reason = "seconds since 2001 stay far below 2^53, which f64 holds exactly"
+        )]
+        let since_cf_epoch = since_cf_epoch as f64;
+        trust
+            .set_trust_verify_date(&CFDate::new(since_cf_epoch))
+            .map_err(general)?;
+        if !evaluation.ocsp_response.is_empty() {
+            trust
+                .set_trust_ocsp_response(std::iter::once(evaluation.ocsp_response))
+                .map_err(general)?;
+        }
+        trust
+            .set_anchor_certificates(evaluation.anchors)
+            .map_err(general)?;
+        trust
+            .set_trust_anchor_certificates_only(evaluation.anchors_only)
+            .map_err(general)?;
+
+        trust
+            .evaluate_with_error()
+            .map_err(|e| evaluation_error(e.code(), &e.description().to_string()))
+    }
+}
+
+/// Returns the rustls error for an evaluation that failed with the `OSStatus` `code`. A code other
+/// than a revocation stays in the message, as the platform verifier reports codes rustls has no
+/// variant for.
+#[cfg(target_os = "macos")]
+fn evaluation_error(code: isize, description: &str) -> Error {
+    let reason = if code == os_status::CERTIFICATE_REVOKED as isize {
+        CertificateError::Revoked
+    } else {
+        let message: Box<dyn std::error::Error + Send + Sync> =
+            format!("{description}: {code}").into();
+        CertificateError::Other(OtherError(Arc::from(message)))
+    };
+    Error::InvalidCertificate(reason)
 }
 
 // ── Test Fixtures ──
@@ -421,6 +504,8 @@ mod tests {
     use std::io::{BufRead, BufReader, Write};
     use std::net::{SocketAddr, TcpListener};
     use std::sync::Arc;
+    #[cfg(target_os = "macos")]
+    use std::sync::Mutex;
 
     use rustls::pki_types::PrivateKeyDer;
     use tempfile::NamedTempFile;
@@ -469,23 +554,6 @@ mod tests {
         AwEHoUQDQgAEnasGs4XIF2Eer/xbi0+ASrJ2oJ0ol6qjVMQ/8/F4atf4sxl70Ivd
         ppr9cqydr+0vdpCk1H0tbv0yTBYz/Kg5iA==
         -----END EC PRIVATE KEY-----
-    "};
-
-    /// A `localhost` server leaf from 2026-10-17 valid for one year, within Apple's limit.
-    #[cfg(target_os = "macos")]
-    const SHORT_LIVED_LEAF_PEM: &str = indoc! {"
-        -----BEGIN CERTIFICATE-----
-        MIIBtTCCAVygAwIBAgIJAL+LZkXFknsjMAoGCCqGSM49BAMCMB4xHDAaBgNVBAMM
-        E294aWRlLXRlc3QtZXh0cmEtY2EwHhcNMjYxMDE3MDYwODA2WhcNMjcxMDE3MDYw
-        ODA2WjAUMRIwEAYDVQQDDAlsb2NhbGhvc3QwWTATBgcqhkjOPQIBBggqhkjOPQMB
-        BwNCAASbn/1ZFqFQ6lN+lOIzZ+EeeoO83IbUtPYOy1OhUym+gQpGY4ujmWK0bhlP
-        5R6m/w8DjQPuINDIO6+AwXejaKyXo4GMMIGJMAwGA1UdEwEB/wQCMAAwDgYDVR0P
-        AQH/BAQDAgeAMBMGA1UdJQQMMAoGCCsGAQUFBwMBMBQGA1UdEQQNMAuCCWxvY2Fs
-        aG9zdDAdBgNVHQ4EFgQUFuMuXR3tZAKp3Csbw0La989aHO0wHwYDVR0jBBgwFoAU
-        Tk695Gu4cijrXhtBt6KzbEGrN8kwCgYIKoZIzj0EAwIDRwAwRAIgHSeM0HQyAkKX
-        2XB4MFPzJW0YaccGkgKesHbPJBWfEDUCIHSMVLumStU4xS9OnIXQEch+mGM+HCFM
-        DnNXvQOe8uP5
-        -----END CERTIFICATE-----
     "};
 
     /// [`LONG_LIVED_LEAF_PEM`] without the extended key usage extension.
@@ -538,59 +606,6 @@ mod tests {
         -----END CERTIFICATE-----
     "};
 
-    /// Another 100-year `localhost` leaf, which [`REVOKED_LEAF_OCSP_BASE64`] revokes. It has its
-    /// own serial number so that a cached revocation cannot reach the other leaves.
-    #[cfg(target_os = "macos")]
-    const REVOKED_LEAF_PEM: &str = indoc! {"
-        -----BEGIN CERTIFICATE-----
-        MIIBuDCCAV6gAwIBAgIJAL+LZkXFknsrMAoGCCqGSM49BAMCMB4xHDAaBgNVBAMM
-        E294aWRlLXRlc3QtZXh0cmEtY2EwIBcNMjYxMDE3MDYyMTI0WhgPMjEyNjA5MjMw
-        NjIxMjRaMBQxEjAQBgNVBAMMCWxvY2FsaG9zdDBZMBMGByqGSM49AgEGCCqGSM49
-        AwEHA0IABN9AMULiSrKSr+ov9JyuzlZqNGtozVgDuqrkdMV/i6Ld9w/ltxRGRmuk
-        508rhhkN7LinwCGdMFZhLSNVUrFKfp6jgYwwgYkwDAYDVR0TAQH/BAIwADAOBgNV
-        HQ8BAf8EBAMCB4AwEwYDVR0lBAwwCgYIKwYBBQUHAwEwFAYDVR0RBA0wC4IJbG9j
-        YWxob3N0MB0GA1UdDgQWBBQZmjUgXCb05vtiXyYmDnFnFfRF5DAfBgNVHSMEGDAW
-        gBROTr3ka7hyKOteG0G3orNsQas3yTAKBggqhkjOPQQDAgNIADBFAiByUjIhz3ea
-        LNX94fhlDD1m9FxNnwGy5Dzfk4KvJlVvBQIhAP6Uyz7QC7mxQ2TmYSwnQ2+wquRm
-        ZZotKLut/Uql2GF7
-        -----END CERTIFICATE-----
-    "};
-
-    /// A DER OCSP response from [`ISSUING_CA_PEM`] that marks [`REVOKED_LEAF_PEM`] revoked, valid
-    /// for 100 years.
-    #[cfg(target_os = "macos")]
-    const REVOKED_LEAF_OCSP_BASE64: &str = indoc! {"
-        MIIBKgoBAKCCASMwggEfBgkrBgEFBQcwAQEEggEQMIIBDDCBsqEgMB4xHDAaBgNV
-        BAMME294aWRlLXRlc3QtZXh0cmEtY2EYDzIwMjYxMDE3MDYyMTQ1WjB9MHswQjAJ
-        BgUrDgMCGgUABBRTf2oks/96uCQL/yYbyFGV7w1qQAQUTk695Gu4cijrXhtBt6Kz
-        bEGrN8kCCQC/i2ZFxZJ7K6ERGA8yMDI2MTAxNjA2MjEyNFoYDzIwMjYxMDE3MDYy
-        MTQ1WqARGA8yMTI2MDkyMzA2MjE0NVowCgYIKoZIzj0EAwIDSQAwRgIhAMxvYbRn
-        jgGm6165QREBnb1I8BSNsjN5JJZKf23SZ/t8AiEAjWm1QJnslUuelsY5V867o2YR
-        lBmBkAq0IS4XXfdnf38=
-    "};
-
-    /// A 100-year `localhost` leaf whose OCSP responder is [`OCSP_RESPONDER_ADDR`].
-    #[cfg(target_os = "macos")]
-    const OCSP_LEAF_PEM: &str = indoc! {"
-        -----BEGIN CERTIFICATE-----
-        MIIB7DCCAZKgAwIBAgIJAL+LZkXFknstMAoGCCqGSM49BAMCMB4xHDAaBgNVBAMM
-        E294aWRlLXRlc3QtZXh0cmEtY2EwIBcNMjYxMDE3MDcwNzEyWhgPMjEyNjA5MjMw
-        NzA3MTJaMBQxEjAQBgNVBAMMCWxvY2FsaG9zdDBZMBMGByqGSM49AgEGCCqGSM49
-        AwEHA0IABC3cyaJWixqJyjK6LBG7EECCjvNCStCZIa5khFxWhM5cVKw/oOp0Mw7J
-        eLnxvEWT4zWJXG9hFPM0t+oN4CxexOGjgcAwgb0wDAYDVR0TAQH/BAIwADAOBgNV
-        HQ8BAf8EBAMCB4AwEwYDVR0lBAwwCgYIKwYBBQUHAwEwFAYDVR0RBA0wC4IJbG9j
-        YWxob3N0MB0GA1UdDgQWBBTEKCPgENuRfTIRFbXyggrHnKHfbzAfBgNVHSMEGDAW
-        gBROTr3ka7hyKOteG0G3orNsQas3yTAyBggrBgEFBQcBAQQmMCQwIgYIKwYBBQUH
-        MAGGFmh0dHA6Ly8xMjcuMC4wLjE6MzkyNTQwCgYIKoZIzj0EAwIDSAAwRQIgGkBw
-        yFI3THC3aYLJe7lLFT7yJ4lmf67f5W4WzhW68TcCIQDlrIWIq7NaH5jQtaoRxF/s
-        YY6DAlKs3AbtOJd+0DX+sA==
-        -----END CERTIFICATE-----
-    "};
-
-    /// The loopback address that [`OCSP_LEAF_PEM`] names as its OCSP responder.
-    #[cfg(target_os = "macos")]
-    const OCSP_RESPONDER_ADDR: &str = "127.0.0.1:39254";
-
     fn write_pem(contents: &str) -> NamedTempFile {
         let mut file = NamedTempFile::new().unwrap();
         file.write_all(contents.as_bytes()).unwrap();
@@ -638,28 +653,191 @@ mod tests {
         addr
     }
 
-    /// A verifier whose platform side trusts `platform_ca_pem` and whose exempt anchors are the
-    /// bundle `exempt_ca_pem`. Production verifiers trust the same bundle on both sides.
+    /// Returns a client for [`serve_once`] at `addr`, which it reaches as `localhost`.
+    fn localhost_client(addr: SocketAddr) -> ClientBuilder {
+        reqwest::Client::builder()
+            .no_proxy()
+            .resolve("localhost", addr)
+    }
+
+    async fn fetch_root(builder: ClientBuilder, addr: SocketAddr) -> anyhow::Result<String> {
+        let response = builder
+            .build()?
+            .get(format!("https://localhost:{}/", addr.port()))
+            .send()
+            .await?;
+        Ok(response.text().await?)
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    fn trust_bundle(
+        builder: ClientBuilder,
+        bundle: Vec<CertificateDer<'static>>,
+    ) -> Result<ClientBuilder> {
+        trust_extra_cas(builder, bundle)
+    }
+
+    /// Calls [`trust_extra_cas_with`] on Apple trust services whose platform verifier rejects
+    /// every chain the way Apple's rejects [`LONG_LIVED_LEAF_PEM`].
     #[cfg(target_os = "macos")]
-    fn verifier(platform_ca_pem: &str, exempt_ca_pem: &str) -> ExtraCaVerifier {
-        let provider = Arc::new(rustls::crypto::aws_lc_rs::default_provider());
-        ExtraCaVerifier {
-            platform: PlatformVerifier::new_with_extra_roots(
-                vec![cert(platform_ca_pem)],
-                Arc::clone(&provider),
-            )
-            .unwrap(),
-            exempt: exempt_anchors(exempt_ca_pem),
+    fn trust_bundle(
+        builder: ClientBuilder,
+        bundle: Vec<CertificateDer<'static>>,
+    ) -> Result<ClientBuilder> {
+        let trust: Arc<dyn AppleTrust> =
+            Arc::new(FakeAppleTrust::new(Err(validity_limit_rejection())));
+        trust_extra_cas_with(builder, bundle, &trust)
+    }
+
+    /// Apple trust services whose built-in roots are `roots`, or unreadable when `None`, whose
+    /// platform verifier gives `platform_verdict`, and whose basic evaluation gives
+    /// `evaluation_verdict`. They record the extra roots and evaluations they receive.
+    #[cfg(target_os = "macos")]
+    #[derive(Debug)]
+    struct FakeAppleTrust {
+        roots: Option<HashSet<Vec<u8>>>,
+        platform_verdict: Result<(), Error>,
+        evaluation_verdict: Result<(), Error>,
+        extra_roots: Mutex<Vec<CertificateDer<'static>>>,
+        evaluations: Mutex<Vec<RecordedEvaluation>>,
+    }
+
+    #[cfg(target_os = "macos")]
+    impl FakeAppleTrust {
+        /// Returns services with no built-in roots and basic evaluations that pass.
+        fn new(platform_verdict: Result<(), Error>) -> Self {
+            Self {
+                roots: Some(HashSet::new()),
+                platform_verdict,
+                evaluation_verdict: Ok(()),
+                extra_roots: Mutex::default(),
+                evaluations: Mutex::default(),
+            }
+        }
+
+        fn extra_roots(&self) -> Vec<CertificateDer<'static>> {
+            self.extra_roots.lock().unwrap().clone()
+        }
+
+        fn evaluations(&self) -> Vec<RecordedEvaluation> {
+            self.evaluations.lock().unwrap().clone()
         }
     }
 
     #[cfg(target_os = "macos")]
-    fn exempt_anchors(ca_pem: &str) -> ExemptAnchors {
-        ExemptAnchors::new(
-            &[cert(ca_pem)],
-            &rustls::crypto::aws_lc_rs::default_provider(),
-        )
-        .unwrap()
+    impl AppleTrust for FakeAppleTrust {
+        fn roots(&self) -> Result<HashSet<Vec<u8>>> {
+            self.roots
+                .clone()
+                .context("the system trust settings are unreadable")
+        }
+
+        fn verifier(
+            &self,
+            extra_roots: Vec<CertificateDer<'static>>,
+            provider: Arc<CryptoProvider>,
+        ) -> Result<Box<dyn ServerCertVerifier>> {
+            *self.extra_roots.lock().unwrap() = extra_roots;
+            Ok(Box::new(FakePlatformVerifier {
+                verdict: self.platform_verdict.clone(),
+                algorithms: provider.signature_verification_algorithms,
+            }))
+        }
+
+        fn evaluate(&self, evaluation: &BasicEvaluation<'_>) -> Result<(), Error> {
+            self.evaluations.lock().unwrap().push(evaluation.into());
+            self.evaluation_verdict.clone()
+        }
+    }
+
+    /// An owned copy of a [`BasicEvaluation`], with the leaf leading the chain and the anchors
+    /// in DER.
+    #[cfg(target_os = "macos")]
+    #[derive(Clone, Debug, PartialEq)]
+    struct RecordedEvaluation {
+        chain: Vec<CertificateDer<'static>>,
+        anchors: Vec<CertificateDer<'static>>,
+        anchors_only: bool,
+        revocation: RevocationPolicy,
+        ocsp_response: Vec<u8>,
+        verify_date: UnixTime,
+    }
+
+    #[cfg(target_os = "macos")]
+    impl From<&BasicEvaluation<'_>> for RecordedEvaluation {
+        fn from(evaluation: &BasicEvaluation<'_>) -> Self {
+            Self {
+                chain: std::iter::once(evaluation.end_entity)
+                    .chain(evaluation.intermediates)
+                    .map(|cert| cert.clone().into_owned())
+                    .collect(),
+                anchors: evaluation
+                    .anchors
+                    .iter()
+                    .map(|anchor| anchor.to_der().into())
+                    .collect(),
+                anchors_only: evaluation.anchors_only,
+                revocation: evaluation.revocation,
+                ocsp_response: evaluation.ocsp_response.to_vec(),
+                verify_date: evaluation.verify_date,
+            }
+        }
+    }
+
+    /// A platform verifier that gives `verdict` for every chain and checks handshake signatures
+    /// with webpki.
+    #[cfg(target_os = "macos")]
+    #[derive(Debug)]
+    struct FakePlatformVerifier {
+        verdict: Result<(), Error>,
+        algorithms: WebPkiSupportedAlgorithms,
+    }
+
+    #[cfg(target_os = "macos")]
+    impl ServerCertVerifier for FakePlatformVerifier {
+        fn verify_server_cert(
+            &self,
+            _end_entity: &CertificateDer<'_>,
+            _intermediates: &[CertificateDer<'_>],
+            _server_name: &ServerName<'_>,
+            _ocsp_response: &[u8],
+            _now: UnixTime,
+        ) -> Result<ServerCertVerified, Error> {
+            self.verdict
+                .clone()
+                .map(|()| ServerCertVerified::assertion())
+        }
+
+        fn verify_tls12_signature(
+            &self,
+            message: &[u8],
+            cert: &CertificateDer<'_>,
+            dss: &DigitallySignedStruct,
+        ) -> Result<HandshakeSignatureValid, Error> {
+            rustls::crypto::verify_tls12_signature(message, cert, dss, &self.algorithms)
+        }
+
+        fn verify_tls13_signature(
+            &self,
+            message: &[u8],
+            cert: &CertificateDer<'_>,
+            dss: &DigitallySignedStruct,
+        ) -> Result<HandshakeSignatureValid, Error> {
+            rustls::crypto::verify_tls13_signature(message, cert, dss, &self.algorithms)
+        }
+
+        fn supported_verify_schemes(&self) -> Vec<SignatureScheme> {
+            self.algorithms.supported_schemes()
+        }
+    }
+
+    /// Returns an [`ExtraCaVerifier`] on `trust` for the PEM certificates in `bundle`.
+    #[cfg(target_os = "macos")]
+    fn verifier(trust: &Arc<FakeAppleTrust>, bundle: &[&str]) -> ExtraCaVerifier {
+        let provider = Arc::new(rustls::crypto::aws_lc_rs::default_provider());
+        let bundle = bundle.iter().map(|pem| cert(pem)).collect();
+        let trust: Arc<dyn AppleTrust> = Arc::<FakeAppleTrust>::clone(trust);
+        ExtraCaVerifier::new(bundle, &provider, &trust).unwrap()
     }
 
     #[cfg(target_os = "macos")]
@@ -667,14 +845,13 @@ mod tests {
         verifier: &ExtraCaVerifier,
         leaf_pem: &str,
         name: &str,
-        ocsp_response: &[u8],
         now: UnixTime,
     ) -> Result<ServerCertVerified, Error> {
         verifier.verify_server_cert(
             &cert(leaf_pem),
             &[],
             &ServerName::try_from(name.to_owned()).unwrap(),
-            ocsp_response,
+            &[],
             now,
         )
     }
@@ -686,51 +863,32 @@ mod tests {
         ))
     }
 
+    /// Returns the rejection that the platform verifier gave [`LONG_LIVED_LEAF_PEM`] under a
+    /// trusted [`ISSUING_CA_PEM`], recorded on macOS 27.0.1 with rustls-platform-verifier 0.7.1.
     #[cfg(target_os = "macos")]
-    fn revoked_leaf_ocsp() -> Vec<u8> {
-        use base64::Engine;
-
-        let base64: String = REVOKED_LEAF_OCSP_BASE64.lines().collect();
-        base64::engine::general_purpose::STANDARD
-            .decode(base64)
-            .unwrap()
+    fn validity_limit_rejection() -> Error {
+        other_error("\u{201c}localhost\u{201d} certificate is not standards compliant: -67901")
     }
 
-    /// Returns whether `err` carries the Security framework `code` the way the platform verifier
-    /// reports codes that rustls has no variant for.
+    /// Returns an error carrying `message` the way the platform verifier reports a code that
+    /// rustls has no variant for.
     #[cfg(target_os = "macos")]
-    fn has_os_status(err: &Error, code: i32) -> bool {
-        matches!(
-            err,
-            Error::InvalidCertificate(CertificateError::Other(other))
-                if other.to_string().ends_with(&format!(": {code}"))
-        )
+    fn other_error(message: &str) -> Error {
+        let message: Box<dyn std::error::Error + Send + Sync> = message.into();
+        Error::InvalidCertificate(CertificateError::Other(OtherError(Arc::from(message))))
+    }
+
+    /// Returns the message of an error that carries a code rustls has no variant for.
+    /// `OtherError` never compares equal, so tests compare this.
+    #[cfg(target_os = "macos")]
+    fn other_message(err: &Error) -> String {
+        match err {
+            Error::InvalidCertificate(CertificateError::Other(other)) => other.to_string(),
+            err => panic!("expected a code without a rustls variant: {err:?}"),
+        }
     }
 
     // ── apply_extra_ca_certs ──
-
-    #[tokio::test]
-    async fn apply_extra_ca_certs_connects_to_a_long_lived_leaf_from_the_bundle() {
-        let bundle = write_pem(ISSUING_CA_PEM);
-        for version in rustls::ALL_VERSIONS {
-            let addr = serve_once(version);
-            let builder = reqwest::Client::builder()
-                .no_proxy()
-                .resolve("localhost", addr);
-            let client = apply_extra_ca_certs(builder, Some(bundle.path()))
-                .unwrap()
-                .build()
-                .unwrap();
-
-            let response = client
-                .get(format!("https://localhost:{}/", addr.port()))
-                .send()
-                .await
-                .unwrap_or_else(|e| panic!("{version:?}: {:#}", anyhow::Error::from(e)));
-
-            assert_eq!(response.text().await.unwrap(), "ok", "{version:?}");
-        }
-    }
 
     #[test]
     fn apply_extra_ca_certs_surfaces_loader_error_with_path() {
@@ -743,6 +901,26 @@ mod tests {
             err.to_string(),
             "failed to read extra CA bundle at /definitely/does/not/exist.pem",
         );
+    }
+
+    #[tokio::test]
+    async fn apply_extra_ca_certs_connects_to_a_long_lived_leaf_from_the_bundle() {
+        let bundle = write_pem(ISSUING_CA_PEM);
+        for version in rustls::ALL_VERSIONS {
+            let addr = serve_once(version);
+            let builder = apply_extra_ca_certs_with(
+                localhost_client(addr),
+                Some(bundle.path()),
+                trust_bundle,
+            )
+            .unwrap();
+
+            let body = fetch_root(builder, addr)
+                .await
+                .unwrap_or_else(|e| panic!("{version:?}: {e:#}"));
+
+            assert_eq!(body, "ok", "{version:?}");
+        }
     }
 
     // ── load_extra_ca_certs ──
@@ -827,96 +1005,92 @@ mod tests {
 
     #[cfg(target_os = "macos")]
     #[test]
-    fn extra_ca_verifier_new_exempts_the_bundle_cas_except_apple_roots() {
-        let apple_root = TrustSettings::new(Domain::System)
-            .iter()
-            .unwrap()
-            .next()
-            .unwrap()
-            .to_der();
-        let bundle = vec![CertificateDer::from(apple_root), cert(ISSUING_CA_PEM)];
+    fn new_exempts_the_bundle_cas_outside_apple_roots() {
+        let trust = Arc::new(FakeAppleTrust {
+            roots: Some(HashSet::from([cert(TEST_CA_PEM).to_vec()])),
+            ..FakeAppleTrust::new(Err(validity_limit_rejection()))
+        });
+        let verifier = verifier(&trust, &[TEST_CA_PEM, ISSUING_CA_PEM]);
 
-        let verifier = ExtraCaVerifier::new(
-            bundle,
-            &Arc::new(rustls::crypto::aws_lc_rs::default_provider()),
-        )
-        .unwrap();
+        verify_leaf(&verifier, LONG_LIVED_LEAF_PEM, "localhost", UnixTime::now()).unwrap();
 
-        let exempt = &verifier.exempt;
-        let apple: Vec<_> = exempt.apple.iter().map(SecCertificate::to_der).collect();
-        assert_eq!(apple, [cert(ISSUING_CA_PEM).to_vec()]);
         assert_eq!(
-            exempt.webpki.roots,
-            [webpki::anchor_from_trusted_cert(&cert(ISSUING_CA_PEM))
-                .unwrap()
-                .to_owned()],
+            trust.extra_roots(),
+            [cert(TEST_CA_PEM), cert(ISSUING_CA_PEM)]
         );
+        let anchors: Vec<_> = trust
+            .evaluations()
+            .into_iter()
+            .map(|evaluation| evaluation.anchors)
+            .collect();
+        assert_eq!(anchors, [vec![cert(ISSUING_CA_PEM)]]);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn new_exempts_no_ca_when_apple_roots_cannot_be_read() {
+        let trust = Arc::new(FakeAppleTrust {
+            roots: None,
+            ..FakeAppleTrust::new(Err(validity_limit_rejection()))
+        });
+        let verifier = verifier(&trust, &[ISSUING_CA_PEM]);
+
+        let err =
+            verify_leaf(&verifier, LONG_LIVED_LEAF_PEM, "localhost", UnixTime::now()).unwrap_err();
+
+        assert_eq!(
+            other_message(&err),
+            other_message(&validity_limit_rejection())
+        );
+        assert_eq!(trust.extra_roots(), [cert(ISSUING_CA_PEM)]);
+        assert_eq!(trust.evaluations(), Vec::new());
     }
 
     // ── ExtraCaVerifier::verify_server_cert ──
 
     #[cfg(target_os = "macos")]
     #[test]
-    fn verify_server_cert_accepts_a_leaf_within_the_validity_limit() {
-        let verifier = verifier(ISSUING_CA_PEM, TEST_CA_PEM);
-        let within_validity = unix_time(datetime!(2026-12-01 00:00 UTC));
+    fn verify_server_cert_keeps_a_platform_verdict_other_than_the_validity_limit() {
+        for verdict in [
+            Ok(()),
+            Err(Error::InvalidCertificate(CertificateError::Revoked)),
+        ] {
+            let trust = Arc::new(FakeAppleTrust::new(verdict.clone()));
+            let verifier = verifier(&trust, &[ISSUING_CA_PEM]);
 
-        verify_leaf(
-            &verifier,
-            SHORT_LIVED_LEAF_PEM,
-            "localhost",
-            &[],
-            within_validity,
-        )
-        .unwrap();
+            let result = verify_leaf(&verifier, LONG_LIVED_LEAF_PEM, "localhost", UnixTime::now());
+
+            assert_eq!(result.map(drop), verdict);
+            assert_eq!(trust.evaluations(), Vec::new(), "{verdict:?}");
+        }
     }
 
     #[cfg(target_os = "macos")]
     #[test]
     fn verify_server_cert_keeps_the_validity_limit_for_a_ca_outside_the_bundle() {
-        let verifier = verifier(ISSUING_CA_PEM, TEST_CA_PEM);
+        let trust = Arc::new(FakeAppleTrust::new(Err(validity_limit_rejection())));
+        let verifier = verifier(&trust, &[TEST_CA_PEM]);
 
-        let err = verify_leaf(
-            &verifier,
-            LONG_LIVED_LEAF_PEM,
-            "localhost",
-            &[],
-            UnixTime::now(),
-        )
-        .unwrap_err();
+        let err =
+            verify_leaf(&verifier, LONG_LIVED_LEAF_PEM, "localhost", UnixTime::now()).unwrap_err();
 
-        assert!(
-            has_os_status(&err, os_status::CERTIFICATE_VALIDITY_PERIOD_TOO_LONG),
-            "{err}",
+        assert_eq!(
+            other_message(&err),
+            other_message(&validity_limit_rejection())
         );
-    }
-
-    #[cfg(target_os = "macos")]
-    #[test]
-    fn verify_server_cert_accepts_a_long_lived_leaf_under_an_intermediate_without_usages() {
-        let verifier = verifier(ISSUING_CA_PEM, ISSUING_CA_PEM);
-
-        let verdict = verifier.verify_server_cert(
-            &cert(INTERMEDIATE_LEAF_PEM),
-            &[cert(INTERMEDIATE_CA_PEM)],
-            &ServerName::try_from("localhost").unwrap(),
-            &[],
-            UnixTime::now(),
-        );
-
-        verdict.unwrap();
+        assert_eq!(trust.evaluations(), Vec::new());
     }
 
     #[cfg(target_os = "macos")]
     #[test]
     fn verify_server_cert_rejects_a_bundle_leaf_for_another_name() {
-        let verifier = verifier(ISSUING_CA_PEM, ISSUING_CA_PEM);
+        let trust = Arc::new(FakeAppleTrust::new(Err(validity_limit_rejection())));
+        let verifier = verifier(&trust, &[ISSUING_CA_PEM]);
 
         let err = verify_leaf(
             &verifier,
             LONG_LIVED_LEAF_PEM,
             "example.com",
-            &[],
             UnixTime::now(),
         )
         .unwrap_err();
@@ -933,17 +1107,12 @@ mod tests {
     #[cfg(target_os = "macos")]
     #[test]
     fn verify_server_cert_rejects_an_expired_bundle_leaf() {
-        let verifier = verifier(ISSUING_CA_PEM, ISSUING_CA_PEM);
+        let trust = Arc::new(FakeAppleTrust::new(Err(validity_limit_rejection())));
+        let verifier = verifier(&trust, &[ISSUING_CA_PEM]);
         let after_expiry = unix_time(datetime!(2126-09-24 00:00 UTC));
 
-        let err = verify_leaf(
-            &verifier,
-            LONG_LIVED_LEAF_PEM,
-            "localhost",
-            &[],
-            after_expiry,
-        )
-        .unwrap_err();
+        let err =
+            verify_leaf(&verifier, LONG_LIVED_LEAF_PEM, "localhost", after_expiry).unwrap_err();
 
         assert_eq!(
             err,
@@ -957,16 +1126,11 @@ mod tests {
     #[cfg(target_os = "macos")]
     #[test]
     fn verify_server_cert_rejects_a_bundle_leaf_without_the_server_auth_usage() {
-        let verifier = verifier(ISSUING_CA_PEM, ISSUING_CA_PEM);
+        let trust = Arc::new(FakeAppleTrust::new(Err(validity_limit_rejection())));
+        let verifier = verifier(&trust, &[ISSUING_CA_PEM]);
 
-        let err = verify_leaf(
-            &verifier,
-            NO_USAGE_LEAF_PEM,
-            "localhost",
-            &[],
-            UnixTime::now(),
-        )
-        .unwrap_err();
+        let err =
+            verify_leaf(&verifier, NO_USAGE_LEAF_PEM, "localhost", UnixTime::now()).unwrap_err();
 
         assert_eq!(
             err,
@@ -976,67 +1140,94 @@ mod tests {
 
     #[cfg(target_os = "macos")]
     #[test]
-    fn verify_server_cert_rejects_a_revoked_bundle_leaf() {
-        let verifier = verifier(ISSUING_CA_PEM, ISSUING_CA_PEM);
+    fn verify_server_cert_rejects_a_bundle_leaf_the_basic_evaluation_rejects() {
+        let revoked = Error::InvalidCertificate(CertificateError::Revoked);
+        let trust = Arc::new(FakeAppleTrust {
+            evaluation_verdict: Err(revoked.clone()),
+            ..FakeAppleTrust::new(Err(validity_limit_rejection()))
+        });
+        let verifier = verifier(&trust, &[ISSUING_CA_PEM]);
 
-        let err = verify_leaf(
-            &verifier,
-            REVOKED_LEAF_PEM,
-            "localhost",
-            &revoked_leaf_ocsp(),
-            UnixTime::now(),
-        )
-        .unwrap_err();
+        let err =
+            verify_leaf(&verifier, LONG_LIVED_LEAF_PEM, "localhost", UnixTime::now()).unwrap_err();
 
-        assert_eq!(err, Error::InvalidCertificate(CertificateError::Revoked));
+        assert_eq!(err, revoked);
+    }
+
+    // ── exceeds_validity_limit ──
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn exceeds_validity_limit_matches_only_the_validity_limit_code() {
+        let others = [
+            other_error("\u{201c}localhost\u{201d} certificate is not trusted: -25318"),
+            Error::InvalidCertificate(CertificateError::Revoked),
+            Error::General("validity period too long: -67901".to_owned()),
+        ];
+
+        assert!(exceeds_validity_limit(&validity_limit_rejection()));
+        for other in others {
+            assert!(!exceeds_validity_limit(&other), "{other:?}");
+        }
     }
 
     // ── ExemptAnchors::verify ──
 
     #[cfg(target_os = "macos")]
     #[test]
-    fn exempt_anchors_verify_enforces_a_stapled_revocation() {
-        let exempt = exempt_anchors(ISSUING_CA_PEM);
-
-        let err = exempt
-            .verify(
-                &cert(REVOKED_LEAF_PEM),
-                &[],
-                &ServerName::try_from("localhost").unwrap(),
-                &revoked_leaf_ocsp(),
-                UnixTime::now(),
-            )
-            .unwrap_err();
-
-        assert_eq!(err, Error::InvalidCertificate(CertificateError::Revoked));
-    }
-
-    // ── ExemptAnchors::evaluate_basic ──
-
-    #[cfg(target_os = "macos")]
-    #[test]
-    fn exempt_anchors_evaluate_basic_rejects_a_chain_to_another_anchor() {
-        let exempt = exempt_anchors(TEST_CA_PEM);
-
-        let err = exempt
-            .evaluate_basic(&cert(LONG_LIVED_LEAF_PEM), &[], &[], UnixTime::now())
-            .unwrap_err();
-
-        assert!(has_os_status(&err, -25_318), "{err}");
-    }
-
-    #[cfg(target_os = "macos")]
-    #[test]
-    fn exempt_anchors_evaluate_basic_leaves_the_ocsp_responder_alone() {
-        let responder = TcpListener::bind(OCSP_RESPONDER_ADDR).unwrap();
-        responder.set_nonblocking(true).unwrap();
-        let exempt = exempt_anchors(ISSUING_CA_PEM);
+    fn exempt_anchors_verify_hands_an_intermediate_chain_and_staple_to_the_basic_evaluation() {
+        let trust = Arc::new(FakeAppleTrust::new(Ok(())));
+        let provider = rustls::crypto::aws_lc_rs::default_provider();
+        let exempt = ExemptAnchors::new(
+            [&cert(ISSUING_CA_PEM)],
+            &provider,
+            Arc::<FakeAppleTrust>::clone(&trust),
+        )
+        .unwrap();
+        let now = UnixTime::now();
 
         exempt
-            .evaluate_basic(&cert(OCSP_LEAF_PEM), &[], &[], UnixTime::now())
+            .verify(
+                &cert(INTERMEDIATE_LEAF_PEM),
+                &[cert(INTERMEDIATE_CA_PEM)],
+                &ServerName::try_from("localhost").unwrap(),
+                b"stapled OCSP response",
+                now,
+            )
             .unwrap();
 
-        let err = responder.accept().unwrap_err();
-        assert_eq!(err.kind(), std::io::ErrorKind::WouldBlock);
+        assert_eq!(
+            trust.evaluations(),
+            [RecordedEvaluation {
+                chain: vec![cert(INTERMEDIATE_LEAF_PEM), cert(INTERMEDIATE_CA_PEM)],
+                anchors: vec![cert(ISSUING_CA_PEM)],
+                anchors_only: true,
+                revocation: RevocationPolicy::USE_ANY_METHOD_AVAILABLE
+                    | RevocationPolicy::NETWORK_ACCESS_DISABLED,
+                ocsp_response: b"stapled OCSP response".to_vec(),
+                verify_date: now,
+            }],
+        );
+    }
+
+    // ── evaluation_error ──
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn evaluation_error_maps_a_revocation_and_keeps_other_codes_in_the_message() {
+        let revoked = evaluation_error(-67_820, "revoked");
+        let untrusted = evaluation_error(
+            -25_318,
+            "\u{201c}localhost\u{201d} certificate is not trusted",
+        );
+
+        assert_eq!(
+            revoked,
+            Error::InvalidCertificate(CertificateError::Revoked)
+        );
+        assert_eq!(
+            other_message(&untrusted),
+            "\u{201c}localhost\u{201d} certificate is not trusted: -25318",
+        );
     }
 }

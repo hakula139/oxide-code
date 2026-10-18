@@ -638,7 +638,8 @@ mod tests {
 
     #[test]
     fn new_with_extra_ca_certs_accepts_valid_bundle() {
-        // This pins Client wiring only. `util::tls` covers the handshake through a bundle.
+        // `util::tls` covers the handshake through a bundle, so this checks only that a valid one
+        // builds a client with the platform's real trust services.
         let pem = tempfile::NamedTempFile::new().unwrap();
         std::io::Write::write_all(&mut pem.as_file(), crate::util::tls::TEST_CA_PEM.as_bytes())
             .unwrap();
