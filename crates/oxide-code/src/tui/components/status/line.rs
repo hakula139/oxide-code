@@ -13,6 +13,8 @@ use crate::permission::Mode;
 use crate::protocol::UsageSnapshot;
 use crate::session::display::id_prefix;
 use crate::tool::tasks::Progress;
+use crate::tui::components::LEFT_MARGIN;
+use crate::tui::saturating_u16;
 use crate::tui::theme::Theme;
 use crate::util::git::{Checks, PullRequest, ReviewDecision};
 use crate::util::text::truncate_to_width;
@@ -21,10 +23,6 @@ use crate::util::time::local_offset;
 const MAX_CURRENT_DIR_WIDTH: usize = 40;
 const MAX_GIT_BRANCH_WIDTH: usize = 32;
 const MAX_TITLE_WIDTH: usize = 40;
-/// Leading margin (cells) inside the status bar that lines up content with the chat block.
-const STATUS_LINE_MARGIN: u16 = 2;
-const STATUS_LINE_MARGIN_STR: &str = "  ";
-const _: () = assert!(STATUS_LINE_MARGIN_STR.len() == STATUS_LINE_MARGIN as usize);
 
 /// Shown percent from which the context and usage-limit segments take the warning style.
 const USAGE_WARNING_PERCENT: f64 = 70.0;
@@ -72,10 +70,9 @@ impl StatusLine {
             .collect::<Vec<_>>();
         fit_segments(&mut rendered, usize::from(width), sep_width);
 
-        // Leading margin lines up content with the chat block underneath.
-        let mut spans = vec![Span::raw(STATUS_LINE_MARGIN_STR)];
+        let mut spans = vec![Span::raw(LEFT_MARGIN)];
         let mut hyperlinks = Vec::new();
-        let mut col: u16 = STATUS_LINE_MARGIN;
+        let mut col = saturating_u16(LEFT_MARGIN.width());
         let sep_w = u16::try_from(sep_width).unwrap_or(0);
         for (index, segment) in rendered.iter().enumerate() {
             if index > 0 {
@@ -274,14 +271,14 @@ fn fit_segments(segments: &mut Vec<RenderedSegment>, max_width: usize, sep_width
         return;
     }
     if let [segment] = segments.as_mut_slice() {
-        let content_width = max_width.saturating_sub(usize::from(STATUS_LINE_MARGIN));
+        let content_width = max_width.saturating_sub(LEFT_MARGIN.width());
         let label = truncate_to_width(segment.span.content.as_ref(), content_width);
         segment.span = Span::styled(label, segment.span.style);
     }
 }
 
 fn total_width(segments: &[RenderedSegment], sep_width: usize) -> usize {
-    usize::from(STATUS_LINE_MARGIN)
+    LEFT_MARGIN.width()
         + segments.iter().map(RenderedSegment::width).sum::<usize>()
         + sep_width.saturating_mul(segments.len().saturating_sub(1))
 }

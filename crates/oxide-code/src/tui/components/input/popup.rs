@@ -31,9 +31,9 @@ const COLUMN_GAP: usize = 2;
 /// overlay so it doesn't bleed into whatever sits above (welcome, chat, preview).
 const CHROME_ROWS: u16 = 1;
 
-/// Mode-tagged so [`super::InputArea`] can format the right Tab-insertion text.
+/// What the rows complete: a command name, or an argument of the named command.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(super) enum PopupMode {
+enum PopupMode {
     Name,
     /// Owned because the name comes from the live input buffer.
     Arg {
@@ -41,31 +41,47 @@ pub(super) enum PopupMode {
     },
 }
 
+impl PopupMode {
+    /// Left-column label. Name mode adds the `/` and parenthesizes a matched alias.
+    fn label(&self, row: &PopupRow) -> String {
+        match self {
+            Self::Name => match row.matched_alias {
+                Some(alias) => format!("/{} ({alias})", row.value),
+                None => format!("/{}", row.value),
+            },
+            Self::Arg { .. } => row.value.to_string(),
+        }
+    }
+}
+
 /// One popup row. `value` is the bare token (command name or arg value). The renderer adds
 /// `/` and any matched-alias suffix in name mode.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(super) struct PopupRow {
-    pub(super) value: Cow<'static, str>,
-    pub(super) description: Cow<'static, str>,
+struct PopupRow {
+    value: Cow<'static, str>,
+    description: Cow<'static, str>,
     /// The alias a name-mode query matched, or `None` when it matched the canonical name.
-    pub(super) matched_alias: Option<&'static str>,
+    matched_alias: Option<&'static str>,
 }
 
-/// Slash-command autocomplete overlay. Empty `rows` means hidden.
+/// Slash-command autocomplete overlay, hidden while `list` is `None`.
 pub(super) struct SlashPopup {
     theme: Theme,
-    /// `Some` when visible.
-    mode: Option<PopupMode>,
-    rows: Vec<PopupRow>,
+    list: Option<PopupList>,
     selected: usize,
+}
+
+/// The rows a visible popup lists, never empty, and the mode they complete in.
+struct PopupList {
+    mode: PopupMode,
+    rows: Vec<PopupRow>,
 }
 
 impl SlashPopup {
     pub(super) fn new(theme: &Theme) -> Self {
         Self {
             theme: theme.clone(),
-            mode: None,
-            rows: Vec::new(),
+            list: None,
             selected: 0,
         }
     }
@@ -76,82 +92,48 @@ impl SlashPopup {
     }
 
     pub(super) fn set_state(&mut self, state: Option<&PopupState<'_>>) {
-        let (mode, rows) = match state {
-            None => (None, Vec::new()),
-            Some(PopupState::Name(query)) => (
-                Some(PopupMode::Name),
-                filter_built_ins(query)
-                    .into_iter()
-                    .map(|m| PopupRow {
-                        value: Cow::Borrowed(m.name),
-                        description: Cow::Borrowed(m.description),
-                        matched_alias: m.matched_alias,
-                    })
-                    .collect(),
-            ),
-            Some(PopupState::Arg { name, prefix }) => {
-                let completions = complete_arg_for(name, prefix);
-                if completions.is_empty() {
-                    // Without a curated roster the popup hides, leaving Tab and Enter to the arg.
-                    (None, Vec::new())
-                } else {
-                    (
-                        Some(PopupMode::Arg {
-                            name: (*name).to_owned(),
-                        }),
-                        completions
-                            .into_iter()
-                            .map(|c| PopupRow {
-                                value: c.value,
-                                description: c.description,
-                                matched_alias: None,
-                            })
-                            .collect(),
-                    )
-                }
-            }
-        };
+        let list = state.and_then(PopupList::new);
         // Mode transitions reset to row 0 (rosters are unrelated). Intra-mode query / prefix
         // changes clamp instead so the cursor sticks.
-        let mode_changed = self.mode != mode;
-        self.mode = mode;
-        self.rows = rows;
-        self.selected = if mode_changed {
-            0
-        } else {
-            self.selected.min(self.rows.len().saturating_sub(1))
+        self.selected = match (&self.list, &list) {
+            (Some(old), Some(new)) if old.mode == new.mode => self.selected.min(new.rows.len() - 1),
+            _ => 0,
         };
+        self.list = list;
     }
 
     pub(super) fn is_visible(&self) -> bool {
-        !self.rows.is_empty()
+        self.list.is_some()
     }
 
-    pub(super) fn mode(&self) -> Option<&PopupMode> {
-        self.mode.as_ref()
-    }
-
-    pub(super) fn selected(&self) -> Option<&PopupRow> {
-        self.rows.get(self.selected)
+    /// Returns the command line the selected row completes to: `/{name}` in name mode, or
+    /// `/{cmd} {value}` in arg mode.
+    pub(super) fn completion(&self) -> Option<String> {
+        let list = self.list.as_ref()?;
+        let value = &list.rows[self.selected].value;
+        Some(match &list.mode {
+            PopupMode::Name => format!("/{value}"),
+            PopupMode::Arg { name } => format!("/{name} {value}"),
+        })
     }
 
     pub(super) fn select_next(&mut self) {
-        if self.rows.is_empty() {
+        if self.rows().is_empty() {
             return;
         }
-        self.selected = wrap_next(self.selected, self.rows.len());
+        self.selected = wrap_next(self.selected, self.rows().len());
     }
 
     pub(super) fn select_prev(&mut self) {
-        if self.rows.is_empty() {
+        if self.rows().is_empty() {
             return;
         }
-        self.selected = wrap_prev(self.selected, self.rows.len());
+        self.selected = wrap_prev(self.selected, self.rows().len());
     }
 
     /// Rows the layout needs, zero when hidden and capped at [`MAX_VISIBLE_ROWS`] plus chrome.
     pub(super) fn height(&self) -> u16 {
-        let visible = self.rows.len().min(MAX_VISIBLE_ROWS);
+        let visible = self.rows().len().min(MAX_VISIBLE_ROWS);
         let body = saturating_u16(visible);
         if body == 0 {
             0
@@ -161,9 +143,9 @@ impl SlashPopup {
     }
 
     pub(super) fn render(&self, frame: &mut Frame<'_>, area: Rect) {
-        if self.rows.is_empty() {
+        let Some(list) = &self.list else {
             return;
-        }
+        };
         let block = Block::default()
             .borders(Borders::TOP)
             .border_style(self.theme.border_unfocused())
@@ -175,10 +157,10 @@ impl SlashPopup {
         }
         let width = usize::from(inner.width);
         let offset = self.scroll_offset();
-        let visible = self.rows.len().min(MAX_VISIBLE_ROWS);
-        let window = &self.rows[offset..offset + visible];
+        let visible = list.rows.len().min(MAX_VISIBLE_ROWS);
+        let window = &list.rows[offset..offset + visible];
         // Cache labels so width measurement and row rendering can't drift.
-        let labels: Vec<String> = window.iter().map(|r| self.label(r)).collect();
+        let labels: Vec<String> = window.iter().map(|r| list.mode.label(r)).collect();
         let label_width = labels.iter().map(|l| l.width()).max().unwrap_or(0);
         let lines: Vec<Line<'static>> = window
             .iter()
@@ -194,7 +176,7 @@ impl SlashPopup {
     /// First visible match index. Centered-cursor scroll: the selected row sits at the visual
     /// middle once it leaves the top half, then anchors at the bottom near the end of the list.
     fn scroll_offset(&self) -> usize {
-        let total = self.rows.len();
+        let total = self.rows().len();
         if total <= MAX_VISIBLE_ROWS {
             return 0;
         }
@@ -203,15 +185,9 @@ impl SlashPopup {
         self.selected.saturating_sub(pad).min(max_offset)
     }
 
-    /// Mode-aware left-column label. The `None` arm is unreachable in practice.
-    fn label(&self, row: &PopupRow) -> String {
-        match &self.mode {
-            Some(PopupMode::Name) => match row.matched_alias {
-                Some(alias) => format!("/{} ({alias})", row.value),
-                None => format!("/{}", row.value),
-            },
-            Some(PopupMode::Arg { .. }) | None => row.value.to_string(),
-        }
+    /// The listed rows, empty when hidden.
+    fn rows(&self) -> &[PopupRow] {
+        self.list.as_ref().map_or(&[], |list| &list.rows)
     }
 
     fn render_row(
@@ -232,6 +208,40 @@ impl SlashPopup {
             Span::raw(" ".repeat(pad + COLUMN_GAP)),
             Span::styled(desc, row_style),
         ])
+    }
+}
+
+impl PopupList {
+    /// Lists the rows `state` matches, or returns `None` when it matches none. An arg without a
+    /// curated roster matches none, which leaves Tab and Enter to the arg.
+    fn new(state: &PopupState<'_>) -> Option<Self> {
+        let (mode, rows): (_, Vec<_>) = match state {
+            PopupState::Name(query) => (
+                PopupMode::Name,
+                filter_built_ins(query)
+                    .into_iter()
+                    .map(|m| PopupRow {
+                        value: Cow::Borrowed(m.name),
+                        description: Cow::Borrowed(m.description),
+                        matched_alias: m.matched_alias,
+                    })
+                    .collect(),
+            ),
+            PopupState::Arg { name, prefix } => (
+                PopupMode::Arg {
+                    name: (*name).to_owned(),
+                },
+                complete_arg_for(name, prefix)
+                    .into_iter()
+                    .map(|c| PopupRow {
+                        value: c.value,
+                        description: c.description,
+                        matched_alias: None,
+                    })
+                    .collect(),
+            ),
+        };
+        (!rows.is_empty()).then_some(Self { mode, rows })
     }
 }
 
@@ -260,6 +270,10 @@ mod tests {
         popup_with_state(Some(&PopupState::Arg { name, prefix }))
     }
 
+    fn mode(popup: &SlashPopup) -> Option<&PopupMode> {
+        popup.list.as_ref().map(|list| &list.mode)
+    }
+
     fn render_to_backend(popup: &SlashPopup, width: u16) -> TestBackend {
         let height = popup.height().max(1);
         let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
@@ -282,9 +296,9 @@ mod tests {
     fn set_state_name_empty_query_lists_full_registry_in_presentation_order() {
         let popup = name_popup("");
         assert!(popup.is_visible());
-        assert_eq!(popup.mode(), Some(&PopupMode::Name));
+        assert_eq!(mode(&popup), Some(&PopupMode::Name));
         let values: Vec<String> = popup
-            .rows
+            .rows()
             .iter()
             .map(|r| r.value.clone().into_owned())
             .collect();
@@ -296,14 +310,14 @@ mod tests {
     fn set_state_clamps_selection_when_row_count_shrinks() {
         // The selection sits past the surviving row count and must clamp to it.
         let mut popup = name_popup("");
-        let n = popup.rows.len();
+        let n = popup.rows().len();
         for _ in 0..n - 1 {
             popup.select_next();
         }
         assert_eq!(popup.selected, n - 1);
 
         popup.set_state(Some(&PopupState::Name("help")));
-        assert_eq!(popup.rows.len(), 1);
+        assert_eq!(popup.rows().len(), 1);
         assert_eq!(popup.selected, 0);
     }
 
@@ -319,7 +333,7 @@ mod tests {
             name: "model",
             prefix: "",
         }));
-        assert!(matches!(popup.mode(), Some(PopupMode::Arg { .. })));
+        assert!(matches!(mode(&popup), Some(PopupMode::Arg { .. })));
         assert_eq!(popup.selected, 0, "mode transition resets selection");
     }
 
@@ -338,8 +352,13 @@ mod tests {
     fn set_state_arg_with_curated_roster_populates_arg_mode() {
         let popup = arg_popup("model", "");
         assert!(popup.is_visible());
-        assert!(matches!(popup.mode(), Some(PopupMode::Arg { name }) if name == "model"));
-        assert_ne!(popup.rows, []);
+        assert_eq!(
+            mode(&popup),
+            Some(&PopupMode::Arg {
+                name: "model".to_owned()
+            })
+        );
+        assert_ne!(popup.rows(), []);
     }
 
     #[test]
@@ -347,7 +366,6 @@ mod tests {
         // `/init` has no curated arg roster, so the popup hides, leaving Tab and Enter to the arg.
         let popup = arg_popup("init", "");
         assert!(!popup.is_visible());
-        assert!(popup.mode().is_none());
     }
 
     #[test]
@@ -356,20 +374,28 @@ mod tests {
         assert!(!popup.is_visible());
     }
 
-    // ── selected ──
+    // ── completion ──
 
     #[test]
-    fn selected_picks_row_at_index() {
-        let mut popup = name_popup("");
-        popup.select_next();
-        let row = popup.selected().expect("popup visible");
-        assert_eq!(row.value, popup.rows[1].value);
+    fn completion_in_name_mode_is_the_slash_command() {
+        let popup = name_popup("hel");
+
+        assert_eq!(popup.completion().as_deref(), Some("/help"));
     }
 
     #[test]
-    fn selected_hidden_popup_has_no_selection() {
+    fn completion_in_arg_mode_follows_the_command_with_the_selected_value() {
+        let mut popup = arg_popup("effort", "");
+        popup.select_next();
+
+        assert_eq!(popup.completion().as_deref(), Some("/effort medium"));
+    }
+
+    #[test]
+    fn completion_of_a_hidden_popup_is_none() {
         let popup = popup_with_state(None);
-        assert!(popup.selected().is_none());
+
+        assert_eq!(popup.completion(), None);
     }
 
     // ── select_next / select_prev ──
@@ -377,7 +403,7 @@ mod tests {
     #[test]
     fn select_next_wraps_at_bottom() {
         let mut popup = name_popup("");
-        let n = popup.rows.len();
+        let n = popup.rows().len();
         for _ in 0..n {
             popup.select_next();
         }
@@ -387,7 +413,7 @@ mod tests {
     #[test]
     fn select_prev_wraps_at_top() {
         let mut popup = name_popup("");
-        let n = popup.rows.len();
+        let n = popup.rows().len();
         popup.select_prev();
         assert_eq!(popup.selected, n - 1, "wrap from first up to last");
     }
@@ -425,14 +451,16 @@ mod tests {
     fn long_popup(n: usize) -> SlashPopup {
         // Hand-rolled list keeps the test independent of registry growth.
         let mut p = SlashPopup::new(&theme());
-        p.mode = Some(PopupMode::Name);
-        p.rows = (0..n)
-            .map(|i| PopupRow {
-                value: Cow::Owned(format!("cmd{i}")),
-                description: Cow::Borrowed("desc"),
-                matched_alias: None,
-            })
-            .collect();
+        p.list = Some(PopupList {
+            mode: PopupMode::Name,
+            rows: (0..n)
+                .map(|i| PopupRow {
+                    value: Cow::Owned(format!("cmd{i}")),
+                    description: Cow::Borrowed("desc"),
+                    matched_alias: None,
+                })
+                .collect(),
+        });
         p
     }
 

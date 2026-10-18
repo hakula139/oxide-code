@@ -12,7 +12,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph};
 use ratatui_textarea::{CursorMove, TextArea, WrapMode};
 
-use self::popup::{PopupMode, SlashPopup};
+use self::popup::SlashPopup;
 use crate::protocol::Op;
 use crate::slash::{PopupState, arg_placeholder_for, popup_state};
 use crate::tui::action::Action;
@@ -312,16 +312,11 @@ impl InputArea {
     }
 
     fn popup_completion_text(&self) -> Option<String> {
-        let row = self.popup.selected()?;
-        Some(format!(
-            "{} ",
-            format_completion(self.popup.mode()?, &row.value)
-        ))
+        Some(format!("{} ", self.popup.completion()?))
     }
 
     fn popup_submit_selected(&mut self) -> Option<Action> {
-        let row = self.popup.selected()?;
-        let submission = format_completion(self.popup.mode()?, &row.value);
+        let submission = self.popup.completion()?;
         self.set_text("");
         self.popup.set_state(None);
         Some(Action::Submit(submission))
@@ -384,13 +379,6 @@ fn trim_blank_edges(text: &str) -> &str {
         text[..first].rfind('\n').map_or(0, |newline| newline + 1)
     });
     &text[start..]
-}
-
-fn format_completion(mode: &PopupMode, value: &str) -> String {
-    match mode {
-        PopupMode::Name => format!("/{value}"),
-        PopupMode::Arg { name } => format!("/{name} {value}"),
-    }
 }
 
 /// Fires only in `Arg` mode with an empty prefix and a `usage()` to surface.
@@ -720,17 +708,17 @@ mod tests {
         input
     }
 
-    fn selected_value(input: &InputArea) -> String {
-        input.popup.selected().unwrap().value.clone().into_owned()
+    fn popup_completion(input: &InputArea) -> String {
+        input.popup.completion().unwrap()
     }
 
     #[test]
     fn handle_event_popup_down_advances_selection() {
         let mut input = input_with_popup();
-        let initial = selected_value(&input);
+        let initial = popup_completion(&input);
         let outcome = input.handle_event(&key(KeyCode::Down, KeyModifiers::NONE));
         assert_eq!(outcome, InputOutcome::Consumed, "chat must not scroll too");
-        let after = selected_value(&input);
+        let after = popup_completion(&input);
         assert_ne!(initial, after, "Down moves to a different command");
     }
 
@@ -738,9 +726,9 @@ mod tests {
     fn handle_event_popup_up_reverses_selection() {
         let mut input = input_with_popup();
         input.handle_event(&key(KeyCode::Down, KeyModifiers::NONE));
-        let after_down = selected_value(&input);
+        let after_down = popup_completion(&input);
         input.handle_event(&key(KeyCode::Up, KeyModifiers::NONE));
-        let after_up = selected_value(&input);
+        let after_up = popup_completion(&input);
         assert_ne!(after_down, after_up, "Up reverses Down");
     }
 
@@ -768,10 +756,10 @@ mod tests {
         // The first row, `/archive`, has no arg roster, so the popup hides once Tab writes
         // `/archive ` and the line turns into an arg-mode query with no rows.
         let mut input = input_with_popup();
-        let selected = selected_value(&input);
+        let completion = popup_completion(&input);
         let outcome = input.handle_event(&key(KeyCode::Tab, KeyModifiers::NONE));
         assert_eq!(outcome, InputOutcome::Consumed);
-        assert_eq!(input.textarea.lines(), vec![format!("/{selected} ")]);
+        assert_eq!(input.textarea.lines(), vec![format!("{completion} ")]);
         assert!(!input.popup_visible(), "no arg roster → popup hides");
     }
 
@@ -795,22 +783,19 @@ mod tests {
         type_text(&mut input, "/effort ");
         input.refresh_popup();
         assert!(input.popup_visible(), "popup opens for /effort arg mode");
-        let picked = selected_value(&input);
+        let completion = popup_completion(&input);
         let outcome = input.handle_event(&key(KeyCode::Tab, KeyModifiers::NONE));
         assert_eq!(outcome, InputOutcome::Consumed);
-        assert_eq!(input.textarea.lines(), vec![format!("/effort {picked} ")]);
+        assert_eq!(input.textarea.lines(), vec![format!("{completion} ")]);
         assert!(!input.popup_visible(), "popup dismisses after Tab");
     }
 
     #[test]
     fn handle_event_popup_enter_in_name_mode_commits_picked_row() {
         let mut input = input_with_popup();
-        let selected = selected_value(&input);
+        let completion = popup_completion(&input);
         let outcome = input.handle_event(&key(KeyCode::Enter, KeyModifiers::NONE));
-        assert_eq!(
-            outcome,
-            InputOutcome::Action(Action::Submit(format!("/{selected}"))),
-        );
+        assert_eq!(outcome, InputOutcome::Action(Action::Submit(completion)));
         assert!(input.textarea.is_empty());
     }
 
@@ -819,12 +804,9 @@ mod tests {
         let mut input = test_input();
         type_text(&mut input, "/effort ");
         input.refresh_popup();
-        let picked = selected_value(&input);
+        let completion = popup_completion(&input);
         let outcome = input.handle_event(&key(KeyCode::Enter, KeyModifiers::NONE));
-        assert_eq!(
-            outcome,
-            InputOutcome::Action(Action::Submit(format!("/effort {picked}"))),
-        );
+        assert_eq!(outcome, InputOutcome::Action(Action::Submit(completion)));
         assert!(input.textarea.is_empty());
     }
 
@@ -834,12 +816,9 @@ mod tests {
         type_text(&mut input, "/model claude-opus");
         input.refresh_popup();
         assert!(input.popup_visible());
-        let picked = selected_value(&input);
+        let completion = popup_completion(&input);
         let outcome = input.handle_event(&key(KeyCode::Enter, KeyModifiers::NONE));
-        assert_eq!(
-            outcome,
-            InputOutcome::Action(Action::Submit(format!("/model {picked}"))),
-        );
+        assert_eq!(outcome, InputOutcome::Action(Action::Submit(completion)));
         assert!(input.textarea.is_empty());
         assert!(!input.popup_visible());
     }

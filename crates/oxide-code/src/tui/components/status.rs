@@ -62,6 +62,15 @@ pub(crate) struct StatusBar {
     pending_hyperlinks: Vec<StatusHyperlink>,
 }
 
+/// The segments a [`StatusBar`] shows and the session values it starts with.
+pub(crate) struct StatusBarInit {
+    pub(crate) segments: Vec<StatusLineSegment>,
+    pub(crate) model: String,
+    pub(crate) effort: Option<Effort>,
+    pub(crate) cwd: String,
+    pub(crate) git_branch: Option<String>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum Status {
     Idle,
@@ -106,14 +115,14 @@ impl StatusBar {
     /// Rows the bar fills: the status line and the border under it.
     pub(crate) const HEIGHT: u16 = 2;
 
-    pub(crate) fn new(
-        theme: &Theme,
-        segments: Vec<StatusLineSegment>,
-        model: String,
-        effort: Option<Effort>,
-        cwd: String,
-        git_branch: Option<String>,
-    ) -> Self {
+    pub(crate) fn new(theme: &Theme, init: StatusBarInit) -> Self {
+        let StatusBarInit {
+            segments,
+            model,
+            effort,
+            cwd,
+            git_branch,
+        } = init;
         let current_time_minute = segments
             .contains(&StatusLineSegment::CurrentTime)
             .then(current_time_minute);
@@ -385,25 +394,35 @@ mod tests {
     /// 2100-01-01, a reset no test run reaches.
     const FUTURE_RESET: i64 = 4_102_444_800;
 
+    /// A `test-model` session in `~/test` with no effort or branch, showing `segments`.
+    fn init(segments: Vec<StatusLineSegment>) -> StatusBarInit {
+        StatusBarInit {
+            segments,
+            model: "test-model".to_owned(),
+            effort: None,
+            cwd: "~/test".to_owned(),
+            git_branch: None,
+        }
+    }
+
     fn test_bar() -> StatusBar {
         StatusBar::new(
             &Theme::default(),
-            StatusLineSegment::DEFAULT.to_vec(),
-            "test-model".to_owned(),
-            Some(Effort::High),
-            "~/test".to_owned(),
-            Some("main".to_owned()),
+            StatusBarInit {
+                effort: Some(Effort::High),
+                git_branch: Some("main".to_owned()),
+                ..init(StatusLineSegment::DEFAULT.to_vec())
+            },
         )
     }
 
     fn pr_bar() -> StatusBar {
         StatusBar::new(
             &Theme::default(),
-            vec![StatusLineSegment::PullRequest, StatusLineSegment::RunState],
-            "Opus 5.5".to_owned(),
-            None,
-            String::new(),
-            None,
+            init(vec![
+                StatusLineSegment::PullRequest,
+                StatusLineSegment::RunState,
+            ]),
         )
     }
 
@@ -544,11 +563,7 @@ mod tests {
     fn tick_without_current_time_segment_skips_minute_refresh() {
         let mut bar = StatusBar::new(
             &Theme::default(),
-            vec![StatusLineSegment::Model, StatusLineSegment::RunState],
-            "test-model".to_owned(),
-            None,
-            "~/test".to_owned(),
-            None,
+            init(vec![StatusLineSegment::Model, StatusLineSegment::RunState]),
         );
 
         assert_eq!(bar.current_time_minute, None);
@@ -560,11 +575,7 @@ mod tests {
     fn tick_idle_current_time_marks_dirty_on_minute_change() {
         let mut bar = StatusBar::new(
             &Theme::default(),
-            vec![StatusLineSegment::CurrentTime],
-            "test-model".to_owned(),
-            None,
-            "~/test".to_owned(),
-            None,
+            init(vec![StatusLineSegment::CurrentTime]),
         );
         let current = current_time_minute();
         bar.current_time_minute = Some((current + 1) % 1440);
@@ -666,11 +677,13 @@ mod tests {
     fn bar_idle(title: Option<&str>, cwd: &str) -> StatusBar {
         let mut bar = StatusBar::new(
             &Theme::default(),
-            StatusLineSegment::DEFAULT.to_vec(),
-            "Opus 5.5".to_owned(),
-            Some(Effort::Xhigh),
-            cwd.into(),
-            Some("main".to_owned()),
+            StatusBarInit {
+                segments: StatusLineSegment::DEFAULT.to_vec(),
+                model: "Opus 5.5".to_owned(),
+                effort: Some(Effort::Xhigh),
+                cwd: cwd.into(),
+                git_branch: Some("main".to_owned()),
+            },
         );
         bar.set_title(title.map(ToOwned::to_owned));
         bar
@@ -762,15 +775,17 @@ mod tests {
     fn render_configured_segments_control_order() {
         let mut bar = StatusBar::new(
             &Theme::default(),
-            vec![
-                StatusLineSegment::RunState,
-                StatusLineSegment::Model,
-                StatusLineSegment::CurrentDir,
-            ],
-            "Opus 5.5".to_owned(),
-            Some(Effort::Xhigh),
-            "~/projects/demo".to_owned(),
-            Some("main".to_owned()),
+            StatusBarInit {
+                segments: vec![
+                    StatusLineSegment::RunState,
+                    StatusLineSegment::Model,
+                    StatusLineSegment::CurrentDir,
+                ],
+                model: "Opus 5.5".to_owned(),
+                effort: Some(Effort::Xhigh),
+                cwd: "~/projects/demo".to_owned(),
+                git_branch: Some("main".to_owned()),
+            },
         );
         let output = render_top_row(&mut bar, 120);
         let state_at = output.find("Ready").unwrap();
@@ -788,16 +803,18 @@ mod tests {
     fn render_uses_theme_separator_and_segment_labels() {
         let mut bar = StatusBar::new(
             &Theme::default(),
-            vec![
-                StatusLineSegment::CurrentDir,
-                StatusLineSegment::GitBranch,
-                StatusLineSegment::ModelWithEffort,
-                StatusLineSegment::RunState,
-            ],
-            "Opus 5.5".to_owned(),
-            Some(Effort::Xhigh),
-            "~/projects/demo".to_owned(),
-            Some("feat/status-line".to_owned()),
+            StatusBarInit {
+                segments: vec![
+                    StatusLineSegment::CurrentDir,
+                    StatusLineSegment::GitBranch,
+                    StatusLineSegment::ModelWithEffort,
+                    StatusLineSegment::RunState,
+                ],
+                model: "Opus 5.5".to_owned(),
+                effort: Some(Effort::Xhigh),
+                cwd: "~/projects/demo".to_owned(),
+                git_branch: Some("feat/status-line".to_owned()),
+            },
         );
         let output = render_top_row(&mut bar, 120);
         assert!(output.contains("~/projects/demo │ feat/status-line │ Opus 5.5 (xhigh) │ Ready"));
@@ -856,11 +873,10 @@ mod tests {
     fn render_empty_cwd_drops_cwd_slot_entirely() {
         let mut bar = StatusBar::new(
             &Theme::default(),
-            StatusLineSegment::DEFAULT.to_vec(),
-            "test-model".to_owned(),
-            None,
-            String::new(),
-            None,
+            StatusBarInit {
+                cwd: String::new(),
+                ..init(StatusLineSegment::DEFAULT.to_vec())
+            },
         );
         let output = render_top_row(&mut bar, 120);
         assert!(output.contains("test-model"));
@@ -877,16 +893,18 @@ mod tests {
     fn segment_bar(segment: StatusLineSegment) -> StatusBar {
         StatusBar::new(
             &Theme::default(),
-            vec![
-                StatusLineSegment::CurrentDir,
-                segment,
-                StatusLineSegment::ModelWithEffort,
-                StatusLineSegment::RunState,
-            ],
-            "Opus 5.5".to_owned(),
-            Some(Effort::Xhigh),
-            "~/projects/demo".to_owned(),
-            None,
+            StatusBarInit {
+                segments: vec![
+                    StatusLineSegment::CurrentDir,
+                    segment,
+                    StatusLineSegment::ModelWithEffort,
+                    StatusLineSegment::RunState,
+                ],
+                model: "Opus 5.5".to_owned(),
+                effort: Some(Effort::Xhigh),
+                cwd: "~/projects/demo".to_owned(),
+                git_branch: None,
+            },
         )
     }
 
