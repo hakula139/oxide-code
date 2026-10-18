@@ -160,7 +160,7 @@ async fn run(prepared: Prepared, ctx: &ToolCtx, read_filter: ReadFilter) -> Tool
     let Prepared { input: raw, access } = prepared;
     let input: Input = match super::parse_input(raw) {
         Ok(v) => v,
-        Err(e) => return e,
+        Err(msg) => return ToolOutput::error(msg),
     };
 
     let Input {

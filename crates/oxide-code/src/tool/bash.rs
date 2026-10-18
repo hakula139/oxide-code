@@ -168,7 +168,7 @@ struct Input {
 async fn run(shells: &Arc<BackgroundShells>, raw: serde_json::Value, ctx: &ToolCtx) -> ToolOutput {
     let input: Input = match super::parse_input(raw) {
         Ok(v) => v,
-        Err(e) => return e,
+        Err(msg) => return ToolOutput::error(msg),
     };
 
     let mut output = if input.run_in_background {

@@ -557,7 +557,7 @@ struct StopInput {
 async fn read(shells: &BackgroundShells, raw: serde_json::Value) -> ToolOutput {
     let input: OutputInput = match parse_input(raw) {
         Ok(input) => input,
-        Err(e) => return e,
+        Err(msg) => return ToolOutput::error(msg),
     };
     let output = match shells.output(&input.shell_id) {
         Ok(output) => output,
@@ -579,7 +579,7 @@ async fn read(shells: &BackgroundShells, raw: serde_json::Value) -> ToolOutput {
 async fn stop(shells: &BackgroundShells, raw: serde_json::Value) -> ToolOutput {
     let input: StopInput = match parse_input(raw) {
         Ok(input) => input,
-        Err(e) => return e,
+        Err(msg) => return ToolOutput::error(msg),
     };
     let Shell {
         output,
