@@ -160,7 +160,6 @@
             preCommit.enabledPackages
             ++ [ rustToolchain ]
             ++ (with pkgs; [
-              cargo-about
               cargo-deny
               cargo-llvm-cov
               cargo-mutants
