@@ -25,9 +25,8 @@ pub(super) struct Loaded {
     pub(super) origins: Origins,
 }
 
-/// Loads the user file, its drop-ins in name order, then the project file nearest `cwd`. Higher
-/// layers win key by key, and a project file may not set credentials, endpoints, or permission
-/// grants.
+/// Loads the user file, its drop-ins in name order, then the project file nearest `cwd`. Later
+/// layers win per key, and a project file may not set credentials, endpoints, or permission grants.
 pub(super) fn load(cwd: &Path) -> Result<Loaded> {
     let layers = discover(app_dir(XdgBase::Config).as_deref(), Some(cwd))?;
     load_layers(layers)
@@ -172,8 +171,7 @@ fn reject_project_secrets(config: &FileConfig, path: &Path) -> Result<()> {
     )
 }
 
-/// Rejects every `[permission]` key but `deny` and `ask` in a project file, which is untrusted. An
-/// unknown key fails too, so the user learns the setting did not take effect.
+/// Rejects every `[permission]` key but `deny` and `ask` in a project file, which is untrusted.
 fn reject_project_permissions(table: &Table, path: &Path) -> Result<()> {
     let Some(permission) = table.get("permission").and_then(Value::as_table) else {
         return Ok(());

@@ -355,8 +355,8 @@ pub(crate) struct Config {
 
 impl Config {
     /// Resolves config from env, the config files [`load::load`] finds from `cwd`, and built-in
-    /// defaults, in that precedence. A TOML or env parse error fails the load. Without a working
-    /// login, an `interactive` session starts signed out and any other session fails.
+    /// defaults. A TOML or env parse error fails the load. Without a working credential, an
+    /// `interactive` session starts signed out and any other session fails.
     pub(crate) async fn load(cwd: &Path, interactive: bool) -> Result<Self> {
         let Loaded { config, origins } = load::load(cwd)?;
         let FileConfig {

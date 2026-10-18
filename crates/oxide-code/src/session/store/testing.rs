@@ -98,7 +98,7 @@ pub(crate) fn test_session_file(dir: &Path, session_id: &str) -> PathBuf {
 }
 
 /// Seeds a session holding a header and, when given, a `UserProvided` title and a summary of
-/// `message_count`, so `None` leaves the session unfinished.
+/// `message_count`, so a `None` `message_count` leaves the session unfinished.
 pub(crate) fn seed_test_session(
     store: &SessionStore,
     session_id: &str,

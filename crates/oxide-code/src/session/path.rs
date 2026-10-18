@@ -14,8 +14,8 @@ const HASH_SUFFIX_HEX_LEN: usize = 16;
 const UNKNOWN_PROJECT_DIR: &str = "_unknown_";
 
 /// Derives a filesystem-safe subdir name. Non-`[A-Za-z0-9._-]` chars become `-`, and a long name
-/// gets an xxh64 suffix over the raw path bytes, so non-UTF-8 paths whose lossy forms collide still
-/// hash apart.
+/// gets an xxh64 suffix over the raw path bytes, so names that truncate alike stay distinct, as do
+/// non-UTF-8 paths whose lossy forms collide.
 pub(crate) fn sanitize_cwd(path: &Path) -> String {
     let raw = path.to_string_lossy();
     let sanitized: String = raw

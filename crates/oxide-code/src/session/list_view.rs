@@ -22,8 +22,7 @@ const FIXED_PREFIX_WIDTH: usize = ID_COL + 1 + LAST_ACTIVE_COL + 1 + MSGS_COL + 
 /// Smallest title budget worth truncating to, since a narrower one chops titles to `F...`.
 const MIN_TITLE_BUDGET: usize = 12;
 
-/// The 7 columns of the "Project" header plus one.
-const PROJECT_COL_MIN: usize = 8;
+const PROJECT_COL_MIN: usize = "Project".len() + 1;
 
 /// Project column cap. A deeper path overflows the column in its own row, so the title column
 /// keeps its width in every other row.

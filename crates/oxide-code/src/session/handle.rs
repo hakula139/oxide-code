@@ -99,11 +99,12 @@ fn surface_once(surfaced: &AtomicBool) -> bool {
 pub(crate) struct RecordOutcome {
     /// `Some` only on the first user-text message of a fresh session.
     pub(crate) ai_title_seed: Option<String>,
-    /// A write failure, reported once per kind of failure while later ones only log.
+    /// A write failure, reported only the first time each kind of failure occurs.
     pub(crate) failure: Option<String>,
 }
 
-/// Ack from the other write cmds, with the same failure surface as [`RecordOutcome`].
+/// Ack from the other write cmds, with the same failure surface as [`RecordOutcome`], except
+/// [`SessionHandle::archive`]'s, which reports every failure.
 pub(crate) struct Outcome {
     pub(crate) failure: Option<String>,
 }
@@ -748,7 +749,7 @@ mod tests {
 
     #[tokio::test]
     async fn record_tool_metadata_batch_actor_drops_ack_surfaces_actor_gone_failure() {
-        // Five healthy acks cover each `Outcome` arm, then the actor drops the sixth cmd's ack.
+        // Five healthy acks cover each cmd `dispatch_outcome` sends. The actor drops the sixth.
         let handle = testing::acks_then_drops("acks-then-drops", 5);
 
         let title = handle.append_ai_title("ok".to_owned()).await;

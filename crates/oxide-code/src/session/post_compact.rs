@@ -1,5 +1,6 @@
 //! The synthetic user message that opens a compacted transcript. Compaction writes it with the
-//! summary, and the resumed display strips its prefix again, since the boundary block shows it.
+//! summary as its first block, and the resumed display strips that block again, since the
+//! boundary block shows the summary.
 
 use indoc::{formatdoc, indoc};
 
