@@ -6,7 +6,7 @@ use std::collections::{HashMap, VecDeque};
 use std::panic::AssertUnwindSafe;
 use std::path::Path;
 use std::pin::Pin;
-use std::sync::{Arc, Mutex as StdMutex};
+use std::sync::{Arc, LazyLock, Mutex as StdMutex};
 use std::time::Duration;
 
 use anyhow::{Result, anyhow};
@@ -341,8 +341,9 @@ pub(super) fn inert_ops() -> mpsc::Receiver<Op> {
     rx
 }
 
-pub(super) fn empty_prompt() -> PromptParts {
-    PromptParts::default()
+pub(super) fn empty_prompt() -> &'static PromptParts {
+    static PROMPT: LazyLock<PromptParts> = LazyLock::new(PromptParts::default);
+    &PROMPT
 }
 
 /// Dispatch context in `cwd` over `exec` deny / allow patterns and the shipped defaults, leaking

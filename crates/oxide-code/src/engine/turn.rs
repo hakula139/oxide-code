@@ -433,7 +433,7 @@ mod tests {
     use std::future::Future;
     use std::path::Path;
     use std::pin::Pin;
-    use std::sync::{Arc, LazyLock};
+    use std::sync::Arc;
 
     use indoc::indoc;
     use serde_json::json;
@@ -448,8 +448,8 @@ mod tests {
     use crate::config::auth::{Auth, AuthSource};
     use crate::engine::dispatch::NOT_RUN;
     use crate::engine::testing::{
-        EchoTool, FakeClient, MODEL, dead_test_session, dispatch_with, inert_ops, reply_of,
-        reply_turn, test_session, text_block, text_turn, thinking_block, with_stop,
+        EchoTool, FakeClient, MODEL, dead_test_session, dispatch_with, empty_prompt, inert_ops,
+        reply_of, reply_turn, test_session, text_block, text_turn, thinking_block, with_stop,
     };
     use crate::message::{Replay, Role};
     use crate::model::ResolvedModelId;
@@ -623,11 +623,10 @@ mod tests {
         sink: &'a dyn EventSink,
         session: &'a SessionHandle,
     ) -> TurnContext<'a> {
-        static PROMPT: LazyLock<PromptParts> = LazyLock::new(PromptParts::default);
         TurnContext {
             client,
             tools,
-            prompt: &PROMPT,
+            prompt: empty_prompt(),
             sink,
             session,
             max_tool_rounds: None,
