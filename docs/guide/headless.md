@@ -21,7 +21,7 @@ ox -p "Fix the failing test" --output stream-json   # Stream every event as a JS
 | `json`           | One [result](#result) line once the run ends                                  |
 | `stream-json`    | One JSON line per [engine event](#events), then the [result](#result)         |
 
-Every format also writes tool calls, the task list, retries, and errors as text to stderr. When parsing JSON, read stdout alone.
+Every format also writes tool calls, the task list, retries, notices, and errors as text to stderr. When parsing JSON, read stdout alone.
 
 ## Exit Status
 
