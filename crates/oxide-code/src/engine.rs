@@ -47,6 +47,7 @@ use crate::session::title_generator;
 use crate::tool::bash::background::BackgroundShells;
 use crate::tool::tasks::Task;
 use crate::tool::{ToolMetadata, ToolRegistry};
+use crate::util::git::current_branch;
 use crate::util::text::{join_sentences, plural};
 
 /// Ops a frontend can queue before the engine reads them. A turn keeps reading ops while it runs,
@@ -543,11 +544,13 @@ impl Engine {
     }
 
     async fn roll_session(&mut self, sink: &dyn EventSink, archived: bool) {
+        let git_branch = current_branch(self.cwd()).await;
         let outcome = handle::roll(
             &mut self.session,
             &self.store,
             &self.file_tracker,
             self.client.model().id(),
+            git_branch,
         )
         .await;
         self.adopt_session(sink, LoadedTranscript::default()).await;
@@ -1021,11 +1024,12 @@ mod tests {
     use crate::permission::{Mode, PermissionClass, Workspace};
     use crate::protocol::CapturingSink;
     use crate::session::post_compact::synthesize_post_compact_message;
-    use crate::session::store::testing::test_store;
+    use crate::session::store::testing::{test_session_file, test_store};
     use crate::tool::bash::background::ShellState;
     use crate::tool::bash::background::testing::{shell, start_shell};
     use crate::tool::tasks::TasksTool;
     use crate::tool::tasks::testing::plan;
+    use crate::util::git::testing::{init_fixture_repo, with_isolated_git_env_async};
 
     /// A toolbox without tools, for an engine that [`Engine::new`] builds.
     fn toolbox() -> Toolbox {
@@ -1147,7 +1151,7 @@ mod tests {
 
     /// Records one exchange in a new session in `store` and finishes it, returning its id.
     async fn finished_session(store: &SessionStore) -> String {
-        let session = handle::start(store, MODEL);
+        let session = handle::start(store, MODEL, None);
         let id = session.session_id().to_owned();
         session
             .record_message(Message::user("earlier prompt"))
@@ -1218,7 +1222,7 @@ mod tests {
                     toolbox(),
                     SessionParts {
                         store: store.clone(),
-                        handle: handle::start(&store, "claude-sonnet-5-5"),
+                        handle: handle::start(&store, "claude-sonnet-5-5", None),
                         transcript: LoadedTranscript {
                             context,
                             usage: usage.to_vec(),
@@ -1263,7 +1267,7 @@ mod tests {
         with_pinned_home(async {
             let dir = tempfile::tempdir().unwrap();
             let store = test_store(dir.path());
-            let session = handle::start(&store, MODEL);
+            let session = handle::start(&store, MODEL, None);
             let mut config = test_config("http://127.0.0.1:9", api_key(), MODEL);
             config.max_tool_rounds = Some(3);
             config.compaction = CompactionConfig::with_threshold_for_test(50_000);
@@ -2881,6 +2885,37 @@ mod tests {
             );
         })
         .await;
+    }
+
+    #[tokio::test]
+    async fn clear_and_archive_record_the_branch_on_the_new_session() {
+        with_pinned_home(with_isolated_git_env_async(async {
+            let server = MockServer::start().await;
+            let dir = tempfile::tempdir().unwrap();
+            init_fixture_repo(dir.path());
+            let mut engine = engine(server.uri(), &test_store(dir.path()), dir.path()).await;
+            let sink = CapturingSink::new();
+
+            engine.clear(&sink).await;
+            let cleared = header_branch(&engine, dir.path()).await;
+            engine.messages = vec![Message::user("archive me")];
+            engine.archive(&sink).await;
+            let archived = header_branch(&engine, dir.path()).await;
+
+            assert_eq!(cleared.as_deref(), Some("fixture-branch"));
+            assert_eq!(archived.as_deref(), Some("fixture-branch"));
+        }))
+        .await;
+    }
+
+    /// The branch in the live session's header, after one recorded message writes the file.
+    async fn header_branch(engine: &Engine, dir: &Path) -> Option<String> {
+        engine.session.record_message(Message::user("first")).await;
+        let jsonl =
+            std::fs::read_to_string(test_session_file(dir, engine.session.session_id())).unwrap();
+        let header: serde_json::Value =
+            serde_json::from_str(jsonl.lines().next().unwrap()).unwrap();
+        header["git_branch"].as_str().map(ToOwned::to_owned)
     }
 
     #[tokio::test]

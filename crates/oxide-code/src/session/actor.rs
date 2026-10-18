@@ -397,7 +397,7 @@ mod tests {
     async fn run_record_then_finish_writes_header_title_message_summary_in_order() {
         let dir = tempdir().unwrap();
         let store = test_store(dir.path());
-        let state = SessionState::fresh(store, "m");
+        let state = SessionState::fresh(store, "m", None);
         let session_id = state.session_id.to_string();
         let (rec, _rec_rx) = record_cmd("hello");
         let (fin, _fin_rx) = finish_cmd();
@@ -431,7 +431,7 @@ mod tests {
     async fn run_first_record_seeds_ai_title_and_subsequent_does_not() {
         let dir = tempdir().unwrap();
         let store = test_store(dir.path());
-        let state = SessionState::fresh(store, "m");
+        let state = SessionState::fresh(store, "m", None);
         let (cmd_a, rx_a) = record_cmd("Fix login bug");
         let (cmd_b, rx_b) = record_cmd("follow up");
 
@@ -448,7 +448,7 @@ mod tests {
         // Three records queued at once must all reach disk in send order via one flush.
         let dir = tempdir().unwrap();
         let store = test_store(dir.path());
-        let state = SessionState::fresh(store.clone(), "m");
+        let state = SessionState::fresh(store.clone(), "m", None);
         let session_id = state.session_id.to_string();
         let (a, _ra) = record_cmd("one");
         let (b, _rb) = record_cmd("two");
@@ -465,7 +465,7 @@ mod tests {
         // Default metadata has no display fields, so emitting an entry would be noise.
         let dir = tempdir().unwrap();
         let store = test_store(dir.path());
-        let state = SessionState::fresh(store.clone(), "m");
+        let state = SessionState::fresh(store.clone(), "m", None);
         let session_id = state.session_id.to_string();
         let (rec, _rec_rx) = record_cmd("trigger");
         let (meta_ack, meta_rx) = oneshot::channel();
@@ -490,7 +490,7 @@ mod tests {
     async fn run_appends_ai_title_after_record() {
         let dir = tempdir().unwrap();
         let store = test_store(dir.path());
-        let state = SessionState::fresh(store.clone(), "m");
+        let state = SessionState::fresh(store.clone(), "m", None);
         let session_id = state.session_id.to_string();
         let (rec, _rec_rx) = record_cmd("Fix login");
         let (ai_ack, _ai_rx) = oneshot::channel();
@@ -519,7 +519,7 @@ mod tests {
         // `WriterStatus::Pending` and dies with the actor when no record ever arrives.
         let dir = tempdir().unwrap();
         let store = test_store(dir.path());
-        let state = SessionState::fresh(store.clone(), "m");
+        let state = SessionState::fresh(store.clone(), "m", None);
         let (manual_ack, manual_rx) = oneshot::channel();
         let manual_cmd = SessionCmd::SetManualTitle {
             title: "Doomed rename".to_owned(),
@@ -547,7 +547,7 @@ mod tests {
         // flushes ahead of the message, and `manual_title_set` suppresses the FirstPrompt push.
         let dir = tempdir().unwrap();
         let store = test_store(dir.path());
-        let state = SessionState::fresh(store.clone(), "m");
+        let state = SessionState::fresh(store.clone(), "m", None);
         let session_id = state.session_id.to_string();
         let (manual_ack, _manual_rx) = oneshot::channel();
         let manual_cmd = SessionCmd::SetManualTitle {
@@ -598,7 +598,7 @@ mod tests {
         // deferred slot's overwrite semantics.
         let dir = tempdir().unwrap();
         let store = test_store(dir.path());
-        let state = SessionState::fresh(store.clone(), "m");
+        let state = SessionState::fresh(store.clone(), "m", None);
         let session_id = state.session_id.to_string();
         let (a_ack, _a_rx) = oneshot::channel();
         let (b_ack, _b_rx) = oneshot::channel();
@@ -640,7 +640,7 @@ mod tests {
     async fn run_set_manual_title_after_record_blocks_ai_title() {
         let dir = tempdir().unwrap();
         let store = test_store(dir.path());
-        let state = SessionState::fresh(store, "m");
+        let state = SessionState::fresh(store, "m", None);
         let session_id = state.session_id.to_string();
         let shared = Arc::new(SharedState::default());
         let (tx, rx) = mpsc::channel(4);
@@ -694,7 +694,7 @@ mod tests {
     async fn run_shutdown_exits_loop_even_with_live_sender_clones() {
         let dir = tempdir().unwrap();
         let store = test_store(dir.path());
-        let state = SessionState::fresh(store, "m");
+        let state = SessionState::fresh(store, "m", None);
         let shared = Arc::new(SharedState::default());
         let (tx, rx) = mpsc::channel::<SessionCmd>(4);
         let _orphan_clone = tx.clone();
@@ -717,7 +717,7 @@ mod tests {
         // batch flush.
         let dir = tempdir().unwrap();
         let store = test_store(dir.path());
-        let state = SessionState::fresh(store.clone(), "m");
+        let state = SessionState::fresh(store.clone(), "m", None);
         let session_id = state.session_id.to_string();
         let (rec, _rec_rx) = record_cmd("flush before exit");
         let (shut, _shut_rx) = shutdown_cmd();
@@ -732,7 +732,7 @@ mod tests {
     async fn run_finish_idempotent_writes_one_summary() {
         let dir = tempdir().unwrap();
         let store = test_store(dir.path());
-        let state = SessionState::fresh(store.clone(), "m");
+        let state = SessionState::fresh(store.clone(), "m", None);
         let session_id = state.session_id.to_string();
         let (rec, _rec_rx) = record_cmd("hi");
         let (f1, _r1) = finish_cmd();
@@ -753,7 +753,7 @@ mod tests {
     async fn run_compact_writes_boundary_and_synthetic_message_to_disk() {
         let dir = tempdir().unwrap();
         let store = test_store(dir.path());
-        let state = SessionState::fresh(store.clone(), "m");
+        let state = SessionState::fresh(store.clone(), "m", None);
         let session_id = state.session_id.to_string();
         let (rec_a, _) = record_cmd("user one");
         let (rec_b, _) = record_cmd("user two");
@@ -797,7 +797,7 @@ mod tests {
     async fn run_compact_acks_with_pre_compact_message_count() {
         let dir = tempdir().unwrap();
         let store = test_store(dir.path());
-        let state = SessionState::fresh(store, "m");
+        let state = SessionState::fresh(store, "m", None);
         let (rec_a, _) = record_cmd("one");
         let (rec_b, _) = record_cmd("two");
         let (compact_ack, compact_rx) = oneshot::channel();
@@ -823,7 +823,7 @@ mod tests {
     async fn run_compact_flushes_before_following_record() {
         let dir = tempdir().unwrap();
         let store = test_store(dir.path());
-        let state = SessionState::fresh(store.clone(), "m");
+        let state = SessionState::fresh(store.clone(), "m", None);
         let session_id = state.session_id.to_string();
         let (rec_before, _) = record_cmd("before compact");
         let (compact_ack, _compact_rx) = oneshot::channel();
@@ -854,7 +854,7 @@ mod tests {
     async fn run_failed_compact_is_dropped_while_earlier_records_retry() {
         let dir = tempdir().unwrap();
         let store = test_store(dir.path());
-        let state = SessionState::fresh(store.clone(), "m");
+        let state = SessionState::fresh(store.clone(), "m", None);
         let session_id = state.session_id.to_string();
         let (tx, rx) = mpsc::channel(4);
         let actor = tokio::spawn(run(state, rx, Arc::new(SharedState::default())));
@@ -901,7 +901,7 @@ mod tests {
     async fn run_failed_archive_is_dropped_while_later_records_land() {
         let dir = tempdir().unwrap();
         let store = test_store(dir.path());
-        let original = SessionState::fresh(store.clone(), "m");
+        let original = SessionState::fresh(store.clone(), "m", None);
         let session_id = original.session_id.to_string();
         let (rec, _) = record_cmd("before archive");
         drive(original, vec![rec]).await;
@@ -943,7 +943,7 @@ mod tests {
     #[tokio::test]
     async fn run_failed_archive_reports_the_failure_after_an_earlier_one_surfaced() {
         let dir = tempdir().unwrap();
-        let state = SessionState::fresh(test_store(dir.path()), "m");
+        let state = SessionState::fresh(test_store(dir.path()), "m", None);
         let (tx, rx) = mpsc::channel(4);
         let actor = tokio::spawn(run(state, rx, Arc::new(SharedState::default())));
         std::fs::remove_dir_all(test_project_dir(dir.path())).unwrap();
@@ -969,7 +969,7 @@ mod tests {
         // Force store.create() to fail by removing its parent dir.
         let dir = tempdir().unwrap();
         let store = test_store(dir.path());
-        let state = SessionState::fresh(store.clone(), "m");
+        let state = SessionState::fresh(store.clone(), "m", None);
 
         let project_dir = test_project_dir(dir.path());
         std::fs::remove_dir_all(&project_dir).unwrap();
@@ -987,7 +987,7 @@ mod tests {
     #[tokio::test]
     async fn run_surfaces_the_persistence_stop_after_an_earlier_flush_failure() {
         let dir = tempdir().unwrap();
-        let state = SessionState::fresh(test_store(dir.path()), "m");
+        let state = SessionState::fresh(test_store(dir.path()), "m", None);
         let (tx, rx) = mpsc::channel(1);
         let actor = tokio::spawn(run(state, rx, Arc::new(SharedState::default())));
         std::fs::remove_dir_all(test_project_dir(dir.path())).unwrap();

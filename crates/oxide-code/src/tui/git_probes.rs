@@ -79,7 +79,7 @@ impl GitProbes {
         if self.branch.start(now) {
             let cwd = cwd.to_path_buf();
             spawn_probe(&self.tx, Probe::Branch, async move {
-                GitUpdate::Branch(git::current_branch_async(&cwd).await)
+                GitUpdate::Branch(git::current_branch(&cwd).await)
             });
         }
         if let Some(schedule) = &mut self.pull_request

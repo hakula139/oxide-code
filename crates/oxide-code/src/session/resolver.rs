@@ -23,11 +23,12 @@ enum ResumeMode<'a> {
     Path(&'a Path),
 }
 
-/// Creates or resumes a session per CLI flags. `all` widens prefix / latest lookup from the
-/// current project to every project subdir.
+/// Creates or resumes a session per CLI flags. A fresh session records `git_branch`, and `all`
+/// widens prefix / latest lookup from the current project to every project subdir.
 pub(crate) async fn resolve_session(
     store: &SessionStore,
     model: &str,
+    git_branch: Option<String>,
     resume: Option<&Option<String>>,
     all: bool,
 ) -> Result<ResumedSession> {
@@ -40,7 +41,7 @@ pub(crate) async fn resolve_session(
     let path = match normalize_resume_arg(resume)? {
         ResumeMode::Fresh => {
             return Ok(ResumedSession {
-                handle: handle::start(store, model),
+                handle: handle::start(store, model, git_branch),
                 transcript: LoadedTranscript::default(),
                 title: None,
                 unarchived: false,
@@ -206,7 +207,9 @@ mod tests {
     async fn resolve_session_starts_fresh_when_no_continue_flag() {
         let dir = tempfile::tempdir().unwrap();
         let store = test_store(dir.path());
-        let resumed = resolve_session(&store, "m", None, false).await.unwrap();
+        let resumed = resolve_session(&store, "m", None, None, false)
+            .await
+            .unwrap();
         assert_eq!(resumed.transcript.messages, []);
         assert!(resumed.title.is_none());
         assert!(resumed.transcript.tool_metadata.is_empty());
@@ -225,7 +228,7 @@ mod tests {
         // even when the file lives outside any store-searched directory.
         let dir = tempfile::tempdir().unwrap();
         let store = test_store(dir.path());
-        let original = handle::start(&store, "m");
+        let original = handle::start(&store, "m", None);
         let full_id = original.session_id().to_owned();
         original
             .record_message(Message::user("external path test"))
@@ -240,7 +243,7 @@ mod tests {
         std::fs::copy(&path, &external_path).unwrap();
 
         let arg = Some(external_path.to_string_lossy().into_owned());
-        let resumed = resolve_session(&store, "m", Some(&arg), false)
+        let resumed = resolve_session(&store, "m", None, Some(&arg), false)
             .await
             .unwrap();
         assert_eq!(resumed.handle.session_id(), full_id);
@@ -252,7 +255,7 @@ mod tests {
     async fn resolve_session_prefix_resumes_single_match() {
         let dir = tempfile::tempdir().unwrap();
         let store = test_store(dir.path());
-        let original = handle::start(&store, "m");
+        let original = handle::start(&store, "m", None);
         let full_id = original.session_id().to_owned();
         original.record_message(Message::user("hello")).await;
         original.finish(Vec::new()).await;
@@ -261,7 +264,7 @@ mod tests {
         // A 10-char UUID prefix is vanishingly unlikely to collide.
         let prefix = full_id[..10].to_owned();
         let arg = Some(prefix);
-        let resumed = resolve_session(&store, "m", Some(&arg), false)
+        let resumed = resolve_session(&store, "m", None, Some(&arg), false)
             .await
             .unwrap();
         assert_eq!(resumed.handle.session_id(), full_id);
@@ -274,14 +277,14 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let store = test_store(dir.path());
         let other = SessionStore::open_at(dir.path().to_path_buf(), "other-project").unwrap();
-        let original = handle::start(&other, "m");
+        let original = handle::start(&other, "m", None);
         let full_id = original.session_id().to_owned();
         original.record_message(Message::user("all scope")).await;
         original.finish(Vec::new()).await;
         drop(original);
         let arg = Some(full_id[..10].to_owned());
 
-        let err = resolve_session(&store, "m", Some(&arg), false)
+        let err = resolve_session(&store, "m", None, Some(&arg), false)
             .await
             .err()
             .unwrap()
@@ -295,7 +298,7 @@ mod tests {
             ),
         );
 
-        let resumed = resolve_session(&store, "m", Some(&arg), true)
+        let resumed = resolve_session(&store, "m", None, Some(&arg), true)
             .await
             .unwrap();
         assert_eq!(resumed.handle.session_id(), full_id);
@@ -303,7 +306,7 @@ mod tests {
         assert_eq!(resumed.title.as_deref(), Some("all scope"));
 
         let missing = Some("zzzz".to_owned());
-        let err = resolve_session(&store, "m", Some(&missing), true)
+        let err = resolve_session(&store, "m", None, Some(&missing), true)
             .await
             .err()
             .unwrap()
@@ -342,7 +345,7 @@ mod tests {
         set_archived_at(&test_session_file(dir.path(), "archived"), true).unwrap();
         write_newest_corrupt_session(dir.path());
 
-        let resumed = resolve_session(&store, "m", Some(&None), false)
+        let resumed = resolve_session(&store, "m", None, Some(&None), false)
             .await
             .unwrap();
         assert_eq!(resumed.handle.session_id(), "newer");
@@ -365,7 +368,7 @@ mod tests {
         set_archived_at(&path, true).unwrap();
 
         let arg = Some("arch".to_owned());
-        let resumed = resolve_session(&store, "m", Some(&arg), false)
+        let resumed = resolve_session(&store, "m", None, Some(&arg), false)
             .await
             .unwrap();
         assert_eq!(resumed.handle.session_id(), "archived");
@@ -385,7 +388,7 @@ mod tests {
     async fn resolve_session_bare_continue_errors_without_sessions() {
         let dir = tempfile::tempdir().unwrap();
         let store = test_store(dir.path());
-        let err = resolve_session(&store, "m", Some(&None), false)
+        let err = resolve_session(&store, "m", None, Some(&None), false)
             .await
             .err()
             .unwrap()
@@ -400,13 +403,13 @@ mod tests {
     async fn resolve_session_prefix_errors_on_no_match() {
         let dir = tempfile::tempdir().unwrap();
         let store = test_store(dir.path());
-        let s = handle::start(&store, "m");
+        let s = handle::start(&store, "m", None);
         s.record_message(Message::user("noop")).await;
         s.finish(Vec::new()).await;
         let prefix_arg = Some("zzzz".to_owned());
         drop(s);
 
-        let err = resolve_session(&store, "m", Some(&prefix_arg), false)
+        let err = resolve_session(&store, "m", None, Some(&prefix_arg), false)
             .await
             .err()
             .unwrap()
@@ -432,7 +435,7 @@ mod tests {
         }
 
         let prefix_arg = Some("ab".to_owned());
-        let err = resolve_session(&store, "m", Some(&prefix_arg), false)
+        let err = resolve_session(&store, "m", None, Some(&prefix_arg), false)
             .await
             .err()
             .unwrap()
@@ -452,7 +455,7 @@ mod tests {
         let cause = store.list_matching("ab", false).unwrap_err();
 
         let prefix_arg = Some("ab".to_owned());
-        let err = resolve_session(&store, "m", Some(&prefix_arg), false)
+        let err = resolve_session(&store, "m", None, Some(&prefix_arg), false)
             .await
             .err()
             .unwrap()
@@ -465,7 +468,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let store = test_store(dir.path());
         let arg = Some("/does/not/exist.jsonl".to_owned());
-        let err = resolve_session(&store, "m", Some(&arg), false)
+        let err = resolve_session(&store, "m", None, Some(&arg), false)
             .await
             .err()
             .unwrap()

@@ -344,9 +344,13 @@ pub(crate) struct ResumedSession {
 
 // ── Constructors ──
 
-/// Starts a fresh session and spawns its actor. The file materializes on the first record cmd.
-pub(crate) fn start(store: &SessionStore, model: &str) -> SessionHandle {
-    spawn_actor(SessionState::fresh(store.clone(), model))
+/// Starts a fresh session on `git_branch` and spawns its actor. The first record creates the file.
+pub(crate) fn start(
+    store: &SessionStore,
+    model: &str,
+    git_branch: Option<String>,
+) -> SessionHandle {
+    spawn_actor(SessionState::fresh(store.clone(), model, git_branch))
 }
 
 /// New id plus any flush failure from finalizing the old session.
@@ -356,18 +360,19 @@ pub(crate) struct RollOutcome {
     pub(crate) finalize_failure: Option<String>,
 }
 
-/// Rolls `session` to a fresh handle and finalizes the old one. Tracker snapshots are taken before
-/// the clear so they land in the old JSONL, and the swap precedes finalize so the new session is
-/// already in place.
+/// Rolls `session` to a fresh handle on `git_branch` and finalizes the old one. Tracker snapshots
+/// are taken before the clear so they land in the old JSONL, and the swap precedes finalize so the
+/// new session is already in place.
 pub(crate) async fn roll(
     session: &mut SessionHandle,
     store: &SessionStore,
     file_tracker: &FileTracker,
     model: &str,
+    git_branch: Option<String>,
 ) -> RollOutcome {
     let snapshots = file_tracker.snapshot_all();
     file_tracker.clear();
-    let new_session = start(store, model);
+    let new_session = start(store, model, git_branch);
     let new_id = new_session.session_id().to_owned();
     let old_session = std::mem::replace(session, new_session);
     let finalize_failure = old_session.finalize(snapshots).await;
@@ -569,7 +574,7 @@ mod tests {
     async fn record_message_writes_title_before_first_user_message() {
         let dir = tempfile::tempdir().unwrap();
         let store = test_store(dir.path());
-        let handle = start(&store, "m");
+        let handle = start(&store, "m", None);
         let sid = handle.session_id().to_owned();
 
         handle.record_message(Message::user("First prompt")).await;
@@ -587,7 +592,7 @@ mod tests {
     async fn record_message_seeds_ai_title_only_for_first_user_text() {
         let dir = tempfile::tempdir().unwrap();
         let store = test_store(dir.path());
-        let handle = start(&store, "m");
+        let handle = start(&store, "m", None);
 
         let outcome_first = handle.record_message(Message::user("Fix login bug")).await;
         let outcome_second = handle.record_message(Message::user("follow up")).await;
@@ -648,7 +653,7 @@ mod tests {
         // Resumed sessions inherit the original first-prompt title.
         let dir = tempfile::tempdir().unwrap();
         let store = test_store(dir.path());
-        let original = start(&store, "m");
+        let original = start(&store, "m", None);
         let session_id = original.session_id().to_owned();
         original.record_message(Message::user("hello")).await;
         original.finish(Vec::new()).await;
@@ -666,7 +671,7 @@ mod tests {
         // Default-metadata items are skipped at absorb, and non-defaults each produce one line.
         let dir = tempfile::tempdir().unwrap();
         let store = test_store(dir.path());
-        let handle = start(&store, "m");
+        let handle = start(&store, "m", None);
         let sid = handle.session_id().to_owned();
         handle.record_message(Message::user("trigger")).await;
 
@@ -717,7 +722,7 @@ mod tests {
     async fn record_tool_metadata_batch_all_default_acks_without_writing() {
         let dir = tempfile::tempdir().unwrap();
         let store = test_store(dir.path());
-        let handle = start(&store, "m");
+        let handle = start(&store, "m", None);
         let sid = handle.session_id().to_owned();
         handle.record_message(Message::user("trigger")).await;
 
@@ -806,7 +811,7 @@ mod tests {
     async fn append_ai_title_writes_title_entry_and_supersedes_first_prompt_on_list() {
         let dir = tempfile::tempdir().unwrap();
         let store = test_store(dir.path());
-        let handle = start(&store, "m");
+        let handle = start(&store, "m", None);
         let sid = handle.session_id().to_owned();
         handle.record_message(Message::user("Fix login bug")).await;
 
@@ -841,7 +846,7 @@ mod tests {
     async fn set_manual_title_writes_user_provided_title_and_latches_shared_flag() {
         let dir = tempfile::tempdir().unwrap();
         let store = test_store(dir.path());
-        let handle = start(&store, "m");
+        let handle = start(&store, "m", None);
         let sid = handle.session_id().to_owned();
 
         assert!(
@@ -887,7 +892,7 @@ mod tests {
     async fn compact_writes_boundary_and_acks_with_pre_count() {
         let dir = tempfile::tempdir().unwrap();
         let store = test_store(dir.path());
-        let handle = start(&store, "m");
+        let handle = start(&store, "m", None);
         let sid = handle.session_id().to_owned();
 
         handle.record_message(Message::user("a")).await;
@@ -951,7 +956,7 @@ mod tests {
     async fn archive_holds_until_the_next_resume_unarchives_the_session() {
         let dir = tempfile::tempdir().unwrap();
         let store = test_store(dir.path());
-        let original = start(&store, "m");
+        let original = start(&store, "m", None);
         let session_id = original.session_id().to_owned();
         original.record_message(Message::user("hello")).await;
 
@@ -998,7 +1003,7 @@ mod tests {
     async fn finish_writes_summary_with_count() {
         let dir = tempfile::tempdir().unwrap();
         let store = test_store(dir.path());
-        let handle = start(&store, "m");
+        let handle = start(&store, "m", None);
         let sid = handle.session_id().to_owned();
 
         handle
@@ -1017,7 +1022,7 @@ mod tests {
     async fn finish_empty_session_leaves_no_file() {
         let dir = tempfile::tempdir().unwrap();
         let store = test_store(dir.path());
-        let handle = start(&store, "m");
+        let handle = start(&store, "m", None);
         let _sid = handle.session_id().to_owned();
         handle.finish(Vec::new()).await;
         drop(handle);
@@ -1037,7 +1042,7 @@ mod tests {
     async fn finish_skips_summary_on_empty_resume() {
         let dir = tempfile::tempdir().unwrap();
         let store = test_store(dir.path());
-        let original = start(&store, "m");
+        let original = start(&store, "m", None);
         let session_id = original.session_id().to_owned();
         original.record_message(Message::user("hello")).await;
         original.finish(Vec::new()).await;
@@ -1073,7 +1078,7 @@ mod tests {
         let files_dir = tempfile::tempdir().unwrap();
         let store = test_store(dir.path());
         let tracker = FileTracker::default();
-        let handle = start(&store, "m");
+        let handle = start(&store, "m", None);
         let sid = handle.session_id().to_owned();
 
         handle.record_message(Message::user("trigger")).await;
@@ -1111,7 +1116,7 @@ mod tests {
     async fn finalize_writes_summary_then_succeeds() {
         let dir = tempfile::tempdir().unwrap();
         let store = test_store(dir.path());
-        let handle = start(&store, "m");
+        let handle = start(&store, "m", None);
         let sid = handle.session_id().to_owned();
         handle.record_message(Message::user("hi")).await;
 
@@ -1138,7 +1143,7 @@ mod tests {
     async fn finalize_ends_the_title_task_before_it_returns() {
         let dir = tempfile::tempdir().unwrap();
         let store = test_store(dir.path());
-        let handle = start(&store, "m");
+        let handle = start(&store, "m", None);
         let (started_tx, started) = oneshot::channel();
         let (alive, mut ended) = oneshot::channel::<()>();
         handle.set_title_task(tokio::spawn(async move {
@@ -1158,7 +1163,7 @@ mod tests {
     async fn finalize_writes_the_summary_after_the_title_task_panics() {
         let dir = tempfile::tempdir().unwrap();
         let store = test_store(dir.path());
-        let handle = start(&store, "m");
+        let handle = start(&store, "m", None);
         let sid = handle.session_id().to_owned();
         handle.record_message(Message::user("hi")).await;
         let (started_tx, started) = oneshot::channel();
@@ -1185,7 +1190,7 @@ mod tests {
         // shutdown's contract: the recorded message must be on disk by the time the await returns.
         let dir = tempfile::tempdir().unwrap();
         let store = test_store(dir.path());
-        let handle = start(&store, "m");
+        let handle = start(&store, "m", None);
         let sid = handle.session_id().to_owned();
 
         handle.record_message(Message::user("hello")).await;
@@ -1210,7 +1215,10 @@ mod tests {
     async fn shutdown_actor_panic_completes_without_panicking() {
         let dir = tempfile::tempdir().unwrap();
         let store = test_store(dir.path());
-        for handle in [start(&store, "m"), testing::acks_then_drops("test", 1)] {
+        for handle in [
+            start(&store, "m", None),
+            testing::acks_then_drops("test", 1),
+        ] {
             handle.cmd_tx.send(SessionCmd::Panic).await.unwrap();
             handle.shutdown().await;
         }
@@ -1222,7 +1230,7 @@ mod tests {
         // in shutdown.
         let dir = tempfile::tempdir().unwrap();
         let store = test_store(dir.path());
-        let handle = start(&store, "m");
+        let handle = start(&store, "m", None);
         if let Some(j) = handle.actor_join.lock().unwrap().as_ref() {
             j.abort();
         }
@@ -1235,7 +1243,7 @@ mod tests {
     async fn start_does_not_materialize_file_until_first_record() {
         let dir = tempfile::tempdir().unwrap();
         let store = test_store(dir.path());
-        let handle = start(&store, "test-model");
+        let handle = start(&store, "test-model", None);
 
         let project_dir = test_project_dir(dir.path());
         assert!(
@@ -1258,11 +1266,18 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let store = test_store(dir.path());
         let tracker = FileTracker::default();
-        let mut session = start(&store, "test-model");
+        let mut session = start(&store, "test-model", None);
         let original_id = session.session_id().to_owned();
         session.record_message(Message::user("original")).await;
 
-        let outcome = roll(&mut session, &store, &tracker, "test-model").await;
+        let outcome = roll(
+            &mut session,
+            &store,
+            &tracker,
+            "test-model",
+            Some("feat/x".to_owned()),
+        )
+        .await;
 
         assert_ne!(outcome.new_id, original_id, "id must roll");
         assert_eq!(
@@ -1285,6 +1300,15 @@ mod tests {
             old_jsonl.contains(&original_id),
             "old JSONL header carries the original id: {old_jsonl}",
         );
+
+        session.record_message(Message::user("rolled")).await;
+        session.finish(Vec::new()).await;
+        let new_jsonl = std::fs::read_to_string(test_session_file(dir.path(), &outcome.new_id))
+            .expect("new session file lands on disk");
+        assert!(
+            new_jsonl.contains(r#""git_branch":"feat/x""#),
+            "new JSONL header records the branch: {new_jsonl}",
+        );
     }
 
     #[tokio::test]
@@ -1299,11 +1323,11 @@ mod tests {
         seed_full_read(&tracker, &seed);
         assert!(!tracker.snapshot_all().is_empty(), "tracker seeded");
 
-        let mut session = start(&store, "test-model");
+        let mut session = start(&store, "test-model", None);
         let original_id = session.session_id().to_owned();
         session.record_message(Message::user("seed")).await;
 
-        let outcome = roll(&mut session, &store, &tracker, "test-model").await;
+        let outcome = roll(&mut session, &store, &tracker, "test-model", None).await;
         assert_eq!(outcome.finalize_failure, None);
 
         assert!(
@@ -1327,7 +1351,7 @@ mod tests {
         let tracker = FileTracker::default();
 
         // Seed a target session on disk.
-        let target = start(&store, "test-model");
+        let target = start(&store, "test-model", None);
         let target_id = target.session_id().to_owned();
         target.record_message(Message::user("target prompt")).await;
         target
@@ -1337,7 +1361,7 @@ mod tests {
         drop(target);
 
         // Live session that swaps into the target.
-        let mut session = start(&store, "test-model");
+        let mut session = start(&store, "test-model", None);
         let original_id = session.session_id().to_owned();
         session.record_message(Message::user("live")).await;
 
@@ -1380,7 +1404,7 @@ mod tests {
         seed_full_read(&tracker, &seed);
         let snapshot_count_before = tracker.snapshot_all().len();
 
-        let mut session = start(&store, "test-model");
+        let mut session = start(&store, "test-model", None);
         let original_id = session.session_id().to_owned();
         session.record_message(Message::user("live")).await;
 
@@ -1405,7 +1429,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let store = test_store(dir.path());
         let tracker = FileTracker::default();
-        let mut session = start(&store, "test-model");
+        let mut session = start(&store, "test-model", None);
         let live_id = session.session_id().to_owned();
         session.record_message(Message::user("live")).await;
 
@@ -1427,7 +1451,7 @@ mod tests {
         let tracker = FileTracker::default();
 
         // Target session: persist a tracker snapshot via finish so resume restores it.
-        let target = start(&store, "test-model");
+        let target = start(&store, "test-model", None);
         let target_id = target.session_id().to_owned();
         target.record_message(Message::user("target")).await;
         let target_seed = dir.path().join("target.txt");
@@ -1441,7 +1465,7 @@ mod tests {
         let live_seed = dir.path().join("live.txt");
         std::fs::write(&live_seed, b"live body").unwrap();
         seed_full_read(&tracker, &live_seed);
-        let mut session = start(&store, "test-model");
+        let mut session = start(&store, "test-model", None);
         let original_id = session.session_id().to_owned();
         session.record_message(Message::user("live")).await;
 
@@ -1478,7 +1502,7 @@ mod tests {
     async fn resume_from_path_loads_messages_and_keeps_session_id() {
         let dir = tempfile::tempdir().unwrap();
         let store = test_store(dir.path());
-        let original = start(&store, "m");
+        let original = start(&store, "m", None);
         let session_id = original.session_id().to_owned();
         original.record_message(Message::user("hello")).await;
         original.record_message(Message::assistant("hi")).await;
@@ -1498,7 +1522,7 @@ mod tests {
     async fn resume_from_path_works_on_unfinished_session() {
         let dir = tempfile::tempdir().unwrap();
         let store = test_store(dir.path());
-        let original = start(&store, "m");
+        let original = start(&store, "m", None);
         let session_id = original.session_id().to_owned();
         original.record_message(Message::user("hello")).await;
         // Skip finish, since `shutdown` drains the queued record cmd anyway.
@@ -1561,7 +1585,7 @@ mod tests {
     async fn resume_from_path_empty_session_errors() {
         let dir = tempfile::tempdir().unwrap();
         let store = test_store(dir.path());
-        let original = start(&store, "m");
+        let original = start(&store, "m", None);
         let session_id = original.session_id().to_owned();
         original.finish(Vec::new()).await;
         drop(original);
@@ -1574,7 +1598,7 @@ mod tests {
         // Sanitize drops the lone unresolved tool_use, so the empty chain makes resume bail.
         let dir = tempfile::tempdir().unwrap();
         let store = test_store(dir.path());
-        let original = start(&store, "m");
+        let original = start(&store, "m", None);
         let session_id = original.session_id().to_owned();
         original
             .record_message(Message {
@@ -1602,7 +1626,7 @@ mod tests {
     async fn resume_from_path_drops_assistant_message_with_only_unresolved_tool_use() {
         let dir = tempfile::tempdir().unwrap();
         let store = test_store(dir.path());
-        let original = start(&store, "m");
+        let original = start(&store, "m", None);
         let session_id = original.session_id().to_owned();
         original.record_message(Message::user("do X")).await;
         original
@@ -1630,7 +1654,7 @@ mod tests {
     async fn resume_from_path_preserves_parent_chain_on_next_record() {
         let dir = tempfile::tempdir().unwrap();
         let store = test_store(dir.path());
-        let original = start(&store, "m");
+        let original = start(&store, "m", None);
         let session_id = original.session_id().to_owned();
         original.record_message(Message::user("hello")).await;
         original.record_message(Message::assistant("hi")).await;
@@ -1673,7 +1697,7 @@ mod tests {
         let files_dir = tempfile::tempdir().unwrap();
         let store = test_store(dir.path());
         let tracker = FileTracker::default();
-        let handle = start(&store, "m");
+        let handle = start(&store, "m", None);
         let session_id = handle.session_id().to_owned();
         handle.record_message(Message::user("hi")).await;
         let path_a = files_dir.path().join("a.rs");
@@ -1707,7 +1731,7 @@ mod tests {
         let files_dir = tempfile::tempdir().unwrap();
         let store = test_store(dir.path());
         let tracker = FileTracker::default();
-        let handle = start(&store, "m");
+        let handle = start(&store, "m", None);
         let session_id = handle.session_id().to_owned();
         handle.record_message(Message::user("hi")).await;
         let path_a = files_dir.path().join("a.rs");
@@ -1743,7 +1767,7 @@ mod tests {
         let files_dir = tempfile::tempdir().unwrap();
         let store = test_store(dir.path());
         let tracker = FileTracker::default();
-        let handle = start(&store, "m");
+        let handle = start(&store, "m", None);
         let session_id = handle.session_id().to_owned();
         handle.record_message(Message::user("hi")).await;
         let path_a = files_dir.path().join("a.rs");
@@ -1804,7 +1828,11 @@ mod tests {
     /// sidecars after its compaction, since a resume drops those from before it. Returns the file
     /// masked, which a release copies as its fixture.
     async fn write_every_entry(dir: &Path) -> String {
-        let session = spawn_actor(SessionState::fresh(test_store(dir), "m").on_branch("main"));
+        let session = spawn_actor(SessionState::fresh(
+            test_store(dir),
+            "m",
+            Some("main".to_owned()),
+        ));
         let session_id = session.session_id().to_owned();
         let mut prompt = PromptParts::default();
         "2026-01-01".clone_into(&mut prompt.seen.date);

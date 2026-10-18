@@ -51,7 +51,7 @@ pub(crate) async fn engine(base_url: String, store: &SessionStore, cwd: &Path) -
         prompt::build_prompt(&ModelSpec::resolve(MODEL.to_owned()), cwd).await;
     SESSION_CONTEXT.clone_into(&mut prompt.user_context);
     let config = test_config(base_url, api_key(), MODEL);
-    let session = handle::start(store, MODEL);
+    let session = handle::start(store, MODEL, None);
     Engine {
         client: Client::new(
             &config,
@@ -376,7 +376,7 @@ pub(super) fn dispatch_with(
 
 pub(super) fn test_session(dir: &Path) -> SessionHandle {
     let store = test_store(dir);
-    handle::start(&store, "claude-sonnet-5-5")
+    handle::start(&store, "claude-sonnet-5-5", None)
 }
 
 /// Handle whose actor channel is closed. Every write returns actor-gone.

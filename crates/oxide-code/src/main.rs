@@ -175,13 +175,21 @@ async fn async_main(offset_error: Option<IndeterminateOffset>) -> Result<Exit> {
 
     let store = SessionStore::open(&cwd)?;
     let file_tracker = Arc::new(FileTracker::default());
+    let git_branch = util::git::current_branch(&cwd).await;
     let ResumedSession {
         handle,
         transcript,
         title,
         unarchived,
         file_snapshots,
-    } = resolve_session(&store, config.model.id(), cli.r#continue.as_ref(), cli.all).await?;
+    } = resolve_session(
+        &store,
+        config.model.id(),
+        git_branch.clone(),
+        cli.r#continue.as_ref(),
+        cli.all,
+    )
+    .await?;
     if unarchived && !tui_mode {
         eprintln!("{}", archive_notice(handle.session_id(), false));
     }
@@ -214,6 +222,7 @@ async fn async_main(offset_error: Option<IndeterminateOffset>) -> Result<Exit> {
     };
 
     let startup = Startup {
+        git_branch,
         picker,
         title,
         unarchived,

@@ -39,6 +39,7 @@ pub(super) fn test_app_with(
     let mut app = App::new(
         &Theme::default(),
         session_info,
+        Some("main".to_owned()),
         false,
         events,
         ops,

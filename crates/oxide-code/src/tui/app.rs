@@ -99,9 +99,11 @@ pub(crate) struct AppHistory {
 }
 
 impl App {
+    /// Builds the app with `git_branch` as the status bar's branch until the first git probe.
     pub(crate) fn new(
         theme: &Theme,
         session_info: LiveSessionInfo,
+        git_branch: Option<String>,
         show_thinking: bool,
         events: mpsc::UnboundedReceiver<Event>,
         ops: mpsc::Sender<Op>,
@@ -118,7 +120,7 @@ impl App {
             session_info.config.model.short_display_name().to_owned(),
             session_info.config.effort,
             session_info.cwd.clone(),
-            session_info.git_branch.clone(),
+            git_branch,
         );
         status_bar.set_title(history.title);
         let git_probes = GitProbes::new(
@@ -255,9 +257,10 @@ mod tests {
     // ── App::new ──
 
     #[test]
-    fn new_plumbs_resumed_title_into_status_bar() {
+    fn new_plumbs_resumed_title_and_branch_into_status_bar() {
         let (app, _rx, _event_tx) = test_app(Some("Resumed title"));
         assert_eq!(app.status_bar.title(), Some("Resumed title"));
+        assert_eq!(app.status_bar.git_branch(), Some("main"));
         assert_eq!(app.status_bar.status(), &Status::Idle);
         assert_eq!(app.chat.entry_count(), 0);
         assert!(app.input.is_enabled());
@@ -285,6 +288,7 @@ mod tests {
         let mut app = App::new(
             &Theme::default(),
             test_session_info(),
+            None,
             false,
             events,
             ops,

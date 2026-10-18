@@ -217,7 +217,7 @@ mod tests {
     /// Session handle with one recorded message, so `append_ai_title` writes to an existing file.
     async fn prepared_session(dir: &Path) -> SessionHandle {
         let store = test_store(dir);
-        let handle = crate::session::handle::start(&store, HAIKU_MODEL);
+        let handle = crate::session::handle::start(&store, HAIKU_MODEL, None);
         handle.record_message(Message::user("first prompt")).await;
         handle
     }
