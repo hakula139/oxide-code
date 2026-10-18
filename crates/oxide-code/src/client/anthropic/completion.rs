@@ -17,11 +17,10 @@ use crate::model::ModelSpec;
 // ── Client::complete ──
 
 impl Client {
-    /// Non-streaming completion. Returns the concatenated assistant text and drops tool-use and
-    /// thinking blocks. `output_format` is dropped when the config turns structured outputs off,
-    /// so callers can pass it unconditionally.
-    ///
-    /// Unlike [`Client::stream_message`], sends no agentic betas or `context_management` directive.
+    /// Sends a non-streaming request and returns the concatenated assistant text, dropping tool-use
+    /// and thinking blocks. The request carries no agentic betas or `context_management` directive.
+    /// `output_format` is dropped when the config turns structured outputs off, so callers can pass
+    /// it unconditionally.
     pub(crate) async fn complete(
         &self,
         model: &ModelSpec,

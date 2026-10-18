@@ -1,5 +1,5 @@
 //! CLI `--continue` argument resolution. Translates the `clap`-parsed `Option<Option<String>>`
-//! into a fresh or resumed [`SessionHandle`] via [`resolve_session`].
+//! into a fresh or resumed session via [`resolve_session`].
 
 use std::path::Path;
 
