@@ -697,15 +697,20 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("a.rs");
         let tracker = Arc::new(FileTracker::default());
-
-        let write = tracker.write_and_record("toolu_write", write_file(path.clone(), b"w"));
-        _ = tokio::time::timeout(Duration::ZERO, write).await;
-        for _ in 0..200 {
-            if tracker.lock().contains_key(&path) {
-                break;
+        let (written_tx, written_rx) = tokio::sync::oneshot::channel();
+        let write = {
+            let path = path.clone();
+            async move {
+                let written = write_file(path, b"w").await;
+                _ = written_tx.send(());
+                written
             }
-            tokio::time::sleep(Duration::from_millis(5)).await;
-        }
+        };
+
+        let caller = tracker.write_and_record("toolu_write", write);
+        _ = tokio::time::timeout(Duration::ZERO, caller).await;
+        // Needs the current-thread runtime, which records the write in the same poll that sends.
+        written_rx.await.unwrap();
 
         assert_eq!(std::fs::read(&path).unwrap(), b"w");
         let stored = tracker.lock().get(&path).cloned().unwrap();
