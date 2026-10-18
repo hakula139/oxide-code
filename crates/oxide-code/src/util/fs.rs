@@ -34,10 +34,8 @@ pub(crate) fn create_private_dir_all(path: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Atomically writes `bytes` to `path` with `0o600` perms on Unix.
-///
-/// The bytes are synced to a `.<name>.tmp.*` file beside `path`, then renamed over `path`. Any
-/// failure removes the temp file.
+/// Atomically writes `bytes` to `path` with `0o600` perms on Unix by renaming a synced
+/// `.<name>.tmp.*` file beside `path` over it. A failure removes the temp file.
 pub(crate) fn atomic_write_private(path: &Path, bytes: &[u8]) -> Result<()> {
     let parent = path
         .parent()

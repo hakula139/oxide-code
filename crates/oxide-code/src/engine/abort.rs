@@ -7,9 +7,8 @@ use tracing::warn;
 use crate::permission::Mode;
 use crate::protocol::{Event, EventSink, Op};
 
-/// Why a turn ended without a clean assistant reply. `Cancelled` and `Shutdown` are user-driven
-/// and distinct, so the engine keeps serving after a cancel but stops on shutdown. `Failed` wraps
-/// any other error so the caller can render it via `{e:#}`.
+/// Why a turn ended without a clean assistant reply. The engine keeps serving after `Cancelled`
+/// but stops on `Shutdown`.
 #[derive(Debug, thiserror::Error)]
 pub(super) enum TurnAbort {
     #[error("turn cancelled")]
@@ -82,7 +81,7 @@ where
     tokio::pin!(fut);
     loop {
         tokio::select! {
-            // Biased: ops observed before same-poll-ready futures.
+            // A queued interrupt must win over a `fut` that is already ready.
             biased;
             op = ops.recv() => {
                 // Unreachable under current wiring, and a `Resolve` here is a stale reply for an

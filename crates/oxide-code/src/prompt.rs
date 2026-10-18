@@ -20,17 +20,15 @@ use sections::{
 pub(crate) const SYSTEM_PROMPT_DYNAMIC_BOUNDARY: &str = "__SYSTEM_PROMPT_DYNAMIC_BOUNDARY__";
 
 /// Output of [`build_prompt`] or [`restore_prompt`], held for a whole session so every request
-/// shares a byte-identical prefix and the conversation history stays append-only.
-///
-/// `system_sections` is ordered: cacheable static sections, then [`SYSTEM_PROMPT_DYNAMIC_BOUNDARY`]
-/// as its own element, then per-session dynamic sections. The client splits on the marker to apply
-/// `cache_control` to the static prefix only. `user_context` is the CLAUDE.md / AGENTS.md, current
-/// date, and model identity reminder. It rides as the first user message, since a `/model` swap
-/// must leave the system prompt byte-identical.
+/// shares a byte-identical prefix.
 #[cfg_attr(test, derive(Default))]
 pub(crate) struct PromptParts {
     environment: Environment,
+    /// The static sections, [`SYSTEM_PROMPT_DYNAMIC_BOUNDARY`] as its own element, then the
+    /// per-session sections. The client applies `cache_control` to the prefix before the marker.
     pub(crate) system_sections: Vec<String>,
+    /// The instruction files, date, and model identity reminder, sent as the first user message so
+    /// a `/model` swap leaves the system prompt byte-identical.
     pub(crate) user_context: String,
     /// What the model has seen of the user context, in `user_context` or a later reminder.
     pub(crate) seen: UserContext,
@@ -76,7 +74,7 @@ pub(crate) struct UserContext {
     pub(crate) instructions: String,
     /// Local date as `YYYY-MM-DD`.
     pub(crate) date: String,
-    /// Rendered model name, exact id, and knowledge cutoff.
+    /// Rendered model name, exact ID, and knowledge cutoff.
     pub(crate) model: String,
 }
 
@@ -471,7 +469,6 @@ mod tests {
         )));
         assert!(joined.contains("Is a git repository: true"));
 
-        // Boundary marker must be a distinct element so the API client can split it out.
         assert!(
             parts
                 .system_sections
@@ -616,7 +613,6 @@ mod tests {
 
     #[test]
     fn prompt_constants_have_no_leading_whitespace() {
-        // Catch `indoc!` regressions that would leak source indentation.
         for (name, content) in [
             ("INTRO", INTRO),
             ("SYSTEM_SECTION", SYSTEM_SECTION),

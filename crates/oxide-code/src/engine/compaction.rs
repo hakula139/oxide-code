@@ -1,13 +1,8 @@
-//! Conversation compaction: the auto-compaction trigger and the summarization request.
+//! Conversation compaction: the auto-compaction trigger and the summarization request, which forks
+//! the live conversation to read its prompt cache. `compact_session` leaves the session untouched,
+//! and its callers swap in the summary through `compact_boundary` once it succeeds.
 //!
-//! The summarization request forks the live conversation. It sends the conversation's own system
-//! prompt, user context, tools, and transcript, then appends the rubric as the last user message,
-//! so it reads the conversation's prompt cache and passes earlier thinking blocks back unchanged. A
-//! summary that overflows the context window, as an HTTP 400 `prompt is too long` or a
-//! `model_context_window_exceeded` stop, retries up to three times without the oldest rounds or
-//! any thinking block, which misses the cache. The summary's text streams to the frontend as it
-//! generates. `compact_session` leaves the session untouched, and its callers swap in the summary
-//! through `compact_boundary` once it succeeds.
+//! Design: `docs/design/slash/compact.md`.
 
 use std::collections::HashSet;
 use std::iter;
@@ -52,9 +47,8 @@ const RETRY_TRUNCATION_MARKER: &str = "[Earlier conversation truncated to fit th
 /// finished turn, which may omit it.
 const RETRY_TURN_CLOSE_MARKER: &str = "[Stopped here to summarize the conversation.]";
 
-/// User-message rubric. Five short asks keep the summary compact without named sections. The
-/// request still carries the conversation's tools, so the last sentence keeps the model from
-/// calling one.
+/// User-message rubric. The request still carries the conversation's tools, so its last sentence
+/// keeps the model from calling one.
 const SUMMARIZATION_USER_RUBRIC: &str = indoc! {"
     Summarize the conversation above so another instance of yourself can pick up where this one left
     off. Capture, in this order:
@@ -124,9 +118,8 @@ pub(super) struct AutoCompact<'a> {
 }
 
 /// Compacts `messages` when the usage in `auto` crosses the threshold, returning whether it did.
-/// Skips without usage, below the threshold, while [`AutoCompactFailures`] has paused
-/// auto-compaction, or when the transcript is too short for a summary to shrink it. A failed
-/// summary or boundary write counts as a failure and fails the prompt before it is sent.
+/// Skips while [`AutoCompactFailures`] has paused auto-compaction or the transcript is too short to
+/// shrink. A failed summary or boundary write counts as a failure and fails the unsent prompt.
 pub(super) async fn auto_compact_if_needed(
     client: &dyn Wire,
     session: &SessionHandle,
@@ -219,11 +212,11 @@ fn record_auto_compact_failure(
 /// when the summary fails or the caller drops the future.
 ///
 /// The summary streams to `sink` as [`Event::SummaryToken`]s. A retry, a failure, or a dropped
-/// future ends them with [`Event::SummaryDiscarded`]. On success the streamed text stays up, and
-/// the caller must end it with [`Event::SessionCompacted`] or [`Event::SummaryDiscarded`].
+/// future ends them with [`Event::SummaryDiscarded`]. On success the caller must end them with
+/// [`Event::SessionCompacted`] or [`Event::SummaryDiscarded`].
 ///
-/// Errors when the transcript is empty or too short to compact, when a request fails, or when the
-/// reply is empty or stops before the summary finishes, as when the last retry still overflows.
+/// Errors when the transcript is too short to compact, a request fails, or the reply is empty or
+/// stops before the summary finishes.
 pub(super) async fn compact_session(
     client: &dyn Wire,
     prompt: &PromptParts,

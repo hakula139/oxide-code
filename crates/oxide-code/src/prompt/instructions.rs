@@ -231,7 +231,6 @@ mod tests {
             .iter()
             .filter(|s| s.label == "project instructions")
             .collect();
-        // 3 levels: /repo, /repo/crates, /repo/crates/core
         assert_eq!(project.len(), 3);
         assert_eq!(project[0].candidates[0], root.join("CLAUDE.md"));
         assert_eq!(

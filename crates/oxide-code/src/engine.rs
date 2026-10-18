@@ -897,9 +897,8 @@ pub(crate) enum TurnEnd {
 }
 
 impl TurnEnd {
-    /// How `op` ended, if `event` is its terminal event. Covers the ops the stdio frontends wait
-    /// on. The rest end without an event of their own (`Queue`, `Interrupt`, `Resolve`, and
-    /// `Shutdown`) or run only in the TUI, which follows them itself.
+    /// How `op` ended, if `event` is its terminal event. Covers only the ops the stdio frontends
+    /// wait on.
     pub(crate) fn of(op: &Op, event: &Event) -> Option<Self> {
         match (op, event) {
             (Op::Prompt(_) | Op::Compact { .. } | Op::Resume { .. }, Event::TurnFailed(_))
@@ -1143,7 +1142,7 @@ mod tests {
         format!("Skipped instruction file {}: {cause}", path.display())
     }
 
-    /// Records one exchange in a new session in `store` and finishes it, returning its id.
+    /// Records one exchange in a new session in `store` and finishes it, returning its ID.
     async fn finished_session(store: &SessionStore) -> String {
         let session = handle::start(store, MODEL, None);
         let id = session.session_id().to_owned();
