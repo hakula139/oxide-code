@@ -185,7 +185,8 @@ pub(super) fn system_prompt(request: &serde_json::Value) -> Vec<&serde_json::Val
 
 // ── Turn ──
 
-/// In-process fake that scripts a [`ResponseEvent`] stream per turn and records every request.
+/// In-process fake that scripts a [`ResponseEvent`] stream per turn and records every request. A
+/// request past the last scripted turn panics.
 pub(super) struct FakeClient {
     turns: StdMutex<VecDeque<Vec<Result<ResponseEvent>>>>,
     requests: StdMutex<Vec<Vec<Message>>>,
@@ -226,7 +227,12 @@ impl Wire for FakeClient {
         _tools: &[ToolDefinition],
     ) -> Result<mpsc::Receiver<Result<ResponseEvent>>> {
         self.requests.lock().unwrap().push(messages.to_vec());
-        let events = self.turns.lock().unwrap().pop_front().unwrap_or_default();
+        let events = self
+            .turns
+            .lock()
+            .unwrap()
+            .pop_front()
+            .expect("every request has a scripted turn");
         let (tx, rx) = mpsc::channel(events.len().max(1));
         for event in events {
             tx.try_send(event).expect("channel capacity");

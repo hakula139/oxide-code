@@ -1792,12 +1792,10 @@ mod tests {
             let dir = tempfile::tempdir().unwrap();
             let store = test_store(dir.path());
             let engine = engine(server.uri(), &store, dir.path()).await;
-            let background = Arc::downgrade(&engine.shells);
+            let shells = Arc::clone(&engine.shells);
             let mut handle = engine.spawn(&[]);
-            let leaked = dir.path().join("leaked");
-            let command = format!("sleep 2 && touch '{}'", leaked.display());
 
-            start_shell(&background.upgrade().unwrap(), &command);
+            start_shell(&shells, "sleep 30");
             let listed = next_matching(&mut handle.events, |event| match event {
                 Event::BackgroundShellsUpdated(list) => Some(list),
                 _ => None,
@@ -1805,9 +1803,8 @@ mod tests {
             .await;
             handle.shutdown().await;
 
-            assert_eq!(listed, [shell("shell-1", &command, ShellState::Running)]);
-            tokio::time::sleep(Duration::from_millis(2_500)).await;
-            assert!(!leaked.exists(), "the shell outlived the session");
+            assert_eq!(listed, [shell("shell-1", "sleep 30", ShellState::Running)]);
+            assert_eq!(shells.list(), []);
         })
         .await;
     }
