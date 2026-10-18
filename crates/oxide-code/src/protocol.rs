@@ -196,6 +196,10 @@ pub(crate) enum Event {
         instructions: Option<String>,
         automatic: bool,
     },
+    /// Ends an [`Op::Clear`], [`Op::Archive`], [`Op::Resume`], or [`Op::Compact`] that replaced the
+    /// transcript. Follows every event that reports the new transcript's state, such as its usage
+    /// and notices.
+    SessionReady,
     /// Live config after an [`Op::SetModel`]. `effort` is the resolved value. `requested_effort`
     /// is the user's pick, surfaced when an unknown model drops it.
     ConfigChanged {
@@ -220,6 +224,9 @@ pub(crate) enum Event {
         auth: Option<AuthSource>,
         fallback_error: Option<String>,
     },
+    /// User-visible warning about a condition the session works around, such as tracked files that
+    /// changed on disk since a resumed session read them. Renders as a notice.
+    Notice(String),
     /// User-visible error that leaves any in-flight turn running, such as a session write failure.
     /// Renders as a dedicated chat block.
     Error(String),
@@ -581,11 +588,13 @@ mod tests {
             Event::SessionRolled { .. } => "session_rolled",
             Event::SessionResumed { .. } => "session_resumed",
             Event::SessionCompacted { .. } => "session_compacted",
+            Event::SessionReady => "session_ready",
             Event::ConfigChanged { .. } => "config_changed",
             Event::ModeChanged(_) => "mode_changed",
             Event::LoginStarted { .. } => "login_started",
             Event::SignedIn { .. } => "signed_in",
             Event::SignedOut { .. } => "signed_out",
+            Event::Notice(_) => "notice",
             Event::Error(_) => "error",
             Event::ApprovalRequested { .. } => "approval_requested",
             Event::SessionRulesUpdated(_) => "session_rules_updated",
@@ -691,6 +700,7 @@ mod tests {
                 instructions: Some("focus".to_owned()),
                 automatic: true,
             },
+            Event::SessionReady,
             Event::ConfigChanged {
                 model: ModelSpec::resolve("claude-opus-5-5".to_owned()),
                 effort: Some(Effort::High),
@@ -717,6 +727,7 @@ mod tests {
                 auth: None,
                 fallback_error: Some("Claude Code login has expired.".to_owned()),
             },
+            Event::Notice("1 tracked file changed on disk".to_owned()),
             Event::Error("Session write failed.".to_owned()),
             Event::SessionRulesUpdated(vec![
                 Rule::parse(PermissionClass::Exec, "cargo test *").unwrap(),

@@ -447,10 +447,9 @@ fn denied_output(name: &str, reason: impl fmt::Display) -> ToolOutput {
     ))
 }
 
-/// Blocks on the `ops` channel for the [`Op::Resolve`] matching `id`, the same channel the turn
-/// loop races elsewhere so no second channel is introduced. An interrupt or shutdown aborts the
-/// turn, an [`Op::Queue`] or [`Op::SetMode`] goes to `inbox`, and a decision for a different id is
-/// ignored (a stale reply for an already-resolved call). Cancel-safe by drop: it holds no state.
+/// Blocks on `ops` for the [`Op::Resolve`] matching `id`, while [`Inbox::absorb`] handles the
+/// other ops. A decision for a different id is a stale reply for an already-resolved call, so it
+/// is ignored. Cancel-safe by drop: it holds no state.
 async fn await_approval(
     id: &str,
     ops: &mut mpsc::Receiver<Op>,
@@ -458,20 +457,15 @@ async fn await_approval(
     sink: &dyn EventSink,
 ) -> AbortResult<Decision> {
     loop {
-        match ops.recv().await {
-            Some(Op::Interrupt) => return Err(TurnAbort::Cancelled),
-            Some(Op::Shutdown) | None => return Err(TurnAbort::Shutdown),
-            Some(Op::Queue(text)) => inbox.prompts.push(text),
-            Some(Op::SetMode(mode)) => inbox.switch_mode(mode, sink),
+        match inbox.absorb(ops.recv().await, sink)? {
             Some(Op::Resolve {
                 id: target,
                 decision,
-            }) if target == id => {
-                return Ok(decision);
-            }
-            // A decision for a different id is a stale reply, and any other op is unreachable
-            // while an approval is outstanding. Log and keep waiting so the gate can't be skipped.
+            }) if target == id => return Ok(decision),
+            // Keep waiting past a stale decision or an op that is unreachable while an approval is
+            // outstanding, so the gate can't be skipped.
             Some(other) => warn!("ignored op while awaiting approval {id}: {other:?}"),
+            None => {}
         }
     }
 }
@@ -1355,20 +1349,5 @@ mod tests {
                 assert!(matches!(abort, TurnAbort::Cancelled), "{op:?}");
             }
         }
-    }
-
-    #[tokio::test]
-    async fn await_approval_dropped_channel_collapses_to_shutdown() {
-        let (tx, mut rx) = mpsc::channel::<Op>(1);
-        drop(tx);
-        let abort = await_approval(
-            "tool_1",
-            &mut rx,
-            &mut Inbox::default(),
-            &CapturingSink::new(),
-        )
-        .await
-        .expect_err("a closed channel aborts");
-        assert!(matches!(abort, TurnAbort::Shutdown));
     }
 }

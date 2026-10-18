@@ -66,8 +66,8 @@ const SUMMARIZATION_USER_RUBRIC: &str = indoc! {"
 
     Be concise. Terse bullets beat paragraphs. Preserve exact identifiers, file paths, error strings,
     and command lines verbatim. Output only the summary, without addressing the engineer or asking
-    questions. Do not call any tools while writing this summary. Respond with text only.
-"};
+    questions. Do not call any tools while writing this summary. Respond with text only."
+};
 
 /// Automatic compaction failures in a row. Auto-compaction pauses at [`MAX_AUTO_COMPACT_FAILURES`]
 /// until a reset.
@@ -214,7 +214,7 @@ fn record_auto_compact_failure(
             "The prompt was not sent, \
              and auto-compaction is paused after {MAX_AUTO_COMPACT_FAILURES} failures in a row. \
              Send the prompt again to run it without compaction, \
-             or run /compact to retry compaction first."
+             or run `/compact` to retry compaction first."
         )
     } else {
         "The prompt was not sent, so send it again to retry.".to_owned()
@@ -231,8 +231,7 @@ fn record_auto_compact_failure(
 /// the caller must end it with [`Event::SessionCompacted`] or [`Event::SummaryDiscarded`].
 ///
 /// Errors when the transcript is empty or too short to compact, when a request fails, or when the
-/// reply is empty or stopped before the summary finished, including when the last retry still
-/// overflows.
+/// reply is empty or stops before the summary finishes, as when the last retry still overflows.
 pub(super) async fn compact_session(
     client: &dyn Wire,
     prompt: &PromptParts,
@@ -283,7 +282,7 @@ pub(super) async fn compact_session(
     match response.stop_reason {
         None | Some(StopReason::EndTurn | StopReason::StopSequence) => {}
         Some(StopReason::MaxTokens) => {
-            bail!("the summary hit the max_tokens output limit before it finished")
+            bail!("the summary hit the `max_tokens` output limit before it finished")
         }
         Some(StopReason::ModelContextWindowExceeded) => {
             bail!("the transcript left no room in the context window for the summary")
@@ -325,8 +324,8 @@ async fn collect_summary(
 }
 
 /// Forwards the summary's text, retry notices, and usage limits to the frontend and drops the rest
-/// of the reply, which belongs to no visible turn. Dropping it discards the streamed text, so a cancelled
-/// compaction clears it.
+/// of the reply, which belongs to no visible turn. Dropping it discards the streamed text, so a
+/// cancelled compaction clears it.
 struct SummaryStream<'a> {
     sink: &'a dyn EventSink,
     streamed: AtomicBool,
@@ -372,8 +371,7 @@ impl EventSink for SummaryStream<'_> {
     }
 }
 
-/// Adds one request's usage to the running total on drop, so a failed or cancelled request still
-/// counts.
+/// Adds one request's usage to the running total on drop, so failed and cancelled requests count.
 struct RequestUsage<'a> {
     total: &'a mut Vec<TokenUsage>,
     request: Option<TokenUsage>,
@@ -500,16 +498,15 @@ fn retry_request(kept: &[Message], rubric: &Message) -> Vec<Message> {
 
 /// Composes the rubric plus optional user-supplied focus instructions.
 fn build_user_message(instructions: Option<&str>) -> String {
-    let rubric = SUMMARIZATION_USER_RUBRIC.trim();
     match instructions.map(str::trim).filter(|s| !s.is_empty()) {
         Some(extra) => formatdoc! {"
-            {rubric}
+            {SUMMARIZATION_USER_RUBRIC}
 
             Additional instructions from the engineer:
 
-            {extra}
-        "},
-        None => rubric.to_owned(),
+            {extra}"
+        },
+        None => SUMMARIZATION_USER_RUBRIC.to_owned(),
     }
 }
 
@@ -923,7 +920,7 @@ mod tests {
              Retry in a minute. \
              The prompt was not sent, and auto-compaction is paused after 3 failures in a row. \
              Send the prompt again to run it without compaction, \
-             or run /compact to retry compaction first.",
+             or run `/compact` to retry compaction first.",
         );
         assert!(
             matches!(fourth, Ok(false)),
@@ -1074,7 +1071,7 @@ mod tests {
         .unwrap();
 
         assert!(compacted);
-        let rubric = Message::user(SUMMARIZATION_USER_RUBRIC.trim());
+        let rubric = Message::user(SUMMARIZATION_USER_RUBRIC);
         assert_eq!(
             client.requests(),
             [
@@ -1676,7 +1673,7 @@ mod tests {
     #[tokio::test]
     async fn compact_session_rejects_an_unfinished_summary_and_still_records_usage() {
         let cases = [
-            ("max_tokens", true, "max_tokens output limit"),
+            ("max_tokens", true, "`max_tokens` output limit"),
             ("refusal", true, "declined to summarize"),
             ("tool_use", true, "called a tool"),
             ("pause_turn", true, "stopped early (PauseTurn)"),
@@ -1989,21 +1986,26 @@ mod tests {
 
     #[test]
     fn build_user_message_without_instructions_is_just_the_rubric() {
-        let s = build_user_message(None);
-        assert!(s.contains("Summarize the conversation"));
-        assert!(!s.contains("Additional instructions"));
+        for instructions in [None, Some("   \n\t  ")] {
+            let message = build_user_message(instructions);
+
+            assert_eq!(message, SUMMARIZATION_USER_RUBRIC, "{instructions:?}");
+        }
     }
 
     #[test]
     fn build_user_message_with_instructions_appends_them_under_an_anchor() {
-        let s = build_user_message(Some("focus on the build error"));
-        assert!(s.contains("Additional instructions from the engineer"));
-        assert!(s.contains("focus on the build error"));
-    }
+        let message = build_user_message(Some("  focus on the build error\n"));
 
-    #[test]
-    fn build_user_message_treats_whitespace_only_instructions_as_absent() {
-        let s = build_user_message(Some("   \n\t  "));
-        assert!(!s.contains("Additional instructions"));
+        assert_eq!(
+            message,
+            formatdoc! {"
+                {SUMMARIZATION_USER_RUBRIC}
+
+                Additional instructions from the engineer:
+
+                focus on the build error"
+            },
+        );
     }
 }

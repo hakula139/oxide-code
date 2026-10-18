@@ -3,6 +3,7 @@
 //! `engine` so it can build the private fields.
 
 use std::collections::{HashMap, VecDeque};
+use std::panic::AssertUnwindSafe;
 use std::path::Path;
 use std::pin::Pin;
 use std::sync::{Arc, Mutex as StdMutex};
@@ -16,7 +17,7 @@ use wiremock::{Mock, MockServer};
 
 use super::compaction::AutoCompactFailures;
 use super::dispatch::DispatchContext;
-use super::{Engine, EngineHandle, EngineTask};
+use super::{Engine, EngineHandle, EnginePanic, EngineTask};
 use crate::client::anthropic::Client;
 use crate::client::anthropic::testing::{
     DEVICE_ID, api_key, sse_response, test_config, text_stream_body, tool_use_stream_body,
@@ -45,7 +46,8 @@ pub(super) const SESSION_CONTEXT: &str = "<system-reminder>session context</syst
 /// rebuilt one. Pass an empty directory, and run under [`with_pinned_home`], so the context never
 /// reads the developer's instruction files or git state.
 pub(crate) async fn engine(base_url: String, store: &SessionStore, cwd: &Path) -> Engine {
-    let mut prompt = prompt::build_prompt(&ModelSpec::resolve(MODEL.to_owned()), cwd).await;
+    let (mut prompt, instruction_warnings) =
+        prompt::build_prompt(&ModelSpec::resolve(MODEL.to_owned()), cwd).await;
     SESSION_CONTEXT.clone_into(&mut prompt.user_context);
     let config = test_config(base_url, api_key(), MODEL);
     let session = handle::start(store, MODEL);
@@ -66,6 +68,7 @@ pub(crate) async fn engine(base_url: String, store: &SessionStore, cwd: &Path) -
         tasks: Vec::new(),
         prompt,
         prompt_unrecorded: true,
+        instruction_warnings,
         file_tracker: Arc::new(FileTracker::default()),
         shells: Arc::default(),
         policy: config.permission,
@@ -87,15 +90,23 @@ impl Engine {
     }
 }
 
-/// Handle to an engine that has already stopped, as after a panic.
-pub(crate) fn stopped_engine() -> EngineHandle {
+/// Handle to an engine whose task panicked with `engine bug`, closing both channels.
+pub(crate) fn panicked_engine() -> EngineHandle {
     let (ops, _) = mpsc::channel(1);
     let (_, events) = mpsc::unbounded_channel();
     EngineHandle {
         ops,
         events,
-        task: EngineTask(tokio::spawn(async { None })),
+        task: EngineTask(tokio::spawn(async { panic!("engine bug") })),
     }
+}
+
+/// The message of an [`EnginePanic`] whose `panic!` took a string literal.
+pub(crate) fn panic_message(panic: EnginePanic) -> &'static str {
+    let payload = std::panic::catch_unwind(AssertUnwindSafe(|| panic.resume())).unwrap_err();
+    payload
+        .downcast_ref::<&str>()
+        .expect("the panic message is a literal")
 }
 
 /// Runs `test` with the home directory pinned to an empty one, so context loads find no user
@@ -183,8 +194,8 @@ pub(super) fn system_prompt(request: &serde_json::Value) -> Vec<&serde_json::Val
 
 // ── Turn ──
 
-/// In-process fake that scripts a [`ResponseEvent`] stream per turn and records each request's
-/// transcript.
+/// In-process fake that scripts a [`ResponseEvent`] stream per turn and records every request. A
+/// request past the last scripted turn panics.
 pub(super) struct FakeClient {
     turns: StdMutex<VecDeque<Vec<Result<ResponseEvent>>>>,
     requests: StdMutex<Vec<Vec<Message>>>,
@@ -225,7 +236,12 @@ impl Wire for FakeClient {
         _tools: &[ToolDefinition],
     ) -> Result<mpsc::Receiver<Result<ResponseEvent>>> {
         self.requests.lock().unwrap().push(messages.to_vec());
-        let events = self.turns.lock().unwrap().pop_front().unwrap_or_default();
+        let events = self
+            .turns
+            .lock()
+            .unwrap()
+            .pop_front()
+            .expect("every request has a scripted turn");
         let (tx, rx) = mpsc::channel(events.len().max(1));
         for event in events {
             tx.try_send(event).expect("channel capacity");

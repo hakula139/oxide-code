@@ -32,7 +32,7 @@ use config::Config;
 use driver::Exit;
 use driver::headless::OutputFormat;
 use driver::tui::Startup;
-use engine::{Engine, Toolbox};
+use engine::{Engine, EnginePanic, Toolbox};
 use file_tracker::FileTracker;
 use permission::{Mode, ReadFilter};
 use session::display::archive_notice;
@@ -122,7 +122,10 @@ fn main() -> Result<ExitCode> {
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()?;
-    let exit = runtime.block_on(async_main(offset_error))?;
+    let exit = match runtime.block_on(async_main(offset_error)) {
+        Ok(exit) => exit,
+        Err(e) => e.downcast::<EnginePanic>()?.resume(),
+    };
     if matches!(exit, Exit::Signal(_)) {
         // tokio's stdin reader can stay blocked in `read`, and a regular drop waits for it.
         runtime.shutdown_background();
@@ -201,7 +204,7 @@ async fn async_main(offset_error: Option<IndeterminateOffset>) -> Result<Exit> {
     .await?;
 
     if let Some(prompt) = cli.prompt {
-        return Ok(driver::headless::run(engine, show_thinking, &prompt, cli.output).await);
+        return Ok(driver::headless::run(engine, show_thinking, &prompt, cli.output).await?);
     }
 
     let Some(theme) = theme else {

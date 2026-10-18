@@ -21,8 +21,7 @@ use crate::tool::{ToolDefinition, ToolMetadata, ToolRegistry};
 /// tool calls set.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(super) struct TurnReport {
-    /// Latest single round's usage, used by the auto-compaction threshold check, which compares
-    /// against the most recent prompt size rather than the historical sum.
+    /// The last round's usage, which the auto-compaction threshold checks.
     pub(super) usage: Option<TokenUsage>,
     /// Every request's usage in order, including one that failed or was cancelled partway. Some
     /// models pick their price tier from a single request's prompt size, so cost is per entry.
@@ -62,31 +61,10 @@ impl TurnOutcome {
         }
     }
 
-    /// Mirrors `Result::unwrap`: returns the report on success or panics with the abort.
+    /// The report of a completed turn, or the abort that stopped it.
     #[cfg(test)]
-    fn unwrap(self) -> TurnReport {
-        match self.result {
-            Ok(()) => self.report,
-            Err(abort) => panic!("turn aborted: {abort:?}"),
-        }
-    }
-
-    /// Mirrors `Result::expect`: returns the report on success or panics with the abort and `msg`.
-    #[cfg(test)]
-    fn expect(self, msg: &str) -> TurnReport {
-        match self.result {
-            Ok(()) => self.report,
-            Err(abort) => panic!("{msg}: {abort:?}"),
-        }
-    }
-
-    /// Mirrors `Result::expect_err`: returns the abort on failure or panics.
-    #[cfg(test)]
-    fn expect_err(self, msg: &str) -> TurnAbort {
-        match self.result {
-            Ok(()) => panic!("{msg}: turn unexpectedly completed"),
-            Err(abort) => abort,
-        }
+    fn into_result(self) -> AbortResult<TurnReport> {
+        self.result.map(|()| self.report)
     }
 }
 
@@ -202,7 +180,7 @@ pub(super) async fn agent_turn(
         report,
         TurnAbort::Failed(anyhow!(
             "Agent stopped after {cap} tool rounds without a final response. \
-             Raise or unset client.max_tool_rounds (OX_MAX_TOOL_ROUNDS) to allow longer turns."
+             Raise or unset `client.max_tool_rounds` (`OX_MAX_TOOL_ROUNDS`) to allow longer turns."
         )),
     )
 }
@@ -297,7 +275,7 @@ fn refusal_message(details: Option<&StopDetails>) -> String {
     );
     format!(
         "The model declined this request{category}{explanation} \
-         Rephrase it, or run /clear to start over."
+         Rephrase it, or run `/clear` to start over."
     )
 }
 
@@ -306,12 +284,12 @@ fn truncation_error(reason: StopReason, blocks: &[ContentBlock]) -> anyhow::Erro
     let (cause, remedy) = if reason == StopReason::ModelContextWindowExceeded {
         (
             "The conversation filled the model's context window",
-            "Run /compact, then continue.",
+            "Run `/compact`, then continue.",
         )
     } else {
         (
-            "The response hit the max_tokens output limit",
-            "Ask for smaller steps, or raise `max_tokens`.",
+            "The response hit the `max_tokens` output limit",
+            "Ask for smaller steps, or raise `client.max_tokens`.",
         )
     };
     let effect = match blocks.last() {
@@ -688,6 +666,7 @@ mod tests {
             &mut yolo_dispatch(),
         )
         .await
+        .into_result()
         .unwrap();
 
         let events = sink.events();
@@ -728,6 +707,7 @@ mod tests {
             &mut yolo_dispatch(),
         )
         .await
+        .into_result()
         .unwrap();
 
         let events = sink.events();
@@ -764,6 +744,7 @@ mod tests {
             &mut yolo_dispatch(),
         )
         .await
+        .into_result()
         .unwrap();
 
         assert_eq!(messages.len(), 2);
@@ -805,6 +786,7 @@ mod tests {
             &mut yolo_dispatch(),
         )
         .await
+        .into_result()
         .unwrap();
 
         assert_eq!(report.usage.map(TokenUsage::total_tokens), Some(107));
@@ -836,6 +818,7 @@ mod tests {
             &mut yolo_dispatch(),
         )
         .await
+        .into_result()
         .unwrap();
 
         // Message ordering: user → assistant(tool_use) → user(tool_result) → assistant(text).
@@ -916,6 +899,7 @@ mod tests {
             &mut yolo_in(cwd.path()),
         )
         .await
+        .into_result()
         .unwrap();
 
         let pinned = dunce::canonicalize(cwd.path()).unwrap().join("notes.txt");
@@ -980,6 +964,7 @@ mod tests {
             &mut yolo_dispatch(),
         )
         .await
+        .into_result()
         .unwrap();
 
         assert_eq!(report.usage.map(TokenUsage::total_tokens), Some(3));
@@ -1024,6 +1009,7 @@ mod tests {
             &mut yolo_dispatch(),
         )
         .await
+        .into_result()
         .expect("turn must complete");
 
         // user → assistant(tool_use) → user(tool_result) → user("follow up") → assistant("done").
@@ -1084,6 +1070,7 @@ mod tests {
             &mut yolo_dispatch(),
         )
         .await
+        .into_result()
         .expect("turn must complete");
 
         // user → assistant(tool_use) → user(tool_result) → user("first")
@@ -1136,6 +1123,7 @@ mod tests {
             &mut yolo_dispatch(),
         )
         .await
+        .into_result()
         .expect_err("cancel must surface as Err(Cancelled)");
 
         assert!(matches!(abort, TurnAbort::Cancelled), "got {abort:?}");
@@ -1177,7 +1165,9 @@ mod tests {
             },
         );
 
-        let abort = outcome.expect_err("cancel must surface as Err(Cancelled)");
+        let abort = outcome
+            .into_result()
+            .expect_err("cancel must surface as Err(Cancelled)");
         assert!(matches!(abort, TurnAbort::Cancelled), "got {abort:?}");
         assert_eq!(
             sink.events(),
@@ -1214,6 +1204,7 @@ mod tests {
             &mut yolo_dispatch(),
         )
         .await
+        .into_result()
         .expect_err("shutdown must surface as Err(Shutdown)");
 
         assert!(matches!(abort, TurnAbort::Shutdown), "got {abort:?}");
@@ -1246,6 +1237,7 @@ mod tests {
             &mut yolo_dispatch(),
         )
         .await
+        .into_result()
         .expect_err("dead channel must surface as Err(Shutdown)");
 
         assert!(matches!(abort, TurnAbort::Shutdown), "got {abort:?}");
@@ -1306,8 +1298,7 @@ mod tests {
 
     #[tokio::test]
     async fn agent_turn_interrupt_during_tool_round_commits_finished_and_interrupted_results() {
-        // Synchronizes on `GateTool`'s started signal so Cancel races the tool future, not the
-        // prior stream phase.
+        // Waits for `GateTool`'s started signal, so Cancel arrives while the tool future runs.
         let dir = tempfile::tempdir().unwrap();
         let session = test_session(dir.path());
         let client = FakeClient::new(vec![tool_uses_turn(&[
@@ -1348,7 +1339,9 @@ mod tests {
             },
         );
 
-        let abort = turn_result.expect_err("cancel must surface as Err(Cancelled)");
+        let abort = turn_result
+            .into_result()
+            .expect_err("cancel must surface as Err(Cancelled)");
         assert!(matches!(abort, TurnAbort::Cancelled), "got {abort:?}");
         let [prompt, assistant, results, interruption] = &messages[..] else {
             panic!("the round commits, then the interruption: {messages:#?}");
@@ -1482,6 +1475,7 @@ mod tests {
             &mut yolo_dispatch(),
         )
         .await
+        .into_result()
         .unwrap();
 
         let ContentBlock::ToolResult {
@@ -1526,17 +1520,17 @@ mod tests {
             &mut yolo_dispatch(),
         )
         .await
+        .into_result()
         .unwrap();
 
-        // ToolUse round-trips with the empty-object fallback so the
-        // assistant message stays well-formed.
+        // The ToolUse keeps the empty-object fallback, so the assistant message stays well-formed.
         assert!(matches!(
             &messages[1].content[0],
             ContentBlock::ToolUse { id, input, .. }
                 if id == "tool_1" && *input == json!({}),
         ));
 
-        // Tool not dispatched: result is the synthetic parse-error, not EchoTool's `{}` echo.
+        // The tool never runs, so the result is the synthetic parse error.
         assert!(matches!(
             &messages[2].content[0],
             ContentBlock::ToolResult {
@@ -1583,11 +1577,12 @@ mod tests {
             &mut yolo_dispatch(),
         )
         .await
+        .into_result()
         .expect_err("cap must trip");
         assert_eq!(
             format!("{err:#}"),
             "Agent stopped after 3 tool rounds without a final response. \
-             Raise or unset client.max_tool_rounds (OX_MAX_TOOL_ROUNDS) to allow longer turns.",
+             Raise or unset `client.max_tool_rounds` (`OX_MAX_TOOL_ROUNDS`) to allow longer turns.",
         );
     }
 
@@ -1659,6 +1654,7 @@ mod tests {
             &mut yolo_dispatch(),
         )
         .await
+        .into_result()
         .expect("unbounded loop must reach the text-only round");
         let last = messages.last().expect("assistant reply recorded");
         assert!(matches!(last.role, Role::Assistant), "{last:?}");
@@ -1686,6 +1682,7 @@ mod tests {
             &mut yolo_dispatch(),
         )
         .await
+        .into_result()
         .expect_err("api error must propagate");
         assert_eq!(format!("{err:#}"), "API error (overloaded_error): Busy");
     }
@@ -1762,6 +1759,7 @@ mod tests {
             &mut yolo_dispatch(),
         )
         .await
+        .into_result()
         .unwrap();
 
         assert_eq!(messages.len(), 4, "round 2 ran on the tool results");
@@ -1799,6 +1797,7 @@ mod tests {
             &mut yolo_dispatch(),
         )
         .await
+        .into_result()
         .unwrap();
 
         assert!(sink.events().iter().any(|e| matches!(
@@ -1834,6 +1833,7 @@ mod tests {
             &mut yolo_dispatch(),
         )
         .await
+        .into_result()
         .unwrap();
 
         let requests = client.requests();
@@ -1884,13 +1884,14 @@ mod tests {
             &mut yolo_dispatch(),
         )
         .await
+        .into_result()
         .expect_err("a truncated reply fails the turn");
 
         assert_eq!(
             abort.to_string(),
-            "The response hit the max_tokens output limit while writing the `echo` call, \
+            "The response hit the `max_tokens` output limit while writing the `echo` call, \
              so no tools ran. \
-             Ask for smaller steps, or raise `max_tokens`.",
+             Ask for smaller steps, or raise `client.max_tokens`.",
         );
         assert!(
             matches!(&messages[1..], [reply] if matches!(&reply.content[..], [ContentBlock::Text { text }] if text == "Writing it now.")),
@@ -1931,6 +1932,7 @@ mod tests {
             &mut yolo_dispatch(),
         )
         .await
+        .into_result()
         .unwrap();
 
         assert_eq!(messages.len(), 1, "{messages:?}");
@@ -1960,6 +1962,7 @@ mod tests {
             &mut yolo_dispatch(),
         )
         .await
+        .into_result()
         .expect_err("a cut stream fails the turn");
 
         assert_eq!(
@@ -2043,7 +2046,7 @@ mod tests {
         let (outcome, messages, _) =
             real_client_turn(vec![sse(HELLO_SSE)], &ToolRegistry::new(vec![])).await;
 
-        outcome.unwrap();
+        outcome.into_result().unwrap();
         assert_eq!(messages.len(), 2);
         assert!(matches!(&messages[1].content[0], ContentBlock::Text { text } if text == "hello"),);
     }
@@ -2060,7 +2063,7 @@ mod tests {
         )
         .await;
 
-        outcome.expect("the third attempt succeeds");
+        outcome.into_result().expect("the third attempt succeeds");
         assert_eq!(messages.len(), 2, "{messages:?}");
         let events = sink.events();
         let notices: Vec<&str> = events
@@ -2164,11 +2167,11 @@ mod tests {
         )
         .await;
 
-        let abort = outcome.expect_err("a refusal fails the turn");
+        let abort = outcome.into_result().expect_err("a refusal fails the turn");
         assert_eq!(
             abort.to_string(),
             "The model declined this request (category: cyber): Exploit development. \
-             Rephrase it, or run /clear to start over.",
+             Rephrase it, or run `/clear` to start over.",
         );
         assert_eq!(
             messages.len(),
@@ -2216,6 +2219,7 @@ mod tests {
             ),
         )
         .await
+        .into_result()
         .unwrap();
 
         let ContentBlock::ToolResult {
@@ -2419,6 +2423,7 @@ mod tests {
             &mut dispatch_ctx,
         )
         .await
+        .into_result()
         .unwrap();
 
         assert!(
@@ -2452,7 +2457,7 @@ mod tests {
     fn refusal_message_without_details_still_offers_a_way_forward() {
         assert_eq!(
             refusal_message(None),
-            "The model declined this request. Rephrase it, or run /clear to start over.",
+            "The model declined this request. Rephrase it, or run `/clear` to start over.",
         );
         let explanation_only = StopDetails {
             category: None,
@@ -2461,7 +2466,7 @@ mod tests {
         assert_eq!(
             refusal_message(Some(&explanation_only)),
             "The model declined this request: Unsafe request. \
-             Rephrase it, or run /clear to start over.",
+             Rephrase it, or run `/clear` to start over.",
         );
     }
 
@@ -2481,12 +2486,12 @@ mod tests {
         assert_eq!(
             truncation_error(StopReason::ModelContextWindowExceeded, &[text()]).to_string(),
             "The conversation filled the model's context window before it finished. \
-             Run /compact, then continue.",
+             Run `/compact`, then continue.",
         );
         assert_eq!(
             truncation_error(StopReason::MaxTokens, &[tool_use, text()]).to_string(),
-            "The response hit the max_tokens output limit before it finished, so no tools ran. \
-             Ask for smaller steps, or raise `max_tokens`.",
+            "The response hit the `max_tokens` output limit before it finished, so no tools ran. \
+             Ask for smaller steps, or raise `client.max_tokens`.",
         );
     }
 

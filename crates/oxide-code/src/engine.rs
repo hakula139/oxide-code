@@ -16,8 +16,7 @@ use std::sync::Arc;
 use anyhow::{Result, anyhow};
 use serde::Serialize;
 use tokio::sync::mpsc;
-use tokio::task::JoinHandle;
-use tracing::warn;
+use tokio::task::{JoinError, JoinHandle};
 
 use self::abort::{Inbox, TurnAbort};
 use self::compact_boundary::Boundary;
@@ -36,6 +35,7 @@ use crate::model::{ModelSpec, ResolvedModelId};
 use crate::permission::{Mode, Policy, Workspace};
 use crate::prompt::{self, PromptParts, SessionContext, UserContext};
 use crate::protocol::{Event, EventSink, Interaction, Op, ResumeTarget, UsageSnapshot};
+use crate::session::display::id_prefix;
 use crate::session::entry::{CompactInfo, UsageRecord};
 use crate::session::handle::{self, LoadedTranscript, RollIntoOutcome, SessionHandle};
 use crate::session::history;
@@ -45,6 +45,7 @@ use crate::session::title_generator;
 use crate::tool::bash::background::BackgroundShells;
 use crate::tool::tasks::Task;
 use crate::tool::{ToolMetadata, ToolRegistry};
+use crate::util::text::plural;
 
 /// Ops a frontend can queue before the engine reads them. A turn keeps reading ops while it runs,
 /// so this only absorbs a burst of queued prompts.
@@ -62,7 +63,7 @@ pub(crate) struct EngineHandle {
 impl EngineHandle {
     /// Quits the engine and joins its task. Holds `events` open until then, so the engine's final
     /// emits don't fail and log as dropped.
-    pub(crate) async fn shutdown(self) -> Option<String> {
+    pub(crate) async fn shutdown(self) -> Result<Option<String>, EnginePanic> {
         let Self {
             ops,
             events: _events,
@@ -76,12 +77,22 @@ impl EngineHandle {
 pub(crate) struct EngineTask(JoinHandle<Option<String>>);
 
 impl EngineTask {
-    /// Waits until the engine has finalized the live session, returning the write failure if any.
-    pub(crate) async fn join(self) -> Option<String> {
-        self.0.await.unwrap_or_else(|e| {
-            warn!("engine task failed: {e}");
-            None
-        })
+    /// Waits until the engine has finalized the live session, returning the write failure if any,
+    /// or the panic of an engine that never finalized it.
+    pub(crate) async fn join(self) -> Result<Option<String>, EnginePanic> {
+        self.0.await.map_err(EnginePanic)
+    }
+}
+
+/// The panic that ended the engine task. The frontend finishes its output first, then `main`
+/// re-raises it with [`Self::resume`], so `ox` exits with the panic status.
+#[derive(Debug, thiserror::Error)]
+#[error(transparent)]
+pub(crate) struct EnginePanic(JoinError);
+
+impl EnginePanic {
+    pub(crate) fn resume(self) -> ! {
+        std::panic::resume_unwind(self.0.into_panic())
     }
 }
 
@@ -125,6 +136,8 @@ pub(crate) struct Engine {
     prompt: PromptParts,
     /// `prompt` changed since the session last recorded it, so the next user message records it.
     prompt_unrecorded: bool,
+    /// Warnings about the instruction files the latest user context load could not read.
+    instruction_warnings: Vec<String>,
     file_tracker: Arc<FileTracker>,
     /// The background shells the `bash` tools start, which end with the session.
     shells: Arc<BackgroundShells>,
@@ -139,7 +152,9 @@ pub(crate) struct Engine {
     /// A TUI is attached, so titles generate in the background.
     interactive: bool,
     auto_compaction_failures: AutoCompactFailures,
+    /// The latest turn's last round usage, `None` when that turn reported none.
     last_usage: Option<TokenUsage>,
+    /// The latest usage any turn reported, which the status line shows.
     displayed_usage: Option<TokenUsage>,
     total_estimated_cost_usd: f64,
 }
@@ -173,7 +188,8 @@ impl Engine {
         } = transcript;
         let prompt_unrecorded = context.is_none();
         let workspace = Arc::new(config.workspace.clone());
-        let prompt = session_prompt(context, client.model(), workspace.cwd()).await;
+        let (prompt, instruction_warnings) =
+            session_prompt(context, client.model(), workspace.cwd()).await;
         Ok(Self {
             client,
             oauth_token_url: oauth::OAUTH_TOKEN_URL.to_owned(),
@@ -186,6 +202,7 @@ impl Engine {
             tasks,
             prompt,
             prompt_unrecorded,
+            instruction_warnings,
             file_tracker,
             shells,
             policy: config.permission.clone(),
@@ -222,18 +239,14 @@ impl Engine {
         )
     }
 
-    /// Starts the engine task. The first events show the resumed session's usage and task list,
-    /// then warn about the tracked files in `drifted`, which changed on disk since the resumed
-    /// session read them, and about a transcript that ends on an interrupted response.
+    /// Starts the engine task, which first emits what [`Self::emit_session_start`] shows. `drifted`
+    /// lists the tracked files that changed on disk since the resumed session read them.
     pub(crate) fn spawn(self, drifted: &[PathBuf]) -> EngineHandle {
         let (ops, op_rx) = mpsc::channel(OP_CHANNEL_CAP);
         let (event_tx, events) = mpsc::unbounded_channel();
         let sink = ChannelSink(event_tx);
         self.shells.attach(Arc::new(sink.clone()));
-        self.emit_usage_update(&sink);
-        self.emit_restored_tasks(&sink);
-        report_drift(&sink, drifted);
-        turn::notify_if_interrupted(&self.messages, &sink);
+        self.emit_session_start(&sink, drifted);
         let task = EngineTask(tokio::spawn(self.run(sink, op_rx)));
         EngineHandle { ops, events, task }
     }
@@ -295,10 +308,8 @@ impl Engine {
         }
 
         let mut user_msg = Message::user(text);
-        if let Some(reminder) = self
-            .prompt
-            .catch_up(UserContext::load(self.cwd(), self.client.model()).await)
-        {
+        let fresh = self.load_user_context(sink).await;
+        if let Some(reminder) = self.prompt.catch_up(fresh) {
             user_msg.content.push(ContentBlock::Text { text: reminder });
             self.prompt_unrecorded = true;
         }
@@ -392,7 +403,7 @@ impl Engine {
         .await;
         self.bill(sink, &spent).await;
         if matches!(compacted, Ok(true)) {
-            self.refresh_prompt().await;
+            self.refresh_prompt(sink).await;
             self.reset_context_usage(sink);
         }
         if !spent.is_empty() {
@@ -459,9 +470,10 @@ impl Engine {
             ));
             return self.fail_compact(sink, abort);
         }
-        self.refresh_prompt().await;
+        self.refresh_prompt(sink).await;
         self.reset_context_usage(sink);
         self.emit_usage_update(sink);
+        sink.emit(Event::SessionReady, "session-ready");
         TurnEnd::Completed
     }
 
@@ -472,10 +484,23 @@ impl Engine {
     }
 
     /// Starts the compacted transcript from the current instructions and date.
-    async fn refresh_prompt(&mut self) {
-        self.prompt
-            .refresh(UserContext::load(self.cwd(), self.client.model()).await);
+    async fn refresh_prompt(&mut self, sink: &dyn EventSink) {
+        let fresh = self.load_user_context(sink).await;
+        self.prompt.refresh(fresh);
         self.prompt_unrecorded = true;
+    }
+
+    /// Reads the user context afresh, showing each instruction file warning the previous load did
+    /// not raise.
+    async fn load_user_context(&mut self, sink: &dyn EventSink) -> UserContext {
+        let (context, warnings) = UserContext::load(self.cwd(), self.client.model()).await;
+        let previous = std::mem::replace(&mut self.instruction_warnings, warnings);
+        for warning in &self.instruction_warnings {
+            if !previous.contains(warning) {
+                sink.emit(Event::Notice(warning.clone()), "instruction-warning");
+            }
+        }
+        context
     }
 
     /// Finalizes the live session and continues in a fresh, empty one.
@@ -510,7 +535,6 @@ impl Engine {
             self.client.model().id(),
         )
         .await;
-        sink.session_write_error(outcome.finalize_failure.as_deref());
         self.adopt_session(sink, LoadedTranscript::default()).await;
         sink.emit(
             Event::SessionRolled {
@@ -519,6 +543,9 @@ impl Engine {
             },
             "session-rolled",
         );
+        report_finalize_failure(sink, outcome.finalize_failure);
+        self.emit_session_start(sink, &[]);
+        sink.emit(Event::SessionReady, "session-ready");
     }
 
     /// Finalizes the live session and continues `target`. On failure the live session stays.
@@ -529,7 +556,7 @@ impl Engine {
                 sink.emit(
                     Event::TurnFailed(format!(
                         "Resume failed (still on session {}): {e:#}",
-                        self.session.session_id(),
+                        id_prefix(self.session.session_id()),
                     )),
                     "resume-failed",
                 );
@@ -546,19 +573,9 @@ impl Engine {
             },
             "session-resumed",
         );
-        self.emit_usage_update(sink);
-        self.emit_restored_tasks(sink);
-        // `SessionResumed` clears the chat, so anything about the old session must follow it.
-        if let Some(failure) = outcome.finalize_failure {
-            sink.emit(
-                Event::Error(format!(
-                    "Previous session failed to finalize cleanly: {failure}",
-                )),
-                "previous-session-finalize-failed",
-            );
-        }
-        report_drift(sink, &outcome.drifted_paths);
-        turn::notify_if_interrupted(&self.messages, sink);
+        report_finalize_failure(sink, outcome.finalize_failure);
+        self.emit_session_start(sink, &outcome.drifted_paths);
+        sink.emit(Event::SessionReady, "session-ready");
     }
 
     /// Finalizes the live session and swaps to the one `target` names. A prefix must match one
@@ -592,7 +609,8 @@ impl Engine {
         self.tool_metadata = tool_metadata;
         self.tasks = tasks;
         self.prompt_unrecorded = context.is_none();
-        self.prompt = session_prompt(context, self.client.model(), self.workspace.cwd()).await;
+        (self.prompt, self.instruction_warnings) =
+            session_prompt(context, self.client.model(), self.workspace.cwd()).await;
         self.policy.clear_session_allow();
         self.reset_context_usage(sink);
         self.total_estimated_cost_usd = estimate_cost_usd(&usage);
@@ -633,6 +651,8 @@ impl Engine {
             Some(pick) => self.client.set_effort(pick),
             None => self.client.effort(),
         };
+        self.auto_compaction_failures.reset(sink);
+        self.emit_usage_update(sink);
         sink.emit(
             Event::ConfigChanged {
                 model: self.client.model().clone(),
@@ -642,8 +662,6 @@ impl Engine {
             },
             "config-changed",
         );
-        self.auto_compaction_failures.reset(sink);
-        self.emit_usage_update(sink);
     }
 
     /// Switches the permission mode for later calls.
@@ -686,8 +704,7 @@ impl Engine {
         }
     }
 
-    /// Sends requests with a new oxide-code login unless an env var or `client.api_key` outranks
-    /// it.
+    /// Uses a new oxide-code login for requests unless an env var or `client.api_key` outranks it.
     fn adopt_login(&mut self, sink: &dyn EventSink, auth: Auth) {
         let active = match self.client.auth_source() {
             Some(source) if !source.is_stored_login() => source,
@@ -772,6 +789,19 @@ impl Engine {
         self.displayed_usage = None;
     }
 
+    /// Shows what a session carries as the engine starts on it: its usage and task list, the
+    /// warnings its prompt raised, the tracked files in `drifted`, and a transcript that ends on an
+    /// interrupted response. Follows the event that swaps the session, which clears the chat.
+    fn emit_session_start(&self, sink: &dyn EventSink, drifted: &[PathBuf]) {
+        self.emit_usage_update(sink);
+        self.emit_restored_tasks(sink);
+        for warning in &self.instruction_warnings {
+            sink.emit(Event::Notice(warning.clone()), "instruction-warning");
+        }
+        report_drift(sink, drifted);
+        turn::notify_if_interrupted(&self.messages, sink);
+    }
+
     /// Shows the task list a loaded session restored. An empty one needs no event, since the
     /// frontend empties its list when the session changes.
     fn emit_restored_tasks(&self, sink: &dyn EventSink) {
@@ -806,14 +836,15 @@ impl Engine {
     }
 }
 
-/// Replays the prompt a session recorded, or builds a fresh one for a session without one.
+/// Replays the prompt a session recorded, or builds a fresh one for a session without one. Also
+/// returns the warnings about instruction files a fresh build could not read.
 async fn session_prompt(
     context: Option<SessionContext>,
     model: &ModelSpec,
     cwd: &Path,
-) -> PromptParts {
+) -> (PromptParts, Vec<String>) {
     match context {
-        Some(context) => prompt::restore_prompt(context, cwd).await,
+        Some(context) => (prompt::restore_prompt(context, cwd).await, Vec::new()),
         None => prompt::build_prompt(model, cwd).await,
     }
 }
@@ -866,9 +897,7 @@ impl TurnEnd {
                 Event::ConfigChanged { effort: None, .. },
             ) => Some(Self::Failed),
             (Op::Prompt(_), Event::TurnComplete)
-            | (Op::Compact { .. }, Event::SessionCompacted { .. })
-            | (Op::Resume { .. }, Event::SessionResumed { .. })
-            | (Op::Clear, Event::SessionRolled { .. })
+            | (Op::Clear | Op::Compact { .. } | Op::Resume { .. }, Event::SessionReady)
             | (Op::Rename { .. }, Event::SessionTitleUpdated { .. })
             | (Op::SetModel { .. }, Event::ConfigChanged { .. })
             | (Op::SetMode(_), Event::ModeChanged(_)) => Some(Self::Completed),
@@ -899,7 +928,17 @@ fn signed_out() -> TurnAbort {
 }
 
 fn sign_in_failed(e: &anyhow::Error) -> TurnAbort {
-    TurnAbort::Failed(anyhow!("Sign-in failed: {e:#}. Run /login to try again."))
+    TurnAbort::Failed(anyhow!("Sign-in failed: {e:#}. Run `/login` to try again."))
+}
+
+/// Reports that the session a roll or resume left behind failed to finalize.
+fn report_finalize_failure(sink: &dyn EventSink, failure: Option<String>) {
+    if let Some(failure) = failure {
+        sink.emit(
+            Event::Error(format!("Previous session write failed: {failure}")),
+            "previous-session-finalize-failed",
+        );
+    }
 }
 
 /// Warns that the tracked files in `drifted` changed on disk since the resumed session read them.
@@ -908,28 +947,30 @@ fn report_drift(sink: &dyn EventSink, drifted: &[PathBuf]) {
         return;
     }
     sink.emit(
-        Event::Error(format_drift_warning(drifted)),
+        Event::Notice(format_drift_warning(drifted)),
         "resume-drift-warning",
     );
 }
 
 fn format_drift_warning(drifted: &[PathBuf]) -> String {
     const PREVIEW_CAP: usize = 3;
+    let count = drifted.len();
     let preview: Vec<String> = drifted
         .iter()
         .take(PREVIEW_CAP)
         .map(|p| p.display().to_string())
         .collect();
-    let suffix = if drifted.len() > preview.len() {
-        format!(", and {} more", drifted.len() - preview.len())
+    let suffix = if count > preview.len() {
+        format!(", and {} more", count - preview.len())
     } else {
         String::new()
     };
     format!(
-        "{} tracked file(s) changed on disk \
-         since the resumed session read them and need a fresh Read before Edit: {}{suffix}",
-        drifted.len(),
+        "{count} tracked {file} changed on disk since the resumed session read {it}, \
+         so Edit needs a fresh Read first: {}{suffix}",
         preview.join(", "),
+        file = plural(count, "file", "files"),
+        it = plural(count, "it", "them"),
     )
 }
 
@@ -944,8 +985,8 @@ mod tests {
 
     use super::testing::{
         MODEL, SESSION_CONTEXT, engine, mount_reply, mount_stalled_reply_once,
-        mount_tool_call_once, request_bodies, service_log, system_prompt, tool_heavy_transcript,
-        until_requested, with_pinned_home,
+        mount_tool_call_once, panic_message, request_bodies, service_log, system_prompt,
+        tool_heavy_transcript, until_requested, with_pinned_home,
     };
     use super::*;
     use crate::client::anthropic::testing::{
@@ -1076,6 +1117,14 @@ mod tests {
         reply
     }
 
+    /// Writes a `CLAUDE.md` that is not UTF-8 into `dir`, returning the warning its load raises.
+    fn write_unreadable_instructions(dir: &Path) -> String {
+        let path = dir.join("CLAUDE.md");
+        std::fs::write(&path, b"\xff\xfe").unwrap();
+        let cause = std::fs::read_to_string(&path).unwrap_err();
+        format!("Skipped instruction file {}: {cause}", path.display())
+    }
+
     /// Records one exchange in a new session in `store` and finishes it, returning its id.
     async fn finished_session(store: &SessionStore) -> String {
         let session = handle::start(store, MODEL);
@@ -1100,7 +1149,7 @@ mod tests {
             let mut engine = engine(server.uri(), &test_store(dir.path()), dir.path()).await;
             engine.session = handle::testing::dead("dead");
 
-            let failure = engine.spawn(&[]).shutdown().await;
+            let failure = engine.spawn(&[]).shutdown().await.unwrap();
 
             assert!(
                 failure.is_some_and(|f| f.starts_with("session writer task has stopped")),
@@ -1113,10 +1162,12 @@ mod tests {
     // ── EngineTask::join ──
 
     #[tokio::test]
-    async fn join_ends_a_panicked_engine_without_a_write_failure() {
+    async fn join_hands_back_the_panic_of_a_panicked_engine() {
         let task = EngineTask(tokio::spawn(async { panic!("engine bug") }));
 
-        assert_eq!(task.join().await, None);
+        let panic = task.join().await.unwrap_err();
+
+        assert_eq!(panic_message(panic), "engine bug");
     }
 
     // ── new ──
@@ -1131,6 +1182,7 @@ mod tests {
                 .await
                 .prompt
                 .session_context();
+            let warning = write_unreadable_instructions(dir.path());
             let usage = [UsageRecord {
                 model: MODEL.to_owned(),
                 cache_ttl: PromptCacheTtl::FiveMin,
@@ -1164,6 +1216,12 @@ mod tests {
                 );
                 assert_eq!(engine.prompt.user_context == SESSION_CONTEXT, replayed);
                 assert_eq!(engine.prompt_unrecorded, !replayed);
+                let built_warnings = if replayed {
+                    Vec::new()
+                } else {
+                    vec![warning.clone()]
+                };
+                assert_eq!(engine.instruction_warnings, built_warnings);
                 let model = if replayed { MODEL } else { "claude-sonnet-5-5" };
                 assert!(
                     engine
@@ -1215,10 +1273,11 @@ mod tests {
     // ── spawn ──
 
     #[tokio::test]
-    async fn spawn_reports_the_resumed_cost_tasks_drift_and_an_interrupted_transcript_first() {
+    async fn spawn_reports_the_resumed_cost_tasks_warnings_drift_and_an_interrupted_transcript() {
         with_pinned_home(async {
             let server = MockServer::start().await;
             let dir = tempfile::tempdir().unwrap();
+            let warning = write_unreadable_instructions(dir.path());
             let mut engine = engine(server.uri(), &test_store(dir.path()), dir.path()).await;
             engine.messages = vec![
                 Message::user("hi"),
@@ -1236,9 +1295,10 @@ mod tests {
             let mut handle = engine.spawn(&[PathBuf::from("a.rs")]);
             let cost = handle.events.recv().await.unwrap();
             let tasks = handle.events.recv().await.unwrap();
+            let instructions = handle.events.recv().await.unwrap();
             let drift = handle.events.recv().await.unwrap();
             let interrupted = handle.events.recv().await.unwrap();
-            let failure = handle.shutdown().await;
+            let failure = handle.shutdown().await.unwrap();
 
             assert!(
                 matches!(
@@ -1252,9 +1312,10 @@ mod tests {
                 "{cost:?}"
             );
             assert_eq!(tasks, Event::TasksUpdated(plan()));
-            assert!(
-                matches!(&drift, Event::Error(msg) if msg.ends_with("Read before Edit: a.rs")),
-                "{drift:?}"
+            assert_eq!(instructions, Event::Notice(warning));
+            assert_eq!(
+                drift,
+                Event::Notice(format_drift_warning(&[PathBuf::from("a.rs")]))
             );
             assert!(
                 matches!(
@@ -1282,7 +1343,7 @@ mod tests {
             let mut handle = engine.spawn(&[]);
 
             let events = submit(&mut handle, "hello").await;
-            let failure = handle.shutdown().await;
+            let failure = handle.shutdown().await.unwrap();
 
             assert!(
                 matches!(
@@ -1337,7 +1398,7 @@ mod tests {
                 _ => None,
             })
             .await;
-            handle.shutdown().await;
+            handle.shutdown().await.unwrap();
 
             assert_eq!(titled, (live_id, "Greeting".to_owned()));
         })
@@ -1362,7 +1423,7 @@ mod tests {
                 handle.ops.send(op).await.unwrap();
             }
             let events = turn_events(&mut handle.events).await;
-            handle.shutdown().await;
+            handle.shutdown().await.unwrap();
 
             let drained: Vec<_> = events
                 .iter()
@@ -1427,7 +1488,7 @@ mod tests {
             })
             .await;
             submit(&mut handle, "after").await;
-            handle.shutdown().await;
+            handle.shutdown().await.unwrap();
 
             assert_eq!(compacted, (4, Some("focus".to_owned()), false));
             let requests = request_bodies(&server).await;
@@ -1463,7 +1524,7 @@ mod tests {
             })
             .await;
             submit(&mut handle, "again").await;
-            handle.shutdown().await;
+            handle.shutdown().await.unwrap();
 
             assert_eq!(
                 resumed,
@@ -1514,14 +1575,14 @@ mod tests {
             })
             .await;
             submit(&mut handle, "second").await;
-            handle.shutdown().await;
+            handle.shutdown().await.unwrap();
 
             assert_eq!(
                 failure,
                 format!(
-                    "Resume failed (still on session {live_id}): \
-                     session prefix `{}` matches the live session",
-                    &live_id[..8],
+                    "Resume failed (still on session {prefix}): \
+                     session prefix `{prefix}` matches the live session",
+                    prefix = &live_id[..8],
                 ),
             );
             let data = store.load_session_data(&live_id).unwrap();
@@ -1549,13 +1610,13 @@ mod tests {
                 .await
                 .unwrap();
             next_matching(&mut handle.events, |event| {
-                matches!(event, Event::SessionCompacted { .. }).then_some(())
+                matches!(event, Event::SessionReady).then_some(())
             })
             .await;
             submit(&mut handle, "after").await;
             handle.ops.send(Op::Clear).await.unwrap();
             next_matching(&mut handle.events, |event| {
-                matches!(event, Event::SessionRolled { .. }).then_some(())
+                matches!(event, Event::SessionReady).then_some(())
             })
             .await;
             let fresh = submit(&mut handle, "fresh").await;
@@ -1566,7 +1627,7 @@ mod tests {
             })
             .await;
             let restored = handle.events.recv().await.unwrap();
-            handle.shutdown().await;
+            handle.shutdown().await.unwrap();
 
             assert!(
                 matches!(
@@ -1626,7 +1687,7 @@ mod tests {
                 _ => None,
             })
             .await;
-            handle.shutdown().await;
+            handle.shutdown().await.unwrap();
 
             assert_eq!(resumed, (archived_id.clone(), true));
             assert!(!store.load_session_data(&archived_id).unwrap().archived);
@@ -1662,7 +1723,8 @@ mod tests {
             }
             let failure = tokio::time::timeout(Duration::from_secs(5), task.join())
                 .await
-                .expect("Shutdown stops the engine while its op channel is still open");
+                .expect("Shutdown stops the engine while its op channel is still open")
+                .unwrap();
             let mut seen = Vec::new();
             while let Ok(event) = events.try_recv() {
                 seen.push(event);
@@ -1696,7 +1758,7 @@ mod tests {
             let handle = engine(server.uri(), &store, dir.path()).await.spawn(&[]);
 
             handle.ops.send(Op::Shutdown).await.unwrap();
-            assert_eq!(handle.task.join().await, None);
+            assert_eq!(handle.task.join().await.unwrap(), None);
 
             assert!(store.list().unwrap().is_empty());
         })
@@ -1727,7 +1789,7 @@ mod tests {
             .await;
             seed_full_read(&tracker, &read_path);
             submit(&mut handle, "after clear").await;
-            handle.shutdown().await;
+            handle.shutdown().await.unwrap();
 
             let snapshots = store.load_session_data(&live_id).unwrap().file_snapshots;
             let paths: Vec<_> = snapshots.iter().map(|snapshot| &snapshot.path).collect();
@@ -1743,22 +1805,19 @@ mod tests {
             let dir = tempfile::tempdir().unwrap();
             let store = test_store(dir.path());
             let engine = engine(server.uri(), &store, dir.path()).await;
-            let background = Arc::downgrade(&engine.shells);
+            let shells = Arc::clone(&engine.shells);
             let mut handle = engine.spawn(&[]);
-            let leaked = dir.path().join("leaked");
-            let command = format!("sleep 2 && touch '{}'", leaked.display());
 
-            start_shell(&background.upgrade().unwrap(), &command);
+            start_shell(&shells, "sleep 30");
             let listed = next_matching(&mut handle.events, |event| match event {
                 Event::BackgroundShellsUpdated(list) => Some(list),
                 _ => None,
             })
             .await;
-            handle.shutdown().await;
+            handle.shutdown().await.unwrap();
 
-            assert_eq!(listed, [shell("shell-1", &command, ShellState::Running)]);
-            tokio::time::sleep(Duration::from_millis(2_500)).await;
-            assert!(!leaked.exists(), "the shell outlived the session");
+            assert_eq!(listed, [shell("shell-1", "sleep 30", ShellState::Running)]);
+            assert_eq!(shells.list(), []);
         })
         .await;
     }
@@ -1788,7 +1847,7 @@ mod tests {
                 cancelled.extend(turn_events(&mut handle.events).await);
             }
             let next = submit(&mut handle, "what is 7 times 6?").await;
-            handle.shutdown().await;
+            handle.shutdown().await.unwrap();
 
             assert_eq!(cancelled, [Event::Cancelled, Event::Cancelled]);
             assert!(matches!(next.last(), Some(Event::TurnComplete)));
@@ -1840,7 +1899,7 @@ mod tests {
             until_requested(&server, 1).await;
             handle.ops.send(Op::Interrupt).await.unwrap();
             let events = turn_events(&mut handle.events).await;
-            handle.shutdown().await;
+            handle.shutdown().await.unwrap();
 
             assert!(
                 matches!(
@@ -1887,7 +1946,8 @@ mod tests {
                     .await
                     .unwrap_or_else(|_| {
                         panic!("Shutdown stops a {label} while the op channel is open")
-                    });
+                    })
+                    .unwrap();
 
                 assert_eq!(failure, None, "{label}");
                 assert!(events.try_recv().is_err(), "{label}");
@@ -1918,7 +1978,8 @@ mod tests {
             until_requested(&server, 1).await;
             tokio::time::timeout(Duration::from_secs(5), handle.shutdown())
                 .await
-                .expect("the engine must stop waiting on the stream");
+                .expect("the engine must stop waiting on the stream")
+                .unwrap();
 
             let data = store.load_session_data(&live_id).unwrap();
             assert_eq!(
@@ -1960,7 +2021,8 @@ mod tests {
                 ops.send(Op::Shutdown).await.unwrap();
                 let failure = tokio::time::timeout(Duration::from_secs(5), task.join())
                     .await
-                    .expect("Shutdown stops the engine mid sign-in");
+                    .expect("Shutdown stops the engine mid sign-in")
+                    .unwrap();
 
                 assert!(
                     url.starts_with("https://claude.ai/oauth/authorize?"),
@@ -2035,6 +2097,37 @@ mod tests {
                 &data.messages[2].content[..],
                 [_, ContentBlock::Text { text }] if text == reminder
             ));
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn submit_prompt_shows_an_instruction_warning_each_time_it_appears() {
+        with_pinned_home(async {
+            let server = MockServer::start().await;
+            mount_reply(&server, "reply").await;
+            let dir = tempfile::tempdir().unwrap();
+            let mut engine = engine(server.uri(), &test_store(dir.path()), dir.path()).await;
+            let sink = CapturingSink::new();
+            let (_ops_tx, mut ops) = crate::protocol::inert_op_channel();
+            let warning = write_unreadable_instructions(dir.path());
+
+            engine.submit_prompt("broken", &sink, &mut ops).await;
+            engine.submit_prompt("still broken", &sink, &mut ops).await;
+            std::fs::write(dir.path().join("CLAUDE.md"), "Fixed rules.").unwrap();
+            engine.submit_prompt("fixed", &sink, &mut ops).await;
+            write_unreadable_instructions(dir.path());
+            engine.submit_prompt("broken again", &sink, &mut ops).await;
+
+            let notices: Vec<String> = sink
+                .events()
+                .into_iter()
+                .filter_map(|event| match event {
+                    Event::Notice(notice) => Some(notice),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(notices, [warning.clone(), warning]);
         })
         .await;
     }
@@ -2383,9 +2476,10 @@ mod tests {
                 },
                 Event::AutoCompactionResumed,
                 Event::UsageUpdated(usage),
+                Event::SessionReady,
             ] = events.as_slice()
             else {
-                panic!("expected the summary, compaction, resume, then cost: {events:?}");
+                panic!("expected the summary, compaction, resume, cost, then the end: {events:?}");
             };
             assert_eq!(streamed, "manual summary");
             assert_eq!(focus, "focus");
@@ -2731,6 +2825,41 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn clear_reports_the_finalize_failure_and_instruction_warnings_before_it_ends() {
+        with_pinned_home(async {
+            let server = MockServer::start().await;
+            let dir = tempfile::tempdir().unwrap();
+            let mut engine = engine(server.uri(), &test_store(dir.path()), dir.path()).await;
+            engine.session = handle::testing::dead("dead");
+            let warning = write_unreadable_instructions(dir.path());
+            let sink = CapturingSink::new();
+
+            engine.clear(&sink).await;
+
+            let events = sink.events();
+            assert!(
+                matches!(
+                    events.as_slice(),
+                    [
+                        Event::SessionRolled {
+                            archived: false,
+                            ..
+                        },
+                        Event::Error(failure),
+                        Event::Notice(notice),
+                        Event::SessionReady,
+                    ] if failure == "Previous session write failed: \
+                                     session writer task has stopped. \
+                                     Conversation history may be incomplete."
+                        && *notice == warning
+                ),
+                "{events:?}",
+            );
+        })
+        .await;
+    }
+
+    #[tokio::test]
     async fn clear_and_resume_end_a_paused_auto_compaction() {
         with_pinned_home(async {
             let server = MockServer::start().await;
@@ -2765,6 +2894,7 @@ mod tests {
                             archived: false,
                             ..
                         },
+                        Event::SessionReady,
                     ]
                 ),
                 "{cleared:?}",
@@ -2773,8 +2903,11 @@ mod tests {
             assert!(
                 matches!(
                     resumed.as_slice(),
-                    [Event::AutoCompactionResumed, Event::SessionResumed { id, .. }]
-                        if *id == target_id
+                    [
+                        Event::AutoCompactionResumed,
+                        Event::SessionResumed { id, .. },
+                        Event::SessionReady,
+                    ] if *id == target_id
                 ),
                 "{resumed:?}",
             );
@@ -2958,7 +3091,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn resume_reports_the_old_session_finalize_failure_after_switching() {
+    async fn resume_reports_the_old_session_finalize_failure_before_it_ends() {
         with_pinned_home(async {
             let server = MockServer::start().await;
             let dir = tempfile::tempdir().unwrap();
@@ -2975,9 +3108,14 @@ mod tests {
             assert!(
                 matches!(
                     events.as_slice(),
-                    [Event::SessionResumed { id, .. }, Event::Error(msg)]
-                        if *id == target_id
-                            && msg.starts_with("Previous session failed to finalize cleanly")
+                    [
+                        Event::SessionResumed { id, .. },
+                        Event::Error(msg),
+                        Event::SessionReady,
+                    ] if *id == target_id
+                            && msg == "Previous session write failed: \
+                                       session writer task has stopped. \
+                                       Conversation history may be incomplete."
                 ),
                 "{events:?}"
             );
@@ -3020,10 +3158,15 @@ mod tests {
                 engine.shells.list(),
                 [shell("shell-1", "sleep 30", ShellState::Running)]
             );
-            assert!(matches!(
-                sink.events().as_slice(),
-                [Event::TurnFailed(msg)] if msg.contains("still on session")
-            ));
+            assert_eq!(
+                sink.events(),
+                [Event::TurnFailed(format!(
+                    "Resume failed (still on session {}): \
+                     session not found: missing-target.jsonl: {}",
+                    id_prefix(&original_id),
+                    std::fs::metadata("missing-target.jsonl").unwrap_err(),
+                ))]
+            );
             engine.shells.stop_all().await;
         })
         .await;
@@ -3233,9 +3376,9 @@ mod tests {
                 matches!(
                     events.as_slice(),
                     [
-                        Event::ConfigChanged { .. },
                         Event::AutoCompactionResumed,
                         Event::UsageUpdated(_),
+                        Event::ConfigChanged { .. },
                     ]
                 ),
                 "{events:?}",
@@ -3326,7 +3469,7 @@ mod tests {
                 let reply = return_from_browser(&url, "code=auth-code").await;
                 let signed_in = handle.events.recv().await;
                 let turn = submit(&mut handle, "hi").await;
-                handle.shutdown().await;
+                handle.shutdown().await.unwrap();
 
                 assert!(reply.starts_with("HTTP/1.1 302 Found\r\n"), "{reply}");
                 assert!(
@@ -3364,7 +3507,7 @@ mod tests {
             let url = login_url(&mut handle.events).await;
             let reply = return_from_browser(&url, "error=access_denied").await;
             let failed = handle.events.recv().await;
-            handle.shutdown().await;
+            handle.shutdown().await.unwrap();
 
             assert!(reply.starts_with("HTTP/1.1 400 Bad Request\r\n"), "{reply}");
             assert!(
@@ -3372,7 +3515,7 @@ mod tests {
                     &failed,
                     Some(Event::TurnFailed(msg))
                         if msg == "Sign-in failed: authorization was refused (access_denied). \
-                                   Run /login to try again."
+                                   Run `/login` to try again."
                 ),
                 "{failed:?}"
             );
@@ -3627,7 +3770,8 @@ mod tests {
             (&prompt, failed.clone(), Some(TurnEnd::Failed)),
             (&prompt, compacted(true), None),
             (&prompt, notice.clone(), None),
-            (&compact, compacted(false), Some(TurnEnd::Completed)),
+            (&compact, compacted(false), None),
+            (&compact, Event::SessionReady, Some(TurnEnd::Completed)),
             (&compact, Event::Cancelled, Some(TurnEnd::Cancelled)),
             (&compact, Event::TurnComplete, None),
             (
@@ -3638,11 +3782,13 @@ mod tests {
                     unarchived: false,
                     history: Vec::new(),
                 },
-                Some(TurnEnd::Completed),
+                None,
             ),
+            (&resume, Event::SessionReady, Some(TurnEnd::Completed)),
             (&resume, failed.clone(), Some(TurnEnd::Failed)),
             (&Op::Clear, notice.clone(), None),
-            (&Op::Clear, rolled.clone(), Some(TurnEnd::Completed)),
+            (&Op::Clear, rolled, None),
+            (&Op::Clear, Event::SessionReady, Some(TurnEnd::Completed)),
             (
                 &rename,
                 Event::SessionTitleUpdated {
@@ -3684,7 +3830,7 @@ mod tests {
                 Some(TurnEnd::Completed),
             ),
             (&set_mode, notice.clone(), None),
-            (&Op::Archive, rolled, None),
+            (&Op::Archive, Event::SessionReady, None),
         ] {
             assert_eq!(TurnEnd::of(op, &event), end, "{op:?} then {event:?}");
         }
@@ -3722,6 +3868,17 @@ mod tests {
     // ── format_drift_warning ──
 
     #[test]
+    fn format_drift_warning_names_a_single_file() {
+        let warning = format_drift_warning(&[PathBuf::from("a.rs")]);
+
+        assert_eq!(
+            warning,
+            "1 tracked file changed on disk since the resumed session read it, \
+             so Edit needs a fresh Read first: a.rs",
+        );
+    }
+
+    #[test]
     fn format_drift_warning_previews_three_paths_and_counts_the_rest() {
         let drifted: Vec<PathBuf> = ["a.rs", "b.rs", "c.rs", "d.rs", "e.rs"]
             .into_iter()
@@ -3730,10 +3887,10 @@ mod tests {
 
         let warning = format_drift_warning(&drifted);
 
-        assert!(warning.starts_with("5 tracked file(s) changed on disk"));
-        assert!(
-            warning.ends_with(": a.rs, b.rs, c.rs, and 2 more"),
-            "{warning}"
+        assert_eq!(
+            warning,
+            "5 tracked files changed on disk since the resumed session read them, \
+             so Edit needs a fresh Read first: a.rs, b.rs, c.rs, and 2 more",
         );
     }
 }

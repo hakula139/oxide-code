@@ -21,16 +21,17 @@ ox -p "Fix the failing test" --output stream-json   # Stream every event as a JS
 | `json`           | One [result](#result) line once the run ends                                  |
 | `stream-json`    | One JSON line per [engine event](#events), then the [result](#result)         |
 
-Every format also writes tool calls, the task list, retries, and errors as text to stderr. When parsing JSON, read stdout alone.
+Every format also writes tool calls, the task list, retries, notices, and errors as text to stderr. When parsing JSON, read stdout alone.
 
 ## Exit Status
 
-| Status              | Meaning                                                     |
-| ------------------- | ----------------------------------------------------------- |
-| `0`                 | The turn completed                                          |
-| `1`                 | The turn failed, or `ox` could not start it                 |
-| `2`                 | The command line was invalid, such as an unknown `--output` |
-| `129`, `130`, `143` | SIGHUP, SIGINT, or SIGTERM stopped the run                  |
+| Status              | Meaning                                                          |
+| ------------------- | ---------------------------------------------------------------- |
+| `0`                 | The turn completed                                               |
+| `1`                 | The turn failed, or `ox` could not start it                      |
+| `2`                 | The command line was invalid, such as an unknown `--output`      |
+| `101`               | `ox` crashed, and the JSON formats still print a `failed` result |
+| `129`, `130`, `143` | SIGHUP, SIGINT, or SIGTERM stopped the run                       |
 
 If `ox` cannot start a run, for example because of a configuration or credential error, it prints the error to stderr and emits no result.
 
@@ -74,6 +75,7 @@ Each `stream-json` line is an object with a `type` and, for most types, a `data`
 | `rate_limits_updated`       | A subscription's usage limits, described below                                                     |
 | `tasks_updated`             | The session's whole task list, described below                                                     |
 | `background_shells_updated` | Every open background shell, described below                                                       |
+| `notice`                    | A warning the run works around, such as an instruction file it cannot read                         |
 | `error`                     | A problem that does not end the turn, such as a session write failure                              |
 | `turn_complete`             | No `data`. The turn finished with a reply                                                          |
 | `turn_failed`               | Why the turn failed, including a refused request                                                   |

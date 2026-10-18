@@ -25,7 +25,8 @@ pub(crate) struct Startup {
 }
 
 /// Runs the TUI until the user quits or a signal arrives, then waits for the engine to finalize the
-/// live session.
+/// live session. An engine panic is returned after the terminal is restored, which prints the
+/// deferred panic report.
 pub(crate) async fn run(
     mut engine: Engine,
     theme: &Theme,
@@ -87,7 +88,7 @@ pub(crate) async fn run(
 
     // Dropping the app closes the op channel, which the engine reads as `Shutdown`.
     drop(app);
-    if let Some(failure) = task.join().await {
+    if let Some(failure) = task.join().await? {
         warn!("session finish failed: {failure}");
     }
 
