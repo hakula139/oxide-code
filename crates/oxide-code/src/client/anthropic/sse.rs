@@ -236,7 +236,7 @@ mod tests {
 
     use super::*;
     use crate::client::anthropic::testing::messages_request;
-    use crate::client::anthropic::wire::Delta;
+    use crate::client::anthropic::wire::{Delta, MessageResponse};
     use crate::client::{RateLimitWindow, RateLimits, Response};
     use crate::message::ContentBlock;
     use crate::model::TokenUsage;
@@ -702,14 +702,18 @@ mod tests {
             event: content_block_delta
             data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Hello"}}
         "#};
+
         let event = parse_sse_frame(frame).unwrap().unwrap();
-        assert!(matches!(
+
+        assert_eq!(
             event,
             StreamEvent::ContentBlockDelta {
                 index: 0,
-                delta: Delta::TextDelta { text },
-            } if text == "Hello",
-        ));
+                delta: Delta::TextDelta {
+                    text: "Hello".to_owned(),
+                },
+            }
+        );
     }
 
     #[test]
@@ -718,10 +722,10 @@ mod tests {
             event: ping
             data: {"type":"ping"}
         "#};
-        assert!(matches!(
-            parse_sse_frame(frame).unwrap().unwrap(),
-            StreamEvent::Ping,
-        ));
+
+        let event = parse_sse_frame(frame).unwrap().unwrap();
+
+        assert_eq!(event, StreamEvent::Ping);
     }
 
     #[test]
@@ -730,22 +734,17 @@ mod tests {
             event: message_start
             data: {"type":"message_start","message":{"id":"msg_123","type":"message","role":"assistant","content":[],"model":"claude-sonnet-5-5","stop_reason":null,"stop_sequence":null,"usage":{"input_tokens":25,"output_tokens":1}}}
         "#};
+
         let event = parse_sse_frame(frame).unwrap().unwrap();
-        assert!(matches!(
+
+        assert_eq!(
             event,
             StreamEvent::MessageStart {
-                message: super::super::wire::MessageResponse {
-                    ref id,
-                    ref model,
-                    usage: Some(TokenUsage {
-                        input_tokens: 25,
-                        cache_creation_input_tokens: 0,
-                        cache_read_input_tokens: 0,
-                        output_tokens: 1,
-                    }),
+                message: MessageResponse {
+                    usage: Some(TokenUsage::new(25, 1)),
                 },
-            } if id == "msg_123" && model == "claude-sonnet-5-5",
-        ));
+            }
+        );
     }
 
     #[test]
@@ -754,16 +753,18 @@ mod tests {
             event: error
             data: {"type":"error","error":{"type":"rate_limit_error","message":"Too many requests"}}
         "#};
+
         let event = parse_sse_frame(frame).unwrap().unwrap();
-        assert!(matches!(
+
+        assert_eq!(
             event,
             StreamEvent::Error {
-                error: super::super::wire::ApiError {
-                    ref error_type,
-                    ref message,
+                error: ApiError {
+                    error_type: "rate_limit_error".to_owned(),
+                    message: "Too many requests".to_owned(),
                 },
-            } if error_type == "rate_limit_error" && message == "Too many requests",
-        ));
+            }
+        );
     }
 
     #[test]
@@ -772,10 +773,10 @@ mod tests {
             event: some_future_event
             data: {"type":"some_future_event","payload":"data"}
         "#};
-        assert!(matches!(
-            parse_sse_frame(frame).unwrap().unwrap(),
-            StreamEvent::Unknown,
-        ));
+
+        let event = parse_sse_frame(frame).unwrap().unwrap();
+
+        assert_eq!(event, StreamEvent::Unknown);
     }
 
     #[test]
@@ -797,10 +798,10 @@ mod tests {
             data: {"type":
             data: "ping"}
         "#};
-        assert!(matches!(
-            parse_sse_frame(frame).unwrap().unwrap(),
-            StreamEvent::Ping,
-        ));
+
+        let event = parse_sse_frame(frame).unwrap().unwrap();
+
+        assert_eq!(event, StreamEvent::Ping);
     }
 
     #[test]
@@ -809,9 +810,9 @@ mod tests {
         let frame = indoc! {r#"
             data:{"type":"ping"}
         "#};
-        assert!(matches!(
-            parse_sse_frame(frame).unwrap().unwrap(),
-            StreamEvent::Ping,
-        ));
+
+        let event = parse_sse_frame(frame).unwrap().unwrap();
+
+        assert_eq!(event, StreamEvent::Ping);
     }
 }

@@ -70,7 +70,7 @@ impl ResponseAccumulator {
             }
             StreamEvent::MessageStop => Some(ResponseEvent::Completed(self.finish())),
             StreamEvent::Error { error } => return Err(error),
-            StreamEvent::ContentBlockStop { .. } | StreamEvent::Ping | StreamEvent::Unknown => None,
+            StreamEvent::ContentBlockStop | StreamEvent::Ping | StreamEvent::Unknown => None,
         };
         Ok(forward)
     }
