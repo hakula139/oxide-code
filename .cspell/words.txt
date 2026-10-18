@@ -10,6 +10,7 @@ anyhow
 APFS
 arboard
 atuin
+bashpid
 cachain
 cachix
 catppuccin
