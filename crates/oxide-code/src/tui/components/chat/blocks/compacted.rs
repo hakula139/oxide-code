@@ -5,6 +5,7 @@ use ratatui::text::Line;
 
 use super::{ChatBlock, RenderCtx, SectionStyles, bar_section};
 use crate::tui::glyphs::TOOL_BORDER_PREFIX;
+use crate::util::text::plural;
 
 /// Header over a summary still streaming in.
 const STREAMING_HEADER: &str = "Summarizing the conversation...";
@@ -21,12 +22,12 @@ impl CompactedBlock {
         instructions: Option<&str>,
         summary: impl Into<String>,
     ) -> Self {
-        let plural = if pre_count == 1 { "" } else { "s" };
+        let messages = plural(pre_count, "message", "messages");
         let header = match instructions {
             Some(focus) => {
-                format!("Compacted {pre_count} message{plural} → 1 summary (focus: {focus})")
+                format!("Compacted {pre_count} {messages} → 1 summary (focus: {focus})")
             }
-            None => format!("Compacted {pre_count} message{plural} → 1 summary"),
+            None => format!("Compacted {pre_count} {messages} → 1 summary"),
         };
         Self {
             header,

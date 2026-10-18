@@ -1,8 +1,9 @@
 //! `tasks` body: the list the call sent, one marked row per task, windowed like the task panel.
 
+use ratatui::style::Style;
 use ratatui::text::Line;
 
-use super::{MAX_TOOL_OUTPUT_LINES, border_style_for};
+use super::MAX_TOOL_OUTPUT_LINES;
 use crate::tool::tasks::Task;
 use crate::tui::components::chat::blocks::RenderCtx;
 use crate::tui::components::chat::blocks::rows::{MAX_ROW_BYTES, body_row, truncate_to_bytes};
@@ -11,10 +12,9 @@ use crate::tui::components::tasks::{hidden_summary, row_text, window};
 pub(super) fn render(
     out: &mut Vec<Line<'static>>,
     ctx: &RenderCtx<'_>,
+    border_style: Style,
     tasks: &[Task],
-    is_error: bool,
 ) {
-    let border_style = border_style_for(ctx.theme, is_error);
     let shown = window(tasks, MAX_TOOL_OUTPUT_LINES);
     for task in &tasks[shown.clone()] {
         body_row(
@@ -38,8 +38,6 @@ pub(super) fn render(
 
 #[cfg(test)]
 mod tests {
-    use ratatui::style::Style;
-
     use super::*;
     use crate::tool::tasks::TaskStatus;
     use crate::tool::tasks::testing::{plan, task};
@@ -55,7 +53,7 @@ mod tests {
             show_thinking: false,
         };
         let mut out = Vec::new();
-        render(&mut out, &ctx, tasks, false);
+        render(&mut out, &ctx, theme.tool_border(), tasks);
         out.iter()
             .map(|line| {
                 let text = line

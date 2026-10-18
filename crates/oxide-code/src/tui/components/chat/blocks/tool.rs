@@ -16,7 +16,7 @@ use super::rows::wrapped_row;
 use super::{ChatBlock, RenderCtx};
 use crate::tool::ToolResultView;
 use crate::tui::glyphs::{TOOL_BORDER_CONT, TOOL_BORDER_PREFIX, TOOL_ERROR, TOOL_SUCCESS};
-use crate::tui::theme::Theme;
+use crate::util::text::plural;
 
 const MAX_TOOL_OUTPUT_LINES: usize = 5;
 
@@ -76,34 +76,39 @@ impl ToolResultBlock {
 
 impl ChatBlock for ToolResultBlock {
     fn render(&self, ctx: &RenderCtx<'_>) -> Vec<Line<'static>> {
+        let border_style = if self.is_error {
+            ctx.theme.error()
+        } else {
+            ctx.theme.tool_border()
+        };
         let mut out = Vec::new();
-        render_status_line(&mut out, ctx, &self.label, self.is_error);
+        self.render_status_line(&mut out, ctx, border_style);
         match &self.view {
             ToolResultView::Text { content } => {
-                text::render(&mut out, ctx, content, &self.label, self.is_error);
+                text::render(&mut out, ctx, border_style, content, &self.label);
             }
             ToolResultView::ReadExcerpt {
                 path,
                 lines,
                 total_lines,
             } => {
-                read_excerpt::render(&mut out, ctx, path, lines, *total_lines, self.is_error);
+                read_excerpt::render(&mut out, ctx, border_style, path, lines, *total_lines);
             }
             ToolResultView::Diff { chunks, .. } => {
-                diff::render(&mut out, ctx, chunks, self.is_error);
+                diff::render(&mut out, ctx, border_style, chunks);
             }
             ToolResultView::GrepMatches { groups, truncated } => {
-                grep::render(&mut out, ctx, groups, *truncated, self.is_error);
+                grep::render(&mut out, ctx, border_style, groups, *truncated);
             }
             ToolResultView::GlobFiles {
                 pattern,
                 files,
                 total,
             } => {
-                glob::render(&mut out, ctx, pattern, files, *total, self.is_error);
+                glob::render(&mut out, ctx, border_style, pattern, files, *total);
             }
             ToolResultView::Tasks { tasks } => {
-                tasks::render(&mut out, ctx, tasks, self.is_error);
+                tasks::render(&mut out, ctx, border_style, tasks);
             }
         }
         out
@@ -118,27 +123,29 @@ impl ChatBlock for ToolResultBlock {
     }
 }
 
-// ── Shared Helpers ──
-
-fn render_status_line(
-    out: &mut Vec<Line<'static>>,
-    ctx: &RenderCtx<'_>,
-    label: &str,
-    is_error: bool,
-) {
-    let (indicator, indicator_style) = if is_error {
-        (TOOL_ERROR, ctx.theme.error())
-    } else {
-        (TOOL_SUCCESS, ctx.theme.success())
-    };
-    status_row(
-        out,
-        ctx,
-        border_style_for(ctx.theme, is_error),
-        Span::styled(indicator, indicator_style),
-        Span::styled(label.to_owned(), ctx.theme.muted()),
-    );
+impl ToolResultBlock {
+    fn render_status_line(
+        &self,
+        out: &mut Vec<Line<'static>>,
+        ctx: &RenderCtx<'_>,
+        border_style: Style,
+    ) {
+        let (indicator, indicator_style) = if self.is_error {
+            (TOOL_ERROR, ctx.theme.error())
+        } else {
+            (TOOL_SUCCESS, ctx.theme.success())
+        };
+        status_row(
+            out,
+            ctx,
+            border_style,
+            Span::styled(indicator, indicator_style),
+            Span::styled(self.label.clone(), ctx.theme.muted()),
+        );
+    }
 }
+
+// ── Shared Helpers ──
 
 /// Emits a tool call or result status line, whose wrapped rows continue under the body text.
 fn status_row(
@@ -157,11 +164,20 @@ fn status_row(
     wrapped_row(out, ctx, line, TOOL_BORDER_CONT, border_style);
 }
 
-fn border_style_for(theme: &Theme, is_error: bool) -> Style {
-    if is_error {
-        theme.error()
-    } else {
-        theme.tool_border()
+/// Footer counting the rows a body hides and flagging a tool-side result limit, as in
+/// `... +3 lines (limit reached)`, or `None` when neither applies.
+fn hidden_footer(
+    hidden: usize,
+    singular: &str,
+    plural_form: &str,
+    limit_reached: bool,
+) -> Option<String> {
+    let noun = plural(hidden, singular, plural_form);
+    match (hidden, limit_reached) {
+        (0, false) => None,
+        (0, true) => Some("... limit reached".to_owned()),
+        (n, false) => Some(format!("... +{n} {noun}")),
+        (n, true) => Some(format!("... +{n} {noun} (limit reached)")),
     }
 }
 
@@ -170,19 +186,48 @@ mod tests {
     use super::*;
     use crate::tool::tasks::TaskStatus;
     use crate::tool::tasks::testing::task;
-    use crate::tool::{GrepFileGroup, GrepMatchLine};
+    use crate::tool::{DiffChunk, DiffLine, GrepFileGroup, GrepMatchLine, ReadExcerptLine};
+    use crate::tui::theme::Theme;
 
     // ── ToolResultBlock::render ──
 
-    #[test]
-    fn tool_result_block_render_puts_the_view_body_under_the_status_line() {
-        let theme = Theme::default();
-        let ctx = RenderCtx {
-            width: 80,
-            theme: &theme,
-            show_thinking: false,
-        };
-        let cases = [
+    /// One view of each kind, with the body rows it renders under the status line.
+    fn views() -> [(ToolResultView, &'static [&'static str]); 6] {
+        [
+            (
+                ToolResultView::Text {
+                    content: "boom".to_owned(),
+                },
+                &["boom"],
+            ),
+            (
+                ToolResultView::ReadExcerpt {
+                    path: "src/lib.rs".to_owned(),
+                    lines: vec![ReadExcerptLine {
+                        number: 1,
+                        text: "fn f() {}".to_owned(),
+                    }],
+                    total_lines: 1,
+                },
+                &["src/lib.rs:1", "1 │ fn f() {}"],
+            ),
+            (
+                ToolResultView::Diff {
+                    chunks: vec![DiffChunk {
+                        old: vec![DiffLine {
+                            number: 1,
+                            text: "a".to_owned(),
+                        }],
+                        new: vec![DiffLine {
+                            number: 1,
+                            text: "b".to_owned(),
+                        }],
+                    }],
+                    replace_all: false,
+                    replacements: 1,
+                },
+                &["1 - a", "1 + b"],
+            ),
             (
                 ToolResultView::GrepMatches {
                     groups: vec![GrepFileGroup {
@@ -195,7 +240,7 @@ mod tests {
                     }],
                     truncated: true,
                 },
-                ["src/main.rs", "3 │ fn main() {}", "... limit reached"].as_slice(),
+                &["src/main.rs", "3 │ fn main() {}", "... limit reached"],
             ),
             (
                 ToolResultView::GlobFiles {
@@ -203,23 +248,47 @@ mod tests {
                     files: vec!["a.rs".to_owned()],
                     total: 1,
                 },
-                ["*.rs (1 of 1)", "a.rs"].as_slice(),
+                &["*.rs (1 of 1)", "a.rs"],
             ),
             (
                 ToolResultView::Tasks {
                     tasks: vec![task("Ship it", TaskStatus::InProgress)],
                 },
-                ["● Ship it"].as_slice(),
+                &["● Ship it"],
             ),
+        ]
+    }
+
+    #[test]
+    fn tool_result_block_render_puts_each_view_under_a_status_line_colored_by_outcome() {
+        let theme = Theme::default();
+        let ctx = RenderCtx {
+            width: 80,
+            theme: &theme,
+            show_thinking: false,
+        };
+        let outcomes = [
+            (false, theme.tool_border(), TOOL_SUCCESS, theme.success()),
+            (true, theme.error(), TOOL_ERROR, theme.error()),
         ];
-        for (view, body) in cases {
-            let block = ToolResultBlock::new("label", view, false);
+        for (is_error, border, indicator, indicator_style) in outcomes {
+            for (view, body) in views() {
+                let block = ToolResultBlock::new("label", view, is_error);
 
-            let rows: Vec<String> = block.render(&ctx).iter().map(ToString::to_string).collect();
+                let lines = block.render(&ctx);
 
-            let mut expected = vec![format!("{TOOL_BORDER_PREFIX}{TOOL_SUCCESS} label")];
-            expected.extend(body.iter().map(|text| format!("{TOOL_BORDER_CONT}{text}")));
-            assert_eq!(rows, expected);
+                let rows: Vec<String> = lines
+                    .iter()
+                    .map(|line| line.to_string().trim_end().to_owned())
+                    .collect();
+                let mut expected = vec![format!("{TOOL_BORDER_PREFIX}{indicator} label")];
+                expected.extend(body.iter().map(|text| format!("{TOOL_BORDER_CONT}{text}")));
+                assert_eq!(rows, expected);
+                assert_eq!(lines[0].spans[1], Span::styled(indicator, indicator_style));
+                for (row, line) in rows.iter().zip(&lines) {
+                    assert_eq!(line.spans[0].style, border, "bar of {row:?}");
+                }
+            }
         }
     }
 }

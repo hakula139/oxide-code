@@ -1,8 +1,9 @@
 //! Default tool-result body: truncated text, with a `... +N lines` footer on overflow.
 
+use ratatui::style::Style;
 use ratatui::text::Line;
 
-use super::{MAX_TOOL_OUTPUT_LINES, border_style_for};
+use super::{MAX_TOOL_OUTPUT_LINES, hidden_footer};
 use crate::tui::components::chat::blocks::RenderCtx;
 use crate::tui::components::chat::blocks::rows::{MAX_ROW_BYTES, body_row, truncate_to_bytes};
 use crate::tui::wrap::expand_tabs;
@@ -10,9 +11,9 @@ use crate::tui::wrap::expand_tabs;
 pub(super) fn render(
     out: &mut Vec<Line<'static>>,
     ctx: &RenderCtx<'_>,
+    border_style: Style,
     content: &str,
     label: &str,
-    is_error: bool,
 ) {
     let lines: Vec<&str> = content.lines().collect();
     let has_text = |line: &&str| !line.trim().is_empty();
@@ -33,14 +34,8 @@ pub(super) fn render(
         return;
     }
 
-    let border_style = border_style_for(ctx.theme, is_error);
     let text_style = ctx.theme.dim();
-    let truncated = output_lines.len() > MAX_TOOL_OUTPUT_LINES;
-    let visible = if truncated {
-        &output_lines[..MAX_TOOL_OUTPUT_LINES]
-    } else {
-        output_lines
-    };
+    let visible = &output_lines[..output_lines.len().min(MAX_TOOL_OUTPUT_LINES)];
 
     for text_line in visible {
         let expanded = expand_tabs(text_line);
@@ -48,23 +43,14 @@ pub(super) fn render(
         body_row(out, ctx, border_style, display_text, text_style);
     }
 
-    if truncated {
-        let n = output_lines.len() - MAX_TOOL_OUTPUT_LINES;
-        let label = if n == 1 { "line" } else { "lines" };
-        body_row(
-            out,
-            ctx,
-            border_style,
-            format!("... +{n} {label}"),
-            ctx.theme.dim(),
-        );
+    let hidden = output_lines.len() - visible.len();
+    if let Some(footer) = hidden_footer(hidden, "line", "lines", false) {
+        body_row(out, ctx, border_style, footer, ctx.theme.dim());
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use ratatui::text::Span;
-
     use super::*;
     use crate::tui::glyphs::TOOL_BORDER_CONT;
     use crate::tui::theme::Theme;
@@ -78,7 +64,7 @@ mod tests {
             show_thinking: false,
         };
         let mut out = Vec::new();
-        render(&mut out, &ctx, content, label, false);
+        render(&mut out, &ctx, theme.tool_border(), content, label);
         out.iter().map(ToString::to_string).collect()
     }
 
@@ -161,26 +147,5 @@ mod tests {
 
         let kept = format!("{}...", "x".repeat(MAX_ROW_BYTES));
         assert_eq!(rows, body(&[&kept]));
-    }
-
-    #[test]
-    fn render_error_paints_the_bar_in_the_error_color() {
-        let theme = Theme::default();
-        let ctx = RenderCtx {
-            width: 80,
-            theme: &theme,
-            show_thinking: false,
-        };
-        let mut out = Vec::new();
-
-        render(&mut out, &ctx, "boom", "bash", true);
-
-        assert_eq!(
-            out,
-            [Line::from(vec![
-                Span::styled(TOOL_BORDER_CONT, theme.error()),
-                Span::styled("boom", theme.dim()),
-            ])]
-        );
     }
 }

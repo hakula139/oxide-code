@@ -1,34 +1,29 @@
 //! `read` tool body: a line-numbered excerpt under a path and range header.
 
-use ratatui::text::{Line, Span};
+use ratatui::style::Style;
+use ratatui::text::Line;
 use unicode_width::UnicodeWidthStr;
 
-use super::{MAX_TOOL_OUTPUT_LINES, border_style_for};
+use super::{MAX_TOOL_OUTPUT_LINES, hidden_footer};
 use crate::tool::ReadExcerptLine;
 use crate::tui::components::chat::blocks::RenderCtx;
 use crate::tui::components::chat::blocks::rows::{NumberedRows, body_row};
-use crate::tui::glyphs::TOOL_BORDER_CONT;
 
 pub(super) fn render(
     out: &mut Vec<Line<'static>>,
     ctx: &RenderCtx<'_>,
+    border_style: Style,
     path: &str,
     lines: &[ReadExcerptLine],
     total_lines: usize,
-    is_error: bool,
 ) {
-    let border_style = border_style_for(ctx.theme, is_error);
     let context = context_label(path, lines, total_lines);
     body_row(out, ctx, border_style, context, ctx.theme.dim());
     if lines.is_empty() {
         return;
     }
 
-    let visible = if lines.len() > MAX_TOOL_OUTPUT_LINES {
-        &lines[..MAX_TOOL_OUTPUT_LINES]
-    } else {
-        lines
-    };
+    let visible = &lines[..lines.len().min(MAX_TOOL_OUTPUT_LINES)];
     let line_number_width = visible
         .iter()
         .map(|line| line.number.to_string().width())
@@ -40,13 +35,9 @@ pub(super) fn render(
         rows.render(out, line.number, &line.text, ctx.theme.text());
     }
 
-    if lines.len() > MAX_TOOL_OUTPUT_LINES {
-        let hidden = lines.len() - MAX_TOOL_OUTPUT_LINES;
-        let noun = if hidden == 1 { "line" } else { "lines" };
-        out.push(Line::from(vec![
-            Span::styled(TOOL_BORDER_CONT.to_owned(), border_style),
-            Span::styled(format!("... +{hidden} {noun}"), ctx.theme.dim()),
-        ]));
+    let hidden = lines.len() - visible.len();
+    if let Some(footer) = hidden_footer(hidden, "line", "lines", false) {
+        body_row(out, ctx, border_style, footer, ctx.theme.dim());
     }
 }
 
@@ -82,7 +73,14 @@ mod tests {
             show_thinking: false,
         };
         let mut out = Vec::new();
-        render(&mut out, &ctx, path, lines, total_lines, false);
+        render(
+            &mut out,
+            &ctx,
+            theme.tool_border(),
+            path,
+            lines,
+            total_lines,
+        );
         out.iter().map(ToString::to_string).collect()
     }
 
