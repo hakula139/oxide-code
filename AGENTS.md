@@ -20,7 +20,7 @@ ox -p "<prompt>"                            # Headless: run one turn and print t
 ├── .github/                                # CI and release workflows, the shared Nix setup action, issue forms, PR template, and Renovate and Dependabot configs
 ├── .gitignore                              # Build output and local tool state kept out of Git
 ├── .markdownlint-cli2.jsonc                # Markdown lint rules
-├── .prettierignore                         # Lockfiles and build output that Prettier skips
+├── .prettierignore                         # The pnpm lockfile, which Prettier skips
 ├── .prettierrc                             # Prettier settings for JSON and YAML
 ├── .taplo.toml                             # TOML formatter settings
 ├── .vscode/                                # Shared VS Code settings

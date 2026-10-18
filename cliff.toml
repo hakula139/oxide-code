@@ -1,6 +1,3 @@
-# git-cliff configuration
-# Reference: https://git-cliff.org/docs/configuration
-
 [changelog]
 header = """
 # Changelog
@@ -37,13 +34,8 @@ body = """
 {%- endfor -%}
 """
 
-# Strip per-line indentation from templates so layout above doesn't leak into output.
 trim = true
-
-postprocessors = [
-  # Collapse the blank-line runs that template control tags leave behind.
-  { pattern = '\n{3,}', replace = "\n\n" },
-]
+postprocessors = [{ pattern = '\n{3,}', replace = "\n\n" }]
 
 [git]
 conventional_commits = true
@@ -55,21 +47,15 @@ use_branch_tags = true
 sort_commits = "oldest"
 
 commit_preprocessors = [
-  # Cargo advisory bumps merged as `chore(deps)` before the `fix(deps)` convention.
-  # This runs first because the autolink below rewrites `(#N)`.
-  { pattern = '(?m)^chore\(deps\)(: .* \(#(17|34)\))$', replace = 'fix(deps)$1' },
-  # Backtick inline HTML in subjects so markdown renders it as code.
-  # `(^|[^`])` is a lookbehind stand-in (Rust regex lacks one) skipping already-fenced spans.
+  # Backtick inline HTML so Markdown renders it as code. `(^|[^`])` stands in for the lookbehind
+  # that Rust regex lacks, so already-fenced spans stay as they are.
   { pattern = '(^|[^`])(<\/?[a-zA-Z][^>]*>)', replace = '$1`$2`' },
   # GitHub autolinks `#N` in release notes but not in rendered files.
   { pattern = '\(#([0-9]+)\)', replace = '([#$1](https://github.com/hakula139/oxide-code/pull/$1))' },
-  # Early PR titles joined clauses with a spaced em-dash.
-  { pattern = ' — ', replace = ': ' },
 ]
 
-# `<!-- N -->` prefixes (stripped in the body template) order sections by priority.
-# First match wins: catch-all `!:` → type prefixes → skips.
-# The `chore` skip covers routine `chore(deps)` and `chore(flake)` bumps.
+# `<!-- N -->` prefixes, which the body template strips, order the sections. The first match wins,
+# so the catch-all `!:` parser precedes the type prefixes and the skips.
 commit_parsers = [
   { message = '^[a-z]+(\([^)]+\))?!:', group = "<!-- 0 -->Breaking changes" },
 

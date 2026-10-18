@@ -1,6 +1,6 @@
 # Development
 
-Learn how to set up the development environment, what the pre-commit hooks check, how the toolchain is pinned, what debug info dev builds keep, and what CI runs. For other ways to build `ox`, see [Installation](../guide/install.md).
+Learn how to set up the development environment, what the pre-commit hooks check, how the toolchain is pinned, how Nix files are styled, what debug info dev builds keep, and what CI runs. For other ways to build `ox`, see [Installation](../guide/install.md).
 
 ## Dev Shell
 
@@ -21,13 +21,36 @@ Entering the dev shell installs a [pre-commit](https://pre-commit.com) hook gene
 
 The hook runs the compile-free subset of the [verification](../../AGENTS.md#verification) checks on staged files: file hygiene, Nix formatting and lints, `rustfmt`, module-doc and ASCII-ellipsis checks, Prettier / dprint / Taplo formatting, `markdownlint`, and `cspell`. Hooks that fix files in place fail the commit if they make changes, so stage the fixes and commit again. `clippy`, tests, and coverage are excluded because their build cost would gate every commit.
 
-The Node-based hooks require `node_modules` and silently skip when it is missing. `nix flake check` runs the same hooks in a Nix sandbox that excludes `node_modules`, so those hooks skip there too. When changing documentation, comments, or config files, run `pnpm format`, `pnpm lint`, and `pnpm spellcheck` directly.
+The Node-based hooks run tools pinned in `node_modules` and fail when that directory is missing, so run `pnpm install` in each new checkout. `nix flake check` runs only the other hooks because its sandbox has no `node_modules`, while CI's Node Check job runs the Node tools. Run `pnpm format`, `pnpm lint`, and `pnpm spellcheck` directly when changing documentation, comments, or config files.
 
 ## Toolchain
 
 - `rust-toolchain.toml` pins the exact Rust release used by the dev shell, CI, and release builds. The flake reads the pin through rust-overlay, while jobs outside Nix install it with `rustup toolchain install`.
 - Renovate bumps the pin in its automerged flake-inputs group. If a new release adds lint failures, fix them in that PR so it can merge.
 - `rust-version` in the root `Cargo.toml` sets the minimum supported Rust version for `cargo install` users. The MSRV job checks it, and [Versioning](../../RELEASING.md#versioning) explains how to bump it.
+
+## Nix Style
+
+`nixfmt` formats `flake.nix` and `package.nix`, and `statix` and `deadnix` lint them. These rules cover what the tools leave open:
+
+- Keep code and comments within 100 columns, counting the indent. `nixfmt` does not reflow comments, so wrap them by hand.
+- Mark the file header with `=` banners at column 0, and mark each section with `-` banners indented to match the code around them. Every banner line ends at column 100. A file without banners stays without them:
+
+  ```nix
+  # ==================================================================================================
+  # oxide-code Development Flake
+  # ==================================================================================================
+
+          # ------------------------------------------------------------------------------------------
+          # Dev Shell
+          # ------------------------------------------------------------------------------------------
+  ```
+
+- Put each argument of a top-level function on its own line, even when the list would fit on one. Take `...` only when the caller passes a broader set, as with flake outputs. A `callPackage` derivation omits it, so an unexpected argument fails.
+- Declare each dependency of a `callPackage` file, such as `package.nix`, as its own argument, as nixpkgs does, so `.override` can replace it. Put `lib` first and the other arguments in alphabetical order. In the flake, reach packages through `pkgs`.
+- Put `inherit` entries first in a `let` block and in a call's argument set. In a set that returns data, keep each `inherit` where its entry belongs.
+- Group related bindings and attributes, and order a `let` block so that each binding follows what it depends on. Within a group, use alphabetical order unless a stronger order applies.
+- Write multiline text, such as a shell hook, as an indented string with literal line breaks.
 
 ## Debug Info
 
@@ -44,6 +67,7 @@ CI runs on pushes to `main`, pull requests, and manual dispatch, and the release
 | Rust Check       | `cargo fmt --all --check` and `cargo clippy --all-targets -- -D warnings`     |
 | Dependency Check | `cargo deny check licenses advisories sources bans`                           |
 | MSRV Check       | `cargo hack check --rust-version` against `rust-version`                      |
+| macOS Check      | Clippy and the test suite on macOS                                            |
 | Windows Check    | Clippy and the test suite on Windows                                          |
 | Coverage         | The test suite under `cargo llvm-cov`, uploaded to Codecov                    |
 | Nix Build        | The package build on Linux and macOS, which runs the tests and `ox --version` |

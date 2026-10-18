@@ -111,6 +111,25 @@ jobs:
       - name: Check
         run: cargo hack check --rust-version --workspace --all-targets --locked
 
+  macos-check:
+    name: macOS Check
+    runs-on: macos-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Set up Rust
+        run: rustup toolchain install
+
+      - name: Cache dependencies
+        uses: Swatinem/rust-cache@v2
+
+      - name: Clippy
+        run: cargo clippy --locked --all-targets -- -D warnings
+
+      - name: Test
+        run: cargo test --locked
+
   windows-check:
     name: Windows Check
     runs-on: windows-latest

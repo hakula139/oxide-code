@@ -40,6 +40,7 @@ Before 0.1.0, config, environment variable, and session format changes may freel
 
 The draft lists PR titles, which are short and written for reviewers at merge time. Before opening the release PR, rewrite the draft for users, reading a PR's description wherever its title leaves the effect unclear. Follow these rules:
 
+- For a stable section, start from the curated sections of the prereleases it rolls up and carry over every entry. The draft rebuilds entries from PR titles, so it drops the curated wording and omits PRs whose titles it skips, such as advisory bumps merged as `chore(deps)`. Then add the draft entries for changes since the last prerelease, and apply the rules below to the whole section.
 - Describe what users can now do, what no longer breaks, and what now works differently, such as a check that now fails or a value that is now rejected. Omit implementation details.
 - Merge entries that describe the same user-visible change, keeping every PR link, as in `([#223](...), [#224](...))`. Fold a fix to a feature that is new in the same section into that feature's entries, and describe the feature as it now works. A merged entry takes the scope of the feature or main change it describes, and a PR with unrelated effects may be split across entries.
 - Move each entry to the group that matches its effect. For example, move a `fix` that adds a capability to Added. Keep entries under Breaking changes there.

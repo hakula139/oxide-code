@@ -11,8 +11,8 @@ runs:
     - name: Install Nix
       uses: cachix/install-nix-action@v31
       with:
-        # A single-user install cannot create the kernel namespaces the sandbox needs, and
-        # `sandbox-fallback` would otherwise hide that by building without one.
+        # `sandbox-fallback = false` fails a build that cannot get a sandbox, which Nix would
+        # otherwise run without one.
         extra_nix_config: |
           sandbox = true
           sandbox-fallback = false
