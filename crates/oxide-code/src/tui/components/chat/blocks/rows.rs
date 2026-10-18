@@ -74,9 +74,10 @@ fn continuation_spans(prefix: &str, bar_style: Style) -> Vec<Span<'static>> {
 
 // ── NumberedRows ──
 
-/// Renders numbered rows under a tool-result body bar. Read and grep rows use the default pipe
-/// separator, while Edit-tool diff sides and `/diff` pass a `- ` or `+ ` sign and a row bg through
-/// [`NumberedRows::with_style`].
+/// Renders numbered rows under a tool-result body bar, with a gutter wide enough for the largest
+/// line number. Read and grep rows use the default pipe separator, while Edit-tool diff sides and
+/// `/diff` sign each row and tint its bg through [`NumberedRows::removed`] and
+/// [`NumberedRows::added`].
 pub(super) struct NumberedRows<'a> {
     ctx: &'a RenderCtx<'a>,
     border_style: Style,
@@ -90,27 +91,52 @@ pub(super) struct NumberedRows<'a> {
 
 impl<'a> NumberedRows<'a> {
     /// Plain numbered rows with the pipe separator and no row bg, as read and grep draw them.
-    pub(super) fn new(ctx: &'a RenderCtx<'a>, border_style: Style, number_width: usize) -> Self {
+    pub(super) fn new(ctx: &'a RenderCtx<'a>, border_style: Style, max_number: usize) -> Self {
         Self::with_style(
             ctx,
             border_style,
-            number_width,
+            max_number,
             DEFAULT_SEPARATOR,
             ctx.theme.dim(),
             None,
         )
     }
 
-    /// Diff-side rows, with the `- ` or `+ ` sign as the separator and a row bg whose tint spans
-    /// the full terminal width.
-    pub(super) fn with_style(
+    /// Removed diff lines, signed `-` over the removed-row bg.
+    pub(super) fn removed(ctx: &'a RenderCtx<'a>, border_style: Style, max_number: usize) -> Self {
+        Self::with_style(
+            ctx,
+            border_style,
+            max_number,
+            " - ",
+            ctx.theme.error(),
+            Some(ctx.theme.diff_del_row()),
+        )
+    }
+
+    /// Added diff lines, signed `+` over the added-row bg.
+    pub(super) fn added(ctx: &'a RenderCtx<'a>, border_style: Style, max_number: usize) -> Self {
+        Self::with_style(
+            ctx,
+            border_style,
+            max_number,
+            " + ",
+            ctx.theme.success(),
+            Some(ctx.theme.diff_add_row()),
+        )
+    }
+
+    /// Rows with `separator` between the number and the text, and a `row_bg` whose tint spans the
+    /// full terminal width.
+    fn with_style(
         ctx: &'a RenderCtx<'a>,
         border_style: Style,
-        number_width: usize,
+        max_number: usize,
         separator: &'static str,
         separator_style: Style,
         row_bg: Option<Style>,
     ) -> Self {
+        let number_width = max_number.to_string().len();
         let separator_width = separator.width();
         let cont_indent = TOOL_BORDER_CONT.width() + number_width + separator_width;
         let cont_spans = make_cont_spans(border_style, number_width, separator_width, row_bg);
@@ -360,7 +386,7 @@ mod tests {
         let renderer = NumberedRows::with_style(
             &ctx,
             theme.tool_border(),
-            2,
+            99,
             " - ",
             theme.error(),
             Some(theme.diff_del_row()),
@@ -396,7 +422,7 @@ mod tests {
         let renderer = NumberedRows::with_style(
             &ctx,
             theme.tool_border(),
-            2,
+            99,
             " + ",
             theme.success(),
             Some(theme.diff_add_row()),
@@ -423,7 +449,7 @@ mod tests {
         let renderer = NumberedRows::with_style(
             &ctx,
             theme.tool_border(),
-            2,
+            99,
             " - ",
             theme.error(),
             Some(theme.diff_del_row()),
@@ -456,7 +482,7 @@ mod tests {
         let renderer = NumberedRows::with_style(
             &ctx,
             theme.tool_border(),
-            2,
+            99,
             " - ",
             theme.error(),
             Some(theme.diff_del_row()),
@@ -494,7 +520,7 @@ mod tests {
             theme: &theme,
             show_thinking: true,
         };
-        let renderer = NumberedRows::new(&ctx, theme.tool_border(), 3);
+        let renderer = NumberedRows::new(&ctx, theme.tool_border(), 100);
         let mut out = Vec::new();
         renderer.render(&mut out, 7, "hello", theme.text());
 
@@ -531,7 +557,7 @@ mod tests {
             theme: &theme,
             show_thinking: true,
         };
-        let renderer = NumberedRows::new(&ctx, theme.tool_border(), 2);
+        let renderer = NumberedRows::new(&ctx, theme.tool_border(), 10);
         let mut out = Vec::new();
         renderer.render(&mut out, 1, "alpha ab cde", theme.text());
 

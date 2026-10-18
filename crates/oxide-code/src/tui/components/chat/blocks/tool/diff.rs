@@ -38,23 +38,9 @@ fn render_chunk_body(
     chunk: &DiffChunk,
     budget: usize,
 ) {
-    let number_width = number_column_width(chunk);
-    let del_renderer = NumberedRows::with_style(
-        ctx,
-        border_style,
-        number_width,
-        " - ",
-        ctx.theme.error(),
-        Some(ctx.theme.diff_del_row()),
-    );
-    let add_renderer = NumberedRows::with_style(
-        ctx,
-        border_style,
-        number_width,
-        " + ",
-        ctx.theme.success(),
-        Some(ctx.theme.diff_add_row()),
-    );
+    let max_number = max_line_number(chunk);
+    let removed = NumberedRows::removed(ctx, border_style, max_number);
+    let added = NumberedRows::added(ctx, border_style, max_number);
     let text_style = ctx.theme.text();
 
     for entry in entries(&chunk.old, &chunk.new, budget) {
@@ -62,11 +48,11 @@ fn render_chunk_body(
             Entry::Line {
                 side: Side::Del,
                 line,
-            } => del_renderer.render(out, line.number, &line.text, text_style),
+            } => removed.render(out, line.number, &line.text, text_style),
             Entry::Line {
                 side: Side::Add,
                 line,
-            } => add_renderer.render(out, line.number, &line.text, text_style),
+            } => added.render(out, line.number, &line.text, text_style),
             Entry::Ellipsis { hidden } => {
                 let noun = plural(hidden, "line", "lines");
                 let text = format!("... {hidden} {noun} hidden");
@@ -76,10 +62,14 @@ fn render_chunk_body(
     }
 }
 
-fn number_column_width(chunk: &DiffChunk) -> usize {
-    let max_old = chunk.old.iter().map(|l| l.number).max().unwrap_or(0);
-    let max_new = chunk.new.iter().map(|l| l.number).max().unwrap_or(0);
-    max_old.max(max_new).to_string().len().max(1)
+fn max_line_number(chunk: &DiffChunk) -> usize {
+    chunk
+        .old
+        .iter()
+        .chain(&chunk.new)
+        .map(|line| line.number)
+        .max()
+        .unwrap_or(0)
 }
 
 fn render_locations_footer(

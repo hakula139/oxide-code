@@ -34,6 +34,9 @@ mod status;
 mod theme;
 
 pub(crate) use context::{LiveSessionInfo, SlashContext};
+#[cfg(test)]
+pub(crate) use diff::truncate_for_display;
+pub(crate) use diff::{TRUNCATION_FOOTER, UNTRACKED_HEADING};
 pub(crate) use matcher::MatchedCommand;
 pub(crate) use parser::{Parsed, PopupState, parse_slash, popup_state, unescape_literal};
 pub(crate) use registry::{ArgCompletion, SlashKind, SlashOutcome};

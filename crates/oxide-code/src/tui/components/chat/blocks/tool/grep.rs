@@ -3,7 +3,6 @@
 
 use ratatui::style::Style;
 use ratatui::text::Line;
-use unicode_width::UnicodeWidthStr;
 
 use super::{MAX_TOOL_OUTPUT_LINES, hidden_footer};
 use crate::tool::GrepFileGroup;
@@ -26,13 +25,13 @@ pub(super) fn render(
     let visible_rows = total_rows.min(MAX_TOOL_OUTPUT_LINES);
     let hidden = total_rows.saturating_sub(visible_rows);
 
-    let line_number_width = groups
+    let max_number = groups
         .iter()
         .flat_map(|g| g.lines.iter())
-        .map(|l| l.number.to_string().width())
+        .map(|l| l.number)
         .max()
-        .unwrap_or(1);
-    let rows = NumberedRows::new(ctx, border_style, line_number_width);
+        .unwrap_or(0);
+    let rows = NumberedRows::new(ctx, border_style, max_number);
 
     let mut emitted: usize = 0;
     'outer: for group in groups {
