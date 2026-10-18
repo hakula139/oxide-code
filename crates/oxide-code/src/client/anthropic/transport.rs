@@ -18,7 +18,7 @@ use super::wire::{ApiError, ErrorResponse};
 use crate::client::PromptTooLong;
 use crate::client::{RateLimitWindow, RateLimits};
 use crate::config::auth::{Auth, AuthSource};
-use crate::util::text::truncate_to_width;
+use crate::util::text::{join_sentences, truncate_to_width};
 
 // ── Retry Policy ──
 
@@ -403,10 +403,7 @@ fn with_details(headline: &str, details: Option<&str>, advice: Option<&str>) -> 
         (None, None) => headline.to_owned(),
         (None, Some(advice)) => format!("{headline}. {advice}"),
         (Some(details), None) => format!("{headline}: {details}"),
-        (Some(details), Some(advice)) if details.ends_with(['.', '?', '!']) => {
-            format!("{headline}: {details} {advice}")
-        }
-        (Some(details), Some(advice)) => format!("{headline}: {details}. {advice}"),
+        (Some(details), Some(advice)) => format!("{headline}: {}", join_sentences(details, advice)),
     }
 }
 

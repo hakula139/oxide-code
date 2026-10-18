@@ -14,6 +14,7 @@ use crate::protocol::{Event, EventSink, Op};
 use crate::session::handle::SessionHandle;
 use crate::tool::tasks::Task;
 use crate::tool::{ToolDefinition, ToolMetadata, ToolRegistry};
+use crate::util::text::join_sentences;
 
 // ── Agent Turn ──
 
@@ -273,18 +274,22 @@ async fn interrupt_turn(
 /// User-facing notice for a `refusal` stop, naming the policy category and explanation when the
 /// API supplied them.
 fn refusal_message(details: Option<&StopDetails>) -> String {
+    const REPHRASE: &str = "Rephrase it, or run `/clear` to start over.";
     let category = details
         .and_then(|d| d.category.as_deref())
         .map(|c| format!(" (category: {c})"))
         .unwrap_or_default();
-    let explanation = details.and_then(|d| d.explanation.as_deref()).map_or_else(
-        || ".".to_owned(),
-        |e| format!(": {}.", e.trim().trim_end_matches('.')),
-    );
-    format!(
-        "The model declined this request{category}{explanation} \
-         Rephrase it, or run `/clear` to start over."
-    )
+    let explanation = details
+        .and_then(|d| d.explanation.as_deref())
+        .map(str::trim)
+        .filter(|e| !e.is_empty());
+    match explanation {
+        Some(explanation) => join_sentences(
+            &format!("The model declined this request{category}: {explanation}"),
+            REPHRASE,
+        ),
+        None => format!("The model declined this request{category}. {REPHRASE}"),
+    }
 }
 
 /// Error for a reply cut off by the output cap or the context window, naming the tool call it cut.
@@ -2312,20 +2317,39 @@ mod tests {
     // ── refusal_message ──
 
     #[test]
-    fn refusal_message_without_details_still_offers_a_way_forward() {
-        assert_eq!(
-            refusal_message(None),
-            "The model declined this request. Rephrase it, or run `/clear` to start over.",
-        );
-        let explanation_only = StopDetails {
-            category: None,
-            explanation: Some(" Unsafe request ".to_owned()),
+    fn refusal_message_names_the_category_and_quotes_a_nonblank_explanation() {
+        let stop = |category: Option<&str>, explanation: Option<&str>| StopDetails {
+            category: category.map(str::to_owned),
+            explanation: explanation.map(str::to_owned),
         };
-        assert_eq!(
-            refusal_message(Some(&explanation_only)),
-            "The model declined this request: Unsafe request. \
-             Rephrase it, or run `/clear` to start over.",
-        );
+        for (details, expected) in [
+            (
+                None,
+                "The model declined this request. Rephrase it, or run `/clear` to start over.",
+            ),
+            (
+                Some(stop(Some("cyber"), None)),
+                "The model declined this request (category: cyber). \
+                 Rephrase it, or run `/clear` to start over.",
+            ),
+            (
+                Some(stop(Some("cyber"), Some(" \n "))),
+                "The model declined this request (category: cyber). \
+                 Rephrase it, or run `/clear` to start over.",
+            ),
+            (
+                Some(stop(None, Some(" Unsafe request "))),
+                "The model declined this request: Unsafe request. \
+                 Rephrase it, or run `/clear` to start over.",
+            ),
+            (
+                Some(stop(None, Some("Unsafe request..."))),
+                "The model declined this request: Unsafe request... \
+                 Rephrase it, or run `/clear` to start over.",
+            ),
+        ] {
+            assert_eq!(refusal_message(details.as_ref()), expected, "{details:?}");
+        }
     }
 
     // ── truncation_error ──

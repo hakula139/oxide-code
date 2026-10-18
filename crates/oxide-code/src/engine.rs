@@ -47,7 +47,7 @@ use crate::session::title_generator;
 use crate::tool::bash::background::BackgroundShells;
 use crate::tool::tasks::Task;
 use crate::tool::{ToolMetadata, ToolRegistry};
-use crate::util::text::plural;
+use crate::util::text::{join_sentences, plural};
 
 /// Ops a frontend can queue before the engine reads them. A turn keeps reading ops while it runs,
 /// so this only absorbs a burst of queued prompts.
@@ -944,7 +944,11 @@ fn signed_out() -> TurnAbort {
 }
 
 fn sign_in_failed(e: &anyhow::Error) -> TurnAbort {
-    TurnAbort::Failed(anyhow!("Sign-in failed: {e:#}. Run `/login` to try again."))
+    let message = join_sentences(
+        &format!("Sign-in failed: {e:#}"),
+        "Run `/login` to try again.",
+    );
+    TurnAbort::Failed(anyhow!(message))
 }
 
 /// Reports that the session a roll or resume left behind failed to finalize.
@@ -3881,6 +3885,21 @@ mod tests {
                 [Event::Cancelled, Event::TurnFailed(msg)] if msg == "boom"
             ),
             "{events:?}",
+        );
+    }
+
+    // ── sign_in_failed ──
+
+    #[test]
+    fn sign_in_failed_keeps_a_cause_that_ends_a_sentence_verbatim() {
+        let cause = anyhow!("token exchange failed with 400 Bad Request: Code expired.");
+
+        let abort = sign_in_failed(&cause);
+
+        assert_eq!(
+            abort.to_string(),
+            "Sign-in failed: token exchange failed with 400 Bad Request: Code expired. \
+             Run `/login` to try again.",
         );
     }
 
