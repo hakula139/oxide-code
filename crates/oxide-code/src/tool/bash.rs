@@ -886,18 +886,57 @@ mod tests {
     #[tokio::test]
     async fn execute_finished_call_keeps_descendants_detached_from_its_pipes() {
         let dir = tempfile::tempdir().unwrap();
-        let marker = dir.path().join("kept");
-        let marker_str = marker.to_str().unwrap();
+        let parent = dir.path().join("parent");
+        let ready = dir.path().join("ready");
+        let completed = dir.path().join("completed");
+        let release = dir.path().join("release");
+        let diagnostics = dir.path().join("diagnostics");
+        let parent_command = record_pid("$$", &parent);
+        let ready_command = record_pid("$$", &ready);
+        let completed_command = record_pid("$$", &completed);
+        let scratch_path = dir.path().display();
+        let ready_path = ready.display();
+        let release_path = release.display();
+        let diagnostics_path = diagnostics.display();
+        let script = dir.path().join("child.sh");
+        let script_path = script.display();
+        std::fs::write(
+            &script,
+            formatdoc! {"
+                {ready_command} || exit
+                while [ -d '{scratch_path}' ] && [ ! -f '{release_path}' ]; do sleep 0.02; done
+                [ -f '{release_path}' ] && {completed_command}
+            "},
+        )
+        .unwrap();
+        let command = formatdoc! {r#"
+            {parent_command} || exit
+            "$BASH" '{script_path}' > '{diagnostics_path}' 2>&1 &
+            child=$!
+            while [ ! -f '{ready_path}' ]; do
+                kill -0 $child || {{ wait $child; exit $?; }}
+                sleep 0.02
+            done
+            echo started
+        "#};
 
-        let command = format!("(sleep 1 && touch '{marker_str}') >/dev/null 2>&1 & echo started");
         let output = run_default(&command).await;
-        assert_eq!(output.content, "started");
+        std::fs::write(&release, "").unwrap();
+        assert_eq!(
+            output.content,
+            "started",
+            "child diagnostics: {:?}",
+            std::fs::read_to_string(&diagnostics),
+        );
+        let pid = until_recorded(&ready).await;
+        assert_ne!(pid, until_recorded(&parent).await);
+        until_gone(&pid).await;
 
-        let deadline = std::time::Instant::now() + Duration::from_secs(5);
-        while !marker.exists() && std::time::Instant::now() < deadline {
-            tokio::time::sleep(Duration::from_millis(50)).await;
-        }
-        assert!(marker.exists(), "detached descendant was killed");
+        let completed_pid = std::fs::read_to_string(&completed).unwrap_or_else(|error| {
+            let diagnostics = std::fs::read_to_string(&diagnostics).unwrap();
+            panic!("descendant {pid} exited without recording completion: {error}. {diagnostics}")
+        });
+        assert_eq!(completed_pid.trim(), pid);
     }
 
     #[tokio::test]
