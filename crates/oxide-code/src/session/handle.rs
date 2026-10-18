@@ -1244,7 +1244,8 @@ mod tests {
         let original_id = session.session_id().to_owned();
         session.record_message(Message::user("seed")).await;
 
-        _ = roll(&mut session, &store, &tracker, "test-model").await;
+        let outcome = roll(&mut session, &store, &tracker, "test-model").await;
+        assert_eq!(outcome.finalize_failure, None);
 
         assert!(
             tracker.snapshot_all().is_empty(),
@@ -1585,8 +1586,7 @@ mod tests {
         let content = std::fs::read_to_string(test_session_file(dir.path(), &session_id)).unwrap();
         let entries: Vec<Entry> = content
             .lines()
-            .filter(|l| !l.is_empty())
-            .filter_map(|l| serde_json::from_str(l).ok())
+            .map(|line| serde_json::from_str(line).unwrap())
             .collect();
 
         let msg_uuids: Vec<_> = entries

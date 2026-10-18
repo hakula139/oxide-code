@@ -209,14 +209,14 @@ mod tests {
         )
     }
 
-    /// Sink backed by an mpsc channel, so tests can await `recv()` with a timeout.
+    /// Sink backed by an mpsc channel. The spawned task owns the only sender, so `recv()` returns
+    /// `None` once the task ends.
     #[derive(Clone)]
     struct ChannelSink(tokio::sync::mpsc::UnboundedSender<Event>);
 
     impl crate::protocol::EventSink for ChannelSink {
         fn send(&self, event: Event) -> anyhow::Result<()> {
-            _ = self.0.send(event);
-            Ok(())
+            Ok(self.0.send(event)?)
         }
     }
 
@@ -244,30 +244,31 @@ mod tests {
 
         let dir = tempfile::tempdir().unwrap();
         let session = prepared_session(dir.path()).await;
+        let session_id = session.session_id().to_owned();
         let client = title_client(server.uri());
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
         let sink = ChannelSink(tx);
 
         spawn(client, session, sink, "first prompt".to_owned());
 
-        let event = tokio::time::timeout(std::time::Duration::from_secs(5), rx.recv())
-            .await
-            .expect("timed out waiting for title event")
-            .expect("channel closed before event");
-
-        assert!(
-            matches!(&event, Event::SessionTitleUpdated { title, .. } if title == "Fix auth"),
-            "unexpected event: {event:?}",
+        assert_eq!(
+            rx.recv().await,
+            Some(Event::SessionTitleUpdated {
+                session_id,
+                title: "Fix auth".to_owned(),
+            }),
         );
+        assert_eq!(rx.recv().await, None);
     }
 
     #[tokio::test]
     async fn spawn_error_does_not_emit_session_title_event() {
-        // 503 → generate_and_record fails → warn-log only, no event.
+        // A 400 is fatal, so the task fails without waiting out the retry backoff.
         let server = MockServer::start().await;
         Mock::given(method("POST"))
             .and(wm_path("/v1/messages"))
-            .respond_with(ResponseTemplate::new(503).set_body_string("bad gateway"))
+            .respond_with(ResponseTemplate::new(400).set_body_string("bad request"))
+            .expect(1)
             .mount(&server)
             .await;
 
@@ -279,11 +280,7 @@ mod tests {
 
         spawn(client, session, sink, "first prompt".to_owned());
 
-        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
-        assert!(
-            rx.try_recv().is_err(),
-            "no event should be emitted on generation failure",
-        );
+        assert_eq!(rx.recv().await, None);
     }
 
     // ── generate_and_record ──
