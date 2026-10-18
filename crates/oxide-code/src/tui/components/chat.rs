@@ -633,7 +633,6 @@ fn rows_between(slot: &Range<usize>, row: usize) -> usize {
 mod tests {
     use std::cell::Cell;
     use std::rc::Rc;
-    use std::time::{Duration, Instant};
 
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseEvent, MouseEventKind};
     use indoc::{formatdoc, indoc};
@@ -842,86 +841,6 @@ mod tests {
                 ]
             })
             .collect()
-    }
-
-    /// Frame times over a resumed transcript of `rows` rows, with medians for the repeated frames.
-    #[derive(Debug)]
-    #[expect(
-        dead_code,
-        reason = "the timing harness reads the fields through Debug"
-    )]
-    struct FrameTimes {
-        rows: usize,
-        open: Duration,
-        steady: Duration,
-        resize: Duration,
-        theme_swap: Duration,
-    }
-
-    /// Paints the frames the timing harness measures over `turns` resumed turns: an open, then
-    /// `samples` frames each of steady state, resizes between `width` and 20 columns narrower, and
-    /// theme swaps. Checks that each frame paints the tail of a full render.
-    fn paint_timed_frames(turns: usize, width: u16, height: u16, samples: usize) -> FrameTimes {
-        let widths = [width, width - 20];
-        let full = widths.map(|width| {
-            let mut full = test_chat();
-            full.load_history(long_transcript(turns));
-            all_lines(&mut full, width)
-        });
-        let tails = full.each_ref().map(|lines| {
-            lines[lines.len() - usize::from(height)..]
-                .iter()
-                .map(|line| line.to_string().trim_end().to_owned())
-                .collect::<Vec<_>>()
-        });
-        let themes = [
-            Theme::default(),
-            crate::tui::theme::load_builtin("latte").unwrap(),
-        ];
-
-        let mut chat = test_chat();
-        chat.load_history(long_transcript(turns));
-        let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
-        let open = paint_timed(&mut terminal, &mut chat, &tails[0]);
-        let mut runs: [Vec<Duration>; 3] = Default::default();
-        for _ in 0..samples {
-            runs[0].push(paint_timed(&mut terminal, &mut chat, &tails[0]));
-        }
-        for i in 1..=samples {
-            terminal.backend_mut().resize(widths[i % 2], height);
-            runs[1].push(paint_timed(&mut terminal, &mut chat, &tails[i % 2]));
-        }
-        terminal.backend_mut().resize(width, height);
-        for i in 1..=samples {
-            chat.set_theme(&themes[i % 2]);
-            runs[2].push(paint_timed(&mut terminal, &mut chat, &tails[0]));
-        }
-
-        let [steady, resize, theme_swap] = runs.map(|mut run| {
-            run.sort();
-            run[run.len() / 2]
-        });
-        FrameTimes {
-            rows: full[0].len(),
-            open,
-            steady,
-            resize,
-            theme_swap,
-        }
-    }
-
-    fn paint_timed(
-        terminal: &mut Terminal<TestBackend>,
-        chat: &mut ChatView,
-        tail: &[String],
-    ) -> Duration {
-        let start = Instant::now();
-        terminal
-            .draw(|frame| chat.render(frame, frame.area()))
-            .unwrap();
-        let elapsed = start.elapsed();
-        assert_eq!(screen_rows(terminal.backend()), tail);
-        elapsed
     }
 
     // ── set_theme ──
@@ -2165,13 +2084,33 @@ mod tests {
 
     #[test]
     fn render_open_resize_and_theme_swap_paint_the_tail_of_the_full_render() {
-        paint_timed_frames(4, 60, 8, 2);
-    }
+        let (wide, narrow, height) = (60, 40, 8);
+        let tail = |width| {
+            let mut full = test_chat();
+            full.load_history(long_transcript(4));
+            let lines = all_lines(&mut full, width);
+            lines[lines.len() - usize::from(height)..]
+                .iter()
+                .map(|line| line.to_string().trim_end().to_owned())
+                .collect::<Vec<_>>()
+        };
+        let (wide_tail, narrow_tail) = (tail(wide), tail(narrow));
+        let latte = load_builtin("latte").expect("latte is built in");
+        let mut chat = test_chat();
+        chat.load_history(long_transcript(4));
 
-    #[test]
-    #[ignore = "timing harness: run in release with --ignored --nocapture"]
-    fn render_long_transcript_frame_timings() {
-        eprintln!("{:?}", paint_timed_frames(200, 120, 40, 20));
+        let opened = screen_rows(&render_chat(&mut chat, wide, height));
+        let steady = screen_rows(&render_chat(&mut chat, wide, height));
+        let narrowed = screen_rows(&render_chat(&mut chat, narrow, height));
+        let widened = screen_rows(&render_chat(&mut chat, wide, height));
+        chat.set_theme(&latte);
+        let swapped = screen_rows(&render_chat(&mut chat, wide, height));
+
+        assert_eq!(opened, wide_tail);
+        assert_eq!(steady, wide_tail);
+        assert_eq!(narrowed, narrow_tail);
+        assert_eq!(widened, wide_tail);
+        assert_eq!(swapped, wide_tail);
     }
 
     #[test]
