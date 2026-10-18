@@ -26,6 +26,7 @@ use super::components::status::{StatusBar, StatusBarInit, StatusHyperlink};
 use super::components::tasks::TaskPanel;
 use super::git_probes::GitProbes;
 use super::modal::{Modal, ModalStack};
+use super::now;
 use super::terminal::Tui;
 use super::theme::Theme;
 use crate::permission::Mode;
@@ -128,7 +129,7 @@ impl App {
         let git_probes = GitProbes::new(
             session_info.working_dir.clone(),
             &session_info.config.status_line,
-            Instant::now(),
+            now(),
         );
         let requested_mode = session_info.config.permission_mode;
         let mode_cycle = match requested_mode {
@@ -214,7 +215,7 @@ impl App {
                 Some(update) = self.git_probes.recv() => self.apply_git_update(update),
                 Some(report) = self.clipboard.recv() => self.apply_copy_report(report),
                 _ = tick.tick() => {
-                    let now = Instant::now();
+                    let now = now();
                     self.git_probes.poll(now);
                     self.dirty |= self.status_bar.tick();
                     self.dirty |= self.expire_armed_exit(now);
@@ -314,7 +315,7 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn run_with_events_expires_armed_exit_on_tick_before_channel_close() {
         let (mut app, _rx, event_tx) = test_app(None);
-        let until = Instant::now()
+        let until = now()
             .checked_sub(EXIT_WINDOW)
             .expect("monotonic clock has run long enough for a test deadline");
         app.status_bar.set_status(Status::ExitArmed { until });

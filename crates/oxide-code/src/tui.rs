@@ -21,8 +21,16 @@ pub(crate) mod theme;
 pub(crate) mod viewport;
 mod wrap;
 
+use std::time::Instant;
+
 // ── Helpers ──
 
 fn saturating_u16(n: usize) -> u16 {
     u16::try_from(n).unwrap_or(u16::MAX)
+}
+
+/// Reads the tokio clock, so a test runtime with paused time controls every UI deadline. Outside a
+/// runtime it reads the system clock.
+fn now() -> Instant {
+    tokio::time::Instant::now().into_std()
 }

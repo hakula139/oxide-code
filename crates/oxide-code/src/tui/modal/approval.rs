@@ -20,9 +20,9 @@ use crate::tool::{ApprovalBody, ApprovalPreview, DiffChunk};
 use crate::tui::action::Action;
 use crate::tui::modal::line_editor::LineEditor;
 use crate::tui::modal::{Modal, ModalAction, ModalKey, is_plain_char};
-use crate::tui::saturating_u16;
 use crate::tui::theme::Theme;
 use crate::tui::wrap::{expand_tabs, wrap_line};
+use crate::tui::{now, saturating_u16};
 use crate::util::text::{is_hidden, truncate_to_width};
 
 // ── Constants ──
@@ -197,13 +197,13 @@ impl ApprovalModal {
             scroll: 0,
             view: Cell::default(),
             wrapped: RefCell::default(),
-            guard_until: Instant::now() + TYPE_AHEAD_GUARD,
+            guard_until: now() + TYPE_AHEAD_GUARD,
         }
     }
 
     #[cfg(test)]
     pub(crate) fn expire_guard(&mut self) {
-        self.guard_until = Instant::now();
+        self.guard_until = now();
     }
 
     fn decision(&self, decision: Decision) -> ModalAction {
@@ -272,14 +272,14 @@ impl ApprovalModal {
             editor: LineEditor::new(text),
             error: None,
         });
-        self.guard_until = Instant::now() + TYPE_AHEAD_GUARD;
+        self.guard_until = now() + TYPE_AHEAD_GUARD;
         ModalKey::Consumed
     }
 
     /// Routes `event` to the open editor, or returns `None` when none is open.
     fn handle_edit_key(&mut self, event: &KeyEvent) -> Option<ModalKey> {
         let scroll = self.line_scroll(event.code);
-        let ready = Instant::now() >= self.guard_until && self.view.get().editor_shown;
+        let ready = now() >= self.guard_until && self.view.get().editor_shown;
         let edit = self.edit.as_mut()?;
         if let Some(delta) = scroll {
             return Some(self.scroll_by(delta));
@@ -430,7 +430,7 @@ impl Modal for ApprovalModal {
         if let Some(outcome) = self.handle_edit_key(event) {
             return outcome;
         }
-        let now = Instant::now();
+        let now = now();
         if now < self.guard_until {
             self.guard_until = now + TYPE_AHEAD_GUARD;
             return ModalKey::Consumed;
@@ -983,8 +983,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn keys_typed_ahead_of_the_modal_are_dropped() {
+    #[tokio::test(start_paused = true)]
+    async fn keys_typed_ahead_of_the_modal_are_dropped() {
         let mut modal = fresh_command_modal("ls");
         render_to_string(&modal, 40, modal.height(40, 40));
         for code in [KeyCode::Char('y'), KeyCode::Char('n')] {
@@ -995,19 +995,35 @@ mod tests {
         }
     }
 
-    #[test]
-    fn a_key_inside_the_guard_restarts_it() {
-        // A paste arrives as a key burst, so a `y` deep inside one must still drop.
+    #[tokio::test(start_paused = true)]
+    async fn the_first_key_is_accepted_at_the_initial_guard_deadline() {
         let mut modal = fresh_command_modal("ls");
         render_to_string(&modal, 40, modal.height(40, 40));
-        modal.guard_until = Instant::now() + Duration::from_millis(50);
-        let before = Instant::now();
-        assert!(matches!(
-            modal.handle_key(&KeyEvent::from(KeyCode::Char('y'))),
-            ModalKey::Consumed
-        ));
-        let restarted = (before + TYPE_AHEAD_GUARD)..=(Instant::now() + TYPE_AHEAD_GUARD);
-        assert!(restarted.contains(&modal.guard_until));
+
+        tokio::time::advance(TYPE_AHEAD_GUARD).await;
+        let outcome = modal.handle_key(&KeyEvent::from(KeyCode::Char('y')));
+
+        assert!(matches!(outcome, ModalKey::Submitted(_)), "{outcome:?}");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_key_inside_the_guard_restarts_it() {
+        // A paste arrives as a key burst, so a `y` deep inside one must still drop.
+        let y = KeyEvent::from(KeyCode::Char('y'));
+        let mut modal = fresh_command_modal("ls");
+        render_to_string(&modal, 40, modal.height(40, 40));
+        let just_inside = TYPE_AHEAD_GUARD
+            .checked_sub(Duration::from_millis(1))
+            .unwrap();
+        for _ in 0..2 {
+            tokio::time::advance(just_inside).await;
+            let outcome = modal.handle_key(&y);
+            assert!(matches!(outcome, ModalKey::Consumed));
+        }
+
+        tokio::time::advance(TYPE_AHEAD_GUARD).await;
+        let outcome = modal.handle_key(&y);
+        assert!(matches!(outcome, ModalKey::Submitted(_)), "{outcome:?}");
     }
 
     #[test]
@@ -1151,8 +1167,8 @@ mod tests {
         assert_eq!(modal.height(60, 40), height - 1);
     }
 
-    #[test]
-    fn enter_waits_for_the_guard_and_a_render_that_shows_the_whole_editor() {
+    #[tokio::test(start_paused = true)]
+    async fn enter_waits_for_the_guard_and_a_render_that_shows_the_whole_editor() {
         let mut modal = granted_modal("cargo test");
         modal.handle_key(&KeyEvent::from(KeyCode::Char('a')));
         render_to_string(&modal, 60, modal.height(60, 40));
@@ -1162,7 +1178,7 @@ mod tests {
             "an Enter typed right behind the `a` must not grant the rule"
         );
 
-        modal.expire_guard();
+        tokio::time::advance(TYPE_AHEAD_GUARD).await;
         let cramped = render_to_string(&modal, 60, 5);
         assert!(!cramped.contains("[Enter]"), "{cramped}");
         assert!(matches!(
@@ -1279,8 +1295,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn enter_typed_right_behind_f_does_not_submit_the_feedback() {
+    #[tokio::test(start_paused = true)]
+    async fn enter_typed_right_behind_f_does_not_submit_the_feedback() {
         let mut modal = shown_modal("ls");
         modal.handle_key(&KeyEvent::from(KeyCode::Char('f')));
         render_to_string(&modal, 60, modal.height(60, 40));

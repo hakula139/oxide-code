@@ -8,6 +8,7 @@ use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
 
 use crate::config::StatusLineSegment;
+use crate::tui::now;
 use crate::util::git::{self, PullRequest, PullRequestDetail};
 
 /// Gap between a branch probe finishing and the next one starting. Branch changes outside the
@@ -103,7 +104,7 @@ impl GitProbes {
                 Probe::PullRequest => self.pull_request.as_mut(),
             };
             if let Some(schedule) = schedule {
-                schedule.finish(Instant::now());
+                schedule.finish(now());
             }
             if update.is_some() {
                 return update;
@@ -251,31 +252,30 @@ mod tests {
 
     // ── GitProbes::recv ──
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn recv_reschedules_only_the_probe_that_finished() {
-        let now = Instant::now();
-        let mut probes = GitProbes::new(None, PULL_REQUEST, now);
-        assert!(probes.branch.start(now + BRANCH_REFRESH_INTERVAL));
-        assert!(probes.pull_request.as_mut().unwrap().start(now));
+        let start = now();
+        let mut probes = GitProbes::new(None, PULL_REQUEST, start);
+        assert!(probes.branch.start(start + BRANCH_REFRESH_INTERVAL));
+        assert!(probes.pull_request.as_mut().unwrap().start(start));
 
-        let before = Instant::now();
+        tokio::time::advance(Duration::from_secs(1)).await;
         probes.inject(GitUpdate::Branch(Some("main".to_owned())));
         assert_eq!(
             probes.recv().await,
             Some(GitUpdate::Branch(Some("main".to_owned())))
         );
-        let branch_due = probes.branch.next_due.expect("branch rescheduled");
-        assert!(before + BRANCH_REFRESH_INTERVAL <= branch_due);
-        assert!(branch_due <= Instant::now() + BRANCH_REFRESH_INTERVAL);
+        let branch_due = now() + BRANCH_REFRESH_INTERVAL;
+        assert_eq!(probes.branch.next_due, Some(branch_due));
         assert_eq!(probes.pull_request.as_ref().unwrap().next_due, None);
 
-        let before = Instant::now();
+        tokio::time::advance(Duration::from_secs(1)).await;
         probes.inject(GitUpdate::PullRequest(None));
         assert_eq!(probes.recv().await, Some(GitUpdate::PullRequest(None)));
-        let due = probes.pull_request.unwrap().next_due;
-        let due = due.expect("pull request rescheduled");
-        assert!(before + PULL_REQUEST_REFRESH_INTERVAL <= due);
-        assert!(due <= Instant::now() + PULL_REQUEST_REFRESH_INTERVAL);
+        assert_eq!(
+            probes.pull_request.unwrap().next_due,
+            Some(now() + PULL_REQUEST_REFRESH_INTERVAL)
+        );
         assert_eq!(probes.branch.next_due, Some(branch_due));
     }
 
