@@ -44,6 +44,7 @@ CI runs on pushes to `main`, pull requests, and manual dispatch, and the release
 | Rust Check       | `cargo fmt --all --check` and `cargo clippy --all-targets -- -D warnings`     |
 | Dependency Check | `cargo deny check licenses advisories sources bans`                           |
 | MSRV Check       | `cargo hack check --rust-version` against `rust-version`                      |
+| macOS Check      | Clippy and the test suite on macOS                                            |
 | Windows Check    | Clippy and the test suite on Windows                                          |
 | Coverage         | The test suite under `cargo llvm-cov`, uploaded to Codecov                    |
 | Nix Build        | The package build on Linux and macOS, which runs the tests and `ox --version` |
