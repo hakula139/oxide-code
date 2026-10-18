@@ -149,7 +149,7 @@ impl App {
         }
         let visible = self.pending_prompts.len().min(PREVIEW_VISIBLE);
         let overflow = usize::from(self.pending_prompts.len() > PREVIEW_VISIBLE);
-        u16::try_from(visible + overflow).unwrap_or(u16::MAX)
+        saturating_u16(visible + overflow)
     }
 
     fn render_preview(&self, frame: &mut ratatui::Frame<'_>, area: ratatui::layout::Rect) {

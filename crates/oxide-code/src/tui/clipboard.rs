@@ -6,7 +6,7 @@
 use std::ffi::{OsStr, OsString};
 use std::fmt;
 use std::process::Stdio;
-use std::sync::{Arc, Mutex, PoisonError};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use base64::Engine as _;
@@ -14,6 +14,9 @@ use base64::engine::general_purpose::STANDARD;
 use tokio::io::AsyncWriteExt as _;
 use tokio::process::Command;
 use tokio::sync::mpsc;
+
+use crate::util::env;
+use crate::util::sync::lock_or_recover;
 
 /// Largest selection sent through tmux or OSC 52, in bytes, matching xterm's default cap.
 const MAX_TERMINAL_COPY_BYTES: usize = 100_000;
@@ -67,16 +70,15 @@ pub(super) struct Environment {
 
 impl Environment {
     pub(super) fn detect() -> Self {
-        let var = |name| std::env::var(name).ok().filter(|value| !value.is_empty());
-        let tmux = var("TMUX").is_some();
+        let tmux = env::string("TMUX").is_some();
         Self {
-            local: var("SSH_CONNECTION").is_none() && var("SSH_TTY").is_none(),
+            local: env::string("SSH_CONNECTION").is_none() && env::string("SSH_TTY").is_none(),
             tmux,
-            screen: !tmux && var("STY").is_some(),
+            screen: !tmux && env::string("STY").is_some(),
             terminal: Terminal::from_vars(
-                var("TERM_PROGRAM").as_deref(),
-                var("LC_TERMINAL").as_deref(),
-                var("TERM").as_deref(),
+                env::string("TERM_PROGRAM").as_deref(),
+                env::string("LC_TERMINAL").as_deref(),
+                env::string("TERM").as_deref(),
             ),
         }
     }
@@ -290,7 +292,7 @@ async fn write_native(
     text: Arc<str>,
 ) -> Result<(), String> {
     tokio::task::spawn_blocking(move || {
-        let mut native = native.lock().unwrap_or_else(PoisonError::into_inner);
+        let mut native = lock_or_recover(&native, "native clipboard");
         let clipboard = match &mut *native {
             Some(clipboard) => clipboard,
             None => native.insert(arboard::Clipboard::new().map_err(|e| e.to_string())?),

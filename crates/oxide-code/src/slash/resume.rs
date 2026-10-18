@@ -757,8 +757,8 @@ mod tests {
             3,
             "row must paint title + meta + trailing blank"
         );
-        let title_text: String = lines[0].spans.iter().map(|s| s.content.as_ref()).collect();
-        let meta_text: String = lines[1].spans.iter().map(|s| s.content.as_ref()).collect();
+        let title_text = lines[0].to_string();
+        let meta_text = lines[1].to_string();
         assert!(title_text.contains("Fix auth"), "title row: {title_text}");
         assert!(
             meta_text.contains(&row.session_id[..8]),
@@ -838,7 +838,7 @@ mod tests {
         );
         let row = SessionRow::from_info(info, UtcOffset::UTC, true);
         let lines = row.render(80, false, &Theme::default());
-        let meta: String = lines[1].spans.iter().map(|s| s.content.as_ref()).collect();
+        let meta = lines[1].to_string();
         assert!(meta.contains("14 msgs"), "plural msgs: {meta}");
         assert!(meta.contains("feat/login"), "branch: {meta}");
 
@@ -852,7 +852,7 @@ mod tests {
         );
         let row = SessionRow::from_info(single, UtcOffset::UTC, false);
         let lines = row.render(80, false, &Theme::default());
-        let meta: String = lines[1].spans.iter().map(|s| s.content.as_ref()).collect();
+        let meta = lines[1].to_string();
         assert!(meta.contains("1 msg"), "singular: {meta}");
         assert!(!meta.contains("1 msgs"), "no `1 msgs` plural slip: {meta}");
     }
@@ -868,7 +868,7 @@ mod tests {
         );
         let row = SessionRow::from_info(info, UtcOffset::UTC, false);
         let lines = row.render(60, false, &Theme::default());
-        let meta: String = lines[1].spans.iter().map(|s| s.content.as_ref()).collect();
+        let meta = lines[1].to_string();
         assert!(
             !meta.contains("msgs"),
             "no count when exit is missing: {meta}"

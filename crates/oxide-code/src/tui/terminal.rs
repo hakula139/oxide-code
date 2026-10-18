@@ -2,7 +2,7 @@
 
 use std::fmt;
 use std::io::{self, Stdout, Write};
-use std::sync::{Mutex, PoisonError};
+use std::sync::Mutex;
 
 use anyhow::Result;
 use crossterm::cursor::{RestorePosition, SavePosition};
@@ -18,6 +18,7 @@ use ratatui::Terminal;
 use ratatui::prelude::{CrosstermBackend, IntoCrossterm};
 
 use super::components::status::StatusHyperlink;
+use crate::util::sync::lock_or_recover;
 
 pub(crate) type Tui = Terminal<CrosstermBackend<Stdout>>;
 
@@ -104,7 +105,7 @@ fn write_sgr_mouse(out: &mut impl Write, enable: bool) -> io::Result<()> {
 /// Marks the terminal restored and drains the deferred panic reports into `out`, one per line.
 fn write_deferred_panics(deferred: &Mutex<DeferredPanics>, out: &mut impl Write) -> io::Result<()> {
     let reports = {
-        let mut deferred = deferred.lock().unwrap_or_else(PoisonError::into_inner);
+        let mut deferred = lock_or_recover(deferred, "deferred panics");
         deferred.restored = true;
         std::mem::take(&mut deferred.reports)
     };
@@ -219,7 +220,7 @@ fn route_panic(
     thread_name: Option<&str>,
     panic_info: &dyn fmt::Display,
 ) -> PanicRoute {
-    let mut deferred = deferred.lock().unwrap_or_else(PoisonError::into_inner);
+    let mut deferred = lock_or_recover(deferred, "deferred panics");
     if deferred.restored {
         return PanicRoute::Print;
     }

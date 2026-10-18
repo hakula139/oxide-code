@@ -134,12 +134,7 @@ mod tests {
     fn all_text(lines: &[Line<'_>]) -> String {
         lines
             .iter()
-            .map(|l| {
-                l.spans
-                    .iter()
-                    .map(|s| s.content.as_ref())
-                    .collect::<String>()
-            })
+            .map(ToString::to_string)
             .collect::<Vec<_>>()
             .join("\n")
     }
