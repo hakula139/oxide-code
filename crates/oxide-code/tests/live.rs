@@ -404,6 +404,7 @@ fn assert_reads_cached_prefix(earlier: &Value, later: &Value) {
     let cached =
         tokens(earlier, "cache_creation_input_tokens") + tokens(earlier, "cache_read_input_tokens");
     let read = tokens(later, "cache_read_input_tokens");
+    assert!(cached > 0, "earlier request cached no tokens: {earlier}");
     assert!(
         read >= cached,
         "read {read} cached tokens after an earlier request cached {cached}: {earlier} → {later}"
