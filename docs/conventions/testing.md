@@ -1,6 +1,6 @@
 # Testing
 
-Conventions for tests, coverage, mutation testing, and live tests.
+Conventions for tests, their environment, timing, coverage, mutation testing, and live tests.
 
 ## Placement
 
@@ -19,6 +19,19 @@ Conventions for tests, coverage, mutation testing, and live tests.
 - Use generic, fictional test data such as `example.com` and `/repo`. Use real names and branded content only when the code under test matches on them, as with model IDs.
 - Use established infrastructure: `wiremock` for HTTP, `temp-env` to isolate environment variables, `TestBackend` with `insta` for TUI snapshots, and extracted trait fakes for dependencies that are difficult to mock.
 - Tests share one process environment, and `temp-env` serializes only code inside its closures. A read outside a closure can therefore see another test's temporary value. If a test's result depends on a variable that other tests set, such as the home directory or `XDG_DATA_HOME`, run it inside a `temp-env` closure that pins the variable. Pin the home directory through `HOME_VAR` in `util::path::testing`, because Windows reads `USERPROFILE`. Types constructed by many tests should take environment-derived values as arguments, as `Client::new` does with the device ID loaded by `main`.
+
+## Hermetic Tests
+
+Every test must run and pass wherever the suite runs: on each supported OS, in CI, and in the Nix build sandbox, which has no network access or system services such as macOS trustd. Never skip, `#[ignore]`, retry, or `cfg`-gate a test to get it past its environment. Restructure tests that depend on their environment until they pass everywhere. For example, move the dependency behind a trait fake, as `util::tls` does for the Security framework, or pin what the test reads. Use a platform `cfg` gate only for a test of code that exists only on that platform.
+
+The [live tests](#live-tests) are the sole exception because they send paid requests to a real endpoint.
+
+## Time
+
+- Drive timers with `#[tokio::test(start_paused = true)]` and the production constants. Tokio advances the paused clock through each `sleep`, making the test deterministic and independent of wall-clock time.
+- Never swap a timing constant under `cfg(test)`, since the tests would then exercise values the binary never ships.
+- Never sleep to order events or assert on elapsed time. Wait for the event itself through a channel or returned handle.
+- Paused time cannot drive a test waiting on a child process because the paused clock stops advancing while a blocking-pool task runs, and on Windows Tokio reads child pipes on that pool. Have the code under test take its deadline as a future that the test completes when an event is observable, or poll with a bounded deadline for a condition caused by the child, such as a file it writes. `tool::bash` does both, through `execute_until` and the PID helpers in its `testing` module.
 
 ## Assertions
 
