@@ -8,6 +8,7 @@ use super::confirm::ConfirmDeleteSessionModal;
 use super::context::SlashContext;
 use super::registry::{SlashCommand, SlashKind, SlashOutcome};
 use super::sessions::{open_store, resolve_error_message};
+use crate::command;
 use crate::session::display::{display_title, format_metadata_line};
 use crate::session::entry::SessionInfo;
 use crate::session::resolver::resolve_saved_prefix;
@@ -42,9 +43,11 @@ impl SlashCommand for DeleteCmd {
     fn execute(&self, args: &str, ctx: &SlashContext<'_>) -> Result<SlashOutcome, String> {
         let arg = args.trim();
         if arg.is_empty() {
-            return Err("Missing session ID. \
-                        Usage: `/delete <id-prefix>`, or press Ctrl+D in the `/resume` picker."
-                .to_owned());
+            return Err(command::missing(
+                "session ID",
+                "/delete <id-prefix>",
+                Some("press Ctrl+D in the `/resume` picker"),
+            ));
         }
         let store = open_store(ctx.info)?;
         let live_id = ctx.info.session_id.as_str();

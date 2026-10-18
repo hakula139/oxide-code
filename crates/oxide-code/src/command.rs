@@ -117,13 +117,22 @@ pub(crate) fn resume(prefix: &str) -> Result<Op, String> {
     })
 }
 
-/// The trimmed `arg`, or an error naming the missing `what` and the form's `usage`.
+/// The trimmed `arg`, or the [`missing`] error for `what` and the form's `usage`.
 fn required<'a>(arg: &'a str, what: &str, usage: &str) -> Result<&'a str, String> {
     let arg = arg.trim();
     if arg.is_empty() {
-        return Err(format!("Missing {what}. Usage: `{usage}`."));
+        return Err(missing(what, usage, None));
     }
     Ok(arg)
+}
+
+/// The error for a form typed without its `what` argument, pointing at its `usage` and, when
+/// given, an `alternative` that needs no argument.
+pub(crate) fn missing(what: &str, usage: &str, alternative: Option<&str>) -> String {
+    let alternative = alternative
+        .map(|alt| format!(", or {alt}"))
+        .unwrap_or_default();
+    format!("Missing {what}. Usage: `{usage}`{alternative}.")
 }
 
 /// Markdown bullet list of `id — display name` rows.
