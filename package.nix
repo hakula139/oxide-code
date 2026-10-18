@@ -1,22 +1,19 @@
 {
+  lib,
   cacert,
   git,
-  lib,
   rustPlatform,
   stdenv,
   versionCheckHook,
 }:
 
-let
-  fs = lib.fileset;
-in
 rustPlatform.buildRustPackage {
-  pname = "oxide-code";
   inherit ((lib.importTOML ./Cargo.toml).workspace.package) version;
+  pname = "oxide-code";
 
-  src = fs.toSource {
+  src = lib.fileset.toSource {
     root = ./.;
-    fileset = fs.unions [
+    fileset = lib.fileset.unions [
       ./Cargo.toml
       ./Cargo.lock
       ./crates
@@ -24,7 +21,7 @@ rustPlatform.buildRustPackage {
   };
   cargoLock.lockFile = ./Cargo.lock;
 
-  # The wiremock tests bind 127.0.0.1, which the darwin sandbox denies by default.
+  # Tests bind loopback ports, which the darwin sandbox denies by default.
   __darwinAllowLocalNetworking = true;
 
   # Tests run `git init`, which needs a writable HOME, and build TLS clients that load the
