@@ -136,6 +136,11 @@ impl<T: SearchableItem> SearchableList<T> {
         self.cursor
     }
 
+    /// Rows loaded, whether or not they pass the filter.
+    pub(crate) fn len(&self) -> usize {
+        self.items.len()
+    }
+
     /// Rows currently passing the filter, for match-count footers.
     pub(crate) fn visible_len(&self) -> usize {
         self.visible.len()
