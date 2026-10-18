@@ -28,12 +28,10 @@ const MAX_TOKENS: u32 = 1_024;
 /// Clamp on the prompt. Long first messages with pasted code stay cheap to title.
 const MAX_PROMPT_CHARS: usize = 1_000;
 
-/// Title prompt. The paired JSON-schema output format ([`title_output_format`]) enforces
-/// the `{"title": ...}` shape regardless of how the model would otherwise respond.
+/// Title prompt. The paired JSON-schema output format ([`title_output_format`]) enforces the
+/// `{"title": ...}` shape regardless of how the model would otherwise respond.
 const SYSTEM_PROMPT: &str = indoc! {r#"
-    Generate a concise, sentence-case title (3-7 words) that captures the main topic or goal of this
-    coding session. The title should be clear enough that the user recognizes the session in a list.
-    Use sentence case: capitalize only the first word and proper nouns.
+    Generate a concise, sentence-case title (3-7 words) that captures the main topic or goal of this coding session. The title should be clear enough that the user recognizes the session in a list. Use sentence case: capitalize only the first word and proper nouns.
 
     Return JSON with a single "title" field.
 
@@ -45,8 +43,8 @@ const SYSTEM_PROMPT: &str = indoc! {r#"
 
     Bad (too vague): {"title": "Code changes"}
     Bad (too long): {"title": "Investigate and fix why the mobile login button no longer responds"}
-    Bad (wrong case): {"title": "Fix Login Button On Mobile"}
-"#};
+    Bad (wrong case): {"title": "Fix Login Button On Mobile"}"#
+};
 
 // ── Public API ──
 
