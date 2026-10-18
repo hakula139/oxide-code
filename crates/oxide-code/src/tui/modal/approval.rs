@@ -14,12 +14,12 @@ use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 
+use super::line_editor::LineEditor;
+use super::{Modal, ModalAction, ModalKey, is_plain_char};
 use crate::permission::SessionGrant;
 use crate::protocol::{Decision, Op};
 use crate::tool::{ApprovalBody, ApprovalPreview, DiffChunk};
 use crate::tui::action::Action;
-use crate::tui::modal::line_editor::LineEditor;
-use crate::tui::modal::{Modal, ModalAction, ModalKey, is_plain_char};
 use crate::tui::theme::Theme;
 use crate::tui::wrap::{expand_tabs, wrap_line};
 use crate::tui::{now, saturating_u16};
@@ -636,6 +636,7 @@ mod tests {
     use crate::permission::rule::Rule;
     use crate::permission::{Access, PermissionClass, Policy, Workspace};
     use crate::tool::DiffLine;
+    use crate::tui::modal::ModalStack;
     use crate::tui::modal::testing::render_rows;
 
     fn fresh_command_modal(command: &str) -> ApprovalModal {
@@ -1243,7 +1244,7 @@ mod tests {
             let choice = render_to_string(&modal, 80, modal.height(80, 40));
             assert!(choice.contains("[A] allow for session"), "{choice}");
 
-            let mut stack = crate::tui::modal::ModalStack::default();
+            let mut stack = ModalStack::default();
             modal.expire_guard();
             modal.handle_key(&KeyEvent::from(KeyCode::Char(opener)));
             stack.push(Box::new(modal));

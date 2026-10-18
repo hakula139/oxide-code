@@ -5,9 +5,17 @@ use std::io::{self, Stdout, Write};
 use std::sync::Mutex;
 
 use anyhow::Result;
+#[cfg(windows)]
+use anyhow::ensure;
+#[cfg(windows)]
+use crossterm::ansi_support::supports_ansi;
 use crossterm::cursor::{MoveTo, RestorePosition, SavePosition, Show};
 use crossterm::event::{
     DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
+};
+#[cfg(not(windows))]
+use crossterm::event::{
+    KeyboardEnhancementFlags, PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
 };
 use crossterm::style::{
     Attribute, ContentStyle, Print, SetAttribute, SetAttributes, SetBackgroundColor,
@@ -20,6 +28,7 @@ use crossterm::{Command, execute, queue};
 use ratatui::Terminal;
 use ratatui::backend::Backend;
 use ratatui::prelude::{CrosstermBackend, IntoCrossterm};
+use tracing::error;
 
 use super::components::status::{HyperlinkCell, StatusHyperlink};
 use crate::util::sync::lock_or_recover;
@@ -39,8 +48,8 @@ pub(crate) fn init() -> Result<Tui> {
     // Besides answering, the check turns on the console's escape-sequence processing, which every
     // sequence the TUI writes relies on.
     #[cfg(windows)]
-    anyhow::ensure!(
-        crossterm::ansi_support::supports_ansi(),
+    ensure!(
+        supports_ansi(),
         "the terminal does not support ANSI escape sequences"
     );
     enable_raw_mode()?;
@@ -71,7 +80,6 @@ fn enter_tui_mode(stdout: &mut impl Write) -> Result<()> {
     // It captures the Windows mouse through the console API instead, so `init` enables it there.
     #[cfg(not(windows))]
     {
-        use crossterm::event::{KeyboardEnhancementFlags, PushKeyboardEnhancementFlags};
         let flags = KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES;
         queue!(
             stdout,
@@ -102,11 +110,7 @@ pub(crate) fn restore() {
 fn leave_tui_mode(stdout: &mut impl Write) -> Result<()> {
     queue!(stdout, Ansi(DisableBracketedPaste))?;
     #[cfg(not(windows))]
-    queue!(
-        stdout,
-        crossterm::event::PopKeyboardEnhancementFlags,
-        DisableMouseCapture
-    )?;
+    queue!(stdout, PopKeyboardEnhancementFlags, DisableMouseCapture)?;
     execute!(stdout, Ansi(LeaveAlternateScreen), Ansi(Show))?;
     Ok(())
 }
@@ -296,7 +300,7 @@ fn route_panic(
     );
     deferred.reports.push(report.clone());
     drop(deferred);
-    tracing::error!("{report}");
+    error!("{report}");
     PanicRoute::Deferred
 }
 
@@ -412,6 +416,7 @@ pub(super) mod testing {
 
 #[cfg(test)]
 mod tests {
+    use anyhow::anyhow;
     use indoc::indoc;
     use ratatui::layout::Rect;
     use ratatui::style::{Color, Modifier, Style};
@@ -576,7 +581,7 @@ mod tests {
     fn synchronized_update_ends_the_update_when_the_closure_fails() {
         let mut terminal = capture_terminal(4, 1);
 
-        let result = synchronized_update(&mut terminal, |_| Err(anyhow::anyhow!("draw failed")));
+        let result = synchronized_update(&mut terminal, |_| Err(anyhow!("draw failed")));
 
         assert_eq!(result.unwrap_err().to_string(), "draw failed");
         assert_eq!(

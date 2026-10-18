@@ -1,19 +1,19 @@
 //! Theme palette and style helpers.
 
+pub(crate) mod builtin;
+mod color;
+mod loader;
+
+pub(crate) use loader::resolve_theme;
+
 use std::sync::LazyLock;
 
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::Span;
 use syntect::highlighting::Theme as SyntaxTheme;
 
+use super::glyphs::SEGMENT_SEPARATOR;
 use crate::tool::tasks::TaskStatus;
-use crate::tui::glyphs::SEGMENT_SEPARATOR;
-
-pub(crate) mod builtin;
-mod color;
-mod loader;
-
-pub(crate) use loader::resolve_theme;
 
 /// Parses the built-in theme `name`, such as `mocha` or `latte`. `None` for an unknown name.
 /// Panics if the vendored TOML fails to parse, which `parse_theme_all_builtins` rules out.

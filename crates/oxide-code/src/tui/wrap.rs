@@ -254,12 +254,9 @@ fn expand_tabs_from(s: &str, col: &mut usize) -> String {
 
 #[cfg(test)]
 mod tests {
-    use ratatui::style::{Color, Modifier, Style};
-    use ratatui::text::{Line, Span};
+    use ratatui::style::{Color, Modifier};
 
-    use super::{
-        expand_tabs, expand_tabs_in_spans, longest_word_width, wrap_line, wrap_line_keeping_lead,
-    };
+    use super::*;
 
     fn texts(lines: &[Line<'_>]) -> Vec<String> {
         lines.iter().map(ToString::to_string).collect()

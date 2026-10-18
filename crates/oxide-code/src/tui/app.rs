@@ -12,6 +12,7 @@ mod render;
 mod testing;
 
 use std::collections::VecDeque;
+use std::io;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
@@ -64,7 +65,7 @@ pub(crate) struct App {
     events: mpsc::UnboundedReceiver<Event>,
     ops: mpsc::Sender<Op>,
     /// Opens a URL in the system browser. Tests replace it so they never launch one.
-    open_browser: fn(&str) -> std::io::Result<()>,
+    open_browser: fn(&str) -> io::Result<()>,
     /// Status-bar links of the last frame, which a plain left click opens.
     status_links: Vec<StatusHyperlink>,
     clipboard: Clipboard,
@@ -188,7 +189,7 @@ impl App {
     ) -> Result<()>
     where
         B: TuiBackend,
-        S: Stream<Item = std::io::Result<CrosstermEvent>> + Unpin,
+        S: Stream<Item = io::Result<CrosstermEvent>> + Unpin,
     {
         let mut tick = tokio::time::interval(TICK_INTERVAL);
         tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -240,8 +241,6 @@ impl App {
 
 #[cfg(test)]
 mod tests {
-    use std::io;
-
     use crossterm::event::{KeyCode, KeyModifiers};
 
     use super::testing::{rendered_text, test_app, test_session_info};
@@ -331,7 +330,7 @@ mod tests {
 
         app.run_with_events(
             &mut terminal,
-            futures::stream::pending::<std::io::Result<CrosstermEvent>>(),
+            futures::stream::pending::<io::Result<CrosstermEvent>>(),
         )
         .await
         .unwrap();
@@ -357,7 +356,7 @@ mod tests {
 
         app.run_with_events(
             &mut terminal,
-            futures::stream::pending::<std::io::Result<CrosstermEvent>>(),
+            futures::stream::pending::<io::Result<CrosstermEvent>>(),
         )
         .await
         .unwrap();
@@ -412,7 +411,7 @@ mod tests {
 
         app.run_with_events(
             &mut terminal,
-            futures::stream::pending::<std::io::Result<CrosstermEvent>>(),
+            futures::stream::pending::<io::Result<CrosstermEvent>>(),
         )
         .await
         .unwrap();

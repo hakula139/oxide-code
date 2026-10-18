@@ -7,8 +7,8 @@ use std::time::{Duration, Instant};
 
 use tokio::sync::mpsc;
 
+use super::now;
 use crate::config::StatusLineSegment;
-use crate::tui::now;
 use crate::util::git::{self, PullRequest, PullRequestDetail};
 
 /// Gap between a branch probe finishing and the next one starting. Branch changes outside the

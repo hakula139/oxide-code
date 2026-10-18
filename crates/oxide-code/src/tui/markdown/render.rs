@@ -904,8 +904,8 @@ mod tests {
     use indoc::indoc;
     use ratatui::style::{Color, Stylize};
 
-    use super::super::render_markdown;
     use super::*;
+    use crate::tui::markdown::render_markdown;
 
     fn theme() -> Theme {
         Theme::default()

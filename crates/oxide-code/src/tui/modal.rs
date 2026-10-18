@@ -10,15 +10,17 @@ pub(crate) mod line_editor;
 pub(crate) mod list_picker;
 pub(crate) mod searchable_list;
 
+use std::fmt;
+
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::Frame;
 use ratatui::layout::Rect;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 
-use crate::tui::action::Action;
-use crate::tui::glyphs::HORIZONTAL_RULE;
-use crate::tui::theme::Theme;
+use super::action::Action;
+use super::glyphs::HORIZONTAL_RULE;
+use super::theme::Theme;
 
 const TOP_BORDER_HEIGHT: u16 = 1;
 
@@ -75,8 +77,8 @@ pub(crate) enum ModalKey {
 }
 
 /// Hand-rolled because `Box<dyn Modal>` can't derive `Debug` without forcing every impl to.
-impl std::fmt::Debug for ModalKey {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl fmt::Debug for ModalKey {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Consumed => f.write_str("Consumed"),
             Self::Cancelled => f.write_str("Cancelled"),
@@ -322,7 +324,6 @@ pub(crate) mod testing {
         fn render(&self, _frame: &mut Frame<'_>, _area: Rect, _theme: &Theme) {}
 
         fn handle_key(&mut self, event: &KeyEvent) -> ModalKey {
-            use crossterm::event::KeyCode;
             match event.code {
                 KeyCode::Char(c) if c == self.on_submit_key => ModalKey::Submitted(
                     std::mem::replace(&mut self.submit_action, ModalAction::Cancelled),
@@ -359,8 +360,7 @@ pub(crate) mod testing {
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
-
-    use crossterm::event::KeyCode;
+    use std::sync::atomic::Ordering;
 
     use super::testing::{ScriptedModal, render_rows_with};
     use super::*;
@@ -725,8 +725,6 @@ mod tests {
 
     #[test]
     fn handle_key_pop_notifies_underlying_top_via_on_focus_regained() {
-        use std::sync::atomic::Ordering;
-
         for (label, exit_key) in [
             ("Esc universal-cancel", KeyEvent::from(KeyCode::Esc)),
             (
