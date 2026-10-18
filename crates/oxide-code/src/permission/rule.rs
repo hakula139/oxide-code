@@ -218,7 +218,9 @@ impl Rule {
                 .collect()
         };
         for literal in literals {
-            let Some(target) = resolve(&literal).filter(|t| *t != lexical_normalize(&literal))
+            let Some(target) = resolve(&literal)
+                .ok()
+                .filter(|t| *t != lexical_normalize(&literal))
             else {
                 continue;
             };

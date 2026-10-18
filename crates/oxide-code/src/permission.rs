@@ -13,6 +13,7 @@ pub(crate) mod shell;
 
 use std::ffi::{OsStr, OsString};
 use std::fmt;
+use std::io;
 use std::path::{Component, Path, PathBuf};
 use std::str::FromStr;
 use std::sync::{Arc, LazyLock};
@@ -188,7 +189,7 @@ struct Anchor {
 impl Workspace {
     /// The workspace launched in `cwd` with no extra roots.
     pub(crate) fn new(cwd: &Path) -> Self {
-        let resolved = resolve(cwd);
+        let resolved = resolve(cwd).ok();
         Self {
             cwd: cwd.to_path_buf(),
             roots: resolved
@@ -263,10 +264,9 @@ pub(crate) fn extra_root(raw: &str) -> Result<PathBuf> {
         root.is_absolute(),
         "invalid extra root {raw:?}: expected an absolute or `~/` path"
     );
-    let Some(root) = resolve(&root) else {
-        bail!(
-            "invalid extra root {raw:?}: it runs through a symlink loop or an unreadable directory"
-        );
+    let root = match resolve(&root) {
+        Ok(root) => root,
+        Err(unreachable) => bail!("invalid extra root {raw:?}: {unreachable}"),
     };
     ensure!(
         is_workspace(&root),
@@ -361,7 +361,7 @@ impl Access {
     pub(crate) fn for_path(path: &str, workspace: &Workspace) -> Self {
         let joined = workspace.cwd().join(path);
         let requested = lexical_normalize(&joined);
-        let resolved = resolve(&joined);
+        let resolved = resolve(&joined).ok();
         let cwd = workspace.resolved_cwd();
         let relative = resolved.as_deref().and_then(|r| relative_to(r, cwd));
         let rooted = resolved.as_deref().map_or_else(Vec::new, |r| {
@@ -476,20 +476,45 @@ fn relative_to_folded(path: &Path, base: &[String]) -> Option<String> {
 /// Symlinks followed while resolving one path before it counts as a loop, Linux's `MAXSYMLINKS`.
 const MAX_SYMLINK_HOPS: usize = 40;
 
+/// Why [`resolve`] cannot place a path, naming the component where the walk stopped.
+#[derive(Debug)]
+enum Unreachable {
+    /// The symlink whose hop exceeded [`MAX_SYMLINK_HOPS`].
+    Loop(PathBuf),
+    /// A component the walk could not step through, and why.
+    Component { at: PathBuf, error: io::Error },
+}
+
+impl fmt::Display for Unreachable {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Loop(link) => write!(f, "`{}` is in a symlink loop", link.display()),
+            Self::Component { at, error } => match error.kind() {
+                io::ErrorKind::NotADirectory => write!(f, "`{}` is not a directory", at.display()),
+                io::ErrorKind::PermissionDenied => {
+                    let dir = at.parent().unwrap_or(at);
+                    write!(f, "cannot search `{}`", dir.display())
+                }
+                _ => write!(f, "cannot reach `{}`: {error}", at.display()),
+            },
+        }
+    }
+}
+
 /// Resolves `path` to the location a tool will touch, walking it one component at a time the way
 /// the kernel does. Every existing symlink is followed, a dangling one included since `open`
 /// follows it too, and `..` steps back from wherever the walk stands. Past the first missing
-/// component nothing exists yet, so the rest applies as `create_dir_all` builds it. `None` when a
-/// symlink loop or an unreachable component, such as one under a file or an unreadable directory,
-/// leaves the location unknown.
-fn resolve(path: &Path) -> Option<PathBuf> {
+/// component nothing exists yet, so the rest applies as `create_dir_all` builds it. It fails where
+/// the kernel would: at a symlink loop, a directory it cannot search, or a file that more
+/// components follow.
+fn resolve(path: &Path) -> Result<PathBuf, Unreachable> {
+    let absolute = std::path::absolute(path).map_err(|error| Unreachable::Component {
+        at: path.to_path_buf(),
+        error,
+    })?;
     let mut resolved = PathBuf::new();
     let mut pending = Vec::new();
-    enqueue(
-        &std::path::absolute(path).ok()?,
-        &mut resolved,
-        &mut pending,
-    );
+    enqueue(&absolute, &mut resolved, &mut pending);
     let mut hops = 0;
 
     while let Some(name) = pending.pop() {
@@ -502,26 +527,46 @@ fn resolve(path: &Path) -> Option<PathBuf> {
             Ok(meta) if meta.is_symlink() => {
                 hops += 1;
                 if hops > MAX_SYMLINK_HOPS {
-                    return None;
+                    return Err(Unreachable::Loop(resolved));
                 }
-                let target = std::fs::read_link(&resolved).ok()?;
+                let target = match std::fs::read_link(&resolved) {
+                    Ok(target) => target,
+                    Err(error) => {
+                        return Err(Unreachable::Component {
+                            at: resolved,
+                            error,
+                        });
+                    }
+                };
                 _ = resolved.pop();
                 enqueue(&target, &mut resolved, &mut pending);
             }
-            Err(e) if e.kind() != std::io::ErrorKind::NotFound => return None,
+            Ok(meta) if !meta.is_dir() && !pending.is_empty() => {
+                return Err(Unreachable::Component {
+                    at: resolved,
+                    error: io::ErrorKind::NotADirectory.into(),
+                });
+            }
+            Err(error) if error.kind() != io::ErrorKind::NotFound => {
+                return Err(Unreachable::Component {
+                    at: resolved,
+                    error,
+                });
+            }
             _ => {}
         }
     }
 
     #[cfg(windows)]
     let resolved = long_names(resolved, Path::canonicalize);
-    Some(resolved)
+    Ok(resolved)
 }
 
-/// `path` with its existing part spelled as `canonicalize` names it, with 8.3 short names in full
-/// and NTFS stream suffixes dropped, so `GIT~1` and `.git::$INDEX_ALLOCATION` compare as `.git`.
+/// `path` with its deepest existing ancestor respelled as `canonicalize` names it and the rest
+/// kept. Windows canonicalization spells 8.3 short names in full and drops NTFS stream suffixes, so
+/// `GIT~1` and `.git::$INDEX_ALLOCATION` compare as `.git`.
 #[cfg(windows)]
-fn long_names(path: PathBuf, canonicalize: impl Fn(&Path) -> std::io::Result<PathBuf>) -> PathBuf {
+fn long_names(path: PathBuf, canonicalize: impl Fn(&Path) -> io::Result<PathBuf>) -> PathBuf {
     path.ancestors()
         .find_map(|existing| {
             let long = canonicalize(existing).ok()?;
@@ -1477,9 +1522,48 @@ mod tests {
         assert_eq!(
             err.to_string(),
             format!(
-                "invalid extra root {raw:?}: \
-                 it runs through a symlink loop or an unreadable directory"
+                "invalid extra root {raw:?}: `{}` is in a symlink loop",
+                looped.display()
             ),
+        );
+    }
+
+    #[test]
+    fn workspace_resolve_rejects_an_extra_root_under_a_file() {
+        let (_dir, base) = temp_cwd();
+        let notes = base.join("notes");
+        std::fs::write(&notes, "").unwrap();
+        let raw = notes.join("inner").display().to_string();
+
+        let err = Workspace::resolve(&base, std::slice::from_ref(&raw)).unwrap_err();
+
+        assert_eq!(
+            err.to_string(),
+            format!(
+                "invalid extra root {raw:?}: `{}` is not a directory",
+                notes.display()
+            ),
+        );
+    }
+
+    // ── Unreachable ──
+
+    #[test]
+    fn unreachable_names_the_directory_it_cannot_search_and_any_other_cause() {
+        let at = Path::new("locked").join("sub");
+        let denied = Unreachable::Component {
+            at: at.clone(),
+            error: io::ErrorKind::PermissionDenied.into(),
+        };
+        let other = Unreachable::Component {
+            at: at.clone(),
+            error: io::Error::other("disk on fire"),
+        };
+
+        assert_eq!(denied.to_string(), "cannot search `locked`");
+        assert_eq!(
+            other.to_string(),
+            format!("cannot reach `{}`: disk on fire", at.display()),
         );
     }
 
@@ -1926,26 +2010,44 @@ mod tests {
         assert_eq!((relative, zone), (None, Zone::Outside));
     }
 
+    #[test]
+    fn for_path_past_a_file_or_an_overlong_name_keeps_the_joined_spelling() {
+        let (_dir, cwd) = temp_cwd();
+        std::fs::write(cwd.join("notes"), "").unwrap();
+
+        for path in [
+            Path::new("notes").join("sub"),
+            PathBuf::from("a".repeat(256)),
+        ] {
+            let target = Access::for_path(path.to_str().unwrap(), &Workspace::new(&cwd));
+
+            assert_eq!(
+                resolved(&target),
+                (&*cwd.join(&path), None, Zone::Outside),
+                "{path:?}",
+            );
+        }
+    }
+
     #[cfg(unix)]
     #[test]
-    fn for_path_dot_dot_past_an_unreachable_component_is_not_resolved_lexically() {
-        // The kernel cannot step through the file `notes` either, so the target keeps its
-        // spelling and never auto-allows as `link/x`.
+    fn for_path_dot_dot_past_a_file_is_not_resolved_lexically() {
+        // The kernel cannot step back out of the file `notes`, so the target keeps its spelling
+        // and never auto-allows as `x` or `link/x`.
         let (_dir, cwd) = temp_cwd();
         let (_outside_dir, outside) = temp_cwd();
         std::os::unix::fs::symlink(&outside, cwd.join("link")).unwrap();
         std::fs::write(cwd.join("notes"), "").unwrap();
 
-        let target = Access::for_path("notes/sub/../../link/x", &Workspace::new(&cwd));
+        for path in ["notes/../x", "notes/sub/../../link/x"] {
+            let target = Access::for_path(path, &Workspace::new(&cwd));
 
-        assert_eq!(
-            resolved(&target),
-            (
-                cwd.join("notes/sub/../../link/x").as_path(),
-                None,
-                Zone::Outside
-            ),
-        );
+            assert_eq!(
+                resolved(&target),
+                (&*cwd.join(path), None, Zone::Outside),
+                "{path}",
+            );
+        }
     }
 
     #[cfg(windows)]
@@ -1966,13 +2068,20 @@ mod tests {
         let target = Access::for_path(r"secrets-store\key::$DATA", &Workspace::new(&cwd));
         assert_eq!(decide(&p, EDIT, &target), Decision::Deny);
 
-        // A cwd spelled another way is still the home directory, which is never a workspace.
+        // The home directory spelled with a stream suffix is still never a workspace.
         let home = cwd.join("home-directory");
         std::fs::create_dir(&home).unwrap();
         temp_env::with_var(HOME_VAR, Some(&home), || {
-            let cwd = cwd.join("home-directory::$INDEX_ALLOCATION");
-            let target = Access::for_path("notes.md", &Workspace::new(&cwd));
-            assert_eq!(resolved(&target).2, Zone::Outside);
+            let home_alias = cwd.join("home-directory::$INDEX_ALLOCATION");
+            let target = Access::for_path("notes.md", &Workspace::new(&home_alias));
+            assert_eq!(
+                resolved(&target),
+                (
+                    &*home.join("notes.md"),
+                    Some(Path::new("notes.md")),
+                    Zone::Outside
+                ),
+            );
         });
     }
 
@@ -1986,6 +2095,7 @@ mod tests {
                 (r"C:\repo\GIT~1", r"\\?\C:\repo\.git"),
                 (r"C:\repo\SECRET~1\key", r"\\?\C:\repo\secrets-store\key"),
                 (r"S:\GIT~1", r"\\?\C:\work\repo\.git"),
+                (r"Z:\GIT~1", r"\\?\UNC\server\share\.git"),
             ]
             .into_iter()
             .find(|(short, _)| path == Path::new(short))
@@ -1997,6 +2107,7 @@ mod tests {
             (r"C:\repo\GIT~1\config", r"C:\repo\.git\config"),
             (r"C:\repo\SECRET~1\key", r"C:\repo\secrets-store\key"),
             (r"S:\GIT~1\config", r"C:\work\repo\.git\config"),
+            (r"Z:\GIT~1\config", r"Z:\.git\config"),
             (r"C:\new\notes.md", r"C:\new\notes.md"),
         ] {
             assert_eq!(

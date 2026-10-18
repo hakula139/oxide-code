@@ -230,7 +230,7 @@ mod tests {
             assert!(!renamed.exists(), "the matched file is deleted");
             assert!(
                 bystander.exists(),
-                "the file named after the header id survives"
+                "the file named after the header ID survives"
             );
         });
     }
