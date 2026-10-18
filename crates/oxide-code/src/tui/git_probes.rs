@@ -151,12 +151,7 @@ impl Schedule {
 
     /// Claims a due, idle slot. Returns whether the caller should start a run.
     fn start(&mut self, now: Instant) -> bool {
-        if self.next_due.is_some_and(|due| now >= due) {
-            self.next_due = None;
-            true
-        } else {
-            false
-        }
+        self.next_due.take_if(|due| now >= *due).is_some()
     }
 
     fn finish(&mut self, now: Instant) {

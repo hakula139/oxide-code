@@ -1,9 +1,11 @@
-//! Engine and git probe events: chat and status updates, the turn lifecycle they drive, session
-//! swaps, config changes, and sign-in results.
+//! Engine events and background task results: chat and status updates, the turn lifecycle they
+//! drive, session swaps, config changes, sign-in results, git probe updates, and copy reports.
+
+use std::time::Instant;
 
 use indoc::formatdoc;
 
-use super::App;
+use super::{App, COPY_NOTICE_DURATION, CopyNotice};
 use crate::config::auth::AuthSource;
 use crate::config::compaction::AutoCompactionConfig;
 use crate::config::{Effort, display_auto_compaction};
@@ -13,9 +15,11 @@ use crate::protocol::{Event, Interaction, Op};
 use crate::session::display::archive_notice;
 use crate::slash;
 use crate::tool::ApprovalPreview;
+use crate::tui::clipboard::{CopyReport, Delivery};
 use crate::tui::components::status::Status;
 use crate::tui::git_probes::GitUpdate;
 use crate::tui::modal::approval::ApprovalModal;
+use crate::util::text::plural;
 
 impl App {
     pub(super) fn handle_engine_event(&mut self, event: Event) {
@@ -39,9 +43,10 @@ impl App {
             }
             Event::ToolCallEnd(result) => self.chat.push_tool_result(result),
             Event::PromptDrained(text) => self.apply_prompt_drained(text),
+            Event::TurnComplete => self.finish_turn(),
+            Event::TurnFailed(msg) => self.apply_turn_failed(&msg),
             Event::UsageUpdated(usage) => self.status_bar.set_usage(Some(usage)),
             Event::RateLimitsUpdated(limits) => self.status_bar.set_rate_limits(Some(limits)),
-            Event::TurnComplete => self.finish_turn(),
             Event::Cancelled => {
                 self.chat.push_interrupted_marker();
                 self.active_prompt = None;
@@ -97,14 +102,6 @@ impl App {
                 auth,
                 fallback_error,
             } => self.apply_signed_out(removed, auth, fallback_error),
-            Event::TurnFailed(msg) => {
-                self.chat.push_error(&msg);
-                if self.auto_compacting {
-                    self.return_unsent_prompt();
-                } else {
-                    self.finish_turn();
-                }
-            }
             Event::Notice(msg) => self.chat.push_system_message(msg),
             Event::Error(msg) | Event::RenameFailed(msg) => self.chat.push_error(&msg),
             Event::ApprovalRequested {
@@ -167,6 +164,15 @@ impl App {
         }
     }
 
+    fn apply_turn_failed(&mut self, msg: &str) {
+        self.chat.push_error(msg);
+        if self.auto_compacting {
+            self.return_unsent_prompt();
+        } else {
+            self.finish_turn();
+        }
+    }
+
     /// Ends a prompt whose automatic compaction failed before it was sent. Goes idle without
     /// starting the queue, and hands the prompt back: into the empty input when nothing else is
     /// queued, so Enter sends it again, or else to the queue head, so it still runs first.
@@ -183,14 +189,7 @@ impl App {
 
     /// `/clear` or `/archive`: rebinds the session and empties chat for the fresh one.
     fn apply_session_rolled(&mut self, id: String, archived: bool) {
-        let old_id = std::mem::replace(&mut self.session_info.session_id, id);
-        self.session_info.session_allow.clear();
-        self.session_info.background_shells.clear();
-        self.tasks.clear();
-        self.status_bar.set_title(None);
-        self.status_bar.set_usage(None);
-        self.chat.clear_history();
-        self.active_prompt = None;
+        let old_id = self.rebind_session(id, None);
         if archived {
             self.chat.push_system_message(archive_notice(&old_id, true));
         }
@@ -204,13 +203,7 @@ impl App {
         unarchived: bool,
         history: Vec<Interaction>,
     ) {
-        self.session_info.session_id = id;
-        self.session_info.session_allow.clear();
-        self.session_info.background_shells.clear();
-        self.tasks.clear();
-        self.status_bar.set_title(title);
-        self.status_bar.set_usage(None);
-        self.chat.clear_history();
+        self.rebind_session(id, title);
         self.chat.load_history(history);
         if unarchived {
             self.chat
@@ -219,18 +212,30 @@ impl App {
         if let Some(notice) = self.session_info.config.model.unsupported_notice() {
             self.chat.push_system_message(notice);
         }
-        self.active_prompt = None;
-        // Queued prompts belonged to the previous thread, so resume drops them.
         let dropped = self.pending_prompts.len();
         self.pending_prompts.clear();
         if dropped > 0 {
             self.chat.push_system_message(format!(
-                "{dropped} queued prompt{plural} discarded. Typed for the previous session.",
-                plural = if dropped == 1 { "" } else { "s" },
+                "Discarded {dropped} queued {} from the previous session",
+                plural(dropped, "prompt", "prompts"),
             ));
         }
         self.clear_modals();
         self.finalize_idle();
+    }
+
+    /// Rebinds to session `id` titled `title`, clearing the previous session's chat, rules,
+    /// background shells, tasks, usage, and in-flight prompt. Returns the previous session's ID.
+    fn rebind_session(&mut self, id: String, title: Option<String>) -> String {
+        let old_id = std::mem::replace(&mut self.session_info.session_id, id);
+        self.session_info.session_allow.clear();
+        self.session_info.background_shells.clear();
+        self.tasks.clear();
+        self.status_bar.set_title(title);
+        self.status_bar.set_usage(None);
+        self.chat.clear_history();
+        self.active_prompt = None;
+        old_id
     }
 
     /// Repaints chat after `/compact` with one boundary block. Queued prompts survive because the
@@ -265,17 +270,20 @@ impl App {
         requested_effort: Option<Effort>,
         auto_compaction: AutoCompactionConfig,
     ) {
-        let model_changed = model.id() != self.session_info.config.model.id();
-        let prev_effort = self.session_info.config.effort;
-        let prev_auto_compaction = self.session_info.config.compaction.auto;
+        let config = &self.session_info.config;
+        let model_changed = model.id() != config.model.id();
         let confirmation = format_config_change(
-            &model,
-            model_changed,
-            prev_effort,
-            effort,
+            &ConfigSettings {
+                model: &config.model,
+                effort: config.effort,
+                auto_compaction: config.compaction.auto,
+            },
+            &ConfigSettings {
+                model: &model,
+                effort,
+                auto_compaction,
+            },
             requested_effort,
-            prev_auto_compaction,
-            auto_compaction,
         );
         if model_changed {
             self.status_bar
@@ -390,32 +398,55 @@ impl App {
             GitUpdate::Branch(branch) => self.status_bar.set_git_branch(branch),
             GitUpdate::PullRequest(pull_request) => self.status_bar.set_pull_request(pull_request),
         };
-        if changed {
-            self.dirty = true;
-        }
+        self.dirty |= changed;
     }
+
+    /// Notes how a copy went, queueing its OSC 52 write for the next frame.
+    pub(super) fn apply_copy_report(&mut self, report: CopyReport) {
+        let (text, failed) = report.notice();
+        if let Ok(Delivery::Osc52 { sequence, .. }) = report.outcome {
+            self.pending_clipboard = Some(sequence);
+        }
+        self.copy_notice = Some(CopyNotice {
+            text,
+            failed,
+            until: Instant::now() + COPY_NOTICE_DURATION,
+        });
+        self.dirty = true;
+    }
+
+    /// Clears the copy notice once it has been shown long enough. Returns whether it cleared.
+    pub(super) fn expire_copy_notice(&mut self, now: Instant) -> bool {
+        self.copy_notice
+            .take_if(|notice| now >= notice.until)
+            .is_some()
+    }
+}
+
+/// The settings an `Event::ConfigChanged` confirmation compares, before or after the change.
+struct ConfigSettings<'a> {
+    model: &'a ModelSpec,
+    effort: Option<Effort>,
+    auto_compaction: AutoCompactionConfig,
 }
 
 /// `Event::ConfigChanged` confirmation, surfacing silent effort shifts.
 fn format_config_change(
-    model: &ModelSpec,
-    model_changed: bool,
-    prev_effort: Option<Effort>,
-    new_effort: Option<Effort>,
+    before: &ConfigSettings<'_>,
+    after: &ConfigSettings<'_>,
     requested_effort: Option<Effort>,
-    prev_auto_compaction: AutoCompactionConfig,
-    new_auto_compaction: AutoCompactionConfig,
 ) -> String {
-    if !model_changed {
-        return match (requested_effort, new_effort) {
+    if after.model.id() == before.model.id() {
+        return match (requested_effort, after.effort) {
             (Some(req), None) => req.unapplied_notice(),
             (_, Some(eff)) => format!("Effort set to {eff}"),
             // Slash dispatch keeps this unreachable, but a clear fallback beats a panic.
             (None, None) => "Config unchanged".to_owned(),
         };
     }
+    let model = after.model;
     let switched = format!("Switched to {} ({})", model.display_name(), model.id());
-    let (head, effort) = match (requested_effort, prev_effort, new_effort) {
+    let (head, effort) = match (requested_effort, before.effort, after.effort) {
         (Some(req), _, None) => (switched, Some(req.unapplied_notice())),
         (None, None, None) => (switched, None),
         (None, Some(_), None) => (
@@ -425,10 +456,10 @@ fn format_config_change(
         (None, None, Some(eff)) => (format!("{switched} · effort {eff} (model default)"), None),
         (_, _, Some(eff)) => (format!("{switched} · effort {eff}"), None),
     };
-    let compaction = (prev_auto_compaction != new_auto_compaction).then(|| {
+    let compaction = (before.auto_compaction != after.auto_compaction).then(|| {
         format!(
             "Auto compaction {}",
-            display_auto_compaction(new_auto_compaction)
+            display_auto_compaction(after.auto_compaction)
         )
     });
     match (effort, compaction) {
@@ -443,6 +474,9 @@ fn format_config_change(
 mod tests {
     use std::io;
     use std::path::Path;
+    use std::time::Duration;
+
+    use tokio::sync::mpsc::error::TryRecvError;
 
     use indoc::indoc;
 
@@ -459,6 +493,7 @@ mod tests {
     use crate::tool::{ApprovalBody, ToolResultView};
     use crate::tui::action::Action;
     use crate::tui::app::testing::{five_hour_limit, rendered_text, test_app};
+    use crate::tui::clipboard::CopyError;
     use crate::tui::glyphs::INTERRUPTED_MARKER;
 
     fn bash_call_start(id: &str, command: &str) -> Event {
@@ -491,6 +526,14 @@ mod tests {
         AutoCompactionConfig {
             enabled: true,
             threshold_tokens: Some(155_000),
+        }
+    }
+
+    fn settings(model: &ModelSpec, effort: Option<Effort>) -> ConfigSettings<'_> {
+        ConfigSettings {
+            model,
+            effort,
+            auto_compaction: base_auto_compaction(),
         }
     }
 
@@ -699,7 +742,11 @@ mod tests {
 
         assert_eq!(app.status_bar.status(), &Status::Idle);
         assert_eq!(app.pending_prompts, ["held"]);
-        assert!(rx.try_recv().is_err(), "the held prompt must not run");
+        assert_eq!(
+            rx.try_recv(),
+            Err(TryRecvError::Empty),
+            "the held prompt must not run"
+        );
     }
 
     #[test]
@@ -926,7 +973,8 @@ mod tests {
         app.session_info.config.model = spec("claude-opus-5-5");
         app.chat.push_user_message("live prompt".to_owned());
         app.status_bar.set_usage(Some(usage_snapshot()));
-        app.pending_prompts.push_back("queued".to_owned());
+        app.pending_prompts
+            .extend(["queued-a".to_owned(), "queued-b".to_owned()]);
         app.handle_engine_event(bash_call_start("pending-1", "ls"));
         app.session_info.session_allow = vec![Rule::parse(PermissionClass::Exec, "ls").unwrap()];
         app.session_info.background_shells = shells_in_each_state();
@@ -957,6 +1005,10 @@ mod tests {
             app.chat.entry_count(),
             3,
             "chat must reflect the resumed transcript + the queued-prompt-discarded notice",
+        );
+        assert_eq!(
+            app.chat.last_system_text(),
+            Some("Discarded 2 queued prompts from the previous session"),
         );
         assert_eq!(
             app.chat.pending_call_count(),
@@ -1105,8 +1157,8 @@ mod tests {
 
     #[tokio::test]
     async fn handle_session_compacted_drains_queued_prompts_unlike_resume() {
-        // Compact preserves user intent: a queued prompt becomes the first post-compact turn
-        // rather than being dropped (the way `/resume` does, since `/resume` swaps identity).
+        // Compaction keeps the session, so a queued prompt becomes the first post-compact turn.
+        // `/resume` swaps sessions and drops it.
         let (mut app, mut rx, _event_tx) = test_app(None);
         app.pending_prompts
             .push_back("queued after compact".to_owned());
@@ -1139,8 +1191,8 @@ mod tests {
         assert_eq!(app.chat.entry_count(), 1, "exactly one boundary block");
     }
 
-    #[tokio::test]
-    async fn handle_session_compacted_automatic_keeps_busy_state_and_queued_prompts() {
+    #[test]
+    fn handle_session_compacted_automatic_keeps_busy_state_and_queued_prompts() {
         let (mut app, mut rx, _event_tx) = test_app(None);
         app.input.set_enabled(false);
         app.status_bar.set_status(Status::Compacting);
@@ -1157,9 +1209,10 @@ mod tests {
         assert_eq!(app.chat.entry_count(), 1);
         assert_eq!(app.status_bar.status(), &Status::Compacting);
         assert!(!app.input.is_enabled());
-        assert_eq!(app.pending_prompts.len(), 1);
-        assert!(
-            rx.try_recv().is_err(),
+        assert_eq!(app.pending_prompts, ["queued while busy"]);
+        assert_eq!(
+            rx.try_recv(),
+            Err(TryRecvError::Empty),
             "automatic compact must not drain early"
         );
     }
@@ -1322,10 +1375,9 @@ mod tests {
 
     #[test]
     fn handle_tool_call_end_without_title_falls_back_to_call_label() {
-        // `title: None` means the tool didn't set a result header, typically on a failure path
-        // (timeout, invalid input) that aborted before `.with_title(...)`. The result must still be
-        // pushed, since a silent swallow would hide the error body, and its header must show the
-        // call label stashed at `ToolCallStart`, not a blank or the generic `(result)` fallback.
+        // A tool that fails before `.with_title(...)`, as on a timeout or invalid input, sets no
+        // result header. Its result still renders so the error body shows, headed by the call
+        // label stashed at `ToolCallStart`.
         let (mut app, _rx, _event_tx) = test_app(None);
         app.handle_engine_event(bash_call_start("t1", "distinctive_label_xyz"));
         let before = app.chat.entry_count();
@@ -1419,7 +1471,11 @@ mod tests {
         rx.recv().await.expect("first submit forwarded");
         app.handle_engine_event(Event::AutoCompactionStarted);
         app.dispatch_action(Action::Submit("held".to_owned()));
-        assert!(rx.try_recv().is_err(), "held while compacting");
+        assert_eq!(
+            rx.try_recv(),
+            Err(TryRecvError::Empty),
+            "held while compacting"
+        );
 
         app.handle_engine_event(Event::StreamToken("x".to_owned()));
         app.dispatch_action(Action::Submit("later".to_owned()));
@@ -1483,7 +1539,11 @@ mod tests {
 
         app.handle_engine_event(Event::TurnComplete);
 
-        assert!(rx.try_recv().is_err(), "nothing resubmits after a cancel");
+        assert_eq!(
+            rx.try_recv(),
+            Err(TryRecvError::Empty),
+            "nothing resubmits after a cancel"
+        );
         assert_eq!(app.status_bar.status(), &Status::Idle);
         assert_eq!(
             app.pending_prompts.iter().cloned().collect::<Vec<_>>(),
@@ -1519,7 +1579,11 @@ mod tests {
 
         app.handle_engine_event(Event::Cancelled);
 
-        assert!(rx.try_recv().is_err(), "nothing resubmits after a cancel");
+        assert_eq!(
+            rx.try_recv(),
+            Err(TryRecvError::Empty),
+            "nothing resubmits after a cancel"
+        );
         assert_eq!(app.status_bar.status(), &Status::Idle);
         app.handle_esc();
         assert_eq!(app.input.lines(), ["second".to_owned()]);
@@ -1550,7 +1614,11 @@ mod tests {
             "Resume failed (still on session x): no session matching `zzzz`".to_owned(),
         ));
 
-        assert!(rx.try_recv().is_err(), "nothing runs after a failed resume");
+        assert_eq!(
+            rx.try_recv(),
+            Err(TryRecvError::Empty),
+            "nothing runs after a failed resume"
+        );
         assert_eq!(app.status_bar.status(), &Status::Idle);
         assert!(app.input.is_enabled());
         assert_eq!(
@@ -1579,7 +1647,11 @@ mod tests {
         assert!(app.chat.last_is_error(), "error entry appended");
         assert_eq!(app.status_bar.status(), &Status::Streaming);
         assert!(!app.input.is_enabled());
-        assert!(rx.try_recv().is_err(), "nothing resubmits mid-turn");
+        assert_eq!(
+            rx.try_recv(),
+            Err(TryRecvError::Empty),
+            "nothing resubmits mid-turn"
+        );
         assert_eq!(
             app.pending_prompts.iter().cloned().collect::<Vec<_>>(),
             ["queued".to_owned()],
@@ -1647,8 +1719,9 @@ mod tests {
             "Enter sends the prompt again as typed",
         );
         assert!(app.pending_prompts.is_empty());
-        assert!(
-            rx.try_recv().is_err(),
+        assert_eq!(
+            rx.try_recv(),
+            Err(TryRecvError::Empty),
             "nothing reaches the engine until the user sends"
         );
     }
@@ -1672,8 +1745,9 @@ mod tests {
             ["active".to_owned(), "queued".to_owned()],
             "the unsent prompt still runs first",
         );
-        assert!(
-            rx.try_recv().is_err(),
+        assert_eq!(
+            rx.try_recv(),
+            Err(TryRecvError::Empty),
             "nothing retries compaction until the user sends again"
         );
     }
@@ -1697,7 +1771,7 @@ mod tests {
             app.pending_prompts.iter().cloned().collect::<Vec<_>>(),
             ["queued".to_owned()],
         );
-        assert!(rx.try_recv().is_err());
+        assert_eq!(rx.try_recv(), Err(TryRecvError::Empty));
     }
 
     #[tokio::test]
@@ -1731,7 +1805,14 @@ mod tests {
             app.dispatch_action(Action::Submit(prompt.to_owned()));
         }
         let mut forwarded = || std::iter::from_fn(|| rx.try_recv().ok()).collect::<Vec<_>>();
-        assert_eq!(forwarded().len(), 3);
+        assert_eq!(
+            forwarded(),
+            [
+                Op::Queue("a".to_owned()),
+                Op::Queue("b".to_owned()),
+                Op::Queue("c".to_owned()),
+            ],
+        );
 
         app.handle_engine_event(Event::TurnFailed(
             "agent stopped after 3 tool rounds".to_owned(),
@@ -1787,7 +1868,7 @@ mod tests {
         app.apply_git_update(GitUpdate::PullRequest(Some(
             crate::util::git::PullRequest {
                 number: 7,
-                url: "https://github.com/o/r/pull/7".to_owned(),
+                url: "https://example.com/pull/7".to_owned(),
                 checks: None,
                 review: None,
             },
@@ -1795,36 +1876,76 @@ mod tests {
         assert!(app.dirty, "new pull request repaints");
     }
 
+    // ── apply_copy_report ──
+
+    #[test]
+    fn apply_copy_report_queues_only_osc52_and_notes_failures() {
+        let (mut app, _rx, _event_tx) = test_app(None);
+
+        app.apply_copy_report(CopyReport {
+            chars: 4,
+            outcome: Ok(Delivery::Copied),
+        });
+        let copied = app.copy_notice.take().unwrap();
+        app.apply_copy_report(CopyReport {
+            chars: 4,
+            outcome: Err(CopyError::TimedOut),
+        });
+        let failed = app.copy_notice.take().unwrap();
+
+        assert_eq!(app.pending_clipboard, None);
+        assert_eq!(
+            (copied.text.as_str(), copied.failed),
+            ("Copied 4 characters", false)
+        );
+        assert_eq!(
+            (failed.text.as_str(), failed.failed),
+            ("Not copied: the clipboard did not answer within 2 s", true),
+        );
+    }
+
+    // ── expire_copy_notice ──
+
+    #[test]
+    fn expire_copy_notice_clears_the_notice_once_its_time_is_up() {
+        let (mut app, _rx, _event_tx) = test_app(None);
+        app.apply_copy_report(CopyReport {
+            chars: 4,
+            outcome: Ok(Delivery::Copied),
+        });
+        let until = app.copy_notice.as_ref().unwrap().until;
+
+        let before = until.checked_sub(Duration::from_millis(1)).unwrap();
+        assert!(!app.expire_copy_notice(before));
+        assert!(app.copy_notice.is_some());
+        assert!(app.expire_copy_notice(until));
+        assert!(app.copy_notice.is_none());
+        assert!(!app.expire_copy_notice(until), "nothing left to clear");
+    }
+
     // ── format_config_change ──
 
     #[test]
     fn format_config_change_swap_both_none_omits_effort_clause() {
-        // No `effort` substring at all, so a mutation that prints `effort none.` fails here.
-        let s = format_config_change(
-            &spec("custom-model"),
-            true,
-            None,
-            None,
-            None,
-            base_auto_compaction(),
-            base_auto_compaction(),
-        );
+        let (opus, custom) = (spec("claude-opus-5-5"), spec("custom-model"));
+
+        let s = format_config_change(&settings(&opus, None), &settings(&custom, None), None);
+
         assert_eq!(s, "Switched to custom-model (custom-model)");
     }
 
     #[test]
     fn format_config_change_swap_to_no_tier_model_surfaces_requested_effort() {
-        // Model swap onto a no-tier model with an explicit effort ask. The user needs to know the
-        // requested tier didn't apply, or else a silent drop reads as a landed config change.
+        // The user needs to know the requested tier didn't apply, or else a silent drop reads as a
+        // landed config change.
+        let (opus, custom) = (spec("claude-opus-5-5"), spec("custom-model"));
+
         let s = format_config_change(
-            &spec("custom-model"),
-            true,
-            None,
-            None,
+            &settings(&opus, None),
+            &settings(&custom, None),
             Some(Effort::High),
-            base_auto_compaction(),
-            base_auto_compaction(),
         );
+
         assert_eq!(
             s,
             "Switched to custom-model (custom-model). \
@@ -1834,17 +1955,14 @@ mod tests {
 
     #[test]
     fn format_config_change_swap_clears_effort_when_new_model_drops_it() {
-        // The user had a tier, and the new model has none. Surface the change so the user knows
-        // their effort just disappeared.
+        let (opus, custom) = (spec("claude-opus-5-5"), spec("custom-model"));
+
         let s = format_config_change(
-            &spec("custom-model"),
-            true,
-            Some(Effort::Xhigh),
+            &settings(&opus, Some(Effort::Xhigh)),
+            &settings(&custom, None),
             None,
-            None,
-            base_auto_compaction(),
-            base_auto_compaction(),
         );
+
         assert_eq!(
             s,
             "Switched to custom-model (custom-model). Effort cleared (model has no effort tier)."
@@ -1855,15 +1973,14 @@ mod tests {
     fn format_config_change_swap_marks_default_when_previous_was_none() {
         // None → Some means the new model's default kicked in. Distinguishing this from "user's
         // pick survived" keeps the user from thinking they chose this tier.
+        let (custom, opus) = (spec("custom-model"), spec("claude-opus-5-5"));
+
         let s = format_config_change(
-            &spec("claude-opus-5-5"),
-            true,
+            &settings(&custom, None),
+            &settings(&opus, Some(Effort::Medium)),
             None,
-            Some(Effort::Medium),
-            None,
-            base_auto_compaction(),
-            base_auto_compaction(),
         );
+
         assert_eq!(
             s,
             "Switched to Claude Opus 5.5 (claude-opus-5-5) · effort medium (model default)"
@@ -1872,21 +1989,17 @@ mod tests {
 
     #[test]
     fn format_config_change_swap_reports_carried_or_picked_effort_plainly() {
-        // A carried-over tier and an explicit pick both read as the plain effort clause. Pin
-        // exact format so a stray suffix (`(unchanged)`) would fail.
+        let (sonnet, opus) = (spec("claude-sonnet-5-5"), spec("claude-opus-5-5"));
         for (prev, requested, new) in [
-            (Some(Effort::High), None, Effort::High),
-            (Some(Effort::Medium), Some(Effort::Max), Effort::Max),
+            (Effort::High, None, Effort::High),
+            (Effort::Medium, Some(Effort::Max), Effort::Max),
         ] {
             let s = format_config_change(
-                &spec("claude-opus-5-5"),
-                true,
-                prev,
-                Some(new),
+                &settings(&sonnet, Some(prev)),
+                &settings(&opus, Some(new)),
                 requested,
-                base_auto_compaction(),
-                base_auto_compaction(),
             );
+
             assert_eq!(
                 s,
                 format!("Switched to Claude Opus 5.5 (claude-opus-5-5) · effort {new}"),
@@ -1896,30 +2009,28 @@ mod tests {
 
     #[test]
     fn format_config_change_effort_explicit_pick_matches_resolution() {
+        let opus = spec("claude-opus-5-5");
+
         let s = format_config_change(
-            &spec("claude-opus-5-5"),
-            false,
-            Some(Effort::High),
+            &settings(&opus, Some(Effort::High)),
+            &settings(&opus, Some(Effort::Xhigh)),
             Some(Effort::Xhigh),
-            Some(Effort::Xhigh),
-            base_auto_compaction(),
-            base_auto_compaction(),
         );
+
         assert_eq!(s, "Effort set to xhigh");
     }
 
     #[test]
     fn format_config_change_effort_pick_on_no_tier_model_surfaces_loss() {
         // The `/effort` preflight stops this, but client-driven flows could still emit it.
+        let custom = spec("custom-model");
+
         let s = format_config_change(
-            &spec("custom-model"),
-            false,
-            None,
-            None,
+            &settings(&custom, None),
+            &settings(&custom, None),
             Some(Effort::High),
-            base_auto_compaction(),
-            base_auto_compaction(),
         );
+
         assert_eq!(
             s,
             "Effort unchanged (model has no effort tier, asked for high)"
@@ -1928,34 +2039,25 @@ mod tests {
 
     #[test]
     fn format_config_change_without_model_or_effort_reports_no_change() {
-        let s = format_config_change(
-            &spec("custom-model"),
-            false,
-            None,
-            None,
-            None,
-            base_auto_compaction(),
-            base_auto_compaction(),
-        );
+        let custom = spec("custom-model");
+
+        let s = format_config_change(&settings(&custom, None), &settings(&custom, None), None);
+
         assert_eq!(s, "Config unchanged");
     }
 
     #[test]
     fn format_config_change_model_swap_mentions_compaction_threshold_change() {
-        let new_auto_compaction = AutoCompactionConfig {
-            enabled: true,
-            threshold_tokens: Some(test_thresholds::WINDOW_1M),
+        let (opus, sonnet) = (spec("claude-opus-5-5"), spec("claude-sonnet-5-5"));
+        let after = ConfigSettings {
+            auto_compaction: AutoCompactionConfig {
+                enabled: true,
+                threshold_tokens: Some(test_thresholds::WINDOW_1M),
+            },
+            ..settings(&sonnet, Some(Effort::High))
         };
 
-        let s = format_config_change(
-            &spec("claude-sonnet-5-5"),
-            true,
-            Some(Effort::High),
-            Some(Effort::High),
-            None,
-            base_auto_compaction(),
-            new_auto_compaction,
-        );
+        let s = format_config_change(&settings(&opus, Some(Effort::High)), &after, None);
 
         assert_eq!(
             s,
@@ -1969,19 +2071,19 @@ mod tests {
 
     #[test]
     fn format_config_change_model_swap_reports_lost_effort_and_compaction_change() {
-        let new_auto_compaction = AutoCompactionConfig {
-            enabled: true,
-            threshold_tokens: Some(test_thresholds::WINDOW_1M),
+        let (opus, custom) = (spec("claude-opus-5-5"), spec("custom-model"));
+        let after = ConfigSettings {
+            auto_compaction: AutoCompactionConfig {
+                enabled: true,
+                threshold_tokens: Some(test_thresholds::WINDOW_1M),
+            },
+            ..settings(&custom, None)
         };
 
         let s = format_config_change(
-            &spec("custom-model"),
-            true,
-            Some(Effort::High),
-            None,
+            &settings(&opus, Some(Effort::High)),
+            &after,
             Some(Effort::Max),
-            base_auto_compaction(),
-            new_auto_compaction,
         );
 
         assert_eq!(

@@ -44,11 +44,14 @@ const COPY_NOTICE_DURATION: Duration = Duration::from_secs(3);
 
 pub(crate) struct App {
     theme: Theme,
+    /// Theme saved when a `/theme` picker opens. Restored if the modal cancels.
+    preview_theme_snapshot: Option<Theme>,
     status_bar: StatusBar,
     git_probes: GitProbes,
     chat: ChatView,
     tasks: TaskPanel,
     input: InputArea,
+    modals: ModalStack,
     session_info: LiveSessionInfo,
     /// The modes Shift+Tab steps through. `yolo` joins only when the session starts in it, so a
     /// stray key press cannot leave every call unprompted.
@@ -77,9 +80,6 @@ pub(crate) struct App {
     pending_prompts: VecDeque<String>,
     /// How many leading `pending_prompts` the in-flight turn already holds.
     forwarded_prompts: usize,
-    modals: ModalStack,
-    /// Theme saved when a `/theme` picker opens. Restored if the modal cancels.
-    preview_theme_snapshot: Option<Theme>,
     should_quit: bool,
     dirty: bool,
 }
@@ -135,11 +135,13 @@ impl App {
         };
         Self {
             theme: theme.clone(),
+            preview_theme_snapshot: None,
             status_bar,
             git_probes,
             chat,
             tasks: TaskPanel::default(),
             input: InputArea::new(theme),
+            modals: ModalStack::new(),
             session_info,
             mode_cycle,
             requested_mode,
@@ -154,8 +156,6 @@ impl App {
             auto_compacting: false,
             pending_prompts: VecDeque::new(),
             forwarded_prompts: 0,
-            modals: ModalStack::new(),
-            preview_theme_snapshot: None,
             should_quit: false,
             dirty: true,
         }
@@ -212,20 +212,12 @@ impl App {
                 Some(update) = self.git_probes.recv() => self.apply_git_update(update),
                 Some(report) = self.clipboard.recv() => self.apply_copy_report(report),
                 _ = tick.tick() => {
-                    self.git_probes.poll(Instant::now());
-                    if self.status_bar.tick() {
-                        self.dirty = true;
-                    }
-                    if self.expire_armed_exit() {
-                        self.dirty = true;
-                    }
                     let now = Instant::now();
-                    if self.chat.tick_selection(now) {
-                        self.dirty = true;
-                    }
-                    if self.expire_copy_notice(now) {
-                        self.dirty = true;
-                    }
+                    self.git_probes.poll(now);
+                    self.dirty |= self.status_bar.tick();
+                    self.dirty |= self.expire_armed_exit(now);
+                    self.dirty |= self.chat.tick_selection(now);
+                    self.dirty |= self.expire_copy_notice(now);
                     if self.dirty {
                         self.render(terminal)?;
                         self.dirty = false;
@@ -316,7 +308,7 @@ mod tests {
 
     // ── run_with_events ──
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn run_with_events_expires_armed_exit_on_tick_before_channel_close() {
         let (mut app, _rx, event_tx) = test_app(None);
         let until = Instant::now()
@@ -369,10 +361,8 @@ mod tests {
         assert!(painted.contains(SPINNER_FRAMES[1]), "{painted:?}");
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn run_with_events_pumps_crossterm_and_engine_events_through_select() {
-        // Pins both arms of `select!`: a key reaches input, a stream token disables it,
-        // and closing the engine's event channel ends the loop.
         let (mut app, _rx, event_tx) = test_app(None);
         let (mut terminal, _buf) = crossterm_test_terminal(60, 8);
 
@@ -399,7 +389,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn run_with_events_applies_git_probe_results() {
         let (mut app, _rx, event_tx) = test_app(None);
         app.git_probes
@@ -433,7 +423,7 @@ mod tests {
             .await
             .unwrap_err();
 
-        assert!(format!("{err:#}").contains("tty gone"), "{err:#}");
+        assert_eq!(format!("{err:#}"), "cannot read terminal input: tty gone");
     }
 
     #[tokio::test]

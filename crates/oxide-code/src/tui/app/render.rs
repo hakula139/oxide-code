@@ -6,19 +6,33 @@ use std::io::Write as _;
 
 use anyhow::Result;
 use ratatui::layout::{Constraint, Layout, Rect};
+use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
-use unicode_width::UnicodeWidthStr;
 
 use super::App;
+use crate::tui::components::status::StatusBar;
 use crate::tui::components::welcome::{self, WelcomeSnapshot};
 use crate::tui::glyphs::{NEWLINE_GLYPH, USER_PROMPT_PREFIX, USER_PROMPT_PREFIX_WIDTH};
+use crate::tui::saturating_u16;
 use crate::tui::terminal::{synchronized_update, write_status_hyperlinks};
 use crate::tui::theme::Theme;
 use crate::util::text::{center_truncate_to_width, truncate_to_width};
 
+/// Chat rows that stay visible however tall the bands below the chat grow.
+const MIN_CHAT_HEIGHT: u16 = 1;
+
 /// Maximum queued prompts shown in the preview before collapsing into `+N more`.
 const PREVIEW_VISIBLE: usize = 3;
+
+/// Cells a pill's padding takes, one on each side of its label.
+const PILL_PADDING: u16 = 2;
+
+/// Narrowest chat that shows the jump-to-bottom pill.
+const JUMP_PILL_MIN_WIDTH: u16 = 25;
+
+/// Narrowest chat whose jump-to-bottom pill spells out its label.
+const JUMP_LABEL_FULL_MIN_WIDTH: usize = 40;
 
 impl App {
     pub(super) fn render<W: std::io::Write>(
@@ -59,7 +73,10 @@ impl App {
     pub(super) fn draw_frame(&mut self, frame: &mut ratatui::Frame<'_>) {
         // The status bar and one chat row stay visible. The modal, or else the input and its
         // popup, outranks the queued-prompt preview, and the preview the task panel.
-        let modal_max = frame.area().height.saturating_sub(2 + 1);
+        let modal_max = frame
+            .area()
+            .height
+            .saturating_sub(StatusBar::HEIGHT + MIN_CHAT_HEIGHT);
         let modal_height = self.modals.height(frame.area().width, modal_max);
         // Modal owns focus, so input and popup bands collapse.
         let modal_active = self.modals.is_active();
@@ -77,16 +94,16 @@ impl App {
             ratatui::widgets::Block::default().style(self.theme.surface()),
             frame.area(),
         );
-        let chunks = Layout::vertical([
-            Constraint::Length(2),
-            Constraint::Min(1),
+        let [status, chat, tasks, preview, modal, popup, input] = Layout::vertical([
+            Constraint::Length(StatusBar::HEIGHT),
+            Constraint::Min(MIN_CHAT_HEIGHT),
             Constraint::Length(tasks_height),
             Constraint::Length(preview_height),
             Constraint::Length(modal_height),
             Constraint::Length(popup_height),
             Constraint::Length(input_height),
         ])
-        .split(frame.area());
+        .areas(frame.area());
 
         self.status_bar
             .set_queued_prompts(self.pending_prompts.len());
@@ -97,32 +114,32 @@ impl App {
             .set_theme_name(&self.session_info.config.theme_name);
         self.status_bar
             .set_permission_mode(self.session_info.config.permission_mode);
-        self.status_bar.render(frame, chunks[0]);
+        self.status_bar.render(frame, status);
         if self.chat.is_empty() && self.session_info.config.show_welcome {
             let snap = WelcomeSnapshot::from_live(&self.session_info);
-            welcome::paint(frame, chunks[1], &self.theme, &snap);
+            welcome::paint(frame, chat, &self.theme, &snap);
         } else {
-            self.chat.render(frame, chunks[1]);
-            let jump = self.jump_pill(chunks[1]);
+            self.chat.render(frame, chat);
+            let jump = self.jump_pill(chat);
             let jump_width = jump.as_ref().map_or(0, |(pill, _)| pill.width);
-            self.render_copy_notice(frame, chunks[1], jump_width);
+            self.render_copy_notice(frame, chat, jump_width);
             if let Some((pill, line)) = jump {
                 frame.render_widget(Paragraph::new(line).style(self.theme.surface()), pill);
             }
         }
         if tasks_height > 0 {
-            self.tasks.render(frame, chunks[2], &self.theme);
+            self.tasks.render(frame, tasks, &self.theme);
         }
         if preview_height > 0 {
-            self.render_preview(frame, chunks[3]);
+            self.render_preview(frame, preview);
         }
         if modal_active {
-            self.modals.render(frame, chunks[4], &self.theme);
+            self.modals.render(frame, modal, &self.theme);
         } else {
             if popup_height > 0 {
-                self.input.render_popup(frame, chunks[5]);
+                self.input.render_popup(frame, popup);
             }
-            self.input.render(frame, chunks[6]);
+            self.input.render(frame, input);
         }
     }
 
@@ -168,34 +185,26 @@ impl App {
             0 => area.width,
             width => area.width.saturating_sub(width + 1),
         };
-        if area.height == 0 || room <= 2 {
+        if area.height == 0 || room <= PILL_PADDING {
             return;
         }
-        let label = truncate_to_width(&notice.text, usize::from(room - 2));
+        let label = truncate_to_width(&notice.text, usize::from(room - PILL_PADDING));
         let style = if notice.failed {
             self.theme.warning()
         } else {
             self.theme.success()
         };
-        let width = u16::try_from(label.width() + 2).unwrap_or(u16::MAX);
-        let pill = Rect {
-            x: area.x,
-            y: area.bottom() - 1,
-            width: width.min(room),
-            height: 1,
-        };
-        let line = Line::from(vec![
-            Span::raw(" "),
-            Span::styled(label, style),
-            Span::raw(" "),
-        ]);
-        frame.render_widget(Paragraph::new(line).style(self.theme.surface()), pill);
+        let line = pill_line(label, style);
+        let width = saturating_u16(line.width()).min(room);
+        frame.render_widget(
+            Paragraph::new(line).style(self.theme.surface()),
+            bottom_row(area, area.x, width),
+        );
     }
 
-    /// The jump-to-bottom pill at the chat's bottom-right corner while scrolled up, sized to its
-    /// label plus a cell of padding per side.
+    /// The jump-to-bottom pill at the chat's bottom-right corner while scrolled up.
     fn jump_pill(&self, area: Rect) -> Option<(Rect, Line<'static>)> {
-        if !self.chat.is_scrolled_up() || area.width < 25 || area.height == 0 {
+        if !self.chat.is_scrolled_up() || area.width < JUMP_PILL_MIN_WIDTH || area.height == 0 {
             return None;
         }
 
@@ -206,27 +215,36 @@ impl App {
         } else {
             self.theme.accent()
         };
-        let pill_width = u16::try_from(label.width().saturating_add(2)).unwrap_or(u16::MAX);
-        if pill_width > area.width {
+        let line = pill_line(label, style);
+        let width = saturating_u16(line.width());
+        if width > area.width {
             return None;
         }
-        let pill = Rect {
-            x: area.x + area.width.saturating_sub(pill_width),
-            y: area.y + area.height.saturating_sub(1),
-            width: pill_width,
-            height: 1,
-        };
-        let line = Line::from(vec![
-            Span::raw(" "),
-            Span::styled(label, style),
-            Span::raw(" "),
-        ]);
-        Some((pill, line))
+        Some((bottom_row(area, area.right() - width, width), line))
+    }
+}
+
+/// `label` in `style`, padded by a cell on each side.
+fn pill_line(label: String, style: Style) -> Line<'static> {
+    Line::from(vec![
+        Span::raw(" "),
+        Span::styled(label, style),
+        Span::raw(" "),
+    ])
+}
+
+/// The `width` cells from column `x` on the bottom row of a non-empty `area`.
+fn bottom_row(area: Rect, x: u16, width: u16) -> Rect {
+    Rect {
+        x,
+        y: area.bottom() - 1,
+        width,
+        height: 1,
     }
 }
 
 fn jump_overlay_label(new_count: u32, width: usize) -> String {
-    if width < 40 {
+    if width < JUMP_LABEL_FULL_MIN_WIDTH {
         return "↓ (ctrl+End)".to_owned();
     }
     let label = match new_count {
@@ -234,7 +252,7 @@ fn jump_overlay_label(new_count: u32, width: usize) -> String {
         1 => "1 new message (ctrl+End) ↓".to_owned(),
         n => format!("{n} new messages (ctrl+End) ↓"),
     };
-    center_truncate_to_width(&label, width.saturating_sub(2))
+    center_truncate_to_width(&label, width.saturating_sub(usize::from(PILL_PADDING)))
 }
 
 /// Renders a queued prompt as a dim ghost, capped at `body_width` columns.
@@ -451,8 +469,7 @@ mod tests {
         - Next: add a regression test.
     "};
 
-    /// An app running `/compact` after a short exchange, with the summary streamed up to its last
-    /// bullet.
+    /// An app running `/compact` on a short exchange, its summary streamed to the last bullet.
     fn app_streaming_a_summary() -> (App, mpsc::Receiver<Op>, mpsc::UnboundedSender<Event>) {
         let (mut app, rx, event_tx) = test_app(None);
         app.chat.push_user_message("Fix the login bug.".to_owned());
@@ -612,8 +629,6 @@ mod tests {
 
     #[test]
     fn draw_frame_renders_slash_popup_above_input_when_visible() {
-        // Typing `/` opens the popup; draw_frame must reserve a band
-        // above the input and paint at least one command row into it.
         let (mut app, _rx, _event_tx) = test_app(None);
         app.handle_crossterm_event(&key_event(KeyCode::Char('/'), KeyModifiers::NONE));
         assert!(app.input.popup_visible());
@@ -695,8 +710,7 @@ mod tests {
             "input must collapse while modal is active: {with_modal}",
         );
 
-        // Non-cancel keys land at the modal's handle_key — proves the focus-grab is wired up
-        // and the layout collapse doesn't bypass it.
+        // A non-cancel key still reaches the modal, so collapsing the layout keeps its focus grab.
         let action = app
             .modals
             .handle_key(&KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE));
@@ -803,6 +817,28 @@ mod tests {
         );
     }
 
+    // ── jump_pill ──
+
+    #[test]
+    fn jump_pill_sits_in_the_bottom_right_corner_of_a_wide_enough_chat() {
+        let (mut app, _rx, _event_tx) = test_app(None);
+        app.chat.push_system_message(long_chat_block());
+        _ = render_app(&mut app, 60, 10);
+        app.chat
+            .handle_event(&key_event(KeyCode::PageUp, KeyModifiers::NONE));
+        let area = Rect::new(2, 1, JUMP_PILL_MIN_WIDTH, 5);
+
+        let narrow = app.jump_pill(Rect {
+            width: JUMP_PILL_MIN_WIDTH - 1,
+            ..area
+        });
+        let (pill, line) = app.jump_pill(area).expect("pill shown");
+
+        assert_eq!(narrow, None);
+        assert_eq!(line.to_string(), " ↓ (ctrl+End) ");
+        assert_eq!(pill, Rect::new(13, 5, 14, 1));
+    }
+
     // ── jump_overlay_label ──
 
     #[test]
@@ -818,6 +854,13 @@ mod tests {
 
     #[test]
     fn jump_overlay_label_uses_short_form_below_full_width() {
-        assert_eq!(jump_overlay_label(3, 30), "↓ (ctrl+End)");
+        assert_eq!(
+            jump_overlay_label(3, JUMP_LABEL_FULL_MIN_WIDTH - 1),
+            "↓ (ctrl+End)"
+        );
+        assert_eq!(
+            jump_overlay_label(3, JUMP_LABEL_FULL_MIN_WIDTH),
+            "3 new messages (ctrl+End) ↓"
+        );
     }
 }

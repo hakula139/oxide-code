@@ -74,6 +74,9 @@ pub(crate) enum Status {
 }
 
 impl StatusBar {
+    /// Rows the bar fills: the status line and the border under it.
+    pub(crate) const HEIGHT: u16 = 2;
+
     pub(crate) fn new(
         theme: &Theme,
         segments: Vec<StatusLineSegment>,
