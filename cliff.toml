@@ -55,7 +55,7 @@ commit_preprocessors = [
 ]
 
 # `<!-- N -->` prefixes, which the body template strips, order the sections. The first match wins,
-# so the catch-all `!:` parser precedes the type prefixes and the skips.
+# so the catch-all `!:` parser precedes the type prefixes. `filter_commits` drops the other types.
 commit_parsers = [
   { message = '^[a-z]+(\([^)]+\))?!:', group = "<!-- 0 -->Breaking changes" },
 
@@ -63,12 +63,4 @@ commit_parsers = [
   { message = "^fix", group = "<!-- 2 -->Fixed" },
   { message = "^perf", group = "<!-- 3 -->Changed" },
   { message = "^revert", group = "<!-- 4 -->Removed" },
-
-  { message = "^build", skip = true },
-  { message = "^chore", skip = true },
-  { message = "^ci", skip = true },
-  { message = "^docs", skip = true },
-  { message = "^refactor", skip = true },
-  { message = "^style", skip = true },
-  { message = "^test", skip = true },
 ]
