@@ -49,6 +49,7 @@ use crate::tool::tasks::Task;
 use crate::tool::{ToolMetadata, ToolRegistry};
 use crate::util::git::current_branch;
 use crate::util::text::{join_sentences, plural};
+use crate::util::tls::Trust;
 
 /// Ops a frontend can queue before the engine reads them. A turn keeps reading ops while it runs,
 /// so this only absorbs a burst of queued prompts.
@@ -162,10 +163,11 @@ pub(crate) struct Engine {
 }
 
 impl Engine {
-    /// Continues `session` with a client and the agent settings from `config`. Fails when the
-    /// client cannot be built.
+    /// Continues `session` with a client built from `config` and `trust`, and the agent settings
+    /// from `config`. Fails when the client cannot be built.
     pub(crate) async fn new(
         config: &Config,
+        trust: impl Trust + 'static,
         device_id: String,
         toolbox: Toolbox,
         session: SessionParts,
@@ -177,7 +179,12 @@ impl Engine {
             transcript,
             file_tracker,
         } = session;
-        let client = Client::new(config, Some(session.session_id().to_owned()), device_id)?;
+        let client = Client::new(
+            config,
+            trust,
+            Some(session.session_id().to_owned()),
+            device_id,
+        )?;
         let Toolbox { tools, shells } = toolbox;
         let LoadedTranscript {
             messages,
@@ -696,7 +703,7 @@ impl Engine {
         );
 
         let mut inbox = Inbox::default();
-        let finish = pending.finish(&self.oauth_token_url, self.client.extra_ca_certs());
+        let finish = pending.finish(&self.oauth_token_url, self.client.trust());
         let signed_in = abort::await_unless_aborted(finish, ops, &mut inbox, sink).await;
         self.adopt_mode(&mut inbox);
         match signed_in {
@@ -740,13 +747,12 @@ impl Engine {
             .auth_source()
             .is_none_or(|source| source == AuthSource::OxLogin)
         {
-            let fallback =
-                auth::claude_code_login(self.claude_code_keychain, self.client.extra_ca_certs())
-                    .await
-                    .unwrap_or_else(|e| {
-                        fallback_error = Some(format!("{e:#}"));
-                        None
-                    });
+            let fallback = auth::claude_code_login(self.claude_code_keychain, self.client.trust())
+                .await
+                .unwrap_or_else(|e| {
+                    fallback_error = Some(format!("{e:#}"));
+                    None
+                });
             self.client.set_auth(fallback);
         }
         sink.emit(
@@ -1006,6 +1012,7 @@ mod tests {
     use crate::tool::tasks::TasksTool;
     use crate::tool::tasks::testing::plan;
     use crate::util::git::testing::{init_fixture_repo, with_isolated_git_env_async};
+    use crate::util::tls::testing::NoRoots;
 
     /// A toolbox without tools, for an engine that [`Engine::new`] builds.
     fn toolbox() -> Toolbox {
@@ -1194,6 +1201,7 @@ mod tests {
             for (context, replayed) in [(Some(recorded), true), (None, false)] {
                 let engine = Engine::new(
                     &config,
+                    NoRoots,
                     DEVICE_ID.to_owned(),
                     toolbox(),
                     SessionParts {
@@ -1252,6 +1260,7 @@ mod tests {
 
             let engine = Engine::new(
                 &config,
+                NoRoots,
                 DEVICE_ID.to_owned(),
                 toolbox(),
                 SessionParts {

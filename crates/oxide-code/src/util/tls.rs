@@ -1,7 +1,7 @@
-//! Extra trust anchors for HTTP clients, so corporate and self-signed endpoints whose CA the
-//! platform trust store lacks still verify.
+//! The roots HTTP clients trust, including extra anchors so corporate and self-signed endpoints
+//! whose CA the platform trust store lacks still verify.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 #[cfg(target_os = "macos")]
 use std::{cell::Cell, collections::HashSet, fmt, sync::Arc};
 
@@ -29,15 +29,30 @@ use {
     tracing::warn,
 };
 
+// ── Trust ──
+
+/// The roots an HTTP client verifies servers against. Tests substitute roots that read no system
+/// store.
+pub(crate) trait Trust: Send + Sync {
+    /// Configures `builder` to verify servers against these roots, possibly replacing its TLS
+    /// options. Set TLS options before calling this method only when they may be replaced.
+    fn apply(&self, builder: ClientBuilder) -> Result<ClientBuilder>;
+}
+
+/// The platform trust store, plus the PEM bundle at the path when one is set.
+pub(crate) struct PlatformTrust(pub(crate) Option<PathBuf>);
+
+impl Trust for PlatformTrust {
+    fn apply(&self, builder: ClientBuilder) -> Result<ClientBuilder> {
+        apply_extra_ca_certs(builder, self.0.as_deref())
+    }
+}
+
 // ── Client Builder ──
 
-/// Trusts the PEM bundle at `path` on top of the platform trust store. `None` returns `builder`
-/// unchanged. On macOS the bundle comes with a TLS configuration of its own, which replaces the
-/// TLS options set on `builder`.
-pub(crate) fn apply_extra_ca_certs(
-    builder: ClientBuilder,
-    path: Option<&Path>,
-) -> Result<ClientBuilder> {
+/// Trusts the PEM bundle at `path` on top of the platform trust store, or returns `builder`
+/// unchanged for `None`.
+fn apply_extra_ca_certs(builder: ClientBuilder, path: Option<&Path>) -> Result<ClientBuilder> {
     apply_extra_ca_certs_with(builder, path, trust_extra_cas)
 }
 
@@ -482,22 +497,23 @@ fn evaluation_error(code: isize, description: &str) -> Error {
 
 #[cfg(test)]
 pub(crate) mod testing {
-    use indoc::indoc;
+    use anyhow::Result;
+    use reqwest::ClientBuilder;
 
-    /// A self-signed P-256 CA, valid for 100 years.
-    pub(crate) const TEST_CA_PEM: &str = indoc! {"
-        -----BEGIN CERTIFICATE-----
-        MIIBhzCCAS2gAwIBAgIUSHnI8j4asiQCYFCLHv+mTjaH7PIwCgYIKoZIzj0EAwIw
-        GDEWMBQGA1UEAwwNb3hpZGUtdGVzdC1jYTAgFw0yNjA1MTMwOTM1NTNaGA8yMTI2
-        MDQxOTA5MzU1M1owGDEWMBQGA1UEAwwNb3hpZGUtdGVzdC1jYTBZMBMGByqGSM49
-        AgEGCCqGSM49AwEHA0IABPPm0pogMrzkQroL61zCV3BzVH25tmWvt6c1OK5pT7Yy
-        tOXqTKKLiqUbpsJW6XzankZ6E8LsI9mwuzXhsQYmGE+jUzBRMB0GA1UdDgQWBBQC
-        hrBBOk1wizWiQQQtrpIDMACA8DAfBgNVHSMEGDAWgBQChrBBOk1wizWiQQQtrpID
-        MACA8DAPBgNVHRMBAf8EBTADAQH/MAoGCCqGSM49BAMCA0gAMEUCIFiHH199T6Sd
-        F2u46c+5D9+pdwYEd1dAgP+a21dwLwo3AiEAyn5ssAPGMPmSP8lKLRLuH+cFNEVQ
-        PyBNMput8iNe6eE=
-        -----END CERTIFICATE-----
-    "};
+    use super::Trust;
+
+    /// A self-signed P-256 CA, valid for 100 years. The CLI tests pin it as the trust store.
+    pub(crate) const TEST_CA_PEM: &str = include_str!("../../tests/fixtures/test-ca.pem");
+
+    /// No roots, so building a client reads no system store. The client reaches only plain-HTTP
+    /// servers, such as the mock servers.
+    pub(crate) struct NoRoots;
+
+    impl Trust for NoRoots {
+        fn apply(&self, builder: ClientBuilder) -> Result<ClientBuilder> {
+            Ok(builder.no_proxy().tls_certs_only([]))
+        }
+    }
 }
 
 #[cfg(test)]

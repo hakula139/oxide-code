@@ -1,20 +1,72 @@
 //! CLI startup, headless session persistence, and session-list output.
 
 use std::fmt::Write as _;
+use std::path::Path;
 use std::process::{Command, Stdio};
 
 use indoc::{indoc, writedoc};
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
-fn ox() -> Command {
-    Command::new(env!("CARGO_BIN_EXE_ox"))
+#[path = "support/env.rs"]
+mod env;
+
+fn ox(root: &Path) -> Command {
+    let mut ox = Command::new(env!("CARGO_BIN_EXE_ox"));
+    env::remove_inherited(&mut ox, |name| {
+        env::is_provider_var(name) || env::is_ox_setting(name) || name == "RUST_LOG"
+    });
+    ox.env("HOME", root.join("home"))
+        .env("USERPROFILE", root.join("home"))
+        .env("XDG_CONFIG_HOME", root.join("config"))
+        .env("XDG_DATA_HOME", root.join("data"))
+        .env("XDG_STATE_HOME", root.join("state"));
+    // On Linux, building the HTTP client reads the system trust store and fails when it holds no
+    // certificates, so the tests pin it to a test CA.
+    ox.env(
+        "SSL_CERT_FILE",
+        concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/test-ca.pem"),
+    );
+    ox
+}
+
+#[tokio::test]
+async fn headless_reports_an_unreadable_extra_ca_bundle() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/messages"))
+        .respond_with(ResponseTemplate::new(400))
+        .mount(&server)
+        .await;
+    let dir = tempfile::tempdir().unwrap();
+    let missing = dir.path().join("missing.pem");
+
+    let output = tokio::process::Command::from(ox(dir.path()))
+        .args(["-p", "hello"])
+        .current_dir(dir.path())
+        .env("ANTHROPIC_API_KEY", "test-key")
+        .env("ANTHROPIC_BASE_URL", server.uri())
+        .env("OX_EXTRA_CA_CERTS", &missing)
+        .output()
+        .await
+        .unwrap();
+
+    assert!(!output.status.success(), "{output:?}");
+    assert!(output.stdout.is_empty(), "{:?}", output.stdout);
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert_eq!(
+        stderr.lines().next().unwrap(),
+        format!(
+            "Error: failed to read extra CA bundle at {}",
+            missing.display()
+        ),
+    );
 }
 
 #[test]
 fn list_in_empty_project_reports_no_sessions() {
     let dir = tempfile::tempdir().unwrap();
-    let output = ox()
+    let output = ox(dir.path())
         .arg("--list")
         .current_dir(dir.path())
         .env("XDG_DATA_HOME", dir.path())
@@ -29,7 +81,7 @@ fn list_in_empty_project_reports_no_sessions() {
 #[test]
 fn list_with_unusable_storage_fails() {
     let file = tempfile::NamedTempFile::new().unwrap();
-    let output = ox()
+    let output = ox(file.path())
         .arg("--list")
         .env("XDG_DATA_HOME", file.path())
         .output()
@@ -59,15 +111,11 @@ fn continue_in_the_repl_unarchives_the_session_with_a_note() {
     )
     .unwrap();
 
-    let output = ox()
+    let output = ox(dir.path())
         .arg("--no-tui")
         .arg("--continue")
         .arg(&session)
         .current_dir(dir.path())
-        .env("HOME", dir.path())
-        .env("XDG_CONFIG_HOME", dir.path().join("config"))
-        .env("XDG_DATA_HOME", dir.path().join("data"))
-        .env("XDG_STATE_HOME", dir.path().join("state"))
         .env("ANTHROPIC_AUTH_TOKEN", "test-token")
         .env("ANTHROPIC_BASE_URL", "http://127.0.0.1:9")
         .stdin(Stdio::null())
@@ -91,7 +139,7 @@ fn continue_in_the_repl_unarchives_the_session_with_a_note() {
 #[test]
 fn resume_without_a_terminal_fails_before_writing_anything() {
     let dir = tempfile::tempdir().unwrap();
-    let output = ox()
+    let output = ox(dir.path())
         .arg("--resume")
         .current_dir(dir.path())
         .env("XDG_DATA_HOME", dir.path())
@@ -135,13 +183,10 @@ async fn headless_rejected_request_preserves_branch_and_user_message() {
     assert!(init.status.success(), "{init:?}");
 
     let data_dir = dir.path().join("data");
-    let output = tokio::process::Command::new(env!("CARGO_BIN_EXE_ox"))
+    let output = tokio::process::Command::from(ox(dir.path()))
         .args(["-p", "hello"])
         .current_dir(dir.path())
-        .env("HOME", dir.path())
-        .env("XDG_CONFIG_HOME", dir.path().join("config"))
         .env("XDG_DATA_HOME", &data_dir)
-        .env("XDG_STATE_HOME", dir.path().join("state"))
         .env("ANTHROPIC_AUTH_TOKEN", "test-token")
         .env("ANTHROPIC_BASE_URL", server.uri())
         .env_remove("GIT_DIR")
@@ -224,13 +269,9 @@ async fn headless_mode_flag_overrides_the_configured_mode() {
     )
     .unwrap();
 
-    let output = tokio::process::Command::new(env!("CARGO_BIN_EXE_ox"))
+    let output = tokio::process::Command::from(ox(dir.path()))
         .args(["-p", "list the files", "--mode", "plan"])
         .current_dir(dir.path())
-        .env("HOME", dir.path())
-        .env("XDG_CONFIG_HOME", dir.path().join("config"))
-        .env("XDG_DATA_HOME", dir.path().join("data"))
-        .env("XDG_STATE_HOME", dir.path().join("state"))
         .env("ANTHROPIC_AUTH_TOKEN", "test-token")
         .env("ANTHROPIC_BASE_URL", server.uri())
         .env_remove("OX_PERMISSION_MODE")

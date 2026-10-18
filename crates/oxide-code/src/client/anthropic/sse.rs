@@ -235,7 +235,7 @@ mod tests {
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
     use super::*;
-    use crate::client::anthropic::testing::messages_request;
+    use crate::client::anthropic::testing::{messages_request, plain_http};
     use crate::client::anthropic::wire::{Delta, MessageResponse};
     use crate::client::{RateLimitWindow, RateLimits, Response};
     use crate::message::ContentBlock;
@@ -362,7 +362,7 @@ mod tests {
     async fn run_stream(base_url: &str) -> (Result<()>, Vec<ResponseEvent>) {
         let request = messages_request(format!("{base_url}/v1/messages"));
         let (tx, mut rx) = mpsc::channel(64);
-        let result = stream_sse(&reqwest::Client::new(), &request, "claude-opus-5-5", &tx).await;
+        let result = stream_sse(&plain_http(), &request, "claude-opus-5-5", &tx).await;
         drop(tx);
         let mut events = Vec::new();
         while let Some(event) = rx.recv().await {
@@ -401,7 +401,7 @@ mod tests {
         let request = messages_request(format!("{}/v1/messages", serve_stalled(MESSAGE_START)));
         let (tx, mut rx) = mpsc::channel(64);
         let forwarding = tokio::spawn(forward_sse(
-            reqwest::Client::new(),
+            plain_http(),
             request,
             "claude-opus-5-5".to_owned(),
             tx,
@@ -642,8 +642,7 @@ mod tests {
             let (tx, rx) = mpsc::channel::<Result<ResponseEvent>>(1);
             drop(rx);
 
-            let result =
-                stream_sse(&reqwest::Client::new(), &request, "claude-opus-5-5", &tx).await;
+            let result = stream_sse(&plain_http(), &request, "claude-opus-5-5", &tx).await;
 
             assert!(matches!(result, Ok(())), "graceful shutdown: {result:?}");
         }

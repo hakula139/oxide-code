@@ -14,7 +14,7 @@ use crate::util::env;
 use crate::util::fs::{atomic_write_private, create_private_dir_all};
 use crate::util::path::{XdgBase, app_dir};
 use crate::util::text::join_sentences;
-use crate::util::tls::apply_extra_ca_certs;
+use crate::util::tls::Trust;
 
 pub(crate) const OAUTH_TOKEN_URL: &str = "https://platform.claude.com/v1/oauth/token";
 pub(super) const OAUTH_CLIENT_ID: &str = "9d1c250a-e61b-44d9-88ed-5944d1962f5e";
@@ -253,16 +253,16 @@ pub(crate) async fn delete_login() -> Result<bool> {
 pub(super) async fn load_token(
     login: Login,
     keychain: ClaudeCodeKeychain,
-    extra_ca_certs: Option<&Path>,
+    trust: &dyn Trust,
 ) -> Result<String, LoginError> {
     let store = Store::locate(login, keychain.0).map_err(|e| LoginError::Unreadable(login, e))?;
-    load_token_from(&store, OAUTH_TOKEN_URL, extra_ca_certs).await
+    load_token_from(&store, OAUTH_TOKEN_URL, trust).await
 }
 
 async fn load_token_from(
     store: &Store<'_>,
     refresh_url: &str,
-    extra_ca_certs: Option<&Path>,
+    trust: &dyn Trust,
 ) -> Result<String, LoginError> {
     let login = store.login;
     let oauth = load_credentials(store)?.oauth;
@@ -297,7 +297,7 @@ async fn load_token_from(
         return usable_until_expiry(login, creds.oauth);
     };
 
-    match refresh_oauth_token(refresh_url, refresh_token, extra_ca_certs).await {
+    match refresh_oauth_token(refresh_url, refresh_token, trust).await {
         Ok(response) => {
             if let Err(e) = write_refreshed_credentials(&creds, &response) {
                 warn!("failed to save refreshed OAuth credentials: {e:#}");
@@ -500,20 +500,20 @@ struct RefreshRequest<'a> {
 pub(super) async fn exchange_code(
     url: &str,
     grant: &CodeGrant<'_>,
-    extra_ca_certs: Option<&Path>,
+    trust: &dyn Trust,
 ) -> Result<TokenResponse> {
     let request = CodeExchangeRequest {
         grant_type: "authorization_code",
         client_id: OAUTH_CLIENT_ID,
         grant,
     };
-    request_tokens(url, "token exchange", &request, extra_ca_certs).await
+    request_tokens(url, "token exchange", &request, trust).await
 }
 
 async fn refresh_oauth_token(
     url: &str,
     refresh_token: &str,
-    extra_ca_certs: Option<&Path>,
+    trust: &dyn Trust,
 ) -> Result<TokenResponse> {
     let scope = OAUTH_SCOPES.join(" ");
     let request = RefreshRequest {
@@ -522,7 +522,7 @@ async fn refresh_oauth_token(
         client_id: OAUTH_CLIENT_ID,
         scope: &scope,
     };
-    request_tokens(url, "token refresh", &request, extra_ca_certs).await
+    request_tokens(url, "token refresh", &request, trust).await
 }
 
 /// Posts `body` to the token endpoint. `what` names the request in errors.
@@ -530,11 +530,10 @@ async fn request_tokens(
     url: &str,
     what: &str,
     body: &impl Serialize,
-    extra_ca_certs: Option<&Path>,
+    trust: &dyn Trust,
 ) -> Result<TokenResponse> {
-    let builder = reqwest::Client::builder().timeout(TOKEN_REQUEST_TIMEOUT);
-    let builder = apply_extra_ca_certs(builder, extra_ca_certs)?;
-    let client = builder
+    let client = trust
+        .apply(reqwest::Client::builder().timeout(TOKEN_REQUEST_TIMEOUT))?
         .build()
         .context("failed to build OAuth HTTP client")?;
 
@@ -668,7 +667,8 @@ mod tests {
 
     use super::*;
     use crate::util::path::testing::{HOME_VAR, abs};
-    use crate::util::tls::testing::TEST_CA_PEM;
+    use crate::util::tls::PlatformTrust;
+    use crate::util::tls::testing::{NoRoots, TEST_CA_PEM};
 
     // ── OAuthCredential::expires_at_ms ──
 
@@ -778,7 +778,7 @@ mod tests {
         let token = temp_env::async_with_vars(
             [(HOME_VAR, Some(home.path().to_string_lossy().into_owned()))],
             async {
-                load_token(Login::ClaudeCode, ClaudeCodeKeychain::NONE, None)
+                load_token(Login::ClaudeCode, ClaudeCodeKeychain::NONE, &NoRoots)
                     .await
                     .unwrap()
             },
@@ -896,7 +896,7 @@ mod tests {
         let token = load_token_from(
             &store(None, &creds, &lock),
             "http://should-not-be-called",
-            None,
+            &NoRoots,
         )
         .await
         .unwrap();
@@ -917,7 +917,7 @@ mod tests {
             now_millis().unwrap() + 1_000,
         );
 
-        let token = load_token_from(&store(None, &creds, &lock), &server.uri(), None)
+        let token = load_token_from(&store(None, &creds, &lock), &server.uri(), &NoRoots)
             .await
             .unwrap();
         assert_eq!(token, "fresh-access");
@@ -944,9 +944,13 @@ mod tests {
             creds_json("old", Some("old-refresh"), now_millis().unwrap() + 1_000).to_string(),
         );
 
-        let token = load_token_from(&store(Some(&keychain), &creds, &lock), &server.uri(), None)
-            .await
-            .unwrap();
+        let token = load_token_from(
+            &store(Some(&keychain), &creds, &lock),
+            &server.uri(),
+            &NoRoots,
+        )
+        .await
+        .unwrap();
         assert_eq!(token, "fresh-access");
 
         let json = keychain.json();
@@ -970,9 +974,13 @@ mod tests {
         keychain_json["claudeAiOauth"]["subscriptionType"] = "max".into();
         let keychain = FakeKeychain::holding(keychain_json.to_string());
 
-        let token = load_token_from(&store(Some(&keychain), &creds, &lock), &server.uri(), None)
-            .await
-            .unwrap();
+        let token = load_token_from(
+            &store(Some(&keychain), &creds, &lock),
+            &server.uri(),
+            &NoRoots,
+        )
+        .await
+        .unwrap();
         assert_eq!(token, "fresh-access");
 
         let json = keychain.json();
@@ -996,9 +1004,13 @@ mod tests {
         );
         let keychain = FakeKeychain::holding("not json");
 
-        let token = load_token_from(&store(Some(&keychain), &creds, &lock), &server.uri(), None)
-            .await
-            .unwrap();
+        let token = load_token_from(
+            &store(Some(&keychain), &creds, &lock),
+            &server.uri(),
+            &NoRoots,
+        )
+        .await
+        .unwrap();
         assert_eq!(token, "fresh-access");
 
         assert_eq!(
@@ -1019,7 +1031,7 @@ mod tests {
         let token = load_token_from(
             &store(Some(&keychain), &creds, &lock),
             "http://unused",
-            None,
+            &NoRoots,
         )
         .await
         .unwrap();
@@ -1040,9 +1052,13 @@ mod tests {
             )
         };
 
-        let token = load_token_from(&store(Some(&keychain), &creds, &lock), &server.uri(), None)
-            .await
-            .unwrap();
+        let token = load_token_from(
+            &store(Some(&keychain), &creds, &lock),
+            &server.uri(),
+            &NoRoots,
+        )
+        .await
+        .unwrap();
         assert_eq!(token, "fresh-access");
     }
 
@@ -1056,7 +1072,7 @@ mod tests {
         let token = load_token_from(
             &store(None, &creds, &lock),
             "http://should-not-be-called",
-            None,
+            &NoRoots,
         )
         .await
         .unwrap();
@@ -1082,7 +1098,7 @@ mod tests {
             now_millis().unwrap() + 60_000,
         );
 
-        let token = load_token_from(&store(None, &creds, &lock), &server.uri(), None)
+        let token = load_token_from(&store(None, &creds, &lock), &server.uri(), &NoRoots)
             .await
             .unwrap();
         assert_eq!(token, "stale");
@@ -1099,7 +1115,7 @@ mod tests {
         let token = load_token_from(
             &store(None, &creds, &lock),
             "http://should-not-be-called",
-            None,
+            &NoRoots,
         )
         .await
         .unwrap();
@@ -1113,7 +1129,7 @@ mod tests {
         let lock = dir.path().join("lock");
         write_creds(&creds, "tok", None, 0);
 
-        let err = load_token_from(&store(None, &creds, &lock), "http://unused", None)
+        let err = load_token_from(&store(None, &creds, &lock), "http://unused", &NoRoots)
             .await
             .expect_err("expired without refresh must bail");
         assert!(
@@ -1136,7 +1152,7 @@ mod tests {
         let lock = dir.path().join("lock");
         write_creds(&creds, "dead", Some("old"), 0);
 
-        let err = load_token_from(&store(None, &creds, &lock), &server.uri(), None)
+        let err = load_token_from(&store(None, &creds, &lock), &server.uri(), &NoRoots)
             .await
             .expect_err("expired + refresh down must bail");
         assert!(
@@ -1164,7 +1180,7 @@ mod tests {
         let lock = dir.path().join("lock");
         write_creds(&creds, "dead", Some("old"), 0);
 
-        let err = load_token_from(&store(None, &creds, &lock), &server.uri(), None)
+        let err = load_token_from(&store(None, &creds, &lock), &server.uri(), &NoRoots)
             .await
             .expect_err("expired + refresh rejected must bail");
 
@@ -1187,7 +1203,7 @@ mod tests {
         let err = load_token_from(
             &store(None, &creds, &lock),
             "http://should-not-be-called",
-            None,
+            &NoRoots,
         )
         .await
         .expect_err("expired + lock held must bail");
@@ -1226,7 +1242,7 @@ mod tests {
         let token = load_token_from(
             &store(None, &creds, &lock),
             "http://should-not-be-called",
-            None,
+            &NoRoots,
         )
         .await
         .unwrap();
@@ -1257,7 +1273,7 @@ mod tests {
         let token = load_token_from(
             &store(None, &creds, &lock),
             "http://should-not-be-called",
-            None,
+            &NoRoots,
         )
         .await
         .unwrap();
@@ -1277,7 +1293,7 @@ mod tests {
         );
 
         for keychain in [None, Some(&empty as &dyn Keychain)] {
-            let err = load_token_from(&store(keychain, &missing, &lock), "http://unused", None)
+            let err = load_token_from(&store(keychain, &missing, &lock), "http://unused", &NoRoots)
                 .await
                 .expect_err("no login anywhere");
             assert!(matches!(err, LoginError::Missing), "{err:?}");
@@ -1286,7 +1302,7 @@ mod tests {
         let err = load_token_from(
             &store(Some(&denying), &missing, &lock),
             "http://unused",
-            None,
+            &NoRoots,
         )
         .await
         .expect_err("a denied Keychain and no file");
@@ -1295,7 +1311,7 @@ mod tests {
         let err = load_token_from(
             &store(Some(&garbled), &missing, &lock),
             "http://unused",
-            None,
+            &NoRoots,
         )
         .await
         .expect_err("an unparsable Keychain entry and no file");
@@ -1312,7 +1328,7 @@ mod tests {
         let err = load_token_from(
             &store(Some(&empty), &unreadable, &lock),
             "http://unused",
-            None,
+            &NoRoots,
         )
         .await
         .expect_err("an unreadable credentials file");
@@ -1449,7 +1465,7 @@ mod tests {
             .mount(&server)
             .await;
 
-        let response = refresh_oauth_token(&server.uri(), "old-refresh", None)
+        let response = refresh_oauth_token(&server.uri(), "old-refresh", &NoRoots)
             .await
             .unwrap();
         assert_eq!(response.access_token, "new-access");
@@ -1478,7 +1494,7 @@ mod tests {
             .mount(&server)
             .await;
 
-        let err = refresh_oauth_token(&server.uri(), "bad", None)
+        let err = refresh_oauth_token(&server.uri(), "bad", &NoRoots)
             .await
             .expect_err("expected HTTP error");
         let msg = format!("{err:#}");
@@ -1495,7 +1511,7 @@ mod tests {
             .mount(&server)
             .await;
 
-        let err = refresh_oauth_token(&server.uri(), "tok", None)
+        let err = refresh_oauth_token(&server.uri(), "tok", &NoRoots)
             .await
             .expect_err("expected parse error");
         assert!(format!("{err:#}").contains("parse"));
@@ -1517,18 +1533,26 @@ mod tests {
         let pem = tempfile::NamedTempFile::new().unwrap();
         std::io::Write::write_all(&mut pem.as_file(), TEST_CA_PEM.as_bytes()).unwrap();
 
-        let response = refresh_oauth_token(&server.uri(), "refresh", Some(pem.path()))
-            .await
-            .expect("valid PEM must build a client and produce a response");
+        let response = refresh_oauth_token(
+            &server.uri(),
+            "refresh",
+            &PlatformTrust(Some(pem.path().to_path_buf())),
+        )
+        .await
+        .expect("valid PEM must build a client and produce a response");
         assert_eq!(response.access_token, "new-access");
     }
 
     #[tokio::test]
     async fn refresh_oauth_token_surfaces_extra_ca_certs_error_with_path() {
         let missing = Path::new("/definitely/does/not/exist.pem");
-        let err = refresh_oauth_token("http://unused.invalid/", "refresh", Some(missing))
-            .await
-            .expect_err("missing CA bundle must error");
+        let err = refresh_oauth_token(
+            "http://unused.invalid/",
+            "refresh",
+            &PlatformTrust(Some(missing.to_path_buf())),
+        )
+        .await
+        .expect_err("missing CA bundle must error");
         let msg = format!("{err:#}");
         assert!(msg.contains("failed to read extra CA bundle"), "{msg}");
         assert!(msg.contains("/definitely/does/not/exist.pem"), "{msg}");

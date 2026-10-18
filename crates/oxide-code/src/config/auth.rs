@@ -2,7 +2,6 @@
 //! travels on the wire.
 
 use std::fmt;
-use std::path::Path;
 
 use anyhow::{Context, Result};
 use reqwest::header::{AUTHORIZATION, HeaderName, HeaderValue};
@@ -10,6 +9,7 @@ use serde::{Deserialize, Serialize};
 
 use super::oauth::{self, ClaudeCodeKeychain, LOGIN_STORES, Login, LoginError};
 use crate::util::env;
+use crate::util::tls::Trust;
 
 // ── AuthKind ──
 
@@ -257,9 +257,9 @@ pub(super) async fn resolve(
 /// another account.
 pub(super) async fn stored_login(
     keychain: ClaudeCodeKeychain,
-    extra_ca_certs: Option<&Path>,
+    trust: &dyn Trust,
 ) -> Result<Auth, LoginError> {
-    first_stored_login(|login| oauth::load_token(login, keychain, extra_ca_certs)).await
+    first_stored_login(|login| oauth::load_token(login, keychain, trust)).await
 }
 
 async fn first_stored_login<F, Fut>(load: F) -> Result<Auth, LoginError>
@@ -284,9 +284,9 @@ where
 /// Returns `None` when Claude Code stores no login, and an error when its login exists but fails.
 pub(crate) async fn claude_code_login(
     keychain: ClaudeCodeKeychain,
-    extra_ca_certs: Option<&Path>,
+    trust: &dyn Trust,
 ) -> Result<Option<Auth>> {
-    match oauth::load_token(Login::ClaudeCode, keychain, extra_ca_certs).await {
+    match oauth::load_token(Login::ClaudeCode, keychain, trust).await {
         Ok(token) => Ok(Some(Auth::new(AuthSource::ClaudeCodeLogin, token))),
         Err(LoginError::Missing) => Ok(None),
         Err(e) => Err(e.into()),
@@ -296,6 +296,7 @@ pub(crate) async fn claude_code_login(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::util::tls::testing::NoRoots;
 
     const ALL_SOURCES: [AuthSource; 6] = [
         AuthSource::AuthTokenEnv,
@@ -592,7 +593,7 @@ mod tests {
 
         let auth = temp_env::async_with_vars(
             [("XDG_DATA_HOME", Some(data.path()))],
-            stored_login(ClaudeCodeKeychain::NONE, None),
+            stored_login(ClaudeCodeKeychain::NONE, &NoRoots),
         )
         .await
         .unwrap();
@@ -661,15 +662,15 @@ mod tests {
         let (missing, unreadable, auth) = temp_env::async_with_vars(
             [(crate::util::path::testing::HOME_VAR, Some(home.path()))],
             async {
-                let missing = claude_code_login(ClaudeCodeKeychain::NONE, None).await;
+                let missing = claude_code_login(ClaudeCodeKeychain::NONE, &NoRoots).await;
                 std::fs::create_dir(file.parent().unwrap()).unwrap();
                 std::fs::write(&file, "not json").unwrap();
-                let unreadable = claude_code_login(ClaudeCodeKeychain::NONE, None).await;
+                let unreadable = claude_code_login(ClaudeCodeKeychain::NONE, &NoRoots).await;
                 std::fs::write(&file, credentials_json("claude-code-token")).unwrap();
                 (
                     missing,
                     unreadable,
-                    claude_code_login(ClaudeCodeKeychain::NONE, None).await,
+                    claude_code_login(ClaudeCodeKeychain::NONE, &NoRoots).await,
                 )
             },
         )
