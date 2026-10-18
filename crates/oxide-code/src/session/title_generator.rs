@@ -28,12 +28,10 @@ const MAX_TOKENS: u32 = 1_024;
 /// Clamp on the prompt. Long first messages with pasted code stay cheap to title.
 const MAX_PROMPT_CHARS: usize = 1_000;
 
-/// Title prompt. The paired JSON-schema output format ([`title_output_format`]) enforces
-/// the `{"title": ...}` shape regardless of how the model would otherwise respond.
+/// Title prompt. The paired JSON-schema output format ([`title_output_format`]) enforces the
+/// `{"title": ...}` shape regardless of how the model would otherwise respond.
 const SYSTEM_PROMPT: &str = indoc! {r#"
-    Generate a concise, sentence-case title (3-7 words) that captures the main topic or goal of this
-    coding session. The title should be clear enough that the user recognizes the session in a list.
-    Use sentence case: capitalize only the first word and proper nouns.
+    Generate a concise, sentence-case title (3-7 words) that captures the main topic or goal of this coding session. The title should be clear enough that the user recognizes the session in a list. Use sentence case: capitalize only the first word and proper nouns.
 
     Return JSON with a single "title" field.
 
@@ -45,26 +43,26 @@ const SYSTEM_PROMPT: &str = indoc! {r#"
 
     Bad (too vague): {"title": "Code changes"}
     Bad (too long): {"title": "Investigate and fix why the mobile login button no longer responds"}
-    Bad (wrong case): {"title": "Fix Login Button On Mobile"}
-"#};
+    Bad (wrong case): {"title": "Fix Login Button On Mobile"}"#
+};
 
 // ── Public API ──
 
-/// Fire-and-forget: spawns a detached tokio task and returns immediately. The task asks Haiku
-/// for a title, appends it to `session`, and emits `SessionTitleUpdated` through `sink`. All
-/// failures (HTTP, parse, write) warn-log and drop. The first-prompt title persists, so the
-/// session is never left without a title. `first_prompt` is tail-truncated to
-/// [`MAX_PROMPT_CHARS`] to keep cost bounded on long pasted code.
+/// Spawns a task that asks Haiku for a title, appends it to `session`, and emits
+/// `SessionTitleUpdated` through `sink`. `session` owns the task, so finalizing it aborts the
+/// request. A generation failure only warns, so the first-prompt title stays, while an append
+/// failure surfaces as a session write error.
 pub(crate) fn spawn<S>(client: Client, session: SessionHandle, sink: S, first_prompt: String)
 where
     S: EventSink + Clone + Send + 'static,
 {
-    tokio::spawn(async move {
+    let owner = session.clone();
+    let task = tokio::spawn(async move {
         if let Err(e) = generate_and_record(&client, &session, &sink, &first_prompt).await {
-            // Expected: network hiccup, rate-limit, or non-JSON reply. First-prompt title stays.
-            warn!("AI title generation failed: {e}");
+            warn!("AI title generation failed: {e:#}");
         }
     });
+    owner.set_title_task(task);
 }
 
 // ── Generation ──
@@ -96,15 +94,7 @@ async fn generate_and_record(
         return Ok(());
     }
     let outcome = session.append_ai_title(title.clone()).await;
-    if let Some(failure) = outcome.failure.as_deref() {
-        if !session.is_actor_alive() {
-            // Session was finalized before this task returned. Surfacing into the next session's
-            // UI would mislead the user.
-            warn!("title-gen append after session shutdown: {failure}");
-            return Ok(());
-        }
-        sink.session_write_error(Some(failure));
-    }
+    sink.session_write_error(outcome.failure.as_deref());
 
     sink.emit(
         Event::SessionTitleUpdated {
@@ -200,7 +190,7 @@ mod tests {
     use crate::config::auth::{Auth, AuthSource};
     use crate::message::Message;
     use crate::protocol::CapturingSink;
-    use crate::session::handle::testing::{acks_append_ai_title_with_failure, dead};
+    use crate::session::handle::testing::dead;
     use crate::session::store::testing::test_store;
 
     // ── Fixtures ──
@@ -213,20 +203,18 @@ mod tests {
         )
     }
 
-    /// Sink backed by an mpsc channel so tests can wait on `recv()` with a timeout instead of
-    /// polling `CapturingSink`.
+    /// Sink backed by an mpsc channel. The spawned task owns the only sender, so `recv()` returns
+    /// `None` once the task ends.
     #[derive(Clone)]
     struct ChannelSink(tokio::sync::mpsc::UnboundedSender<Event>);
 
     impl crate::protocol::EventSink for ChannelSink {
         fn send(&self, event: Event) -> anyhow::Result<()> {
-            _ = self.0.send(event);
-            Ok(())
+            Ok(self.0.send(event)?)
         }
     }
 
-    /// Session handle with one recorded message so the file is materialized when `append_ai_title`
-    /// runs.
+    /// Session handle with one recorded message, so `append_ai_title` writes to an existing file.
     async fn prepared_session(dir: &Path) -> SessionHandle {
         let store = test_store(dir);
         let handle = crate::session::handle::start(&store, HAIKU_MODEL);
@@ -250,30 +238,31 @@ mod tests {
 
         let dir = tempfile::tempdir().unwrap();
         let session = prepared_session(dir.path()).await;
+        let session_id = session.session_id().to_owned();
         let client = title_client(server.uri());
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
         let sink = ChannelSink(tx);
 
         spawn(client, session, sink, "first prompt".to_owned());
 
-        let event = tokio::time::timeout(std::time::Duration::from_secs(5), rx.recv())
-            .await
-            .expect("timed out waiting for title event")
-            .expect("channel closed before event");
-
-        assert!(
-            matches!(&event, Event::SessionTitleUpdated { title, .. } if title == "Fix auth"),
-            "unexpected event: {event:?}",
+        assert_eq!(
+            rx.recv().await,
+            Some(Event::SessionTitleUpdated {
+                session_id,
+                title: "Fix auth".to_owned(),
+            }),
         );
+        assert_eq!(rx.recv().await, None);
     }
 
     #[tokio::test]
     async fn spawn_error_does_not_emit_session_title_event() {
-        // 503 → generate_and_record fails → warn-log only, no event.
+        // A 400 is fatal, so the task fails without waiting out the retry backoff.
         let server = MockServer::start().await;
         Mock::given(method("POST"))
             .and(wm_path("/v1/messages"))
-            .respond_with(ResponseTemplate::new(503).set_body_string("bad gateway"))
+            .respond_with(ResponseTemplate::new(400).set_body_string("bad request"))
+            .expect(1)
             .mount(&server)
             .await;
 
@@ -285,11 +274,7 @@ mod tests {
 
         spawn(client, session, sink, "first prompt".to_owned());
 
-        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
-        assert!(
-            rx.try_recv().is_err(),
-            "no event should be emitted on generation failure",
-        );
+        assert_eq!(rx.recv().await, None);
     }
 
     // ── generate_and_record ──
@@ -395,7 +380,7 @@ mod tests {
 
     #[tokio::test]
     async fn generate_and_record_conversational_reply_bails_without_updating_title() {
-        // Haiku sometimes answers the prompt instead of titling it. The bail keeps the first-prompt
+        // Haiku sometimes answers the prompt conversationally. The bail keeps the first-prompt
         // title on disk and out of the UI.
         let server = MockServer::start().await;
         Mock::given(method("POST"))
@@ -425,43 +410,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn generate_and_record_alive_session_writer_failure_surfaces_as_error() {
-        // Counterpart to the post-finalize-silent test below: when the actor is still alive but
-        // its append_ai_title ack carries a `failure`, the user IS seeing the live session, so the
-        // failure must be surfaced as a normal session-write error.
-        let server = MockServer::start().await;
-        Mock::given(method("POST"))
-            .and(wm_path("/v1/messages"))
-            .respond_with(
-                ResponseTemplate::new(200)
-                    .set_body_string(completion_body(r#"{"title":"Fix auth"}"#)),
-            )
-            .mount(&server)
-            .await;
-
-        let session = acks_append_ai_title_with_failure("live-session", "disk full");
-        let client = title_client(server.uri());
-        let sink = CapturingSink::new();
-
-        generate_and_record(&client, &session, &sink, "first prompt")
-            .await
-            .unwrap();
-
-        let events = sink.events();
-        assert!(
-            events.iter().any(|e| matches!(
-                e,
-                Event::Error(msg) if msg.contains("disk full")
-            )),
-            "writer-failure on live session must surface as Error: {events:?}",
-        );
-    }
-
-    #[tokio::test]
-    async fn generate_and_record_post_finalize_actor_gone_is_silent() {
-        // Title-gen is best-effort: a session that finalized (`/clear`, `/resume`) before this
-        // background task returned must not surface "Session write failed" into the UI of the
-        // *next* session. It only logs a warning, with no Error and no title event.
+    async fn generate_and_record_surfaces_an_append_failure_before_the_title_event() {
         let server = MockServer::start().await;
         Mock::given(method("POST"))
             .and(wm_path("/v1/messages"))
@@ -480,17 +429,19 @@ mod tests {
             .await
             .unwrap();
 
-        let events = sink.events();
-        assert!(
-            !events.iter().any(|e| matches!(e, Event::Error(_))),
-            "post-finalize actor-gone must not surface as Error: {events:?}",
-        );
-        assert!(
-            !events
-                .iter()
-                .any(|e| matches!(e, Event::SessionTitleUpdated { .. })),
-            "post-finalize must skip SessionTitleUpdated \
-             because the title belongs to the dead session: {events:?}",
+        assert_eq!(
+            sink.events(),
+            [
+                Event::Error(
+                    "Session write failed: session writer task has stopped. \
+                     Conversation history may be incomplete."
+                        .to_owned(),
+                ),
+                Event::SessionTitleUpdated {
+                    session_id: "dead-session".to_owned(),
+                    title: "Fix auth".to_owned(),
+                },
+            ],
         );
     }
 
@@ -659,8 +610,6 @@ mod tests {
 
     #[test]
     fn truncate_prompt_respects_char_boundaries_for_multibyte() {
-        // 1000 é followed by "tail": truncating to 4 chars should give just "tail", not broken
-        // bytes from an é midpoint.
         let s: String = "\u{00e9}".repeat(1_000) + "tail";
         let out = truncate_prompt(&s, 4);
         assert_eq!(out, "tail");

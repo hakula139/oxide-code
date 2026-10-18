@@ -33,8 +33,8 @@ const CHANNEL_CAPACITY: usize = 1024;
 
 // ── SessionHandle ──
 
-/// Cheap to clone because clones share one actor task. All methods are async
-/// and return after the batch flush this cmd lands in.
+/// Cheap to clone because clones share one actor task. Every write method returns after the
+/// batch flush that its cmd lands in.
 #[derive(Clone)]
 pub(crate) struct SessionHandle {
     cmd_tx: mpsc::Sender<SessionCmd>,
@@ -42,17 +42,19 @@ pub(crate) struct SessionHandle {
     shared: Arc<SharedState>,
     /// First `shutdown` takes the join. Subsequent calls no-op.
     actor_join: Arc<std::sync::Mutex<Option<JoinHandle<()>>>>,
+    title_task: Arc<std::sync::Mutex<Option<JoinHandle<()>>>>,
 }
 
-/// Sticky-once failure flags shared between actor and handle clones.
+/// State the actor and every handle clone share. Each `surface_first_*` method returns `true` on
+/// its first call and `false` after.
 #[derive(Default)]
 pub(super) struct SharedState {
     flush_failure_surfaced: AtomicBool,
     persistence_stop_surfaced: AtomicBool,
     actor_gone_surfaced: AtomicBool,
-    /// Set when the user has run `/rename`, suppressing AI titles and the next `FirstPrompt`.
-    /// Latched by [`SessionHandle::set_manual_title`] before dispatch so the title generator's
-    /// pre-check observes it without an actor round-trip.
+    /// Set by [`SessionHandle::set_manual_title`] before it sends the title, so no AI title or
+    /// `FirstPrompt` title follows a `/rename`. The title generator checks it before appending,
+    /// and the actor checks again on arrival, since a `/rename` can land in between.
     manual_title_set: AtomicBool,
     /// Most recent flush error, threaded into actor-gone messages so the user sees the I/O cause.
     last_flush_failure: std::sync::Mutex<Option<String>>,
@@ -63,19 +65,16 @@ impl SharedState {
         *lock_or_recover(&self.last_flush_failure, "last_flush_failure") = Some(msg.to_owned());
     }
 
-    /// `true` on the first call after [`Self::record_flush_failure`], then sticky `false`.
     pub(super) fn surface_first_flush_failure(&self) -> bool {
-        !self.flush_failure_surfaced.swap(true, Ordering::AcqRel)
+        surface_once(&self.flush_failure_surfaced)
     }
 
-    /// Sticky-once: `true` on first call, `false` after.
     pub(super) fn surface_first_persistence_stop(&self) -> bool {
-        !self.persistence_stop_surfaced.swap(true, Ordering::AcqRel)
+        surface_once(&self.persistence_stop_surfaced)
     }
 
-    /// Sticky-once: `true` on first call, `false` after.
     pub(super) fn surface_first_actor_gone(&self) -> bool {
-        !self.actor_gone_surfaced.swap(true, Ordering::AcqRel)
+        surface_once(&self.actor_gone_surfaced)
     }
 
     pub(super) fn mark_manual_title_set(&self) {
@@ -86,10 +85,13 @@ impl SharedState {
         self.manual_title_set.load(Ordering::Acquire)
     }
 
-    /// Most recent flush error, threaded into actor-gone messages.
     pub(super) fn last_flush_failure(&self) -> Option<String> {
         lock_or_recover(&self.last_flush_failure, "last_flush_failure").clone()
     }
+}
+
+fn surface_once(surfaced: &AtomicBool) -> bool {
+    !surfaced.swap(true, Ordering::AcqRel)
 }
 
 /// Combined ack from `record_message`: AI-title seed and first-failure surface in one round-trip.
@@ -106,9 +108,8 @@ pub(crate) struct Outcome {
     pub(crate) failure: Option<String>,
 }
 
-/// Ack from `SessionHandle::compact`. `pre_count` is the message count at the moment the
-/// compact request landed in the actor. The post-compact UI line uses it for the
-/// "compacted N messages → 1 summary" header.
+/// Ack from `SessionHandle::compact`. `pre_count` is the message count when the compact request
+/// landed in the actor, which the post-compact line shows as "compacted N messages → 1 summary".
 pub(crate) struct CompactOutcome {
     pub(crate) pre_count: u32,
     pub(crate) failure: Option<String>,
@@ -119,11 +120,9 @@ impl SessionHandle {
         &self.session_id
     }
 
-    /// `false` once the actor has shut down (after `finalize` / `roll` / `roll_into`). Lets
-    /// background best-effort tasks (title generator) suppress actor-gone failures that follow a
-    /// session swap, since those aren't real I/O errors the user needs to see.
-    pub(crate) fn is_actor_alive(&self) -> bool {
-        !self.cmd_tx.is_closed()
+    /// Ties the AI title request to this session, so `finalize` aborts it.
+    pub(super) fn set_title_task(&self, task: JoinHandle<()>) {
+        *lock_or_recover(&self.title_task, "title_task") = Some(task);
     }
 
     /// Records a conversation message. Returns after the batch flush completes.
@@ -170,8 +169,7 @@ impl SessionHandle {
             .await
     }
 
-    /// Persists a user-supplied title. The flag flips in `SharedState` *before* dispatch so the
-    /// title generator's pre-check sees it even if the actor hasn't drained its channel yet.
+    /// Persists a user-supplied title, suppressing AI titles for the rest of the session.
     pub(crate) async fn set_manual_title(&self, title: String) -> Outcome {
         self.shared.mark_manual_title_set();
         let (ack, rx) = oneshot::channel();
@@ -230,16 +228,31 @@ impl SessionHandle {
             .await
     }
 
-    /// Finalizes and tears down: writes the summary, surfaces a flush error (if any), and shuts
-    /// the actor down. Returns the failure message for the caller to route.
+    /// Tears down: stops the title request, writes the summary, surfaces a flush error (if any),
+    /// and shuts the actor down. Returns the failure message for the caller to route.
     pub(crate) async fn finalize(self, snapshots: Vec<FileSnapshot>) -> Option<String> {
+        self.stop_title_task().await;
         let outcome = self.finish(snapshots).await;
         self.shutdown().await;
         outcome.failure
     }
 
+    /// Aborts the title request and waits for it to end, so it never writes to or reports on a
+    /// finalized session.
+    async fn stop_title_task(&self) {
+        let task = lock_or_recover(&self.title_task, "title_task").take();
+        if let Some(task) = task {
+            task.abort();
+            if let Err(e) = task.await
+                && e.is_panic()
+            {
+                tracing::error!("title generation panicked: {e}");
+            }
+        }
+    }
+
     /// Sends [`SessionCmd::Shutdown`] so the actor breaks after the current batch, then awaits
-    /// the join handle. Cmd-driven exit keeps process-exit fast when orphaned clones are mid-HTTP.
+    /// the join handle. Cmd-driven exit keeps a clone held elsewhere from pinning the actor.
     pub(crate) async fn shutdown(self) {
         let Self {
             cmd_tx, actor_join, ..
@@ -393,7 +406,7 @@ pub(crate) async fn roll_into(
     if read_session_id_from_path(target)? == session.session_id() {
         bail!("already resumed: target id matches the live session");
     }
-    // Load and sanitize FIRST so a target-load error leaves the live session untouched.
+    // Load and sanitize first so a target-load error leaves the live session untouched.
     let ResumedSession {
         handle: target_handle,
         transcript,
@@ -438,7 +451,7 @@ fn from_resumed_data(
     // `last_message_uuid` would corrupt the chain. A title-only file is fine because the next
     // message starts a fresh chain.
     if pre_sanitize_len > 0 && data.messages.is_empty() {
-        bail!("session {session_id}: sanitize dropped all messages");
+        bail!("session {session_id} has no messages left after repair");
     }
     retain_visible_file_snapshots(&mut data.file_snapshots, &data.messages);
     if data.archived {
@@ -489,6 +502,7 @@ fn spawn_actor(state: SessionState) -> SessionHandle {
         session_id,
         shared,
         actor_join: Arc::new(std::sync::Mutex::new(Some(join))),
+        title_task: Arc::default(),
     }
 }
 
@@ -1120,6 +1134,50 @@ mod tests {
         assert!(failure.is_some(), "dead handle finalize surfaces failure");
     }
 
+    #[tokio::test]
+    async fn finalize_ends_the_title_task_before_it_returns() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = test_store(dir.path());
+        let handle = start(&store, "m");
+        let (started_tx, started) = oneshot::channel();
+        let (alive, mut ended) = oneshot::channel::<()>();
+        handle.set_title_task(tokio::spawn(async move {
+            let _alive = alive;
+            started_tx.send(()).unwrap();
+            std::future::pending::<()>().await;
+        }));
+        started.await.unwrap();
+
+        let failure = handle.finalize(Vec::new()).await;
+
+        assert_eq!(failure, None);
+        assert_eq!(ended.try_recv(), Err(oneshot::error::TryRecvError::Closed));
+    }
+
+    #[tokio::test]
+    async fn finalize_writes_the_summary_after_the_title_task_panics() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = test_store(dir.path());
+        let handle = start(&store, "m");
+        let sid = handle.session_id().to_owned();
+        handle.record_message(Message::user("hi")).await;
+        let (started_tx, started) = oneshot::channel();
+        handle.set_title_task(tokio::spawn(async move {
+            started_tx.send(()).unwrap();
+            panic!("deliberate title task panic for testing");
+        }));
+        started.await.unwrap();
+
+        let failure = handle.finalize(Vec::new()).await;
+
+        assert_eq!(failure, None);
+        let content = std::fs::read_to_string(test_session_file(dir.path(), &sid)).unwrap();
+        assert!(
+            content.contains(r#""type":"summary""#),
+            "summary lands on disk: {content}",
+        );
+    }
+
     // ── shutdown ──
 
     #[tokio::test]
@@ -1245,7 +1303,8 @@ mod tests {
         let original_id = session.session_id().to_owned();
         session.record_message(Message::user("seed")).await;
 
-        _ = roll(&mut session, &store, &tracker, "test-model").await;
+        let outcome = roll(&mut session, &store, &tracker, "test-model").await;
+        assert_eq!(outcome.finalize_failure, None);
 
         assert!(
             tracker.snapshot_all().is_empty(),
@@ -1532,9 +1591,10 @@ mod tests {
         let err = resume_id(&store, &session_id)
             .err()
             .expect("all messages sanitized must be an error");
-        assert!(
-            format!("{err:#}").contains("sanitize dropped all messages"),
-            "error explains why: {err:#}",
+
+        assert_eq!(
+            format!("{err:#}"),
+            format!("session {session_id} has no messages left after repair"),
         );
     }
 
@@ -1585,8 +1645,7 @@ mod tests {
         let content = std::fs::read_to_string(test_session_file(dir.path(), &session_id)).unwrap();
         let entries: Vec<Entry> = content
             .lines()
-            .filter(|l| !l.is_empty())
-            .filter_map(|l| serde_json::from_str(l).ok())
+            .map(|line| serde_json::from_str(line).unwrap())
             .collect();
 
         let msg_uuids: Vec<_> = entries

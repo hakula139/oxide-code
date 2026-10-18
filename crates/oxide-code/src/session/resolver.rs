@@ -88,7 +88,7 @@ fn normalize_resume_arg(resume: Option<&Option<String>>) -> Result<ResumeMode<'_
 }
 
 /// True if the argument contains a path separator or has a `.jsonl` extension. UUIDs contain
-/// only hex + `-`, so this never mis-routes a valid session-ID prefix.
+/// only hex digits and `-`, so this never mis-routes a valid session-ID prefix.
 fn looks_like_path(arg: &str) -> bool {
     arg.contains('/')
         || arg.contains('\\')
