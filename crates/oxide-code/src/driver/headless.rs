@@ -216,7 +216,7 @@ struct RunResult<'a> {
     error: Option<&'a str>,
     /// The reply after the last tool call, kept only when the turn completed.
     message: Option<&'a str>,
-    /// The latest usage snapshot, or `None` when no request reported usage.
+    /// The latest usage snapshot any request reported.
     usage: Option<&'a UsageSnapshot>,
     session_id: &'a str,
 }

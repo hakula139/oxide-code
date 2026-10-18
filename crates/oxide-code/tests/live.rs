@@ -184,9 +184,8 @@ fn continue_answers_from_the_resumed_transcript_and_cache() {
 
 // ── Harness ──
 
-/// A scratch working directory with its own home, config, session, and log storage, so `ox` loads
-/// no global instructions or stored login, and the endpoint and credentials come only from the
-/// caller's environment.
+/// A scratch working directory with its own home, config, session, and log storage, so `ox` takes
+/// the endpoint and credentials only from the caller's environment.
 struct Live {
     root: TempDir,
     credentials: Vec<(&'static str, String)>,
@@ -271,7 +270,7 @@ impl Live {
         output
     }
 
-    /// Names the source and the variable of a leaked credential without printing its value.
+    /// Fails on a leaked credential, naming its source and variable without printing its value.
     fn assert_no_credentials(&self, output: &Output) {
         let captured = [("stdout", &output.stdout), ("stderr", &output.stderr)]
             .map(|(source, bytes)| (source.to_owned(), bytes.clone()));
@@ -316,8 +315,7 @@ fn credentials() -> Vec<(&'static str, String)> {
     tokens.chain(header_values).collect()
 }
 
-/// Returns whether an inherited variable changes what the tests observe. The endpoint, credential,
-/// header, CA, and attribution variables pass through.
+/// Returns whether an inherited variable changes what the tests observe.
 fn is_behavior_var(name: &str) -> bool {
     name.starts_with("OX_") && name != "OX_EXTRA_CA_CERTS"
 }

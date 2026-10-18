@@ -1,6 +1,5 @@
-//! Test-only engine fixtures: [`Engine`] builders and mocked replies, the turn fixtures the turn,
-//! dispatch, and compaction tests share, and the transcripts large enough to compact. Child of
-//! `engine` so it can build the private fields.
+//! Test-only fixtures shared by the engine, turn, dispatch, and compaction tests. They build
+//! [`Engine`]s, mock API replies, script turns, and seed transcripts large enough to compact.
 
 use std::collections::{HashMap, VecDeque};
 use std::panic::AssertUnwindSafe;
@@ -308,7 +307,7 @@ pub(super) fn with_stop(
     events
 }
 
-/// Echoes its input. Exercises the tool-dispatch path without subprocess machinery.
+/// Echoes its input.
 pub(super) struct EchoTool;
 
 impl Tool for EchoTool {
@@ -333,8 +332,7 @@ impl Tool for EchoTool {
     }
 }
 
-/// Inert receiver whose `recv()` stays pending. The sender is leaked so call sites don't
-/// need to bind it for the test's lifetime.
+/// Inert receiver whose `recv()` stays pending, its sender leaked so callers need not hold it.
 pub(super) fn inert_ops() -> mpsc::Receiver<Op> {
     let (tx, rx) = crate::protocol::inert_op_channel();
     std::mem::forget(tx);

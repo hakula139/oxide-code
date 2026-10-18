@@ -338,11 +338,10 @@ impl<'r> Dispatcher<'r, '_> {
         )
     }
 
-    /// Runs the permission gate on a prepared call. Returns `None` to proceed or a synthetic
+    /// Runs the permission gate on a prepared call, returning `None` to proceed or a synthetic
     /// denial. An `ask` emits [`Event::ApprovalRequested`] and blocks on the matching
-    /// [`Op::Resolve`], which every frontend answers in its own way. An allow-for-session answer
-    /// adds its rule to the policy once the call's own grant admits it. It denies at once when no
-    /// frontend can receive the request.
+    /// [`Op::Resolve`]. It denies at once when no frontend can receive the request, since nothing
+    /// would ever resolve it.
     async fn check_permission(
         &mut self,
         spec: &ToolSpec,
@@ -370,9 +369,6 @@ impl<'r> Dispatcher<'r, '_> {
                 format_args!("by {}", verdict.basis),
             ))),
             crate::permission::Decision::Ask => {
-                // The approval request is a control-plane event: if it can't be delivered, no
-                // frontend can answer it and `await_approval` would block forever. Fail closed on
-                // a send error, so the turn is not stranded.
                 let grant = self
                     .dispatch_ctx
                     .policy
@@ -446,9 +442,8 @@ impl<'r> Dispatcher<'r, '_> {
     }
 }
 
-/// The synthetic tool result for a call denied for `reason`, a phrase that follows "was denied",
-/// such as `by the user`. Marked `is_error` so the model treats it as a failed call and can try
-/// another approach.
+/// The synthetic error result for a call denied for `reason`, a phrase that follows "was denied",
+/// such as `by the user`.
 fn denied_output(name: &str, reason: impl fmt::Display) -> ToolOutput {
     ToolOutput::error(format!(
         "The {name} call was denied {reason}. \
@@ -458,8 +453,8 @@ fn denied_output(name: &str, reason: impl fmt::Display) -> ToolOutput {
 }
 
 /// Blocks on `ops` for the [`Op::Resolve`] matching `id`, while [`Inbox::absorb`] handles the
-/// other ops. A decision for a different id is a stale reply for an already-resolved call, so it
-/// is ignored. Cancel-safe by drop: it holds no state.
+/// other ops. A decision for a different ID is a stale reply for an already-resolved call, so it
+/// is ignored, like any op the gate must not act on mid-approval. Cancel-safe by drop.
 async fn await_approval(
     id: &str,
     ops: &mut mpsc::Receiver<Op>,
@@ -472,8 +467,6 @@ async fn await_approval(
                 id: target,
                 decision,
             }) if target == id => return Ok(decision),
-            // Keep waiting past a stale decision or an op that is unreachable while an approval is
-            // outstanding, so the gate can't be skipped.
             Some(other) => warn!("ignored op while awaiting approval {id}: {other:?}"),
             None => {}
         }
@@ -1110,8 +1103,6 @@ mod tests {
 
     #[tokio::test]
     async fn gate_ask_undeliverable_event_fails_closed() {
-        // If the approval event can't be delivered, no modal can answer it, so the gate must deny
-        // before `await_approval` blocks forever. An inert receiver would hang on a regression.
         let tools = ToolRegistry::new(vec![Box::new(EchoTool)]);
         let mut dispatch_ctx = dispatch_with(Mode::Manual, &[], &[], Path::new("/repo"));
         let (_tx, mut rx) = mpsc::channel::<Op>(1);
@@ -1202,8 +1193,6 @@ mod tests {
     #[cfg(unix)]
     #[tokio::test]
     async fn gate_pins_a_path_input_to_the_resolved_target() {
-        // The tool must act on the file the gate checked, so a relative or symlinked `file_path` is
-        // rewritten to the resolved location before the preview and the run see it.
         let dir = tempfile::tempdir().unwrap();
         let cwd = dunce::canonicalize(dir.path()).unwrap();
         std::fs::write(cwd.join("real.txt"), "x").unwrap();
@@ -1289,7 +1278,6 @@ mod tests {
 
     #[tokio::test]
     async fn await_approval_ignores_a_stale_decision_for_another_call() {
-        // A decision for a resolved call must not satisfy the wait, but the matching id does.
         let (tx, mut rx) = mpsc::channel::<Op>(2);
         tx.try_send(Op::Resolve {
             id: "other".to_owned(),

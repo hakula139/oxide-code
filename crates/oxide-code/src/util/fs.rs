@@ -1,4 +1,4 @@
-//! Filesystem helpers for persisting private state (0o700 dirs, 0o600 files).
+//! Filesystem helpers for persisting private state (0700 dirs, 0600 files).
 
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Write};
@@ -7,8 +7,8 @@ use std::path::Path;
 use anyhow::{Context, Result};
 use tempfile::Builder;
 
-/// Creates `path` and its missing parents with `0o700` perms on Unix, also tightening an existing
-/// `path` to `0o700` when permitted.
+/// Creates `path` and its missing parents with `0700` perms on Unix, also tightening an existing
+/// `path` to `0700` when permitted.
 pub(crate) fn create_private_dir_all(path: &Path) -> Result<()> {
     let mut builder = fs::DirBuilder::new();
     builder.recursive(true);
@@ -34,10 +34,8 @@ pub(crate) fn create_private_dir_all(path: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Atomically writes `bytes` to `path` with `0o600` perms on Unix.
-///
-/// The bytes are synced to a `.<name>.tmp.*` file beside `path`, then renamed over `path`. Any
-/// failure removes the temp file.
+/// Atomically writes `bytes` to `path` with `0600` perms on Unix by renaming a synced
+/// `.<name>.tmp.*` file beside `path` over it. A failure removes the temp file.
 pub(crate) fn atomic_write_private(path: &Path, bytes: &[u8]) -> Result<()> {
     let parent = path
         .parent()
@@ -56,7 +54,7 @@ pub(crate) fn atomic_write_private(path: &Path, bytes: &[u8]) -> Result<()> {
     Ok(())
 }
 
-/// Opens `path` for appending with `0o600` perms on Unix, also tightening an existing file's mode.
+/// Opens `path` for appending with `0600` perms on Unix, also tightening an existing file's mode.
 pub(crate) fn open_private_append(path: &Path) -> io::Result<File> {
     let mut options = OpenOptions::new();
     options.append(true).create(true);

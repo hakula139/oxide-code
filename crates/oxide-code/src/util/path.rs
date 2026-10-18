@@ -1,4 +1,5 @@
-//! Small path-related utilities shared across modules.
+//! XDG directory lookup, `~` expansion and display, lexical path normalization, and the
+//! slash-separated spelling of paths the model reads.
 
 use std::path::{Component, Path, PathBuf};
 
@@ -36,9 +37,8 @@ impl XdgBase {
     }
 }
 
-/// The XDG directory `base`, such as `$XDG_DATA_HOME` or `~/.local/share`. The variable counts
-/// only when absolute, since the spec rejects relative values, which would otherwise resolve
-/// against the process cwd. `None` without a home directory to fall back to.
+/// The XDG directory `base`, such as `$XDG_DATA_HOME` or `~/.local/share`. A relative variable is
+/// ignored, as the spec requires. `None` without a home directory to fall back to.
 pub(crate) fn xdg_dir(base: XdgBase) -> Option<PathBuf> {
     std::env::var_os(base.var())
         .map(PathBuf::from)
@@ -60,10 +60,9 @@ pub(crate) fn tildify(path: &Path) -> String {
     }
 }
 
-/// Expands a leading `~` or `~/` (or `~\` on Windows) to the user's home directory. Per-user
-/// forms like `~alice/...` (no passwd lookup) and paths without a tilde pass through unchanged.
-/// Errors when a `~` or `~/` prefix finds no home dir through [`std::env::home_dir`], since the
-/// literal path would otherwise fail downstream with a misleading filesystem error.
+/// Expands a leading `~` or `~/` (`~\` on Windows) to the home directory, passing `~alice/...`
+/// and paths without a tilde through unchanged. Errors when there is no home directory, since the
+/// literal path would fail later with a misleading filesystem error.
 pub(crate) fn expand_user(raw: &str) -> Result<PathBuf> {
     let Some(tail) = raw.strip_prefix('~') else {
         return Ok(PathBuf::from(raw));
@@ -76,6 +75,7 @@ pub(crate) fn expand_user(raw: &str) -> Result<PathBuf> {
     if tail.is_empty() {
         return Ok(home);
     }
+    // `join` replaces `home` with an absolute argument, such as the `//foo` tail of `~//foo`.
     Ok(home.join(tail.trim_start_matches(std::path::is_separator)))
 }
 
@@ -208,8 +208,6 @@ mod tests {
 
     #[test]
     fn expand_user_collapses_redundant_slashes_after_tilde() {
-        // `~//foo` and `~///foo` should land at $HOME/foo, not at /foo. PathBuf::join replaces
-        // the receiver when the argument is absolute, so the tail must be trimmed first.
         temp_env::with_var(HOME_VAR, Some("/tmp/oxide-fake-home"), || {
             for (raw, expected) in [
                 ("~//foo", "/tmp/oxide-fake-home/foo"),
@@ -243,7 +241,6 @@ mod tests {
 
     #[test]
     fn expand_user_does_not_handle_per_user_home() {
-        // `~alice/foo` stays verbatim, since there is no passwd lookup to resolve the user's home.
         assert_eq!(
             expand_user("~alice/foo").unwrap(),
             PathBuf::from("~alice/foo")

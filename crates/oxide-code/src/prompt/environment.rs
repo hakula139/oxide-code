@@ -116,7 +116,7 @@ fn format_local_date(now: time::OffsetDateTime, offset: time::UtcOffset) -> Stri
 
 // ── Model Identity ──
 
-/// Names `model`, its exact id, and its knowledge cutoff when the catalog knows the model.
+/// Names `model`, its exact ID, and its knowledge cutoff when the catalog knows the model.
 pub(super) fn model_identity(model: &ModelSpec) -> String {
     let id = model.id();
     let Some(info) = model.info() else {

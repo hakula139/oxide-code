@@ -129,10 +129,10 @@ impl Approver for Unattended {
 
 // ── StdioSink ──
 
-/// [`EventSink`] for the `--no-tui` REPL: assistant tokens stream to stdout, everything else (tool
-/// calls, errors, the interrupted marker) to stderr so piped output stays clean. Headless runs
-/// reuse [`Self::render`] for their text output. Model and tool text passes through
-/// [`escape_controls`], so it cannot redraw the terminal around a REPL approval prompt.
+/// [`EventSink`] for the `--no-tui` REPL: assistant tokens stream to stdout and everything else to
+/// stderr, so piped output stays clean. Headless runs reuse [`Self::render`] for their text output.
+/// Model and tool text passes through [`escape_controls`], so it cannot redraw the terminal around
+/// a REPL approval prompt.
 pub(super) struct StdioSink {
     show_thinking: bool,
     calls: Mutex<StartedCalls>,

@@ -37,11 +37,8 @@ pub(crate) fn join_sentences(text: &str, next: &str) -> String {
     format!("{text}{separator}{next}")
 }
 
-/// Truncates `s` to `max_width` display columns, appending [`ELLIPSIS`] when shortened.
-///
-/// Width is measured in terminal columns (CJK and emoji take 2), and cuts fall between grapheme
-/// clusters so ZWJ emoji and combining marks stay whole. The ellipsis is dropped when
-/// `max_width < ELLIPSIS_WIDTH` because emitting it would itself overflow the budget.
+/// Truncates `s` to `max_width` display columns between grapheme clusters, appending
+/// [`ELLIPSIS`] when shortened unless the ellipsis alone would overflow `max_width`.
 pub(crate) fn truncate_to_width(s: &str, max_width: usize) -> String {
     if s.width() <= max_width {
         return s.to_owned();
@@ -54,12 +51,8 @@ pub(crate) fn truncate_to_width(s: &str, max_width: usize) -> String {
     out
 }
 
-/// Truncates `s` to `max_width` columns by removing characters from the middle, replacing the
-/// excised run with [`ELLIPSIS`].
-///
-/// Preserves head and tail context. Falls back to right-truncation when the budget is too small
-/// for any context on either side (`max_width < ELLIPSIS_WIDTH`, or both halves drop their first
-/// CJK char).
+/// Truncates `s` to `max_width` columns by replacing its middle with [`ELLIPSIS`], falling back
+/// to [`truncate_to_width`] when neither side has room for a grapheme.
 pub(crate) fn center_truncate_to_width(s: &str, max_width: usize) -> String {
     if s.width() <= max_width {
         return s.to_owned();
@@ -70,8 +63,6 @@ pub(crate) fn center_truncate_to_width(s: &str, max_width: usize) -> String {
     let budget = max_width - ELLIPSIS_WIDTH;
     let head = take_head(s, budget / 2);
     let tail = take_tail(s, budget - budget / 2);
-    // Both halves dropped their first char (e.g., a 2-col CJK head into a 1-col half-budget).
-    // Right-truncate so we surface at least the leading context.
     if head.is_empty() && tail.is_empty() {
         return truncate_to_width(s, max_width);
     }
@@ -193,7 +184,7 @@ mod tests {
 
     #[test]
     fn truncate_to_width_accounts_for_cjk_double_width() {
-        // 测试文本 = 4 chars × 2 cols = 8 cols. Budget = 5 − 3 (ellipsis) = 2 cols → one char fits.
+        // Width 5 leaves 2 columns beside the ellipsis, room for one 2-column char.
         assert_eq!(truncate_to_width("测试文本", 5), "测...");
     }
 
@@ -204,7 +195,6 @@ mod tests {
 
     #[test]
     fn truncate_to_width_drops_ellipsis_when_budget_below_ellipsis_width() {
-        // Emitting "..." into a 1- or 2-col slot would overflow the budget, so the marker drops.
         assert_eq!(truncate_to_width("abc", 1), "a");
         assert_eq!(truncate_to_width("abc", 2), "ab");
     }
@@ -225,7 +215,6 @@ mod tests {
 
     #[test]
     fn center_truncate_to_width_keeps_head_and_tail_around_ellipsis() {
-        // Path use case: `~/work/project/src/x.rs` should keep the `~/` prefix and `.rs` leaf.
         assert_eq!(
             center_truncate_to_width("~/work/project/src/x.rs", 13),
             "~/wor.../x.rs",
@@ -234,23 +223,19 @@ mod tests {
 
     #[test]
     fn center_truncate_to_width_falls_back_to_right_truncation_when_budget_too_small() {
-        // Below the ellipsis floor, center-truncate would underflow the budget split, so the
-        // right-truncate fallback returns whatever fits.
         assert_eq!(center_truncate_to_width("abcdef", 2), "ab");
         assert_eq!(center_truncate_to_width("abcdef", 1), "a");
     }
 
     #[test]
     fn center_truncate_to_width_accounts_for_cjk_double_width() {
-        // 测试文本编辑 = 6 chars × 2 cols = 12 cols. Width 9 = 3 head + `...` + 3 tail, so only one
-        // 2-col CJK char fits each side.
+        // Width 9 leaves 3 columns per side, room for one 2-column char each.
         assert_eq!(center_truncate_to_width("测试文本编辑", 9), "测...辑");
     }
 
     #[test]
     fn center_truncate_to_width_falls_back_to_right_truncate_when_cjk_overflows_both_halves() {
-        // 中文测试 = 8 cols. Width 5 leaves a budget of 2, so each half gets 1 and neither side
-        // fits a 2-col char. Centering would yield a bare "...", so it right-truncates instead.
+        // Width 5 leaves 1 column per side, too narrow for a 2-column char.
         assert_eq!(center_truncate_to_width("中文测试", 5), "中...");
     }
 

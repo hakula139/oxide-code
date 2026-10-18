@@ -19,10 +19,8 @@ const BACKUP_LOG_FILE: &str = "oxide-code.log.1";
 /// Size past which the active log rotates into [`BACKUP_LOG_FILE`].
 const MAX_LOG_BYTES: u64 = 10 * 1024 * 1024;
 
-/// Initializes the global tracing subscriber.
-///
-/// The returned `WorkerGuard` (TUI mode only) flushes the non-blocking appender on drop and must
-/// be held for the program lifetime, because dropping it early truncates buffered log lines.
+/// Initializes the global tracing subscriber. In TUI mode it returns the file appender's guard,
+/// which flushes on drop and must live until exit, since later lines are lost once it drops.
 pub(crate) fn init_tracing(tui_mode: bool) -> Result<Option<WorkerGuard>> {
     let filter = make_filter();
     if tui_mode {
@@ -58,9 +56,8 @@ fn open_file_appender(dir: &Path) -> Result<(NonBlocking, WorkerGuard)> {
     Ok(tracing_appender::non_blocking(file))
 }
 
-/// Private (0o600) append-only log that moves itself to [`BACKUP_LOG_FILE`] when a write would
-/// push it past `max_bytes`. Each rotation replaces the previous backup, so the directory holds at
-/// most two log files.
+/// Private (0600) append-only log that moves itself over [`BACKUP_LOG_FILE`] when a write
+/// would push it past `max_bytes`.
 struct RotatingFile {
     path: PathBuf,
     backup: PathBuf,
@@ -129,7 +126,6 @@ mod tests {
 
     #[test]
     fn make_filter_empty_rust_log_yields_empty_filter() {
-        // Empty `RUST_LOG` parses to an empty filter, not the warn floor.
         temp_env::with_var("RUST_LOG", Some(""), || {
             assert_eq!(make_filter().to_string(), "");
         });
@@ -174,7 +170,6 @@ mod tests {
 
     #[test]
     fn open_file_appender_appends_across_sessions() {
-        // Below the size cap, reopening must append to the same file.
         let tmp = tempfile::tempdir().unwrap();
         for line in ["first\n", "second\n"] {
             let (mut writer, guard) = open_file_appender(tmp.path()).unwrap();

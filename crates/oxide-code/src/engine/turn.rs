@@ -39,8 +39,7 @@ impl TurnReport {
     }
 }
 
-/// Result of one [`agent_turn`] invocation. The report counts every request whose stream
-/// reported usage, including one the user cancelled or that failed partway.
+/// Result of one [`agent_turn`] invocation.
 #[derive(Debug)]
 pub(super) struct TurnOutcome {
     pub(super) report: TurnReport,
@@ -80,13 +79,11 @@ pub(super) struct TurnContext<'a> {
     pub(super) max_tool_rounds: Option<u32>,
 }
 
-/// Drives one user prompt to a final assistant text reply. The loop returns as soon as a round
-/// produces no tool calls, and a `pause_turn` stop re-requests without a new user message.
-/// [`Op::Queue`]s splice in as user messages at round boundaries, and an [`Op::SetMode`] waits in
-/// `inbox` for the next gated call. Long-running awaits race `ops` so `Interrupt` / `Shutdown`
-/// abort promptly. An abort mid-stream commits none of the reply, while an abort mid-round commits
-/// the round with the unfinished calls marked interrupted. Either way the transcript then ends on
-/// [`Message::interruption`].
+/// Drives one user prompt to a final assistant text reply, re-requesting after a `pause_turn`
+/// stop. [`Op::Queue`]s splice in as user messages at round boundaries, and an [`Op::SetMode`]
+/// waits in `inbox` for the next gated call. An abort mid-stream commits none of the reply, while
+/// an abort mid-round commits the round with the unfinished calls marked interrupted. Either way
+/// the transcript then ends on [`Message::interruption`].
 pub(super) async fn agent_turn(
     turn: TurnContext<'_>,
     messages: &mut Vec<Message>,
@@ -196,7 +193,7 @@ pub(super) async fn agent_turn(
 
 /// How the round loop continues after [`settle_stop_reason`].
 enum StopAction {
-    /// The stop needs no special handling. Dispatch any tool calls in these blocks.
+    /// The stop needs no special handling, so the round dispatches these blocks' tool calls.
     Proceed(Vec<ContentBlock>),
     /// `pause_turn`: the reply is committed and the next request resumes it.
     Resume,
@@ -572,8 +569,7 @@ mod tests {
         }
     }
 
-    /// Signals on entry then blocks forever, so cancel tests can synchronize on the agent being
-    /// parked inside the tool future before sending the interrupt.
+    /// Signals on entry, then blocks forever, so a test can interrupt while the tool runs.
     struct GateTool {
         started: Arc<Notify>,
     }
@@ -640,9 +636,7 @@ mod tests {
         }
     }
 
-    /// Dispatch context in `cwd` whose gate runs every call that no deny or ask rule stops
-    /// (`yolo`), so the turn tests exercise the loop without approvals. The `dispatch` and
-    /// `permission` tests cover the gate itself.
+    /// Dispatch context in `cwd` under `yolo`, so the turn tests run the loop without approvals.
     fn yolo_in(cwd: &Path) -> DispatchContext<'static> {
         dispatch_with(crate::permission::Mode::Yolo, &[], &[], cwd)
     }
@@ -678,7 +672,7 @@ mod tests {
 
     #[tokio::test]
     async fn agent_turn_dead_session_surfaces_write_failure_on_first_call() {
-        // Write errors must not abort the turn. One Error event surfaces and the turn returns Ok.
+        // Write errors must not abort the turn.
         let session = dead_test_session();
         let client = FakeClient::new(vec![text_turn("Hello!")]);
         let tools = ToolRegistry::new(vec![]);
@@ -710,8 +704,7 @@ mod tests {
 
     #[tokio::test]
     async fn agent_turn_metadata_batch_failure_after_healthy_messages_surfaces_error() {
-        // First 2 cmds (assistant + tool_result messages) ack healthily. The 3rd (metadata batch)
-        // is dropped without ack so the batch's failure handler fires the Error event.
+        // The assistant and tool-result writes ack, and the third, the metadata batch, does not.
         let session = crate::session::handle::testing::acks_then_drops("metadata-batch-fails", 2);
         let client = FakeClient::new(vec![
             tool_use_turn("tool_1", "echo", r#"{"v":1}"#),
@@ -978,8 +971,6 @@ mod tests {
 
     #[tokio::test]
     async fn agent_turn_drains_mid_round_submit_into_messages_at_round_boundary() {
-        // Pre-loaded `Op::Queue` is consumed during the round. At the boundary the agent splices
-        // the queued text as a trailing user message and emits PromptDrained.
         let dir = tempfile::tempdir().unwrap();
         let session = test_session(dir.path());
         let client = FakeClient::new(vec![
@@ -1034,8 +1025,6 @@ mod tests {
 
     #[tokio::test]
     async fn agent_turn_drains_multiple_mid_round_submits_in_order() {
-        // Two `Op::Queue`s during one await must land as separate User messages in dispatch order
-        // with one PromptDrained event each.
         let dir = tempfile::tempdir().unwrap();
         let session = test_session(dir.path());
         let client = FakeClient::new(vec![
@@ -1086,8 +1075,7 @@ mod tests {
 
     #[tokio::test]
     async fn agent_turn_interrupt_before_any_output_ends_on_the_interruption() {
-        // Biased select picks the queued Cancel before the stream future, so the turn commits only
-        // the interruption and the abort is Cancelled.
+        // The biased select takes the queued interrupt before it polls the stream.
         let dir = tempfile::tempdir().unwrap();
         let session = test_session(dir.path());
         let client = FakeClient::new(vec![text_turn("never reached")]);
@@ -1157,7 +1145,6 @@ mod tests {
 
     #[tokio::test]
     async fn agent_turn_shutdown_during_stream_is_shutdown_abort() {
-        // Shutdown is the teardown signal. It must stay distinct from an interrupt for the engine.
         let dir = tempfile::tempdir().unwrap();
         let session = test_session(dir.path());
         let client = FakeClient::new(vec![text_turn("never reached")]);
@@ -1185,7 +1172,6 @@ mod tests {
 
     #[tokio::test]
     async fn agent_turn_sender_drop_during_turn_collapses_to_shutdown_abort() {
-        // Closed channel resolves `recv()` to None. Treated as Shutdown so the engine stops.
         let dir = tempfile::tempdir().unwrap();
         let session = test_session(dir.path());
         let client = FakeClient::new(vec![text_turn("never reached")]);
@@ -1211,8 +1197,6 @@ mod tests {
 
     #[tokio::test]
     async fn agent_turn_absorbs_stragglers_without_killing_turn() {
-        // Every catch-all variant in `await_unless_aborted` must let the turn complete. Returning
-        // Cancelled for any of these would kill the turn from a buffered no-op.
         for op in [
             Op::Prompt("late".to_owned()),
             Op::Resolve {
@@ -1259,7 +1243,7 @@ mod tests {
 
     #[tokio::test]
     async fn agent_turn_interrupt_during_tool_round_commits_finished_and_interrupted_results() {
-        // Waits for `GateTool`'s started signal, so Cancel arrives while the tool future runs.
+        // Waits for `GateTool`'s started signal, so the interrupt arrives while the tool runs.
         let dir = tempfile::tempdir().unwrap();
         let session = test_session(dir.path());
         let client = FakeClient::new(vec![tool_uses_turn(&[
@@ -1352,8 +1336,6 @@ mod tests {
 
     #[tokio::test]
     async fn agent_turn_interrupt_during_tool_round_preserves_completed_round_usage() {
-        // Round 1's stream observes usage before the tool gates. Cancel arrives during the tool
-        // execution, so the abort must still carry billable_rounds from the completed round.
         let dir = tempfile::tempdir().unwrap();
         let session = test_session(dir.path());
         let client = FakeClient::new(vec![with_usage(
@@ -1437,8 +1419,6 @@ mod tests {
 
     #[tokio::test]
     async fn agent_turn_malformed_tool_input_short_circuits_to_parse_error_result() {
-        // A call whose streamed input failed to parse must not run with the `{}` fallback. The
-        // agent answers it with an `is_error: true` result naming the failure to self-correct on.
         let dir = tempfile::tempdir().unwrap();
         let session = test_session(dir.path());
         let mut malformed = tool_use_turn("tool_1", "echo", "{}");
@@ -1469,7 +1449,6 @@ mod tests {
                 if id == "tool_1" && *input == json!({}),
         ));
 
-        // The tool never runs, so the result is the synthetic parse error.
         assert!(matches!(
             &messages[2].content[0],
             ContentBlock::ToolResult {
@@ -1481,7 +1460,6 @@ mod tests {
                 && content.contains("Retry with a valid JSON object"),
         ));
 
-        // Sink also reflects the failure via ToolCallEnd { is_error: true }.
         let events = sink.events();
         assert!(events.iter().any(|e| matches!(
             e,
@@ -1525,8 +1503,6 @@ mod tests {
 
     #[tokio::test]
     async fn agent_turn_safety_cap_bail_preserves_completed_round_usage() {
-        // Each capped round reports usage. The cap-trip abort must still fold every round into
-        // billable_rounds so the caller bills what the API charged for.
         const CAP: u32 = 2;
         let dir = tempfile::tempdir().unwrap();
         let session = test_session(dir.path());
@@ -1614,9 +1590,6 @@ mod tests {
 
     #[tokio::test]
     async fn agent_turn_failed_after_completed_round_preserves_billable_rounds() {
-        // Round 1 completes with reported usage. Round 2's stream fails, so the turn bails with
-        // TurnAbort::Failed. The completed round's usage must still ride out on billable_rounds
-        // so the caller bills what the API charged for.
         let dir = tempfile::tempdir().unwrap();
         let session = test_session(dir.path());
         let client = FakeClient::new(vec![with_usage(
@@ -2074,8 +2047,6 @@ mod tests {
 
     #[tokio::test]
     async fn agent_turn_deny_rule_blocks_the_tool_and_returns_a_denial_result() {
-        // The gate must sit on the dispatch path: a denied call never reaches the tool, and the
-        // model sees the refusal as that call's tool_result.
         let dir = tempfile::tempdir().unwrap();
         let session = test_session(dir.path());
         let client = FakeClient::new(vec![
@@ -2174,8 +2145,6 @@ mod tests {
 
     #[tokio::test]
     async fn agent_turn_approval_decision_arriving_mid_turn_settles_the_call() {
-        // An `ask` blocks the round on `ops` until the reply lands, and the reply alone decides
-        // whether the tool runs, what the model reads in its place, or whether the turn ends.
         let feedback = Decision::DenyWithFeedback {
             feedback: "Use ls instead.".to_owned(),
         };
@@ -2256,7 +2225,7 @@ mod tests {
     #[tokio::test]
     async fn agent_turn_write_through_a_dangling_symlink_is_never_auto_allowed() {
         // A dangling `notes.md -> ../escape.txt` must resolve to its outside target, so the write
-        // never passes as a new in-cwd file. The gate asks, and a denial keeps it from running.
+        // never passes as a new in-cwd file.
         let dir = tempfile::tempdir().unwrap();
         let root = dunce::canonicalize(dir.path()).unwrap();
         let cwd = root.join("repo");
