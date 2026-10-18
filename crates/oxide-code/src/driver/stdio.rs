@@ -215,10 +215,10 @@ impl StdioSink {
             Event::ConfigChanged {
                 model,
                 effort,
-                requested_effort,
+                requested,
                 ..
             } => {
-                let notice = config_change(&model, effort, requested_effort);
+                let notice = config_change(&model, effort, requested.effort());
                 writeln!(stderr, "{notice}")?;
             }
             Event::ModeChanged(mode) => writeln!(stderr, "Using {mode} mode")?,
@@ -351,10 +351,11 @@ mod tests {
     use crate::client::{RateLimitWindow, RateLimits};
     use crate::config::compaction::AutoCompactionConfig;
     use crate::engine::testing::{engine, with_pinned_home};
+    use crate::model::ResolvedModelId;
     use crate::permission::defaults::Shipped;
     use crate::permission::rule::Rule;
     use crate::permission::{Access, Mode, PermissionClass, Policy, Tier, Workspace};
-    use crate::protocol::{CapturingSink, FailingSink};
+    use crate::protocol::{CapturingSink, ConfigPick, FailingSink};
     use crate::session::store::testing::test_store;
     use crate::tool::bash::background::testing::shells_in_each_state;
     use crate::tool::tasks::TaskStatus;
@@ -879,24 +880,32 @@ mod tests {
 
     #[test]
     fn render_config_changed_names_the_model_and_the_effort_in_use() {
-        let config_changed = |id: &str, effort, requested_effort| Event::ConfigChanged {
+        let config_changed = |id: &str, effort, requested| Event::ConfigChanged {
             model: ModelSpec::resolve(id.to_owned()),
             effort,
-            requested_effort,
+            requested,
             auto_compaction: AutoCompactionConfig::disabled(),
+        };
+        let custom_model = || ConfigPick::Model {
+            id: ResolvedModelId::new("custom-model".to_owned()),
+            effort: None,
         };
         let cases = [
             (
-                config_changed("claude-opus-5-5", Some(Effort::Low), Some(Effort::Low)),
+                config_changed(
+                    "claude-opus-5-5",
+                    Some(Effort::Low),
+                    ConfigPick::Effort(Effort::Low),
+                ),
                 "Using Claude Opus 5.5 (claude-opus-5-5) at low effort\n",
             ),
             (
-                config_changed("custom-model", None, Some(Effort::High)),
+                config_changed("custom-model", None, ConfigPick::Effort(Effort::High)),
                 "Using custom-model (custom-model). \
                  Effort unchanged (model has no effort tier, asked for high).\n",
             ),
             (
-                config_changed("custom-model", None, None),
+                config_changed("custom-model", None, custom_model()),
                 "Using custom-model (custom-model)\n",
             ),
         ];

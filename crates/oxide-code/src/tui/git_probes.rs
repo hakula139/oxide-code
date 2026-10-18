@@ -79,7 +79,7 @@ impl GitProbes {
         if self.branch.start(now) {
             let cwd = cwd.to_path_buf();
             spawn_probe(&self.tx, Probe::Branch, async move {
-                GitUpdate::Branch(git::current_branch_async(&cwd).await)
+                GitUpdate::Branch(git::current_branch(&cwd).await)
             });
         }
         if let Some(schedule) = &mut self.pull_request
@@ -151,12 +151,7 @@ impl Schedule {
 
     /// Claims a due, idle slot. Returns whether the caller should start a run.
     fn start(&mut self, now: Instant) -> bool {
-        if self.next_due.is_some_and(|due| now >= due) {
-            self.next_due = None;
-            true
-        } else {
-            false
-        }
+        self.next_due.take_if(|due| now >= *due).is_some()
     }
 
     fn finish(&mut self, now: Instant) {

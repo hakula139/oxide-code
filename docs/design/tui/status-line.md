@@ -123,4 +123,4 @@ A user-command segment is [#166](https://github.com/hakula139/oxide-code/issues/
 - `crates/oxide-code/src/tui/components/status.rs`: `StatusBar` state and the run-state `Status`.
 - `crates/oxide-code/src/tui/components/status/line.rs`: `StatusLine` segment rendering and width fitting.
 - `crates/oxide-code/src/tui/git_probes.rs`: `GitProbes` background branch and pull-request polling, at the detail the roster needs.
-- `crates/oxide-code/src/util/git.rs`: `current_branch_async` and `current_pull_request` probes, and the checks summary.
+- `crates/oxide-code/src/util/git.rs`: `current_branch` and `current_pull_request` probes, and the checks summary.

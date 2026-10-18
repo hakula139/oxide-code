@@ -22,6 +22,9 @@ use crate::tool::{ApprovalBody, ApprovalPreview};
 use crate::tui::clipboard::{self, Clipboard, Environment};
 use crate::tui::theme::Theme;
 
+/// How many unread ops [`test_app`]'s channel holds before `try_send` reports it full.
+pub(super) const OP_CHANNEL_CAPACITY: usize = 8;
+
 /// Idle `App` plus the `ops` consumer and an `event_tx` kept alive so `events` stays open.
 pub(super) fn test_app(
     title: Option<&str>,
@@ -35,10 +38,11 @@ pub(super) fn test_app_with(
     title: Option<&str>,
 ) -> (App, mpsc::Receiver<Op>, mpsc::UnboundedSender<Event>) {
     let (event_tx, events) = mpsc::unbounded_channel::<Event>();
-    let (ops, op_rx) = mpsc::channel::<Op>(8);
+    let (ops, op_rx) = mpsc::channel::<Op>(OP_CHANNEL_CAPACITY);
     let mut app = App::new(
         &Theme::default(),
         session_info,
+        Some("main".to_owned()),
         false,
         events,
         ops,

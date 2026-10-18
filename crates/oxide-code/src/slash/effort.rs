@@ -76,7 +76,7 @@ fn no_effort_tier_msg(model: &ModelSpec) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::protocol::Op;
+    use crate::protocol::{ConfigPick, Op};
     use crate::slash::registry::testing::run_execute;
     use crate::slash::test_session_info;
 
@@ -160,10 +160,7 @@ mod tests {
     fn execute_with_level_forwards_set_model_with_effort_only() {
         assert_eq!(
             run_execute(&EffortCmd, "xhigh").unwrap().into_forward(),
-            Action::Op(Op::SetModel {
-                model: None,
-                effort: Some(Effort::Xhigh),
-            }),
+            Action::Op(Op::SetModel(ConfigPick::Effort(Effort::Xhigh))),
         );
     }
 

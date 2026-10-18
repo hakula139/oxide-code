@@ -10,7 +10,7 @@ use ratatui::widgets::Paragraph;
 
 use super::context::LiveSessionInfo;
 use crate::config::Effort;
-use crate::protocol::Op;
+use crate::protocol::{ConfigPick, Op};
 use crate::tui::action::Action;
 use crate::tui::glyphs::{HORIZONTAL_RULE, RADIO_SELECTED, RADIO_UNSELECTED};
 use crate::tui::modal::chrome::{CONFIRM_HINTS, HINT_SEPARATOR, KEY_LEFT_RIGHT};
@@ -73,10 +73,9 @@ impl EffortSlider {
         if picked == self.initial {
             return ModalKey::Cancelled;
         }
-        ModalKey::Submitted(ModalAction::Dispatch(Action::Op(Op::SetModel {
-            model: None,
-            effort: Some(picked),
-        })))
+        ModalKey::Submitted(ModalAction::Dispatch(Action::Op(Op::SetModel(
+            ConfigPick::Effort(picked),
+        ))))
     }
 
     /// Width every render line targets so `Paragraph::Center` aligns them on a single axis.
@@ -328,12 +327,8 @@ mod tests {
         s.handle_key(&key(KeyCode::Right));
         let outcome = s.handle_key(&key(KeyCode::Enter));
         match outcome {
-            ModalKey::Submitted(ModalAction::Dispatch(Action::Op(Op::SetModel {
-                model,
-                effort,
-            }))) => {
-                assert!(model.is_none(), "an effort-only swap keeps the model");
-                assert_eq!(effort, Some(Effort::Medium));
+            ModalKey::Submitted(ModalAction::Dispatch(Action::Op(Op::SetModel(pick)))) => {
+                assert_eq!(pick, ConfigPick::Effort(Effort::Medium));
             }
             other => panic!("expected Submitted SetModel, got {other:?}"),
         }

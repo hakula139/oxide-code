@@ -11,7 +11,7 @@ use super::context::LiveSessionInfo;
 use super::effort_slider::tier_color;
 use crate::config::{DEFAULT_MODEL, Effort};
 use crate::model::{MODELS, ModelInfo, ResolvedModelId};
-use crate::protocol::Op;
+use crate::protocol::{ConfigPick, Op};
 use crate::tui::action::Action;
 use crate::tui::glyphs::RADIO_SELECTED;
 use crate::tui::modal::chrome::{CONFIRM_HINTS, FOOTER_HEIGHT, KEY_LEFT_RIGHT, render_footer};
@@ -122,26 +122,29 @@ impl ModelEffortPicker {
         self.picked_effort = Some(Effort::ALL[next]);
     }
 
-    /// Commits both axes through one atomic `SetModel`. Each axis is `Some` only when it differs
-    /// from the open-time state, so a no-touch Enter (or a pick that returns to the active effort)
-    /// cancels without re-resolving config defaults.
+    /// Commits both axes through one atomic `SetModel`, picking only the axes that differ from the
+    /// open-time state. A no-touch Enter, or a pick that returns to the active effort, cancels
+    /// without re-resolving config defaults.
     fn submit(&self) -> ModalKey {
         let model = self
             .list
             .selected()
             .map_or_else(|| self.active_model.clone(), |row| row.info.id.to_owned());
-        let model_changed = model != self.active_model;
         let effort = self
             .picked_effort
             .filter(|pick| Some(*pick) != self.active_effort);
 
-        if !model_changed && effort.is_none() {
+        let pick = if model != self.active_model {
+            ConfigPick::Model {
+                id: ResolvedModelId::new(model),
+                effort,
+            }
+        } else if let Some(effort) = effort {
+            ConfigPick::Effort(effort)
+        } else {
             return ModalKey::Cancelled;
-        }
-        ModalKey::Submitted(ModalAction::Dispatch(Action::Op(Op::SetModel {
-            model: model_changed.then(|| ResolvedModelId::new(model)),
-            effort,
-        })))
+        };
+        ModalKey::Submitted(ModalAction::Dispatch(Action::Op(Op::SetModel(pick))))
     }
 
     fn render_effort_row(&self, theme: &Theme) -> Option<Line<'static>> {
@@ -251,13 +254,17 @@ mod tests {
         KeyEvent::from(code)
     }
 
-    fn submitted_swap(outcome: ModalKey) -> (Option<String>, Option<Effort>) {
+    fn submitted_pick(outcome: ModalKey) -> ConfigPick {
         match outcome {
-            ModalKey::Submitted(ModalAction::Dispatch(Action::Op(Op::SetModel {
-                model,
-                effort,
-            }))) => (model.map(ResolvedModelId::into_inner), effort),
+            ModalKey::Submitted(ModalAction::Dispatch(Action::Op(Op::SetModel(pick)))) => pick,
             other => panic!("expected Submitted SetModel, got {other:?}"),
+        }
+    }
+
+    fn model_only(id: &str) -> ConfigPick {
+        ConfigPick::Model {
+            id: ResolvedModelId::new(id.to_owned()),
+            effort: None,
         }
     }
 
@@ -407,26 +414,46 @@ mod tests {
     fn handle_key_enter_after_model_change_emits_swap_with_model_only() {
         let mut p = picker();
         p.handle_key(&key(KeyCode::Down));
-        let (model, effort) = submitted_swap(p.handle_key(&key(KeyCode::Enter)));
-        assert_eq!(model.as_deref(), Some("claude-sonnet-5-5"));
-        assert_eq!(effort, None, "effort stays unset when only the model moved");
+
+        let pick = submitted_pick(p.handle_key(&key(KeyCode::Enter)));
+
+        assert_eq!(pick, model_only("claude-sonnet-5-5"));
     }
 
     #[test]
     fn handle_key_enter_after_effort_change_emits_swap_with_effort_only() {
         let mut p = picker();
         p.handle_key(&key(KeyCode::Right));
-        let (model, effort) = submitted_swap(p.handle_key(&key(KeyCode::Enter)));
-        assert_eq!(model, None, "model stays unset when only the effort moved");
-        assert_eq!(effort, Some(Effort::Xhigh));
+
+        let pick = submitted_pick(p.handle_key(&key(KeyCode::Enter)));
+
+        assert_eq!(pick, ConfigPick::Effort(Effort::Xhigh));
+    }
+
+    #[test]
+    fn handle_key_enter_after_model_and_effort_changes_emits_swap_with_both() {
+        let mut p = picker();
+        p.handle_key(&key(KeyCode::Down));
+        p.handle_key(&key(KeyCode::Right));
+
+        let pick = submitted_pick(p.handle_key(&key(KeyCode::Enter)));
+
+        assert_eq!(
+            pick,
+            ConfigPick::Model {
+                id: ResolvedModelId::new("claude-sonnet-5-5".to_owned()),
+                effort: Some(Effort::Xhigh),
+            },
+        );
     }
 
     #[test]
     fn handle_key_enter_on_unknown_model_without_touch_swaps_model_only() {
         // The highlighted row's default is what a model-only swap resolves to, so it is not sent.
         let mut p = picker_on_unknown_model();
-        let (model, effort) = submitted_swap(p.handle_key(&key(KeyCode::Enter)));
-        assert_eq!(model.as_deref(), Some("claude-opus-5-5"));
-        assert_eq!(effort, None);
+
+        let pick = submitted_pick(p.handle_key(&key(KeyCode::Enter)));
+
+        assert_eq!(pick, model_only("claude-opus-5-5"));
     }
 }

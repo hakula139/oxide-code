@@ -291,11 +291,6 @@ impl ResolvedModelId {
     pub(crate) fn into_inner(self) -> String {
         self.0
     }
-
-    #[cfg(test)]
-    pub(crate) fn as_str(&self) -> &str {
-        &self.0
-    }
 }
 
 #[cfg(test)]

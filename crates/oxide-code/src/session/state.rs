@@ -14,7 +14,6 @@ use super::store::{SessionStore, SessionWriter, encode_lines};
 use crate::file_tracker::FileSnapshot;
 use crate::message::{ContentBlock, Message, Role};
 use crate::tool::tasks::Task;
-use crate::util::git::current_branch;
 
 /// Retry-queue size in MiB past which a failed flush stops persistence for the rest of the session.
 const MAX_UNWRITTEN_MIB: usize = 8;
@@ -57,8 +56,8 @@ enum WriterStatus {
 }
 
 impl SessionState {
-    pub(super) fn fresh(store: SessionStore, model: &str) -> Self {
-        let (session_id, header) = new_header(store.cwd(), model);
+    pub(super) fn fresh(store: SessionStore, model: &str, git_branch: Option<String>) -> Self {
+        let (session_id, header) = new_header(store.cwd(), model, git_branch);
         Self {
             session_id: Arc::from(session_id),
             store,
@@ -74,18 +73,6 @@ impl SessionState {
             finished: false,
             persistence_stopped: false,
         }
-    }
-
-    #[cfg(test)]
-    pub(super) fn on_branch(mut self, branch: &str) -> Self {
-        if let WriterStatus::Pending {
-            header: Entry::Header { git_branch, .. },
-            ..
-        } = &mut self.writer_status
-        {
-            *git_branch = Some(branch.to_owned());
-        }
-        self
     }
 
     /// Resumed sessions land directly in `Active`. Set `first_user_prompt_seen` when disk already
@@ -301,16 +288,8 @@ impl SessionState {
 
 // ── Helpers ──
 
-fn new_header(cwd: &Path, model: &str) -> (String, Entry) {
+fn new_header(cwd: &Path, model: &str, git_branch: Option<String>) -> (String, Entry) {
     let session_id = Uuid::new_v4().to_string();
-    // Skipped under `cfg(test)` so byte-compatible JSONL snapshots and seeded fixtures don't
-    // depend on the working tree's branch. Tests that need a branch supply it in the fixture or
-    // through `SessionState::on_branch`.
-    let git_branch = if cfg!(test) {
-        None
-    } else {
-        current_branch(cwd)
-    };
     let header = Entry::Header {
         session_id: session_id.clone(),
         cwd: cwd.display().to_string(),
@@ -347,7 +326,7 @@ mod tests {
     fn try_defer_title_pending_accepts_and_overwrites_previous_value() {
         let dir = tempfile::tempdir().unwrap();
         let store = test_store(dir.path());
-        let mut state = SessionState::fresh(store, "m");
+        let mut state = SessionState::fresh(store, "m", None);
 
         assert!(state.try_defer_title("first".to_owned()).is_none());
         assert!(state.try_defer_title("second".to_owned()).is_none());
@@ -366,7 +345,7 @@ mod tests {
     fn try_defer_title_active_rejects_with_title() {
         let dir = tempfile::tempdir().unwrap();
         let store = test_store(dir.path());
-        let mut state = SessionState::fresh(store, "m");
+        let mut state = SessionState::fresh(store, "m", None);
         let now = OffsetDateTime::now_utc();
         let (entries, _) = state.queue_message_entries(&Message::user("first"), now, false);
         state.flush_entries(entries).unwrap();
@@ -382,7 +361,7 @@ mod tests {
     fn queue_message_entries_seeds_ai_title_on_first_user_text() {
         let dir = tempfile::tempdir().unwrap();
         let store = test_store(dir.path());
-        let mut state = SessionState::fresh(store, "m");
+        let mut state = SessionState::fresh(store, "m", None);
         let now = OffsetDateTime::now_utc();
 
         let (entries, seed) =
@@ -404,7 +383,7 @@ mod tests {
     fn queue_message_entries_subsequent_user_message_skips_title_and_chains_uuid() {
         let dir = tempfile::tempdir().unwrap();
         let store = test_store(dir.path());
-        let mut state = SessionState::fresh(store, "m");
+        let mut state = SessionState::fresh(store, "m", None);
         let now = OffsetDateTime::now_utc();
         _ = state.queue_message_entries(&Message::user("first"), now, false);
         let first_tip = state.last_message_uuid.unwrap();
@@ -428,7 +407,7 @@ mod tests {
     fn queue_message_entries_tool_result_only_user_does_not_seed_title() {
         let dir = tempfile::tempdir().unwrap();
         let store = test_store(dir.path());
-        let mut state = SessionState::fresh(store, "m");
+        let mut state = SessionState::fresh(store, "m", None);
         let now = OffsetDateTime::now_utc();
         let msg = Message {
             role: Role::User,
@@ -454,7 +433,7 @@ mod tests {
     fn queue_message_entries_assistant_message_skips_title() {
         let dir = tempfile::tempdir().unwrap();
         let store = test_store(dir.path());
-        let mut state = SessionState::fresh(store, "m");
+        let mut state = SessionState::fresh(store, "m", None);
         let now = OffsetDateTime::now_utc();
 
         let (entries, seed) = state.queue_message_entries(&Message::assistant("hi"), now, false);
@@ -470,7 +449,7 @@ mod tests {
     fn compact_entries_writes_boundary_and_synthetic_message_without_committing() {
         let dir = tempfile::tempdir().unwrap();
         let store = test_store(dir.path());
-        let mut state = SessionState::fresh(store, "m");
+        let mut state = SessionState::fresh(store, "m", None);
         let now = OffsetDateTime::now_utc();
         let (rec, _) = state.queue_message_entries(&Message::user("first"), now, false);
         state.flush_entries(rec).unwrap();
@@ -525,7 +504,7 @@ mod tests {
     fn compact_entries_omits_instructions_when_none() {
         let dir = tempfile::tempdir().unwrap();
         let store = test_store(dir.path());
-        let state = SessionState::fresh(store, "m");
+        let state = SessionState::fresh(store, "m", None);
         let now = OffsetDateTime::now_utc();
 
         let (entries, _) =
@@ -546,7 +525,7 @@ mod tests {
     fn commit_compact_resets_chain_and_message_count() {
         let dir = tempfile::tempdir().unwrap();
         let store = test_store(dir.path());
-        let mut state = SessionState::fresh(store, "m");
+        let mut state = SessionState::fresh(store, "m", None);
         let now = OffsetDateTime::now_utc();
         let (rec, _) = state.queue_message_entries(&Message::user("first"), now, false);
         state.flush_entries(rec).unwrap();
@@ -565,7 +544,7 @@ mod tests {
     fn commit_compact_marks_first_user_prompt_seen_so_post_compact_record_skips_title() {
         let dir = tempfile::tempdir().unwrap();
         let store = test_store(dir.path());
-        let mut state = SessionState::fresh(store, "m");
+        let mut state = SessionState::fresh(store, "m", None);
         let now = OffsetDateTime::now_utc();
 
         let (_, synthetic_uuid) =
@@ -581,7 +560,7 @@ mod tests {
     fn commit_compact_clears_resume_anchor_so_finish_writes_summary() {
         let dir = tempfile::tempdir().unwrap();
         let store = test_store(dir.path());
-        let mut state = SessionState::fresh(store, "m");
+        let mut state = SessionState::fresh(store, "m", None);
         state.initial_message_count = 5;
         state.message_count = 5;
         let now = OffsetDateTime::now_utc();
@@ -600,7 +579,7 @@ mod tests {
     fn finish_entries_after_record_produces_summary_with_count() {
         let dir = tempfile::tempdir().unwrap();
         let store = test_store(dir.path());
-        let mut state = SessionState::fresh(store, "m");
+        let mut state = SessionState::fresh(store, "m", None);
         let now = OffsetDateTime::now_utc();
         let (entries, _) = state.queue_message_entries(&Message::user("hello"), now, false);
         state.flush_entries(entries).unwrap();
@@ -618,7 +597,7 @@ mod tests {
         // record cmd no-ops cleanly.
         let dir = tempfile::tempdir().unwrap();
         let store = test_store(dir.path());
-        let mut state = SessionState::fresh(store, "m");
+        let mut state = SessionState::fresh(store, "m", None);
 
         let entries = state.finish_entries(Vec::new(), OffsetDateTime::now_utc());
 
@@ -631,7 +610,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let store = test_store(dir.path());
         let tracker = FileTracker::default();
-        let mut state = SessionState::fresh(store, "m");
+        let mut state = SessionState::fresh(store, "m", None);
         let now = OffsetDateTime::now_utc();
         let (msgs, _) = state.queue_message_entries(&Message::user("hi"), now, false);
         state.flush_entries(msgs).unwrap();
@@ -661,7 +640,7 @@ mod tests {
     fn finish_entries_is_idempotent() {
         let dir = tempfile::tempdir().unwrap();
         let store = test_store(dir.path());
-        let mut state = SessionState::fresh(store, "m");
+        let mut state = SessionState::fresh(store, "m", None);
         let now = OffsetDateTime::now_utc();
         let (entries, _) = state.queue_message_entries(&Message::user("hi"), now, false);
         state.flush_entries(entries).unwrap();
@@ -678,7 +657,7 @@ mod tests {
         // Without this short-circuit, every noisy resume would append another summary line.
         let dir = tempfile::tempdir().unwrap();
         let store = test_store(dir.path());
-        let mut original = SessionState::fresh(store.clone(), "m");
+        let mut original = SessionState::fresh(store.clone(), "m", None);
         let now = OffsetDateTime::now_utc();
         let (entries, _) = original.queue_message_entries(&Message::user("hi"), now, false);
         original.flush_entries(entries).unwrap();
@@ -701,7 +680,7 @@ mod tests {
         let source = tempfile::tempdir().unwrap();
         let elsewhere = tempfile::tempdir().unwrap();
         let now = OffsetDateTime::now_utc();
-        let mut original = SessionState::fresh(test_store(source.path()), "m");
+        let mut original = SessionState::fresh(test_store(source.path()), "m", None);
         let (entries, _) = original.queue_message_entries(&Message::user("first"), now, false);
         original.flush_entries(entries).unwrap();
         let session_id = original.session_id.to_string();
@@ -738,7 +717,7 @@ mod tests {
     fn flush_entries_pending_create_failure_keeps_entries_and_deferred_title() {
         let dir = tempfile::tempdir().unwrap();
         let store = test_store(dir.path());
-        let mut state = SessionState::fresh(store, "m");
+        let mut state = SessionState::fresh(store, "m", None);
         let now = OffsetDateTime::now_utc();
         let session_id = state.session_id.to_string();
         assert!(
@@ -784,7 +763,7 @@ mod tests {
     fn flush_entries_failure_over_the_cap_stops_persistence_for_good() {
         let dir = tempfile::tempdir().unwrap();
         let now = OffsetDateTime::now_utc();
-        let mut original = SessionState::fresh(test_store(dir.path()), "m");
+        let mut original = SessionState::fresh(test_store(dir.path()), "m", None);
         let (entries, _) = original.queue_message_entries(&Message::user("first"), now, false);
         original.flush_entries(entries).unwrap();
         let session_id = original.session_id.to_string();

@@ -17,6 +17,8 @@ use crate::util::path::tildify;
 
 /// Startup state the TUI shows besides the engine's history.
 pub(crate) struct Startup {
+    /// The branch checked out at startup, which the status bar shows until its first git probe.
+    pub(crate) git_branch: Option<String>,
     /// The `ox --resume` session picker, opened over the first frame.
     pub(crate) picker: Option<ResumePicker>,
     pub(crate) title: Option<String>,
@@ -39,13 +41,10 @@ pub(crate) async fn run(
 
     let cwd = engine.cwd();
     let notices = config.notices();
-    let (project_root, git_branch) =
-        tokio::join!(git::repo_root(cwd), git::current_branch_async(cwd));
     let session_info = LiveSessionInfo {
         cwd: tildify(cwd),
         working_dir: Some(cwd.to_owned()),
-        project_root: project_root.unwrap_or_else(|| cwd.to_owned()),
-        git_branch,
+        project_root: git::repo_root(cwd).await.unwrap_or_else(|| cwd.to_owned()),
         version: env!("CARGO_PKG_VERSION"),
         session_id: engine.session_id().to_owned(),
         session_allow: Vec::new(),
@@ -60,6 +59,7 @@ pub(crate) async fn run(
     let mut app = App::new(
         theme,
         session_info,
+        startup.git_branch,
         show_thinking,
         events,
         ops,

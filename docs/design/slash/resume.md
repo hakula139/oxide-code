@@ -89,7 +89,7 @@ The picker wraps [`SearchableList`](modals.md) and adds these controls and displ
 
 - **`Engine::resume` (`engine.rs`)**: Drives `roll_into`, rebinds `Client::set_session_id`, and emits `SessionResumed`. It then surfaces `finalize_failure` as an `Event::Error`, reports a non-zero restored cost as `UsageUpdated`, shows the instruction warnings and `drifted_paths` as `Event::Notice`s, and ends with `SessionReady`. A prefix without a unique match or a `roll_into` failure ends the resume with `Event::TurnFailed` and keeps the live session.
 
-- **`apply_session_resumed` (TUI)**: Swaps the session ID, repaints the title, clears and replays chat history, notes an unarchived session, drops queued prompts (with a system-message surface), clears the modal stack, and resumes idle. While the resume runs, `Status::Resuming` holds queued prompts, and a failed resume returns to idle with them still queued.
+- **`apply_session_resumed` (TUI)**: Swaps the session ID, repaints the title, clears and replays chat history, notes an unarchived session, drops queued prompts (with a system-message surface), and clears the modal stack. At `SessionReady`, `apply_session_ready` returns to idle and submits the queue head, or only returns to idle after a cancel that lost the race to the swap. While the resume runs, `Status::Resuming` holds queued prompts, and a failed resume returns to idle with them still queued.
 
 - **`--list --limit N`**: `0` opts out of the cap, while positive values cap it. The `... more` footer line appears only when more sessions follow the cap.
 

@@ -6,7 +6,7 @@ use indoc::formatdoc;
 use crate::config::Effort;
 use crate::model::{MODELS, ModelInfo, ResolvedModelId, replacement_for};
 use crate::permission::Mode;
-use crate::protocol::{Op, ResumeTarget};
+use crate::protocol::{ConfigPick, Op, ResumeTarget};
 use crate::session::display::fit_title;
 
 /// Canonical names of the commands [`parse`] knows, without their leading `/`.
@@ -45,10 +45,7 @@ pub(crate) fn effort(arg: &str) -> Result<Op, String> {
         .to_ascii_lowercase()
         .parse()
         .map_err(|_| format!("Unknown effort: `{arg}`. Valid: {}.", Effort::VALID_VALUES))?;
-    Ok(Op::SetModel {
-        model: None,
-        effort: Some(pick),
-    })
+    Ok(Op::SetModel(ConfigPick::Effort(pick)))
 }
 
 /// `/mode <mode>`, case-insensitive.
@@ -98,10 +95,10 @@ pub(crate) fn model(arg: &str) -> Result<Op, String> {
             });
         }
     };
-    Ok(Op::SetModel {
-        model: Some(ResolvedModelId::new(info.id.to_owned())),
+    Ok(Op::SetModel(ConfigPick::Model {
+        id: ResolvedModelId::new(info.id.to_owned()),
         effort: None,
-    })
+    }))
 }
 
 /// `/rename <title>`, fitted to the session's title cap.
@@ -146,17 +143,14 @@ mod tests {
     use crate::session::display::MAX_TITLE_WIDTH;
 
     fn set_model(id: &str) -> Op {
-        Op::SetModel {
-            model: Some(ResolvedModelId::new(id.to_owned())),
+        Op::SetModel(ConfigPick::Model {
+            id: ResolvedModelId::new(id.to_owned()),
             effort: None,
-        }
+        })
     }
 
     fn set_effort(level: Effort) -> Op {
-        Op::SetModel {
-            model: None,
-            effort: Some(level),
-        }
+        Op::SetModel(ConfigPick::Effort(level))
     }
 
     // ── parse ──

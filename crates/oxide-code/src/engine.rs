@@ -24,18 +24,19 @@ use self::compaction::{AutoCompact, AutoCompactFailures};
 use self::turn::{TurnContext, TurnOutcome, TurnReport};
 use crate::client::TokenUsage;
 use crate::client::anthropic::Client;
+use crate::config::Config;
 use crate::config::auth::{self, Auth, AuthSource};
 use crate::config::compaction::CompactionConfig;
 use crate::config::login::PendingLogin;
 use crate::config::oauth::{self, ClaudeCodeKeychain};
-use crate::config::{Config, Effort};
 use crate::file_tracker::FileTracker;
 use crate::message::{ContentBlock, Message};
-use crate::model::{self, ModelSpec, ResolvedModelId};
+use crate::model::{self, ModelSpec};
 use crate::permission::{Mode, Policy, Workspace};
 use crate::prompt::{self, PromptParts, SessionContext, UserContext};
 use crate::protocol::{
-    Event, EventSink, Interaction, Op, ResumeTarget, UsageSnapshot, session_write_failed,
+    ConfigPick, Event, EventSink, Interaction, Op, ResumeTarget, UsageSnapshot,
+    session_write_failed,
 };
 use crate::session::display::id_prefix;
 use crate::session::entry::{CompactInfo, UsageRecord};
@@ -47,6 +48,7 @@ use crate::session::title_generator;
 use crate::tool::bash::background::BackgroundShells;
 use crate::tool::tasks::Task;
 use crate::tool::{ToolMetadata, ToolRegistry};
+use crate::util::git::current_branch;
 use crate::util::text::{join_sentences, plural};
 
 /// Ops a frontend can queue before the engine reads them. A turn keeps reading ops while it runs,
@@ -282,7 +284,7 @@ impl Engine {
                 Op::Archive => self.archive(&sink).await,
                 Op::Resume { target } => self.resume(&sink, target).await,
                 Op::Rename { title } => self.rename(&sink, title).await,
-                Op::SetModel { model, effort } => self.set_model(&sink, model, effort),
+                Op::SetModel(pick) => self.set_model(&sink, pick),
                 Op::SetMode(mode) => self.set_mode(&sink, mode),
                 Op::Login => {
                     if self.login(&sink, &mut ops).await == TurnEnd::Shutdown {
@@ -543,11 +545,13 @@ impl Engine {
     }
 
     async fn roll_session(&mut self, sink: &dyn EventSink, archived: bool) {
+        let git_branch = current_branch(self.cwd()).await;
         let outcome = handle::roll(
             &mut self.session,
             &self.store,
             &self.file_tracker,
             self.client.model().id(),
+            git_branch,
         )
         .await;
         self.adopt_session(sink, LoadedTranscript::default()).await;
@@ -650,20 +654,15 @@ impl Engine {
     }
 
     /// Applies a model and / or effort pick. The model goes first because it re-resolves effort.
-    fn set_model(
-        &mut self,
-        sink: &dyn EventSink,
-        model: Option<ResolvedModelId>,
-        effort: Option<Effort>,
-    ) {
-        if let Some(id) = model {
-            self.client.set_model(id.into_inner());
+    fn set_model(&mut self, sink: &dyn EventSink, pick: ConfigPick) {
+        if let ConfigPick::Model { id, .. } = &pick {
+            self.client.set_model(id.clone().into_inner());
             self.compaction = self
                 .compaction
                 .for_model(self.client.model(), self.client.max_tokens());
         }
-        let resolved = match effort {
-            Some(pick) => self.client.set_effort(pick),
+        let resolved = match pick.effort() {
+            Some(effort) => self.client.set_effort(effort),
             None => self.client.effort(),
         };
         self.auto_compaction_failures.reset(sink);
@@ -672,7 +671,7 @@ impl Engine {
             Event::ConfigChanged {
                 model: self.client.model().clone(),
                 effort: resolved,
-                requested_effort: effort,
+                requested: pick,
                 auto_compaction: self.compaction.auto,
             },
             "config-changed",
@@ -905,17 +904,13 @@ impl TurnEnd {
             (Op::Prompt(_) | Op::Compact { .. } | Op::Resume { .. }, Event::TurnFailed(_))
             | (Op::Rename { .. }, Event::RenameFailed(_))
             // The model has no tier for the effort, so the pick changed nothing.
-            | (
-                Op::SetModel {
-                    model: None,
-                    effort: Some(_),
-                },
-                Event::ConfigChanged { effort: None, .. },
-            ) => Some(Self::Failed),
+            | (Op::SetModel(ConfigPick::Effort(_)), Event::ConfigChanged { effort: None, .. }) => {
+                Some(Self::Failed)
+            }
             (Op::Prompt(_), Event::TurnComplete)
             | (Op::Clear | Op::Compact { .. } | Op::Resume { .. }, Event::SessionReady)
             | (Op::Rename { .. }, Event::SessionTitleUpdated { .. })
-            | (Op::SetModel { .. }, Event::ConfigChanged { .. })
+            | (Op::SetModel(_), Event::ConfigChanged { .. })
             | (Op::SetMode(_), Event::ModeChanged(_)) => Some(Self::Completed),
             (Op::Prompt(_) | Op::Compact { .. }, Event::Cancelled) => Some(Self::Cancelled),
             _ => None,
@@ -1013,19 +1008,21 @@ mod tests {
         DEVICE_ID, api_key, client_for, completion_body, sse_body, sse_response, test_config,
         text_stream_body,
     };
-    use crate::config::PromptCacheTtl;
     use crate::config::compaction::{CompactionConfig, test_thresholds};
+    use crate::config::{Effort, PromptCacheTtl};
     use crate::file_tracker::testing::seed_full_read;
     use crate::message::{Replay, Role};
+    use crate::model::ResolvedModelId;
     use crate::permission::rule::Rule;
     use crate::permission::{Mode, PermissionClass, Workspace};
     use crate::protocol::CapturingSink;
     use crate::session::post_compact::synthesize_post_compact_message;
-    use crate::session::store::testing::test_store;
+    use crate::session::store::testing::{test_session_file, test_store};
     use crate::tool::bash::background::ShellState;
     use crate::tool::bash::background::testing::{shell, start_shell};
     use crate::tool::tasks::TasksTool;
     use crate::tool::tasks::testing::plan;
+    use crate::util::git::testing::{init_fixture_repo, with_isolated_git_env_async};
 
     /// A toolbox without tools, for an engine that [`Engine::new`] builds.
     fn toolbox() -> Toolbox {
@@ -1147,7 +1144,7 @@ mod tests {
 
     /// Records one exchange in a new session in `store` and finishes it, returning its id.
     async fn finished_session(store: &SessionStore) -> String {
-        let session = handle::start(store, MODEL);
+        let session = handle::start(store, MODEL, None);
         let id = session.session_id().to_owned();
         session
             .record_message(Message::user("earlier prompt"))
@@ -1218,7 +1215,7 @@ mod tests {
                     toolbox(),
                     SessionParts {
                         store: store.clone(),
-                        handle: handle::start(&store, "claude-sonnet-5-5"),
+                        handle: handle::start(&store, "claude-sonnet-5-5", None),
                         transcript: LoadedTranscript {
                             context,
                             usage: usage.to_vec(),
@@ -1263,7 +1260,7 @@ mod tests {
         with_pinned_home(async {
             let dir = tempfile::tempdir().unwrap();
             let store = test_store(dir.path());
-            let session = handle::start(&store, MODEL);
+            let session = handle::start(&store, MODEL, None);
             let mut config = test_config("http://127.0.0.1:9", api_key(), MODEL);
             config.max_tool_rounds = Some(3);
             config.compaction = CompactionConfig::with_threshold_for_test(50_000);
@@ -1736,10 +1733,7 @@ mod tests {
                 Op::Rename {
                     title: "Fix login".to_owned(),
                 },
-                Op::SetModel {
-                    model: None,
-                    effort: Some(Effort::Low),
-                },
+                Op::SetModel(ConfigPick::Effort(Effort::Low)),
                 Op::SetMode(Mode::Plan),
                 Op::Shutdown,
             ] {
@@ -1761,7 +1755,7 @@ mod tests {
                     [
                         Event::SessionTitleUpdated { session_id, title },
                         Event::ConfigChanged {
-                            requested_effort: Some(Effort::Low),
+                            requested: ConfigPick::Effort(Effort::Low),
                             ..
                         },
                         Event::ModeChanged(Mode::Plan),
@@ -2884,6 +2878,37 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn clear_and_archive_record_the_branch_on_the_new_session() {
+        with_pinned_home(with_isolated_git_env_async(async {
+            let server = MockServer::start().await;
+            let dir = tempfile::tempdir().unwrap();
+            init_fixture_repo(dir.path());
+            let mut engine = engine(server.uri(), &test_store(dir.path()), dir.path()).await;
+            let sink = CapturingSink::new();
+
+            engine.clear(&sink).await;
+            let cleared = header_branch(&engine, dir.path()).await;
+            engine.messages = vec![Message::user("archive me")];
+            engine.archive(&sink).await;
+            let archived = header_branch(&engine, dir.path()).await;
+
+            assert_eq!(cleared.as_deref(), Some("fixture-branch"));
+            assert_eq!(archived.as_deref(), Some("fixture-branch"));
+        }))
+        .await;
+    }
+
+    /// The branch in the live session's header, after one recorded message writes the file.
+    async fn header_branch(engine: &Engine, dir: &Path) -> Option<String> {
+        engine.session.record_message(Message::user("first")).await;
+        let jsonl =
+            std::fs::read_to_string(test_session_file(dir, engine.session.session_id())).unwrap();
+        let header: serde_json::Value =
+            serde_json::from_str(jsonl.lines().next().unwrap()).unwrap();
+        header["git_branch"].as_str().map(ToOwned::to_owned)
+    }
+
+    #[tokio::test]
     async fn clear_and_resume_end_a_paused_auto_compaction() {
         with_pinned_home(async {
             let server = MockServer::start().await;
@@ -3230,6 +3255,13 @@ mod tests {
 
     // ── set_model ──
 
+    fn sonnet_pick() -> ConfigPick {
+        ConfigPick::Model {
+            id: ResolvedModelId::new("claude-sonnet-5-5".to_owned()),
+            effort: None,
+        }
+    }
+
     #[tokio::test]
     async fn set_model_swap_keeps_the_system_prompt_and_names_the_model_next_turn() {
         with_pinned_home(async {
@@ -3241,11 +3273,7 @@ mod tests {
             let (_ops_tx, mut ops) = crate::protocol::inert_op_channel();
 
             engine.submit_prompt("first", &sink, &mut ops).await;
-            engine.set_model(
-                &sink,
-                Some(ResolvedModelId::new("claude-sonnet-5-5".to_owned())),
-                None,
-            );
+            engine.set_model(&sink, sonnet_pick());
             engine.submit_prompt("second", &sink, &mut ops).await;
 
             let turns = request_bodies(&server).await;
@@ -3293,11 +3321,7 @@ mod tests {
             let (_ops_tx, mut ops) = crate::protocol::inert_op_channel();
 
             engine.submit_prompt("first", &sink, &mut ops).await;
-            engine.set_model(
-                &sink,
-                Some(ResolvedModelId::new("claude-sonnet-5-5".to_owned())),
-                None,
-            );
+            engine.set_model(&sink, sonnet_pick());
             engine.submit_prompt("second", &sink, &mut ops).await;
 
             let turns = request_bodies(&server).await;
@@ -3344,11 +3368,7 @@ mod tests {
                 engine.client = client_for(&config);
                 engine.compaction = configured;
 
-                engine.set_model(
-                    &sink,
-                    Some(ResolvedModelId::new("claude-sonnet-5-5".to_owned())),
-                    None,
-                );
+                engine.set_model(&sink, sonnet_pick());
 
                 assert_eq!(
                     engine.compaction.auto.threshold_tokens,
@@ -3383,7 +3403,7 @@ mod tests {
             engine.total_estimated_cost_usd = 1.23;
             let sink = CapturingSink::new();
 
-            engine.set_model(&sink, None, Some(Effort::Xhigh));
+            engine.set_model(&sink, ConfigPick::Effort(Effort::Xhigh));
 
             assert_eq!(
                 engine.auto_compaction_failures,
@@ -3769,10 +3789,7 @@ mod tests {
         let rename = Op::Rename {
             title: "Fix login".to_owned(),
         };
-        let set_model = Op::SetModel {
-            model: None,
-            effort: Some(Effort::Low),
-        };
+        let set_model = Op::SetModel(ConfigPick::Effort(Effort::Low));
         let set_mode = Op::SetMode(Mode::Plan);
         let compacted = |automatic| Event::SessionCompacted {
             summary: "summary".to_owned(),
@@ -3831,7 +3848,7 @@ mod tests {
                 Event::ConfigChanged {
                     model: ModelSpec::resolve(MODEL.to_owned()),
                     effort: Some(Effort::Low),
-                    requested_effort: Some(Effort::Low),
+                    requested: ConfigPick::Effort(Effort::Low),
                     auto_compaction: CompactionConfig::with_threshold_for_test(50_000).auto,
                 },
                 Some(TurnEnd::Completed),
@@ -3841,7 +3858,7 @@ mod tests {
                 Event::ConfigChanged {
                     model: ModelSpec::resolve("custom-model".to_owned()),
                     effort: None,
-                    requested_effort: Some(Effort::Low),
+                    requested: ConfigPick::Effort(Effort::Low),
                     auto_compaction: CompactionConfig::with_threshold_for_test(50_000).auto,
                 },
                 Some(TurnEnd::Failed),

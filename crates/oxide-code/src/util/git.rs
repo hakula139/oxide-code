@@ -13,27 +13,19 @@ use tracing::debug;
 use crate::util::text::truncate_to_width;
 
 /// Probes the current branch via `git branch --show-current`, returning `None` on a detached HEAD.
-pub(crate) fn current_branch(cwd: &Path) -> Option<String> {
+/// Dropping the future kills the child process.
+pub(crate) async fn current_branch(cwd: &Path) -> Option<String> {
     let cwd_str = cwd_to_str(cwd, "git branch")?;
-    let output = check_output("git branch", cwd_str, branch_command(cwd_str).output())?;
-    stdout_line(&output.stdout)
-}
-
-/// [`current_branch`] for async callers. Dropping the future kills the child process.
-pub(crate) async fn current_branch_async(cwd: &Path) -> Option<String> {
-    let cwd_str = cwd_to_str(cwd, "git branch")?;
-    let output = check_output(
-        "git branch",
-        cwd_str,
-        output_async(branch_command(cwd_str)).await,
-    )?;
-    stdout_line(&output.stdout)
-}
-
-fn branch_command(cwd: &str) -> Command {
     let mut command = Command::new("git");
-    command.args(["-C", cwd, "--no-optional-locks", "branch", "--show-current"]);
-    command
+    command.args([
+        "-C",
+        cwd_str,
+        "--no-optional-locks",
+        "branch",
+        "--show-current",
+    ]);
+    let output = check_output("git branch", cwd_str, output_async(command).await)?;
+    stdout_line(&output.stdout)
 }
 
 /// Probes the top-level directory of the repository containing `cwd` via
@@ -321,6 +313,20 @@ pub(crate) mod testing {
     pub(crate) async fn with_isolated_git_env_async<F: Future>(future: F) -> F::Output {
         temp_env::async_with_vars(ISOLATED_GIT_ENV, future).await
     }
+
+    /// Initializes a repository in `cwd` with one commit on `fixture-branch`. Panics when git
+    /// fails, since the dev shell and CI both provide it.
+    pub(crate) fn init_fixture_repo(cwd: &Path) {
+        for args in [
+            ["init", "-q", "-b", "fixture-branch"].as_slice(),
+            ["config", "user.email", "test@example.com"].as_slice(),
+            ["config", "user.name", "Test"].as_slice(),
+            ["commit", "-q", "--allow-empty", "-m", "init"].as_slice(),
+        ] {
+            let status = isolated_git(cwd).args(args).status().unwrap();
+            assert!(status.success(), "git {args:?} failed: {status}");
+        }
+    }
 }
 
 #[cfg(test)]
@@ -332,79 +338,37 @@ mod tests {
     #[cfg(unix)]
     use std::path::PathBuf;
 
-    use super::testing::{isolated_git, with_isolated_git_env, with_isolated_git_env_async};
+    use super::testing::{init_fixture_repo, with_isolated_git_env_async};
     use super::*;
 
     // ── current_branch ──
 
-    #[test]
-    fn current_branch_in_a_real_repo_yields_the_branch_name() {
+    #[tokio::test]
+    async fn current_branch_in_a_real_repo_yields_the_branch_name() {
         let dir = tempfile::tempdir().unwrap();
-        if !init_fixture_repo(dir.path()) {
-            return;
-        }
-        assert_eq!(
-            with_isolated_git_env(|| current_branch(dir.path())),
-            Some("fixture-branch".to_owned())
-        );
+        init_fixture_repo(dir.path());
+
+        let branch = with_isolated_git_env_async(current_branch(dir.path())).await;
+
+        assert_eq!(branch, Some("fixture-branch".to_owned()));
     }
 
-    #[test]
-    fn current_branch_outside_a_repo_is_absent() {
+    #[tokio::test]
+    async fn current_branch_outside_a_repo_is_absent() {
         let dir = tempfile::tempdir().unwrap();
-        assert_eq!(with_isolated_git_env(|| current_branch(dir.path())), None);
+
+        let branch = with_isolated_git_env_async(current_branch(dir.path())).await;
+
+        assert_eq!(branch, None);
     }
 
-    #[test]
+    #[tokio::test]
     #[cfg(unix)]
-    fn current_branch_with_non_utf8_cwd_is_absent() {
+    async fn current_branch_with_non_utf8_cwd_is_absent() {
         // Unix paths are bytes, so a non-UTF-8 one fails `cwd_to_str` before git spawns.
         let cwd = PathBuf::from(OsStr::from_bytes(b"/tmp/\xff"));
-        assert_eq!(current_branch(&cwd), None);
-    }
 
-    /// Commits once on `fixture-branch` in `cwd`. Returns `false` when git is unavailable.
-    fn init_fixture_repo(cwd: &Path) -> bool {
-        let Ok(status) = isolated_git(cwd)
-            .args(["init", "-q", "-b", "fixture-branch"])
-            .status()
-        else {
-            return false;
-        };
-        if !status.success() {
-            return false;
-        }
-        for args in [
-            ["config", "user.email", "test@example.com"].as_slice(),
-            ["config", "user.name", "Test"].as_slice(),
-            ["commit", "-q", "--allow-empty", "-m", "init"].as_slice(),
-        ] {
-            isolated_git(cwd).args(args).status().unwrap();
-        }
-        true
-    }
-
-    // ── current_branch_async ──
-
-    #[tokio::test]
-    async fn current_branch_async_in_a_real_repo_yields_the_branch_name() {
-        let dir = tempfile::tempdir().unwrap();
-        if !init_fixture_repo(dir.path()) {
-            return;
-        }
-        assert_eq!(
-            with_isolated_git_env_async(current_branch_async(dir.path())).await,
-            Some("fixture-branch".to_owned()),
-        );
-    }
-
-    #[tokio::test]
-    async fn current_branch_async_outside_a_repo_is_absent() {
-        let dir = tempfile::tempdir().unwrap();
-        assert_eq!(
-            with_isolated_git_env_async(current_branch_async(dir.path())).await,
-            None
-        );
+        assert_eq!(current_branch(&cwd).await, None);
     }
 
     // ── repo_root ──
@@ -412,9 +376,7 @@ mod tests {
     #[tokio::test]
     async fn repo_root_in_a_subdirectory_finds_the_top_level() {
         let dir = tempfile::tempdir().unwrap();
-        if !init_fixture_repo(dir.path()) {
-            return;
-        }
+        init_fixture_repo(dir.path());
         let nested = dir.path().join("crates/app");
         std::fs::create_dir_all(&nested).unwrap();
 

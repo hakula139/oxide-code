@@ -19,7 +19,6 @@ pub(crate) struct LiveSessionInfo {
     /// The root `/init` checks for instruction files: the git repository containing the session's
     /// working directory, or that directory itself outside a repository.
     pub(crate) project_root: PathBuf,
-    pub(crate) git_branch: Option<String>,
     pub(crate) version: &'static str,
     pub(crate) session_id: String,
     /// Rules granted from approvals for the rest of this session.
@@ -60,7 +59,6 @@ pub(crate) mod testing {
             cwd: "~/test".to_owned(),
             working_dir: Some(PathBuf::from("/repo")),
             project_root: PathBuf::from("/repo"),
-            git_branch: Some("main".to_owned()),
             version: "0.0.0-test",
             session_id: "test-session".to_owned(),
             session_allow: Vec::new(),
