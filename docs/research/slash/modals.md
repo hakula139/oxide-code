@@ -79,7 +79,7 @@ Imperative single-modal API.
 
 3. **Two open paths from day one.** Slash-triggered plus agent-triggered. The trait shape is identical for both, with only the call site differing. Codex already does this with `try_consume_approval_request`. oxide-code uses its modal stack for both slash commands and tool approvals.
 
-4. **Async event for completion.** Modal pushes a `UserAction` (or richer `ModalEvent`) onto the existing `user_tx` channel. Symmetric with how the rest of oxide-code's UI talks to the agent loop. Avoids the `Box<dyn FnOnce>` and lifetime gymnastics of a callback-based design.
+4. **Typed result for completion.** The modal returns a `ModalAction` that the App dispatches through the same path as keyboard input, which avoids the `Box<dyn FnOnce>` and lifetime gymnastics of a callback-based design.
 
 5. **Lazy live-data getters on slash command metadata.** Claude Code's dynamic `description()` lets the popup show `(currently sonnet)` without a refresh hook. Cheap, useful, doesn't require the modal infrastructure.
 

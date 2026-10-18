@@ -49,4 +49,4 @@ Slash entries are derived from the command palette and keymap, with no fixed sla
 | Claude Code | declarative `Command[]`    | ~100     | submit handler | three modes           | synthetic messages w/ display modes | yes (markdown + YAML)   |
 | Codex       | strum enum + impl methods  | ~55      | input layer    | one big `match`       | synthetic `history_cell`            | no                      |
 | opencode    | palette-derived slash rows | dynamic  | input layer    | closures + server     | toast / dialog / synthetic message  | yes (server-published)  |
-| oxide-code  | trait + `&[&dyn]` slice    | 15       | submit handler | `SlashOutcome` return | `SystemMessageBlock` / `ErrorBlock` | no (namespace reserved) |
+| oxide-code  | trait + `&[&dyn]` slice    | 18       | submit handler | `SlashOutcome` return | `SystemMessageBlock` / `ErrorBlock` | no (namespace reserved) |

@@ -69,9 +69,7 @@ The on-disk file is owned by a single `tokio::spawn`-ed actor task. The rest of 
 
 ### Writer Recovery on Write Error
 
-Writer recovery follows these rules:
-
-- `WriterStatus` is either `Pending` (file not yet on disk, staged header plus an optional deferred rename) or `Active(SessionWriter)`.
+- `WriterStatus` is either `Pending` (file not yet on disk, staged header plus an optional deferred title) or `Active(SessionWriter)`.
 - Entries stay queued in `SessionState` until a write succeeds, and each batch retries the queue ahead of its own entries, so a message never reaches disk before its parent.
 - The flush that creates the file writes the header and its batch in one write and unlinks the file if that write fails, so the session stays `Pending` with nothing on disk.
 - A failed append drops the writer's file handle, and the next append reopens the same path, including for sessions resumed from an explicit path.
@@ -148,12 +146,12 @@ Listings sort rows and render them as follows:
 
 ## Design Decisions
 
-1. **JSONL, append-only, one file per session.** Crash-safe, streamable, universal.
+1. **JSONL, append-only, one file per session.** A crash loses at most the batch it interrupts, and readers can stream the file line by line.
 2. **Per-project subdirectory.** Listings stay scoped, and `--all` opts into cross-project view.
 3. **`{epoch}-{uuid}.jsonl` naming.** Timestamp prefix for `ls` order, UUID suffix for lookup.
-4. **Explicit entry schema.** Tagged union + `parent_uuid` DAG + `version` field.
+4. **Explicit entry schema.** A tagged union of entries, a `parent_uuid` DAG, and a header `version`.
 5. **Lazy file creation.** Empty sessions leave no artifact.
-6. **Resume + symmetric sanitization.** Reopen, walk DAG, sanitize, keep every transcript API-valid.
+6. **Resume with symmetric sanitization.** Resume walks the DAG and drops orphans on both sides of each tool call, so every transcript stays API-valid.
 7. **Fork-on-conflict concurrency, no file lock.** Newest-leaf rule resolves forks, and one write per batch keeps concurrent appends from splitting a line.
 8. **Best-effort AI titles scoped to their session.** A one-shot Haiku call logs a warning on failure, and finalizing the session aborts it. The title with the newest `updated_at` wins.
 9. **First-failure-only write-error surfacing.** One `Event::Error` per failure kind plus warn-logs gives visibility without spam.

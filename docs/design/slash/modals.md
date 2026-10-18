@@ -44,7 +44,7 @@ The modal implementation uses these shared components:
 
 Concrete modals embed these primitives.
 
-Modals shipping today:
+The modals:
 
 - **Combined `/model + /effort` picker** (over `ListPicker`).
 - **`/effort` slider**: Bare `/effort` Speed ↔ Intelligence slider.
@@ -75,7 +75,7 @@ App owns `ModalStack` and runs the key gate first inside `handle_crossterm_event
 
 7. **Bare `/model` and bare `/effort` open separate modals.** Threading both bare forms through one modal would force a single-axis decision through a two-axis interface. `/model` keeps the multi-axis combined picker (model and effort cycle together), while `/effort` gets its own single-axis slider. Typed-arg `/model <id>` and `/effort <level>` keep direct-switch behavior for scripting and power users.
 
-8. **`ListPicker` is a state + render primitive.** Concrete pickers embed it and forward keys to it. This separates "list selection state" from "what does Enter dispatch", avoiding the boxed-callback pattern while staying broadly reusable. `/model + /effort`, `/mode`, `/theme`, and `/init` build on it.
+8. **`ListPicker` is a state + render primitive.** Concrete pickers embed it and forward keys to it. This keeps list selection apart from what Enter dispatches, with no callbacks. `/model + /effort`, `/mode`, `/theme`, and `/init` build on it.
 
 9. **Read-only kv overviews share `KvOverview`.** `/status`, `/config`, and `/help` all build the same shape of a title, sectioned rows, and a footer, so the layout, key handling, and dismiss live in one place. Per-command files supply only the sections, with their rows and headings, and a thin constructor, so a new overview is a `Vec<KvSection>` away.
 
@@ -83,13 +83,13 @@ App owns `ModalStack` and runs the key gate first inside `handle_crossterm_event
 
 11. **Nested modals use `ModalKey::Push`.** A push outcome keeps `handle_key` returning one value and avoids threading a stack borrow through every modal. `Debug for ModalKey` is hand-rolled because `Box<dyn Modal>` cannot derive it.
 
-12. **`Modal::on_focus_regained` is a generally-useful hook.** It defaults to a no-op, but any picker that opens a sub-modal mutating shared state can override it to refresh on pop.
+12. **Parents refresh through `Modal::on_focus_regained`.** A picker whose sub-modal mutates shared state overrides the no-op default to refresh on pop, as the `/resume` picker does after a delete.
 
 ## Per-Modal Notes
 
 - **Combined `/model + /effort` picker**: `ModelEffortPicker` wraps `ListPicker<ModelRow>` and tracks the effort axis separately. Left / Right cycles the effort row through all five tiers, which every supported model accepts. Until the user picks a tier, the row shows the active effort, falling back to the highlighted model's default. Submit emits one `Op::SetModel` whose `ConfigPick` carries only the changed axes, and Enter on a no-op cancels.
 
-- **`/effort` slider**: `EffortSlider` is a horizontal Speed ↔ Intelligence visual. Lists all five tiers and seeds the cursor at the active effort. Unknown model IDs have no effort, so bare `/effort` errors on them. Tiers render with uniform `●` / `○` glyphs plus per-tier ANSI color along blue → red. Color encodes identity, bold encodes the active pick. ANSI-named colors decouple the gradient from theme TOML so the user's terminal palette supplies the actual rendering.
+- **`/effort` slider**: `EffortSlider` is a horizontal Speed ↔ Intelligence visual. Lists all five tiers and seeds the cursor at the active effort. Unknown model IDs have no effort, so bare `/effort` errors on them. Tiers render with uniform `●` / `○` glyphs plus per-tier ANSI color along blue → red. Color encodes identity, bold encodes the active pick. ANSI-named colors decouple the gradient from theme TOML, so the user's terminal palette renders it.
 
 - **`/mode` picker**: `ModePicker` wraps `ListPicker<ModeRow>` over `manual`, `plan`, and `yolo`, each with a short description, and seeds the cursor at the active mode. Enter forwards `Op::SetMode` for the highlighted row and cancels on the active one, and numeric `1`–`3` shortcuts jump to a row. It opens mid-turn, since the engine applies a switch from the turn's next gated call.
 
@@ -101,7 +101,7 @@ App owns `ModalStack` and runs the key gate first inside `handle_crossterm_event
 
 - **`/resume` picker**: `ResumePicker` wraps `SearchableList<SessionRow>` and adds a footer line. Each row paints a two-line title plus dim metadata block (ID prefix · relative time · message count · branch · project) followed by a trailing blank. Tab toggles current-project ↔ all-projects and Ctrl+A toggles the archived view, each reloading rows while the typed query survives the rebuild. Enter on a focused row submits `Op::Resume`. Enter with no selection stays open so the user can Tab the scope or Esc out. The footer leads with the Enter and Esc hints, then counts the loaded rows, and flags when more sessions remain beyond the 30-session load cap (`30 most recent sessions`, then `more not loaded`). Load failures take over the footer so a failure can't disguise itself as "0 sessions". Ctrl+D on the cursor row pushes `ConfirmDeleteSessionModal`, and Ctrl+X archives or unarchives the cursor row in place. On focus regain the picker reloads and re-seeks the cursor to the previously selected row, or to the row that followed a deleted one.
 
-- **Confirm-delete modal**: `ConfirmDeleteSessionModal` runs `session::saved::delete` on the session's file synchronously on Y / Enter and submits `ModalAction::SystemMessage("Deleted session {id}: {title}")` on success so the user has chat-stream evidence the action ran. Failures latch into a sticky inline error that clears only on a deliberate Y / N choice, so a stray key can't wipe the diagnostic. Pushed by `/delete <id-prefix>` and by `/resume`'s Ctrl+D.
+- **Confirm-delete modal**: `ConfirmDeleteSessionModal` runs `session::saved::delete` on the session's file synchronously on Y / Enter and submits `ModalAction::SystemMessage("Deleted session {id}: {title}")` on success, so the chat records the deletion. Failures latch into a sticky inline error that clears only on a deliberate Y / N choice, so a stray key can't wipe the diagnostic. Pushed by `/delete <id-prefix>` and by `/resume`'s Ctrl+D.
 
 - **Approval modal**: `ApprovalModal` holds the tool-use ID and renders the call summary as its title above the body: the command text for `bash`, or `-` / `+` diff rows for `edit` and `write`. The body shows at most 16 rows and scrolls when the call runs longer or the band is shorter. Y submits `Op::Resolve` with `Approve` once a render has shown the first body row, while Enter does nothing. [permissions.md](../tools/permissions.md) covers the type-ahead guard. When the call offers a session grant, A opens a rule editor prefilled with the suggested rule, and Enter submits `AllowForSession` with the edited rule once a render has shown the whole editor. N submits `Deny`. F opens a feedback editor whose Enter submits `DenyWithFeedback` with the typed text. Esc from the choice, Ctrl+C, and a `clear` on resume or compaction all resolve through `on_cancel` to `Abort`, which ends the turn.
 
@@ -113,7 +113,7 @@ App owns `ModalStack` and runs the key gate first inside `handle_crossterm_event
 
 ## Out of Scope
 
-- **Persistent modals in chat scroll.** Modals are ephemeral. `/diff` stays a chat-pushed printer because the diff genuinely earns scrollback, and modal cropping would lose value.
+- **Persistent modals in chat scroll.** Modals are ephemeral. `/diff` stays a chat-pushed printer because a diff needs scrollback, which a modal would crop.
 
 - **Mouse interaction.** The TUI captures the mouse ([mouse interactions](../tui/mouse-interactions.md)), but a modal receives only the wheel, as Up / Down keys. It ignores clicks and stays keyboard-driven.
 

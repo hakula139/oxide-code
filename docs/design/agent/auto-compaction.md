@@ -8,16 +8,17 @@ Companion docs: [research/agent/auto-compaction.md](../../research/agent/auto-co
 
 Auto-compaction is **default on** and can be disabled independently from manual `/compact`. The trigger runs before recording a new user prompt when the previous completed turn left usage over threshold. Tool results are compacted only after the assistant has consumed them and returned a final response.
 
-It does not interrupt an in-flight stream or tool call. If another prompt arrives while summarization is running, the prompt remains queued during compaction and drains afterward through the existing prompt-queue path. If the compaction fails, the queue waits for the user.
+It does not interrupt an in-flight stream or tool call. A prompt that arrives while the summary runs stays queued and drains afterward, unless the compaction fails, in which case the queue waits for the user.
 
 ## Token Signal
 
-The agent loop records the maximum observed token usage from each stream:
+The trigger reads the usage of the previous turn's last round as one total:
 
-- `message_start.message.usage.input_tokens + cache_creation_input_tokens + cache_read_input_tokens + output_tokens`
-- `message_delta.usage.input_tokens + cache_creation_input_tokens + cache_read_input_tokens + output_tokens`
+```text
+input_tokens + cache_creation_input_tokens + cache_read_input_tokens + output_tokens
+```
 
-Anthropic's delta usage often carries only output tokens, so stream processing keeps the latest non-zero input, cache-creation input, cache-read input, and output values separately. The status-line context segment reuses the same cache-aware signal. Missing usage means "do not auto-compact".
+`message_start` reports the input and cache counts, and `message_delta` usually reports only `output_tokens`, so the stream keeps the latest non-zero value of each field. The status-line context segment reads the same cache-aware signal. Missing usage means "do not auto-compact".
 
 ## Threshold
 
@@ -52,9 +53,9 @@ Environment:
 | `OX_COMPACTION_AUTO_THRESHOLD_TOKENS`  | Absolute automatic trigger threshold       |
 | `OX_COMPACTION_AUTO_THRESHOLD_PERCENT` | Percent of context, capped by safe trigger |
 
-Manual `/compact` remains available. The config controls only whether automatic compaction triggers and where that trigger fires. Token and percent thresholds are mutually exclusive so the resolved trigger stays obvious.
+The config controls only whether and where automatic compaction triggers, and manual `/compact` ignores it. Token and percent thresholds are mutually exclusive, so the resolved trigger stays obvious.
 
-Explicit thresholds snap into a usable range. Token values below `50_000` rise to that floor, and for models with known context windows, values above the model-derived safe trigger drop to it. Percent thresholds must be 1-100 and snap the same way once resolved to tokens. The floor exists because lower values create frequent summarization loops, extra latency, and avoidable summary loss long before context pressure exists.
+Explicit thresholds snap into a usable range. Token values below `50_000` rise to that floor, and for models with known context windows, values above the model-derived safe trigger drop to it. Percent thresholds must be 1-100 and snap the same way once resolved to tokens. The floor exists because a lower threshold would summarize again and again long before context pressure exists.
 
 ## Trigger Flow
 
@@ -72,9 +73,9 @@ The failure counter lives on `Engine`. Three consecutive automatic failures paus
 
 ## User Experience
 
-Manual and automatic compaction use the same visible `CompactedBlock`. When an automatic attempt fails, the prompt is not sent, and chat shows why. A summarizer failure reads `Auto-compaction failed: ...`, and a failed boundary write shows a `Session write failed: ...` notice followed by `Auto-compaction was not saved`. The TUI puts the prompt back in the input, or at the head of the queue when other prompts are waiting or the input holds a draft, and leaves the queue for the user to start. Sending the prompt again retries the compaction. The third consecutive failure pauses automatic attempts, so the next send goes out without compaction until a `/model` or `/effort` swap, `/clear`, `/archive`, `/resume`, or a successful `/compact` resets the counter. Until then, `/status` shows auto-compaction as paused and points to `/compact`. Each reset allows three more attempts.
+Manual and automatic compaction use the same visible `CompactedBlock`. When an automatic attempt fails, the prompt is not sent, and chat shows why. A summarizer failure reads `Auto-compaction failed: ...`, and a failed boundary write shows a `Session write failed: ...` notice followed by `Auto-compaction was not saved`. The TUI puts the prompt back in the input, or at the head of the queue when other prompts are waiting or the input holds a draft, and leaves the queue for the user to start. Sending the prompt again retries the compaction. After the third consecutive failure, the next send goes out without compaction until the counter resets. Until then, `/status` shows auto-compaction as paused and points to `/compact`.
 
-During TUI auto-compaction, the status bar uses the existing `Compacting` state. Automatic `SessionCompacted` events keep the TUI busy until the queued prompt drains or the prompt submission finishes. In the bare REPL, `driver::stdio::StdioSink` renders `SessionCompacted` as a stderr boundary line.
+During TUI auto-compaction, the status bar shows the `Compacting` state. Automatic `SessionCompacted` events keep the TUI busy until the queued prompt drains or the prompt submission finishes. In the bare REPL and headless text output, `driver::stdio::StdioSink` renders `SessionCompacted` as a stderr line such as `Auto-compacted 12 messages into summary`.
 
 ## Design Decisions
 
@@ -86,9 +87,9 @@ During TUI auto-compaction, the status bar uses the existing `Compacting` state.
 
 4. **Same summarizer as `/compact`.** Auto-compaction has no model setting of its own. The summarizer forks the conversation's request through the agent loop's stream path, which already handles auth, model, effort, betas, prompt caching, and first-party gateway constraints.
 
-5. **Same persistence boundary as `/compact`.** Auto-compaction should not create a second session format.
+5. **Same persistence boundary as `/compact`.** Automatic and manual compaction write the same boundary, so sessions keep one format.
 
-6. **Failure circuit breaker.** A too-large or malformed compact request can be unrecoverable. After 3 consecutive automatic failures, the loop stops trying until a successful manual compaction, a model or effort change, `/clear`, `/archive`, or `/resume` resets it.
+6. **Failure circuit breaker.** A too-large or malformed compact request can be unrecoverable. After 3 consecutive automatic failures, the engine stops trying until the counter resets.
 
 7. **No automatic continue prompt.** If the user queued input, it drains after compaction. Otherwise the assistant waits. Synthetic "continue" prompts make the agent act without fresh user intent.
 

@@ -36,10 +36,10 @@ Organized by topic. Each subdirectory except `api/` shares its topic with a dire
 
 ## Tools
 
-| Document                                 | Description                                                              |
-| ---------------------------------------- | ------------------------------------------------------------------------ |
-| [Output Truncation](tools/truncation.md) | Per-tool vs central caps, spillover strategies                           |
-| [Permissions](tools/permissions.md)      | Approval modes, rules, decision precedence, oxide-code integration seams |
+| Document                                 | Description                                                   |
+| ---------------------------------------- | ------------------------------------------------------------- |
+| [Output Truncation](tools/truncation.md) | Per-tool vs central caps, spillover strategies                |
+| [Permissions](tools/permissions.md)      | Approval modes, rules, decision precedence, grant persistence |
 
 ## Terminal UI
 

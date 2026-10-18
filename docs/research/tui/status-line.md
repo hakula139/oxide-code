@@ -16,7 +16,7 @@ The useful data split is provider-local versus external:
 
 Codex exposes a roster-style `tui.status_line` array of built-in item names. At Codex commit ce0323f2f (2026-10-17), the default roster is `model-with-reasoning`, `current-dir`, and `thread-name`. Other items include the git branch, PR number, run state, context used, five-hour and weekly limits, thread title, and task progress (`StatusLineItem` in `codex-rs/tui/src/bottom_pane/status_line_setup.rs`).
 
-The important pattern is not the exact segment list. The useful part for oxide-code is the ordered roster, where users can place trustworthy built-in segments without adopting a command DSL.
+The useful part for oxide-code is the ordered roster, where users can place trustworthy built-in segments without adopting a command DSL.
 
 ## opencode (TypeScript)
 

@@ -23,7 +23,7 @@ The picker wraps [`SearchableList`](modals.md) and adds these controls and displ
 
 `session/handle` provides `roll_into(...)`, which mirrors `roll(...)`. It loads and sanitizes the target first, so a load failure leaves the live session untouched. Loading an archived target appends an entry unarchiving it, which `RollIntoOutcome::unarchived` reports. It then snapshots and clears the file tracker, restores the target's tracker state through `restore_verified`, swaps the handle in place, and finalizes the old session. `RollIntoOutcome` carries the target's `LoadedTranscript` (messages, recorded prompt context, compact boundary, tool-result metadata, and recorded usage) and title, plus a diagnostic pair (finalize failure of the prior session, drift list from the file tracker).
 
-`Engine::resume` in `engine.rs` resolves the target to a session file, drives `roll_into`, and adopts the loaded transcript, which rebinds `Client::set_session_id` and replays the recorded prompt context. It then emits `Event::SessionResumed { id, title, unarchived, history }`, followed in order by the old session's finalize failure as an `Event::Error`, an `Event::UsageUpdated` carrying the restored session cost when it is non-zero, the restored task list, an `Event::Notice` for each instruction file the rebuilt prompt cannot read, an `Event::Notice` for any tracker drift, and the interrupted-response `Event::Error` when the transcript ends mid-reply. `Event::SessionReady` ends the resume. The history comes from `Engine::take_history`, the same projection the TUI paints at startup, which runs the adopted transcript through `session::history::interactions`: the compaction boundary first, then text, thinking, and each tool call paired with its result, with icons, labels, and result views already resolved. The TUI's `App::apply_session_resumed` clears the chat, replays the history through `ChatView::load_history`, notes an unarchived session, drops queued prompts (surfaces the count as a system message), and clears the modal stack.
+`Engine::resume` in `engine.rs` resolves the target to a session file, drives `roll_into`, and adopts the loaded transcript, which rebinds `Client::set_session_id` and replays the recorded prompt context. It then emits `Event::SessionResumed { id, title, unarchived, history }`, followed in order by the old session's finalize failure as an `Event::Error`, an `Event::UsageUpdated` carrying the restored session cost when it is non-zero, the restored task list, an `Event::Notice` for each instruction file the rebuilt prompt cannot read, an `Event::Notice` for any tracker drift, and the interrupted-response `Event::Error` when the transcript ends mid-reply. `Event::SessionReady` ends the resume, while a prefix without a unique match or a `roll_into` failure ends it with `Event::TurnFailed` and keeps the live session. The history comes from `Engine::take_history`, the same projection the TUI paints at startup, which runs the adopted transcript through `session::history::interactions`: the compaction boundary first, then text, thinking, and each tool call paired with its result, with icons, labels, and result views already resolved.
 
 `SessionStore::list_paged` stats every candidate file, sorts by mtime desc, then parses files in order until it holds one readable session in the requested archive state past the page. `ListPage` carries the page and whether more matching sessions follow it. `SessionStore::list_matching` filters the same walk by the ID in each file name, so a prefix lookup parses only the matching files. Each `SessionInfo` carries the file it was read from, and resume and delete act on that file. `ox --list --limit N` (default `30`, `0` = unbounded) prints ``... more (use `--limit N` to raise the cap or `--limit 0` to list all)`` when more sessions follow the cap.
 
@@ -31,9 +31,9 @@ The picker wraps [`SearchableList`](modals.md) and adds these controls and displ
 
 1. **Bare opens the picker, typed-arg resolves directly.** Same shape as `/model`, `/effort`, `/theme`: bare opens a modal, typed-arg switches directly. Reference CLIs converged on this exploratory-vs-direct split independently (Claude Code's `-r` vs `-c`, Codex's bare `resume` vs `resume <id>`).
 
-2. **Alias `continue`.** Matches the existing `--continue` / `-c` CLI flag, using the same word in both surfaces.
+2. **Alias `continue`.** Matches the `--continue` / `-c` CLI flag, so both surfaces use the same word.
 
-3. **`classify` is always `Mutating`.** Both bare and typed-arg refuse mid-turn, since the picker eventually submits a `Op::Resume`, and allowing it mid-stream would interleave a session swap with an in-flight response, which is exactly what the read-only fast path was designed to rule out.
+3. **`classify` is always `Mutating`.** Both bare and typed-arg refuse mid-turn, since the picker eventually submits a `Op::Resume`, and allowing it mid-stream would interleave a session swap with an in-flight response, which the read-only fast path exists to rule out.
 
 4. **Mid-session re-init uses `roll_into`.** The in-process swap preserves the process and terminal state, avoids an alt-screen exit or relaunch flash, and reuses the `roll` pattern from `/clear`. It clears modals, rolls back any theme preview, and discards queued prompts.
 
@@ -41,17 +41,17 @@ The picker wraps [`SearchableList`](modals.md) and adds these controls and displ
 
 6. **Surface old-session finalize failures and tracker drift as distinct events.** They have two causes: the previous session failing to finalize (writer), and tracked files drifting since the resumed session (filesystem). The finalize failure is an error that names the previous session, so the user does not read it as a current-writer fault. Drift is a notice, since the Read-before-Edit gate handles it and nothing failed.
 
-7. **Drop queued prompts on resume, then surface the count.** Queued prompts belong to the source thread, so replaying them in a different transcript would amount to silent corruption. `/clear` keeps the queue while starting a new session, but `/resume` drops it and prints `N queued prompt(s) discarded` so the user knows their typing didn't carry over.
+7. **Drop queued prompts on resume, then surface the count.** Queued prompts belong to the source thread, so replaying them in a different transcript would amount to silent corruption. `/clear` keeps the queue while starting a new session, but `/resume` drops it and prints `Discarded N queued prompts from the previous session` so the user knows their typing didn't carry over.
 
-8. **`SearchableList` as a sibling primitive to `ListPicker`.** `ListPicker` is small and focused, and bolting search + viewport onto it would double its surface area for the simpler pickers. `SearchableList` sits sibling-style with the same trait pattern and the same delegation.
+8. **`SearchableList` as a sibling primitive to `ListPicker`.** `ListPicker` is small and focused, and adding search and a viewport would double its surface for the simpler pickers. `SearchableList` follows the same trait and delegation pattern beside it.
 
-9. **Two-method `SearchableItem`: `haystack` plus `render`.** A substring filter and a layout callback are the only things the primitive needs from items. Date grouping, numeric mnemonics, and other UX shapes were prototyped and dropped because they bloat the trait for one consumer.
+9. **Two-method `SearchableItem`: `haystack` plus `render`.** A substring filter and a layout callback are the only things the primitive needs from items.
 
-10. **Substring search only.** Codex and opencode both ship plain substring and it works.
+10. **Substring search only.** Codex and opencode both use plain substring search.
 
-11. **Project scoping defaults to current cwd, with Tab widening.** Matches the existing `ox -c` resolver semantics: CLI `--all` widens up front, in-picker `Tab` toggles, and the typed query persists across the rebuild.
+11. **Project scoping defaults to current cwd, with Tab widening.** Matches the `ox -c` resolver semantics: CLI `--all` widens up front, in-picker `Tab` toggles, and the typed query persists across the rebuild.
 
-12. **Default to a 30-row page with no background load-more.** Codex's near-bottom prefetch is genuinely nice but adds a non-trivial state machine for marginal gain at typical session counts. More than 30 sessions in a project is search territory anyway.
+12. **Default to a 30-row page with no background load-more.** Codex's near-bottom prefetch adds a state machine for little gain at typical session counts, and past 30 sessions in a project, search finds a session faster than scrolling.
 
 13. **Listing API centralizes pagination in `list_paged(limit, scope)`.** The page, the archive filter, and whether more sessions follow come from one walk that stops one session past the page, so a listing's cost scales with the page. Listings report no exact total, since counting the sessions in one archive state would parse every file in scope. Bare `ox -c` stops at the first unarchived session through `latest`, and a prefix lookup parses only matching files.
 
@@ -71,15 +71,13 @@ The picker wraps [`SearchableList`](modals.md) and adds these controls and displ
 
 ## Per-Component Notes
 
-- **`ResumeCmd`**: Canonical `resume`, alias `continue`. `classify` is always `Mutating`. `echoes_input` returns false for bare (the modal is the response) and true for typed-arg (echo anchors the swap-confirmation message). Typed-arg path forwards the trimmed prefix through `command::resume` for the engine to resolve.
-
-- **`ResumePicker`**: Wraps `SearchableList<SessionRow>` plus a footer row. Loads rows from `SessionStore::list_paged`. Dispatches keys through `ACTIONS`, whose entries bind each `PickerAction` to a key and label: Enter resumes, Esc dismisses, Ctrl+X archives or unarchives, Ctrl+D opens the delete confirmation, Tab toggles `all`, Ctrl+A toggles `archived`, and Ctrl+U clears the query. The toggles rebuild while preserving the query, and other unbound keys edit it through the shared `LineEditor`. Enter on a focused row dispatches `Op::Resume`. Enter with no selection keeps the picker open so the user can Tab the scope or Esc out. `at_startup` builds the `ox --resume` variant, whose `Dismissal::Quit` turns a dismissal into `Op::Shutdown`.
+- **`ResumePicker`**: Wraps `SearchableList<SessionRow>` plus a footer row. Loads rows from `SessionStore::list_paged`. Dispatches keys through `ACTIONS`, whose entries bind each `PickerAction` to a key and label: Enter resumes, Esc dismisses, Ctrl+X archives or unarchives, Ctrl+D opens the delete confirmation, Tab toggles `all`, Ctrl+A toggles `archived`, and Ctrl+U clears the query. The toggles rebuild while preserving the query, and other unbound keys edit it through the shared `LineEditor`.
 
 - **`SearchableList<T>`**: Owns the query editor, items, filtered visible index, cursor, and viewport. The substring filter recomputes whenever the query changes, through `set_query` or an `edit_query` keystroke, and resets the cursor to the top. The viewport sizes itself from the height each render grants, and paging steps by the rows last shown. `SearchableItem::haystack` returns the composite filter source. `render(width, is_cursor, theme)` paints one or more `Line`s per row.
 
 - **`SessionRow`**: Carries the full ID, session file path, title-or-`(untitled)`, `last_active_at`, message count, optional git branch, and (in all-projects mode) the tildified project path. `haystack` joins the ID and title, plus the project when visible. `render` paints a two-line title plus dim metadata block under a fixed width budget. The metadata line is built via the shared `session::display::format_metadata_line` helper so the confirm-delete modal can reuse the same shape.
 
-- **`SessionStore::list_paged`**: Takes a `ListScope` with project and archive flags. Stats every candidate, sorts by mtime desc, then parses files in order, keeping readable sessions in the requested archive state until it holds one past the page. `ListPage::has_more()` reports whether a matching session follows the page, for the `--list` footer and the picker's `more not loaded` note.
+- **`SessionStore::list_paged`**: Takes a `ListScope` with project and archive flags. `ListPage::has_more()` reports whether a matching session follows the page, for the `--list` footer and the picker's `more not loaded` note.
 
 - **`/resume <id>` resolver**: `Engine::roll_into` calls `resolve_saved_prefix`, which runs the prefix lookup against the current project, then retries across all projects on miss, skipping the live session. A prefix without a unique match, or one that matches only the live session, fails the resume with a message saying why.
 
@@ -87,21 +85,15 @@ The picker wraps [`SearchableList`](modals.md) and adds these controls and displ
 
 - **`Event::SessionResumed`**: Carries the ID, title, unarchived flag, and transcript projected for display, so the TUI renders it without a tool registry. `StdioSink` prints the resumed ID prefix and title on stderr, plus a note when the resume unarchived the session.
 
-- **`Engine::resume` (`engine.rs`)**: Drives `roll_into`, rebinds `Client::set_session_id`, and emits `SessionResumed`. It then surfaces `finalize_failure` as an `Event::Error`, reports a non-zero restored cost as `UsageUpdated`, shows the instruction warnings and `drifted_paths` as `Event::Notice`s, and ends with `SessionReady`. A prefix without a unique match or a `roll_into` failure ends the resume with `Event::TurnFailed` and keeps the live session.
-
-- **`apply_session_resumed` (TUI)**: Swaps the session ID, repaints the title, clears and replays chat history, notes an unarchived session, drops queued prompts (with a system-message surface), and clears the modal stack. At `SessionReady`, `apply_session_ready` returns to idle and submits the queue head, or only returns to idle after a cancel that lost the race to the swap. While the resume runs, `Status::Resuming` holds queued prompts, and a failed resume returns to idle with them still queued.
-
-- **`--list --limit N`**: `0` opts out of the cap, while positive values cap it. The `... more` footer line appears only when more sessions follow the cap.
+- **`apply_session_resumed` (TUI)**: Swaps the session ID, repaints the title, clears the chat and replays the history through `ChatView::load_history`, notes an unarchived session, drops queued prompts with a system message giving their count, and clears the modal stack. At `SessionReady`, `apply_session_ready` returns to idle and submits the queue head, or only returns to idle after a cancel that lost the race to the swap. While the resume runs, `Status::Resuming` holds queued prompts, and a failed resume returns to idle with them still queued.
 
 ## Out of Scope
 
-- **Date grouping in the picker.** Considered (`Today` / `Yesterday` / ISO date) but dropped, because flat mtime list reads fine at 30 rows and the `last_active_at` column already encodes recency.
+- **Date grouping in the picker** (`Today` / `Yesterday` / ISO date). A flat mtime list reads fine at 30 rows, and the relative time in each row already encodes recency.
 - **Numeric `1`–`9` mnemonics.** Cursor plus Enter is enough, and mnemonics conflict with type-to-search.
 - **Worktree / branch tree expansion** (Claude Code's `▼` / `▶`) and **side preview pane.** Both double layout complexity for marginal gain.
 - **In-picker rename of other sessions.** `/rename` covers the live session's title.
-- **Background load-more on scroll near bottom.** A 30-row page plus search covers the typical case.
 - **Fuzzy search.** Substring search covers typical session counts.
-- **Auto-resume on single match.** Users who type `/resume` to peek the list deserve to see it.
 - **`/sessions` listing variant.** One slash command per intent. `ox --list` already covers script-friendly listing.
 
 ## Sources
@@ -126,4 +118,4 @@ The picker wraps [`SearchableList`](modals.md) and adds these controls and displ
 - `crates/oxide-code/src/tui/app/events.rs`: `apply_session_resumed`.
 - `crates/oxide-code/src/tui/components/chat.rs`: `ChatView::load_history`.
 - `crates/oxide-code/src/tui/modal/keymap.rs`: `Keymap`, `KeyAction`, and `KeyChord`, behind the picker's keys and footer hints.
-- `crates/oxide-code/src/tui/modal/searchable_list.rs`: `SearchableList<T>` plus `SearchableItem` plus `cursor_to` for cursor preservation across reload.
+- `crates/oxide-code/src/tui/modal/searchable_list.rs`: `SearchableList<T>`, `SearchableItem`, and `cursor_to`, which keeps the cursor across a reload.

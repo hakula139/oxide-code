@@ -1,6 +1,6 @@
 # Theming
 
-oxide-code's TUI palette is fully user-configurable. Pick one of the bundled Catppuccin or Material palettes, point at a TOML file you wrote yourself, or patch individual color slots on top of any base, all without rebuilding `ox`.
+oxide-code's TUI palette is user-configurable. Pick one of the bundled Catppuccin or Material palettes, point at a TOML file you wrote yourself, or patch individual color slots on top of any base, all without rebuilding `ox`.
 
 ## Quick Start
 
@@ -60,7 +60,7 @@ ANSI 16-color names accepted (case-insensitive):
 - **Standard**: `black`, `red`, `green`, `yellow`, `blue`, `magenta`, `cyan`, `gray` (alias `grey`).
 - **Bright**: `dark_gray` (alias `dark_grey`), `bright_red` (alias `light_red`), `bright_green` (alias `light_green`), `bright_yellow` (alias `light_yellow`), `bright_blue` (alias `light_blue`), `bright_magenta` (alias `light_magenta`), `bright_cyan` (alias `light_cyan`), `white` (alias `bright_white` / `light_white`).
 
-See the [ANSI escape code reference][ansi] for what each name maps to in your terminal's palette. Three-digit hex shorthand (`#fff`) is intentionally rejected. Always use the full six digits.
+See the [ANSI escape code reference][ansi] for what each name maps to in your terminal's palette. Three-digit hex shorthand (`#fff`) is rejected, so write all six digits.
 
 [ansi]: https://en.wikipedia.org/wiki/ANSI_escape_code#Colors
 
@@ -261,7 +261,7 @@ The default log level is `warn`, so per-slot fallback warnings appear in the [lo
 
 ## Examples
 
-### Mocha Base + a Brighter Error Color
+### Mocha Base with a Brighter Error Color
 
 ```toml
 [tui.theme.overrides]
