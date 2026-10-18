@@ -86,8 +86,7 @@ impl App {
                 instructions.as_deref(),
                 automatic,
             ),
-            // The TUI settles at the swap event, since it renders the events that follow in order.
-            Event::SessionReady => {}
+            Event::SessionReady => self.apply_session_ready(),
             Event::ConfigChanged {
                 model,
                 effort,
@@ -221,7 +220,6 @@ impl App {
             ));
         }
         self.clear_modals();
-        self.finalize_idle();
     }
 
     /// Rebinds to session `id` titled `title`, clearing the previous session's chat, rules,
@@ -257,9 +255,16 @@ impl App {
                 .push_user_message(slash::unescape_literal(prompt).to_owned());
         }
         self.clear_modals();
-        if !automatic {
-            self.active_prompt = None;
-            self.finalize_idle();
+    }
+
+    /// Ends a `/compact` or `/resume` once the new transcript has reported its state. A cancel that
+    /// lost the race to the swap leaves the queue to the user, and a roll never leaves idle, so its
+    /// `SessionReady` changes nothing.
+    fn apply_session_ready(&mut self) {
+        match self.status_bar.status() {
+            Status::Compacting | Status::Resuming => self.finalize_idle(),
+            Status::Cancelling => self.enter_idle(),
+            _ => {}
         }
     }
 
@@ -981,6 +986,87 @@ mod tests {
         assert_eq!(rx.try_recv().ok(), None);
     }
 
+    #[tokio::test]
+    async fn handle_session_ready_after_a_compaction_starts_the_queue_head_below_its_notices() {
+        // Compaction keeps the session, so a queued prompt becomes the first post-compact turn.
+        // `/resume` swaps sessions and drops it.
+        let (mut app, mut rx, _event_tx) = test_app(None);
+        app.pending_prompts
+            .push_back("queued before compact".to_owned());
+        app.dispatch_op(Op::Compact { instructions: None });
+        assert_eq!(rx.recv().await, Some(Op::Compact { instructions: None }));
+
+        app.handle_engine_event(Event::SessionCompacted {
+            summary: "s".to_owned(),
+            pre_count: 2,
+            instructions: None,
+            automatic: false,
+        });
+        app.handle_engine_event(Event::Notice(
+            "Skipped instruction file CLAUDE.md".to_owned(),
+        ));
+        let before_ready = rx.try_recv();
+        app.handle_engine_event(Event::SessionReady);
+
+        assert_eq!(before_ready, Err(TryRecvError::Empty));
+        assert_eq!(
+            rx.recv().await,
+            Some(Op::Prompt("queued before compact".to_owned())),
+        );
+        assert_eq!(app.status_bar.status(), &Status::Streaming);
+        let text = rendered_text(&mut app, 80, 12);
+        let notice_at = text.find("Skipped instruction file CLAUDE.md").unwrap();
+        let prompt_at = text.find("queued before compact").unwrap();
+        assert!(notice_at < prompt_at, "{text}");
+    }
+
+    #[tokio::test]
+    async fn handle_session_ready_after_a_cancelled_compaction_keeps_the_queue_waiting() {
+        let (mut app, mut rx, _event_tx) = test_app(None);
+        app.pending_prompts
+            .push_back("queued before compact".to_owned());
+        app.dispatch_op(Op::Compact { instructions: None });
+        app.dispatch_op(Op::Interrupt);
+        assert_eq!(rx.recv().await, Some(Op::Compact { instructions: None }));
+        assert_eq!(rx.recv().await, Some(Op::Interrupt));
+
+        app.handle_engine_event(Event::SessionCompacted {
+            summary: "s".to_owned(),
+            pre_count: 2,
+            instructions: None,
+            automatic: false,
+        });
+        app.handle_engine_event(Event::SessionReady);
+
+        assert_eq!(rx.try_recv(), Err(TryRecvError::Empty));
+        assert_eq!(app.pending_prompts, ["queued before compact"]);
+        assert_eq!(app.status_bar.status(), &Status::Idle);
+        assert!(app.input.is_enabled());
+    }
+
+    #[tokio::test]
+    async fn handle_session_ready_ends_a_resume_after_the_swap() {
+        let (mut app, mut rx, _event_tx) = test_app(None);
+        let resume = Op::Resume {
+            target: ResumeTarget::Prefix("1a2b".to_owned()),
+        };
+        app.dispatch_op(resume.clone());
+        assert_eq!(rx.recv().await, Some(resume));
+
+        app.handle_engine_event(Event::SessionResumed {
+            id: "resumed-session".to_owned(),
+            title: None,
+            unarchived: false,
+            history: Vec::new(),
+        });
+        let at_swap = (app.status_bar.status().clone(), app.input.is_enabled());
+        app.handle_engine_event(Event::SessionReady);
+
+        assert_eq!(at_swap, (Status::Resuming, false));
+        assert_eq!(app.status_bar.status(), &Status::Idle);
+        assert!(app.input.is_enabled());
+    }
+
     #[test]
     fn handle_session_resumed_replays_transcript_and_clears_pending() {
         let (mut app, _rx, _event_tx) = test_app(Some("Old"));
@@ -1033,8 +1119,6 @@ mod tests {
             app.pending_prompts.is_empty(),
             "queued prompts must drop on resume",
         );
-        assert_eq!(app.status_bar.status(), &Status::Idle);
-        assert!(app.input.is_enabled(), "resume returns to idle input");
         assert!(app.dirty);
     }
 
@@ -1164,33 +1248,7 @@ mod tests {
             plan(),
             "the task list outlives compaction"
         );
-        assert_eq!(app.status_bar.status(), &Status::Idle);
-        assert!(app.input.is_enabled(), "compact returns to idle input");
         assert!(app.dirty);
-    }
-
-    #[tokio::test]
-    async fn handle_session_compacted_drains_queued_prompts_unlike_resume() {
-        // Compaction keeps the session, so a queued prompt becomes the first post-compact turn.
-        // `/resume` swaps sessions and drops it.
-        let (mut app, mut rx, _event_tx) = test_app(None);
-        app.pending_prompts
-            .push_back("queued after compact".to_owned());
-
-        app.handle_engine_event(Event::SessionCompacted {
-            summary: "s".to_owned(),
-            pre_count: 2,
-            instructions: None,
-            automatic: false,
-        });
-
-        let forwarded = rx.recv().await.expect("drained prompt reaches the engine");
-        assert_eq!(
-            forwarded,
-            Op::Prompt("queued after compact".to_owned()),
-            "queued prompt must drain as the next user turn",
-        );
-        assert!(app.pending_prompts.is_empty());
     }
 
     #[test]

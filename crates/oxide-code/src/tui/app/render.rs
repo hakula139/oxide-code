@@ -496,6 +496,7 @@ mod tests {
             instructions: None,
             automatic: false,
         });
+        app.handle_engine_event(Event::SessionReady);
         insta::assert_snapshot!(render_app(&mut app, 60, 16));
     }
 

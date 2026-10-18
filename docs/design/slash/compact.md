@@ -31,7 +31,7 @@ Companions: [commands.md](commands.md), [session/persistence.md](../session/pers
 - Cancellation routes through the existing cancel infrastructure and emits `Event::Cancelled` like a regular turn, and a quit ends the compaction without a terminal event. Dropping the summarization future discards the streamed summary first.
 - Each summary request is recorded as a `usage` entry, and its estimated cost joins the session total whether the summary succeeds, fails, or is cancelled. An `Event::UsageUpdated` then shows the new total, between `SessionCompacted` and `SessionReady` on success and before the terminal event otherwise.
 
-While the summary streams, the TUI shows it below the chat under a `Summarizing the conversation...` header, laid out like the `CompactedBlock` it becomes, and `Event::SummaryDiscarded` removes it. `App::apply_session_compacted` clears the chat, pushes a single `CompactedBlock` with a count header and markdown summary body, keeps queued prompts for the normal idle drain, clears the modal stack, and resumes idle after a manual compact. Resume renders the same boundary block and skips the synthetic root in visible chat.
+While the summary streams, the TUI shows it below the chat under a `Summarizing the conversation...` header, laid out like the `CompactedBlock` it becomes, and `Event::SummaryDiscarded` removes it. `App::apply_session_compacted` clears the chat, pushes a single `CompactedBlock` with a count header and markdown summary body, keeps queued prompts, and clears the modal stack. At `Event::SessionReady`, a manual compact returns to idle and submits the queue head, so the prompt renders below the notices the rebuilt prompt raises, or only returns to idle after a cancel that lost the race to the swap. Resume renders the same boundary block and skips the synthetic root in visible chat.
 
 ## Design Decisions
 
@@ -102,7 +102,7 @@ While the summary streams, the TUI shows it below the chat under a `Summarizing 
 
 - **`CompactedBlock`**: Chat block with an accent-bar surface, a `Compacted N messages → 1 summary` header (with a `(focus: ...)` suffix when instructions were given), and the rendered summary markdown body. No footer. Reuses the existing markdown renderer. `CompactedBlock::render_streaming` renders the summary in flight under a `Summarizing the conversation...` header.
 
-- **`apply_session_compacted` (TUI)**: Clears the chat, pushes a single `CompactedBlock`, keeps queued prompts for the normal idle drain, clears the modal stack, and resumes idle unless the compaction was automatic.
+- **`apply_session_compacted` (TUI)**: Clears the chat, pushes a single `CompactedBlock`, keeps queued prompts, and clears the modal stack. A manual compact ends at `SessionReady`, where `apply_session_ready` returns to idle and submits the queue head, or only returns to idle after a cancel that lost the race to the swap.
 
 - **`ChainBuilder::resolve`**: Needs no compaction-specific logic. The store loader starts a fresh `ChainBuilder` at the compact boundary, and the walk back from the latest tail leaf stops at the post-compact head because its `parent_uuid` is `None`.
 
