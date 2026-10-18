@@ -262,7 +262,7 @@ mod tests {
         assert_eq!(
             typed_op(&parsed("continue", "")),
             Some(Err(
-                "/continue: Missing session id. Usage: `/resume <id-prefix>`.".to_owned()
+                "/continue: Missing session ID. Usage: `/resume <id-prefix>`.".to_owned()
             )),
         );
     }

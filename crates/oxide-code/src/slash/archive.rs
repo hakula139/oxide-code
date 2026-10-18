@@ -75,7 +75,7 @@ impl SlashCommand for UnarchiveCmd {
     fn execute(&self, args: &str, ctx: &SlashContext<'_>) -> Result<SlashOutcome, String> {
         let prefix = args.trim();
         if prefix.is_empty() {
-            return Err("Missing session id. \
+            return Err("Missing session ID. \
                         Usage: `/unarchive <id-prefix>`, or press Ctrl+A in the `/resume` picker \
                         to list archived sessions and Ctrl+X to unarchive one."
                 .to_owned());
@@ -267,7 +267,7 @@ mod tests {
             .unwrap_err();
         assert_eq!(
             err,
-            "Missing session id. \
+            "Missing session ID. \
              Usage: `/unarchive <id-prefix>`, or press Ctrl+A in the `/resume` picker \
              to list archived sessions and Ctrl+X to unarchive one.",
         );

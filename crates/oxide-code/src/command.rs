@@ -58,10 +58,10 @@ pub(crate) fn mode(arg: &str) -> Result<Op, String> {
     Ok(Op::SetMode(mode))
 }
 
-/// `/model <id>`. Matches an exact catalog id, then a unique substring of one, so family names
+/// `/model <id>`. Matches an exact catalog ID, then a unique substring of one, so family names
 /// such as `opus` work as aliases.
 pub(crate) fn model(arg: &str) -> Result<Op, String> {
-    let arg = required(arg, "model id", "/model <id>")?.to_ascii_lowercase();
+    let arg = required(arg, "model ID", "/model <id>")?.to_ascii_lowercase();
     let hits: Vec<&ModelInfo> = match MODELS.iter().find(|info| info.id == arg) {
         Some(exact) => vec![exact],
         None => MODELS
@@ -111,7 +111,7 @@ pub(crate) fn rename(title: &str) -> Result<Op, String> {
 
 /// `/resume <id-prefix>`. The engine resolves the prefix against the saved sessions.
 pub(crate) fn resume(prefix: &str) -> Result<Op, String> {
-    let prefix = required(prefix, "session id", "/resume <id-prefix>")?;
+    let prefix = required(prefix, "session ID", "/resume <id-prefix>")?;
     Ok(Op::Resume {
         target: ResumeTarget::Prefix(prefix.to_owned()),
     })
@@ -185,11 +185,11 @@ mod tests {
         for (name, usage) in [
             ("effort", "Missing level. Usage: `/effort <level>`."),
             ("mode", "Missing mode. Usage: `/mode <mode>`."),
-            ("model", "Missing model id. Usage: `/model <id>`."),
+            ("model", "Missing model ID. Usage: `/model <id>`."),
             ("rename", "Missing title. Usage: `/rename <title>`."),
             (
                 "resume",
-                "Missing session id. Usage: `/resume <id-prefix>`.",
+                "Missing session ID. Usage: `/resume <id-prefix>`.",
             ),
         ] {
             assert_eq!(parse(name, "  "), Some(Err(usage.to_owned())), "{name}");
@@ -281,7 +281,7 @@ mod tests {
 
     #[test]
     fn model_unknown_id_suggests_a_replacement_and_lists_the_catalog() {
-        // Ids naming a family and a `[1m]` suffix also get the matching model as a suggestion.
+        // IDs naming a family and a `[1m]` suffix also get the matching model as a suggestion.
         for (arg, expected) in [
             (
                 "gpt-4",
