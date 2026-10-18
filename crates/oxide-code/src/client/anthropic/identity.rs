@@ -56,7 +56,7 @@ fn read_existing(path: &Path) -> Result<Option<String>> {
         Err(e) if e.kind() == ErrorKind::NotFound => return Ok(None),
         Err(e) => {
             return Err(e)
-                .with_context(|| format!("failed to read device id at {}", path.display()));
+                .with_context(|| format!("failed to read device ID at {}", path.display()));
         }
     };
     let trimmed = std::str::from_utf8(&bytes).map(str::trim).ok();
@@ -179,7 +179,7 @@ mod tests {
         let err = read_existing(dir.path()).unwrap_err();
         assert_eq!(
             err.to_string(),
-            format!("failed to read device id at {}", dir.path().display()),
+            format!("failed to read device ID at {}", dir.path().display()),
         );
     }
 

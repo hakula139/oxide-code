@@ -42,7 +42,7 @@ impl SlashCommand for DeleteCmd {
     fn execute(&self, args: &str, ctx: &SlashContext<'_>) -> Result<SlashOutcome, String> {
         let arg = args.trim();
         if arg.is_empty() {
-            return Err("Missing session id. \
+            return Err("Missing session ID. \
                         Usage: `/delete <id-prefix>`, or press Ctrl+D in the `/resume` picker."
                 .to_owned());
         }
@@ -133,7 +133,7 @@ mod tests {
             .unwrap_err();
         assert_eq!(
             err,
-            "Missing session id. \
+            "Missing session ID. \
              Usage: `/delete <id-prefix>`, or press Ctrl+D in the `/resume` picker.",
         );
     }
@@ -230,7 +230,7 @@ mod tests {
             assert!(!renamed.exists(), "the matched file is deleted");
             assert!(
                 bystander.exists(),
-                "the file named after the header id survives"
+                "the file named after the header ID survives"
             );
         });
     }

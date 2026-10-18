@@ -285,7 +285,7 @@ pub(super) fn protected_roots(cwd: &Path, workspace_roots: &[PathBuf]) -> Vec<(S
             roots.extend(
                 bases
                     .iter()
-                    .filter_map(|base| resolve(&base.join(&name)))
+                    .filter_map(|base| resolve(&base.join(&name)).ok())
                     .map(|path| (group, path)),
             );
         }

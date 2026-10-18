@@ -489,7 +489,7 @@ mod tests {
             );
             assert_eq!(
                 reports[1],
-                "/model: Missing model id. Usage: `/model <id>`."
+                "/model: Missing model ID. Usage: `/model <id>`."
             );
             assert_eq!(
                 reports[2],

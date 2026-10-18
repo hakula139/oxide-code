@@ -196,8 +196,9 @@ mod tests {
     use crate::file_tracker::MAX_TRACKED_FILE_SIZE;
     use crate::file_tracker::testing::seed_full_read;
     use crate::tool::read::ReadTool;
-    use crate::tool::testing::{self, canonical_tempdir, ctx, symlink_file, temp_ctx};
+    use crate::tool::testing::{self, canonical_tempdir, ctx, temp_ctx};
     use crate::tool::{DiffChunk, DiffLine};
+    use crate::util::fs::testing::symlink_file;
 
     // ── Fixtures ──
 

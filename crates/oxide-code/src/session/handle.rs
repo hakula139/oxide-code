@@ -411,7 +411,7 @@ pub(crate) async fn roll_into(
     target: &Path,
 ) -> Result<RollIntoOutcome> {
     if read_session_id_from_path(target)? == session.session_id() {
-        bail!("already resumed: target id matches the live session");
+        bail!("already resumed: target ID matches the live session");
     }
     // Load and sanitize first so a target-load error leaves the live session untouched.
     let ResumedSession {

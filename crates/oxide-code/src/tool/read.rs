@@ -263,7 +263,8 @@ mod tests {
     use super::*;
     use crate::file_tracker::{GateError, GatePurpose, MAX_TRACKED_FILE_SIZE};
     use crate::tool::MAX_OUTPUT_BYTES;
-    use crate::tool::testing::{canonical_tempdir, ctx, symlink_file, temp_ctx};
+    use crate::tool::testing::{canonical_tempdir, ctx, temp_ctx};
+    use crate::util::fs::testing::symlink_file;
 
     // ── run ──
 
