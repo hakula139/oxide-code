@@ -1,4 +1,4 @@
-//! Conversation message types shared by the API client, session transcript, and TUI renderer.
+//! Conversation message types shared by the client, engine, session transcript, and tools.
 
 use serde::{Deserialize, Serialize};
 
@@ -44,7 +44,7 @@ pub(crate) enum ContentBlock {
     ToolResult {
         tool_use_id: String,
         content: String,
-        #[serde(default, skip_serializing_if = "is_default")]
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         is_error: bool,
     },
     /// Reasoning the model shows, empty when the request omits it.
@@ -58,10 +58,6 @@ pub(crate) enum ContentBlock {
         #[serde(flatten)]
         replay: Replay,
     },
-}
-
-fn is_default<T: Default + PartialEq>(v: &T) -> bool {
-    *v == T::default()
 }
 
 // ── Replay ──
@@ -166,18 +162,19 @@ mod tests {
             name: "advisor".to_owned(),
             input: serde_json::json!({"query": "test"}),
         };
-        let json = serde_json::to_value(&block).unwrap();
-        assert_eq!(json["type"], "server_tool_use");
-        assert_eq!(json["id"], "stu_01");
-        assert_eq!(json["name"], "advisor");
 
-        let deserialized: ContentBlock = serde_json::from_value(json).unwrap();
-        let ContentBlock::ServerToolUse { id, name, input } = deserialized else {
-            panic!("expected ServerToolUse");
-        };
-        assert_eq!(id, "stu_01");
-        assert_eq!(name, "advisor");
-        assert_eq!(input["query"], "test");
+        let json = serde_json::to_value(&block).unwrap();
+
+        assert_eq!(
+            json,
+            serde_json::json!({
+                "type": "server_tool_use",
+                "id": "stu_01",
+                "name": "advisor",
+                "input": {"query": "test"},
+            }),
+        );
+        assert_eq!(serde_json::from_value::<ContentBlock>(json).unwrap(), block);
     }
 
     // ── ContentBlock::ServerToolResult ──
@@ -212,49 +209,33 @@ mod tests {
     // ── ContentBlock::ToolResult ──
 
     #[test]
-    fn tool_result_serializes_is_error_when_true() {
-        let block = ContentBlock::ToolResult {
-            tool_use_id: "id".to_owned(),
-            content: "error msg".to_owned(),
-            is_error: true,
-        };
-        let json = serde_json::to_value(&block).unwrap();
-        assert_eq!(json["type"], "tool_result");
-        assert_eq!(json["tool_use_id"], "id");
-        assert_eq!(json["content"], "error msg");
-        assert_eq!(json["is_error"], true);
-    }
+    fn tool_result_writes_is_error_only_when_set() {
+        for (is_error, expected) in [
+            (
+                true,
+                serde_json::json!({
+                    "type": "tool_result",
+                    "tool_use_id": "id",
+                    "content": "out",
+                    "is_error": true,
+                }),
+            ),
+            (
+                false,
+                serde_json::json!({"type": "tool_result", "tool_use_id": "id", "content": "out"}),
+            ),
+        ] {
+            let block = ContentBlock::ToolResult {
+                tool_use_id: "id".to_owned(),
+                content: "out".to_owned(),
+                is_error,
+            };
 
-    #[test]
-    fn tool_result_omits_is_error_when_false() {
-        let block = ContentBlock::ToolResult {
-            tool_use_id: "id".to_owned(),
-            content: "ok".to_owned(),
-            is_error: false,
-        };
-        let json = serde_json::to_value(&block).unwrap();
-        assert!(json.get("is_error").is_none());
-    }
+            let json = serde_json::to_value(&block).unwrap();
 
-    #[test]
-    fn tool_result_deserializes_missing_is_error_as_false() {
-        let json = serde_json::json!({
-            "type": "tool_result",
-            "tool_use_id": "id",
-            "content": "ok"
-        });
-        let block: ContentBlock = serde_json::from_value(json).unwrap();
-        let ContentBlock::ToolResult {
-            tool_use_id,
-            content,
-            is_error,
-        } = block
-        else {
-            panic!("expected ToolResult");
-        };
-        assert_eq!(tool_use_id, "id");
-        assert_eq!(content, "ok");
-        assert!(!is_error);
+            assert_eq!(json, expected);
+            assert_eq!(serde_json::from_value::<ContentBlock>(json).unwrap(), block);
+        }
     }
 
     // ── ContentBlock::Thinking ──
@@ -344,20 +325,30 @@ mod tests {
 
     #[test]
     fn user_creates_user_role_with_text() {
-        let msg = Message::user("hello");
-        assert_eq!(msg.role, Role::User);
-        assert_eq!(msg.content.len(), 1);
-        assert!(matches!(&msg.content[0], ContentBlock::Text { text } if text == "hello"));
+        assert_eq!(
+            Message::user("hello"),
+            Message {
+                role: Role::User,
+                content: vec![ContentBlock::Text {
+                    text: "hello".to_owned(),
+                }],
+            },
+        );
     }
 
     // ── Message::assistant ──
 
     #[test]
     fn assistant_creates_assistant_role_with_text() {
-        let msg = Message::assistant("hi");
-        assert_eq!(msg.role, Role::Assistant);
-        assert_eq!(msg.content.len(), 1);
-        assert!(matches!(&msg.content[0], ContentBlock::Text { text } if text == "hi"));
+        assert_eq!(
+            Message::assistant("hi"),
+            Message {
+                role: Role::Assistant,
+                content: vec![ContentBlock::Text {
+                    text: "hi".to_owned(),
+                }],
+            },
+        );
     }
 
     // ── progress_update_before ──
