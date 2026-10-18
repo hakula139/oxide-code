@@ -1329,6 +1329,7 @@ pub(crate) mod testing {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::util::fs::testing::{symlink_dir, symlink_file};
     use crate::util::path::slash_separated;
     use crate::util::path::testing::{HOME_VAR, abs};
 
@@ -1509,12 +1510,11 @@ mod tests {
         });
     }
 
-    #[cfg(unix)]
     #[test]
     fn workspace_resolve_rejects_an_extra_root_through_a_symlink_loop() {
         let (_dir, base) = temp_cwd();
         let looped = base.join("loop");
-        std::os::unix::fs::symlink(&looped, &looped).unwrap();
+        symlink_file(&looped, &looped);
         let raw = format!("{}/inner", looped.display());
 
         let err = Workspace::resolve(&base, std::slice::from_ref(&raw)).unwrap_err();
@@ -1591,7 +1591,6 @@ mod tests {
         });
     }
 
-    #[cfg(unix)]
     #[test]
     fn workspace_resolve_rejects_home_and_its_parent_under_another_name() {
         // A symlink to `$HOME` resolves to it. An alias that `resolve` keeps, as `up` stands in
@@ -1600,8 +1599,8 @@ mod tests {
         let (repo, home) = (base.join("repo"), base.join("home"));
         std::fs::create_dir(&repo).unwrap();
         std::fs::create_dir(&home).unwrap();
-        std::os::unix::fs::symlink(&home, base.join("home-link")).unwrap();
-        std::os::unix::fs::symlink(&base, base.join("up")).unwrap();
+        symlink_dir(&home, &base.join("home-link"));
+        symlink_dir(&base, &base.join("up"));
         let link = slash_separated(&base.join("home-link"));
 
         temp_env::with_var(HOME_VAR, Some(&home), || {
@@ -1844,12 +1843,11 @@ mod tests {
         );
     }
 
-    #[cfg(unix)]
     #[test]
     fn for_path_new_file_under_a_symlinked_parent_resolves_through_the_link() {
         let (_dir, cwd) = temp_cwd();
         let (_outside_dir, outside) = temp_cwd();
-        std::os::unix::fs::symlink(&outside, cwd.join("link")).unwrap();
+        symlink_dir(&outside, &cwd.join("link"));
 
         let target = Access::for_path("link/new.rs", &Workspace::new(&cwd));
         assert_eq!(
@@ -1858,7 +1856,6 @@ mod tests {
         );
     }
 
-    #[cfg(unix)]
     #[test]
     fn for_path_dangling_symlink_resolves_to_its_missing_target() {
         // `canonicalize` fails on the dangling `notes.md -> ../escape.txt`, yet `fs::write`
@@ -1866,7 +1863,7 @@ mod tests {
         let (_dir, root) = temp_cwd();
         let cwd = root.join("repo");
         std::fs::create_dir(&cwd).unwrap();
-        std::os::unix::fs::symlink("../escape.txt", cwd.join("notes.md")).unwrap();
+        symlink_file(Path::new("../escape.txt"), &cwd.join("notes.md"));
 
         let target = Access::for_path("notes.md", &Workspace::new(&cwd));
         assert_eq!(
@@ -1875,7 +1872,6 @@ mod tests {
         );
     }
 
-    #[cfg(unix)]
     #[test]
     fn for_path_dangling_symlink_chain_through_a_directory_is_followed() {
         // A dangling link in the middle of the path (`out/new.rs` with `out -> ../gone/dir`) and a
@@ -1884,8 +1880,8 @@ mod tests {
         let cwd = root.join("repo");
         std::fs::create_dir(&cwd).unwrap();
         std::fs::create_dir(root.join("elsewhere")).unwrap();
-        std::os::unix::fs::symlink("elsewhere", root.join("gone")).unwrap();
-        std::os::unix::fs::symlink("../gone/dir", cwd.join("out")).unwrap();
+        symlink_dir(Path::new("elsewhere"), &root.join("gone"));
+        symlink_dir(Path::new("../gone/dir"), &cwd.join("out"));
 
         let target = Access::for_path("out/new.rs", &Workspace::new(&cwd));
         assert_eq!(
@@ -1898,16 +1894,15 @@ mod tests {
         );
     }
 
-    #[cfg(unix)]
     #[test]
     fn for_path_follows_a_symlink_reached_by_stepping_out_of_a_missing_dir() {
         // `missing/..` must not hide the later `link` from the walk: the write lands where the
         // link points, and through `tools -> .git/hooks` that would be a hook.
         let (_dir, cwd) = temp_cwd();
         let (_outside_dir, outside) = temp_cwd();
-        std::os::unix::fs::symlink(&outside, cwd.join("link")).unwrap();
+        symlink_dir(&outside, &cwd.join("link"));
         std::fs::create_dir_all(cwd.join(".git/hooks")).unwrap();
-        std::os::unix::fs::symlink(cwd.join(".git/hooks"), cwd.join("tools")).unwrap();
+        symlink_dir(&cwd.join(".git/hooks"), &cwd.join("tools"));
 
         let target = Access::for_path("missing/../link/x", &Workspace::new(&cwd));
         assert_eq!(
@@ -1921,13 +1916,12 @@ mod tests {
         assert_eq!(decide(&p, EDIT, &target), Decision::Ask);
     }
 
-    #[cfg(unix)]
     #[test]
     fn for_path_dangling_symlink_target_with_a_missing_dot_dot_is_walked_component_by_component() {
         let (_dir, cwd) = temp_cwd();
         let (_outside_dir, outside) = temp_cwd();
-        std::os::unix::fs::symlink(&outside, cwd.join("out")).unwrap();
-        std::os::unix::fs::symlink("missing/../out/new", cwd.join("notes.md")).unwrap();
+        symlink_dir(&outside, &cwd.join("out"));
+        symlink_file(Path::new("missing/../out/new"), &cwd.join("notes.md"));
 
         let target = Access::for_path("notes.md", &Workspace::new(&cwd));
         assert_eq!(
@@ -1936,7 +1930,6 @@ mod tests {
         );
     }
 
-    #[cfg(unix)]
     #[test]
     fn for_path_symlinked_protected_name_protects_both_spellings() {
         // `.vscode -> tools/vscode` at the top and `sub/.idea -> ../tools/idea` deeper: the link
@@ -1945,8 +1938,8 @@ mod tests {
         std::fs::create_dir_all(cwd.join("tools/vscode")).unwrap();
         std::fs::create_dir_all(cwd.join("tools/idea")).unwrap();
         std::fs::create_dir(cwd.join("sub")).unwrap();
-        std::os::unix::fs::symlink("tools/vscode", cwd.join(".vscode")).unwrap();
-        std::os::unix::fs::symlink("../tools/idea", cwd.join("sub/.idea")).unwrap();
+        symlink_dir(Path::new("tools/vscode"), &cwd.join(".vscode"));
+        symlink_dir(Path::new("../tools/idea"), &cwd.join("sub/.idea"));
 
         for raw in [
             ".vscode/tasks.json",
@@ -1960,14 +1953,13 @@ mod tests {
         assert_eq!(protected(&sibling), []);
     }
 
-    #[cfg(unix)]
     #[test]
     fn for_path_symlinked_protected_name_in_an_extra_root_protects_its_target() {
         let (_dir, base) = temp_cwd();
         let (repo, shared) = (base.join("repo"), base.join("shared"));
         std::fs::create_dir(&repo).unwrap();
         std::fs::create_dir_all(shared.join("tools/vscode")).unwrap();
-        std::os::unix::fs::symlink("tools/vscode", shared.join(".vscode")).unwrap();
+        symlink_dir(Path::new("tools/vscode"), &shared.join(".vscode"));
         let workspace = Workspace::resolve(&repo, &[slash_separated(&shared)]).unwrap();
 
         for (raw, groups) in [
@@ -1980,6 +1972,7 @@ mod tests {
         }
     }
 
+    // A Unix name is raw bytes, so only there can one fail to be UTF-8 the way `caf\xe9` does.
     #[cfg(unix)]
     #[test]
     fn for_path_resolving_to_a_name_that_is_not_utf8_never_auto_allows() {
@@ -1998,12 +1991,11 @@ mod tests {
         assert_eq!(zone, Zone::Outside);
     }
 
-    #[cfg(unix)]
     #[test]
     fn for_path_symlink_loop_never_auto_allows() {
         let (_dir, cwd) = temp_cwd();
-        std::os::unix::fs::symlink("b", cwd.join("a")).unwrap();
-        std::os::unix::fs::symlink("a", cwd.join("b")).unwrap();
+        symlink_file(Path::new("b"), &cwd.join("a"));
+        symlink_file(Path::new("a"), &cwd.join("b"));
 
         let target = Access::for_path("a/new.rs", &Workspace::new(&cwd));
         let (_, relative, zone) = resolved(&target);
@@ -2029,6 +2021,7 @@ mod tests {
         }
     }
 
+    // Windows drops `..` lexically before any lookup, so only Unix stops at a file before it.
     #[cfg(unix)]
     #[test]
     fn for_path_dot_dot_past_a_file_is_not_resolved_lexically() {
@@ -2036,7 +2029,7 @@ mod tests {
         // and never auto-allows as `x` or `link/x`.
         let (_dir, cwd) = temp_cwd();
         let (_outside_dir, outside) = temp_cwd();
-        std::os::unix::fs::symlink(&outside, cwd.join("link")).unwrap();
+        symlink_dir(&outside, &cwd.join("link"));
         std::fs::write(cwd.join("notes"), "").unwrap();
 
         for path in ["notes/../x", "notes/sub/../../link/x"] {
@@ -2305,7 +2298,6 @@ mod tests {
         );
     }
 
-    #[cfg(unix)]
     #[test]
     fn resolve_deny_and_ask_rules_also_cover_where_their_literal_prefix_resolves() {
         // `secrets -> ../vault` and `alias -> real`: naming the link targets directly must still
@@ -2315,10 +2307,10 @@ mod tests {
         std::fs::create_dir(&cwd).unwrap();
         std::fs::create_dir(root.join("vault")).unwrap();
         std::fs::create_dir(root.join("real")).unwrap();
-        std::os::unix::fs::symlink("../vault", cwd.join("secrets")).unwrap();
-        std::os::unix::fs::symlink("real", root.join("alias")).unwrap();
+        symlink_dir(Path::new("../vault"), &cwd.join("secrets"));
+        symlink_dir(Path::new("real"), &root.join("alias"));
 
-        let alias = format!("{}/alias", root.display());
+        let alias = slash_separated(&root.join("alias"));
         let p = resolved_policy(
             Mode::Manual,
             &[(READ, "secrets/**")],
@@ -2406,7 +2398,7 @@ mod tests {
     #[test]
     fn read_filter_withholds_exactly_the_files_the_gate_holds_back() {
         let (_dir, cwd) = temp_cwd();
-        let secrets = format!("{}/secrets", cwd.display());
+        let secrets = slash_separated(&cwd.join("secrets"));
         let p = resolved_policy(
             Mode::Manual,
             &[(READ, ".env"), (EDIT, "notes.md")],
@@ -2635,7 +2627,6 @@ mod tests {
         }
     }
 
-    #[cfg(unix)]
     #[test]
     fn decide_deny_matches_a_symlinked_path_as_spelled_even_in_yolo() {
         // `.env -> ../shared/.env` resolves outside cwd, and `secrets -> ../vault` resolves away
@@ -2646,10 +2637,10 @@ mod tests {
         std::fs::create_dir_all(root.join("vault")).unwrap();
         std::fs::create_dir(&cwd).unwrap();
         std::fs::write(root.join("shared/.env"), "SECRET=1").unwrap();
-        std::os::unix::fs::symlink("../shared/.env", cwd.join(".env")).unwrap();
-        std::os::unix::fs::symlink("../vault", cwd.join("secrets")).unwrap();
+        symlink_file(Path::new("../shared/.env"), &cwd.join(".env"));
+        symlink_dir(Path::new("../vault"), &cwd.join("secrets"));
 
-        let secrets = format!("{}/secrets", cwd.display());
+        let secrets = slash_separated(&cwd.join("secrets"));
         let p = policy(
             Mode::Yolo,
             &[(READ, ".env"), (EDIT, ".env"), (READ, &secrets)],
@@ -3248,14 +3239,13 @@ mod tests {
         }
     }
 
-    #[cfg(unix)]
     #[test]
     fn walk_filter_withholds_a_file_by_the_spelling_the_call_used() {
         let (_dir, root) = temp_cwd();
         let (cwd, outside) = (root.join("cwd"), root.join("outside"));
         std::fs::create_dir(&cwd).unwrap();
         std::fs::create_dir(&outside).unwrap();
-        std::os::unix::fs::symlink(&outside, cwd.join("config")).unwrap();
+        symlink_dir(&outside, &cwd.join("config"));
         let p = resolved_policy(Mode::Manual, &[(READ, ".env")], &[], &[], &cwd);
         let filter = p.read_filter();
         let env = outside.join(".env");
@@ -3273,14 +3263,13 @@ mod tests {
         }
     }
 
-    #[cfg(unix)]
     #[test]
     fn walk_filter_withholds_where_a_rule_prefix_resolves_through_a_symlink() {
         let (_dir, root) = temp_cwd();
         let (cwd, outside) = (root.join("cwd"), root.join("outside"));
         std::fs::create_dir(&cwd).unwrap();
         std::fs::create_dir(&outside).unwrap();
-        std::os::unix::fs::symlink(&outside, cwd.join("link")).unwrap();
+        symlink_dir(&outside, &cwd.join("link"));
         let p = resolved_policy(Mode::Manual, &[], &[(READ, "link/**")], &[], &cwd);
 
         let filter = p.read_filter();

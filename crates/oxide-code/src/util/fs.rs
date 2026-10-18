@@ -73,6 +73,29 @@ pub(crate) fn open_private_append(path: &Path) -> io::Result<File> {
     Ok(file)
 }
 
+// ── Testing ──
+
+#[cfg(test)]
+pub(crate) mod testing {
+    use std::path::Path;
+
+    /// A symlink to a file. Windows needs Developer Mode or admin rights for it, which CI has.
+    pub(crate) fn symlink_file(target: &Path, link: &Path) {
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(target, link).unwrap();
+        #[cfg(windows)]
+        std::os::windows::fs::symlink_file(target, link).unwrap();
+    }
+
+    /// A symlink to a directory, needing the same Windows rights as [`symlink_file`].
+    pub(crate) fn symlink_dir(target: &Path, link: &Path) {
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(target, link).unwrap();
+        #[cfg(windows)]
+        std::os::windows::fs::symlink_dir(target, link).unwrap();
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::ffi::OsString;
