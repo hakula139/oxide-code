@@ -1154,6 +1154,30 @@ mod tests {
         assert_eq!(ended.try_recv(), Err(oneshot::error::TryRecvError::Closed));
     }
 
+    #[tokio::test]
+    async fn finalize_writes_the_summary_after_the_title_task_panics() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = test_store(dir.path());
+        let handle = start(&store, "m");
+        let sid = handle.session_id().to_owned();
+        handle.record_message(Message::user("hi")).await;
+        let (started_tx, started) = oneshot::channel();
+        handle.set_title_task(tokio::spawn(async move {
+            started_tx.send(()).unwrap();
+            panic!("deliberate title task panic for testing");
+        }));
+        started.await.unwrap();
+
+        let failure = handle.finalize(Vec::new()).await;
+
+        assert_eq!(failure, None);
+        let content = std::fs::read_to_string(test_session_file(dir.path(), &sid)).unwrap();
+        assert!(
+            content.contains(r#""type":"summary""#),
+            "summary lands on disk: {content}",
+        );
+    }
+
     // ── shutdown ──
 
     #[tokio::test]

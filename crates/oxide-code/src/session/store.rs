@@ -886,21 +886,15 @@ mod tests {
             .unwrap();
 
         let content = fs::read_to_string(&path).unwrap();
-        let entries: Vec<Entry> = content
+        let message_uuids: Vec<Option<Uuid>> = content
             .lines()
-            .map(|line| serde_json::from_str(line).unwrap())
+            .map(|line| match serde_json::from_str(line).unwrap() {
+                Entry::Header { .. } => None,
+                Entry::Message { uuid, .. } => Some(uuid),
+                entry => panic!("unexpected entry: {entry:?}"),
+            })
             .collect();
-        assert!(
-            matches!(
-                entries.as_slice(),
-                [
-                    Entry::Header { .. },
-                    Entry::Message { uuid: first, .. },
-                    Entry::Message { uuid: second, .. },
-                ] if *first == from_a && *second == from_b
-            ),
-            "got: {entries:?}"
-        );
+        assert_eq!(message_uuids, [None, Some(from_a), Some(from_b)]);
     }
 
     // ── load_session_data ──
