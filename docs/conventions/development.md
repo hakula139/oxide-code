@@ -60,17 +60,17 @@ Dev and test builds include line tables for `ox` and no debug info for dependenc
 
 CI runs on pushes to `main`, pull requests, and manual dispatch, and the release workflow calls it again for each tag before publishing:
 
-| Job              | Checks                                                                        |
-| ---------------- | ----------------------------------------------------------------------------- |
-| Nix Flake Check  | `nix flake check`, which runs the pre-commit hooks without the Node ones      |
-| Node Check       | `pnpm format`, `pnpm lint`, and `pnpm spellcheck`                             |
-| Rust Check       | `cargo fmt --all --check` and `cargo clippy --all-targets -- -D warnings`     |
-| Dependency Check | `cargo deny check licenses advisories sources bans`                           |
-| MSRV Check       | `cargo hack check --rust-version` against `rust-version`                      |
-| macOS Check      | Clippy and the test suite on macOS                                            |
-| Windows Check    | Clippy and the test suite on Windows                                          |
-| Coverage         | The test suite under `cargo llvm-cov`, uploaded to Codecov                    |
-| Nix Build        | The package build on Linux and macOS, which runs the tests and `ox --version` |
+| Job              | Checks                                                                                                                       |
+| ---------------- | ---------------------------------------------------------------------------------------------------------------------------- |
+| Nix Flake Check  | `nix flake check`, which runs the pre-commit hooks without the Node ones                                                     |
+| Node Check       | `pnpm format`, `pnpm lint`, and `pnpm spellcheck`                                                                            |
+| Rust Check       | `cargo fmt --all --check`, `cargo clippy --all-targets -- -D warnings`, and `RUSTDOCFLAGS="-D warnings" cargo doc --no-deps` |
+| Dependency Check | `cargo deny check licenses advisories sources bans`                                                                          |
+| MSRV Check       | `cargo hack check --rust-version` against `rust-version`                                                                     |
+| macOS Check      | Clippy and the test suite on macOS                                                                                           |
+| Windows Check    | Clippy and the test suite on Windows                                                                                         |
+| Coverage         | The test suite under `cargo llvm-cov`, uploaded to Codecov                                                                   |
+| Nix Build        | The package build on Linux and macOS, which runs the tests and `ox --version`                                                |
 
 No job runs a plain `cargo build`, so run it locally for a quick compile check. See [RELEASING.md](../../RELEASING.md) for the release workflow.
 

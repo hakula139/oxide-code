@@ -77,6 +77,11 @@ jobs:
       - name: Clippy
         run: nix develop -c cargo clippy --locked --all-targets -- -D warnings
 
+      - name: Rustdoc
+        env:
+          RUSTDOCFLAGS: -D warnings
+        run: nix develop -c cargo doc --locked --no-deps
+
   dependency-check:
     name: Dependency Check
     runs-on: ubuntu-latest
