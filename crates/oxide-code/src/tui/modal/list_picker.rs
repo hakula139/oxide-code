@@ -1,5 +1,5 @@
-//! Generic list-picker primitive for [`Modal`](super::Modal) impls. State + render surface only;
-//! concrete pickers own their submit semantics so the picker stays callback-free.
+//! Generic list-picker primitive for [`Modal`](super::Modal) impls. It holds the state and renders
+//! the rows, while concrete pickers own submit semantics, so it needs no callbacks.
 
 use ratatui::Frame;
 use ratatui::layout::Rect;
@@ -7,8 +7,8 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 use unicode_width::UnicodeWidthStr;
 
-use super::chrome::Header;
-use crate::tui::glyphs::{ACTIVE_MARKER, CURSOR_MARKER, CURSOR_MARKER_WIDTH};
+use super::chrome::{COLUMN_GAP, Header};
+use crate::tui::glyphs::{ACTIVE_MARKER, cursor_gutter};
 use crate::tui::saturating_u16;
 use crate::tui::theme::Theme;
 use crate::tui::viewport::{Viewport, wrap_next, wrap_prev};
@@ -44,13 +44,14 @@ pub(crate) fn numeric_hint(index: usize) -> Option<char> {
 
 // ── ListPicker ──
 
-const COLUMN_GAP: usize = 2;
+/// Columns kept clear between a description and the right edge of its row.
+const RIGHT_MARGIN: usize = 2;
 
-/// Selectable list with cursor + active marker. Rows past the granted height scroll.
+/// Selectable list with a cursor and an active-row marker. Rows past the granted height scroll.
 pub(crate) struct ListPicker<T: PickerItem> {
     header: Header,
     items: Vec<T>,
-    selected: usize,
+    cursor: usize,
     viewport: Viewport,
 }
 
@@ -59,7 +60,7 @@ impl<T: PickerItem> ListPicker<T> {
         Self {
             header: Header::new(title),
             items,
-            selected: 0,
+            cursor: 0,
             viewport: Viewport::default(),
         }
     }
@@ -69,38 +70,38 @@ impl<T: PickerItem> ListPicker<T> {
         self
     }
 
-    /// Position the cursor on the first item matching `predicate`. No-op if no match.
-    pub(crate) fn select_initial(&mut self, predicate: impl Fn(&T) -> bool) {
-        if let Some(idx) = self.items.iter().position(predicate) {
-            self.selected = idx;
+    /// Moves the cursor to the first item matching `f`. No-op if none matches.
+    pub(crate) fn cursor_to(&mut self, f: impl Fn(&T) -> bool) {
+        if let Some(idx) = self.items.iter().position(f) {
+            self.cursor = idx;
         }
     }
 
     pub(crate) fn selected(&self) -> Option<&T> {
-        self.items.get(self.selected)
+        self.items.get(self.cursor)
     }
 
     #[cfg(test)]
-    pub(crate) fn selected_index(&self) -> usize {
-        self.selected
+    pub(crate) fn cursor_index(&self) -> usize {
+        self.cursor
     }
 
     pub(crate) fn select_next(&mut self) {
         if !self.items.is_empty() {
-            self.selected = wrap_next(self.selected, self.items.len());
+            self.cursor = wrap_next(self.cursor, self.items.len());
         }
     }
 
     pub(crate) fn select_prev(&mut self) {
         if !self.items.is_empty() {
-            self.selected = wrap_prev(self.selected, self.items.len());
+            self.cursor = wrap_prev(self.cursor, self.items.len());
         }
     }
 
-    /// Jump cursor to the row whose `key_hint` matches `c`. Returns whether a jump happened.
+    /// Moves the cursor to the row whose `key_hint` is `c`. Returns whether a row matched.
     pub(crate) fn select_by_hint(&mut self, c: char) -> bool {
         if let Some(idx) = self.items.iter().position(|i| i.key_hint() == Some(c)) {
-            self.selected = idx;
+            self.cursor = idx;
             return true;
         }
         false
@@ -126,7 +127,7 @@ impl<T: PickerItem> ListPicker<T> {
         let rows = area.height.saturating_sub(self.header.height());
         let window = self
             .viewport
-            .window(self.items.len(), usize::from(rows), Some(self.selected));
+            .window(self.items.len(), usize::from(rows), Some(self.cursor));
         for idx in window {
             lines.push(self.render_row(&self.items[idx], idx, label_width, area.width, theme));
         }
@@ -142,51 +143,33 @@ impl<T: PickerItem> ListPicker<T> {
         area_width: u16,
         theme: &Theme,
     ) -> Line<'static> {
-        let is_cursor = idx == self.selected;
+        let is_cursor = idx == self.cursor;
         let row_style = theme.row_style(is_cursor);
 
-        let mut spans: Vec<Span<'static>> = Vec::with_capacity(6);
-
-        spans.push(Span::styled(
-            if is_cursor {
-                CURSOR_MARKER.to_owned()
-            } else {
-                " ".repeat(usize::from(CURSOR_MARKER_WIDTH))
-            },
-            theme.accent(),
-        ));
-
-        // Numeric mnemonic (or three-space gutter when none).
-        if let Some(c) = item.key_hint() {
-            spans.push(Span::styled(format!("{c}. "), row_style));
-        } else {
-            spans.push(Span::styled("   ".to_owned(), row_style));
-        }
-
+        let hint = item
+            .key_hint()
+            .map_or_else(|| "   ".to_owned(), |c| format!("{c}. "));
         let label = format!(
             "{}{}",
             item.label(),
             " ".repeat(label_width - item.label().width())
         );
-        spans.push(Span::styled(label, row_style));
-
-        spans.push(Span::styled(
-            if item.is_active() {
-                format!("  {ACTIVE_MARKER} ")
-            } else {
-                "    ".to_owned()
-            },
-            theme.accent(),
-        ));
+        let marker = if item.is_active() { ACTIVE_MARKER } else { " " };
+        let mut line = Line::from(vec![
+            Span::styled(cursor_gutter(is_cursor), theme.accent()),
+            Span::styled(hint, row_style),
+            Span::styled(label, row_style),
+            Span::styled(
+                format!("{}{marker} ", " ".repeat(COLUMN_GAP)),
+                theme.accent(),
+            ),
+        ]);
 
         if let Some(desc) = item.description() {
-            let used: usize = spans.iter().map(|s| s.content.width()).sum();
-            let budget = usize::from(area_width).saturating_sub(used + COLUMN_GAP);
-            let truncated = truncate_to_width(desc, budget);
-            spans.push(Span::styled(truncated, theme.dim()));
+            let budget = usize::from(area_width).saturating_sub(line.width() + RIGHT_MARGIN);
+            line.push_span(Span::styled(truncate_to_width(desc, budget), theme.dim()));
         }
-
-        Line::from(spans)
+        line
     }
 }
 
@@ -252,24 +235,48 @@ mod tests {
         assert_eq!(numeric_hint(42), None);
     }
 
+    // ── cursor_to ──
+
+    #[test]
+    fn cursor_to_seeks_first_matching_item() {
+        let mut p = picker(vec![
+            FakeItem::new("a"),
+            FakeItem::new("b"),
+            FakeItem::new("c"),
+        ]);
+
+        p.cursor_to(|i| i.label() == "b");
+
+        assert_eq!(p.cursor_index(), 1);
+    }
+
+    #[test]
+    fn cursor_to_no_match_leaves_cursor_at_zero() {
+        let mut p = picker(vec![FakeItem::new("a"), FakeItem::new("b")]);
+
+        p.cursor_to(|i| i.label() == "missing");
+
+        assert_eq!(p.cursor_index(), 0);
+    }
+
     // ── select_next / select_prev ──
 
     #[test]
     fn select_next_advances_and_wraps_at_end() {
         let mut p = picker(vec![FakeItem::new("a"), FakeItem::new("b")]);
         p.select_next();
-        assert_eq!(p.selected_index(), 1);
+        assert_eq!(p.cursor_index(), 1);
         p.select_next();
-        assert_eq!(p.selected_index(), 0, "wraps past the last row");
+        assert_eq!(p.cursor_index(), 0, "wraps past the last row");
     }
 
     #[test]
     fn select_prev_retreats_and_wraps_at_zero() {
         let mut p = picker(vec![FakeItem::new("a"), FakeItem::new("b")]);
         p.select_prev();
-        assert_eq!(p.selected_index(), 1, "wraps past the first row");
+        assert_eq!(p.cursor_index(), 1, "wraps past the first row");
         p.select_prev();
-        assert_eq!(p.selected_index(), 0);
+        assert_eq!(p.cursor_index(), 0);
     }
 
     #[test]
@@ -277,7 +284,7 @@ mod tests {
         let mut p = picker(Vec::new());
         p.select_next();
         p.select_prev();
-        assert_eq!(p.selected_index(), 0);
+        assert_eq!(p.cursor_index(), 0);
         assert!(p.selected().is_none());
     }
 
@@ -300,7 +307,7 @@ mod tests {
             },
         ]);
         assert!(p.select_by_hint('2'));
-        assert_eq!(p.selected_index(), 1);
+        assert_eq!(p.cursor_index(), 1);
     }
 
     #[test]
@@ -310,27 +317,7 @@ mod tests {
             ..FakeItem::new("a")
         }]);
         assert!(!p.select_by_hint('9'));
-        assert_eq!(p.selected_index(), 0, "cursor stays put on miss");
-    }
-
-    // ── select_initial ──
-
-    #[test]
-    fn select_initial_seeks_first_matching_item() {
-        let mut p = picker(vec![
-            FakeItem::new("a"),
-            FakeItem::new("b"),
-            FakeItem::new("c"),
-        ]);
-        p.select_initial(|i| i.label() == "b");
-        assert_eq!(p.selected_index(), 1);
-    }
-
-    #[test]
-    fn select_initial_no_match_leaves_cursor_at_zero() {
-        let mut p = picker(vec![FakeItem::new("a"), FakeItem::new("b")]);
-        p.select_initial(|i| i.label() == "missing");
-        assert_eq!(p.selected_index(), 0);
+        assert_eq!(p.cursor_index(), 0, "cursor stays put on miss");
     }
 
     // ── height ──
@@ -424,7 +411,7 @@ mod tests {
     fn render_scrolls_the_cursor_row_into_a_short_area() {
         const LABELS: [&str; 6] = ["r0", "r1", "r2", "r3", "r4", "r5"];
         let mut p = picker(LABELS.into_iter().map(FakeItem::new).collect());
-        p.select_initial(|item| item.label == "r4");
+        p.cursor_to(|item| item.label == "r4");
         let rows = render_rows(&p, 20, p.height(20, 5));
         assert_eq!(
             rows.iter().map(|row| row.trim_end()).collect::<Vec<_>>(),

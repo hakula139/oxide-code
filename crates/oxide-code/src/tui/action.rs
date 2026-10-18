@@ -14,12 +14,12 @@ pub(crate) enum Action {
     ConfirmExit,
     /// Shift+Tab, which switches to the next permission mode.
     CycleMode,
-    /// Live-preview the picker's highlighted theme without committing it. Cursor moves in the
+    /// A preview of the picker's highlighted theme, without committing it. Cursor moves in the
     /// `/theme` modal emit this, and cancelling the modal restores the open-time snapshot.
     PreviewTheme {
         name: String,
     },
-    /// Commit a theme swap for the rest of the session. Restart returns to user config.
+    /// A theme swap for the rest of the session. A restart returns to the configured theme.
     SwapTheme {
         name: String,
     },

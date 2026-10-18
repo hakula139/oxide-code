@@ -1,6 +1,5 @@
-//! Searchable + scrollable list primitive for [`Modal`](super::Modal) impls. Adds a search
-//! input + scrollable viewport on top of the [`ListPicker`](super::list_picker::ListPicker)
-//! shape; concrete pickers own submit semantics.
+//! Searchable list primitive for [`Modal`](super::Modal) impls. A search field filters rows that
+//! may span several lines each, and concrete pickers own submit semantics.
 
 use std::borrow::Cow;
 
@@ -12,28 +11,24 @@ use ratatui::widgets::Paragraph;
 
 use super::chrome::Header;
 use super::line_editor::LineEditor;
-use crate::tui::glyphs::{CURSOR_MARKER, CURSOR_MARKER_WIDTH};
+use crate::tui::glyphs::{CURSOR_MARKER_WIDTH, cursor_gutter};
 use crate::tui::theme::Theme;
 use crate::tui::viewport::{Viewport, wrap_next, wrap_prev};
 
 // ── SearchableItem ──
 
 pub(crate) trait SearchableItem {
-    /// Composite haystack — include every field the user might filter against (title, id,
-    /// project, etc).
+    /// Terminal rows per item. [`Self::render`] returns this many lines for every instance, since
+    /// the list sizes its viewport from it.
+    const ROW_HEIGHT: u16;
+
+    /// Text the query filters on, covering every field a user might search for, such as the title
+    /// and id.
     fn haystack(&self) -> Cow<'_, str>;
 
-    /// Paint the item body to the right of the cursor gutter (owned by the primitive). Multi-line
-    /// returns let layouts split across rows (e.g. title row + dim metadata row). The primitive
-    /// places the gutter marker on the first line and pads subsequent lines with blanks for
-    /// alignment. Length must equal [`Self::row_height`] for every instance.
+    /// Renders the item to the right of the list's cursor gutter. The list marks the cursor on the
+    /// first line, so an item can split across rows, such as a title over dim metadata.
     fn render(&self, width: u16, is_cursor: bool, theme: &Theme) -> Vec<Line<'static>>;
-
-    /// Constant terminal-rows per item. Must match `render(...).len()` for every instance, since
-    /// the list primitive treats this as a layout invariant when sizing its viewport.
-    fn row_height() -> u16
-    where
-        Self: Sized;
 }
 
 // ── SearchableList ──
@@ -42,8 +37,8 @@ const SEARCH_PLACEHOLDER: &str = "Type to filter (substring match)";
 const SEARCH_ROW_HEIGHT: u16 = 1;
 const SECTION_GAP: u16 = 1;
 
-/// Selectable + searchable list with a scrollable viewport. Cursor walks the **filtered** index
-/// space, so out-of-filter rows are skipped by navigation.
+/// Selectable, searchable list with a scrolling viewport. The cursor walks the filtered rows, so
+/// navigation skips the rows the query hides.
 pub(crate) struct SearchableList<T: SearchableItem> {
     header: Header,
     items: Vec<T>,
@@ -104,7 +99,7 @@ impl<T: SearchableItem> SearchableList<T> {
         }
     }
 
-    /// Replace all items and re-run the filter. Cursor and viewport reset to 0.
+    /// Replaces all items and re-runs the filter, resetting the cursor and viewport to the top.
     pub(crate) fn replace_items(&mut self, items: Vec<T>) {
         self.items = items;
         self.recompute_visible();
@@ -118,9 +113,9 @@ impl<T: SearchableItem> SearchableList<T> {
         self.cursor = self.cursor.min(self.visible.len().saturating_sub(1));
     }
 
-    /// Seek the cursor to the first visible row matching `f`. No-op if no row matches. Pairs with
-    /// [`Self::refresh_items`] to keep the cursor pinned across a refresh.
-    pub(crate) fn cursor_to<F: Fn(&T) -> bool>(&mut self, f: F) {
+    /// Moves the cursor to the first visible row matching `f`. No-op if none matches. Pairs with
+    /// [`Self::refresh_items`] to keep the cursor on its item across a refresh.
+    pub(crate) fn cursor_to(&mut self, f: impl Fn(&T) -> bool) {
         if let Some(vi) = self
             .visible
             .iter()
@@ -198,7 +193,7 @@ impl<T: SearchableItem> SearchableList<T> {
             .collect()
     }
 
-    /// Total rows occupied by chrome (header + search row + gap).
+    /// Rows the header, search row, and gap take.
     fn chrome_height(&self) -> u16 {
         self.header.height() + SEARCH_ROW_HEIGHT + SECTION_GAP
     }
@@ -208,13 +203,13 @@ impl<T: SearchableItem> SearchableList<T> {
         let chrome = self.chrome_height();
         let rows = self.visible_rows(max_height);
         chrome
-            .saturating_add(rows.saturating_mul(T::row_height()))
+            .saturating_add(rows.saturating_mul(T::ROW_HEIGHT))
             .min(max_height)
     }
 
     /// Whole items that fit beside the chrome in `height` rows, capped at `max_visible`.
     fn visible_rows(&self, height: u16) -> u16 {
-        let fit = height.saturating_sub(self.chrome_height()) / T::row_height();
+        let fit = height.saturating_sub(self.chrome_height()) / T::ROW_HEIGHT;
         fit.min(self.max_visible)
     }
 
@@ -238,8 +233,8 @@ impl<T: SearchableItem> SearchableList<T> {
             lines.push(Line::from(Span::styled(
                 format!(
                     "{}no matches for `{}`",
-                    " ".repeat(CURSOR_MARKER_WIDTH.into()),
-                    self.query.text(),
+                    cursor_gutter(false),
+                    self.query.text()
                 ),
                 theme.dim(),
             )));
@@ -260,19 +255,9 @@ impl<T: SearchableItem> SearchableList<T> {
         body_width: u16,
         theme: &Theme,
     ) {
-        let blank_gutter = " ".repeat(usize::from(CURSOR_MARKER_WIDTH));
-        let cursor_marker = if is_cursor {
-            CURSOR_MARKER.to_owned()
-        } else {
-            blank_gutter.clone()
-        };
         let body_lines = item.render(body_width, is_cursor, theme);
         for (idx, body) in body_lines.into_iter().enumerate() {
-            let gutter = if idx == 0 {
-                cursor_marker.clone()
-            } else {
-                blank_gutter.clone()
-            };
+            let gutter = cursor_gutter(is_cursor && idx == 0);
             let mut spans: Vec<Span<'static>> = Vec::with_capacity(1 + body.spans.len());
             spans.push(Span::styled(gutter, theme.accent()));
             spans.extend(body.spans);
@@ -306,6 +291,8 @@ mod tests {
     }
 
     impl<const ROWS: u16> SearchableItem for FakeItem<ROWS> {
+        const ROW_HEIGHT: u16 = ROWS;
+
         fn haystack(&self) -> Cow<'_, str> {
             Cow::Borrowed(self.haystack)
         }
@@ -315,10 +302,6 @@ mod tests {
             let mut lines = vec![Line::from(Span::styled(trimmed, theme.text()))];
             lines.resize(usize::from(ROWS), Line::default());
             lines
-        }
-
-        fn row_height() -> u16 {
-            ROWS
         }
     }
 
@@ -554,8 +537,6 @@ mod tests {
 
     #[test]
     fn select_next_skips_filtered_out_items() {
-        // Filter narrows to two of three items; cursor walks the visible pair only — the hidden
-        // middle row never receives the cursor.
         let mut l = list(vec![
             FakeItem::new("apple-pie"),
             FakeItem::new("BERRY"),
@@ -621,8 +602,7 @@ mod tests {
 
     #[test]
     fn select_next_prev_and_paging_with_nothing_visible_keep_the_cursor() {
-        // Filter out everything → all four navigation guards must short-circuit. Without the
-        // is_empty checks, `% self.visible.len()` would panic.
+        // Without the `is_empty` guards, wrapping would divide by zero and paging would underflow.
         let mut l = list(vec![FakeItem::new("alpha"), FakeItem::new("beta")]);
         l.set_query("zzz");
         assert_eq!(l.visible_len(), 0);
@@ -634,7 +614,7 @@ mod tests {
     }
 
     fn item_label(i: usize) -> &'static str {
-        // Leak owned strings for &'static str; fine in tests.
+        // Leaks the label so a `FakeItem` can hold it as a `&'static str`.
         Box::leak(format!("item-{i}").into_boxed_str())
     }
 

@@ -113,7 +113,7 @@ impl ModePicker {
         let mut list = ListPicker::new("Select permission mode", rows).with_description(
             "Switch the permission mode for this session. Restarting returns to your config.",
         );
-        list.select_initial(|row| row.is_active);
+        list.cursor_to(|row| row.is_active);
         Self { list, current }
     }
 

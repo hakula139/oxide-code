@@ -255,7 +255,7 @@ Overrides from every [config layer](configuration.md#layers) merge by slot name,
 Theme errors fall into two severities:
 
 - **Theme selection errors** are fatal when the TUI starts. An unknown built-in name with no matching file path, a path that is not a regular file of at most 64 KiB, a file that cannot be read, or a file with a parse error in the base body stops oxide-code at startup with a message identifying what went wrong. `-p` and `--no-tui` runs never load the theme, so a theme error does not stop them.
-- **Per-slot value errors** warn and fall back. If an override's color string can't be parsed, its slot name isn't recognized, its patch is neither a color string nor a table of `fg`, `bg`, and modifier flags, or an inline patch is empty, oxide-code logs a warning and uses the base slot's value for that role. The TUI still launches.
+- **Per-slot value errors** warn and fall back. If an override's color string can't be parsed, its slot name isn't recognized, its patch is neither a color string nor a table of `fg`, `bg`, and modifier flags, or an inline patch is empty, oxide-code uses the base slot's value for that role, shows a notice in the chat, and logs a warning. The TUI still launches.
 
 The default log level is `warn`, so per-slot fallback warnings appear in the [log](configuration.md#logs) even when `RUST_LOG` is unset.
 

@@ -1,8 +1,8 @@
-//! Terminal UI.
+//! Terminal UI built on ratatui and crossterm, driven by a `tokio::select!` event loop.
 //!
-//! ratatui + crossterm with a `tokio::select!` event loop. [`app::App`] is the root state.
-//! [`components`] owns the chat / input / status regions. [`markdown`] renders assistant text.
-//! [`theme`] centralizes all styling.
+//! [`app::App`] is the root state. [`components`] holds the chat, input, status, task, and welcome
+//! views, and [`modal`] the overlays. [`markdown`] renders assistant text, [`clipboard`] copies
+//! selections, and [`theme`] centralizes styling.
 
 pub(crate) mod action;
 pub(crate) mod app;

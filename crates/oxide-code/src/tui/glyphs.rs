@@ -3,7 +3,8 @@
 //! Conventions:
 //!
 //! - First-line prefix glyphs end with a trailing space (`"❯ "`, `"◉ "`, `"✗ "`).
-//! - Continuation indents (`*_CONT`) match the prefix's display width.
+//! - The user, assistant, and error continuation indents (`*_CONT`) match their prefix's display
+//!   width. Tool bodies (`TOOL_BORDER_CONT`) indent two columns past `TOOL_BORDER_PREFIX`.
 //! - Tool status indicators (`✓` / `✗`) carry no trailing space. The renderer handles the gap.
 
 use crate::tool::tasks::TaskStatus;
@@ -11,41 +12,41 @@ use crate::tool::tasks::TaskStatus;
 // ── User Prompt ──
 
 /// First-line prefix for user-typed prompts.
-pub(crate) const USER_PROMPT_PREFIX: &str = "❯ ";
+pub(super) const USER_PROMPT_PREFIX: &str = "❯ ";
 
 /// Display width of [`USER_PROMPT_PREFIX`] in terminal columns.
-pub(crate) const USER_PROMPT_PREFIX_WIDTH: u16 = 2;
+pub(super) const USER_PROMPT_PREFIX_WIDTH: u16 = 2;
 
 /// Continuation indent for multi-line user-typed content.
-pub(crate) const USER_PROMPT_CONT: &str = "  ";
+pub(super) const USER_PROMPT_CONT: &str = "  ";
 
 // ── Assistant ──
 
 /// First-line prefix for assistant text.
-pub(crate) const ASSISTANT_PREFIX: &str = "◉ ";
+pub(super) const ASSISTANT_PREFIX: &str = "◉ ";
 
 /// Continuation indent for multi-line assistant content.
-pub(crate) const ASSISTANT_CONT: &str = "  ";
+pub(super) const ASSISTANT_CONT: &str = "  ";
 
 // ── Tool / Thinking ──
 
 /// Left-bar glyph for tool and thinking blocks.
-pub(crate) const BAR: &str = "▎";
+pub(super) const BAR: &str = "▎";
 
 /// Per-line prefix for thinking blocks.
-pub(crate) const THINKING_PREFIX: &str = "▎ ";
+pub(super) const THINKING_PREFIX: &str = "▎ ";
 
 /// First-line prefix for tool-call and tool-result status lines.
-pub(crate) const TOOL_BORDER_PREFIX: &str = "▎ ";
+pub(super) const TOOL_BORDER_PREFIX: &str = "▎ ";
 
 /// Continuation prefix for tool-block body lines (content at col 4).
-pub(crate) const TOOL_BORDER_CONT: &str = "▎   ";
+pub(super) const TOOL_BORDER_CONT: &str = "▎   ";
 
 /// Tool-result success indicator.
-pub(crate) const TOOL_SUCCESS: &str = "✓";
+pub(super) const TOOL_SUCCESS: &str = "✓";
 
 /// Tool-result failure indicator.
-pub(crate) const TOOL_ERROR: &str = "✗";
+pub(super) const TOOL_ERROR: &str = "✗";
 
 // ── Tasks ──
 
@@ -61,10 +62,10 @@ pub(crate) const fn task_marker(status: TaskStatus) -> &'static str {
 // ── Error ──
 
 /// First-line prefix for error blocks.
-pub(crate) const ERROR_PREFIX: &str = "✗ ";
+pub(super) const ERROR_PREFIX: &str = "✗ ";
 
 /// Continuation indent for multi-line error messages.
-pub(crate) const ERROR_CONT: &str = "  ";
+pub(super) const ERROR_CONT: &str = "  ";
 
 /// Prefix for an error shown inside a modal, such as a failed delete or session load.
 pub(crate) const MODAL_ERROR_PREFIX: &str = "! ";
@@ -72,13 +73,19 @@ pub(crate) const MODAL_ERROR_PREFIX: &str = "! ";
 // ── Pickers ──
 
 /// Prefix of the highlighted row in list and searchable pickers.
-pub(crate) const CURSOR_MARKER: &str = "> ";
+const CURSOR_MARKER: &str = "> ";
 
 /// Display width of [`CURSOR_MARKER`] in terminal columns.
-pub(crate) const CURSOR_MARKER_WIDTH: u16 = 2;
+pub(super) const CURSOR_MARKER_WIDTH: u16 = 2;
+
+/// A picker row's gutter: [`CURSOR_MARKER`] on the cursor row, and blank columns of the same width
+/// on the others.
+pub(super) const fn cursor_gutter(is_cursor: bool) -> &'static str {
+    if is_cursor { CURSOR_MARKER } else { "  " }
+}
 
 /// Marker after the label of a list picker's active row.
-pub(crate) const ACTIVE_MARKER: &str = "✓";
+pub(super) const ACTIVE_MARKER: &str = "✓";
 
 /// Dot for the chosen effort level.
 pub(crate) const RADIO_SELECTED: char = '●';
@@ -92,32 +99,32 @@ pub(crate) const RADIO_UNSELECTED: char = '○';
 pub(crate) const HORIZONTAL_RULE: &str = "─";
 
 /// Border between markdown table cells.
-pub(crate) const VERTICAL_RULE: &str = "│";
+pub(super) const VERTICAL_RULE: &str = "│";
 
 /// Corner and junction glyphs of one horizontal rule in a markdown table.
 #[derive(Debug, Clone, Copy)]
-pub(crate) struct TableRule {
-    pub(crate) left: char,
-    pub(crate) join: char,
-    pub(crate) right: char,
+pub(super) struct TableRule {
+    pub(super) left: char,
+    pub(super) join: char,
+    pub(super) right: char,
 }
 
 /// Rule above a table's first row.
-pub(crate) const TABLE_TOP: TableRule = TableRule {
+pub(super) const TABLE_TOP: TableRule = TableRule {
     left: '┌',
     join: '┬',
     right: '┐',
 };
 
 /// Rule between two rows of a table.
-pub(crate) const TABLE_MIDDLE: TableRule = TableRule {
+pub(super) const TABLE_MIDDLE: TableRule = TableRule {
     left: '├',
     join: '┼',
     right: '┤',
 };
 
 /// Rule below a table's last row.
-pub(crate) const TABLE_BOTTOM: TableRule = TableRule {
+pub(super) const TABLE_BOTTOM: TableRule = TableRule {
     left: '└',
     join: '┴',
     right: '┘',
@@ -126,23 +133,23 @@ pub(crate) const TABLE_BOTTOM: TableRule = TableRule {
 // ── Separators ──
 
 /// Separator between status bar segments.
-pub(crate) const SEGMENT_SEPARATOR: &str = " │ ";
+pub(super) const SEGMENT_SEPARATOR: &str = " │ ";
 
 /// Separator between items on one line of the welcome screen.
-pub(crate) const INLINE_SEPARATOR: &str = " · ";
+pub(super) const INLINE_SEPARATOR: &str = " · ";
 
 // ── Inline Markers ──
 
 /// Inline newline replacement for collapsed multi-line previews.
-pub(crate) const NEWLINE_GLYPH: &str = " ⏎ ";
+pub(super) const NEWLINE_GLYPH: &str = " ⏎ ";
 
 /// Line marking where a cancelled turn's reply stopped, in the chat and on stderr under `--no-tui`.
 pub(crate) const INTERRUPTED_MARKER: &str = "(interrupted)";
 
 // ── Status Spinner ──
 
-/// 8-dot Braille spinner, counterclockwise. Cycle by modulo index.
-pub(crate) const SPINNER_FRAMES: &[char] = &['⣷', '⣯', '⣟', '⡿', '⢿', '⣻', '⣽', '⣾'];
+/// 8-dot Braille spinner frames, counterclockwise, indexed modulo their count.
+pub(super) const SPINNER_FRAMES: &[char] = &['⣷', '⣯', '⣟', '⡿', '⢿', '⣻', '⣽', '⣾'];
 
 #[cfg(test)]
 mod tests {
@@ -178,6 +185,12 @@ mod tests {
     #[test]
     fn cursor_marker_width_matches_display_width() {
         assert_eq!(CURSOR_MARKER.width(), usize::from(CURSOR_MARKER_WIDTH));
+    }
+
+    #[test]
+    fn cursor_gutter_marks_only_the_cursor_row_at_the_marker_width() {
+        assert_eq!(cursor_gutter(true), CURSOR_MARKER);
+        assert_eq!(cursor_gutter(false), " ".repeat(CURSOR_MARKER.width()));
     }
 
     // ── Cross-Glyph Consistency ──

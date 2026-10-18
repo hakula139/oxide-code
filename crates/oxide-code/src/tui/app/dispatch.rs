@@ -1517,9 +1517,8 @@ mod tests {
 
     #[tokio::test]
     async fn dispatch_unknown_slash_during_busy_renders_error_no_queue() {
-        // Unknown commands route through `dispatch`, so the user sees the canonical
-        // "unknown command" error with recovery hints (alternatives and the `//` escape),
-        // and the prompt never reaches the LLM.
+        // An unknown command routes through `dispatch`, which shows its error with recovery hints,
+        // such as alternatives and the `//` escape, and never sends the prompt to the model.
         let (mut app, mut rx, _event_tx) = test_app(None);
         app.dispatch_action(Action::Submit("active".to_owned()));
         rx.recv().await.expect("active submit forwarded");

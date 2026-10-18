@@ -55,7 +55,7 @@ Modals shipping today:
 - **`/resume` picker**: Searchable session picker (over `SearchableList`).
 - **Confirm-delete modal**: Y/N gate pushed by `/delete <id-prefix>` and `/resume`'s Ctrl+D.
 - **Approval modal**: Approve-or-deny gate the App pushes when the agent asks to run a gated tool call.
-- **`/status`, `/config`, `/help`**: Read-only overviews assembled from `KvOverview` + `KvSection` fixtures inside the per-command files.
+- **`/status`, `/config`, `/help`**: Read-only overviews that each command file assembles from `KvSection`s and shows in a `KvOverview`.
 
 App owns `ModalStack` and runs the key gate first inside `handle_crossterm_event`, so an active modal sees every key before any other component. `apply_modal_action` then dispatches the result through the same `App::dispatch_action` path as a keyboard action.
 
@@ -77,7 +77,7 @@ App owns `ModalStack` and runs the key gate first inside `handle_crossterm_event
 
 8. **`ListPicker` is a state + render primitive.** Concrete pickers embed it and forward keys to it. This separates "list selection state" from "what does Enter dispatch", avoiding the boxed-callback pattern while staying broadly reusable. `/model + /effort`, `/mode`, `/theme`, and `/init` build on it.
 
-9. **Read-only kv overviews share `KvOverview`.** `/status`, `/config`, and `/help` all build the same title + sectioned-rows + footer shape, so the layout, key handling, and dismiss live in one place. Per-command files own only the fixture (rows, headings) and a thin constructor, and new overviews are a `Vec<KvSection>` away.
+9. **Read-only kv overviews share `KvOverview`.** `/status`, `/config`, and `/help` all build the same shape of a title, sectioned rows, and a footer, so the layout, key handling, and dismiss live in one place. Per-command files supply only the sections, with their rows and headings, and a thin constructor, so a new overview is a `Vec<KvSection>` away.
 
 10. **Read-only modals don't bind Enter.** `KvOverview::handle_key` scrolls on Up / Down, `j` / `k`, PageUp / PageDown, and Home / End, and consumes every other key. Esc / Ctrl+C cancel universally at the stack layer. Enter stays reserved for commit semantics in `ListPicker`-based modals, since binding it to dismiss in `KvOverview` would give the same gesture two meanings across modal types.
 

@@ -142,7 +142,7 @@ impl ThemePicker {
         let mut list = ListPicker::new("Select theme", rows).with_description(
             "Switch the active theme for this session. Restarting returns to your config.",
         );
-        list.select_initial(|row| row.is_active);
+        list.cursor_to(|row| row.is_active);
         Self {
             list,
             original_name: active_name.to_owned(),

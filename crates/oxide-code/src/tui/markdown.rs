@@ -16,13 +16,13 @@ const OPTIONS: Options = Options::ENABLE_STRIKETHROUGH.union(Options::ENABLE_TAB
 /// `width == 0` disables wrapping entirely (useful for tests and width-agnostic callers). Any
 /// non-zero value wraps each block to that column budget, preserving the enclosing block's
 /// continuation indent (blockquote `>`, list-item gutter, etc.) on wrapped sub-lines.
-pub(crate) fn render_markdown(input: &str, theme: &Theme, width: usize) -> Text<'static> {
+pub(super) fn render_markdown(input: &str, theme: &Theme, width: usize) -> Text<'static> {
     render_markdown_chunk(input, theme, width, false).0
 }
 
 /// Renders `input` as the next chunk of a document, where `after_block` says whether the chunks
 /// before it ended after a block. Returns the rows and that flag for the chunk after this one.
-pub(crate) fn render_markdown_chunk(
+pub(super) fn render_markdown_chunk(
     input: &str,
     theme: &Theme,
     width: usize,
@@ -40,7 +40,7 @@ pub(crate) fn render_markdown_chunk(
 /// where the last block starts. Rendering the run and then the remainder with
 /// [`render_markdown_chunk`], passing its flag along, matches a single render of `input`, except
 /// that a reference-style link renders literally when its definition is on the other side.
-pub(crate) fn complete_blocks_len(input: &str) -> usize {
+pub(super) fn complete_blocks_len(input: &str) -> usize {
     let mut depth = 0_usize;
     let mut last_start = 0;
     for (event, range) in Parser::new_ext(input, OPTIONS).into_offset_iter() {

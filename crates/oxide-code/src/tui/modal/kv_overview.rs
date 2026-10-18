@@ -1,5 +1,5 @@
 //! Read-only key-value overview modal with a title, multi-section body, and fixed footer.
-//! Used by `/status`, `/config`, and `/help`. The modal owns layout for `KvSection` fixtures.
+//! `/status`, `/config`, and `/help` supply the sections, and the modal lays them out.
 
 use crossterm::event::{KeyCode, KeyEvent};
 use ratatui::Frame;
@@ -9,7 +9,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 use unicode_width::UnicodeWidthStr;
 
-use super::chrome::{FOOTER_HEIGHT, Header, KEY_UP_DOWN, render_footer};
+use super::chrome::{COLUMN_GAP, FOOTER_HEIGHT, Header, KEY_UP_DOWN, render_footer};
 use super::{Modal, ModalKey};
 use crate::tui::saturating_u16;
 use crate::tui::theme::Theme;
@@ -17,7 +17,6 @@ use crate::tui::viewport::Viewport;
 
 // ── Constants ──
 
-const COLUMN_GAP: usize = 2;
 const CLOSE_HINT: &str = "Esc to close";
 
 // ── KvSection ──
@@ -31,6 +30,37 @@ struct KvRow {
     label: String,
     value: String,
     note: Option<String>,
+}
+
+impl KvRow {
+    /// The row with its label padded to `label_width` and any note aligned after `value_width`.
+    fn line(&self, label_width: usize, value_width: usize, theme: &Theme) -> Line<'static> {
+        let mut spans = vec![
+            Span::styled(
+                format!(
+                    "{}{}",
+                    self.label,
+                    " ".repeat(label_width - self.label.width())
+                ),
+                theme.dim(),
+            ),
+            Span::styled(" ".repeat(COLUMN_GAP), theme.surface()),
+            Span::styled(self.value.clone(), theme.text()),
+        ];
+        if let Some(note) = &self.note {
+            let pad = value_width.saturating_sub(self.value.width());
+            spans.push(Span::styled(" ".repeat(pad + COLUMN_GAP), theme.surface()));
+            spans.push(Span::styled(note.clone(), theme.dim()));
+        }
+        Line::from(spans)
+    }
+}
+
+/// One line of the overview body.
+enum BodyRow<'a> {
+    Blank,
+    Heading(&'a str),
+    Entry { section: usize, row: &'a KvRow },
 }
 
 impl KvSection {
@@ -92,57 +122,45 @@ impl KvOverview {
             .unwrap_or(0)
     }
 
+    /// Every body line in order: sections apart by a blank line, each heading followed by one.
+    fn body_rows(&self) -> impl Iterator<Item = BodyRow<'_>> {
+        self.sections.iter().enumerate().flat_map(|(i, section)| {
+            let gap = (i > 0).then_some(BodyRow::Blank);
+            let heading = section
+                .heading
+                .iter()
+                .flat_map(|heading| [BodyRow::Heading(heading), BodyRow::Blank]);
+            let entries = section
+                .rows
+                .iter()
+                .map(move |row| BodyRow::Entry { section: i, row });
+            gap.into_iter().chain(heading).chain(entries)
+        })
+    }
+
     fn body_len(&self) -> usize {
-        let mut total = 0;
-        for (i, section) in self.sections.iter().enumerate() {
-            if i > 0 {
-                total += 1;
-            }
-            if section.heading.is_some() {
-                total += 2;
-            }
-            total += section.rows.len();
-        }
-        total
+        self.body_rows().count()
     }
 
     fn body_lines(&self, theme: &Theme, width: usize) -> Vec<Line<'static>> {
         let label_width = self.label_width();
-        let mut lines: Vec<Line<'static>> = Vec::with_capacity(self.body_len());
-        for (i, section) in self.sections.iter().enumerate() {
-            if i > 0 {
-                lines.push(Line::default());
-            }
-            if let Some(heading) = &section.heading {
-                lines.push(Line::from(Span::styled(
-                    heading.clone(),
+        let value_widths: Vec<usize> = self
+            .sections
+            .iter()
+            .map(|section| note_column(section, label_width, width))
+            .collect();
+        self.body_rows()
+            .map(|row| match row {
+                BodyRow::Blank => Line::default(),
+                BodyRow::Heading(heading) => Line::from(Span::styled(
+                    heading.to_owned(),
                     theme.text().add_modifier(Modifier::BOLD),
-                )));
-                lines.push(Line::default());
-            }
-            let value_width = note_column(section, label_width, width);
-            for row in &section.rows {
-                let mut spans = vec![
-                    Span::styled(
-                        format!(
-                            "{}{}",
-                            row.label,
-                            " ".repeat(label_width - row.label.width())
-                        ),
-                        theme.dim(),
-                    ),
-                    Span::styled(" ".repeat(COLUMN_GAP), theme.surface()),
-                    Span::styled(row.value.clone(), theme.text()),
-                ];
-                if let Some(note) = &row.note {
-                    let pad = value_width.saturating_sub(row.value.width());
-                    spans.push(Span::styled(" ".repeat(pad + COLUMN_GAP), theme.surface()));
-                    spans.push(Span::styled(note.clone(), theme.dim()));
+                )),
+                BodyRow::Entry { section, row } => {
+                    row.line(label_width, value_widths[section], theme)
                 }
-                lines.push(Line::from(spans));
-            }
-        }
-        lines
+            })
+            .collect()
     }
 
     fn scroll(&self, delta: isize) {

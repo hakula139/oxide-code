@@ -141,7 +141,7 @@ impl App {
             chat,
             tasks: TaskPanel::default(),
             input: InputArea::new(theme),
-            modals: ModalStack::new(),
+            modals: ModalStack::default(),
             session_info,
             mode_cycle,
             requested_mode,

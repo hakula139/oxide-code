@@ -15,9 +15,9 @@ mod loader;
 
 pub(crate) use loader::resolve_theme;
 
-/// Resolve a built-in theme name (mocha / latte / ...) to a parsed [`Theme`]. `None` for unknown
-/// names. Vendored TOML must parse: a parse failure is a build-time bug surfaced at startup.
-pub(crate) fn load_builtin(name: &str) -> Option<Theme> {
+/// Parses the built-in theme `name`, such as `mocha` or `latte`. `None` for an unknown name.
+/// Panics if the vendored TOML fails to parse, which `parse_theme_all_builtins` rules out.
+pub(super) fn load_builtin(name: &str) -> Option<Theme> {
     let body = builtin::lookup(name)?;
     Some(loader::parse_theme(body).expect("vendored builtin theme TOML must parse"))
 }
@@ -49,7 +49,8 @@ impl Slot {
 
 // ── Theme ──
 
-/// Canonical slot list. Adding or renaming a slot is a one-place edit.
+/// Canonical slot list. A new slot also needs a value in every built-in theme TOML, since the
+/// loader requires every slot, and a row in `docs/guide/theming.md`.
 macro_rules! for_each_slot {
     ($callback:ident) => {
         $callback! {
@@ -62,7 +63,7 @@ macro_rules! for_each_slot {
             (surface, "Chat / input / status panel background (bg-only)"),
 
             // Semantic accents
-            (accent, "Highlights, active borders (bold by default)"),
+            (accent, "Highlights and active borders"),
             (user, "User messages and icon"),
             (queued, "Queued user prompts in the preview panel"),
             (assistant, "Assistant messages and icon"),
@@ -78,31 +79,31 @@ macro_rules! for_each_slot {
             (inline_code, "Inline code spans (`` `code` ``)"),
 
             // Diff backgrounds
-            (diff_add, "Background fill for added diff rows (Catppuccin Mocha plus-style)"),
-            (diff_del, "Background fill for deleted diff rows (Catppuccin Mocha minus-style)"),
+            (diff_add, "Background fill for added diff rows (bg-only)"),
+            (diff_del, "Background fill for deleted diff rows (bg-only)"),
 
             // Markdown headings
-            (heading_h1, "H1, most prominent heading (bold + underlined)"),
-            (heading_h2, "H2, bold section header"),
-            (heading_h3, "H3, bold italic"),
-            (heading_minor, "H4–H6, italic (demoted minor headings)"),
+            (heading_h1, "H1, the most prominent heading"),
+            (heading_h2, "H2 section headers"),
+            (heading_h3, "H3 subsection headers"),
+            (heading_minor, "H4 to H6 minor headings"),
 
             // Markdown body
-            (thinking, "Thinking text (dimmed italic)"),
-            (link, "Markdown links, underlined"),
+            (thinking, "Thinking text"),
+            (link, "Markdown links"),
             (blockquote, "Markdown blockquote marker (`> `)"),
             (list_marker, "List item bullet / number marker"),
 
-            // Markdown chrome (default-aligned with `dim` / `accent`)
+            // Markdown chrome
             (horizontal_rule, "Markdown horizontal rule (`---`)"),
-            (table_header, "Markdown table header cell (bold accent)"),
+            (table_header, "Markdown table header cells"),
             (table_border, "Markdown table borders and row rules"),
 
             // UI chrome
             (tool_border, "Left border for tool call blocks"),
             (tool_icon, "Tool icon accent"),
             (border_focused, "Focused component border"),
-            (border_unfocused, "Unfocused component border (default-aligned with `dim`)"),
+            (border_unfocused, "Unfocused component border"),
             (separator, "Status-line segment separator"),
             (selection, "Chat text selected with the mouse (bg-only)"),
         }
@@ -111,7 +112,7 @@ macro_rules! for_each_slot {
 
 pub(super) use for_each_slot;
 
-/// Theme palette. Each slot is a semantic role, not a raw color.
+/// Theme palette, with one slot per semantic role.
 macro_rules! define_theme_struct {
     ( $( ($name:ident, $doc:literal), )* ) => {
         #[derive(Debug, Clone)]
@@ -125,7 +126,7 @@ macro_rules! define_theme_struct {
         }
 
         #[cfg(test)]
-        pub(crate) const SLOT_NAMES: &[&str] = &[ $(stringify!($name),)* ];
+        pub(super) const SLOT_NAMES: &[&str] = &[ $(stringify!($name),)* ];
     };
 }
 
@@ -146,12 +147,12 @@ impl Default for Theme {
 
 macro_rules! define_slot_accessor {
     (diff_add) => {
-        pub(crate) fn diff_add_row(&self) -> Style {
+        pub(super) fn diff_add_row(&self) -> Style {
             Style::default().bg(self.diff_add.bg.unwrap_or(Color::Reset))
         }
     };
     (diff_del) => {
-        pub(crate) fn diff_del_row(&self) -> Style {
+        pub(super) fn diff_del_row(&self) -> Style {
             Style::default().bg(self.diff_del.bg.unwrap_or(Color::Reset))
         }
     };
@@ -173,7 +174,7 @@ macro_rules! define_slot_accessors {
 for_each_slot!(define_slot_accessors);
 
 impl Theme {
-    pub(crate) fn row_style(&self, selected: bool) -> Style {
+    pub(super) fn row_style(&self, selected: bool) -> Style {
         if selected {
             self.text().add_modifier(Modifier::BOLD)
         } else {
@@ -181,12 +182,12 @@ impl Theme {
         }
     }
 
-    pub(crate) fn separator_span(&self) -> Span<'static> {
+    pub(super) fn separator_span(&self) -> Span<'static> {
         Span::styled(SEGMENT_SEPARATOR, self.separator())
     }
 
     /// Style of a task row, which highlights the task in progress and dims the finished ones.
-    pub(crate) fn task_style(&self, status: TaskStatus) -> Style {
+    pub(super) fn task_style(&self, status: TaskStatus) -> Style {
         match status {
             TaskStatus::Pending => self.text(),
             TaskStatus::InProgress => self.info(),

@@ -1,14 +1,10 @@
-//! Shared terminal-cursor placement helpers — every input surface (the chat input panel and the
-//! modal pickers' search bar) ends up clamping a computed `raw_x` to the right edge of its area
-//! before calling `Frame::set_cursor_position`.
+//! Terminal-cursor placement for the chat input and the modal line editors.
 
 use ratatui::Frame;
 use ratatui::layout::Rect;
 
-/// Place the terminal-native cursor at `(raw_x, y)`, clamped to the right edge of `area` so that
-/// the cursor never escapes its containing region when callers compute positions from a sum of
-/// widths (prompt + query, or column + textarea origin).
-pub(crate) fn place_clamped(frame: &mut Frame<'_>, raw_x: u16, y: u16, area: Rect) {
+/// Places the terminal cursor at `(raw_x, y)`, clamped inside the right edge of `area`.
+pub(super) fn place_clamped(frame: &mut Frame<'_>, raw_x: u16, y: u16, area: Rect) {
     let cursor_x = raw_x.min(area.right().saturating_sub(1));
     frame.set_cursor_position((cursor_x, y));
 }
@@ -36,7 +32,6 @@ mod tests {
 
     #[test]
     fn place_clamped_past_right_edge_pulls_back_inside() {
-        // raw_x = 30 in a 20-wide area would land outside; clamp parks us at the rightmost cell.
         let mut terminal = Terminal::new(TestBackend::new(20, 1)).unwrap();
         terminal
             .draw(|frame| {
@@ -49,7 +44,7 @@ mod tests {
 
     #[test]
     fn place_clamped_in_offset_area_anchors_relative_to_right_edge() {
-        // Area starting at x=5 with width=10 → right edge column = 14. raw_x past 14 clamps there.
+        // The area spans columns 5 through 14.
         let mut terminal = Terminal::new(TestBackend::new(20, 1)).unwrap();
         terminal
             .draw(|frame| {

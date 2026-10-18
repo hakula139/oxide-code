@@ -38,8 +38,6 @@ const PICKER_DESCRIPTION: &str = "Pick a session to resume in place";
 const ARCHIVED_PICKER_TITLE: &str = "Resume archived session";
 const ARCHIVED_PICKER_DESCRIPTION: &str = "Pick a session to unarchive and resume in place";
 const VIEWPORT_HEIGHT: u16 = 6;
-/// Each row paints a title, a metadata line, and a blank line that separates sessions.
-const ROW_HEIGHT: u16 = 3;
 /// Floor on the title column so narrow terminals still show a truncated label.
 const TITLE_FLOOR: usize = 8;
 
@@ -143,6 +141,9 @@ impl SessionRow {
 }
 
 impl SearchableItem for SessionRow {
+    /// Each row paints a title, a metadata line, and a blank line that separates sessions.
+    const ROW_HEIGHT: u16 = 3;
+
     fn haystack(&self) -> Cow<'_, str> {
         Cow::Borrowed(&self.haystack)
     }
@@ -163,10 +164,6 @@ impl SearchableItem for SessionRow {
             theme.dim(),
         ));
         vec![title_line, meta_line, Line::default()]
-    }
-
-    fn row_height() -> u16 {
-        ROW_HEIGHT
     }
 }
 
@@ -1606,7 +1603,7 @@ mod tests {
             );
         }
         let picker = ResumePicker::new(store.clone(), "live-session-id".to_owned());
-        let mut stack = crate::tui::modal::ModalStack::new();
+        let mut stack = crate::tui::modal::ModalStack::default();
         stack.push(Box::new(picker));
         let ctrl_d = KeyChord::ctrl('d').event();
 
@@ -1929,7 +1926,7 @@ mod tests {
     #[test]
     fn on_cancel_quits_from_the_startup_picker_only() {
         let (_dir, store) = isolated_store();
-        let mut stack = crate::tui::modal::ModalStack::new();
+        let mut stack = crate::tui::modal::ModalStack::default();
         stack.push(Box::new(ResumePicker::at_startup(
             store.clone(),
             "live-session-id".to_owned(),

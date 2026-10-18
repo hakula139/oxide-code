@@ -21,6 +21,8 @@ pub(crate) struct Startup {
     pub(crate) git_branch: Option<String>,
     /// The `ox --resume` session picker, opened over the first frame.
     pub(crate) picker: Option<ResumePicker>,
+    /// One notice per `[tui.theme]` override the theme ignored, shown after the config notices.
+    pub(crate) theme_notices: Vec<String>,
     pub(crate) title: Option<String>,
     /// Resuming the session unarchived it.
     pub(crate) unarchived: bool,
@@ -69,7 +71,7 @@ pub(crate) async fn run(
             unarchived: startup.unarchived,
         },
     );
-    for notice in notices {
+    for notice in notices.into_iter().chain(startup.theme_notices) {
         app.push_system_message(notice);
     }
     if let Some(picker) = startup.picker {
