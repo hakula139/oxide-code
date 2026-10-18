@@ -5,7 +5,7 @@ use std::ops::Range;
 use ratatui::style::Style;
 use ratatui::text::Line;
 
-use super::blocks::{BlockKind, ChatBlock, RenderCtx, last_has_width};
+use super::blocks::{ChatBlock, RenderCtx, last_has_width};
 
 /// Separator row borrowed by every stack gap, and the stand-in for a block that never rendered.
 static BLANK: [Line<'static>; 1] = [Line {
@@ -169,25 +169,24 @@ pub(super) struct Stack<'a> {
     runs: Vec<&'a [Line<'static>]>,
     height: usize,
     tops: SlotTops,
-    prev_kind: Option<BlockKind>,
+    /// Whether the last visible block closed a tool group.
+    after_tool_group: bool,
 }
 
 impl<'a> Stack<'a> {
-    /// Stacks a block's rows in its slot. Standalone blocks sit between blank rows. A tool `Call`
-    /// after a `Result` opens a new tool group, while a `Result` stays flush under its `Call`.
+    /// Stacks a block's rows in its slot. Standalone blocks sit between blank rows, and a block
+    /// after a closed tool group sits a blank row below it.
     pub(super) fn push_block(&mut self, cached: &'a CachedBlock) {
         if cached.visible() {
             let block = cached.block();
-            if self.last_has_width()
-                && (block.standalone() || self.prev_kind == Some(BlockKind::Result))
-            {
+            if self.last_has_width() && (block.standalone() || self.after_tool_group) {
                 self.push_blank();
             }
             self.push(cached.lines());
             if block.standalone() {
                 self.push_blank();
             }
-            self.prev_kind = Some(block.block_kind());
+            self.after_tool_group = block.ends_tool_group();
         }
         self.tops.0.push(self.height);
     }

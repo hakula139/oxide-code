@@ -15,7 +15,7 @@ use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 use unicode_width::UnicodeWidthStr;
 
-use super::{BlockKind, ChatBlock, RenderCtx, bar_continuation_prefix};
+use super::{ChatBlock, RenderCtx, bar_continuation_prefix};
 use crate::tool::ToolResultView;
 use crate::tui::glyphs::{TOOL_BORDER_CONT, TOOL_BORDER_PREFIX, TOOL_ERROR, TOOL_SUCCESS};
 use crate::tui::theme::Theme;
@@ -62,10 +62,6 @@ impl ChatBlock for ToolCallBlock {
 
     fn standalone(&self) -> bool {
         false
-    }
-
-    fn block_kind(&self) -> BlockKind {
-        BlockKind::Call
     }
 }
 
@@ -127,8 +123,8 @@ impl ChatBlock for ToolResultBlock {
         false
     }
 
-    fn block_kind(&self) -> BlockKind {
-        BlockKind::Result
+    fn ends_tool_group(&self) -> bool {
+        true
     }
 }
 

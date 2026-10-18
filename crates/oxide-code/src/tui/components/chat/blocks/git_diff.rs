@@ -5,7 +5,7 @@ use ratatui::style::Modifier;
 use ratatui::text::Line;
 
 use super::tool::{bordered_row, numbered_row};
-use super::{BlockKind, ChatBlock, RenderCtx};
+use super::{ChatBlock, RenderCtx};
 
 // ── GitDiffBlock ──
 
@@ -103,10 +103,6 @@ impl ChatBlock for GitDiffBlock {
             }
         }
         out
-    }
-
-    fn block_kind(&self) -> BlockKind {
-        BlockKind::Other
     }
 }
 
@@ -555,14 +551,5 @@ mod tests {
             .map(|line| line.spans[1].content.trim().to_owned())
             .collect();
         assert_eq!(plus_numbers, vec!["1", "2"]);
-    }
-
-    // ── block_kind ──
-
-    #[test]
-    fn block_kind_is_other() {
-        // A `Result` kind would hug a tool call above the diff, so the block stays `Other`.
-        let block = GitDiffBlock::new("diff --git a/x b/x\n");
-        assert!(matches!(block.block_kind(), BlockKind::Other));
     }
 }

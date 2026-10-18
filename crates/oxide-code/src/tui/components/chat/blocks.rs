@@ -42,17 +42,6 @@ pub(super) struct RenderCtx<'a> {
     pub(super) show_thinking: bool,
 }
 
-/// Categorizes a block for inter-block spacing decisions.
-///
-/// Adjacent `Call` and `Result` pairs render flush against each other so a tool call and its
-/// result read as a single unit, while `Other` blocks always get a blank-line separator.
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub(super) enum BlockKind {
-    Call,
-    Result,
-    Other,
-}
-
 /// Render contract for one chat block (assistant prose, tool call, error marker, etc.).
 ///
 /// `render` and `visible` must be pure functions of the block's state and the [`RenderCtx`], since
@@ -60,13 +49,15 @@ pub(super) enum BlockKind {
 pub(super) trait ChatBlock {
     fn render(&self, ctx: &RenderCtx<'_>) -> Vec<Line<'static>>;
 
-    /// Standalone blocks get blank-line separators, while a tool call and its result hug.
+    /// Returns whether blank rows separate this block from its neighbors. A tool call and its
+    /// result return false, so they stay flush.
     fn standalone(&self) -> bool {
         true
     }
 
-    fn block_kind(&self) -> BlockKind {
-        BlockKind::Other
+    /// Returns whether this block closes a tool group, so the next block sits a blank row below.
+    fn ends_tool_group(&self) -> bool {
+        false
     }
 
     fn visible(&self, _ctx: &RenderCtx<'_>) -> bool {
@@ -76,11 +67,6 @@ pub(super) trait ChatBlock {
     /// Returns whether this block is committed assistant prose, so a fresh streaming buffer can
     /// continue its turn without inserting a separator.
     fn continues_assistant_turn(&self) -> bool {
-        false
-    }
-
-    #[cfg(test)]
-    fn is_error_marker(&self) -> bool {
         false
     }
 
