@@ -1290,7 +1290,7 @@ mod tests {
 
         assert_eq!(
             format!("{err:#}"),
-            "API error (invalid_request_error). Details: Bad block"
+            "API error (invalid_request_error): Bad block"
         );
         assert_eq!(
             server.received_requests().await.unwrap().len(),
@@ -1322,21 +1322,33 @@ mod tests {
             .stream_message(&[Message::user("hi")], &[], None, &[])
             .unwrap();
         let err = collect_events(rx).await.expect_err("redirect must fail");
-        let msg = format!("{err:#}");
-        assert!(
-            msg.starts_with(
-                "Anthropic API endpoint redirected (HTTP 307 Temporary Redirect) to 127.0.0.1."
-            ),
-            "{msg}"
+
+        assert_eq!(
+            format!("{err:#}"),
+            "Anthropic API endpoint redirected (HTTP 307 Temporary Redirect) to 127.0.0.1. \
+             Redirects are not followed, so point the base URL at the final endpoint.",
         );
         elsewhere.verify().await;
     }
 
     #[tokio::test]
     async fn stream_message_http_error_propagates_status_and_body() {
-        for (status, body) in [
-            (429_u16, r#"{"error":{"type":"rate_limit_error"}}"#),
-            (529, "overloaded"),
+        let rate_limited = r#"{"error":{"type":"rate_limit_error"}}"#;
+        for (status, body, expected) in [
+            (
+                429_u16,
+                rate_limited,
+                format!(
+                    "Anthropic API rate limited (HTTP 429): {rate_limited}. \
+                     Retry after a short delay."
+                ),
+            ),
+            (
+                529,
+                "overloaded",
+                "Anthropic API overloaded (HTTP 529): overloaded. Retry in a few seconds."
+                    .to_owned(),
+            ),
         ] {
             let server = MockServer::start().await;
             Mock::given(method("POST"))
@@ -1350,12 +1362,8 @@ mod tests {
                 .stream_message(&[Message::user("hi")], &[], None, &[])
                 .unwrap();
             let err = collect_events(rx).await.expect_err("expected HTTP error");
-            let msg = format!("{err:#}");
-            assert!(
-                msg.contains(&status.to_string()),
-                "status {status} in error: {msg}",
-            );
-            assert!(msg.contains(body), "body surfaced in error: {msg}");
+
+            assert_eq!(format!("{err:#}"), expected);
         }
     }
 
@@ -1377,12 +1385,13 @@ mod tests {
             .stream_message(&[Message::user("hi")], &[], None, &[])
             .unwrap();
         let err = collect_events(rx).await.expect_err("expected 401");
-        let msg = format!("{err:#}");
-        assert!(
-            msg.contains("CLAUDE_CODE_OAUTH_TOKEN may be expired or revoked"),
-            "{msg}"
+
+        assert_eq!(
+            format!("{err:#}"),
+            "Anthropic API rejected credentials (HTTP 401): token revoked. \
+             CLAUDE_CODE_OAUTH_TOKEN may be expired or revoked. \
+             Generate a new one with `claude setup-token`.",
         );
-        assert!(msg.contains("claude setup-token"), "{msg}");
     }
 
     #[tokio::test]
@@ -1394,7 +1403,7 @@ mod tests {
             .respond_with(
                 ResponseTemplate::new(429)
                     .insert_header("retry-after", "120")
-                    .set_body_string(r#"{"error":{"type":"rate_limit_error"}}"#),
+                    .set_body_string("Too many requests"),
             )
             .mount(&server)
             .await;
@@ -1404,9 +1413,10 @@ mod tests {
             .stream_message(&[Message::user("hi")], &[], None, &[])
             .unwrap();
         let err = collect_events(rx).await.expect_err("expected 429");
-        assert!(
-            format!("{err:#}").contains("Retry after 120 s."),
-            "retry-after threaded through stream_sse: {err:#}",
+
+        assert_eq!(
+            format!("{err:#}"),
+            "Anthropic API rate limited (HTTP 429): Too many requests. Retry after 120 s.",
         );
         assert_eq!(server.received_requests().await.unwrap().len(), 1);
     }

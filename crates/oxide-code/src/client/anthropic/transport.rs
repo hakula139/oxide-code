@@ -3,19 +3,22 @@
 
 use std::fmt;
 use std::future::Future;
+use std::sync::LazyLock;
 use std::time::Duration;
 
 use anyhow::{Result, anyhow};
 use bytes::Bytes;
+use regex::Regex;
 use reqwest::StatusCode;
 use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
-use tracing::warn;
+use tracing::{debug, warn};
 
 use super::Client;
-use super::wire::ErrorResponse;
+use super::wire::{ApiError, ErrorResponse};
 use crate::client::PromptTooLong;
 use crate::client::{RateLimitWindow, RateLimits};
 use crate::config::auth::{Auth, AuthSource};
+use crate::util::text::truncate_to_width;
 
 // ── Retry Policy ──
 
@@ -212,12 +215,23 @@ async fn error_for_status(
     let location = header("location");
     let should_retry = header("x-should-retry");
     let body = response.text().await.unwrap_or_default();
-    let diagnostic = format_api_error(auth, status, retry_after, location.as_deref(), &body);
+    debug!(status = status.as_u16(), body, "API error response");
+    let api_error = serde_json::from_str::<ErrorResponse>(&body)
+        .ok()
+        .map(|response| response.error);
+    let details = body_details(&body, api_error.as_ref());
+    let diagnostic = format_api_error(
+        auth,
+        status,
+        retry_after,
+        location.as_deref(),
+        details.as_deref(),
+    );
     let error = if status == StatusCode::BAD_REQUEST
-        && let Some(message) = prompt_too_long_message(&body)
+        && let Some(message) = api_error.as_ref().and_then(prompt_too_long_message)
     {
         anyhow::Error::new(PromptTooLong {
-            overflow: prompt_overflow(&message),
+            overflow: prompt_overflow(message),
             diagnostic,
         })
     } else {
@@ -234,7 +248,7 @@ async fn error_for_status(
     }
     Err(AttemptError::Retryable {
         error,
-        cause: status_cause(status, &body),
+        cause: status_cause(status, api_error.as_ref()),
         retry_after,
     })
 }
@@ -265,14 +279,13 @@ fn rate_limit_window(headers: &HeaderMap, window: &str) -> Option<RateLimitWindo
 }
 
 /// The message of an `invalid_request_error` that says the prompt is too long.
-fn prompt_too_long_message(body: &str) -> Option<String> {
-    let error = serde_json::from_str::<ErrorResponse>(body).ok()?.error;
+fn prompt_too_long_message(error: &ApiError) -> Option<&str> {
     (error.error_type == "invalid_request_error"
         && error
             .message
             .to_ascii_lowercase()
             .starts_with("prompt is too long"))
-    .then_some(error.message)
+    .then_some(&error.message)
 }
 
 /// Reads the overflow from `prompt is too long: N tokens > M maximum`.
@@ -292,14 +305,19 @@ fn prompt_overflow(message: &str) -> Option<u32> {
     actual.checked_sub(limit).filter(|&overflow| overflow > 0)
 }
 
-/// Names a failed status in a few words, such as `HTTP 529 overloaded_error`, preferring the API's
-/// error type to the status reason.
-fn status_cause(status: StatusCode, body: &str) -> String {
-    let error_type = serde_json::from_str::<ErrorResponse>(body)
-        .ok()
-        .map(|response| response.error.error_type);
-    match error_type.as_deref().or(status.canonical_reason()) {
-        Some(detail) => format!("HTTP {} {detail}", status.as_u16()),
+/// Names a failed status in a few words, such as `HTTP 529 overloaded_error`, with the API's error
+/// type when the body carries one and the [`http_status`] reason otherwise.
+fn status_cause(status: StatusCode, error: Option<&ApiError>) -> String {
+    match error {
+        Some(error) => format!("HTTP {} {}", status.as_u16(), error.error_type),
+        None => http_status(status),
+    }
+}
+
+/// `HTTP 502 Bad Gateway`, or `HTTP 529` for a code without a standard reason phrase.
+fn http_status(status: StatusCode) -> String {
+    match status.canonical_reason() {
+        Some(reason) => format!("HTTP {} {reason}", status.as_u16()),
         None => format!("HTTP {}", status.as_u16()),
     }
 }
@@ -316,14 +334,14 @@ const SERVER_ERROR: &str = "Anthropic API server error";
 /// Advice for an overload or a server failure, both of which usually pass.
 const TRANSIENT_ADVICE: &str = "Retry in a few seconds.";
 
-/// Renders a user-facing diagnostic for a non-2xx Anthropic response, with a per-status hint and
-/// any non-blank response body appended for debugging.
+/// Renders a user-facing diagnostic for a non-2xx Anthropic response: a per-status headline, the
+/// body's `details` after a colon, then a per-status hint.
 fn format_api_error(
     auth: AuthSource,
     status: StatusCode,
     retry_after: Option<Duration>,
     location: Option<&str>,
-    body: &str,
+    details: Option<&str>,
 ) -> String {
     let (headline, advice) = match status.as_u16() {
         300..=399 => {
@@ -332,7 +350,10 @@ fn format_api_error(
                 .and_then(|url| url.host_str().map(|host| format!(" to {host}")))
                 .unwrap_or_default();
             (
-                format!("Anthropic API endpoint redirected (HTTP {status}){target}"),
+                format!(
+                    "Anthropic API endpoint redirected ({}){target}",
+                    http_status(status),
+                ),
                 Some(
                     "Redirects are not followed, so point the base URL at the final endpoint."
                         .to_owned(),
@@ -355,12 +376,12 @@ fn format_api_error(
             Some(TRANSIENT_ADVICE.to_owned()),
         ),
         s if (500..600).contains(&s) => (
-            format!("{SERVER_ERROR} (HTTP {status})"),
+            format!("{SERVER_ERROR} ({})", http_status(status)),
             Some(TRANSIENT_ADVICE.to_owned()),
         ),
-        _ => (format!("API error (HTTP {status})"), None),
+        _ => (format!("API error ({})", http_status(status)), None),
     };
-    with_details(&headline, advice.as_deref(), body)
+    with_details(&headline, details, advice.as_deref())
 }
 
 /// Renders an in-band SSE `error` event in the shape of the HTTP diagnostic for the same failure,
@@ -371,23 +392,59 @@ pub(super) fn format_stream_error(error_type: &str, message: &str) -> String {
         "api_error" => (SERVER_ERROR, Some(TRANSIENT_ADVICE)),
         _ => ("API error", None),
     };
-    with_details(&format!("{headline} ({error_type})"), advice, message)
+    let details = condense(message);
+    with_details(
+        &format!("{headline} ({error_type})"),
+        details.as_deref(),
+        advice,
+    )
 }
 
-/// Joins a diagnostic's headline and advice, then appends any non-blank server details as is.
-fn with_details(headline: &str, advice: Option<&str>, details: &str) -> String {
-    match (advice, details.trim()) {
-        (None, "") => headline.to_owned(),
-        (None, details) => format!("{headline}. Details: {details}"),
-        (Some(advice), "") => format!("{headline}. {advice}"),
-        (Some(advice), details) => format!("{headline}. {advice} Details: {details}"),
+/// Joins a diagnostic as `headline: details. advice`, leaving out whichever part is absent.
+fn with_details(headline: &str, details: Option<&str>, advice: Option<&str>) -> String {
+    match (details, advice) {
+        (None, None) => headline.to_owned(),
+        (None, Some(advice)) => format!("{headline}. {advice}"),
+        (Some(details), None) => format!("{headline}: {details}"),
+        (Some(details), Some(advice)) => format!("{headline}: {details}. {advice}"),
     }
+}
+
+/// Most terminal columns [`condense`] keeps, so a verbose body cannot bury the advice.
+const MAX_DETAILS_WIDTH: usize = 300;
+
+static HTML_TITLE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?is)<title[^>]*>(.*?)</title>").expect("the title pattern is a valid regex")
+});
+
+/// What a non-2xx `body` says, [condensed](condense): the message of an API `error`, the title of
+/// a markup page such as a gateway's HTML error, or else the text itself. `None` when that is
+/// blank or a page has no title.
+fn body_details(body: &str, error: Option<&ApiError>) -> Option<String> {
+    let text = match error {
+        Some(error) => &error.message,
+        None if body.trim_start().starts_with('<') => HTML_TITLE.captures(body)?.get(1)?.as_str(),
+        None => body,
+    };
+    condense(text)
+}
+
+/// Server text on one line of at most [`MAX_DETAILS_WIDTH`] columns, without the sentence period
+/// that the diagnostic places after it. An ellipsis stays. `None` when the text is blank.
+fn condense(text: &str) -> Option<String> {
+    let text = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    let text = text
+        .strip_suffix('.')
+        .filter(|rest| !rest.ends_with('.'))
+        .unwrap_or(&text);
+    (!text.is_empty()).then(|| truncate_to_width(text, MAX_DETAILS_WIDTH))
 }
 
 #[cfg(test)]
 mod tests {
     use std::sync::atomic::{AtomicU32, Ordering};
 
+    use indoc::indoc;
     use wiremock::matchers::{method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
@@ -625,54 +682,70 @@ mod tests {
             .await;
 
             let err = post_once(&server).await.expect_err("non-2xx fails");
-            let (AttemptError::Retryable { error, .. } | AttemptError::Fatal(error)) = &err;
             assert_eq!(
                 matches!(err, AttemptError::Retryable { .. }),
                 retryable,
                 "status {status}",
             );
-            let msg = format!("{error:#}");
-            assert!(msg.contains(&status.to_string()), "{msg}");
-            assert!(msg.contains("Details: boom"), "{msg}");
         }
     }
 
     #[tokio::test]
-    async fn post_messages_types_a_prompt_too_long_rejection() {
-        let body = |kind: &str, message: &str| {
-            format!(r#"{{"type":"error","error":{{"type":"{kind}","message":"{message}"}}}}"#)
+    async fn post_messages_condenses_a_gateway_page_to_its_title() {
+        let server = MockServer::start().await;
+        let page = indoc! {r#"
+            <!DOCTYPE html>
+            <html>
+            <head><TITLE lang="en">
+              example.com | 522: Connection timed out
+            </TITLE><style>body { margin: 0 }</style></head>
+            <body><h1>Connection timed out</h1></body>
+            </html>
+        "#};
+        mount(&server, ResponseTemplate::new(522).set_body_string(page)).await;
+
+        let Err(AttemptError::Retryable { error, cause, .. }) = post_once(&server).await else {
+            panic!("HTTP 522 is retryable");
         };
-        for (body, expected) in [
+
+        assert_eq!(
+            error.to_string(),
+            "Anthropic API server error (HTTP 522): example.com | 522: Connection timed out. \
+             Retry in a few seconds.",
+        );
+        assert_eq!(cause, "HTTP 522");
+    }
+
+    #[tokio::test]
+    async fn post_messages_types_a_prompt_too_long_rejection() {
+        for (kind, message, expected) in [
             (
-                body(
-                    "invalid_request_error",
-                    "prompt is too long: 215000 tokens > 200000 maximum",
-                ),
+                "invalid_request_error",
+                "prompt is too long: 215000 tokens > 200000 maximum",
                 Some(Some(15_000)),
             ),
+            ("invalid_request_error", "Prompt is too long", Some(None)),
+            ("invalid_request_error", "max_tokens: too large", None),
             (
-                body("invalid_request_error", "Prompt is too long"),
-                Some(None),
-            ),
-            (body("invalid_request_error", "max_tokens: too large"), None),
-            (
-                body("api_error", "prompt is too long: 3 tokens > 2 maximum"),
+                "api_error",
+                "prompt is too long: 3 tokens > 2 maximum",
                 None,
             ),
         ] {
             let server = MockServer::start().await;
+            let body =
+                format!(r#"{{"type":"error","error":{{"type":"{kind}","message":"{message}"}}}}"#);
             mount(&server, ResponseTemplate::new(400).set_body_string(&body)).await;
 
             let Err(AttemptError::Fatal(error)) = post_once(&server).await else {
                 panic!("HTTP 400 is fatal");
             };
+
             let too_long = error.downcast_ref::<PromptTooLong>();
             assert_eq!(too_long.map(|e| e.overflow), expected, "{body}");
-            assert!(
-                error
-                    .to_string()
-                    .starts_with("API error (HTTP 400 Bad Request)."),
-                "{error}",
+            assert_eq!(
+                error.to_string(),
+                format!("API error (HTTP 400 Bad Request): {message}"),
             );
         }
     }
@@ -693,9 +766,9 @@ mod tests {
             panic!("429 must be retryable");
         };
         assert_eq!(retry_after, Some(Duration::from_secs(12)));
-        assert!(
-            format!("{error:#}").contains("Retry after 12 s."),
-            "{error:#}"
+        assert_eq!(
+            error.to_string(),
+            "Anthropic API rate limited (HTTP 429). Retry after 12 s.",
         );
     }
 
@@ -850,42 +923,69 @@ mod tests {
     // ── format_api_error ──
 
     #[test]
-    fn format_api_error_renders_a_hint_per_status_and_appends_the_body() {
+    fn format_api_error_puts_the_details_after_the_headline_and_the_hint_last() {
         let secs = Some(Duration::from_secs(42));
-        for (status, retry_after, prefix) in [
+        for (status, retry_after, expected) in [
             (
                 401,
                 None,
-                "Anthropic API rejected credentials (HTTP 401). \
+                "Anthropic API rejected credentials (HTTP 401): boom. \
                  CLAUDE_CODE_OAUTH_TOKEN may be expired or revoked. \
                  Generate a new one with `claude setup-token`.",
             ),
             (
                 429,
                 secs,
-                "Anthropic API rate limited (HTTP 429). Retry after 42 s.",
+                "Anthropic API rate limited (HTTP 429): boom. Retry after 42 s.",
             ),
             (
                 429,
                 None,
-                "Anthropic API rate limited (HTTP 429). Retry after a short delay.",
+                "Anthropic API rate limited (HTTP 429): boom. Retry after a short delay.",
             ),
             (
                 529,
                 None,
-                "Anthropic API overloaded (HTTP 529). Retry in a few seconds.",
+                "Anthropic API overloaded (HTTP 529): boom. Retry in a few seconds.",
             ),
             (
                 502,
                 None,
-                "Anthropic API server error (HTTP 502 Bad Gateway). Retry in a few seconds.",
+                "Anthropic API server error (HTTP 502 Bad Gateway): boom. Retry in a few seconds.",
             ),
-            (400, secs, "API error (HTTP 400 Bad Request)."),
+            (
+                522,
+                None,
+                "Anthropic API server error (HTTP 522): boom. Retry in a few seconds.",
+            ),
+            (400, secs, "API error (HTTP 400 Bad Request): boom"),
         ] {
             let status = StatusCode::from_u16(status).unwrap();
             assert_eq!(
-                format_api_error(AuthSource::OAuthTokenEnv, status, retry_after, None, "body"),
-                format!("{prefix} Details: body"),
+                format_api_error(
+                    AuthSource::OAuthTokenEnv,
+                    status,
+                    retry_after,
+                    None,
+                    Some("boom"),
+                ),
+                expected,
+            );
+        }
+    }
+
+    #[test]
+    fn format_api_error_without_details_puts_the_hint_after_the_headline() {
+        for (status, expected) in [
+            (StatusCode::BAD_REQUEST, "API error (HTTP 400 Bad Request)"),
+            (
+                StatusCode::BAD_GATEWAY,
+                "Anthropic API server error (HTTP 502 Bad Gateway). Retry in a few seconds.",
+            ),
+        ] {
+            assert_eq!(
+                format_api_error(AuthSource::ApiKeyEnv, status, None, None, None),
+                expected,
             );
         }
     }
@@ -908,64 +1008,100 @@ mod tests {
                     StatusCode::TEMPORARY_REDIRECT,
                     None,
                     location,
-                    "moved",
+                    Some("moved"),
                 ),
-                format!("{redirected}{target}. {advice} Details: moved"),
+                format!("{redirected}{target}: moved. {advice}"),
                 "{location:?}",
             );
         }
     }
 
+    // ── body_details ──
+
     #[test]
-    fn format_api_error_trims_the_body_and_omits_a_blank_one() {
+    fn body_details_shows_the_api_error_message() {
+        let error = ApiError {
+            error_type: "invalid_request_error".to_owned(),
+            message: "max_tokens:\n  too large".to_owned(),
+        };
+
+        let details = body_details(r#"{"type":"error"}"#, Some(&error));
+
+        assert_eq!(details.as_deref(), Some("max_tokens: too large"));
+    }
+
+    #[test]
+    fn body_details_shows_the_title_of_a_markup_page() {
+        let nginx = indoc! {"
+            <html>
+            <head><title>502 Bad Gateway</title></head>
+            <body><center><h1>502 Bad Gateway</h1></center></body>
+            </html>
+        "};
+        assert_eq!(
+            body_details(nginx, None).as_deref(),
+            Some("502 Bad Gateway")
+        );
+        assert_eq!(body_details("<html><body>busy</body></html>", None), None);
+    }
+
+    #[test]
+    fn body_details_shows_plain_text_on_one_capped_line() {
+        let long = "x".repeat(MAX_DETAILS_WIDTH + 1);
         for (body, expected) in [
-            ("", "API error (HTTP 400 Bad Request)"),
-            (" \r\n", "API error (HTTP 400 Bad Request)"),
             (
-                "\n  boom\n",
-                "API error (HTTP 400 Bad Request). Details: boom",
+                "\n  upstream connect error\r\n\treset reason: overflow\n",
+                Some("upstream connect error reset reason: overflow".to_owned()),
             ),
+            (
+                long.as_str(),
+                Some(format!("{}...", "x".repeat(MAX_DETAILS_WIDTH - 3))),
+            ),
+            (" \r\n", None),
         ] {
-            assert_eq!(
-                format_api_error(
-                    AuthSource::ApiKeyEnv,
-                    StatusCode::BAD_REQUEST,
-                    None,
-                    None,
-                    body,
-                ),
-                expected,
-                "{body:?}",
-            );
+            assert_eq!(body_details(body, None), expected, "{body:?}");
+        }
+    }
+
+    // ── condense ──
+
+    #[test]
+    fn condense_drops_a_final_period_and_keeps_an_ellipsis() {
+        for (text, expected) in [
+            ("Upstream is down.\n", Some("Upstream is down")),
+            ("Still starting...", Some("Still starting...")),
+            (".", None),
+        ] {
+            assert_eq!(condense(text).as_deref(), expected, "{text:?}");
         }
     }
 
     // ── format_stream_error ──
 
     #[test]
-    fn format_stream_error_matches_the_http_diagnostic_for_transient_failures() {
-        for (error_type, expected) in [
+    fn format_stream_error_matches_the_http_diagnostic_for_the_same_failure() {
+        for (error_type, message, expected) in [
             (
                 "overloaded_error",
-                "Anthropic API overloaded (overloaded_error). \
-                 Retry in a few seconds. \
-                 Details: Overloaded",
+                "Overloaded",
+                "Anthropic API overloaded (overloaded_error): Overloaded. Retry in a few seconds.",
             ),
             (
                 "api_error",
-                "Anthropic API server error (api_error). \
-                 Retry in a few seconds. \
-                 Details: Overloaded",
+                "Internal server error.",
+                "Anthropic API server error (api_error): Internal server error. \
+                 Retry in a few seconds.",
             ),
             (
                 "invalid_request_error",
-                "API error (invalid_request_error). Details: Overloaded",
+                "messages:\n  bad block",
+                "API error (invalid_request_error): messages: bad block",
             ),
         ] {
             assert_eq!(
-                format_stream_error(error_type, "Overloaded"),
+                format_stream_error(error_type, message),
                 expected,
-                "{error_type}"
+                "{error_type}",
             );
         }
     }
