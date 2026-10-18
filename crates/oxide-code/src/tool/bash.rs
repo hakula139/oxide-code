@@ -893,26 +893,33 @@ mod tests {
         let release = dir.path().join("release");
         let diagnostics = dir.path().join("diagnostics");
         let parent_command = record_pid("$$", &parent);
-        let ready_command = record_pid("$BASHPID", &ready);
-        let completed_command = record_pid("$BASHPID", &completed);
+        let ready_command = record_pid("$$", &ready);
+        let completed_command = record_pid("$$", &completed);
         let scratch_path = dir.path().display();
         let ready_path = ready.display();
         let release_path = release.display();
         let diagnostics_path = diagnostics.display();
-        let command = formatdoc! {"
-            {parent_command} || exit
-            (
+        let script = dir.path().join("child.sh");
+        let script_path = script.display();
+        std::fs::write(
+            &script,
+            formatdoc! {"
                 {ready_command} || exit
                 while [ -d '{scratch_path}' ] && [ ! -f '{release_path}' ]; do sleep 0.02; done
                 [ -f '{release_path}' ] && {completed_command}
-            ) > '{diagnostics_path}' 2>&1 &
+            "},
+        )
+        .unwrap();
+        let command = formatdoc! {r#"
+            {parent_command} || exit
+            "$BASH" '{script_path}' > '{diagnostics_path}' 2>&1 &
             child=$!
             while [ ! -f '{ready_path}' ]; do
                 kill -0 $child || {{ wait $child; exit $?; }}
                 sleep 0.02
             done
             echo started
-        "};
+        "#};
 
         let output = run_default(&command).await;
         std::fs::write(&release, "").unwrap();
