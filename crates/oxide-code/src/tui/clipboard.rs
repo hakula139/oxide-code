@@ -3,8 +3,8 @@
 //! 3.2 and later forward to the outer terminal, or sends the terminal an OSC 52 sequence. Every
 //! route runs off the event loop and reports back through [`Clipboard::recv`].
 
-use std::ffi::{OsStr, OsString};
 use std::fmt;
+use std::pin::Pin;
 use std::process::Stdio;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -179,8 +179,8 @@ impl CopyReport {
 pub(super) struct Clipboard {
     environment: Environment,
     native: Arc<Mutex<Option<arboard::Clipboard>>>,
-    /// Program run for tmux routes. Tests point it at a script.
-    tmux: OsString,
+    /// Runs tmux for the tmux routes. Tests replace it with a fake.
+    tmux: Arc<dyn Runner>,
     tx: mpsc::UnboundedSender<CopyReport>,
     rx: mpsc::UnboundedReceiver<CopyReport>,
 }
@@ -191,7 +191,7 @@ impl Clipboard {
         Self {
             environment,
             native: Arc::default(),
-            tmux: OsString::from("tmux"),
+            tmux: Arc::new(Program("tmux")),
             tx,
             rx,
         }
@@ -202,7 +202,7 @@ impl Clipboard {
         let route = Route {
             environment: self.environment,
             native: Arc::clone(&self.native),
-            tmux: self.tmux.clone(),
+            tmux: Arc::clone(&self.tmux),
         };
         let tx = self.tx.clone();
         tokio::spawn(async move {
@@ -224,7 +224,7 @@ impl Clipboard {
 struct Route {
     environment: Environment,
     native: Arc<Mutex<Option<arboard::Clipboard>>>,
-    tmux: OsString,
+    tmux: Arc<dyn Runner>,
 }
 
 impl Route {
@@ -238,7 +238,7 @@ impl Route {
             None
         };
         let tmux = if self.environment.tmux && text.len() <= MAX_TERMINAL_COPY_BYTES {
-            Some(load_tmux_buffer(&self.tmux, &text).await)
+            Some(load_tmux_buffer(&*self.tmux, &text).await)
         } else {
             None
         };
@@ -303,13 +303,59 @@ async fn write_native(
     .map_err(|e| e.to_string())?
 }
 
+trait Runner: Send + Sync {
+    /// Runs the program with `args` and `stdin`, returning its trimmed stderr, or else its exit
+    /// status, when it fails.
+    fn run<'a>(
+        &'a self,
+        args: &'a [&'a str],
+        stdin: &'a str,
+    ) -> Pin<Box<dyn Future<Output = Result<(), String>> + Send + 'a>>;
+}
+
+/// A program on `PATH`. Dropping a run's future kills the child, and tokio reaps it.
+struct Program(&'static str);
+
+impl Runner for Program {
+    fn run<'a>(
+        &'a self,
+        args: &'a [&'a str],
+        stdin: &'a str,
+    ) -> Pin<Box<dyn Future<Output = Result<(), String>> + Send + 'a>> {
+        Box::pin(async move {
+            let mut child = Command::new(self.0)
+                .args(args)
+                .stdin(Stdio::piped())
+                .stdout(Stdio::null())
+                .stderr(Stdio::piped())
+                .kill_on_drop(true)
+                .spawn()
+                .map_err(|e| e.to_string())?;
+            let mut pipe = child.stdin.take().expect("stdin is piped");
+            let written = pipe.write_all(stdin.as_bytes()).await;
+            drop(pipe);
+            let output = child.wait_with_output().await.map_err(|e| e.to_string())?;
+            if !output.status.success() {
+                let stderr = String::from_utf8_lossy(&output.stderr).trim().to_owned();
+                return Err(if stderr.is_empty() {
+                    output.status.to_string()
+                } else {
+                    stderr
+                });
+            }
+            written.map_err(|e| e.to_string())
+        })
+    }
+}
+
 /// Stores `text` in a tmux paste buffer. `-w` also forwards it to the outer terminal's clipboard
 /// unless `set-clipboard` is off, and tmux before 3.2 rejects the flag, so a failure retries
 /// without it.
-async fn load_tmux_buffer(tmux: &OsStr, text: &str) -> Result<TmuxLoad, String> {
-    match pipe_to(tmux, &["load-buffer", "-w", "-"], text).await {
+async fn load_tmux_buffer(tmux: &dyn Runner, text: &str) -> Result<TmuxLoad, String> {
+    match tmux.run(&["load-buffer", "-w", "-"], text).await {
         Ok(()) => Ok(TmuxLoad::Forwarded),
-        Err(error) => pipe_to(tmux, &["load-buffer", "-"], text)
+        Err(error) => tmux
+            .run(&["load-buffer", "-"], text)
             .await
             .map(|()| TmuxLoad::BufferOnly)
             .map_err(|_| error),
@@ -331,34 +377,10 @@ fn osc52_sequence(text: &str, screen: bool) -> String {
     format!("\x1bP\x1b]52;c;{}\x07\x1b\\", pieces.join("\x1b\\\x1bP"))
 }
 
-/// Runs `program` with `text` on stdin, returning its trimmed stderr, or else its exit status, when
-/// it fails. Dropping the future kills the child, and tokio reaps it.
-async fn pipe_to(program: &OsStr, args: &[&str], text: &str) -> Result<(), String> {
-    let mut child = Command::new(program)
-        .args(args)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::null())
-        .stderr(Stdio::piped())
-        .kill_on_drop(true)
-        .spawn()
-        .map_err(|e| e.to_string())?;
-    let mut stdin = child.stdin.take().expect("stdin is piped");
-    let written = stdin.write_all(text.as_bytes()).await;
-    drop(stdin);
-    let output = child.wait_with_output().await.map_err(|e| e.to_string())?;
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_owned();
-        return Err(if stderr.is_empty() {
-            output.status.to_string()
-        } else {
-            stderr
-        });
-    }
-    written.map_err(|e| e.to_string())
-}
-
 #[cfg(test)]
 mod tests {
+    use std::collections::VecDeque;
+
     use super::*;
 
     const REMOTE: Environment = Environment {
@@ -368,15 +390,67 @@ mod tests {
         terminal: Terminal::Other,
     };
 
-    /// Writes an executable `sh` script standing in for tmux.
-    #[cfg(unix)]
-    fn fake_tmux(dir: &std::path::Path, body: &str) -> OsString {
-        use std::os::unix::fs::PermissionsExt as _;
+    /// A tmux that records each run's arguments and stdin and answers from `replies` in order,
+    /// failing any unexpected call.
+    struct FakeTmux {
+        runs: Mutex<Vec<(Vec<String>, String)>>,
+        replies: Mutex<VecDeque<Result<(), String>>>,
+    }
 
-        let path = dir.join("tmux");
-        std::fs::write(&path, format!("#!/bin/sh\n{body}\n")).unwrap();
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
-        path.into_os_string()
+    impl FakeTmux {
+        fn new<const N: usize>(replies: [Result<(), &str>; N]) -> Arc<Self> {
+            Arc::new(Self {
+                runs: Mutex::default(),
+                replies: Mutex::new(
+                    replies
+                        .into_iter()
+                        .map(|reply| reply.map_err(ToOwned::to_owned))
+                        .collect(),
+                ),
+            })
+        }
+
+        fn runs(&self) -> Vec<(Vec<String>, String)> {
+            self.runs.lock().unwrap().clone()
+        }
+    }
+
+    impl Runner for FakeTmux {
+        fn run<'a>(
+            &'a self,
+            args: &'a [&'a str],
+            stdin: &'a str,
+        ) -> Pin<Box<dyn Future<Output = Result<(), String>> + Send + 'a>> {
+            let args = args.iter().map(|&arg| arg.to_owned()).collect();
+            self.runs.lock().unwrap().push((args, stdin.to_owned()));
+            let reply = self
+                .replies
+                .lock()
+                .unwrap()
+                .pop_front()
+                .unwrap_or_else(|| Err("unexpected tmux invocation".to_owned()));
+            Box::pin(async move { reply })
+        }
+    }
+
+    struct PendingTmux;
+
+    impl Runner for PendingTmux {
+        fn run<'a>(
+            &'a self,
+            _args: &'a [&'a str],
+            _stdin: &'a str,
+        ) -> Pin<Box<dyn Future<Output = Result<(), String>> + Send + 'a>> {
+            Box::pin(std::future::pending())
+        }
+    }
+
+    fn load_buffer(args: &[&str], stdin: &str) -> (Vec<String>, String) {
+        let args = ["load-buffer"]
+            .iter()
+            .chain(args)
+            .map(|&arg| arg.to_owned());
+        (args.collect(), stdin.to_owned())
     }
 
     async fn copy_with(clipboard: &mut Clipboard, text: &str) -> CopyReport {
@@ -498,42 +572,28 @@ mod tests {
         );
     }
 
-    #[cfg(unix)]
     #[tokio::test]
     async fn copy_inside_tmux_hands_the_text_to_tmux() {
-        let dir = tempfile::tempdir().unwrap();
-        let out = dir.path().join("out");
+        let tmux = FakeTmux::new([Ok(())]);
         let mut clipboard = Clipboard::new(Environment {
             tmux: true,
             ..REMOTE
         });
-        clipboard.tmux = fake_tmux(
-            dir.path(),
-            &format!(
-                "echo \"$*\" > '{}'; cat >> '{}'",
-                out.display(),
-                out.display()
-            ),
-        );
+        clipboard.tmux = tmux.clone();
 
         let report = copy_with(&mut clipboard, "text").await;
 
         assert_eq!(report.outcome, Ok(Delivery::Copied));
-        assert_eq!(
-            std::fs::read_to_string(&out).unwrap(),
-            "load-buffer -w -\ntext"
-        );
+        assert_eq!(tmux.runs(), [load_buffer(&["-w", "-"], "text")]);
     }
 
-    #[cfg(unix)]
     #[tokio::test(start_paused = true)]
     async fn copy_reports_a_route_that_outlasts_the_timeout() {
-        let dir = tempfile::tempdir().unwrap();
         let mut clipboard = Clipboard::new(Environment {
             tmux: true,
             ..REMOTE
         });
-        clipboard.tmux = fake_tmux(dir.path(), "exec sleep 30");
+        clipboard.tmux = Arc::new(PendingTmux);
 
         let report = copy_with(&mut clipboard, "text").await;
 
@@ -621,26 +681,72 @@ mod tests {
         );
     }
 
-    // ── load_tmux_buffer ──
+    // ── Program::run ──
 
-    #[cfg(unix)]
     #[tokio::test]
-    async fn load_tmux_buffer_retries_without_w_for_tmux_before_3_2() {
-        let (old_dir, down_dir) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
-        let old = fake_tmux(
-            old_dir.path(),
-            r#"cat >/dev/null; [ "$2" = -w ] && { echo 'usage: load-buffer [-b buffer-name] path' >&2; exit 1; }; exit 0"#,
-        );
-        let down = fake_tmux(down_dir.path(), "echo 'no server running' >&2; exit 1");
+    async fn run_feeds_stdin_and_reports_stderr_or_the_exit_status_on_failure() {
+        // `git config --file -` parses its stdin, and every platform the tests run on has git.
+        let git = Program("git");
+        let config = "[a]\n\tb = c\n";
+        let exit_1 = if cfg!(windows) {
+            "exit code: 1"
+        } else {
+            "exit status: 1"
+        };
 
         assert_eq!(
-            load_tmux_buffer(&old, "text").await,
+            git.run(&["config", "--file", "-", "--get", "a.b"], config)
+                .await,
+            Ok(())
+        );
+        assert_eq!(
+            git.run(
+                &[
+                    "-c",
+                    "alias.fixture=!echo '  fixture error  ' >&2; exit 3",
+                    "fixture",
+                ],
+                "",
+            )
+            .await,
+            Err("fixture error".to_owned()),
+        );
+        assert_eq!(
+            git.run(&["config", "--file", "-", "--get", "a.c"], config)
+                .await,
+            Err(exit_1.to_owned()),
+        );
+    }
+
+    // ── load_tmux_buffer ──
+
+    #[tokio::test]
+    async fn load_tmux_buffer_retries_without_w_for_tmux_before_3_2() {
+        let old = FakeTmux::new([Err("usage: load-buffer [-b buffer-name] path"), Ok(())]);
+        let down = FakeTmux::new([Err("no server running"), Err("usage: load-buffer")]);
+
+        assert_eq!(
+            load_tmux_buffer(&*old, "text").await,
             Ok(TmuxLoad::BufferOnly)
         );
         assert_eq!(
-            load_tmux_buffer(&down, "text").await,
+            old.runs(),
+            [
+                load_buffer(&["-w", "-"], "text"),
+                load_buffer(&["-"], "text")
+            ]
+        );
+        assert_eq!(
+            load_tmux_buffer(&*down, "text").await,
             Err("no server running".to_owned()),
             "the first error explains the failure",
+        );
+        assert_eq!(
+            down.runs(),
+            [
+                load_buffer(&["-w", "-"], "text"),
+                load_buffer(&["-"], "text")
+            ]
         );
     }
 
@@ -663,35 +769,5 @@ mod tests {
             ),
         );
         assert_eq!(osc52_sequence("x", false), "\x1b]52;c;eA==\x07");
-    }
-
-    // ── pipe_to ──
-
-    #[cfg(unix)]
-    #[tokio::test]
-    async fn pipe_to_feeds_stdin_and_reports_stderr_or_the_exit_status_on_failure() {
-        let dir = tempfile::tempdir().unwrap();
-        let out = dir.path().join("out");
-        let sh = OsStr::new("sh");
-        let write = format!("cat > '{}'", out.display());
-
-        assert_eq!(
-            pipe_to(sh, &["-c", &write], "line one\nline two").await,
-            Ok(())
-        );
-        assert_eq!(std::fs::read_to_string(&out).unwrap(), "line one\nline two");
-        assert_eq!(
-            pipe_to(
-                sh,
-                &["-c", "cat >/dev/null; echo 'no server running' >&2; exit 1"],
-                "text"
-            )
-            .await,
-            Err("no server running".to_owned()),
-        );
-        assert_eq!(
-            pipe_to(sh, &["-c", "exit 3"], "text").await,
-            Err("exit status: 3".to_owned()),
-        );
     }
 }
