@@ -2,10 +2,8 @@
 
 use ratatui::text::Line;
 
-use super::super::RenderCtx;
 use super::{
-    MAX_TOOL_OUTPUT_LINE_BYTES, MAX_TOOL_OUTPUT_LINES, border_style_for, bordered_row,
-    truncate_to_bytes,
+    MAX_ROW_BYTES, MAX_TOOL_OUTPUT_LINES, RenderCtx, body_row, border_style_for, truncate_to_bytes,
 };
 use crate::tool::tasks::Task;
 use crate::tui::components::tasks::{hidden_summary, row_text, window};
@@ -19,16 +17,16 @@ pub(super) fn render(
     let border_style = border_style_for(ctx.theme, is_error);
     let shown = window(tasks, MAX_TOOL_OUTPUT_LINES);
     for task in &tasks[shown.clone()] {
-        bordered_row::render(
+        body_row(
             out,
             ctx,
             border_style,
-            truncate_to_bytes(&row_text(task), MAX_TOOL_OUTPUT_LINE_BYTES),
+            truncate_to_bytes(&row_text(task), MAX_ROW_BYTES),
             ctx.theme.task_style(task.status),
         );
     }
     if let Some(summary) = hidden_summary(tasks, &shown) {
-        bordered_row::render(
+        body_row(
             out,
             ctx,
             border_style,

@@ -3,10 +3,8 @@
 
 use ratatui::text::Line;
 
-use super::super::RenderCtx;
 use super::{
-    MAX_TOOL_OUTPUT_LINE_BYTES, MAX_TOOL_OUTPUT_LINES, border_style_for, bordered_row,
-    truncate_to_bytes,
+    MAX_ROW_BYTES, MAX_TOOL_OUTPUT_LINES, RenderCtx, body_row, border_style_for, truncate_to_bytes,
 };
 
 pub(super) fn render(
@@ -21,7 +19,7 @@ pub(super) fn render(
 
     if files.is_empty() {
         // "No files found" already labels the result, so the header is skipped.
-        bordered_row::render(out, ctx, border_style, "No files found", ctx.theme.dim());
+        body_row(out, ctx, border_style, "No files found", ctx.theme.dim());
         return;
     }
 
@@ -29,7 +27,7 @@ pub(super) fn render(
     let hidden = files.len() - visible;
     let truncated_by_tool = total > files.len();
 
-    bordered_row::render(
+    body_row(
         out,
         ctx,
         border_style,
@@ -38,12 +36,12 @@ pub(super) fn render(
     );
 
     for path in &files[..visible] {
-        let display = truncate_to_bytes(path, MAX_TOOL_OUTPUT_LINE_BYTES);
-        bordered_row::render(out, ctx, border_style, display, ctx.theme.text());
+        let display = truncate_to_bytes(path, MAX_ROW_BYTES);
+        body_row(out, ctx, border_style, display, ctx.theme.text());
     }
 
     if let Some(text) = footer_text(hidden, truncated_by_tool) {
-        bordered_row::render(out, ctx, border_style, text, ctx.theme.dim());
+        body_row(out, ctx, border_style, text, ctx.theme.dim());
     }
 }
 

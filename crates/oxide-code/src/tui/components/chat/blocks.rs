@@ -6,6 +6,7 @@ mod error;
 mod git_diff;
 mod interrupted;
 mod notice;
+mod rows;
 mod streaming;
 mod system;
 mod tool;
@@ -26,7 +27,9 @@ use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 use unicode_width::UnicodeWidthStr;
 
+use self::rows::bar_row;
 use crate::tui::glyphs::BAR;
+use crate::tui::markdown::render_markdown;
 use crate::tui::theme::Theme;
 use crate::tui::wrap::wrap_line;
 
@@ -97,6 +100,51 @@ fn push_icon_wrapped(
         Span::styled(text.to_owned(), text_style),
     ]);
     out.extend(wrap_line(line, width, prefix.width(), None));
+}
+
+/// Styles of a [`bar_section`]. Body spans without a color take `body`.
+struct SectionStyles {
+    bar: Style,
+    header: Style,
+    body: Style,
+}
+
+/// Renders `header` and the markdown `body` behind a left bar, with a bar-only row between them.
+/// A blank body leaves the header alone.
+fn bar_section(
+    ctx: &RenderCtx<'_>,
+    prefix: &str,
+    styles: &SectionStyles,
+    header: &str,
+    body: &str,
+) -> Vec<Line<'static>> {
+    let mut out = Vec::new();
+    bar_row(&mut out, ctx, prefix, styles.bar, header, styles.header);
+    if body.trim().is_empty() {
+        return out;
+    }
+
+    out.push(Line::from(Span::styled(prefix.to_owned(), styles.bar)));
+    let width = usize::from(ctx.width).saturating_sub(prefix.width());
+    for line in render_markdown(body, ctx.theme, width).lines {
+        let line = fill_plain_spans(line, styles.body);
+        out.push(prepend_markdown_prefix(line, prefix, styles.bar));
+    }
+    out
+}
+
+/// Patches `base` onto spans without a color. A line colored as a whole, such as a plain code
+/// fence, keeps its color, since any span color would paint over it.
+fn fill_plain_spans(mut line: Line<'static>, base: Style) -> Line<'static> {
+    if line.style.fg.is_some() {
+        return line;
+    }
+    for span in &mut line.spans {
+        if span.style.fg.is_none() {
+            span.style = span.style.patch(base);
+        }
+    }
+    line
 }
 
 /// Prepends a styled prefix span, keeping the line's style and alignment.
@@ -201,6 +249,37 @@ mod tests {
         );
         let rows: Vec<String> = out.iter().map(ToString::to_string).collect();
         assert_eq!(rows, ["❯ 你好 世界 ", "  再见"]);
+    }
+
+    // ── fill_plain_spans ──
+
+    #[test]
+    fn fill_plain_spans_patches_only_spans_without_a_color() {
+        let theme = Theme::default();
+        let line = Line::from(vec![
+            Span::raw("plain "),
+            Span::styled("code", theme.code()),
+        ]);
+
+        let out = fill_plain_spans(line, theme.thinking());
+
+        assert_eq!(
+            out,
+            Line::from(vec![
+                Span::styled("plain ", theme.thinking()),
+                Span::styled("code", theme.code()),
+            ])
+        );
+    }
+
+    #[test]
+    fn fill_plain_spans_keeps_a_line_colored_as_a_whole() {
+        let theme = Theme::default();
+        let line = Line::styled("cargo test", theme.code());
+
+        let out = fill_plain_spans(line.clone(), theme.text());
+
+        assert_eq!(out, line);
     }
 
     // ── prepend_markdown_prefix ──

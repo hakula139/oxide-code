@@ -3,9 +3,7 @@
 use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 
-use super::super::RenderCtx;
-use super::numbered_row;
-use super::{TOOL_BORDER_CONT, border_style_for};
+use super::{NumberedRows, RenderCtx, TOOL_BORDER_CONT, border_style_for};
 use crate::tool::{DiffChunk, DiffLine};
 
 const MAX_DIFF_BODY_LINES: usize = 20;
@@ -44,7 +42,7 @@ fn render_chunk_body(
     budget: usize,
 ) {
     let number_width = number_column_width(chunk);
-    let del_renderer = numbered_row::Renderer::with_style(
+    let del_renderer = NumberedRows::with_style(
         ctx,
         border_style,
         number_width,
@@ -52,7 +50,7 @@ fn render_chunk_body(
         ctx.theme.error(),
         Some(ctx.theme.diff_del_row()),
     );
-    let add_renderer = numbered_row::Renderer::with_style(
+    let add_renderer = NumberedRows::with_style(
         ctx,
         border_style,
         number_width,

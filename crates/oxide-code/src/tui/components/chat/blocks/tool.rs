@@ -2,11 +2,9 @@
 //! error color when the tool fails. Each [`ToolResultView`] variant renders its body in a child
 //! module, and unstructured output renders as truncated text.
 
-pub(super) mod bordered_row;
 mod diff;
 mod glob;
 mod grep;
-pub(super) mod numbered_row;
 mod read_excerpt;
 mod tasks;
 mod text;
@@ -15,6 +13,7 @@ use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 use unicode_width::UnicodeWidthStr;
 
+use super::rows::{MAX_ROW_BYTES, NumberedRows, body_row, truncate_to_bytes};
 use super::{ChatBlock, RenderCtx, bar_continuation_prefix};
 use crate::tool::ToolResultView;
 use crate::tui::glyphs::{TOOL_BORDER_CONT, TOOL_BORDER_PREFIX, TOOL_ERROR, TOOL_SUCCESS};
@@ -22,8 +21,6 @@ use crate::tui::theme::Theme;
 use crate::tui::wrap::wrap_line;
 
 const MAX_TOOL_OUTPUT_LINES: usize = 5;
-
-const MAX_TOOL_OUTPUT_LINE_BYTES: usize = 512;
 
 // ── Tool Call ──
 
@@ -165,14 +162,6 @@ fn border_style_for(theme: &Theme, is_error: bool) -> Style {
     }
 }
 
-fn truncate_to_bytes(s: &str, max_bytes: usize) -> String {
-    if s.len() <= max_bytes {
-        return s.to_owned();
-    }
-    let boundary = s.floor_char_boundary(max_bytes);
-    format!("{}...", &s[..boundary])
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -229,32 +218,5 @@ mod tests {
             expected.extend(body.iter().map(|text| format!("{TOOL_BORDER_CONT}{text}")));
             assert_eq!(rows, expected);
         }
-    }
-
-    // ── truncate_to_bytes ──
-
-    #[test]
-    fn truncate_to_bytes_under_limit_preserves_input() {
-        assert_eq!(truncate_to_bytes("hello", 10), "hello");
-    }
-
-    #[test]
-    fn truncate_to_bytes_over_limit_appends_ellipsis() {
-        assert_eq!(truncate_to_bytes("hello world", 5), "hello...");
-    }
-
-    #[test]
-    fn truncate_to_bytes_respects_char_boundary() {
-        // Each `中` is 3 bytes, so cutting at byte 5 without `floor_char_boundary` would split a
-        // codepoint and panic on `&s[..5]`. Rounding down to byte 3 yields one `中` + `...`.
-        let input = "中中中中";
-        let result = truncate_to_bytes(input, 5);
-        assert_eq!(result, "中...");
-        assert!(result.is_char_boundary(result.len() - 3));
-    }
-
-    #[test]
-    fn truncate_to_bytes_exact_boundary_no_split() {
-        assert_eq!(truncate_to_bytes("中中", 6), "中中");
     }
 }

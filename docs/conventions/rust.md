@@ -46,6 +46,7 @@ Conventions for Rust code under `crates/`. Tooling enforces some style rules, so
 ## Visibility
 
 - Use the narrowest visibility that works: private first, then `pub(super)` within the parent module, then `pub(crate)`. Because the crate is a binary, it has no `pub` items.
+- Skip scoped forms such as `pub(in super::super)`. When modules outside an item's parent use it, move it to a child of their nearest common module, where `pub(super)` reaches every user.
 
 ## Modules
 

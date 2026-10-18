@@ -2,10 +2,8 @@
 
 use ratatui::text::Line;
 
-use super::super::RenderCtx;
 use super::{
-    MAX_TOOL_OUTPUT_LINE_BYTES, MAX_TOOL_OUTPUT_LINES, border_style_for, bordered_row,
-    truncate_to_bytes,
+    MAX_ROW_BYTES, MAX_TOOL_OUTPUT_LINES, RenderCtx, body_row, border_style_for, truncate_to_bytes,
 };
 use crate::tui::wrap::expand_tabs;
 
@@ -46,14 +44,14 @@ pub(super) fn render(
 
     for text_line in visible {
         let expanded = expand_tabs(text_line);
-        let display_text = truncate_to_bytes(&expanded, MAX_TOOL_OUTPUT_LINE_BYTES);
-        bordered_row::render(out, ctx, border_style, display_text, text_style);
+        let display_text = truncate_to_bytes(&expanded, MAX_ROW_BYTES);
+        body_row(out, ctx, border_style, display_text, text_style);
     }
 
     if truncated {
         let n = output_lines.len() - MAX_TOOL_OUTPUT_LINES;
         let label = if n == 1 { "line" } else { "lines" };
-        bordered_row::render(
+        body_row(
             out,
             ctx,
             border_style,
@@ -157,11 +155,11 @@ mod tests {
 
     #[test]
     fn render_truncates_a_long_line_to_the_byte_budget() {
-        let long_line = "x".repeat(MAX_TOOL_OUTPUT_LINE_BYTES + 100);
+        let long_line = "x".repeat(MAX_ROW_BYTES + 100);
 
         let rows = render_rows(&long_line, "result");
 
-        let kept = format!("{}...", "x".repeat(MAX_TOOL_OUTPUT_LINE_BYTES));
+        let kept = format!("{}...", "x".repeat(MAX_ROW_BYTES));
         assert_eq!(rows, body(&[&kept]));
     }
 
