@@ -52,8 +52,8 @@ impl GatewayCompat {
         let name = auth.kind().header_name();
         if self.custom_headers.contains_key(&name) {
             bail!(
-                "invalid ANTHROPIC_CUSTOM_HEADERS: {name} carries the {auth} credential and cannot \
-                 be overridden"
+                "invalid ANTHROPIC_CUSTOM_HEADERS: \
+                 {name} carries the {auth} credential and cannot be overridden"
             );
         }
         Ok(())
@@ -212,8 +212,9 @@ mod tests {
             .unwrap_err();
         assert_eq!(
             err.to_string(),
-            "invalid ANTHROPIC_CUSTOM_HEADERS: authorization carries the OAuth \
-             (CLAUDE_CODE_OAUTH_TOKEN) credential and cannot be overridden",
+            "invalid ANTHROPIC_CUSTOM_HEADERS: \
+             authorization carries the OAuth (CLAUDE_CODE_OAUTH_TOKEN) credential \
+             and cannot be overridden",
         );
         assert!(!err.to_string().contains("gateway-jwt"));
     }

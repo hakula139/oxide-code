@@ -1,16 +1,15 @@
 //! The synthetic user message that opens a compacted transcript. Compaction writes it with the
 //! summary, and the resumed display strips its prefix again, since the boundary block shows it.
 
-use std::fmt::Write as _;
-
 use indoc::{formatdoc, indoc};
 
 use crate::message::{ContentBlock, Message, Role};
+use crate::prompt::system_reminder;
 use crate::tool::bash::background::BackgroundShell;
 use crate::tool::tasks::Task;
 
 /// Prefix for the synthetic post-compact user message.
-const SUMMARY_PREFIX: &str = indoc! {r"
+const SUMMARY_PREFIX: &str = indoc! {"
     This conversation has been compacted. The summary below covers the prior work. Continue from here
     without re-asking the engineer what to do.
 "};
@@ -22,11 +21,13 @@ pub(crate) fn synthesize_post_compact_message(
     tasks: &[Task],
     shells: &[BackgroundShell],
 ) -> Message {
+    let prefix = SUMMARY_PREFIX.trim();
+    let summary = summary.trim();
     let mut message = Message::user(formatdoc! {"
         {prefix}
 
         {summary}
-    ", prefix = SUMMARY_PREFIX.trim(), summary = summary.trim()});
+    "});
     message.content.extend(
         [task_reminder(tasks), shell_reminder(shells)]
             .into_iter()
@@ -42,16 +43,16 @@ fn task_reminder(tasks: &[Task]) -> Option<String> {
     if tasks.is_empty() {
         return None;
     }
-    let mut list = String::new();
-    for task in tasks {
-        _ = writeln!(list, "- [{}] {}", task.status.as_str(), task.content);
-    }
-    Some(formatdoc! {"
-        <system-reminder>
+    let list = tasks
+        .iter()
+        .map(|task| format!("- [{}] {}", task.status.as_str(), task.content))
+        .collect::<Vec<_>>()
+        .join("\n");
+    Some(system_reminder(&formatdoc! {"
         Your task list carries over from before the summary. Keep it current with the tasks tool:
 
-        {list}</system-reminder>"
-    })
+        {list}"
+    }))
 }
 
 /// The block that lists the open background shells after the summary, since the calls that
@@ -60,23 +61,24 @@ fn shell_reminder(shells: &[BackgroundShell]) -> Option<String> {
     if shells.is_empty() {
         return None;
     }
-    let mut list = String::new();
-    for shell in shells {
-        _ = writeln!(
-            list,
-            "- {} ({}): {}",
-            shell.id,
-            shell.state.describe(),
-            shell.command_preview()
-        );
-    }
-    Some(formatdoc! {"
-        <system-reminder>
+    let list = shells
+        .iter()
+        .map(|shell| {
+            format!(
+                "- {} ({}): {}",
+                shell.id,
+                shell.state.describe(),
+                shell.command_preview()
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    Some(system_reminder(&formatdoc! {"
         These background shells are still open from before the summary. Read them with bash_output,
         and stop the ones you no longer need with bash_stop:
 
-        {list}</system-reminder>"
-    })
+        {list}"
+    }))
 }
 
 /// Removes the synthetic summary prefix from a resumed post-compact root message.
@@ -192,11 +194,11 @@ mod tests {
 
     #[test]
     fn strip_synthetic_post_compact_prefix_leaves_assistant_messages() {
+        let prefix = SUMMARY_PREFIX.trim();
         let mut m = Message::assistant(formatdoc! {"
-            {}
+            {prefix}
 
-            not a synthetic user root",
-            SUMMARY_PREFIX.trim(),
+            not a synthetic user root"
         });
 
         assert!(!strip_synthetic_post_compact_prefix(&mut m));

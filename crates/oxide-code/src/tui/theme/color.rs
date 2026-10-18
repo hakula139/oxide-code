@@ -156,7 +156,8 @@ mod tests {
     fn parse_color_indexed_rejects_out_of_range() {
         assert_eq!(
             error_text("ansi:256"),
-            r#"invalid indexed color "ansi:256": expected 0-255 (e.g., ansi:174): number too large to fit in target type"#,
+            "invalid indexed color \"ansi:256\": expected 0-255 (e.g., ansi:174): \
+             number too large to fit in target type",
         );
     }
 
@@ -164,7 +165,8 @@ mod tests {
     fn parse_color_indexed_rejects_non_numeric() {
         assert_eq!(
             error_text("ansi:abc"),
-            r#"invalid indexed color "ansi:abc": expected 0-255 (e.g., ansi:174): invalid digit found in string"#,
+            "invalid indexed color \"ansi:abc\": expected 0-255 (e.g., ansi:174): \
+             invalid digit found in string",
         );
     }
 

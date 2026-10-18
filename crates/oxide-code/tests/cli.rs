@@ -257,6 +257,7 @@ async fn headless_mode_flag_overrides_the_configured_mode() {
 fn sse(frames: &[serde_json::Value]) -> ResponseTemplate {
     let mut body = String::new();
     for frame in frames {
+        let event = frame["type"].as_str().expect("each frame has a type");
         _ = writedoc!(
             body,
             "
@@ -264,7 +265,6 @@ fn sse(frames: &[serde_json::Value]) -> ResponseTemplate {
             data: {frame}
 
             ",
-            event = frame["type"].as_str().expect("each frame has a type"),
         );
     }
     ResponseTemplate::new(200)

@@ -465,6 +465,7 @@ mod tests {
     use std::time::Duration;
 
     use base64::Engine as _;
+    use indoc::indoc;
     use ratatui::layout::Rect;
 
     use super::*;
@@ -543,7 +544,7 @@ mod tests {
     async fn handle_crossterm_key_ctrl_c_busy_forwards_interrupt_without_quitting() {
         // Mid-turn Ctrl+C forwards `Interrupt` to the engine and leaves `should_quit` clear.
         let (mut app, mut rx, _event_tx) = test_app(None);
-        app.handle_engine_event(Event::StreamToken("partial".into()));
+        app.handle_engine_event(Event::StreamToken("partial".to_owned()));
         assert!(!app.input.is_enabled());
 
         app.handle_crossterm_event(&key_event(KeyCode::Char('c'), KeyModifiers::CONTROL));
@@ -555,7 +556,7 @@ mod tests {
     #[tokio::test]
     async fn handle_crossterm_key_esc_busy_forwards_interrupt() {
         let (mut app, mut rx, _event_tx) = test_app(None);
-        app.handle_engine_event(Event::StreamToken("partial".into()));
+        app.handle_engine_event(Event::StreamToken("partial".to_owned()));
 
         app.handle_crossterm_event(&key_event(KeyCode::Esc, KeyModifiers::NONE));
         assert!(!app.should_quit);
@@ -677,7 +678,7 @@ mod tests {
     async fn handle_crossterm_event_ctrl_c_copies_the_selection_without_interrupting() {
         let (mut app, mut rx, _event_tx) = test_app(None);
         app.chat.push_system_message("copy this word");
-        app.handle_engine_event(Event::StreamToken("partial".into()));
+        app.handle_engine_event(Event::StreamToken("partial".to_owned()));
         select_word(&mut app, "this").await;
 
         app.handle_crossterm_event(&key_event(KeyCode::Char('c'), KeyModifiers::CONTROL));
@@ -786,7 +787,7 @@ mod tests {
         let (mut app, _rx, _event_tx) = test_app(None);
         app.chat.push_system_message(long_chat_block());
         _ = render_app(&mut app, 80, 20);
-        app.handle_engine_event(Event::StreamToken("partial".into()));
+        app.handle_engine_event(Event::StreamToken("partial".to_owned()));
         app.handle_crossterm_event(&key_event(KeyCode::Char('/'), KeyModifiers::NONE));
         assert!(app.input.popup_visible());
 
@@ -1029,7 +1030,7 @@ mod tests {
     async fn handle_esc_busy_dispatches_interrupt() {
         // Esc is routed by `App` because its meaning depends on queue state and run-state.
         let (mut app, mut rx, _event_tx) = test_app(None);
-        app.handle_engine_event(Event::StreamToken("partial".into()));
+        app.handle_engine_event(Event::StreamToken("partial".to_owned()));
         app.handle_crossterm_event(&key_event(KeyCode::Esc, KeyModifiers::NONE));
         assert_eq!(app.status_bar.status(), &Status::Cancelling);
         let forwarded = rx.recv().await.expect("Interrupt forwarded");
@@ -1048,8 +1049,8 @@ mod tests {
     fn handle_esc_idle_with_queue_pops_most_recent_into_input() {
         // The most recent prompt (back of FIFO) returns to input, while the rest stay queued.
         let (mut app, _rx, _event_tx) = test_app(None);
-        app.pending_prompts.push_back("first".into());
-        app.pending_prompts.push_back("second".into());
+        app.pending_prompts.push_back("first".to_owned());
+        app.pending_prompts.push_back("second".to_owned());
 
         app.handle_crossterm_event(&key_event(KeyCode::Esc, KeyModifiers::NONE));
 
@@ -1064,7 +1065,7 @@ mod tests {
     fn handle_esc_idle_with_buffer_content_refuses_pop() {
         // Esc must not clobber an in-progress draft.
         let (mut app, _rx, _event_tx) = test_app(None);
-        app.pending_prompts.push_back("queued".into());
+        app.pending_prompts.push_back("queued".to_owned());
         app.input.set_text("draft");
 
         app.handle_crossterm_event(&key_event(KeyCode::Esc, KeyModifiers::NONE));
@@ -1080,7 +1081,7 @@ mod tests {
     fn handle_esc_with_popup_visible_dismisses_popup_and_leaves_queue_intact() {
         // The popup gate runs before App's Esc routing, so the popup hides and the queue stays put.
         let (mut app, _rx, _event_tx) = test_app(None);
-        app.pending_prompts.push_back("queued".into());
+        app.pending_prompts.push_back("queued".to_owned());
         app.handle_crossterm_event(&key_event(KeyCode::Char('/'), KeyModifiers::NONE));
         assert!(app.input.popup_visible(), "/ opens the popup");
 
@@ -2000,7 +2001,7 @@ mod tests {
 
     #[test]
     fn apply_slash_outcome_shows_output_and_hands_back_forwards_whether_idle_or_busy() {
-        let diff = indoc::indoc! {"
+        let diff = indoc! {"
             diff --git a/src/lib.rs b/src/lib.rs
             --- a/src/lib.rs
             +++ b/src/lib.rs
@@ -2011,7 +2012,7 @@ mod tests {
         for busy in [false, true] {
             let (mut app, mut rx, _event_tx) = test_app(None);
             if busy {
-                app.handle_engine_event(Event::StreamToken("partial".into()));
+                app.handle_engine_event(Event::StreamToken("partial".to_owned()));
             }
 
             let clean = SlashOutcome::SystemMessage("Working tree clean".to_owned());

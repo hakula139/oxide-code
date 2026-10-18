@@ -89,9 +89,9 @@ pub(super) enum LoginError {
     /// Keychain and its test fakes deny access.
     #[cfg(any(target_os = "macos", test))]
     #[error(
-        "macOS Keychain denied access to the Claude Code login. Allow access when the Keychain \
-         prompt appears, or set CLAUDE_CODE_OAUTH_TOKEN (from `claude setup-token`) where no \
-         prompt can appear."
+        "macOS Keychain denied access to the Claude Code login. \
+         Allow access when the Keychain prompt appears, \
+         or set CLAUDE_CODE_OAUTH_TOKEN (from `claude setup-token`) where no prompt can appear."
     )]
     KeychainDenied,
     /// The token expired, and no refresh token is stored.
@@ -626,8 +626,8 @@ async fn acquire_lock(path: &Path) -> Result<LockGuard> {
         }
     }
     bail!(
-        "failed to acquire credentials lock after {LOCK_MAX_RETRIES} retries (another process may \
-         be refreshing)"
+        "failed to acquire credentials lock after {LOCK_MAX_RETRIES} retries \
+         (another process may be refreshing)"
     )
 }
 
@@ -641,6 +641,7 @@ fn is_stale_lock(path: &Path) -> bool {
 mod tests {
     use std::sync::{Arc, Mutex};
 
+    use indoc::indoc;
     use wiremock::matchers::{method, path as wm_path};
     use wiremock::{Mock, MockServer, Request, ResponseTemplate};
 
@@ -1117,8 +1118,9 @@ mod tests {
         );
         assert_eq!(
             format!("{err:#}"),
-            "failed to refresh the expired Claude Code login: token refresh failed with 503 \
-             Service Unavailable. Run `claude` to sign in again.",
+            "failed to refresh the expired Claude Code login: \
+             token refresh failed with 503 Service Unavailable. \
+             Run `claude` to sign in again.",
         );
     }
 
@@ -1143,8 +1145,10 @@ mod tests {
         );
         assert_eq!(
             format!("{err:#}"),
-            "failed to refresh the expired Claude Code login: failed to acquire credentials lock \
-             after 5 retries (another process may be refreshing). Run `claude` to sign in again.",
+            "failed to refresh the expired Claude Code login: \
+             failed to acquire credentials lock after 5 retries \
+             (another process may be refreshing). \
+             Run `claude` to sign in again.",
         );
     }
 
@@ -1245,8 +1249,10 @@ mod tests {
         .expect_err("an unparsable Keychain entry and no file");
         assert_eq!(
             format!("{err:#}"),
-            "failed to load the Claude Code login: failed to parse the credentials in the macOS \
-             Keychain: expected ident at line 1 column 2. Run `claude` to sign in again.",
+            "failed to load the Claude Code login: \
+             failed to parse the credentials in the macOS Keychain: \
+             expected ident at line 1 column 2. \
+             Run `claude` to sign in again.",
         );
 
         let unreadable = dir.path().join("directory.json");
@@ -1331,8 +1337,8 @@ mod tests {
         assert_eq!(
             format!("{err:#}"),
             format!(
-                "failed to parse the credentials in {}: missing field `claudeAiOauth` at line 1 \
-                 column 17",
+                "failed to parse the credentials in {}: \
+                 missing field `claudeAiOauth` at line 1 column 17",
                 path.display()
             ),
         );
@@ -1489,7 +1495,7 @@ mod tests {
 
         std::fs::write(
             &path,
-            indoc::indoc! {r#"
+            indoc! {r#"
                 {
                     "claudeAiOauth": {
                         "accessToken": "old-access",
@@ -1544,7 +1550,7 @@ mod tests {
 
         std::fs::write(
             &path,
-            indoc::indoc! {r#"
+            indoc! {r#"
                 {
                     "claudeAiOauth": {
                         "accessToken": "t",
@@ -1581,7 +1587,7 @@ mod tests {
 
         std::fs::write(
             &path,
-            indoc::indoc! {r#"
+            indoc! {r#"
                 {
                     "claudeAiOauth": {
                         "accessToken": "old",

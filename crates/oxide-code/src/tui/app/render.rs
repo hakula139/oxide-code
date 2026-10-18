@@ -351,7 +351,8 @@ mod tests {
         let text = rendered_text(&mut app, 60, 12);
         assert!(
             text.contains("line 39"),
-            "tail of overflowing block must be in the viewport after the first render, got:\n{text}",
+            "tail of overflowing block must be in the viewport after the first render, \
+             got:\n{text}",
         );
     }
 
@@ -427,7 +428,8 @@ mod tests {
     #[test]
     fn draw_frame_with_conversation_and_tool_call() {
         let (mut app, _rx, _event_tx) = test_app(None);
-        app.chat.push_user_message("what files are here?".into());
+        app.chat
+            .push_user_message("what files are here?".to_owned());
         push_ls_call(&mut app);
         app.chat.append_stream_token("Two files.");
         app.chat.commit_streaming();
@@ -437,8 +439,8 @@ mod tests {
     #[test]
     fn draw_frame_streaming_shows_spinner_in_status_bar() {
         let (mut app, _rx, _event_tx) = test_app(None);
-        app.dispatch_action(Action::Submit("working...".into()));
-        app.handle_engine_event(Event::StreamToken("part".into()));
+        app.dispatch_action(Action::Submit("working...".to_owned()));
+        app.handle_engine_event(Event::StreamToken("part".to_owned()));
         insta::assert_snapshot!(render_app(&mut app, 60, 8));
     }
 
@@ -604,7 +606,7 @@ mod tests {
     #[test]
     fn draw_frame_narrow_width_still_renders_all_three_panels() {
         let (mut app, _rx, _event_tx) = test_app(Some("narrow"));
-        app.chat.push_user_message("hi".into());
+        app.chat.push_user_message("hi".to_owned());
         insta::assert_snapshot!(render_app(&mut app, 40, 8));
     }
 
@@ -626,7 +628,7 @@ mod tests {
     #[test]
     fn draw_frame_preview_panel_renders_queued_prompts_and_overflow_tag() {
         let (mut app, _rx, _event_tx) = test_app(None);
-        app.dispatch_action(Action::Submit("active".into()));
+        app.dispatch_action(Action::Submit("active".to_owned()));
         for i in 0..5 {
             app.pending_prompts.push_back(format!("queued {i}"));
         }
@@ -644,7 +646,7 @@ mod tests {
             "~/test".to_owned(),
             None,
         );
-        app.dispatch_action(Action::Submit("active".into()));
+        app.dispatch_action(Action::Submit("active".to_owned()));
         push_ls_call(&mut app);
         app.pending_prompts.push_back("queued 0".to_owned());
 

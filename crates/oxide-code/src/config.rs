@@ -757,6 +757,7 @@ mod tests {
     use std::collections::HashSet;
     use std::path::Path;
 
+    use indoc::indoc;
     use tempfile::TempDir;
 
     use super::compaction::test_thresholds;
@@ -1090,7 +1091,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         write_user_config(
             dir.path(),
-            indoc::indoc! {r##"
+            indoc! {r##"
                 [tui.theme]
                 base = "latte"
 
@@ -1103,7 +1104,7 @@ mod tests {
         assert_eq!(config.theme.base, "latte");
         assert_eq!(
             config.theme.overrides,
-            indoc::indoc! {r##"
+            indoc! {r##"
                 error = "#ff0000"
                 accent = { bold = false }
             "##}
@@ -1154,7 +1155,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let user = write_user_config(
             dir.path(),
-            indoc::indoc! {r#"
+            indoc! {r#"
                 [client]
                 model = "claude-haiku-5-5"
                 base_url = "https://config-file.invalid"
@@ -1217,7 +1218,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         write_user_config(
             dir.path(),
-            indoc::indoc! {r#"
+            indoc! {r#"
                 [client]
                 model = "claude-haiku-5-5"
                 max_tokens = 128
@@ -1281,7 +1282,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         write_user_config(
             dir.path(),
-            indoc::indoc! {r#"
+            indoc! {r#"
                 [client]
                 api_key = "sk-from-file"
                 show_thinking = true
@@ -1342,7 +1343,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         write_user_config(
             dir.path(),
-            indoc::indoc! {r#"
+            indoc! {r#"
                 [client]
                 extra_ca_certs = "/etc/ssl/from-file.pem"
             "#},
@@ -1371,7 +1372,7 @@ mod tests {
 
         write_user_config(
             dir.path(),
-            indoc::indoc! {r#"
+            indoc! {r#"
                 [client]
                 extra_ca_certs = "/etc/ssl/from-file.pem"
             "#},
@@ -1398,7 +1399,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         write_user_config(
             dir.path(),
-            indoc::indoc! {r#"
+            indoc! {r#"
                 [client]
                 extra_ca_certs = "/etc/ssl/from-file.pem"
             "#},
@@ -1417,7 +1418,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         write_user_config(
             dir.path(),
-            indoc::indoc! {r#"
+            indoc! {r#"
                 [client]
                 extra_ca_certs = "/etc/ssl/from-file.pem"
             "#},
@@ -1436,7 +1437,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         write_user_config(
             dir.path(),
-            indoc::indoc! {r#"
+            indoc! {r#"
                 [client]
                 api_key = "sk-from-file"
             "#},
@@ -1452,7 +1453,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let user = write_user_config(
             dir.path(),
-            indoc::indoc! {r#"
+            indoc! {r#"
                 [client]
                 api_key = "sk-from-file"
             "#},
@@ -1479,7 +1480,7 @@ mod tests {
             if file_key {
                 write_user_config(
                     dir.path(),
-                    indoc::indoc! {r#"
+                    indoc! {r#"
                         [client]
                         api_key = "sk-from-file"
                     "#},
@@ -1594,8 +1595,9 @@ mod tests {
         .expect_err("custom header must not replace the credential");
         assert_eq!(
             format!("{err:#}"),
-            "invalid ANTHROPIC_CUSTOM_HEADERS: authorization carries the Auth token \
-             (ANTHROPIC_AUTH_TOKEN) credential and cannot be overridden",
+            "invalid ANTHROPIC_CUSTOM_HEADERS: \
+             authorization carries the Auth token (ANTHROPIC_AUTH_TOKEN) credential \
+             and cannot be overridden",
         );
     }
 
@@ -1662,7 +1664,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         write_user_config(
             dir.path(),
-            indoc::indoc! {r#"
+            indoc! {r#"
                 [client]
                 model = "claude-sonnet-5-5"
                 effort = "medium"
@@ -1677,7 +1679,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         write_user_config(
             dir.path(),
-            indoc::indoc! {r#"
+            indoc! {r#"
                 [client]
                 model = "claude-opus-5-5"
                 effort = "low"
@@ -1721,8 +1723,8 @@ mod tests {
             .expect_err("stray comma must surface as a typo");
         assert_eq!(
             format!("{err:#}"),
-            "invalid OX_STATUS_LINE \"model,,run-state\": empty segment between commas. Remove the \
-             stray comma.",
+            "invalid OX_STATUS_LINE \"model,,run-state\": empty segment between commas. \
+             Remove the stray comma.",
         );
     }
 
@@ -1731,7 +1733,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         write_user_config(
             dir.path(),
-            indoc::indoc! {r#"
+            indoc! {r#"
                 [tui]
                 status_line = ["model", "nope"]
             "#},
@@ -1766,7 +1768,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         write_user_config(
             dir.path(),
-            indoc::indoc! {r"
+            indoc! {"
                 [tui]
                 status_line = []
             "},
@@ -1798,7 +1800,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         write_user_config(
             dir.path(),
-            indoc::indoc! {r#"
+            indoc! {r#"
                 [client]
                 prompt_cache_ttl = "5m"
             "#},
@@ -1812,7 +1814,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         write_user_config(
             dir.path(),
-            indoc::indoc! {r#"
+            indoc! {r#"
                 [client]
                 prompt_cache_ttl = "5m"
             "#},
@@ -1842,7 +1844,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let user = write_user_config(
             dir.path(),
-            indoc::indoc! {r"
+            indoc! {"
                 [client.compaction]
                 auto_enabled = false
             "},
@@ -1866,7 +1868,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         write_user_config(
             dir.path(),
-            indoc::indoc! {r"
+            indoc! {"
                 [client.compaction]
                 auto_enabled = false
             "},
@@ -1882,7 +1884,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         write_user_config(
             dir.path(),
-            indoc::indoc! {r"
+            indoc! {"
                 [client.compaction]
                 auto_threshold_tokens = 400000
             "},
@@ -1896,7 +1898,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         write_user_config(
             dir.path(),
-            indoc::indoc! {r"
+            indoc! {"
                 [client.compaction]
                 auto_threshold_tokens = 400000
                 auto_threshold_percent = 40
@@ -1923,8 +1925,9 @@ mod tests {
         .expect_err("ambiguous env thresholds must fail config load");
         assert_eq!(
             format!("{err:#}"),
-            "both OX_COMPACTION_AUTO_THRESHOLD_TOKENS and OX_COMPACTION_AUTO_THRESHOLD_PERCENT \
-             are set. Set only one compaction threshold.",
+            "both OX_COMPACTION_AUTO_THRESHOLD_TOKENS \
+             and OX_COMPACTION_AUTO_THRESHOLD_PERCENT are set. \
+             Set only one compaction threshold.",
         );
     }
 
@@ -1935,7 +1938,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         write_user_config(
             dir.path(),
-            indoc::indoc! {r#"
+            indoc! {r#"
                 [permission.deny]
                 exec = ["git push *"]
 
@@ -2025,9 +2028,9 @@ mod tests {
 
         assert_eq!(
             format!("{err:#}"),
-            "invalid built-in `ssh` pattern \"!home/.ssh\": a pattern cannot start with `!`, since \
-             patterns have no negation. Write the paths to match instead, or turn off the built-in \
-             rule that covers them."
+            "invalid built-in `ssh` pattern \"!home/.ssh\": \
+             a pattern cannot start with `!`, since patterns have no negation. \
+             Write the paths to match instead, or turn off the built-in rule that covers them."
         );
     }
 
@@ -2036,7 +2039,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         write_user_config(
             dir.path(),
-            indoc::indoc! {r#"
+            indoc! {r#"
                 [permission]
                 mode = "plan"
             "#},
@@ -2101,7 +2104,8 @@ mod tests {
         assert_eq!(
             format!("{err:#}"),
             format!(
-                r#"invalid config at {}: invalid extra root "shared": expected an absolute or `~/` path"#,
+                "invalid config at {}: invalid extra root \"shared\": \
+                 expected an absolute or `~/` path",
                 drop_in.path().display()
             ),
         );
@@ -2112,7 +2116,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         write_user_config(
             dir.path(),
-            indoc::indoc! {r#"
+            indoc! {r#"
                 [permission.allow]
                 edit = ["src/**/["]
             "#},
@@ -2133,7 +2137,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let user = write_user_config(
             dir.path(),
-            indoc::indoc! {r#"
+            indoc! {r#"
                 [client]
                 model = "claude-haiku-5-5"
                 effort = "high"
@@ -2146,7 +2150,7 @@ mod tests {
         let drop_in = write_drop_in(
             dir.path(),
             "10-team.toml",
-            indoc::indoc! {r#"
+            indoc! {r#"
                 [client]
                 effort = "low"
                 prompt_cache_ttl = "5m"

@@ -34,6 +34,7 @@ These rules apply to comments, docs, commit messages, PR and issue text, `#[expe
 - Place commas and periods outside closing quotation marks.
 - Use straight quotes. Arrows and comparison operators (`→`, `≤`, `≠`) are welcome.
 - Put spaces around `/` and arrows when they separate words or phrases, as in `Read / Write` and `low → high`. Keep compound terms such as `I/O` tight.
+- Close a delimited block the same way it opens. If an opening tag or fence, such as `<system-reminder>`, appears on its own line, put its closing counterpart on its own line too.
 
 ## Markdown
 

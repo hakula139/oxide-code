@@ -6,6 +6,8 @@ use std::path::Path;
 use std::{cell::Cell, collections::HashSet, sync::Arc};
 
 use anyhow::{Context, Result, bail};
+#[cfg(test)]
+use indoc::indoc;
 use reqwest::ClientBuilder;
 use rustls::pki_types::CertificateDer;
 use rustls::pki_types::pem::PemObject;
@@ -56,7 +58,8 @@ pub(crate) fn load_extra_ca_certs(path: &Path) -> Result<Vec<CertificateDer<'sta
         .with_context(|| format!("failed to parse PEM bundle at {}", path.display()))?;
     if certs.is_empty() {
         bail!(
-            "no PEM certificates found in {} (expected one or more `-----BEGIN CERTIFICATE-----` blocks)",
+            "no PEM certificates found in {} \
+             (expected one or more `-----BEGIN CERTIFICATE-----` blocks)",
             path.display(),
         );
     }
@@ -399,7 +402,7 @@ impl webpki::ExtendedKeyUsageValidator for LeafServerAuth {
 /// Self-signed throwaway P-256 cert generated once with `openssl req -x509 ...`. Embedding
 /// keeps tests hermetic and never touches the network. 100-year validity so tests do not rot.
 #[cfg(test)]
-pub(crate) const TEST_CA_PEM: &str = indoc::indoc! {"
+pub(crate) const TEST_CA_PEM: &str = indoc! {"
     -----BEGIN CERTIFICATE-----
     MIIBhzCCAS2gAwIBAgIUSHnI8j4asiQCYFCLHv+mTjaH7PIwCgYIKoZIzj0EAwIw
     GDEWMBQGA1UEAwwNb3hpZGUtdGVzdC1jYTAgFw0yNjA1MTMwOTM1NTNaGA8yMTI2
@@ -429,7 +432,7 @@ mod tests {
     // ── Fixtures ──
 
     /// A P-256 CA that issued the leaves below, valid for 100 years.
-    const ISSUING_CA_PEM: &str = indoc::indoc! {"
+    const ISSUING_CA_PEM: &str = indoc! {"
         -----BEGIN CERTIFICATE-----
         MIIBdjCCAR2gAwIBAgIJANQtabEExkQPMAoGCCqGSM49BAMCMB4xHDAaBgNVBAMM
         E294aWRlLXRlc3QtZXh0cmEtY2EwIBcNMjYxMDE3MDU0MDE3WhgPMjEyNzAxMDEw
@@ -444,7 +447,7 @@ mod tests {
 
     /// A `localhost` server leaf valid for 100 years, beyond Apple's 825-day limit, with the
     /// `serverAuth` usage and the subject alternative name Apple requires.
-    const LONG_LIVED_LEAF_PEM: &str = indoc::indoc! {"
+    const LONG_LIVED_LEAF_PEM: &str = indoc! {"
         -----BEGIN CERTIFICATE-----
         MIIBuTCCAV6gAwIBAgIJAL+LZkXFknsiMAoGCCqGSM49BAMCMB4xHDAaBgNVBAMM
         E294aWRlLXRlc3QtZXh0cmEtY2EwIBcNMjYxMDE3MDU0MDE3WhgPMjEyNjA5MjMw
@@ -460,7 +463,7 @@ mod tests {
     "};
 
     /// The throwaway private key of [`LONG_LIVED_LEAF_PEM`].
-    const LONG_LIVED_LEAF_KEY_PEM: &str = indoc::indoc! {"
+    const LONG_LIVED_LEAF_KEY_PEM: &str = indoc! {"
         -----BEGIN EC PRIVATE KEY-----
         MHcCAQEEINmz7sOs20KgX0/M7R5/avsn9FXV266iOrOi4ABp1YpDoAoGCCqGSM49
         AwEHoUQDQgAEnasGs4XIF2Eer/xbi0+ASrJ2oJ0ol6qjVMQ/8/F4atf4sxl70Ivd
@@ -470,7 +473,7 @@ mod tests {
 
     /// A `localhost` server leaf from 2026-10-17 valid for one year, within Apple's limit.
     #[cfg(target_os = "macos")]
-    const SHORT_LIVED_LEAF_PEM: &str = indoc::indoc! {"
+    const SHORT_LIVED_LEAF_PEM: &str = indoc! {"
         -----BEGIN CERTIFICATE-----
         MIIBtTCCAVygAwIBAgIJAL+LZkXFknsjMAoGCCqGSM49BAMCMB4xHDAaBgNVBAMM
         E294aWRlLXRlc3QtZXh0cmEtY2EwHhcNMjYxMDE3MDYwODA2WhcNMjcxMDE3MDYw
@@ -487,7 +490,7 @@ mod tests {
 
     /// [`LONG_LIVED_LEAF_PEM`] without the extended key usage extension.
     #[cfg(target_os = "macos")]
-    const NO_USAGE_LEAF_PEM: &str = indoc::indoc! {"
+    const NO_USAGE_LEAF_PEM: &str = indoc! {"
         -----BEGIN CERTIFICATE-----
         MIIBojCCAUegAwIBAgIJAL+LZkXFknsmMAoGCCqGSM49BAMCMB4xHDAaBgNVBAMM
         E294aWRlLXRlc3QtZXh0cmEtY2EwIBcNMjYxMDE3MDYxNzEzWhgPMjEyNjA5MjMw
@@ -504,7 +507,7 @@ mod tests {
     /// An intermediate CA under [`ISSUING_CA_PEM`] without the extended key usage extension, as
     /// private CAs often issue them.
     #[cfg(target_os = "macos")]
-    const INTERMEDIATE_CA_PEM: &str = indoc::indoc! {"
+    const INTERMEDIATE_CA_PEM: &str = indoc! {"
         -----BEGIN CERTIFICATE-----
         MIIBozCCAUigAwIBAgIJAL+LZkXFknssMAoGCCqGSM49BAMCMB4xHDAaBgNVBAMM
         E294aWRlLXRlc3QtZXh0cmEtY2EwIBcNMjYxMDE3MDcwNzEyWhgPMjEyNjA5MjMw
@@ -520,7 +523,7 @@ mod tests {
 
     /// A `localhost` server leaf under [`INTERMEDIATE_CA_PEM`], valid for 98 years.
     #[cfg(target_os = "macos")]
-    const INTERMEDIATE_LEAF_PEM: &str = indoc::indoc! {"
+    const INTERMEDIATE_LEAF_PEM: &str = indoc! {"
         -----BEGIN CERTIFICATE-----
         MIIByzCCAXCgAwIBAgIURavIKAYby7s2CnBI92HfR/sG2lcwCgYIKoZIzj0EAwIw
         JTEjMCEGA1UEAwwab3hpZGUtdGVzdC1pbnRlcm1lZGlhdGUtY2EwIBcNMjYxMDE3
@@ -538,7 +541,7 @@ mod tests {
     /// Another 100-year `localhost` leaf, which [`REVOKED_LEAF_OCSP_BASE64`] revokes. It has its
     /// own serial number so that a cached revocation cannot reach the other leaves.
     #[cfg(target_os = "macos")]
-    const REVOKED_LEAF_PEM: &str = indoc::indoc! {"
+    const REVOKED_LEAF_PEM: &str = indoc! {"
         -----BEGIN CERTIFICATE-----
         MIIBuDCCAV6gAwIBAgIJAL+LZkXFknsrMAoGCCqGSM49BAMCMB4xHDAaBgNVBAMM
         E294aWRlLXRlc3QtZXh0cmEtY2EwIBcNMjYxMDE3MDYyMTI0WhgPMjEyNjA5MjMw
@@ -556,7 +559,7 @@ mod tests {
     /// A DER OCSP response from [`ISSUING_CA_PEM`] that marks [`REVOKED_LEAF_PEM`] revoked, valid
     /// for 100 years.
     #[cfg(target_os = "macos")]
-    const REVOKED_LEAF_OCSP_BASE64: &str = indoc::indoc! {"
+    const REVOKED_LEAF_OCSP_BASE64: &str = indoc! {"
         MIIBKgoBAKCCASMwggEfBgkrBgEFBQcwAQEEggEQMIIBDDCBsqEgMB4xHDAaBgNV
         BAMME294aWRlLXRlc3QtZXh0cmEtY2EYDzIwMjYxMDE3MDYyMTQ1WjB9MHswQjAJ
         BgUrDgMCGgUABBRTf2oks/96uCQL/yYbyFGV7w1qQAQUTk695Gu4cijrXhtBt6Kz
@@ -568,7 +571,7 @@ mod tests {
 
     /// A 100-year `localhost` leaf whose OCSP responder is [`OCSP_RESPONDER_ADDR`].
     #[cfg(target_os = "macos")]
-    const OCSP_LEAF_PEM: &str = indoc::indoc! {"
+    const OCSP_LEAF_PEM: &str = indoc! {"
         -----BEGIN CERTIFICATE-----
         MIIB7DCCAZKgAwIBAgIJAL+LZkXFknstMAoGCCqGSM49BAMCMB4xHDAaBgNVBAMM
         E294aWRlLXRlc3QtZXh0cmEtY2EwIBcNMjYxMDE3MDcwNzEyWhgPMjEyNjA5MjMw
@@ -623,8 +626,14 @@ mod tests {
                     break;
                 }
             }
-            tls.write_all(b"HTTP/1.1 200 OK\r\ncontent-length: 2\r\nconnection: close\r\n\r\nok")
-                .unwrap();
+            tls.write_all(indoc! {b"
+                HTTP/1.1 200 OK\r
+                content-length: 2\r
+                connection: close\r
+                \r
+                ok"
+            })
+            .unwrap();
         });
         addr
     }
@@ -766,7 +775,8 @@ mod tests {
         assert_eq!(
             err.to_string(),
             format!(
-                "no PEM certificates found in {} (expected one or more `-----BEGIN CERTIFICATE-----` blocks)",
+                "no PEM certificates found in {} \
+                 (expected one or more `-----BEGIN CERTIFICATE-----` blocks)",
                 file.path().display(),
             ),
         );
@@ -774,7 +784,7 @@ mod tests {
 
     #[test]
     fn load_extra_ca_certs_reports_filename_on_parse_failure() {
-        let malformed = write_pem(indoc::indoc! {"
+        let malformed = write_pem(indoc! {"
             -----BEGIN CERTIFICATE-----
             not base64 data
             -----END CERTIFICATE-----
@@ -795,7 +805,7 @@ mod tests {
     fn load_extra_ca_certs_rejects_a_block_that_is_not_a_certificate() {
         let file = write_pem(&format!(
             "{TEST_CA_PEM}{}",
-            indoc::indoc! {"
+            indoc! {"
                 -----BEGIN CERTIFICATE-----
                 AAAA
                 -----END CERTIFICATE-----

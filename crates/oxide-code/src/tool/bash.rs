@@ -61,12 +61,13 @@ impl Tool for BashTool {
     fn spec(&self) -> ToolSpec {
         ToolSpec {
             name: "bash".to_owned(),
-            description: "Execute a shell command and return its output. For a dev server, a \
-                 watcher, or a long build, set run_in_background, without a trailing `&`: the \
-                 call returns a shell ID at once. You are not notified when the command \
-                 finishes, so check on it with bash_output, and stop it with bash_stop. A \
-                 background shell stays open, running or finished, until bash_stop stops it or \
-                 the session ends."
+            description: "Execute a shell command and return its output. \
+                          For a dev server, a watcher, or a long build, set run_in_background, \
+                          without a trailing `&`: the call returns a shell ID at once. \
+                          You are not notified when the command finishes, \
+                          so check on it with bash_output, and stop it with bash_stop. \
+                          A background shell stays open, running or finished, \
+                          until bash_stop stops it or the session ends."
                 .to_owned(),
             input_schema: input_schema(),
             class: PermissionClass::Exec,
@@ -139,11 +140,14 @@ fn input_schema() -> serde_json::Value {
             },
             "timeout": {
                 "type": "integer",
-                "description": "Timeout in milliseconds, at most 600000. Omit or pass 0 for the default of 120000."
+                "description": "Timeout in milliseconds, at most 600000. \
+                                Omit or pass 0 for the default of 120000."
             },
             "run_in_background": {
                 "type": "boolean",
-                "description": "Start the command as a background shell and return its ID without waiting. The timeout field does not apply."
+                "description": "Start the command as a background shell \
+                                and return its ID without waiting. \
+                                The timeout field does not apply."
             }
         },
         "required": ["command"]
@@ -362,12 +366,12 @@ fn render_pipe(pipe: &PipeCapture, budget: usize) -> String {
         head = &head[..head.len() - split_char];
         tail = &tail[continuations..];
         omitted += split_char + continuations;
+        let head = String::from_utf8_lossy(head);
+        let tail = String::from_utf8_lossy(tail);
         formatdoc! {"
-            {}
+            {head}
             ... [{omitted} bytes omitted] ...
-            {}",
-            String::from_utf8_lossy(head),
-            String::from_utf8_lossy(tail),
+            {tail}"
         }
     };
 
@@ -661,7 +665,8 @@ mod tests {
             indoc! {"
                 started
 
-                Command timed out after 1000 ms"}
+                Command timed out after 1000 ms"
+            }
         );
     }
 
@@ -749,7 +754,8 @@ mod tests {
             indoc! {"
                 partial
 
-                (exit code 1)"}
+                (exit code 1)"
+            }
         );
     }
 
@@ -874,7 +880,8 @@ mod tests {
             indoc! {"
                 done
 
-                Command timed out after 1000 ms"}
+                Command timed out after 1000 ms"
+            }
         );
         assert!(
             start.elapsed() < Duration::from_secs(3),
@@ -892,7 +899,8 @@ mod tests {
             indoc! {"
                 before
 
-                (killed by signal 9)"}
+                (killed by signal 9)"
+            }
         );
     }
 
@@ -905,7 +913,7 @@ mod tests {
         // A shim outside any Git root, then the `mingw64\bin` and `cmd` copies a Git Bash session
         // puts on `PATH`.
         let [shims, mingw, cmd, bin] =
-            [r"shims", r"Git\mingw64\bin", r"Git\cmd", r"Git\bin"].map(|d| dir.path().join(d));
+            ["shims", r"Git\mingw64\bin", r"Git\cmd", r"Git\bin"].map(|d| dir.path().join(d));
         for d in [&shims, &mingw, &cmd, &bin] {
             std::fs::create_dir_all(d).unwrap();
         }
@@ -1000,7 +1008,8 @@ mod tests {
                 hello
 
                 ... [7 bytes omitted] ...
-                world"},
+                world"
+            },
         );
     }
 
@@ -1017,7 +1026,8 @@ mod tests {
             indoc! {"
                 ab
                 ... [10 bytes omitted] ...
-                cd"},
+                cd"
+            },
         );
     }
 
@@ -1029,7 +1039,8 @@ mod tests {
             indoc! {"
                 0123
                 ... [12 bytes omitted] ...
-                4321"},
+                4321"
+            },
         );
     }
 

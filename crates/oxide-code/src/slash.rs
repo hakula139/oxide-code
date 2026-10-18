@@ -81,7 +81,8 @@ fn dispatch_with(
 ) -> Result<SlashOutcome, String> {
     let Some(cmd) = registry::lookup_in(commands, &parsed.name) else {
         return Err(format!(
-            "Unknown command: /{name}. Available: {available}. \
+            "Unknown command: /{name}. \
+             Available: {available}. \
              Use //{name} to send the literal text.",
             name = parsed.name,
             available = format_available(commands),

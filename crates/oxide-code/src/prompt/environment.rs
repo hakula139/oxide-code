@@ -42,6 +42,13 @@ impl Environment {
     }
 
     pub(super) fn render(&self) -> String {
+        let Self {
+            cwd,
+            is_git,
+            platform,
+            shell,
+            os_version,
+        } = self;
         formatdoc! {"
             # Environment
 
@@ -51,12 +58,7 @@ impl Environment {
               - Is a git repository: {is_git}
             - Platform: {platform}
             - Shell: {shell}
-            - OS Version: {os_version}",
-            cwd = self.cwd,
-            is_git = self.is_git,
-            platform = self.platform,
-            shell = self.shell,
-            os_version = self.os_version,
+            - OS Version: {os_version}"
         }
     }
 }
@@ -121,14 +123,17 @@ pub(super) fn model_identity(model: &ModelSpec) -> String {
         return format!("You are powered by the model {id}.");
     };
     format!(
-        "You are powered by the model named {}. The exact model ID is {id}. Assistant knowledge \
-         cutoff is {}.",
+        "You are powered by the model named {}. \
+         The exact model ID is {id}. \
+         Assistant knowledge cutoff is {}.",
         info.display_name, info.cutoff,
     )
 }
 
 #[cfg(test)]
 mod tests {
+    use indoc::indoc;
+
     use super::*;
 
     fn spec(id: &str) -> ModelSpec {
@@ -169,7 +174,7 @@ mod tests {
 
         assert_eq!(
             env.render(),
-            indoc::indoc! {"
+            indoc! {"
                 # Environment
 
                 You have been invoked in the following environment:
@@ -258,8 +263,9 @@ mod tests {
     fn model_identity_names_a_catalog_model_with_its_cutoff() {
         assert_eq!(
             model_identity(&spec("claude-opus-5-5")),
-            "You are powered by the model named Claude Opus 5.5. The exact model ID is \
-             claude-opus-5-5. Assistant knowledge cutoff is June 2026.",
+            "You are powered by the model named Claude Opus 5.5. \
+             The exact model ID is claude-opus-5-5. \
+             Assistant knowledge cutoff is June 2026.",
         );
     }
 

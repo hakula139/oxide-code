@@ -109,7 +109,8 @@ mod tests {
 
             para two
 
-            - tail"};
+            - tail"
+        };
         assert_eq!(complete_blocks_len(input), "para one\n\npara two\n\n".len());
     }
 
@@ -141,7 +142,8 @@ mod tests {
 
                 - b
 
-                  more"}),
+                  more"
+            }),
             0
         );
     }
@@ -151,7 +153,8 @@ mod tests {
         let input = indoc! {"
             para
 
-                indented code"};
+                indented code"
+        };
         assert_eq!(complete_blocks_len(input), "para\n\n".len());
     }
 

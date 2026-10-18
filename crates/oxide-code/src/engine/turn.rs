@@ -100,7 +100,8 @@ impl TurnOutcome {
 /// `max_tool_rounds = None` runs unbounded, and `Some(n)` bails after `n` rounds without a reply.
 #[expect(
     clippy::too_many_arguments,
-    reason = "agent_turn takes the full per-turn dependency set, since a bundle struct would obscure lifetimes"
+    reason = "agent_turn takes the full per-turn dependency set, \
+              since a bundle struct would obscure lifetimes"
 )]
 pub(super) async fn agent_turn(
     client: &dyn Wire,
@@ -200,8 +201,8 @@ pub(super) async fn agent_turn(
     TurnOutcome::aborted(
         report,
         TurnAbort::Failed(anyhow!(
-            "Agent stopped after {cap} tool rounds without a final response. Raise or unset \
-             client.max_tool_rounds (OX_MAX_TOOL_ROUNDS) to allow longer turns."
+            "Agent stopped after {cap} tool rounds without a final response. \
+             Raise or unset client.max_tool_rounds (OX_MAX_TOOL_ROUNDS) to allow longer turns."
         )),
     )
 }
@@ -295,8 +296,8 @@ fn refusal_message(details: Option<&StopDetails>) -> String {
         |e| format!(": {}.", e.trim().trim_end_matches('.')),
     );
     format!(
-        "The model declined this request{category}{explanation} Rephrase it, or run /clear to \
-         start over."
+        "The model declined this request{category}{explanation} \
+         Rephrase it, or run /clear to start over."
     )
 }
 
@@ -447,6 +448,7 @@ mod tests {
     use std::pin::Pin;
     use std::sync::Arc;
 
+    use indoc::indoc;
     use serde_json::json;
     use tokio::sync::Notify;
     use wiremock::matchers::{method, path as wm_path};
@@ -1007,7 +1009,7 @@ mod tests {
         let mut messages = vec![Message::user("kick off")];
         let (tx, mut rx) = mpsc::channel::<Op>(4);
         // Hold the sender so `recv()` stays pending after the queued submit.
-        tx.send(Op::Queue("follow up".into())).await.unwrap();
+        tx.send(Op::Queue("follow up".to_owned())).await.unwrap();
 
         agent_turn(
             &client,
@@ -1066,8 +1068,8 @@ mod tests {
         let sink = CapturingSink::new();
         let mut messages = vec![Message::user("kick off")];
         let (tx, mut rx) = mpsc::channel::<Op>(4);
-        tx.send(Op::Queue("first".into())).await.unwrap();
-        tx.send(Op::Queue("second".into())).await.unwrap();
+        tx.send(Op::Queue("first".to_owned())).await.unwrap();
+        tx.send(Op::Queue("second".to_owned())).await.unwrap();
 
         agent_turn(
             &client,
@@ -1379,8 +1381,8 @@ mod tests {
                 ("tool_1", r#"{"v":1}"#, false),
                 (
                     "tool_2",
-                    "The user interrupted this call before it finished, so it may have run \
-                     partially.",
+                    "The user interrupted this call before it finished, \
+                     so it may have run partially.",
                     true,
                 ),
                 (
@@ -1407,7 +1409,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let session = test_session(dir.path());
         let client = FakeClient::new(vec![with_usage(
-            tool_use_turn("tool_1", "gate", r"{}"),
+            tool_use_turn("tool_1", "gate", "{}"),
             7,
             3,
         )]);
@@ -1460,7 +1462,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let session = test_session(dir.path());
         let client = FakeClient::new(vec![
-            tool_use_turn("tool_1", "nonexistent", r"{}"),
+            tool_use_turn("tool_1", "nonexistent", "{}"),
             text_turn("fallback"),
         ]);
         let tools = ToolRegistry::new(vec![]);
@@ -1561,7 +1563,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let session = test_session(dir.path());
         let turns: Vec<Vec<ResponseEvent>> = (0..CAP)
-            .map(|i| tool_use_turn(&format!("tool_{i}"), "echo", r"{}"))
+            .map(|i| tool_use_turn(&format!("tool_{i}"), "echo", "{}"))
             .collect();
         let client = FakeClient::new(turns);
         let tools = ToolRegistry::new(vec![Box::new(EchoTool)]);
@@ -1584,8 +1586,8 @@ mod tests {
         .expect_err("cap must trip");
         assert_eq!(
             format!("{err:#}"),
-            "Agent stopped after 3 tool rounds without a final response. Raise or unset \
-             client.max_tool_rounds (OX_MAX_TOOL_ROUNDS) to allow longer turns.",
+            "Agent stopped after 3 tool rounds without a final response. \
+             Raise or unset client.max_tool_rounds (OX_MAX_TOOL_ROUNDS) to allow longer turns.",
         );
     }
 
@@ -1597,7 +1599,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let session = test_session(dir.path());
         let turns: Vec<Vec<ResponseEvent>> = (0..CAP)
-            .map(|i| with_usage(tool_use_turn(&format!("tool_{i}"), "echo", r"{}"), 5, 2))
+            .map(|i| with_usage(tool_use_turn(&format!("tool_{i}"), "echo", "{}"), 5, 2))
             .collect();
         let client = FakeClient::new(turns);
         let tools = ToolRegistry::new(vec![Box::new(EchoTool)]);
@@ -1636,7 +1638,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let session = test_session(dir.path());
         let mut turns: Vec<Vec<ResponseEvent>> = (0..50)
-            .map(|i| tool_use_turn(&format!("tool_{i}"), "echo", r"{}"))
+            .map(|i| tool_use_turn(&format!("tool_{i}"), "echo", "{}"))
             .collect();
         turns.push(text_turn("done"));
         let client = FakeClient::new(turns);
@@ -1696,7 +1698,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let session = test_session(dir.path());
         let client = FakeClient::new(vec![with_usage(
-            tool_use_turn("tool_1", "echo", r"{}"),
+            tool_use_turn("tool_1", "echo", "{}"),
             9,
             4,
         )])
@@ -1886,8 +1888,9 @@ mod tests {
 
         assert_eq!(
             abort.to_string(),
-            "The response hit the max_tokens output limit while writing the `echo` call, so no \
-             tools ran. Ask for smaller steps, or raise `max_tokens`.",
+            "The response hit the max_tokens output limit while writing the `echo` call, \
+             so no tools ran. \
+             Ask for smaller steps, or raise `max_tokens`.",
         );
         assert!(
             matches!(&messages[1..], [reply] if matches!(&reply.content[..], [ContentBlock::Text { text }] if text == "Writing it now.")),
@@ -1966,7 +1969,7 @@ mod tests {
         assert_eq!(messages.len(), 1, "{messages:?}");
     }
 
-    const HELLO_SSE: &str = indoc::indoc! {r#"
+    const HELLO_SSE: &str = indoc! {r#"
         event: message_start
         data: {"type":"message_start","message":{"id":"msg_1","model":"claude-sonnet-5-5","usage":{"input_tokens":5,"output_tokens":0}}}
 
@@ -2091,7 +2094,7 @@ mod tests {
 
     #[tokio::test]
     async fn agent_turn_real_client_bills_only_the_attempt_that_answered() {
-        let failed = indoc::indoc! {r#"
+        let failed = indoc! {r#"
             event: message_start
             data: {"type":"message_start","message":{"id":"msg_1","model":"claude-sonnet-5-5","usage":{"input_tokens":5,"cache_creation_input_tokens":900,"output_tokens":0}}}
 
@@ -2099,7 +2102,7 @@ mod tests {
             data: {"type":"error","error":{"type":"overloaded_error","message":"Overloaded"}}
 
         "#};
-        let answered = indoc::indoc! {r#"
+        let answered = indoc! {r#"
             event: message_start
             data: {"type":"message_start","message":{"id":"msg_2","model":"claude-sonnet-5-5","usage":{"input_tokens":5,"cache_read_input_tokens":900,"output_tokens":0}}}
 
@@ -2134,7 +2137,7 @@ mod tests {
 
     #[tokio::test]
     async fn agent_turn_real_client_refusal_discards_the_reply_and_names_the_policy() {
-        let body = indoc::indoc! {r#"
+        let body = indoc! {r#"
             event: message_start
             data: {"type":"message_start","message":{"id":"msg_1","model":"claude-sonnet-5-5","usage":{"input_tokens":5,"output_tokens":0}}}
 
@@ -2164,8 +2167,8 @@ mod tests {
         let abort = outcome.expect_err("a refusal fails the turn");
         assert_eq!(
             abort.to_string(),
-            "The model declined this request (category: cyber): Exploit development. Rephrase it, \
-             or run /clear to start over.",
+            "The model declined this request (category: cyber): Exploit development. \
+             Rephrase it, or run /clear to start over.",
         );
         assert_eq!(
             messages.len(),
@@ -2457,8 +2460,8 @@ mod tests {
         };
         assert_eq!(
             refusal_message(Some(&explanation_only)),
-            "The model declined this request: Unsafe request. Rephrase it, or run /clear to start \
-             over.",
+            "The model declined this request: Unsafe request. \
+             Rephrase it, or run /clear to start over.",
         );
     }
 
@@ -2477,8 +2480,8 @@ mod tests {
 
         assert_eq!(
             truncation_error(StopReason::ModelContextWindowExceeded, &[text()]).to_string(),
-            "The conversation filled the model's context window before it finished. Run \
-             /compact, then continue.",
+            "The conversation filled the model's context window before it finished. \
+             Run /compact, then continue.",
         );
         assert_eq!(
             truncation_error(StopReason::MaxTokens, &[tool_use, text()]).to_string(),
@@ -2509,9 +2512,8 @@ mod tests {
 
         assert_eq!(
             events(&[Message::user("hi"), interrupted.clone()]),
-            [
-                r#"Error("The response was interrupted before it finished. Send a message to continue.")"#
-            ],
+            ["Error(\"The response was interrupted before it finished. \
+              Send a message to continue.\")"],
         );
         let none: [String; 0] = [];
         assert_eq!(events(&[]), none);

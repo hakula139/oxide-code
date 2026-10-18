@@ -2150,7 +2150,7 @@ mod tests {
     #[test]
     fn last_is_error_false_for_non_error_blocks() {
         let mut chat = test_chat();
-        chat.push_user_message("hello".into());
+        chat.push_user_message("hello".to_owned());
         assert!(!chat.last_is_error());
 
         chat.push_tool_call(call("$", "ls"));
@@ -2181,7 +2181,7 @@ mod tests {
     #[test]
     fn last_system_text_default_is_none_for_non_system_blocks() {
         let mut chat = test_chat();
-        chat.push_user_message("a user prompt".into());
+        chat.push_user_message("a user prompt".to_owned());
         assert_eq!(chat.last_system_text(), None);
 
         chat.push_tool_call(call("$", "ls"));
@@ -2584,7 +2584,7 @@ mod tests {
     #[test]
     fn render_user_and_assistant_interleaved() {
         let mut chat = test_chat();
-        chat.push_user_message("what is 2 + 2?".into());
+        chat.push_user_message("what is 2 + 2?".to_owned());
         chat.append_stream_token("The answer is 4.");
         chat.commit_streaming();
         insta::assert_snapshot!(render_chat(&mut chat, 60, 10));

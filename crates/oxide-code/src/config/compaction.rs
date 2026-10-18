@@ -183,8 +183,8 @@ fn resolve_auto_threshold(
                     "{} sets both auto_threshold_tokens and auto_threshold_percent",
                     tildify(layer.path())
                 ),
-                _ => "both OX_COMPACTION_AUTO_THRESHOLD_TOKENS and \
-                      OX_COMPACTION_AUTO_THRESHOLD_PERCENT are set"
+                _ => "both OX_COMPACTION_AUTO_THRESHOLD_TOKENS \
+                      and OX_COMPACTION_AUTO_THRESHOLD_PERCENT are set"
                     .to_owned(),
             };
             bail!("{both}. Set only one compaction threshold.")

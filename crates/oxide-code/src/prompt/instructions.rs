@@ -116,13 +116,16 @@ fn render(files: &[InstructionFile]) -> String {
         Be sure to adhere to these instructions."
     };
     let sections = files.iter().map(|file| {
+        let InstructionFile {
+            path,
+            content,
+            label,
+        } = file;
+        let path = path.display();
         formatdoc! {"
-            Contents of {} ({}):
+            Contents of {path} ({label}):
 
-            {}",
-            file.path.display(),
-            file.label,
-            file.content,
+            {content}"
         }
     });
 
@@ -398,7 +401,8 @@ mod tests {
 
                 Contents of /project/CLAUDE.md (project instructions):
 
-                Project rules."},
+                Project rules."
+            },
         );
     }
 }
