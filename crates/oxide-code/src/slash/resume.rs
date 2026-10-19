@@ -599,7 +599,7 @@ mod tests {
     }
 
     /// Renders `picker` at `width` and the height it requests, for a snapshot of the whole frame.
-    fn render_backend(picker: &ResumePicker, width: u16) -> TestBackend {
+    fn render_to_backend(picker: &ResumePicker, width: u16) -> TestBackend {
         let height = picker.height(width, u16::MAX);
         let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
         terminal
@@ -1239,7 +1239,7 @@ mod tests {
         seed_active_and_archived(&store);
         let picker = ResumePicker::new(store, "live-session-id".to_owned());
 
-        insta::assert_snapshot!(render_backend(&picker, 180));
+        insta::assert_snapshot!(render_to_backend(&picker, 180));
     }
 
     #[test]
@@ -1250,7 +1250,7 @@ mod tests {
 
         picker.handle_key(&KeyEvent::new(KeyCode::Char('a'), KeyModifiers::CONTROL));
 
-        insta::assert_snapshot!(render_backend(&picker, 180));
+        insta::assert_snapshot!(render_to_backend(&picker, 180));
     }
 
     #[test]

@@ -1,6 +1,6 @@
 ---
 source: crates/oxide-code/src/slash/resume.rs
-expression: "render_backend(&picker, 180)"
+expression: "render_to_backend(&picker, 180)"
 ---
 "Resume archived session                                                                                                                                                             "
 "Pick a session to unarchive and resume in place                                                                                                                                     "
