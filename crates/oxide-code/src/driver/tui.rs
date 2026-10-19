@@ -46,7 +46,7 @@ pub(crate) async fn run(
     let session_info = LiveSessionInfo {
         cwd: tildify(cwd),
         working_dir: Some(cwd.to_owned()),
-        project_root: git::repo_root(cwd).await.unwrap_or_else(|| cwd.to_owned()),
+        project_root: git::project_root(cwd).await,
         version: env!("CARGO_PKG_VERSION"),
         session_id: engine.session_id().to_owned(),
         session_allow: Vec::new(),

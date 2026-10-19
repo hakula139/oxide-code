@@ -38,6 +38,8 @@ pub(crate) use parser::{Parsed, PopupState, parse_slash, popup_state, unescape_l
 pub(crate) use registry::{ArgCompletion, SlashKind, SlashOutcome};
 pub(crate) use resume::ResumePicker;
 
+use std::path::Path;
+
 use crate::command;
 use crate::protocol::Op;
 
@@ -103,11 +105,11 @@ fn format_available(commands: &[&dyn registry::SlashCommand]) -> String {
         .join(", ")
 }
 
-/// The op the typed form of `parsed` runs without the TUI's pickers and modals, with an error
-/// prefixed by the name the user typed. `None` when the command has no such form.
-pub(crate) fn typed_op(parsed: &Parsed) -> Option<Result<Op, String>> {
+/// The op the typed form of `parsed` runs at `project_root` without the TUI's pickers and modals,
+/// with an error prefixed by the name the user typed. `None` when the command has no such form.
+pub(crate) fn typed_op(parsed: &Parsed, project_root: &Path) -> Option<Result<Op, String>> {
     let cmd = registry::lookup_in(registry::BUILT_INS, &parsed.name)?;
-    let op = command::parse(cmd.name(), &parsed.args)?;
+    let op = command::parse(cmd.name(), &parsed.args, project_root)?;
     Some(op.map_err(|msg| named_error(parsed, &msg)))
 }
 
@@ -255,9 +257,12 @@ mod tests {
 
         #[test]
         fn routes_an_alias_to_its_command() {
-            assert_eq!(typed_op(&parsed("new", "")), Some(Ok(Op::Clear)));
             assert_eq!(
-                typed_op(&parsed("continue", " ab12 ")),
+                typed_op(&parsed("new", ""), Path::new("/repo")),
+                Some(Ok(Op::Clear))
+            );
+            assert_eq!(
+                typed_op(&parsed("continue", " ab12 "), Path::new("/repo")),
                 Some(Ok(Op::Resume {
                     target: ResumeTarget::Prefix("ab12".to_owned()),
                 })),
@@ -267,7 +272,7 @@ mod tests {
         #[test]
         fn error_names_the_command_as_typed() {
             assert_eq!(
-                typed_op(&parsed("continue", "")),
+                typed_op(&parsed("continue", ""), Path::new("/repo")),
                 Some(Err(
                     "/continue: Missing session ID. Usage: `/resume <id-prefix>`.".to_owned()
                 )),
@@ -276,8 +281,11 @@ mod tests {
 
         #[test]
         fn command_without_a_typed_form_or_an_unknown_one_has_no_op() {
-            assert_eq!(typed_op(&parsed("help", "")), None);
-            assert_eq!(typed_op(&parsed("no-such-thing", "x")), None);
+            assert_eq!(typed_op(&parsed("help", ""), Path::new("/repo")), None);
+            assert_eq!(
+                typed_op(&parsed("no-such-thing", "x"), Path::new("/repo")),
+                None
+            );
         }
     }
 

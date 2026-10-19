@@ -2,7 +2,7 @@
 
 Type `/` to open the autocomplete popup. Use **Up / Down** to browse, **Tab** to complete, **Enter** to submit, and **Esc** to dismiss. An alias runs the same command as its canonical name. Typing `/new` shows `/clear (new)` in the popup, and `/help` lists every alias.
 
-After `/effort`, `/mode`, `/model`, or `/theme`, type a space to switch the popup to **arg mode**, which lists the valid values.
+After `/effort`, `/init`, `/mode`, `/model`, or `/theme`, type a space to switch the popup to **arg mode**, which lists the valid values.
 
 ## Built-In Commands
 
@@ -16,7 +16,7 @@ After `/effort`, `/mode`, `/model`, or `/theme`, type a space to switch the popu
 | `/diff`                                     | Show uncommitted git changes and untracked files in chat, capped at 64 KB.                                                                    |
 | `/effort [<level>]`                         | Open the slider, or set the level directly (`low`, `medium`, `high`, `xhigh`, `max`).                                                         |
 | `/help`                                     | Open a read-only list of available commands.                                                                                                  |
-| `/init`                                     | Create `AGENTS.md` or `CLAUDE.md`, or propose edits to an existing one as a diff to confirm.                                                  |
+| `/init [<file>]`                            | Propose edits to an existing `AGENTS.md` or `CLAUDE.md` as a diff to confirm. Without either, pick or name the one to create.                 |
 | `/login`                                    | Sign in to a Claude account in the browser and store the login for oxide-code.                                                                |
 | `/logout`                                   | Remove the oxide-code login. The Claude Code login stays in place.                                                                            |
 | `/mode [<mode>]`                            | Open the permission mode picker, or switch directly to `manual`, `plan`, or `yolo`.                                                           |
@@ -34,7 +34,7 @@ Model, effort, permission mode, and theme choices last for the session. No slash
 ## When Commands Run
 
 - **During a turn**, only `/config`, `/diff`, `/help`, `/mode`, `/status`, and the bare `/theme` picker run. A mode switch applies from the turn's next tool call. Retry other commands after the turn finishes.
-- **In the bare REPL** (`--no-tui`), only `/clear`, `/compact`, `/effort <level>`, `/mode <mode>`, `/model <id>`, `/rename <title>`, and `/resume <id-prefix>` run, along with their aliases, and each prints a confirmation to stderr. The REPL rejects other commands, and a rejected or failed command makes it exit with a failure status at the end of input.
+- **In the bare REPL** (`--no-tui`), only `/clear`, `/compact`, `/effort <level>`, `/init [<file>]`, `/mode <mode>`, `/model <id>`, `/rename <title>`, and `/resume <id-prefix>` run, along with their aliases. `/init` starts a turn like a prompt, and the others print a confirmation to stderr. The REPL has no picker, so a project without an instruction file needs `/init AGENTS.md` or `/init CLAUDE.md`. The REPL rejects other commands, and a rejected or failed command makes it exit with a failure status at the end of input.
 
 ## Model and Effort
 

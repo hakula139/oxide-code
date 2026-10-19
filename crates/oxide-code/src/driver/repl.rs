@@ -1,7 +1,7 @@
 //! Bare REPL driver for `--no-tui`: prompts and slash commands from stdin, replies on stdout.
 
 use std::io::{self, IsTerminal, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Result, bail};
 use tokio::io::{AsyncBufRead, AsyncBufReadExt, BufReader, Lines};
@@ -15,6 +15,7 @@ use crate::permission::{Basis, SessionGrant};
 use crate::protocol::{Decision, Event, EventSink, Op};
 use crate::slash::{self, Parsed};
 use crate::tool::{ApprovalBody, ApprovalPreview};
+use crate::util::git;
 use crate::util::text::escape_hidden;
 
 /// Reads prompts and slash commands until EOF or a signal, then finalizes the session. EOF after
@@ -24,11 +25,13 @@ pub(crate) async fn run(engine: Engine, show_thinking: bool, drifted: &[PathBuf]
     let sink = StdioSink::new(show_thinking);
     let attended = io::stdin().is_terminal();
     let stdin = BufReader::new(tokio::io::stdin());
-    drive(engine.spawn(drifted), &sink, stdin, attended).await
+    let project_root = git::project_root(engine.cwd()).await;
+    drive(engine.spawn(drifted), &project_root, &sink, stdin, attended).await
 }
 
 async fn drive<R>(
     mut handle: EngineHandle,
+    project_root: &Path,
     sink: &dyn EventSink,
     input: R,
     attended: bool,
@@ -63,7 +66,7 @@ where
                 continue;
             }
             let op = match slash::parse_slash(input) {
-                Some(parsed) => match command_op(&parsed) {
+                Some(parsed) => match command_op(&parsed, project_root) {
                     Ok(op) => op,
                     Err(message) => {
                         sink.emit(Event::Error(message), "slash-command-rejected");
@@ -114,9 +117,10 @@ where
     })
 }
 
-/// The op a slash command runs in the REPL, or the message saying why it cannot run here.
-fn command_op(parsed: &Parsed) -> Result<Op, String> {
-    slash::typed_op(parsed).unwrap_or_else(|| {
+/// The op a slash command runs in the REPL at `project_root`, or the message saying why it cannot
+/// run here.
+fn command_op(parsed: &Parsed, project_root: &Path) -> Result<Op, String> {
+    slash::typed_op(parsed, project_root).unwrap_or_else(|| {
         let names: Vec<String> = command::NAMES
             .iter()
             .map(|name| format!("/{name}"))
@@ -254,6 +258,8 @@ fn write_preview(out: &mut impl Write, preview: &ApprovalPreview, basis: &Basis)
 
 #[cfg(test)]
 mod tests {
+    use std::fs;
+
     use indoc::{formatdoc, indoc};
     use wiremock::matchers::{method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -285,7 +291,7 @@ mod tests {
                 let sink = CapturingSink::default();
                 let input: &[u8] = b"\n   \nhello\n";
 
-                let exit = Box::pin(drive(engine.spawn(&[]), &sink, input, true))
+                let exit = Box::pin(drive(engine.spawn(&[]), dir.path(), &sink, input, true))
                     .await
                     .unwrap();
 
@@ -322,6 +328,7 @@ mod tests {
 
                 let exit = Box::pin(drive(
                     engine.spawn(&[PathBuf::from("drifted.rs")]),
+                    dir.path(),
                     &sink,
                     input,
                     true,
@@ -390,9 +397,15 @@ mod tests {
                     /resume {prefix}
                 "};
 
-                let exit = Box::pin(drive(engine.spawn(&[]), &sink, input.as_bytes(), true))
-                    .await
-                    .unwrap();
+                let exit = Box::pin(drive(
+                    engine.spawn(&[]),
+                    dir.path(),
+                    &sink,
+                    input.as_bytes(),
+                    true,
+                ))
+                .await
+                .unwrap();
 
                 assert_eq!(exit, Exit::Success);
                 let requests = request_bodies(&server).await;
@@ -443,6 +456,80 @@ mod tests {
         }
 
         #[tokio::test]
+        async fn runs_init_as_the_update_prompt_when_instruction_files_exist() {
+            with_pinned_home(async {
+                let server = MockServer::start().await;
+                mount_reply(&server, "reply").await;
+                let dir = tempfile::tempdir().unwrap();
+                let engine = engine(server.uri(), &test_store(dir.path()), dir.path()).await;
+                fs::write(dir.path().join("AGENTS.md"), "# AGENTS.md\n").unwrap();
+                let input: &[u8] = b"/init\n";
+
+                let exit = Box::pin(drive(
+                    engine.spawn(&[]),
+                    dir.path(),
+                    &CapturingSink::default(),
+                    input,
+                    true,
+                ))
+                .await
+                .unwrap();
+
+                assert_eq!(exit, Exit::Success);
+                let Some(Ok(Op::Prompt(prompt))) = command::parse("init", "", dir.path()) else {
+                    panic!("bare /init must resolve once AGENTS.md exists");
+                };
+                let requests = request_bodies(&server).await;
+                assert_eq!(requests.len(), 1);
+                let last = requests[0]["messages"].as_array().unwrap().last().unwrap();
+                assert_eq!(last["content"][0]["text"], prompt);
+            })
+            .await;
+        }
+
+        #[tokio::test]
+        async fn init_without_an_instruction_file_runs_only_with_a_file_name() {
+            with_pinned_home(async {
+                let server = MockServer::start().await;
+                mount_reply(&server, "reply").await;
+                let dir = tempfile::tempdir().unwrap();
+                let engine = engine(server.uri(), &test_store(dir.path()), dir.path()).await;
+                let sink = CapturingSink::default();
+                let input: &[u8] = indoc! {b"
+                    /init
+                    /init CLAUDE.md
+                "};
+
+                let exit = Box::pin(drive(engine.spawn(&[]), dir.path(), &sink, input, true))
+                    .await
+                    .unwrap();
+
+                assert_eq!(exit, Exit::Failure);
+                let errors: Vec<String> = sink
+                    .events()
+                    .into_iter()
+                    .filter_map(|event| match event {
+                        Event::Error(msg) => Some(msg),
+                        _ => None,
+                    })
+                    .collect();
+                assert_eq!(
+                    errors,
+                    ["/init: This project has no AGENTS.md or CLAUDE.md. \
+                      Run `/init AGENTS.md` or `/init CLAUDE.md` to create one."],
+                );
+                let requests = request_bodies(&server).await;
+                assert_eq!(requests.len(), 1, "the bare /init must not reach the model");
+                let last = requests[0]["messages"].as_array().unwrap().last().unwrap();
+                assert_eq!(
+                    last["content"][0]["text"],
+                    command::init::create_prompt(dir.path(), "CLAUDE.md"),
+                );
+            })
+            .await;
+        }
+
+        #[tokio::test]
         async fn rejects_a_command_it_cannot_run_and_exits_with_failure() {
             with_pinned_home(async {
                 let server = MockServer::start().await;
@@ -455,7 +542,7 @@ mod tests {
                     /help
                 "};
 
-                let exit = Box::pin(drive(engine.spawn(&[]), &sink, input, true))
+                let exit = Box::pin(drive(engine.spawn(&[]), dir.path(), &sink, input, true))
                     .await
                     .unwrap();
 
@@ -481,7 +568,7 @@ mod tests {
                 assert_eq!(
                     reports[2],
                     "/help is not a REPL command. \
-                     Available: /clear, /compact, /effort, /mode, /model, /rename, /resume. \
+                     Available: /clear, /compact, /effort, /init, /mode, /model, /rename, /resume. \
                      Use //help to send the literal text.",
                 );
             })
@@ -506,6 +593,7 @@ mod tests {
 
                 let exit = Box::pin(drive(
                     engine.spawn(&[]),
+                    dir.path(),
                     &CapturingSink::default(),
                     input.as_bytes(),
                     true,
@@ -543,6 +631,7 @@ mod tests {
 
                 let exit = Box::pin(drive(
                     engine.spawn(&[]),
+                    dir.path(),
                     &CapturingSink::default(),
                     input.as_bytes(),
                     false,
@@ -572,6 +661,7 @@ mod tests {
 
             let result = Box::pin(drive(
                 panicked_engine(),
+                Path::new("/repo"),
                 &CapturingSink::default(),
                 input,
                 true,

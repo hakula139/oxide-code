@@ -351,8 +351,8 @@ mod tests {
 
         #[test]
         fn arg_with_empty_roster_stays_hidden() {
-            // `/init` has no curated roster, so the popup hides, leaving Tab and Enter to the arg.
-            let popup = arg_popup("init", "");
+            // `/compact` has no roster, so the popup hides, leaving Tab and Enter to the arg.
+            let popup = arg_popup("compact", "");
             assert!(!popup.is_visible());
         }
 
