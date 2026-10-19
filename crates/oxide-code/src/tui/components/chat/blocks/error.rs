@@ -46,70 +46,72 @@ mod tests {
     use super::*;
     use crate::tui::theme::Theme;
 
-    fn ctx_at(width: u16, theme: &Theme) -> RenderCtx<'_> {
-        RenderCtx {
-            width,
-            theme,
-            show_thinking: false,
+    mod render {
+        use super::*;
+
+        fn ctx_at(width: u16, theme: &Theme) -> RenderCtx<'_> {
+            RenderCtx {
+                width,
+                theme,
+                show_thinking: false,
+            }
         }
-    }
 
-    // ── render ──
+        #[test]
+        fn single_line_message_emits_icon_then_body() {
+            let theme = Theme::default();
+            let block = ErrorBlock::new("boom");
 
-    #[test]
-    fn render_single_line_message_emits_icon_then_body() {
-        let theme = Theme::default();
-        let block = ErrorBlock::new("boom");
+            let lines = block.render(&ctx_at(60, &theme));
 
-        let lines = block.render(&ctx_at(60, &theme));
+            let style = theme.error();
+            assert_eq!(
+                lines,
+                [Line::from(vec![
+                    Span::styled(ERROR_PREFIX, style),
+                    Span::styled("boom", style),
+                ])]
+            );
+        }
 
-        let style = theme.error();
-        assert_eq!(
-            lines,
-            [Line::from(vec![
-                Span::styled(ERROR_PREFIX, style),
-                Span::styled("boom", style),
-            ])]
-        );
-    }
+        #[test]
+        fn multi_line_message_keeps_each_line_on_its_own_row() {
+            // Slash-command errors emit markdown bullets (`/model gpt-4` → "Unknown model: ...").
+            // Joining them at render time would collapse the bullets into one wrapped line.
+            let theme = Theme::default();
+            let block = ErrorBlock::new(indoc! {"
+                Unknown model: `gpt-4`. Valid:
 
-    #[test]
-    fn render_multi_line_message_keeps_each_line_on_its_own_row() {
-        // Slash-command errors emit markdown bullets (`/model gpt-4` → "Unknown model: ...").
-        // Joining them at render time would collapse the bullets into one wrapped line.
-        let theme = Theme::default();
-        let block = ErrorBlock::new(indoc! {"
-            Unknown model: `gpt-4`. Valid:
+                - `claude-opus-5-5` — Claude Opus 5.5
+                - `claude-haiku-5-5` — Claude Haiku 5.5"
+            });
+            let lines = block.render(&ctx_at(80, &theme));
+            let bodies: Vec<&str> = lines
+                .iter()
+                .map(|l| l.spans.last().expect("non-empty").content.as_ref())
+                .collect();
+            assert_eq!(
+                bodies,
+                vec![
+                    "Unknown model: `gpt-4`. Valid:",
+                    "",
+                    "- `claude-opus-5-5` — Claude Opus 5.5",
+                    "- `claude-haiku-5-5` — Claude Haiku 5.5",
+                ],
+            );
+        }
 
-            - `claude-opus-5-5` — Claude Opus 5.5
-            - `claude-haiku-5-5` — Claude Haiku 5.5"
-        });
-        let lines = block.render(&ctx_at(80, &theme));
-        let bodies: Vec<&str> = lines
-            .iter()
-            .map(|l| l.spans.last().expect("non-empty").content.as_ref())
-            .collect();
-        assert_eq!(
-            bodies,
-            vec![
-                "Unknown model: `gpt-4`. Valid:",
-                "",
-                "- `claude-opus-5-5` — Claude Opus 5.5",
-                "- `claude-haiku-5-5` — Claude Haiku 5.5",
-            ],
-        );
-    }
+        #[test]
+        fn continuation_rows_align_under_first_line_body() {
+            // The first row starts with `✗ ` (icon and space), and later logical rows indent to the
+            // same column so the message reads as one block.
+            let theme = Theme::default();
+            let block = ErrorBlock::new("first\nsecond");
 
-    #[test]
-    fn render_continuation_rows_align_under_first_line_body() {
-        // The first row starts with `✗ ` (icon and space), and later logical rows indent to the
-        // same column so the message reads as one block.
-        let theme = Theme::default();
-        let block = ErrorBlock::new("first\nsecond");
+            let lines = block.render(&ctx_at(60, &theme));
 
-        let lines = block.render(&ctx_at(60, &theme));
-
-        let rows: Vec<String> = lines.iter().map(ToString::to_string).collect();
-        assert_eq!(rows, ["✗ first", "  second"]);
+            let rows: Vec<String> = lines.iter().map(ToString::to_string).collect();
+            assert_eq!(rows, ["✗ first", "  second"]);
+        }
     }
 }

@@ -443,222 +443,6 @@ mod tests {
         }
     }
 
-    // ── set_title ──
-
-    #[test]
-    fn set_title_stores_non_empty_title() {
-        let mut bar = test_bar();
-        bar.set_title(Some("Fix auth bug".to_owned()));
-        assert_eq!(bar.title.as_deref(), Some("Fix auth bug"));
-    }
-
-    #[test]
-    fn set_title_none_clears_title() {
-        let mut bar = test_bar();
-        bar.set_title(Some("something".to_owned()));
-        bar.set_title(None);
-        assert!(bar.title.is_none());
-    }
-
-    #[test]
-    fn set_title_drops_whitespace_only() {
-        let mut bar = test_bar();
-        bar.set_title(Some("   \n".to_owned()));
-        assert!(bar.title.is_none());
-    }
-
-    // ── set_model ──
-
-    #[test]
-    fn set_model_replaces_displayed_model_label() {
-        let mut bar = test_bar();
-        bar.set_model("Opus 5.5".to_owned());
-        assert_eq!(bar.model(), "Opus 5.5");
-        let output = render_top_row(&mut bar, 80);
-        assert!(
-            output.contains("Opus 5.5"),
-            "new label must reach the rendered bar: {output:?}",
-        );
-        assert!(
-            !output.contains("test-model"),
-            "old label must not survive: {output:?}",
-        );
-    }
-
-    // ── set_git_branch ──
-
-    #[test]
-    fn set_git_branch_reports_only_real_changes() {
-        let mut bar = test_bar();
-        assert!(!bar.set_git_branch(Some("main".to_owned())));
-        assert!(bar.set_git_branch(Some("feat/x".to_owned())));
-        assert_eq!(bar.git_branch(), Some("feat/x"));
-        assert!(bar.set_git_branch(None));
-        assert_eq!(bar.git_branch(), None);
-    }
-
-    // ── set_pull_request ──
-
-    #[test]
-    fn set_pull_request_reports_only_real_changes() {
-        let mut bar = pr_bar();
-        assert!(!bar.set_pull_request(None));
-        assert!(bar.set_pull_request(Some(pr_state(1))));
-        assert!(!bar.set_pull_request(Some(pr_state(1))));
-        assert!(bar.set_pull_request(Some(pr_state(2))));
-        assert_eq!(bar.pull_request, Some(pr_state(2)));
-    }
-
-    // ── set_status ──
-
-    #[test]
-    fn set_status_resets_spinner_on_transition() {
-        let mut bar = test_bar();
-        bar.set_status(Status::Streaming);
-
-        for _ in 0..TICKS_PER_FRAME * 3 {
-            bar.tick();
-        }
-        assert_eq!(bar.spinner_frame, 3);
-
-        bar.set_status(Status::ToolRunning {
-            name: "bash".to_owned(),
-        });
-        assert_eq!(bar.spinner_frame, 0);
-        assert_eq!(bar.tick_counter, 0);
-    }
-
-    #[test]
-    fn set_status_same_status_preserves_spinner() {
-        let mut bar = test_bar();
-        bar.set_status(Status::Streaming);
-
-        for _ in 0..TICKS_PER_FRAME * 2 {
-            bar.tick();
-        }
-        let frame_before = bar.spinner_frame;
-
-        bar.set_status(Status::Streaming);
-        assert_eq!(bar.spinner_frame, frame_before);
-    }
-
-    #[test]
-    fn set_status_to_idle_resets_spinner() {
-        let mut bar = test_bar();
-        bar.set_status(Status::Streaming);
-
-        for _ in 0..TICKS_PER_FRAME * 2 {
-            bar.tick();
-        }
-
-        bar.set_status(Status::Idle);
-        assert_eq!(bar.spinner_frame, 0);
-        assert_eq!(bar.tick_counter, 0);
-        assert!(!bar.tick());
-    }
-
-    // ── tick ──
-
-    #[test]
-    fn tick_idle_is_false() {
-        let mut bar = test_bar();
-        assert!(!bar.tick());
-        assert_eq!(bar.spinner_frame, 0);
-        assert_eq!(bar.tick_counter, 0);
-    }
-
-    #[test]
-    fn tick_without_current_time_segment_skips_minute_refresh() {
-        let mut bar = StatusBar::new(
-            &Theme::default(),
-            status_bar_init(vec![StatusLineSegment::Model, StatusLineSegment::RunState]),
-        );
-
-        assert_eq!(bar.current_time_minute, None);
-        assert!(!bar.tick());
-        assert_eq!(bar.current_time_minute, None);
-    }
-
-    #[test]
-    fn tick_idle_current_time_marks_dirty_on_minute_change() {
-        let mut bar = StatusBar::new(
-            &Theme::default(),
-            status_bar_init(vec![StatusLineSegment::CurrentTime]),
-        );
-        let current = current_time_minute();
-        bar.current_time_minute = Some((current + 1) % 1440);
-
-        assert!(bar.tick());
-        assert_eq!(bar.current_time_minute, Some(current));
-        assert!(!bar.tick());
-        assert_eq!(bar.spinner_frame, 0);
-    }
-
-    #[test]
-    fn tick_drops_a_usage_limit_window_once_it_resets() {
-        let mut bar = test_bar();
-        let window = |resets_at| {
-            Some(RateLimitWindow {
-                utilization: 0.97,
-                resets_at,
-            })
-        };
-        bar.set_rate_limits(Some(RateLimits {
-            five_hour: window(0),
-            seven_day: window(FUTURE_RESET),
-        }));
-
-        assert!(bar.tick());
-        assert_eq!(
-            bar.rate_limits(),
-            Some(RateLimits {
-                five_hour: None,
-                seven_day: window(FUTURE_RESET),
-            }),
-        );
-        assert!(!bar.tick(), "the open window stays");
-    }
-
-    #[test]
-    fn tick_streaming_before_threshold_does_not_advance_spinner_frame() {
-        let mut bar = test_bar();
-        bar.set_status(Status::Streaming);
-
-        for _ in 0..TICKS_PER_FRAME - 1 {
-            assert!(!bar.tick());
-        }
-        assert_eq!(bar.tick_counter, TICKS_PER_FRAME - 1);
-        assert_eq!(bar.spinner_frame, 0);
-    }
-
-    #[test]
-    fn tick_streaming_advances_frame_at_threshold() {
-        let mut bar = test_bar();
-        bar.set_status(Status::Streaming);
-
-        for _ in 0..TICKS_PER_FRAME - 1 {
-            bar.tick();
-        }
-        assert!(bar.tick());
-        assert_eq!(bar.spinner_frame, 1);
-        assert_eq!(bar.tick_counter, 0);
-    }
-
-    #[test]
-    fn tick_wraps_spinner_frames() {
-        let mut bar = test_bar();
-        bar.set_status(Status::ToolRunning {
-            name: "bash".to_owned(),
-        });
-
-        for _ in 0..SPINNER_FRAMES.len() * TICKS_PER_FRAME {
-            bar.tick();
-        }
-        assert_eq!(bar.spinner_frame, 0);
-    }
-
-    // ── render ──
-
     fn render_status(bar: &mut StatusBar, width: u16) -> TestBackend {
         let mut terminal = Terminal::new(TestBackend::new(width, 2)).unwrap();
         terminal
@@ -682,370 +466,602 @@ mod tests {
             .to_owned()
     }
 
-    fn bar_idle(title: Option<&str>, cwd: &str) -> StatusBar {
-        let mut bar = StatusBar::new(
-            &Theme::default(),
-            StatusBarInit {
-                segments: StatusLineSegment::DEFAULT.to_vec(),
-                model: "Opus 5.5".to_owned(),
-                effort: Some(Effort::Xhigh),
-                cwd: cwd.into(),
-                git_branch: Some("main".to_owned()),
-            },
-        );
-        bar.set_title(title.map(ToOwned::to_owned));
-        bar
-    }
+    mod set_title {
+        use super::*;
 
-    #[test]
-    fn render_idle_with_title_shows_model_title_and_cwd() {
-        let mut bar = bar_idle(Some("Fix login flow"), "~/projects/demo");
-        insta::assert_snapshot!(render_status(&mut bar, 80));
-    }
+        #[test]
+        fn stores_non_empty_title() {
+            let mut bar = test_bar();
+            bar.set_title(Some("Fix auth bug".to_owned()));
+            assert_eq!(bar.title.as_deref(), Some("Fix auth bug"));
+        }
 
-    #[test]
-    fn render_idle_without_title_leaves_slot_unused() {
-        let mut bar = bar_idle(None, "~/projects/demo");
-        insta::assert_snapshot!(render_status(&mut bar, 80));
-    }
+        #[test]
+        fn clears_a_stored_title() {
+            let mut bar = test_bar();
+            bar.set_title(Some("something".to_owned()));
+            bar.set_title(None);
+            assert!(bar.title.is_none());
+        }
 
-    #[test]
-    fn render_streaming_shows_spinner_and_status_label() {
-        let mut bar = bar_idle(None, "~/projects/demo");
-        bar.set_status(Status::Streaming);
-        insta::assert_snapshot!(render_status(&mut bar, 80));
-    }
-
-    #[test]
-    fn render_usage_shows_context_and_session_cost() {
-        let mut bar = bar_idle(None, "~/projects/demo");
-        bar.set_usage(Some(UsageSnapshot {
-            context_tokens: Some(124_000),
-            context_window: Some(1_000_000),
-            estimated_cost_usd: Some(0.4321),
-        }));
-        let output = render_top_row(&mut bar, 120);
-        assert!(
-            output.contains("Ctx: 12% (124k/1M)"),
-            "usage slot should render before status: {output:?}",
-        );
-        assert!(output.contains("Sess: $0.4321"));
-        assert!(output.contains("Ready"));
-    }
-
-    #[test]
-    fn render_tool_running_status() {
-        let mut bar = bar_idle(None, "~/projects/demo");
-        bar.set_status(Status::ToolRunning {
-            name: "bash".to_owned(),
-        });
-        insta::assert_snapshot!(render_status(&mut bar, 80));
-    }
-
-    #[test]
-    fn render_compacting_shows_spinner_and_status_label() {
-        let mut bar = bar_idle(None, "~/projects/demo");
-        bar.set_status(Status::Compacting);
-        insta::assert_snapshot!(render_status(&mut bar, 80));
-    }
-
-    #[test]
-    fn render_signing_in_shows_spinner_and_cancel_hint() {
-        let mut bar = bar_idle(None, "~/projects/demo");
-        bar.set_status(Status::SigningIn);
-        insta::assert_snapshot!(render_status(&mut bar, 80));
-    }
-
-    #[test]
-    fn render_resuming_shows_spinner_and_label() {
-        let mut bar = bar_idle(None, "~/projects/demo");
-        bar.set_status(Status::Resuming);
-        insta::assert_snapshot!(render_status(&mut bar, 80));
-    }
-
-    #[test]
-    fn render_cancelling_shows_spinner_and_label() {
-        let mut bar = bar_idle(None, "~/projects/demo");
-        bar.set_status(Status::Cancelling);
-        insta::assert_snapshot!(render_status(&mut bar, 80));
-    }
-
-    #[test]
-    fn render_exit_armed_shows_static_hint_without_spinner() {
-        let mut bar = bar_idle(None, "~/projects/demo");
-        bar.set_status(Status::ExitArmed {
-            until: Instant::now() + std::time::Duration::from_secs(1),
-        });
-        insta::assert_snapshot!(render_status(&mut bar, 80));
-    }
-
-    #[test]
-    fn render_configured_segments_control_order() {
-        let mut bar = StatusBar::new(
-            &Theme::default(),
-            StatusBarInit {
-                segments: vec![
-                    StatusLineSegment::RunState,
-                    StatusLineSegment::Model,
-                    StatusLineSegment::CurrentDir,
-                ],
-                model: "Opus 5.5".to_owned(),
-                effort: Some(Effort::Xhigh),
-                cwd: "~/projects/demo".to_owned(),
-                git_branch: Some("main".to_owned()),
-            },
-        );
-        let output = render_top_row(&mut bar, 120);
-        let state_at = output.find("Ready").unwrap();
-        let model_at = output.find("Opus 5.5").unwrap();
-        let cwd_at = output.find("~/projects/demo").unwrap();
-        assert!(state_at < model_at, "run state should lead: {output:?}");
-        assert!(model_at < cwd_at, "cwd should follow model: {output:?}");
-        assert!(
-            !output.contains("main"),
-            "git branch was not requested: {output:?}"
-        );
-    }
-
-    #[test]
-    fn render_uses_theme_separator_and_segment_labels() {
-        let mut bar = StatusBar::new(
-            &Theme::default(),
-            StatusBarInit {
-                segments: vec![
-                    StatusLineSegment::CurrentDir,
-                    StatusLineSegment::GitBranch,
-                    StatusLineSegment::ModelWithEffort,
-                    StatusLineSegment::RunState,
-                ],
-                model: "Opus 5.5".to_owned(),
-                effort: Some(Effort::Xhigh),
-                cwd: "~/projects/demo".to_owned(),
-                git_branch: Some("feat/status-line".to_owned()),
-            },
-        );
-        let output = render_top_row(&mut bar, 120);
-        assert!(output.contains("~/projects/demo │ feat/status-line │ Opus 5.5 (xhigh) │ Ready"));
-    }
-
-    #[test]
-    fn render_narrow_width_preserves_model_and_run_state() {
-        let mut bar = bar_idle(Some("A rather long session title"), "~/projects/demo/long");
-        insta::assert_snapshot!(render_status(&mut bar, 40));
-    }
-
-    #[test]
-    fn render_wide_shows_title_after_status() {
-        let mut bar = test_bar();
-        bar.set_title(Some("Fix auth bug".to_owned()));
-        let output = render_top_row(&mut bar, 120);
-        let model_at = output.find("test-model").unwrap();
-        let status_at = output.find("Ready").unwrap();
-        let title_at = output.find("Fix auth bug").unwrap();
-        assert!(model_at < title_at, "title should follow model: {output:?}");
-        assert!(
-            status_at < title_at,
-            "title should follow status: {output:?}"
-        );
-    }
-
-    #[test]
-    fn render_truncates_long_title_with_ellipsis() {
-        let mut bar = test_bar();
-        let long =
-            "A very long session title that keeps going well past any reasonable width limit";
-        bar.set_title(Some(long.to_owned()));
-        let output = render_top_row(&mut bar, 200);
-        assert!(
-            output.contains("..."),
-            "expected truncated title: {output:?}"
-        );
-        assert!(
-            !output.contains(long),
-            "full title should not render: {output:?}"
-        );
-    }
-
-    #[test]
-    fn render_no_title_still_shows_cwd_wide() {
-        let mut bar = test_bar();
-        let output = render_top_row(&mut bar, 120);
-        assert!(output.contains("~/test"));
-        assert!(
-            !output.contains("..."),
-            "no ellipsis without title: {output:?}"
-        );
-    }
-
-    #[test]
-    fn render_empty_cwd_drops_cwd_slot_entirely() {
-        let mut bar = StatusBar::new(
-            &Theme::default(),
-            StatusBarInit {
-                cwd: String::new(),
-                ..status_bar_init(StatusLineSegment::DEFAULT.to_vec())
-            },
-        );
-        let output = render_top_row(&mut bar, 120);
-        assert!(output.contains("test-model"));
-        assert!(output.contains("Ready"));
-        assert!(
-            !output.contains('~'),
-            "no tildified path should appear: {output:?}",
-        );
-    }
-
-    // ── render: opt-in segments ──
-
-    /// Shows `segment` between the directory and the model.
-    fn segment_bar(segment: StatusLineSegment) -> StatusBar {
-        StatusBar::new(
-            &Theme::default(),
-            StatusBarInit {
-                segments: vec![
-                    StatusLineSegment::CurrentDir,
-                    segment,
-                    StatusLineSegment::ModelWithEffort,
-                    StatusLineSegment::RunState,
-                ],
-                model: "Opus 5.5".to_owned(),
-                effort: Some(Effort::Xhigh),
-                cwd: "~/projects/demo".to_owned(),
-                git_branch: None,
-            },
-        )
-    }
-
-    /// Renders the bar 100 columns wide, then 40.
-    fn render_wide_and_narrow(bar: &mut StatusBar) -> String {
-        [100, 40]
-            .map(|width| render_status(bar, width).to_string())
-            .join("\n")
-    }
-
-    fn rate_limits() -> RateLimits {
-        let window = |utilization| {
-            Some(RateLimitWindow {
-                utilization,
-                resets_at: FUTURE_RESET,
-            })
-        };
-        RateLimits {
-            five_hour: window(0.42),
-            seven_day: window(0.13),
+        #[test]
+        fn drops_whitespace_only() {
+            let mut bar = test_bar();
+            bar.set_title(Some("   \n".to_owned()));
+            assert!(bar.title.is_none());
         }
     }
 
-    #[test]
-    fn render_queued_prompts_at_wide_and_narrow_widths() {
-        let mut bar = segment_bar(StatusLineSegment::QueuedPrompts);
-        bar.set_queued_prompts(2);
-        insta::assert_snapshot!(render_wide_and_narrow(&mut bar));
+    mod set_model {
+        use super::*;
+
+        #[test]
+        fn replaces_displayed_model_label() {
+            let mut bar = test_bar();
+            bar.set_model("Opus 5.5".to_owned());
+            assert_eq!(bar.model(), "Opus 5.5");
+            let output = render_top_row(&mut bar, 80);
+            assert!(
+                output.contains("Opus 5.5"),
+                "new label must reach the rendered bar: {output:?}",
+            );
+            assert!(
+                !output.contains("test-model"),
+                "old label must not survive: {output:?}",
+            );
+        }
     }
 
-    #[test]
-    fn render_session_id_at_wide_and_narrow_widths() {
-        let mut bar = segment_bar(StatusLineSegment::SessionId);
-        bar.set_session_id("3f2a9c1e-5b7d-4e8f-9a0b-1c2d3e4f5a6b");
-        insta::assert_snapshot!(render_wide_and_narrow(&mut bar));
+    mod set_git_branch {
+        use super::*;
+
+        #[test]
+        fn reports_only_real_changes() {
+            let mut bar = test_bar();
+            assert!(!bar.set_git_branch(Some("main".to_owned())));
+            assert!(bar.set_git_branch(Some("feat/x".to_owned())));
+            assert_eq!(bar.git_branch(), Some("feat/x"));
+            assert!(bar.set_git_branch(None));
+            assert_eq!(bar.git_branch(), None);
+        }
     }
 
-    #[test]
-    fn render_theme_at_wide_and_narrow_widths() {
-        let mut bar = segment_bar(StatusLineSegment::Theme);
-        bar.set_theme_name("mocha");
-        insta::assert_snapshot!(render_wide_and_narrow(&mut bar));
+    mod set_pull_request {
+        use super::*;
+
+        #[test]
+        fn reports_only_real_changes() {
+            let mut bar = pr_bar();
+            assert!(!bar.set_pull_request(None));
+            assert!(bar.set_pull_request(Some(pr_state(1))));
+            assert!(!bar.set_pull_request(Some(pr_state(1))));
+            assert!(bar.set_pull_request(Some(pr_state(2))));
+            assert_eq!(bar.pull_request, Some(pr_state(2)));
+        }
     }
 
-    #[test]
-    fn render_five_hour_limit_at_wide_and_narrow_widths() {
-        let mut bar = segment_bar(StatusLineSegment::FiveHourLimit);
-        bar.set_rate_limits(Some(rate_limits()));
-        insta::assert_snapshot!(render_wide_and_narrow(&mut bar));
+    mod set_status {
+        use super::*;
+
+        #[test]
+        fn resets_spinner_on_transition() {
+            let mut bar = test_bar();
+            bar.set_status(Status::Streaming);
+
+            for _ in 0..TICKS_PER_FRAME * 3 {
+                bar.tick();
+            }
+            assert_eq!(bar.spinner_frame, 3);
+
+            bar.set_status(Status::ToolRunning {
+                name: "bash".to_owned(),
+            });
+            assert_eq!(bar.spinner_frame, 0);
+            assert_eq!(bar.tick_counter, 0);
+        }
+
+        #[test]
+        fn same_status_preserves_spinner() {
+            let mut bar = test_bar();
+            bar.set_status(Status::Streaming);
+
+            for _ in 0..TICKS_PER_FRAME * 2 {
+                bar.tick();
+            }
+            let frame_before = bar.spinner_frame;
+
+            bar.set_status(Status::Streaming);
+            assert_eq!(bar.spinner_frame, frame_before);
+        }
+
+        #[test]
+        fn to_idle_resets_spinner() {
+            let mut bar = test_bar();
+            bar.set_status(Status::Streaming);
+
+            for _ in 0..TICKS_PER_FRAME * 2 {
+                bar.tick();
+            }
+
+            bar.set_status(Status::Idle);
+            assert_eq!(bar.spinner_frame, 0);
+            assert_eq!(bar.tick_counter, 0);
+            assert!(!bar.tick());
+        }
     }
 
-    #[test]
-    fn render_weekly_limit_at_wide_and_narrow_widths() {
-        let mut bar = segment_bar(StatusLineSegment::WeeklyLimit);
-        bar.set_rate_limits(Some(rate_limits()));
-        insta::assert_snapshot!(render_wide_and_narrow(&mut bar));
+    mod tick {
+        use super::*;
+
+        #[test]
+        fn idle_needs_no_repaint() {
+            let mut bar = test_bar();
+            assert!(!bar.tick());
+            assert_eq!(bar.spinner_frame, 0);
+            assert_eq!(bar.tick_counter, 0);
+        }
+
+        #[test]
+        fn without_current_time_segment_skips_minute_refresh() {
+            let mut bar = StatusBar::new(
+                &Theme::default(),
+                status_bar_init(vec![StatusLineSegment::Model, StatusLineSegment::RunState]),
+            );
+
+            assert_eq!(bar.current_time_minute, None);
+            assert!(!bar.tick());
+            assert_eq!(bar.current_time_minute, None);
+        }
+
+        #[test]
+        fn idle_current_time_marks_dirty_on_minute_change() {
+            let mut bar = StatusBar::new(
+                &Theme::default(),
+                status_bar_init(vec![StatusLineSegment::CurrentTime]),
+            );
+            let current = current_time_minute();
+            bar.current_time_minute = Some((current + 1) % 1440);
+
+            assert!(bar.tick());
+            assert_eq!(bar.current_time_minute, Some(current));
+            assert!(!bar.tick());
+            assert_eq!(bar.spinner_frame, 0);
+        }
+
+        #[test]
+        fn drops_a_usage_limit_window_once_it_resets() {
+            let mut bar = test_bar();
+            let window = |resets_at| {
+                Some(RateLimitWindow {
+                    utilization: 0.97,
+                    resets_at,
+                })
+            };
+            bar.set_rate_limits(Some(RateLimits {
+                five_hour: window(0),
+                seven_day: window(FUTURE_RESET),
+            }));
+
+            assert!(bar.tick());
+            assert_eq!(
+                bar.rate_limits(),
+                Some(RateLimits {
+                    five_hour: None,
+                    seven_day: window(FUTURE_RESET),
+                }),
+            );
+            assert!(!bar.tick(), "the open window stays");
+        }
+
+        #[test]
+        fn streaming_before_threshold_does_not_advance_spinner_frame() {
+            let mut bar = test_bar();
+            bar.set_status(Status::Streaming);
+
+            for _ in 0..TICKS_PER_FRAME - 1 {
+                assert!(!bar.tick());
+            }
+            assert_eq!(bar.tick_counter, TICKS_PER_FRAME - 1);
+            assert_eq!(bar.spinner_frame, 0);
+        }
+
+        #[test]
+        fn streaming_advances_frame_at_threshold() {
+            let mut bar = test_bar();
+            bar.set_status(Status::Streaming);
+
+            for _ in 0..TICKS_PER_FRAME - 1 {
+                bar.tick();
+            }
+            assert!(bar.tick());
+            assert_eq!(bar.spinner_frame, 1);
+            assert_eq!(bar.tick_counter, 0);
+        }
+
+        #[test]
+        fn wraps_spinner_frames() {
+            let mut bar = test_bar();
+            bar.set_status(Status::ToolRunning {
+                name: "bash".to_owned(),
+            });
+
+            for _ in 0..SPINNER_FRAMES.len() * TICKS_PER_FRAME {
+                bar.tick();
+            }
+            assert_eq!(bar.spinner_frame, 0);
+        }
     }
 
-    #[test]
-    fn render_pull_request_checks_at_wide_and_narrow_widths() {
-        let mut bar = segment_bar(StatusLineSegment::PullRequestChecks);
-        bar.set_pull_request(Some(git::PullRequest {
-            checks: Some(git::Checks::Failing(2)),
-            ..pr_state(86)
-        }));
-        insta::assert_snapshot!(render_wide_and_narrow(&mut bar));
+    mod render {
+        use super::*;
+
+        fn bar_idle(title: Option<&str>, cwd: &str) -> StatusBar {
+            let mut bar = StatusBar::new(
+                &Theme::default(),
+                StatusBarInit {
+                    segments: StatusLineSegment::DEFAULT.to_vec(),
+                    model: "Opus 5.5".to_owned(),
+                    effort: Some(Effort::Xhigh),
+                    cwd: cwd.into(),
+                    git_branch: Some("main".to_owned()),
+                },
+            );
+            bar.set_title(title.map(ToOwned::to_owned));
+            bar
+        }
+
+        /// Shows `segment` between the directory and the model.
+        fn segment_bar(segment: StatusLineSegment) -> StatusBar {
+            StatusBar::new(
+                &Theme::default(),
+                StatusBarInit {
+                    segments: vec![
+                        StatusLineSegment::CurrentDir,
+                        segment,
+                        StatusLineSegment::ModelWithEffort,
+                        StatusLineSegment::RunState,
+                    ],
+                    model: "Opus 5.5".to_owned(),
+                    effort: Some(Effort::Xhigh),
+                    cwd: "~/projects/demo".to_owned(),
+                    git_branch: None,
+                },
+            )
+        }
+
+        /// Renders the bar 100 columns wide, then 40.
+        fn render_wide_and_narrow(bar: &mut StatusBar) -> String {
+            [100, 40]
+                .map(|width| render_status(bar, width).to_string())
+                .join("\n")
+        }
+
+        fn rate_limits() -> RateLimits {
+            let window = |utilization| {
+                Some(RateLimitWindow {
+                    utilization,
+                    resets_at: FUTURE_RESET,
+                })
+            };
+            RateLimits {
+                five_hour: window(0.42),
+                seven_day: window(0.13),
+            }
+        }
+
+        #[test]
+        fn idle_with_title_shows_model_title_and_cwd() {
+            let mut bar = bar_idle(Some("Fix login flow"), "~/projects/demo");
+            insta::assert_snapshot!(render_status(&mut bar, 80));
+        }
+
+        #[test]
+        fn idle_without_title_leaves_slot_unused() {
+            let mut bar = bar_idle(None, "~/projects/demo");
+            insta::assert_snapshot!(render_status(&mut bar, 80));
+        }
+
+        #[test]
+        fn streaming_shows_spinner_and_status_label() {
+            let mut bar = bar_idle(None, "~/projects/demo");
+            bar.set_status(Status::Streaming);
+            insta::assert_snapshot!(render_status(&mut bar, 80));
+        }
+
+        #[test]
+        fn tool_running_status() {
+            let mut bar = bar_idle(None, "~/projects/demo");
+            bar.set_status(Status::ToolRunning {
+                name: "bash".to_owned(),
+            });
+            insta::assert_snapshot!(render_status(&mut bar, 80));
+        }
+
+        #[test]
+        fn compacting_shows_spinner_and_status_label() {
+            let mut bar = bar_idle(None, "~/projects/demo");
+            bar.set_status(Status::Compacting);
+            insta::assert_snapshot!(render_status(&mut bar, 80));
+        }
+
+        #[test]
+        fn signing_in_shows_spinner_and_cancel_hint() {
+            let mut bar = bar_idle(None, "~/projects/demo");
+            bar.set_status(Status::SigningIn);
+            insta::assert_snapshot!(render_status(&mut bar, 80));
+        }
+
+        #[test]
+        fn resuming_shows_spinner_and_label() {
+            let mut bar = bar_idle(None, "~/projects/demo");
+            bar.set_status(Status::Resuming);
+            insta::assert_snapshot!(render_status(&mut bar, 80));
+        }
+
+        #[test]
+        fn cancelling_shows_spinner_and_label() {
+            let mut bar = bar_idle(None, "~/projects/demo");
+            bar.set_status(Status::Cancelling);
+            insta::assert_snapshot!(render_status(&mut bar, 80));
+        }
+
+        #[test]
+        fn exit_armed_shows_static_hint_without_spinner() {
+            let mut bar = bar_idle(None, "~/projects/demo");
+            bar.set_status(Status::ExitArmed {
+                until: Instant::now() + std::time::Duration::from_secs(1),
+            });
+            insta::assert_snapshot!(render_status(&mut bar, 80));
+        }
+
+        #[test]
+        fn pull_request_checks_at_wide_and_narrow_widths() {
+            let mut bar = segment_bar(StatusLineSegment::PullRequestChecks);
+            bar.set_pull_request(Some(git::PullRequest {
+                checks: Some(git::Checks::Failing(2)),
+                ..pr_state(86)
+            }));
+            insta::assert_snapshot!(render_wide_and_narrow(&mut bar));
+        }
+
+        #[test]
+        fn pull_request_review_at_wide_and_narrow_widths() {
+            let mut bar = segment_bar(StatusLineSegment::PullRequestReview);
+            bar.set_pull_request(Some(git::PullRequest {
+                review: Some(git::ReviewDecision::ChangesRequested),
+                ..pr_state(86)
+            }));
+            insta::assert_snapshot!(render_wide_and_narrow(&mut bar));
+        }
+
+        #[test]
+        fn usage_shows_context_and_session_cost() {
+            let mut bar = bar_idle(None, "~/projects/demo");
+            bar.set_usage(Some(UsageSnapshot {
+                context_tokens: Some(124_000),
+                context_window: Some(1_000_000),
+                estimated_cost_usd: Some(0.4321),
+            }));
+            let output = render_top_row(&mut bar, 120);
+            assert!(
+                output.contains("Ctx: 12% (124k/1M)"),
+                "usage slot should render before status: {output:?}",
+            );
+            assert!(output.contains("Sess: $0.4321"));
+            assert!(output.contains("Ready"));
+        }
+
+        #[test]
+        fn five_hour_limit_at_wide_and_narrow_widths() {
+            let mut bar = segment_bar(StatusLineSegment::FiveHourLimit);
+            bar.set_rate_limits(Some(rate_limits()));
+            insta::assert_snapshot!(render_wide_and_narrow(&mut bar));
+        }
+
+        #[test]
+        fn weekly_limit_at_wide_and_narrow_widths() {
+            let mut bar = segment_bar(StatusLineSegment::WeeklyLimit);
+            bar.set_rate_limits(Some(rate_limits()));
+            insta::assert_snapshot!(render_wide_and_narrow(&mut bar));
+        }
+
+        #[test]
+        fn queued_prompts_at_wide_and_narrow_widths() {
+            let mut bar = segment_bar(StatusLineSegment::QueuedPrompts);
+            bar.set_queued_prompts(2);
+            insta::assert_snapshot!(render_wide_and_narrow(&mut bar));
+        }
+
+        #[test]
+        fn task_progress_at_wide_and_narrow_widths() {
+            let mut bar = segment_bar(StatusLineSegment::TaskProgress);
+            bar.set_task_progress(Some(Progress {
+                completed: 2,
+                total: 5,
+            }));
+            insta::assert_snapshot!(render_wide_and_narrow(&mut bar));
+        }
+
+        #[test]
+        fn session_id_at_wide_and_narrow_widths() {
+            let mut bar = segment_bar(StatusLineSegment::SessionId);
+            bar.set_session_id("3f2a9c1e-5b7d-4e8f-9a0b-1c2d3e4f5a6b");
+            insta::assert_snapshot!(render_wide_and_narrow(&mut bar));
+        }
+
+        #[test]
+        fn theme_at_wide_and_narrow_widths() {
+            let mut bar = segment_bar(StatusLineSegment::Theme);
+            bar.set_theme_name("mocha");
+            insta::assert_snapshot!(render_wide_and_narrow(&mut bar));
+        }
+
+        #[test]
+        fn configured_segments_control_order() {
+            let mut bar = StatusBar::new(
+                &Theme::default(),
+                StatusBarInit {
+                    segments: vec![
+                        StatusLineSegment::RunState,
+                        StatusLineSegment::Model,
+                        StatusLineSegment::CurrentDir,
+                    ],
+                    model: "Opus 5.5".to_owned(),
+                    effort: Some(Effort::Xhigh),
+                    cwd: "~/projects/demo".to_owned(),
+                    git_branch: Some("main".to_owned()),
+                },
+            );
+            let output = render_top_row(&mut bar, 120);
+            let state_at = output.find("Ready").unwrap();
+            let model_at = output.find("Opus 5.5").unwrap();
+            let cwd_at = output.find("~/projects/demo").unwrap();
+            assert!(state_at < model_at, "run state should lead: {output:?}");
+            assert!(model_at < cwd_at, "cwd should follow model: {output:?}");
+            assert!(
+                !output.contains("main"),
+                "git branch was not requested: {output:?}"
+            );
+        }
+
+        #[test]
+        fn uses_theme_separator_and_segment_labels() {
+            let mut bar = StatusBar::new(
+                &Theme::default(),
+                StatusBarInit {
+                    segments: vec![
+                        StatusLineSegment::CurrentDir,
+                        StatusLineSegment::GitBranch,
+                        StatusLineSegment::ModelWithEffort,
+                        StatusLineSegment::RunState,
+                    ],
+                    model: "Opus 5.5".to_owned(),
+                    effort: Some(Effort::Xhigh),
+                    cwd: "~/projects/demo".to_owned(),
+                    git_branch: Some("feat/status-line".to_owned()),
+                },
+            );
+            let output = render_top_row(&mut bar, 120);
+            assert!(
+                output.contains("~/projects/demo │ feat/status-line │ Opus 5.5 (xhigh) │ Ready")
+            );
+        }
+
+        #[test]
+        fn narrow_width_preserves_model_and_run_state() {
+            let mut bar = bar_idle(Some("A rather long session title"), "~/projects/demo/long");
+            insta::assert_snapshot!(render_status(&mut bar, 40));
+        }
+
+        #[test]
+        fn wide_shows_title_after_status() {
+            let mut bar = test_bar();
+            bar.set_title(Some("Fix auth bug".to_owned()));
+            let output = render_top_row(&mut bar, 120);
+            let model_at = output.find("test-model").unwrap();
+            let status_at = output.find("Ready").unwrap();
+            let title_at = output.find("Fix auth bug").unwrap();
+            assert!(model_at < title_at, "title should follow model: {output:?}");
+            assert!(
+                status_at < title_at,
+                "title should follow status: {output:?}"
+            );
+        }
+
+        #[test]
+        fn truncates_long_title_with_ellipsis() {
+            let mut bar = test_bar();
+            let long =
+                "A very long session title that keeps going well past any reasonable width limit";
+            bar.set_title(Some(long.to_owned()));
+            let output = render_top_row(&mut bar, 200);
+            assert!(
+                output.contains("..."),
+                "expected truncated title: {output:?}"
+            );
+            assert!(
+                !output.contains(long),
+                "full title should not render: {output:?}"
+            );
+        }
+
+        #[test]
+        fn no_title_still_shows_cwd_wide() {
+            let mut bar = test_bar();
+            let output = render_top_row(&mut bar, 120);
+            assert!(output.contains("~/test"));
+            assert!(
+                !output.contains("..."),
+                "no ellipsis without title: {output:?}"
+            );
+        }
+
+        #[test]
+        fn empty_cwd_drops_cwd_slot_entirely() {
+            let mut bar = StatusBar::new(
+                &Theme::default(),
+                StatusBarInit {
+                    cwd: String::new(),
+                    ..status_bar_init(StatusLineSegment::DEFAULT.to_vec())
+                },
+            );
+            let output = render_top_row(&mut bar, 120);
+            assert!(output.contains("test-model"));
+            assert!(output.contains("Ready"));
+            assert!(
+                !output.contains('~'),
+                "no tildified path should appear: {output:?}",
+            );
+        }
+
+        #[test]
+        fn records_pull_request_hyperlink_rect_for_post_flush_emission() {
+            let mut bar = pr_bar();
+            bar.pull_request = Some(pr_state(86));
+            render_status(&mut bar, 40);
+            let links = bar.take_pending_hyperlinks();
+            assert_eq!(
+                links.len(),
+                1,
+                "PR segment reports exactly one link: {links:?}",
+            );
+            let link = &links[0];
+            assert_eq!(link.url, "https://github.com/o/r/pull/86");
+            assert_eq!(link.rect.x, 2);
+            assert_eq!(link.rect.width, 3);
+            let visible: String = link.cells.iter().map(|c| c.symbol.as_str()).collect();
+            assert_eq!(visible, "#86");
+        }
+
+        #[test]
+        fn records_no_hyperlinks_when_pull_request_absent() {
+            let mut bar = test_bar();
+            render_status(&mut bar, 40);
+            assert!(bar.take_pending_hyperlinks().is_empty());
+        }
+
+        #[test]
+        fn drops_hyperlink_when_segment_clipped_to_zero_width() {
+            let mut bar = pr_bar();
+            bar.pull_request = Some(pr_state(86));
+            render_status(&mut bar, 10);
+            assert!(bar.take_pending_hyperlinks().is_empty());
+        }
     }
 
-    #[test]
-    fn render_pull_request_review_at_wide_and_narrow_widths() {
-        let mut bar = segment_bar(StatusLineSegment::PullRequestReview);
-        bar.set_pull_request(Some(git::PullRequest {
-            review: Some(git::ReviewDecision::ChangesRequested),
-            ..pr_state(86)
-        }));
-        insta::assert_snapshot!(render_wide_and_narrow(&mut bar));
-    }
+    mod take_pending_hyperlinks {
+        use super::*;
 
-    #[test]
-    fn render_task_progress_at_wide_and_narrow_widths() {
-        let mut bar = segment_bar(StatusLineSegment::TaskProgress);
-        bar.set_task_progress(Some(Progress {
-            completed: 2,
-            total: 5,
-        }));
-        insta::assert_snapshot!(render_wide_and_narrow(&mut bar));
-    }
-
-    #[test]
-    fn render_records_pull_request_hyperlink_rect_for_post_flush_emission() {
-        let mut bar = pr_bar();
-        bar.pull_request = Some(pr_state(86));
-        render_status(&mut bar, 40);
-        let links = bar.take_pending_hyperlinks();
-        assert_eq!(
-            links.len(),
-            1,
-            "PR segment reports exactly one link: {links:?}",
-        );
-        let link = &links[0];
-        assert_eq!(link.url, "https://github.com/o/r/pull/86");
-        assert_eq!(link.rect.x, 2);
-        assert_eq!(link.rect.width, 3);
-        let visible: String = link.cells.iter().map(|c| c.symbol.as_str()).collect();
-        assert_eq!(visible, "#86");
-    }
-
-    #[test]
-    fn render_records_no_hyperlinks_when_pull_request_absent() {
-        let mut bar = test_bar();
-        render_status(&mut bar, 40);
-        assert!(bar.take_pending_hyperlinks().is_empty());
-    }
-
-    #[test]
-    fn render_drops_hyperlink_when_segment_clipped_to_zero_width() {
-        let mut bar = pr_bar();
-        bar.pull_request = Some(pr_state(86));
-        render_status(&mut bar, 10);
-        assert!(bar.take_pending_hyperlinks().is_empty());
-    }
-
-    // ── take_pending_hyperlinks ──
-
-    #[test]
-    fn take_pending_hyperlinks_drains_after_first_call() {
-        let mut bar = pr_bar();
-        bar.pull_request = Some(pr_state(86));
-        render_status(&mut bar, 40);
-        assert_eq!(bar.take_pending_hyperlinks().len(), 1);
-        assert!(
-            bar.take_pending_hyperlinks().is_empty(),
-            "second take leaves nothing behind",
-        );
+        #[test]
+        fn drains_after_first_call() {
+            let mut bar = pr_bar();
+            bar.pull_request = Some(pr_state(86));
+            render_status(&mut bar, 40);
+            assert_eq!(bar.take_pending_hyperlinks().len(), 1);
+            assert!(
+                bar.take_pending_hyperlinks().is_empty(),
+                "second take leaves nothing behind",
+            );
+        }
     }
 }

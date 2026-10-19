@@ -189,104 +189,106 @@ mod tests {
     use crate::tool::{DiffChunk, DiffLine, GrepFileGroup, GrepMatchLine, ReadExcerptLine};
     use crate::tui::theme::Theme;
 
-    // ── ToolResultBlock::render ──
+    mod render {
+        use super::*;
 
-    /// One view of each kind, with the body rows it renders under the status line.
-    fn views() -> [(ToolResultView, &'static [&'static str]); 6] {
-        [
-            (
-                ToolResultView::Text {
-                    content: "boom".to_owned(),
-                },
-                &["boom"],
-            ),
-            (
-                ToolResultView::ReadExcerpt {
-                    path: "src/lib.rs".to_owned(),
-                    lines: vec![ReadExcerptLine {
-                        number: 1,
-                        text: "fn f() {}".to_owned(),
-                    }],
-                    total_lines: 1,
-                },
-                &["src/lib.rs:1", "1 │ fn f() {}"],
-            ),
-            (
-                ToolResultView::Diff {
-                    chunks: vec![DiffChunk {
-                        old: vec![DiffLine {
+        /// One view of each kind, with the body rows it renders under the status line.
+        fn views() -> [(ToolResultView, &'static [&'static str]); 6] {
+            [
+                (
+                    ToolResultView::Text {
+                        content: "boom".to_owned(),
+                    },
+                    &["boom"],
+                ),
+                (
+                    ToolResultView::ReadExcerpt {
+                        path: "src/lib.rs".to_owned(),
+                        lines: vec![ReadExcerptLine {
                             number: 1,
-                            text: "a".to_owned(),
+                            text: "fn f() {}".to_owned(),
                         }],
-                        new: vec![DiffLine {
-                            number: 1,
-                            text: "b".to_owned(),
+                        total_lines: 1,
+                    },
+                    &["src/lib.rs:1", "1 │ fn f() {}"],
+                ),
+                (
+                    ToolResultView::Diff {
+                        chunks: vec![DiffChunk {
+                            old: vec![DiffLine {
+                                number: 1,
+                                text: "a".to_owned(),
+                            }],
+                            new: vec![DiffLine {
+                                number: 1,
+                                text: "b".to_owned(),
+                            }],
                         }],
-                    }],
-                    replace_all: false,
-                    replacements: 1,
-                },
-                &["1 - a", "1 + b"],
-            ),
-            (
-                ToolResultView::GrepMatches {
-                    groups: vec![GrepFileGroup {
-                        path: "src/main.rs".to_owned(),
-                        lines: vec![GrepMatchLine {
-                            number: 3,
-                            text: "fn main() {}".to_owned(),
-                            is_match: true,
+                        replace_all: false,
+                        replacements: 1,
+                    },
+                    &["1 - a", "1 + b"],
+                ),
+                (
+                    ToolResultView::GrepMatches {
+                        groups: vec![GrepFileGroup {
+                            path: "src/main.rs".to_owned(),
+                            lines: vec![GrepMatchLine {
+                                number: 3,
+                                text: "fn main() {}".to_owned(),
+                                is_match: true,
+                            }],
                         }],
-                    }],
-                    truncated: true,
-                },
-                &["src/main.rs", "3 │ fn main() {}", "... limit reached"],
-            ),
-            (
-                ToolResultView::GlobFiles {
-                    pattern: "*.rs".to_owned(),
-                    files: vec!["a.rs".to_owned()],
-                    total: 1,
-                },
-                &["*.rs (1 of 1)", "a.rs"],
-            ),
-            (
-                ToolResultView::Tasks {
-                    tasks: vec![task("Ship it", TaskStatus::InProgress)],
-                },
-                &["● Ship it"],
-            ),
-        ]
-    }
+                        truncated: true,
+                    },
+                    &["src/main.rs", "3 │ fn main() {}", "... limit reached"],
+                ),
+                (
+                    ToolResultView::GlobFiles {
+                        pattern: "*.rs".to_owned(),
+                        files: vec!["a.rs".to_owned()],
+                        total: 1,
+                    },
+                    &["*.rs (1 of 1)", "a.rs"],
+                ),
+                (
+                    ToolResultView::Tasks {
+                        tasks: vec![task("Ship it", TaskStatus::InProgress)],
+                    },
+                    &["● Ship it"],
+                ),
+            ]
+        }
 
-    #[test]
-    fn tool_result_block_render_puts_each_view_under_a_status_line_colored_by_outcome() {
-        let theme = Theme::default();
-        let ctx = RenderCtx {
-            width: 80,
-            theme: &theme,
-            show_thinking: false,
-        };
-        let outcomes = [
-            (false, theme.tool_border(), TOOL_SUCCESS, theme.success()),
-            (true, theme.error(), TOOL_ERROR, theme.error()),
-        ];
-        for (is_error, border, indicator, indicator_style) in outcomes {
-            for (view, body) in views() {
-                let block = ToolResultBlock::new("label", view, is_error);
+        #[test]
+        fn puts_each_view_under_a_status_line_colored_by_outcome() {
+            let theme = Theme::default();
+            let ctx = RenderCtx {
+                width: 80,
+                theme: &theme,
+                show_thinking: false,
+            };
+            let outcomes = [
+                (false, theme.tool_border(), TOOL_SUCCESS, theme.success()),
+                (true, theme.error(), TOOL_ERROR, theme.error()),
+            ];
+            for (is_error, border, indicator, indicator_style) in outcomes {
+                for (view, body) in views() {
+                    let block = ToolResultBlock::new("label", view, is_error);
 
-                let lines = block.render(&ctx);
+                    let lines = block.render(&ctx);
 
-                let rows: Vec<String> = lines
-                    .iter()
-                    .map(|line| line.to_string().trim_end().to_owned())
-                    .collect();
-                let mut expected = vec![format!("{TOOL_BORDER_PREFIX}{indicator} label")];
-                expected.extend(body.iter().map(|text| format!("{TOOL_BORDER_CONT}{text}")));
-                assert_eq!(rows, expected);
-                assert_eq!(lines[0].spans[1], Span::styled(indicator, indicator_style));
-                for (row, line) in rows.iter().zip(&lines) {
-                    assert_eq!(line.spans[0].style, border, "bar of {row:?}");
+                    let rows: Vec<String> = lines
+                        .iter()
+                        .map(|line| line.to_string().trim_end().to_owned())
+                        .collect();
+                    let mut expected = vec![format!("{TOOL_BORDER_PREFIX}{indicator} label")];
+                    expected.extend(body.iter().map(|text| format!("{TOOL_BORDER_CONT}{text}")));
+                    assert_eq!(rows, expected);
+                    assert_eq!(lines[0].spans[1], Span::styled(indicator, indicator_style));
+                    for (row, line) in rows.iter().zip(&lines) {
+                        assert_eq!(line.spans[0].style, border, "bar of {row:?}");
+                    }
                 }
             }
         }

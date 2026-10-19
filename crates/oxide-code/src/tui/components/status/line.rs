@@ -417,581 +417,592 @@ fn format_cost(cost: f64) -> String {
 mod tests {
     use super::*;
 
-    /// Resets in 2100, so a window built with it stays current.
-    const FUTURE_RESET: i64 = 4_102_444_800;
+    mod render {
+        use super::*;
 
-    /// No optional data, idle, with model `m`.
-    fn bare_state() -> StatusLineState<'static> {
-        StatusLineState {
-            model: "m",
-            effort: None,
-            title: None,
-            usage: None,
-            cwd: "~/repo",
-            git_branch: None,
-            pull_request: None,
-            rate_limits: None,
-            permission_mode: Mode::Manual,
-            status_span: Span::raw("Ready"),
-            queued_prompts: 0,
-            task_progress: None,
-            session_id: "",
-            theme_name: "",
+        /// Resets in 2100, so a window built with it stays current.
+        const FUTURE_RESET: i64 = 4_102_444_800;
+
+        /// No optional data, idle, with model `m`.
+        fn bare_state() -> StatusLineState<'static> {
+            StatusLineState {
+                model: "m",
+                effort: None,
+                title: None,
+                usage: None,
+                cwd: "~/repo",
+                git_branch: None,
+                pull_request: None,
+                rate_limits: None,
+                permission_mode: Mode::Manual,
+                status_span: Span::raw("Ready"),
+                queued_prompts: 0,
+                task_progress: None,
+                session_id: "",
+                theme_name: "",
+            }
         }
-    }
 
-    fn render(segments: Vec<StatusLineSegment>, state: &StatusLineState<'_>) -> RenderedStatusLine {
-        StatusLine::new(segments).render(&Theme::default(), state, 80)
-    }
-
-    fn text_of(rendered: &RenderedStatusLine) -> String {
-        rendered
-            .line
-            .spans
-            .iter()
-            .map(|span| span.content.as_ref())
-            .collect()
-    }
-
-    fn render_text(segments: Vec<StatusLineSegment>, width: u16) -> String {
-        let pr = pr_state(86);
-        let rendered = StatusLine::new(segments).render(
-            &Theme::default(),
-            &StatusLineState {
-                effort: Some(Effort::High),
-                title: Some("title"),
-                usage: Some(UsageSnapshot {
-                    context_tokens: Some(100_000),
-                    context_window: Some(200_000),
-                    estimated_cost_usd: Some(0.1234),
-                }),
-                git_branch: Some("main"),
-                pull_request: Some(&pr),
-                ..bare_state()
-            },
-            width,
-        );
-        text_of(&rendered)
-    }
-
-    fn is_hh_mm(label: &str) -> bool {
-        let bytes = label.as_bytes();
-        bytes.len() == 5
-            && bytes[0].is_ascii_digit()
-            && bytes[1].is_ascii_digit()
-            && bytes[2] == b':'
-            && bytes[3].is_ascii_digit()
-            && bytes[4].is_ascii_digit()
-    }
-
-    fn pr_state(number: u64) -> PullRequest {
-        PullRequest {
-            number,
-            url: format!("https://github.com/o/r/pull/{number}"),
-            checks: None,
-            review: None,
+        fn render(
+            segments: Vec<StatusLineSegment>,
+            state: &StatusLineState<'_>,
+        ) -> RenderedStatusLine {
+            StatusLine::new(segments).render(&Theme::default(), state, 80)
         }
-    }
 
-    // ── StatusLine::render ──
+        fn text_of(rendered: &RenderedStatusLine) -> String {
+            rendered
+                .line
+                .spans
+                .iter()
+                .map(|span| span.content.as_ref())
+                .collect()
+        }
 
-    #[test]
-    fn render_current_time_uses_clock_label() {
-        let text = render_text(vec![StatusLineSegment::CurrentTime], 20);
-        assert!(is_hh_mm(text.trim()), "expected HH:MM label: {text:?}");
-    }
-
-    #[test]
-    fn render_truncates_single_oversized_segment_to_width() {
-        let rendered = StatusLine::new(vec![StatusLineSegment::RunState]).render(
-            &Theme::default(),
-            &StatusLineState {
-                cwd: "",
-                status_span: Span::raw("Running a very long command name"),
-                ..bare_state()
-            },
-            12,
-        );
-
-        assert_eq!(text_of(&rendered), "  Running...");
-    }
-
-    #[test]
-    fn render_drops_low_utility_segments_before_usage_model_and_state() {
-        let segments = vec![
-            StatusLineSegment::CurrentTime,
-            StatusLineSegment::SessionCost,
-            StatusLineSegment::ContextUsed,
-            StatusLineSegment::Model,
-            StatusLineSegment::RunState,
-        ];
-
-        assert_eq!(
-            render_text(segments.clone(), 34),
-            "  Ctx: 50% (100k/200k) │ m │ Ready",
-        );
-        assert_eq!(render_text(segments.clone(), 11), "  m │ Ready");
-        assert_eq!(render_text(segments, 10), "  Ready");
-    }
-
-    #[test]
-    fn render_drops_plain_model_before_model_with_effort() {
-        // The compact `model-with-effort` label carries strictly more information than `model`,
-        // so a user who configures both keeps the more useful variant under width pressure.
-        let segments = vec![
-            StatusLineSegment::Model,
-            StatusLineSegment::ModelWithEffort,
-            StatusLineSegment::RunState,
-        ];
-
-        assert_eq!(render_text(segments.clone(), 80), "  m │ m (high) │ Ready");
-        assert_eq!(render_text(segments, 18), "  m (high) │ Ready");
-    }
-
-    #[test]
-    fn render_pull_request_renders_hash_prefix_and_drops_before_git_branch() {
-        let segments = vec![
-            StatusLineSegment::CurrentTime,
-            StatusLineSegment::GitBranch,
-            StatusLineSegment::PullRequest,
-            StatusLineSegment::RunState,
-        ];
-
-        let full = render_text(segments.clone(), 80);
-        assert!(
-            full.contains("#86") && full.contains("main") && full.ends_with("Ready"),
-            "wide width keeps every segment: {full}",
-        );
-        assert_eq!(render_text(segments.clone(), 22), "  main │ #86 │ Ready");
-        assert_eq!(render_text(segments, 14), "  main │ Ready");
-    }
-
-    #[test]
-    fn render_pull_request_reports_hyperlink_range() {
-        let pr = pr_state(86);
-        let rendered = render(
-            vec![StatusLineSegment::PullRequest],
-            &StatusLineState {
-                pull_request: Some(&pr),
-                ..bare_state()
-            },
-        );
-        assert_eq!(rendered.hyperlinks.len(), 1);
-        assert_eq!(rendered.hyperlinks[0].col, 2);
-        assert_eq!(rendered.hyperlinks[0].width, 3);
-        assert_eq!(rendered.hyperlinks[0].url, pr.url);
-    }
-
-    #[test]
-    fn render_pull_request_reports_no_hyperlink_when_absent() {
-        let rendered = render(vec![StatusLineSegment::PullRequest], &bare_state());
-        assert!(rendered.hyperlinks.is_empty(), "no PR → no hyperlink range");
-        assert!(
-            !text_of(&rendered).contains('#'),
-            "no PR number rendered when absent"
-        );
-    }
-
-    #[test]
-    fn render_pull_request_checks_label_their_worst_state_and_link_the_checks_page() {
-        let theme = Theme::default();
-        for (checks, label, style) in [
-            (Checks::Failing(2), "Checks: 2 failing", theme.error()),
-            (Checks::Pending(1), "Checks: 1 pending", theme.warning()),
-            (Checks::Cancelled(3), "Checks: 3 cancelled", theme.muted()),
-            (Checks::Passing, "Checks: passing", theme.success()),
-        ] {
-            let pr = PullRequest {
-                checks: Some(checks),
-                ..pr_state(86)
-            };
-            let rendered = render(
-                vec![StatusLineSegment::PullRequestChecks],
+        fn render_text(segments: Vec<StatusLineSegment>, width: u16) -> String {
+            let pr = pr_state(86);
+            let rendered = StatusLine::new(segments).render(
+                &Theme::default(),
                 &StatusLineState {
+                    effort: Some(Effort::High),
+                    title: Some("title"),
+                    usage: Some(UsageSnapshot {
+                        context_tokens: Some(100_000),
+                        context_window: Some(200_000),
+                        estimated_cost_usd: Some(0.1234),
+                    }),
+                    git_branch: Some("main"),
                     pull_request: Some(&pr),
                     ..bare_state()
                 },
+                width,
             );
-
-            assert_eq!(text_of(&rendered), format!("  {label}"));
-            assert_eq!(rendered.line.spans[1].style, style, "{label}");
-            assert_eq!(
-                rendered.hyperlinks[0].url,
-                "https://github.com/o/r/pull/86/checks"
-            );
+            text_of(&rendered)
         }
-    }
 
-    #[test]
-    fn render_pull_request_review_labels_the_decision_and_links_the_review_page() {
-        let theme = Theme::default();
-        for (review, label, style) in [
-            (
-                ReviewDecision::Approved,
-                "Review: approved",
-                theme.success(),
-            ),
-            (
-                ReviewDecision::ChangesRequested,
-                "Review: changes requested",
-                theme.error(),
-            ),
-            (
-                ReviewDecision::ReviewRequired,
-                "Review: required",
-                theme.warning(),
-            ),
-        ] {
-            let pr = PullRequest {
-                review: Some(review),
-                ..pr_state(86)
-            };
-            let rendered = render(
-                vec![StatusLineSegment::PullRequestReview],
-                &StatusLineState {
-                    pull_request: Some(&pr),
-                    ..bare_state()
-                },
-            );
-
-            assert_eq!(text_of(&rendered), format!("  {label}"));
-            assert_eq!(rendered.line.spans[1].style, style, "{label}");
-            assert_eq!(
-                rendered.hyperlinks[0].url,
-                "https://github.com/o/r/pull/86/files"
-            );
+        fn is_hh_mm(label: &str) -> bool {
+            let bytes = label.as_bytes();
+            bytes.len() == 5
+                && bytes[0].is_ascii_digit()
+                && bytes[1].is_ascii_digit()
+                && bytes[2] == b':'
+                && bytes[3].is_ascii_digit()
+                && bytes[4].is_ascii_digit()
         }
-    }
 
-    #[test]
-    fn render_pull_request_metadata_hides_without_checks_or_review() {
-        let pr = pr_state(86);
-        let rendered = render(
-            vec![
-                StatusLineSegment::PullRequestChecks,
-                StatusLineSegment::PullRequestReview,
+        fn pr_state(number: u64) -> PullRequest {
+            PullRequest {
+                number,
+                url: format!("https://github.com/o/r/pull/{number}"),
+                checks: None,
+                review: None,
+            }
+        }
+
+        #[test]
+        fn pull_request_renders_hash_prefix_and_drops_before_git_branch() {
+            let segments = vec![
+                StatusLineSegment::CurrentTime,
+                StatusLineSegment::GitBranch,
+                StatusLineSegment::PullRequest,
                 StatusLineSegment::RunState,
-            ],
-            &StatusLineState {
-                pull_request: Some(&pr),
-                ..bare_state()
-            },
-        );
+            ];
 
-        assert_eq!(text_of(&rendered), "  Ready");
-        assert!(rendered.hyperlinks.is_empty());
-    }
+            let full = render_text(segments.clone(), 80);
+            assert!(
+                full.contains("#86") && full.contains("main") && full.ends_with("Ready"),
+                "wide width keeps every segment: {full}",
+            );
+            assert_eq!(render_text(segments.clone(), 22), "  main │ #86 │ Ready");
+            assert_eq!(render_text(segments, 14), "  main │ Ready");
+        }
 
-    #[test]
-    fn render_context_used_escalates_from_text_to_warning_and_error() {
-        let theme = Theme::default();
-        let render_context = |tokens| {
-            render(
+        #[test]
+        fn pull_request_reports_hyperlink_range() {
+            let pr = pr_state(86);
+            let rendered = render(
+                vec![StatusLineSegment::PullRequest],
+                &StatusLineState {
+                    pull_request: Some(&pr),
+                    ..bare_state()
+                },
+            );
+            assert_eq!(rendered.hyperlinks.len(), 1);
+            assert_eq!(rendered.hyperlinks[0].col, 2);
+            assert_eq!(rendered.hyperlinks[0].width, 3);
+            assert_eq!(rendered.hyperlinks[0].url, pr.url);
+        }
+
+        #[test]
+        fn pull_request_reports_no_hyperlink_when_absent() {
+            let rendered = render(vec![StatusLineSegment::PullRequest], &bare_state());
+            assert!(rendered.hyperlinks.is_empty(), "no PR → no hyperlink range");
+            assert!(
+                !text_of(&rendered).contains('#'),
+                "no PR number rendered when absent"
+            );
+        }
+
+        #[test]
+        fn pull_request_checks_label_their_worst_state_and_link_the_checks_page() {
+            let theme = Theme::default();
+            for (checks, label, style) in [
+                (Checks::Failing(2), "Checks: 2 failing", theme.error()),
+                (Checks::Pending(1), "Checks: 1 pending", theme.warning()),
+                (Checks::Cancelled(3), "Checks: 3 cancelled", theme.muted()),
+                (Checks::Passing, "Checks: passing", theme.success()),
+            ] {
+                let pr = PullRequest {
+                    checks: Some(checks),
+                    ..pr_state(86)
+                };
+                let rendered = render(
+                    vec![StatusLineSegment::PullRequestChecks],
+                    &StatusLineState {
+                        pull_request: Some(&pr),
+                        ..bare_state()
+                    },
+                );
+
+                assert_eq!(text_of(&rendered), format!("  {label}"));
+                assert_eq!(rendered.line.spans[1].style, style, "{label}");
+                assert_eq!(
+                    rendered.hyperlinks[0].url,
+                    "https://github.com/o/r/pull/86/checks"
+                );
+            }
+        }
+
+        #[test]
+        fn pull_request_review_labels_the_decision_and_links_the_review_page() {
+            let theme = Theme::default();
+            for (review, label, style) in [
+                (
+                    ReviewDecision::Approved,
+                    "Review: approved",
+                    theme.success(),
+                ),
+                (
+                    ReviewDecision::ChangesRequested,
+                    "Review: changes requested",
+                    theme.error(),
+                ),
+                (
+                    ReviewDecision::ReviewRequired,
+                    "Review: required",
+                    theme.warning(),
+                ),
+            ] {
+                let pr = PullRequest {
+                    review: Some(review),
+                    ..pr_state(86)
+                };
+                let rendered = render(
+                    vec![StatusLineSegment::PullRequestReview],
+                    &StatusLineState {
+                        pull_request: Some(&pr),
+                        ..bare_state()
+                    },
+                );
+
+                assert_eq!(text_of(&rendered), format!("  {label}"));
+                assert_eq!(rendered.line.spans[1].style, style, "{label}");
+                assert_eq!(
+                    rendered.hyperlinks[0].url,
+                    "https://github.com/o/r/pull/86/files"
+                );
+            }
+        }
+
+        #[test]
+        fn pull_request_metadata_hides_without_checks_or_review() {
+            let pr = pr_state(86);
+            let rendered = render(
+                vec![
+                    StatusLineSegment::PullRequestChecks,
+                    StatusLineSegment::PullRequestReview,
+                    StatusLineSegment::RunState,
+                ],
+                &StatusLineState {
+                    pull_request: Some(&pr),
+                    ..bare_state()
+                },
+            );
+
+            assert_eq!(text_of(&rendered), "  Ready");
+            assert!(rendered.hyperlinks.is_empty());
+        }
+
+        #[test]
+        fn context_used_escalates_from_text_to_warning_and_error() {
+            let theme = Theme::default();
+            let render_context = |tokens| {
+                render(
+                    vec![StatusLineSegment::ContextUsed],
+                    &StatusLineState {
+                        usage: Some(UsageSnapshot {
+                            context_tokens: Some(tokens),
+                            context_window: Some(1_000_000),
+                            estimated_cost_usd: None,
+                        }),
+                        ..bare_state()
+                    },
+                )
+            };
+
+            for (tokens, label, style) in [
+                (23_000, "Ctx: 2% (23k/1M)", theme.text()),
+                (699_999, "Ctx: 69% (699k/1M)", theme.text()),
+                (700_000, "Ctx: 70% (700k/1M)", theme.warning()),
+                (899_999, "Ctx: 89% (899k/1M)", theme.warning()),
+                (900_000, "Ctx: 90% (900k/1M)", theme.error()),
+            ] {
+                let rendered = render_context(tokens);
+
+                assert_eq!(text_of(&rendered), format!("  {label}"));
+                assert_eq!(rendered.line.spans[1].style, style, "{label}");
+            }
+        }
+
+        #[test]
+        fn context_used_without_a_window_shows_tokens_in_the_text_style() {
+            let rendered = render(
                 vec![StatusLineSegment::ContextUsed],
                 &StatusLineState {
                     usage: Some(UsageSnapshot {
-                        context_tokens: Some(tokens),
-                        context_window: Some(1_000_000),
+                        context_tokens: Some(987),
+                        context_window: None,
                         estimated_cost_usd: None,
                     }),
                     ..bare_state()
                 },
-            )
-        };
+            );
 
-        for (tokens, label, style) in [
-            (23_000, "Ctx: 2% (23k/1M)", theme.text()),
-            (699_999, "Ctx: 69% (699k/1M)", theme.text()),
-            (700_000, "Ctx: 70% (700k/1M)", theme.warning()),
-            (899_999, "Ctx: 89% (899k/1M)", theme.warning()),
-            (900_000, "Ctx: 90% (900k/1M)", theme.error()),
-        ] {
-            let rendered = render_context(tokens);
-
-            assert_eq!(text_of(&rendered), format!("  {label}"));
-            assert_eq!(rendered.line.spans[1].style, style, "{label}");
+            assert_eq!(text_of(&rendered), "  Ctx: 987");
+            assert_eq!(rendered.line.spans[1].style, Theme::default().text());
         }
-    }
 
-    #[test]
-    fn render_context_used_without_a_window_shows_tokens_in_the_text_style() {
-        let rendered = render(
-            vec![StatusLineSegment::ContextUsed],
-            &StatusLineState {
-                usage: Some(UsageSnapshot {
-                    context_tokens: Some(987),
-                    context_window: None,
-                    estimated_cost_usd: None,
-                }),
-                ..bare_state()
-            },
-        );
-
-        assert_eq!(text_of(&rendered), "  Ctx: 987");
-        assert_eq!(rendered.line.spans[1].style, Theme::default().text());
-    }
-
-    #[test]
-    fn render_session_cost_reads_in_the_muted_style() {
-        let rendered = render(
-            vec![StatusLineSegment::SessionCost],
-            &StatusLineState {
-                usage: Some(UsageSnapshot {
-                    context_tokens: None,
-                    context_window: None,
-                    estimated_cost_usd: Some(0.5385),
-                }),
-                ..bare_state()
-            },
-        );
-
-        assert_eq!(text_of(&rendered), "  Sess: $0.5385");
-        assert_eq!(rendered.line.spans[1].style, Theme::default().muted());
-    }
-
-    #[test]
-    fn render_rate_limits_floor_the_spent_share_to_a_whole_percent() {
-        let window = |utilization| {
-            Some(RateLimitWindow {
-                utilization,
-                resets_at: FUTURE_RESET,
-            })
-        };
-        let segments = vec![
-            StatusLineSegment::FiveHourLimit,
-            StatusLineSegment::WeeklyLimit,
-            StatusLineSegment::RunState,
-        ];
-        let text = |five_hour, seven_day| {
-            text_of(&render(
-                segments.clone(),
-                &StatusLineState {
-                    rate_limits: Some(RateLimits {
-                        five_hour,
-                        seven_day,
-                    }),
-                    ..bare_state()
-                },
-            ))
-        };
-
-        assert_eq!(
-            text(window(0.429), window(0.995)),
-            "  5h: 42% │ 7d: 99% │ Ready",
-        );
-        assert_eq!(
-            text(window(0.29), window(0.57)),
-            "  5h: 29% │ 7d: 57% │ Ready",
-            "a two-decimal share keeps its percent despite binary rounding",
-        );
-        assert_eq!(text(None, window(0.13)), "  7d: 13% │ Ready");
-        assert_eq!(text(None, None), "  Ready");
-        assert_eq!(
-            text_of(&render(segments, &bare_state())),
-            "  Ready",
-            "no limits before the first response reports them",
-        );
-    }
-
-    #[test]
-    fn render_rate_limits_escalate_from_text_to_warning_and_error_by_the_shown_percent() {
-        let theme = Theme::default();
-        for (utilization, percent, style) in [
-            (0.05, "5%", theme.text()),
-            (0.6999, "69%", theme.text()),
-            (0.70, "70%", theme.warning()),
-            (0.8999, "89%", theme.warning()),
-            (0.90, "90%", theme.error()),
-            (1.0, "100%", theme.error()),
-        ] {
-            let window = Some(RateLimitWindow {
-                utilization,
-                resets_at: FUTURE_RESET,
-            });
+        #[test]
+        fn session_cost_reads_in_the_muted_style() {
             let rendered = render(
-                vec![
-                    StatusLineSegment::FiveHourLimit,
-                    StatusLineSegment::WeeklyLimit,
-                ],
+                vec![StatusLineSegment::SessionCost],
                 &StatusLineState {
-                    rate_limits: Some(RateLimits {
-                        five_hour: window,
-                        seven_day: window,
+                    usage: Some(UsageSnapshot {
+                        context_tokens: None,
+                        context_window: None,
+                        estimated_cost_usd: Some(0.5385),
                     }),
                     ..bare_state()
                 },
             );
+
+            assert_eq!(text_of(&rendered), "  Sess: $0.5385");
+            assert_eq!(rendered.line.spans[1].style, Theme::default().muted());
+        }
+
+        #[test]
+        fn rate_limits_floor_the_spent_share_to_a_whole_percent() {
+            let window = |utilization| {
+                Some(RateLimitWindow {
+                    utilization,
+                    resets_at: FUTURE_RESET,
+                })
+            };
+            let segments = vec![
+                StatusLineSegment::FiveHourLimit,
+                StatusLineSegment::WeeklyLimit,
+                StatusLineSegment::RunState,
+            ];
+            let text = |five_hour, seven_day| {
+                text_of(&render(
+                    segments.clone(),
+                    &StatusLineState {
+                        rate_limits: Some(RateLimits {
+                            five_hour,
+                            seven_day,
+                        }),
+                        ..bare_state()
+                    },
+                ))
+            };
 
             assert_eq!(
-                text_of(&rendered),
-                format!("  5h: {percent} │ 7d: {percent}")
+                text(window(0.429), window(0.995)),
+                "  5h: 42% │ 7d: 99% │ Ready",
             );
-            assert_eq!(rendered.line.spans[1].style, style, "5h at {percent}");
-            assert_eq!(rendered.line.spans[3].style, style, "7d at {percent}");
+            assert_eq!(
+                text(window(0.29), window(0.57)),
+                "  5h: 29% │ 7d: 57% │ Ready",
+                "a two-decimal share keeps its percent despite binary rounding",
+            );
+            assert_eq!(text(None, window(0.13)), "  7d: 13% │ Ready");
+            assert_eq!(text(None, None), "  Ready");
+            assert_eq!(
+                text_of(&render(segments, &bare_state())),
+                "  Ready",
+                "no limits before the first response reports them",
+            );
+        }
+
+        #[test]
+        fn rate_limits_escalate_from_text_to_warning_and_error_by_the_shown_percent() {
+            let theme = Theme::default();
+            for (utilization, percent, style) in [
+                (0.05, "5%", theme.text()),
+                (0.6999, "69%", theme.text()),
+                (0.70, "70%", theme.warning()),
+                (0.8999, "89%", theme.warning()),
+                (0.90, "90%", theme.error()),
+                (1.0, "100%", theme.error()),
+            ] {
+                let window = Some(RateLimitWindow {
+                    utilization,
+                    resets_at: FUTURE_RESET,
+                });
+                let rendered = render(
+                    vec![
+                        StatusLineSegment::FiveHourLimit,
+                        StatusLineSegment::WeeklyLimit,
+                    ],
+                    &StatusLineState {
+                        rate_limits: Some(RateLimits {
+                            five_hour: window,
+                            seven_day: window,
+                        }),
+                        ..bare_state()
+                    },
+                );
+
+                assert_eq!(
+                    text_of(&rendered),
+                    format!("  5h: {percent} │ 7d: {percent}")
+                );
+                assert_eq!(rendered.line.spans[1].style, style, "5h at {percent}");
+                assert_eq!(rendered.line.spans[3].style, style, "7d at {percent}");
+            }
+        }
+
+        #[test]
+        fn permission_mode_flags_plan_and_yolo_and_hides_manual() {
+            let rendered = |permission_mode| {
+                render(
+                    vec![
+                        StatusLineSegment::PermissionMode,
+                        StatusLineSegment::RunState,
+                    ],
+                    &StatusLineState {
+                        permission_mode,
+                        ..bare_state()
+                    },
+                )
+            };
+            let theme = Theme::default();
+
+            let plan = rendered(Mode::Plan);
+            assert_eq!(text_of(&plan), "  Mode: plan │ Ready");
+            assert_eq!(plan.line.spans[1].style, theme.accent());
+
+            let yolo = rendered(Mode::Yolo);
+            assert_eq!(text_of(&yolo), "  Mode: yolo │ Ready");
+            assert_eq!(yolo.line.spans[1].style, theme.error());
+
+            assert_eq!(text_of(&rendered(Mode::Manual)), "  Ready");
+        }
+
+        #[test]
+        fn queued_prompts_counts_the_queue_in_the_muted_style_and_hides_an_empty_one() {
+            let rendered = |queued_prompts| {
+                render(
+                    vec![
+                        StatusLineSegment::QueuedPrompts,
+                        StatusLineSegment::RunState,
+                    ],
+                    &StatusLineState {
+                        queued_prompts,
+                        ..bare_state()
+                    },
+                )
+            };
+
+            let queued = rendered(2);
+            assert_eq!(text_of(&queued), "  Queued: 2 │ Ready");
+            assert_eq!(queued.line.spans[1].style, Theme::default().muted());
+
+            assert_eq!(text_of(&rendered(0)), "  Ready");
+        }
+
+        #[test]
+        fn task_progress_counts_completed_tasks_in_the_muted_style_and_hides_without_a_list() {
+            let rendered = |task_progress| {
+                render(
+                    vec![StatusLineSegment::TaskProgress, StatusLineSegment::RunState],
+                    &StatusLineState {
+                        task_progress,
+                        ..bare_state()
+                    },
+                )
+            };
+
+            let progress = rendered(Some(Progress {
+                completed: 2,
+                total: 5,
+            }));
+            assert_eq!(text_of(&progress), "  Tasks: 2/5 │ Ready");
+            assert_eq!(progress.line.spans[1].style, Theme::default().muted());
+
+            assert_eq!(text_of(&rendered(None)), "  Ready");
+        }
+
+        #[test]
+        fn session_id_shows_the_resumable_prefix() {
+            let text = |session_id| {
+                text_of(&render(
+                    vec![StatusLineSegment::SessionId, StatusLineSegment::RunState],
+                    &StatusLineState {
+                        session_id,
+                        ..bare_state()
+                    },
+                ))
+            };
+
+            assert_eq!(
+                text("3f2a9c1e-5b7d-4e8f-9a0b-1c2d3e4f5a6b"),
+                "  ID: 3f2a9c1e │ Ready"
+            );
+            assert_eq!(text(""), "  Ready");
+        }
+
+        #[test]
+        fn theme_names_a_built_in_or_a_theme_file_by_its_stem() {
+            let text = |theme_name| {
+                text_of(&render(
+                    vec![StatusLineSegment::Theme, StatusLineSegment::RunState],
+                    &StatusLineState {
+                        theme_name,
+                        ..bare_state()
+                    },
+                ))
+            };
+
+            assert_eq!(text("latte"), "  Theme: latte │ Ready");
+            assert_eq!(text("/home/me/themes/dusk.toml"), "  Theme: dusk │ Ready");
+            assert_eq!(text(""), "  Ready");
+        }
+
+        #[test]
+        fn current_time_uses_clock_label() {
+            let text = render_text(vec![StatusLineSegment::CurrentTime], 20);
+            assert!(is_hh_mm(text.trim()), "expected HH:MM label: {text:?}");
+        }
+
+        #[test]
+        fn truncates_single_oversized_segment_to_width() {
+            let rendered = StatusLine::new(vec![StatusLineSegment::RunState]).render(
+                &Theme::default(),
+                &StatusLineState {
+                    cwd: "",
+                    status_span: Span::raw("Running a very long command name"),
+                    ..bare_state()
+                },
+                12,
+            );
+
+            assert_eq!(text_of(&rendered), "  Running...");
+        }
+
+        #[test]
+        fn drops_low_utility_segments_before_usage_model_and_state() {
+            let segments = vec![
+                StatusLineSegment::CurrentTime,
+                StatusLineSegment::SessionCost,
+                StatusLineSegment::ContextUsed,
+                StatusLineSegment::Model,
+                StatusLineSegment::RunState,
+            ];
+
+            assert_eq!(
+                render_text(segments.clone(), 34),
+                "  Ctx: 50% (100k/200k) │ m │ Ready",
+            );
+            assert_eq!(render_text(segments.clone(), 11), "  m │ Ready");
+            assert_eq!(render_text(segments, 10), "  Ready");
+        }
+
+        #[test]
+        fn drops_plain_model_before_model_with_effort() {
+            // The compact `model-with-effort` label carries strictly more information than `model`,
+            // so a user who configures both keeps the more useful variant under width pressure.
+            let segments = vec![
+                StatusLineSegment::Model,
+                StatusLineSegment::ModelWithEffort,
+                StatusLineSegment::RunState,
+            ];
+
+            assert_eq!(render_text(segments.clone(), 80), "  m │ m (high) │ Ready");
+            assert_eq!(render_text(segments, 18), "  m (high) │ Ready");
         }
     }
 
-    #[test]
-    fn render_permission_mode_flags_plan_and_yolo_and_hides_manual() {
-        let rendered = |permission_mode| {
-            render(
-                vec![
-                    StatusLineSegment::PermissionMode,
-                    StatusLineSegment::RunState,
-                ],
-                &StatusLineState {
-                    permission_mode,
-                    ..bare_state()
-                },
-            )
-        };
-        let theme = Theme::default();
+    mod segment_utility {
+        use super::*;
 
-        let plan = rendered(Mode::Plan);
-        assert_eq!(text_of(&plan), "  Mode: plan │ Ready");
-        assert_eq!(plan.line.spans[1].style, theme.accent());
-
-        let yolo = rendered(Mode::Yolo);
-        assert_eq!(text_of(&yolo), "  Mode: yolo │ Ready");
-        assert_eq!(yolo.line.spans[1].style, theme.error());
-
-        assert_eq!(text_of(&rendered(Mode::Manual)), "  Ready");
-    }
-
-    #[test]
-    fn render_queued_prompts_counts_the_queue_in_the_muted_style_and_hides_an_empty_one() {
-        let rendered = |queued_prompts| {
-            render(
-                vec![
-                    StatusLineSegment::QueuedPrompts,
-                    StatusLineSegment::RunState,
-                ],
-                &StatusLineState {
-                    queued_prompts,
-                    ..bare_state()
-                },
-            )
-        };
-
-        let queued = rendered(2);
-        assert_eq!(text_of(&queued), "  Queued: 2 │ Ready");
-        assert_eq!(queued.line.spans[1].style, Theme::default().muted());
-
-        assert_eq!(text_of(&rendered(0)), "  Ready");
-    }
-
-    #[test]
-    fn render_task_progress_counts_completed_tasks_in_the_muted_style_and_hides_without_a_list() {
-        let rendered = |task_progress| {
-            render(
-                vec![StatusLineSegment::TaskProgress, StatusLineSegment::RunState],
-                &StatusLineState {
-                    task_progress,
-                    ..bare_state()
-                },
-            )
-        };
-
-        let progress = rendered(Some(Progress {
-            completed: 2,
-            total: 5,
-        }));
-        assert_eq!(text_of(&progress), "  Tasks: 2/5 │ Ready");
-        assert_eq!(progress.line.spans[1].style, Theme::default().muted());
-
-        assert_eq!(text_of(&rendered(None)), "  Ready");
-    }
-
-    #[test]
-    fn render_session_id_shows_the_resumable_prefix() {
-        let text = |session_id| {
-            text_of(&render(
-                vec![StatusLineSegment::SessionId, StatusLineSegment::RunState],
-                &StatusLineState {
-                    session_id,
-                    ..bare_state()
-                },
-            ))
-        };
-
-        assert_eq!(
-            text("3f2a9c1e-5b7d-4e8f-9a0b-1c2d3e4f5a6b"),
-            "  ID: 3f2a9c1e │ Ready"
-        );
-        assert_eq!(text(""), "  Ready");
-    }
-
-    #[test]
-    fn render_theme_names_a_built_in_or_a_theme_file_by_its_stem() {
-        let text = |theme_name| {
-            text_of(&render(
-                vec![StatusLineSegment::Theme, StatusLineSegment::RunState],
-                &StatusLineState {
-                    theme_name,
-                    ..bare_state()
-                },
-            ))
-        };
-
-        assert_eq!(text("latte"), "  Theme: latte │ Ready");
-        assert_eq!(text("/home/me/themes/dusk.toml"), "  Theme: dusk │ Ready");
-        assert_eq!(text(""), "  Ready");
-    }
-
-    // ── segment_utility ──
-
-    /// The drop order the configuration guide documents.
-    #[test]
-    fn segment_utility_follows_the_documented_drop_order() {
-        let drop_order = [
-            StatusLineSegment::Theme,
-            StatusLineSegment::SessionId,
-            StatusLineSegment::ThreadTitle,
-            StatusLineSegment::CurrentTime,
-            StatusLineSegment::PullRequestReview,
-            StatusLineSegment::PullRequestChecks,
-            StatusLineSegment::PullRequest,
-            StatusLineSegment::GitBranch,
-            StatusLineSegment::CurrentDir,
-            StatusLineSegment::TaskProgress,
-            StatusLineSegment::QueuedPrompts,
-            StatusLineSegment::SessionCost,
-            StatusLineSegment::WeeklyLimit,
-            StatusLineSegment::FiveHourLimit,
-            StatusLineSegment::ContextUsed,
-            StatusLineSegment::Model,
-            StatusLineSegment::ModelWithEffort,
-            StatusLineSegment::PermissionMode,
-            StatusLineSegment::RunState,
-        ];
-        for (earlier, later) in drop_order.iter().zip(&drop_order[1..]) {
-            assert!(
-                segment_utility(*earlier) < segment_utility(*later),
-                "{earlier:?} must drop before {later:?}",
-            );
+        /// The drop order the configuration guide documents.
+        #[test]
+        fn follows_the_documented_drop_order() {
+            let drop_order = [
+                StatusLineSegment::Theme,
+                StatusLineSegment::SessionId,
+                StatusLineSegment::ThreadTitle,
+                StatusLineSegment::CurrentTime,
+                StatusLineSegment::PullRequestReview,
+                StatusLineSegment::PullRequestChecks,
+                StatusLineSegment::PullRequest,
+                StatusLineSegment::GitBranch,
+                StatusLineSegment::CurrentDir,
+                StatusLineSegment::TaskProgress,
+                StatusLineSegment::QueuedPrompts,
+                StatusLineSegment::SessionCost,
+                StatusLineSegment::WeeklyLimit,
+                StatusLineSegment::FiveHourLimit,
+                StatusLineSegment::ContextUsed,
+                StatusLineSegment::Model,
+                StatusLineSegment::ModelWithEffort,
+                StatusLineSegment::PermissionMode,
+                StatusLineSegment::RunState,
+            ];
+            for (earlier, later) in drop_order.iter().zip(&drop_order[1..]) {
+                assert!(
+                    segment_utility(*earlier) < segment_utility(*later),
+                    "{earlier:?} must drop before {later:?}",
+                );
+            }
         }
     }
 
-    // ── context_label ──
+    mod context_label {
+        use super::*;
 
-    #[test]
-    fn context_label_hides_context_a_compaction_cleared() {
-        let label = context_label(UsageSnapshot {
-            context_tokens: None,
-            context_window: Some(200_000),
-            estimated_cost_usd: Some(1.0),
-        });
+        #[test]
+        fn hides_context_a_compaction_cleared() {
+            let label = context_label(UsageSnapshot {
+                context_tokens: None,
+                context_window: Some(200_000),
+                estimated_cost_usd: Some(1.0),
+            });
 
-        assert!(label.is_none(), "{label:?}");
+            assert!(label.is_none(), "{label:?}");
+        }
     }
 
-    // ── format_cost ──
+    mod format_cost {
+        use super::*;
 
-    #[test]
-    fn format_cost_switches_to_cents_where_they_round_up_to_a_dollar() {
-        assert_eq!(format_cost(1.234), "$1.23");
-        assert_eq!(format_cost(0.9951), "$1.00");
-        assert_eq!(format_cost(0.9949), "$0.9949");
-        assert_eq!(format_cost(0.12345), "$0.1235");
+        #[test]
+        fn switches_to_cents_where_they_round_up_to_a_dollar() {
+            assert_eq!(format_cost(1.234), "$1.23");
+            assert_eq!(format_cost(0.9951), "$1.00");
+            assert_eq!(format_cost(0.9949), "$0.9949");
+            assert_eq!(format_cost(0.12345), "$0.1235");
+        }
     }
 }

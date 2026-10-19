@@ -273,8 +273,6 @@ mod tests {
     use super::*;
     use crate::tui::theme::Theme;
 
-    // ── Fixtures ──
-
     fn texts(lines: &[Line<'_>]) -> Vec<String> {
         lines.iter().map(ToString::to_string).collect()
     }
@@ -355,181 +353,215 @@ mod tests {
         stack
     }
 
-    // ── CachedBlock::lines ──
+    mod cached_block {
+        use super::*;
 
-    #[test]
-    fn lines_stand_in_as_one_blank_row_until_the_first_render() {
-        let mut block = standalone(&["a", "b"]);
-        assert_eq!(texts(block.lines()), [""]);
+        mod lines {
+            use super::*;
 
-        refresh(&mut block, 40);
-        assert_eq!(texts(block.lines()), ["a", "b"]);
+            #[test]
+            fn stand_in_as_one_blank_row_until_the_first_render() {
+                let mut block = standalone(&["a", "b"]);
+                assert_eq!(texts(block.lines()), [""]);
 
-        let mut hidden = hidden(&["a"]);
-        assert!(!hidden.visible());
-        refresh(&mut hidden, 40);
-        assert_eq!(texts(hidden.lines()), Vec::<String>::new());
+                refresh(&mut block, 40);
+                assert_eq!(texts(block.lines()), ["a", "b"]);
+
+                let mut hidden = hidden(&["a"]);
+                assert!(!hidden.visible());
+                refresh(&mut hidden, 40);
+                assert_eq!(texts(hidden.lines()), Vec::<String>::new());
+            }
+        }
+
+        mod is_current {
+            use super::*;
+
+            #[test]
+            fn until_the_width_or_theme_epoch_changes() {
+                let mut block = standalone(&["a"]);
+                assert!(!block.is_current(40, 0));
+
+                refresh(&mut block, 40);
+                assert!(block.is_current(40, 0));
+                assert!(!block.is_current(30, 0), "a width change is stale");
+                assert!(!block.is_current(40, 1), "a theme swap is stale");
+            }
+        }
     }
 
-    // ── CachedBlock::is_current ──
+    mod anchor {
+        use super::*;
 
-    #[test]
-    fn is_current_until_the_width_or_theme_epoch_changes() {
-        let mut block = standalone(&["a"]);
-        assert!(!block.is_current(40, 0));
+        mod shift_from {
+            use super::*;
 
-        refresh(&mut block, 40);
-        assert!(block.is_current(40, 0));
-        assert!(!block.is_current(30, 0), "a width change is stale");
-        assert!(!block.is_current(40, 1), "a theme swap is stale");
+            #[test]
+            fn keeps_naming_the_block_moved_by_an_insert() {
+                let painted = SlotTops(vec![0, 2, 4]);
+                let mut above = painted.anchor_at(1);
+                let mut below = painted.anchor_at(3);
+
+                above.shift_from(1);
+                below.shift_from(1);
+
+                let inserted = SlotTops(vec![0, 2, 3, 5]);
+                assert_eq!(inserted.offset_of(above), 1);
+                assert_eq!(
+                    inserted.offset_of(below),
+                    4,
+                    "row 1 of the block now at index 2"
+                );
+            }
+        }
     }
 
-    // ── SlotTops::anchor_at / SlotTops::offset_of ──
+    mod slot_tops {
+        use super::*;
 
-    #[test]
-    fn anchor_at_names_the_slot_holding_the_row() {
-        let mut blocks = [flush(&["a0", "a1"]), hidden(&["h"]), flush(&["c0", "c1"])];
-        let stack = stack_of(&mut blocks);
-        let tops = stack.tops();
-        assert_eq!(*tops, SlotTops(vec![0, 2, 2, 4]));
+        mod anchor_at {
+            use super::*;
 
-        let anchor = |offset| {
-            let anchor = tops.anchor_at(offset);
-            (anchor.block, anchor.row)
-        };
-        assert_eq!(anchor(1), (0, 1));
-        assert_eq!(anchor(2), (2, 0), "skips the hidden block's empty slot");
-        assert_eq!(anchor(5), (3, 1), "rows past the end count from it");
-        assert_eq!(SlotTops::default().anchor_at(3).row, 3);
+            #[test]
+            fn names_the_slot_holding_the_row() {
+                let mut blocks = [flush(&["a0", "a1"]), hidden(&["h"]), flush(&["c0", "c1"])];
+                let stack = stack_of(&mut blocks);
+                let tops = stack.tops();
+                assert_eq!(*tops, SlotTops(vec![0, 2, 2, 4]));
+
+                let anchor = |offset| {
+                    let anchor = tops.anchor_at(offset);
+                    (anchor.block, anchor.row)
+                };
+                assert_eq!(anchor(1), (0, 1));
+                assert_eq!(anchor(2), (2, 0), "skips the hidden block's empty slot");
+                assert_eq!(anchor(5), (3, 1), "rows past the end count from it");
+                assert_eq!(SlotTops::default().anchor_at(3).row, 3);
+            }
+        }
+
+        mod offset_of {
+            use super::*;
+
+            #[test]
+            fn keeps_the_row_in_place_as_slots_change_height() {
+                let painted = SlotTops(vec![0, 4, 8, 10]);
+                let in_slot = painted.anchor_at(6);
+                let past_end = painted.anchor_at(12);
+
+                let taller = SlotTops(vec![0, 10, 18, 20, 23]);
+                assert_eq!(
+                    taller.offset_of(in_slot),
+                    10 + 4,
+                    "row 2 of 4 becomes row 4 of 8"
+                );
+                assert_eq!(
+                    taller.offset_of(past_end),
+                    20 + 2,
+                    "a row past the old end keeps its distance from it"
+                );
+                assert_eq!(painted.offset_of(in_slot), 6);
+            }
+        }
+
+        mod blocks_within {
+            use super::*;
+
+            #[test]
+            fn lists_nonempty_slots_overlapping_the_rows() {
+                let tops = SlotTops(vec![0, 2, 2, 5, 9]);
+                let within = |rows| tops.blocks_within(rows).collect::<Vec<_>>();
+                assert_eq!(within(0..1), [0]);
+                assert_eq!(within(1..3), [0, 2], "the empty slot at row 2 is skipped");
+                assert_eq!(within(4..20), [2, 3]);
+                assert_eq!(within(9..20), Vec::<usize>::new(), "past the last block");
+            }
+        }
     }
 
-    #[test]
-    fn offset_of_keeps_the_row_in_place_as_slots_change_height() {
-        let painted = SlotTops(vec![0, 4, 8, 10]);
-        let in_slot = painted.anchor_at(6);
-        let past_end = painted.anchor_at(12);
+    mod push_block {
+        use super::*;
 
-        let taller = SlotTops(vec![0, 10, 18, 20, 23]);
-        assert_eq!(
-            taller.offset_of(in_slot),
-            10 + 4,
-            "row 2 of 4 becomes row 4 of 8"
-        );
-        assert_eq!(
-            taller.offset_of(past_end),
-            20 + 2,
-            "a row past the old end keeps its distance from it"
-        );
-        assert_eq!(painted.offset_of(in_slot), 6);
+        #[test]
+        fn separates_standalone_blocks_and_starts_each_slot_at_its_first_row() {
+            let mut blocks = [
+                standalone(&["user"]),
+                hidden(&["thought"]),
+                flush(&["call"]),
+                standalone(&["reply"]),
+            ];
+            let stack = stack_of(&mut blocks);
+
+            assert_eq!(
+                texts(&stack.slice(0, stack.height())),
+                ["user", "", "call", "", "reply", ""],
+            );
+            assert_eq!(
+                stack.into_tops(),
+                SlotTops(vec![0, 2, 2, 4, 6]),
+                "the blank above the reply ends the call's slot",
+            );
+        }
     }
 
-    // ── Anchor::shift_from ──
+    mod last_has_width {
+        use super::*;
 
-    #[test]
-    fn shift_from_keeps_naming_the_block_moved_by_an_insert() {
-        let painted = SlotTops(vec![0, 2, 4]);
-        let mut above = painted.anchor_at(1);
-        let mut below = painted.anchor_at(3);
+        #[test]
+        fn ignores_empty_runs() {
+            let text = [Line::raw("text")];
+            let mut stack = Stack::default();
+            assert!(!stack.last_has_width());
 
-        above.shift_from(1);
-        below.shift_from(1);
+            stack.push(&text);
+            stack.push(&[]);
+            assert!(
+                stack.last_has_width(),
+                "an empty push must not hide the last row"
+            );
 
-        let inserted = SlotTops(vec![0, 2, 3, 5]);
-        assert_eq!(inserted.offset_of(above), 1);
-        assert_eq!(
-            inserted.offset_of(below),
-            4,
-            "row 1 of the block now at index 2"
-        );
+            stack.push_blank();
+            assert!(!stack.last_has_width());
+        }
     }
 
-    // ── SlotTops::blocks_within ──
+    mod row {
+        use super::*;
 
-    #[test]
-    fn blocks_within_lists_nonempty_slots_overlapping_the_rows() {
-        let tops = SlotTops(vec![0, 2, 2, 5, 9]);
-        let within = |rows| tops.blocks_within(rows).collect::<Vec<_>>();
-        assert_eq!(within(0..1), [0]);
-        assert_eq!(within(1..3), [0, 2], "the empty slot at row 2 is skipped");
-        assert_eq!(within(4..20), [2, 3]);
-        assert_eq!(within(9..20), Vec::<usize>::new(), "past the last block");
+        #[test]
+        fn reads_across_run_boundaries() {
+            let a = [Line::raw("a0")];
+            let b = [Line::raw("b0"), Line::raw("b1")];
+            let mut stack = Stack::default();
+            stack.push(&a);
+            stack.push_blank();
+            stack.push(&b);
+
+            let row = |index| stack.row(index).map(ToString::to_string);
+            assert_eq!(row(0).as_deref(), Some("a0"));
+            assert_eq!(row(1).as_deref(), Some(""));
+            assert_eq!(row(3).as_deref(), Some("b1"));
+            assert_eq!(row(4), None);
+        }
     }
 
-    // ── Stack::push_block ──
+    mod slice {
+        use super::*;
 
-    #[test]
-    fn push_block_separates_standalone_blocks_and_starts_each_slot_at_its_first_row() {
-        let mut blocks = [
-            standalone(&["user"]),
-            hidden(&["thought"]),
-            flush(&["call"]),
-            standalone(&["reply"]),
-        ];
-        let stack = stack_of(&mut blocks);
+        #[test]
+        fn spans_run_boundaries() {
+            let a = [Line::raw("a0"), Line::raw("a1")];
+            let b = [Line::raw("b0"), Line::raw("b1"), Line::raw("b2")];
+            let mut stack = Stack::default();
+            stack.push(&a);
+            stack.push_blank();
+            stack.push(&b);
 
-        assert_eq!(
-            texts(&stack.slice(0, stack.height())),
-            ["user", "", "call", "", "reply", ""],
-        );
-        assert_eq!(
-            stack.into_tops(),
-            SlotTops(vec![0, 2, 2, 4, 6]),
-            "the blank above the reply ends the call's slot",
-        );
-    }
-
-    // ── Stack::last_has_width ──
-
-    #[test]
-    fn last_has_width_ignores_empty_runs() {
-        let text = [Line::raw("text")];
-        let mut stack = Stack::default();
-        assert!(!stack.last_has_width());
-
-        stack.push(&text);
-        stack.push(&[]);
-        assert!(
-            stack.last_has_width(),
-            "an empty push must not hide the last row"
-        );
-
-        stack.push_blank();
-        assert!(!stack.last_has_width());
-    }
-
-    // ── Stack::row ──
-
-    #[test]
-    fn row_reads_across_run_boundaries() {
-        let a = [Line::raw("a0")];
-        let b = [Line::raw("b0"), Line::raw("b1")];
-        let mut stack = Stack::default();
-        stack.push(&a);
-        stack.push_blank();
-        stack.push(&b);
-
-        let row = |index| stack.row(index).map(ToString::to_string);
-        assert_eq!(row(0).as_deref(), Some("a0"));
-        assert_eq!(row(1).as_deref(), Some(""));
-        assert_eq!(row(3).as_deref(), Some("b1"));
-        assert_eq!(row(4), None);
-    }
-
-    // ── Stack::slice ──
-
-    #[test]
-    fn slice_spans_run_boundaries() {
-        let a = [Line::raw("a0"), Line::raw("a1")];
-        let b = [Line::raw("b0"), Line::raw("b1"), Line::raw("b2")];
-        let mut stack = Stack::default();
-        stack.push(&a);
-        stack.push_blank();
-        stack.push(&b);
-
-        assert_eq!(stack.height(), 6);
-        assert_eq!(texts(&stack.slice(1, 3)), ["a1", "", "b0"]);
-        assert_eq!(texts(&stack.slice(4, 10)), ["b1", "b2"]);
-        assert_eq!(texts(&stack.slice(6, 3)), Vec::<String>::new());
-        assert_eq!(texts(&stack.slice(0, 0)), Vec::<String>::new());
+            assert_eq!(stack.height(), 6);
+            assert_eq!(texts(&stack.slice(1, 3)), ["a1", "", "b0"]);
+            assert_eq!(texts(&stack.slice(4, 10)), ["b1", "b2"]);
+            assert_eq!(texts(&stack.slice(6, 3)), Vec::<String>::new());
+            assert_eq!(texts(&stack.slice(0, 0)), Vec::<String>::new());
+        }
     }
 }

@@ -131,112 +131,122 @@ mod tests {
         }
     }
 
-    // ── AssistantText::render ──
+    mod render {
+        use super::*;
 
-    #[test]
-    fn assistant_text_fenced_code_preserves_highlight_style() {
-        // `prepend_markdown_prefix` must keep `line.style` so the whole-line fg of unknown-lang
-        // fence blocks survives into the assistant render.
-        let theme = Theme::default();
-        let block = AssistantText::new(indoc! {"
-            ```
-            let x = 1;
-            ```
-        "});
-        let ctx = ctx_at(60, &theme);
-        let lines = block.render(&ctx);
-        let fence_line = lines
-            .iter()
-            .find(|l| l.spans.iter().any(|s| s.content.contains("let x = 1;")))
-            .expect("fence body line missing from render");
-        assert_eq!(fence_line.style.fg, theme.code().fg);
+        #[test]
+        fn fenced_code_preserves_highlight_style() {
+            // `prepend_markdown_prefix` must keep `line.style` so the whole-line fg of unknown-lang
+            // fence blocks survives into the assistant render.
+            let theme = Theme::default();
+            let block = AssistantText::new(indoc! {"
+                ```
+                let x = 1;
+                ```
+            "});
+            let ctx = ctx_at(60, &theme);
+            let lines = block.render(&ctx);
+            let fence_line = lines
+                .iter()
+                .find(|l| l.spans.iter().any(|s| s.content.contains("let x = 1;")))
+                .expect("fence body line missing from render");
+            assert_eq!(fence_line.style.fg, theme.code().fg);
+        }
     }
 
-    // ── AssistantThinking::render ──
+    mod assistant_thinking {
+        use super::*;
 
-    #[test]
-    fn render_empty_body_emits_header_only() {
-        // Thinking that holds only whitespace renders as the bare header.
-        let theme = Theme::default();
-        let block = AssistantThinking::new("   \n  ");
+        mod render {
+            use super::*;
 
-        let lines = block.render(&ctx_at(60, &theme));
+            #[test]
+            fn empty_body_emits_header_only() {
+                // Thinking that holds only whitespace renders as the bare header.
+                let theme = Theme::default();
+                let block = AssistantThinking::new("   \n  ");
 
-        let style = theme.thinking();
-        assert_eq!(
-            lines,
-            [Line::from(vec![
-                Span::styled(THINKING_PREFIX, style),
-                Span::styled(THINKING_LABEL, style),
-            ])]
-        );
+                let lines = block.render(&ctx_at(60, &theme));
+
+                let style = theme.thinking();
+                assert_eq!(
+                    lines,
+                    [Line::from(vec![
+                        Span::styled(THINKING_PREFIX, style),
+                        Span::styled(THINKING_LABEL, style),
+                    ])]
+                );
+            }
+
+            #[test]
+            fn paints_header_gutter_and_plain_body_in_the_thinking_style() {
+                let theme = Theme::default();
+                let block = AssistantThinking::new("hello");
+
+                let lines = block.render(&ctx_at(60, &theme));
+
+                let style = theme.thinking();
+                assert_eq!(
+                    lines,
+                    [
+                        Line::from(vec![
+                            Span::styled(THINKING_PREFIX, style),
+                            Span::styled(THINKING_LABEL, style),
+                        ]),
+                        Line::from(Span::styled(THINKING_PREFIX, style)),
+                        Line::from(vec![
+                            Span::styled(THINKING_PREFIX, style),
+                            Span::styled("hello", style),
+                        ]),
+                    ]
+                );
+            }
+
+            #[test]
+            fn fenced_code_block_preserves_highlight_style() {
+                // Whole-line fg on fence output must survive the bar prefix.
+                let theme = Theme::default();
+                let block = AssistantThinking::new(indoc! {"
+                    Consider:
+
+                    ```
+                    let x = 1;
+                    ```
+                "});
+                let lines = block.render(&ctx_at(60, &theme));
+
+                let fence_line = lines
+                    .iter()
+                    .find(|l| l.spans.iter().any(|s| s.content.contains("let x = 1;")))
+                    .expect("fence body line missing from render");
+                assert_eq!(fence_line.style.fg, theme.code().fg);
+
+                let first_span = fence_line.spans.first().expect("empty fence line");
+                assert_eq!(first_span.content, THINKING_PREFIX);
+                assert_eq!(first_span.style, theme.thinking());
+            }
+        }
     }
 
-    #[test]
-    fn render_paints_header_gutter_and_plain_body_in_the_thinking_style() {
-        let theme = Theme::default();
-        let block = AssistantThinking::new("hello");
+    mod progress_update {
+        use super::*;
 
-        let lines = block.render(&ctx_at(60, &theme));
+        #[test]
+        fn shows_as_assistant_text_only_while_thinking_hidden() {
+            let theme = Theme::default();
+            let block = ProgressUpdate::new("Found the loader.");
+            let mut ctx = ctx_at(60, &theme);
+            assert!(
+                !block.visible(&ctx),
+                "the thinking block already shows the text"
+            );
 
-        let style = theme.thinking();
-        assert_eq!(
-            lines,
-            [
-                Line::from(vec![
-                    Span::styled(THINKING_PREFIX, style),
-                    Span::styled(THINKING_LABEL, style),
-                ]),
-                Line::from(Span::styled(THINKING_PREFIX, style)),
-                Line::from(vec![
-                    Span::styled(THINKING_PREFIX, style),
-                    Span::styled("hello", style),
-                ]),
-            ]
-        );
-    }
-
-    #[test]
-    fn render_fenced_code_block_preserves_highlight_style() {
-        // Whole-line fg on fence output must survive the bar prefix.
-        let theme = Theme::default();
-        let block = AssistantThinking::new(indoc! {"
-            Consider:
-
-            ```
-            let x = 1;
-            ```
-        "});
-        let lines = block.render(&ctx_at(60, &theme));
-
-        let fence_line = lines
-            .iter()
-            .find(|l| l.spans.iter().any(|s| s.content.contains("let x = 1;")))
-            .expect("fence body line missing from render");
-        assert_eq!(fence_line.style.fg, theme.code().fg);
-
-        let first_span = fence_line.spans.first().expect("empty fence line");
-        assert_eq!(first_span.content, THINKING_PREFIX);
-        assert_eq!(first_span.style, theme.thinking());
-    }
-
-    // ── ProgressUpdate::visible ──
-
-    #[test]
-    fn progress_update_visible_only_while_thinking_hidden() {
-        let theme = Theme::default();
-        let block = ProgressUpdate::new("Found the loader.");
-        let mut ctx = ctx_at(60, &theme);
-        assert!(
-            !block.visible(&ctx),
-            "the thinking block already shows the text"
-        );
-
-        ctx.show_thinking = false;
-        assert!(block.visible(&ctx));
-        assert_eq!(
-            block.render(&ctx),
-            AssistantText::new("Found the loader.").render(&ctx),
-        );
+            ctx.show_thinking = false;
+            assert!(block.visible(&ctx));
+            assert_eq!(
+                block.render(&ctx),
+                AssistantText::new("Found the loader.").render(&ctx),
+            );
+        }
     }
 }

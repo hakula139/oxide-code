@@ -230,364 +230,374 @@ mod tests {
     use crate::tui::glyphs::USER_PROMPT_PREFIX;
     use crate::tui::theme::Theme;
 
-    // ── prefixed_row ──
+    mod prefixed_row {
+        use super::*;
 
-    #[test]
-    fn prefixed_row_emits_the_prefix_and_text_on_one_row() {
-        let theme = Theme::default();
-        let ctx = RenderCtx {
-            width: 80,
-            theme: &theme,
-            show_thinking: true,
-        };
-        let mut out = Vec::new();
+        #[test]
+        fn emits_the_prefix_and_text_on_one_row() {
+            let theme = Theme::default();
+            let ctx = RenderCtx {
+                width: 80,
+                theme: &theme,
+                show_thinking: true,
+            };
+            let mut out = Vec::new();
 
-        prefixed_row(
-            &mut out,
-            &ctx,
-            TOOL_BORDER_CONT,
-            theme.tool_border(),
-            "hello",
-            theme.dim(),
-        );
-
-        assert_eq!(
-            out,
-            [Line::from(vec![
-                Span::styled(TOOL_BORDER_CONT, theme.tool_border()),
-                Span::styled("hello", theme.dim()),
-            ])]
-        );
-    }
-
-    #[test]
-    fn prefixed_row_wraps_long_text_under_the_bar_in_the_text_style() {
-        let theme = Theme::default();
-        let ctx = RenderCtx {
-            width: 12,
-            theme: &theme,
-            show_thinking: true,
-        };
-        let mut out = Vec::new();
-
-        prefixed_row(
-            &mut out,
-            &ctx,
-            TOOL_BORDER_CONT,
-            theme.tool_border(),
-            "alpha beta gamma",
-            theme.dim(),
-        );
-
-        let (bar, dim) = (theme.tool_border(), theme.dim());
-        let cont = |text| {
-            Line::from(vec![
-                Span::styled(BAR, bar),
-                Span::raw("   "),
-                Span::styled(text, dim),
-            ])
-        };
-        assert_eq!(
-            out,
-            [
-                Line::from(vec![
-                    Span::styled(TOOL_BORDER_CONT, bar),
-                    Span::styled("alpha ", dim),
-                ]),
-                cont("beta "),
-                cont("gamma"),
-            ]
-        );
-    }
-
-    #[test]
-    fn prefixed_row_wraps_under_the_indent_of_an_icon_prefix() {
-        let theme = Theme::default();
-        let ctx = RenderCtx {
-            width: 16,
-            theme: &theme,
-            show_thinking: true,
-        };
-        let mut out = Vec::new();
-
-        prefixed_row(
-            &mut out,
-            &ctx,
-            USER_PROMPT_PREFIX,
-            theme.user(),
-            "one two three four five six seven",
-            theme.text(),
-        );
-
-        let text = theme.text();
-        let cont = |words| Line::from(vec![Span::raw("  "), Span::styled(words, text)]);
-        assert_eq!(
-            out,
-            [
-                Line::from(vec![
-                    Span::styled(USER_PROMPT_PREFIX, theme.user()),
-                    Span::styled("one two three ", text),
-                ]),
-                cont("four five six "),
-                cont("seven"),
-            ]
-        );
-    }
-
-    #[test]
-    fn prefixed_row_wraps_by_display_width() {
-        let theme = Theme::default();
-        let ctx = RenderCtx {
-            width: 12,
-            theme: &theme,
-            show_thinking: true,
-        };
-        let mut out = Vec::new();
-
-        prefixed_row(
-            &mut out,
-            &ctx,
-            USER_PROMPT_PREFIX,
-            theme.user(),
-            "你好 世界 再见",
-            theme.text(),
-        );
-
-        let rows: Vec<String> = out.iter().map(ToString::to_string).collect();
-        assert_eq!(rows, ["❯ 你好 世界 ", "  再见"]);
-    }
-
-    // ── continuation_spans ──
-
-    #[test]
-    fn continuation_spans_keep_the_bar_in_place_and_blank_the_cells_around_it() {
-        let style = Theme::default().tool_border();
-
-        let spans = continuation_spans("  ▎   ", style);
-
-        assert_eq!(
-            spans,
-            [Span::raw("  "), Span::styled(BAR, style), Span::raw("   ")]
-        );
-    }
-
-    // ── NumberedRows::with_style ──
-
-    #[test]
-    fn with_style_render_uses_custom_separator_in_place_of_pipe() {
-        // On the diff path the separator carries the `- ` or `+ ` sign, and the text stays a
-        // separate span so the sign can take its own color.
-        let theme = Theme::default();
-        let ctx = RenderCtx {
-            width: 30,
-            theme: &theme,
-            show_thinking: true,
-        };
-        let renderer = NumberedRows::with_style(
-            &ctx,
-            theme.tool_border(),
-            99,
-            " - ",
-            theme.error(),
-            Some(theme.diff_del_row()),
-        );
-        let mut out = Vec::new();
-
-        renderer.render(&mut out, 14, r#"println!("x");"#, theme.error());
-
-        let row = out.first().expect("renders one line");
-        let contents: Vec<&str> = row.spans.iter().map(|s| s.content.as_ref()).collect();
-        assert_eq!(
-            contents,
-            [
+            prefixed_row(
+                &mut out,
+                &ctx,
                 TOOL_BORDER_CONT,
-                "14",
-                " - ",
-                r#"println!("x");"#,
-                "       "
-            ]
-        );
-    }
+                theme.tool_border(),
+                "hello",
+                theme.dim(),
+            );
 
-    #[test]
-    fn with_style_patches_row_bg_onto_content_spans() {
-        // The bar prefix stays transparent while the number, separator, and text inherit the row
-        // bg, so the chrome column never tints and the band has no holes.
-        let theme = Theme::default();
-        let ctx = RenderCtx {
-            width: 80,
-            theme: &theme,
-            show_thinking: true,
-        };
-        let renderer = NumberedRows::with_style(
-            &ctx,
-            theme.tool_border(),
-            99,
-            " + ",
-            theme.success(),
-            Some(theme.diff_add_row()),
-        );
-        let mut out = Vec::new();
-        renderer.render(&mut out, 7, "x", theme.success());
-
-        let row = &out[0];
-        assert_eq!(row.spans[0].style.bg, None, "bar prefix must stay clear");
-        assert_eq!(row.spans[1].style.bg, theme.diff_add_row().bg);
-        assert_eq!(row.spans[2].style.bg, theme.diff_add_row().bg);
-        assert_eq!(row.spans[3].style.bg, theme.diff_add_row().bg);
-    }
-
-    #[test]
-    fn with_style_pads_to_full_width_with_row_bg() {
-        // Trailing pad fills remaining columns so the bg tint reaches `ctx.width`.
-        let theme = Theme::default();
-        let ctx = RenderCtx {
-            width: 40,
-            theme: &theme,
-            show_thinking: true,
-        };
-        let renderer = NumberedRows::with_style(
-            &ctx,
-            theme.tool_border(),
-            99,
-            " - ",
-            theme.error(),
-            Some(theme.diff_del_row()),
-        );
-        let mut out = Vec::new();
-        renderer.render(&mut out, 1, "abc", theme.error());
-
-        let row = &out[0];
-        assert_eq!(row.width(), 40, "padded row must reach ctx.width");
-
-        let last = row.spans.last().expect("trailing pad span");
-        assert!(
-            last.content.chars().all(|c| c == ' '),
-            "trailing pad span must be spaces only, got {:?}",
-            last.content,
-        );
-        assert_eq!(last.style.bg, theme.diff_del_row().bg);
-    }
-
-    #[test]
-    fn with_style_wrapped_continuation_keeps_bg_under_text_column() {
-        // Every wrapped line pads to `ctx.width` so the bg stays contiguous, and the bar prefix on
-        // continuations stays transparent like the header line.
-        let theme = Theme::default();
-        let ctx = RenderCtx {
-            width: 20,
-            theme: &theme,
-            show_thinking: true,
-        };
-        let renderer = NumberedRows::with_style(
-            &ctx,
-            theme.tool_border(),
-            99,
-            " - ",
-            theme.error(),
-            Some(theme.diff_del_row()),
-        );
-        let mut out = Vec::new();
-        renderer.render(&mut out, 1, "alpha beta gamma delta", theme.error());
-
-        let rows: Vec<String> = out
-            .iter()
-            .map(|line| line.to_string().trim_end().to_owned())
-            .collect();
-        assert_eq!(rows, ["▎    1 - alpha beta", "▎        gamma delta"]);
-        for line in &out {
-            assert_eq!(line.width(), 20, "every wrapped row must reach ctx.width");
             assert_eq!(
-                line.spans.last().unwrap().style.bg,
-                theme.diff_del_row().bg,
-                "trailing span on every line must carry row bg",
+                out,
+                [Line::from(vec![
+                    Span::styled(TOOL_BORDER_CONT, theme.tool_border()),
+                    Span::styled("hello", theme.dim()),
+                ])]
             );
         }
-        let cont = &out[1];
-        assert_eq!(
-            cont.spans[0].style.bg, None,
-            "continuation bar prefix must stay clear"
-        );
+
+        #[test]
+        fn wraps_long_text_under_the_bar_in_the_text_style() {
+            let theme = Theme::default();
+            let ctx = RenderCtx {
+                width: 12,
+                theme: &theme,
+                show_thinking: true,
+            };
+            let mut out = Vec::new();
+
+            prefixed_row(
+                &mut out,
+                &ctx,
+                TOOL_BORDER_CONT,
+                theme.tool_border(),
+                "alpha beta gamma",
+                theme.dim(),
+            );
+
+            let (bar, dim) = (theme.tool_border(), theme.dim());
+            let cont = |text| {
+                Line::from(vec![
+                    Span::styled(BAR, bar),
+                    Span::raw("   "),
+                    Span::styled(text, dim),
+                ])
+            };
+            assert_eq!(
+                out,
+                [
+                    Line::from(vec![
+                        Span::styled(TOOL_BORDER_CONT, bar),
+                        Span::styled("alpha ", dim),
+                    ]),
+                    cont("beta "),
+                    cont("gamma"),
+                ]
+            );
+        }
+
+        #[test]
+        fn wraps_under_the_indent_of_an_icon_prefix() {
+            let theme = Theme::default();
+            let ctx = RenderCtx {
+                width: 16,
+                theme: &theme,
+                show_thinking: true,
+            };
+            let mut out = Vec::new();
+
+            prefixed_row(
+                &mut out,
+                &ctx,
+                USER_PROMPT_PREFIX,
+                theme.user(),
+                "one two three four five six seven",
+                theme.text(),
+            );
+
+            let text = theme.text();
+            let cont = |words| Line::from(vec![Span::raw("  "), Span::styled(words, text)]);
+            assert_eq!(
+                out,
+                [
+                    Line::from(vec![
+                        Span::styled(USER_PROMPT_PREFIX, theme.user()),
+                        Span::styled("one two three ", text),
+                    ]),
+                    cont("four five six "),
+                    cont("seven"),
+                ]
+            );
+        }
+
+        #[test]
+        fn wraps_by_display_width() {
+            let theme = Theme::default();
+            let ctx = RenderCtx {
+                width: 12,
+                theme: &theme,
+                show_thinking: true,
+            };
+            let mut out = Vec::new();
+
+            prefixed_row(
+                &mut out,
+                &ctx,
+                USER_PROMPT_PREFIX,
+                theme.user(),
+                "你好 世界 再见",
+                theme.text(),
+            );
+
+            let rows: Vec<String> = out.iter().map(ToString::to_string).collect();
+            assert_eq!(rows, ["❯ 你好 世界 ", "  再见"]);
+        }
     }
 
-    // ── NumberedRows::render ──
+    mod continuation_spans {
+        use super::*;
 
-    #[test]
-    fn render_emits_bar_number_separator_and_text() {
-        let theme = Theme::default();
-        let ctx = RenderCtx {
-            width: 80,
-            theme: &theme,
-            show_thinking: true,
-        };
-        let renderer = NumberedRows::new(&ctx, theme.tool_border(), 100);
-        let mut out = Vec::new();
-        renderer.render(&mut out, 7, "hello", theme.text());
+        #[test]
+        fn keep_the_bar_in_place_and_blank_the_cells_around_it() {
+            let style = Theme::default().tool_border();
 
-        let row = out.first().expect("renders one line");
-        let spans: Vec<&str> = row.spans.iter().map(|s| s.content.as_ref()).collect();
-        assert_eq!(spans, vec![TOOL_BORDER_CONT, "  7", " │ ", "hello"]);
+            let spans = continuation_spans("  ▎   ", style);
+
+            assert_eq!(
+                spans,
+                [Span::raw("  "), Span::styled(BAR, style), Span::raw("   ")]
+            );
+        }
     }
 
-    #[test]
-    fn render_truncates_overlong_text_to_byte_budget() {
-        let theme = Theme::default();
-        let ctx = RenderCtx {
-            width: 4096,
-            theme: &theme,
-            show_thinking: true,
-        };
-        let renderer = NumberedRows::new(&ctx, theme.tool_border(), 1);
-        let mut out = Vec::new();
-        let long = "a".repeat(MAX_ROW_BYTES + 50);
-        renderer.render(&mut out, 1, &long, theme.text());
+    mod with_style {
+        use super::*;
 
-        assert_eq!(
-            out[0].spans[3].content,
-            format!("{}...", "a".repeat(MAX_ROW_BYTES)),
-        );
+        #[test]
+        fn render_uses_custom_separator_in_place_of_pipe() {
+            // On the diff path the separator carries the `- ` or `+ ` sign, and the text stays a
+            // separate span so the sign can take its own color.
+            let theme = Theme::default();
+            let ctx = RenderCtx {
+                width: 30,
+                theme: &theme,
+                show_thinking: true,
+            };
+            let renderer = NumberedRows::with_style(
+                &ctx,
+                theme.tool_border(),
+                99,
+                " - ",
+                theme.error(),
+                Some(theme.diff_del_row()),
+            );
+            let mut out = Vec::new();
+
+            renderer.render(&mut out, 14, r#"println!("x");"#, theme.error());
+
+            let row = out.first().expect("renders one line");
+            let contents: Vec<&str> = row.spans.iter().map(|s| s.content.as_ref()).collect();
+            assert_eq!(
+                contents,
+                [
+                    TOOL_BORDER_CONT,
+                    "14",
+                    " - ",
+                    r#"println!("x");"#,
+                    "       "
+                ]
+            );
+        }
+
+        #[test]
+        fn patches_row_bg_onto_content_spans() {
+            // The bar prefix stays transparent while the number, separator, and text inherit the
+            // row bg, so the chrome column never tints and the band has no holes.
+            let theme = Theme::default();
+            let ctx = RenderCtx {
+                width: 80,
+                theme: &theme,
+                show_thinking: true,
+            };
+            let renderer = NumberedRows::with_style(
+                &ctx,
+                theme.tool_border(),
+                99,
+                " + ",
+                theme.success(),
+                Some(theme.diff_add_row()),
+            );
+            let mut out = Vec::new();
+            renderer.render(&mut out, 7, "x", theme.success());
+
+            let row = &out[0];
+            assert_eq!(row.spans[0].style.bg, None, "bar prefix must stay clear");
+            assert_eq!(row.spans[1].style.bg, theme.diff_add_row().bg);
+            assert_eq!(row.spans[2].style.bg, theme.diff_add_row().bg);
+            assert_eq!(row.spans[3].style.bg, theme.diff_add_row().bg);
+        }
+
+        #[test]
+        fn pads_to_full_width_with_row_bg() {
+            // Trailing pad fills remaining columns so the bg tint reaches `ctx.width`.
+            let theme = Theme::default();
+            let ctx = RenderCtx {
+                width: 40,
+                theme: &theme,
+                show_thinking: true,
+            };
+            let renderer = NumberedRows::with_style(
+                &ctx,
+                theme.tool_border(),
+                99,
+                " - ",
+                theme.error(),
+                Some(theme.diff_del_row()),
+            );
+            let mut out = Vec::new();
+            renderer.render(&mut out, 1, "abc", theme.error());
+
+            let row = &out[0];
+            assert_eq!(row.width(), 40, "padded row must reach ctx.width");
+
+            let last = row.spans.last().expect("trailing pad span");
+            assert!(
+                last.content.chars().all(|c| c == ' '),
+                "trailing pad span must be spaces only, got {:?}",
+                last.content,
+            );
+            assert_eq!(last.style.bg, theme.diff_del_row().bg);
+        }
+
+        #[test]
+        fn wrapped_continuation_keeps_bg_under_text_column() {
+            // Every wrapped line pads to `ctx.width` so the bg stays contiguous, and the bar prefix
+            // on continuations stays transparent like the header line.
+            let theme = Theme::default();
+            let ctx = RenderCtx {
+                width: 20,
+                theme: &theme,
+                show_thinking: true,
+            };
+            let renderer = NumberedRows::with_style(
+                &ctx,
+                theme.tool_border(),
+                99,
+                " - ",
+                theme.error(),
+                Some(theme.diff_del_row()),
+            );
+            let mut out = Vec::new();
+            renderer.render(&mut out, 1, "alpha beta gamma delta", theme.error());
+
+            let rows: Vec<String> = out
+                .iter()
+                .map(|line| line.to_string().trim_end().to_owned())
+                .collect();
+            assert_eq!(rows, ["▎    1 - alpha beta", "▎        gamma delta"]);
+            for line in &out {
+                assert_eq!(line.width(), 20, "every wrapped row must reach ctx.width");
+                assert_eq!(
+                    line.spans.last().unwrap().style.bg,
+                    theme.diff_del_row().bg,
+                    "trailing span on every line must carry row bg",
+                );
+            }
+            let cont = &out[1];
+            assert_eq!(
+                cont.spans[0].style.bg, None,
+                "continuation bar prefix must stay clear"
+            );
+        }
     }
 
-    #[test]
-    fn render_wraps_with_aligned_continuation_prefix() {
-        // Continuation lines carry the bar plus padding aligned under the text column.
-        let theme = Theme::default();
-        let ctx = RenderCtx {
-            width: 14,
-            theme: &theme,
-            show_thinking: true,
-        };
-        let renderer = NumberedRows::new(&ctx, theme.tool_border(), 10);
-        let mut out = Vec::new();
-        renderer.render(&mut out, 1, "alpha ab cde", theme.text());
+    mod render {
+        use super::*;
 
-        let rows: Vec<String> = out.iter().map(ToString::to_string).collect();
-        assert_eq!(rows, ["▎    1 │ alpha", "▎        ab ", "▎        cde"]);
+        #[test]
+        fn emits_bar_number_separator_and_text() {
+            let theme = Theme::default();
+            let ctx = RenderCtx {
+                width: 80,
+                theme: &theme,
+                show_thinking: true,
+            };
+            let renderer = NumberedRows::new(&ctx, theme.tool_border(), 100);
+            let mut out = Vec::new();
+            renderer.render(&mut out, 7, "hello", theme.text());
+
+            let row = out.first().expect("renders one line");
+            let spans: Vec<&str> = row.spans.iter().map(|s| s.content.as_ref()).collect();
+            assert_eq!(spans, vec![TOOL_BORDER_CONT, "  7", " │ ", "hello"]);
+        }
+
+        #[test]
+        fn truncates_overlong_text_to_byte_budget() {
+            let theme = Theme::default();
+            let ctx = RenderCtx {
+                width: 4096,
+                theme: &theme,
+                show_thinking: true,
+            };
+            let renderer = NumberedRows::new(&ctx, theme.tool_border(), 1);
+            let mut out = Vec::new();
+            let long = "a".repeat(MAX_ROW_BYTES + 50);
+            renderer.render(&mut out, 1, &long, theme.text());
+
+            assert_eq!(
+                out[0].spans[3].content,
+                format!("{}...", "a".repeat(MAX_ROW_BYTES)),
+            );
+        }
+
+        #[test]
+        fn wraps_with_aligned_continuation_prefix() {
+            // Continuation lines carry the bar plus padding aligned under the text column.
+            let theme = Theme::default();
+            let ctx = RenderCtx {
+                width: 14,
+                theme: &theme,
+                show_thinking: true,
+            };
+            let renderer = NumberedRows::new(&ctx, theme.tool_border(), 10);
+            let mut out = Vec::new();
+            renderer.render(&mut out, 1, "alpha ab cde", theme.text());
+
+            let rows: Vec<String> = out.iter().map(ToString::to_string).collect();
+            assert_eq!(rows, ["▎    1 │ alpha", "▎        ab ", "▎        cde"]);
+        }
     }
 
-    // ── truncate_to_bytes ──
+    mod truncate_to_bytes {
+        use super::*;
 
-    #[test]
-    fn truncate_to_bytes_under_limit_preserves_input() {
-        assert_eq!(truncate_to_bytes("hello", 10), "hello");
-    }
+        #[test]
+        fn under_limit_preserves_input() {
+            assert_eq!(truncate_to_bytes("hello", 10), "hello");
+        }
 
-    #[test]
-    fn truncate_to_bytes_over_limit_appends_ellipsis() {
-        assert_eq!(truncate_to_bytes("hello world", 5), "hello...");
-    }
+        #[test]
+        fn over_limit_appends_ellipsis() {
+            assert_eq!(truncate_to_bytes("hello world", 5), "hello...");
+        }
 
-    #[test]
-    fn truncate_to_bytes_respects_char_boundary() {
-        // Each `中` is 3 bytes, so cutting at byte 5 without `floor_char_boundary` would split a
-        // codepoint and panic on `&s[..5]`. Rounding down to byte 3 yields one `中` + `...`.
-        let input = "中中中中";
-        let result = truncate_to_bytes(input, 5);
-        assert_eq!(result, "中...");
-    }
+        #[test]
+        fn respects_char_boundary() {
+            // Each `中` is 3 bytes, so cutting at byte 5 without `floor_char_boundary` would split a
+            // codepoint and panic on `&s[..5]`. Rounding down to byte 3 yields one `中` + `...`.
+            let input = "中中中中";
+            let result = truncate_to_bytes(input, 5);
+            assert_eq!(result, "中...");
+        }
 
-    #[test]
-    fn truncate_to_bytes_exact_boundary_no_split() {
-        assert_eq!(truncate_to_bytes("中中", 6), "中中");
+        #[test]
+        fn exact_boundary_no_split() {
+            assert_eq!(truncate_to_bytes("中中", 6), "中中");
+        }
     }
 }

@@ -150,52 +150,56 @@ mod tests {
 
     use super::*;
 
-    // ── fill_plain_spans ──
+    mod fill_plain_spans {
+        use super::*;
 
-    #[test]
-    fn fill_plain_spans_patches_only_spans_without_a_color() {
-        let theme = Theme::default();
-        let line = Line::from(vec![
-            Span::raw("plain "),
-            Span::styled("code", theme.code()),
-        ]);
-
-        let out = fill_plain_spans(line, theme.thinking());
-
-        assert_eq!(
-            out,
-            Line::from(vec![
-                Span::styled("plain ", theme.thinking()),
+        #[test]
+        fn patches_only_spans_without_a_color() {
+            let theme = Theme::default();
+            let line = Line::from(vec![
+                Span::raw("plain "),
                 Span::styled("code", theme.code()),
-            ])
-        );
+            ]);
+
+            let out = fill_plain_spans(line, theme.thinking());
+
+            assert_eq!(
+                out,
+                Line::from(vec![
+                    Span::styled("plain ", theme.thinking()),
+                    Span::styled("code", theme.code()),
+                ])
+            );
+        }
+
+        #[test]
+        fn keeps_a_line_colored_as_a_whole() {
+            let theme = Theme::default();
+            let line = Line::styled("cargo test", theme.code());
+
+            let out = fill_plain_spans(line.clone(), theme.text());
+
+            assert_eq!(out, line);
+        }
     }
 
-    #[test]
-    fn fill_plain_spans_keeps_a_line_colored_as_a_whole() {
-        let theme = Theme::default();
-        let line = Line::styled("cargo test", theme.code());
+    mod prepend_markdown_prefix {
+        use super::*;
 
-        let out = fill_plain_spans(line.clone(), theme.text());
+        #[test]
+        fn adds_styled_prefix_and_keeps_line_style_and_alignment() {
+            let line_style = Style::default().fg(Color::Green);
+            let prefix_style = Style::default().fg(Color::Blue);
+            let line = Line::styled("content", line_style).centered();
 
-        assert_eq!(out, line);
-    }
+            let result = prepend_markdown_prefix(line, "◉ ", prefix_style);
 
-    // ── prepend_markdown_prefix ──
-
-    #[test]
-    fn prepend_markdown_prefix_adds_styled_prefix_and_keeps_line_style_and_alignment() {
-        let line_style = Style::default().fg(Color::Green);
-        let prefix_style = Style::default().fg(Color::Blue);
-        let line = Line::styled("content", line_style).centered();
-
-        let result = prepend_markdown_prefix(line, "◉ ", prefix_style);
-
-        assert_eq!(
-            result,
-            Line::from(vec![Span::styled("◉ ", prefix_style), Span::raw("content")])
-                .style(line_style)
-                .centered()
-        );
+            assert_eq!(
+                result,
+                Line::from(vec![Span::styled("◉ ", prefix_style), Span::raw("content")])
+                    .style(line_style)
+                    .centered()
+            );
+        }
     }
 }

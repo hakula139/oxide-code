@@ -134,155 +134,163 @@ mod tests {
         lines.iter().map(ToString::to_string).collect()
     }
 
-    // ── take_buffer ──
+    mod take_buffer {
+        use super::*;
 
-    #[test]
-    fn take_buffer_returns_the_text_and_drops_the_cache() {
-        let theme = Theme::default();
-        let ctx = ctx_at(80, &theme);
-        let mut streaming = streamed(&["para1\n\npara2\n"], &ctx);
-
-        let text = streaming.take_buffer();
-
-        assert_eq!(text, "para1\n\npara2\n");
-        assert_eq!(rows(streaming.rendered()), [] as [String; 0]);
-        assert_eq!(rows(&streaming.render_tail(&ctx, false)), [] as [String; 0]);
-    }
-
-    // ── invalidate_cache_for_width ──
-
-    #[test]
-    fn invalidate_cache_for_width_drops_the_cache_only_when_the_width_changes() {
-        let theme = Theme::default();
-        let ctx = ctx_at(80, &theme);
-        for (width, cached) in [(80, &["◉ para1"][..]), (40, &[])] {
+        #[test]
+        fn returns_the_text_and_drops_the_cache() {
+            let theme = Theme::default();
+            let ctx = ctx_at(80, &theme);
             let mut streaming = streamed(&["para1\n\npara2\n"], &ctx);
 
-            streaming.invalidate_cache_for_width(width);
+            let text = streaming.take_buffer();
 
-            assert_eq!(rows(streaming.rendered()), cached, "width {width}");
+            assert_eq!(text, "para1\n\npara2\n");
+            assert_eq!(rows(streaming.rendered()), [] as [String; 0]);
+            assert_eq!(rows(&streaming.render_tail(&ctx, false)), [] as [String; 0]);
         }
     }
 
-    // ── invalidate_cache ──
+    mod invalidate_cache_for_width {
+        use super::*;
 
-    #[test]
-    fn invalidate_cache_leaves_the_whole_buffer_to_the_tail() {
-        let theme = Theme::default();
-        let ctx = ctx_at(80, &theme);
-        let mut streaming = streamed(&["para1\n\npara2\n"], &ctx);
+        #[test]
+        fn drops_the_cache_only_when_the_width_changes() {
+            let theme = Theme::default();
+            let ctx = ctx_at(80, &theme);
+            for (width, cached) in [(80, &["◉ para1"][..]), (40, &[])] {
+                let mut streaming = streamed(&["para1\n\npara2\n"], &ctx);
 
-        streaming.invalidate_cache();
+                streaming.invalidate_cache_for_width(width);
 
-        assert_eq!(rows(streaming.rendered()), [] as [String; 0]);
-        assert_eq!(
-            rows(&streaming.render_tail(&ctx, false)),
-            ["◉ para1", "  ", "  para2"]
-        );
+                assert_eq!(rows(streaming.rendered()), cached, "width {width}");
+            }
+        }
     }
 
-    // ── advance_cache ──
+    mod invalidate_cache {
+        use super::*;
 
-    #[test]
-    fn advance_cache_waits_for_a_measured_width() {
-        let theme = Theme::default();
+        #[test]
+        fn leaves_the_whole_buffer_to_the_tail() {
+            let theme = Theme::default();
+            let ctx = ctx_at(80, &theme);
+            let mut streaming = streamed(&["para1\n\npara2\n"], &ctx);
 
-        let streaming = streamed(&["first paragraph\n\nsecond\n"], &ctx_at(0, &theme));
+            streaming.invalidate_cache();
 
-        assert_eq!(streaming.rendered_boundary, 0);
-        assert_eq!(streaming.cached_width, 0);
-    }
-
-    #[test]
-    fn advance_cache_caches_only_the_blocks_a_finished_line_closes() {
-        let theme = Theme::default();
-        let ctx = ctx_at(80, &theme);
-        for (buffer, cached) in [
-            ("no newline here", ""),
-            ("first line\nsecond line", ""),
-            ("para1\n\npartial", ""),
-            ("para1\n\npartial\n", "para1\n\n"),
-            ("p1\n\np2\n\np3\n\np4\n", "p1\n\np2\n\np3\n\n"),
-            // A loose list continues past a blank line until another block starts.
-            ("- item 1\n\n", ""),
-            (
-                "- item 1\n\n- item 2\n\nafter\n",
-                "- item 1\n\n- item 2\n\n",
-            ),
-        ] {
-            let streaming = streamed(&[buffer], &ctx);
-
+            assert_eq!(rows(streaming.rendered()), [] as [String; 0]);
             assert_eq!(
-                &streaming.buffer[..streaming.rendered_boundary],
-                cached,
-                "{buffer:?}"
+                rows(&streaming.render_tail(&ctx, false)),
+                ["◉ para1", "  ", "  para2"]
             );
         }
     }
 
-    #[test]
-    fn advance_cache_separates_each_cached_block_from_the_next() {
-        let theme = Theme::default();
+    mod advance_cache {
+        use super::*;
 
-        let streaming = streamed(&["para1\n\npara2\n", "\npara3\n"], &ctx_at(80, &theme));
+        #[test]
+        fn waits_for_a_measured_width() {
+            let theme = Theme::default();
 
-        assert_eq!(rows(streaming.rendered()), ["◉ para1", "  ", "  para2"]);
-        assert_eq!(streaming.cached_width, 80);
-    }
+            let streaming = streamed(&["first paragraph\n\nsecond\n"], &ctx_at(0, &theme));
 
-    #[test]
-    fn advance_cache_matches_committed_render_at_every_char() {
-        let body = indoc! {"
-            ```
-            ```
+            assert_eq!(streaming.rendered_boundary, 0);
+            assert_eq!(streaming.cached_width, 0);
+        }
 
-            Here:
+        #[test]
+        fn caches_only_the_blocks_a_finished_line_closes() {
+            let theme = Theme::default();
+            let ctx = ctx_at(80, &theme);
+            for (buffer, cached) in [
+                ("no newline here", ""),
+                ("first line\nsecond line", ""),
+                ("para1\n\npartial", ""),
+                ("para1\n\npartial\n", "para1\n\n"),
+                ("p1\n\np2\n\np3\n\np4\n", "p1\n\np2\n\np3\n\n"),
+                // A loose list continues past a blank line until another block starts.
+                ("- item 1\n\n", ""),
+                (
+                    "- item 1\n\n- item 2\n\nafter\n",
+                    "- item 1\n\n- item 2\n\n",
+                ),
+            ] {
+                let streaming = streamed(&[buffer], &ctx);
 
-            | a | b |
-            | - | - |
-            | 1 | 2 |
+                assert_eq!(
+                    &streaming.buffer[..streaming.rendered_boundary],
+                    cached,
+                    "{buffer:?}"
+                );
+            }
+        }
 
-            text
-            #tag
+        #[test]
+        fn separates_each_cached_block_from_the_next() {
+            let theme = Theme::default();
 
-            para
-            ```x
-            code
-            ```
+            let streaming = streamed(&["para1\n\npara2\n", "\npara3\n"], &ctx_at(80, &theme));
 
-            ```c
-            #include <a.h>
+            assert_eq!(rows(streaming.rendered()), ["◉ para1", "  ", "  para2"]);
+            assert_eq!(streaming.cached_width, 80);
+        }
 
-            #define X 1
-            - not a bullet
-            ```
+        #[test]
+        fn matches_committed_render_at_every_char() {
+            let body = indoc! {"
+                ```
+                ```
 
-            [ref]: https://example.com
+                Here:
 
-            ```
-            ```
+                | a | b |
+                | - | - |
+                | 1 | 2 |
 
-            <div>
-            html
-            </div>
+                text
+                #tag
 
-            Done.
-        "};
-        let theme = Theme::default();
-        let ctx = ctx_at(80, &theme);
-        let mut streaming = StreamingAssistant::default();
-        for (i, ch) in body.char_indices() {
-            streaming.append(&ch.to_string());
+                para
+                ```x
+                code
+                ```
 
-            streaming.advance_cache(&ctx, false);
+                ```c
+                #include <a.h>
 
-            let prefix = &body[..i + ch.len_utf8()];
-            let lines = [streaming.rendered(), &streaming.render_tail(&ctx, false)].concat();
-            assert_eq!(
-                lines,
-                AssistantText::new(prefix).render(&ctx),
-                "after {prefix:?}"
-            );
+                #define X 1
+                - not a bullet
+                ```
+
+                [ref]: https://example.com
+
+                ```
+                ```
+
+                <div>
+                html
+                </div>
+
+                Done.
+            "};
+            let theme = Theme::default();
+            let ctx = ctx_at(80, &theme);
+            let mut streaming = StreamingAssistant::default();
+            for (i, ch) in body.char_indices() {
+                streaming.append(&ch.to_string());
+
+                streaming.advance_cache(&ctx, false);
+
+                let prefix = &body[..i + ch.len_utf8()];
+                let lines = [streaming.rendered(), &streaming.render_tail(&ctx, false)].concat();
+                assert_eq!(
+                    lines,
+                    AssistantText::new(prefix).render(&ctx),
+                    "after {prefix:?}"
+                );
+            }
         }
     }
 }
