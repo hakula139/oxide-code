@@ -447,506 +447,516 @@ mod tests {
         ApprovalBody, DiffChunk, DiffLine, GrepFileGroup, GrepMatchLine, ReadExcerptLine,
     };
 
-    fn diff_chunks() -> Vec<DiffChunk> {
-        vec![DiffChunk {
-            old: vec![DiffLine {
-                number: 3,
-                text: "old".to_owned(),
-            }],
-            new: vec![DiffLine {
-                number: 3,
-                text: "new".to_owned(),
-            }],
-        }]
-    }
+    mod op {
+        use super::*;
 
-    fn ls_result(view: ToolResultView) -> ToolResult {
-        ToolResult {
-            id: "t1".to_owned(),
-            content: "ok".to_owned(),
-            is_error: false,
-            title: Some("Ran".to_owned()),
-            view,
+        /// Each [`Op`]'s wire tag. The match has no wildcard arm, so a new variant fails to compile
+        /// here until it gets a tag and a case in `every_op`.
+        fn op_tag(op: &Op) -> &'static str {
+            match op {
+                Op::Prompt(_) => "prompt",
+                Op::Queue(_) => "queue",
+                Op::Interrupt => "interrupt",
+                Op::Resolve { .. } => "resolve",
+                Op::SetModel(_) => "set_model",
+                Op::SetMode(_) => "set_mode",
+                Op::Compact { .. } => "compact",
+                Op::Clear => "clear",
+                Op::Archive => "archive",
+                Op::Resume { .. } => "resume",
+                Op::Rename { .. } => "rename",
+                Op::Login => "login",
+                Op::Logout => "logout",
+                Op::Shutdown => "shutdown",
+            }
         }
-    }
 
-    /// A resumed history holding every [`Interaction`] variant, with one result per
-    /// [`ToolResultView`] variant.
-    fn full_history() -> Vec<Interaction> {
-        let views = [
-            ToolResultView::Text {
-                content: "ok".to_owned(),
-            },
-            ToolResultView::ReadExcerpt {
-                path: "src/main.rs".to_owned(),
-                lines: vec![ReadExcerptLine {
-                    number: 1,
-                    text: "fn main() {}".to_owned(),
-                }],
-                total_lines: 1,
-            },
-            ToolResultView::Diff {
-                chunks: diff_chunks(),
-                replace_all: false,
-                replacements: 1,
-            },
-            ToolResultView::GrepMatches {
-                groups: vec![GrepFileGroup {
-                    path: "src/lib.rs".to_owned(),
-                    lines: vec![GrepMatchLine {
-                        number: 7,
-                        text: "TODO".to_owned(),
-                        is_match: true,
-                    }],
-                }],
-                truncated: true,
-            },
-            ToolResultView::GlobFiles {
-                pattern: "*.rs".to_owned(),
-                files: vec!["src/main.rs".to_owned()],
-                total: 1,
-            },
-            ToolResultView::Tasks { tasks: plan() },
-        ];
-        let mut history = vec![
-            Interaction::Compacted {
-                summary: "Summary.".to_owned(),
-                pre_count: 4,
-                instructions: Some("focus".to_owned()),
-            },
-            Interaction::UserText("ask".to_owned()),
-            Interaction::AssistantThinking("thinking".to_owned()),
-            Interaction::ProgressUpdate("Reading.".to_owned()),
-            Interaction::ToolCall(ls_call()),
-            Interaction::AssistantText("reply".to_owned()),
-            Interaction::Interrupted,
-        ];
-        history.extend(
-            views
-                .into_iter()
-                .map(|view| Interaction::ToolResult(ls_result(view))),
-        );
-        history
-    }
-
-    /// Each [`Op`]'s wire tag. The match has no wildcard arm, so a new variant fails to compile
-    /// here until it gets a tag and a case in `every_op`.
-    fn op_tag(op: &Op) -> &'static str {
-        match op {
-            Op::Prompt(_) => "prompt",
-            Op::Queue(_) => "queue",
-            Op::Interrupt => "interrupt",
-            Op::Resolve { .. } => "resolve",
-            Op::SetModel(_) => "set_model",
-            Op::SetMode(_) => "set_mode",
-            Op::Compact { .. } => "compact",
-            Op::Clear => "clear",
-            Op::Archive => "archive",
-            Op::Resume { .. } => "resume",
-            Op::Rename { .. } => "rename",
-            Op::Login => "login",
-            Op::Logout => "logout",
-            Op::Shutdown => "shutdown",
+        fn every_op() -> Vec<Op> {
+            vec![
+                Op::Prompt("hi".to_owned()),
+                Op::Queue("next".to_owned()),
+                Op::Interrupt,
+                Op::Resolve {
+                    id: "t1".to_owned(),
+                    decision: Decision::Approve,
+                },
+                Op::Resolve {
+                    id: "t1".to_owned(),
+                    decision: Decision::AllowForSession {
+                        rule: Box::new(Rule::parse(PermissionClass::Exec, "cargo test *").unwrap()),
+                    },
+                },
+                Op::Resolve {
+                    id: "t1".to_owned(),
+                    decision: Decision::Deny,
+                },
+                Op::Resolve {
+                    id: "t1".to_owned(),
+                    decision: Decision::DenyWithFeedback {
+                        feedback: "Use rg instead.".to_owned(),
+                    },
+                },
+                Op::Resolve {
+                    id: "t1".to_owned(),
+                    decision: Decision::Abort,
+                },
+                Op::SetModel(ConfigPick::Model {
+                    id: ResolvedModelId::new("claude-opus-5-5".to_owned()),
+                    effort: Some(Effort::High),
+                }),
+                Op::SetModel(ConfigPick::Effort(Effort::Low)),
+                Op::SetMode(Mode::Plan),
+                Op::Compact {
+                    instructions: Some("focus on auth".to_owned()),
+                },
+                Op::Clear,
+                Op::Archive,
+                Op::Resume {
+                    target: ResumeTarget::Path(PathBuf::from("/repo/session.jsonl")),
+                },
+                Op::Resume {
+                    target: ResumeTarget::Prefix("1a2b".to_owned()),
+                },
+                Op::Rename {
+                    title: "Title".to_owned(),
+                },
+                Op::Login,
+                Op::Logout,
+                Op::Shutdown,
+            ]
         }
-    }
 
-    fn every_op() -> Vec<Op> {
-        vec![
-            Op::Prompt("hi".to_owned()),
-            Op::Queue("next".to_owned()),
-            Op::Interrupt,
-            Op::Resolve {
-                id: "t1".to_owned(),
-                decision: Decision::Approve,
-            },
-            Op::Resolve {
-                id: "t1".to_owned(),
-                decision: Decision::AllowForSession {
+        #[test]
+        fn round_trips_every_variant_under_its_type_tag() {
+            for op in every_op() {
+                let value = serde_json::to_value(&op).unwrap();
+                assert_eq!(value["type"], op_tag(&op), "{value}");
+                assert_eq!(serde_json::from_value::<Op>(value).unwrap(), op);
+            }
+        }
+
+        #[test]
+        fn carries_its_payload_under_data() {
+            assert_eq!(
+                serde_json::to_value(Op::Prompt("hi".to_owned())).unwrap(),
+                json!({"type": "prompt", "data": "hi"}),
+            );
+            assert_eq!(
+                serde_json::to_value(Op::Resolve {
+                    id: "t1".to_owned(),
+                    decision: Decision::Deny,
+                })
+                .unwrap(),
+                json!({"type": "resolve", "data": {"id": "t1", "decision": {"type": "deny"}}}),
+            );
+            assert_eq!(
+                serde_json::to_value(Decision::AllowForSession {
                     rule: Box::new(Rule::parse(PermissionClass::Exec, "cargo test *").unwrap()),
-                },
-            },
-            Op::Resolve {
-                id: "t1".to_owned(),
-                decision: Decision::Deny,
-            },
-            Op::Resolve {
-                id: "t1".to_owned(),
-                decision: Decision::DenyWithFeedback {
+                })
+                .unwrap(),
+                json!({
+                    "type": "allow_for_session",
+                    "data": {"rule": {"class": "exec", "pattern": "cargo test *"}},
+                }),
+            );
+            assert_eq!(
+                serde_json::to_value(Decision::DenyWithFeedback {
                     feedback: "Use rg instead.".to_owned(),
-                },
-            },
-            Op::Resolve {
-                id: "t1".to_owned(),
-                decision: Decision::Abort,
-            },
-            Op::SetModel(ConfigPick::Model {
-                id: ResolvedModelId::new("claude-opus-5-5".to_owned()),
-                effort: Some(Effort::High),
-            }),
-            Op::SetModel(ConfigPick::Effort(Effort::Low)),
-            Op::SetMode(Mode::Plan),
-            Op::Compact {
-                instructions: Some("focus on auth".to_owned()),
-            },
-            Op::Clear,
-            Op::Archive,
-            Op::Resume {
-                target: ResumeTarget::Path(PathBuf::from("/repo/session.jsonl")),
-            },
-            Op::Resume {
-                target: ResumeTarget::Prefix("1a2b".to_owned()),
-            },
-            Op::Rename {
-                title: "Title".to_owned(),
-            },
-            Op::Login,
-            Op::Logout,
-            Op::Shutdown,
-        ]
-    }
-
-    /// Each [`Event`]'s wire tag. The match has no wildcard arm, so a new variant fails to compile
-    /// here until it gets a tag and a case in `every_event`.
-    fn event_tag(event: &Event) -> &'static str {
-        match event {
-            Event::StreamToken(_) => "stream_token",
-            Event::ThinkingToken(_) => "thinking_token",
-            Event::ProgressUpdate(_) => "progress_update",
-            Event::Retrying(_) => "retrying",
-            Event::ToolCallStart(_) => "tool_call_start",
-            Event::ToolCallEnd(_) => "tool_call_end",
-            Event::PromptDrained(_) => "prompt_drained",
-            Event::TurnComplete => "turn_complete",
-            Event::TurnFailed(_) => "turn_failed",
-            Event::UsageUpdated(_) => "usage_updated",
-            Event::RateLimitsUpdated(_) => "rate_limits_updated",
-            Event::Cancelled => "cancelled",
-            Event::AutoCompactionStarted => "auto_compaction_started",
-            Event::AutoCompactionPaused { .. } => "auto_compaction_paused",
-            Event::AutoCompactionResumed => "auto_compaction_resumed",
-            Event::SummaryToken(_) => "summary_token",
-            Event::SummaryDiscarded => "summary_discarded",
-            Event::SessionTitleUpdated { .. } => "session_title_updated",
-            Event::RenameFailed(_) => "rename_failed",
-            Event::SessionRolled { .. } => "session_rolled",
-            Event::SessionResumed { .. } => "session_resumed",
-            Event::SessionCompacted { .. } => "session_compacted",
-            Event::SessionReady => "session_ready",
-            Event::ConfigChanged { .. } => "config_changed",
-            Event::ModeChanged(_) => "mode_changed",
-            Event::LoginStarted { .. } => "login_started",
-            Event::SignedIn { .. } => "signed_in",
-            Event::SignedOut { .. } => "signed_out",
-            Event::Notice(_) => "notice",
-            Event::Error(_) => "error",
-            Event::ApprovalRequested { .. } => "approval_requested",
-            Event::SessionRulesUpdated(_) => "session_rules_updated",
-            Event::TasksUpdated(_) => "tasks_updated",
-            Event::BackgroundShellsUpdated(_) => "background_shells_updated",
+                })
+                .unwrap(),
+                json!({"type": "deny_with_feedback", "data": {"feedback": "Use rg instead."}}),
+            );
+            assert_eq!(
+                serde_json::to_value(Op::Resume {
+                    target: ResumeTarget::Prefix("1a2b".to_owned()),
+                })
+                .unwrap(),
+                json!({"type": "resume", "data": {"target": {"type": "prefix", "data": "1a2b"}}}),
+            );
+            assert_eq!(
+                serde_json::to_value(Op::Interrupt).unwrap(),
+                json!({"type": "interrupt"}),
+            );
         }
     }
 
-    /// One approval per [`ApprovalBody`] variant, each held by a different basis.
-    fn approval_requests() -> [Event; 2] {
-        [
-            Event::ApprovalRequested {
-                id: "t2".to_owned(),
-                preview: ApprovalPreview {
-                    title: "Edit".to_owned(),
-                    body: ApprovalBody::Diff(diff_chunks()),
-                },
-                basis: Basis::Mode(Mode::Manual),
-                grant: None,
-            },
-            Event::ApprovalRequested {
-                id: "t3".to_owned(),
-                preview: bash_preview("cargo test"),
-                basis: Basis::Rule {
-                    tier: Tier::Ask,
-                    rule: Rule::parse(PermissionClass::Exec, "cargo *").unwrap(),
-                },
-                grant: Some(Box::new(exec_grant("cargo test"))),
-            },
-        ]
-    }
+    mod event {
+        use super::*;
 
-    /// Every [`Event`] variant, plus one approval per [`ApprovalBody`] variant.
-    fn every_event() -> Vec<Event> {
-        let mut events = vec![
-            Event::StreamToken("hello".to_owned()),
-            Event::ThinkingToken("hmm".to_owned()),
-            Event::ProgressUpdate("Reading.".to_owned()),
-            Event::Retrying("Retrying in 1 s.".to_owned()),
-            Event::ToolCallStart(ls_call()),
-            Event::ToolCallEnd(text_result("t1", "ok", true, None)),
-            Event::PromptDrained("next".to_owned()),
-            Event::TurnComplete,
-            Event::TurnFailed("boom".to_owned()),
-            Event::UsageUpdated(UsageSnapshot {
-                context_tokens: Some(1_200),
-                context_window: Some(200_000),
-                estimated_cost_usd: Some(0.25),
-            }),
-            Event::RateLimitsUpdated(five_hour_limit()),
-            Event::Cancelled,
-            Event::AutoCompactionStarted,
-            Event::AutoCompactionPaused { failures: 3 },
-            Event::AutoCompactionResumed,
-            Event::SummaryToken("Recap".to_owned()),
-            Event::SummaryDiscarded,
-            Event::SessionTitleUpdated {
-                session_id: "s1".to_owned(),
-                title: "Title".to_owned(),
-            },
-            Event::RenameFailed("Session write failed: disk full".to_owned()),
-            Event::SessionRolled {
-                id: "s2".to_owned(),
-                archived: true,
-            },
-            Event::SessionResumed {
-                id: "s3".to_owned(),
-                title: Some("Resumed".to_owned()),
-                unarchived: true,
-                history: full_history(),
-            },
-            Event::SessionCompacted {
-                summary: "Summary.".to_owned(),
-                pre_count: 4,
-                instructions: Some("focus".to_owned()),
-                automatic: true,
-            },
-            Event::SessionReady,
-            Event::ConfigChanged {
-                model: ModelSpec::resolve("claude-opus-5-5".to_owned()),
-                effort: Some(Effort::High),
-                requested: ConfigPick::Effort(Effort::Max),
-                auto_compaction: AutoCompactionConfig {
-                    enabled: true,
-                    threshold_tokens: Some(400_000),
+        fn diff_chunks() -> Vec<DiffChunk> {
+            vec![DiffChunk {
+                old: vec![DiffLine {
+                    number: 3,
+                    text: "old".to_owned(),
+                }],
+                new: vec![DiffLine {
+                    number: 3,
+                    text: "new".to_owned(),
+                }],
+            }]
+        }
+
+        fn ls_result(view: ToolResultView) -> ToolResult {
+            ToolResult {
+                id: "t1".to_owned(),
+                content: "ok".to_owned(),
+                is_error: false,
+                title: Some("Ran".to_owned()),
+                view,
+            }
+        }
+
+        /// A resumed history holding every [`Interaction`] variant, with one result per
+        /// [`ToolResultView`] variant.
+        fn full_history() -> Vec<Interaction> {
+            let views = [
+                ToolResultView::Text {
+                    content: "ok".to_owned(),
                 },
-            },
-            Event::ModeChanged(Mode::Yolo),
-            Event::LoginStarted {
-                url: "https://claude.ai/oauth/authorize?state=s".to_owned(),
-            },
-            Event::SignedIn {
-                auth: AuthSource::OxLogin,
-            },
-            Event::SignedOut {
+                ToolResultView::ReadExcerpt {
+                    path: "src/main.rs".to_owned(),
+                    lines: vec![ReadExcerptLine {
+                        number: 1,
+                        text: "fn main() {}".to_owned(),
+                    }],
+                    total_lines: 1,
+                },
+                ToolResultView::Diff {
+                    chunks: diff_chunks(),
+                    replace_all: false,
+                    replacements: 1,
+                },
+                ToolResultView::GrepMatches {
+                    groups: vec![GrepFileGroup {
+                        path: "src/lib.rs".to_owned(),
+                        lines: vec![GrepMatchLine {
+                            number: 7,
+                            text: "TODO".to_owned(),
+                            is_match: true,
+                        }],
+                    }],
+                    truncated: true,
+                },
+                ToolResultView::GlobFiles {
+                    pattern: "*.rs".to_owned(),
+                    files: vec!["src/main.rs".to_owned()],
+                    total: 1,
+                },
+                ToolResultView::Tasks { tasks: plan() },
+            ];
+            let mut history = vec![
+                Interaction::Compacted {
+                    summary: "Summary.".to_owned(),
+                    pre_count: 4,
+                    instructions: Some("focus".to_owned()),
+                },
+                Interaction::UserText("ask".to_owned()),
+                Interaction::AssistantThinking("thinking".to_owned()),
+                Interaction::ProgressUpdate("Reading.".to_owned()),
+                Interaction::ToolCall(ls_call()),
+                Interaction::AssistantText("reply".to_owned()),
+                Interaction::Interrupted,
+            ];
+            history.extend(
+                views
+                    .into_iter()
+                    .map(|view| Interaction::ToolResult(ls_result(view))),
+            );
+            history
+        }
+
+        /// Each [`Event`]'s wire tag. The match has no wildcard arm, so a new variant fails to
+        /// compile here until it gets a tag and a case in `every_event`.
+        fn event_tag(event: &Event) -> &'static str {
+            match event {
+                Event::StreamToken(_) => "stream_token",
+                Event::ThinkingToken(_) => "thinking_token",
+                Event::ProgressUpdate(_) => "progress_update",
+                Event::Retrying(_) => "retrying",
+                Event::ToolCallStart(_) => "tool_call_start",
+                Event::ToolCallEnd(_) => "tool_call_end",
+                Event::PromptDrained(_) => "prompt_drained",
+                Event::TurnComplete => "turn_complete",
+                Event::TurnFailed(_) => "turn_failed",
+                Event::UsageUpdated(_) => "usage_updated",
+                Event::RateLimitsUpdated(_) => "rate_limits_updated",
+                Event::Cancelled => "cancelled",
+                Event::AutoCompactionStarted => "auto_compaction_started",
+                Event::AutoCompactionPaused { .. } => "auto_compaction_paused",
+                Event::AutoCompactionResumed => "auto_compaction_resumed",
+                Event::SummaryToken(_) => "summary_token",
+                Event::SummaryDiscarded => "summary_discarded",
+                Event::SessionTitleUpdated { .. } => "session_title_updated",
+                Event::RenameFailed(_) => "rename_failed",
+                Event::SessionRolled { .. } => "session_rolled",
+                Event::SessionResumed { .. } => "session_resumed",
+                Event::SessionCompacted { .. } => "session_compacted",
+                Event::SessionReady => "session_ready",
+                Event::ConfigChanged { .. } => "config_changed",
+                Event::ModeChanged(_) => "mode_changed",
+                Event::LoginStarted { .. } => "login_started",
+                Event::SignedIn { .. } => "signed_in",
+                Event::SignedOut { .. } => "signed_out",
+                Event::Notice(_) => "notice",
+                Event::Error(_) => "error",
+                Event::ApprovalRequested { .. } => "approval_requested",
+                Event::SessionRulesUpdated(_) => "session_rules_updated",
+                Event::TasksUpdated(_) => "tasks_updated",
+                Event::BackgroundShellsUpdated(_) => "background_shells_updated",
+            }
+        }
+
+        /// One approval per [`ApprovalBody`] variant, each held by a different basis.
+        fn approval_requests() -> [Event; 2] {
+            [
+                Event::ApprovalRequested {
+                    id: "t2".to_owned(),
+                    preview: ApprovalPreview {
+                        title: "Edit".to_owned(),
+                        body: ApprovalBody::Diff(diff_chunks()),
+                    },
+                    basis: Basis::Mode(Mode::Manual),
+                    grant: None,
+                },
+                Event::ApprovalRequested {
+                    id: "t3".to_owned(),
+                    preview: bash_preview("cargo test"),
+                    basis: Basis::Rule {
+                        tier: Tier::Ask,
+                        rule: Rule::parse(PermissionClass::Exec, "cargo *").unwrap(),
+                    },
+                    grant: Some(Box::new(exec_grant("cargo test"))),
+                },
+            ]
+        }
+
+        /// Every [`Event`] variant, plus one approval per [`ApprovalBody`] variant.
+        fn every_event() -> Vec<Event> {
+            let mut events = vec![
+                Event::StreamToken("hello".to_owned()),
+                Event::ThinkingToken("hmm".to_owned()),
+                Event::ProgressUpdate("Reading.".to_owned()),
+                Event::Retrying("Retrying in 1 s.".to_owned()),
+                Event::ToolCallStart(ls_call()),
+                Event::ToolCallEnd(text_result("t1", "ok", true, None)),
+                Event::PromptDrained("next".to_owned()),
+                Event::TurnComplete,
+                Event::TurnFailed("boom".to_owned()),
+                Event::UsageUpdated(UsageSnapshot {
+                    context_tokens: Some(1_200),
+                    context_window: Some(200_000),
+                    estimated_cost_usd: Some(0.25),
+                }),
+                Event::RateLimitsUpdated(five_hour_limit()),
+                Event::Cancelled,
+                Event::AutoCompactionStarted,
+                Event::AutoCompactionPaused { failures: 3 },
+                Event::AutoCompactionResumed,
+                Event::SummaryToken("Recap".to_owned()),
+                Event::SummaryDiscarded,
+                Event::SessionTitleUpdated {
+                    session_id: "s1".to_owned(),
+                    title: "Title".to_owned(),
+                },
+                Event::RenameFailed("Session write failed: disk full".to_owned()),
+                Event::SessionRolled {
+                    id: "s2".to_owned(),
+                    archived: true,
+                },
+                Event::SessionResumed {
+                    id: "s3".to_owned(),
+                    title: Some("Resumed".to_owned()),
+                    unarchived: true,
+                    history: full_history(),
+                },
+                Event::SessionCompacted {
+                    summary: "Summary.".to_owned(),
+                    pre_count: 4,
+                    instructions: Some("focus".to_owned()),
+                    automatic: true,
+                },
+                Event::SessionReady,
+                Event::ConfigChanged {
+                    model: ModelSpec::resolve("claude-opus-5-5".to_owned()),
+                    effort: Some(Effort::High),
+                    requested: ConfigPick::Effort(Effort::Max),
+                    auto_compaction: AutoCompactionConfig {
+                        enabled: true,
+                        threshold_tokens: Some(400_000),
+                    },
+                },
+                Event::ModeChanged(Mode::Yolo),
+                Event::LoginStarted {
+                    url: "https://claude.ai/oauth/authorize?state=s".to_owned(),
+                },
+                Event::SignedIn {
+                    auth: AuthSource::OxLogin,
+                },
+                Event::SignedOut {
+                    removed: true,
+                    auth: Some(AuthSource::ClaudeCodeLogin),
+                    fallback_error: None,
+                },
+                Event::SignedOut {
+                    removed: false,
+                    auth: None,
+                    fallback_error: Some("Claude Code login has expired.".to_owned()),
+                },
+                Event::Notice("1 tracked file changed on disk".to_owned()),
+                Event::Error("Session write failed.".to_owned()),
+                Event::SessionRulesUpdated(vec![
+                    Rule::parse(PermissionClass::Exec, "cargo test *").unwrap(),
+                ]),
+                Event::TasksUpdated(plan()),
+                Event::BackgroundShellsUpdated(shells_in_each_state()),
+            ];
+            events.extend(approval_requests());
+            events
+        }
+
+        #[test]
+        fn round_trips_every_variant_under_its_type_tag() {
+            for event in every_event() {
+                let value = serde_json::to_value(&event).unwrap();
+                assert_eq!(value["type"], event_tag(&event), "{value}");
+                assert_eq!(serde_json::from_value::<Event>(value).unwrap(), event);
+            }
+        }
+
+        #[test]
+        fn carries_nested_payloads_tagged_the_same_way() {
+            let event = Event::ToolCallEnd(ToolResult {
+                id: "t1".to_owned(),
+                content: "Edited.".to_owned(),
+                is_error: false,
+                title: Some("Edited f.rs".to_owned()),
+                view: ToolResultView::Diff {
+                    chunks: diff_chunks(),
+                    replace_all: false,
+                    replacements: 1,
+                },
+            });
+            assert_eq!(
+                serde_json::to_value(event).unwrap(),
+                json!({
+                    "type": "tool_call_end",
+                    "data": {
+                        "id": "t1",
+                        "content": "Edited.",
+                        "is_error": false,
+                        "title": "Edited f.rs",
+                        "view": {
+                            "type": "diff",
+                            "data": {
+                                "chunks": [{
+                                    "old": [{"number": 3, "text": "old"}],
+                                    "new": [{"number": 3, "text": "new"}],
+                                }],
+                                "replace_all": false,
+                                "replacements": 1,
+                            },
+                        },
+                    },
+                }),
+            );
+        }
+
+        #[test]
+        fn carries_a_task_list_as_content_and_status_pairs() {
+            let event = Event::TasksUpdated(plan());
+            assert_eq!(
+                serde_json::to_value(event).unwrap(),
+                json!({
+                    "type": "tasks_updated",
+                    "data": [
+                        {"content": "Read the config loader", "status": "completed"},
+                        {"content": "Add the entry type", "status": "in_progress"},
+                        {"content": "Write the tests", "status": "pending"},
+                    ],
+                }),
+            );
+        }
+
+        #[test]
+        fn carries_each_background_shell_with_its_state_tagged() {
+            let event = Event::BackgroundShellsUpdated(shells_in_each_state());
+            assert_eq!(
+                serde_json::to_value(event).unwrap(),
+                json!({
+                    "type": "background_shells_updated",
+                    "data": [
+                        {"id": "shell-1", "command": "cargo watch", "state": {"type": "running"}},
+                        {
+                            "id": "shell-2",
+                            "command": "make test",
+                            "state": {"type": "exited", "data": 2},
+                        },
+                        {
+                            "id": "shell-3",
+                            "command": "sleep 60",
+                            "state": {"type": "killed", "data": 15},
+                        },
+                    ],
+                }),
+            );
+        }
+
+        #[test]
+        fn serializes_a_model_as_its_id() {
+            let event = Event::ConfigChanged {
+                model: ModelSpec::resolve("claude-opus-5-5".to_owned()),
+                effort: None,
+                auto_compaction: AutoCompactionConfig::disabled(),
+                requested: ConfigPick::Model {
+                    id: ResolvedModelId::new("claude-opus-5-5".to_owned()),
+                    effort: None,
+                },
+            };
+            let value = serde_json::to_value(&event).unwrap();
+            assert_eq!(value["data"]["model"], "claude-opus-5-5");
+
+            let Event::ConfigChanged { model, .. } = serde_json::from_value(value).unwrap() else {
+                panic!("config_changed must round-trip to ConfigChanged");
+            };
+            assert_eq!(model.short_display_name(), "Opus 5.5");
+        }
+
+        #[test]
+        fn tags_an_auth_source_like_its_own_variants() {
+            let event = Event::SignedOut {
                 removed: true,
                 auth: Some(AuthSource::ClaudeCodeLogin),
                 fallback_error: None,
-            },
-            Event::SignedOut {
-                removed: false,
-                auth: None,
-                fallback_error: Some("Claude Code login has expired.".to_owned()),
-            },
-            Event::Notice("1 tracked file changed on disk".to_owned()),
-            Event::Error("Session write failed.".to_owned()),
-            Event::SessionRulesUpdated(vec![
-                Rule::parse(PermissionClass::Exec, "cargo test *").unwrap(),
-            ]),
-            Event::TasksUpdated(plan()),
-            Event::BackgroundShellsUpdated(shells_in_each_state()),
-        ];
-        events.extend(approval_requests());
-        events
-    }
-
-    // ── Op ──
-
-    #[test]
-    fn op_round_trips_every_variant_under_its_type_tag() {
-        for op in every_op() {
-            let value = serde_json::to_value(&op).unwrap();
-            assert_eq!(value["type"], op_tag(&op), "{value}");
-            assert_eq!(serde_json::from_value::<Op>(value).unwrap(), op);
+            };
+            assert_eq!(
+                serde_json::to_value(event).unwrap(),
+                json!({
+                    "type": "signed_out",
+                    "data": {
+                        "removed": true,
+                        "auth": {"type": "claude_code_login"},
+                        "fallback_error": null,
+                    },
+                }),
+            );
         }
     }
 
-    #[test]
-    fn op_carries_its_payload_under_data() {
-        assert_eq!(
-            serde_json::to_value(Op::Prompt("hi".to_owned())).unwrap(),
-            json!({"type": "prompt", "data": "hi"}),
-        );
-        assert_eq!(
-            serde_json::to_value(Op::Resolve {
-                id: "t1".to_owned(),
-                decision: Decision::Deny,
-            })
-            .unwrap(),
-            json!({"type": "resolve", "data": {"id": "t1", "decision": {"type": "deny"}}}),
-        );
-        assert_eq!(
-            serde_json::to_value(Decision::AllowForSession {
-                rule: Box::new(Rule::parse(PermissionClass::Exec, "cargo test *").unwrap()),
-            })
-            .unwrap(),
-            json!({
-                "type": "allow_for_session",
-                "data": {"rule": {"class": "exec", "pattern": "cargo test *"}},
-            }),
-        );
-        assert_eq!(
-            serde_json::to_value(Decision::DenyWithFeedback {
-                feedback: "Use rg instead.".to_owned(),
-            })
-            .unwrap(),
-            json!({"type": "deny_with_feedback", "data": {"feedback": "Use rg instead."}}),
-        );
-        assert_eq!(
-            serde_json::to_value(Op::Resume {
-                target: ResumeTarget::Prefix("1a2b".to_owned()),
-            })
-            .unwrap(),
-            json!({"type": "resume", "data": {"target": {"type": "prefix", "data": "1a2b"}}}),
-        );
-        assert_eq!(
-            serde_json::to_value(Op::Interrupt).unwrap(),
-            json!({"type": "interrupt"}),
-        );
-    }
+    mod unbounded_sender {
+        use super::*;
 
-    // ── Event ──
+        mod send {
+            use super::*;
 
-    #[test]
-    fn event_round_trips_every_variant_under_its_type_tag() {
-        for event in every_event() {
-            let value = serde_json::to_value(&event).unwrap();
-            assert_eq!(value["type"], event_tag(&event), "{value}");
-            assert_eq!(serde_json::from_value::<Event>(value).unwrap(), event);
+            #[test]
+            fn fails_once_the_frontend_drops_the_receiver() {
+                let (tx, rx) = mpsc::unbounded_channel();
+                drop(rx);
+
+                let err = EventSink::send(&tx, Event::TurnComplete).unwrap_err();
+
+                assert_eq!(err.to_string(), "the frontend stopped reading events");
+            }
         }
-    }
-
-    #[test]
-    fn event_carries_nested_payloads_tagged_the_same_way() {
-        let event = Event::ToolCallEnd(ToolResult {
-            id: "t1".to_owned(),
-            content: "Edited.".to_owned(),
-            is_error: false,
-            title: Some("Edited f.rs".to_owned()),
-            view: ToolResultView::Diff {
-                chunks: diff_chunks(),
-                replace_all: false,
-                replacements: 1,
-            },
-        });
-        assert_eq!(
-            serde_json::to_value(event).unwrap(),
-            json!({
-                "type": "tool_call_end",
-                "data": {
-                    "id": "t1",
-                    "content": "Edited.",
-                    "is_error": false,
-                    "title": "Edited f.rs",
-                    "view": {
-                        "type": "diff",
-                        "data": {
-                            "chunks": [{
-                                "old": [{"number": 3, "text": "old"}],
-                                "new": [{"number": 3, "text": "new"}],
-                            }],
-                            "replace_all": false,
-                            "replacements": 1,
-                        },
-                    },
-                },
-            }),
-        );
-    }
-
-    #[test]
-    fn event_carries_a_task_list_as_content_and_status_pairs() {
-        let event = Event::TasksUpdated(plan());
-        assert_eq!(
-            serde_json::to_value(event).unwrap(),
-            json!({
-                "type": "tasks_updated",
-                "data": [
-                    {"content": "Read the config loader", "status": "completed"},
-                    {"content": "Add the entry type", "status": "in_progress"},
-                    {"content": "Write the tests", "status": "pending"},
-                ],
-            }),
-        );
-    }
-
-    #[test]
-    fn event_carries_each_background_shell_with_its_state_tagged() {
-        let event = Event::BackgroundShellsUpdated(shells_in_each_state());
-        assert_eq!(
-            serde_json::to_value(event).unwrap(),
-            json!({
-                "type": "background_shells_updated",
-                "data": [
-                    {"id": "shell-1", "command": "cargo watch", "state": {"type": "running"}},
-                    {
-                        "id": "shell-2",
-                        "command": "make test",
-                        "state": {"type": "exited", "data": 2},
-                    },
-                    {
-                        "id": "shell-3",
-                        "command": "sleep 60",
-                        "state": {"type": "killed", "data": 15},
-                    },
-                ],
-            }),
-        );
-    }
-
-    #[test]
-    fn event_serializes_a_model_as_its_id() {
-        let event = Event::ConfigChanged {
-            model: ModelSpec::resolve("claude-opus-5-5".to_owned()),
-            effort: None,
-            auto_compaction: AutoCompactionConfig::disabled(),
-            requested: ConfigPick::Model {
-                id: ResolvedModelId::new("claude-opus-5-5".to_owned()),
-                effort: None,
-            },
-        };
-        let value = serde_json::to_value(&event).unwrap();
-        assert_eq!(value["data"]["model"], "claude-opus-5-5");
-
-        let Event::ConfigChanged { model, .. } = serde_json::from_value(value).unwrap() else {
-            panic!("config_changed must round-trip to ConfigChanged");
-        };
-        assert_eq!(model.short_display_name(), "Opus 5.5");
-    }
-
-    #[test]
-    fn event_tags_an_auth_source_like_its_own_variants() {
-        let event = Event::SignedOut {
-            removed: true,
-            auth: Some(AuthSource::ClaudeCodeLogin),
-            fallback_error: None,
-        };
-        assert_eq!(
-            serde_json::to_value(event).unwrap(),
-            json!({
-                "type": "signed_out",
-                "data": {
-                    "removed": true,
-                    "auth": {"type": "claude_code_login"},
-                    "fallback_error": null,
-                },
-            }),
-        );
-    }
-
-    // ── EventSink for UnboundedSender ──
-
-    #[test]
-    fn unbounded_sender_send_fails_once_the_frontend_drops_the_receiver() {
-        let (tx, rx) = mpsc::unbounded_channel();
-        drop(rx);
-
-        let err = EventSink::send(&tx, Event::TurnComplete).unwrap_err();
-
-        assert_eq!(err.to_string(), "the frontend stopped reading events");
     }
 }

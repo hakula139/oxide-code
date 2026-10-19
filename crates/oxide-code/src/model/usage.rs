@@ -45,10 +45,8 @@ impl TokenUsage {
 mod tests {
     use super::*;
 
-    // ── TokenUsage ──
-
     #[test]
-    fn token_usage_context_and_total_include_cache_tokens() {
+    fn context_and_total_include_cache_tokens() {
         let usage = TokenUsage {
             input_tokens: 10,
             cache_creation_input_tokens: 20,

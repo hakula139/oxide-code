@@ -162,230 +162,244 @@ mod tests {
         Op::SetModel(ConfigPick::Effort(level))
     }
 
-    // ── parse ──
+    mod parse {
+        use super::*;
 
-    #[test]
-    fn parse_routes_each_name_to_its_form() {
-        let cases = [
-            ("clear", "", Op::Clear),
-            ("compact", "auth", compact("auth")),
-            ("effort", "low", set_effort(Effort::Low)),
-            ("mode", "plan", Op::SetMode(Mode::Plan)),
-            ("model", "haiku", set_model("claude-haiku-5-5")),
-            ("rename", "Fix login", rename("Fix login").unwrap()),
-            ("resume", "1a2b", resume("1a2b").unwrap()),
-        ];
+        #[test]
+        fn routes_each_name_to_its_form() {
+            let cases = [
+                ("clear", "", Op::Clear),
+                ("compact", "auth", compact("auth")),
+                ("effort", "low", set_effort(Effort::Low)),
+                ("mode", "plan", Op::SetMode(Mode::Plan)),
+                ("model", "haiku", set_model("claude-haiku-5-5")),
+                ("rename", "Fix login", rename("Fix login").unwrap()),
+                ("resume", "1a2b", resume("1a2b").unwrap()),
+            ];
 
-        assert_eq!(cases.each_ref().map(|(name, ..)| *name), NAMES);
-        for (name, args, op) in cases {
-            assert_eq!(parse(name, args), Some(Ok(op)), "{name}");
+            assert_eq!(cases.each_ref().map(|(name, ..)| *name), NAMES);
+            for (name, args, op) in cases {
+                assert_eq!(parse(name, args), Some(Ok(op)), "{name}");
+            }
+        }
+
+        #[test]
+        fn knows_no_other_name() {
+            for name in ["help", "new", "theme", "compact-all", ""] {
+                assert_eq!(parse(name, "x"), None, "{name}");
+            }
+        }
+
+        #[test]
+        fn bare_forms_that_need_an_argument_name_the_usage() {
+            for (name, usage) in [
+                ("effort", "Missing level. Usage: `/effort <level>`."),
+                ("mode", "Missing mode. Usage: `/mode <mode>`."),
+                ("model", "Missing model ID. Usage: `/model <id>`."),
+                ("rename", "Missing title. Usage: `/rename <title>`."),
+                (
+                    "resume",
+                    "Missing session ID. Usage: `/resume <id-prefix>`.",
+                ),
+            ] {
+                assert_eq!(parse(name, "  "), Some(Err(usage.to_owned())), "{name}");
+            }
         }
     }
 
-    #[test]
-    fn parse_knows_no_other_name() {
-        for name in ["help", "new", "theme", "compact-all", ""] {
-            assert_eq!(parse(name, "x"), None, "{name}");
-        }
-    }
+    mod compact {
+        use super::*;
 
-    #[test]
-    fn parse_bare_forms_that_need_an_argument_name_the_usage() {
-        for (name, usage) in [
-            ("effort", "Missing level. Usage: `/effort <level>`."),
-            ("mode", "Missing mode. Usage: `/mode <mode>`."),
-            ("model", "Missing model ID. Usage: `/model <id>`."),
-            ("rename", "Missing title. Usage: `/rename <title>`."),
-            (
-                "resume",
-                "Missing session ID. Usage: `/resume <id-prefix>`.",
-            ),
-        ] {
-            assert_eq!(parse(name, "  "), Some(Err(usage.to_owned())), "{name}");
-        }
-    }
-
-    // ── compact ──
-
-    #[test]
-    fn compact_trims_the_instructions_and_drops_blank_ones() {
-        assert_eq!(compact("   \n\t  "), Op::Compact { instructions: None });
-        assert_eq!(
-            compact("  focus on the build error  "),
-            Op::Compact {
-                instructions: Some("focus on the build error".to_owned()),
-            },
-        );
-    }
-
-    // ── effort ──
-
-    #[test]
-    fn effort_accepts_each_level_in_any_case() {
-        for (arg, level) in [
-            ("low", Effort::Low),
-            ("Medium", Effort::Medium),
-            ("high", Effort::High),
-            ("XHIGH", Effort::Xhigh),
-            (" MaX ", Effort::Max),
-        ] {
-            assert_eq!(effort(arg), Ok(set_effort(level)), "{arg}");
-        }
-    }
-
-    #[test]
-    fn effort_unknown_level_lists_the_valid_ones() {
-        for arg in ["turbo", "auto"] {
+        #[test]
+        fn trims_the_instructions_and_drops_blank_ones() {
+            assert_eq!(compact("   \n\t  "), Op::Compact { instructions: None });
             assert_eq!(
-                effort(arg),
-                Err(format!(
-                    "Unknown effort: `{arg}`. Valid: low, medium, high, xhigh, max."
-                )),
+                compact("  focus on the build error  "),
+                Op::Compact {
+                    instructions: Some("focus on the build error".to_owned()),
+                },
             );
         }
     }
 
-    // ── mode ──
+    mod effort {
+        use super::*;
 
-    #[test]
-    fn mode_accepts_each_mode_in_any_case() {
-        for (arg, expected) in [
-            ("manual", Mode::Manual),
-            (" Plan ", Mode::Plan),
-            ("YOLO", Mode::Yolo),
-        ] {
-            assert_eq!(mode(arg), Ok(Op::SetMode(expected)), "{arg}");
+        #[test]
+        fn accepts_each_level_in_any_case() {
+            for (arg, level) in [
+                ("low", Effort::Low),
+                ("Medium", Effort::Medium),
+                ("high", Effort::High),
+                ("XHIGH", Effort::Xhigh),
+                (" MaX ", Effort::Max),
+            ] {
+                assert_eq!(effort(arg), Ok(set_effort(level)), "{arg}");
+            }
+        }
+
+        #[test]
+        fn unknown_level_lists_the_valid_ones() {
+            for arg in ["turbo", "auto"] {
+                assert_eq!(
+                    effort(arg),
+                    Err(format!(
+                        "Unknown effort: `{arg}`. Valid: low, medium, high, xhigh, max."
+                    )),
+                );
+            }
         }
     }
 
-    #[test]
-    fn mode_unknown_mode_lists_the_valid_ones() {
-        assert_eq!(
-            mode("Turbo"),
-            Err("Unknown mode: `Turbo`. Valid: manual, plan, yolo.".to_owned()),
-        );
-    }
+    mod mode {
+        use super::*;
 
-    // ── model ──
+        #[test]
+        fn accepts_each_mode_in_any_case() {
+            for (arg, expected) in [
+                ("manual", Mode::Manual),
+                (" Plan ", Mode::Plan),
+                ("YOLO", Mode::Yolo),
+            ] {
+                assert_eq!(mode(arg), Ok(Op::SetMode(expected)), "{arg}");
+            }
+        }
 
-    #[test]
-    fn model_round_trips_every_catalog_id() {
-        for info in MODELS {
-            assert_eq!(model(info.id), Ok(set_model(info.id)));
+        #[test]
+        fn unknown_mode_lists_the_valid_ones() {
+            assert_eq!(
+                mode("Turbo"),
+                Err("Unknown mode: `Turbo`. Valid: manual, plan, yolo.".to_owned()),
+            );
         }
     }
 
-    #[test]
-    fn model_resolves_family_aliases_ignoring_case_and_padding() {
-        for (arg, id) in [
-            ("fable", "claude-fable-5-1"),
-            ("opus", "claude-opus-5-5"),
-            ("sonnet", "claude-sonnet-5-5"),
-            ("haiku", "claude-haiku-5-5"),
-            ("  Claude-Sonnet-5-5  ", "claude-sonnet-5-5"),
-        ] {
-            assert_eq!(model(arg), Ok(set_model(id)), "{arg}");
-        }
-    }
+    mod model {
+        use super::*;
 
-    #[test]
-    fn model_unknown_id_suggests_a_replacement_and_lists_the_catalog() {
-        // IDs naming a family and a `[1m]` suffix also get the matching model as a suggestion.
-        for (arg, expected) in [
-            (
-                "gpt-4",
+        #[test]
+        fn round_trips_every_catalog_id() {
+            for info in MODELS {
+                assert_eq!(model(info.id), Ok(set_model(info.id)));
+            }
+        }
+
+        #[test]
+        fn resolves_family_aliases_ignoring_case_and_padding() {
+            for (arg, id) in [
+                ("fable", "claude-fable-5-1"),
+                ("opus", "claude-opus-5-5"),
+                ("sonnet", "claude-sonnet-5-5"),
+                ("haiku", "claude-haiku-5-5"),
+                ("  Claude-Sonnet-5-5  ", "claude-sonnet-5-5"),
+            ] {
+                assert_eq!(model(arg), Ok(set_model(id)), "{arg}");
+            }
+        }
+
+        #[test]
+        fn unknown_id_suggests_a_replacement_and_lists_the_catalog() {
+            // IDs naming a family and a `[1m]` suffix also get the matching model as a suggestion.
+            for (arg, expected) in [
+                (
+                    "gpt-4",
+                    indoc! {"
+                        Unknown model: `gpt-4`. Valid:
+
+                        - `claude-fable-5-1` — Claude Fable 5.1
+                        - `claude-opus-5-5` — Claude Opus 5.5
+                        - `claude-sonnet-5-5` — Claude Sonnet 5.5
+                        - `claude-haiku-5-5` — Claude Haiku 5.5"
+                    },
+                ),
+                (
+                    "claude-opus-5-5-20261001",
+                    indoc! {"
+                        Unknown model: `claude-opus-5-5-20261001`. Did you mean `claude-opus-5-5`? Valid:
+
+                        - `claude-fable-5-1` — Claude Fable 5.1
+                        - `claude-opus-5-5` — Claude Opus 5.5
+                        - `claude-sonnet-5-5` — Claude Sonnet 5.5
+                        - `claude-haiku-5-5` — Claude Haiku 5.5"
+                    },
+                ),
+                (
+                    "sonnet[1m]",
+                    indoc! {"
+                        Unknown model: `sonnet[1m]`. Did you mean `claude-sonnet-5-5`? Valid:
+
+                        - `claude-fable-5-1` — Claude Fable 5.1
+                        - `claude-opus-5-5` — Claude Opus 5.5
+                        - `claude-sonnet-5-5` — Claude Sonnet 5.5
+                        - `claude-haiku-5-5` — Claude Haiku 5.5"
+                    },
+                ),
+            ] {
+                assert_eq!(model(arg), Err(expected.to_owned()), "{arg}");
+            }
+        }
+
+        #[test]
+        fn ambiguous_substring_lists_only_the_matching_rows() {
+            assert_eq!(
+                model("o").expect_err("ambiguous arg must error"),
                 indoc! {"
-                    Unknown model: `gpt-4`. Valid:
+                    Model `o` is ambiguous. Pick one or use a short alias (`fable`, `opus`, `sonnet`, `haiku`):
 
-                    - `claude-fable-5-1` — Claude Fable 5.1
                     - `claude-opus-5-5` — Claude Opus 5.5
-                    - `claude-sonnet-5-5` — Claude Sonnet 5.5
-                    - `claude-haiku-5-5` — Claude Haiku 5.5"
+                    - `claude-sonnet-5-5` — Claude Sonnet 5.5"
                 },
-            ),
-            (
-                "claude-opus-5-5-20261001",
-                indoc! {"
-                    Unknown model: `claude-opus-5-5-20261001`. Did you mean `claude-opus-5-5`? Valid:
+            );
+        }
 
-                    - `claude-fable-5-1` — Claude Fable 5.1
-                    - `claude-opus-5-5` — Claude Opus 5.5
-                    - `claude-sonnet-5-5` — Claude Sonnet 5.5
-                    - `claude-haiku-5-5` — Claude Haiku 5.5"
-                },
-            ),
-            (
-                "sonnet[1m]",
-                indoc! {"
-                    Unknown model: `sonnet[1m]`. Did you mean `claude-sonnet-5-5`? Valid:
+        #[test]
+        fn ambiguous_suggests_every_catalog_alias() {
+            let err = model("o").expect_err("ambiguous arg must error");
 
-                    - `claude-fable-5-1` — Claude Fable 5.1
-                    - `claude-opus-5-5` — Claude Opus 5.5
-                    - `claude-sonnet-5-5` — Claude Sonnet 5.5
-                    - `claude-haiku-5-5` — Claude Haiku 5.5"
-                },
-            ),
-        ] {
-            assert_eq!(model(arg), Err(expected.to_owned()), "{arg}");
+            for info in MODELS {
+                let alias = format!("`{}`", info.family.id_token());
+                assert!(err.contains(&alias), "missing {alias}: {err}");
+            }
         }
     }
 
-    #[test]
-    fn model_ambiguous_substring_lists_only_the_matching_rows() {
-        assert_eq!(
-            model("o").expect_err("ambiguous arg must error"),
-            indoc! {"
-                Model `o` is ambiguous. Pick one or use a short alias (`fable`, `opus`, `sonnet`, `haiku`):
+    mod rename {
+        use super::*;
 
-                - `claude-opus-5-5` — Claude Opus 5.5
-                - `claude-sonnet-5-5` — Claude Sonnet 5.5"
-            },
-        );
-    }
+        #[test]
+        fn trims_the_title() {
+            assert_eq!(
+                rename("  Fix auth bug  "),
+                Ok(Op::Rename {
+                    title: "Fix auth bug".to_owned(),
+                }),
+            );
+        }
 
-    #[test]
-    fn model_ambiguous_suggests_every_catalog_alias() {
-        let err = model("o").expect_err("ambiguous arg must error");
+        #[test]
+        fn fits_a_long_title_to_the_session_cap() {
+            let pasted = format!("{}\nSecond line", "a".repeat(MAX_TITLE_WIDTH + 1));
 
-        for info in MODELS {
-            let alias = format!("`{}`", info.family.id_token());
-            assert!(err.contains(&alias), "missing {alias}: {err}");
+            assert_eq!(
+                rename(&pasted),
+                Ok(Op::Rename {
+                    title: format!("{}...", "a".repeat(MAX_TITLE_WIDTH - 3)),
+                }),
+            );
         }
     }
 
-    // ── rename ──
+    mod resume {
+        use super::*;
 
-    #[test]
-    fn rename_trims_the_title() {
-        assert_eq!(
-            rename("  Fix auth bug  "),
-            Ok(Op::Rename {
-                title: "Fix auth bug".to_owned(),
-            }),
-        );
-    }
-
-    #[test]
-    fn rename_fits_a_long_title_to_the_session_cap() {
-        let pasted = format!("{}\nSecond line", "a".repeat(MAX_TITLE_WIDTH + 1));
-
-        assert_eq!(
-            rename(&pasted),
-            Ok(Op::Rename {
-                title: format!("{}...", "a".repeat(MAX_TITLE_WIDTH - 3)),
-            }),
-        );
-    }
-
-    // ── resume ──
-
-    #[test]
-    fn resume_targets_the_trimmed_prefix() {
-        assert_eq!(
-            resume(" 1a2b "),
-            Ok(Op::Resume {
-                target: ResumeTarget::Prefix("1a2b".to_owned()),
-            }),
-        );
+        #[test]
+        fn targets_the_trimmed_prefix() {
+            assert_eq!(
+                resume(" 1a2b "),
+                Ok(Op::Resume {
+                    target: ResumeTarget::Prefix("1a2b".to_owned()),
+                }),
+            );
+        }
     }
 }
