@@ -20,7 +20,7 @@ use super::{
 use crate::permission::PermissionClass;
 use crate::protocol::{Event, EventSink};
 use crate::tool::{
-    Prepared, Tool, ToolCtx, ToolOutput, ToolSpec, extract_input_field, parse_input,
+    Prepared, Spills, Tool, ToolCtx, ToolOutput, ToolSpec, extract_input_field, parse_input,
 };
 use crate::util::sync::lock_or_recover;
 use crate::util::text::ELLIPSIS;
@@ -127,7 +127,7 @@ impl BackgroundShells {
             .map_err(|e| format!("Failed to execute command in {}: {e}", ctx.cwd().display()))?;
         registry.started += 1;
         let id = format!("shell-{}", registry.started);
-        let output = Arc::new(ShellOutput::default());
+        let output = Arc::new(ShellOutput::new(ctx.spills()));
         let (stop, stopped) = oneshot::channel();
         let supervisor = tokio::spawn(supervise(
             tree,
@@ -260,24 +260,45 @@ impl Registry {
 struct ShellOutput {
     unread: Mutex<Unread>,
     state: watch::Sender<ShellState>,
+    /// The spill files of the call that started the shell, one pair for each read that omits bytes.
+    spills: Spills,
 }
 
-#[derive(Default)]
+/// The output of the shell's `read`th read, counted from 1, which numbers its spill files. Each
+/// pipe's capture has a lock of its own, so a pump writing to its spill holds up neither the other
+/// pipe nor the next read's swap.
 struct Unread {
-    stdout: PipeCapture,
-    stderr: PipeCapture,
+    read: usize,
+    stdout: Arc<Mutex<PipeCapture>>,
+    stderr: Arc<Mutex<PipeCapture>>,
 }
 
-impl Default for ShellOutput {
-    fn default() -> Self {
+/// Picks one pipe's capture out of a read.
+type PipeOf = fn(&Unread) -> &Arc<Mutex<PipeCapture>>;
+
+impl Unread {
+    fn new(spills: &Spills, read: usize) -> Self {
+        let capture = |pipe: &str| {
+            let spill = spills.file(&format!(".{read}.{pipe}.txt"));
+            Arc::new(Mutex::new(PipeCapture::new(spill)))
+        };
         Self {
-            unread: Mutex::default(),
-            state: watch::Sender::new(ShellState::Running),
+            read,
+            stdout: capture("stdout"),
+            stderr: capture("stderr"),
         }
     }
 }
 
 impl ShellOutput {
+    fn new(spills: Spills) -> Self {
+        Self {
+            unread: Mutex::new(Unread::new(&spills, 1)),
+            state: watch::Sender::new(ShellState::Running),
+            spills,
+        }
+    }
+
     fn state(&self) -> ShellState {
         *self.state.borrow()
     }
@@ -290,15 +311,37 @@ impl ShellOutput {
     }
 
     /// Renders what the shell printed since the last read, bounded like a foreground call's
-    /// output, and starts the next read empty.
+    /// output, and starts the next read empty. The render waits only for a spill write already in
+    /// flight, so its markers name complete files.
     fn take(&self) -> String {
-        let unread = std::mem::take(&mut *self.lock());
-        render_streams(&unread.stdout, &unread.stderr)
+        let unread = {
+            let mut unread = self.lock();
+            let next = Unread::new(&self.spills, unread.read + 1);
+            std::mem::replace(&mut *unread, next)
+        };
+        render_streams(
+            &mut lock_pipe(&unread.stdout),
+            &mut lock_pipe(&unread.stderr),
+        )
+    }
+
+    /// Runs `f` on the capture `pipe` picks in the current read. The capture is locked before the
+    /// read is released, so a read that takes the capture over sees what `f` adds.
+    fn with_pipe(&self, pipe: PipeOf, f: impl FnOnce(&mut PipeCapture)) {
+        let unread = self.lock();
+        let capture = Arc::clone(pipe(&unread));
+        let mut capture = lock_pipe(&capture);
+        drop(unread);
+        f(&mut capture);
     }
 
     fn lock(&self) -> MutexGuard<'_, Unread> {
         lock_or_recover(&self.unread, "background shell output")
     }
+}
+
+fn lock_pipe(capture: &Mutex<PipeCapture>) -> MutexGuard<'_, PipeCapture> {
+    lock_or_recover(capture, "background shell pipe")
 }
 
 // ── Supervisor ──
@@ -318,8 +361,8 @@ async fn supervise(
         let output = Arc::clone(&output);
         async move {
             tokio::join!(
-                pump(stdout, &output, "stdout", |unread| &mut unread.stdout),
-                pump(stderr, &output, "stderr", |unread| &mut unread.stderr),
+                pump(stdout, &output, "stdout", |unread| &unread.stdout),
+                pump(stderr, &output, "stderr", |unread| &unread.stderr),
             );
         }
     });
@@ -355,9 +398,9 @@ fn exit_state(status: io::Result<ExitStatus>, output: &ShellOutput) -> ShellStat
     match status {
         Ok(status) => ShellState::of(status),
         Err(e) => {
-            push_note(
-                &mut output.lock().stderr,
-                &format!("Failed to wait for the command: {e}"),
+            output.with_pipe(
+                |unread| &unread.stderr,
+                |stderr| push_note(stderr, &format!("Failed to wait for the command: {e}")),
             );
             ShellState::Exited(-1)
         }
@@ -366,20 +409,18 @@ fn exit_state(status: io::Result<ExitStatus>, output: &ShellOutput) -> ShellStat
 
 /// Copies `reader` into the capture `pipe` picks until the pipe closes. A read error lands in the
 /// same capture, where the next read reports it.
-async fn pump<R>(
-    mut reader: R,
-    output: &ShellOutput,
-    name: &str,
-    pipe: fn(&mut Unread) -> &mut PipeCapture,
-) where
+async fn pump<R>(mut reader: R, output: &ShellOutput, name: &str, pipe: PipeOf)
+where
     R: AsyncRead + Unpin,
 {
-    let read = read_chunks(&mut reader, |chunk| pipe(&mut output.lock()).push(chunk)).await;
+    let read = read_chunks(&mut reader, |chunk| {
+        output.with_pipe(pipe, |capture| capture.push(chunk));
+    })
+    .await;
     if let Err(e) = read {
-        push_note(
-            pipe(&mut output.lock()),
-            &format!("Failed to read command {name}: {e}"),
-        );
+        output.with_pipe(pipe, |capture| {
+            push_note(capture, &format!("Failed to read command {name}: {e}"));
+        });
     }
 }
 
@@ -659,9 +700,9 @@ mod tests {
     use super::*;
     use crate::protocol::testing::CapturingSink;
     use crate::tool::MAX_OUTPUT_BYTES;
+    use crate::tool::bash::BashTool;
     use crate::tool::bash::testing::{record_pid, until_gone, until_recorded};
-    use crate::tool::bash::{BashTool, OUTPUT_BUDGET};
-    use crate::tool::testing::{self, temp_ctx};
+    use crate::tool::testing::{self, ctx, spill_path, temp_ctx};
 
     /// A registry that reports its list to the returned sink.
     fn shells() -> (Arc<BackgroundShells>, CapturingSink) {
@@ -672,8 +713,13 @@ mod tests {
     }
 
     async fn start(shells: &Arc<BackgroundShells>, command: &str) -> ToolOutput {
+        start_in(shells, command, &temp_ctx()).await
+    }
+
+    /// Starts `command` with `ctx`, whose session directory takes the shell's spill files.
+    async fn start_in(shells: &Arc<BackgroundShells>, command: &str, ctx: &ToolCtx) -> ToolOutput {
         let input = serde_json::json!({"command": command, "run_in_background": true});
-        testing::run(&BashTool::new(Arc::clone(shells)), input, &temp_ctx()).await
+        testing::run(&BashTool::new(Arc::clone(shells)), input, ctx).await
     }
 
     async fn output(shells: &Arc<BackgroundShells>, id: &str, timeout: u64) -> String {
@@ -801,8 +847,11 @@ mod tests {
 
         #[test]
         fn reports_a_failed_wait_after_the_output_so_far() {
-            let output = ShellOutput::default();
-            output.lock().stderr.push(b"warning: slow");
+            let output = ShellOutput::new(temp_ctx().spills());
+            output.with_pipe(
+                |unread| &unread.stderr,
+                |stderr| stderr.push(b"warning: slow"),
+            );
 
             let state = exit_state(Err(io::Error::other("no child")), &output);
 
@@ -832,9 +881,9 @@ mod tests {
 
         #[tokio::test]
         async fn reports_a_failed_read_in_its_own_capture() {
-            let output = ShellOutput::default();
+            let output = ShellOutput::new(temp_ctx().spills());
 
-            pump(BrokenPipe, &output, "stdout", |unread| &mut unread.stdout).await;
+            pump(BrokenPipe, &output, "stdout", |unread| &unread.stdout).await;
 
             assert_eq!(output.take(), "Failed to read command stdout: pipe broke");
         }
@@ -898,16 +947,36 @@ mod tests {
         }
 
         #[tokio::test]
-        async fn bounds_a_large_output_like_a_foreground_call() {
+        async fn spills_each_read_that_omits_bytes_to_its_own_file() {
+            let dir = tempfile::tempdir().unwrap();
+            let (ready, go) = (dir.path().join("ready"), dir.path().join("go"));
             let (shells, _sink) = shells();
-            start(&shells, "head -c 400000 /dev/zero | tr '\\0' a").await;
+            let command = format!(
+                "head -c 400000 /dev/zero | tr '\\0' a; {}; \
+                 while [ ! -e '{}' ]; do sleep 0.02; done; head -c 400000 /dev/zero | tr '\\0' b",
+                record_pid("$$", &ready),
+                go.display(),
+            );
+            start_in(&shells, &command, &ctx(dir.path())).await;
+            until_recorded(&ready).await;
 
-            let read = output(&shells, "shell-1", 5_000).await;
+            let first = output(&shells, "shell-1", 0).await;
+            std::fs::write(&go, "").unwrap();
+            let second = output(&shells, "shell-1", 5_000).await;
 
-            let marker = format!("... [{} bytes omitted] ...", 400_000 - OUTPUT_BUDGET);
-            assert!(read.contains(&marker), "{}", &read[..read.len().min(200)]);
-            assert!(read.ends_with("\n\n(exit code 0)"));
-            assert!(read.len() <= MAX_OUTPUT_BYTES);
+            let spills = [1, 2].map(|read| spill_path(dir.path(), &format!(".{read}.stdout.txt")));
+            for (read, spill) in [&first, &second].into_iter().zip(&spills) {
+                let note = format!(
+                    "bytes omitted, full stdout saved to {}] ...",
+                    spill.display()
+                );
+                assert!(read.contains(&note), "{}", &read[..read.len().min(200)]);
+                assert!(read.len() <= MAX_OUTPUT_BYTES);
+            }
+            assert!(second.ends_with("\n\n(exit code 0)"));
+            let spilled = spills.map(|spill| std::fs::read(spill).unwrap()).concat();
+            let sent = [vec![b'a'; 400_000], vec![b'b'; 400_000]].concat();
+            assert!(spilled == sent, "the spills hold every byte sent");
             shells.stop_all().await;
         }
 

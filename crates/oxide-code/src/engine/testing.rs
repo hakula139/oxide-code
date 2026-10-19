@@ -371,6 +371,7 @@ pub(super) fn dispatch_with(
         policy,
         workspace,
         session_id: "test-session".to_owned(),
+        artifact_dir: Arc::from(cwd.join("session")),
         tracker: Arc::new(FileTracker::default()),
     }
 }

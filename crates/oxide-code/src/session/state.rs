@@ -10,7 +10,7 @@ use uuid::Uuid;
 
 use super::display::fit_title;
 use super::entry::{CURRENT_VERSION, Entry, TitleSource};
-use super::store::{SessionStore, SessionWriter, encode_lines};
+use super::store::{SessionStore, SessionWriter, artifact_dir, encode_lines};
 use crate::file_tracker::FileSnapshot;
 use crate::message::{ContentBlock, Message, Role};
 use crate::tool::tasks::Task;
@@ -32,6 +32,8 @@ fn persistence_stopped() -> String {
 /// [`SessionWriter`] in [`WriterStatus`].
 pub(super) struct SessionState {
     pub(super) session_id: Arc<str>,
+    /// The [`artifact_dir`] beside the session file, the one a fresh session will create.
+    pub(super) artifact_dir: Arc<Path>,
     store: SessionStore,
     writer_status: WriterStatus,
     /// Unwritten entries, retried ahead of the next batch so no message precedes its parent.
@@ -58,8 +60,11 @@ enum WriterStatus {
 
 impl SessionState {
     pub(super) fn fresh(store: SessionStore, model: &str, git_branch: Option<String>) -> Self {
-        let (session_id, header) = new_header(store.cwd(), model, git_branch);
+        let created_at = OffsetDateTime::now_utc();
+        let (session_id, header) = new_header(store.cwd(), model, git_branch, created_at);
+        let session_file = store.session_file(&session_id, created_at);
         Self {
+            artifact_dir: artifact_dir(&session_file, &session_id).into(),
             session_id: Arc::from(session_id),
             store,
             writer_status: WriterStatus::Pending {
@@ -87,6 +92,7 @@ impl SessionState {
         first_user_prompt_seen: bool,
     ) -> Self {
         Self {
+            artifact_dir: artifact_dir(writer.path(), &session_id).into(),
             session_id: Arc::from(session_id),
             store,
             writer_status: WriterStatus::Active(writer),
@@ -288,13 +294,18 @@ impl SessionState {
 
 // ── Helpers ──
 
-fn new_header(cwd: &Path, model: &str, git_branch: Option<String>) -> (String, Entry) {
+fn new_header(
+    cwd: &Path,
+    model: &str,
+    git_branch: Option<String>,
+    created_at: OffsetDateTime,
+) -> (String, Entry) {
     let session_id = Uuid::new_v4().to_string();
     let header = Entry::Header {
         session_id: session_id.clone(),
         cwd: cwd.display().to_string(),
         model: model.to_owned(),
-        created_at: OffsetDateTime::now_utc(),
+        created_at,
         version: CURRENT_VERSION,
         git_branch,
     };

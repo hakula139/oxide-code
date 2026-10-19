@@ -31,7 +31,8 @@ pub(crate) fn set_archived(
     })
 }
 
-/// Deletes the session file at `path`, refusing the live session's file.
+/// Deletes the session file at `path` and the session's artifact directory, refusing the live
+/// session's file.
 pub(crate) fn delete(path: &Path, session_id: &str, live_id: &str) -> Result<(), String> {
     delete_at(path, live_id).map_err(|e| {
         warn!("delete failed for session {session_id}: {e:#}");
