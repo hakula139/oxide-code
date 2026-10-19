@@ -1,5 +1,5 @@
-//! Named key actions for a modal. Each entry binds an action to its key and footer hint, so the
-//! modal dispatches keys and renders hints from one table and the two cannot drift apart.
+//! Named key actions. Each entry binds an action to its key and hint, so a modal or the app
+//! dispatches keys and renders hints from one table and the two cannot drift apart.
 
 use std::fmt;
 
@@ -51,16 +51,23 @@ impl fmt::Display for KeyChord {
 
 // ── Keymap ──
 
-/// A named action bound to a key, with the footer hint it shows.
+/// A named action bound to a key, with the hint it shows.
 pub(crate) struct KeyAction<A, V> {
     pub(crate) action: A,
     pub(crate) key: KeyChord,
-    /// Hint text after the key, such as `to resume`, for the modal state `V`. `None` hides the
-    /// hint while the action has nothing to act on, such as a row action over an empty list.
+    /// Hint text after the key, such as `to resume`, for the state `V`. `None` hides the hint
+    /// while the action has nothing to act on, such as a row action over an empty list.
     pub(crate) label: fn(&V) -> Option<&'static str>,
 }
 
-/// A modal's key actions, in footer order.
+impl<A, V> KeyAction<A, V> {
+    /// The `{key} {label}` hint in `view`, or `None` while the action is unlabeled there.
+    fn hint(&self, view: &V) -> Option<String> {
+        (self.label)(view).map(|label| format!("{} {label}", self.key))
+    }
+}
+
+/// A modal's or the app's key actions, in hint order.
 pub(crate) struct Keymap<A: 'static, V: 'static> {
     actions: &'static [KeyAction<A, V>],
 }
@@ -80,9 +87,20 @@ impl<A: Copy, V> Keymap<A, V> {
 
     /// Each action labeled in `view` with its `{key} {label}` hint, in table order.
     pub(crate) fn hints<'a>(&'a self, view: &'a V) -> impl Iterator<Item = (A, String)> + 'a {
-        self.actions.iter().filter_map(move |entry| {
-            (entry.label)(view).map(|label| (entry.action, format!("{} {label}", entry.key)))
-        })
+        self.actions
+            .iter()
+            .filter_map(move |entry| Some((entry.action, entry.hint(view)?)))
+    }
+
+    /// The `{key} {label}` hint of `action` in `view`, or `None` while it is unlabeled there.
+    pub(crate) fn hint(&self, action: A, view: &V) -> Option<String>
+    where
+        A: PartialEq,
+    {
+        self.actions
+            .iter()
+            .filter(|entry| entry.action == action)
+            .find_map(|entry| entry.hint(view))
     }
 }
 
@@ -188,6 +206,21 @@ mod tests {
                     (TestAction::Confirm, "Y to confirm".to_owned()),
                 ],
             );
+        }
+    }
+
+    mod hint {
+        use super::*;
+
+        #[test]
+        fn names_one_action_in_the_view_and_hides_it_while_unlabeled() {
+            let keymap = keymap();
+
+            assert_eq!(
+                keymap.hint(TestAction::Toggle, &true).as_deref(),
+                Some("Ctrl+X to stop"),
+            );
+            assert_eq!(keymap.hint(TestAction::Reset, &false), None);
         }
     }
 }

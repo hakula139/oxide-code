@@ -1,6 +1,8 @@
-//! What the input box, slash commands, and modals ask the [`App`](super::app::App) to do.
+//! What the input box, slash commands, modals, and the app's named keys ask the
+//! [`App`](super::app::App) to do.
 
 use crate::protocol::Op;
+use crate::tui::keymap::{KeyAction, KeyChord, Keymap};
 
 /// A request from a TUI surface. [`Self::Op`] reaches the engine after the app applies its local
 /// state change. The other variants act on TUI state alone.
@@ -23,4 +25,45 @@ pub(crate) enum Action {
     SwapTheme {
         name: String,
     },
+}
+
+// ── App Keymap ──
+
+/// A named action whose key works while no modal holds the keyboard.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum AppAction {
+    /// Switches the chat between its compact and expanded views.
+    ToggleExpanded,
+}
+
+/// The app's key actions, which take their keys before the input box sees them.
+pub(super) const APP_KEYMAP: Keymap<AppAction, ()> = Keymap::new(&[KeyAction {
+    action: AppAction::ToggleExpanded,
+    key: KeyChord::ctrl('o'),
+    label: |()| Some("to expand"),
+}]);
+
+#[cfg(test)]
+mod tests {
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+    use super::*;
+
+    mod app_keymap {
+        use super::*;
+
+        #[test]
+        fn binds_ctrl_o_to_the_expanded_view_toggle_and_names_its_effect() {
+            let ctrl_o = KeyEvent::new(KeyCode::Char('o'), KeyModifiers::CONTROL);
+
+            assert_eq!(
+                APP_KEYMAP.action_for(&ctrl_o),
+                Some(AppAction::ToggleExpanded),
+            );
+            assert_eq!(
+                APP_KEYMAP.hint(AppAction::ToggleExpanded, &()).as_deref(),
+                Some("Ctrl+O to expand"),
+            );
+        }
+    }
 }

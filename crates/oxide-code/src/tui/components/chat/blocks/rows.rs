@@ -90,14 +90,15 @@ pub(super) struct NumberedRows<'a> {
 }
 
 impl<'a> NumberedRows<'a> {
-    /// Plain numbered rows with the pipe separator and no row bg, as read and grep draw them.
+    /// Plain numbered rows with no row bg, as read and grep draw them. The pipe separator is a
+    /// column rule in the tool border's color, whatever outcome `border_style` shows.
     pub(super) fn new(ctx: &'a RenderCtx<'a>, border_style: Style, max_number: usize) -> Self {
         Self::with_style(
             ctx,
             border_style,
             max_number,
             DEFAULT_SEPARATOR,
-            ctx.theme.dim(),
+            ctx.theme.tool_border(),
             None,
         )
     }
@@ -159,8 +160,7 @@ impl<'a> NumberedRows<'a> {
         text: &str,
         text_style: Style,
     ) {
-        let expanded = expand_tabs(text);
-        let display_text = truncate_to_bytes(&expanded, MAX_ROW_BYTES);
+        let display_text = self.ctx.cap_row(&expand_tabs(text));
         let line_number = format!("{:>width$}", number, width = self.number_width);
         let bg = self.row_bg.unwrap_or_default();
         let rendered = Line::from(vec![
@@ -212,7 +212,7 @@ fn pad_to_width(line: &mut Line<'static>, target_width: usize, bg: Style) {
 
 // ── Truncation ──
 
-/// Byte budget for the text of one row, past which [`truncate_to_bytes`] cuts it.
+/// Byte budget for one row's text in the compact view, past which [`truncate_to_bytes`] cuts it.
 pub(super) const MAX_ROW_BYTES: usize = 512;
 
 /// Cuts `s` to at most `max_bytes` on a char boundary and marks the cut with [`ELLIPSIS`].
@@ -240,6 +240,8 @@ mod tests {
                 width: 80,
                 theme: &theme,
                 show_thinking: true,
+                expanded: false,
+                expand_hint: None,
             };
             let mut out = Vec::new();
 
@@ -268,6 +270,8 @@ mod tests {
                 width: 12,
                 theme: &theme,
                 show_thinking: true,
+                expanded: false,
+                expand_hint: None,
             };
             let mut out = Vec::new();
 
@@ -308,6 +312,8 @@ mod tests {
                 width: 16,
                 theme: &theme,
                 show_thinking: true,
+                expanded: false,
+                expand_hint: None,
             };
             let mut out = Vec::new();
 
@@ -342,6 +348,8 @@ mod tests {
                 width: 12,
                 theme: &theme,
                 show_thinking: true,
+                expanded: false,
+                expand_hint: None,
             };
             let mut out = Vec::new();
 
@@ -387,6 +395,8 @@ mod tests {
                 width: 30,
                 theme: &theme,
                 show_thinking: true,
+                expanded: false,
+                expand_hint: None,
             };
             let renderer = NumberedRows::with_style(
                 &ctx,
@@ -423,6 +433,8 @@ mod tests {
                 width: 80,
                 theme: &theme,
                 show_thinking: true,
+                expanded: false,
+                expand_hint: None,
             };
             let renderer = NumberedRows::with_style(
                 &ctx,
@@ -450,6 +462,8 @@ mod tests {
                 width: 40,
                 theme: &theme,
                 show_thinking: true,
+                expanded: false,
+                expand_hint: None,
             };
             let renderer = NumberedRows::with_style(
                 &ctx,
@@ -483,6 +497,8 @@ mod tests {
                 width: 20,
                 theme: &theme,
                 show_thinking: true,
+                expanded: false,
+                expand_hint: None,
             };
             let renderer = NumberedRows::with_style(
                 &ctx,
@@ -526,33 +542,50 @@ mod tests {
                 width: 80,
                 theme: &theme,
                 show_thinking: true,
+                expanded: false,
+                expand_hint: None,
             };
-            let renderer = NumberedRows::new(&ctx, theme.tool_border(), 100);
+            let renderer = NumberedRows::new(&ctx, theme.error(), 100);
             let mut out = Vec::new();
             renderer.render(&mut out, 7, "hello", theme.text());
 
-            let row = out.first().expect("renders one line");
-            let spans: Vec<&str> = row.spans.iter().map(|s| s.content.as_ref()).collect();
-            assert_eq!(spans, vec![TOOL_BORDER_CONT, "  7", " │ ", "hello"]);
+            assert_eq!(
+                out,
+                [Line::from(vec![
+                    Span::styled(TOOL_BORDER_CONT, theme.error()),
+                    Span::styled("  7", theme.muted()),
+                    Span::styled(" │ ", theme.tool_border()),
+                    Span::styled("hello", theme.text()),
+                ])]
+            );
         }
 
         #[test]
-        fn truncates_overlong_text_to_byte_budget() {
+        fn cuts_overlong_text_to_the_byte_budget_until_expanded() {
             let theme = Theme::default();
-            let ctx = RenderCtx {
-                width: 4096,
-                theme: &theme,
-                show_thinking: true,
-            };
-            let renderer = NumberedRows::new(&ctx, theme.tool_border(), 1);
-            let mut out = Vec::new();
             let long = "a".repeat(MAX_ROW_BYTES + 50);
-            renderer.render(&mut out, 1, &long, theme.text());
+            let text_in = |expanded| {
+                let ctx = RenderCtx {
+                    width: 4096,
+                    theme: &theme,
+                    show_thinking: true,
+                    expanded,
+                    expand_hint: None,
+                };
+                let mut out = Vec::new();
+                NumberedRows::new(&ctx, theme.tool_border(), 1).render(
+                    &mut out,
+                    1,
+                    &long,
+                    theme.text(),
+                );
+                out[0].spans[3].content.to_string()
+            };
 
-            assert_eq!(
-                out[0].spans[3].content,
-                format!("{}...", "a".repeat(MAX_ROW_BYTES)),
-            );
+            let (compact, expanded) = (text_in(false), text_in(true));
+
+            assert_eq!(compact, format!("{}...", "a".repeat(MAX_ROW_BYTES)));
+            assert_eq!(expanded, long);
         }
 
         #[test]
@@ -563,6 +596,8 @@ mod tests {
                 width: 14,
                 theme: &theme,
                 show_thinking: true,
+                expanded: false,
+                expand_hint: None,
             };
             let renderer = NumberedRows::new(&ctx, theme.tool_border(), 10);
             let mut out = Vec::new();

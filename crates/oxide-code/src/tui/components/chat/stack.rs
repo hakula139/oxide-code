@@ -5,7 +5,7 @@ use std::ops::Range;
 use ratatui::style::Style;
 use ratatui::text::Line;
 
-use super::blocks::{ChatBlock, RenderCtx, last_has_width};
+use super::blocks::{BlockRows, ChatBlock, RenderCtx, last_has_width};
 
 /// Separator row borrowed by every stack gap, and the stand-in for a block that never rendered.
 static BLANK: [Line<'static>; 1] = [Line {
@@ -21,15 +21,18 @@ static BLANK: [Line<'static>; 1] = [Line {
 struct RenderKey {
     width: u16,
     theme_epoch: u64,
+    expanded: bool,
 }
 
 /// A committed block with its most recent render. Blocks never change after push, so the cached
-/// lines only go stale when the width or theme epoch changes.
+/// lines only go stale when the width, theme epoch, or expanded state changes.
 pub(super) struct CachedBlock {
     block: Box<dyn ChatBlock>,
+    /// Whether a click expanded this block alone, which the compact view renders in full.
+    expanded: bool,
     key: Option<RenderKey>,
     visible: bool,
-    lines: Vec<Line<'static>>,
+    rows: BlockRows,
 }
 
 impl CachedBlock {
@@ -38,9 +41,10 @@ impl CachedBlock {
         let visible = block.visible(ctx);
         Self {
             block,
+            expanded: false,
             key: None,
             visible,
-            lines: Vec::new(),
+            rows: BlockRows::default(),
         }
     }
 
@@ -52,32 +56,57 @@ impl CachedBlock {
         self.visible
     }
 
-    /// The latest render, which may predate the current width or theme. A block that never
+    /// The latest render, which may predate the current width, theme, or view. A block that never
     /// rendered stands in as one blank row, so every block keeps a row the viewport can land on.
     pub(super) fn lines(&self) -> &[Line<'static>] {
         if self.key.is_some() {
-            &self.lines
+            &self.rows.lines
         } else {
             &BLANK
         }
     }
 
-    /// Returns whether the cached lines were rendered at this width and theme epoch.
-    pub(super) fn is_current(&self, width: u16, theme_epoch: u64) -> bool {
-        self.key == Some(RenderKey { width, theme_epoch })
+    /// Returns whether a click on row `row` of the latest render expands the block.
+    pub(super) fn expands_from(&self, row: usize) -> bool {
+        self.rows.expands_from(row)
     }
 
-    /// Renders at this width and theme epoch, replacing the cached lines.
+    /// Returns whether the cached lines were rendered for `ctx` at this theme epoch.
+    pub(super) fn is_current(&self, ctx: &RenderCtx<'_>, theme_epoch: u64) -> bool {
+        self.key == Some(self.key_for(ctx, theme_epoch))
+    }
+
+    /// Renders for `ctx` at this theme epoch, replacing the cached lines.
     pub(super) fn refresh(&mut self, ctx: &RenderCtx<'_>, theme_epoch: u64) {
-        self.lines = if self.visible {
-            self.block.render(ctx)
-        } else {
-            Vec::new()
+        let key = self.key_for(ctx, theme_epoch);
+        let ctx = RenderCtx {
+            expanded: key.expanded,
+            ..*ctx
         };
-        self.key = Some(RenderKey {
+        self.rows = if self.visible {
+            self.block.render_rows(&ctx)
+        } else {
+            BlockRows::default()
+        };
+        self.key = Some(key);
+    }
+
+    /// Renders the block in full while the view is compact.
+    pub(super) fn expand(&mut self) {
+        self.expanded = true;
+    }
+
+    /// Drops a click's expansion, returning the block to the chat's view.
+    pub(super) fn reset_view(&mut self) {
+        self.expanded = false;
+    }
+
+    fn key_for(&self, ctx: &RenderCtx<'_>, theme_epoch: u64) -> RenderKey {
+        RenderKey {
             width: ctx.width,
             theme_epoch,
-        });
+            expanded: ctx.expanded || self.expanded,
+        }
     }
 }
 
@@ -97,6 +126,14 @@ pub(super) struct Anchor {
 }
 
 impl Anchor {
+    pub(super) fn block(self) -> usize {
+        self.block
+    }
+
+    pub(super) fn row(self) -> usize {
+        self.row
+    }
+
     /// Keeps naming the same block after a block is inserted at index `at`.
     pub(super) fn shift_from(&mut self, at: usize) {
         if self.block >= at {
@@ -134,6 +171,17 @@ impl SlotTops {
     pub(super) fn offset_of(&self, anchor: Anchor) -> usize {
         let row = match (anchor.slot_height, self.slot(anchor.block)) {
             (Some(named), Some(slot)) => anchor.row * slot.len() / named,
+            _ => anchor.row,
+        };
+        self.0[anchor.block] + row
+    }
+
+    /// The row `anchor` names here, like [`Self::offset_of`], except that a row in a slot whose
+    /// height changed keeps its index, up to the slot's last row. A block that expands or
+    /// collapses keeps its head, so the rows there stay put.
+    pub(super) fn offset_keeping_row(&self, anchor: Anchor) -> usize {
+        let row = match (anchor.slot_height, self.slot(anchor.block)) {
+            (Some(_), Some(slot)) => anchor.row.min(slot.len().saturating_sub(1)),
             _ => anchor.row,
         };
         self.0[anchor.block] + row
@@ -298,16 +346,49 @@ mod tests {
         }
     }
 
+    /// Renders a head row over two body rows, which the compact view folds into a footer that
+    /// expands the block.
+    struct FoldingBlock;
+
+    impl ChatBlock for FoldingBlock {
+        fn render(&self, ctx: &RenderCtx<'_>) -> Vec<Line<'static>> {
+            let rows: &[&str] = if ctx.expanded {
+                &["head", "a", "b"]
+            } else {
+                &["head", "... +2 rows"]
+            };
+            rows.iter().map(|row| Line::raw(*row)).collect()
+        }
+
+        fn render_rows(&self, ctx: &RenderCtx<'_>) -> BlockRows {
+            let mut rows = self.render(ctx).into_iter();
+            let mut out = BlockRows::default();
+            out.lines.extend(rows.next());
+            if ctx.expanded {
+                out.lines.extend(rows);
+            } else {
+                out.push_expander(|lines| lines.extend(rows));
+            }
+            out
+        }
+    }
+
     fn with_ctx<T>(width: u16, f: impl FnOnce(&RenderCtx<'_>) -> T) -> T {
+        with_view_ctx(width, false, f)
+    }
+
+    fn with_view_ctx<T>(width: u16, expanded: bool, f: impl FnOnce(&RenderCtx<'_>) -> T) -> T {
         let theme = Theme::default();
         f(&RenderCtx {
             width,
             theme: &theme,
             show_thinking: true,
+            expanded,
+            expand_hint: None,
         })
     }
 
-    fn cached(block: FixedBlock) -> CachedBlock {
+    fn cached(block: impl ChatBlock + 'static) -> CachedBlock {
         with_ctx(40, |ctx| CachedBlock::new(Box::new(block), ctx))
     }
 
@@ -337,8 +418,17 @@ mod tests {
         })
     }
 
+    fn folding() -> CachedBlock {
+        cached(FoldingBlock)
+    }
+
     fn refresh(block: &mut CachedBlock, width: u16) {
         with_ctx(width, |ctx| block.refresh(ctx, 0));
+    }
+
+    /// Returns whether `block` rendered at `width` and theme epoch `epoch` in the given view.
+    fn is_current_in(block: &CachedBlock, width: u16, epoch: u64, expanded: bool) -> bool {
+        with_view_ctx(width, expanded, |ctx| block.is_current(ctx, epoch))
     }
 
     /// Refreshes every block at width 40 and stacks them.
@@ -374,18 +464,82 @@ mod tests {
             }
         }
 
+        mod expands_from {
+            use super::*;
+
+            #[test]
+            fn holds_on_the_rows_that_expand_the_latest_render() {
+                let mut block = folding();
+
+                refresh(&mut block, 40);
+
+                assert_eq!(texts(block.lines()), ["head", "... +2 rows"]);
+                assert!(!block.expands_from(0));
+                assert!(block.expands_from(1));
+                assert!(!block.expands_from(2));
+            }
+        }
+
         mod is_current {
             use super::*;
 
             #[test]
-            fn until_the_width_or_theme_epoch_changes() {
+            fn until_the_width_theme_epoch_or_view_changes() {
                 let mut block = standalone(&["a"]);
-                assert!(!block.is_current(40, 0));
+                assert!(!is_current_in(&block, 40, 0, false));
 
                 refresh(&mut block, 40);
-                assert!(block.is_current(40, 0));
-                assert!(!block.is_current(30, 0), "a width change is stale");
-                assert!(!block.is_current(40, 1), "a theme swap is stale");
+                assert!(is_current_in(&block, 40, 0, false));
+                assert!(
+                    !is_current_in(&block, 30, 0, false),
+                    "a width change is stale"
+                );
+                assert!(
+                    !is_current_in(&block, 40, 1, false),
+                    "a theme swap is stale"
+                );
+                assert!(
+                    !is_current_in(&block, 40, 0, true),
+                    "a view toggle is stale"
+                );
+            }
+        }
+
+        mod expand {
+            use super::*;
+
+            #[test]
+            fn renders_the_block_in_full_while_the_view_is_compact() {
+                let mut block = folding();
+                refresh(&mut block, 40);
+
+                block.expand();
+
+                assert!(!is_current_in(&block, 40, 0, false));
+                refresh(&mut block, 40);
+                assert_eq!(texts(block.lines()), ["head", "a", "b"]);
+                assert!(!block.expands_from(1), "a full render has no footer");
+                assert!(
+                    is_current_in(&block, 40, 0, true),
+                    "the render matches the expanded view"
+                );
+            }
+        }
+
+        mod reset_view {
+            use super::*;
+
+            #[test]
+            fn drops_a_click_expansion() {
+                let mut block = folding();
+                block.expand();
+                refresh(&mut block, 40);
+
+                block.reset_view();
+
+                assert!(!is_current_in(&block, 40, 0, false));
+                refresh(&mut block, 40);
+                assert_eq!(texts(block.lines()), ["head", "... +2 rows"]);
             }
         }
     }
@@ -461,6 +615,34 @@ mod tests {
                     "a row past the old end keeps its distance from it"
                 );
                 assert_eq!(painted.offset_of(in_slot), 6);
+            }
+        }
+
+        mod offset_keeping_row {
+            use super::*;
+
+            #[test]
+            fn keeps_the_row_index_up_to_the_slot_end() {
+                let painted = SlotTops(vec![0, 4, 8, 10]);
+                let early = painted.anchor_at(5);
+                let late = painted.anchor_at(7);
+                let past_end = painted.anchor_at(12);
+
+                let taller = SlotTops(vec![0, 4, 16, 18]);
+                let shorter = SlotTops(vec![0, 4, 6, 8]);
+
+                assert_eq!(taller.offset_keeping_row(late), 4 + 3);
+                assert_eq!(shorter.offset_keeping_row(early), 4 + 1);
+                assert_eq!(
+                    shorter.offset_keeping_row(late),
+                    4 + 1,
+                    "row 3 of a slot cut to 2 rows lands on its last"
+                );
+                assert_eq!(
+                    shorter.offset_keeping_row(past_end),
+                    8 + 2,
+                    "a row past the end keeps its distance from it"
+                );
             }
         }
 

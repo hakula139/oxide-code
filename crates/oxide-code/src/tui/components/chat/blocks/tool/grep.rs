@@ -2,15 +2,14 @@
 //! lines render dim.
 
 use ratatui::style::Style;
-use ratatui::text::Line;
 
-use super::{MAX_TOOL_OUTPUT_LINES, hidden_footer};
+use super::{MAX_TOOL_OUTPUT_LINES, overflow_footer};
 use crate::tool::GrepFileGroup;
-use crate::tui::components::chat::blocks::RenderCtx;
 use crate::tui::components::chat::blocks::rows::{NumberedRows, body_row};
+use crate::tui::components::chat::blocks::{BlockRows, RenderCtx};
 
 pub(super) fn render(
-    out: &mut Vec<Line<'static>>,
+    out: &mut BlockRows,
     ctx: &RenderCtx<'_>,
     border_style: Style,
     groups: &[GrepFileGroup],
@@ -22,7 +21,7 @@ pub(super) fn render(
 
     // Budget spans both path headers and match rows.
     let total_rows: usize = groups.iter().map(|g| 1 + g.lines.len()).sum();
-    let visible_rows = total_rows.min(MAX_TOOL_OUTPUT_LINES);
+    let visible_rows = total_rows.min(ctx.cap(MAX_TOOL_OUTPUT_LINES));
     let hidden = total_rows.saturating_sub(visible_rows);
 
     let max_number = groups
@@ -38,7 +37,13 @@ pub(super) fn render(
         if emitted >= visible_rows {
             break;
         }
-        body_row(out, ctx, border_style, &group.path, ctx.theme.muted());
+        body_row(
+            &mut out.lines,
+            ctx,
+            border_style,
+            &group.path,
+            ctx.theme.muted(),
+        );
         emitted += 1;
 
         for line in &group.lines {
@@ -50,14 +55,12 @@ pub(super) fn render(
             } else {
                 ctx.theme.dim()
             };
-            rows.render(out, line.number, &line.text, text_style);
+            rows.render(&mut out.lines, line.number, &line.text, text_style);
             emitted += 1;
         }
     }
 
-    if let Some(footer) = hidden_footer(hidden, "line", "lines", truncated) {
-        body_row(out, ctx, border_style, footer, ctx.theme.dim());
-    }
+    overflow_footer(out, ctx, border_style, hidden, "line", "lines", truncated);
 }
 
 #[cfg(test)]
@@ -90,10 +93,12 @@ mod tests {
                 width: 80,
                 theme: &theme,
                 show_thinking: true,
+                expanded: false,
+                expand_hint: None,
             };
-            let mut out = Vec::new();
+            let mut out = BlockRows::default();
             render(&mut out, &ctx, theme.tool_border(), groups, truncated);
-            out.iter().map(ToString::to_string).collect()
+            out.lines.iter().map(ToString::to_string).collect()
         }
 
         #[test]
@@ -103,6 +108,8 @@ mod tests {
                 width: 80,
                 theme: &theme,
                 show_thinking: true,
+                expanded: false,
+                expand_hint: None,
             };
             let groups = [
                 group(
@@ -111,11 +118,11 @@ mod tests {
                 ),
                 group("src/lib.rs", &[(5, "fn lib_func()", true)]),
             ];
-            let mut out = Vec::new();
+            let mut out = BlockRows::default();
 
             render(&mut out, &ctx, theme.tool_border(), &groups, false);
 
-            let rows: Vec<String> = out.iter().map(ToString::to_string).collect();
+            let rows: Vec<String> = out.lines.iter().map(ToString::to_string).collect();
             assert_eq!(
                 rows,
                 [
@@ -126,8 +133,16 @@ mod tests {
                     "▎    5 │ fn lib_func()",
                 ]
             );
-            assert_eq!(out[1].spans[3].style, theme.text(), "a match is full color");
-            assert_eq!(out[2].spans[3].style, theme.dim(), "a context line is dim");
+            assert_eq!(
+                out.lines[1].spans[3].style,
+                theme.text(),
+                "a match is full color"
+            );
+            assert_eq!(
+                out.lines[2].spans[3].style,
+                theme.dim(),
+                "a context line is dim"
+            );
         }
 
         #[test]

@@ -2,14 +2,13 @@
 //! the tool's `MAX_RESULTS` cap when the search hits it.
 
 use ratatui::style::Style;
-use ratatui::text::Line;
 
-use super::{MAX_TOOL_OUTPUT_LINES, hidden_footer};
-use crate::tui::components::chat::blocks::RenderCtx;
-use crate::tui::components::chat::blocks::rows::{MAX_ROW_BYTES, body_row, truncate_to_bytes};
+use super::{MAX_TOOL_OUTPUT_LINES, overflow_footer};
+use crate::tui::components::chat::blocks::rows::body_row;
+use crate::tui::components::chat::blocks::{BlockRows, RenderCtx};
 
 pub(super) fn render(
-    out: &mut Vec<Line<'static>>,
+    out: &mut BlockRows,
     ctx: &RenderCtx<'_>,
     border_style: Style,
     pattern: &str,
@@ -18,16 +17,22 @@ pub(super) fn render(
 ) {
     if files.is_empty() {
         // "No files found" already labels the result, so the header is skipped.
-        body_row(out, ctx, border_style, "No files found", ctx.theme.dim());
+        body_row(
+            &mut out.lines,
+            ctx,
+            border_style,
+            "No files found",
+            ctx.theme.dim(),
+        );
         return;
     }
 
-    let visible = files.len().min(MAX_TOOL_OUTPUT_LINES);
+    let visible = files.len().min(ctx.cap(MAX_TOOL_OUTPUT_LINES));
     let hidden = files.len() - visible;
     let truncated_by_tool = total > files.len();
 
     body_row(
-        out,
+        &mut out.lines,
         ctx,
         border_style,
         format!("{pattern} ({visible} of {total})"),
@@ -35,13 +40,19 @@ pub(super) fn render(
     );
 
     for path in &files[..visible] {
-        let display = truncate_to_bytes(path, MAX_ROW_BYTES);
-        body_row(out, ctx, border_style, display, ctx.theme.text());
+        let display = ctx.cap_row(path);
+        body_row(&mut out.lines, ctx, border_style, display, ctx.theme.text());
     }
 
-    if let Some(footer) = hidden_footer(hidden, "file", "files", truncated_by_tool) {
-        body_row(out, ctx, border_style, footer, ctx.theme.dim());
-    }
+    overflow_footer(
+        out,
+        ctx,
+        border_style,
+        hidden,
+        "file",
+        "files",
+        truncated_by_tool,
+    );
 }
 
 #[cfg(test)]
@@ -52,17 +63,25 @@ mod tests {
     mod render {
         use super::*;
 
-        /// Rows of `files` from a `pattern` search that found `total`.
-        fn render_rows(pattern: &str, files: &[String], total: usize) -> Vec<String> {
+        /// Rows of `files` from a `pattern` search that found `total`, in the compact or expanded
+        /// view.
+        fn render_rows(
+            pattern: &str,
+            files: &[String],
+            total: usize,
+            expanded: bool,
+        ) -> Vec<String> {
             let theme = Theme::default();
             let ctx = RenderCtx {
                 width: 80,
                 theme: &theme,
                 show_thinking: true,
+                expanded,
+                expand_hint: None,
             };
-            let mut out = Vec::new();
+            let mut out = BlockRows::default();
             render(&mut out, &ctx, theme.tool_border(), pattern, files, total);
-            out.iter().map(ToString::to_string).collect()
+            out.lines.iter().map(ToString::to_string).collect()
         }
 
         fn numbered_files(count: usize) -> Vec<String> {
@@ -71,7 +90,7 @@ mod tests {
 
         #[test]
         fn empty_files_shows_no_files_found_row() {
-            let rows = render_rows("**/*.rs", &[], 0);
+            let rows = render_rows("**/*.rs", &[], 0, false);
 
             assert_eq!(rows, ["▎   No files found"]);
         }
@@ -80,7 +99,7 @@ mod tests {
         fn short_list_emits_header_and_no_footer() {
             let files = vec!["src/main.rs".to_owned(), "src/lib.rs".to_owned()];
 
-            let rows = render_rows("**/*.rs", &files, 2);
+            let rows = render_rows("**/*.rs", &files, 2, false);
 
             assert_eq!(
                 rows,
@@ -92,7 +111,7 @@ mod tests {
         fn caps_at_max_output_lines_with_hidden_footer() {
             let files = numbered_files(8);
 
-            let rows = render_rows("**/*.rs", &files, 8);
+            let rows = render_rows("**/*.rs", &files, 8, false);
 
             assert_eq!(
                 rows,
@@ -112,7 +131,7 @@ mod tests {
         fn tool_truncation_surfaces_total_in_footer() {
             let files = numbered_files(10);
 
-            let rows = render_rows("**/*.rs", &files, 1234);
+            let rows = render_rows("**/*.rs", &files, 1234, false);
 
             assert_eq!(
                 rows,
@@ -126,6 +145,18 @@ mod tests {
                     "▎   ... +5 files (limit reached)",
                 ]
             );
+        }
+
+        #[test]
+        fn expanded_view_lists_every_file_and_still_flags_the_tool_limit() {
+            let files = numbered_files(7);
+
+            let rows = render_rows("**/*.rs", &files, 1234, true);
+
+            let mut expected = vec!["▎   **/*.rs (7 of 1234)".to_owned()];
+            expected.extend(files.iter().map(|file| format!("▎   {file}")));
+            expected.push("▎   ... limit reached".to_owned());
+            assert_eq!(rows, expected);
         }
     }
 }

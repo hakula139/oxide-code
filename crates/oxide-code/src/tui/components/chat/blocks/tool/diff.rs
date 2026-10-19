@@ -1,29 +1,37 @@
 //! Edit-tool diff body: a unified `-` / `+` layout of the [`DiffChunk`]s.
 
 use ratatui::style::Style;
-use ratatui::text::Line;
 
+use super::overflow_footer;
 use crate::tool::{DiffChunk, DiffLine};
-use crate::tui::components::chat::blocks::RenderCtx;
 use crate::tui::components::chat::blocks::rows::{NumberedRows, body_row};
+use crate::tui::components::chat::blocks::{BlockRows, RenderCtx};
 use crate::util::text::plural;
 
+/// Body rows a diff shows in the compact view, split between its sides.
 const MAX_DIFF_BODY_LINES: usize = 20;
+/// Line numbers the locations footer lists in the compact view.
 const MAX_LOCATIONS_DISPLAYED: usize = 8;
 const NO_CHANGE_MARKER: &str = "(no change)";
 
 pub(super) fn render(
-    out: &mut Vec<Line<'static>>,
+    out: &mut BlockRows,
     ctx: &RenderCtx<'_>,
     border_style: Style,
     chunks: &[DiffChunk],
 ) {
     if !any_chunk_has_content(chunks) {
-        body_row(out, ctx, border_style, NO_CHANGE_MARKER, ctx.theme.dim());
+        body_row(
+            &mut out.lines,
+            ctx,
+            border_style,
+            NO_CHANGE_MARKER,
+            ctx.theme.dim(),
+        );
         return;
     }
 
-    render_chunk_body(out, ctx, border_style, &chunks[0], MAX_DIFF_BODY_LINES);
+    render_chunk_body(out, ctx, border_style, &chunks[0]);
 
     if chunks.len() > 1 {
         let locations: Vec<usize> = chunks.iter().filter_map(chunk_anchor_line).collect();
@@ -32,31 +40,29 @@ pub(super) fn render(
 }
 
 fn render_chunk_body(
-    out: &mut Vec<Line<'static>>,
+    out: &mut BlockRows,
     ctx: &RenderCtx<'_>,
     border_style: Style,
     chunk: &DiffChunk,
-    budget: usize,
 ) {
     let max_number = max_line_number(chunk);
     let removed = NumberedRows::removed(ctx, border_style, max_number);
     let added = NumberedRows::added(ctx, border_style, max_number);
     let text_style = ctx.theme.text();
+    let budget = ctx.cap(MAX_DIFF_BODY_LINES);
 
     for entry in entries(&chunk.old, &chunk.new, budget) {
         match entry {
             Entry::Line {
                 side: Side::Del,
                 line,
-            } => removed.render(out, line.number, &line.text, text_style),
+            } => removed.render(&mut out.lines, line.number, &line.text, text_style),
             Entry::Line {
                 side: Side::Add,
                 line,
-            } => added.render(out, line.number, &line.text, text_style),
+            } => added.render(&mut out.lines, line.number, &line.text, text_style),
             Entry::Ellipsis { hidden } => {
-                let noun = plural(hidden, "line", "lines");
-                let text = format!("... {hidden} {noun} hidden");
-                body_row(out, ctx, border_style, text, ctx.theme.dim());
+                overflow_footer(out, ctx, border_style, hidden, "line", "lines", false);
             }
         }
     }
@@ -72,8 +78,10 @@ fn max_line_number(chunk: &DiffChunk) -> usize {
         .unwrap_or(0)
 }
 
+/// Lists the lines each chunk applied at. A compact list that leaves some out ends with the
+/// expand hint and expands the block when clicked.
 fn render_locations_footer(
-    out: &mut Vec<Line<'static>>,
+    out: &mut BlockRows,
     ctx: &RenderCtx<'_>,
     border_style: Style,
     locations: &[usize],
@@ -81,20 +89,22 @@ fn render_locations_footer(
     if locations.is_empty() {
         return;
     }
-    let shown = locations.len().min(MAX_LOCATIONS_DISPLAYED);
+    let shown = locations.len().min(ctx.cap(MAX_LOCATIONS_DISPLAYED));
     let list = locations[..shown]
         .iter()
         .map(usize::to_string)
         .collect::<Vec<_>>()
         .join(", ");
-    let suffix = if locations.len() > MAX_LOCATIONS_DISPLAYED {
-        format!(" and {} more", locations.len() - MAX_LOCATIONS_DISPLAYED)
-    } else {
-        String::new()
-    };
     let noun = plural(locations.len(), "line", "lines");
-    let text = format!("applied at {noun} {list}{suffix}");
-    body_row(out, ctx, border_style, text, ctx.theme.dim());
+    let text = format!("applied at {noun} {list}");
+    let style = ctx.theme.dim();
+    let hidden = locations.len() - shown;
+    if hidden == 0 {
+        body_row(&mut out.lines, ctx, border_style, text, style);
+        return;
+    }
+    let text = ctx.with_expand_hint(&format!("{text} and {hidden} more"));
+    out.push_expander(|lines| body_row(lines, ctx, border_style, text, style));
 }
 
 fn any_chunk_has_content(chunks: &[DiffChunk]) -> bool {
@@ -181,6 +191,8 @@ fn emit_side<'a>(out: &mut Vec<Entry<'a>>, side: Side, lines: &'a [DiffLine], bu
 
 #[cfg(test)]
 mod tests {
+    use ratatui::text::Line;
+
     use super::*;
     use crate::tui::theme::Theme;
 
@@ -206,6 +218,15 @@ mod tests {
             width: 80,
             theme,
             show_thinking: true,
+            expanded: false,
+            expand_hint: None,
+        }
+    }
+
+    fn expanded_ctx(theme: &Theme) -> RenderCtx<'_> {
+        RenderCtx {
+            expanded: true,
+            ..ctx(theme)
         }
     }
 
@@ -222,7 +243,7 @@ mod tests {
         #[test]
         fn marks_chunks_without_lines_as_no_change() {
             let theme = Theme::default();
-            let mut out = Vec::new();
+            let mut out = BlockRows::default();
 
             render(
                 &mut out,
@@ -231,13 +252,13 @@ mod tests {
                 &[chunk_of(&[], &[])],
             );
 
-            assert_eq!(rows(&out), ["▎   (no change)"]);
+            assert_eq!(rows(&out.lines), ["▎   (no change)"]);
         }
 
         #[test]
         fn single_chunk_emits_body_without_locations_footer() {
             let theme = Theme::default();
-            let mut out = Vec::new();
+            let mut out = BlockRows::default();
 
             render(
                 &mut out,
@@ -246,7 +267,7 @@ mod tests {
                 &[chunk_of(&["foo"], &["bar"])],
             );
 
-            assert_eq!(rows(&out), ["▎   1 - foo", "▎   1 + bar"]);
+            assert_eq!(rows(&out.lines), ["▎   1 - foo", "▎   1 + bar"]);
         }
 
         #[test]
@@ -262,7 +283,7 @@ mod tests {
                     text: "bar".to_owned(),
                 }],
             };
-            let mut out = Vec::new();
+            let mut out = BlockRows::default();
 
             render(
                 &mut out,
@@ -272,7 +293,7 @@ mod tests {
             );
 
             assert_eq!(
-                rows(&out),
+                rows(&out.lines),
                 [
                     "▎   12 - foo",
                     "▎   12 + bar",
@@ -282,41 +303,104 @@ mod tests {
         }
     }
 
+    mod render_chunk_body {
+        use super::*;
+
+        #[test]
+        fn caps_a_long_side_with_a_clickable_footer_until_expanded() {
+            let theme = Theme::default();
+            let added: Vec<String> = (1..=MAX_DIFF_BODY_LINES + 2)
+                .map(|n| format!("line {n}"))
+                .collect();
+            let added: Vec<&str> = added.iter().map(String::as_str).collect();
+            let chunk = chunk_of(&[], &added);
+            let row = |n: usize| format!("▎   {n:>2} + line {n}");
+            let mut compact = BlockRows::default();
+            let mut expanded = BlockRows::default();
+
+            render_chunk_body(&mut compact, &ctx(&theme), theme.tool_border(), &chunk);
+            render_chunk_body(
+                &mut expanded,
+                &expanded_ctx(&theme),
+                theme.tool_border(),
+                &chunk,
+            );
+
+            let head = MAX_DIFF_BODY_LINES - 1;
+            let mut expected: Vec<String> = (1..=head).map(row).collect();
+            expected.push("▎   ... +2 lines".to_owned());
+            expected.push(row(MAX_DIFF_BODY_LINES + 2));
+            assert_eq!(rows(&compact.lines), expected);
+            assert_eq!(compact.expander_rows(), [head]);
+            assert_eq!(
+                rows(&expanded.lines),
+                (1..=MAX_DIFF_BODY_LINES + 2).map(row).collect::<Vec<_>>(),
+            );
+            assert_eq!(expanded.expander_rows(), Vec::<usize>::new());
+        }
+    }
+
     mod render_locations_footer {
         use super::*;
 
         #[test]
         fn caps_with_and_more_suffix_past_max() {
             let theme = Theme::default();
+            let ctx = RenderCtx {
+                width: 100,
+                expand_hint: Some("Ctrl+O to expand"),
+                ..ctx(&theme)
+            };
             let locations: Vec<usize> = (1..=10).collect();
-            let mut out = Vec::new();
+            let mut out = BlockRows::default();
 
-            render_locations_footer(&mut out, &ctx(&theme), theme.tool_border(), &locations);
+            render_locations_footer(&mut out, &ctx, theme.tool_border(), &locations);
 
             assert_eq!(
-                rows(&out),
-                ["▎   applied at lines 1, 2, 3, 4, 5, 6, 7, 8 and 2 more"]
+                rows(&out.lines),
+                ["▎   applied at lines 1, 2, 3, 4, 5, 6, 7, 8 and 2 more · Ctrl+O to expand"]
             );
+            assert_eq!(out.expander_rows(), [0]);
+        }
+
+        #[test]
+        fn lists_every_location_when_expanded() {
+            let theme = Theme::default();
+            let locations: Vec<usize> = (1..=10).collect();
+            let mut out = BlockRows::default();
+
+            render_locations_footer(
+                &mut out,
+                &expanded_ctx(&theme),
+                theme.tool_border(),
+                &locations,
+            );
+
+            assert_eq!(
+                rows(&out.lines),
+                ["▎   applied at lines 1, 2, 3, 4, 5, 6, 7, 8, 9, 10"]
+            );
+            assert_eq!(out.expander_rows(), Vec::<usize>::new());
         }
 
         #[test]
         fn singular_label_for_one_location() {
             let theme = Theme::default();
-            let mut out = Vec::new();
+            let mut out = BlockRows::default();
 
             render_locations_footer(&mut out, &ctx(&theme), theme.tool_border(), &[42]);
 
-            assert_eq!(rows(&out), ["▎   applied at line 42"]);
+            assert_eq!(rows(&out.lines), ["▎   applied at line 42"]);
         }
 
         #[test]
         fn empty_emits_nothing() {
             let theme = Theme::default();
-            let mut out = Vec::new();
+            let mut out = BlockRows::default();
 
             render_locations_footer(&mut out, &ctx(&theme), theme.tool_border(), &[]);
 
-            assert_eq!(out, []);
+            assert_eq!(out.lines, []);
         }
 
         #[test]
@@ -326,12 +410,17 @@ mod tests {
                 width: 24,
                 theme: &theme,
                 show_thinking: true,
+                expanded: false,
+                expand_hint: None,
             };
-            let mut out = Vec::new();
+            let mut out = BlockRows::default();
 
             render_locations_footer(&mut out, &ctx, theme.tool_border(), &[12, 47, 200]);
 
-            assert_eq!(rows(&out), ["▎   applied at lines 12,", "▎   47, 200"]);
+            assert_eq!(
+                rows(&out.lines),
+                ["▎   applied at lines 12,", "▎   47, 200"]
+            );
         }
     }
 

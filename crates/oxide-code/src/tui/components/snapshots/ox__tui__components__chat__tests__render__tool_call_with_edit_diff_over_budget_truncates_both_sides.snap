@@ -1,6 +1,5 @@
 ---
 source: crates/oxide-code/src/tui/components/chat.rs
-assertion_line: 2255
 expression: "render_chat(&mut chat, 60, 26)"
 ---
 "▎ ✎ Edit(/tmp/big.rs)                                       "
@@ -14,7 +13,7 @@ expression: "render_chat(&mut chat, 60, 26)"
 "▎    7 - old6                                               "
 "▎    8 - old7                                               "
 "▎    9 - old8                                               "
-"▎   ... 4 lines hidden                                      "
+"▎   ... +4 lines · Ctrl+O to expand                         "
 "▎   14 - old13                                              "
 "▎    1 + new0                                               "
 "▎    2 + new1                                               "
@@ -25,7 +24,7 @@ expression: "render_chat(&mut chat, 60, 26)"
 "▎    7 + new6                                               "
 "▎    8 + new7                                               "
 "▎    9 + new8                                               "
-"▎   ... 4 lines hidden                                      "
+"▎   ... +4 lines · Ctrl+O to expand                         "
 "▎   14 + new13                                              "
 "                                                            "
 "                                                            "

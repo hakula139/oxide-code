@@ -117,6 +117,8 @@ mod tests {
             width,
             theme,
             show_thinking: false,
+            expanded: false,
+            expand_hint: None,
         }
     }
 

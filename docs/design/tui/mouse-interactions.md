@@ -4,11 +4,12 @@ Design policy for mouse behavior in the TUI.
 
 ## Goal
 
-Three user-visible features:
+Four user-visible features:
 
 1. **Scroll the chat with the mouse wheel**, in a bare terminal and inside tmux.
 2. **Click `#NN` in the status bar to open the pull request in the browser**, with a plain click or the terminal's own Ctrl / Cmd+click.
 3. **Select chat content with the mouse and paste it elsewhere**, in any terminal the user runs `ox` in (iTerm2, WezTerm, kitty, Alacritty, Terminal.app, GNOME Terminal, Konsole, Ghostty, Windows Terminal, VS Code's integrated terminal, Cursor's integrated terminal).
+4. **Click a collapsed block to expand it**, on its overflow footer or its `Thought` header.
 
 The TUI captures the mouse so wheel events reach it everywhere, and selects and copies chat text itself, since capture takes drags away from the terminal. The status-bar PR segments are wrapped in an OSC 8 hyperlink envelope, which terminals open on Ctrl / Cmd+click, and `ox` opens them itself on a plain click.
 
@@ -26,17 +27,21 @@ Terminal-side wheel translation can't cover tmux. DECSET 1007 (alternate scroll)
 
 ## Text Selection
 
-Dragging with the left button over the chat selects text, and releasing the button copies it. A double click selects a word, which whitespace and bracket, quote, and separator characters bound, and a triple click selects a row. Dragging after a double or triple click extends the selection by words or rows. A press on the second cell of a wide character takes the whole character. A plain click selects nothing and clears the previous selection. Selection covers only the chat area, and a drag past the last row ends at that row's end.
+Dragging with the left button over the chat selects text, and releasing the button copies it. A double click selects a word, which whitespace and bracket, quote, and separator characters bound, and a triple click selects a row. Dragging after a double or triple click extends the selection by words or rows. A press on the second cell of a wide character takes the whole character. A plain click selects nothing and clears the previous selection, though one on a collapsed block [expands it](#expanding-a-block). Selection covers only the chat area, and a drag past the last row ends at that row's end.
 
 The highlight stays until the next keystroke clears it. While it shows, Ctrl+C copies it again and clears it without interrupting a turn or arming exit.
 
-- **Anchoring:** Each end of the selection is a content anchor from `SlotTops`, the scheme the scroll position already uses, plus a column. A slot starts at its block's first row, and a separator above a block belongs to the slot before it, so a tool result inserted above a selected call keeps the highlight on the call. Every frame resolves the anchors against the current slot tops, so the highlight stays on the same text while blocks stream in below it or are inserted above it. A release renders any block the selection covers that the last frame did not, such as a reply committed since. A width change rewraps every row, so it drops the selection.
+- **Anchoring:** Each end of the selection is a content anchor from `SlotTops`, the scheme the scroll position already uses, plus a column. A slot starts at its block's first row, and a separator above a block belongs to the slot before it, so a tool result inserted above a selected call keeps the highlight on the call. Every frame resolves the anchors against the current slot tops, so the highlight stays on the same text while blocks stream in below it or are inserted above it. A release renders any block the selection covers that the last frame did not, such as a reply committed since. A width change rewraps every row and a view toggle reshapes the blocks, so either drops the selection.
 - **Following the tail:** A drag pauses following the tail, so streamed output can't move text out from under the pointer, and scrolling to the bottom doesn't resume it while the button is held. The release resumes following when the drag paused it.
 - **Edge auto-scroll:** While the pointer is held above or below the chat, the 60 FPS tick scrolls one row every 50 ms toward it until the view reaches the content's end, and the selection's head follows the row at that edge. After 200 rows without a mouse event, it stops, in case the terminal lost the release.
 - **Highlight:** Selected cells take the `selection` theme slot's style, a background fill in the built-in themes.
 - **Copied text:** Rows join with newlines, and each row drops its trailing whitespace. The text is what the rows show, including gutters such as the block bar and diff line numbers. Columns follow ratatui's paint, which skips control characters and zero-width graphemes, so a row holding an escape sequence copies what it shows. A selection of only whitespace copies nothing.
 
 The terminal's bypass modifier still gives native selection: Shift in most terminals, Option in iTerm2, Fn in Terminal.app, and Option in VS Code and Cursor on macOS with `terminal.integrated.macOptionClickForcesSelection` enabled. Inside tmux with `mouse on`, tmux's default `MouseDrag1Pane` binding forwards drags to a pane that reports the mouse, so tmux's own copy-mode selection needs the same bypass and selects across pane borders.
+
+## Expanding a Block
+
+In the compact view, a plain click on a block's overflow footer, such as `... +3 lines · Ctrl+O to expand`, or on a collapsed `Thought` header renders that block in full. Each block marks these rows when it renders, so the click finds them in the cached render it landed on. The block expands on the release, which keeps a drag that starts on the footer a selection, and only for a press on a painted row, since a press below the last row still lands on that row for selection. The click pauses following the tail, so the rows on screen stay put while the block grows below them. Ctrl+O returns every block to the view it switches to.
 
 ## Copying
 
@@ -78,7 +83,6 @@ URLs are sanitized: every control char is filtered out before the envelope is bu
 
 ## Out of Scope
 
-- Click-to-expand on tool-result blocks.
 - OSC 8 hyperlinks inside markdown body text (would require threading URLs through the markdown renderer).
 - Selecting text outside the chat, such as in the input or a modal.
 - Copying source text without gutters or soft-wrap breaks, which would require each block to map rendered rows back to its source.
@@ -93,6 +97,7 @@ Manual verification across terminals:
 4. Drag-select a chat region in a bare terminal, inside tmux, and over SSH. Confirm the highlight and the copy notice, then paste somewhere external and confirm the bytes round-trip. Double-click a word and triple-click a row. Hold a drag past the top edge and confirm the chat scrolls. Press Ctrl+C and confirm it copies without interrupting. Then hold the bypass modifier and confirm native selection still works.
 5. With the `pull-request`, `pull-request-checks`, and `pull-request-review` status segments configured, click each, then Ctrl+click each (Cmd+click on iTerm2 / Terminal.app). Confirm the browser opens the PR, its checks page, and its changed-files page once per click.
 6. Wheel scroll, both in a bare terminal and inside tmux with `mouse on`. Confirm chat scrolls and tmux stays out of copy mode.
-7. Quit. Confirm alt-screen restored.
+7. Click a tool result's `... +N lines` footer and a `Thought` header. Confirm each expands only its block and the rows above it stay put.
+8. Quit. Confirm alt-screen restored.
 
-Automated coverage pins the mouse-capture enter / leave bytes, the Windows SGR request bytes, wheel scroll steps, wheel routing to modals and the slash popup, plain-click link opening, ignored mouse events, selection units, anchoring across inserted and streamed blocks, edge auto-scroll and its stops, the highlight, keystrokes that clear or copy the selection, copy routing, the tmux retry and timeout, the OSC 52 write, the notice truncation, OSC 8 replay bytes, URL sanitization, the unwrapped envelope inside tmux, and status-bar hyperlink capture.
+Automated coverage pins the mouse-capture enter / leave bytes, the Windows SGR request bytes, wheel scroll steps, wheel routing to modals and the slash popup, plain-click link opening, footer-click expansion, ignored mouse events, selection units, anchoring across inserted and streamed blocks, edge auto-scroll and its stops, the highlight, keystrokes that clear or copy the selection, copy routing, the tmux retry and timeout, the OSC 52 write, the notice truncation, OSC 8 replay bytes, URL sanitization, the unwrapped envelope inside tmux, and status-bar hyperlink capture.

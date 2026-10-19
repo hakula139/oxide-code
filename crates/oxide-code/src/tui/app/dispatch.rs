@@ -14,7 +14,7 @@ use tracing::{debug, warn};
 use super::{App, EXIT_WINDOW};
 use crate::protocol::Op;
 use crate::slash::{self, Parsed, SlashContext, SlashKind, SlashOutcome};
-use crate::tui::action::Action;
+use crate::tui::action::{APP_KEYMAP, Action, AppAction};
 use crate::tui::components::input::InputOutcome;
 use crate::tui::components::status::Status;
 use crate::tui::modal::ModalAction;
@@ -57,6 +57,13 @@ impl App {
                 }
                 _ => {}
             }
+        }
+        if let CrosstermEvent::Key(key) = event
+            && let Some(action) = APP_KEYMAP.action_for(key)
+        {
+            self.apply_app_action(action);
+            self.dirty = true;
+            return;
         }
         match event {
             CrosstermEvent::Key(KeyEvent {
@@ -147,6 +154,12 @@ impl App {
         };
         self.clipboard.copy(text);
         true
+    }
+
+    fn apply_app_action(&mut self, action: AppAction) {
+        match action {
+            AppAction::ToggleExpanded => self.chat.toggle_expanded(),
+        }
     }
 
     fn apply_modal_action(&mut self, action: ModalAction) {
@@ -448,8 +461,8 @@ mod tests {
     use crate::model::ResolvedModelId;
     use crate::permission::defaults::Shipped;
     use crate::permission::{Basis, Mode};
-    use crate::protocol::{ConfigPick, Decision, Event, ResumeTarget};
-    use crate::tool::{ApprovalBody, ApprovalPreview};
+    use crate::protocol::{ConfigPick, Decision, Event, ResumeTarget, ToolResult};
+    use crate::tool::{ApprovalBody, ApprovalPreview, ToolResultView};
     use crate::tui::app::testing::{
         FakeModal, KeyLogModal, OP_CHANNEL_CAPACITY, long_chat_block, push_answerable_approval,
         render_app, rendered_text, test_app, test_app_with, test_session_info,
@@ -703,6 +716,37 @@ mod tests {
             assert!(!app.should_quit, "busy Ctrl+C must not exit");
             let forwarded = rx.recv().await.expect("Interrupt forwarded to the engine");
             assert!(matches!(forwarded, Op::Interrupt));
+        }
+
+        #[test]
+        fn ctrl_o_toggles_the_expanded_view_before_the_input_sees_it() {
+            let (mut app, _rx, _event_tx) = test_app(None);
+            let output = (0..8)
+                .map(|i| format!("line {i}"))
+                .collect::<Vec<_>>()
+                .join("\n");
+            app.chat.push_tool_result(ToolResult {
+                id: "ls".to_owned(),
+                content: output.clone(),
+                is_error: false,
+                title: Some("Listed files".to_owned()),
+                view: ToolResultView::Text { content: output },
+            });
+            app.input.set_text("draft");
+            let compact = rendered_text(&mut app, 80, 20);
+            app.dirty = false;
+
+            app.handle_crossterm_event(&key_event(KeyCode::Char('o'), KeyModifiers::CONTROL));
+            assert!(app.dirty);
+
+            let expanded = rendered_text(&mut app, 80, 20);
+            assert!(
+                compact.contains("... +3 lines · Ctrl+O to expand"),
+                "{compact}"
+            );
+            assert!(!compact.contains("line 7"), "{compact}");
+            assert!(expanded.contains("line 7"), "{expanded}");
+            assert_eq!(app.input.lines(), vec!["draft".to_owned()]);
         }
 
         #[test]
