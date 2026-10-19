@@ -143,6 +143,7 @@
           src = ./.;
         };
 
+        flock = pkgs.lib.getExe pkgs.flock;
         git = pkgs.lib.getExe pkgs.git;
       in
       {
@@ -157,6 +158,7 @@
             rustDevToolchain
           ]
           ++ preCommit.enabledPackages
+          ++ [ preCommit.config.package ]
           ++ (with pkgs; [
             cargo-deny
             cargo-llvm-cov
@@ -167,11 +169,16 @@
           ]);
 
           # git-hooks.nix stores a hooks path relative to the main checkout, which linked worktrees
-          # can't resolve (cachix/git-hooks.nix#688), so commits there would skip the hooks.
+          # can't resolve (cachix/git-hooks.nix#688), so unset it to fall back to the shared hooks
+          # directory. The lock keeps a concurrent load from setting it while `pre-commit install`
+          # runs, since pre-commit refuses to install with the path set.
           shellHook = ''
-            ${preCommit.shellHook}
             if common=$(${git} rev-parse --path-format=absolute --git-common-dir 2>/dev/null); then
-              ${git} config --local core.hooksPath "$common/hooks"
+              (
+                ${flock} 9
+                ${preCommit.config.installationScript}
+                ${git} config --local --unset-all core.hooksPath || true
+              ) 9>"$common/git-hooks.lock"
             fi
           '';
 
