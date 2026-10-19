@@ -14,7 +14,7 @@ A session loads its stored login at startup or sign-in, keeping the access token
 
 When the API rejects a stored login with HTTP 401, the session reloads it and resends the request once, using the token another process stored or, if the store still holds the rejected token, one refreshed regardless of its expiry. If that refresh fails or no refresh token is stored, nothing is resent, and the error names the login's sign-in step, as it does when the resent request also gets a 401. Env vars and `client.api_key` are never reloaded, and their 401 fails at once.
 
-Either reload runs on a task of its own, which keeps the token locked until the reload finishes. A request cancelled mid-refresh, such as a turn interrupted with Esc or a title request that `/rename` stops, therefore still leaves the rotated tokens in the store and in the session. Since the refresh invalidates the old refresh token, losing them would force a new sign-in.
+Either reload runs on a task of its own, which keeps the token locked until the reload finishes. A request cancelled mid-refresh, such as a turn interrupted with Esc or a title request that `/rename` stops, therefore still leaves the rotated tokens in the store and in the session, and exiting waits for such a reload to finish. Since the refresh invalidates the old refresh token, losing them would force a new sign-in.
 
 A refresh required by a request, whether for an expired token or after a 401, retries the request with backoff when the token endpoint sends no response or a server error, as a transient API failure does. Any other refresh failure ends the request with the sign-in step.
 

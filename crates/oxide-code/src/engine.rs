@@ -863,12 +863,18 @@ impl Engine {
     }
 
     /// Ends the background shells, then flushes and closes the live session, returning the write
-    /// failure if any.
+    /// failure if any. Then waits for a stored-login reload still in flight, such as one the
+    /// aborted title request started, so exiting does not cancel its write-back.
     async fn finalize(self) -> Option<String> {
         self.shells.stop_all().await;
-        self.session
+        let failure = self
+            .session
             .finalize(self.file_tracker.snapshot_all())
-            .await
+            .await;
+        if let Ok(auth) = self.client.auth() {
+            auth.settle().await;
+        }
+        failure
     }
 }
 
@@ -1902,12 +1908,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn run_shutdown_before_any_prompt_leaves_no_session_file() {
+    async fn run_shutdown_signed_out_before_any_prompt_leaves_no_session_file() {
         with_pinned_home(async {
             let server = MockServer::start().await;
             let dir = tempfile::tempdir().unwrap();
             let store = test_store(dir.path());
-            let handle = engine(server.uri(), &store, dir.path()).await.spawn(&[]);
+            let mut engine = engine(server.uri(), &store, dir.path()).await;
+            engine.client.set_auth(None);
+            let handle = engine.spawn(&[]);
 
             handle.ops.send(Op::Shutdown).await.unwrap();
             assert_eq!(handle.task.join().await.unwrap(), None);

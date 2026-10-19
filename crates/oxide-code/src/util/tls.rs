@@ -517,7 +517,7 @@ pub(crate) mod testing {
         }
     }
 
-    /// [`NoRoots`] behind the `Arc` that stored-login refreshes take.
+    /// [`NoRoots`] as a shared `Arc<dyn Trust>`.
     pub(crate) fn no_roots() -> Arc<dyn Trust> {
         Arc::new(NoRoots)
     }

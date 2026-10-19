@@ -169,17 +169,16 @@ pub(super) async fn post_messages(
     request: &MessagesRequest,
     retry: u32,
 ) -> Result<reqwest::Response, AttemptError> {
-    let trust = &request.trust;
     let credential = request
         .auth
-        .credential(trust)
+        .credential(&request.trust)
         .await
         .map_err(credential_failure)?;
     let mut response = send(http, request, &credential, retry).await?;
     if response.status() == StatusCode::UNAUTHORIZED
         && let Some(reloaded) = request
             .auth
-            .reload(&credential, trust)
+            .reload(&credential, &request.trust)
             .await
             .map_err(credential_failure)?
     {

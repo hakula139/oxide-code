@@ -214,6 +214,14 @@ impl Auth {
             }
         }
     }
+
+    /// Waits for a stored login's reload in flight, so the rotated tokens reach its store before
+    /// the session ends.
+    pub(crate) async fn settle(&self) {
+        if let Secret::Stored(login) = &self.secret {
+            login.settle().await;
+        }
+    }
 }
 
 impl fmt::Debug for Auth {
@@ -391,8 +399,10 @@ async fn load_login(
 
 #[cfg(test)]
 mod tests {
+    use wiremock::MockServer;
+
     use super::*;
-    use crate::config::oauth::testing::{ox_login_in, write_creds};
+    use crate::config::oauth::testing::{HeldRefresh, ox_login_in, write_creds};
     use crate::util::tls::testing::{NoRoots, no_roots};
 
     const ALL_SOURCES: [AuthSource; 6] = [
@@ -587,6 +597,32 @@ mod tests {
                 .expect("the refresh of the rejected token fails");
 
             assert!(is_transient(&err), "{err:#}");
+        }
+    }
+
+    mod settle {
+        use super::*;
+
+        #[tokio::test]
+        async fn waits_for_a_stored_login_reload_a_dropped_request_left_in_flight() {
+            let server = MockServer::start().await;
+            let refresh = HeldRefresh::mount(&server).await;
+            let dir = tempfile::tempdir().unwrap();
+            let file = dir.path().join("credentials.json");
+            write_creds(&file, "expired", Some("ref"), 0);
+            let auth = ox_login_in(&file, &server.uri(), "expired", 0);
+
+            refresh
+                .abort_mid_refresh({
+                    let auth = auth.clone();
+                    async move { auth.credential(&no_roots()).await }
+                })
+                .await;
+            refresh.release();
+            auth.settle().await;
+
+            assert_eq!(auth.secret(), "fresh-access");
+            server.verify().await;
         }
     }
 
