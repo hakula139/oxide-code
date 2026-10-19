@@ -183,7 +183,7 @@ Unset, it defaults to `base16-ocean.dark`, which the dark built-ins use. `latte`
 
 | Slot               | Role                                        |
 | ------------------ | ------------------------------------------- |
-| `tool_border`      | Left border for tool call blocks            |
+| `tool_border`      | Tool block borders and line-number gutters  |
 | `tool_icon`        | Per-tool icon                               |
 | `border_focused`   | Input rules while idle                      |
 | `border_unfocused` | Unfocused component border                  |
