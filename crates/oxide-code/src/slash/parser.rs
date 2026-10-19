@@ -71,161 +71,167 @@ pub(crate) fn popup_state(buffer: &str) -> Option<PopupState<'_>> {
 mod tests {
     use super::*;
 
-    // ── parse_slash ──
+    mod parse_slash {
+        use super::*;
 
-    #[test]
-    fn parse_slash_bare_name_has_empty_args() {
-        let parsed = parse_slash("/help").unwrap();
-        assert_eq!(parsed.name, "help");
-        assert_eq!(parsed.args, "");
-    }
+        #[test]
+        fn bare_name_has_empty_args() {
+            let parsed = parse_slash("/help").unwrap();
+            assert_eq!(parsed.name, "help");
+            assert_eq!(parsed.args, "");
+        }
 
-    #[test]
-    fn parse_slash_name_with_args_keeps_remainder_trimmed() {
-        let parsed = parse_slash("/model claude-sonnet-5-5").unwrap();
-        assert_eq!(parsed.name, "model");
-        assert_eq!(parsed.args, "claude-sonnet-5-5");
-    }
+        #[test]
+        fn name_with_args_keeps_remainder_trimmed() {
+            let parsed = parse_slash("/model claude-sonnet-5-5").unwrap();
+            assert_eq!(parsed.name, "model");
+            assert_eq!(parsed.args, "claude-sonnet-5-5");
+        }
 
-    #[test]
-    fn parse_slash_collapses_inner_whitespace_into_args() {
-        let parsed = parse_slash("/init please write CLAUDE.md").unwrap();
-        assert_eq!(parsed.name, "init");
-        assert_eq!(parsed.args, "please write CLAUDE.md");
-    }
+        #[test]
+        fn collapses_inner_whitespace_into_args() {
+            let parsed = parse_slash("/init please write CLAUDE.md").unwrap();
+            assert_eq!(parsed.name, "init");
+            assert_eq!(parsed.args, "please write CLAUDE.md");
+        }
 
-    #[test]
-    fn parse_slash_tolerates_leading_whitespace() {
-        let parsed = parse_slash("   /help").unwrap();
-        assert_eq!(parsed.name, "help");
-    }
+        #[test]
+        fn tolerates_leading_whitespace() {
+            let parsed = parse_slash("   /help").unwrap();
+            assert_eq!(parsed.name, "help");
+        }
 
-    #[test]
-    fn parse_slash_trailing_whitespace_in_args_is_trimmed() {
-        let parsed = parse_slash("/help   ").unwrap();
-        assert_eq!(parsed.args, "");
-    }
+        #[test]
+        fn trailing_whitespace_in_args_is_trimmed() {
+            let parsed = parse_slash("/help   ").unwrap();
+            assert_eq!(parsed.args, "");
+        }
 
-    #[test]
-    fn parse_slash_plain_prompt_is_not_a_command() {
-        assert!(parse_slash("hello").is_none());
-        assert!(parse_slash("explain /etc/hosts").is_none());
-    }
+        #[test]
+        fn plain_prompt_is_not_a_command() {
+            assert!(parse_slash("hello").is_none());
+            assert!(parse_slash("explain /etc/hosts").is_none());
+        }
 
-    #[test]
-    fn parse_slash_bare_slash_is_not_a_command() {
-        assert!(parse_slash("/").is_none());
-        assert!(parse_slash("  /  ").is_none());
-    }
+        #[test]
+        fn bare_slash_is_not_a_command() {
+            assert!(parse_slash("/").is_none());
+            assert!(parse_slash("  /  ").is_none());
+        }
 
-    #[test]
-    fn parse_slash_double_slash_is_not_a_command() {
-        assert!(parse_slash("//help").is_none());
-    }
+        #[test]
+        fn double_slash_is_not_a_command() {
+            assert!(parse_slash("//help").is_none());
+        }
 
-    #[test]
-    fn parse_slash_accepts_plugin_namespace_in_name() {
-        let parsed = parse_slash("/context7-plugin:docs").unwrap();
-        assert_eq!(parsed.name, "context7-plugin:docs");
-        assert_eq!(parsed.args, "");
-    }
+        #[test]
+        fn accepts_plugin_namespace_in_name() {
+            let parsed = parse_slash("/context7-plugin:docs").unwrap();
+            assert_eq!(parsed.name, "context7-plugin:docs");
+            assert_eq!(parsed.args, "");
+        }
 
-    #[test]
-    fn parse_slash_rejects_non_ascii_or_special_chars_in_name() {
-        assert!(parse_slash("/foo🦀").is_none());
-        assert!(parse_slash("/foo!").is_none());
-        assert!(parse_slash("/foo,bar").is_none());
-    }
-
-    // ── unescape_literal ──
-
-    #[test]
-    fn unescape_literal_strips_one_slash_from_the_escape() {
-        assert_eq!(unescape_literal("//etc/hosts"), "/etc/hosts");
-        assert_eq!(unescape_literal("  //help me"), "/help me");
-        assert_eq!(
-            unescape_literal("///x"),
-            "//x",
-            "only one slash is consumed"
-        );
-    }
-
-    #[test]
-    fn unescape_literal_leaves_other_input_unchanged() {
-        for input in ["hello", "/help", " explain //etc", ""] {
-            assert_eq!(unescape_literal(input), input);
+        #[test]
+        fn rejects_non_ascii_or_special_chars_in_name() {
+            assert!(parse_slash("/foo🦀").is_none());
+            assert!(parse_slash("/foo!").is_none());
+            assert!(parse_slash("/foo,bar").is_none());
         }
     }
 
-    // ── popup_state ──
+    mod unescape_literal {
+        use super::*;
 
-    fn name(s: &str) -> PopupState<'_> {
-        PopupState::Name(s)
+        #[test]
+        fn strips_one_slash_from_the_escape() {
+            assert_eq!(unescape_literal("//etc/hosts"), "/etc/hosts");
+            assert_eq!(unescape_literal("  //help me"), "/help me");
+            assert_eq!(
+                unescape_literal("///x"),
+                "//x",
+                "only one slash is consumed"
+            );
+        }
+
+        #[test]
+        fn leaves_other_input_unchanged() {
+            for input in ["hello", "/help", " explain //etc", ""] {
+                assert_eq!(unescape_literal(input), input);
+            }
+        }
     }
 
-    fn arg<'a>(name: &'a str, prefix: &'a str) -> PopupState<'a> {
-        PopupState::Arg { name, prefix }
-    }
+    mod popup_state {
+        use super::*;
 
-    #[test]
-    fn popup_state_bare_slash_is_empty_name() {
-        assert_eq!(popup_state("/"), Some(name("")));
-    }
+        fn name(s: &str) -> PopupState<'_> {
+            PopupState::Name(s)
+        }
 
-    #[test]
-    fn popup_state_partial_name_carries_typed_chars() {
-        assert_eq!(popup_state("/cl"), Some(name("cl")));
-        assert_eq!(popup_state("/clear"), Some(name("clear")));
-    }
+        fn arg<'a>(name: &'a str, prefix: &'a str) -> PopupState<'a> {
+            PopupState::Arg { name, prefix }
+        }
 
-    #[test]
-    fn popup_state_tolerates_leading_whitespace_before_slash() {
-        assert_eq!(popup_state("   /he"), Some(name("he")));
-    }
+        #[test]
+        fn bare_slash_is_empty_name() {
+            assert_eq!(popup_state("/"), Some(name("")));
+        }
 
-    #[test]
-    fn popup_state_trailing_space_after_name_switches_to_empty_arg() {
-        assert_eq!(popup_state("/clear "), Some(arg("clear", "")));
-    }
+        #[test]
+        fn partial_name_carries_typed_chars() {
+            assert_eq!(popup_state("/cl"), Some(name("cl")));
+            assert_eq!(popup_state("/clear"), Some(name("clear")));
+        }
 
-    #[test]
-    fn popup_state_typed_arg_carries_prefix_trimmed_of_leading_whitespace() {
-        assert_eq!(popup_state("/model claude-"), Some(arg("model", "claude-")));
-        assert_eq!(popup_state("/model    opus"), Some(arg("model", "opus")));
-    }
+        #[test]
+        fn tolerates_leading_whitespace_before_slash() {
+            assert_eq!(popup_state("   /he"), Some(name("he")));
+        }
 
-    #[test]
-    fn popup_state_inner_whitespace_in_args_is_kept_for_free_form_commands() {
-        assert_eq!(
-            popup_state("/init please write CLAUDE.md"),
-            Some(arg("init", "please write CLAUDE.md")),
-        );
-    }
+        #[test]
+        fn trailing_space_after_name_switches_to_empty_arg() {
+            assert_eq!(popup_state("/clear "), Some(arg("clear", "")));
+        }
 
-    #[test]
-    fn popup_state_double_slash_escape_is_not_a_command() {
-        assert!(popup_state("//etc/hosts").is_none());
-        assert!(popup_state("//").is_none());
-    }
+        #[test]
+        fn typed_arg_carries_prefix_trimmed_of_leading_whitespace() {
+            assert_eq!(popup_state("/model claude-"), Some(arg("model", "claude-")));
+            assert_eq!(popup_state("/model    opus"), Some(arg("model", "opus")));
+        }
 
-    #[test]
-    fn popup_state_plain_prompts_are_not_a_command() {
-        assert!(popup_state("hello").is_none());
-        assert!(popup_state("explain /etc/hosts").is_none());
-        assert!(popup_state("").is_none());
-    }
+        #[test]
+        fn inner_whitespace_in_args_is_kept_for_free_form_commands() {
+            assert_eq!(
+                popup_state("/init please write CLAUDE.md"),
+                Some(arg("init", "please write CLAUDE.md")),
+            );
+        }
 
-    #[test]
-    fn popup_state_invalid_name_chars_reject_the_buffer() {
-        assert!(popup_state("/foo🦀").is_none());
-        assert!(popup_state("/foo!").is_none());
-        assert!(popup_state("/foo! arg").is_none());
-    }
+        #[test]
+        fn double_slash_escape_is_not_a_command() {
+            assert!(popup_state("//etc/hosts").is_none());
+            assert!(popup_state("//").is_none());
+        }
 
-    #[test]
-    fn popup_state_empty_name_rejects_buffer() {
-        assert!(popup_state("/ ").is_none());
-        assert!(popup_state("/    ").is_none());
-        assert!(popup_state("/  arg").is_none());
+        #[test]
+        fn plain_prompts_are_not_a_command() {
+            assert!(popup_state("hello").is_none());
+            assert!(popup_state("explain /etc/hosts").is_none());
+            assert!(popup_state("").is_none());
+        }
+
+        #[test]
+        fn invalid_name_chars_reject_the_buffer() {
+            assert!(popup_state("/foo🦀").is_none());
+            assert!(popup_state("/foo!").is_none());
+            assert!(popup_state("/foo! arg").is_none());
+        }
+
+        #[test]
+        fn empty_name_rejects_buffer() {
+            assert!(popup_state("/ ").is_none());
+            assert!(popup_state("/    ").is_none());
+            assert!(popup_state("/  arg").is_none());
+        }
     }
 }

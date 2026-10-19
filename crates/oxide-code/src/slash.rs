@@ -160,138 +160,148 @@ mod tests {
         }
     }
 
-    fn run_dispatch(name: &str) -> Result<SlashOutcome, String> {
-        let parsed = parsed(name, "");
-        dispatch(&parsed, &SlashContext::new(&test_session_info(), None))
+    mod echoes_input {
+        use super::*;
+
+        #[test]
+        fn modal_only_commands_suppress_their_typed_line() {
+            for name in ["status", "config", "help"] {
+                let parsed = parsed(name, "");
+                assert!(!echoes_input(&parsed), "/{name} must not echo");
+            }
+        }
+
+        #[test]
+        fn picker_or_typed_commands_split_on_args() {
+            for name in ["effort", "model", "theme"] {
+                let bare = parsed(name, "");
+                assert!(!echoes_input(&bare), "bare /{name} must not echo");
+                let typed = parsed(name, "x");
+                assert!(echoes_input(&typed), "typed /{name} must echo");
+            }
+        }
+
+        #[test]
+        fn unknown_command_echoes_so_error_block_has_context() {
+            let parsed = parsed("no-such-thing", "");
+            assert!(echoes_input(&parsed));
+        }
     }
 
-    // ── echoes_input ──
+    mod dispatch {
+        use super::*;
 
-    #[test]
-    fn echoes_input_modal_only_commands_suppress_their_typed_line() {
-        for name in ["status", "config", "help"] {
+        fn run_dispatch(name: &str) -> Result<SlashOutcome, String> {
             let parsed = parsed(name, "");
-            assert!(!echoes_input(&parsed), "/{name} must not echo");
+            dispatch(&parsed, &SlashContext::new(&test_session_info(), None))
+        }
+
+        #[test]
+        fn known_command_returns_its_outcome() {
+            run_dispatch("help").unwrap().into_modal();
+        }
+
+        #[test]
+        fn unknown_command_lists_every_built_in() {
+            let msg = run_dispatch("etc").expect_err("unknown command must error");
+            for cmd in registry::BUILT_INS {
+                let needle = format!("/{}", cmd.name());
+                assert!(msg.contains(&needle), "should list `{needle}`: {msg}");
+            }
         }
     }
 
-    #[test]
-    fn echoes_input_picker_or_typed_commands_split_on_args() {
-        for name in ["effort", "model", "theme"] {
-            let bare = parsed(name, "");
-            assert!(!echoes_input(&bare), "bare /{name} must not echo");
-            let typed = parsed(name, "x");
-            assert!(echoes_input(&typed), "typed /{name} must echo");
-        }
-    }
+    mod dispatch_with {
+        use super::*;
 
-    #[test]
-    fn echoes_input_unknown_command_echoes_so_error_block_has_context() {
-        let parsed = parsed("no-such-thing", "");
-        assert!(echoes_input(&parsed));
-    }
-
-    // ── dispatch ──
-
-    #[test]
-    fn dispatch_known_command_returns_its_outcome() {
-        run_dispatch("help").unwrap().into_modal();
-    }
-
-    #[test]
-    fn dispatch_unknown_command_lists_every_built_in() {
-        let msg = run_dispatch("etc").expect_err("unknown command must error");
-        for cmd in registry::BUILT_INS {
-            let needle = format!("/{}", cmd.name());
-            assert!(msg.contains(&needle), "should list `{needle}`: {msg}");
-        }
-    }
-
-    // ── dispatch_with ──
-
-    fn dispatch_fake(name: &str) -> String {
-        let parsed = parsed(name, "");
-        let info = test_session_info();
-        dispatch_with(
-            &[&FakeCmd {
-                name: "failing",
-                aliases: &["bust", "boom"],
-                error: "Explicit failure.",
-                ..FakeCmd::DEFAULT
-            }],
-            &parsed,
-            &SlashContext::new(&info, None),
-        )
-        .unwrap_err()
-    }
-
-    #[test]
-    fn dispatch_with_command_failure_prefixes_the_command_name() {
-        assert_eq!(dispatch_fake("failing"), "/failing: Explicit failure.");
-    }
-
-    #[test]
-    fn dispatch_with_alias_routes_to_canonical_impl() {
-        // Error must echo the alias the user typed.
-        assert_eq!(dispatch_fake("boom"), "/boom: Explicit failure.");
-    }
-
-    #[test]
-    fn dispatch_with_unknown_command_lists_available_and_the_escape() {
-        assert_eq!(
-            dispatch_fake("etc"),
-            "Unknown command: /etc. Available: /failing. Use //etc to send the literal text.",
-        );
-    }
-
-    // ── typed_op ──
-
-    #[test]
-    fn typed_op_routes_an_alias_to_its_command() {
-        assert_eq!(typed_op(&parsed("new", "")), Some(Ok(Op::Clear)));
-        assert_eq!(
-            typed_op(&parsed("continue", " ab12 ")),
-            Some(Ok(Op::Resume {
-                target: ResumeTarget::Prefix("ab12".to_owned()),
-            })),
-        );
-    }
-
-    #[test]
-    fn typed_op_error_names_the_command_as_typed() {
-        assert_eq!(
-            typed_op(&parsed("continue", "")),
-            Some(Err(
-                "/continue: Missing session ID. Usage: `/resume <id-prefix>`.".to_owned()
-            )),
-        );
-    }
-
-    #[test]
-    fn typed_op_is_none_for_a_command_without_a_typed_form_or_an_unknown_one() {
-        assert_eq!(typed_op(&parsed("help", "")), None);
-        assert_eq!(typed_op(&parsed("no-such-thing", "x")), None);
-    }
-
-    // ── classify ──
-
-    #[test]
-    fn classify_built_in_read_only_command_is_read_only() {
-        let parsed = parsed("help", "");
-        assert_eq!(classify(&parsed), SlashKind::ReadOnly);
-    }
-
-    #[test]
-    fn classify_built_in_state_mutating_command_is_mutating() {
-        for name in ["clear", "new", "reset", "init"] {
+        fn dispatch_fake(name: &str) -> String {
             let parsed = parsed(name, "");
-            assert_eq!(classify(&parsed), SlashKind::Mutating, "{name}");
+            let info = test_session_info();
+            dispatch_with(
+                &[&FakeCmd {
+                    name: "failing",
+                    aliases: &["bust", "boom"],
+                    error: "Explicit failure.",
+                    ..FakeCmd::DEFAULT
+                }],
+                &parsed,
+                &SlashContext::new(&info, None),
+            )
+            .unwrap_err()
+        }
+
+        #[test]
+        fn command_failure_prefixes_the_command_name() {
+            assert_eq!(dispatch_fake("failing"), "/failing: Explicit failure.");
+        }
+
+        #[test]
+        fn alias_routes_to_canonical_impl() {
+            // Error must echo the alias the user typed.
+            assert_eq!(dispatch_fake("boom"), "/boom: Explicit failure.");
+        }
+
+        #[test]
+        fn unknown_command_lists_available_and_the_escape() {
+            assert_eq!(
+                dispatch_fake("etc"),
+                "Unknown command: /etc. Available: /failing. Use //etc to send the literal text.",
+            );
         }
     }
 
-    #[test]
-    fn classify_unknown_command_is_unknown() {
-        let parsed = parsed("no-such-thing", "");
-        assert_eq!(classify(&parsed), SlashKind::Unknown);
+    mod typed_op {
+        use super::*;
+
+        #[test]
+        fn routes_an_alias_to_its_command() {
+            assert_eq!(typed_op(&parsed("new", "")), Some(Ok(Op::Clear)));
+            assert_eq!(
+                typed_op(&parsed("continue", " ab12 ")),
+                Some(Ok(Op::Resume {
+                    target: ResumeTarget::Prefix("ab12".to_owned()),
+                })),
+            );
+        }
+
+        #[test]
+        fn error_names_the_command_as_typed() {
+            assert_eq!(
+                typed_op(&parsed("continue", "")),
+                Some(Err(
+                    "/continue: Missing session ID. Usage: `/resume <id-prefix>`.".to_owned()
+                )),
+            );
+        }
+
+        #[test]
+        fn command_without_a_typed_form_or_an_unknown_one_has_no_op() {
+            assert_eq!(typed_op(&parsed("help", "")), None);
+            assert_eq!(typed_op(&parsed("no-such-thing", "x")), None);
+        }
+    }
+
+    mod classify {
+        use super::*;
+
+        #[test]
+        fn built_in_read_only_command_is_read_only() {
+            let parsed = parsed("help", "");
+            assert_eq!(classify(&parsed), SlashKind::ReadOnly);
+        }
+
+        #[test]
+        fn built_in_state_mutating_command_is_mutating() {
+            for name in ["clear", "new", "reset", "init"] {
+                let parsed = parsed(name, "");
+                assert_eq!(classify(&parsed), SlashKind::Mutating, "{name}");
+            }
+        }
+
+        #[test]
+        fn unknown_command_is_unknown() {
+            let parsed = parsed("no-such-thing", "");
+            assert_eq!(classify(&parsed), SlashKind::Unknown);
+        }
     }
 }
