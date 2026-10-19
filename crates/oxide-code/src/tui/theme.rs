@@ -200,117 +200,6 @@ impl Theme {
 mod tests {
     use super::*;
 
-    // ── Slot::style ──
-
-    #[test]
-    fn style_fg_only_sets_only_foreground() {
-        let slot = Slot {
-            fg: Some(Color::Red),
-            ..Slot::default()
-        };
-
-        assert_eq!(slot.style(), Style::default().fg(Color::Red));
-    }
-
-    #[test]
-    fn style_bg_only_sets_only_background() {
-        let slot = Slot {
-            bg: Some(Color::Blue),
-            ..Slot::default()
-        };
-
-        assert_eq!(slot.style(), Style::default().bg(Color::Blue));
-    }
-
-    #[test]
-    fn style_carries_modifiers() {
-        let slot = Slot {
-            fg: Some(Color::Green),
-            bg: None,
-            modifiers: Modifier::BOLD | Modifier::ITALIC,
-        };
-
-        assert_eq!(
-            slot.style(),
-            Style::default()
-                .fg(Color::Green)
-                .add_modifier(Modifier::BOLD | Modifier::ITALIC)
-        );
-    }
-
-    // ── Theme::default ──
-
-    #[test]
-    fn default_has_distinct_colors() {
-        let t = Theme::default();
-        assert_ne!(t.text.fg, t.muted.fg);
-        assert_ne!(t.muted.fg, t.dim.fg);
-        assert_ne!(t.accent.fg, t.assistant.fg);
-        assert_ne!(t.user.fg, t.assistant.fg);
-        assert_ne!(t.success.fg, t.error.fg);
-        assert_ne!(t.diff_add.bg, t.diff_del.bg);
-    }
-
-    #[test]
-    fn default_accent_is_bold() {
-        let t = Theme::default();
-        assert_eq!(t.accent.modifiers, Modifier::BOLD);
-    }
-
-    #[test]
-    fn default_chrome_slots_reuse_accent_and_dim_colors() {
-        let t = Theme::default();
-        assert_eq!(t.tool_icon.fg, t.accent.fg);
-        assert_eq!(t.border_focused.fg, t.accent.fg);
-        assert_eq!(t.border_unfocused.fg, t.dim.fg);
-        assert_eq!(t.list_marker.fg, t.accent.fg);
-        assert_eq!(t.blockquote.fg, t.success.fg);
-    }
-
-    #[test]
-    fn default_headings_step_down_from_bold_underlined_to_italic() {
-        let t = Theme::default();
-        let text = t.text();
-        assert_eq!(
-            t.heading_h1(),
-            text.add_modifier(Modifier::BOLD | Modifier::UNDERLINED)
-        );
-        assert_eq!(t.heading_h2(), text.add_modifier(Modifier::BOLD));
-        assert_eq!(
-            t.heading_h3(),
-            text.add_modifier(Modifier::BOLD | Modifier::ITALIC)
-        );
-        assert_eq!(t.heading_minor(), text.add_modifier(Modifier::ITALIC));
-    }
-
-    #[test]
-    fn default_link_is_underlined_accent() {
-        let t = Theme::default();
-        assert_eq!(
-            t.link(),
-            Style::default()
-                .fg(t.accent.fg.unwrap())
-                .add_modifier(Modifier::UNDERLINED)
-        );
-    }
-
-    #[test]
-    fn default_thinking_is_italic() {
-        let t = Theme::default();
-        assert!(t.thinking.modifiers.contains(Modifier::ITALIC));
-    }
-
-    #[test]
-    fn default_dim_cluster_matches_dim() {
-        let t = Theme::default();
-        let dim = t.dim();
-        assert_eq!(t.border_unfocused(), dim);
-        assert_eq!(t.horizontal_rule(), dim);
-        assert_eq!(t.table_border(), dim);
-    }
-
-    // ── Theme::diff_add_row / Theme::diff_del_row ──
-
     #[test]
     fn diff_add_row_and_diff_del_row_set_only_background() {
         let t = Theme::default();
@@ -324,33 +213,156 @@ mod tests {
         );
     }
 
-    // ── Theme::row_style ──
+    mod slot {
+        use super::*;
 
-    #[test]
-    fn row_style_selection_uses_bold_text_and_other_rows_are_dim() {
-        let theme = Theme::default();
-        assert_eq!(
-            theme.row_style(true),
-            theme.text().add_modifier(Modifier::BOLD)
-        );
-        assert_eq!(theme.row_style(false), theme.dim());
+        mod style {
+            use super::*;
+
+            #[test]
+            fn fg_only_sets_only_foreground() {
+                let slot = Slot {
+                    fg: Some(Color::Red),
+                    ..Slot::default()
+                };
+
+                assert_eq!(slot.style(), Style::default().fg(Color::Red));
+            }
+
+            #[test]
+            fn bg_only_sets_only_background() {
+                let slot = Slot {
+                    bg: Some(Color::Blue),
+                    ..Slot::default()
+                };
+
+                assert_eq!(slot.style(), Style::default().bg(Color::Blue));
+            }
+
+            #[test]
+            fn carries_modifiers() {
+                let slot = Slot {
+                    fg: Some(Color::Green),
+                    bg: None,
+                    modifiers: Modifier::BOLD | Modifier::ITALIC,
+                };
+
+                assert_eq!(
+                    slot.style(),
+                    Style::default()
+                        .fg(Color::Green)
+                        .add_modifier(Modifier::BOLD | Modifier::ITALIC)
+                );
+            }
+        }
     }
 
-    // ── Theme::separator_span ──
+    mod default {
+        use super::*;
 
-    #[test]
-    fn separator_span_pads_a_pipe_in_the_separator_style() {
-        let t = Theme::default();
-        assert_eq!(t.separator_span(), Span::styled(" │ ", t.separator()));
+        #[test]
+        fn has_distinct_colors() {
+            let t = Theme::default();
+            assert_ne!(t.text.fg, t.muted.fg);
+            assert_ne!(t.muted.fg, t.dim.fg);
+            assert_ne!(t.accent.fg, t.assistant.fg);
+            assert_ne!(t.user.fg, t.assistant.fg);
+            assert_ne!(t.success.fg, t.error.fg);
+            assert_ne!(t.diff_add.bg, t.diff_del.bg);
+        }
+
+        #[test]
+        fn accent_is_bold() {
+            let t = Theme::default();
+            assert_eq!(t.accent.modifiers, Modifier::BOLD);
+        }
+
+        #[test]
+        fn chrome_slots_reuse_accent_and_dim_colors() {
+            let t = Theme::default();
+            assert_eq!(t.tool_icon.fg, t.accent.fg);
+            assert_eq!(t.border_focused.fg, t.accent.fg);
+            assert_eq!(t.border_unfocused.fg, t.dim.fg);
+            assert_eq!(t.list_marker.fg, t.accent.fg);
+            assert_eq!(t.blockquote.fg, t.success.fg);
+        }
+
+        #[test]
+        fn headings_step_down_from_bold_underlined_to_italic() {
+            let t = Theme::default();
+            let text = t.text();
+            assert_eq!(
+                t.heading_h1(),
+                text.add_modifier(Modifier::BOLD | Modifier::UNDERLINED)
+            );
+            assert_eq!(t.heading_h2(), text.add_modifier(Modifier::BOLD));
+            assert_eq!(
+                t.heading_h3(),
+                text.add_modifier(Modifier::BOLD | Modifier::ITALIC)
+            );
+            assert_eq!(t.heading_minor(), text.add_modifier(Modifier::ITALIC));
+        }
+
+        #[test]
+        fn link_is_underlined_accent() {
+            let t = Theme::default();
+            assert_eq!(
+                t.link(),
+                Style::default()
+                    .fg(t.accent.fg.unwrap())
+                    .add_modifier(Modifier::UNDERLINED)
+            );
+        }
+
+        #[test]
+        fn thinking_is_italic() {
+            let t = Theme::default();
+            assert!(t.thinking.modifiers.contains(Modifier::ITALIC));
+        }
+
+        #[test]
+        fn dim_cluster_matches_dim() {
+            let t = Theme::default();
+            let dim = t.dim();
+            assert_eq!(t.border_unfocused(), dim);
+            assert_eq!(t.horizontal_rule(), dim);
+            assert_eq!(t.table_border(), dim);
+        }
     }
 
-    // ── Theme::task_style ──
+    mod row_style {
+        use super::*;
 
-    #[test]
-    fn task_style_highlights_the_task_in_progress_and_dims_completed_ones() {
-        let t = Theme::default();
-        assert_eq!(t.task_style(TaskStatus::Pending), t.text());
-        assert_eq!(t.task_style(TaskStatus::InProgress), t.info());
-        assert_eq!(t.task_style(TaskStatus::Completed), t.dim());
+        #[test]
+        fn selection_uses_bold_text_and_other_rows_are_dim() {
+            let theme = Theme::default();
+            assert_eq!(
+                theme.row_style(true),
+                theme.text().add_modifier(Modifier::BOLD)
+            );
+            assert_eq!(theme.row_style(false), theme.dim());
+        }
+    }
+
+    mod separator_span {
+        use super::*;
+
+        #[test]
+        fn pads_a_pipe_in_the_separator_style() {
+            let t = Theme::default();
+            assert_eq!(t.separator_span(), Span::styled(" │ ", t.separator()));
+        }
+    }
+
+    mod task_style {
+        use super::*;
+
+        #[test]
+        fn highlights_the_task_in_progress_and_dims_completed_ones() {
+            let t = Theme::default();
+            assert_eq!(t.task_style(TaskStatus::Pending), t.text());
+            assert_eq!(t.task_style(TaskStatus::InProgress), t.info());
+            assert_eq!(t.task_style(TaskStatus::Completed), t.dim());
+        }
     }
 }

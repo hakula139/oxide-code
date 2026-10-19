@@ -529,10 +529,6 @@ mod tests {
         rule(PermissionClass::Exec, pattern)
     }
 
-    fn edit(pattern: &str) -> Rule {
-        rule(PermissionClass::Edit, pattern)
-    }
-
     fn cmd(s: &str) -> Access {
         Access::for_command(s, &Workspace::new(Path::new("/repo")))
     }
@@ -542,14 +538,6 @@ mod tests {
             PermissionClass::Exec,
             &cmd(command).as_target(),
             MatchDiscipline::Allow,
-        )
-    }
-
-    fn holds(rule: &Rule, command: &str) -> bool {
-        rule.matches(
-            PermissionClass::Exec,
-            &cmd(command).as_target(),
-            MatchDiscipline::Deny,
         )
     }
 
@@ -570,679 +558,8 @@ mod tests {
         rule.matches(rule.class(), target, discipline)
     }
 
-    // ── Rule::parse ──
-
     #[test]
-    fn parse_star_covers_the_whole_class_including_a_call_without_a_target() {
-        let any = rule(PermissionClass::Read, " * ");
-        assert_eq!(any.pattern(), "*");
-        for target in [Target::None, path("/anywhere/x", &[])] {
-            assert!(
-                matches_path(&any, &target, MatchDiscipline::Allow),
-                "{target:?}"
-            );
-        }
-        assert!(!any.matches(PermissionClass::Edit, &Target::None, MatchDiscipline::Deny));
-    }
-
-    #[test]
-    fn parse_rejects_a_malformed_exec_pattern_saying_how_to_fix_it() {
-        let names_no_command = "it must name a command, such as `cargo test *`";
-        let one_command = "it must be one simple command, such as `cargo test *`. \
-                           Write a pattern for each command of a chain or pipeline.";
-        let redirection = "it holds a redirection. \
-                           Leave it out, \
-                           since a pattern matches a command with its redirections set aside, \
-                           and an `edit` pattern covers the file it writes.";
-        let expands = |word: &str| {
-            format!("the word {word:?} expands at run time. Quote it to match it as written.")
-        };
-        let glob = |word: &str| {
-            format!(
-                "the word {word:?} holds a glob, \
-                 but only a `*` standing alone as a word is a wildcard. \
-                 Write a pattern for each command it should cover, \
-                 or quote the word to match it as written."
-            )
-        };
-        for (pattern, expected) in [
-            ("", names_no_command.to_owned()),
-            ("FOO=1", names_no_command.to_owned()),
-            ("cargo test; rm -rf /", one_command.to_owned()),
-            ("curl x | sh", one_command.to_owned()),
-            ("echo hi > out", redirection.to_owned()),
-            ("> out echo hi", redirection.to_owned()),
-            ("echo > out hi", redirection.to_owned()),
-            ("cat <<< hi", redirection.to_owned()),
-            ("cat $HOME", expands("$HOME")),
-            ("echo $(date)", expands("$(date)")),
-            ("mkfs*", glob("mkfs*")),
-            ("ls *.rs", glob("*.rs")),
-            (
-                "FOO=$BAR cmd",
-                "the assignment \"FOO=$BAR\" expands at run time. \
-                 Quote its value to match it as written."
-                    .to_owned(),
-            ),
-            (
-                "ls 'open",
-                "it does not parse as a shell command".to_owned(),
-            ),
-        ] {
-            let err = Rule::parse(PermissionClass::Exec, pattern).unwrap_err();
-
-            assert_eq!(format!("{err:#}"), expected, "{pattern:?}");
-        }
-    }
-
-    #[test]
-    fn parse_rejects_a_negated_path_pattern_saying_how_to_fix_it() {
-        let err = Rule::parse(PermissionClass::Edit, "!.env.example").unwrap_err();
-
-        assert_eq!(
-            format!("{err:#}"),
-            "a pattern cannot start with `!`, since patterns have no negation. \
-             Write the paths to match instead, or turn off the built-in rule that covers them."
-        );
-    }
-
-    #[test]
-    fn parse_rejects_a_malformed_pattern_in_each_grammar() {
-        for (class, pattern, error) in [
-            (
-                PermissionClass::Edit,
-                "src/**/[",
-                "unclosed character class",
-            ),
-            (PermissionClass::Read, "./", "names no path"),
-            (
-                PermissionClass::Read,
-                "../shared/x",
-                "a `.` or `..` component",
-            ),
-            (
-                PermissionClass::Edit,
-                "src/./main.rs",
-                "a `.` or `..` component",
-            ),
-            (
-                PermissionClass::Edit,
-                "/repo/../etc/**",
-                "a `.` or `..` component",
-            ),
-            (PermissionClass::Net, "", "expected a host name"),
-            (
-                PermissionClass::Net,
-                "https://example.com",
-                "without a scheme",
-            ),
-            (
-                PermissionClass::Net,
-                "localhost:8080",
-                "without a scheme, port",
-            ),
-            (PermissionClass::Mcp, "github", "expected `server/tool`"),
-            (PermissionClass::Mcp, "/get_me", "expected `server/tool`"),
-            (PermissionClass::Mcp, "a/b/c", "expected `server/tool`"),
-        ] {
-            let err = format!("{:#}", Rule::parse(class, pattern).unwrap_err());
-            assert!(err.contains(error), "{class} {pattern:?}: {err}");
-        }
-    }
-
-    #[test]
-    fn parse_suggests_an_absolute_pattern_only_for_a_relative_one_with_a_dot_component() {
-        let relative = format!(
-            "{:#}",
-            Rule::parse(PermissionClass::Read, "../shared/x").unwrap_err()
-        );
-        let absolute = format!(
-            "{:#}",
-            Rule::parse(PermissionClass::Read, &abs("/repo/../etc/**")).unwrap_err()
-        );
-
-        assert_eq!(
-            relative,
-            "the pattern holds a `.` or `..` component, which no resolved path does. \
-             Start it with `/` or `~/` \
-             to name a path outside the working directory and extra roots."
-        );
-        assert_eq!(
-            absolute,
-            "the pattern holds a `.` or `..` component, which no resolved path does"
-        );
-    }
-
-    // ── Rule::for_call ──
-
-    #[test]
-    fn for_call_names_the_one_simple_command_by_its_quoted_named_words() {
-        for (command, expected) in [
-            (" cargo test ", "cargo test"),
-            ("RUST_LOG=debug cargo test 2>&1", "cargo test"),
-            (
-                "git commit -m \"it's done\"",
-                r"git commit -m 'it'\''s done'",
-            ),
-            ("GIT_PAGER=cat git log", "GIT_PAGER=cat git log"),
-            ("echo '*' ''", "echo '*' ''"),
-        ] {
-            let target = cmd(command);
-            let rule = Rule::for_call(PermissionClass::Exec, &target.as_target()).unwrap();
-            assert_eq!(rule.pattern(), expected, "{command:?}");
-            assert!(allows(&rule, command), "{command:?}");
-        }
-        assert!(!allows(&exec("cargo test"), "cargo test --all"));
-    }
-
-    #[test]
-    fn for_call_names_the_path_under_dot_slash_inside_cwd_and_absolute_outside() {
-        let canonical = abs("/repo/src/a[1].rs");
-        let rooted = ["src/a[1].rs".to_owned()];
-        let rule = Rule::for_call(PermissionClass::Edit, &path(&canonical, &rooted)).unwrap();
-        assert_eq!(rule.pattern(), "./src/a[[]1[]].rs");
-        let other = ["src/a1.rs".to_owned()];
-        assert!(!matches_path(
-            &rule,
-            &path(&abs("/repo/src/a1.rs"), &other),
-            MatchDiscipline::Allow
-        ));
-
-        let top = ["a.rs".to_owned()];
-        let rule = Rule::for_call(PermissionClass::Edit, &path(&abs("/repo/a.rs"), &top)).unwrap();
-        assert_eq!(
-            rule.pattern(),
-            "./a.rs",
-            "a bare name would match at any depth"
-        );
-
-        let outside = abs("/etc/hosts");
-        let rule = Rule::for_call(PermissionClass::Edit, &path(&outside, &[])).unwrap();
-        assert_eq!(rule.pattern(), slash_separated(Path::new(&outside)));
-    }
-
-    #[test]
-    fn for_call_declines_a_call_no_exact_rule_can_name() {
-        for command in [
-            "ls *.rs",
-            "cat $F",
-            "cargo test; rm -rf /",
-            "  ",
-            "cargo test \u{1b}[2K",
-            "echo 'a\u{200b}b'",
-            "echo 'a\tb'",
-        ] {
-            assert!(
-                Rule::for_call(PermissionClass::Exec, &cmd(command).as_target()).is_none(),
-                "{command:?}"
-            );
-        }
-        let empty = [String::new()];
-        let hidden = ["a\u{200b}.rs".to_owned()];
-        let hidden_path = abs("/repo/a\u{200b}.rs");
-        for target in [
-            path(&abs("/repo"), &empty),
-            path(&hidden_path, &hidden),
-            Target::None,
-        ] {
-            assert!(
-                Rule::for_call(PermissionClass::Edit, &target).is_none(),
-                "{target:?}"
-            );
-        }
-    }
-
-    #[test]
-    fn for_call_names_a_host_or_tool_by_its_escaped_name() {
-        let host = Rule::for_call(PermissionClass::Net, &Target::Name("api.example.com")).unwrap();
-        assert_eq!(host.pattern(), "api.example.com");
-
-        let tool = Rule::for_call(PermissionClass::Mcp, &Target::Name("srv/a*b")).unwrap();
-        assert_eq!(tool.pattern(), "srv/a[*]b");
-        let matches = |name| {
-            tool.matches(
-                PermissionClass::Mcp,
-                &Target::Name(name),
-                MatchDiscipline::Allow,
-            )
-        };
-        assert!(matches("srv/a*b"));
-        assert!(!matches("srv/axb"));
-    }
-
-    // ── Rule::matches: exec ──
-
-    #[test]
-    fn matches_exec_trailing_star_covers_zero_or_more_words_and_a_middle_one_covers_one() {
-        let prefix = exec("cargo test *");
-        for (command, expected) in [
-            ("cargo test", true),
-            ("cargo test --all -- --nocapture", true),
-            ("cargo testbench", false),
-            ("cargo build", false),
-        ] {
-            assert_eq!(allows(&prefix, command), expected, "{command}");
-        }
-
-        let middle = exec("git * --force");
-        for (command, expected) in [
-            ("git push --force", true),
-            ("git --force", false),
-            ("git push origin --force", false),
-        ] {
-            assert_eq!(allows(&middle, command), expected, "{command}");
-        }
-    }
-
-    #[test]
-    fn matches_exec_compares_words_however_the_command_quotes_or_spaces_them() {
-        let rule = exec("git commit -m 'fix the parser'");
-        for command in [
-            "git commit -m 'fix the parser'",
-            "git  commit   -m \"fix the parser\"",
-            "git commit -m fix\\ the\\ parser 2>&1",
-            "nice -n 5 git commit -m 'fix the parser'",
-        ] {
-            assert!(allows(&rule, command), "{command}");
-        }
-        assert!(!allows(&rule, "git commit -m 'fix the'"));
-        assert!(allows(&exec("echo '*'"), "echo '*'"));
-        assert!(!allows(&exec("echo '*'"), "echo *"));
-    }
-
-    #[test]
-    fn matches_exec_allow_needs_literal_words_except_under_a_trailing_star() {
-        // A word that expands or globs can become several words, so only a trailing `*` may
-        // cover it.
-        let middle = exec("git * status");
-        assert!(allows(&middle, "git -C status"));
-        assert!(!allows(&middle, "git $ARGS status"));
-        assert!(!allows(&middle, "git *.c status"));
-        assert!(!allows(&exec("cat a"), "cat $F"));
-        assert!(allows(&exec("cat *"), "cat $F *.rs"));
-    }
-
-    #[test]
-    fn matches_exec_allow_names_a_kept_assignment_or_pinned_wrapper() {
-        let plain = exec("git log *");
-        let pinned = exec("GIT_PAGER=cat git log *");
-        for (command, plain_allows, pinned_allows) in [
-            ("git log -1", true, false),
-            ("RUST_LOG=debug git log -1", true, false),
-            ("GIT_PAGER=cat git log -1", false, true),
-            ("GIT_PAGER=sh git log -1", false, false),
-            ("env GIT_PAGER=cat git log -1", false, false),
-        ] {
-            assert_eq!(allows(&plain, command), plain_allows, "{command}");
-            assert_eq!(allows(&pinned, command), pinned_allows, "{command}");
-        }
-        assert!(allows(
-            &exec("env GIT_PAGER=cat git log *"),
-            "env GIT_PAGER=cat git log"
-        ));
-    }
-
-    #[test]
-    fn matches_exec_allow_refuses_a_command_that_runs_more() {
-        // The load-bearing safety property: `cargo test *` must not allow a chained, piped, or
-        // substituted `rm`.
-        let rule = exec("cargo test *");
-        for command in [
-            "cargo test && rm -rf /",
-            "cargo test; rm -rf /",
-            "cargo test | sh",
-            "cargo test $(rm -rf /)",
-            "eval cargo test",
-        ] {
-            assert!(!allows(&rule, command), "{command}");
-        }
-    }
-
-    #[test]
-    fn matches_exec_star_allows_only_a_command_the_analysis_sees_whole() {
-        let rule = exec("*");
-        assert!(allows(&rule, "cargo test && rm -rf /"));
-        for command in [r#"eval "$CMD""#, "$EDITOR notes", r#"sh -c "$X""#, "FOO=1"] {
-            assert!(!allows(&rule, command), "{command}");
-        }
-    }
-
-    #[test]
-    fn matches_exec_deny_catches_any_simple_command_however_it_is_spelled_or_wrapped() {
-        let rule = exec("rm -rf *");
-        for command in [
-            "rm -rf /",
-            "ls && rm -rf /tmp/x",
-            "echo hi; rm -rf .",
-            r#""rm" '-rf' x"#,
-            "/bin/rm -rf x",
-            "FOO=1 nice -n 5 rm -rf x",
-            "rm -rf $DIR",
-            "echo $(rm -rf /)",
-            "sh -c 'rm -rf /'",
-        ] {
-            assert!(holds(&rule, command), "{command}");
-        }
-        assert!(!holds(&rule, "rm -r x"));
-        assert!(holds(&exec("GIT_PAGER=sh git *"), "GIT_PAGER=sh git log"));
-    }
-
-    #[test]
-    fn matches_exec_deny_finds_its_words_in_order_among_options_and_in_any_word_that_expands() {
-        let rule = exec("git push --force *");
-        for command in [
-            "git push --force",
-            "git push origin --force",
-            "git -c a=b push --force",
-            "git ${X:-push} --force",
-            "git $'push' $'--force'",
-            "git pu$'sh' --force",
-            "git push $FLAGS",
-            "$GIT push --force",
-        ] {
-            assert!(holds(&rule, command), "{command}");
-        }
-        for command in [
-            "git push origin",
-            "git --force push",
-            "git status --force",
-            "gh push --force",
-        ] {
-            assert!(!holds(&rule, command), "{command}");
-        }
-
-        let any_program = exec("* --force");
-        assert!(holds(&any_program, "git push origin --force"));
-        assert!(!holds(&any_program, "git push origin"));
-    }
-
-    #[test]
-    fn matches_exec_deny_folds_each_word_where_allow_compares_it_exactly() {
-        let rule = exec("rm -rf *");
-        for command in ["RM -Rf x", "/BIN/RM -RF x", "r\u{200c}m -rf x"] {
-            assert!(holds(&rule, command), "{command}");
-        }
-        assert!(!allows(&rule, "RM -rf x"));
-        assert!(allows(&rule, "rm -rf x"));
-    }
-
-    // ── Rule::matches: paths ──
-
-    #[test]
-    fn matches_path_name_pattern_at_any_depth_below_an_anchor_and_everything_under_it() {
-        let rule = edit("target");
-        for (relative, expected) in [
-            ("target", true),
-            ("target/debug/ox", true),
-            ("crates/x/target/a.o", true),
-            ("targets/a", false),
-            ("src/target.rs", false),
-        ] {
-            let rooted = [relative.to_owned()];
-            let canonical = format!("/repo/{relative}");
-            assert_eq!(
-                matches_path(&rule, &path(&canonical, &rooted), MatchDiscipline::Allow),
-                expected,
-                "{relative}"
-            );
-        }
-        assert!(
-            !matches_path(
-                &rule,
-                &path("/elsewhere/target", &[]),
-                MatchDiscipline::Deny
-            ),
-            "a name pattern applies only below an anchor directory"
-        );
-    }
-
-    #[test]
-    fn matches_path_slash_anchors_a_pattern_at_each_anchor_directory() {
-        for raw in ["src/*.rs", "./src/*.rs", "src/*.rs/"] {
-            let rule = edit(raw);
-            for (relative, expected) in [
-                ("src/a.rs", true),
-                ("src/a/b.rs", false),
-                ("crates/x/src/a.rs", false),
-            ] {
-                let rooted = [relative.to_owned()];
-                assert_eq!(
-                    matches_path(&rule, &path("/repo/x", &rooted), MatchDiscipline::Allow),
-                    expected,
-                    "{raw} vs {relative}"
-                );
-            }
-        }
-        let top = edit("./a.rs");
-        let nested = ["sub/a.rs".to_owned()];
-        assert!(!matches_path(
-            &top,
-            &path("/repo/sub/a.rs", &nested),
-            MatchDiscipline::Allow
-        ));
-    }
-
-    #[test]
-    fn matches_path_absolute_and_home_patterns_match_the_resolved_path() {
-        let etc = edit(&abs("/etc/**"));
-        assert!(matches_path(
-            &etc,
-            &path(&abs("/etc/passwd"), &[]),
-            MatchDiscipline::Allow
-        ));
-        let inside = ["etc/x".to_owned()];
-        assert!(!matches_path(
-            &etc,
-            &path(&abs("/repo/etc/x"), &inside),
-            MatchDiscipline::Allow
-        ));
-
-        let nginx = edit(&format!("{}/", abs("/etc/nginx")));
-        for target in [abs("/etc/nginx"), abs("/etc/nginx/nginx.conf")] {
-            assert!(
-                matches_path(&nginx, &path(&target, &[]), MatchDiscipline::Allow),
-                "a trailing `/` is ignored: {target}"
-            );
-        }
-
-        temp_env::with_var(HOME_VAR, Some(abs("/home/u")), || {
-            let notes = edit("~/notes/");
-            assert!(matches_path(
-                &notes,
-                &path(&abs("/home/u/notes"), &[]),
-                MatchDiscipline::Allow
-            ));
-            assert!(matches_path(
-                &notes,
-                &path(&abs("/home/u/notes/today.md"), &[]),
-                MatchDiscipline::Allow
-            ));
-            let literal = ["~/notes/today.md".to_owned()];
-            assert!(!matches_path(
-                &notes,
-                &path("/repo/~/notes/today.md", &literal),
-                MatchDiscipline::Allow
-            ));
-        });
-    }
-
-    #[test]
-    fn matches_path_home_pattern_expands_a_home_spelled_with_a_trailing_slash_or_dot() {
-        let home = abs("/home/u");
-        for (spelling, target) in [
-            (format!("{home}/"), abs("/home/u/notes/a.md")),
-            (format!("{home}/."), abs("/home/u/notes/a.md")),
-            (format!("{home}/x/.."), abs("/home/u/notes/a.md")),
-            (abs("/"), abs("/notes/a.md")),
-        ] {
-            temp_env::with_var(HOME_VAR, Some(&spelling), || {
-                let notes = edit("~/notes/*.md");
-                assert!(
-                    matches_path(&notes, &path(&target, &[]), MatchDiscipline::Allow),
-                    "{spelling}"
-                );
-            });
-        }
-    }
-
-    #[test]
-    fn matches_path_deny_also_matches_the_requested_spelling_and_folded_names() {
-        // `.env -> /shared/.env`: a deny on the spelled path must fire, and an allow on it must not
-        // reach a target that resolves elsewhere.
-        let (canonical, requested) = (abs("/shared/.env"), abs("/repo/.env"));
-        let deny_rooted = [".env".to_owned()];
-        let env = Target::Path {
-            canonical: &canonical,
-            relative: None,
-            rooted: &[],
-            requested: &requested,
-            deny_rooted: &deny_rooted,
-            zone: Zone::Outside,
-            protected: &[],
-        };
-        let absolute = edit(&abs("/repo/.env"));
-        for rule in [edit(".env"), absolute] {
-            assert!(
-                matches_path(&rule, &env, MatchDiscipline::Deny),
-                "{}",
-                rule.pattern()
-            );
-            assert!(
-                !matches_path(&rule, &env, MatchDiscipline::Allow),
-                "{}",
-                rule.pattern()
-            );
-        }
-
-        let upper = [".ENV.".to_owned()];
-        let folded = path("/repo/.ENV.", &upper);
-        assert!(matches_path(&edit(".env"), &folded, MatchDiscipline::Deny));
-        assert!(!matches_path(
-            &edit(".env"),
-            &folded,
-            MatchDiscipline::Allow
-        ));
-    }
-
-    #[cfg(windows)]
-    #[test]
-    fn matches_path_reads_backslash_separators_and_needs_a_drive() {
-        let rule = edit(r"src\*.rs");
-        let rooted = [r"src\a.rs".to_owned()];
-        assert!(matches_path(
-            &rule,
-            &path(r"C:\repo\src\a.rs", &rooted),
-            MatchDiscipline::Allow
-        ));
-        let dotted = edit(r"C:\repo\secrets");
-        let target = path(r"C:\repo\secrets.\key", &[]);
-        assert!(matches_path(&dotted, &target, MatchDiscipline::Deny));
-        assert!(!matches_path(&dotted, &target, MatchDiscipline::Allow));
-        for raw in ["/secrets/**", r"\tmp\**"] {
-            let err = format!("{:#}", Rule::parse(PermissionClass::Read, raw).unwrap_err());
-            assert!(err.contains("needs a drive"), "{raw}: {err}");
-        }
-    }
-
-    // ── Rule::matches: net and MCP ──
-
-    #[test]
-    fn matches_host_globs_without_case_and_tool_globs_within_each_name() {
-        let host = rule(PermissionClass::Net, "*.github.com");
-        for (name, expected) in [
-            ("api.github.com", true),
-            ("a.b.GitHub.com", true),
-            ("github.com", false),
-            ("github.com.evil.io", false),
-        ] {
-            assert_eq!(
-                host.matches(
-                    PermissionClass::Net,
-                    &Target::Name(name),
-                    MatchDiscipline::Allow
-                ),
-                expected,
-                "{name}"
-            );
-        }
-
-        let tool = rule(PermissionClass::Mcp, "github/get_*");
-        for (name, expected) in [
-            ("github/get_me", true),
-            ("github/create_issue", false),
-            ("github/get_x/y", false),
-            ("gitlab/get_me", false),
-        ] {
-            assert_eq!(
-                tool.matches(
-                    PermissionClass::Mcp,
-                    &Target::Name(name),
-                    MatchDiscipline::Deny
-                ),
-                expected,
-                "{name}"
-            );
-        }
-    }
-
-    // ── Rule::with_resolved_prefixes ──
-
-    #[test]
-    fn with_resolved_prefixes_also_matches_where_a_literal_prefix_resolves() {
-        let dir = tempfile::tempdir().unwrap();
-        let root = dunce::canonicalize(dir.path()).unwrap();
-        std::fs::create_dir(root.join("real")).unwrap();
-        #[cfg(unix)]
-        std::os::unix::fs::symlink("real", root.join("alias")).unwrap();
-        // A Windows symlink needs Developer Mode or admin rights, which CI runners have.
-        #[cfg(windows)]
-        std::os::windows::fs::symlink_dir("real", root.join("alias")).unwrap();
-        let alias = root.join("alias");
-        let root_glob = slash_separated(&root);
-
-        for (raw, anchor, inside, outside) in [
-            (
-                format!("{root_glob}/alias/sub*/x.rs"),
-                &root,
-                "real/sub1/x.rs",
-                "real/other/x.rs",
-            ),
-            ("*.rs".to_owned(), &alias, "real/a.rs", "real/sub/b.c"),
-            ("./x.rs".to_owned(), &alias, "real/x.rs", "real/y.rs"),
-            (
-                format!("{root_glob}/alias/x.rs"),
-                &root,
-                "real/x.rs",
-                "real/y.rs",
-            ),
-        ] {
-            let rule = Rule::parse(PermissionClass::Read, &raw)
-                .unwrap()
-                .with_resolved_prefixes(std::slice::from_ref(anchor))
-                .unwrap();
-            assert_eq!(rule.pattern(), raw, "the copy keeps the pattern as written");
-            let matches = |relative: &str| {
-                let canonical = format!("{root_glob}/{relative}");
-                matches_path(&rule, &path(&canonical, &[]), MatchDiscipline::Deny)
-            };
-            assert!(matches(inside), "{raw}");
-            assert!(!matches(outside), "{raw}");
-        }
-
-        let unchanged = Rule::parse(PermissionClass::Read, &format!("{root_glob}/real/**"))
-            .unwrap()
-            .with_resolved_prefixes(std::slice::from_ref(&root))
-            .unwrap();
-        let Pattern::Path(globs) = &unchanged.pattern else {
-            panic!("a read rule has a path pattern");
-        };
-        assert_eq!(globs.len(), 1);
-    }
-
-    // ── Rule: serde ──
-
-    #[test]
-    fn rule_serializes_as_its_class_and_pattern() {
+    fn serializes_as_its_class_and_pattern() {
         let rule = exec("  cargo test * ");
 
         let json = serde_json::to_value(&rule).unwrap();
@@ -1260,18 +577,707 @@ mod tests {
         assert!(err.to_string().contains("one simple command"), "{err}");
     }
 
-    // ── literal_prefix ──
+    mod parse {
+        use super::*;
 
-    #[test]
-    fn literal_prefix_splits_at_the_last_slash_before_a_glob_and_keeps_a_root_slash() {
-        for (glob, expected) in [
-            ("/a/b*/c", ("/a", "b*/c")),
-            ("/secrets*", ("/", "secrets*")),
-            ("C:/secrets*", ("C:/", "secrets*")),
-            ("src/a", ("src/a", "")),
-            ("*.rs", ("", "*.rs")),
-        ] {
-            assert_eq!(literal_prefix(glob), expected, "{glob}");
+        #[test]
+        fn star_covers_the_whole_class_including_a_call_without_a_target() {
+            let any = rule(PermissionClass::Read, " * ");
+            assert_eq!(any.pattern(), "*");
+            for target in [Target::None, path("/anywhere/x", &[])] {
+                assert!(
+                    matches_path(&any, &target, MatchDiscipline::Allow),
+                    "{target:?}"
+                );
+            }
+            assert!(!any.matches(PermissionClass::Edit, &Target::None, MatchDiscipline::Deny));
+        }
+
+        #[test]
+        fn rejects_a_malformed_exec_pattern_saying_how_to_fix_it() {
+            let names_no_command = "it must name a command, such as `cargo test *`";
+            let one_command = "it must be one simple command, such as `cargo test *`. \
+                               Write a pattern for each command of a chain or pipeline.";
+            let redirection = "it holds a redirection. \
+                               Leave it out, \
+                               since a pattern matches a command with its redirections set aside, \
+                               and an `edit` pattern covers the file it writes.";
+            let expands = |word: &str| {
+                format!("the word {word:?} expands at run time. Quote it to match it as written.")
+            };
+            let glob = |word: &str| {
+                format!(
+                    "the word {word:?} holds a glob, \
+                     but only a `*` standing alone as a word is a wildcard. \
+                     Write a pattern for each command it should cover, \
+                     or quote the word to match it as written."
+                )
+            };
+            for (pattern, expected) in [
+                ("", names_no_command.to_owned()),
+                ("FOO=1", names_no_command.to_owned()),
+                ("cargo test; rm -rf /", one_command.to_owned()),
+                ("curl x | sh", one_command.to_owned()),
+                ("echo hi > out", redirection.to_owned()),
+                ("> out echo hi", redirection.to_owned()),
+                ("echo > out hi", redirection.to_owned()),
+                ("cat <<< hi", redirection.to_owned()),
+                ("cat $HOME", expands("$HOME")),
+                ("echo $(date)", expands("$(date)")),
+                ("mkfs*", glob("mkfs*")),
+                ("ls *.rs", glob("*.rs")),
+                (
+                    "FOO=$BAR cmd",
+                    "the assignment \"FOO=$BAR\" expands at run time. \
+                     Quote its value to match it as written."
+                        .to_owned(),
+                ),
+                (
+                    "ls 'open",
+                    "it does not parse as a shell command".to_owned(),
+                ),
+            ] {
+                let err = Rule::parse(PermissionClass::Exec, pattern).unwrap_err();
+
+                assert_eq!(format!("{err:#}"), expected, "{pattern:?}");
+            }
+        }
+
+        #[test]
+        fn rejects_a_negated_path_pattern_saying_how_to_fix_it() {
+            let err = Rule::parse(PermissionClass::Edit, "!.env.example").unwrap_err();
+
+            assert_eq!(
+                format!("{err:#}"),
+                "a pattern cannot start with `!`, since patterns have no negation. \
+                 Write the paths to match instead, or turn off the built-in rule that covers them."
+            );
+        }
+
+        #[test]
+        fn rejects_a_malformed_pattern_in_each_grammar() {
+            for (class, pattern, error) in [
+                (
+                    PermissionClass::Edit,
+                    "src/**/[",
+                    "unclosed character class",
+                ),
+                (PermissionClass::Read, "./", "names no path"),
+                (
+                    PermissionClass::Read,
+                    "../shared/x",
+                    "a `.` or `..` component",
+                ),
+                (
+                    PermissionClass::Edit,
+                    "src/./main.rs",
+                    "a `.` or `..` component",
+                ),
+                (
+                    PermissionClass::Edit,
+                    "/repo/../etc/**",
+                    "a `.` or `..` component",
+                ),
+                (PermissionClass::Net, "", "expected a host name"),
+                (
+                    PermissionClass::Net,
+                    "https://example.com",
+                    "without a scheme",
+                ),
+                (
+                    PermissionClass::Net,
+                    "localhost:8080",
+                    "without a scheme, port",
+                ),
+                (PermissionClass::Mcp, "github", "expected `server/tool`"),
+                (PermissionClass::Mcp, "/get_me", "expected `server/tool`"),
+                (PermissionClass::Mcp, "a/b/c", "expected `server/tool`"),
+            ] {
+                let err = format!("{:#}", Rule::parse(class, pattern).unwrap_err());
+                assert!(err.contains(error), "{class} {pattern:?}: {err}");
+            }
+        }
+
+        #[test]
+        fn suggests_an_absolute_pattern_only_for_a_relative_one_with_a_dot_component() {
+            let relative = format!(
+                "{:#}",
+                Rule::parse(PermissionClass::Read, "../shared/x").unwrap_err()
+            );
+            let absolute = format!(
+                "{:#}",
+                Rule::parse(PermissionClass::Read, &abs("/repo/../etc/**")).unwrap_err()
+            );
+
+            assert_eq!(
+                relative,
+                "the pattern holds a `.` or `..` component, which no resolved path does. \
+                 Start it with `/` or `~/` \
+                 to name a path outside the working directory and extra roots."
+            );
+            assert_eq!(
+                absolute,
+                "the pattern holds a `.` or `..` component, which no resolved path does"
+            );
+        }
+    }
+
+    mod for_call {
+        use super::*;
+
+        #[test]
+        fn names_the_one_simple_command_by_its_quoted_named_words() {
+            for (command, expected) in [
+                (" cargo test ", "cargo test"),
+                ("RUST_LOG=debug cargo test 2>&1", "cargo test"),
+                (
+                    "git commit -m \"it's done\"",
+                    r"git commit -m 'it'\''s done'",
+                ),
+                ("GIT_PAGER=cat git log", "GIT_PAGER=cat git log"),
+                ("echo '*' ''", "echo '*' ''"),
+            ] {
+                let target = cmd(command);
+                let rule = Rule::for_call(PermissionClass::Exec, &target.as_target()).unwrap();
+                assert_eq!(rule.pattern(), expected, "{command:?}");
+                assert!(allows(&rule, command), "{command:?}");
+            }
+            assert!(!allows(&exec("cargo test"), "cargo test --all"));
+        }
+
+        #[test]
+        fn names_the_path_under_dot_slash_inside_cwd_and_absolute_outside() {
+            let canonical = abs("/repo/src/a[1].rs");
+            let rooted = ["src/a[1].rs".to_owned()];
+            let rule = Rule::for_call(PermissionClass::Edit, &path(&canonical, &rooted)).unwrap();
+            assert_eq!(rule.pattern(), "./src/a[[]1[]].rs");
+            let other = ["src/a1.rs".to_owned()];
+            assert!(!matches_path(
+                &rule,
+                &path(&abs("/repo/src/a1.rs"), &other),
+                MatchDiscipline::Allow
+            ));
+
+            let top = ["a.rs".to_owned()];
+            let rule =
+                Rule::for_call(PermissionClass::Edit, &path(&abs("/repo/a.rs"), &top)).unwrap();
+            assert_eq!(
+                rule.pattern(),
+                "./a.rs",
+                "a bare name would match at any depth"
+            );
+
+            let outside = abs("/etc/hosts");
+            let rule = Rule::for_call(PermissionClass::Edit, &path(&outside, &[])).unwrap();
+            assert_eq!(rule.pattern(), slash_separated(Path::new(&outside)));
+        }
+
+        #[test]
+        fn declines_a_call_no_exact_rule_can_name() {
+            for command in [
+                "ls *.rs",
+                "cat $F",
+                "cargo test; rm -rf /",
+                "  ",
+                "cargo test \u{1b}[2K",
+                "echo 'a\u{200b}b'",
+                "echo 'a\tb'",
+            ] {
+                assert!(
+                    Rule::for_call(PermissionClass::Exec, &cmd(command).as_target()).is_none(),
+                    "{command:?}"
+                );
+            }
+            let empty = [String::new()];
+            let hidden = ["a\u{200b}.rs".to_owned()];
+            let hidden_path = abs("/repo/a\u{200b}.rs");
+            for target in [
+                path(&abs("/repo"), &empty),
+                path(&hidden_path, &hidden),
+                Target::None,
+            ] {
+                assert!(
+                    Rule::for_call(PermissionClass::Edit, &target).is_none(),
+                    "{target:?}"
+                );
+            }
+        }
+
+        #[test]
+        fn names_a_host_or_tool_by_its_escaped_name() {
+            let host =
+                Rule::for_call(PermissionClass::Net, &Target::Name("api.example.com")).unwrap();
+            assert_eq!(host.pattern(), "api.example.com");
+
+            let tool = Rule::for_call(PermissionClass::Mcp, &Target::Name("srv/a*b")).unwrap();
+            assert_eq!(tool.pattern(), "srv/a[*]b");
+            let matches = |name| {
+                tool.matches(
+                    PermissionClass::Mcp,
+                    &Target::Name(name),
+                    MatchDiscipline::Allow,
+                )
+            };
+            assert!(matches("srv/a*b"));
+            assert!(!matches("srv/axb"));
+        }
+    }
+
+    mod matches {
+        use super::*;
+
+        fn edit(pattern: &str) -> Rule {
+            rule(PermissionClass::Edit, pattern)
+        }
+
+        fn holds(rule: &Rule, command: &str) -> bool {
+            rule.matches(
+                PermissionClass::Exec,
+                &cmd(command).as_target(),
+                MatchDiscipline::Deny,
+            )
+        }
+
+        #[test]
+        fn exec_trailing_star_covers_zero_or_more_words_and_a_middle_one_covers_one() {
+            let prefix = exec("cargo test *");
+            for (command, expected) in [
+                ("cargo test", true),
+                ("cargo test --all -- --nocapture", true),
+                ("cargo testbench", false),
+                ("cargo build", false),
+            ] {
+                assert_eq!(allows(&prefix, command), expected, "{command}");
+            }
+
+            let middle = exec("git * --force");
+            for (command, expected) in [
+                ("git push --force", true),
+                ("git --force", false),
+                ("git push origin --force", false),
+            ] {
+                assert_eq!(allows(&middle, command), expected, "{command}");
+            }
+        }
+
+        #[test]
+        fn exec_compares_words_however_the_command_quotes_or_spaces_them() {
+            let rule = exec("git commit -m 'fix the parser'");
+            for command in [
+                "git commit -m 'fix the parser'",
+                "git  commit   -m \"fix the parser\"",
+                "git commit -m fix\\ the\\ parser 2>&1",
+                "nice -n 5 git commit -m 'fix the parser'",
+            ] {
+                assert!(allows(&rule, command), "{command}");
+            }
+            assert!(!allows(&rule, "git commit -m 'fix the'"));
+            assert!(allows(&exec("echo '*'"), "echo '*'"));
+            assert!(!allows(&exec("echo '*'"), "echo *"));
+        }
+
+        #[test]
+        fn exec_allow_needs_literal_words_except_under_a_trailing_star() {
+            // A word that expands or globs can become several words, so only a trailing `*` may
+            // cover it.
+            let middle = exec("git * status");
+            assert!(allows(&middle, "git -C status"));
+            assert!(!allows(&middle, "git $ARGS status"));
+            assert!(!allows(&middle, "git *.c status"));
+            assert!(!allows(&exec("cat a"), "cat $F"));
+            assert!(allows(&exec("cat *"), "cat $F *.rs"));
+        }
+
+        #[test]
+        fn exec_allow_names_a_kept_assignment_or_pinned_wrapper() {
+            let plain = exec("git log *");
+            let pinned = exec("GIT_PAGER=cat git log *");
+            for (command, plain_allows, pinned_allows) in [
+                ("git log -1", true, false),
+                ("RUST_LOG=debug git log -1", true, false),
+                ("GIT_PAGER=cat git log -1", false, true),
+                ("GIT_PAGER=sh git log -1", false, false),
+                ("env GIT_PAGER=cat git log -1", false, false),
+            ] {
+                assert_eq!(allows(&plain, command), plain_allows, "{command}");
+                assert_eq!(allows(&pinned, command), pinned_allows, "{command}");
+            }
+            assert!(allows(
+                &exec("env GIT_PAGER=cat git log *"),
+                "env GIT_PAGER=cat git log"
+            ));
+        }
+
+        #[test]
+        fn exec_allow_refuses_a_command_that_runs_more() {
+            // The load-bearing safety property: `cargo test *` must not allow a chained, piped, or
+            // substituted `rm`.
+            let rule = exec("cargo test *");
+            for command in [
+                "cargo test && rm -rf /",
+                "cargo test; rm -rf /",
+                "cargo test | sh",
+                "cargo test $(rm -rf /)",
+                "eval cargo test",
+            ] {
+                assert!(!allows(&rule, command), "{command}");
+            }
+        }
+
+        #[test]
+        fn exec_star_allows_only_a_command_the_analysis_sees_whole() {
+            let rule = exec("*");
+            assert!(allows(&rule, "cargo test && rm -rf /"));
+            for command in [r#"eval "$CMD""#, "$EDITOR notes", r#"sh -c "$X""#, "FOO=1"] {
+                assert!(!allows(&rule, command), "{command}");
+            }
+        }
+
+        #[test]
+        fn exec_deny_catches_any_simple_command_however_it_is_spelled_or_wrapped() {
+            let rule = exec("rm -rf *");
+            for command in [
+                "rm -rf /",
+                "ls && rm -rf /tmp/x",
+                "echo hi; rm -rf .",
+                r#""rm" '-rf' x"#,
+                "/bin/rm -rf x",
+                "FOO=1 nice -n 5 rm -rf x",
+                "rm -rf $DIR",
+                "echo $(rm -rf /)",
+                "sh -c 'rm -rf /'",
+            ] {
+                assert!(holds(&rule, command), "{command}");
+            }
+            assert!(!holds(&rule, "rm -r x"));
+            assert!(holds(&exec("GIT_PAGER=sh git *"), "GIT_PAGER=sh git log"));
+        }
+
+        #[test]
+        fn exec_deny_finds_its_words_in_order_among_options_and_in_any_word_that_expands() {
+            let rule = exec("git push --force *");
+            for command in [
+                "git push --force",
+                "git push origin --force",
+                "git -c a=b push --force",
+                "git ${X:-push} --force",
+                "git $'push' $'--force'",
+                "git pu$'sh' --force",
+                "git push $FLAGS",
+                "$GIT push --force",
+            ] {
+                assert!(holds(&rule, command), "{command}");
+            }
+            for command in [
+                "git push origin",
+                "git --force push",
+                "git status --force",
+                "gh push --force",
+            ] {
+                assert!(!holds(&rule, command), "{command}");
+            }
+
+            let any_program = exec("* --force");
+            assert!(holds(&any_program, "git push origin --force"));
+            assert!(!holds(&any_program, "git push origin"));
+        }
+
+        #[test]
+        fn exec_deny_folds_each_word_where_allow_compares_it_exactly() {
+            let rule = exec("rm -rf *");
+            for command in ["RM -Rf x", "/BIN/RM -RF x", "r\u{200c}m -rf x"] {
+                assert!(holds(&rule, command), "{command}");
+            }
+            assert!(!allows(&rule, "RM -rf x"));
+            assert!(allows(&rule, "rm -rf x"));
+        }
+
+        #[test]
+        fn path_name_pattern_at_any_depth_below_an_anchor_and_everything_under_it() {
+            let rule = edit("target");
+            for (relative, expected) in [
+                ("target", true),
+                ("target/debug/ox", true),
+                ("crates/x/target/a.o", true),
+                ("targets/a", false),
+                ("src/target.rs", false),
+            ] {
+                let rooted = [relative.to_owned()];
+                let canonical = format!("/repo/{relative}");
+                assert_eq!(
+                    matches_path(&rule, &path(&canonical, &rooted), MatchDiscipline::Allow),
+                    expected,
+                    "{relative}"
+                );
+            }
+            assert!(
+                !matches_path(
+                    &rule,
+                    &path("/elsewhere/target", &[]),
+                    MatchDiscipline::Deny
+                ),
+                "a name pattern applies only below an anchor directory"
+            );
+        }
+
+        #[test]
+        fn path_slash_anchors_a_pattern_at_each_anchor_directory() {
+            for raw in ["src/*.rs", "./src/*.rs", "src/*.rs/"] {
+                let rule = edit(raw);
+                for (relative, expected) in [
+                    ("src/a.rs", true),
+                    ("src/a/b.rs", false),
+                    ("crates/x/src/a.rs", false),
+                ] {
+                    let rooted = [relative.to_owned()];
+                    assert_eq!(
+                        matches_path(&rule, &path("/repo/x", &rooted), MatchDiscipline::Allow),
+                        expected,
+                        "{raw} vs {relative}"
+                    );
+                }
+            }
+            let top = edit("./a.rs");
+            let nested = ["sub/a.rs".to_owned()];
+            assert!(!matches_path(
+                &top,
+                &path("/repo/sub/a.rs", &nested),
+                MatchDiscipline::Allow
+            ));
+        }
+
+        #[test]
+        fn path_absolute_and_home_patterns_match_the_resolved_path() {
+            let etc = edit(&abs("/etc/**"));
+            assert!(matches_path(
+                &etc,
+                &path(&abs("/etc/passwd"), &[]),
+                MatchDiscipline::Allow
+            ));
+            let inside = ["etc/x".to_owned()];
+            assert!(!matches_path(
+                &etc,
+                &path(&abs("/repo/etc/x"), &inside),
+                MatchDiscipline::Allow
+            ));
+
+            let nginx = edit(&format!("{}/", abs("/etc/nginx")));
+            for target in [abs("/etc/nginx"), abs("/etc/nginx/nginx.conf")] {
+                assert!(
+                    matches_path(&nginx, &path(&target, &[]), MatchDiscipline::Allow),
+                    "a trailing `/` is ignored: {target}"
+                );
+            }
+
+            temp_env::with_var(HOME_VAR, Some(abs("/home/u")), || {
+                let notes = edit("~/notes/");
+                assert!(matches_path(
+                    &notes,
+                    &path(&abs("/home/u/notes"), &[]),
+                    MatchDiscipline::Allow
+                ));
+                assert!(matches_path(
+                    &notes,
+                    &path(&abs("/home/u/notes/today.md"), &[]),
+                    MatchDiscipline::Allow
+                ));
+                let literal = ["~/notes/today.md".to_owned()];
+                assert!(!matches_path(
+                    &notes,
+                    &path("/repo/~/notes/today.md", &literal),
+                    MatchDiscipline::Allow
+                ));
+            });
+        }
+
+        #[test]
+        fn path_home_pattern_expands_a_home_spelled_with_a_trailing_slash_or_dot() {
+            let home = abs("/home/u");
+            for (spelling, target) in [
+                (format!("{home}/"), abs("/home/u/notes/a.md")),
+                (format!("{home}/."), abs("/home/u/notes/a.md")),
+                (format!("{home}/x/.."), abs("/home/u/notes/a.md")),
+                (abs("/"), abs("/notes/a.md")),
+            ] {
+                temp_env::with_var(HOME_VAR, Some(&spelling), || {
+                    let notes = edit("~/notes/*.md");
+                    assert!(
+                        matches_path(&notes, &path(&target, &[]), MatchDiscipline::Allow),
+                        "{spelling}"
+                    );
+                });
+            }
+        }
+
+        #[test]
+        fn path_deny_also_matches_the_requested_spelling_and_folded_names() {
+            // `.env -> /shared/.env`: a deny on the spelled path must fire, and an allow on it must
+            // not reach a target that resolves elsewhere.
+            let (canonical, requested) = (abs("/shared/.env"), abs("/repo/.env"));
+            let deny_rooted = [".env".to_owned()];
+            let env = Target::Path {
+                canonical: &canonical,
+                relative: None,
+                rooted: &[],
+                requested: &requested,
+                deny_rooted: &deny_rooted,
+                zone: Zone::Outside,
+                protected: &[],
+            };
+            let absolute = edit(&abs("/repo/.env"));
+            for rule in [edit(".env"), absolute] {
+                assert!(
+                    matches_path(&rule, &env, MatchDiscipline::Deny),
+                    "{}",
+                    rule.pattern()
+                );
+                assert!(
+                    !matches_path(&rule, &env, MatchDiscipline::Allow),
+                    "{}",
+                    rule.pattern()
+                );
+            }
+
+            let upper = [".ENV.".to_owned()];
+            let folded = path("/repo/.ENV.", &upper);
+            assert!(matches_path(&edit(".env"), &folded, MatchDiscipline::Deny));
+            assert!(!matches_path(
+                &edit(".env"),
+                &folded,
+                MatchDiscipline::Allow
+            ));
+        }
+
+        #[cfg(windows)]
+        #[test]
+        fn path_reads_backslash_separators_and_needs_a_drive() {
+            let rule = edit(r"src\*.rs");
+            let rooted = [r"src\a.rs".to_owned()];
+            assert!(matches_path(
+                &rule,
+                &path(r"C:\repo\src\a.rs", &rooted),
+                MatchDiscipline::Allow
+            ));
+            let dotted = edit(r"C:\repo\secrets");
+            let target = path(r"C:\repo\secrets.\key", &[]);
+            assert!(matches_path(&dotted, &target, MatchDiscipline::Deny));
+            assert!(!matches_path(&dotted, &target, MatchDiscipline::Allow));
+            for raw in ["/secrets/**", r"\tmp\**"] {
+                let err = format!("{:#}", Rule::parse(PermissionClass::Read, raw).unwrap_err());
+                assert!(err.contains("needs a drive"), "{raw}: {err}");
+            }
+        }
+
+        #[test]
+        fn host_globs_without_case_and_tool_globs_within_each_name() {
+            let host = rule(PermissionClass::Net, "*.github.com");
+            for (name, expected) in [
+                ("api.github.com", true),
+                ("a.b.GitHub.com", true),
+                ("github.com", false),
+                ("github.com.evil.io", false),
+            ] {
+                assert_eq!(
+                    host.matches(
+                        PermissionClass::Net,
+                        &Target::Name(name),
+                        MatchDiscipline::Allow
+                    ),
+                    expected,
+                    "{name}"
+                );
+            }
+
+            let tool = rule(PermissionClass::Mcp, "github/get_*");
+            for (name, expected) in [
+                ("github/get_me", true),
+                ("github/create_issue", false),
+                ("github/get_x/y", false),
+                ("gitlab/get_me", false),
+            ] {
+                assert_eq!(
+                    tool.matches(
+                        PermissionClass::Mcp,
+                        &Target::Name(name),
+                        MatchDiscipline::Deny
+                    ),
+                    expected,
+                    "{name}"
+                );
+            }
+        }
+    }
+
+    mod with_resolved_prefixes {
+        use super::*;
+
+        #[test]
+        fn also_matches_where_a_literal_prefix_resolves() {
+            let dir = tempfile::tempdir().unwrap();
+            let root = dunce::canonicalize(dir.path()).unwrap();
+            std::fs::create_dir(root.join("real")).unwrap();
+            #[cfg(unix)]
+            std::os::unix::fs::symlink("real", root.join("alias")).unwrap();
+            // A Windows symlink needs Developer Mode or admin rights, which CI runners have.
+            #[cfg(windows)]
+            std::os::windows::fs::symlink_dir("real", root.join("alias")).unwrap();
+            let alias = root.join("alias");
+            let root_glob = slash_separated(&root);
+
+            for (raw, anchor, inside, outside) in [
+                (
+                    format!("{root_glob}/alias/sub*/x.rs"),
+                    &root,
+                    "real/sub1/x.rs",
+                    "real/other/x.rs",
+                ),
+                ("*.rs".to_owned(), &alias, "real/a.rs", "real/sub/b.c"),
+                ("./x.rs".to_owned(), &alias, "real/x.rs", "real/y.rs"),
+                (
+                    format!("{root_glob}/alias/x.rs"),
+                    &root,
+                    "real/x.rs",
+                    "real/y.rs",
+                ),
+            ] {
+                let rule = Rule::parse(PermissionClass::Read, &raw)
+                    .unwrap()
+                    .with_resolved_prefixes(std::slice::from_ref(anchor))
+                    .unwrap();
+                assert_eq!(rule.pattern(), raw, "the copy keeps the pattern as written");
+                let matches = |relative: &str| {
+                    let canonical = format!("{root_glob}/{relative}");
+                    matches_path(&rule, &path(&canonical, &[]), MatchDiscipline::Deny)
+                };
+                assert!(matches(inside), "{raw}");
+                assert!(!matches(outside), "{raw}");
+            }
+
+            let unchanged = Rule::parse(PermissionClass::Read, &format!("{root_glob}/real/**"))
+                .unwrap()
+                .with_resolved_prefixes(std::slice::from_ref(&root))
+                .unwrap();
+            let Pattern::Path(globs) = &unchanged.pattern else {
+                panic!("a read rule has a path pattern");
+            };
+            assert_eq!(globs.len(), 1);
+        }
+    }
+
+    mod literal_prefix {
+        use super::*;
+
+        #[test]
+        fn splits_at_the_last_slash_before_a_glob_and_keeps_a_root_slash() {
+            for (glob, expected) in [
+                ("/a/b*/c", ("/a", "b*/c")),
+                ("/secrets*", ("/", "secrets*")),
+                ("C:/secrets*", ("C:/", "secrets*")),
+                ("src/a", ("src/a", "")),
+                ("*.rs", ("", "*.rs")),
+            ] {
+                assert_eq!(literal_prefix(glob), expected, "{glob}");
+            }
         }
     }
 }

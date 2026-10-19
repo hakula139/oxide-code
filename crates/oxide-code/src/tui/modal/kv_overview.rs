@@ -271,68 +271,6 @@ mod tests {
         )
     }
 
-    // ── KvOverview::label_width ──
-
-    #[test]
-    fn label_width_spans_every_section() {
-        let m = KvOverview::new(
-            "T",
-            vec![
-                KvSection::new(vec![row("a", "1")]),
-                KvSection::new(vec![row("longer", "2")]),
-            ],
-        );
-        assert_eq!(m.label_width(), "longer".len());
-    }
-
-    #[test]
-    fn label_width_empty_sections_is_zero() {
-        let m = KvOverview::new("T", vec![]);
-        assert_eq!(m.label_width(), 0);
-    }
-
-    // ── KvOverview::body_lines ──
-
-    #[test]
-    fn body_lines_aligns_cjk_labels_values_and_notes_by_display_width() {
-        let theme = Theme::default();
-        let m = KvOverview::new(
-            "Config",
-            vec![KvSection::annotated(vec![
-                ("中文".to_owned(), "值".to_owned(), "说明".to_owned()),
-                ("a".to_owned(), "abc".to_owned(), "note".to_owned()),
-            ])],
-        );
-        let text = |width| -> Vec<String> {
-            m.body_lines(&theme, width)
-                .iter()
-                .map(ToString::to_string)
-                .collect()
-        };
-
-        assert_eq!(text(15), ["中文  值   说明", "a     abc  note"]);
-        assert_eq!(text(14), ["中文  值  说明", "a     abc  note"]);
-    }
-
-    // ── KvOverview::height ──
-
-    #[test]
-    fn height_for_single_section_without_heading_counts_title_blank_rows_blank_footer() {
-        assert_eq!(flat_overview().height(80, 40), 6);
-    }
-
-    #[test]
-    fn height_for_two_headed_sections_adds_heading_blanks_and_inter_section_blank() {
-        assert_eq!(sectioned_overview().height(80, 40), 11);
-    }
-
-    #[test]
-    fn height_caps_at_the_max() {
-        assert_eq!(sectioned_overview().height(80, 7), 7);
-    }
-
-    // ── KvOverview::render ──
-
     fn long_overview() -> KvOverview {
         let rows = (0..10)
             .map(|i| row(&format!("k{i}"), &format!("v{i}")))
@@ -340,159 +278,231 @@ mod tests {
         KvOverview::new("Long", vec![KvSection::new(rows)])
     }
 
-    #[test]
-    fn render_lays_out_every_row_with_a_close_hint_when_it_fits() {
-        let m = flat_overview();
-        let rows = trimmed_rows(&m, 40, m.height(40, 40));
-        assert_eq!(
-            rows,
-            [
-                "Status",
-                "",
-                "Model   Claude Opus",
-                "Effort  high",
-                "",
-                "Esc to close"
-            ],
-        );
-    }
+    mod label_width {
+        use super::*;
 
-    #[test]
-    fn render_clips_the_body_between_pinned_header_and_scroll_hint() {
-        let m = long_overview();
-        let rows = trimmed_rows(&m, 40, 7);
-        assert_eq!(
-            rows,
-            [
-                "Long",
-                "",
-                "k0  v0",
-                "k1  v1",
-                "k2  v2",
-                "",
-                "↑ / ↓ to scroll  ·  Esc to close"
-            ]
-        );
-    }
-
-    fn annotated_overview() -> KvOverview {
-        let note_row = |k: &str, v: &str, n: &str| (k.to_owned(), v.to_owned(), n.to_owned());
-        KvOverview::new(
-            "Config",
-            vec![
-                KvSection::annotated(vec![
-                    note_row("Model", "Opus", "$ANTHROPIC_MODEL"),
-                    note_row("Base URL", "https://x.test", "default"),
-                ]),
-                KvSection::new(vec![row("user", "~/.config/ox/config.toml")]),
-            ],
-        )
-    }
-
-    #[test]
-    fn render_aligns_notes_in_a_column_when_they_fit() {
-        // 42 columns is exactly label + gap + value + gap + note for this fixture.
-        let m = annotated_overview();
-        let rows = trimmed_rows(&m, 42, m.height(42, 40));
-        assert_eq!(
-            rows[2..6],
-            [
-                "Model     Opus            $ANTHROPIC_MODEL",
-                "Base URL  https://x.test  default",
-                "",
-                "user      ~/.config/ox/config.toml",
-            ],
-        );
-    }
-
-    #[test]
-    fn render_puts_notes_after_their_values_when_the_column_would_overflow() {
-        let m = annotated_overview();
-        let rows = trimmed_rows(&m, 41, m.height(41, 40));
-        assert_eq!(
-            rows[2..4],
-            [
-                "Model     Opus  $ANTHROPIC_MODEL",
-                "Base URL  https://x.test  default",
-            ],
-        );
-    }
-
-    #[test]
-    fn render_separates_headed_sections_with_blank_rows() {
-        let m = sectioned_overview();
-
-        let rows = trimmed_rows(&m, 40, m.height(40, 40));
-
-        assert_eq!(
-            rows,
-            [
-                "Config",
-                "",
-                "Resolved",
-                "",
-                "Model  Claude Opus",
-                "",
-                "Source Files",
-                "",
-                "User   ~/.config/ox/config.toml",
-                "",
-                "Esc to close",
-            ]
-        );
-    }
-
-    // ── KvOverview::handle_key ──
-
-    #[test]
-    fn handle_key_scrolls_the_clipped_body_within_its_bounds() {
-        let mut m = long_overview();
-        trimmed_rows(&m, 40, 7);
-
-        m.handle_key(&KeyEvent::from(KeyCode::Down));
-        assert_eq!(trimmed_rows(&m, 40, 7)[2], "k1  v1");
-        m.handle_key(&KeyEvent::from(KeyCode::PageDown));
-        assert_eq!(
-            trimmed_rows(&m, 40, 7)[2],
-            "k4  v4",
-            "a page is the three body rows"
-        );
-        m.handle_key(&KeyEvent::from(KeyCode::End));
-        assert_eq!(
-            trimmed_rows(&m, 40, 7)[4],
-            "k9  v9",
-            "End pins the last row"
-        );
-        m.handle_key(&KeyEvent::from(KeyCode::Down));
-        assert_eq!(
-            trimmed_rows(&m, 40, 7)[4],
-            "k9  v9",
-            "no scrolling past the end"
-        );
-        m.handle_key(&KeyEvent::from(KeyCode::Char('k')));
-        assert_eq!(trimmed_rows(&m, 40, 7)[4], "k8  v8");
-        m.handle_key(&KeyEvent::from(KeyCode::PageUp));
-        assert_eq!(trimmed_rows(&m, 40, 7)[2], "k3  v3");
-        m.handle_key(&KeyEvent::from(KeyCode::Home));
-        assert_eq!(trimmed_rows(&m, 40, 7)[2], "k0  v0");
-    }
-
-    #[test]
-    fn handle_key_every_key_is_consumed_so_only_universal_cancel_dismisses() {
-        // Esc / Ctrl+C close at the stack layer, so the modal itself never pops.
-        let mut m = flat_overview();
-        for code in [
-            KeyCode::Enter,
-            KeyCode::Up,
-            KeyCode::Down,
-            KeyCode::Char('x'),
-            KeyCode::Tab,
-        ] {
-            let outcome = m.handle_key(&KeyEvent::from(code));
-            assert!(
-                matches!(outcome, ModalKey::Consumed),
-                "{code:?} must be consumed",
+        #[test]
+        fn spans_every_section() {
+            let m = KvOverview::new(
+                "T",
+                vec![
+                    KvSection::new(vec![row("a", "1")]),
+                    KvSection::new(vec![row("longer", "2")]),
+                ],
             );
+            assert_eq!(m.label_width(), "longer".len());
+        }
+
+        #[test]
+        fn empty_sections_is_zero() {
+            let m = KvOverview::new("T", vec![]);
+            assert_eq!(m.label_width(), 0);
+        }
+    }
+
+    mod body_lines {
+        use super::*;
+
+        #[test]
+        fn aligns_cjk_labels_values_and_notes_by_display_width() {
+            let theme = Theme::default();
+            let m = KvOverview::new(
+                "Config",
+                vec![KvSection::annotated(vec![
+                    ("中文".to_owned(), "值".to_owned(), "说明".to_owned()),
+                    ("a".to_owned(), "abc".to_owned(), "note".to_owned()),
+                ])],
+            );
+            let text = |width| -> Vec<String> {
+                m.body_lines(&theme, width)
+                    .iter()
+                    .map(ToString::to_string)
+                    .collect()
+            };
+
+            assert_eq!(text(15), ["中文  值   说明", "a     abc  note"]);
+            assert_eq!(text(14), ["中文  值  说明", "a     abc  note"]);
+        }
+    }
+
+    mod height {
+        use super::*;
+
+        #[test]
+        fn for_single_section_without_heading_counts_title_blank_rows_blank_footer() {
+            assert_eq!(flat_overview().height(80, 40), 6);
+        }
+
+        #[test]
+        fn for_two_headed_sections_adds_heading_blanks_and_inter_section_blank() {
+            assert_eq!(sectioned_overview().height(80, 40), 11);
+        }
+
+        #[test]
+        fn caps_at_the_max() {
+            assert_eq!(sectioned_overview().height(80, 7), 7);
+        }
+    }
+
+    mod render {
+        use super::*;
+
+        fn annotated_overview() -> KvOverview {
+            let note_row = |k: &str, v: &str, n: &str| (k.to_owned(), v.to_owned(), n.to_owned());
+            KvOverview::new(
+                "Config",
+                vec![
+                    KvSection::annotated(vec![
+                        note_row("Model", "Opus", "$ANTHROPIC_MODEL"),
+                        note_row("Base URL", "https://x.test", "default"),
+                    ]),
+                    KvSection::new(vec![row("user", "~/.config/ox/config.toml")]),
+                ],
+            )
+        }
+
+        #[test]
+        fn lays_out_every_row_with_a_close_hint_when_it_fits() {
+            let m = flat_overview();
+            let rows = trimmed_rows(&m, 40, m.height(40, 40));
+            assert_eq!(
+                rows,
+                [
+                    "Status",
+                    "",
+                    "Model   Claude Opus",
+                    "Effort  high",
+                    "",
+                    "Esc to close"
+                ],
+            );
+        }
+
+        #[test]
+        fn clips_the_body_between_pinned_header_and_scroll_hint() {
+            let m = long_overview();
+            let rows = trimmed_rows(&m, 40, 7);
+            assert_eq!(
+                rows,
+                [
+                    "Long",
+                    "",
+                    "k0  v0",
+                    "k1  v1",
+                    "k2  v2",
+                    "",
+                    "↑ / ↓ to scroll  ·  Esc to close"
+                ]
+            );
+        }
+
+        #[test]
+        fn aligns_notes_in_a_column_when_they_fit() {
+            // 42 columns is exactly label + gap + value + gap + note for this fixture.
+            let m = annotated_overview();
+            let rows = trimmed_rows(&m, 42, m.height(42, 40));
+            assert_eq!(
+                rows[2..6],
+                [
+                    "Model     Opus            $ANTHROPIC_MODEL",
+                    "Base URL  https://x.test  default",
+                    "",
+                    "user      ~/.config/ox/config.toml",
+                ],
+            );
+        }
+
+        #[test]
+        fn puts_notes_after_their_values_when_the_column_would_overflow() {
+            let m = annotated_overview();
+            let rows = trimmed_rows(&m, 41, m.height(41, 40));
+            assert_eq!(
+                rows[2..4],
+                [
+                    "Model     Opus  $ANTHROPIC_MODEL",
+                    "Base URL  https://x.test  default",
+                ],
+            );
+        }
+
+        #[test]
+        fn separates_headed_sections_with_blank_rows() {
+            let m = sectioned_overview();
+
+            let rows = trimmed_rows(&m, 40, m.height(40, 40));
+
+            assert_eq!(
+                rows,
+                [
+                    "Config",
+                    "",
+                    "Resolved",
+                    "",
+                    "Model  Claude Opus",
+                    "",
+                    "Source Files",
+                    "",
+                    "User   ~/.config/ox/config.toml",
+                    "",
+                    "Esc to close",
+                ]
+            );
+        }
+    }
+
+    mod handle_key {
+        use super::*;
+
+        #[test]
+        fn scrolls_the_clipped_body_within_its_bounds() {
+            let mut m = long_overview();
+            trimmed_rows(&m, 40, 7);
+
+            m.handle_key(&KeyEvent::from(KeyCode::Down));
+            assert_eq!(trimmed_rows(&m, 40, 7)[2], "k1  v1");
+            m.handle_key(&KeyEvent::from(KeyCode::PageDown));
+            assert_eq!(
+                trimmed_rows(&m, 40, 7)[2],
+                "k4  v4",
+                "a page is the three body rows"
+            );
+            m.handle_key(&KeyEvent::from(KeyCode::End));
+            assert_eq!(
+                trimmed_rows(&m, 40, 7)[4],
+                "k9  v9",
+                "End pins the last row"
+            );
+            m.handle_key(&KeyEvent::from(KeyCode::Down));
+            assert_eq!(
+                trimmed_rows(&m, 40, 7)[4],
+                "k9  v9",
+                "no scrolling past the end"
+            );
+            m.handle_key(&KeyEvent::from(KeyCode::Char('k')));
+            assert_eq!(trimmed_rows(&m, 40, 7)[4], "k8  v8");
+            m.handle_key(&KeyEvent::from(KeyCode::PageUp));
+            assert_eq!(trimmed_rows(&m, 40, 7)[2], "k3  v3");
+            m.handle_key(&KeyEvent::from(KeyCode::Home));
+            assert_eq!(trimmed_rows(&m, 40, 7)[2], "k0  v0");
+        }
+
+        #[test]
+        fn every_key_is_consumed_so_only_universal_cancel_dismisses() {
+            // Esc / Ctrl+C close at the stack layer, so the modal itself never pops.
+            let mut m = flat_overview();
+            for code in [
+                KeyCode::Enter,
+                KeyCode::Up,
+                KeyCode::Down,
+                KeyCode::Char('x'),
+                KeyCode::Tab,
+            ] {
+                let outcome = m.handle_key(&KeyEvent::from(code));
+                assert!(
+                    matches!(outcome, ModalKey::Consumed),
+                    "{code:?} must be consumed",
+                );
+            }
         }
     }
 }

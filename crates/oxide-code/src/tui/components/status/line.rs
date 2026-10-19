@@ -17,7 +17,7 @@ use crate::tui::components::LEFT_MARGIN;
 use crate::tui::saturating_u16;
 use crate::tui::theme::Theme;
 use crate::util::git::{Checks, PullRequest, ReviewDecision};
-use crate::util::text::truncate_to_width;
+use crate::util::text::{compact_count, truncate_to_width};
 use crate::util::time::local_offset;
 
 const MAX_CURRENT_DIR_WIDTH: usize = 40;
@@ -334,13 +334,13 @@ fn context_label(usage: UsageSnapshot) -> Option<(String, SegmentStyle)> {
             let percent = tokens.saturating_mul(100) / window;
             let label = format!(
                 "Ctx: {percent}% ({}/{})",
-                compact_tokens(tokens),
-                compact_tokens(window),
+                compact_count(tokens),
+                compact_count(window),
             );
             (label, usage_style(f64::from(percent)))
         }
         _ => (
-            format!("Ctx: {}", compact_tokens(tokens)),
+            format!("Ctx: {}", compact_count(tokens)),
             SegmentStyle::Text,
         ),
     })
@@ -402,16 +402,6 @@ fn theme_label(theme_name: &str) -> Option<String> {
 fn current_time_label() -> String {
     let now = OffsetDateTime::now_utc().to_offset(local_offset());
     format!("{:02}:{:02}", now.hour(), now.minute())
-}
-
-fn compact_tokens(tokens: u32) -> String {
-    if tokens >= 1_000_000 {
-        format!("{}M", tokens / 1_000_000)
-    } else if tokens >= 1_000 {
-        format!("{}k", tokens / 1_000)
-    } else {
-        tokens.to_string()
-    }
 }
 
 fn format_cost(cost: f64) -> String {

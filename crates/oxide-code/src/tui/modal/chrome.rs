@@ -24,7 +24,7 @@ pub(crate) const CONFIRM_HINTS: [&str; 2] = ["Enter to confirm", "Esc to cancel"
 pub(crate) const FOOTER_HEIGHT: u16 = 2;
 
 /// Blank columns between two text columns of a modal row.
-pub(super) const COLUMN_GAP: usize = 2;
+pub(crate) const COLUMN_GAP: usize = 2;
 
 // ── Header ──
 
@@ -113,76 +113,88 @@ mod tests {
     use crate::tui::modal::testing::render_rows_with;
     use crate::tui::testing::buffer_rows;
 
-    // ── Header::height ──
+    mod header {
+        use super::*;
 
-    #[test]
-    fn height_counts_the_title_blank_and_optional_description() {
-        assert_eq!(Header::new("Pick").height(), 2);
-        assert_eq!(Header::new("Pick").with_description("Choose").height(), 3);
+        mod height {
+            use super::*;
+
+            #[test]
+            fn counts_the_title_blank_and_optional_description() {
+                assert_eq!(Header::new("Pick").height(), 2);
+                assert_eq!(Header::new("Pick").with_description("Choose").height(), 3);
+            }
+        }
+
+        mod push_lines {
+            use super::*;
+
+            #[test]
+            fn emits_title_description_then_blank_truncated_to_width() {
+                let header = Header::new("Select theme").with_description("Switch the palette");
+                let mut lines = Vec::new();
+                header.push_lines(&mut lines, 12, &Theme::default());
+
+                let text: Vec<String> = lines.iter().map(ToString::to_string).collect();
+                assert_eq!(text, ["Select theme", "Switch th...", ""]);
+                assert_eq!(lines.len(), usize::from(header.height()));
+            }
+        }
     }
 
-    // ── Header::push_lines ──
+    mod render_footer {
+        use super::*;
 
-    #[test]
-    fn push_lines_emits_title_description_then_blank_truncated_to_width() {
-        let header = Header::new("Select theme").with_description("Switch the palette");
-        let mut lines = Vec::new();
-        header.push_lines(&mut lines, 12, &Theme::default());
+        #[test]
+        fn joins_hints_on_the_bottom_row_below_a_gap() {
+            let rows = render_rows_with(40, 4, |frame, area, theme| {
+                render_footer(frame, area, &CONFIRM_HINTS, theme);
+            });
+            assert_eq!(rows[2].trim_end(), "");
+            assert_eq!(rows[3].trim_end(), "Enter to confirm  ·  Esc to cancel");
+        }
 
-        let text: Vec<String> = lines.iter().map(ToString::to_string).collect();
-        assert_eq!(text, ["Select theme", "Switch th...", ""]);
-        assert_eq!(lines.len(), usize::from(header.height()));
+        #[test]
+        fn truncates_the_tail_hints_on_a_narrow_row() {
+            let rows = render_rows_with(24, 2, |frame, area, theme| {
+                render_footer(frame, area, &CONFIRM_HINTS, theme);
+            });
+            assert_eq!(rows[1], "Enter to confirm  ·  ...");
+        }
+
+        #[test]
+        fn skips_an_area_without_room_for_the_gap() {
+            let rows = render_rows_with(20, 1, |frame, area, theme| {
+                render_footer(frame, area, &["Esc to close"], theme);
+            });
+            assert_eq!(rows[0].trim_end(), "");
+        }
     }
 
-    // ── render_footer ──
+    mod render_footer_text {
+        use super::*;
 
-    #[test]
-    fn render_footer_joins_hints_on_the_bottom_row_below_a_gap() {
-        let rows = render_rows_with(40, 4, |frame, area, theme| {
-            render_footer(frame, area, &CONFIRM_HINTS, theme);
-        });
-        assert_eq!(rows[2].trim_end(), "");
-        assert_eq!(rows[3].trim_end(), "Enter to confirm  ·  Esc to cancel");
-    }
+        #[test]
+        fn truncates_a_message_in_its_own_style() {
+            let theme = Theme::default();
+            let mut terminal = Terminal::new(TestBackend::new(12, 2)).unwrap();
+            terminal
+                .draw(|frame| {
+                    render_footer_text(
+                        frame,
+                        frame.area(),
+                        "! permission denied",
+                        theme.error(),
+                        &theme,
+                    );
+                })
+                .unwrap();
 
-    #[test]
-    fn render_footer_truncates_the_tail_hints_on_a_narrow_row() {
-        let rows = render_rows_with(24, 2, |frame, area, theme| {
-            render_footer(frame, area, &CONFIRM_HINTS, theme);
-        });
-        assert_eq!(rows[1], "Enter to confirm  ·  ...");
-    }
-
-    #[test]
-    fn render_footer_skips_an_area_without_room_for_the_gap() {
-        let rows = render_rows_with(20, 1, |frame, area, theme| {
-            render_footer(frame, area, &["Esc to close"], theme);
-        });
-        assert_eq!(rows[0].trim_end(), "");
-    }
-
-    // ── render_footer_text ──
-
-    #[test]
-    fn render_footer_text_truncates_a_message_in_its_own_style() {
-        let theme = Theme::default();
-        let mut terminal = Terminal::new(TestBackend::new(12, 2)).unwrap();
-        terminal
-            .draw(|frame| {
-                render_footer_text(
-                    frame,
-                    frame.area(),
-                    "! permission denied",
-                    theme.error(),
-                    &theme,
-                );
-            })
-            .unwrap();
-
-        let buffer = terminal.backend().buffer();
-        let rows = buffer_rows(buffer);
-        let rows: Vec<&str> = rows.iter().map(|row| row.trim_end()).collect();
-        assert_eq!(rows, ["", "! permiss..."]);
-        assert_eq!(buffer[(0, 1)].fg, theme.error().fg.unwrap());
+            let buffer = terminal.backend().buffer();
+            let rows = buffer_rows(buffer);
+            let rows: Vec<&str> = rows.iter().map(|row| row.trim_end()).collect();
+            assert_eq!(rows, ["", "! permiss..."]);
+            assert_eq!(buffer[(0, 1)].fg, theme.error().fg.unwrap());
+        }
     }
 }

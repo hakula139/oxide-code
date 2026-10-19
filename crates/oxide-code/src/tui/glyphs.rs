@@ -157,99 +157,139 @@ mod tests {
 
     use super::*;
 
-    // ── Width Invariants ──
+    mod task_marker {
+        use super::*;
 
-    #[test]
-    fn user_prompt_prefix_width_matches_display_width() {
-        assert_eq!(
-            USER_PROMPT_PREFIX.width(),
-            usize::from(USER_PROMPT_PREFIX_WIDTH),
-        );
-    }
-
-    #[test]
-    fn user_prompt_continuation_aligns_with_prefix_width() {
-        assert_eq!(USER_PROMPT_CONT.width(), USER_PROMPT_PREFIX.width());
-    }
-
-    #[test]
-    fn assistant_continuation_aligns_with_prefix_width() {
-        assert_eq!(ASSISTANT_CONT.width(), ASSISTANT_PREFIX.width());
-    }
-
-    #[test]
-    fn error_continuation_aligns_with_prefix_width() {
-        assert_eq!(ERROR_CONT.width(), ERROR_PREFIX.width());
-    }
-
-    #[test]
-    fn cursor_marker_width_matches_display_width() {
-        assert_eq!(CURSOR_MARKER.width(), usize::from(CURSOR_MARKER_WIDTH));
-    }
-
-    #[test]
-    fn cursor_gutter_marks_only_the_cursor_row_at_the_marker_width() {
-        assert_eq!(cursor_gutter(true), CURSOR_MARKER);
-        assert_eq!(cursor_gutter(false), " ".repeat(CURSOR_MARKER.width()));
-    }
-
-    // ── Cross-Glyph Consistency ──
-
-    #[test]
-    fn thinking_prefix_starts_with_bar() {
-        assert!(
-            THINKING_PREFIX.starts_with(BAR),
-            "THINKING_PREFIX ({THINKING_PREFIX:?}) must start with BAR ({BAR:?})",
-        );
-    }
-
-    #[test]
-    fn tool_border_prefix_starts_with_bar() {
-        assert!(
-            TOOL_BORDER_PREFIX.starts_with(BAR),
-            "TOOL_BORDER_PREFIX ({TOOL_BORDER_PREFIX:?}) must start with BAR ({BAR:?})",
-        );
-    }
-
-    #[test]
-    fn tool_border_cont_starts_with_bar() {
-        assert!(
-            TOOL_BORDER_CONT.starts_with(BAR),
-            "TOOL_BORDER_CONT ({TOOL_BORDER_CONT:?}) must start with BAR ({BAR:?})",
-        );
-    }
-
-    #[test]
-    fn tool_error_matches_error_prefix_glyph() {
-        assert!(
-            ERROR_PREFIX.starts_with(TOOL_ERROR),
-            "ERROR_PREFIX ({ERROR_PREFIX:?}) must start with TOOL_ERROR ({TOOL_ERROR:?})",
-        );
-    }
-
-    // ── Tasks ──
-
-    #[test]
-    fn task_markers_each_render_in_one_column() {
-        for status in [
-            TaskStatus::Pending,
-            TaskStatus::InProgress,
-            TaskStatus::Completed,
-        ] {
-            assert_eq!(task_marker(status).width(), 1, "{status:?}");
+        #[test]
+        fn every_status_renders_in_one_column() {
+            for status in [
+                TaskStatus::Pending,
+                TaskStatus::InProgress,
+                TaskStatus::Completed,
+            ] {
+                assert_eq!(task_marker(status).width(), 1, "{status:?}");
+            }
         }
     }
 
-    // ── Spinner ──
+    mod cursor_gutter {
+        use super::*;
 
-    #[test]
-    fn spinner_frames_each_render_in_one_column() {
-        for &frame in SPINNER_FRAMES {
+        #[test]
+        fn marks_only_the_cursor_row_at_the_marker_width() {
+            assert_eq!(cursor_gutter(true), CURSOR_MARKER);
+            assert_eq!(cursor_gutter(false), " ".repeat(CURSOR_MARKER.width()));
+        }
+    }
+
+    mod user_prompt_prefix_width {
+        use super::*;
+
+        #[test]
+        fn matches_display_width() {
             assert_eq!(
-                frame.width(),
-                Some(1),
-                "spinner frame {frame:?} must render in one terminal column",
+                USER_PROMPT_PREFIX.width(),
+                usize::from(USER_PROMPT_PREFIX_WIDTH),
             );
+        }
+    }
+
+    mod user_prompt_cont {
+        use super::*;
+
+        #[test]
+        fn aligns_with_prefix_width() {
+            assert_eq!(USER_PROMPT_CONT.width(), USER_PROMPT_PREFIX.width());
+        }
+    }
+
+    mod assistant_cont {
+        use super::*;
+
+        #[test]
+        fn aligns_with_prefix_width() {
+            assert_eq!(ASSISTANT_CONT.width(), ASSISTANT_PREFIX.width());
+        }
+    }
+
+    mod thinking_prefix {
+        use super::*;
+
+        #[test]
+        fn starts_with_bar() {
+            assert!(
+                THINKING_PREFIX.starts_with(BAR),
+                "THINKING_PREFIX ({THINKING_PREFIX:?}) must start with BAR ({BAR:?})",
+            );
+        }
+    }
+
+    mod tool_border_prefix {
+        use super::*;
+
+        #[test]
+        fn starts_with_bar() {
+            assert!(
+                TOOL_BORDER_PREFIX.starts_with(BAR),
+                "TOOL_BORDER_PREFIX ({TOOL_BORDER_PREFIX:?}) must start with BAR ({BAR:?})",
+            );
+        }
+    }
+
+    mod tool_border_cont {
+        use super::*;
+
+        #[test]
+        fn starts_with_bar() {
+            assert!(
+                TOOL_BORDER_CONT.starts_with(BAR),
+                "TOOL_BORDER_CONT ({TOOL_BORDER_CONT:?}) must start with BAR ({BAR:?})",
+            );
+        }
+    }
+
+    mod tool_error {
+        use super::*;
+
+        #[test]
+        fn matches_error_prefix_glyph() {
+            assert!(
+                ERROR_PREFIX.starts_with(TOOL_ERROR),
+                "ERROR_PREFIX ({ERROR_PREFIX:?}) must start with TOOL_ERROR ({TOOL_ERROR:?})",
+            );
+        }
+    }
+
+    mod error_cont {
+        use super::*;
+
+        #[test]
+        fn aligns_with_prefix_width() {
+            assert_eq!(ERROR_CONT.width(), ERROR_PREFIX.width());
+        }
+    }
+
+    mod cursor_marker_width {
+        use super::*;
+
+        #[test]
+        fn matches_display_width() {
+            assert_eq!(CURSOR_MARKER.width(), usize::from(CURSOR_MARKER_WIDTH));
+        }
+    }
+
+    mod spinner_frames {
+        use super::*;
+
+        #[test]
+        fn each_render_in_one_column() {
+            for &frame in SPINNER_FRAMES {
+                assert_eq!(
+                    frame.width(),
+                    Some(1),
+                    "spinner frame {frame:?} must render in one terminal column",
+                );
+            }
         }
     }
 }

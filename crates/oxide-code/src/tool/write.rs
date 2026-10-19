@@ -200,465 +200,469 @@ mod tests {
     use crate::tool::{DiffChunk, DiffLine};
     use crate::util::fs::testing::symlink_file;
 
-    // ── Fixtures ──
+    mod approval_preview {
+        use super::*;
 
-    fn added_line(text: &str) -> ApprovalBody {
-        ApprovalBody::Diff(vec![DiffChunk {
-            old: Vec::new(),
-            new: vec![DiffLine {
-                number: 1,
-                text: text.to_owned(),
-            }],
-        }])
-    }
-
-    // ── approval_preview ──
-
-    #[tokio::test]
-    async fn approval_preview_renders_a_new_file_as_an_all_added_diff() {
-        let input = serde_json::json!({
-            "file_path": "/repo/src/new.rs",
-            "content": "fn main() {}",
-        });
-
-        let preview = WriteTool
-            .approval_preview("write", &input, Path::new("/repo"))
-            .await;
-
-        assert_eq!(preview.title, "Write(src/new.rs)");
-        assert_eq!(preview.body, added_line("fn main() {}"));
-    }
-
-    #[tokio::test]
-    async fn approval_preview_without_a_file_path_renders_the_content_as_added() {
-        let input = serde_json::json!({"content": "fn main() {}"});
-
-        let preview = WriteTool
-            .approval_preview("write", &input, Path::new("/repo"))
-            .await;
-
-        assert_eq!(preview.title, "Write");
-        assert_eq!(preview.body, added_line("fn main() {}"));
-    }
-
-    #[tokio::test]
-    async fn approval_preview_diffs_an_overwrite_against_the_current_content() {
-        let dir = canonical_tempdir();
-        let path = dir.path().join("notes.txt");
-        std::fs::write(&path, "keep\nold line\n").unwrap();
-        let input = serde_json::json!({
-            "file_path": path,
-            "content": "keep\nnew line\n",
-        });
-
-        let preview = WriteTool
-            .approval_preview("write", &input, dir.path())
-            .await;
-
-        assert_eq!(
-            preview.body,
+        fn added_line(text: &str) -> ApprovalBody {
             ApprovalBody::Diff(vec![DiffChunk {
-                old: vec![DiffLine {
-                    number: 2,
-                    text: "old line".to_owned(),
-                }],
+                old: Vec::new(),
                 new: vec![DiffLine {
-                    number: 2,
-                    text: "new line".to_owned(),
+                    number: 1,
+                    text: text.to_owned(),
                 }],
-            }]),
-        );
+            }])
+        }
+
+        #[tokio::test]
+        async fn renders_a_new_file_as_an_all_added_diff() {
+            let input = serde_json::json!({
+                "file_path": "/repo/src/new.rs",
+                "content": "fn main() {}",
+            });
+
+            let preview = WriteTool
+                .approval_preview("write", &input, Path::new("/repo"))
+                .await;
+
+            assert_eq!(preview.title, "Write(src/new.rs)");
+            assert_eq!(preview.body, added_line("fn main() {}"));
+        }
+
+        #[tokio::test]
+        async fn without_a_file_path_renders_the_content_as_added() {
+            let input = serde_json::json!({"content": "fn main() {}"});
+
+            let preview = WriteTool
+                .approval_preview("write", &input, Path::new("/repo"))
+                .await;
+
+            assert_eq!(preview.title, "Write");
+            assert_eq!(preview.body, added_line("fn main() {}"));
+        }
+
+        #[tokio::test]
+        async fn diffs_an_overwrite_against_the_current_content() {
+            let dir = canonical_tempdir();
+            let path = dir.path().join("notes.txt");
+            std::fs::write(&path, "keep\nold line\n").unwrap();
+            let input = serde_json::json!({
+                "file_path": path,
+                "content": "keep\nnew line\n",
+            });
+
+            let preview = WriteTool
+                .approval_preview("write", &input, dir.path())
+                .await;
+
+            assert_eq!(
+                preview.body,
+                ApprovalBody::Diff(vec![DiffChunk {
+                    old: vec![DiffLine {
+                        number: 2,
+                        text: "old line".to_owned(),
+                    }],
+                    new: vec![DiffLine {
+                        number: 2,
+                        text: "new line".to_owned(),
+                    }],
+                }]),
+            );
+        }
+
+        #[tokio::test]
+        async fn does_not_read_through_a_symlink() {
+            let dir = canonical_tempdir();
+            let secret = dir.path().join("secret.txt");
+            std::fs::write(&secret, "token").unwrap();
+            let link = dir.path().join("link.txt");
+            symlink_file(&secret, &link);
+            let input = serde_json::json!({
+                "file_path": link,
+                "content": "new",
+            });
+
+            let preview = WriteTool
+                .approval_preview("write", &input, dir.path())
+                .await;
+
+            assert_eq!(preview.body, added_line("new"));
+        }
     }
 
-    #[tokio::test]
-    async fn approval_preview_does_not_read_through_a_symlink() {
-        let dir = canonical_tempdir();
-        let secret = dir.path().join("secret.txt");
-        std::fs::write(&secret, "token").unwrap();
-        let link = dir.path().join("link.txt");
-        symlink_file(&secret, &link);
-        let input = serde_json::json!({
-            "file_path": link,
-            "content": "new",
-        });
+    mod run {
+        use super::*;
 
-        let preview = WriteTool
-            .approval_preview("write", &input, dir.path())
+        #[tokio::test]
+        async fn new_file_reports_creation() {
+            let dir = canonical_tempdir();
+            let path = dir.path().join("new.txt");
+
+            let input = serde_json::json!({
+                "file_path": path.to_str().unwrap(),
+                "content": "hello world"
+            });
+
+            let output = testing::run(&WriteTool, input, &ctx(dir.path())).await;
+
+            assert!(!output.is_error);
+            assert_eq!(
+                output.content,
+                format!("Successfully created {}.", path.display())
+            );
+            assert_eq!(output.metadata.title.as_deref(), Some("Created new.txt"));
+            assert_eq!(std::fs::read_to_string(&path).unwrap(), "hello world");
+        }
+
+        #[tokio::test]
+        async fn missing_required_fields_reports_input_error() {
+            let output = run(serde_json::json!({"file_path": "/tmp/x"}), &temp_ctx()).await;
+            assert!(output.is_error);
+            assert!(output.content.contains("Invalid input"));
+        }
+
+        #[tokio::test]
+        async fn overwrites_existing_file_uses_updated_verb() {
+            let dir = canonical_tempdir();
+            let path = dir.path().join("existing.txt");
+            std::fs::write(&path, "old").unwrap();
+            let ctx = temp_ctx();
+            seed_full_read(&ctx.tracker, &path);
+
+            let output = run(
+                serde_json::json!({
+                    "file_path": path.to_str().unwrap(),
+                    "content": "new",
+                }),
+                &ctx,
+            )
             .await;
 
-        assert_eq!(preview.body, added_line("new"));
+            assert!(!output.is_error);
+            assert_eq!(
+                output.content,
+                format!("Successfully updated {}.", path.display())
+            );
+            assert_eq!(
+                output.metadata.title.as_deref(),
+                Some("Updated existing.txt"),
+                "overwrite should surface as Updated",
+            );
+            assert_eq!(std::fs::read_to_string(&path).unwrap(), "new");
+        }
+
+        #[tokio::test]
+        async fn gate_rejection_omits_title() {
+            let dir = canonical_tempdir();
+            let path = dir.path().join("existing.txt");
+            std::fs::write(&path, "old").unwrap();
+
+            let output = run(
+                serde_json::json!({
+                    "file_path": path.to_str().unwrap(),
+                    "content": "new",
+                }),
+                &temp_ctx(),
+            )
+            .await;
+
+            assert!(output.is_error);
+            assert_eq!(
+                output.metadata.title, None,
+                "error path must not claim the write happened",
+            );
+        }
     }
 
-    // ── run ──
+    mod write_file {
+        use super::*;
 
-    #[tokio::test]
-    async fn run_new_file_reports_creation() {
-        let dir = canonical_tempdir();
-        let path = dir.path().join("new.txt");
+        #[tokio::test]
+        async fn new_path_creates_content() {
+            let dir = canonical_tempdir();
+            let path = dir.path().join("new.txt");
 
-        let input = serde_json::json!({
-            "file_path": path.to_str().unwrap(),
-            "content": "hello world"
-        });
+            let mode = write_file(path.to_str().unwrap(), "content", &temp_ctx())
+                .await
+                .unwrap();
 
-        let output = testing::run(&WriteTool, input, &ctx(dir.path())).await;
+            assert_eq!(mode, WriteMode::CreateNew);
+            assert_eq!(std::fs::read_to_string(&path).unwrap(), "content");
+        }
 
-        assert!(!output.is_error);
-        assert_eq!(
-            output.content,
-            format!("Successfully created {}.", path.display())
-        );
-        assert_eq!(output.metadata.title.as_deref(), Some("Created new.txt"));
-        assert_eq!(std::fs::read_to_string(&path).unwrap(), "hello world");
-    }
+        #[tokio::test]
+        async fn resolves_a_relative_path_against_the_ctx_cwd() {
+            let dir = canonical_tempdir();
+            let ctx = ctx(dir.path());
 
-    #[tokio::test]
-    async fn run_missing_required_fields_reports_input_error() {
-        let output = run(serde_json::json!({"file_path": "/tmp/x"}), &temp_ctx()).await;
-        assert!(output.is_error);
-        assert!(output.content.contains("Invalid input"));
-    }
+            let mode = write_file("notes/new.txt", "content", &ctx).await.unwrap();
 
-    #[tokio::test]
-    async fn run_overwrites_existing_file_uses_updated_verb() {
-        let dir = canonical_tempdir();
-        let path = dir.path().join("existing.txt");
-        std::fs::write(&path, "old").unwrap();
-        let ctx = temp_ctx();
-        seed_full_read(&ctx.tracker, &path);
+            assert_eq!(mode, WriteMode::CreateNew);
+            let path = dir.path().join("notes/new.txt");
+            assert_eq!(std::fs::read_to_string(&path).unwrap(), "content");
+            assert_eq!(
+                ctx.tracker
+                    .verify_current_content(&path, b"content", GatePurpose::Write),
+                Ok(()),
+            );
+        }
 
-        let output = run(
-            serde_json::json!({
-                "file_path": path.to_str().unwrap(),
-                "content": "new",
-            }),
-            &ctx,
-        )
-        .await;
+        #[tokio::test]
+        async fn existing_without_read_is_rejected() {
+            let dir = canonical_tempdir();
+            let path = dir.path().join("existing.txt");
+            std::fs::write(&path, "old content").unwrap();
 
-        assert!(!output.is_error);
-        assert_eq!(
-            output.content,
-            format!("Successfully updated {}.", path.display())
-        );
-        assert_eq!(
-            output.metadata.title.as_deref(),
-            Some("Updated existing.txt"),
-            "overwrite should surface as Updated",
-        );
-        assert_eq!(std::fs::read_to_string(&path).unwrap(), "new");
-    }
+            let err = write_file(path.to_str().unwrap(), "new content", &temp_ctx())
+                .await
+                .unwrap_err();
+            assert!(
+                err.contains("has not been read"),
+                "expected must-read-first error, got: {err}",
+            );
+            assert_eq!(std::fs::read_to_string(&path).unwrap(), "old content");
+        }
 
-    #[tokio::test]
-    async fn run_gate_rejection_omits_title() {
-        let dir = canonical_tempdir();
-        let path = dir.path().join("existing.txt");
-        std::fs::write(&path, "old").unwrap();
+        #[tokio::test]
+        async fn after_read_overwrites_existing() {
+            let dir = canonical_tempdir();
+            let path = dir.path().join("existing.txt");
+            std::fs::write(&path, "old content").unwrap();
 
-        let output = run(
-            serde_json::json!({
-                "file_path": path.to_str().unwrap(),
-                "content": "new",
-            }),
-            &temp_ctx(),
-        )
-        .await;
+            let ctx = temp_ctx();
+            seed_full_read(&ctx.tracker, &path);
 
-        assert!(output.is_error);
-        assert_eq!(
-            output.metadata.title, None,
-            "error path must not claim the write happened",
-        );
-    }
+            let mode = write_file(path.to_str().unwrap(), "new content", &ctx)
+                .await
+                .unwrap();
 
-    // ── write_file ──
+            assert_eq!(mode, WriteMode::Overwrite);
+            assert_eq!(std::fs::read_to_string(&path).unwrap(), "new content");
+        }
 
-    #[tokio::test]
-    async fn write_file_new_path_creates_content() {
-        let dir = canonical_tempdir();
-        let path = dir.path().join("new.txt");
+        #[tokio::test]
+        async fn needs_every_line_read_across_paged_reads() {
+            let dir = canonical_tempdir();
+            let path = dir.path().join("existing.txt");
+            std::fs::write(&path, "one\ntwo\nthree\n").unwrap();
+            let ctx = temp_ctx();
+            let read = ReadTool;
 
-        let mode = write_file(path.to_str().unwrap(), "content", &temp_ctx())
-            .await
-            .unwrap();
+            let first = testing::run(
+                &read,
+                serde_json::json!({"file_path": path, "limit": 2}),
+                &ctx,
+            )
+            .await;
+            assert!(!first.is_error, "{}", first.content);
+            let err = write_file(path.to_str().unwrap(), "new", &ctx)
+                .await
+                .unwrap_err();
+            assert!(err.contains("only been read in part"), "{err}");
 
-        assert_eq!(mode, WriteMode::CreateNew);
-        assert_eq!(std::fs::read_to_string(&path).unwrap(), "content");
-    }
+            let rest = testing::run(
+                &read,
+                serde_json::json!({"file_path": path, "offset": 3}),
+                &ctx,
+            )
+            .await;
+            assert!(!rest.is_error, "{}", rest.content);
+            write_file(path.to_str().unwrap(), "new", &ctx)
+                .await
+                .unwrap();
+            assert_eq!(std::fs::read_to_string(&path).unwrap(), "new");
+        }
 
-    #[tokio::test]
-    async fn write_file_resolves_a_relative_path_against_the_ctx_cwd() {
-        let dir = canonical_tempdir();
-        let ctx = ctx(dir.path());
+        #[tokio::test]
+        async fn after_external_modification_is_rejected() {
+            let dir = canonical_tempdir();
+            let path = dir.path().join("existing.txt");
+            std::fs::write(&path, "old content").unwrap();
 
-        let mode = write_file("notes/new.txt", "content", &ctx).await.unwrap();
+            let ctx = temp_ctx();
+            seed_full_read(&ctx.tracker, &path);
+            std::fs::write(&path, "external edit").unwrap();
 
-        assert_eq!(mode, WriteMode::CreateNew);
-        let path = dir.path().join("notes/new.txt");
-        assert_eq!(std::fs::read_to_string(&path).unwrap(), "content");
-        assert_eq!(
-            ctx.tracker
-                .verify_current_content(&path, b"content", GatePurpose::Write),
-            Ok(()),
-        );
-    }
+            let err = write_file(path.to_str().unwrap(), "our edit", &ctx)
+                .await
+                .unwrap_err();
+            assert!(
+                err.contains("modified externally"),
+                "drift error expected, got: {err}",
+            );
+            assert_eq!(std::fs::read_to_string(&path).unwrap(), "external edit");
+        }
 
-    #[tokio::test]
-    async fn write_file_existing_without_read_is_rejected() {
-        let dir = canonical_tempdir();
-        let path = dir.path().join("existing.txt");
-        std::fs::write(&path, "old content").unwrap();
+        #[tokio::test]
+        async fn creates_parent_directories() {
+            let dir = canonical_tempdir();
+            let path = dir.path().join("a").join("b").join("c.txt");
 
-        let err = write_file(path.to_str().unwrap(), "new content", &temp_ctx())
-            .await
-            .unwrap_err();
-        assert!(
-            err.contains("has not been read"),
-            "expected must-read-first error, got: {err}",
-        );
-        assert_eq!(std::fs::read_to_string(&path).unwrap(), "old content");
-    }
+            write_file(path.to_str().unwrap(), "deep", &temp_ctx())
+                .await
+                .unwrap();
+            assert_eq!(std::fs::read_to_string(&path).unwrap(), "deep");
+        }
 
-    #[tokio::test]
-    async fn write_file_after_read_overwrites_existing() {
-        let dir = canonical_tempdir();
-        let path = dir.path().join("existing.txt");
-        std::fs::write(&path, "old content").unwrap();
+        #[tokio::test]
+        async fn empty_content_creates_empty_file() {
+            let dir = canonical_tempdir();
+            let path = dir.path().join("empty.txt");
 
-        let ctx = temp_ctx();
-        seed_full_read(&ctx.tracker, &path);
+            write_file(path.to_str().unwrap(), "", &temp_ctx())
+                .await
+                .unwrap();
+            assert_eq!(std::fs::read_to_string(&path).unwrap(), "");
+        }
 
-        let mode = write_file(path.to_str().unwrap(), "new content", &ctx)
-            .await
-            .unwrap();
+        #[tokio::test]
+        async fn fails_when_parent_is_a_file() {
+            // Unix fails the stat with ENOTDIR, and Windows, which reports the path as missing,
+            // fails creating the parent. Either error names the blocking path.
+            let dir = canonical_tempdir();
+            let blocker = dir.path().join("blocker");
+            std::fs::write(&blocker, "I am a file").unwrap();
 
-        assert_eq!(mode, WriteMode::Overwrite);
-        assert_eq!(std::fs::read_to_string(&path).unwrap(), "new content");
-    }
+            let path = blocker.join("child.txt");
+            let err = write_file(path.to_str().unwrap(), "content", &temp_ctx())
+                .await
+                .unwrap_err();
+            assert!(
+                err.contains(blocker.to_str().unwrap()),
+                "expected the error to name the blocking file, got: {err}",
+            );
+            assert_eq!(std::fs::read_to_string(&blocker).unwrap(), "I am a file");
+        }
 
-    #[tokio::test]
-    async fn write_file_needs_every_line_read_across_paged_reads() {
-        let dir = canonical_tempdir();
-        let path = dir.path().join("existing.txt");
-        std::fs::write(&path, "one\ntwo\nthree\n").unwrap();
-        let ctx = temp_ctx();
-        let read = ReadTool;
+        #[tokio::test]
+        async fn rejects_directory_before_gate() {
+            let dir = canonical_tempdir();
+            let err = write_file(dir.path().to_str().unwrap(), "content", &temp_ctx())
+                .await
+                .unwrap_err();
+            assert!(
+                err.contains("is a directory"),
+                "expected directory rejection, got: {err}",
+            );
+        }
 
-        let first = testing::run(
-            &read,
-            serde_json::json!({"file_path": path, "limit": 2}),
-            &ctx,
-        )
-        .await;
-        assert!(!first.is_error, "{}", first.content);
-        let err = write_file(path.to_str().unwrap(), "new", &ctx)
-            .await
-            .unwrap_err();
-        assert!(err.contains("only been read in part"), "{err}");
+        #[tokio::test]
+        async fn rejects_oversized_file_before_gate() {
+            let dir = canonical_tempdir();
+            let path = dir.path().join("huge.txt");
+            let f = std::fs::File::create(&path).unwrap();
+            f.set_len(MAX_TRACKED_FILE_SIZE + 1).unwrap();
 
-        let rest = testing::run(
-            &read,
-            serde_json::json!({"file_path": path, "offset": 3}),
-            &ctx,
-        )
-        .await;
-        assert!(!rest.is_error, "{}", rest.content);
-        write_file(path.to_str().unwrap(), "new", &ctx)
-            .await
-            .unwrap();
-        assert_eq!(std::fs::read_to_string(&path).unwrap(), "new");
-    }
+            let err = write_file(path.to_str().unwrap(), "content", &temp_ctx())
+                .await
+                .unwrap_err();
+            assert!(
+                err.contains("too large"),
+                "expected size-limit rejection, got: {err}",
+            );
+        }
 
-    #[tokio::test]
-    async fn write_file_after_external_modification_is_rejected() {
-        let dir = canonical_tempdir();
-        let path = dir.path().join("existing.txt");
-        std::fs::write(&path, "old content").unwrap();
+        #[tokio::test]
+        async fn refuses_a_dangling_symlink_at_the_final_component() {
+            let dir = canonical_tempdir();
+            std::fs::create_dir(dir.path().join("outside")).unwrap();
+            let target = dir.path().join("outside").join("escape.txt");
+            let link = dir.path().join("notes.md");
+            symlink_file(&target, &link);
 
-        let ctx = temp_ctx();
-        seed_full_read(&ctx.tracker, &path);
-        std::fs::write(&path, "external edit").unwrap();
+            let err = write_file(link.to_str().unwrap(), "payload", &temp_ctx())
+                .await
+                .unwrap_err();
+            assert!(
+                err.contains("is a symlink"),
+                "expected symlink refusal, got: {err}"
+            );
+            assert!(!target.exists(), "the link target must not be created");
+        }
 
-        let err = write_file(path.to_str().unwrap(), "our edit", &ctx)
-            .await
-            .unwrap_err();
-        assert!(
-            err.contains("modified externally"),
-            "drift error expected, got: {err}",
-        );
-        assert_eq!(std::fs::read_to_string(&path).unwrap(), "external edit");
-    }
+        #[cfg(unix)]
+        #[tokio::test]
+        async fn records_a_new_file_under_its_canonical_key() {
+            let dir = canonical_tempdir();
+            std::fs::create_dir(dir.path().join("real")).unwrap();
+            std::os::unix::fs::symlink(dir.path().join("real"), dir.path().join("link")).unwrap();
+            let ctx = temp_ctx();
 
-    #[cfg(unix)]
-    #[tokio::test]
-    async fn write_file_records_a_new_file_under_its_canonical_key() {
-        let dir = canonical_tempdir();
-        std::fs::create_dir(dir.path().join("real")).unwrap();
-        std::os::unix::fs::symlink(dir.path().join("real"), dir.path().join("link")).unwrap();
-        let ctx = temp_ctx();
+            let via_link = dir.path().join("link/new.txt");
+            write_file(via_link.to_str().unwrap(), "fresh", &ctx)
+                .await
+                .unwrap();
 
-        let via_link = dir.path().join("link/new.txt");
-        write_file(via_link.to_str().unwrap(), "fresh", &ctx)
-            .await
-            .unwrap();
+            let real = dir.path().join("real/new.txt");
+            let result = ctx
+                .tracker
+                .verify_current_content(&real, b"fresh", GatePurpose::Write);
+            assert_eq!(result, Ok(()));
+        }
 
-        let real = dir.path().join("real/new.txt");
-        let result = ctx
-            .tracker
-            .verify_current_content(&real, b"fresh", GatePurpose::Write);
-        assert_eq!(result, Ok(()));
-    }
+        #[cfg(unix)]
+        #[tokio::test]
+        async fn rejects_non_regular_file_before_gate() {
+            let dir = canonical_tempdir();
+            let path = dir.path().join("socket");
+            let _listener = std::os::unix::net::UnixListener::bind(&path).unwrap();
 
-    #[tokio::test]
-    async fn write_file_creates_parent_directories() {
-        let dir = canonical_tempdir();
-        let path = dir.path().join("a").join("b").join("c.txt");
+            let err = write_file(path.to_str().unwrap(), "content", &temp_ctx())
+                .await
+                .unwrap_err();
+            assert!(
+                err.contains("not a regular file"),
+                "expected non-regular-file rejection, got: {err}",
+            );
+        }
 
-        write_file(path.to_str().unwrap(), "deep", &temp_ctx())
-            .await
-            .unwrap();
-        assert_eq!(std::fs::read_to_string(&path).unwrap(), "deep");
-    }
+        #[cfg(unix)]
+        #[tokio::test]
+        async fn fails_on_read_only_file() {
+            use std::os::unix::fs::PermissionsExt;
 
-    #[tokio::test]
-    async fn write_file_empty_content_creates_empty_file() {
-        let dir = canonical_tempdir();
-        let path = dir.path().join("empty.txt");
+            let dir = canonical_tempdir();
+            let path = dir.path().join("locked.txt");
+            std::fs::write(&path, "original").unwrap();
+            let ctx = temp_ctx();
+            seed_full_read(&ctx.tracker, &path);
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o444)).unwrap();
 
-        write_file(path.to_str().unwrap(), "", &temp_ctx())
-            .await
-            .unwrap();
-        assert_eq!(std::fs::read_to_string(&path).unwrap(), "");
-    }
+            let err = write_file(path.to_str().unwrap(), "overwrite", &ctx)
+                .await
+                .unwrap_err();
 
-    #[tokio::test]
-    async fn write_file_fails_when_parent_is_a_file() {
-        // Unix fails the stat with ENOTDIR, and Windows, which reports the path as missing, fails
-        // creating the parent. Either error names the blocking path.
-        let dir = canonical_tempdir();
-        let blocker = dir.path().join("blocker");
-        std::fs::write(&blocker, "I am a file").unwrap();
+            let cause = std::fs::OpenOptions::new()
+                .write(true)
+                .open(&path)
+                .unwrap_err();
+            assert_eq!(err, format!("Failed to write {}: {cause}", path.display()));
+            assert_eq!(std::fs::read_to_string(&path).unwrap(), "original");
+        }
 
-        let path = blocker.join("child.txt");
-        let err = write_file(path.to_str().unwrap(), "content", &temp_ctx())
-            .await
-            .unwrap_err();
-        assert!(
-            err.contains(blocker.to_str().unwrap()),
-            "expected the error to name the blocking file, got: {err}",
-        );
-        assert_eq!(std::fs::read_to_string(&blocker).unwrap(), "I am a file");
-    }
+        #[cfg(unix)]
+        #[tokio::test]
+        async fn fails_when_parent_creation_is_denied() {
+            // The missing target passes the stat, so the read-only ancestor denies
+            // `create_dir_all`. It stays empty, so the temp dir still cleans up.
+            use std::os::unix::fs::PermissionsExt;
 
-    #[tokio::test]
-    async fn write_file_rejects_directory_before_gate() {
-        let dir = canonical_tempdir();
-        let err = write_file(dir.path().to_str().unwrap(), "content", &temp_ctx())
-            .await
-            .unwrap_err();
-        assert!(
-            err.contains("is a directory"),
-            "expected directory rejection, got: {err}",
-        );
-    }
+            let dir = canonical_tempdir();
+            let readonly = dir.path().join("readonly");
+            std::fs::create_dir(&readonly).unwrap();
+            let path = readonly.join("nested").join("file.txt");
+            std::fs::set_permissions(&readonly, std::fs::Permissions::from_mode(0o555)).unwrap();
 
-    #[tokio::test]
-    async fn write_file_rejects_oversized_file_before_gate() {
-        let dir = canonical_tempdir();
-        let path = dir.path().join("huge.txt");
-        let f = std::fs::File::create(&path).unwrap();
-        f.set_len(MAX_TRACKED_FILE_SIZE + 1).unwrap();
-
-        let err = write_file(path.to_str().unwrap(), "content", &temp_ctx())
-            .await
-            .unwrap_err();
-        assert!(
-            err.contains("too large"),
-            "expected size-limit rejection, got: {err}",
-        );
-    }
-
-    #[tokio::test]
-    async fn write_file_refuses_a_dangling_symlink_at_the_final_component() {
-        let dir = canonical_tempdir();
-        std::fs::create_dir(dir.path().join("outside")).unwrap();
-        let target = dir.path().join("outside").join("escape.txt");
-        let link = dir.path().join("notes.md");
-        symlink_file(&target, &link);
-
-        let err = write_file(link.to_str().unwrap(), "payload", &temp_ctx())
-            .await
-            .unwrap_err();
-        assert!(
-            err.contains("is a symlink"),
-            "expected symlink refusal, got: {err}"
-        );
-        assert!(!target.exists(), "the link target must not be created");
-    }
-
-    #[cfg(unix)]
-    #[tokio::test]
-    async fn write_file_rejects_non_regular_file_before_gate() {
-        let dir = canonical_tempdir();
-        let path = dir.path().join("socket");
-        let _listener = std::os::unix::net::UnixListener::bind(&path).unwrap();
-
-        let err = write_file(path.to_str().unwrap(), "content", &temp_ctx())
-            .await
-            .unwrap_err();
-        assert!(
-            err.contains("not a regular file"),
-            "expected non-regular-file rejection, got: {err}",
-        );
-    }
-
-    #[cfg(unix)]
-    #[tokio::test]
-    async fn write_file_fails_on_read_only_file() {
-        use std::os::unix::fs::PermissionsExt;
-
-        let dir = canonical_tempdir();
-        let path = dir.path().join("locked.txt");
-        std::fs::write(&path, "original").unwrap();
-        let ctx = temp_ctx();
-        seed_full_read(&ctx.tracker, &path);
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o444)).unwrap();
-
-        let err = write_file(path.to_str().unwrap(), "overwrite", &ctx)
-            .await
-            .unwrap_err();
-
-        let cause = std::fs::OpenOptions::new()
-            .write(true)
-            .open(&path)
-            .unwrap_err();
-        assert_eq!(err, format!("Failed to write {}: {cause}", path.display()));
-        assert_eq!(std::fs::read_to_string(&path).unwrap(), "original");
-    }
-
-    #[cfg(unix)]
-    #[tokio::test]
-    async fn write_file_fails_when_parent_creation_is_denied() {
-        // The missing target passes the stat, so the read-only ancestor denies `create_dir_all`.
-        // It stays empty, so the temp dir still cleans up.
-        use std::os::unix::fs::PermissionsExt;
-
-        let dir = canonical_tempdir();
-        let readonly = dir.path().join("readonly");
-        std::fs::create_dir(&readonly).unwrap();
-        let path = readonly.join("nested").join("file.txt");
-        std::fs::set_permissions(&readonly, std::fs::Permissions::from_mode(0o555)).unwrap();
-
-        let err = write_file(path.to_str().unwrap(), "content", &temp_ctx())
-            .await
-            .unwrap_err();
-        let expected = format!(
-            "Failed to create directory {}: ",
-            readonly.join("nested").display()
-        );
-        assert!(
-            err.starts_with(&expected),
-            "expected mkdir denial, got: {err}"
-        );
+            let err = write_file(path.to_str().unwrap(), "content", &temp_ctx())
+                .await
+                .unwrap_err();
+            let expected = format!(
+                "Failed to create directory {}: ",
+                readonly.join("nested").display()
+            );
+            assert!(
+                err.starts_with(&expected),
+                "expected mkdir denial, got: {err}"
+            );
+        }
     }
 }

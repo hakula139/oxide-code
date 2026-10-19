@@ -363,1090 +363,1117 @@ mod tests {
         ctx_with(&std::env::temp_dir(), tracker_seeded(path))
     }
 
-    // ── result_view ──
+    mod result_view {
+        use super::*;
 
-    #[test]
-    fn result_view_prefers_structured_chunks_from_metadata_on_live_path() {
-        let input = serde_json::json!({
-            "file_path": "/tmp/f.rs",
-            "old_string": "a",
-            "new_string": "b",
-            "replace_all": true,
-        });
-        let chunks = vec![
-            DiffChunk {
-                old: vec![DiffLine {
-                    number: 12,
-                    text: "a".to_owned(),
-                }],
-                new: vec![DiffLine {
-                    number: 12,
-                    text: "b".to_owned(),
-                }],
-            },
-            DiffChunk {
-                old: vec![DiffLine {
-                    number: 47,
-                    text: "a".to_owned(),
-                }],
-                new: vec![DiffLine {
-                    number: 47,
-                    text: "b".to_owned(),
-                }],
-            },
-        ];
-        let metadata = ToolMetadata {
-            diff_chunks: Some(chunks.clone()),
-            ..ToolMetadata::default()
-        };
-        let view = EditTool.result_view(
-            &input,
-            "Replaced 2 occurrences in /tmp/f.rs.",
-            &metadata,
-            Path::new("/repo"),
-        );
-        assert_eq!(
-            view,
-            Some(ToolResultView::Diff {
-                chunks,
-                replace_all: true,
-                replacements: 2,
-            }),
-        );
+        #[test]
+        fn prefers_structured_chunks_from_metadata_on_live_path() {
+            let input = serde_json::json!({
+                "file_path": "/tmp/f.rs",
+                "old_string": "a",
+                "new_string": "b",
+                "replace_all": true,
+            });
+            let chunks = vec![
+                DiffChunk {
+                    old: vec![DiffLine {
+                        number: 12,
+                        text: "a".to_owned(),
+                    }],
+                    new: vec![DiffLine {
+                        number: 12,
+                        text: "b".to_owned(),
+                    }],
+                },
+                DiffChunk {
+                    old: vec![DiffLine {
+                        number: 47,
+                        text: "a".to_owned(),
+                    }],
+                    new: vec![DiffLine {
+                        number: 47,
+                        text: "b".to_owned(),
+                    }],
+                },
+            ];
+            let metadata = ToolMetadata {
+                diff_chunks: Some(chunks.clone()),
+                ..ToolMetadata::default()
+            };
+            let view = EditTool.result_view(
+                &input,
+                "Replaced 2 occurrences in /tmp/f.rs.",
+                &metadata,
+                Path::new("/repo"),
+            );
+            assert_eq!(
+                view,
+                Some(ToolResultView::Diff {
+                    chunks,
+                    replace_all: true,
+                    replacements: 2,
+                }),
+            );
+        }
+
+        #[test]
+        fn synthesizes_chunk_when_metadata_lacks_diff_chunks() {
+            let input = serde_json::json!({
+                "file_path": "/tmp/f.rs",
+                "old_string": "fn foo()",
+                "new_string": "fn bar()",
+            });
+            let view = EditTool.result_view(
+                &input,
+                "Successfully edited /tmp/f.rs.",
+                &ToolMetadata::default(),
+                Path::new("/repo"),
+            );
+            assert_eq!(
+                view,
+                Some(ToolResultView::Diff {
+                    chunks: vec![DiffChunk {
+                        old: vec![DiffLine {
+                            number: 1,
+                            text: "fn foo()".to_owned()
+                        }],
+                        new: vec![DiffLine {
+                            number: 1,
+                            text: "fn bar()".to_owned()
+                        }],
+                    }],
+                    replace_all: false,
+                    replacements: 1,
+                }),
+            );
+        }
+
+        #[test]
+        fn missing_or_mistyped_required_inputs_uses_plain_output() {
+            for input in [
+                serde_json::json!({"old_string": "x"}),
+                serde_json::json!({"file_path": "/tmp/x"}),
+                serde_json::json!({"file_path": "/tmp/x", "old_string": 42, "new_string": "b"}),
+                serde_json::json!({"file_path": "/tmp/x", "old_string": "a", "new_string": 42}),
+            ] {
+                assert_eq!(
+                    EditTool.result_view(
+                        &input,
+                        "edited",
+                        &ToolMetadata::default(),
+                        Path::new("/repo")
+                    ),
+                    None,
+                    "{input}",
+                );
+            }
+        }
     }
 
-    #[test]
-    fn result_view_synthesizes_chunk_when_metadata_lacks_diff_chunks() {
-        let input = serde_json::json!({
-            "file_path": "/tmp/f.rs",
-            "old_string": "fn foo()",
-            "new_string": "fn bar()",
-        });
-        let view = EditTool.result_view(
-            &input,
-            "Successfully edited /tmp/f.rs.",
-            &ToolMetadata::default(),
-            Path::new("/repo"),
-        );
-        assert_eq!(
-            view,
-            Some(ToolResultView::Diff {
-                chunks: vec![DiffChunk {
+    mod approval_preview {
+        use super::*;
+
+        #[tokio::test]
+        async fn renders_old_and_new_as_a_diff() {
+            let tool = EditTool;
+            let preview = tool
+                .approval_preview(
+                    "edit",
+                    &serde_json::json!({
+                        "file_path": "/repo/src/main.rs",
+                        "old_string": "let a = 1;",
+                        "new_string": "let a = 2;",
+                    }),
+                    Path::new("/repo"),
+                )
+                .await;
+
+            assert_eq!(preview.title, "Edit(src/main.rs)");
+            assert_eq!(
+                preview.body,
+                ApprovalBody::Diff(vec![DiffChunk {
                     old: vec![DiffLine {
                         number: 1,
-                        text: "fn foo()".to_owned()
+                        text: "let a = 1;".to_owned(),
                     }],
                     new: vec![DiffLine {
                         number: 1,
-                        text: "fn bar()".to_owned()
+                        text: "let a = 2;".to_owned(),
                     }],
-                }],
-                replace_all: false,
-                replacements: 1,
-            }),
-        );
-    }
-
-    #[test]
-    fn result_view_missing_or_mistyped_required_inputs_uses_plain_output() {
-        for input in [
-            serde_json::json!({"old_string": "x"}),
-            serde_json::json!({"file_path": "/tmp/x"}),
-            serde_json::json!({"file_path": "/tmp/x", "old_string": 42, "new_string": "b"}),
-            serde_json::json!({"file_path": "/tmp/x", "old_string": "a", "new_string": 42}),
-        ] {
-            assert_eq!(
-                EditTool.result_view(
-                    &input,
-                    "edited",
-                    &ToolMetadata::default(),
-                    Path::new("/repo")
-                ),
-                None,
-                "{input}",
+                }]),
             );
         }
     }
 
-    // ── approval_preview ──
+    mod run {
+        use super::*;
 
-    #[tokio::test]
-    async fn approval_preview_renders_old_and_new_as_a_diff() {
-        let tool = EditTool;
-        let preview = tool
-            .approval_preview(
-                "edit",
-                &serde_json::json!({
-                    "file_path": "/repo/src/main.rs",
-                    "old_string": "let a = 1;",
-                    "new_string": "let a = 2;",
+        #[tokio::test]
+        async fn valid_edit_updates_file() {
+            let dir = canonical_tempdir();
+            let path = dir.path().join("test.txt");
+            std::fs::write(&path, "hello world").unwrap();
+
+            let input = serde_json::json!({
+                "file_path": path.to_str().unwrap(),
+                "old_string": "hello",
+                "new_string": "goodbye"
+            });
+
+            let output = testing::run(&EditTool, input, &seeded_ctx(&path)).await;
+
+            assert!(!output.is_error);
+            assert_eq!(
+                output.content,
+                format!("Successfully edited {}.", path.display())
+            );
+            assert_eq!(std::fs::read_to_string(&path).unwrap(), "goodbye world");
+            assert_eq!(
+                output.metadata.title.as_deref(),
+                Some("Edited test.txt"),
+                "success path attaches the Edited title",
+            );
+        }
+
+        #[tokio::test]
+        async fn replace_all_reports_every_replaced_occurrence() {
+            let dir = canonical_tempdir();
+            let path = dir.path().join("test.txt");
+            std::fs::write(&path, "aaa bbb aaa").unwrap();
+            let input = serde_json::json!({
+                "file_path": path,
+                "old_string": "aaa",
+                "new_string": "ccc",
+                "replace_all": true,
+            });
+
+            let output = run(input, &seeded_ctx(&path)).await;
+
+            assert_eq!(
+                output.content,
+                format!("Replaced 2 occurrences in {}.", path.display())
+            );
+            assert_eq!(std::fs::read_to_string(&path).unwrap(), "ccc bbb ccc");
+        }
+
+        #[tokio::test]
+        async fn replace_all_with_a_single_match_reports_an_edit() {
+            let dir = canonical_tempdir();
+            let path = dir.path().join("test.txt");
+            std::fs::write(&path, "hello world").unwrap();
+            let input = serde_json::json!({
+                "file_path": path,
+                "old_string": "hello",
+                "new_string": "goodbye",
+                "replace_all": true,
+            });
+
+            let output = run(input, &seeded_ctx(&path)).await;
+
+            assert_eq!(
+                output.content,
+                format!("Successfully edited {}.", path.display())
+            );
+            assert_eq!(std::fs::read_to_string(&path).unwrap(), "goodbye world");
+        }
+
+        #[tokio::test]
+        async fn missing_required_fields_reports_input_error() {
+            let output = run(
+                serde_json::json!({
+                    "file_path": "/tmp/x",
+                    "old_string": "a"
                 }),
-                Path::new("/repo"),
+                &temp_ctx(),
+            )
+            .await;
+            assert!(output.is_error);
+            assert!(output.content.contains("Invalid input"));
+        }
+
+        #[tokio::test]
+        async fn edit_error_omits_edited_title() {
+            let dir = canonical_tempdir();
+            let path = dir.path().join("test.txt");
+            std::fs::write(&path, "hello world").unwrap();
+
+            let output = run(
+                serde_json::json!({
+                    "file_path": path.to_str().unwrap(),
+                    "old_string": "not present",
+                    "new_string": "x",
+                }),
+                &seeded_ctx(&path),
             )
             .await;
 
-        assert_eq!(preview.title, "Edit(src/main.rs)");
-        assert_eq!(
-            preview.body,
-            ApprovalBody::Diff(vec![DiffChunk {
+            assert!(output.is_error);
+            assert_eq!(
+                output.metadata.title, None,
+                "error path must not claim the edit happened",
+            );
+        }
+    }
+
+    mod edit_file {
+        use super::*;
+
+        #[tokio::test]
+        async fn replaces_unique_string() {
+            let dir = canonical_tempdir();
+            let path = dir.path().join("test.txt");
+            std::fs::write(
+                &path,
+                indoc! {"
+                    fn foo() {}
+                    fn bar() {}
+                "},
+            )
+            .unwrap();
+
+            edit_file(
+                path.to_str().unwrap(),
+                "fn foo() {}",
+                "fn foo() -> i32 { 42 }",
+                false,
+                &seeded_ctx(&path),
+            )
+            .await
+            .unwrap();
+
+            let content = std::fs::read_to_string(&path).unwrap();
+            assert_eq!(
+                content,
+                indoc! {"
+                    fn foo() -> i32 { 42 }
+                    fn bar() {}
+                "}
+            );
+        }
+
+        #[tokio::test]
+        async fn crlf_matching_preserves_line_endings() {
+            let dir = canonical_tempdir();
+            let path = dir.path().join("test.txt");
+            std::fs::write(&path, "line1\r\nline2\r\n").unwrap();
+
+            edit_file(
+                path.to_str().unwrap(),
+                "line1\nline2",
+                "a\nb",
+                false,
+                &seeded_ctx(&path),
+            )
+            .await
+            .unwrap();
+
+            let bytes = std::fs::read(&path).unwrap();
+            assert_eq!(bytes, b"a\r\nb\r\n");
+        }
+
+        #[tokio::test]
+        async fn crlf_in_new_string_not_doubled() {
+            let dir = canonical_tempdir();
+            let path = dir.path().join("test.txt");
+            std::fs::write(&path, "aaa\r\nbbb\r\n").unwrap();
+
+            edit_file(
+                path.to_str().unwrap(),
+                "aaa",
+                "x\r\ny",
+                false,
+                &seeded_ctx(&path),
+            )
+            .await
+            .unwrap();
+
+            let bytes = std::fs::read(&path).unwrap();
+            assert_eq!(bytes, b"x\r\ny\r\nbbb\r\n");
+        }
+
+        #[tokio::test]
+        async fn mixed_eol_normalized_to_dominant() {
+            let dir = canonical_tempdir();
+            let path = dir.path().join("mixed.txt");
+            std::fs::write(&path, "aaa\nbbb\r\nreplace_me\r\n").unwrap();
+
+            edit_file(
+                path.to_str().unwrap(),
+                "replace_me",
+                "replaced",
+                false,
+                &seeded_ctx(&path),
+            )
+            .await
+            .unwrap();
+
+            let bytes = std::fs::read(&path).unwrap();
+            assert_eq!(bytes, b"aaa\r\nbbb\r\nreplaced\r\n");
+        }
+
+        #[tokio::test]
+        async fn mixed_eol_multiline_match() {
+            let dir = canonical_tempdir();
+            let path = dir.path().join("mixed.txt");
+            std::fs::write(&path, "foo\nbar\r\nbaz\r\n").unwrap();
+
+            edit_file(
+                path.to_str().unwrap(),
+                "foo\nbar",
+                "a\nb",
+                false,
+                &seeded_ctx(&path),
+            )
+            .await
+            .unwrap();
+
+            let bytes = std::fs::read(&path).unwrap();
+            assert_eq!(bytes, b"a\r\nb\r\nbaz\r\n");
+        }
+
+        #[tokio::test]
+        async fn rejects_empty_old_string() {
+            let dir = canonical_tempdir();
+            let path = dir.path().join("test.txt");
+            std::fs::write(&path, "hello").unwrap();
+
+            let err = edit_file(path.to_str().unwrap(), "", "x", false, &temp_ctx())
+                .await
+                .unwrap_err();
+            assert!(err.contains("must not be empty"));
+            assert_eq!(std::fs::read_to_string(&path).unwrap(), "hello");
+        }
+
+        #[tokio::test]
+        async fn rejects_identical_strings() {
+            let dir = canonical_tempdir();
+            let path = dir.path().join("test.txt");
+            std::fs::write(&path, "hello").unwrap();
+
+            let err = edit_file(path.to_str().unwrap(), "hello", "hello", false, &temp_ctx())
+                .await
+                .unwrap_err();
+            assert!(err.contains("identical"));
+        }
+
+        #[tokio::test]
+        async fn rejects_string_not_found() {
+            let dir = canonical_tempdir();
+            let path = dir.path().join("test.txt");
+            std::fs::write(&path, "hello world").unwrap();
+
+            let err = edit_file(
+                path.to_str().unwrap(),
+                "nonexistent",
+                "replacement",
+                false,
+                &seeded_ctx(&path),
+            )
+            .await
+            .unwrap_err();
+            assert_eq!(
+                err,
+                format!(
+                    "Found no occurrence of old_string in {}. \
+                     Copy it exactly from the file, including whitespace and indentation.",
+                    path.display(),
+                ),
+            );
+        }
+
+        #[tokio::test]
+        async fn without_prior_read_is_rejected() {
+            let dir = canonical_tempdir();
+            let path = dir.path().join("test.txt");
+            std::fs::write(&path, "hello world").unwrap();
+
+            let err = edit_file(
+                path.to_str().unwrap(),
+                "hello",
+                "goodbye",
+                false,
+                &temp_ctx(),
+            )
+            .await
+            .unwrap_err();
+            assert!(
+                err.contains("has not been read"),
+                "expected must-read-first rejection, got: {err}",
+            );
+            assert_eq!(std::fs::read_to_string(&path).unwrap(), "hello world");
+        }
+
+        #[tokio::test]
+        async fn after_external_modification_is_rejected() {
+            let dir = canonical_tempdir();
+            let path = dir.path().join("test.txt");
+            std::fs::write(&path, "hello world").unwrap();
+            let ctx = seeded_ctx(&path);
+            std::fs::write(&path, "external edit").unwrap();
+
+            let err = edit_file(path.to_str().unwrap(), "external", "ours", false, &ctx)
+                .await
+                .unwrap_err();
+            assert!(
+                err.contains("modified externally"),
+                "drift error expected, got: {err}",
+            );
+        }
+
+        #[tokio::test]
+        async fn accepts_a_read_under_another_spelling_of_the_path() {
+            let dir = canonical_tempdir();
+            std::fs::create_dir(dir.path().join("sub")).unwrap();
+            let path = dir.path().join("test.txt");
+            std::fs::write(&path, "hello world").unwrap();
+            let ctx = temp_ctx();
+
+            let read = testing::run(&ReadTool, serde_json::json!({"file_path": path}), &ctx).await;
+            assert!(!read.is_error, "{}", read.content);
+
+            let detour = dir.path().join("sub").join("..").join("test.txt");
+            edit_file(detour.to_str().unwrap(), "hello", "goodbye", false, &ctx)
+                .await
+                .unwrap();
+            assert_eq!(std::fs::read_to_string(&path).unwrap(), "goodbye world");
+        }
+
+        #[tokio::test]
+        async fn accepts_a_partial_read_of_current_content() {
+            let dir = canonical_tempdir();
+            let path = dir.path().join("test.txt");
+            std::fs::write(&path, "hello world\nsecond line\n").unwrap();
+            let bytes = std::fs::read(&path).unwrap();
+            let ctx = temp_ctx();
+            ctx.tracker
+                .record_read(&path, &bytes, LastView::lines(1, 1, 2), "toolu_test");
+
+            edit_file(path.to_str().unwrap(), "hello", "goodbye", false, &ctx)
+                .await
+                .unwrap();
+            assert_eq!(
+                std::fs::read_to_string(&path).unwrap(),
+                "goodbye world\nsecond line\n",
+            );
+        }
+
+        #[tokio::test]
+        async fn rejects_nonexistent_file() {
+            let path = "/nonexistent/file.txt";
+
+            let err = edit_file(path, "a", "b", false, &temp_ctx())
+                .await
+                .unwrap_err();
+
+            let cause = std::fs::metadata(path).unwrap_err();
+            assert_eq!(err, format!("Failed to access {path}: {cause}"));
+        }
+
+        #[tokio::test]
+        async fn rejects_non_utf8_content() {
+            let dir = canonical_tempdir();
+            let path = dir.path().join("blob.bin");
+            let bytes = [0xff_u8, 0xfe, 0xfd];
+            std::fs::write(&path, bytes).unwrap();
+            let ctx = temp_ctx();
+            ctx.tracker
+                .record_read(&path, &bytes, LastView::Full, "toolu_test");
+
+            let err = edit_file(path.to_str().unwrap(), "a", "b", false, &ctx)
+                .await
+                .unwrap_err();
+
+            let cause = String::from_utf8(bytes.to_vec()).unwrap_err();
+            assert_eq!(err, format!("Failed to read {}: {cause}", path.display()));
+        }
+
+        #[tokio::test]
+        async fn rejects_ambiguous_match() {
+            let dir = canonical_tempdir();
+            let path = dir.path().join("test.txt");
+            std::fs::write(&path, "aaa bbb aaa").unwrap();
+
+            let err = edit_file(
+                path.to_str().unwrap(),
+                "aaa",
+                "ccc",
+                false,
+                &seeded_ctx(&path),
+            )
+            .await
+            .unwrap_err();
+            assert_eq!(
+                err,
+                format!(
+                    "Found 2 occurrences of old_string in {}. \
+                     Set replace_all to true to replace them all, \
+                     or add context to make old_string unique.",
+                    path.display(),
+                ),
+            );
+        }
+
+        #[tokio::test]
+        async fn rejects_directory() {
+            let dir = canonical_tempdir();
+
+            let err = edit_file(dir.path().to_str().unwrap(), "a", "b", false, &temp_ctx())
+                .await
+                .unwrap_err();
+
+            assert!(
+                err.contains("is a directory"),
+                "expected directory rejection, got: {err}",
+            );
+        }
+
+        #[tokio::test]
+        async fn rejects_too_large_file() {
+            let dir = canonical_tempdir();
+            let path = dir.path().join("huge.txt");
+            let f = std::fs::File::create(&path).unwrap();
+            f.set_len(MAX_TRACKED_FILE_SIZE + 1).unwrap();
+
+            let err = edit_file(path.to_str().unwrap(), "a", "b", false, &temp_ctx())
+                .await
+                .unwrap_err();
+            assert!(err.contains("too large"));
+        }
+
+        #[tokio::test]
+        async fn chunks_carry_real_file_line_numbers_for_replace_all() {
+            let dir = canonical_tempdir();
+            let path = dir.path().join("multi.txt");
+            std::fs::write(
+                &path,
+                indoc! {"
+                    A
+                    B
+                    C
+                    B
+                "},
+            )
+            .unwrap();
+
+            let chunks = edit_file(path.to_str().unwrap(), "B", "X", true, &seeded_ctx(&path))
+                .await
+                .unwrap();
+
+            assert_eq!(chunks.len(), 2);
+            assert_eq!(
+                chunks[0].old,
+                vec![DiffLine {
+                    number: 2,
+                    text: "B".to_owned()
+                }]
+            );
+            assert_eq!(
+                chunks[0].new,
+                vec![DiffLine {
+                    number: 2,
+                    text: "X".to_owned()
+                }]
+            );
+            assert_eq!(
+                chunks[1].old,
+                vec![DiffLine {
+                    number: 4,
+                    text: "B".to_owned()
+                }]
+            );
+            assert_eq!(
+                chunks[1].new,
+                vec![DiffLine {
+                    number: 4,
+                    text: "X".to_owned()
+                }]
+            );
+        }
+
+        #[tokio::test]
+        async fn chunks_shift_new_side_for_growing_replace_all() {
+            let dir = canonical_tempdir();
+            let path = dir.path().join("grow.txt");
+            std::fs::write(
+                &path,
+                indoc! {"
+                    A
+                    B
+                    C
+                    B
+                "},
+            )
+            .unwrap();
+
+            let chunks = edit_file(
+                path.to_str().unwrap(),
+                "B",
+                "X\nY",
+                true,
+                &seeded_ctx(&path),
+            )
+            .await
+            .unwrap();
+
+            assert_eq!(chunks.len(), 2);
+            assert_eq!(chunks[0].old[0].number, 2);
+            assert_eq!(
+                chunks[0].new,
+                vec![
+                    DiffLine {
+                        number: 2,
+                        text: "X".to_owned()
+                    },
+                    DiffLine {
+                        number: 3,
+                        text: "Y".to_owned()
+                    },
+                ],
+            );
+            assert_eq!(chunks[1].old[0].number, 4);
+            assert_eq!(
+                chunks[1].new,
+                vec![
+                    DiffLine {
+                        number: 5,
+                        text: "X".to_owned()
+                    },
+                    DiffLine {
+                        number: 6,
+                        text: "Y".to_owned()
+                    },
+                ],
+            );
+        }
+
+        #[tokio::test]
+        async fn chunks_shift_new_side_for_shrinking_replace_all() {
+            let dir = canonical_tempdir();
+            let path = dir.path().join("shrink.txt");
+            std::fs::write(
+                &path,
+                indoc! {"
+                    X
+                    Y
+                    A
+                    X
+                    Y
+                    B
+                    X
+                    Y
+                    C
+                "},
+            )
+            .unwrap();
+
+            let chunks = edit_file(
+                path.to_str().unwrap(),
+                "X\nY",
+                "Z",
+                true,
+                &seeded_ctx(&path),
+            )
+            .await
+            .unwrap();
+
+            assert_eq!(chunks.len(), 3);
+            assert_eq!(chunks[0].old[0].number, 1);
+            assert_eq!(chunks[0].new[0].number, 1);
+            assert_eq!(chunks[1].old[0].number, 4);
+            assert_eq!(chunks[1].new[0].number, 3);
+            assert_eq!(chunks[2].old[0].number, 7);
+            assert_eq!(chunks[2].new[0].number, 5);
+        }
+
+        #[cfg(unix)]
+        #[tokio::test]
+        async fn accepts_a_read_through_a_symlinked_directory() {
+            let dir = canonical_tempdir();
+            std::fs::create_dir(dir.path().join("real")).unwrap();
+            std::os::unix::fs::symlink(dir.path().join("real"), dir.path().join("link")).unwrap();
+            let path = dir.path().join("real/test.txt");
+            std::fs::write(&path, "hello world").unwrap();
+            let ctx = temp_ctx();
+
+            let via_link = dir.path().join("link/test.txt");
+            let read =
+                testing::run(&ReadTool, serde_json::json!({"file_path": via_link}), &ctx).await;
+            assert!(!read.is_error, "{}", read.content);
+
+            edit_file(path.to_str().unwrap(), "hello", "goodbye", false, &ctx)
+                .await
+                .unwrap();
+            assert_eq!(std::fs::read_to_string(&path).unwrap(), "goodbye world");
+        }
+
+        #[cfg(unix)]
+        #[tokio::test]
+        async fn rejects_non_regular_file() {
+            let dir = canonical_tempdir();
+            let path = dir.path().join("socket");
+            let _listener = std::os::unix::net::UnixListener::bind(&path).unwrap();
+
+            let err = edit_file(path.to_str().unwrap(), "a", "b", false, &temp_ctx())
+                .await
+                .unwrap_err();
+
+            assert!(
+                err.contains("not a regular file"),
+                "expected non-regular-file rejection, got: {err}",
+            );
+        }
+
+        #[cfg(unix)]
+        #[tokio::test]
+        async fn fails_if_write_is_rejected() {
+            use std::os::unix::fs::PermissionsExt;
+
+            let dir = canonical_tempdir();
+            let path = dir.path().join("readonly.txt");
+            std::fs::write(&path, "hello world").unwrap();
+            let ctx = seeded_ctx(&path);
+
+            let mut perms = std::fs::metadata(&path).unwrap().permissions();
+            perms.set_mode(0o444);
+            std::fs::set_permissions(&path, perms).unwrap();
+
+            let err = edit_file(path.to_str().unwrap(), "hello", "goodbye", false, &ctx)
+                .await
+                .unwrap_err();
+            assert!(err.contains("Failed to write"));
+        }
+    }
+
+    mod build_diff_chunks {
+        use super::*;
+
+        #[test]
+        fn single_match_carries_real_position() {
+            let chunks = build_diff_chunks("A\nB\nC\n", "B", "X", 1);
+            assert_eq!(chunks.len(), 1);
+            assert_eq!(
+                chunks[0].old,
+                vec![DiffLine {
+                    number: 2,
+                    text: "B".to_owned()
+                }]
+            );
+            assert_eq!(
+                chunks[0].new,
+                vec![DiffLine {
+                    number: 2,
+                    text: "X".to_owned()
+                }]
+            );
+        }
+
+        #[test]
+        fn take_one_caps_at_first_match() {
+            let chunks = build_diff_chunks("B\nB\nB\n", "B", "X", 1);
+            assert_eq!(chunks.len(), 1);
+            assert_eq!(chunks[0].old[0].number, 1);
+        }
+
+        #[test]
+        fn applies_per_chunk_trim() {
+            let chunks = build_diff_chunks(
+                indoc! {"
+                    x
+                    x
+                    x
+                    x
+                    fn foo()
+                "},
+                "fn foo()",
+                "fn foo()\n    return 42;",
+                1,
+            );
+            assert_eq!(chunks.len(), 1);
+            assert_eq!(chunks[0].old, []);
+            assert_eq!(
+                chunks[0].new,
+                vec![DiffLine {
+                    number: 6,
+                    text: "    return 42;".to_owned()
+                }],
+            );
+        }
+    }
+
+    mod line_at_byte {
+        use super::*;
+
+        #[test]
+        fn first_line_is_one() {
+            assert_eq!(line_at_byte("A\nB\n", 0), 1);
+        }
+
+        #[test]
+        fn after_newline_increments() {
+            assert_eq!(line_at_byte("A\nB\nC\n", 2), 2);
+            assert_eq!(line_at_byte("A\nB\nC\n", 4), 3);
+        }
+
+        #[test]
+        fn end_of_file_after_trailing_newline() {
+            assert_eq!(line_at_byte("A\n", 2), 2);
+        }
+
+        #[test]
+        fn end_of_file_without_trailing_newline() {
+            assert_eq!(line_at_byte("AB", 2), 1);
+            assert_eq!(line_at_byte("A\nB", 3), 2);
+        }
+    }
+
+    mod split_into_diff_lines {
+        use super::*;
+
+        #[test]
+        fn numbers_from_start_line() {
+            assert_eq!(
+                split_into_diff_lines("a\nb", 47),
+                vec![
+                    DiffLine {
+                        number: 47,
+                        text: "a".to_owned()
+                    },
+                    DiffLine {
+                        number: 48,
+                        text: "b".to_owned()
+                    },
+                ],
+            );
+        }
+
+        #[test]
+        fn drops_trailing_newline() {
+            assert_eq!(
+                split_into_diff_lines("a\nb\n", 1),
+                vec![
+                    DiffLine {
+                        number: 1,
+                        text: "a".to_owned()
+                    },
+                    DiffLine {
+                        number: 2,
+                        text: "b".to_owned()
+                    },
+                ],
+            );
+        }
+
+        #[test]
+        fn empty_yields_empty() {
+            assert_eq!(split_into_diff_lines("", 1), []);
+        }
+    }
+
+    mod trim_chunk {
+        use super::*;
+
+        #[test]
+        fn drops_matching_prefix_and_suffix_preserving_numbers() {
+            let mut chunk = DiffChunk {
+                old: vec![
+                    DiffLine {
+                        number: 10,
+                        text: "anchor".to_owned(),
+                    },
+                    DiffLine {
+                        number: 11,
+                        text: "old".to_owned(),
+                    },
+                    DiffLine {
+                        number: 12,
+                        text: "tail".to_owned(),
+                    },
+                ],
+                new: vec![
+                    DiffLine {
+                        number: 10,
+                        text: "anchor".to_owned(),
+                    },
+                    DiffLine {
+                        number: 11,
+                        text: "new".to_owned(),
+                    },
+                    DiffLine {
+                        number: 12,
+                        text: "tail".to_owned(),
+                    },
+                ],
+            };
+            trim_chunk(&mut chunk);
+            assert_eq!(
+                chunk.old,
+                vec![DiffLine {
+                    number: 11,
+                    text: "old".to_owned()
+                }]
+            );
+            assert_eq!(
+                chunk.new,
+                vec![DiffLine {
+                    number: 11,
+                    text: "new".to_owned()
+                }]
+            );
+        }
+
+        #[test]
+        fn pure_tail_insertion_strips_anchor() {
+            let mut chunk = DiffChunk {
+                old: vec![DiffLine {
+                    number: 5,
+                    text: "fn foo()".to_owned(),
+                }],
+                new: vec![
+                    DiffLine {
+                        number: 5,
+                        text: "fn foo()".to_owned(),
+                    },
+                    DiffLine {
+                        number: 6,
+                        text: "    return 42;".to_owned(),
+                    },
+                ],
+            };
+            trim_chunk(&mut chunk);
+            assert_eq!(chunk.old, []);
+            assert_eq!(
+                chunk.new,
+                vec![DiffLine {
+                    number: 6,
+                    text: "    return 42;".to_owned()
+                }],
+            );
+        }
+
+        #[test]
+        fn fully_identical_collapses_both_sides() {
+            let mut chunk = DiffChunk {
                 old: vec![DiffLine {
                     number: 1,
-                    text: "let a = 1;".to_owned(),
+                    text: "a".to_owned(),
                 }],
                 new: vec![DiffLine {
                     number: 1,
-                    text: "let a = 2;".to_owned(),
+                    text: "a".to_owned(),
                 }],
-            }]),
-        );
+            };
+            trim_chunk(&mut chunk);
+            assert_eq!(chunk.old, []);
+            assert_eq!(chunk.new, []);
+        }
     }
 
-    // ── run ──
+    mod common_boundaries {
+        use super::*;
 
-    #[tokio::test]
-    async fn run_valid_edit_updates_file() {
-        let dir = canonical_tempdir();
-        let path = dir.path().join("test.txt");
-        std::fs::write(&path, "hello world").unwrap();
+        #[test]
+        fn produces_prefix_and_suffix_counts() {
+            let old = ["a", "b", "c", "d"];
+            let new = ["a", "X", "Y", "d"];
+            assert_eq!(common_boundaries(&old, &new), (1, 1));
+        }
 
-        let input = serde_json::json!({
-            "file_path": path.to_str().unwrap(),
-            "old_string": "hello",
-            "new_string": "goodbye"
-        });
+        #[test]
+        fn disjoint_is_zero() {
+            assert_eq!(common_boundaries(&["a"], &["b"]), (0, 0));
+        }
 
-        let output = testing::run(&EditTool, input, &seeded_ctx(&path)).await;
+        #[test]
+        fn empty_inputs_have_zero_boundaries() {
+            let empty: [&str; 0] = [];
+            assert_eq!(common_boundaries(&empty, &empty), (0, 0));
+        }
 
-        assert!(!output.is_error);
-        assert_eq!(
-            output.content,
-            format!("Successfully edited {}.", path.display())
-        );
-        assert_eq!(std::fs::read_to_string(&path).unwrap(), "goodbye world");
-        assert_eq!(
-            output.metadata.title.as_deref(),
-            Some("Edited test.txt"),
-            "success path attaches the Edited title",
-        );
+        #[test]
+        fn asymmetric_lengths_capped_by_shorter_side() {
+            assert_eq!(common_boundaries(&["a", "b", "a"], &["a", "X"]), (1, 0));
+            assert_eq!(common_boundaries(&["a", "X"], &["a", "b", "a"]), (1, 0));
+        }
     }
 
-    #[tokio::test]
-    async fn run_replace_all_reports_every_replaced_occurrence() {
-        let dir = canonical_tempdir();
-        let path = dir.path().join("test.txt");
-        std::fs::write(&path, "aaa bbb aaa").unwrap();
-        let input = serde_json::json!({
-            "file_path": path,
-            "old_string": "aaa",
-            "new_string": "ccc",
-            "replace_all": true,
-        });
+    mod dominant_eol {
+        use super::*;
 
-        let output = run(input, &seeded_ctx(&path)).await;
+        #[test]
+        fn lf_only_selects_lf() {
+            assert_eq!(dominant_eol("a\nb\n"), "\n");
+        }
 
-        assert_eq!(
-            output.content,
-            format!("Replaced 2 occurrences in {}.", path.display())
-        );
-        assert_eq!(std::fs::read_to_string(&path).unwrap(), "ccc bbb ccc");
+        #[test]
+        fn crlf_only_selects_crlf() {
+            assert_eq!(dominant_eol("a\r\nb\r\n"), "\r\n");
+        }
+
+        #[test]
+        fn mixed_favors_majority() {
+            assert_eq!(dominant_eol("a\nb\r\nc\r\n"), "\r\n");
+            assert_eq!(dominant_eol("a\nb\nc\r\n"), "\n");
+        }
+
+        #[test]
+        fn tie_defaults_to_lf() {
+            assert_eq!(dominant_eol("a\nb\r\n"), "\n");
+        }
+
+        #[test]
+        fn no_newlines_defaults_to_lf() {
+            assert_eq!(dominant_eol("no newlines"), "\n");
+        }
     }
 
-    #[tokio::test]
-    async fn run_replace_all_with_a_single_match_reports_an_edit() {
-        let dir = canonical_tempdir();
-        let path = dir.path().join("test.txt");
-        std::fs::write(&path, "hello world").unwrap();
-        let input = serde_json::json!({
-            "file_path": path,
-            "old_string": "hello",
-            "new_string": "goodbye",
-            "replace_all": true,
-        });
+    mod normalize_eol {
+        use super::*;
 
-        let output = run(input, &seeded_ctx(&path)).await;
+        #[test]
+        fn converts_crlf_to_lf() {
+            let out = normalize_eol("a\r\nb\r\n");
+            assert_eq!(out, "a\nb\n");
+            assert!(matches!(out, Cow::Owned(_)));
+        }
 
-        assert_eq!(
-            output.content,
-            format!("Successfully edited {}.", path.display())
-        );
-        assert_eq!(std::fs::read_to_string(&path).unwrap(), "goodbye world");
+        #[test]
+        fn lf_input_borrows() {
+            let out = normalize_eol("a\nb\n");
+            assert_eq!(out, "a\nb\n");
+            assert!(matches!(out, Cow::Borrowed(_)));
+        }
     }
 
-    #[tokio::test]
-    async fn run_missing_required_fields_reports_input_error() {
-        let output = run(
-            serde_json::json!({
-                "file_path": "/tmp/x",
-                "old_string": "a"
-            }),
-            &temp_ctx(),
-        )
-        .await;
-        assert!(output.is_error);
-        assert!(output.content.contains("Invalid input"));
+    mod apply_eol {
+        use super::*;
+
+        #[test]
+        fn inserts_cr_for_crlf() {
+            assert_eq!(apply_eol("a\nb\n".to_owned(), "\r\n"), "a\r\nb\r\n");
+        }
+
+        #[test]
+        fn lf_preserves_content() {
+            assert_eq!(apply_eol("a\nb\n".to_owned(), "\n"), "a\nb\n");
+        }
     }
 
-    #[tokio::test]
-    async fn run_edit_error_omits_edited_title() {
-        let dir = canonical_tempdir();
-        let path = dir.path().join("test.txt");
-        std::fs::write(&path, "hello world").unwrap();
-
-        let output = run(
-            serde_json::json!({
-                "file_path": path.to_str().unwrap(),
-                "old_string": "not present",
-                "new_string": "x",
-            }),
-            &seeded_ctx(&path),
-        )
-        .await;
-
-        assert!(output.is_error);
-        assert_eq!(
-            output.metadata.title, None,
-            "error path must not claim the edit happened",
-        );
-    }
-
-    // ── edit_file ──
-
-    #[tokio::test]
-    async fn edit_file_replaces_unique_string() {
-        let dir = canonical_tempdir();
-        let path = dir.path().join("test.txt");
-        std::fs::write(
-            &path,
-            indoc! {"
-                fn foo() {}
-                fn bar() {}
-            "},
-        )
-        .unwrap();
-
-        edit_file(
-            path.to_str().unwrap(),
-            "fn foo() {}",
-            "fn foo() -> i32 { 42 }",
-            false,
-            &seeded_ctx(&path),
-        )
-        .await
-        .unwrap();
-
-        let content = std::fs::read_to_string(&path).unwrap();
-        assert_eq!(
-            content,
-            indoc! {"
-                fn foo() -> i32 { 42 }
-                fn bar() {}
-            "}
-        );
-    }
-
-    #[tokio::test]
-    async fn edit_file_crlf_matching_preserves_line_endings() {
-        let dir = canonical_tempdir();
-        let path = dir.path().join("test.txt");
-        std::fs::write(&path, "line1\r\nline2\r\n").unwrap();
-
-        edit_file(
-            path.to_str().unwrap(),
-            "line1\nline2",
-            "a\nb",
-            false,
-            &seeded_ctx(&path),
-        )
-        .await
-        .unwrap();
-
-        let bytes = std::fs::read(&path).unwrap();
-        assert_eq!(bytes, b"a\r\nb\r\n");
-    }
-
-    #[tokio::test]
-    async fn edit_file_crlf_in_new_string_not_doubled() {
-        let dir = canonical_tempdir();
-        let path = dir.path().join("test.txt");
-        std::fs::write(&path, "aaa\r\nbbb\r\n").unwrap();
-
-        edit_file(
-            path.to_str().unwrap(),
-            "aaa",
-            "x\r\ny",
-            false,
-            &seeded_ctx(&path),
-        )
-        .await
-        .unwrap();
-
-        let bytes = std::fs::read(&path).unwrap();
-        assert_eq!(bytes, b"x\r\ny\r\nbbb\r\n");
-    }
-
-    #[tokio::test]
-    async fn edit_file_mixed_eol_normalized_to_dominant() {
-        let dir = canonical_tempdir();
-        let path = dir.path().join("mixed.txt");
-        std::fs::write(&path, "aaa\nbbb\r\nreplace_me\r\n").unwrap();
-
-        edit_file(
-            path.to_str().unwrap(),
-            "replace_me",
-            "replaced",
-            false,
-            &seeded_ctx(&path),
-        )
-        .await
-        .unwrap();
-
-        let bytes = std::fs::read(&path).unwrap();
-        assert_eq!(bytes, b"aaa\r\nbbb\r\nreplaced\r\n");
-    }
-
-    #[tokio::test]
-    async fn edit_file_mixed_eol_multiline_match() {
-        let dir = canonical_tempdir();
-        let path = dir.path().join("mixed.txt");
-        std::fs::write(&path, "foo\nbar\r\nbaz\r\n").unwrap();
-
-        edit_file(
-            path.to_str().unwrap(),
-            "foo\nbar",
-            "a\nb",
-            false,
-            &seeded_ctx(&path),
-        )
-        .await
-        .unwrap();
-
-        let bytes = std::fs::read(&path).unwrap();
-        assert_eq!(bytes, b"a\r\nb\r\nbaz\r\n");
-    }
-
-    #[tokio::test]
-    async fn edit_file_rejects_empty_old_string() {
-        let dir = canonical_tempdir();
-        let path = dir.path().join("test.txt");
-        std::fs::write(&path, "hello").unwrap();
-
-        let err = edit_file(path.to_str().unwrap(), "", "x", false, &temp_ctx())
-            .await
-            .unwrap_err();
-        assert!(err.contains("must not be empty"));
-        assert_eq!(std::fs::read_to_string(&path).unwrap(), "hello");
-    }
-
-    #[tokio::test]
-    async fn edit_file_rejects_identical_strings() {
-        let dir = canonical_tempdir();
-        let path = dir.path().join("test.txt");
-        std::fs::write(&path, "hello").unwrap();
-
-        let err = edit_file(path.to_str().unwrap(), "hello", "hello", false, &temp_ctx())
-            .await
-            .unwrap_err();
-        assert!(err.contains("identical"));
-    }
-
-    #[tokio::test]
-    async fn edit_file_rejects_string_not_found() {
-        let dir = canonical_tempdir();
-        let path = dir.path().join("test.txt");
-        std::fs::write(&path, "hello world").unwrap();
-
-        let err = edit_file(
-            path.to_str().unwrap(),
-            "nonexistent",
-            "replacement",
-            false,
-            &seeded_ctx(&path),
-        )
-        .await
-        .unwrap_err();
-        assert_eq!(
-            err,
-            format!(
-                "Found no occurrence of old_string in {}. \
-                 Copy it exactly from the file, including whitespace and indentation.",
-                path.display(),
-            ),
-        );
-    }
-
-    #[tokio::test]
-    async fn edit_file_without_prior_read_is_rejected() {
-        let dir = canonical_tempdir();
-        let path = dir.path().join("test.txt");
-        std::fs::write(&path, "hello world").unwrap();
-
-        let err = edit_file(
-            path.to_str().unwrap(),
-            "hello",
-            "goodbye",
-            false,
-            &temp_ctx(),
-        )
-        .await
-        .unwrap_err();
-        assert!(
-            err.contains("has not been read"),
-            "expected must-read-first rejection, got: {err}",
-        );
-        assert_eq!(std::fs::read_to_string(&path).unwrap(), "hello world");
-    }
-
-    #[tokio::test]
-    async fn edit_file_after_external_modification_is_rejected() {
-        let dir = canonical_tempdir();
-        let path = dir.path().join("test.txt");
-        std::fs::write(&path, "hello world").unwrap();
-        let ctx = seeded_ctx(&path);
-        std::fs::write(&path, "external edit").unwrap();
-
-        let err = edit_file(path.to_str().unwrap(), "external", "ours", false, &ctx)
-            .await
-            .unwrap_err();
-        assert!(
-            err.contains("modified externally"),
-            "drift error expected, got: {err}",
-        );
-    }
-
-    #[tokio::test]
-    async fn edit_file_accepts_a_read_under_another_spelling_of_the_path() {
-        let dir = canonical_tempdir();
-        std::fs::create_dir(dir.path().join("sub")).unwrap();
-        let path = dir.path().join("test.txt");
-        std::fs::write(&path, "hello world").unwrap();
-        let ctx = temp_ctx();
-
-        let read = testing::run(&ReadTool, serde_json::json!({"file_path": path}), &ctx).await;
-        assert!(!read.is_error, "{}", read.content);
-
-        let detour = dir.path().join("sub").join("..").join("test.txt");
-        edit_file(detour.to_str().unwrap(), "hello", "goodbye", false, &ctx)
-            .await
-            .unwrap();
-        assert_eq!(std::fs::read_to_string(&path).unwrap(), "goodbye world");
-    }
-
-    #[cfg(unix)]
-    #[tokio::test]
-    async fn edit_file_accepts_a_read_through_a_symlinked_directory() {
-        let dir = canonical_tempdir();
-        std::fs::create_dir(dir.path().join("real")).unwrap();
-        std::os::unix::fs::symlink(dir.path().join("real"), dir.path().join("link")).unwrap();
-        let path = dir.path().join("real/test.txt");
-        std::fs::write(&path, "hello world").unwrap();
-        let ctx = temp_ctx();
-
-        let via_link = dir.path().join("link/test.txt");
-        let read = testing::run(&ReadTool, serde_json::json!({"file_path": via_link}), &ctx).await;
-        assert!(!read.is_error, "{}", read.content);
-
-        edit_file(path.to_str().unwrap(), "hello", "goodbye", false, &ctx)
-            .await
-            .unwrap();
-        assert_eq!(std::fs::read_to_string(&path).unwrap(), "goodbye world");
-    }
-
-    #[tokio::test]
-    async fn edit_file_accepts_a_partial_read_of_current_content() {
-        let dir = canonical_tempdir();
-        let path = dir.path().join("test.txt");
-        std::fs::write(&path, "hello world\nsecond line\n").unwrap();
-        let bytes = std::fs::read(&path).unwrap();
-        let ctx = temp_ctx();
-        ctx.tracker
-            .record_read(&path, &bytes, LastView::lines(1, 1, 2), "toolu_test");
-
-        edit_file(path.to_str().unwrap(), "hello", "goodbye", false, &ctx)
-            .await
-            .unwrap();
-        assert_eq!(
-            std::fs::read_to_string(&path).unwrap(),
-            "goodbye world\nsecond line\n",
-        );
-    }
-
-    #[tokio::test]
-    async fn edit_file_rejects_nonexistent_file() {
-        let path = "/nonexistent/file.txt";
-
-        let err = edit_file(path, "a", "b", false, &temp_ctx())
-            .await
-            .unwrap_err();
-
-        let cause = std::fs::metadata(path).unwrap_err();
-        assert_eq!(err, format!("Failed to access {path}: {cause}"));
-    }
-
-    #[tokio::test]
-    async fn edit_file_rejects_non_utf8_content() {
-        let dir = canonical_tempdir();
-        let path = dir.path().join("blob.bin");
-        let bytes = [0xff_u8, 0xfe, 0xfd];
-        std::fs::write(&path, bytes).unwrap();
-        let ctx = temp_ctx();
-        ctx.tracker
-            .record_read(&path, &bytes, LastView::Full, "toolu_test");
-
-        let err = edit_file(path.to_str().unwrap(), "a", "b", false, &ctx)
-            .await
-            .unwrap_err();
-
-        let cause = String::from_utf8(bytes.to_vec()).unwrap_err();
-        assert_eq!(err, format!("Failed to read {}: {cause}", path.display()));
-    }
-
-    #[tokio::test]
-    async fn edit_file_rejects_ambiguous_match() {
-        let dir = canonical_tempdir();
-        let path = dir.path().join("test.txt");
-        std::fs::write(&path, "aaa bbb aaa").unwrap();
-
-        let err = edit_file(
-            path.to_str().unwrap(),
-            "aaa",
-            "ccc",
-            false,
-            &seeded_ctx(&path),
-        )
-        .await
-        .unwrap_err();
-        assert_eq!(
-            err,
-            format!(
-                "Found 2 occurrences of old_string in {}. \
-                 Set replace_all to true to replace them all, \
-                 or add context to make old_string unique.",
-                path.display(),
-            ),
-        );
-    }
-
-    #[tokio::test]
-    async fn edit_file_rejects_directory() {
-        let dir = canonical_tempdir();
-
-        let err = edit_file(dir.path().to_str().unwrap(), "a", "b", false, &temp_ctx())
-            .await
-            .unwrap_err();
-
-        assert!(
-            err.contains("is a directory"),
-            "expected directory rejection, got: {err}",
-        );
-    }
-
-    #[cfg(unix)]
-    #[tokio::test]
-    async fn edit_file_rejects_non_regular_file() {
-        let dir = canonical_tempdir();
-        let path = dir.path().join("socket");
-        let _listener = std::os::unix::net::UnixListener::bind(&path).unwrap();
-
-        let err = edit_file(path.to_str().unwrap(), "a", "b", false, &temp_ctx())
-            .await
-            .unwrap_err();
-
-        assert!(
-            err.contains("not a regular file"),
-            "expected non-regular-file rejection, got: {err}",
-        );
-    }
-
-    #[tokio::test]
-    async fn edit_file_rejects_too_large_file() {
-        let dir = canonical_tempdir();
-        let path = dir.path().join("huge.txt");
-        let f = std::fs::File::create(&path).unwrap();
-        f.set_len(MAX_TRACKED_FILE_SIZE + 1).unwrap();
-
-        let err = edit_file(path.to_str().unwrap(), "a", "b", false, &temp_ctx())
-            .await
-            .unwrap_err();
-        assert!(err.contains("too large"));
-    }
-
-    #[cfg(unix)]
-    #[tokio::test]
-    async fn edit_file_fails_if_write_is_rejected() {
-        use std::os::unix::fs::PermissionsExt;
-
-        let dir = canonical_tempdir();
-        let path = dir.path().join("readonly.txt");
-        std::fs::write(&path, "hello world").unwrap();
-        let ctx = seeded_ctx(&path);
-
-        let mut perms = std::fs::metadata(&path).unwrap().permissions();
-        perms.set_mode(0o444);
-        std::fs::set_permissions(&path, perms).unwrap();
-
-        let err = edit_file(path.to_str().unwrap(), "hello", "goodbye", false, &ctx)
-            .await
-            .unwrap_err();
-        assert!(err.contains("Failed to write"));
-    }
-
-    #[tokio::test]
-    async fn edit_file_chunks_carry_real_file_line_numbers_for_replace_all() {
-        let dir = canonical_tempdir();
-        let path = dir.path().join("multi.txt");
-        std::fs::write(
-            &path,
-            indoc! {"
-                A
-                B
-                C
-                B
-            "},
-        )
-        .unwrap();
-
-        let chunks = edit_file(path.to_str().unwrap(), "B", "X", true, &seeded_ctx(&path))
-            .await
-            .unwrap();
-
-        assert_eq!(chunks.len(), 2);
-        assert_eq!(
-            chunks[0].old,
-            vec![DiffLine {
-                number: 2,
-                text: "B".to_owned()
-            }]
-        );
-        assert_eq!(
-            chunks[0].new,
-            vec![DiffLine {
-                number: 2,
-                text: "X".to_owned()
-            }]
-        );
-        assert_eq!(
-            chunks[1].old,
-            vec![DiffLine {
-                number: 4,
-                text: "B".to_owned()
-            }]
-        );
-        assert_eq!(
-            chunks[1].new,
-            vec![DiffLine {
-                number: 4,
-                text: "X".to_owned()
-            }]
-        );
-    }
-
-    #[tokio::test]
-    async fn edit_file_chunks_shift_new_side_for_growing_replace_all() {
-        let dir = canonical_tempdir();
-        let path = dir.path().join("grow.txt");
-        std::fs::write(
-            &path,
-            indoc! {"
-                A
-                B
-                C
-                B
-            "},
-        )
-        .unwrap();
-
-        let chunks = edit_file(
-            path.to_str().unwrap(),
-            "B",
-            "X\nY",
-            true,
-            &seeded_ctx(&path),
-        )
-        .await
-        .unwrap();
-
-        assert_eq!(chunks.len(), 2);
-        assert_eq!(chunks[0].old[0].number, 2);
-        assert_eq!(
-            chunks[0].new,
-            vec![
-                DiffLine {
-                    number: 2,
-                    text: "X".to_owned()
-                },
-                DiffLine {
-                    number: 3,
-                    text: "Y".to_owned()
-                },
-            ],
-        );
-        assert_eq!(chunks[1].old[0].number, 4);
-        assert_eq!(
-            chunks[1].new,
-            vec![
-                DiffLine {
-                    number: 5,
-                    text: "X".to_owned()
-                },
-                DiffLine {
-                    number: 6,
-                    text: "Y".to_owned()
-                },
-            ],
-        );
-    }
-
-    #[tokio::test]
-    async fn edit_file_chunks_shift_new_side_for_shrinking_replace_all() {
-        let dir = canonical_tempdir();
-        let path = dir.path().join("shrink.txt");
-        std::fs::write(
-            &path,
-            indoc! {"
-                X
-                Y
-                A
-                X
-                Y
-                B
-                X
-                Y
-                C
-            "},
-        )
-        .unwrap();
-
-        let chunks = edit_file(
-            path.to_str().unwrap(),
-            "X\nY",
-            "Z",
-            true,
-            &seeded_ctx(&path),
-        )
-        .await
-        .unwrap();
-
-        assert_eq!(chunks.len(), 3);
-        assert_eq!(chunks[0].old[0].number, 1);
-        assert_eq!(chunks[0].new[0].number, 1);
-        assert_eq!(chunks[1].old[0].number, 4);
-        assert_eq!(chunks[1].new[0].number, 3);
-        assert_eq!(chunks[2].old[0].number, 7);
-        assert_eq!(chunks[2].new[0].number, 5);
-    }
-
-    // ── build_diff_chunks ──
-
-    #[test]
-    fn build_diff_chunks_single_match_carries_real_position() {
-        let chunks = build_diff_chunks("A\nB\nC\n", "B", "X", 1);
-        assert_eq!(chunks.len(), 1);
-        assert_eq!(
-            chunks[0].old,
-            vec![DiffLine {
-                number: 2,
-                text: "B".to_owned()
-            }]
-        );
-        assert_eq!(
-            chunks[0].new,
-            vec![DiffLine {
-                number: 2,
-                text: "X".to_owned()
-            }]
-        );
-    }
-
-    #[test]
-    fn build_diff_chunks_take_one_caps_at_first_match() {
-        let chunks = build_diff_chunks("B\nB\nB\n", "B", "X", 1);
-        assert_eq!(chunks.len(), 1);
-        assert_eq!(chunks[0].old[0].number, 1);
-    }
-
-    #[test]
-    fn build_diff_chunks_applies_per_chunk_trim() {
-        let chunks = build_diff_chunks(
-            indoc! {"
-                x
-                x
-                x
-                x
-                fn foo()
-            "},
-            "fn foo()",
-            "fn foo()\n    return 42;",
-            1,
-        );
-        assert_eq!(chunks.len(), 1);
-        assert_eq!(chunks[0].old, []);
-        assert_eq!(
-            chunks[0].new,
-            vec![DiffLine {
-                number: 6,
-                text: "    return 42;".to_owned()
-            }],
-        );
-    }
-
-    // ── line_at_byte ──
-
-    #[test]
-    fn line_at_byte_first_line_is_one() {
-        assert_eq!(line_at_byte("A\nB\n", 0), 1);
-    }
-
-    #[test]
-    fn line_at_byte_after_newline_increments() {
-        assert_eq!(line_at_byte("A\nB\nC\n", 2), 2);
-        assert_eq!(line_at_byte("A\nB\nC\n", 4), 3);
-    }
-
-    #[test]
-    fn line_at_byte_end_of_file_after_trailing_newline() {
-        assert_eq!(line_at_byte("A\n", 2), 2);
-    }
-
-    #[test]
-    fn line_at_byte_end_of_file_without_trailing_newline() {
-        assert_eq!(line_at_byte("AB", 2), 1);
-        assert_eq!(line_at_byte("A\nB", 3), 2);
-    }
-
-    // ── split_into_diff_lines ──
-
-    #[test]
-    fn split_into_diff_lines_numbers_from_start_line() {
-        assert_eq!(
-            split_into_diff_lines("a\nb", 47),
-            vec![
-                DiffLine {
-                    number: 47,
-                    text: "a".to_owned()
-                },
-                DiffLine {
-                    number: 48,
-                    text: "b".to_owned()
-                },
-            ],
-        );
-    }
-
-    #[test]
-    fn split_into_diff_lines_drops_trailing_newline() {
-        assert_eq!(
-            split_into_diff_lines("a\nb\n", 1),
-            vec![
-                DiffLine {
-                    number: 1,
-                    text: "a".to_owned()
-                },
-                DiffLine {
-                    number: 2,
-                    text: "b".to_owned()
-                },
-            ],
-        );
-    }
-
-    #[test]
-    fn split_into_diff_lines_empty_yields_empty() {
-        assert_eq!(split_into_diff_lines("", 1), []);
-    }
-
-    // ── trim_chunk ──
-
-    #[test]
-    fn trim_chunk_drops_matching_prefix_and_suffix_preserving_numbers() {
-        let mut chunk = DiffChunk {
-            old: vec![
-                DiffLine {
-                    number: 10,
-                    text: "anchor".to_owned(),
-                },
-                DiffLine {
-                    number: 11,
-                    text: "old".to_owned(),
-                },
-                DiffLine {
-                    number: 12,
-                    text: "tail".to_owned(),
-                },
-            ],
-            new: vec![
-                DiffLine {
-                    number: 10,
-                    text: "anchor".to_owned(),
-                },
-                DiffLine {
-                    number: 11,
-                    text: "new".to_owned(),
-                },
-                DiffLine {
-                    number: 12,
-                    text: "tail".to_owned(),
-                },
-            ],
-        };
-        trim_chunk(&mut chunk);
-        assert_eq!(
-            chunk.old,
-            vec![DiffLine {
-                number: 11,
-                text: "old".to_owned()
-            }]
-        );
-        assert_eq!(
-            chunk.new,
-            vec![DiffLine {
-                number: 11,
-                text: "new".to_owned()
-            }]
-        );
-    }
-
-    #[test]
-    fn trim_chunk_pure_tail_insertion_strips_anchor() {
-        let mut chunk = DiffChunk {
-            old: vec![DiffLine {
-                number: 5,
-                text: "fn foo()".to_owned(),
-            }],
-            new: vec![
-                DiffLine {
-                    number: 5,
-                    text: "fn foo()".to_owned(),
-                },
-                DiffLine {
-                    number: 6,
-                    text: "    return 42;".to_owned(),
-                },
-            ],
-        };
-        trim_chunk(&mut chunk);
-        assert_eq!(chunk.old, []);
-        assert_eq!(
-            chunk.new,
-            vec![DiffLine {
-                number: 6,
-                text: "    return 42;".to_owned()
-            }],
-        );
-    }
-
-    #[test]
-    fn trim_chunk_fully_identical_collapses_both_sides() {
-        let mut chunk = DiffChunk {
-            old: vec![DiffLine {
-                number: 1,
-                text: "a".to_owned(),
-            }],
-            new: vec![DiffLine {
-                number: 1,
-                text: "a".to_owned(),
-            }],
-        };
-        trim_chunk(&mut chunk);
-        assert_eq!(chunk.old, []);
-        assert_eq!(chunk.new, []);
-    }
-
-    // ── common_boundaries ──
-
-    #[test]
-    fn common_boundaries_produces_prefix_and_suffix_counts() {
-        let old = ["a", "b", "c", "d"];
-        let new = ["a", "X", "Y", "d"];
-        assert_eq!(common_boundaries(&old, &new), (1, 1));
-    }
-
-    #[test]
-    fn common_boundaries_disjoint_is_zero() {
-        assert_eq!(common_boundaries(&["a"], &["b"]), (0, 0));
-    }
-
-    #[test]
-    fn common_boundaries_empty_inputs_have_zero_boundaries() {
-        let empty: [&str; 0] = [];
-        assert_eq!(common_boundaries(&empty, &empty), (0, 0));
-    }
-
-    #[test]
-    fn common_boundaries_asymmetric_lengths_capped_by_shorter_side() {
-        assert_eq!(common_boundaries(&["a", "b", "a"], &["a", "X"]), (1, 0));
-        assert_eq!(common_boundaries(&["a", "X"], &["a", "b", "a"]), (1, 0));
-    }
-
-    // ── dominant_eol ──
-
-    #[test]
-    fn dominant_eol_lf_only_selects_lf() {
-        assert_eq!(dominant_eol("a\nb\n"), "\n");
-    }
-
-    #[test]
-    fn dominant_eol_crlf_only_selects_crlf() {
-        assert_eq!(dominant_eol("a\r\nb\r\n"), "\r\n");
-    }
-
-    #[test]
-    fn dominant_eol_mixed_favors_majority() {
-        assert_eq!(dominant_eol("a\nb\r\nc\r\n"), "\r\n");
-        assert_eq!(dominant_eol("a\nb\nc\r\n"), "\n");
-    }
-
-    #[test]
-    fn dominant_eol_tie_defaults_to_lf() {
-        assert_eq!(dominant_eol("a\nb\r\n"), "\n");
-    }
-
-    #[test]
-    fn dominant_eol_no_newlines_defaults_to_lf() {
-        assert_eq!(dominant_eol("no newlines"), "\n");
-    }
-
-    // ── normalize_eol ──
-
-    #[test]
-    fn normalize_eol_converts_crlf_to_lf() {
-        let out = normalize_eol("a\r\nb\r\n");
-        assert_eq!(out, "a\nb\n");
-        assert!(matches!(out, Cow::Owned(_)));
-    }
-
-    #[test]
-    fn normalize_eol_lf_input_borrows() {
-        let out = normalize_eol("a\nb\n");
-        assert_eq!(out, "a\nb\n");
-        assert!(matches!(out, Cow::Borrowed(_)));
-    }
-
-    // ── apply_eol ──
-
-    #[test]
-    fn apply_eol_inserts_cr_for_crlf() {
-        assert_eq!(apply_eol("a\nb\n".to_owned(), "\r\n"), "a\r\nb\r\n");
-    }
-
-    #[test]
-    fn apply_eol_lf_preserves_content() {
-        assert_eq!(apply_eol("a\nb\n".to_owned(), "\n"), "a\nb\n");
-    }
-
-    // ── synthesize_chunk ──
-
-    #[test]
-    fn synthesize_chunk_starts_numbering_at_one() {
-        let chunk = synthesize_chunk("a\nb", "x\ny");
-        assert_eq!(chunk.old[0].number, 1);
-        assert_eq!(chunk.new[0].number, 1);
-    }
-
-    #[test]
-    fn synthesize_chunk_applies_trim() {
-        let chunk = synthesize_chunk("fn foo()", "fn foo()\n    body");
-        assert_eq!(chunk.old, []);
-        assert_eq!(chunk.new.len(), 1);
-        assert_eq!(chunk.new[0].text, "    body");
+    mod synthesize_chunk {
+        use super::*;
+
+        #[test]
+        fn starts_numbering_at_one() {
+            let chunk = synthesize_chunk("a\nb", "x\ny");
+            assert_eq!(chunk.old[0].number, 1);
+            assert_eq!(chunk.new[0].number, 1);
+        }
+
+        #[test]
+        fn applies_trim() {
+            let chunk = synthesize_chunk("fn foo()", "fn foo()\n    body");
+            assert_eq!(chunk.old, []);
+            assert_eq!(chunk.new.len(), 1);
+            assert_eq!(chunk.new[0].text, "    body");
+        }
     }
 }

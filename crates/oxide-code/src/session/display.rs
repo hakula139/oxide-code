@@ -1,4 +1,4 @@
-//! Display helpers for session titles, metadata lines, and archive notices.
+//! Display helpers for session titles, metadata lines, relative times, and archive notices.
 
 use std::fmt::Write as _;
 
@@ -8,8 +8,11 @@ use super::entry::SessionInfo;
 use crate::util::text::{plural, truncate_to_width};
 
 const SEPARATOR: &str = " · ";
-const ID_PREFIX_WIDTH: usize = 8;
+pub(crate) const ID_PREFIX_WIDTH: usize = 8;
 pub(crate) const UNTITLED_MARKER: &str = "(untitled)";
+
+/// Widest [`format_short_relative_time`] output, an ISO date.
+pub(crate) const SHORT_RELATIVE_TIME_WIDTH: usize = "2026-01-01".len();
 
 /// Column cap on first-prompt and manual titles, leaving room in a 120-column `--list` row after
 /// the fixed `ID / Last Active / Msgs` prefix.
@@ -35,8 +38,34 @@ pub(crate) fn fit_title(text: &str) -> String {
 
 /// Compact "N units ago", or the ISO date past 30 days. A future `ts` reads as 0 seconds ago.
 fn format_relative_time(ts: OffsetDateTime, now: OffsetDateTime) -> String {
+    match elapsed(ts, now) {
+        Some((n, unit)) => {
+            let suffix = plural(n, "", "s");
+            format!("{n} {unit}{suffix} ago")
+        }
+        None => format_date(ts),
+    }
+}
+
+/// [`format_relative_time`] with each unit cut to its first letter, as in `3h ago`, for a time
+/// column [`SHORT_RELATIVE_TIME_WIDTH`] wide.
+pub(crate) fn format_short_relative_time(ts: OffsetDateTime, local_offset: UtcOffset) -> String {
+    let now = OffsetDateTime::now_utc().to_offset(local_offset);
+    short_relative_time(ts.to_offset(local_offset), now)
+}
+
+fn short_relative_time(ts: OffsetDateTime, now: OffsetDateTime) -> String {
+    match elapsed(ts, now) {
+        Some((n, unit)) => format!("{n}{} ago", &unit[..1]),
+        None => format_date(ts),
+    }
+}
+
+/// The time from `ts` to `now` in whole units of the largest unit that fits, or `None` past 30
+/// days. A future `ts` reads as 0 seconds.
+fn elapsed(ts: OffsetDateTime, now: OffsetDateTime) -> Option<(i64, &'static str)> {
     let secs = (now - ts).whole_seconds().max(0);
-    let (n, unit) = if secs < 60 {
+    Some(if secs < 60 {
         (secs, "second")
     } else if secs < 3600 {
         (secs / 60, "minute")
@@ -45,12 +74,13 @@ fn format_relative_time(ts: OffsetDateTime, now: OffsetDateTime) -> String {
     } else if secs < 30 * 86_400 {
         (secs / 86_400, "day")
     } else {
-        return ts
-            .format(time::macros::format_description!("[year]-[month]-[day]"))
-            .expect("static `[year]-[month]-[day]` description never fails on a valid ts");
-    };
-    let suffix = plural(n, "", "s");
-    format!("{n} {unit}{suffix} ago")
+        return None;
+    })
+}
+
+fn format_date(ts: OffsetDateTime) -> String {
+    ts.format(time::macros::format_description!("[year]-[month]-[day]"))
+        .expect("static `[year]-[month]-[day]` description never fails on a valid ts")
 }
 
 /// `{id_prefix} · {when} · {N msgs} · {branch} · {project}`, omitting each trailing component
@@ -219,6 +249,23 @@ mod tests {
             "0 seconds ago",
             "future stamps collapse to 0",
         );
+    }
+
+    mod short_relative_time {
+        use super::*;
+
+        #[test]
+        fn cuts_each_unit_to_its_letter_and_keeps_the_date_past_30_days() {
+            let now = datetime!(2026-05-08 12:00:00 UTC);
+            let ago = |elapsed: time::Duration| short_relative_time(now - elapsed, now);
+
+            assert_eq!(ago(time::Duration::seconds(45)), "45s ago");
+            assert_eq!(ago(time::Duration::minutes(5)), "5m ago");
+            assert_eq!(ago(time::Duration::hours(23)), "23h ago");
+            assert_eq!(ago(time::Duration::days(29)), "29d ago");
+            assert_eq!(ago(time::Duration::days(30)), "2026-04-08");
+            assert_eq!(SHORT_RELATIVE_TIME_WIDTH, "2026-04-08".len());
+        }
     }
 
     // ── format_metadata_line ──
