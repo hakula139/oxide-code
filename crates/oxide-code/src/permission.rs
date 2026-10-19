@@ -1353,6 +1353,8 @@ pub(crate) mod testing {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::session::store::testing::sample_header;
+    use crate::session::store::{SessionStore, artifact_dir};
     use crate::util::fs::testing::{symlink_dir, symlink_file};
     use crate::util::path::slash_separated;
     use crate::util::path::testing::{HOME_VAR, abs};
@@ -2664,6 +2666,38 @@ mod tests {
                         "{mode}: reads pass"
                     );
                 }
+            }
+
+            #[test]
+            fn spilled_tool_output_reads_without_a_prompt_and_asks_to_be_edited() {
+                let (_dir, root) = temp_cwd();
+                let (cwd, home, data) = (root.join("repo"), root.join("home"), root.join("data"));
+                std::fs::create_dir(&cwd).unwrap();
+                temp_env::with_vars(
+                    [(HOME_VAR, Some(&home)), ("XDG_DATA_HOME", Some(&data))],
+                    || {
+                        let workspace = Workspace::new(&cwd);
+                        let store = SessionStore::open(&cwd).unwrap();
+                        store.create(&sample_header("s1"), &[]).unwrap();
+                        let session_file = store.find_session_path("s1").unwrap();
+                        let spill = artifact_dir(&session_file, "s1").join("tool-results/x.txt");
+                        let target = Access::for_path(&slash_separated(&spill), &workspace);
+
+                        for mode in [Mode::Manual, Mode::Yolo] {
+                            let p = Policy::resolve(
+                                mode,
+                                Vec::new(),
+                                Vec::new(),
+                                rules(&[(EDIT, "*")]),
+                                &[],
+                                &workspace,
+                            )
+                            .unwrap();
+                            assert_eq!(decide(&p, READ, &target), Decision::Allow, "{mode}");
+                            assert_eq!(decide(&p, EDIT, &target), Decision::Ask, "{mode}");
+                        }
+                    },
+                );
             }
 
             #[test]

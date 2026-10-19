@@ -23,8 +23,8 @@ use tracing::warn;
 
 use self::background::{BackgroundShells, ShellState};
 use super::{
-    ApprovalBody, ApprovalPreview, Prepared, Tool, ToolCtx, ToolOutput, ToolSpec,
-    extract_input_field, pascal_case,
+    ApprovalBody, ApprovalPreview, Prepared, Spill, Tool, ToolCtx, ToolOutput, ToolSpec,
+    extract_input_field, omission_marker, pascal_case,
 };
 use crate::permission::{Access, PermissionClass};
 
@@ -37,9 +37,10 @@ const DRAIN_GRACE: Duration = Duration::from_millis(250);
 /// which session started it.
 const SESSION_ID_VAR: &str = "OX_SESSION_ID";
 
-/// Bytes of pipe output one call renders. The reserve below the dispatcher cap holds the omission
-/// markers, the stream separator, and the footer, so the dispatcher never re-truncates bash output.
-const OUTPUT_BUDGET: usize = super::MAX_OUTPUT_BYTES - 256;
+/// Bytes of pipe output one call renders, less the spill paths its omission markers name. The
+/// reserve below the dispatcher cap holds the rest of the markers, the stream separator, and the
+/// footer, so the dispatcher never re-truncates bash output.
+const OUTPUT_BUDGET: usize = super::MAX_OUTPUT_BYTES - 512;
 const PIPE_HEAD_BYTES: usize = OUTPUT_BUDGET / 2;
 const PIPE_TAIL_BYTES: usize = OUTPUT_BUDGET - PIPE_HEAD_BYTES;
 const PIPE_READ_CHUNK_BYTES: usize = 8 * 1024;
@@ -222,8 +223,9 @@ async fn execute_until(
     };
 
     let (mut stdout, mut stderr) = shell.take_pipes();
-    let mut stdout_capture = PipeCapture::default();
-    let mut stderr_capture = PipeCapture::default();
+    let spills = ctx.spills();
+    let mut stdout_capture = PipeCapture::new(spills.file(".stdout.txt"));
+    let mut stderr_capture = PipeCapture::new(spills.file(".stderr.txt"));
 
     // One deadline covers the exit and the pipe drain, so a backgrounded descendant that holds the
     // pipes open cannot stretch the call past the timeout.
@@ -250,7 +252,10 @@ async fn execute_until(
             )
         })
         .await;
-        return Err(TimedOut(render_streams(&stdout_capture, &stderr_capture)));
+        return Err(TimedOut(render_streams(
+            &mut stdout_capture,
+            &mut stderr_capture,
+        )));
     };
 
     let status = match status {
@@ -272,7 +277,7 @@ async fn execute_until(
     // Descendants that released the pipes, such as a redirected background server, keep running.
     shell.disarm();
 
-    let mut content = render_streams(&stdout_capture, &stderr_capture);
+    let mut content = render_streams(&mut stdout_capture, &mut stderr_capture);
     if !status.success() {
         push_footer(&mut content, &exit_footer(status));
     }
@@ -335,11 +340,14 @@ fn git_bash_on(path: &std::ffi::OsStr) -> Option<std::path::PathBuf> {
 
 // ── Output Rendering ──
 
-fn render_streams(stdout: &PipeCapture, stderr: &PipeCapture) -> String {
-    let (stdout_budget, stderr_budget) = split_budget(stdout.kept(), stderr.kept(), OUTPUT_BUDGET);
-    let stdout = render_pipe(stdout, stdout_budget);
+/// Renders stdout and stderr within [`OUTPUT_BUDGET`], spilling each pipe it cuts.
+fn render_streams(stdout: &mut PipeCapture, stderr: &mut PipeCapture) -> String {
+    let paths = stdout.spill.path().as_os_str().len() + stderr.spill.path().as_os_str().len();
+    let (stdout_budget, stderr_budget) =
+        split_budget(stdout.kept(), stderr.kept(), OUTPUT_BUDGET - paths);
+    let stdout = render_pipe(stdout, stdout_budget, "stdout");
     let stdout = stdout.trim_start_matches('\n');
-    let stderr = render_pipe(stderr, stderr_budget);
+    let stderr = render_pipe(stderr, stderr_budget, "stderr");
     let stderr = stderr.trim_start();
     match (stdout.is_empty(), stderr.is_empty()) {
         (_, true) => stdout.to_owned(),
@@ -362,13 +370,18 @@ fn split_budget(first: usize, second: usize, budget: usize) -> (usize, usize) {
     (first.min(budget - second), second)
 }
 
-/// Renders at most `budget` bytes of `pipe`, folding everything it drops into the omission count.
-fn render_pipe(pipe: &PipeCapture, budget: usize) -> String {
+/// Renders at most `budget` bytes of the pipe called `name`, folding everything it drops into the
+/// omission count. A cut spills the pipe's kept bytes if it has not spilled yet, so its marker can
+/// always name a file with the full output.
+fn render_pipe(pipe: &mut PipeCapture, budget: usize, name: &str) -> String {
+    let (head_len, tail_len) = split_budget(pipe.head.len(), pipe.tail.len(), budget);
+    let mut omitted = pipe.omitted + (pipe.head.len() - head_len) + (pipe.tail.len() - tail_len);
+    if omitted > 0 && !pipe.spill.started() {
+        pipe.spill_kept();
+    }
     let tail: Vec<u8> = pipe.tail.iter().copied().collect();
-    let (head_len, tail_len) = split_budget(pipe.head.len(), tail.len(), budget);
     let mut head = &pipe.head[..head_len];
     let mut tail = &tail[tail.len() - tail_len..];
-    let mut omitted = pipe.omitted + (pipe.head.len() - head_len) + (pipe.tail.len() - tail_len);
 
     let text = if omitted == 0 {
         String::from_utf8_lossy(&[head, tail].concat()).into_owned()
@@ -384,10 +397,11 @@ fn render_pipe(pipe: &PipeCapture, budget: usize) -> String {
         tail = &tail[continuations..];
         omitted += split_char + continuations;
         let head = String::from_utf8_lossy(head);
+        let marker = omission_marker(omitted, &pipe.spill.note(name));
         let tail = String::from_utf8_lossy(tail);
         formatdoc! {"
             {head}
-            ... [{omitted} bytes omitted] ...
+            {marker}
             {tail}"
         }
     };
@@ -398,15 +412,25 @@ fn render_pipe(pipe: &PipeCapture, budget: usize) -> String {
 // ── Pipe Capture ──
 
 /// Bounded capture of one pipe: the first [`PIPE_HEAD_BYTES`] and the last [`PIPE_TAIL_BYTES`],
-/// with the bytes dropped between them counted in `omitted`.
-#[derive(Debug, Default)]
+/// with the bytes dropped between them counted in `omitted`. Once it would drop a byte, it writes
+/// everything the pipe sends to its spill, so the full output survives while memory stays bounded.
 struct PipeCapture {
     head: Vec<u8>,
     tail: VecDeque<u8>,
     omitted: usize,
+    spill: Spill,
 }
 
 impl PipeCapture {
+    fn new(spill: Spill) -> Self {
+        Self {
+            head: Vec::new(),
+            tail: VecDeque::new(),
+            omitted: 0,
+            spill,
+        }
+    }
+
     /// Reads `reader` to EOF. Cancel-safe: each chunk is recorded as soon as it is read, so a drain
     /// cut short by the timeout keeps everything that arrived, and a later call resumes it.
     async fn drain<R>(&mut self, reader: &mut R) -> io::Result<()>
@@ -421,6 +445,13 @@ impl PipeCapture {
     }
 
     fn push(&mut self, chunk: &[u8]) {
+        if self.spill.started() {
+            self.spill.write(chunk);
+        } else if self.kept() + chunk.len() > PIPE_HEAD_BYTES + PIPE_TAIL_BYTES {
+            self.spill_kept();
+            self.spill.write(chunk);
+        }
+
         let head_room = PIPE_HEAD_BYTES.saturating_sub(self.head.len());
         let (head, rest) = chunk.split_at(head_room.min(chunk.len()));
         self.head.extend_from_slice(head);
@@ -429,6 +460,15 @@ impl PipeCapture {
         let overflow = self.tail.len().saturating_sub(PIPE_TAIL_BYTES);
         self.tail.drain(..overflow);
         self.omitted += overflow;
+    }
+
+    /// Starts the spill with the kept bytes, which hold everything the pipe sent while nothing was
+    /// dropped.
+    fn spill_kept(&mut self) {
+        let (front, back) = self.tail.as_slices();
+        self.spill.write(&self.head);
+        self.spill.write(front);
+        self.spill.write(back);
     }
 }
 
@@ -633,15 +673,22 @@ mod tests {
     use super::testing::{record_pid, until_gone, until_recorded};
     use super::*;
     use crate::tool::MAX_OUTPUT_BYTES;
-    use crate::tool::testing::{self, bash_preview, temp_ctx};
     #[cfg(unix)]
-    use crate::tool::testing::{canonical_tempdir, ctx};
+    use crate::tool::testing::canonical_tempdir;
+    use crate::tool::testing::{self, bash_preview, ctx, spill_path, temp_ctx};
 
-    fn capture(head: &[u8], tail: &[u8], omitted: usize) -> PipeCapture {
+    /// An empty capture of the stdout of call `toolu_test` in `dir`.
+    fn empty_capture(dir: &Path) -> PipeCapture {
+        PipeCapture::new(ctx(dir).spills().file(".stdout.txt"))
+    }
+
+    /// A capture in `dir` holding `head` and `tail`, with `omitted` bytes dropped between them.
+    fn capture(dir: &Path, head: &[u8], tail: &[u8], omitted: usize) -> PipeCapture {
         PipeCapture {
             head: head.to_vec(),
             tail: tail.iter().copied().collect(),
             omitted,
+            ..empty_capture(dir)
         }
     }
 
@@ -810,24 +857,63 @@ mod tests {
         }
 
         #[tokio::test]
-        async fn large_output_keeps_head_and_tail() {
+        async fn large_output_spills_in_full_and_keeps_head_and_tail() {
             // `cargo build 2>&1` ends with its error summary, so the tail must survive the cap.
+            let dir = tempfile::tempdir().unwrap();
             let filler = PIPE_HEAD_BYTES + PIPE_TAIL_BYTES + 1024;
-            let output =
-                run_default(&format!("echo HEAD; yes x | head -c {filler}; echo TAIL")).await;
+            let command = format!("echo HEAD; yes x | head -c {filler}; echo TAIL");
+
+            let output = execute(&command, DEFAULT_TIMEOUT, &ctx(dir.path())).await;
 
             assert!(!output.is_error);
-            assert!(output.content.starts_with("HEAD\nx\n"), "head kept");
-            assert!(output.content.ends_with("x\nTAIL"), "tail kept");
-            let omitted =
-                "HEAD\n".len() + filler + "TAIL\n".len() - PIPE_HEAD_BYTES - PIPE_TAIL_BYTES;
-            assert!(
-                output
-                    .content
-                    .contains(&format!("\n... [{omitted} bytes omitted] ...\n")),
-                "middle marker counts the dropped bytes",
+            let path = spill_path(dir.path(), ".stdout.txt");
+            let full = std::fs::read_to_string(&path).unwrap();
+            assert_eq!(full, format!("HEAD\n{}TAIL\n", "x\n".repeat(filler / 2)));
+            let (head, rest) = output.content.split_once("\n... [").unwrap();
+            let (marker, tail) = rest.split_once("] ...\n").unwrap();
+            let (omitted, note) = marker.split_once(" bytes omitted, ").unwrap();
+            assert_eq!(note, format!("full stdout saved to {}", path.display()));
+            assert!(full.starts_with(head) && head.starts_with("HEAD\nx\n"));
+            assert!(full.ends_with(&format!("{tail}\n")) && tail.ends_with("x\nTAIL"));
+            let omitted: usize = omitted.parse().unwrap();
+            assert_eq!(head.len() + omitted + tail.len() + "\n".len(), full.len());
+            assert!(output.content.len() <= MAX_OUTPUT_BYTES);
+        }
+
+        #[tokio::test]
+        async fn spills_each_pipe_over_the_cap_to_its_own_file() {
+            let dir = tempfile::tempdir().unwrap();
+            let bytes = 300 << 10;
+            let command = format!(
+                "head -c {bytes} /dev/zero | tr '\\0' o; head -c {bytes} /dev/zero | tr '\\0' e >&2"
             );
-            assert!(output.content.len() <= PIPE_HEAD_BYTES + PIPE_TAIL_BYTES + 64);
+
+            let output = execute(&command, DEFAULT_TIMEOUT, &ctx(dir.path())).await;
+
+            assert!(!output.is_error, "{}", output.content);
+            for (name, byte) in [("stdout", b'o'), ("stderr", b'e')] {
+                let path = spill_path(dir.path(), &format!(".{name}.txt"));
+                assert_eq!(std::fs::read(&path).unwrap(), vec![byte; bytes], "{name}");
+                let note = format!(
+                    "bytes omitted, full {name} saved to {}] ...",
+                    path.display()
+                );
+                assert!(output.content.contains(&note), "{name}");
+            }
+            assert!(output.content.len() <= MAX_OUTPUT_BYTES);
+        }
+
+        #[tokio::test]
+        async fn output_under_the_cap_writes_no_spill_file() {
+            // One pipe can use the other's unused share, so this renders whole.
+            let dir = tempfile::tempdir().unwrap();
+            let bytes = 100 << 10;
+            let command = format!("head -c {bytes} /dev/zero | tr '\\0' o");
+
+            let output = execute(&command, DEFAULT_TIMEOUT, &ctx(dir.path())).await;
+
+            assert_eq!(output.content, "o".repeat(bytes));
+            assert!(!dir.path().join("session").exists());
         }
 
         #[tokio::test]
@@ -1029,40 +1115,51 @@ mod tests {
     mod render_streams {
         use super::*;
 
-        /// Reads the byte count out of each `[N bytes omitted]` marker in `content`.
-        fn omitted_counts(content: &str) -> Vec<usize> {
-            content
-                .split("... [")
-                .skip(1)
-                .map(|rest| rest[..rest.find(' ').unwrap()].parse().unwrap())
-                .collect()
+        /// Counts the bytes a pipe's rendering kept, and reads the byte count out of each of its
+        /// `... [N bytes omitted, ...] ...` marker lines.
+        fn kept_and_omitted(text: &str) -> (usize, Vec<usize>) {
+            let (mut kept, mut omitted) = (0, Vec::new());
+            for line in text.lines() {
+                match line.strip_prefix("... [") {
+                    Some(marker) => {
+                        omitted.push(marker.split(' ').next().unwrap().parse().unwrap());
+                    }
+                    None => kept += line.len(),
+                }
+            }
+            (kept, omitted)
         }
 
         #[test]
         fn fits_overflowing_pipes_under_the_dispatcher_cap() {
-            // `a` and `z` appear nowhere in the marker text, so counting them counts kept bytes.
-            for (stdout_len, stderr_len) in [(10 << 20, 1024), (300 << 10, 300 << 10)] {
-                let mut stdout = PipeCapture::default();
+            let cases = [
+                (10 << 20, 1024, 0),
+                (300 << 10, 300 << 10, 0),
+                (300 << 10, 300 << 10, 3),
+            ];
+            for (stdout_len, stderr_len, depth) in cases {
+                let dir = tempfile::tempdir().unwrap();
+                let cwd =
+                    (0..depth).fold(dir.path().to_owned(), |cwd, _| cwd.join("d".repeat(100)));
+                let spills = ctx(&cwd).spills();
+                let mut stdout = PipeCapture::new(spills.file(".stdout.txt"));
                 stdout.push(&vec![b'a'; stdout_len]);
-                let mut stderr = PipeCapture::default();
+                let mut stderr = PipeCapture::new(spills.file(".stderr.txt"));
                 stderr.push(&vec![b'z'; stderr_len]);
 
-                let content = render_streams(&stdout, &stderr);
+                let content = render_streams(&mut stdout, &mut stderr);
 
                 assert!(
                     content.len() <= MAX_OUTPUT_BYTES,
-                    "{stdout_len} / {stderr_len}"
+                    "{stdout_len} / {stderr_len} at depth {depth}"
                 );
                 let (stdout_text, stderr_text) = content.split_once("\nz").unwrap();
-                let stdout_omitted = omitted_counts(stdout_text);
+                let (stdout_kept, stdout_omitted) = kept_and_omitted(stdout_text);
                 assert_eq!(stdout_omitted.len(), 1);
+                assert_eq!(stdout_kept + stdout_omitted[0], stdout_len);
+                let (stderr_kept, stderr_omitted) = kept_and_omitted(stderr_text);
                 assert_eq!(
-                    stdout_text.matches('a').count() + stdout_omitted[0],
-                    stdout_len
-                );
-                let stderr_omitted: usize = omitted_counts(stderr_text).iter().sum();
-                assert_eq!(
-                    stderr_text.matches('z').count() + 1 + stderr_omitted,
+                    stderr_kept + 1 + stderr_omitted.iter().sum::<usize>(),
                     stderr_len
                 );
             }
@@ -1070,9 +1167,10 @@ mod tests {
 
         #[test]
         fn trims_stdout_newlines_and_stderr_whitespace() {
-            let stdout = capture(b"\n  output\n", b"", 0);
-            let stderr = capture(b"\n  error\n", b"", 0);
-            assert_eq!(render_streams(&stdout, &stderr), "  output\nerror");
+            let dir = tempfile::tempdir().unwrap();
+            let mut stdout = capture(dir.path(), b"\n  output\n", b"", 0);
+            let mut stderr = capture(dir.path(), b"\n  error\n", b"", 0);
+            assert_eq!(render_streams(&mut stdout, &mut stderr), "  output\nerror");
         }
     }
 
@@ -1091,63 +1189,77 @@ mod tests {
     mod render_pipe {
         use super::*;
 
+        /// The marker for `omitted` bytes of the stdout spilled in `dir`.
+        fn marker(dir: &Path, omitted: usize) -> String {
+            let path = spill_path(dir, ".stdout.txt");
+            format!(
+                "... [{omitted} bytes omitted, full stdout saved to {}] ...",
+                path.display()
+            )
+        }
+
         #[test]
         fn marks_the_omitted_middle_between_head_and_tail() {
-            let pipe = capture(b"hello\n", b"world\n", 7);
-            assert_eq!(
-                render_pipe(&pipe, OUTPUT_BUDGET),
-                indoc! {"
-                    hello
+            let dir = tempfile::tempdir().unwrap();
+            let mut pipe = capture(dir.path(), b"hello\n", b"world\n", 7);
 
-                    ... [7 bytes omitted] ...
-                    world"
-                },
+            let rendered = render_pipe(&mut pipe, OUTPUT_BUDGET, "stdout");
+
+            assert_eq!(
+                rendered,
+                format!("hello\n\n{}\nworld", marker(dir.path(), 7))
             );
         }
 
         #[test]
         fn folds_chars_split_by_the_omission_into_the_count() {
+            let dir = tempfile::tempdir().unwrap();
             let crab = "🦀".as_bytes();
-            let pipe = capture(
+            let mut pipe = capture(
+                dir.path(),
                 &[b"ab", &crab[..2]].concat(),
                 &[&crab[1..], b"cd"].concat(),
                 5,
             );
-            assert_eq!(
-                render_pipe(&pipe, OUTPUT_BUDGET),
-                indoc! {"
-                    ab
-                    ... [10 bytes omitted] ...
-                    cd"
-                },
-            );
+
+            let rendered = render_pipe(&mut pipe, OUTPUT_BUDGET, "stdout");
+
+            assert_eq!(rendered, format!("ab\n{}\ncd", marker(dir.path(), 10)));
         }
 
         #[test]
-        fn over_budget_drops_the_middle_and_counts_it() {
-            let pipe = capture(b"0123456789", b"abcdef4321", 0);
-            assert_eq!(
-                render_pipe(&pipe, 8),
-                indoc! {"
-                    0123
-                    ... [12 bytes omitted] ...
-                    4321"
-                },
-            );
+        fn over_budget_spills_the_whole_pipe_and_counts_the_cut() {
+            let dir = tempfile::tempdir().unwrap();
+            let mut pipe = capture(dir.path(), b"0123456789", b"abcdef4321", 0);
+
+            let rendered = render_pipe(&mut pipe, 8, "stdout");
+
+            assert_eq!(rendered, format!("0123\n{}\n4321", marker(dir.path(), 12)));
+            let spilled = std::fs::read_to_string(spill_path(dir.path(), ".stdout.txt")).unwrap();
+            assert_eq!(spilled, "0123456789abcdef4321");
         }
 
         #[test]
         fn decodes_head_and_tail_together_when_nothing_was_omitted() {
             // A multibyte char across the head / tail split must not decode as two replacements.
+            let dir = tempfile::tempdir().unwrap();
             let crab = "🦀".as_bytes();
-            let pipe = capture(&crab[..2], &crab[2..], 0);
-            assert_eq!(render_pipe(&pipe, OUTPUT_BUDGET), "🦀");
+            let mut pipe = capture(dir.path(), &crab[..2], &crab[2..], 0);
+
+            let rendered = render_pipe(&mut pipe, OUTPUT_BUDGET, "stdout");
+
+            assert_eq!(rendered, "🦀");
+            assert!(!dir.path().join("session").exists());
         }
 
         #[test]
         fn trims_the_end_and_keeps_leading_and_internal_newlines() {
-            let pipe = capture(b"\nerr\nmore\n\n", b"", 0);
-            assert_eq!(render_pipe(&pipe, OUTPUT_BUDGET), "\nerr\nmore");
+            let dir = tempfile::tempdir().unwrap();
+            let mut pipe = capture(dir.path(), b"\nerr\nmore\n\n", b"", 0);
+            assert_eq!(
+                render_pipe(&mut pipe, OUTPUT_BUDGET, "stdout"),
+                "\nerr\nmore"
+            );
         }
     }
 
@@ -1159,10 +1271,11 @@ mod tests {
 
             #[tokio::test]
             async fn cut_short_keeps_what_already_arrived() {
+                let dir = tempfile::tempdir().unwrap();
                 let (mut writer, mut reader) = tokio::io::duplex(64);
                 writer.write_all(b"partial").await.unwrap();
 
-                let mut pipe = PipeCapture::default();
+                let mut pipe = empty_capture(dir.path());
                 let drained =
                     tokio::time::timeout(Duration::from_millis(50), pipe.drain(&mut reader)).await;
 
@@ -1172,6 +1285,21 @@ mod tests {
                 );
                 assert_eq!(pipe.head, b"partial");
             }
+
+            #[tokio::test]
+            async fn spills_everything_while_buffering_a_bounded_amount() {
+                let dir = tempfile::tempdir().unwrap();
+                let sent: Vec<u8> = (0..=u8::MAX).cycle().take(4 << 20).collect();
+
+                let mut pipe = empty_capture(dir.path());
+                pipe.drain(&mut sent.as_slice()).await.unwrap();
+
+                let spilled = std::fs::read(spill_path(dir.path(), ".stdout.txt")).unwrap();
+                assert!(spilled == sent, "the spill holds every byte sent");
+                let buffered = pipe.head.capacity() + pipe.tail.capacity();
+                let bound = 2 * (PIPE_HEAD_BYTES + PIPE_TAIL_BYTES + PIPE_READ_CHUNK_BYTES);
+                assert!(buffered <= bound, "{buffered} bytes buffered");
+            }
         }
 
         mod push {
@@ -1179,7 +1307,8 @@ mod tests {
 
             #[test]
             fn keeps_head_and_tail_across_chunks_and_counts_the_middle() {
-                let mut pipe = PipeCapture::default();
+                let dir = tempfile::tempdir().unwrap();
+                let mut pipe = empty_capture(dir.path());
                 pipe.push(&vec![b'h'; PIPE_HEAD_BYTES - 1]);
                 pipe.push(b"hm");
                 pipe.push(&[b'm'; 99]);
@@ -1188,6 +1317,13 @@ mod tests {
                 assert_eq!(pipe.head, vec![b'h'; PIPE_HEAD_BYTES]);
                 assert_eq!(pipe.tail, vec![b't'; PIPE_TAIL_BYTES]);
                 assert_eq!(pipe.omitted, 100);
+                let spilled = std::fs::read(spill_path(dir.path(), ".stdout.txt")).unwrap();
+                let sent = [
+                    vec![b'h'; PIPE_HEAD_BYTES],
+                    vec![b'm'; 100],
+                    vec![b't'; PIPE_TAIL_BYTES],
+                ];
+                assert!(spilled == sent.concat(), "the spill holds every byte sent");
             }
         }
     }

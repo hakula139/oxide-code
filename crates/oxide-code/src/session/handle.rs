@@ -39,6 +39,7 @@ const CHANNEL_CAPACITY: usize = 1024;
 pub(crate) struct SessionHandle {
     cmd_tx: mpsc::Sender<SessionCmd>,
     session_id: Arc<str>,
+    artifact_dir: Arc<Path>,
     shared: Arc<SharedState>,
     /// Taken by the first `shutdown` among the clones.
     actor_join: Arc<std::sync::Mutex<Option<JoinHandle<()>>>>,
@@ -119,6 +120,12 @@ pub(crate) struct CompactOutcome {
 impl SessionHandle {
     pub(crate) fn session_id(&self) -> &str {
         &self.session_id
+    }
+
+    /// The [`artifact_dir`](super::store::artifact_dir) beside the session's file, wherever the
+    /// file lives.
+    pub(crate) fn artifact_dir(&self) -> &Arc<Path> {
+        &self.artifact_dir
     }
 
     /// Ties the AI title request to this session, so `finalize` aborts it.
@@ -489,6 +496,7 @@ fn from_resumed_data(
 
 fn spawn_actor(state: SessionState) -> SessionHandle {
     let session_id = Arc::clone(&state.session_id);
+    let artifact_dir = Arc::clone(&state.artifact_dir);
     let shared = Arc::new(SharedState::default());
     let (cmd_tx, cmd_rx) = mpsc::channel(CHANNEL_CAPACITY);
     let actor_shared = Arc::clone(&shared);
@@ -496,6 +504,7 @@ fn spawn_actor(state: SessionState) -> SessionHandle {
     SessionHandle {
         cmd_tx,
         session_id,
+        artifact_dir,
         shared,
         actor_join: Arc::new(std::sync::Mutex::new(Some(join))),
         title_task: Arc::default(),
@@ -1406,6 +1415,23 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn start_keeps_artifacts_beside_the_file_its_first_record_creates() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = test_store(dir.path());
+
+        let handle = start(&store, "test-model", None);
+
+        let id = handle.session_id().to_owned();
+        let expected = test_project_dir(dir.path()).join(&id);
+        assert_eq!(handle.artifact_dir().to_path_buf(), expected);
+        handle.record_message(Message::user("first")).await;
+        assert_eq!(
+            test_session_file(dir.path(), &id).with_file_name(&id),
+            expected
+        );
+    }
+
     // ── roll ──
 
     #[tokio::test]
@@ -1654,6 +1680,27 @@ mod tests {
         } = resume_id(&store, &session_id).unwrap();
         assert_eq!(resumed.session_id(), session_id);
         assert_eq!(transcript.messages.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn resume_from_path_keeps_artifacts_beside_the_file_wherever_it_lives() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = test_store(dir.path());
+        let original = start(&store, "m", None);
+        let session_id = original.session_id().to_owned();
+        original.record_message(Message::user("hello")).await;
+        original.shutdown().await;
+        let outside = dir.path().join("outside");
+        std::fs::create_dir(&outside).unwrap();
+        let copied = outside.join("copied.jsonl");
+        std::fs::copy(test_session_file(dir.path(), &session_id), &copied).unwrap();
+
+        let ResumedSession { handle, .. } = resume_from_path(&store, &copied).unwrap();
+
+        assert_eq!(
+            handle.artifact_dir().to_path_buf(),
+            outside.join(&session_id)
+        );
     }
 
     #[tokio::test]

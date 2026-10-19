@@ -13,6 +13,7 @@ use std::borrow::Cow;
 use std::cmp::Reverse;
 use std::fmt::Write as _;
 use std::future::Future;
+use std::io::Write as _;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::sync::Arc;
@@ -22,10 +23,14 @@ use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 use tokio_util::sync::CancellationToken;
+use tracing::warn;
 
 use self::tasks::Task;
-use crate::file_tracker::{FileTracker, TrackableFileError, validate_trackable_file};
+use crate::file_tracker::{
+    FileTracker, MAX_TRACKED_FILE_SIZE, TrackableFileError, validate_trackable_file,
+};
 use crate::permission::{Access, PermissionClass, WalkFilter, Workspace};
+use crate::util::fs::create_private_dir_all;
 use crate::util::path::{lexical_normalize, slash_separated};
 use crate::util::text::{ELLIPSIS, plural};
 
@@ -64,12 +69,15 @@ pub(crate) struct ToolDefinition {
 
 // ── Tool Context ──
 
-/// The context a call prepares and runs in. Its workspace, session ID, and tracker are shared with
-/// the session's other calls.
+/// The context a call prepares and runs in. Its workspace, session ID, artifact directory, and
+/// tracker are shared with the session's other calls.
 #[derive(Clone)]
 pub(crate) struct ToolCtx {
     pub(crate) workspace: Arc<Workspace>,
     pub(crate) session_id: String,
+    /// The directory that holds the session's artifacts, such as spilled tool output. It may not
+    /// exist yet, so the first call that writes there creates it.
+    pub(crate) artifact_dir: Arc<Path>,
     pub(crate) tracker: Arc<FileTracker>,
     /// The ID the model gave the call, which the tracker attributes the call's records to.
     pub(crate) tool_use_id: String,
@@ -81,6 +89,15 @@ pub(crate) struct ToolCtx {
 impl ToolCtx {
     fn cwd(&self) -> &Path {
         self.workspace.cwd()
+    }
+
+    /// Where the call's spill files go: [`SPILL_DIR`] in the artifact directory, under names that
+    /// start with the call's ID.
+    fn spills(&self) -> Spills {
+        Spills {
+            dir: self.artifact_dir.join(SPILL_DIR),
+            stem: spill_stem(&self.tool_use_id),
+        }
     }
 }
 
@@ -428,47 +445,194 @@ impl ToolRegistry {
 
 const MAX_OUTPUT_BYTES: usize = 128 * 1024;
 
-const TRUNCATION_OVERHEAD: usize = 80;
-
-/// Runs the prepared call on `tool`, applying [`cap_output`] after each tool's row caps.
-/// Records the original length in `metadata.truncated_bytes` when truncated.
+/// Runs the prepared call on `tool`, applying [`cap_output`] after each tool's row caps, with the
+/// call's `.txt` spill file keeping the full output. Records the original length in
+/// `metadata.truncated_bytes` when truncated.
 pub(crate) async fn run_capped(tool: &dyn Tool, prepared: Prepared, ctx: &ToolCtx) -> ToolOutput {
     let mut output = tool.run(prepared, ctx).await;
-    let (content, original_len) = cap_output(output.content);
-    output.content = content;
-    if let Some(len) = original_len {
-        output.metadata.truncated_bytes = Some(len);
+    let original_len = output.content.len();
+    if original_len <= MAX_OUTPUT_BYTES {
+        return output;
     }
+
+    let content = std::mem::take(&mut output.content);
+    let spill = ctx.spills().file(".txt");
+    match run_blocking(move || Ok(cap_output(&content, spill))).await {
+        Ok(capped) => output.content = capped,
+        Err(e) => return ToolOutput::error(e),
+    }
+    output.metadata.truncated_bytes = Some(original_len);
     output
 }
 
-/// Truncates content above [`MAX_OUTPUT_BYTES`], keeping roughly half that many bytes from each end
-/// at UTF-8 boundaries plus an omission marker. Returns the original length when truncated.
-/// Leaves content unchanged if the omitted middle is shorter than [`TRUNCATION_OVERHEAD`] bytes.
-fn cap_output(content: String) -> (String, Option<usize>) {
-    if content.len() <= MAX_OUTPUT_BYTES {
-        return (content, None);
-    }
-
-    let half = MAX_OUTPUT_BYTES / 2;
+/// Writes `content`, which must be longer than [`MAX_OUTPUT_BYTES`], whole to `spill`, and returns
+/// equal parts of each end at UTF-8 boundaries around an omission marker, all within the cap.
+fn cap_output(content: &str, mut spill: Spill) -> String {
+    spill.write(content.as_bytes());
+    let note = spill.note("output");
+    // The full length has at least as many digits as the omitted count the marker ends up with.
+    let reserve = omission_marker(content.len(), &note).len() + "\n\n".len();
+    let half = (MAX_OUTPUT_BYTES - reserve) / 2;
     let head_end = content.floor_char_boundary(half);
-    let tail_start = content.floor_char_boundary(content.len() - half);
+    let tail_start = content.ceil_char_boundary(content.len() - half);
 
-    let omitted_bytes = tail_start - head_end;
-    if omitted_bytes < TRUNCATION_OVERHEAD {
-        return (content, None);
+    let marker = omission_marker(tail_start - head_end, &note);
+    let mut capped = String::with_capacity(MAX_OUTPUT_BYTES);
+    capped.push_str(&content[..head_end]);
+    _ = write!(capped, "\n{marker}\n");
+    capped.push_str(&content[tail_start..]);
+    capped
+}
+
+/// The line that stands in for the `omitted` bytes cut from a result, with `note` saying where the
+/// full output is kept.
+fn omission_marker(omitted: usize, note: &str) -> String {
+    format!("... [{omitted} bytes omitted, {note}] ...")
+}
+
+// ── Output Spill ──
+
+/// The directory in [`ToolCtx::artifact_dir`] that keeps the full output of results too large to
+/// return whole.
+const SPILL_DIR: &str = "tool-results";
+
+/// Most bytes a spill file keeps, so a runaway command cannot fill the disk. It matches the largest
+/// file `read` opens, so every spill file reads back.
+const MAX_SPILL_BYTES: u64 = MAX_TRACKED_FILE_SIZE;
+
+/// Where one call's spill files go, each named by the call's ID and a suffix.
+struct Spills {
+    dir: PathBuf,
+    stem: String,
+}
+
+impl Spills {
+    /// The spill into the file named by the call's ID followed by `suffix`, such as `.stdout.txt`.
+    fn file(&self, suffix: &str) -> Spill {
+        Spill {
+            path: self.dir.join(format!("{}{suffix}", self.stem)),
+            state: SpillState::Pending,
+        }
+    }
+}
+
+/// `id` with each character other than an ASCII letter, digit, `-`, or `_` replaced by `_`, so a
+/// tool call ID from the API cannot name a path outside the spill directory.
+fn spill_stem(id: &str) -> String {
+    id.chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect()
+}
+
+/// A file that keeps the full output of a result too large to return whole. The first write creates
+/// it with `0600` perms in a `0700` directory, so a result that fits leaves nothing on disk.
+struct Spill {
+    path: PathBuf,
+    state: SpillState,
+}
+
+enum SpillState {
+    Pending,
+    /// `full` once the file reached [`MAX_SPILL_BYTES`] and dropped bytes.
+    Open {
+        file: std::fs::File,
+        written: u64,
+        full: bool,
+    },
+    /// Why creating or writing the file failed.
+    Failed(String),
+}
+
+impl Spill {
+    fn path(&self) -> &Path {
+        &self.path
     }
 
-    let original_len = content.len();
-    let mut truncated = String::with_capacity(MAX_OUTPUT_BYTES + TRUNCATION_OVERHEAD);
-    truncated.push_str(&content[..head_end]);
-    _ = write!(
-        truncated,
-        "\n... [{omitted_bytes} bytes truncated, head + tail kept] ...\n"
-    );
-    truncated.push_str(&content[tail_start..]);
+    /// Returns whether a write has started the spill, whether or not it succeeded.
+    fn started(&self) -> bool {
+        !matches!(self.state, SpillState::Pending)
+    }
 
-    (truncated, Some(original_len))
+    /// Appends `bytes`, creating the file on the first write. A failure ends the spill, and
+    /// [`Self::note`] reports it.
+    fn write(&mut self, bytes: &[u8]) {
+        if let SpillState::Pending = self.state {
+            self.state = match create_spill_file(&self.path) {
+                Ok(file) => SpillState::Open {
+                    file,
+                    written: 0,
+                    full: false,
+                },
+                Err(e) => self.fail(&e),
+            };
+        }
+        let SpillState::Open {
+            file,
+            written,
+            full,
+        } = &mut self.state
+        else {
+            return;
+        };
+
+        let room = usize::try_from(MAX_SPILL_BYTES - *written).unwrap_or(usize::MAX);
+        let kept = &bytes[..bytes.len().min(room)];
+        *full |= kept.len() < bytes.len();
+        if let Err(e) = file.write_all(kept) {
+            self.state = self.fail(&e.to_string());
+        } else {
+            *written += kept.len() as u64;
+        }
+    }
+
+    /// Logs `error` and returns the state that ends the spill.
+    fn fail(&self, error: &str) -> SpillState {
+        warn!(
+            "failed to spill tool output to {}: {error}",
+            self.path.display()
+        );
+        SpillState::Failed(error.to_owned())
+    }
+
+    /// Where the full `what`, such as `stdout`, is kept, as the omission marker names it. Call it
+    /// only once a write has started the spill.
+    fn note(&self, what: &str) -> String {
+        let path = self.path.display();
+        match &self.state {
+            SpillState::Pending => unreachable!("a result omits bytes only after they spill"),
+            SpillState::Open { full: false, .. } => format!("full {what} saved to {path}"),
+            SpillState::Open { full: true, .. } => {
+                let mib = MAX_SPILL_BYTES >> 20;
+                format!("first {mib} MiB of {what} saved to {path}")
+            }
+            SpillState::Failed(error) => {
+                format!("saving the full {what} to {path} failed: {error}")
+            }
+        }
+    }
+}
+
+/// Creates the new file at `path` with `0600` perms on Unix, and its directory with `0700` perms.
+fn create_spill_file(path: &Path) -> Result<std::fs::File, String> {
+    let dir = path
+        .parent()
+        .expect("a spill file sits in the spill directory");
+    create_private_dir_all(dir).map_err(|e| e.root_cause().to_string())?;
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt as _;
+
+        options.mode(0o600);
+    }
+    options.open(path).map_err(|e| e.to_string())
 }
 
 // ── Input Parsing ──
@@ -985,12 +1149,14 @@ pub(crate) mod testing {
     use crate::permission::rule::Rule;
     use crate::permission::{Access, Mode, PermissionClass, Policy, ReadFilter, Workspace};
 
-    /// A fresh tracker's context in `cwd`, for call `toolu_test` of session `test-session`.
+    /// A fresh tracker's context in `cwd`, for call `toolu_test` of session `test-session`, whose
+    /// artifact directory is `cwd/session`.
     pub(crate) fn ctx(cwd: &Path) -> ToolCtx {
         ctx_with(cwd, Arc::new(FileTracker::default()))
     }
 
-    /// [`ctx`] in the system temp dir, for calls that name absolute paths.
+    /// [`ctx`] in the system temp dir, for calls that name absolute paths. Its artifact directory
+    /// is shared, so a call that spills output needs [`ctx`] in a temp dir of its own.
     pub(crate) fn temp_ctx() -> ToolCtx {
         ctx(&std::env::temp_dir())
     }
@@ -1000,10 +1166,18 @@ pub(crate) mod testing {
         ToolCtx {
             workspace: Arc::new(Workspace::new(cwd)),
             session_id: "test-session".to_owned(),
+            artifact_dir: Arc::from(cwd.join("session")),
             tracker,
             tool_use_id: "toolu_test".to_owned(),
             cancel: CancellationToken::new(),
         }
+    }
+
+    /// Where a spill of call `toolu_test` in [`ctx`] in `cwd` with `suffix`, such as `.txt`, goes.
+    pub(crate) fn spill_path(cwd: &Path, suffix: &str) -> PathBuf {
+        cwd.join("session")
+            .join("tool-results")
+            .join(format!("toolu_test{suffix}"))
     }
 
     /// Prepares `input` for `tool` and runs it in `ctx`, the way dispatch does past the gate.
@@ -1162,7 +1336,7 @@ mod tests {
     use super::tasks::TasksTool;
     use super::testing::{
         canonical_tempdir, create_modified_at, ctx, deny_read_access, deny_reads, search_root,
-        temp_ctx,
+        spill_path,
     };
     use super::write::WriteTool;
     use super::*;
@@ -1190,6 +1364,14 @@ mod tests {
             .find(|t| t.spec().name == name)
             .unwrap_or_else(|| panic!("tool {name} missing from catalog"))
             .as_ref()
+    }
+
+    /// Splits output capped by [`cap_output`] into its head, the text inside its omission marker,
+    /// and its tail.
+    fn split_capped(out: &str) -> (&str, &str, &str) {
+        let (head, rest) = out.split_once("\n... [").unwrap();
+        let (marker, tail) = rest.split_once("] ...\n").unwrap();
+        (head, marker, tail)
     }
 
     #[test]
@@ -1915,6 +2097,36 @@ mod tests {
     mod run_capped {
         use super::*;
 
+        /// A tool whose every call returns its text.
+        struct Fixed(String);
+
+        impl Tool for Fixed {
+            fn spec(&self) -> ToolSpec {
+                ToolSpec {
+                    name: "fixed".to_owned(),
+                    description: "return fixed text".to_owned(),
+                    input_schema: serde_json::json!({"type": "object"}),
+                    class: PermissionClass::Read,
+                    parallel_safe: true,
+                }
+            }
+
+            fn run<'a>(
+                &'a self,
+                _prepared: Prepared,
+                _ctx: &'a ToolCtx,
+            ) -> Pin<Box<dyn Future<Output = ToolOutput> + Send + 'a>> {
+                Box::pin(std::future::ready(ToolOutput::success(self.0.clone())))
+            }
+        }
+
+        async fn run_fixed(text: &str, ctx: &ToolCtx) -> ToolOutput {
+            let registry = ToolRegistry::new(vec![Box::new(Fixed(text.to_owned()))]);
+            registry
+                .run_input("fixed", serde_json::json!({}), ctx)
+                .await
+        }
+
         fn oversize_grep_input() -> (tempfile::TempDir, serde_json::Value) {
             let dir = tempfile::tempdir().unwrap();
             let path = dir.path().join("big.txt");
@@ -1925,45 +2137,57 @@ mod tests {
         }
 
         #[tokio::test]
-        async fn caps_byte_overflow() {
-            let (_dir, input) = oversize_grep_input();
-            let registry = ToolRegistry::new(vec![Box::new(GrepTool::default())]);
-            let output = registry.run_input("grep", input, &temp_ctx()).await;
+        async fn spills_an_oversized_result_and_returns_its_head_tail_and_path() {
+            let dir = tempfile::tempdir().unwrap();
+            let full = (0..25_600).fold(String::new(), |mut full, i| {
+                _ = writeln!(full, "line {i:06}");
+                full
+            });
+            assert_eq!(full.len(), 300 << 10);
 
-            assert!(!output.is_error);
-            assert!(output.content.len() <= MAX_OUTPUT_BYTES + TRUNCATION_OVERHEAD);
-            assert!(output.content.contains("bytes truncated, head + tail kept"));
-            assert!(output.metadata.truncated_bytes.is_some());
-            assert!(output.metadata.truncated_total.is_none());
+            let output = run_fixed(&full, &ctx(dir.path())).await;
+
+            let (head, marker, tail) = split_capped(&output.content);
+            assert_eq!(head.len(), tail.len());
+            assert!(full.starts_with(head) && full.ends_with(tail));
+            let omitted = full.len() - head.len() - tail.len();
+            let path = spill_path(dir.path(), ".txt");
+            assert_eq!(
+                marker,
+                format!(
+                    "{omitted} bytes omitted, full output saved to {}",
+                    path.display()
+                ),
+            );
+            assert!((MAX_OUTPUT_BYTES - 1..=MAX_OUTPUT_BYTES).contains(&output.content.len()));
+            assert_eq!(std::fs::read_to_string(&path).unwrap(), full);
+            assert_eq!(output.metadata.truncated_bytes, Some(full.len()));
         }
 
         #[tokio::test]
-        async fn within_cap_leaves_content_and_metadata_untouched() {
+        async fn within_cap_leaves_content_and_metadata_untouched_and_writes_nothing() {
             let dir = tempfile::tempdir().unwrap();
-            let path = dir.path().join("small.txt");
-            std::fs::write(&path, "hello\nworld\n").unwrap();
+            let text = "x".repeat(MAX_OUTPUT_BYTES);
 
-            let registry = ToolRegistry::new(vec![Box::new(ReadTool)]);
+            let output = run_fixed(&text, &ctx(dir.path())).await;
+
+            assert_eq!(output.content, text);
+            assert!(output.metadata.truncated_bytes.is_none());
+            assert!(!dir.path().join("session").exists());
+        }
+
+        #[tokio::test]
+        async fn byte_cap_on_grep_keeps_the_row_count_apart_and_falls_through_to_text_view() {
+            let (dir, input) = oversize_grep_input();
+            let registry = ToolRegistry::new(vec![Box::new(GrepTool::default())]);
+
             let output = registry
-                .run_input(
-                    "read",
-                    serde_json::json!({"file_path": path.to_str().unwrap()}),
-                    &temp_ctx(),
-                )
+                .run_input("grep", input.clone(), &ctx(dir.path()))
                 .await;
 
-            assert!(!output.is_error);
-            assert_eq!(output.content, "1\thello\n2\tworld");
-            assert!(output.metadata.truncated_bytes.is_none());
-        }
-
-        #[tokio::test]
-        async fn byte_cap_on_grep_falls_through_to_text_view() {
-            let (_dir, input) = oversize_grep_input();
-            let registry = ToolRegistry::new(vec![Box::new(GrepTool::default())]);
-            let output = registry.run_input("grep", input.clone(), &temp_ctx()).await;
-            assert!(output.metadata.truncated_bytes.is_some());
-
+            let spilled = std::fs::read(spill_path(dir.path(), ".txt")).unwrap();
+            assert_eq!(output.metadata.truncated_bytes, Some(spilled.len()));
+            assert!(output.metadata.truncated_total.is_none());
             let view = registry.result_view(
                 "grep",
                 &input,
@@ -1980,62 +2204,150 @@ mod tests {
         use super::*;
 
         #[test]
-        fn short_content_unchanged() {
-            let (out, original) = cap_output("hello".to_owned());
-            assert_eq!(out, "hello");
-            assert!(original.is_none());
+        fn cuts_both_ends_at_char_boundaries() {
+            // Wherever the cuts fall, three of the four offsets put each one inside a 4-byte char.
+            for offset in 0..4 {
+                let dir = tempfile::tempdir().unwrap();
+                let pad = "a".repeat(offset);
+                let content = format!("{pad}{}{pad}", "🦀".repeat(MAX_OUTPUT_BYTES / 2));
+
+                let out = cap_output(&content, ctx(dir.path()).spills().file(".txt"));
+
+                let (head, marker, tail) = split_capped(&out);
+                assert!(content.starts_with(head) && content.ends_with(tail));
+                let omitted = content.len() - head.len() - tail.len();
+                assert!(marker.starts_with(&format!("{omitted} bytes omitted, ")));
+                assert!(
+                    out.len() <= MAX_OUTPUT_BYTES,
+                    "offset {offset}: {}",
+                    out.len()
+                );
+            }
         }
 
         #[test]
-        fn keeps_head_and_tail() {
-            let head = "HEAD_SENTINEL\n";
-            let tail = "TAIL_SENTINEL\n";
-            let filler_len = MAX_OUTPUT_BYTES * 2 - head.len() - tail.len();
+        fn fits_the_cap_beside_a_long_spill_path() {
+            let dir = tempfile::tempdir().unwrap();
+            let cwd = (0..3).fold(dir.path().to_owned(), |cwd, _| cwd.join("d".repeat(100)));
+            let content = "x".repeat(MAX_OUTPUT_BYTES + 1);
 
-            let mut content = String::with_capacity(head.len() + filler_len + tail.len());
-            content.push_str(head);
-            content.extend(std::iter::repeat_n('x', filler_len));
-            content.push_str(tail);
-            let original_len = content.len();
+            let out = cap_output(&content, ctx(&cwd).spills().file(".txt"));
 
-            let (out, original) = cap_output(content);
-
-            assert!(out.starts_with(head));
-            assert!(out.ends_with(tail));
-            assert!(out.contains("bytes truncated, head + tail kept"));
-            assert!(out.len() <= MAX_OUTPUT_BYTES + TRUNCATION_OVERHEAD);
-            let sep_pos = out.find("bytes truncated").unwrap();
-            assert!(sep_pos > head.len());
-            assert!(sep_pos < out.len() - tail.len());
-            assert_eq!(original, Some(original_len));
+            let path = spill_path(&cwd, ".txt");
+            assert!(path.as_os_str().len() > 300);
+            assert!(out.len() <= MAX_OUTPUT_BYTES, "{}", out.len());
+            let (_, marker, _) = split_capped(&out);
+            assert!(marker.ends_with(&format!("full output saved to {}", path.display())));
+            assert_eq!(std::fs::read_to_string(&path).unwrap(), content);
         }
 
         #[test]
-        fn multibyte_at_split_boundary() {
-            let half = MAX_OUTPUT_BYTES / 2;
-            let emoji = "🦀"; // 4 bytes
-            let prefix_len = half - 2;
+        fn names_why_the_spill_failed_in_place_of_its_path() {
+            let dir = tempfile::tempdir().unwrap();
+            std::fs::write(dir.path().join("session"), "a file").unwrap();
+            let content = "x".repeat(MAX_OUTPUT_BYTES * 2);
 
-            let mut content = String::new();
-            content.push_str(&"a".repeat(prefix_len));
-            content.push_str(emoji);
-            content.push_str(&"b".repeat(MAX_OUTPUT_BYTES * 2));
+            let out = cap_output(&content, ctx(dir.path()).spills().file(".txt"));
 
-            let (out, original) = cap_output(content);
-
-            assert!(out.contains("bytes truncated"));
-            assert!(out.starts_with("aaaa"));
-            assert!(out.ends_with('b'));
-            assert!(!out.contains(emoji));
-            assert!(original.is_some());
+            let (_, marker, _) = split_capped(&out);
+            let path = spill_path(dir.path(), ".txt");
+            let failed = format!("saving the full output to {} failed: ", path.display());
+            assert!(marker.contains(&failed), "{marker}");
+            assert!(out.len() <= MAX_OUTPUT_BYTES, "{}", out.len());
         }
+    }
+
+    mod spill_stem {
+        use super::*;
 
         #[test]
-        fn barely_over_limit_unchanged() {
-            let original = "a".repeat(MAX_OUTPUT_BYTES + 1);
-            let (out, original_len) = cap_output(original.clone());
-            assert_eq!(out, original);
-            assert!(original_len.is_none());
+        fn replaces_characters_that_could_leave_the_spill_directory() {
+            assert_eq!(spill_stem("toolu_01Ab-9"), "toolu_01Ab-9");
+            assert_eq!(spill_stem("../a/b\\c.d"), "___a_b_c_d");
+        }
+    }
+
+    mod spill {
+        use super::*;
+
+        mod write {
+            use super::*;
+
+            #[test]
+            fn keeps_at_most_the_size_cap_and_says_so() {
+                let dir = tempfile::tempdir().unwrap();
+                let mut spill = ctx(dir.path()).spills().file(".stdout.txt");
+                let chunk = vec![b'a'; 1 << 20];
+
+                for _ in 0..=MAX_SPILL_BYTES >> 20 {
+                    spill.write(&chunk);
+                }
+
+                let path = spill_path(dir.path(), ".stdout.txt");
+                let spilled = std::fs::metadata(&path).unwrap().len();
+                assert_eq!(spilled, MAX_SPILL_BYTES);
+                assert_eq!(
+                    spill.note("stdout"),
+                    format!("first 10 MiB of stdout saved to {}", path.display()),
+                );
+            }
+
+            #[test]
+            fn names_the_error_of_a_write_the_file_refuses() {
+                let dir = tempfile::tempdir().unwrap();
+                let path = dir.path().join("toolu_test.stdout.txt");
+                std::fs::write(&path, "").unwrap();
+                let read_only = || std::fs::File::open(&path).unwrap();
+                let mut spill = Spill {
+                    path: path.clone(),
+                    state: SpillState::Open {
+                        file: read_only(),
+                        written: 0,
+                        full: false,
+                    },
+                };
+
+                spill.write(b"x");
+
+                let error = read_only().write_all(b"x").unwrap_err();
+                assert_eq!(
+                    spill.note("stdout"),
+                    format!(
+                        "saving the full stdout to {} failed: {error}",
+                        path.display()
+                    ),
+                );
+            }
+        }
+    }
+
+    mod create_spill_file {
+        use super::*;
+
+        #[test]
+        fn refuses_to_replace_an_existing_file() {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("toolu_test.txt");
+            std::fs::write(&path, "earlier").unwrap();
+
+            assert!(create_spill_file(&path).is_err());
+
+            assert_eq!(std::fs::read_to_string(&path).unwrap(), "earlier");
+        }
+
+        #[cfg(unix)]
+        #[test]
+        fn creates_a_private_file_in_a_private_directory() {
+            use std::os::unix::fs::PermissionsExt as _;
+
+            let dir = tempfile::tempdir().unwrap();
+            let path = spill_path(dir.path(), ".txt");
+
+            create_spill_file(&path).unwrap();
+
+            let mode = |path: &Path| std::fs::metadata(path).unwrap().permissions().mode() & 0o777;
+            assert_eq!(mode(&path), 0o600);
+            assert_eq!(mode(path.parent().unwrap()), 0o700);
         }
     }
 
