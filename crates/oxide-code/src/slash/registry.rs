@@ -214,169 +214,185 @@ mod tests {
     use crate::tui::modal::ModalAction;
     use crate::tui::modal::testing::ScriptedModal;
 
-    fn done() -> SlashOutcome {
-        SlashOutcome::SystemMessage("done".to_owned())
-    }
+    mod slash_outcome {
+        use super::*;
 
-    // ── SlashOutcome::fmt ──
+        fn done() -> SlashOutcome {
+            SlashOutcome::SystemMessage("done".to_owned())
+        }
 
-    #[test]
-    fn fmt_slash_outcome_debug_names_each_variant() {
-        let modal = SlashOutcome::Modal(Box::new(ScriptedModal::new(ModalAction::Cancelled)));
-        assert_eq!(
-            format!("{:?}", SlashOutcome::Forward(Action::Op(Op::Clear))),
-            "Forward(Op(Clear))"
-        );
-        assert_eq!(format!("{modal:?}"), "Modal(<modal>)");
-        assert_eq!(format!("{:?}", done()), r#"SystemMessage("done")"#);
-        assert_eq!(
-            format!("{:?}", SlashOutcome::GitDiff("+x".to_owned())),
-            r#"GitDiff("+x")"#
-        );
-    }
+        #[test]
+        fn debug_names_each_variant() {
+            let modal = SlashOutcome::Modal(Box::new(ScriptedModal::new(ModalAction::Cancelled)));
+            assert_eq!(
+                format!("{:?}", SlashOutcome::Forward(Action::Op(Op::Clear))),
+                "Forward(Op(Clear))"
+            );
+            assert_eq!(format!("{modal:?}"), "Modal(<modal>)");
+            assert_eq!(format!("{:?}", done()), r#"SystemMessage("done")"#);
+            assert_eq!(
+                format!("{:?}", SlashOutcome::GitDiff("+x".to_owned())),
+                r#"GitDiff("+x")"#
+            );
+        }
 
-    // ── SlashOutcome::into_forward / into_modal / into_system_message ──
+        mod into_forward {
+            use super::*;
 
-    #[test]
-    #[should_panic(expected = r#"expected Forward, got SystemMessage("done")"#)]
-    fn into_forward_names_the_variant_it_got() {
-        done().into_forward();
-    }
-
-    #[test]
-    #[should_panic(expected = r#"expected Modal, got GitDiff("+x")"#)]
-    fn into_modal_names_the_variant_it_got() {
-        SlashOutcome::GitDiff("+x".to_owned()).into_modal();
-    }
-
-    #[test]
-    #[should_panic(expected = "expected SystemMessage, got Forward(Op(Clear))")]
-    fn into_system_message_names_the_variant_it_got() {
-        SlashOutcome::Forward(Action::Op(Op::Clear)).into_system_message();
-    }
-
-    // ── BUILT_INS contract ──
-
-    #[test]
-    fn built_ins_have_unique_canonical_names() {
-        let names: HashSet<_> = BUILT_INS.iter().map(|c| c.name()).collect();
-        assert_eq!(
-            names.len(),
-            BUILT_INS.len(),
-            "duplicate canonical name in BUILT_INS",
-        );
-    }
-
-    fn alias_collisions<'a>(commands: &[&'a dyn SlashCommand]) -> Vec<(&'a str, &'a str)> {
-        let names: HashSet<_> = commands.iter().map(|c| c.name()).collect();
-        commands
-            .iter()
-            .flat_map(|cmd| {
-                cmd.aliases()
-                    .iter()
-                    .filter(|alias| names.contains(*alias))
-                    .map(move |alias| (cmd.name(), *alias))
-            })
-            .collect()
-    }
-
-    fn empty_metadata_offenders<'a>(commands: &[&'a dyn SlashCommand]) -> Vec<&'a str> {
-        commands
-            .iter()
-            .filter(|c| c.name().is_empty() || c.description().is_empty())
-            .map(|c| c.name())
-            .collect()
-    }
-
-    #[test]
-    fn built_ins_aliases_do_not_collide_with_any_canonical_name() {
-        let collisions = alias_collisions(BUILT_INS);
-        assert!(collisions.is_empty(), "alias collisions: {collisions:?}");
-    }
-
-    #[test]
-    fn alias_collisions_finds_a_synthetic_overlap() {
-        let collider = FakeCmd {
-            name: "collider",
-            aliases: &["help"],
-            description: "collide",
-            ..FakeCmd::DEFAULT
-        };
-        let registry: &[&dyn SlashCommand] = &[&HelpCmd, &collider];
-        assert_eq!(alias_collisions(registry), vec![("collider", "help")]);
-    }
-
-    #[test]
-    fn built_ins_have_non_empty_name_and_description() {
-        let offenders = empty_metadata_offenders(BUILT_INS);
-        assert!(
-            offenders.is_empty(),
-            "commands with empty name or description: {offenders:?}",
-        );
-    }
-
-    #[test]
-    fn empty_metadata_offenders_reports_command_with_empty_description() {
-        let empty = FakeCmd {
-            name: "no-desc",
-            description: "",
-            ..FakeCmd::DEFAULT
-        };
-        assert_eq!(empty_metadata_offenders(&[&empty]), vec!["no-desc"]);
-    }
-
-    #[test]
-    fn built_ins_steering_forms_forward_only_ops_the_engine_takes_mid_turn() {
-        let info = test_session_info();
-        let ctx = SlashContext::new(&info, None);
-        let mut steering = 0;
-
-        for cmd in BUILT_INS {
-            let completions = cmd
-                .complete_arg("")
-                .into_iter()
-                .map(|c| c.value.into_owned());
-            let forms = [String::new(), "x".to_owned()]
-                .into_iter()
-                .chain(completions);
-            for args in forms.filter(|args| cmd.classify(args) == SlashKind::Steering) {
-                match cmd.execute(&args, &ctx) {
-                    Ok(SlashOutcome::Forward(Action::Op(Op::Queue(_) | Op::SetMode(_))))
-                    | Err(_) => {}
-                    other => panic!("/{} {args} forwards {other:?}", cmd.name()),
-                }
-                steering += 1;
+            #[test]
+            #[should_panic(expected = r#"expected Forward, got SystemMessage("done")"#)]
+            fn names_the_variant_it_got() {
+                done().into_forward();
             }
         }
 
-        assert!(steering > 0, "no built-in form steers");
-    }
+        mod into_modal {
+            use super::*;
 
-    // ── lookup_in ──
+            #[test]
+            #[should_panic(expected = r#"expected Modal, got GitDiff("+x")"#)]
+            fn names_the_variant_it_got() {
+                SlashOutcome::GitDiff("+x".to_owned()).into_modal();
+            }
+        }
 
-    const ALIASED: FakeCmd = FakeCmd {
-        name: "primary",
-        aliases: &["alt", "shortcut"],
-        ..FakeCmd::DEFAULT
-    };
+        mod into_system_message {
+            use super::*;
 
-    #[test]
-    fn lookup_in_resolves_canonical_name() {
-        let cmd = lookup_in(BUILT_INS, "help").expect("/help is registered");
-        assert_eq!(cmd.name(), "help");
-    }
-
-    #[test]
-    fn lookup_in_resolves_each_alias_to_canonical_impl() {
-        let registry: &[&dyn SlashCommand] = &[&ALIASED];
-        for alias in ["alt", "shortcut"] {
-            let cmd = lookup_in(registry, alias).expect("alias must resolve");
-            assert_eq!(cmd.name(), "primary");
+            #[test]
+            #[should_panic(expected = "expected SystemMessage, got Forward(Op(Clear))")]
+            fn names_the_variant_it_got() {
+                SlashOutcome::Forward(Action::Op(Op::Clear)).into_system_message();
+            }
         }
     }
 
-    #[test]
-    fn lookup_in_unknown_name_is_absent() {
-        assert!(lookup_in(BUILT_INS, "nonexistent").is_none());
+    mod built_ins {
+        use super::*;
+
+        fn alias_collisions<'a>(commands: &[&'a dyn SlashCommand]) -> Vec<(&'a str, &'a str)> {
+            let names: HashSet<_> = commands.iter().map(|c| c.name()).collect();
+            commands
+                .iter()
+                .flat_map(|cmd| {
+                    cmd.aliases()
+                        .iter()
+                        .filter(|alias| names.contains(*alias))
+                        .map(move |alias| (cmd.name(), *alias))
+                })
+                .collect()
+        }
+
+        fn empty_metadata_offenders<'a>(commands: &[&'a dyn SlashCommand]) -> Vec<&'a str> {
+            commands
+                .iter()
+                .filter(|c| c.name().is_empty() || c.description().is_empty())
+                .map(|c| c.name())
+                .collect()
+        }
+
+        #[test]
+        fn have_unique_canonical_names() {
+            let names: HashSet<_> = BUILT_INS.iter().map(|c| c.name()).collect();
+            assert_eq!(
+                names.len(),
+                BUILT_INS.len(),
+                "duplicate canonical name in BUILT_INS",
+            );
+        }
+
+        #[test]
+        fn aliases_do_not_collide_with_any_canonical_name() {
+            let collisions = alias_collisions(BUILT_INS);
+            assert!(collisions.is_empty(), "alias collisions: {collisions:?}");
+        }
+
+        #[test]
+        fn alias_collisions_finds_a_synthetic_overlap() {
+            let collider = FakeCmd {
+                name: "collider",
+                aliases: &["help"],
+                description: "collide",
+                ..FakeCmd::DEFAULT
+            };
+            let registry: &[&dyn SlashCommand] = &[&HelpCmd, &collider];
+            assert_eq!(alias_collisions(registry), vec![("collider", "help")]);
+        }
+
+        #[test]
+        fn have_non_empty_name_and_description() {
+            let offenders = empty_metadata_offenders(BUILT_INS);
+            assert!(
+                offenders.is_empty(),
+                "commands with empty name or description: {offenders:?}",
+            );
+        }
+
+        #[test]
+        fn empty_metadata_offenders_reports_command_with_empty_description() {
+            let empty = FakeCmd {
+                name: "no-desc",
+                description: "",
+                ..FakeCmd::DEFAULT
+            };
+            assert_eq!(empty_metadata_offenders(&[&empty]), vec!["no-desc"]);
+        }
+
+        #[test]
+        fn steering_forms_forward_only_ops_the_engine_takes_mid_turn() {
+            let info = test_session_info();
+            let ctx = SlashContext::new(&info, None);
+            let mut steering = 0;
+
+            for cmd in BUILT_INS {
+                let completions = cmd
+                    .complete_arg("")
+                    .into_iter()
+                    .map(|c| c.value.into_owned());
+                let forms = [String::new(), "x".to_owned()]
+                    .into_iter()
+                    .chain(completions);
+                for args in forms.filter(|args| cmd.classify(args) == SlashKind::Steering) {
+                    match cmd.execute(&args, &ctx) {
+                        Ok(SlashOutcome::Forward(Action::Op(Op::Queue(_) | Op::SetMode(_))))
+                        | Err(_) => {}
+                        other => panic!("/{} {args} forwards {other:?}", cmd.name()),
+                    }
+                    steering += 1;
+                }
+            }
+
+            assert!(steering > 0, "no built-in form steers");
+        }
+    }
+
+    mod lookup_in {
+        use super::*;
+
+        const ALIASED: FakeCmd = FakeCmd {
+            name: "primary",
+            aliases: &["alt", "shortcut"],
+            ..FakeCmd::DEFAULT
+        };
+
+        #[test]
+        fn resolves_canonical_name() {
+            let cmd = lookup_in(BUILT_INS, "help").expect("/help is registered");
+            assert_eq!(cmd.name(), "help");
+        }
+
+        #[test]
+        fn resolves_each_alias_to_canonical_impl() {
+            let registry: &[&dyn SlashCommand] = &[&ALIASED];
+            for alias in ["alt", "shortcut"] {
+                let cmd = lookup_in(registry, alias).expect("alias must resolve");
+                assert_eq!(cmd.name(), "primary");
+            }
+        }
+
+        #[test]
+        fn unknown_name_resolves_to_no_command() {
+            assert!(lookup_in(BUILT_INS, "nonexistent").is_none());
+        }
     }
 }

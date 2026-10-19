@@ -142,226 +142,228 @@ mod tests {
 
     use super::*;
 
-    fn layer(name: &str) -> Layer {
-        Layer::DropIn(PathBuf::from(format!("/ox/config.d/{name}.toml")))
-    }
+    mod merge {
+        use super::*;
 
-    fn merged(layers: &[(&str, &str)]) -> (Table, Origins) {
-        merge(
-            layers
-                .iter()
-                .map(|(name, body)| (layer(name), body.parse::<Table>().unwrap()))
-                .collect(),
-        )
-    }
+        fn layer(name: &str) -> Layer {
+            Layer::DropIn(PathBuf::from(format!("/ox/config.d/{name}.toml")))
+        }
 
-    fn get<'a>(table: &'a Table, path: &str) -> Option<&'a Value> {
-        let mut parts = path.split('.');
-        let first = table.get(parts.next()?)?;
-        parts.try_fold(first, |value, key| value.get(key))
-    }
+        fn merged(layers: &[(&str, &str)]) -> (Table, Origins) {
+            merge(
+                layers
+                    .iter()
+                    .map(|(name, body)| (layer(name), body.parse::<Table>().unwrap()))
+                    .collect(),
+            )
+        }
 
-    fn strings(table: &Table, path: &str) -> Vec<String> {
-        get(table, path)
-            .and_then(Value::as_array)
-            .unwrap()
-            .iter()
-            .map(|value| value.as_str().unwrap().to_owned())
-            .collect()
-    }
+        fn get<'a>(table: &'a Table, path: &str) -> Option<&'a Value> {
+            let mut parts = path.split('.');
+            let first = table.get(parts.next()?)?;
+            parts.try_fold(first, |value, key| value.get(key))
+        }
 
-    // ── merge ──
-
-    #[test]
-    fn merge_tables_by_key_with_the_higher_layer_winning_each_key() {
-        let (table, origins) = merged(&[
-            (
-                "a",
-                indoc! {r##"
-                    [client]
-                    model = "low-model"
-                    max_tokens = 100
-
-                    [tui.theme.overrides]
-                    error = { fg = "#aaaaaa" }
-                "##},
-            ),
-            (
-                "b",
-                indoc! {r##"
-                    [client]
-                    model = "high-model"
-
-                    [tui.theme.overrides]
-                    error = { bold = true }
-                    accent = "#bbbbbb"
-                "##},
-            ),
-        ]);
-
-        assert_eq!(
-            get(&table, "client.model").and_then(Value::as_str),
-            Some("high-model")
-        );
-        assert_eq!(
-            get(&table, "client.max_tokens").and_then(Value::as_integer),
-            Some(100)
-        );
-        assert_eq!(
-            get(&table, "tui.theme.overrides.error"),
-            Some(&Value::Table(
-                indoc! {r##"
-                    fg = "#aaaaaa"
-                    bold = true
-                "##}
-                .parse()
+        fn strings(table: &Table, path: &str) -> Vec<String> {
+            get(table, path)
+                .and_then(Value::as_array)
                 .unwrap()
-            )),
-        );
-        assert_eq!(origins.source("client.model"), Source::File(layer("b")));
-        assert_eq!(
-            origins.source("client.max_tokens"),
-            Source::File(layer("a"))
-        );
-        assert_eq!(
-            origins.source("tui.theme.overrides.error.fg"),
-            Source::File(layer("a"))
-        );
-        assert_eq!(
-            origins.source("tui.theme.overrides.accent"),
-            Source::File(layer("b"))
-        );
-        assert_eq!(origins.source("client.effort"), Source::Default);
-        assert_eq!(origins.into_layers(), [layer("a"), layer("b")]);
-    }
+                .iter()
+                .map(|value| value.as_str().unwrap().to_owned())
+                .collect()
+        }
 
-    #[test]
-    fn merge_concatenates_permission_lists_lowest_layer_first() {
-        let (table, origins) = merged(&[
-            (
-                "a",
-                indoc! {r#"
-                    [permission]
-                    extra_roots = ["/srv/a"]
-                    allow.exec = ["ls"]
-                    deny.exec = ["rm *"]
-                "#},
-            ),
-            ("b", r#"permission.mode = "plan""#),
-            (
-                "c",
-                indoc! {r#"
-                    [permission]
-                    extra_roots = ["/srv/b"]
-                    allow.exec = ["cat *"]
-                    ask.edit = ["./Cargo.toml"]
-                    deny.exec = ["curl *", "rm *"]
-                "#},
-            ),
-        ]);
+        #[test]
+        fn tables_by_key_with_the_higher_layer_winning_each_key() {
+            let (table, origins) = merged(&[
+                (
+                    "a",
+                    indoc! {r##"
+                        [client]
+                        model = "low-model"
+                        max_tokens = 100
 
-        assert_eq!(
-            strings(&table, "permission.extra_roots"),
-            ["/srv/a", "/srv/b"]
-        );
-        assert_eq!(strings(&table, "permission.allow.exec"), ["ls", "cat *"]);
-        assert_eq!(strings(&table, "permission.ask.edit"), ["./Cargo.toml"]);
-        assert_eq!(
-            strings(&table, "permission.deny.exec"),
-            ["rm *", "curl *", "rm *"]
-        );
-        assert_eq!(
-            origins.source("permission.deny.exec"),
-            Source::File(layer("c"))
-        );
-    }
+                        [tui.theme.overrides]
+                        error = { fg = "#aaaaaa" }
+                    "##},
+                ),
+                (
+                    "b",
+                    indoc! {r##"
+                        [client]
+                        model = "high-model"
 
-    #[test]
-    fn merge_replaces_other_arrays() {
-        let (table, origins) = merged(&[
-            ("a", r#"tui.status_line = ["model", "run-state"]"#),
-            ("b", r#"tui.status_line = ["current-dir"]"#),
-        ]);
+                        [tui.theme.overrides]
+                        error = { bold = true }
+                        accent = "#bbbbbb"
+                    "##},
+                ),
+            ]);
 
-        assert_eq!(strings(&table, "tui.status_line"), ["current-dir"]);
-        assert_eq!(origins.source("tui.status_line"), Source::File(layer("b")));
-    }
+            assert_eq!(
+                get(&table, "client.model").and_then(Value::as_str),
+                Some("high-model")
+            );
+            assert_eq!(
+                get(&table, "client.max_tokens").and_then(Value::as_integer),
+                Some(100)
+            );
+            assert_eq!(
+                get(&table, "tui.theme.overrides.error"),
+                Some(&Value::Table(
+                    indoc! {r##"
+                        fg = "#aaaaaa"
+                        bold = true
+                    "##}
+                    .parse()
+                    .unwrap()
+                )),
+            );
+            assert_eq!(origins.source("client.model"), Source::File(layer("b")));
+            assert_eq!(
+                origins.source("client.max_tokens"),
+                Source::File(layer("a"))
+            );
+            assert_eq!(
+                origins.source("tui.theme.overrides.error.fg"),
+                Source::File(layer("a"))
+            );
+            assert_eq!(
+                origins.source("tui.theme.overrides.accent"),
+                Source::File(layer("b"))
+            );
+            assert_eq!(origins.source("client.effort"), Source::Default);
+            assert_eq!(origins.into_layers(), [layer("a"), layer("b")]);
+        }
 
-    #[test]
-    fn merge_a_value_of_another_shape_replaces_the_lower_one_and_its_origins() {
-        let (table, origins) = merged(&[
-            ("a", r##"tui.theme.overrides.error = { fg = "#aaaaaa" }"##),
-            ("b", r##"tui.theme.overrides.error = "#bbbbbb""##),
-            ("c", r##"tui.theme.overrides.accent = "#cccccc""##),
-            ("d", "tui.theme.overrides.accent = { bold = true }"),
-        ]);
+        #[test]
+        fn concatenates_permission_lists_lowest_layer_first() {
+            let (table, origins) = merged(&[
+                (
+                    "a",
+                    indoc! {r#"
+                        [permission]
+                        extra_roots = ["/srv/a"]
+                        allow.exec = ["ls"]
+                        deny.exec = ["rm *"]
+                    "#},
+                ),
+                ("b", r#"permission.mode = "plan""#),
+                (
+                    "c",
+                    indoc! {r#"
+                        [permission]
+                        extra_roots = ["/srv/b"]
+                        allow.exec = ["cat *"]
+                        ask.edit = ["./Cargo.toml"]
+                        deny.exec = ["curl *", "rm *"]
+                    "#},
+                ),
+            ]);
 
-        assert_eq!(
-            get(&table, "tui.theme.overrides.error").and_then(Value::as_str),
-            Some("#bbbbbb")
-        );
-        assert_eq!(
-            get(&table, "tui.theme.overrides.accent"),
-            Some(&Value::Table("bold = true".parse().unwrap())),
-        );
-        assert_eq!(
-            origins.source("tui.theme.overrides.error"),
-            Source::File(layer("b"))
-        );
-        assert_eq!(
-            origins.source("tui.theme.overrides.error.fg"),
-            Source::Default
-        );
-        assert_eq!(
-            origins.source("tui.theme.overrides.accent"),
-            Source::Default
-        );
-        assert_eq!(
-            origins.source("tui.theme.overrides.accent.bold"),
-            Source::File(layer("d"))
-        );
-    }
+            assert_eq!(
+                strings(&table, "permission.extra_roots"),
+                ["/srv/a", "/srv/b"]
+            );
+            assert_eq!(strings(&table, "permission.allow.exec"), ["ls", "cat *"]);
+            assert_eq!(strings(&table, "permission.ask.edit"), ["./Cargo.toml"]);
+            assert_eq!(
+                strings(&table, "permission.deny.exec"),
+                ["rm *", "curl *", "rm *"]
+            );
+            assert_eq!(
+                origins.source("permission.deny.exec"),
+                Source::File(layer("c"))
+            );
+        }
 
-    #[test]
-    fn merge_a_threshold_clears_the_other_threshold_from_lower_layers() {
-        let (table, origins) = merged(&[
-            (
-                "a",
-                indoc! {"
-                    [client.compaction]
-                    auto_enabled = false
-                    auto_threshold_tokens = 400000
-                "},
-            ),
-            ("b", "client.compaction.auto_threshold_percent = 40"),
-        ]);
+        #[test]
+        fn replaces_other_arrays() {
+            let (table, origins) = merged(&[
+                ("a", r#"tui.status_line = ["model", "run-state"]"#),
+                ("b", r#"tui.status_line = ["current-dir"]"#),
+            ]);
 
-        assert_eq!(get(&table, "client.compaction.auto_threshold_tokens"), None);
-        assert_eq!(
-            get(&table, "client.compaction.auto_threshold_percent").and_then(Value::as_integer),
-            Some(40)
-        );
-        assert_eq!(
-            get(&table, "client.compaction.auto_enabled").and_then(Value::as_bool),
-            Some(false),
-            "only the threshold group is exclusive"
-        );
-        assert_eq!(
-            origins.source("client.compaction.auto_threshold_tokens"),
-            Source::Default
-        );
-    }
+            assert_eq!(strings(&table, "tui.status_line"), ["current-dir"]);
+            assert_eq!(origins.source("tui.status_line"), Source::File(layer("b")));
+        }
 
-    #[test]
-    fn merge_a_layer_without_a_threshold_keeps_the_lower_one() {
-        let (table, _) = merged(&[
-            ("a", "client.compaction.auto_threshold_tokens = 400000"),
-            ("b", "client.compaction.auto_enabled = true"),
-        ]);
+        #[test]
+        fn a_value_of_another_shape_replaces_the_lower_one_and_its_origins() {
+            let (table, origins) = merged(&[
+                ("a", r##"tui.theme.overrides.error = { fg = "#aaaaaa" }"##),
+                ("b", r##"tui.theme.overrides.error = "#bbbbbb""##),
+                ("c", r##"tui.theme.overrides.accent = "#cccccc""##),
+                ("d", "tui.theme.overrides.accent = { bold = true }"),
+            ]);
 
-        assert_eq!(
-            get(&table, "client.compaction.auto_threshold_tokens").and_then(Value::as_integer),
-            Some(400_000)
-        );
+            assert_eq!(
+                get(&table, "tui.theme.overrides.error").and_then(Value::as_str),
+                Some("#bbbbbb")
+            );
+            assert_eq!(
+                get(&table, "tui.theme.overrides.accent"),
+                Some(&Value::Table("bold = true".parse().unwrap())),
+            );
+            assert_eq!(
+                origins.source("tui.theme.overrides.error"),
+                Source::File(layer("b"))
+            );
+            assert_eq!(
+                origins.source("tui.theme.overrides.error.fg"),
+                Source::Default
+            );
+            assert_eq!(
+                origins.source("tui.theme.overrides.accent"),
+                Source::Default
+            );
+            assert_eq!(
+                origins.source("tui.theme.overrides.accent.bold"),
+                Source::File(layer("d"))
+            );
+        }
+
+        #[test]
+        fn a_threshold_clears_the_other_threshold_from_lower_layers() {
+            let (table, origins) = merged(&[
+                (
+                    "a",
+                    indoc! {"
+                        [client.compaction]
+                        auto_enabled = false
+                        auto_threshold_tokens = 400000
+                    "},
+                ),
+                ("b", "client.compaction.auto_threshold_percent = 40"),
+            ]);
+
+            assert_eq!(get(&table, "client.compaction.auto_threshold_tokens"), None);
+            assert_eq!(
+                get(&table, "client.compaction.auto_threshold_percent").and_then(Value::as_integer),
+                Some(40)
+            );
+            assert_eq!(
+                get(&table, "client.compaction.auto_enabled").and_then(Value::as_bool),
+                Some(false),
+                "only the threshold group is exclusive"
+            );
+            assert_eq!(
+                origins.source("client.compaction.auto_threshold_tokens"),
+                Source::Default
+            );
+        }
+
+        #[test]
+        fn a_layer_without_a_threshold_keeps_the_lower_one() {
+            let (table, _) = merged(&[
+                ("a", "client.compaction.auto_threshold_tokens = 400000"),
+                ("b", "client.compaction.auto_enabled = true"),
+            ]);
+
+            assert_eq!(
+                get(&table, "client.compaction.auto_threshold_tokens").and_then(Value::as_integer),
+                Some(400_000)
+            );
+        }
     }
 }

@@ -123,8 +123,6 @@ mod tests {
             .collect()
     }
 
-    // ── GatewayCompat::load ──
-
     const ENV_KEYS: [&str; 3] = [
         "ANTHROPIC_CUSTOM_HEADERS",
         "CLAUDE_CODE_ATTRIBUTION_HEADER",
@@ -139,148 +137,156 @@ mod tests {
         temp_env::with_vars(vars, GatewayCompat::load)
     }
 
-    #[test]
-    fn load_defaults_send_attribution_and_allow_structured_outputs() {
-        let compat = load_with(&[]).unwrap();
-        assert!(compat.custom_headers.is_empty());
-        assert!(compat.attribution);
-        assert!(compat.structured_outputs);
-    }
+    mod load {
+        use super::*;
 
-    #[test]
-    fn load_reads_claude_code_env_names() {
-        let compat = load_with(&[
-            (
+        #[test]
+        fn defaults_send_attribution_and_allow_structured_outputs() {
+            let compat = load_with(&[]).unwrap();
+            assert!(compat.custom_headers.is_empty());
+            assert!(compat.attribution);
+            assert!(compat.structured_outputs);
+        }
+
+        #[test]
+        fn reads_claude_code_env_names() {
+            let compat = load_with(&[
+                (
+                    "ANTHROPIC_CUSTOM_HEADERS",
+                    "X-Team: platform\nx-route: blue",
+                ),
+                ("CLAUDE_CODE_ATTRIBUTION_HEADER", "0"),
+                ("CLAUDE_CODE_DISABLE_STRUCTURED_OUTPUTS", "1"),
+            ])
+            .unwrap();
+            assert_eq!(
+                pairs(&compat.custom_headers),
+                [("x-team", "platform"), ("x-route", "blue")],
+            );
+            assert!(!compat.attribution);
+            assert!(!compat.structured_outputs);
+        }
+
+        #[test]
+        fn malformed_headers_name_the_variable_and_line() {
+            let err = load_with(&[(
                 "ANTHROPIC_CUSTOM_HEADERS",
-                "X-Team: platform\nx-route: blue",
-            ),
-            ("CLAUDE_CODE_ATTRIBUTION_HEADER", "0"),
-            ("CLAUDE_CODE_DISABLE_STRUCTURED_OUTPUTS", "1"),
-        ])
-        .unwrap();
-        assert_eq!(
-            pairs(&compat.custom_headers),
-            [("x-team", "platform"), ("x-route", "blue")],
-        );
-        assert!(!compat.attribution);
-        assert!(!compat.structured_outputs);
-    }
-
-    #[test]
-    fn load_malformed_headers_name_the_variable_and_line() {
-        let err = load_with(&[(
-            "ANTHROPIC_CUSTOM_HEADERS",
-            "x-team: platform\nmissing colon",
-        )])
-        .expect_err("malformed header must fail startup");
-        assert_eq!(
-            format!("{err:#}"),
-            "invalid ANTHROPIC_CUSTOM_HEADERS: line 2: expected `Name: value`",
-        );
-    }
-
-    #[test]
-    fn load_unrecognized_toggle_names_the_variable() {
-        for key in [
-            "CLAUDE_CODE_ATTRIBUTION_HEADER",
-            "CLAUDE_CODE_DISABLE_STRUCTURED_OUTPUTS",
-        ] {
-            let err = load_with(&[(key, "maybe")]).expect_err(key);
-            assert!(
-                err.to_string()
-                    .starts_with(&format!("invalid {key} \"maybe\"")),
-                "{err}",
+                "x-team: platform\nmissing colon",
+            )])
+            .expect_err("malformed header must fail startup");
+            assert_eq!(
+                format!("{err:#}"),
+                "invalid ANTHROPIC_CUSTOM_HEADERS: line 2: expected `Name: value`",
             );
         }
-    }
 
-    // ── GatewayCompat::check_credential_header ──
-
-    #[test]
-    fn check_credential_header_rejects_only_the_active_credential_header() {
-        let compat = load_with(&[(
-            "ANTHROPIC_CUSTOM_HEADERS",
-            "Authorization: Bearer gateway-jwt",
-        )])
-        .unwrap();
-        compat
-            .check_credential_header(AuthSource::ApiKeyEnv)
-            .expect("x-api-key carries the credential, so a custom Authorization is free");
-
-        let err = compat
-            .check_credential_header(AuthSource::OAuthTokenEnv)
-            .unwrap_err();
-        assert_eq!(
-            err.to_string(),
-            "invalid ANTHROPIC_CUSTOM_HEADERS: \
-             authorization carries the OAuth (CLAUDE_CODE_OAUTH_TOKEN) credential \
-             and cannot be overridden",
-        );
-        assert!(!err.to_string().contains("gateway-jwt"));
-    }
-
-    // ── parse_headers ──
-
-    #[test]
-    fn parse_headers_accepts_well_formed_lines() {
-        for (raw, expected) in [
-            ("X-Team: platform", vec![("x-team", "platform")]),
-            ("x-a: 1\nx-b: 2", vec![("x-a", "1"), ("x-b", "2")]),
-            ("x-a: 1\r\nx-b: 2\r\n", vec![("x-a", "1"), ("x-b", "2")]),
-            ("\n  \nx-a: 1\n\n", vec![("x-a", "1")]),
-            (
-                "x-upstream: https://example.com:8443/v1",
-                vec![("x-upstream", "https://example.com:8443/v1")],
-            ),
-            (
-                "  x-pad  :   spaced value  ",
-                vec![("x-pad", "spaced value")],
-            ),
-            ("x-empty:", vec![("x-empty", "")]),
-            ("user-agent: custom/1.0", vec![("user-agent", "custom/1.0")]),
-        ] {
-            let headers = parse_headers(raw).unwrap_or_else(|e| panic!("{raw:?}: {e:#}"));
-            assert_eq!(pairs(&headers), expected, "{raw:?}");
+        #[test]
+        fn unrecognized_toggle_names_the_variable() {
+            for key in [
+                "CLAUDE_CODE_ATTRIBUTION_HEADER",
+                "CLAUDE_CODE_DISABLE_STRUCTURED_OUTPUTS",
+            ] {
+                let err = load_with(&[(key, "maybe")]).expect_err(key);
+                assert!(
+                    err.to_string()
+                        .starts_with(&format!("invalid {key} \"maybe\"")),
+                    "{err}",
+                );
+            }
         }
     }
 
-    #[test]
-    fn parse_headers_marks_values_sensitive() {
-        let headers = parse_headers("x-gateway-key: secret-value").unwrap();
-        assert!(headers["x-gateway-key"].is_sensitive());
-        assert!(!format!("{headers:?}").contains("secret-value"));
-    }
+    mod check_credential_header {
+        use super::*;
 
-    #[test]
-    fn parse_headers_rejects_malformed_lines_with_line_number() {
-        for (raw, expected) in [
-            ("x-a: 1\nno colon here", "line 2: expected `Name: value`"),
-            (": value", "line 1: invalid header name"),
-            ("X-Upstream-Auth=user:pass", "line 1: invalid header name"),
-            (
-                "x-a: 1\n\nx-key: bad\u{7}secret",
-                "line 3: the x-key value contains a character a header cannot carry",
-            ),
-            ("x-a: 1\nX-A: 2", "line 2: x-a is set more than once"),
-        ] {
-            let err = parse_headers(raw).expect_err(raw);
-            assert_eq!(err.to_string(), expected, "{raw:?}");
-        }
-    }
+        #[test]
+        fn rejects_only_the_active_credential_header() {
+            let compat = load_with(&[(
+                "ANTHROPIC_CUSTOM_HEADERS",
+                "Authorization: Bearer gateway-jwt",
+            )])
+            .unwrap();
+            compat
+                .check_credential_header(AuthSource::ApiKeyEnv)
+                .expect("x-api-key carries the credential, so a custom Authorization is free");
 
-    #[test]
-    fn parse_headers_rejects_reserved_names_case_insensitively() {
-        for (line, name) in [
-            ("ANTHROPIC-BETA: x", "anthropic-beta"),
-            ("Anthropic-Version: x", "anthropic-version"),
-            ("Content-Type: x", "content-type"),
-            ("X-Claude-Code-Session-Id: x", "x-claude-code-session-id"),
-        ] {
-            let err = parse_headers(line).expect_err(line);
+            let err = compat
+                .check_credential_header(AuthSource::OAuthTokenEnv)
+                .unwrap_err();
             assert_eq!(
                 err.to_string(),
-                format!("line 1: {name} is set by ox and cannot be overridden"),
+                "invalid ANTHROPIC_CUSTOM_HEADERS: \
+                 authorization carries the OAuth (CLAUDE_CODE_OAUTH_TOKEN) credential \
+                 and cannot be overridden",
             );
+            assert!(!err.to_string().contains("gateway-jwt"));
+        }
+    }
+
+    mod parse_headers {
+        use super::*;
+
+        #[test]
+        fn accepts_well_formed_lines() {
+            for (raw, expected) in [
+                ("X-Team: platform", vec![("x-team", "platform")]),
+                ("x-a: 1\nx-b: 2", vec![("x-a", "1"), ("x-b", "2")]),
+                ("x-a: 1\r\nx-b: 2\r\n", vec![("x-a", "1"), ("x-b", "2")]),
+                ("\n  \nx-a: 1\n\n", vec![("x-a", "1")]),
+                (
+                    "x-upstream: https://example.com:8443/v1",
+                    vec![("x-upstream", "https://example.com:8443/v1")],
+                ),
+                (
+                    "  x-pad  :   spaced value  ",
+                    vec![("x-pad", "spaced value")],
+                ),
+                ("x-empty:", vec![("x-empty", "")]),
+                ("user-agent: custom/1.0", vec![("user-agent", "custom/1.0")]),
+            ] {
+                let headers = parse_headers(raw).unwrap_or_else(|e| panic!("{raw:?}: {e:#}"));
+                assert_eq!(pairs(&headers), expected, "{raw:?}");
+            }
+        }
+
+        #[test]
+        fn marks_values_sensitive() {
+            let headers = parse_headers("x-gateway-key: secret-value").unwrap();
+            assert!(headers["x-gateway-key"].is_sensitive());
+            assert!(!format!("{headers:?}").contains("secret-value"));
+        }
+
+        #[test]
+        fn rejects_malformed_lines_with_line_number() {
+            for (raw, expected) in [
+                ("x-a: 1\nno colon here", "line 2: expected `Name: value`"),
+                (": value", "line 1: invalid header name"),
+                ("X-Upstream-Auth=user:pass", "line 1: invalid header name"),
+                (
+                    "x-a: 1\n\nx-key: bad\u{7}secret",
+                    "line 3: the x-key value contains a character a header cannot carry",
+                ),
+                ("x-a: 1\nX-A: 2", "line 2: x-a is set more than once"),
+            ] {
+                let err = parse_headers(raw).expect_err(raw);
+                assert_eq!(err.to_string(), expected, "{raw:?}");
+            }
+        }
+
+        #[test]
+        fn rejects_reserved_names_case_insensitively() {
+            for (line, name) in [
+                ("ANTHROPIC-BETA: x", "anthropic-beta"),
+                ("Anthropic-Version: x", "anthropic-version"),
+                ("Content-Type: x", "content-type"),
+                ("X-Claude-Code-Session-Id: x", "x-claude-code-session-id"),
+            ] {
+                let err = parse_headers(line).expect_err(line);
+                assert_eq!(
+                    err.to_string(),
+                    format!("line 1: {name} is set by ox and cannot be overridden"),
+                );
+            }
         }
     }
 }
