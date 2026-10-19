@@ -184,9 +184,9 @@ impl Auth {
         }
     }
 
-    /// The credential the next request sends, refreshing a stored login near expiry first. The
-    /// refresh runs on a task in `reloads`, which outlives a dropped request. When the refresh
-    /// fails for a reason a later attempt may clear, [`is_transient`] says so.
+    /// The credential the next request sends, refreshing a stored login near expiry first. That
+    /// reload runs on a task in `reloads`, which outlives a dropped request. When the refresh fails
+    /// for a reason a later attempt may clear, [`is_transient`] says so.
     pub(crate) async fn credential(
         &self,
         trust: &Arc<dyn Trust>,
@@ -201,8 +201,8 @@ impl Auth {
 
     /// The credential to resend a request with after the API rejected `rejected` with HTTP 401: a
     /// stored login's token that another process stored or a refresh issued. `None` for other
-    /// credentials and for a login that cannot be refreshed. The refresh runs in `reloads`, as in
-    /// [`Self::credential`]. When it fails for a reason a later attempt may clear,
+    /// credentials and for a login that cannot be refreshed. The reload runs in `reloads`, as in
+    /// [`Self::credential`]. When its refresh fails for a reason a later attempt may clear,
     /// [`is_transient`] says so.
     pub(crate) async fn reload(
         &self,

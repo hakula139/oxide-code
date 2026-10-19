@@ -863,7 +863,7 @@ impl Engine {
     }
 
     /// Ends the background shells, flushes and closes the live session, then waits for the
-    /// stored-login refreshes still in flight, such as one the aborted title request started, so
+    /// stored-login reloads still in flight, such as one the aborted title request started, so
     /// exiting does not cancel their write-back. Returns the session's write failure, if any.
     async fn finalize(self) -> Option<String> {
         self.shells.stop_all().await;

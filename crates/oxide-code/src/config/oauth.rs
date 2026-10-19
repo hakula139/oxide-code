@@ -363,11 +363,11 @@ impl SessionLogin {
             .await
     }
 
-    /// Reloads `token` from the store on a task of its own, which holds the lock until it finishes
-    /// and joins `reloads`, so the session can wait for it before exiting. A refresh invalidates
-    /// the stored refresh token, so the rotated tokens must reach the store and `token` even when
-    /// the request awaiting them is dropped. Nothing aborts the task, so awaiting it fails only
-    /// when it panics, and the panic resumes in the caller.
+    /// Reloads `token` from the store on a task in `reloads`, so the session can wait for it before
+    /// exiting. The task holds the lock until it finishes. A refresh invalidates the stored refresh
+    /// token, so the rotated tokens must reach the store and `token` even when the request awaiting
+    /// them is dropped. Nothing aborts the task, so awaiting it fails only when it panics, and the
+    /// panic resumes in the caller.
     async fn reload_detached(
         &self,
         mut token: OwnedMutexGuard<Token>,

@@ -75,7 +75,7 @@ pub(crate) struct Client {
     auth: Option<Auth>,
     base_url: String,
     trust: Arc<dyn Trust>,
-    /// Stored-login refreshes that outlive their requests, which the session waits for at exit.
+    /// Stored-login reloads that outlive their requests, which the session waits for at exit.
     reloads: TaskTracker,
     gateway: GatewayCompat,
     /// User-set output cap. `None` defers to [`ModelSpec::resolve_max_tokens`].
@@ -195,7 +195,7 @@ impl Client {
         self.auth = auth;
     }
 
-    /// Waits for the stored-login refreshes in flight from this client or a clone of it, including
+    /// Waits for the stored-login reloads in flight from this client or a clone of it, including
     /// one for a credential since replaced, so exiting does not cancel their write-back.
     pub(crate) async fn finish_reloads(&self) {
         self.reloads.close();

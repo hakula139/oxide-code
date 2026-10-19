@@ -45,7 +45,7 @@ pub(super) struct MessagesRequest {
     pub(super) auth: Auth,
     /// Verifies the token endpoint when a stored login refreshes.
     pub(super) trust: Arc<dyn Trust>,
-    /// Tracks a stored login's refresh, which outlives a dropped request.
+    /// Tracks a stored login's reload, which outlives a dropped request.
     pub(super) reloads: TaskTracker,
 }
 
