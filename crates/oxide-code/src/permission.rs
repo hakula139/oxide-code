@@ -2284,6 +2284,39 @@ mod tests {
     mod policy {
         use super::*;
 
+        #[test]
+        fn allows_for_the_session_what_asked_until_cleared() {
+            let mut p = policy(Mode::Manual, &[], &[], &[]);
+            let hosts = abs("/etc/hosts");
+            let hosts_glob = slash_separated(Path::new(&hosts));
+            assert_eq!(
+                decide(&p, EXEC, &command("cargo test --all")),
+                Decision::Ask
+            );
+
+            for (class, pattern) in [
+                (EXEC, "cargo test *"),
+                (EXEC, "cargo test *"),
+                (EDIT, &*hosts_glob),
+            ] {
+                p.allow_for_session(Rule::parse(class, pattern).unwrap());
+            }
+            let held: Vec<&str> = p.session_allow().iter().map(Rule::pattern).collect();
+            assert_eq!(held, ["cargo test *", hosts_glob.as_str()]);
+            assert_eq!(
+                decide(&p, EXEC, &command("cargo test --all")),
+                Decision::Allow
+            );
+            assert_eq!(decide(&p, EDIT, &outside(&hosts)), Decision::Allow);
+
+            p.clear_session_allow();
+            assert_eq!(p.session_allow(), []);
+            assert_eq!(
+                decide(&p, EXEC, &command("cargo test --all")),
+                Decision::Ask
+            );
+        }
+
         mod resolve {
             use super::*;
 
@@ -2449,43 +2482,6 @@ mod tests {
                     let target = Access::for_path(raw, &Workspace::new(&cwd));
                     assert_eq!(decide(&p, READ, &target), decision, "{raw}");
                 }
-            }
-        }
-
-        mod allow_for_session {
-            use super::*;
-
-            #[test]
-            fn allows_what_asked_until_cleared() {
-                let mut p = policy(Mode::Manual, &[], &[], &[]);
-                let hosts = abs("/etc/hosts");
-                let hosts_glob = slash_separated(Path::new(&hosts));
-                assert_eq!(
-                    decide(&p, EXEC, &command("cargo test --all")),
-                    Decision::Ask
-                );
-
-                for (class, pattern) in [
-                    (EXEC, "cargo test *"),
-                    (EXEC, "cargo test *"),
-                    (EDIT, &*hosts_glob),
-                ] {
-                    p.allow_for_session(Rule::parse(class, pattern).unwrap());
-                }
-                let held: Vec<&str> = p.session_allow().iter().map(Rule::pattern).collect();
-                assert_eq!(held, ["cargo test *", hosts_glob.as_str()]);
-                assert_eq!(
-                    decide(&p, EXEC, &command("cargo test --all")),
-                    Decision::Allow
-                );
-                assert_eq!(decide(&p, EDIT, &outside(&hosts)), Decision::Allow);
-
-                p.clear_session_allow();
-                assert_eq!(p.session_allow(), []);
-                assert_eq!(
-                    decide(&p, EXEC, &command("cargo test --all")),
-                    Decision::Ask
-                );
             }
         }
 
@@ -3314,6 +3310,27 @@ mod tests {
         use super::*;
 
         #[test]
+        fn takes_an_edit_that_still_covers_the_call() {
+            let target = command("cargo test --all");
+            let grant = policy(Mode::Manual, &[], &[], &[])
+                .session_grant(EXEC, &target)
+                .unwrap();
+
+            let rule = grant.accept(" cargo test * ").unwrap();
+            assert_eq!((rule.class(), rule.pattern()), (EXEC, "cargo test *"));
+            for (text, error) in [
+                ("cargo build", "no longer covers this call"),
+                ("cargo test; ls", "one simple command"),
+            ] {
+                let err = format!("{:#}", grant.accept(text).unwrap_err());
+                assert!(err.contains(error), "{text}: {err}");
+            }
+            let edit = Rule::parse(EDIT, "*").unwrap();
+            let err = grant.admit(edit).unwrap_err().to_string();
+            assert_eq!(err, "the rule must stay an `exec` rule");
+        }
+
+        #[test]
         fn round_trips_through_json_and_still_admits_the_call() {
             let (_dir, root) = temp_cwd();
             let cwd = root.join("cwd");
@@ -3333,31 +3350,6 @@ mod tests {
                 back.accept(grant.suggested().pattern()).unwrap(),
                 *grant.suggested()
             );
-        }
-
-        mod accept {
-            use super::*;
-
-            #[test]
-            fn takes_an_edit_that_still_covers_the_call() {
-                let target = command("cargo test --all");
-                let grant = policy(Mode::Manual, &[], &[], &[])
-                    .session_grant(EXEC, &target)
-                    .unwrap();
-
-                let rule = grant.accept(" cargo test * ").unwrap();
-                assert_eq!((rule.class(), rule.pattern()), (EXEC, "cargo test *"));
-                for (text, error) in [
-                    ("cargo build", "no longer covers this call"),
-                    ("cargo test; ls", "one simple command"),
-                ] {
-                    let err = format!("{:#}", grant.accept(text).unwrap_err());
-                    assert!(err.contains(error), "{text}: {err}");
-                }
-                let edit = Rule::parse(EDIT, "*").unwrap();
-                let err = grant.admit(edit).unwrap_err().to_string();
-                assert_eq!(err, "the rule must stay an `exec` rule");
-            }
         }
     }
 

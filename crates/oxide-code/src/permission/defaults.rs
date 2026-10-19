@@ -345,6 +345,64 @@ mod tests {
     mod shipped {
         use super::*;
 
+        #[test]
+        fn puts_each_pattern_group_in_its_tier_and_class() {
+            temp_env::with_vars(
+                [
+                    (HOME_VAR, Some(abs("/home/u"))),
+                    ("XDG_DATA_HOME", Some(abs("/data"))),
+                ],
+                || {
+                    let patterns = |group: Shipped| {
+                        let rules = group.rules().unwrap().unwrap();
+                        let classes: Vec<PermissionClass> = rules.iter().map(Rule::class).collect();
+                        let patterns: Vec<String> =
+                            rules.iter().map(|rule| rule.pattern().to_owned()).collect();
+                        (group.tier(), classes, patterns)
+                    };
+                    let home = slash_separated(Path::new(&abs("/home/u")));
+                    let data = slash_separated(Path::new(&abs("/data")));
+                    assert_eq!(
+                        patterns(Shipped::Devices),
+                        (
+                            ShippedTier::Ask,
+                            if cfg!(unix) {
+                                vec![PermissionClass::Edit]
+                            } else {
+                                Vec::new()
+                            },
+                            if cfg!(unix) {
+                                vec!["/dev/**".to_owned()]
+                            } else {
+                                Vec::new()
+                            },
+                        )
+                    );
+                    assert_eq!(
+                        patterns(Shipped::Ssh),
+                        (
+                            ShippedTier::Deny,
+                            vec![PermissionClass::Read],
+                            vec![format!("{home}/.ssh")]
+                        )
+                    );
+                    assert_eq!(
+                        patterns(Shipped::Credentials),
+                        (
+                            ShippedTier::Deny,
+                            vec![PermissionClass::Read; 2],
+                            vec![
+                                format!("{data}/ox/credentials.json"),
+                                format!("{home}/.claude/.credentials.json"),
+                            ]
+                        )
+                    );
+                    assert!(Shipped::Git.rules().unwrap().is_none());
+                    assert!(Shipped::Rm.rules().unwrap().is_none());
+                },
+            );
+        }
+
         mod as_str {
             use super::*;
 
@@ -361,65 +419,6 @@ mod tests {
 
         mod rules {
             use super::*;
-
-            #[test]
-            fn put_each_pattern_group_in_its_tier_and_class() {
-                temp_env::with_vars(
-                    [
-                        (HOME_VAR, Some(abs("/home/u"))),
-                        ("XDG_DATA_HOME", Some(abs("/data"))),
-                    ],
-                    || {
-                        let patterns = |group: Shipped| {
-                            let rules = group.rules().unwrap().unwrap();
-                            let classes: Vec<PermissionClass> =
-                                rules.iter().map(Rule::class).collect();
-                            let patterns: Vec<String> =
-                                rules.iter().map(|rule| rule.pattern().to_owned()).collect();
-                            (group.tier(), classes, patterns)
-                        };
-                        let home = slash_separated(Path::new(&abs("/home/u")));
-                        let data = slash_separated(Path::new(&abs("/data")));
-                        assert_eq!(
-                            patterns(Shipped::Devices),
-                            (
-                                ShippedTier::Ask,
-                                if cfg!(unix) {
-                                    vec![PermissionClass::Edit]
-                                } else {
-                                    Vec::new()
-                                },
-                                if cfg!(unix) {
-                                    vec!["/dev/**".to_owned()]
-                                } else {
-                                    Vec::new()
-                                },
-                            )
-                        );
-                        assert_eq!(
-                            patterns(Shipped::Ssh),
-                            (
-                                ShippedTier::Deny,
-                                vec![PermissionClass::Read],
-                                vec![format!("{home}/.ssh")]
-                            )
-                        );
-                        assert_eq!(
-                            patterns(Shipped::Credentials),
-                            (
-                                ShippedTier::Deny,
-                                vec![PermissionClass::Read; 2],
-                                vec![
-                                    format!("{data}/ox/credentials.json"),
-                                    format!("{home}/.claude/.credentials.json"),
-                                ]
-                            )
-                        );
-                        assert!(Shipped::Git.rules().unwrap().is_none());
-                        assert!(Shipped::Rm.rules().unwrap().is_none());
-                    },
-                );
-            }
 
             #[test]
             fn name_the_home_directory_however_its_variable_spells_it() {

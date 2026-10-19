@@ -712,56 +712,60 @@ mod tests {
         }
     }
 
-    mod start {
+    mod background_shells {
         use super::*;
 
-        #[tokio::test]
-        async fn returns_the_shell_id_and_lists_the_running_shell() {
-            let (shells, sink) = shells();
+        mod start {
+            use super::*;
 
-            let started = start(&shells, "sleep 30").await;
+            #[tokio::test]
+            async fn returns_the_shell_id_and_lists_the_running_shell() {
+                let (shells, sink) = shells();
 
-            assert!(!started.is_error, "{}", started.content);
-            assert_eq!(
-                started.content,
-                "Started background shell shell-1. \
-                 You are not notified when it finishes, \
-                 so check its output and state with bash_output, and stop it with bash_stop.",
-            );
-            assert_eq!(
-                sink.events(),
-                [Event::BackgroundShellsUpdated(vec![shell(
-                    "shell-1",
-                    "sleep 30",
-                    ShellState::Running,
-                )])],
-            );
-            shells.stop_all().await;
-        }
+                let started = start(&shells, "sleep 30").await;
 
-        #[tokio::test]
-        async fn refuses_a_shell_past_the_cap_and_names_the_open_ones() {
-            let (shells, _sink) = shells();
-            for _ in 0..MAX_SHELLS {
-                assert!(!start(&shells, "sleep 30").await.is_error);
+                assert!(!started.is_error, "{}", started.content);
+                assert_eq!(
+                    started.content,
+                    "Started background shell shell-1. \
+                     You are not notified when it finishes, \
+                     so check its output and state with bash_output, and stop it with bash_stop.",
+                );
+                assert_eq!(
+                    sink.events(),
+                    [Event::BackgroundShellsUpdated(vec![shell(
+                        "shell-1",
+                        "sleep 30",
+                        ShellState::Running,
+                    )])],
+                );
+                shells.stop_all().await;
             }
 
-            let refused = start(&shells, "sleep 30").await;
+            #[tokio::test]
+            async fn refuses_a_shell_past_the_cap_and_names_the_open_ones() {
+                let (shells, _sink) = shells();
+                for _ in 0..MAX_SHELLS {
+                    assert!(!start(&shells, "sleep 30").await.is_error);
+                }
 
-            assert!(refused.is_error);
-            let open: Vec<_> = (1..=MAX_SHELLS)
-                .map(|n| format!("shell-{n} (running)"))
-                .collect();
-            assert_eq!(
-                refused.content,
-                format!(
-                    "A session keeps at most 16 background shells open, running or finished, \
-                     and these are open: {}. \
-                     Stop one you no longer need with bash_stop.",
-                    open.join(", "),
-                ),
-            );
-            shells.stop_all().await;
+                let refused = start(&shells, "sleep 30").await;
+
+                assert!(refused.is_error);
+                let open: Vec<_> = (1..=MAX_SHELLS)
+                    .map(|n| format!("shell-{n} (running)"))
+                    .collect();
+                assert_eq!(
+                    refused.content,
+                    format!(
+                        "A session keeps at most 16 background shells open, running or finished, \
+                         and these are open: {}. \
+                         Stop one you no longer need with bash_stop.",
+                        open.join(", "),
+                    ),
+                );
+                shells.stop_all().await;
+            }
         }
     }
 
@@ -836,216 +840,208 @@ mod tests {
         }
     }
 
-    mod bash_output_tool {
+    mod read {
         use super::*;
 
-        mod run {
-            use super::*;
+        #[tokio::test]
+        async fn reads_only_what_arrived_since_the_last_read() {
+            let dir = tempfile::tempdir().unwrap();
+            let go = dir.path().join("go");
+            let (shells, sink) = shells();
+            let command = format!(
+                "echo one; while [ ! -e '{}' ]; do sleep 0.02; done; echo two",
+                go.display(),
+            );
+            start(&shells, &command).await;
 
-            #[tokio::test]
-            async fn reads_only_what_arrived_since_the_last_read() {
-                let dir = tempfile::tempdir().unwrap();
-                let go = dir.path().join("go");
-                let (shells, sink) = shells();
-                let command = format!(
-                    "echo one; while [ ! -e '{}' ]; do sleep 0.02; done; echo two",
-                    go.display(),
-                );
-                start(&shells, &command).await;
-
-                let mut first = output(&shells, "shell-1", 0).await;
-                let deadline = Instant::now() + Duration::from_secs(5);
-                while first == "(no new output)\n\n(still running)" && Instant::now() < deadline {
-                    tokio::time::sleep(Duration::from_millis(20)).await;
-                    first = output(&shells, "shell-1", 0).await;
-                }
-                std::fs::write(&go, "").unwrap();
-                let second = output(&shells, "shell-1", 5_000).await;
-                let third = output(&shells, "shell-1", 0).await;
-
-                assert_eq!(first, "one\n\n(still running)");
-                assert_eq!(second, "two\n\n(exit code 0)");
-                assert_eq!(third, "(no new output)\n\n(exit code 0)");
-                assert_eq!(
-                    sink.events().last(),
-                    Some(&Event::BackgroundShellsUpdated(vec![shell(
-                        "shell-1",
-                        &command,
-                        ShellState::Exited(0),
-                    )])),
-                );
-                shells.stop_all().await;
+            let mut first = output(&shells, "shell-1", 0).await;
+            let deadline = Instant::now() + Duration::from_secs(5);
+            while first == "(no new output)\n\n(still running)" && Instant::now() < deadline {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+                first = output(&shells, "shell-1", 0).await;
             }
+            std::fs::write(&go, "").unwrap();
+            let second = output(&shells, "shell-1", 5_000).await;
+            let third = output(&shells, "shell-1", 0).await;
 
-            #[tokio::test]
-            async fn waits_up_to_its_timeout_for_the_command_to_finish() {
-                let (shells, _sink) = shells();
-                start(&shells, "sleep 0.2; echo done >&2; exit 3").await;
-                start(&shells, "sleep 30").await;
+            assert_eq!(first, "one\n\n(still running)");
+            assert_eq!(second, "two\n\n(exit code 0)");
+            assert_eq!(third, "(no new output)\n\n(exit code 0)");
+            assert_eq!(
+                sink.events().last(),
+                Some(&Event::BackgroundShellsUpdated(vec![shell(
+                    "shell-1",
+                    &command,
+                    ShellState::Exited(0),
+                )])),
+            );
+            shells.stop_all().await;
+        }
 
-                let finished = output(&shells, "shell-1", 5_000).await;
-                let began = Instant::now();
-                let running = output(&shells, "shell-2", 100).await;
+        #[tokio::test]
+        async fn waits_up_to_its_timeout_for_the_command_to_finish() {
+            let (shells, _sink) = shells();
+            start(&shells, "sleep 0.2; echo done >&2; exit 3").await;
+            start(&shells, "sleep 30").await;
 
-                assert_eq!(finished, "done\n\n(exit code 3)");
-                assert_eq!(running, "(no new output)\n\n(still running)");
-                assert!(
-                    began.elapsed() < Duration::from_secs(2),
-                    "the wait outlived its timeout"
-                );
-                shells.stop_all().await;
-            }
+            let finished = output(&shells, "shell-1", 5_000).await;
+            let began = Instant::now();
+            let running = output(&shells, "shell-2", 100).await;
 
-            #[tokio::test]
-            async fn bounds_a_large_output_like_a_foreground_call() {
-                let (shells, _sink) = shells();
-                start(&shells, "head -c 400000 /dev/zero | tr '\\0' a").await;
+            assert_eq!(finished, "done\n\n(exit code 3)");
+            assert_eq!(running, "(no new output)\n\n(still running)");
+            assert!(
+                began.elapsed() < Duration::from_secs(2),
+                "the wait outlived its timeout"
+            );
+            shells.stop_all().await;
+        }
 
-                let read = output(&shells, "shell-1", 5_000).await;
+        #[tokio::test]
+        async fn bounds_a_large_output_like_a_foreground_call() {
+            let (shells, _sink) = shells();
+            start(&shells, "head -c 400000 /dev/zero | tr '\\0' a").await;
 
-                let marker = format!("... [{} bytes omitted] ...", 400_000 - OUTPUT_BUDGET);
-                assert!(read.contains(&marker), "{}", &read[..read.len().min(200)]);
-                assert!(read.ends_with("\n\n(exit code 0)"));
-                assert!(read.len() <= MAX_OUTPUT_BYTES);
-                shells.stop_all().await;
-            }
+            let read = output(&shells, "shell-1", 5_000).await;
 
-            #[tokio::test]
-            async fn names_the_open_shells_for_an_unknown_id() {
-                let (shells, _sink) = shells();
-                let none_open = output(&shells, "shell-9", 0).await;
+            let marker = format!("... [{} bytes omitted] ...", 400_000 - OUTPUT_BUDGET);
+            assert!(read.contains(&marker), "{}", &read[..read.len().min(200)]);
+            assert!(read.ends_with("\n\n(exit code 0)"));
+            assert!(read.len() <= MAX_OUTPUT_BYTES);
+            shells.stop_all().await;
+        }
 
-                start(&shells, "sleep 30").await;
-                start(&shells, "exit 3").await;
-                output(&shells, "shell-2", 5_000).await;
-                let some_open = output(&shells, "shell-9", 0).await;
+        #[tokio::test]
+        async fn names_the_open_shells_for_an_unknown_id() {
+            let (shells, _sink) = shells();
+            let none_open = output(&shells, "shell-9", 0).await;
 
-                assert_eq!(
-                    none_open,
-                    "No background shell shell-9 is open, and none are. \
-                     A shell closes when bash_stop stops it, when the session ends, \
-                     and when ox exits.",
-                );
-                assert_eq!(
-                    some_open,
-                    "No background shell shell-9 is open. \
-                     Open shells: shell-1 (running), shell-2 (exit code 3).",
-                );
-                shells.stop_all().await;
-            }
+            start(&shells, "sleep 30").await;
+            start(&shells, "exit 3").await;
+            output(&shells, "shell-2", 5_000).await;
+            let some_open = output(&shells, "shell-9", 0).await;
+
+            assert_eq!(
+                none_open,
+                "No background shell shell-9 is open, and none are. \
+                 A shell closes when bash_stop stops it, when the session ends, \
+                 and when ox exits.",
+            );
+            assert_eq!(
+                some_open,
+                "No background shell shell-9 is open. \
+                 Open shells: shell-1 (running), shell-2 (exit code 3).",
+            );
+            shells.stop_all().await;
         }
     }
 
-    mod bash_stop_tool {
+    mod stop {
         use super::*;
 
-        mod run {
-            use super::*;
+        async fn stop(shells: &Arc<BackgroundShells>, id: &str) -> ToolOutput {
+            let input = serde_json::json!({"shell_id": id});
+            testing::run(&BashStopTool::new(Arc::clone(shells)), input, &temp_ctx()).await
+        }
 
-            async fn stop(shells: &Arc<BackgroundShells>, id: &str) -> ToolOutput {
-                let input = serde_json::json!({"shell_id": id});
-                testing::run(&BashStopTool::new(Arc::clone(shells)), input, &temp_ctx()).await
-            }
+        #[tokio::test]
+        async fn ends_the_tree_and_returns_the_unread_output() {
+            let dir = tempfile::tempdir().unwrap();
+            let pid_file = dir.path().join("pid");
+            let (shells, sink) = shells();
+            start(&shells, &leaking(&pid_file)).await;
+            let pid = until_recorded(&pid_file).await;
 
-            #[tokio::test]
-            async fn ends_the_tree_and_returns_the_unread_output() {
-                let dir = tempfile::tempdir().unwrap();
-                let pid_file = dir.path().join("pid");
-                let (shells, sink) = shells();
-                start(&shells, &leaking(&pid_file)).await;
-                let pid = until_recorded(&pid_file).await;
+            let stopped = stop(&shells, "shell-1").await;
 
-                let stopped = stop(&shells, "shell-1").await;
+            assert!(!stopped.is_error, "{}", stopped.content);
+            assert_eq!(stopped.content, "hi\n\n(stopped)");
+            assert_eq!(
+                sink.events().last(),
+                Some(&Event::BackgroundShellsUpdated(Vec::new()))
+            );
+            let again = stop(&shells, "shell-1").await;
+            assert!(again.is_error);
+            assert!(
+                again
+                    .content
+                    .starts_with("No background shell shell-1 is open"),
+                "{}",
+                again.content,
+            );
+            until_gone(&pid).await;
+        }
 
-                assert!(!stopped.is_error, "{}", stopped.content);
-                assert_eq!(stopped.content, "hi\n\n(stopped)");
-                assert_eq!(
-                    sink.events().last(),
-                    Some(&Event::BackgroundShellsUpdated(Vec::new()))
-                );
-                let again = stop(&shells, "shell-1").await;
-                assert!(again.is_error);
-                assert!(
-                    again
-                        .content
-                        .starts_with("No background shell shell-1 is open"),
-                    "{}",
-                    again.content,
-                );
-                until_gone(&pid).await;
-            }
+        #[tokio::test]
+        async fn ends_a_descendant_still_holding_the_pipes_of_a_finished_shell() {
+            let dir = tempfile::tempdir().unwrap();
+            let pid_file = dir.path().join("pid");
+            let (shells, _sink) = shells();
+            let command = format!("sleep 30 & {}; exit 3", record_pid("$!", &pid_file));
+            start(&shells, &command).await;
 
-            #[tokio::test]
-            async fn ends_a_descendant_still_holding_the_pipes_of_a_finished_shell() {
-                let dir = tempfile::tempdir().unwrap();
-                let pid_file = dir.path().join("pid");
-                let (shells, _sink) = shells();
-                let command = format!("sleep 30 & {}; exit 3", record_pid("$!", &pid_file));
-                start(&shells, &command).await;
+            let read = output(&shells, "shell-1", 5_000).await;
+            let stopped = stop(&shells, "shell-1").await;
 
-                let read = output(&shells, "shell-1", 5_000).await;
-                let stopped = stop(&shells, "shell-1").await;
+            assert_eq!(read, "(no new output)\n\n(exit code 3)");
+            assert!(!stopped.is_error, "{}", stopped.content);
+            assert_eq!(
+                stopped.content,
+                "(no new output)\n\n(stopped after it exited with code 3)"
+            );
+            until_gone(&until_recorded(&pid_file).await).await;
+        }
 
-                assert_eq!(read, "(no new output)\n\n(exit code 3)");
-                assert!(!stopped.is_error, "{}", stopped.content);
-                assert_eq!(
-                    stopped.content,
-                    "(no new output)\n\n(stopped after it exited with code 3)"
-                );
-                until_gone(&until_recorded(&pid_file).await).await;
-            }
+        #[cfg(unix)]
+        #[tokio::test]
+        async fn reports_the_signal_that_ended_the_shell() {
+            let (shells, _sink) = shells();
+            start(&shells, "kill -9 $$").await;
 
-            #[cfg(unix)]
-            #[tokio::test]
-            async fn reports_the_signal_that_ended_the_shell() {
-                let (shells, _sink) = shells();
-                start(&shells, "kill -9 $$").await;
+            let read = output(&shells, "shell-1", 5_000).await;
+            let stopped = stop(&shells, "shell-1").await;
 
-                let read = output(&shells, "shell-1", 5_000).await;
-                let stopped = stop(&shells, "shell-1").await;
+            assert_eq!(read, "(no new output)\n\n(killed by signal 9)");
+            assert_eq!(
+                stopped.content,
+                "(no new output)\n\n(stopped after signal 9 killed it)"
+            );
+        }
 
-                assert_eq!(read, "(no new output)\n\n(killed by signal 9)");
-                assert_eq!(
-                    stopped.content,
-                    "(no new output)\n\n(stopped after signal 9 killed it)"
-                );
-            }
+        #[cfg(unix)]
+        #[tokio::test]
+        async fn leaves_a_descendant_that_released_the_pipes_as_a_foreground_call_does() {
+            let dir = tempfile::tempdir().unwrap();
+            let pid_file = dir.path().join("pid");
+            let (shells, _sink) = shells();
+            let command = format!(
+                "sleep 30 >/dev/null 2>&1 & echo $! > '{}'",
+                pid_file.display()
+            );
+            start(&shells, &command).await;
+            output(&shells, "shell-1", 5_000).await;
 
-            #[cfg(unix)]
-            #[tokio::test]
-            async fn leaves_a_descendant_that_released_the_pipes_as_a_foreground_call_does() {
-                let dir = tempfile::tempdir().unwrap();
-                let pid_file = dir.path().join("pid");
-                let (shells, _sink) = shells();
-                let command = format!(
-                    "sleep 30 >/dev/null 2>&1 & echo $! > '{}'",
-                    pid_file.display()
-                );
-                start(&shells, &command).await;
-                output(&shells, "shell-1", 5_000).await;
+            let stopped = stop(&shells, "shell-1").await;
 
-                let stopped = stop(&shells, "shell-1").await;
-
-                let pid = std::fs::read_to_string(&pid_file).unwrap();
-                let signal = |args: &[&str]| {
-                    std::process::Command::new("kill")
-                        .args(args)
-                        .arg(pid.trim())
-                        .status()
-                        .unwrap()
-                        .success()
-                };
-                let alive = signal(&["-0"]);
-                signal(&["-9"]);
-                assert!(
-                    alive,
-                    "the stop killed a descendant that released the pipes"
-                );
-                assert_eq!(
-                    stopped.content,
-                    "(no new output)\n\n(stopped after it exited with code 0)"
-                );
-            }
+            let pid = std::fs::read_to_string(&pid_file).unwrap();
+            let signal = |args: &[&str]| {
+                std::process::Command::new("kill")
+                    .args(args)
+                    .arg(pid.trim())
+                    .status()
+                    .unwrap()
+                    .success()
+            };
+            let alive = signal(&["-0"]);
+            signal(&["-9"]);
+            assert!(
+                alive,
+                "the stop killed a descendant that released the pipes"
+            );
+            assert_eq!(
+                stopped.content,
+                "(no new output)\n\n(stopped after it exited with code 0)"
+            );
         }
     }
 

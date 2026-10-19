@@ -660,7 +660,7 @@ mod tests {
         }
 
         #[test]
-        fn missing_command_is_none() {
+        fn missing_command_has_no_target() {
             // Only a tool-wide rule matches `None`, so a malformed call cannot slip past a
             // command-specific allow.
             let prepared = BashTool::default().prepare(serde_json::json!({}), &temp_ctx());

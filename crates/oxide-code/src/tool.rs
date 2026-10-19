@@ -1503,7 +1503,7 @@ mod tests {
         }
 
         #[test]
-        fn is_absent_when_primary_field_missing() {
+        fn plucks_no_argument_without_the_primary_field() {
             for t in all_tools() {
                 assert!(
                     t.summarize_input(&serde_json::json!({})).is_none(),
@@ -2067,7 +2067,7 @@ mod tests {
             }
 
             #[test]
-            fn none_uses_cwd() {
+            fn defaults_to_the_cwd_without_a_path() {
                 let dir = canonical_tempdir();
 
                 let root = search_root(dir.path(), None).unwrap();
