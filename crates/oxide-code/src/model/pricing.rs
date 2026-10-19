@@ -110,57 +110,63 @@ fn million_tokens(tokens: u32) -> f64 {
 mod tests {
     use super::*;
 
-    fn assert_usd(actual: f64, expected: f64) {
-        assert!(
-            (actual - expected).abs() < 1e-9,
-            "expected ${expected}, got ${actual}"
-        );
-    }
+    mod token_cost_rates {
+        use super::*;
 
-    // ── TokenCostRates::estimate_usd ──
+        mod estimate_usd {
+            use super::*;
 
-    #[test]
-    fn estimate_usd_flat_rates_price_every_token_class_and_cache_ttl() {
-        // 1M of each class isolates the per-class rate: 4 input + 5 / 8 write + 0.20 read + 20.
-        let usage = TokenUsage {
-            input_tokens: 1_000_000,
-            cache_creation_input_tokens: 1_000_000,
-            cache_read_input_tokens: 1_000_000,
-            output_tokens: 1_000_000,
-        };
+            fn assert_usd(actual: f64, expected: f64) {
+                assert!(
+                    (actual - expected).abs() < 1e-9,
+                    "expected ${expected}, got ${actual}"
+                );
+            }
 
-        let five_min = OPUS_5_5_RATES.estimate_usd(usage, PromptCacheTtl::FiveMin);
-        let one_hour = OPUS_5_5_RATES.estimate_usd(usage, PromptCacheTtl::OneHour);
+            #[test]
+            fn flat_rates_price_every_token_class_and_cache_ttl() {
+                // 1M of each class isolates its rate: 4 input + 5 / 8 write + 0.20 read + 20.
+                let usage = TokenUsage {
+                    input_tokens: 1_000_000,
+                    cache_creation_input_tokens: 1_000_000,
+                    cache_read_input_tokens: 1_000_000,
+                    output_tokens: 1_000_000,
+                };
 
-        assert_usd(five_min, 29.2);
-        assert_usd(one_hour, 32.2);
-    }
+                let five_min = OPUS_5_5_RATES.estimate_usd(usage, PromptCacheTtl::FiveMin);
+                let one_hour = OPUS_5_5_RATES.estimate_usd(usage, PromptCacheTtl::OneHour);
 
-    #[test]
-    fn estimate_usd_tiered_rates_switch_card_only_above_prompt_threshold() {
-        // 100K prompt tokens bill on the base card at $0.10 / MTok input. One more token moves the
-        // whole request, output included, onto the long-prompt card at $0.50 / $2.50.
-        let at_threshold = HAIKU_5_5_RATES
-            .estimate_usd(TokenUsage::new(100_000, 1_000_000), PromptCacheTtl::FiveMin);
-        let above_threshold = HAIKU_5_5_RATES
-            .estimate_usd(TokenUsage::new(100_001, 1_000_000), PromptCacheTtl::FiveMin);
+                assert_usd(five_min, 29.2);
+                assert_usd(one_hour, 32.2);
+            }
 
-        assert_usd(at_threshold, 0.01 + 0.50);
-        assert_usd(above_threshold, 0.100_001 * 0.50 + 2.50);
-    }
+            #[test]
+            fn tiered_rates_switch_card_only_above_prompt_threshold() {
+                // 100K prompt tokens bill on the base card at $0.10 / MTok input. One more token
+                // moves the whole request, output too, onto the long-prompt card at $0.50 / $2.50.
+                let at_threshold = HAIKU_5_5_RATES
+                    .estimate_usd(TokenUsage::new(100_000, 1_000_000), PromptCacheTtl::FiveMin);
+                let above_threshold = HAIKU_5_5_RATES
+                    .estimate_usd(TokenUsage::new(100_001, 1_000_000), PromptCacheTtl::FiveMin);
 
-    #[test]
-    fn estimate_usd_tiered_prompt_size_counts_cache_tokens() {
-        // The 151K prompt includes cache writes and reads, so every class bills on the long-prompt
-        // card ($0.50 input, $1.00 1h write, $0.05 read).
-        let usage = TokenUsage {
-            cache_creation_input_tokens: 50_000,
-            cache_read_input_tokens: 100_000,
-            ..TokenUsage::new(1_000, 0)
-        };
+                assert_usd(at_threshold, 0.01 + 0.50);
+                assert_usd(above_threshold, 0.100_001 * 0.50 + 2.50);
+            }
 
-        let cost = HAIKU_5_5_RATES.estimate_usd(usage, PromptCacheTtl::OneHour);
+            #[test]
+            fn tiered_prompt_size_counts_cache_tokens() {
+                // The 151K prompt includes cache writes and reads, so every class bills on the
+                // long-prompt card ($0.50 input, $1.00 1h write, $0.05 read).
+                let usage = TokenUsage {
+                    cache_creation_input_tokens: 50_000,
+                    cache_read_input_tokens: 100_000,
+                    ..TokenUsage::new(1_000, 0)
+                };
 
-        assert_usd(cost, 0.001 * 0.50 + 0.05 * 1.0 + 0.1 * 0.05);
+                let cost = HAIKU_5_5_RATES.estimate_usd(usage, PromptCacheTtl::OneHour);
+
+                assert_usd(cost, 0.001 * 0.50 + 0.05 * 1.0 + 0.1 * 0.05);
+            }
+        }
     }
 }

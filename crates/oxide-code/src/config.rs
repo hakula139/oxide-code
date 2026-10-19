@@ -760,8 +760,6 @@ mod tests {
     use crate::util::path::testing::HOME_VAR;
     use crate::util::tls::testing::TEST_CA_PEM;
 
-    // ── ConfigSnapshot::notices ──
-
     fn sample_config() -> Config {
         Config {
             auth: Some(Auth::new(
@@ -802,1543 +800,1574 @@ mod tests {
         }
     }
 
-    #[test]
-    fn notices_list_an_unsupported_model_then_why_the_session_is_signed_out() {
-        let mut cfg = sample_config();
-        cfg.auth = None;
-        cfg.signed_out_notice = Some("Not signed in. Run `/login` to sign in.".to_owned());
+    mod config_snapshot {
+        use super::*;
 
-        let notices = cfg.snapshot().notices();
+        mod notices {
+            use super::*;
 
-        assert_eq!(notices.len(), 2, "{notices:?}");
-        assert!(
-            notices[0].starts_with("`claude-test-1-0` is not a supported model"),
-            "{notices:?}"
-        );
-        assert_eq!(notices[1], "Not signed in. Run `/login` to sign in.");
-    }
+            #[test]
+            fn list_an_unsupported_model_then_why_the_session_is_signed_out() {
+                let mut cfg = sample_config();
+                cfg.auth = None;
+                cfg.signed_out_notice = Some("Not signed in. Run `/login` to sign in.".to_owned());
 
-    #[test]
-    fn notices_are_empty_for_a_current_setup() {
-        let mut cfg = sample_config();
-        cfg.model = ModelSpec::resolve("claude-opus-5-5".to_owned());
-        assert_eq!(cfg.snapshot().notices(), [] as [String; 0]);
-    }
+                let notices = cfg.snapshot().notices();
 
-    // ── ConfigSnapshot::apply_swap ──
+                assert_eq!(notices.len(), 2, "{notices:?}");
+                assert!(
+                    notices[0].starts_with("`claude-test-1-0` is not a supported model"),
+                    "{notices:?}"
+                );
+                assert_eq!(notices[1], "Not signed in. Run `/login` to sign in.");
+            }
 
-    #[test]
-    fn apply_swap_marks_the_model_and_an_honored_effort_pick_as_session_set() {
-        let mut snap = sample_config().snapshot();
-        let model = snap.model.clone();
-        let auto = AutoCompactionConfig::disabled();
-
-        snap.apply_swap(model.clone(), Some(Effort::Xhigh), None, auto);
-        assert_eq!(snap.provenance.model, Source::Env("ANTHROPIC_MODEL"));
-        assert_eq!(snap.provenance.effort, Source::Env("OX_EFFORT"));
-        assert_eq!(snap.compaction.auto, auto);
-
-        snap.apply_swap(model, Some(Effort::Low), Some(Effort::Low), auto);
-        assert_eq!(snap.provenance.model, Source::Env("ANTHROPIC_MODEL"));
-        assert_eq!(snap.provenance.effort, Source::Session);
-        assert_eq!(snap.effort, Some(Effort::Low));
-
-        let opus = ModelSpec::resolve("claude-opus-5-5".to_owned());
-        snap.apply_swap(opus, Some(Effort::Low), None, auto);
-        assert_eq!(snap.provenance.model, Source::Session);
-        assert_eq!(snap.provenance.effort, Source::Session);
-        assert_eq!(snap.model.id(), "claude-opus-5-5");
-    }
-
-    #[test]
-    fn apply_swap_reverts_an_effort_the_model_derived_to_the_default_source() {
-        let mut snap = sample_config().snapshot();
-        let custom = ModelSpec::resolve("gateway-alias".to_owned());
-        let auto = AutoCompactionConfig::disabled();
-
-        snap.apply_swap(custom, None, Some(Effort::High), auto);
-        assert_eq!(snap.provenance.effort, Source::Default);
-        assert_eq!(snap.effort, None);
-
-        let opus = ModelSpec::resolve("claude-opus-5-5".to_owned());
-        snap.apply_swap(opus, Some(Effort::Medium), None, auto);
-        assert_eq!(snap.provenance.effort, Source::Default);
-        assert_eq!(snap.effort, Some(Effort::Medium));
-    }
-
-    // ── ConfigSnapshot::apply_mode ──
-
-    #[test]
-    fn apply_mode_marks_the_switch_as_session_set() {
-        let mut snap = sample_config().snapshot();
-
-        snap.apply_mode(Mode::Plan);
-
-        assert_eq!(snap.permission_mode, Mode::Plan);
-        assert_eq!(snap.provenance.permission_mode, Source::Session);
-    }
-
-    // ── Effort ──
-
-    #[test]
-    fn effort_round_trips_through_serde_and_fromstr() {
-        for (variant, token) in Effort::ALL
-            .into_iter()
-            .zip(["low", "medium", "high", "xhigh", "max"])
-        {
-            assert_eq!(serde_json::to_value(variant).unwrap(), token);
-            assert_eq!(variant.to_string(), token);
-            assert_eq!(token.parse::<Effort>().unwrap(), variant);
-        }
-    }
-
-    #[test]
-    fn effort_rejects_unknown_tokens_listing_the_accepted_ones() {
-        let err = "extra-high".parse::<Effort>().expect_err("unknown token");
-        assert_eq!(
-            format!("{err:#}"),
-            "expected one of low, medium, high, xhigh, max"
-        );
-    }
-
-    #[test]
-    fn effort_round_trips_through_toml_deserialize() {
-        #[derive(Deserialize)]
-        struct Wrap {
-            effort: Effort,
-        }
-        let wrap: Wrap = toml::from_str(r#"effort = "xhigh""#).unwrap();
-        assert_eq!(wrap.effort, Effort::Xhigh);
-    }
-
-    // ── PromptCacheTtl ──
-
-    #[test]
-    fn prompt_cache_ttl_wire_omits_the_five_minute_server_default() {
-        assert_eq!(PromptCacheTtl::FiveMin.wire(), None);
-        assert_eq!(PromptCacheTtl::OneHour.wire(), Some("1h"));
-    }
-
-    #[test]
-    fn prompt_cache_ttl_round_trips_through_serde_and_fromstr() {
-        for (variant, token) in [
-            (PromptCacheTtl::FiveMin, "5m"),
-            (PromptCacheTtl::OneHour, "1h"),
-        ] {
-            assert_eq!(serde_json::to_value(variant).unwrap(), token);
-            assert_eq!(variant.to_string(), token);
-            assert_eq!(token.parse::<PromptCacheTtl>().unwrap(), variant);
-        }
-    }
-
-    #[test]
-    fn prompt_cache_ttl_rejects_unknown_tokens_listing_the_accepted_ones() {
-        let err = "30m".parse::<PromptCacheTtl>().expect_err("unknown token");
-        assert_eq!(format!("{err:#}"), "expected one of 5m, 1h");
-    }
-
-    // ── StatusLineSegment ──
-
-    #[test]
-    fn status_line_segment_names_round_trip_through_serde_and_fromstr() {
-        for &(segment, name) in StatusLineSegment::ALL {
-            assert_eq!(serde_json::to_value(segment).unwrap(), name);
-            assert_eq!(name.parse::<StatusLineSegment>().unwrap(), segment);
-        }
-    }
-
-    // ── Config::load ──
-
-    /// Env keys `Config::load` reads. `ANTHROPIC_API_KEY` defaults non-empty in [`env_vars`] so
-    /// tests land on `ApiKey` without consulting the stored login.
-    const ENV_KEYS: &[&str] = &[
-        "ANTHROPIC_AUTH_TOKEN",
-        "ANTHROPIC_API_KEY",
-        "CLAUDE_CODE_OAUTH_TOKEN",
-        "ANTHROPIC_CUSTOM_HEADERS",
-        "CLAUDE_CODE_ATTRIBUTION_HEADER",
-        "CLAUDE_CODE_DISABLE_STRUCTURED_OUTPUTS",
-        "ANTHROPIC_MODEL",
-        "ANTHROPIC_BASE_URL",
-        "OX_EFFORT",
-        "OX_MAX_TOKENS",
-        "OX_EXTRA_CA_CERTS",
-        "NODE_EXTRA_CA_CERTS",
-        "OX_MAX_TOOL_ROUNDS",
-        "OX_COMPACTION_AUTO_ENABLED",
-        "OX_COMPACTION_AUTO_THRESHOLD_PERCENT",
-        "OX_COMPACTION_AUTO_THRESHOLD_TOKENS",
-        "OX_SHOW_THINKING",
-        "OX_SHOW_WELCOME",
-        "OX_STATUS_LINE",
-        "OX_PROMPT_CACHE_TTL",
-        "OX_PERMISSION_MODE",
-        "XDG_CONFIG_HOME",
-        "XDG_DATA_HOME",
-    ];
-
-    fn write_user_config(xdg_dir: &Path, body: &str) -> Layer {
-        let path = xdg_dir.join("ox").join("config.toml");
-        write_config(path.clone(), body);
-        Layer::User(path)
-    }
-
-    fn write_drop_in(xdg_dir: &Path, name: &str, body: &str) -> Layer {
-        let path = xdg_dir.join("ox").join("config.d").join(name);
-        write_config(path.clone(), body);
-        Layer::DropIn(path)
-    }
-
-    fn write_config(path: PathBuf, body: &str) {
-        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-        std::fs::write(path, body).unwrap();
-    }
-
-    /// Baseline env (all unset, `ANTHROPIC_API_KEY` = `"sk-default"`) plus overrides.
-    fn env_vars(
-        overrides: impl IntoIterator<Item = (&'static str, Option<String>)>,
-    ) -> Vec<(&'static str, Option<String>)> {
-        let known: HashSet<&'static str> = ENV_KEYS.iter().copied().collect();
-        let mut out: Vec<(&'static str, Option<String>)> = ENV_KEYS
-            .iter()
-            .copied()
-            .map(|k| {
-                (
-                    k,
-                    (k == "ANTHROPIC_API_KEY").then(|| "sk-default".to_owned()),
-                )
-            })
-            .collect();
-        for (key, value) in overrides {
-            assert!(known.contains(key), "env key {key:?} not in ENV_KEYS");
-            if let Some(slot) = out.iter_mut().find(|(k, _)| *k == key) {
-                slot.1 = value;
+            #[test]
+            fn are_empty_for_a_current_setup() {
+                let mut cfg = sample_config();
+                cfg.model = ModelSpec::resolve("claude-opus-5-5".to_owned());
+                assert_eq!(cfg.snapshot().notices(), [] as [String; 0]);
             }
         }
-        out
-    }
 
-    fn xdg(dir: &TempDir) -> (&'static str, Option<String>) {
-        (
-            "XDG_CONFIG_HOME",
-            Some(dir.path().to_string_lossy().into_owned()),
-        )
-    }
+        mod apply_swap {
+            use super::*;
 
-    fn env(key: &'static str, value: &str) -> (&'static str, Option<String>) {
-        (key, Some(value.to_owned()))
-    }
+            #[test]
+            fn marks_the_model_and_an_honored_effort_pick_as_session_set() {
+                let mut snap = sample_config().snapshot();
+                let model = snap.model.clone();
+                let auto = AutoCompactionConfig::disabled();
 
-    /// Loads a non-interactive session from the user config under `dir` and the baseline env
-    /// plus `overrides`.
-    async fn load_with(dir: &TempDir, overrides: &[(&'static str, &str)]) -> Result<Config> {
-        let overrides = overrides.iter().map(|&(key, value)| env(key, value));
-        let vars = env_vars([xdg(dir)].into_iter().chain(overrides));
-        temp_env::async_with_vars(vars, Config::load(dir.path(), false)).await
-    }
+                snap.apply_swap(model.clone(), Some(Effort::Xhigh), None, auto);
+                assert_eq!(snap.provenance.model, Source::Env("ANTHROPIC_MODEL"));
+                assert_eq!(snap.provenance.effort, Source::Env("OX_EFFORT"));
+                assert_eq!(snap.compaction.auto, auto);
 
-    fn assert_auth(config: &Config, source: AuthSource, secret: &str) {
-        let auth = config.auth.as_ref().expect("the session must be signed in");
-        assert_eq!(auth.source(), source);
-        assert_eq!(auth.secret(), secret);
-    }
+                snap.apply_swap(model, Some(Effort::Low), Some(Effort::Low), auto);
+                assert_eq!(snap.provenance.model, Source::Env("ANTHROPIC_MODEL"));
+                assert_eq!(snap.provenance.effort, Source::Session);
+                assert_eq!(snap.effort, Some(Effort::Low));
 
-    #[tokio::test]
-    async fn load_defaults_apply_when_no_config_and_no_env() {
-        let dir = tempfile::tempdir().unwrap();
-        let config = load_with(&dir, &[]).await.unwrap();
-        assert_eq!(config.model.id(), "claude-opus-5-5");
-        assert_eq!(config.base_url, DEFAULT_BASE_URL);
-        assert_eq!(config.max_tokens, None);
-        assert_eq!(config.effort, Some(Effort::Medium));
-        assert_eq!(config.prompt_cache_ttl, PromptCacheTtl::OneHour);
-        assert!(config.compaction.auto.enabled);
-        assert_eq!(
-            config.compaction.auto.threshold_tokens,
-            Some(test_thresholds::WINDOW_1M),
-        );
-        assert!(!config.show_thinking);
-        assert!(
-            config.show_welcome,
-            "default-on so the empty chat surfaces the welcome"
-        );
-        assert_eq!(config.status_line, StatusLineSegment::DEFAULT);
-        assert_auth(&config, AuthSource::ApiKeyEnv, "sk-default");
-        assert!(config.gateway.custom_headers.is_empty());
-        assert!(config.gateway.attribution);
-        assert!(config.gateway.structured_outputs);
-        assert_eq!(config.theme.base, DEFAULT_THEME);
-        assert!(config.theme.overrides.is_empty());
-        assert_eq!(config.permission.mode(), Mode::Manual);
-        assert_eq!(
-            config.provenance,
-            Provenance {
-                auth: Source::Env("ANTHROPIC_API_KEY"),
-                ..Provenance::default()
-            },
-        );
-    }
+                let opus = ModelSpec::resolve("claude-opus-5-5".to_owned());
+                snap.apply_swap(opus, Some(Effort::Low), None, auto);
+                assert_eq!(snap.provenance.model, Source::Session);
+                assert_eq!(snap.provenance.effort, Source::Session);
+                assert_eq!(snap.model.id(), "claude-opus-5-5");
+            }
 
-    #[tokio::test]
-    async fn load_theme_passes_base_and_raw_overrides_through() {
-        let dir = tempfile::tempdir().unwrap();
-        write_user_config(
-            dir.path(),
-            indoc! {r##"
-                [tui.theme]
-                base = "latte"
+            #[test]
+            fn reverts_an_effort_the_model_derived_to_the_default_source() {
+                let mut snap = sample_config().snapshot();
+                let custom = ModelSpec::resolve("gateway-alias".to_owned());
+                let auto = AutoCompactionConfig::disabled();
 
-                [tui.theme.overrides]
-                error = "#ff0000"
-                accent = { bold = false }
-            "##},
-        );
-        let config = load_with(&dir, &[]).await.unwrap();
-        assert_eq!(config.theme.base, "latte");
-        assert_eq!(
-            config.theme.overrides,
-            indoc! {r##"
-                error = "#ff0000"
-                accent = { bold = false }
-            "##}
-            .parse::<toml::Table>()
-            .unwrap(),
-        );
-    }
+                snap.apply_swap(custom, None, Some(Effort::High), auto);
+                assert_eq!(snap.provenance.effort, Source::Default);
+                assert_eq!(snap.effort, None);
 
-    #[tokio::test]
-    async fn load_env_overrides_every_client_field() {
-        let dir = tempfile::tempdir().unwrap();
-        let config = load_with(
-            &dir,
-            &[
-                ("ANTHROPIC_MODEL", "claude-sonnet-5-5"),
-                ("ANTHROPIC_BASE_URL", "https://example.invalid"),
-                ("OX_MAX_TOKENS", "64"),
-                ("OX_MAX_TOOL_ROUNDS", "200"),
-                ("OX_SHOW_THINKING", "1"),
-                ("OX_SHOW_WELCOME", "0"),
-                ("OX_STATUS_LINE", "run-state,model,current-dir"),
-            ],
-        )
-        .await
-        .unwrap();
-        assert_eq!(config.model.id(), "claude-sonnet-5-5");
-        assert_eq!(config.base_url, "https://example.invalid");
-        assert_eq!(config.max_tokens, Some(64));
-        assert_eq!(config.max_tool_rounds, Some(200));
-        assert!(config.compaction.auto.enabled);
-        assert!(config.show_thinking);
-        assert!(
-            !config.show_welcome,
-            "env `0` flips the default-on welcome off"
-        );
-        assert_eq!(
-            config.status_line,
-            vec![
-                StatusLineSegment::RunState,
-                StatusLineSegment::Model,
-                StatusLineSegment::CurrentDir,
-            ],
-        );
-    }
+                let opus = ModelSpec::resolve("claude-opus-5-5".to_owned());
+                snap.apply_swap(opus, Some(Effort::Medium), None, auto);
+                assert_eq!(snap.provenance.effort, Source::Default);
+                assert_eq!(snap.effort, Some(Effort::Medium));
+            }
+        }
 
-    #[tokio::test]
-    async fn load_user_config_supplies_values_without_env_overrides() {
-        let dir = tempfile::tempdir().unwrap();
-        let user = write_user_config(
-            dir.path(),
-            indoc! {r#"
-                [client]
-                model = "claude-haiku-5-5"
-                base_url = "https://config-file.invalid"
-                extra_ca_certs = "/etc/ssl/corp-ca.pem"
-                max_tokens = 128
-                max_tool_rounds = 75
+        mod apply_mode {
+            use super::*;
 
-                [client.compaction]
-                auto_threshold_percent = 40
+            #[test]
+            fn marks_the_switch_as_session_set() {
+                let mut snap = sample_config().snapshot();
 
-                [tui]
-                show_thinking = true
-                show_welcome = false
-                status_line = ["current-dir", "git-branch", "model-with-effort"]
-            "#},
-        );
-        let config = load_with(&dir, &[]).await.unwrap();
-        assert_eq!(config.model.id(), "claude-haiku-5-5");
-        assert_eq!(config.base_url, "https://config-file.invalid");
-        assert_eq!(
-            config.extra_ca_certs.as_deref(),
-            Some(Path::new("/etc/ssl/corp-ca.pem"))
-        );
-        assert_eq!(config.max_tokens, Some(128));
-        assert_eq!(config.max_tool_rounds, Some(75));
-        assert!(config.compaction.auto.enabled);
-        let file = Source::File(user.clone());
-        assert_eq!(
-            config.provenance,
-            Provenance {
-                layers: vec![user],
-                model: file.clone(),
-                auth: Source::Env("ANTHROPIC_API_KEY"),
-                base_url: file.clone(),
-                extra_ca_certs: file.clone(),
-                max_tokens: file.clone(),
-                max_tool_rounds: file.clone(),
-                compaction: file.clone(),
-                show_thinking: file,
-                ..Provenance::default()
-            },
-        );
-        assert!(config.show_thinking);
-        assert!(
-            !config.show_welcome,
-            "file `false` opts out of the default-on welcome"
-        );
-        assert_eq!(
-            config.status_line,
-            vec![
-                StatusLineSegment::CurrentDir,
-                StatusLineSegment::GitBranch,
-                StatusLineSegment::ModelWithEffort,
-            ],
-        );
-    }
+                snap.apply_mode(Mode::Plan);
 
-    #[tokio::test]
-    async fn load_env_beats_config_file_field_by_field() {
-        let dir = tempfile::tempdir().unwrap();
-        write_user_config(
-            dir.path(),
-            indoc! {r#"
-                [client]
-                model = "claude-haiku-5-5"
-                max_tokens = 128
-
-                [tui]
-                show_thinking = true
-            "#},
-        );
-        let config = load_with(
-            &dir,
-            &[
-                ("ANTHROPIC_MODEL", "claude-sonnet-5-5"),
-                // `max_tokens` has no env value, so the file value must win.
-                ("OX_SHOW_THINKING", "0"),
-            ],
-        )
-        .await
-        .unwrap();
-        assert_eq!(config.model.id(), "claude-sonnet-5-5");
-        assert_eq!(config.max_tokens, Some(128));
-        assert!(!config.show_thinking, "env `0` overrides file `true`");
-    }
-
-    #[tokio::test]
-    async fn load_numeric_env_errors_name_the_variable_and_range() {
-        let whole = format!("1 to {}", u32::MAX);
-        for (var, raw, range) in [
-            ("OX_MAX_TOKENS", "32k", whole.clone()),
-            ("OX_MAX_TOKENS", "0", whole.clone()),
-            ("OX_MAX_TOOL_ROUNDS", "-3", whole),
-            (
-                "OX_COMPACTION_AUTO_THRESHOLD_TOKENS",
-                "4294967296",
-                format!("0 to {}", u32::MAX),
-            ),
-            (
-                "OX_COMPACTION_AUTO_THRESHOLD_PERCENT",
-                "300",
-                "1 to 100".to_owned(),
-            ),
-            (
-                "OX_COMPACTION_AUTO_THRESHOLD_PERCENT",
-                "0",
-                "1 to 100".to_owned(),
-            ),
-        ] {
-            let dir = tempfile::tempdir().unwrap();
-            // A bad threshold must fail the load even with auto compaction off.
-            let err = load_with(&dir, &[("OX_COMPACTION_AUTO_ENABLED", "0"), (var, raw)])
-                .await
-                .expect_err("an invalid number must fail config load");
-            assert_eq!(
-                format!("{err:#}"),
-                format!("invalid {var} {raw:?}: expected a whole number from {range}"),
-            );
+                assert_eq!(snap.permission_mode, Mode::Plan);
+                assert_eq!(snap.provenance.permission_mode, Source::Session);
+            }
         }
     }
 
-    #[tokio::test]
-    async fn load_propagates_invalid_config_file() {
-        let dir = tempfile::tempdir().unwrap();
-        write_user_config(
-            dir.path(),
-            indoc! {r#"
-                [client]
-                api_key = "sk-from-file"
-                show_thinking = true
-            "#},
-        );
-        let err = load_with(&dir, &[("ANTHROPIC_API_KEY", "")])
-            .await
-            .expect_err("misplaced field must surface as an error");
-        let msg = format!("{err:#}");
-        assert!(msg.contains("invalid config at"), "{msg}");
-        assert!(msg.contains("unknown field `show_thinking`"), "{msg}");
-    }
+    mod effort {
+        use super::*;
 
-    // ── Config::load: base URL validation ──
+        #[test]
+        fn round_trips_through_serde_and_fromstr() {
+            for (variant, token) in Effort::ALL
+                .into_iter()
+                .zip(["low", "medium", "high", "xhigh", "max"])
+            {
+                assert_eq!(serde_json::to_value(variant).unwrap(), token);
+                assert_eq!(variant.to_string(), token);
+                assert_eq!(token.parse::<Effort>().unwrap(), variant);
+            }
+        }
 
-    #[tokio::test]
-    async fn load_rejects_plain_http_base_url_unless_loopback() {
-        let dir = tempfile::tempdir().unwrap();
-        let err = load_with(&dir, &[("ANTHROPIC_BASE_URL", "http://example.com")])
-            .await
-            .expect_err("non-loopback http must be rejected");
-        let msg = format!("{err:#}");
-        assert!(msg.contains("https"), "{msg}");
-        assert!(msg.contains("localhost"), "{msg}");
-    }
+        #[test]
+        fn round_trips_through_toml_deserialize() {
+            #[derive(Deserialize)]
+            struct Wrap {
+                effort: Effort,
+            }
+            let wrap: Wrap = toml::from_str(r#"effort = "xhigh""#).unwrap();
+            assert_eq!(wrap.effort, Effort::Xhigh);
+        }
 
-    #[tokio::test]
-    async fn load_rejects_non_http_base_url_scheme() {
-        let dir = tempfile::tempdir().unwrap();
-        let err = load_with(&dir, &[("ANTHROPIC_BASE_URL", "ftp://example.com")])
-            .await
-            .expect_err("non-http schemes must be rejected");
-        let msg = format!("{err:#}");
-        assert!(msg.contains("http or https"), "{msg}");
-        assert!(msg.contains("ftp"), "{msg}");
-    }
+        mod from_str {
+            use super::*;
 
-    #[tokio::test]
-    async fn load_accepts_loopback_http_base_url_for_local_proxy() {
-        let dir = tempfile::tempdir().unwrap();
-        let config = load_with(&dir, &[("ANTHROPIC_BASE_URL", "http://127.0.0.1:8080")])
-            .await
-            .unwrap();
-        assert_eq!(config.base_url, "http://127.0.0.1:8080");
-    }
-
-    // ── Config::load: extra_ca_certs ──
-
-    #[tokio::test]
-    async fn load_extra_ca_certs_default_is_none() {
-        let dir = tempfile::tempdir().unwrap();
-        let config = load_with(&dir, &[]).await.unwrap();
-        assert!(config.extra_ca_certs.is_none());
-    }
-
-    #[tokio::test]
-    async fn load_extra_ca_certs_env_beats_file_and_expands_tilde() {
-        let dir = tempfile::tempdir().unwrap();
-        write_user_config(
-            dir.path(),
-            indoc! {r#"
-                [client]
-                extra_ca_certs = "/etc/ssl/from-file.pem"
-            "#},
-        );
-        let home = [(HOME_VAR, Some(dir.path()))];
-        let overrides = [("OX_EXTRA_CA_CERTS", "~/certs/env.pem")];
-        let config = Box::pin(temp_env::async_with_vars(home, load_with(&dir, &overrides)))
-            .await
-            .unwrap();
-        assert_eq!(
-            config.extra_ca_certs,
-            Some(dir.path().join("certs/env.pem"))
-        );
-    }
-
-    #[tokio::test]
-    async fn load_extra_ca_certs_node_env_is_the_last_fallback() {
-        let dir = tempfile::tempdir().unwrap();
-        let bundle = dir.path().join("node.pem");
-        std::fs::write(&bundle, TEST_CA_PEM).unwrap();
-        let node = [("NODE_EXTRA_CA_CERTS", bundle.to_str().unwrap())];
-
-        let config = load_with(&dir, &node).await.unwrap();
-        assert_eq!(config.extra_ca_certs.as_deref(), Some(bundle.as_path()));
-
-        write_user_config(
-            dir.path(),
-            indoc! {r#"
-                [client]
-                extra_ca_certs = "/etc/ssl/from-file.pem"
-            "#},
-        );
-        let config = load_with(&dir, &node).await.unwrap();
-        assert_eq!(
-            config.extra_ca_certs,
-            Some(PathBuf::from("/etc/ssl/from-file.pem")),
-        );
-    }
-
-    #[tokio::test]
-    async fn load_extra_ca_certs_skips_unreadable_node_bundle() {
-        let dir = tempfile::tempdir().unwrap();
-        let missing = dir.path().join("missing.pem");
-        let config = load_with(&dir, &[("NODE_EXTRA_CA_CERTS", missing.to_str().unwrap())])
-            .await
-            .unwrap();
-        assert!(config.extra_ca_certs.is_none());
-    }
-
-    #[tokio::test]
-    async fn load_extra_ca_certs_file_used_when_env_unset() {
-        let dir = tempfile::tempdir().unwrap();
-        write_user_config(
-            dir.path(),
-            indoc! {r#"
-                [client]
-                extra_ca_certs = "/etc/ssl/from-file.pem"
-            "#},
-        );
-        let config = load_with(&dir, &[]).await.unwrap();
-        assert_eq!(
-            config.extra_ca_certs,
-            Some(PathBuf::from("/etc/ssl/from-file.pem")),
-        );
-    }
-
-    #[tokio::test]
-    async fn load_extra_ca_certs_file_wins_when_env_is_empty() {
-        let dir = tempfile::tempdir().unwrap();
-        write_user_config(
-            dir.path(),
-            indoc! {r#"
-                [client]
-                extra_ca_certs = "/etc/ssl/from-file.pem"
-            "#},
-        );
-        let config = load_with(&dir, &[("OX_EXTRA_CA_CERTS", "")]).await.unwrap();
-        assert_eq!(
-            config.extra_ca_certs,
-            Some(PathBuf::from("/etc/ssl/from-file.pem")),
-        );
-    }
-
-    // ── Config::load: auth ──
-
-    #[tokio::test]
-    async fn load_env_api_key_beats_file_api_key() {
-        let dir = tempfile::tempdir().unwrap();
-        write_user_config(
-            dir.path(),
-            indoc! {r#"
-                [client]
-                api_key = "sk-from-file"
-            "#},
-        );
-        let config = load_with(&dir, &[("ANTHROPIC_API_KEY", "sk-from-env")])
-            .await
-            .unwrap();
-        assert_auth(&config, AuthSource::ApiKeyEnv, "sk-from-env");
-    }
-
-    #[tokio::test]
-    async fn load_file_api_key_used_when_env_is_empty() {
-        let dir = tempfile::tempdir().unwrap();
-        let user = write_user_config(
-            dir.path(),
-            indoc! {r#"
-                [client]
-                api_key = "sk-from-file"
-            "#},
-        );
-        let config = load_with(&dir, &[("ANTHROPIC_API_KEY", "")]).await.unwrap();
-        assert_auth(&config, AuthSource::ApiKeyFile, "sk-from-file");
-        assert_eq!(config.provenance.auth, Source::File(user));
-    }
-
-    #[tokio::test]
-    async fn load_resolves_credentials_in_precedence_order() {
-        // Each row drops the previous winner. `ANTHROPIC_API_KEY` stays unset throughout.
-        for (auth_token, file_key, winner, secret) in [
-            (
-                Some("gateway-token"),
-                true,
-                AuthSource::AuthTokenEnv,
-                "gateway-token",
-            ),
-            (None, true, AuthSource::ApiKeyFile, "sk-from-file"),
-            (None, false, AuthSource::OAuthTokenEnv, "oauth-token"),
-        ] {
-            let dir = tempfile::tempdir().unwrap();
-            if file_key {
-                write_user_config(
-                    dir.path(),
-                    indoc! {r#"
-                        [client]
-                        api_key = "sk-from-file"
-                    "#},
+            #[test]
+            fn rejects_unknown_tokens_listing_the_accepted_ones() {
+                let err = "extra-high".parse::<Effort>().expect_err("unknown token");
+                assert_eq!(
+                    format!("{err:#}"),
+                    "expected one of low, medium, high, xhigh, max"
                 );
             }
-            let vars = env_vars(vec![
-                xdg(&dir),
+        }
+    }
+
+    mod prompt_cache_ttl {
+        use super::*;
+
+        #[test]
+        fn round_trips_through_serde_and_fromstr() {
+            for (variant, token) in [
+                (PromptCacheTtl::FiveMin, "5m"),
+                (PromptCacheTtl::OneHour, "1h"),
+            ] {
+                assert_eq!(serde_json::to_value(variant).unwrap(), token);
+                assert_eq!(variant.to_string(), token);
+                assert_eq!(token.parse::<PromptCacheTtl>().unwrap(), variant);
+            }
+        }
+
+        mod wire {
+            use super::*;
+
+            #[test]
+            fn omits_the_five_minute_server_default() {
+                assert_eq!(PromptCacheTtl::FiveMin.wire(), None);
+                assert_eq!(PromptCacheTtl::OneHour.wire(), Some("1h"));
+            }
+        }
+
+        mod from_str {
+            use super::*;
+
+            #[test]
+            fn rejects_unknown_tokens_listing_the_accepted_ones() {
+                let err = "30m".parse::<PromptCacheTtl>().expect_err("unknown token");
+                assert_eq!(format!("{err:#}"), "expected one of 5m, 1h");
+            }
+        }
+    }
+
+    mod status_line_segment {
+        use super::*;
+
+        #[test]
+        fn names_round_trip_through_serde_and_fromstr() {
+            for &(segment, name) in StatusLineSegment::ALL {
+                assert_eq!(serde_json::to_value(segment).unwrap(), name);
+                assert_eq!(name.parse::<StatusLineSegment>().unwrap(), segment);
+            }
+        }
+    }
+
+    mod load {
+        use super::*;
+
+        /// Env keys `Config::load` reads. `ANTHROPIC_API_KEY` defaults non-empty in [`env_vars`] so
+        /// tests land on `ApiKey` without consulting the stored login.
+        const ENV_KEYS: &[&str] = &[
+            "ANTHROPIC_AUTH_TOKEN",
+            "ANTHROPIC_API_KEY",
+            "CLAUDE_CODE_OAUTH_TOKEN",
+            "ANTHROPIC_CUSTOM_HEADERS",
+            "CLAUDE_CODE_ATTRIBUTION_HEADER",
+            "CLAUDE_CODE_DISABLE_STRUCTURED_OUTPUTS",
+            "ANTHROPIC_MODEL",
+            "ANTHROPIC_BASE_URL",
+            "OX_EFFORT",
+            "OX_MAX_TOKENS",
+            "OX_EXTRA_CA_CERTS",
+            "NODE_EXTRA_CA_CERTS",
+            "OX_MAX_TOOL_ROUNDS",
+            "OX_COMPACTION_AUTO_ENABLED",
+            "OX_COMPACTION_AUTO_THRESHOLD_PERCENT",
+            "OX_COMPACTION_AUTO_THRESHOLD_TOKENS",
+            "OX_SHOW_THINKING",
+            "OX_SHOW_WELCOME",
+            "OX_STATUS_LINE",
+            "OX_PROMPT_CACHE_TTL",
+            "OX_PERMISSION_MODE",
+            "XDG_CONFIG_HOME",
+            "XDG_DATA_HOME",
+        ];
+
+        fn write_user_config(xdg_dir: &Path, body: &str) -> Layer {
+            let path = xdg_dir.join("ox").join("config.toml");
+            write_config(path.clone(), body);
+            Layer::User(path)
+        }
+
+        fn write_drop_in(xdg_dir: &Path, name: &str, body: &str) -> Layer {
+            let path = xdg_dir.join("ox").join("config.d").join(name);
+            write_config(path.clone(), body);
+            Layer::DropIn(path)
+        }
+
+        fn write_config(path: PathBuf, body: &str) {
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, body).unwrap();
+        }
+
+        /// Baseline env (all unset, `ANTHROPIC_API_KEY` = `"sk-default"`) plus overrides.
+        fn env_vars(
+            overrides: impl IntoIterator<Item = (&'static str, Option<String>)>,
+        ) -> Vec<(&'static str, Option<String>)> {
+            let known: HashSet<&'static str> = ENV_KEYS.iter().copied().collect();
+            let mut out: Vec<(&'static str, Option<String>)> = ENV_KEYS
+                .iter()
+                .copied()
+                .map(|k| {
+                    (
+                        k,
+                        (k == "ANTHROPIC_API_KEY").then(|| "sk-default".to_owned()),
+                    )
+                })
+                .collect();
+            for (key, value) in overrides {
+                assert!(known.contains(key), "env key {key:?} not in ENV_KEYS");
+                if let Some(slot) = out.iter_mut().find(|(k, _)| *k == key) {
+                    slot.1 = value;
+                }
+            }
+            out
+        }
+
+        fn xdg(dir: &TempDir) -> (&'static str, Option<String>) {
+            (
+                "XDG_CONFIG_HOME",
+                Some(dir.path().to_string_lossy().into_owned()),
+            )
+        }
+
+        fn env(key: &'static str, value: &str) -> (&'static str, Option<String>) {
+            (key, Some(value.to_owned()))
+        }
+
+        /// Loads a non-interactive session from the user config under `dir` and the baseline env
+        /// plus `overrides`.
+        async fn load_with(dir: &TempDir, overrides: &[(&'static str, &str)]) -> Result<Config> {
+            let overrides = overrides.iter().map(|&(key, value)| env(key, value));
+            let vars = env_vars([xdg(dir)].into_iter().chain(overrides));
+            temp_env::async_with_vars(vars, Config::load(dir.path(), false)).await
+        }
+
+        fn assert_auth(config: &Config, source: AuthSource, secret: &str) {
+            let auth = config.auth.as_ref().expect("the session must be signed in");
+            assert_eq!(auth.source(), source);
+            assert_eq!(auth.secret(), secret);
+        }
+
+        /// Env with no explicit credential and an oxide-code login under `data` that expires at
+        /// `expires_at`, so the stored-login search stops before Claude Code's store.
+        fn ox_login_env(
+            config: &TempDir,
+            data: &TempDir,
+            expires_at: u64,
+        ) -> Vec<(&'static str, Option<String>)> {
+            write_config(
+                data.path().join("ox").join("credentials.json"),
+                &serde_json::json!({
+                    "claudeAiOauth": { "accessToken": "ox-token", "expiresAt": expires_at },
+                })
+                .to_string(),
+            );
+            env_vars(vec![
+                xdg(config),
                 ("ANTHROPIC_API_KEY", None),
-                ("ANTHROPIC_AUTH_TOKEN", auth_token.map(str::to_owned)),
-                env("CLAUDE_CODE_OAUTH_TOKEN", "oauth-token"),
-            ]);
+                (
+                    "XDG_DATA_HOME",
+                    Some(data.path().to_string_lossy().into_owned()),
+                ),
+            ])
+        }
+
+        #[tokio::test]
+        async fn defaults_apply_when_no_config_and_no_env() {
+            let dir = tempfile::tempdir().unwrap();
+            let config = load_with(&dir, &[]).await.unwrap();
+            assert_eq!(config.model.id(), "claude-opus-5-5");
+            assert_eq!(config.base_url, DEFAULT_BASE_URL);
+            assert_eq!(config.max_tokens, None);
+            assert_eq!(config.effort, Some(Effort::Medium));
+            assert_eq!(config.prompt_cache_ttl, PromptCacheTtl::OneHour);
+            assert!(config.compaction.auto.enabled);
+            assert_eq!(
+                config.compaction.auto.threshold_tokens,
+                Some(test_thresholds::WINDOW_1M),
+            );
+            assert!(!config.show_thinking);
+            assert!(
+                config.show_welcome,
+                "default-on so the empty chat surfaces the welcome"
+            );
+            assert_eq!(config.status_line, StatusLineSegment::DEFAULT);
+            assert_auth(&config, AuthSource::ApiKeyEnv, "sk-default");
+            assert!(config.gateway.custom_headers.is_empty());
+            assert!(config.gateway.attribution);
+            assert!(config.gateway.structured_outputs);
+            assert_eq!(config.theme.base, DEFAULT_THEME);
+            assert!(config.theme.overrides.is_empty());
+            assert_eq!(config.permission.mode(), Mode::Manual);
+            assert_eq!(
+                config.provenance,
+                Provenance {
+                    auth: Source::Env("ANTHROPIC_API_KEY"),
+                    ..Provenance::default()
+                },
+            );
+        }
+
+        #[tokio::test]
+        async fn theme_passes_base_and_raw_overrides_through() {
+            let dir = tempfile::tempdir().unwrap();
+            write_user_config(
+                dir.path(),
+                indoc! {r##"
+                    [tui.theme]
+                    base = "latte"
+
+                    [tui.theme.overrides]
+                    error = "#ff0000"
+                    accent = { bold = false }
+                "##},
+            );
+            let config = load_with(&dir, &[]).await.unwrap();
+            assert_eq!(config.theme.base, "latte");
+            assert_eq!(
+                config.theme.overrides,
+                indoc! {r##"
+                    error = "#ff0000"
+                    accent = { bold = false }
+                "##}
+                .parse::<toml::Table>()
+                .unwrap(),
+            );
+        }
+
+        #[tokio::test]
+        async fn env_overrides_every_client_field() {
+            let dir = tempfile::tempdir().unwrap();
+            let config = load_with(
+                &dir,
+                &[
+                    ("ANTHROPIC_MODEL", "claude-sonnet-5-5"),
+                    ("ANTHROPIC_BASE_URL", "https://example.invalid"),
+                    ("OX_MAX_TOKENS", "64"),
+                    ("OX_MAX_TOOL_ROUNDS", "200"),
+                    ("OX_SHOW_THINKING", "1"),
+                    ("OX_SHOW_WELCOME", "0"),
+                    ("OX_STATUS_LINE", "run-state,model,current-dir"),
+                ],
+            )
+            .await
+            .unwrap();
+            assert_eq!(config.model.id(), "claude-sonnet-5-5");
+            assert_eq!(config.base_url, "https://example.invalid");
+            assert_eq!(config.max_tokens, Some(64));
+            assert_eq!(config.max_tool_rounds, Some(200));
+            assert!(config.compaction.auto.enabled);
+            assert!(config.show_thinking);
+            assert!(
+                !config.show_welcome,
+                "env `0` flips the default-on welcome off"
+            );
+            assert_eq!(
+                config.status_line,
+                vec![
+                    StatusLineSegment::RunState,
+                    StatusLineSegment::Model,
+                    StatusLineSegment::CurrentDir,
+                ],
+            );
+        }
+
+        #[tokio::test]
+        async fn user_config_supplies_values_without_env_overrides() {
+            let dir = tempfile::tempdir().unwrap();
+            let user = write_user_config(
+                dir.path(),
+                indoc! {r#"
+                    [client]
+                    model = "claude-haiku-5-5"
+                    base_url = "https://config-file.invalid"
+                    extra_ca_certs = "/etc/ssl/corp-ca.pem"
+                    max_tokens = 128
+                    max_tool_rounds = 75
+
+                    [client.compaction]
+                    auto_threshold_percent = 40
+
+                    [tui]
+                    show_thinking = true
+                    show_welcome = false
+                    status_line = ["current-dir", "git-branch", "model-with-effort"]
+                "#},
+            );
+            let config = load_with(&dir, &[]).await.unwrap();
+            assert_eq!(config.model.id(), "claude-haiku-5-5");
+            assert_eq!(config.base_url, "https://config-file.invalid");
+            assert_eq!(
+                config.extra_ca_certs.as_deref(),
+                Some(Path::new("/etc/ssl/corp-ca.pem"))
+            );
+            assert_eq!(config.max_tokens, Some(128));
+            assert_eq!(config.max_tool_rounds, Some(75));
+            assert!(config.compaction.auto.enabled);
+            let file = Source::File(user.clone());
+            assert_eq!(
+                config.provenance,
+                Provenance {
+                    layers: vec![user],
+                    model: file.clone(),
+                    auth: Source::Env("ANTHROPIC_API_KEY"),
+                    base_url: file.clone(),
+                    extra_ca_certs: file.clone(),
+                    max_tokens: file.clone(),
+                    max_tool_rounds: file.clone(),
+                    compaction: file.clone(),
+                    show_thinking: file,
+                    ..Provenance::default()
+                },
+            );
+            assert!(config.show_thinking);
+            assert!(
+                !config.show_welcome,
+                "file `false` opts out of the default-on welcome"
+            );
+            assert_eq!(
+                config.status_line,
+                vec![
+                    StatusLineSegment::CurrentDir,
+                    StatusLineSegment::GitBranch,
+                    StatusLineSegment::ModelWithEffort,
+                ],
+            );
+        }
+
+        #[tokio::test]
+        async fn env_beats_config_file_field_by_field() {
+            let dir = tempfile::tempdir().unwrap();
+            write_user_config(
+                dir.path(),
+                indoc! {r#"
+                    [client]
+                    model = "claude-haiku-5-5"
+                    max_tokens = 128
+
+                    [tui]
+                    show_thinking = true
+                "#},
+            );
+            let config = load_with(
+                &dir,
+                &[
+                    ("ANTHROPIC_MODEL", "claude-sonnet-5-5"),
+                    // `max_tokens` has no env value, so the file value must win.
+                    ("OX_SHOW_THINKING", "0"),
+                ],
+            )
+            .await
+            .unwrap();
+            assert_eq!(config.model.id(), "claude-sonnet-5-5");
+            assert_eq!(config.max_tokens, Some(128));
+            assert!(!config.show_thinking, "env `0` overrides file `true`");
+        }
+
+        #[tokio::test]
+        async fn numeric_env_errors_name_the_variable_and_range() {
+            let whole = format!("1 to {}", u32::MAX);
+            for (var, raw, range) in [
+                ("OX_MAX_TOKENS", "32k", whole.clone()),
+                ("OX_MAX_TOKENS", "0", whole.clone()),
+                ("OX_MAX_TOOL_ROUNDS", "-3", whole),
+                (
+                    "OX_COMPACTION_AUTO_THRESHOLD_TOKENS",
+                    "4294967296",
+                    format!("0 to {}", u32::MAX),
+                ),
+                (
+                    "OX_COMPACTION_AUTO_THRESHOLD_PERCENT",
+                    "300",
+                    "1 to 100".to_owned(),
+                ),
+                (
+                    "OX_COMPACTION_AUTO_THRESHOLD_PERCENT",
+                    "0",
+                    "1 to 100".to_owned(),
+                ),
+            ] {
+                let dir = tempfile::tempdir().unwrap();
+                // A bad threshold must fail the load even with auto compaction off.
+                let err = load_with(&dir, &[("OX_COMPACTION_AUTO_ENABLED", "0"), (var, raw)])
+                    .await
+                    .expect_err("an invalid number must fail config load");
+                assert_eq!(
+                    format!("{err:#}"),
+                    format!("invalid {var} {raw:?}: expected a whole number from {range}"),
+                );
+            }
+        }
+
+        #[tokio::test]
+        async fn propagates_invalid_config_file() {
+            let dir = tempfile::tempdir().unwrap();
+            write_user_config(
+                dir.path(),
+                indoc! {r#"
+                    [client]
+                    api_key = "sk-from-file"
+                    show_thinking = true
+                "#},
+            );
+            let err = load_with(&dir, &[("ANTHROPIC_API_KEY", "")])
+                .await
+                .expect_err("misplaced field must surface as an error");
+            let msg = format!("{err:#}");
+            assert!(msg.contains("invalid config at"), "{msg}");
+            assert!(msg.contains("unknown field `show_thinking`"), "{msg}");
+        }
+
+        #[tokio::test]
+        async fn rejects_plain_http_base_url_unless_loopback() {
+            let dir = tempfile::tempdir().unwrap();
+            let err = load_with(&dir, &[("ANTHROPIC_BASE_URL", "http://example.com")])
+                .await
+                .expect_err("non-loopback http must be rejected");
+            let msg = format!("{err:#}");
+            assert!(msg.contains("https"), "{msg}");
+            assert!(msg.contains("localhost"), "{msg}");
+        }
+
+        #[tokio::test]
+        async fn rejects_non_http_base_url_scheme() {
+            let dir = tempfile::tempdir().unwrap();
+            let err = load_with(&dir, &[("ANTHROPIC_BASE_URL", "ftp://example.com")])
+                .await
+                .expect_err("non-http schemes must be rejected");
+            let msg = format!("{err:#}");
+            assert!(msg.contains("http or https"), "{msg}");
+            assert!(msg.contains("ftp"), "{msg}");
+        }
+
+        #[tokio::test]
+        async fn accepts_loopback_http_base_url_for_local_proxy() {
+            let dir = tempfile::tempdir().unwrap();
+            let config = load_with(&dir, &[("ANTHROPIC_BASE_URL", "http://127.0.0.1:8080")])
+                .await
+                .unwrap();
+            assert_eq!(config.base_url, "http://127.0.0.1:8080");
+        }
+
+        #[tokio::test]
+        async fn extra_ca_certs_default_to_no_bundle() {
+            let dir = tempfile::tempdir().unwrap();
+            let config = load_with(&dir, &[]).await.unwrap();
+            assert!(config.extra_ca_certs.is_none());
+        }
+
+        #[tokio::test]
+        async fn extra_ca_certs_env_beats_file_and_expands_tilde() {
+            let dir = tempfile::tempdir().unwrap();
+            write_user_config(
+                dir.path(),
+                indoc! {r#"
+                    [client]
+                    extra_ca_certs = "/etc/ssl/from-file.pem"
+                "#},
+            );
+            let home = [(HOME_VAR, Some(dir.path()))];
+            let overrides = [("OX_EXTRA_CA_CERTS", "~/certs/env.pem")];
+            let config = Box::pin(temp_env::async_with_vars(home, load_with(&dir, &overrides)))
+                .await
+                .unwrap();
+            assert_eq!(
+                config.extra_ca_certs,
+                Some(dir.path().join("certs/env.pem"))
+            );
+        }
+
+        #[tokio::test]
+        async fn extra_ca_certs_node_env_is_the_last_fallback() {
+            let dir = tempfile::tempdir().unwrap();
+            let bundle = dir.path().join("node.pem");
+            std::fs::write(&bundle, TEST_CA_PEM).unwrap();
+            let node = [("NODE_EXTRA_CA_CERTS", bundle.to_str().unwrap())];
+
+            let config = load_with(&dir, &node).await.unwrap();
+            assert_eq!(config.extra_ca_certs.as_deref(), Some(bundle.as_path()));
+
+            write_user_config(
+                dir.path(),
+                indoc! {r#"
+                    [client]
+                    extra_ca_certs = "/etc/ssl/from-file.pem"
+                "#},
+            );
+            let config = load_with(&dir, &node).await.unwrap();
+            assert_eq!(
+                config.extra_ca_certs,
+                Some(PathBuf::from("/etc/ssl/from-file.pem")),
+            );
+        }
+
+        #[tokio::test]
+        async fn extra_ca_certs_skips_unreadable_node_bundle() {
+            let dir = tempfile::tempdir().unwrap();
+            let missing = dir.path().join("missing.pem");
+            let config = load_with(&dir, &[("NODE_EXTRA_CA_CERTS", missing.to_str().unwrap())])
+                .await
+                .unwrap();
+            assert!(config.extra_ca_certs.is_none());
+        }
+
+        #[tokio::test]
+        async fn extra_ca_certs_file_used_when_env_unset() {
+            let dir = tempfile::tempdir().unwrap();
+            write_user_config(
+                dir.path(),
+                indoc! {r#"
+                    [client]
+                    extra_ca_certs = "/etc/ssl/from-file.pem"
+                "#},
+            );
+            let config = load_with(&dir, &[]).await.unwrap();
+            assert_eq!(
+                config.extra_ca_certs,
+                Some(PathBuf::from("/etc/ssl/from-file.pem")),
+            );
+        }
+
+        #[tokio::test]
+        async fn extra_ca_certs_file_wins_when_env_is_empty() {
+            let dir = tempfile::tempdir().unwrap();
+            write_user_config(
+                dir.path(),
+                indoc! {r#"
+                    [client]
+                    extra_ca_certs = "/etc/ssl/from-file.pem"
+                "#},
+            );
+            let config = load_with(&dir, &[("OX_EXTRA_CA_CERTS", "")]).await.unwrap();
+            assert_eq!(
+                config.extra_ca_certs,
+                Some(PathBuf::from("/etc/ssl/from-file.pem")),
+            );
+        }
+
+        #[tokio::test]
+        async fn env_api_key_beats_file_api_key() {
+            let dir = tempfile::tempdir().unwrap();
+            write_user_config(
+                dir.path(),
+                indoc! {r#"
+                    [client]
+                    api_key = "sk-from-file"
+                "#},
+            );
+            let config = load_with(&dir, &[("ANTHROPIC_API_KEY", "sk-from-env")])
+                .await
+                .unwrap();
+            assert_auth(&config, AuthSource::ApiKeyEnv, "sk-from-env");
+        }
+
+        #[tokio::test]
+        async fn file_api_key_used_when_env_is_empty() {
+            let dir = tempfile::tempdir().unwrap();
+            let user = write_user_config(
+                dir.path(),
+                indoc! {r#"
+                    [client]
+                    api_key = "sk-from-file"
+                "#},
+            );
+            let config = load_with(&dir, &[("ANTHROPIC_API_KEY", "")]).await.unwrap();
+            assert_auth(&config, AuthSource::ApiKeyFile, "sk-from-file");
+            assert_eq!(config.provenance.auth, Source::File(user));
+        }
+
+        #[tokio::test]
+        async fn resolves_credentials_in_precedence_order() {
+            // Each row drops the previous winner. `ANTHROPIC_API_KEY` stays unset throughout.
+            for (auth_token, file_key, winner, secret) in [
+                (
+                    Some("gateway-token"),
+                    true,
+                    AuthSource::AuthTokenEnv,
+                    "gateway-token",
+                ),
+                (None, true, AuthSource::ApiKeyFile, "sk-from-file"),
+                (None, false, AuthSource::OAuthTokenEnv, "oauth-token"),
+            ] {
+                let dir = tempfile::tempdir().unwrap();
+                if file_key {
+                    write_user_config(
+                        dir.path(),
+                        indoc! {r#"
+                            [client]
+                            api_key = "sk-from-file"
+                        "#},
+                    );
+                }
+                let vars = env_vars(vec![
+                    xdg(&dir),
+                    ("ANTHROPIC_API_KEY", None),
+                    ("ANTHROPIC_AUTH_TOKEN", auth_token.map(str::to_owned)),
+                    env("CLAUDE_CODE_OAUTH_TOKEN", "oauth-token"),
+                ]);
+                let config = temp_env::async_with_vars(vars, Config::load(dir.path(), false))
+                    .await
+                    .unwrap();
+                assert_auth(&config, winner, secret);
+            }
+        }
+
+        #[tokio::test]
+        async fn falls_back_to_the_oxide_code_login() {
+            let (dir, data) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+            let vars = ox_login_env(&dir, &data, 9_999_999_999_999);
             let config = temp_env::async_with_vars(vars, Config::load(dir.path(), false))
                 .await
                 .unwrap();
-            assert_auth(&config, winner, secret);
+            assert_auth(&config, AuthSource::OxLogin, "ox-token");
+            assert_eq!(config.provenance.auth, Source::Default);
+            assert_eq!(config.signed_out_notice, None);
         }
-    }
 
-    /// Env with no explicit credential and an oxide-code login under `data` that expires at
-    /// `expires_at`, so the stored-login search stops before Claude Code's store.
-    fn ox_login_env(
-        config: &TempDir,
-        data: &TempDir,
-        expires_at: u64,
-    ) -> Vec<(&'static str, Option<String>)> {
-        write_config(
-            data.path().join("ox").join("credentials.json"),
-            &serde_json::json!({
-                "claudeAiOauth": { "accessToken": "ox-token", "expiresAt": expires_at },
+        #[tokio::test]
+        async fn starts_an_interactive_session_signed_out_when_the_stored_login_fails() {
+            let (dir, data) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+            let vars = ox_login_env(&dir, &data, 1);
+            let (interactive, other) = temp_env::async_with_vars(vars, async {
+                (
+                    Config::load(dir.path(), true).await,
+                    Config::load(dir.path(), false).await,
+                )
             })
-            .to_string(),
-        );
-        env_vars(vec![
-            xdg(config),
-            ("ANTHROPIC_API_KEY", None),
-            (
-                "XDG_DATA_HOME",
-                Some(data.path().to_string_lossy().into_owned()),
-            ),
-        ])
-    }
+            .await;
 
-    #[tokio::test]
-    async fn load_falls_back_to_the_oxide_code_login() {
-        let (dir, data) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
-        let vars = ox_login_env(&dir, &data, 9_999_999_999_999);
-        let config = temp_env::async_with_vars(vars, Config::load(dir.path(), false))
+            let interactive = interactive.unwrap();
+            assert!(interactive.auth.is_none());
+            assert_eq!(
+                interactive.signed_out_notice.as_deref(),
+                Some("Not signed in: oxide-code login has expired. Run `/login` to sign in again."),
+            );
+            assert_eq!(
+                format!(
+                    "{:#}",
+                    other.expect_err("only an interactive session starts signed out")
+                ),
+                "oxide-code login has expired. Run `/login` to sign in again.",
+            );
+        }
+
+        #[tokio::test]
+        async fn malformed_custom_headers_fail_before_credentials_resolve() {
+            // No credential exists for the gateway, so reaching auth would fail
+            // with a different error.
+            let dir = tempfile::tempdir().unwrap();
+            let vars = env_vars(vec![
+                xdg(&dir),
+                ("ANTHROPIC_API_KEY", None),
+                env("ANTHROPIC_BASE_URL", "https://gateway.example.com"),
+                env("ANTHROPIC_CUSTOM_HEADERS", "missing colon"),
+            ]);
+            let err = temp_env::async_with_vars(vars, Config::load(dir.path(), false))
+                .await
+                .expect_err("malformed header must fail startup");
+            assert_eq!(
+                format!("{err:#}"),
+                "invalid ANTHROPIC_CUSTOM_HEADERS: line 1: expected `Name: value`",
+            );
+        }
+
+        #[tokio::test]
+        async fn custom_header_carrying_the_active_credential_fails() {
+            let dir = tempfile::tempdir().unwrap();
+            let err = load_with(
+                &dir,
+                &[
+                    ("ANTHROPIC_CUSTOM_HEADERS", "Authorization: Bearer other"),
+                    ("ANTHROPIC_AUTH_TOKEN", "gateway-token"),
+                ],
+            )
+            .await
+            .expect_err("custom header must not replace the credential");
+            assert_eq!(
+                format!("{err:#}"),
+                "invalid ANTHROPIC_CUSTOM_HEADERS: \
+                 authorization carries the Auth token (ANTHROPIC_AUTH_TOKEN) credential \
+                 and cannot be overridden",
+            );
+        }
+
+        #[tokio::test]
+        async fn gateway_without_credential_names_the_env_vars() {
+            let dir = tempfile::tempdir().unwrap();
+            let vars = env_vars(vec![
+                xdg(&dir),
+                ("ANTHROPIC_API_KEY", None),
+                env("ANTHROPIC_BASE_URL", "https://gateway.example.com"),
+            ]);
+            let err = temp_env::async_with_vars(vars, Config::load(dir.path(), false))
+                .await
+                .expect_err("stored login must not go to a gateway");
+            let msg = format!("{err:#}");
+            assert!(msg.contains("https://gateway.example.com"), "{msg}");
+            assert!(msg.contains("ANTHROPIC_AUTH_TOKEN"), "{msg}");
+        }
+
+        #[tokio::test]
+        async fn effort_defaults_to_per_model_value() {
+            for (model, expected) in [
+                ("claude-opus-5-5", Some(Effort::Medium)),
+                ("claude-sonnet-5-5", Some(Effort::High)),
+                ("custom-model", None),
+            ] {
+                let dir = tempfile::tempdir().unwrap();
+                let config = load_with(&dir, &[("ANTHROPIC_MODEL", model)])
+                    .await
+                    .unwrap();
+                assert_eq!(config.effort, expected, "model={model}");
+            }
+        }
+
+        #[tokio::test]
+        async fn effort_env_overrides_per_model_default() {
+            let dir = tempfile::tempdir().unwrap();
+            let config = load_with(
+                &dir,
+                &[("ANTHROPIC_MODEL", "claude-opus-5-5"), ("OX_EFFORT", "low")],
+            )
             .await
             .unwrap();
-        assert_auth(&config, AuthSource::OxLogin, "ox-token");
-        assert_eq!(config.provenance.auth, Source::Default);
-        assert_eq!(config.signed_out_notice, None);
-    }
+            assert_eq!(config.effort, Some(Effort::Low));
+        }
 
-    #[tokio::test]
-    async fn load_starts_an_interactive_session_signed_out_when_the_stored_login_fails() {
-        let (dir, data) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
-        let vars = ox_login_env(&dir, &data, 1);
-        let (interactive, other) = temp_env::async_with_vars(vars, async {
-            (
-                Config::load(dir.path(), true).await,
-                Config::load(dir.path(), false).await,
-            )
-        })
-        .await;
-
-        let interactive = interactive.unwrap();
-        assert!(interactive.auth.is_none());
-        assert_eq!(
-            interactive.signed_out_notice.as_deref(),
-            Some("Not signed in: oxide-code login has expired. Run `/login` to sign in again."),
-        );
-        assert_eq!(
-            format!(
-                "{:#}",
-                other.expect_err("only an interactive session starts signed out")
-            ),
-            "oxide-code login has expired. Run `/login` to sign in again.",
-        );
-    }
-
-    #[tokio::test]
-    async fn load_malformed_custom_headers_fail_before_credentials_resolve() {
-        // No credential exists for the gateway, so reaching auth would fail with a different error.
-        let dir = tempfile::tempdir().unwrap();
-        let vars = env_vars(vec![
-            xdg(&dir),
-            ("ANTHROPIC_API_KEY", None),
-            env("ANTHROPIC_BASE_URL", "https://gateway.example.com"),
-            env("ANTHROPIC_CUSTOM_HEADERS", "missing colon"),
-        ]);
-        let err = temp_env::async_with_vars(vars, Config::load(dir.path(), false))
-            .await
-            .expect_err("malformed header must fail startup");
-        assert_eq!(
-            format!("{err:#}"),
-            "invalid ANTHROPIC_CUSTOM_HEADERS: line 1: expected `Name: value`",
-        );
-    }
-
-    #[tokio::test]
-    async fn load_custom_header_carrying_the_active_credential_fails() {
-        let dir = tempfile::tempdir().unwrap();
-        let err = load_with(
-            &dir,
-            &[
-                ("ANTHROPIC_CUSTOM_HEADERS", "Authorization: Bearer other"),
-                ("ANTHROPIC_AUTH_TOKEN", "gateway-token"),
-            ],
-        )
-        .await
-        .expect_err("custom header must not replace the credential");
-        assert_eq!(
-            format!("{err:#}"),
-            "invalid ANTHROPIC_CUSTOM_HEADERS: \
-             authorization carries the Auth token (ANTHROPIC_AUTH_TOKEN) credential \
-             and cannot be overridden",
-        );
-    }
-
-    #[tokio::test]
-    async fn load_gateway_without_credential_names_the_env_vars() {
-        let dir = tempfile::tempdir().unwrap();
-        let vars = env_vars(vec![
-            xdg(&dir),
-            ("ANTHROPIC_API_KEY", None),
-            env("ANTHROPIC_BASE_URL", "https://gateway.example.com"),
-        ]);
-        let err = temp_env::async_with_vars(vars, Config::load(dir.path(), false))
-            .await
-            .expect_err("stored login must not go to a gateway");
-        let msg = format!("{err:#}");
-        assert!(msg.contains("https://gateway.example.com"), "{msg}");
-        assert!(msg.contains("ANTHROPIC_AUTH_TOKEN"), "{msg}");
-    }
-
-    // ── Config::load: effort resolution ──
-
-    #[tokio::test]
-    async fn load_effort_defaults_to_per_model_value() {
-        for (model, expected) in [
-            ("claude-opus-5-5", Some(Effort::Medium)),
-            ("claude-sonnet-5-5", Some(Effort::High)),
-            ("custom-model", None),
-        ] {
+        #[tokio::test]
+        async fn effort_pick_is_dropped_on_unknown_model() {
             let dir = tempfile::tempdir().unwrap();
-            let config = load_with(&dir, &[("ANTHROPIC_MODEL", model)])
+            let config = load_with(
+                &dir,
+                &[("ANTHROPIC_MODEL", "custom-model"), ("OX_EFFORT", "max")],
+            )
+            .await
+            .unwrap();
+            assert_eq!(config.effort, None);
+            assert_eq!(config.provenance.effort, Source::Default);
+        }
+
+        #[tokio::test]
+        async fn effort_file_picks_up_when_env_unset() {
+            let dir = tempfile::tempdir().unwrap();
+            write_user_config(
+                dir.path(),
+                indoc! {r#"
+                    [client]
+                    model = "claude-sonnet-5-5"
+                    effort = "medium"
+                "#},
+            );
+            let config = load_with(&dir, &[]).await.unwrap();
+            assert_eq!(config.effort, Some(Effort::Medium));
+        }
+
+        #[tokio::test]
+        async fn effort_env_beats_file() {
+            let dir = tempfile::tempdir().unwrap();
+            write_user_config(
+                dir.path(),
+                indoc! {r#"
+                    [client]
+                    model = "claude-opus-5-5"
+                    effort = "low"
+                "#},
+            );
+            let config = load_with(&dir, &[("OX_EFFORT", "max")]).await.unwrap();
+            assert_eq!(config.effort, Some(Effort::Max));
+        }
+
+        #[tokio::test]
+        async fn effort_invalid_env_lists_the_accepted_tiers() {
+            let dir = tempfile::tempdir().unwrap();
+            let err = load_with(&dir, &[("OX_EFFORT", "insane")])
+                .await
+                .expect_err("invalid effort must propagate");
+            assert_eq!(
+                format!("{err:#}"),
+                r#"invalid OX_EFFORT "insane": expected one of low, medium, high, xhigh, max"#,
+            );
+        }
+
+        #[tokio::test]
+        async fn status_line_invalid_segment_surfaces_parse_error() {
+            let dir = tempfile::tempdir().unwrap();
+            let err = load_with(&dir, &[("OX_STATUS_LINE", "model,nope")])
+                .await
+                .expect_err("invalid segment must propagate");
+            let msg = format!("{err:#}");
+            assert!(msg.contains("OX_STATUS_LINE"), "{msg}");
+            assert!(msg.contains("nope"), "{msg}");
+            assert!(msg.contains("current-dir"), "{msg}");
+        }
+
+        #[tokio::test]
+        async fn status_line_stray_comma_in_env_is_rejected() {
+            let dir = tempfile::tempdir().unwrap();
+            let err = load_with(&dir, &[("OX_STATUS_LINE", "model,,run-state")])
+                .await
+                .expect_err("stray comma must surface as a typo");
+            assert_eq!(
+                format!("{err:#}"),
+                "invalid OX_STATUS_LINE \"model,,run-state\": empty segment between commas. \
+                 Remove the stray comma.",
+            );
+        }
+
+        #[tokio::test]
+        async fn status_line_invalid_segment_in_file_surfaces_parse_error() {
+            let dir = tempfile::tempdir().unwrap();
+            write_user_config(
+                dir.path(),
+                indoc! {r#"
+                    [tui]
+                    status_line = ["model", "nope"]
+                "#},
+            );
+            let err = load_with(&dir, &[])
+                .await
+                .expect_err("invalid TOML segment must propagate");
+            let msg = format!("{err:#}");
+            assert!(msg.contains("status_line"), "{msg}");
+            assert!(msg.contains("unknown variant `nope`"), "{msg}");
+            assert!(msg.contains("current-dir"), "{msg}");
+            assert!(msg.contains("run-state"), "{msg}");
+        }
+
+        #[tokio::test]
+        async fn status_line_empty_env_is_rejected() {
+            let dir = tempfile::tempdir().unwrap();
+            let err = load_with(&dir, &[("OX_STATUS_LINE", ",")])
+                .await
+                .expect_err("empty status line must not launch without run-state");
+            let msg = format!("{err:#}");
+            assert!(
+                msg.starts_with(r#"invalid OX_STATUS_LINE ",": no segments. List at least one of"#),
+                "{msg}"
+            );
+            assert!(msg.contains("run-state"), "{msg}");
+            assert!(msg.ends_with("or remove it to use the default."), "{msg}");
+        }
+
+        #[tokio::test]
+        async fn status_line_empty_file_roster_is_rejected() {
+            let dir = tempfile::tempdir().unwrap();
+            write_user_config(
+                dir.path(),
+                indoc! {"
+                    [tui]
+                    status_line = []
+                "},
+            );
+            let err = load_with(&dir, &[])
+                .await
+                .expect_err("empty status line must not launch without run-state");
+            let msg = format!("{err:#}");
+            assert!(
+                msg.starts_with("invalid tui.status_line: no segments. List at least one of"),
+                "{msg}"
+            );
+            assert!(msg.contains("run-state"), "{msg}");
+        }
+
+        #[tokio::test]
+        async fn prompt_cache_ttl_env_overrides_default() {
+            let dir = tempfile::tempdir().unwrap();
+            let config = load_with(&dir, &[("OX_PROMPT_CACHE_TTL", "5m")])
                 .await
                 .unwrap();
-            assert_eq!(config.effort, expected, "model={model}");
+            assert_eq!(config.prompt_cache_ttl, PromptCacheTtl::FiveMin);
         }
-    }
 
-    #[tokio::test]
-    async fn load_effort_env_overrides_per_model_default() {
-        let dir = tempfile::tempdir().unwrap();
-        let config = load_with(
-            &dir,
-            &[("ANTHROPIC_MODEL", "claude-opus-5-5"), ("OX_EFFORT", "low")],
-        )
-        .await
-        .unwrap();
-        assert_eq!(config.effort, Some(Effort::Low));
-    }
+        #[tokio::test]
+        async fn prompt_cache_ttl_file_picks_up_when_env_unset() {
+            let dir = tempfile::tempdir().unwrap();
+            write_user_config(
+                dir.path(),
+                indoc! {r#"
+                    [client]
+                    prompt_cache_ttl = "5m"
+                "#},
+            );
+            let config = load_with(&dir, &[]).await.unwrap();
+            assert_eq!(config.prompt_cache_ttl, PromptCacheTtl::FiveMin);
+        }
 
-    #[tokio::test]
-    async fn load_effort_pick_is_dropped_on_unknown_model() {
-        let dir = tempfile::tempdir().unwrap();
-        let config = load_with(
-            &dir,
-            &[("ANTHROPIC_MODEL", "custom-model"), ("OX_EFFORT", "max")],
-        )
-        .await
-        .unwrap();
-        assert_eq!(config.effort, None);
-        assert_eq!(config.provenance.effort, Source::Default);
-    }
+        #[tokio::test]
+        async fn prompt_cache_ttl_env_beats_file() {
+            let dir = tempfile::tempdir().unwrap();
+            write_user_config(
+                dir.path(),
+                indoc! {r#"
+                    [client]
+                    prompt_cache_ttl = "5m"
+                "#},
+            );
+            let config = load_with(&dir, &[("OX_PROMPT_CACHE_TTL", "1h")])
+                .await
+                .unwrap();
+            assert_eq!(config.prompt_cache_ttl, PromptCacheTtl::OneHour);
+        }
 
-    #[tokio::test]
-    async fn load_effort_file_picks_up_when_env_unset() {
-        let dir = tempfile::tempdir().unwrap();
-        write_user_config(
-            dir.path(),
-            indoc! {r#"
-                [client]
-                model = "claude-sonnet-5-5"
-                effort = "medium"
-            "#},
-        );
-        let config = load_with(&dir, &[]).await.unwrap();
-        assert_eq!(config.effort, Some(Effort::Medium));
-    }
+        #[tokio::test]
+        async fn prompt_cache_ttl_invalid_env_surfaces_parse_error() {
+            let dir = tempfile::tempdir().unwrap();
+            let err = load_with(&dir, &[("OX_PROMPT_CACHE_TTL", "forever")])
+                .await
+                .expect_err("invalid ttl must propagate");
+            assert_eq!(
+                format!("{err:#}"),
+                r#"invalid OX_PROMPT_CACHE_TTL "forever": expected one of 5m, 1h"#,
+            );
+        }
 
-    #[tokio::test]
-    async fn load_effort_env_beats_file() {
-        let dir = tempfile::tempdir().unwrap();
-        write_user_config(
-            dir.path(),
-            indoc! {r#"
-                [client]
-                model = "claude-opus-5-5"
-                effort = "low"
-            "#},
-        );
-        let config = load_with(&dir, &[("OX_EFFORT", "max")]).await.unwrap();
-        assert_eq!(config.effort, Some(Effort::Max));
-    }
+        #[tokio::test]
+        async fn compaction_file_can_disable_default_on_auto_behavior() {
+            let dir = tempfile::tempdir().unwrap();
+            let user = write_user_config(
+                dir.path(),
+                indoc! {"
+                    [client.compaction]
+                    auto_enabled = false
+                "},
+            );
+            write_drop_in(
+                dir.path(),
+                "10-threshold.toml",
+                "client.compaction.auto_threshold_percent = 40",
+            );
+            let config = load_with(&dir, &[]).await.unwrap();
+            assert!(!config.compaction.auto.enabled);
+            assert_eq!(
+                config.provenance.compaction,
+                Source::File(user),
+                "a disabled trigger ignores the threshold"
+            );
+        }
 
-    #[tokio::test]
-    async fn load_effort_invalid_env_lists_the_accepted_tiers() {
-        let dir = tempfile::tempdir().unwrap();
-        let err = load_with(&dir, &[("OX_EFFORT", "insane")])
+        #[tokio::test]
+        async fn compaction_auto_env_beats_file() {
+            let dir = tempfile::tempdir().unwrap();
+            write_user_config(
+                dir.path(),
+                indoc! {"
+                    [client.compaction]
+                    auto_enabled = false
+                "},
+            );
+            let config = load_with(&dir, &[("OX_COMPACTION_AUTO_ENABLED", "TRUE")])
+                .await
+                .unwrap();
+            assert!(config.compaction.auto.enabled);
+        }
+
+        #[tokio::test]
+        async fn compaction_auto_threshold_tokens_sets_absolute_trigger() {
+            let dir = tempfile::tempdir().unwrap();
+            write_user_config(
+                dir.path(),
+                indoc! {"
+                    [client.compaction]
+                    auto_threshold_tokens = 400000
+                "},
+            );
+            let config = load_with(&dir, &[]).await.unwrap();
+            assert_eq!(config.compaction.auto.threshold_tokens, Some(400_000));
+        }
+
+        #[tokio::test]
+        async fn compaction_rejects_ambiguous_auto_thresholds() {
+            let dir = tempfile::tempdir().unwrap();
+            write_user_config(
+                dir.path(),
+                indoc! {"
+                    [client.compaction]
+                    auto_threshold_tokens = 400000
+                    auto_threshold_percent = 40
+                "},
+            );
+            let home = [(HOME_VAR, Some(dir.path()))];
+            let err = Box::pin(temp_env::async_with_vars(home, load_with(&dir, &[])))
+                .await
+                .expect_err("ambiguous file thresholds must fail config load");
+            assert_eq!(
+                format!("{err:#}"),
+                "~/ox/config.toml sets both auto_threshold_tokens and auto_threshold_percent. \
+                 Set only one compaction threshold.",
+            );
+
+            let err = load_with(
+                &dir,
+                &[
+                    ("OX_COMPACTION_AUTO_THRESHOLD_TOKENS", "400000"),
+                    ("OX_COMPACTION_AUTO_THRESHOLD_PERCENT", "40"),
+                ],
+            )
             .await
-            .expect_err("invalid effort must propagate");
-        assert_eq!(
-            format!("{err:#}"),
-            r#"invalid OX_EFFORT "insane": expected one of low, medium, high, xhigh, max"#,
-        );
-    }
+            .expect_err("ambiguous env thresholds must fail config load");
+            assert_eq!(
+                format!("{err:#}"),
+                "both OX_COMPACTION_AUTO_THRESHOLD_TOKENS \
+                 and OX_COMPACTION_AUTO_THRESHOLD_PERCENT are set. \
+                 Set only one compaction threshold.",
+            );
+        }
 
-    // ── Config::load: status_line ──
+        #[tokio::test]
+        async fn permission_resolves_each_tier_and_the_defaults_across_layers() {
+            let dir = tempfile::tempdir().unwrap();
+            write_user_config(
+                dir.path(),
+                indoc! {r#"
+                    [permission.deny]
+                    exec = ["git push *"]
 
-    #[tokio::test]
-    async fn load_status_line_invalid_segment_surfaces_parse_error() {
-        let dir = tempfile::tempdir().unwrap();
-        let err = load_with(&dir, &[("OX_STATUS_LINE", "model,nope")])
-            .await
-            .expect_err("invalid segment must propagate");
-        let msg = format!("{err:#}");
-        assert!(msg.contains("OX_STATUS_LINE"), "{msg}");
-        assert!(msg.contains("nope"), "{msg}");
-        assert!(msg.contains("current-dir"), "{msg}");
-    }
+                    [permission.ask]
+                    exec = ["cargo publish *"]
 
-    #[tokio::test]
-    async fn load_status_line_stray_comma_in_env_is_rejected() {
-        let dir = tempfile::tempdir().unwrap();
-        let err = load_with(&dir, &[("OX_STATUS_LINE", "model,,run-state")])
-            .await
-            .expect_err("stray comma must surface as a typo");
-        assert_eq!(
-            format!("{err:#}"),
-            "invalid OX_STATUS_LINE \"model,,run-state\": empty segment between commas. \
-             Remove the stray comma.",
-        );
-    }
+                    [permission.allow]
+                    exec = ["git *", "cargo *", "rm *"]
 
-    #[tokio::test]
-    async fn load_status_line_invalid_segment_in_file_surfaces_parse_error() {
-        let dir = tempfile::tempdir().unwrap();
-        write_user_config(
-            dir.path(),
-            indoc! {r#"
-                [tui]
-                status_line = ["model", "nope"]
-            "#},
-        );
-        let err = load_with(&dir, &[])
-            .await
-            .expect_err("invalid TOML segment must propagate");
-        let msg = format!("{err:#}");
-        assert!(msg.contains("status_line"), "{msg}");
-        assert!(msg.contains("unknown variant `nope`"), "{msg}");
-        assert!(msg.contains("current-dir"), "{msg}");
-        assert!(msg.contains("run-state"), "{msg}");
-    }
+                    [permission.defaults]
+                    git = false
+                    rm = false
+                "#},
+            );
+            write_drop_in(dir.path(), "10-team.toml", "permission.defaults.git = true");
 
-    #[tokio::test]
-    async fn load_status_line_empty_env_is_rejected() {
-        let dir = tempfile::tempdir().unwrap();
-        let err = load_with(&dir, &[("OX_STATUS_LINE", ",")])
-            .await
-            .expect_err("empty status line must not launch without run-state");
-        let msg = format!("{err:#}");
-        assert!(
-            msg.starts_with(r#"invalid OX_STATUS_LINE ",": no segments. List at least one of"#),
-            "{msg}"
-        );
-        assert!(msg.contains("run-state"), "{msg}");
-        assert!(msg.ends_with("or remove it to use the default."), "{msg}");
-    }
+            let config = load_with(&dir, &[]).await.unwrap();
 
-    #[tokio::test]
-    async fn load_status_line_empty_file_roster_is_rejected() {
-        let dir = tempfile::tempdir().unwrap();
-        write_user_config(
-            dir.path(),
-            indoc! {"
-                [tui]
-                status_line = []
-            "},
-        );
-        let err = load_with(&dir, &[])
-            .await
-            .expect_err("empty status line must not launch without run-state");
-        let msg = format!("{err:#}");
-        assert!(
-            msg.starts_with("invalid tui.status_line: no segments. List at least one of"),
-            "{msg}"
-        );
-        assert!(msg.contains("run-state"), "{msg}");
-    }
+            let decide =
+                |class, target: Access| config.permission.decide(class, &target.as_target());
+            let command = |command: &str| Access::for_command(command, &config.workspace);
+            assert_eq!(
+                decide(PermissionClass::Exec, command("git push origin")),
+                Decision::Deny
+            );
+            assert_eq!(
+                decide(PermissionClass::Exec, command("cargo publish")),
+                Decision::Ask
+            );
+            assert_eq!(
+                decide(PermissionClass::Exec, command("cargo build")),
+                Decision::Allow
+            );
+            assert_eq!(
+                decide(PermissionClass::Exec, command("rm -rf target")),
+                Decision::Allow,
+                "`rm = false` turns the shipped `rm` rule off"
+            );
+            assert_eq!(
+                decide(
+                    PermissionClass::Edit,
+                    Access::for_path(".git/config", &config.workspace)
+                ),
+                Decision::Ask,
+                "a later layer turns the `git` default back on"
+            );
+        }
 
-    // ── Config::load: prompt_cache_ttl ──
+        #[tokio::test]
+        async fn permission_denies_ssh_reads_under_a_home_spelled_with_a_trailing_slash_or_dot() {
+            let dir = tempfile::tempdir().unwrap();
+            let home = dunce::canonicalize(dir.path()).unwrap().join("home");
+            std::fs::create_dir(&home).unwrap();
+            let key = home.join(".ssh").join("id_ed25519");
 
-    #[tokio::test]
-    async fn load_prompt_cache_ttl_env_overrides_default() {
-        let dir = tempfile::tempdir().unwrap();
-        let config = load_with(&dir, &[("OX_PROMPT_CACHE_TTL", "5m")])
-            .await
-            .unwrap();
-        assert_eq!(config.prompt_cache_ttl, PromptCacheTtl::FiveMin);
-    }
+            for spelling in [
+                format!("{}/", home.display()),
+                format!("{}/.", home.display()),
+            ] {
+                let config = Box::pin(temp_env::async_with_vars(
+                    [(HOME_VAR, Some(spelling.as_str()))],
+                    load_with(&dir, &[]),
+                ))
+                .await
+                .unwrap();
 
-    #[tokio::test]
-    async fn load_prompt_cache_ttl_file_picks_up_when_env_unset() {
-        let dir = tempfile::tempdir().unwrap();
-        write_user_config(
-            dir.path(),
-            indoc! {r#"
-                [client]
-                prompt_cache_ttl = "5m"
-            "#},
-        );
-        let config = load_with(&dir, &[]).await.unwrap();
-        assert_eq!(config.prompt_cache_ttl, PromptCacheTtl::FiveMin);
-    }
+                let target = Access::for_path(&key.to_string_lossy(), &config.workspace);
+                assert_eq!(
+                    config
+                        .permission
+                        .decide(PermissionClass::Read, &target.as_target()),
+                    Decision::Deny,
+                    "{spelling}"
+                );
+            }
+        }
 
-    #[tokio::test]
-    async fn load_prompt_cache_ttl_env_beats_file() {
-        let dir = tempfile::tempdir().unwrap();
-        write_user_config(
-            dir.path(),
-            indoc! {r#"
-                [client]
-                prompt_cache_ttl = "5m"
-            "#},
-        );
-        let config = load_with(&dir, &[("OX_PROMPT_CACHE_TTL", "1h")])
-            .await
-            .unwrap();
-        assert_eq!(config.prompt_cache_ttl, PromptCacheTtl::OneHour);
-    }
+        #[tokio::test]
+        async fn permission_invalid_built_in_pattern_errors() {
+            let dir = tempfile::tempdir().unwrap();
 
-    #[tokio::test]
-    async fn load_prompt_cache_ttl_invalid_env_surfaces_parse_error() {
-        let dir = tempfile::tempdir().unwrap();
-        let err = load_with(&dir, &[("OX_PROMPT_CACHE_TTL", "forever")])
-            .await
-            .expect_err("invalid ttl must propagate");
-        assert_eq!(
-            format!("{err:#}"),
-            r#"invalid OX_PROMPT_CACHE_TTL "forever": expected one of 5m, 1h"#,
-        );
-    }
-
-    // ── Config::load: compaction ──
-
-    #[tokio::test]
-    async fn load_compaction_file_can_disable_default_on_auto_behavior() {
-        let dir = tempfile::tempdir().unwrap();
-        let user = write_user_config(
-            dir.path(),
-            indoc! {"
-                [client.compaction]
-                auto_enabled = false
-            "},
-        );
-        write_drop_in(
-            dir.path(),
-            "10-threshold.toml",
-            "client.compaction.auto_threshold_percent = 40",
-        );
-        let config = load_with(&dir, &[]).await.unwrap();
-        assert!(!config.compaction.auto.enabled);
-        assert_eq!(
-            config.provenance.compaction,
-            Source::File(user),
-            "a disabled trigger ignores the threshold"
-        );
-    }
-
-    #[tokio::test]
-    async fn load_compaction_auto_env_beats_file() {
-        let dir = tempfile::tempdir().unwrap();
-        write_user_config(
-            dir.path(),
-            indoc! {"
-                [client.compaction]
-                auto_enabled = false
-            "},
-        );
-        let config = load_with(&dir, &[("OX_COMPACTION_AUTO_ENABLED", "TRUE")])
-            .await
-            .unwrap();
-        assert!(config.compaction.auto.enabled);
-    }
-
-    #[tokio::test]
-    async fn load_compaction_auto_threshold_tokens_sets_absolute_trigger() {
-        let dir = tempfile::tempdir().unwrap();
-        write_user_config(
-            dir.path(),
-            indoc! {"
-                [client.compaction]
-                auto_threshold_tokens = 400000
-            "},
-        );
-        let config = load_with(&dir, &[]).await.unwrap();
-        assert_eq!(config.compaction.auto.threshold_tokens, Some(400_000));
-    }
-
-    #[tokio::test]
-    async fn load_compaction_rejects_ambiguous_auto_thresholds() {
-        let dir = tempfile::tempdir().unwrap();
-        write_user_config(
-            dir.path(),
-            indoc! {"
-                [client.compaction]
-                auto_threshold_tokens = 400000
-                auto_threshold_percent = 40
-            "},
-        );
-        let home = [(HOME_VAR, Some(dir.path()))];
-        let err = Box::pin(temp_env::async_with_vars(home, load_with(&dir, &[])))
-            .await
-            .expect_err("ambiguous file thresholds must fail config load");
-        assert_eq!(
-            format!("{err:#}"),
-            "~/ox/config.toml sets both auto_threshold_tokens and auto_threshold_percent. \
-             Set only one compaction threshold.",
-        );
-
-        let err = load_with(
-            &dir,
-            &[
-                ("OX_COMPACTION_AUTO_THRESHOLD_TOKENS", "400000"),
-                ("OX_COMPACTION_AUTO_THRESHOLD_PERCENT", "40"),
-            ],
-        )
-        .await
-        .expect_err("ambiguous env thresholds must fail config load");
-        assert_eq!(
-            format!("{err:#}"),
-            "both OX_COMPACTION_AUTO_THRESHOLD_TOKENS \
-             and OX_COMPACTION_AUTO_THRESHOLD_PERCENT are set. \
-             Set only one compaction threshold.",
-        );
-    }
-
-    // ── Config::load: permission ──
-
-    #[tokio::test]
-    async fn load_permission_resolves_each_tier_and_the_defaults_across_layers() {
-        let dir = tempfile::tempdir().unwrap();
-        write_user_config(
-            dir.path(),
-            indoc! {r#"
-                [permission.deny]
-                exec = ["git push *"]
-
-                [permission.ask]
-                exec = ["cargo publish *"]
-
-                [permission.allow]
-                exec = ["git *", "cargo *", "rm *"]
-
-                [permission.defaults]
-                git = false
-                rm = false
-            "#},
-        );
-        write_drop_in(dir.path(), "10-team.toml", "permission.defaults.git = true");
-
-        let config = load_with(&dir, &[]).await.unwrap();
-
-        let decide = |class, target: Access| config.permission.decide(class, &target.as_target());
-        let command = |command: &str| Access::for_command(command, &config.workspace);
-        assert_eq!(
-            decide(PermissionClass::Exec, command("git push origin")),
-            Decision::Deny
-        );
-        assert_eq!(
-            decide(PermissionClass::Exec, command("cargo publish")),
-            Decision::Ask
-        );
-        assert_eq!(
-            decide(PermissionClass::Exec, command("cargo build")),
-            Decision::Allow
-        );
-        assert_eq!(
-            decide(PermissionClass::Exec, command("rm -rf target")),
-            Decision::Allow,
-            "`rm = false` turns the shipped `rm` rule off"
-        );
-        assert_eq!(
-            decide(
-                PermissionClass::Edit,
-                Access::for_path(".git/config", &config.workspace)
-            ),
-            Decision::Ask,
-            "a later layer turns the `git` default back on"
-        );
-    }
-
-    #[tokio::test]
-    async fn load_permission_denies_ssh_reads_under_a_home_spelled_with_a_trailing_slash_or_dot() {
-        let dir = tempfile::tempdir().unwrap();
-        let home = dunce::canonicalize(dir.path()).unwrap().join("home");
-        std::fs::create_dir(&home).unwrap();
-        let key = home.join(".ssh").join("id_ed25519");
-
-        for spelling in [
-            format!("{}/", home.display()),
-            format!("{}/.", home.display()),
-        ] {
-            let config = Box::pin(temp_env::async_with_vars(
-                [(HOME_VAR, Some(spelling.as_str()))],
+            let err = Box::pin(temp_env::async_with_vars(
+                [(HOME_VAR, Some("!home"))],
                 load_with(&dir, &[]),
             ))
             .await
+            .expect_err("a built-in pattern that fails to parse must fail the load");
+
+            assert_eq!(
+                format!("{err:#}"),
+                "invalid built-in `ssh` pattern \"!home/.ssh\": \
+                 a pattern cannot start with `!`, since patterns have no negation. \
+                 Write the paths to match instead, or turn off the built-in rule that covers them."
+            );
+        }
+
+        #[tokio::test]
+        async fn permission_mode_env_beats_file() {
+            let dir = tempfile::tempdir().unwrap();
+            write_user_config(
+                dir.path(),
+                indoc! {r#"
+                    [permission]
+                    mode = "plan"
+                "#},
+            );
+            let config = load_with(&dir, &[("OX_PERMISSION_MODE", "yolo")])
+                .await
+                .unwrap();
+            assert_eq!(config.permission.mode(), Mode::Yolo);
+        }
+
+        #[tokio::test]
+        async fn permission_invalid_mode_env_errors() {
+            let dir = tempfile::tempdir().unwrap();
+            let err = load_with(&dir, &[("OX_PERMISSION_MODE", "bypass")])
+                .await
+                .expect_err("invalid mode must propagate");
+            assert_eq!(
+                format!("{err:#}"),
+                r#"invalid OX_PERMISSION_MODE "bypass": expected one of manual, plan, yolo"#,
+            );
+        }
+
+        #[tokio::test]
+        async fn permission_extra_roots_join_the_cwd_across_layers() {
+            let dir = tempfile::tempdir().unwrap();
+            let (shared, docs) = (dir.path().join("shared"), dir.path().join("docs"));
+            std::fs::create_dir(&shared).unwrap();
+            std::fs::create_dir(&docs).unwrap();
+            let roots = |paths: &[&Path]| {
+                let quoted: Vec<String> = paths
+                    .iter()
+                    .map(|path| toml::Value::from(path.to_str().unwrap()).to_string())
+                    .collect();
+                format!("permission.extra_roots = [{}]", quoted.join(", "))
+            };
+            write_user_config(dir.path(), &roots(&[&shared]));
+            write_drop_in(dir.path(), "10-docs.toml", &roots(&[&docs, &shared]));
+
+            let config = load_with(&dir, &[]).await.unwrap();
+
+            let canonical = |path: &Path| dunce::canonicalize(path).unwrap();
+            assert_eq!(config.workspace.cwd(), dir.path());
+            assert_eq!(
+                config.workspace.roots(),
+                [canonical(dir.path()), canonical(&shared), canonical(&docs)],
+            );
+        }
+
+        #[tokio::test]
+        async fn permission_invalid_extra_root_names_its_file() {
+            let dir = tempfile::tempdir().unwrap();
+            let drop_in = write_drop_in(
+                dir.path(),
+                "10-roots.toml",
+                r#"permission.extra_roots = ["shared"]"#,
+            );
+
+            let err = load_with(&dir, &[])
+                .await
+                .expect_err("a relative extra root must propagate");
+
+            assert_eq!(
+                format!("{err:#}"),
+                format!(
+                    "invalid config at {}: invalid extra root \"shared\": \
+                     expected an absolute or `~/` path",
+                    drop_in.path().display()
+                ),
+            );
+        }
+
+        #[tokio::test]
+        async fn permission_invalid_rule_in_file_errors() {
+            let dir = tempfile::tempdir().unwrap();
+            write_user_config(
+                dir.path(),
+                indoc! {r#"
+                    [permission.allow]
+                    edit = ["src/**/["]
+                "#},
+            );
+            let err = load_with(&dir, &[])
+                .await
+                .expect_err("malformed rule must propagate");
+            assert!(
+                format!("{err:#}")
+                    .contains(r#"invalid permission.allow.edit pattern "src/**/[": "#),
+                "{err:#}"
+            );
+        }
+
+        #[tokio::test]
+        async fn records_the_layer_behind_each_setting() {
+            let dir = tempfile::tempdir().unwrap();
+            let user = write_user_config(
+                dir.path(),
+                indoc! {r#"
+                    [client]
+                    model = "claude-haiku-5-5"
+                    effort = "high"
+                    max_tool_rounds = 50
+
+                    [client.compaction]
+                    auto_threshold_tokens = 400000
+                "#},
+            );
+            let drop_in = write_drop_in(
+                dir.path(),
+                "10-team.toml",
+                indoc! {r#"
+                    [client]
+                    effort = "low"
+                    prompt_cache_ttl = "5m"
+
+                    [permission]
+                    mode = "plan"
+                "#},
+            );
+            let config = load_with(
+                &dir,
+                &[
+                    ("ANTHROPIC_MODEL", "claude-sonnet-5-5"),
+                    ("ANTHROPIC_CUSTOM_HEADERS", "x-team: platform"),
+                    ("CLAUDE_CODE_DISABLE_STRUCTURED_OUTPUTS", "1"),
+                    ("OX_SHOW_THINKING", "1"),
+                ],
+            )
+            .await
             .unwrap();
 
-            let target = Access::for_path(&key.to_string_lossy(), &config.workspace);
+            assert_eq!(config.effort, Some(Effort::Low));
             assert_eq!(
-                config
-                    .permission
-                    .decide(PermissionClass::Read, &target.as_target()),
-                Decision::Deny,
-                "{spelling}"
+                config.provenance,
+                Provenance {
+                    layers: vec![user.clone(), drop_in.clone()],
+                    model: Source::Env("ANTHROPIC_MODEL"),
+                    effort: Source::File(drop_in.clone()),
+                    auth: Source::Env("ANTHROPIC_API_KEY"),
+                    custom_headers: Source::Env("ANTHROPIC_CUSTOM_HEADERS"),
+                    structured_outputs: Source::Env("CLAUDE_CODE_DISABLE_STRUCTURED_OUTPUTS"),
+                    max_tool_rounds: Source::File(user.clone()),
+                    prompt_cache_ttl: Source::File(drop_in.clone()),
+                    compaction: Source::File(user),
+                    permission_mode: Source::File(drop_in),
+                    show_thinking: Source::Env("OX_SHOW_THINKING"),
+                    ..Provenance::default()
+                },
+            );
+        }
+
+        #[tokio::test]
+        async fn env_sources_the_settings_it_overrides() {
+            let dir = tempfile::tempdir().unwrap();
+            let config = load_with(
+                &dir,
+                &[
+                    ("ANTHROPIC_BASE_URL", "https://gateway.example.com"),
+                    ("ANTHROPIC_AUTH_TOKEN", "gateway-token"),
+                    ("OX_MAX_TOKENS", "64"),
+                    ("CLAUDE_CODE_ATTRIBUTION_HEADER", "0"),
+                    ("OX_COMPACTION_AUTO_THRESHOLD_PERCENT", "40"),
+                    ("OX_EXTRA_CA_CERTS", "/etc/ssl/ca.pem"),
+                    ("OX_PERMISSION_MODE", "yolo"),
+                    ("OX_PROMPT_CACHE_TTL", "5m"),
+                ],
+            )
+            .await
+            .unwrap();
+
+            assert_eq!(
+                config.provenance,
+                Provenance {
+                    auth: Source::Env("ANTHROPIC_AUTH_TOKEN"),
+                    base_url: Source::Env("ANTHROPIC_BASE_URL"),
+                    extra_ca_certs: Source::Env("OX_EXTRA_CA_CERTS"),
+                    attribution: Source::Env("CLAUDE_CODE_ATTRIBUTION_HEADER"),
+                    max_tokens: Source::Env("OX_MAX_TOKENS"),
+                    prompt_cache_ttl: Source::Env("OX_PROMPT_CACHE_TTL"),
+                    compaction: Source::Env("OX_COMPACTION_AUTO_THRESHOLD_PERCENT"),
+                    permission_mode: Source::Env("OX_PERMISSION_MODE"),
+                    ..Provenance::default()
+                },
             );
         }
     }
 
-    #[tokio::test]
-    async fn load_permission_invalid_built_in_pattern_errors() {
-        let dir = tempfile::tempdir().unwrap();
+    mod apply_mode_flag {
+        use super::*;
 
-        let err = Box::pin(temp_env::async_with_vars(
-            [(HOME_VAR, Some("!home"))],
-            load_with(&dir, &[]),
-        ))
-        .await
-        .expect_err("a built-in pattern that fails to parse must fail the load");
+        #[test]
+        fn sets_the_gate_mode_and_credits_the_flag() {
+            let mut config = sample_config();
 
-        assert_eq!(
-            format!("{err:#}"),
-            "invalid built-in `ssh` pattern \"!home/.ssh\": \
-             a pattern cannot start with `!`, since patterns have no negation. \
-             Write the paths to match instead, or turn off the built-in rule that covers them."
-        );
+            config.apply_mode_flag(Mode::Yolo);
+
+            assert_eq!(config.permission.mode(), Mode::Yolo);
+            let snap = config.snapshot();
+            assert_eq!(snap.permission_mode, Mode::Yolo);
+            assert_eq!(snap.provenance.permission_mode, Source::Flag("--mode"));
+        }
     }
 
-    #[tokio::test]
-    async fn load_permission_mode_env_beats_file() {
-        let dir = tempfile::tempdir().unwrap();
-        write_user_config(
-            dir.path(),
-            indoc! {r#"
-                [permission]
-                mode = "plan"
-            "#},
-        );
-        let config = load_with(&dir, &[("OX_PERMISSION_MODE", "yolo")])
-            .await
-            .unwrap();
-        assert_eq!(config.permission.mode(), Mode::Yolo);
+    mod snapshot {
+        use super::*;
+
+        #[test]
+        fn copies_every_user_facing_field_and_drops_secret() {
+            let cfg = sample_config();
+            let snap = cfg.snapshot();
+            assert_eq!(snap.auth, Some(AuthSource::ClaudeCodeLogin));
+            assert_eq!(snap.gateway.custom_header_names, ["x-team"]);
+            assert!(!snap.gateway.attribution);
+            assert!(snap.gateway.structured_outputs);
+            let debug = format!("{snap:?}");
+            assert!(!debug.contains("token-must-not-leak"), "{debug}");
+            assert!(!debug.contains("secret-team"), "{debug}");
+            assert_eq!(snap.base_url, "https://api.example.test");
+            assert_eq!(
+                snap.extra_ca_certs.as_deref(),
+                Some(Path::new("/etc/ssl/corp-ca.pem")),
+            );
+            assert_eq!(snap.model.id(), "claude-test-1-0");
+            assert_eq!(snap.effort, Some(Effort::Xhigh));
+            assert_eq!(snap.max_tokens, None);
+            assert_eq!(snap.max_tool_rounds, Some(100));
+            assert_eq!(snap.prompt_cache_ttl, PromptCacheTtl::FiveMin);
+            assert_eq!(snap.compaction.auto.threshold_tokens, Some(42));
+            assert_eq!(snap.permission_mode, Mode::Plan);
+            assert!(snap.show_thinking);
+            assert!(!snap.show_welcome);
+            assert_eq!(
+                snap.status_line,
+                vec![
+                    StatusLineSegment::CurrentDir,
+                    StatusLineSegment::ModelWithEffort,
+                ],
+            );
+            assert_eq!(snap.theme_name, "macchiato");
+            assert_eq!(snap.provenance, cfg.provenance);
+        }
     }
 
-    #[tokio::test]
-    async fn load_permission_invalid_mode_env_errors() {
-        let dir = tempfile::tempdir().unwrap();
-        let err = load_with(&dir, &[("OX_PERMISSION_MODE", "bypass")])
-            .await
-            .expect_err("invalid mode must propagate");
-        assert_eq!(
-            format!("{err:#}"),
-            r#"invalid OX_PERMISSION_MODE "bypass": expected one of manual, plan, yolo"#,
-        );
+    mod is_first_party_base_url {
+        use super::*;
+
+        #[test]
+        fn accepts_official_hosts() {
+            assert!(is_first_party_base_url("https://api.anthropic.com"));
+            assert!(is_first_party_base_url("https://api.anthropic.com/"));
+            assert!(is_first_party_base_url("https://api-staging.anthropic.com"));
+            assert!(is_first_party_base_url("https://API.ANTHROPIC.COM"));
+        }
+
+        #[test]
+        fn rejects_proxies_and_malformed_urls() {
+            assert!(!is_first_party_base_url("https://api.openai.com"));
+            assert!(!is_first_party_base_url("https://proxy.example.com"));
+            assert!(!is_first_party_base_url("https://anthropic.com.evil.io"));
+            assert!(!is_first_party_base_url("http://127.0.0.1:8080"));
+            assert!(!is_first_party_base_url(""));
+            assert!(!is_first_party_base_url("not-a-url"));
+        }
     }
 
-    #[tokio::test]
-    async fn load_permission_extra_roots_join_the_cwd_across_layers() {
-        let dir = tempfile::tempdir().unwrap();
-        let (shared, docs) = (dir.path().join("shared"), dir.path().join("docs"));
-        std::fs::create_dir(&shared).unwrap();
-        std::fs::create_dir(&docs).unwrap();
-        let roots = |paths: &[&Path]| {
-            let quoted: Vec<String> = paths
-                .iter()
-                .map(|path| toml::Value::from(path.to_str().unwrap()).to_string())
-                .collect();
-            format!("permission.extra_roots = [{}]", quoted.join(", "))
-        };
-        write_user_config(dir.path(), &roots(&[&shared]));
-        write_drop_in(dir.path(), "10-docs.toml", &roots(&[&docs, &shared]));
+    mod display_auth {
+        use super::*;
 
-        let config = load_with(&dir, &[]).await.unwrap();
-
-        let canonical = |path: &Path| dunce::canonicalize(path).unwrap();
-        assert_eq!(config.workspace.cwd(), dir.path());
-        assert_eq!(
-            config.workspace.roots(),
-            [canonical(dir.path()), canonical(&shared), canonical(&docs)],
-        );
+        #[test]
+        fn names_the_source_or_the_signed_out_state() {
+            assert_eq!(
+                display_auth(Some(AuthSource::OxLogin)),
+                "OAuth (oxide-code login)"
+            );
+            assert_eq!(display_auth(None), "Not signed in");
+        }
     }
 
-    #[tokio::test]
-    async fn load_permission_invalid_extra_root_names_its_file() {
-        let dir = tempfile::tempdir().unwrap();
-        let drop_in = write_drop_in(
-            dir.path(),
-            "10-roots.toml",
-            r#"permission.extra_roots = ["shared"]"#,
-        );
+    mod display_effort {
+        use super::*;
 
-        let err = load_with(&dir, &[])
-            .await
-            .expect_err("a relative extra root must propagate");
-
-        assert_eq!(
-            format!("{err:#}"),
-            format!(
-                "invalid config at {}: invalid extra root \"shared\": \
-                 expected an absolute or `~/` path",
-                drop_in.path().display()
-            ),
-        );
+        #[test]
+        fn names_effective_tier_or_no_tier() {
+            assert_eq!(display_effort(Some(Effort::High)), "high");
+            assert_eq!(display_effort(None), "(no effort tier)");
+        }
     }
 
-    #[tokio::test]
-    async fn load_permission_invalid_rule_in_file_errors() {
-        let dir = tempfile::tempdir().unwrap();
-        write_user_config(
-            dir.path(),
-            indoc! {r#"
-                [permission.allow]
-                edit = ["src/**/["]
-            "#},
-        );
-        let err = load_with(&dir, &[])
-            .await
-            .expect_err("malformed rule must propagate");
-        assert!(
-            format!("{err:#}").contains(r#"invalid permission.allow.edit pattern "src/**/[": "#),
-            "{err:#}"
-        );
+    mod display_bool {
+        use super::*;
+
+        #[test]
+        fn names_the_two_flag_states() {
+            assert_eq!(display_bool(true), "on");
+            assert_eq!(display_bool(false), "off");
+        }
     }
 
-    // ── Config::load: provenance ──
+    mod display_auto_compaction {
+        use super::*;
 
-    #[tokio::test]
-    async fn load_records_the_layer_behind_each_setting() {
-        let dir = tempfile::tempdir().unwrap();
-        let user = write_user_config(
-            dir.path(),
-            indoc! {r#"
-                [client]
-                model = "claude-haiku-5-5"
-                effort = "high"
-                max_tool_rounds = 50
-
-                [client.compaction]
-                auto_threshold_tokens = 400000
-            "#},
-        );
-        let drop_in = write_drop_in(
-            dir.path(),
-            "10-team.toml",
-            indoc! {r#"
-                [client]
-                effort = "low"
-                prompt_cache_ttl = "5m"
-
-                [permission]
-                mode = "plan"
-            "#},
-        );
-        let config = load_with(
-            &dir,
-            &[
-                ("ANTHROPIC_MODEL", "claude-sonnet-5-5"),
-                ("ANTHROPIC_CUSTOM_HEADERS", "x-team: platform"),
-                ("CLAUDE_CODE_DISABLE_STRUCTURED_OUTPUTS", "1"),
-                ("OX_SHOW_THINKING", "1"),
-            ],
-        )
-        .await
-        .unwrap();
-
-        assert_eq!(config.effort, Some(Effort::Low));
-        assert_eq!(
-            config.provenance,
-            Provenance {
-                layers: vec![user.clone(), drop_in.clone()],
-                model: Source::Env("ANTHROPIC_MODEL"),
-                effort: Source::File(drop_in.clone()),
-                auth: Source::Env("ANTHROPIC_API_KEY"),
-                custom_headers: Source::Env("ANTHROPIC_CUSTOM_HEADERS"),
-                structured_outputs: Source::Env("CLAUDE_CODE_DISABLE_STRUCTURED_OUTPUTS"),
-                max_tool_rounds: Source::File(user.clone()),
-                prompt_cache_ttl: Source::File(drop_in.clone()),
-                compaction: Source::File(user),
-                permission_mode: Source::File(drop_in),
-                show_thinking: Source::Env("OX_SHOW_THINKING"),
-                ..Provenance::default()
-            },
-        );
-    }
-
-    #[tokio::test]
-    async fn load_env_sources_the_settings_it_overrides() {
-        let dir = tempfile::tempdir().unwrap();
-        let config = load_with(
-            &dir,
-            &[
-                ("ANTHROPIC_BASE_URL", "https://gateway.example.com"),
-                ("ANTHROPIC_AUTH_TOKEN", "gateway-token"),
-                ("OX_MAX_TOKENS", "64"),
-                ("CLAUDE_CODE_ATTRIBUTION_HEADER", "0"),
-                ("OX_COMPACTION_AUTO_THRESHOLD_PERCENT", "40"),
-                ("OX_EXTRA_CA_CERTS", "/etc/ssl/ca.pem"),
-                ("OX_PERMISSION_MODE", "yolo"),
-                ("OX_PROMPT_CACHE_TTL", "5m"),
-            ],
-        )
-        .await
-        .unwrap();
-
-        assert_eq!(
-            config.provenance,
-            Provenance {
-                auth: Source::Env("ANTHROPIC_AUTH_TOKEN"),
-                base_url: Source::Env("ANTHROPIC_BASE_URL"),
-                extra_ca_certs: Source::Env("OX_EXTRA_CA_CERTS"),
-                attribution: Source::Env("CLAUDE_CODE_ATTRIBUTION_HEADER"),
-                max_tokens: Source::Env("OX_MAX_TOKENS"),
-                prompt_cache_ttl: Source::Env("OX_PROMPT_CACHE_TTL"),
-                compaction: Source::Env("OX_COMPACTION_AUTO_THRESHOLD_PERCENT"),
-                permission_mode: Source::Env("OX_PERMISSION_MODE"),
-                ..Provenance::default()
-            },
-        );
-    }
-
-    // ── Config::apply_mode_flag ──
-
-    #[test]
-    fn apply_mode_flag_sets_the_gate_mode_and_credits_the_flag() {
-        let mut config = sample_config();
-
-        config.apply_mode_flag(Mode::Yolo);
-
-        assert_eq!(config.permission.mode(), Mode::Yolo);
-        let snap = config.snapshot();
-        assert_eq!(snap.permission_mode, Mode::Yolo);
-        assert_eq!(snap.provenance.permission_mode, Source::Flag("--mode"));
-    }
-
-    // ── Config::snapshot ──
-
-    #[test]
-    fn snapshot_copies_every_user_facing_field_and_drops_secret() {
-        let cfg = sample_config();
-        let snap = cfg.snapshot();
-        assert_eq!(snap.auth, Some(AuthSource::ClaudeCodeLogin));
-        assert_eq!(snap.gateway.custom_header_names, ["x-team"]);
-        assert!(!snap.gateway.attribution);
-        assert!(snap.gateway.structured_outputs);
-        let debug = format!("{snap:?}");
-        assert!(!debug.contains("token-must-not-leak"), "{debug}");
-        assert!(!debug.contains("secret-team"), "{debug}");
-        assert_eq!(snap.base_url, "https://api.example.test");
-        assert_eq!(
-            snap.extra_ca_certs.as_deref(),
-            Some(Path::new("/etc/ssl/corp-ca.pem")),
-        );
-        assert_eq!(snap.model.id(), "claude-test-1-0");
-        assert_eq!(snap.effort, Some(Effort::Xhigh));
-        assert_eq!(snap.max_tokens, None);
-        assert_eq!(snap.max_tool_rounds, Some(100));
-        assert_eq!(snap.prompt_cache_ttl, PromptCacheTtl::FiveMin);
-        assert_eq!(snap.compaction.auto.threshold_tokens, Some(42));
-        assert_eq!(snap.permission_mode, Mode::Plan);
-        assert!(snap.show_thinking);
-        assert!(!snap.show_welcome);
-        assert_eq!(
-            snap.status_line,
-            vec![
-                StatusLineSegment::CurrentDir,
-                StatusLineSegment::ModelWithEffort,
-            ],
-        );
-        assert_eq!(snap.theme_name, "macchiato");
-        assert_eq!(snap.provenance, cfg.provenance);
-    }
-
-    // ── is_first_party_base_url ──
-
-    #[test]
-    fn is_first_party_base_url_accepts_official_hosts() {
-        assert!(is_first_party_base_url("https://api.anthropic.com"));
-        assert!(is_first_party_base_url("https://api.anthropic.com/"));
-        assert!(is_first_party_base_url("https://api-staging.anthropic.com"));
-        assert!(is_first_party_base_url("https://API.ANTHROPIC.COM"));
-    }
-
-    #[test]
-    fn is_first_party_base_url_rejects_proxies_and_malformed_urls() {
-        assert!(!is_first_party_base_url("https://api.openai.com"));
-        assert!(!is_first_party_base_url("https://proxy.example.com"));
-        assert!(!is_first_party_base_url("https://anthropic.com.evil.io"));
-        assert!(!is_first_party_base_url("http://127.0.0.1:8080"));
-        assert!(!is_first_party_base_url(""));
-        assert!(!is_first_party_base_url("not-a-url"));
-    }
-
-    // ── display_auth ──
-
-    #[test]
-    fn display_auth_names_the_source_or_the_signed_out_state() {
-        assert_eq!(
-            display_auth(Some(AuthSource::OxLogin)),
-            "OAuth (oxide-code login)"
-        );
-        assert_eq!(display_auth(None), "Not signed in");
-    }
-
-    // ── display_effort ──
-
-    #[test]
-    fn display_effort_names_effective_tier_or_no_tier() {
-        assert_eq!(display_effort(Some(Effort::High)), "high");
-        assert_eq!(display_effort(None), "(no effort tier)");
-    }
-
-    // ── display_bool ──
-
-    #[test]
-    fn display_bool_names_the_two_flag_states() {
-        assert_eq!(display_bool(true), "on");
-        assert_eq!(display_bool(false), "off");
-    }
-
-    // ── display_auto_compaction ──
-
-    #[test]
-    fn display_auto_compaction_names_enabled_threshold_or_off() {
-        assert_eq!(
-            display_auto_compaction(AutoCompactionConfig {
-                enabled: true,
-                threshold_tokens: Some(400_000),
-            }),
-            "at 400000 tokens",
-        );
-        assert_eq!(
-            display_auto_compaction(AutoCompactionConfig {
-                enabled: false,
-                threshold_tokens: Some(400_000),
-            }),
-            "off",
-        );
-        assert_eq!(
-            display_auto_compaction(AutoCompactionConfig {
-                enabled: true,
-                threshold_tokens: None,
-            }),
-            "off (no threshold)",
-        );
+        #[test]
+        fn names_enabled_threshold_or_off() {
+            assert_eq!(
+                display_auto_compaction(AutoCompactionConfig {
+                    enabled: true,
+                    threshold_tokens: Some(400_000),
+                }),
+                "at 400000 tokens",
+            );
+            assert_eq!(
+                display_auto_compaction(AutoCompactionConfig {
+                    enabled: false,
+                    threshold_tokens: Some(400_000),
+                }),
+                "off",
+            );
+            assert_eq!(
+                display_auto_compaction(AutoCompactionConfig {
+                    enabled: true,
+                    threshold_tokens: None,
+                }),
+                "off (no threshold)",
+            );
+        }
     }
 }
