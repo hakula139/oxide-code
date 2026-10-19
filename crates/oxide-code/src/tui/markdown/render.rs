@@ -34,6 +34,9 @@ use crate::tui::wrap::{
 pub(super) struct MarkdownRenderer<I> {
     iter: I,
     theme: Theme,
+    /// Style of the body, which fills the spans still without a color once the walk ends and
+    /// decides the quote style.
+    base: Style,
     width: usize,
     pub(super) lines: Vec<Line<'static>>,
 
@@ -119,10 +122,17 @@ impl<'a, I> MarkdownRenderer<I>
 where
     I: Iterator<Item = Event<'a>>,
 {
-    pub(super) fn new(iter: I, theme: &Theme, width: usize, after_block: bool) -> Self {
+    pub(super) fn new(
+        iter: I,
+        theme: &Theme,
+        base: Style,
+        width: usize,
+        after_block: bool,
+    ) -> Self {
         Self {
             iter,
             theme: theme.clone(),
+            base,
             width,
             lines: Vec::new(),
             needs_newline: after_block,
@@ -141,6 +151,9 @@ where
     pub(super) fn run(&mut self) {
         while let Some(event) = self.iter.next() {
             self.handle_event(event);
+        }
+        for line in &mut self.lines {
+            fill_uncolored_spans(line, self.base);
         }
     }
 
@@ -270,19 +283,29 @@ where
         self.blockquote_starts.push(self.lines.len());
     }
 
-    /// Fills the quote's uncolored spans with `muted`, so headings, links, code, and table headers
-    /// keep their own colors.
+    /// Fills the quote's uncolored spans with [`Self::quote_style`], so headings, links, code, and
+    /// table headers keep their own colors.
     fn end_blockquote(&mut self) {
         let start = self
             .blockquote_starts
             .pop()
             .expect("every blockquote end follows its start");
-        let muted = self.theme.muted();
+        let style = self.quote_style();
         for line in &mut self.lines[start..] {
-            fill_uncolored_spans(line, muted);
+            fill_uncolored_spans(line, style);
         }
         self.indent_stack.pop();
         self.needs_newline = true;
+    }
+
+    /// Style of quoted text: `muted` over a body with no color or in `text`, and otherwise the
+    /// body's style, since a body in another color, such as thinking, already reads as secondary.
+    fn quote_style(&self) -> Style {
+        if self.base.fg.is_none() || self.base.fg == self.theme.text().fg {
+            self.base.patch(self.theme.muted())
+        } else {
+            self.base
+        }
     }
 
     fn rule(&mut self) {
@@ -718,9 +741,10 @@ where
     }
 }
 
-// ── Blockquote Helpers ──
+// ── Style Helpers ──
 
-/// Patches `base` onto spans without a foreground, unless the line's style supplies one.
+/// Patches `base` onto spans without a foreground. A line colored as a whole, such as a plain code
+/// fence, keeps its color, since any span color would paint over it.
 fn fill_uncolored_spans(line: &mut Line<'_>, base: Style) {
     if line.style.fg.is_some() {
         return;
@@ -937,7 +961,7 @@ mod tests {
     use ratatui::style::{Color, Stylize};
 
     use super::*;
-    use crate::tui::markdown::render_markdown;
+    use crate::tui::markdown::{render_markdown, render_markdown_on};
 
     mod render_markdown {
         use super::*;
@@ -2184,6 +2208,57 @@ mod tests {
                     "│   four five six ",
                     "│   seven eight"
                 ],
+            );
+        }
+    }
+
+    mod render_markdown_on {
+        use super::*;
+
+        #[test]
+        fn fills_only_text_without_a_color_with_the_base() {
+            let t = Theme::default();
+
+            let text = render_markdown_on("plain `code`", &t, t.thinking(), 0);
+
+            assert_eq!(
+                text.lines,
+                [Line::from(vec![
+                    Span::styled("plain ", t.thinking()),
+                    Span::styled("code", t.inline_code()),
+                ])]
+            );
+        }
+
+        #[test]
+        fn quote_in_a_text_body_steps_down_to_muted_keeping_modifiers() {
+            let t = Theme::default();
+            let base = t.text().add_modifier(Modifier::BOLD);
+
+            let text = render_markdown_on("> quoted", &t, base, 0);
+
+            assert_eq!(
+                text.lines,
+                [Line::from(vec![
+                    Span::styled("│ ", t.blockquote()),
+                    Span::styled("quoted", t.muted().add_modifier(Modifier::BOLD)),
+                ])]
+            );
+        }
+
+        #[test]
+        fn quote_in_a_thinking_body_keeps_the_thinking_style() {
+            let t = Theme::default();
+
+            let text = render_markdown_on("> Quoted **text**", &t, t.thinking(), 0);
+
+            assert_eq!(
+                text.lines,
+                [Line::from(vec![
+                    Span::styled("│ ", t.blockquote()),
+                    Span::styled("Quoted ", t.thinking()),
+                    Span::styled("text", t.thinking().add_modifier(Modifier::BOLD)),
+                ])]
             );
         }
     }

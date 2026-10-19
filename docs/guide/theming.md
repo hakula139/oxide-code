@@ -164,12 +164,12 @@ Unset, it defaults to `base16-ocean.dark`, which the dark built-ins use. `latte`
 
 ### Markdown Body
 
-| Slot          | Role                                                |
-| ------------- | --------------------------------------------------- |
-| `thinking`    | Thinking text (italic), as readable as `dim`        |
-| `link`        | Markdown links (underlined)                         |
-| `blockquote`  | Blockquote bar (`│`), beside quoted text in `muted` |
-| `list_marker` | Bullet / number marker on list items                |
+| Slot          | Role                                                                                          |
+| ------------- | --------------------------------------------------------------------------------------------- |
+| `thinking`    | Thinking text (italic), as readable as `dim`                                                  |
+| `link`        | Markdown links (underlined)                                                                   |
+| `blockquote`  | Blockquote bar (`│`), beside quoted text in `muted`, or in `thinking` within a thinking block |
+| `list_marker` | Bullet / number marker on list items                                                          |
 
 ### Markdown Chrome
 

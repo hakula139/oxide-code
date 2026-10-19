@@ -4,6 +4,7 @@ mod highlight;
 mod render;
 
 use pulldown_cmark::{Event, Options, Parser};
+use ratatui::style::Style;
 use ratatui::text::Text;
 
 use super::theme::Theme;
@@ -17,7 +18,19 @@ const OPTIONS: Options = Options::ENABLE_STRIKETHROUGH.union(Options::ENABLE_TAB
 /// non-zero value wraps each block to that column budget, preserving the enclosing block's
 /// continuation indent (blockquote `│`, list-item gutter, etc.) on wrapped sub-lines.
 pub(super) fn render_markdown(input: &str, theme: &Theme, width: usize) -> Text<'static> {
-    render_markdown_chunk(input, theme, width, false).0
+    render_markdown_on(input, theme, Style::default(), width)
+}
+
+/// Renders markdown like [`render_markdown`] for the body of a block styled `base`, such as
+/// thinking. Text without a color of its own takes `base`, while quoted text takes `muted` over a
+/// `base` with no color or in `text`, and `base` itself otherwise.
+pub(super) fn render_markdown_on(
+    input: &str,
+    theme: &Theme,
+    base: Style,
+    width: usize,
+) -> Text<'static> {
+    render_document(input, theme, base, width, false).0
 }
 
 /// Renders `input` as the next chunk of a document, where `after_block` says whether the chunks
@@ -28,8 +41,18 @@ pub(super) fn render_markdown_chunk(
     width: usize,
     after_block: bool,
 ) -> (Text<'static>, bool) {
+    render_document(input, theme, Style::default(), width, after_block)
+}
+
+fn render_document(
+    input: &str,
+    theme: &Theme,
+    base: Style,
+    width: usize,
+    after_block: bool,
+) -> (Text<'static>, bool) {
     let parser = Parser::new_ext(input, OPTIONS);
-    let mut renderer = MarkdownRenderer::new(parser, theme, width, after_block);
+    let mut renderer = MarkdownRenderer::new(parser, theme, base, width, after_block);
     renderer.run();
     (Text::from(renderer.lines), renderer.needs_newline)
 }
