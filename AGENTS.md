@@ -88,7 +88,7 @@ pnpm spellcheck                                       # Spell check
 
 ## Code Review
 
-Review the complete change and its affected callers against the convention docs, and check in particular:
+Review the complete change, its affected callers, and the adjacent code it touches against the convention docs. Propose a fix wherever that nearby code could be more concise or elegant, even when the fix is a large refactor. Check in particular:
 
 - Cross-file consistency: parallel types use the same structure, naming, ordering, and derive traits.
 - Comment hygiene: one-line docs where one line suffices, and a comment wherever a constraint is non-obvious.
