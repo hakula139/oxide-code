@@ -56,7 +56,7 @@ impl Client {
         );
 
         let betas = compute_betas(model, None, auth.kind(), false).join(",");
-        let request = &self.messages_request(betas, body, auth)?;
+        let request = &self.messages_request(betas, body, auth);
         let CompletionResponse { content } = with_retry(
             |retry| async move {
                 let response = post_messages(&self.http, request, retry).await?;

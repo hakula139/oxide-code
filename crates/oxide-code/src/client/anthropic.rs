@@ -61,8 +61,9 @@ const SYSTEM_PROMPT_PREFIX: &str = "You are Claude Code, Anthropic's official CL
 // ── Client ──
 
 /// Shareable HTTP client for the Anthropic Messages API, holding the endpoint and what each
-/// request sends. `Clone` is cheap because `reqwest::Client` shares its connection pool. Callers
-/// keep one per session and swap `session_id` / `model` / `effort` / `auth` via `set_*`.
+/// request sends. `Clone` is cheap because `reqwest::Client` shares its connection pool, and clones
+/// share a stored login's token. Callers keep one per session and swap `session_id` / `model` /
+/// `effort` / `auth` via `set_*`.
 #[derive(Clone)]
 pub(crate) struct Client {
     http: reqwest::Client,
@@ -259,7 +260,7 @@ impl Client {
         let (tx, rx) = mpsc::channel(64);
         let http = self.http.clone();
         let betas = compute_betas(model, thinking.as_ref(), auth.kind(), true).join(",");
-        let request = self.messages_request(betas, body, auth)?;
+        let request = self.messages_request(betas, body, auth);
         tokio::spawn(forward_sse(http, request, model.id().to_owned(), tx));
 
         Ok(rx)
@@ -488,16 +489,17 @@ mod tests {
     use std::fmt::Write as _;
 
     use indoc::writedoc;
-    use wiremock::matchers::{header, method, path, query_param};
+    use wiremock::matchers::{body_partial_json, header, method, path, query_param};
     use wiremock::{Mock, MockServer, Request, ResponseTemplate};
 
     use super::testing::{
-        Captured, DEVICE_ID, api_key, captured, client_for, oauth, test_client, test_config,
-        text_stream_body,
+        Captured, DEVICE_ID, api_key, captured, client_for, completion_body, oauth, sse_response,
+        test_client, test_config, text_stream_body,
     };
     use super::*;
     use crate::client::{Response, StopReason};
     use crate::config::auth::{Auth, AuthSource};
+    use crate::config::oauth::testing::{ok_refresh_body, ox_login_in, write_creds};
     use crate::config::{Effort, PromptCacheTtl};
     use crate::model::TokenUsage;
     use crate::util::tls::PlatformTrust;
@@ -1375,11 +1377,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn stream_message_401_names_the_oauth_token_variable() {
+    async fn stream_message_401_names_the_oauth_token_variable_without_resending() {
         let server = MockServer::start().await;
         Mock::given(method("POST"))
             .and(path("/v1/messages"))
             .respond_with(ResponseTemplate::new(401).set_body_string("token revoked"))
+            .expect(1)
             .mount(&server)
             .await;
 
@@ -1399,6 +1402,7 @@ mod tests {
              CLAUDE_CODE_OAUTH_TOKEN may be expired or revoked. \
              Generate a new one with `claude setup-token`.",
         );
+        server.verify().await;
     }
 
     #[tokio::test]
@@ -1428,8 +1432,8 @@ mod tests {
         assert_eq!(server.received_requests().await.unwrap().len(), 1);
     }
 
-    #[test]
-    fn stream_message_rejects_a_credential_no_header_can_carry() {
+    #[tokio::test]
+    async fn stream_message_rejects_a_credential_no_header_can_carry() {
         // `HeaderValue::from_str` rejects control chars (\n, \r). Both auth arms must propagate.
         for auth in [
             Auth::new(AuthSource::ApiKeyEnv, "bad\nkey"),
@@ -1438,9 +1442,10 @@ mod tests {
             let source = auth.source();
             let client = test_client(OFFLINE_URL, auth, TEST_MODEL);
 
-            let err = client
+            let rx = client
                 .stream_message(&[Message::user("hi")], &[], None, &[])
-                .unwrap_err();
+                .unwrap();
+            let err = collect_events(rx).await.unwrap_err();
 
             let msg = format!("{err:#}");
             assert!(
@@ -1452,6 +1457,68 @@ mod tests {
                 "error must not echo the secret: {msg}"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn stream_message_refreshes_an_expired_stored_login_once_for_every_clone() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/token"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(ok_refresh_body(
+                "fresh-access",
+                "fresh-refresh",
+                3600,
+            )))
+            .expect(1)
+            .mount(&server)
+            .await;
+        for (streamed, reply) in [
+            (true, sse_response(text_stream_body("", "Hi"))),
+            (
+                false,
+                ResponseTemplate::new(200).set_body_string(completion_body("Title")),
+            ),
+        ] {
+            Mock::given(method("POST"))
+                .and(path("/v1/messages"))
+                .and(header("authorization", "Bearer fresh-access"))
+                .and(body_partial_json(serde_json::json!({ "stream": streamed })))
+                .respond_with(reply)
+                .expect(1)
+                .mount(&server)
+                .await;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("credentials.json");
+        write_creds(&file, "expired", Some("old-refresh"), 0);
+        let token_url = format!("{}/token", server.uri());
+        let client = test_client(
+            server.uri(),
+            ox_login_in(&file, &token_url, "expired", 0),
+            TEST_MODEL,
+        );
+
+        let rx = client
+            .stream_message(&[Message::user("hi")], &[], None, &[])
+            .unwrap();
+        collect_events(rx).await.unwrap();
+        let stored: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&file).unwrap()).unwrap();
+        std::fs::remove_file(&file).unwrap();
+        let haiku = ModelSpec::resolve("claude-haiku-5-5".to_owned());
+        let title = client
+            .clone()
+            .complete(&haiku, "", "u", 40, None, None)
+            .await
+            .unwrap();
+
+        assert_eq!(stored["claudeAiOauth"]["accessToken"], "fresh-access");
+        assert_eq!(stored["claudeAiOauth"]["refreshToken"], "fresh-refresh");
+        assert_eq!(
+            title, "Title",
+            "the clone reuses the refreshed token unread"
+        );
+        server.verify().await;
     }
 
     // ── Client::stream_message / agentic body fields ──

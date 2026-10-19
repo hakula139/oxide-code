@@ -79,14 +79,13 @@ pub(super) fn plain_http() -> reqwest::Client {
 
 /// A `/v1/messages` call to `url` with an empty body and an API key.
 pub(super) fn messages_request(url: impl Into<String>) -> MessagesRequest {
-    let auth = Auth::new(AuthSource::ApiKeyEnv, "k");
     MessagesRequest {
         url: url.into(),
         betas: String::new(),
         session_id: "sid".to_owned(),
         body: Bytes::from_static(b"{}"),
-        auth: auth.source(),
-        credential: auth.header().unwrap(),
+        auth: api_key(),
+        trust: Arc::new(NoRoots),
     }
 }
 
