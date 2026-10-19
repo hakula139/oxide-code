@@ -267,224 +267,6 @@ mod tests {
         popup.list.as_ref().expect("popup visible")
     }
 
-    fn render_to_backend(popup: &SlashPopup, width: u16) -> TestBackend {
-        let height = popup.height().max(1);
-        let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
-        terminal
-            .draw(|frame| popup.render(frame, frame.area()))
-            .unwrap();
-        terminal.backend().clone()
-    }
-
-    // ── set_state ──
-
-    #[test]
-    fn set_state_none_hides_popup() {
-        let popup = popup_with_state(None);
-        assert!(!popup.is_visible());
-        assert_eq!(popup.height(), 0);
-    }
-
-    #[test]
-    fn set_state_name_empty_query_lists_full_registry_in_presentation_order() {
-        let popup = name_popup("");
-
-        let list = list(&popup);
-        let values: Vec<&str> = list.rows.iter().map(|r| r.value.as_ref()).collect();
-        assert_eq!(list.mode, PopupMode::Name);
-        assert_eq!(
-            values,
-            [
-                "archive",
-                "clear",
-                "compact",
-                "config",
-                "delete",
-                "diff",
-                "effort",
-                "help",
-                "init",
-                "login",
-                "logout",
-                "mode",
-                "model",
-                "rename",
-                "resume",
-                "status",
-                "theme",
-                "unarchive",
-            ]
-        );
-    }
-
-    #[test]
-    fn set_state_clamps_selection_when_row_count_shrinks() {
-        let mut popup = name_popup("");
-        let n = list(&popup).rows.len();
-        for _ in 0..n - 1 {
-            popup.select_next();
-        }
-        assert_eq!(list(&popup).selected, n - 1);
-
-        popup.set_state(Some(&PopupState::Name("help")));
-
-        assert_eq!(list(&popup).rows.len(), 1);
-        assert_eq!(list(&popup).selected, 0);
-    }
-
-    #[test]
-    fn set_state_resets_selection_on_mode_transition() {
-        let mut popup = name_popup("");
-        popup.select_next();
-        popup.select_next();
-        assert_eq!(list(&popup).selected, 2);
-
-        popup.set_state(Some(&PopupState::Arg {
-            name: "model",
-            prefix: "",
-        }));
-
-        assert!(matches!(list(&popup).mode, PopupMode::Arg { .. }));
-        assert_eq!(list(&popup).selected, 0, "mode transition resets selection");
-    }
-
-    #[test]
-    fn set_state_resets_selection_on_switch_to_another_commands_args() {
-        let mut popup = arg_popup("model", "");
-        popup.select_next();
-        popup.select_next();
-        assert_eq!(list(&popup).selected, 2);
-
-        popup.set_state(Some(&PopupState::Arg {
-            name: "effort",
-            prefix: "",
-        }));
-
-        assert_eq!(popup.completion().as_deref(), Some("/effort low"));
-    }
-
-    #[test]
-    fn set_state_intra_mode_query_change_preserves_selection_via_clamp() {
-        let mut popup = name_popup("");
-        popup.select_next();
-        let parked = list(&popup).selected;
-        assert!(parked > 0, "selection past row 0");
-
-        popup.set_state(Some(&PopupState::Name("")));
-
-        assert_eq!(
-            list(&popup).selected,
-            parked,
-            "same mode preserves selection"
-        );
-    }
-
-    #[test]
-    fn set_state_arg_with_curated_roster_populates_arg_mode() {
-        let popup = arg_popup("model", "");
-
-        assert_eq!(
-            list(&popup).mode,
-            PopupMode::Arg {
-                name: "model".to_owned()
-            }
-        );
-    }
-
-    #[test]
-    fn set_state_arg_with_empty_roster_stays_hidden() {
-        // `/init` has no curated arg roster, so the popup hides, leaving Tab and Enter to the arg.
-        let popup = arg_popup("init", "");
-        assert!(!popup.is_visible());
-    }
-
-    #[test]
-    fn set_state_arg_unknown_command_stays_hidden() {
-        let popup = arg_popup("nope", "");
-        assert!(!popup.is_visible());
-    }
-
-    // ── completion ──
-
-    #[test]
-    fn completion_in_name_mode_is_the_slash_command() {
-        let popup = name_popup("hel");
-
-        assert_eq!(popup.completion().as_deref(), Some("/help"));
-    }
-
-    #[test]
-    fn completion_in_arg_mode_follows_the_command_with_the_selected_value() {
-        let mut popup = arg_popup("effort", "");
-        popup.select_next();
-
-        assert_eq!(popup.completion().as_deref(), Some("/effort medium"));
-    }
-
-    #[test]
-    fn completion_of_a_hidden_popup_completes_nothing() {
-        let popup = popup_with_state(None);
-
-        assert_eq!(popup.completion(), None);
-    }
-
-    // ── select_next / select_prev ──
-
-    #[test]
-    fn select_next_wraps_at_bottom() {
-        let mut popup = name_popup("");
-        let n = list(&popup).rows.len();
-
-        for _ in 0..n {
-            popup.select_next();
-        }
-
-        assert_eq!(list(&popup).selected, 0, "wrap from last back to first");
-    }
-
-    #[test]
-    fn select_prev_wraps_at_top() {
-        let mut popup = name_popup("");
-        let n = list(&popup).rows.len();
-
-        popup.select_prev();
-
-        assert_eq!(list(&popup).selected, n - 1, "wrap from first up to last");
-    }
-
-    #[test]
-    fn select_prev_when_not_at_top_moves_up_one_row() {
-        // Pins the decrement branch, since select_prev() from row 0 always takes the wrap branch.
-        let mut popup = name_popup("");
-        popup.select_next();
-        popup.select_next();
-        assert_eq!(list(&popup).selected, 2);
-
-        popup.select_prev();
-
-        assert_eq!(list(&popup).selected, 1);
-    }
-
-    #[test]
-    fn select_next_and_prev_leave_a_hidden_popup_hidden() {
-        let mut popup = popup_with_state(None);
-
-        popup.select_next();
-        popup.select_prev();
-
-        assert!(!popup.is_visible());
-    }
-
-    // ── height ──
-
-    #[test]
-    fn height_caps_at_max_visible_rows_plus_chrome() {
-        assert_eq!(long_popup(3).height(), 3 + CHROME_ROWS);
-        assert_eq!(long_popup(12).height(), 8 + CHROME_ROWS);
-    }
-
-    // ── render ──
-
     fn long_popup(n: usize) -> SlashPopup {
         // Hand-rolled list keeps the test independent of registry growth.
         let mut p = SlashPopup::new(&theme());
@@ -503,216 +285,454 @@ mod tests {
     }
 
     #[test]
-    fn render_empty_name_query_shows_each_command_once() {
-        let popup = name_popup("");
-        insta::assert_snapshot!(render_to_backend(&popup, 60));
-    }
+    fn select_next_and_prev_leave_a_hidden_popup_hidden() {
+        let mut popup = popup_with_state(None);
 
-    #[test]
-    fn render_filtered_name_query_shows_only_matching_rows() {
-        let popup = name_popup("hel");
-        insta::assert_snapshot!(render_to_backend(&popup, 60));
-    }
-
-    #[test]
-    fn render_arg_mode_lists_curated_roster_without_slash_prefix() {
-        let popup = arg_popup("effort", "");
-        insta::assert_snapshot!(render_to_backend(&popup, 60));
-    }
-
-    #[test]
-    fn render_arg_mode_prefix_filters_to_subset() {
-        let popup = arg_popup("theme", "m");
-        insta::assert_snapshot!(render_to_backend(&popup, 60));
-    }
-
-    #[test]
-    fn render_selected_row_paints_bold_text_others_dim() {
-        // TestBackend snapshots don't capture style, so layout-only snapshots can't tell selected
-        // from unselected. Pin the bold-vs-dim contrast directly on the rendered cells.
-        use ratatui::layout::Position;
-        use ratatui::style::Modifier;
-
-        let theme = theme();
-        let mut popup = name_popup("");
         popup.select_next();
-        let backend = render_to_backend(&popup, 60);
+        popup.select_prev();
 
-        // Data rows start below the top-border chrome row, at y = CHROME_ROWS.
-        let chrome = CHROME_ROWS;
-        let selected = backend.buffer().cell(Position::new(0, chrome + 1)).unwrap();
-        assert_eq!(selected.fg, theme.text().fg.unwrap());
-        assert!(
-            selected.modifier.contains(Modifier::BOLD),
-            "selected row should paint bold: got {:?}",
-            selected.modifier,
-        );
-
-        let unselected = backend.buffer().cell(Position::new(0, chrome)).unwrap();
-        assert_eq!(unselected.fg, theme.dim().fg.unwrap());
-        assert!(
-            !unselected.modifier.contains(Modifier::BOLD),
-            "unselected row must not be bold: got {:?}",
-            unselected.modifier,
-        );
+        assert!(!popup.is_visible());
     }
 
-    #[test]
-    fn render_narrow_terminal_truncates_description() {
-        let popup = name_popup("");
-        insta::assert_snapshot!(render_to_backend(&popup, 30));
-    }
+    mod set_state {
+        use super::*;
 
-    #[test]
-    fn render_alias_match_parenthesizes_only_typed_alias() {
-        let popup = name_popup("new");
-        insta::assert_snapshot!(render_to_backend(&popup, 60));
-    }
+        #[test]
+        fn none_hides_popup() {
+            let popup = popup_with_state(None);
+            assert!(!popup.is_visible());
+            assert_eq!(popup.height(), 0);
+        }
 
-    #[test]
-    fn render_with_only_chrome_room_paints_the_border_and_skips_rows() {
-        // With exactly CHROME_ROWS reserved, the inner area has zero height, so the border paints
-        // and the row loop is skipped.
-        let popup = name_popup("");
-        let width: u16 = 60;
-        let mut terminal = Terminal::new(TestBackend::new(width, CHROME_ROWS)).unwrap();
-        terminal
-            .draw(|frame| popup.render(frame, Rect::new(0, 0, width, CHROME_ROWS)))
-            .unwrap();
-        let buf = terminal.backend().buffer();
-        for x in 0..width {
+        #[test]
+        fn name_empty_query_lists_full_registry_in_presentation_order() {
+            let popup = name_popup("");
+
+            let list = list(&popup);
+            let values: Vec<&str> = list.rows.iter().map(|r| r.value.as_ref()).collect();
+            assert_eq!(list.mode, PopupMode::Name);
             assert_eq!(
-                buf.cell(ratatui::layout::Position::new(x, 0))
-                    .unwrap()
-                    .symbol(),
-                "─",
-                "chrome row must be a continuous border at col {x}",
+                values,
+                [
+                    "archive",
+                    "clear",
+                    "compact",
+                    "config",
+                    "delete",
+                    "diff",
+                    "effort",
+                    "help",
+                    "init",
+                    "login",
+                    "logout",
+                    "mode",
+                    "model",
+                    "rename",
+                    "resume",
+                    "status",
+                    "theme",
+                    "unarchive",
+                ]
             );
         }
+
+        #[test]
+        fn clamps_selection_when_row_count_shrinks() {
+            let mut popup = name_popup("");
+            let n = list(&popup).rows.len();
+            for _ in 0..n - 1 {
+                popup.select_next();
+            }
+            assert_eq!(list(&popup).selected, n - 1);
+
+            popup.set_state(Some(&PopupState::Name("help")));
+
+            assert_eq!(list(&popup).rows.len(), 1);
+            assert_eq!(list(&popup).selected, 0);
+        }
+
+        #[test]
+        fn resets_selection_on_mode_transition() {
+            let mut popup = name_popup("");
+            popup.select_next();
+            popup.select_next();
+            assert_eq!(list(&popup).selected, 2);
+
+            popup.set_state(Some(&PopupState::Arg {
+                name: "model",
+                prefix: "",
+            }));
+
+            assert!(matches!(list(&popup).mode, PopupMode::Arg { .. }));
+            assert_eq!(list(&popup).selected, 0, "mode transition resets selection");
+        }
+
+        #[test]
+        fn resets_selection_on_switch_to_another_commands_args() {
+            let mut popup = arg_popup("model", "");
+            popup.select_next();
+            popup.select_next();
+            assert_eq!(list(&popup).selected, 2);
+
+            popup.set_state(Some(&PopupState::Arg {
+                name: "effort",
+                prefix: "",
+            }));
+
+            assert_eq!(popup.completion().as_deref(), Some("/effort low"));
+        }
+
+        #[test]
+        fn intra_mode_query_change_preserves_selection_via_clamp() {
+            let mut popup = name_popup("");
+            popup.select_next();
+            let parked = list(&popup).selected;
+            assert!(parked > 0, "selection past row 0");
+
+            popup.set_state(Some(&PopupState::Name("")));
+
+            assert_eq!(
+                list(&popup).selected,
+                parked,
+                "same mode preserves selection"
+            );
+        }
+
+        #[test]
+        fn arg_with_curated_roster_populates_arg_mode() {
+            let popup = arg_popup("model", "");
+
+            assert_eq!(
+                list(&popup).mode,
+                PopupMode::Arg {
+                    name: "model".to_owned()
+                }
+            );
+        }
+
+        #[test]
+        fn arg_with_empty_roster_stays_hidden() {
+            // `/init` has no curated roster, so the popup hides, leaving Tab and Enter to the arg.
+            let popup = arg_popup("init", "");
+            assert!(!popup.is_visible());
+        }
+
+        #[test]
+        fn arg_unknown_command_stays_hidden() {
+            let popup = arg_popup("nope", "");
+            assert!(!popup.is_visible());
+        }
     }
 
-    #[test]
-    fn render_hidden_popup_emits_nothing() {
-        // App's draw gates on height(), so only this test reaches render()'s hidden-popup return.
-        let popup = popup_with_state(None);
-        let backend = render_to_backend(&popup, 60);
-        let buf = backend.buffer();
-        for y in 0..buf.area.height {
-            for x in 0..buf.area.width {
-                let cell = buf.cell(ratatui::layout::Position::new(x, y)).unwrap();
-                assert_eq!(cell.symbol(), " ", "hidden popup must paint nothing");
+    mod completion {
+        use super::*;
+
+        #[test]
+        fn in_name_mode_is_the_slash_command() {
+            let popup = name_popup("hel");
+
+            assert_eq!(popup.completion().as_deref(), Some("/help"));
+        }
+
+        #[test]
+        fn in_arg_mode_follows_the_command_with_the_selected_value() {
+            let mut popup = arg_popup("effort", "");
+            popup.select_next();
+
+            assert_eq!(popup.completion().as_deref(), Some("/effort medium"));
+        }
+
+        #[test]
+        fn of_a_hidden_popup_completes_nothing() {
+            let popup = popup_with_state(None);
+
+            assert_eq!(popup.completion(), None);
+        }
+    }
+
+    mod select_next {
+        use super::*;
+
+        #[test]
+        fn wraps_at_bottom() {
+            let mut popup = name_popup("");
+            let n = list(&popup).rows.len();
+
+            for _ in 0..n {
+                popup.select_next();
+            }
+
+            assert_eq!(list(&popup).selected, 0, "wrap from last back to first");
+        }
+    }
+
+    mod select_prev {
+        use super::*;
+
+        #[test]
+        fn wraps_at_top() {
+            let mut popup = name_popup("");
+            let n = list(&popup).rows.len();
+
+            popup.select_prev();
+
+            assert_eq!(list(&popup).selected, n - 1, "wrap from first up to last");
+        }
+
+        #[test]
+        fn when_not_at_top_moves_up_one_row() {
+            // Pins the decrement branch, since select_prev() from row 0 takes the wrap branch.
+            let mut popup = name_popup("");
+            popup.select_next();
+            popup.select_next();
+            assert_eq!(list(&popup).selected, 2);
+
+            popup.select_prev();
+
+            assert_eq!(list(&popup).selected, 1);
+        }
+    }
+
+    mod height {
+        use super::*;
+
+        #[test]
+        fn caps_at_max_visible_rows_plus_chrome() {
+            assert_eq!(long_popup(3).height(), 3 + CHROME_ROWS);
+            assert_eq!(long_popup(12).height(), 8 + CHROME_ROWS);
+        }
+    }
+
+    mod render {
+        use super::*;
+
+        fn render_to_backend(popup: &SlashPopup, width: u16) -> TestBackend {
+            let height = popup.height().max(1);
+            let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+            terminal
+                .draw(|frame| popup.render(frame, frame.area()))
+                .unwrap();
+            terminal.backend().clone()
+        }
+
+        #[test]
+        fn empty_name_query_shows_each_command_once() {
+            let popup = name_popup("");
+            insta::assert_snapshot!(render_to_backend(&popup, 60));
+        }
+
+        #[test]
+        fn filtered_name_query_shows_only_matching_rows() {
+            let popup = name_popup("hel");
+            insta::assert_snapshot!(render_to_backend(&popup, 60));
+        }
+
+        #[test]
+        fn arg_mode_lists_curated_roster_without_slash_prefix() {
+            let popup = arg_popup("effort", "");
+            insta::assert_snapshot!(render_to_backend(&popup, 60));
+        }
+
+        #[test]
+        fn arg_mode_prefix_filters_to_subset() {
+            let popup = arg_popup("theme", "m");
+            insta::assert_snapshot!(render_to_backend(&popup, 60));
+        }
+
+        #[test]
+        fn selected_row_paints_bold_text_others_dim() {
+            // TestBackend snapshots don't capture style, so layout-only snapshots can't tell
+            // selected from unselected. Pin the bold-vs-dim contrast on the rendered cells.
+            use ratatui::layout::Position;
+            use ratatui::style::Modifier;
+
+            let theme = theme();
+            let mut popup = name_popup("");
+            popup.select_next();
+            let backend = render_to_backend(&popup, 60);
+
+            // Data rows start below the top-border chrome row, at y = CHROME_ROWS.
+            let chrome = CHROME_ROWS;
+            let selected = backend.buffer().cell(Position::new(0, chrome + 1)).unwrap();
+            assert_eq!(selected.fg, theme.text().fg.unwrap());
+            assert!(
+                selected.modifier.contains(Modifier::BOLD),
+                "selected row should paint bold: got {:?}",
+                selected.modifier,
+            );
+
+            let unselected = backend.buffer().cell(Position::new(0, chrome)).unwrap();
+            assert_eq!(unselected.fg, theme.dim().fg.unwrap());
+            assert!(
+                !unselected.modifier.contains(Modifier::BOLD),
+                "unselected row must not be bold: got {:?}",
+                unselected.modifier,
+            );
+        }
+
+        #[test]
+        fn narrow_terminal_truncates_description() {
+            let popup = name_popup("");
+            insta::assert_snapshot!(render_to_backend(&popup, 30));
+        }
+
+        #[test]
+        fn alias_match_parenthesizes_only_typed_alias() {
+            let popup = name_popup("new");
+            insta::assert_snapshot!(render_to_backend(&popup, 60));
+        }
+
+        #[test]
+        fn with_only_chrome_room_paints_the_border_and_skips_rows() {
+            // With exactly CHROME_ROWS reserved, the inner area has zero height, so the border
+            // paints and the row loop is skipped.
+            let popup = name_popup("");
+            let width: u16 = 60;
+            let mut terminal = Terminal::new(TestBackend::new(width, CHROME_ROWS)).unwrap();
+            terminal
+                .draw(|frame| popup.render(frame, Rect::new(0, 0, width, CHROME_ROWS)))
+                .unwrap();
+            let buf = terminal.backend().buffer();
+            for x in 0..width {
+                assert_eq!(
+                    buf.cell(ratatui::layout::Position::new(x, 0))
+                        .unwrap()
+                        .symbol(),
+                    "─",
+                    "chrome row must be a continuous border at col {x}",
+                );
             }
         }
-    }
 
-    #[test]
-    fn render_after_scroll_shows_window_starting_at_offset() {
-        // Moving to row 8 of 12 scrolls `cmd0` out and `cmd8` in, so the slice and offset agree.
-        let mut popup = long_popup(12);
-        for _ in 0..8 {
-            popup.select_next();
+        #[test]
+        fn hidden_popup_emits_nothing() {
+            // App's draw gates on height(), so only this test hits render()'s hidden-popup return.
+            let popup = popup_with_state(None);
+            let backend = render_to_backend(&popup, 60);
+            let buf = backend.buffer();
+            for y in 0..buf.area.height {
+                for x in 0..buf.area.width {
+                    let cell = buf.cell(ratatui::layout::Position::new(x, y)).unwrap();
+                    assert_eq!(cell.symbol(), " ", "hidden popup must paint nothing");
+                }
+            }
         }
-        let backend = render_to_backend(&popup, 30);
-        let rendered = format!("{backend}");
-        assert!(!rendered.contains("cmd0"), "cmd0 scrolled off: {rendered}");
-        assert!(rendered.contains("cmd8"), "cmd8 in window: {rendered}");
-    }
 
-    // ── scroll_offset ──
-
-    #[test]
-    fn scroll_offset_is_zero_when_total_fits_window() {
-        let mut p = long_popup(5);
-        p.select_next();
-        p.select_next();
-        assert_eq!(list(&p).scroll_offset(), 0);
-    }
-
-    #[test]
-    fn scroll_offset_at_exactly_cap_does_not_scroll_last_row() {
-        // Boundary: total == MAX_VISIBLE_ROWS hits the `<=` early-return. Tightening the boundary
-        // pins the invariant for the only case where the edge matters.
-        let mut p = long_popup(MAX_VISIBLE_ROWS);
-        while list(&p).selected < MAX_VISIBLE_ROWS - 1 {
-            p.select_next();
-        }
-        assert_eq!(list(&p).scroll_offset(), 0);
-    }
-
-    #[test]
-    fn scroll_offset_anchors_at_top_while_cursor_in_first_half() {
-        let mut p = long_popup(MAX_VISIBLE_ROWS + 4);
-        for _ in 0..MAX_VISIBLE_ROWS / 2 {
-            assert_eq!(list(&p).scroll_offset(), 0);
-            p.select_next();
+        #[test]
+        fn after_scroll_shows_window_starting_at_offset() {
+            // Moving to row 8 of 12 scrolls `cmd0` out and `cmd8` in, so slice and offset agree.
+            let mut popup = long_popup(12);
+            for _ in 0..8 {
+                popup.select_next();
+            }
+            let backend = render_to_backend(&popup, 30);
+            let rendered = format!("{backend}");
+            assert!(!rendered.contains("cmd0"), "cmd0 scrolled off: {rendered}");
+            assert!(rendered.contains("cmd8"), "cmd8 in window: {rendered}");
         }
     }
 
-    #[test]
-    fn scroll_offset_centers_cursor_past_first_half() {
-        // pad = MAX_VISIBLE_ROWS / 2 = 4 for the default cap. At selected = pad + k the offset is
-        // k, keeping the cursor visually at row `pad`.
-        let mut p = long_popup(MAX_VISIBLE_ROWS + 4);
-        for _ in 0..=(MAX_VISIBLE_ROWS / 2) {
-            p.select_next();
-        }
-        assert_eq!(
-            list(&p).scroll_offset(),
-            1,
-            "cursor at pad + 1 → offset = 1"
-        );
-    }
+    mod popup_list {
+        use super::*;
 
-    #[test]
-    fn scroll_offset_keeps_visible_row_at_pad_for_mid_list_selection() {
-        // Pin the centering invariant directly: the visible row of the cursor (selected - offset)
-        // equals `pad` whenever the selection is past the top half but not yet near the bottom.
-        // Mutating the divisor (e.g. `/3`) or the formula would shift this row index.
-        let total = MAX_VISIBLE_ROWS + 4;
-        let mut p = long_popup(total);
-        let pad = MAX_VISIBLE_ROWS / 2;
-        for _ in 0..=(pad + 1) {
-            p.select_next();
-        }
-        let visible_row = list(&p).selected - list(&p).scroll_offset();
-        assert_eq!(visible_row, pad, "cursor must sit at the visual middle row");
-    }
+        mod scroll_offset {
+            use super::*;
 
-    #[test]
-    fn scroll_offset_anchors_at_bottom_near_end() {
-        // Once selected nears the end, the offset clamps to `len - MAX_VISIBLE_ROWS` so the last
-        // row stays visible while the cursor advances within the bottom-anchored window.
-        let total = MAX_VISIBLE_ROWS + 4;
-        let mut p = long_popup(total);
-        while list(&p).selected < total - 1 {
-            p.select_next();
-        }
-        assert_eq!(list(&p).scroll_offset(), total - MAX_VISIBLE_ROWS);
-    }
+            #[test]
+            fn is_zero_when_total_fits_window() {
+                let mut p = long_popup(5);
+                p.select_next();
+                p.select_next();
+                assert_eq!(list(&p).scroll_offset(), 0);
+            }
 
-    #[test]
-    fn scroll_offset_resets_on_wrap_to_first_row() {
-        let total = MAX_VISIBLE_ROWS + 4;
-        let mut p = long_popup(total);
-        for _ in 0..total {
-            p.select_next();
-        }
-        assert_eq!(list(&p).selected, 0, "wrap to row 0");
-        assert_eq!(
-            list(&p).scroll_offset(),
-            0,
-            "wrap snaps the window back to top"
-        );
-    }
+            #[test]
+            fn at_exactly_cap_does_not_scroll_last_row() {
+                // Boundary: total == MAX_VISIBLE_ROWS hits the `<=` early-return. Tightening the
+                // boundary pins the invariant for the only case where the edge matters.
+                let mut p = long_popup(MAX_VISIBLE_ROWS);
+                while list(&p).selected < MAX_VISIBLE_ROWS - 1 {
+                    p.select_next();
+                }
+                assert_eq!(list(&p).scroll_offset(), 0);
+            }
 
-    #[test]
-    fn scroll_offset_select_prev_from_top_anchors_at_bottom_window() {
-        // Up from row 0 wraps to the last row, and the bottom-anchored window clamps to
-        // `len - MAX_VISIBLE_ROWS`, mirroring the wrap-to-top test above.
-        let total = MAX_VISIBLE_ROWS + 4;
-        let mut p = long_popup(total);
-        p.select_prev();
-        assert_eq!(list(&p).selected, total - 1, "wrap to last row");
-        assert_eq!(list(&p).scroll_offset(), total - MAX_VISIBLE_ROWS);
+            #[test]
+            fn anchors_at_top_while_cursor_in_first_half() {
+                let mut p = long_popup(MAX_VISIBLE_ROWS + 4);
+                for _ in 0..MAX_VISIBLE_ROWS / 2 {
+                    assert_eq!(list(&p).scroll_offset(), 0);
+                    p.select_next();
+                }
+            }
+
+            #[test]
+            fn centers_cursor_past_first_half() {
+                // pad = MAX_VISIBLE_ROWS / 2 = 4 for the default cap. At selected = pad + k the
+                // offset is k, keeping the cursor visually at row `pad`.
+                let mut p = long_popup(MAX_VISIBLE_ROWS + 4);
+                for _ in 0..=(MAX_VISIBLE_ROWS / 2) {
+                    p.select_next();
+                }
+                assert_eq!(
+                    list(&p).scroll_offset(),
+                    1,
+                    "cursor at pad + 1 → offset = 1"
+                );
+            }
+
+            #[test]
+            fn keeps_visible_row_at_pad_for_mid_list_selection() {
+                // Pin the centering invariant: the visible row of the cursor (selected - offset)
+                // equals `pad` whenever the selection is past the top half but not yet near the
+                // bottom. Mutating the divisor (e.g. `/3`) or the formula would shift this row.
+                let total = MAX_VISIBLE_ROWS + 4;
+                let mut p = long_popup(total);
+                let pad = MAX_VISIBLE_ROWS / 2;
+                for _ in 0..=(pad + 1) {
+                    p.select_next();
+                }
+                let visible_row = list(&p).selected - list(&p).scroll_offset();
+                assert_eq!(visible_row, pad, "cursor must sit at the visual middle row");
+            }
+
+            #[test]
+            fn anchors_at_bottom_near_end() {
+                // Once selected nears the end, the offset clamps to `len - MAX_VISIBLE_ROWS` so the
+                // last row stays visible while the cursor advances in the bottom-anchored window.
+                let total = MAX_VISIBLE_ROWS + 4;
+                let mut p = long_popup(total);
+                while list(&p).selected < total - 1 {
+                    p.select_next();
+                }
+                assert_eq!(list(&p).scroll_offset(), total - MAX_VISIBLE_ROWS);
+            }
+
+            #[test]
+            fn resets_on_wrap_to_first_row() {
+                let total = MAX_VISIBLE_ROWS + 4;
+                let mut p = long_popup(total);
+                for _ in 0..total {
+                    p.select_next();
+                }
+                assert_eq!(list(&p).selected, 0, "wrap to row 0");
+                assert_eq!(
+                    list(&p).scroll_offset(),
+                    0,
+                    "wrap snaps the window back to top"
+                );
+            }
+
+            #[test]
+            fn select_prev_from_top_anchors_at_bottom_window() {
+                // Up from row 0 wraps to the last row, and the bottom-anchored window clamps to
+                // `len - MAX_VISIBLE_ROWS`, mirroring the wrap-to-top test above.
+                let total = MAX_VISIBLE_ROWS + 4;
+                let mut p = long_popup(total);
+                p.select_prev();
+                assert_eq!(list(&p).selected, total - 1, "wrap to last row");
+                assert_eq!(list(&p).scroll_offset(), total - MAX_VISIBLE_ROWS);
+            }
+        }
     }
 }

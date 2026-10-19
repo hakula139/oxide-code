@@ -22,25 +22,27 @@ mod tests {
     use super::*;
     use crate::tui::theme::Theme;
 
-    // ── render ──
+    mod render {
+        use super::*;
 
-    #[test]
-    fn render_emits_one_dim_italic_marker_row() {
-        let theme = Theme::default();
-        let ctx = RenderCtx {
-            width: 80,
-            theme: &theme,
-            show_thinking: false,
-        };
+        #[test]
+        fn emits_one_dim_italic_marker_row() {
+            let theme = Theme::default();
+            let ctx = RenderCtx {
+                width: 80,
+                theme: &theme,
+                show_thinking: false,
+            };
 
-        let lines = InterruptedMarker.render(&ctx);
+            let lines = InterruptedMarker.render(&ctx);
 
-        assert_eq!(
-            lines,
-            [Line::from(Span::styled(
-                "(interrupted)",
-                theme.dim().add_modifier(Modifier::ITALIC),
-            ))]
-        );
+            assert_eq!(
+                lines,
+                [Line::from(Span::styled(
+                    "(interrupted)",
+                    theme.dim().add_modifier(Modifier::ITALIC),
+                ))]
+            );
+        }
     }
 }

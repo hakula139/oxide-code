@@ -357,200 +357,210 @@ mod tests {
         WelcomeSnapshot::from_live_with_seed(info, TEST_SEED)
     }
 
-    fn render(width: u16, height: u16, snap: &WelcomeSnapshot) -> TestBackend {
-        let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
-        let theme = Theme::default();
-        terminal
-            .draw(|frame| {
-                paint(frame, Rect::new(0, 0, width, height), &theme, snap);
-            })
-            .unwrap();
-        terminal.backend().clone()
-    }
+    mod from_live {
+        use super::*;
 
-    // ── STARTER_POOL ──
+        #[test]
+        fn projects_display_name_and_effort() {
+            let info = fixture();
+            let snap = snap_for(&info);
+            assert_eq!(snap.version, "0.1.0");
+            assert_eq!(snap.model_label, "Claude Opus 5.5");
+            assert_eq!(snap.effort_label, "xhigh");
+            assert_eq!(snap.auth_label, "OAuth");
+            assert_eq!(snap.cwd, "~/github/oxide-code");
+        }
 
-    #[test]
-    fn starter_pool_lists_every_built_in_that_runs_bare_on_an_empty_session() {
-        // `/delete` and `/unarchive` need an id, `/archive` has nothing to archive yet, and
-        // `/logout` only undoes a `/login`.
-        let mut built_ins: Vec<String> = crate::slash::filter_built_ins("")
-            .into_iter()
-            .map(|cmd| format!("/{}", cmd.name))
-            .filter(|name| {
-                !["/archive", "/delete", "/logout", "/unarchive"].contains(&name.as_str())
-            })
-            .collect();
-        built_ins.sort_unstable();
-        let starters: Vec<&str> = STARTER_POOL.iter().map(|(name, _)| *name).collect();
-        assert_eq!(starters, built_ins);
-    }
+        #[test]
+        fn labels_a_signed_out_session() {
+            let mut info = fixture();
+            info.config.auth = None;
+            assert_eq!(snap_for(&info).auth_label, "Not signed in");
+        }
 
-    // ── WelcomeSnapshot::from_live ──
+        #[test]
+        fn picks_distinct_starters_from_the_pool() {
+            let info = fixture();
+            let snap = snap_for(&info);
+            let names: Vec<&str> = snap.starters.iter().map(|(n, _)| *n).collect();
+            assert_eq!(names.len(), STARTER_PICK);
+            let mut sorted = names.clone();
+            sorted.sort_unstable();
+            sorted.dedup();
+            assert_eq!(
+                sorted.len(),
+                STARTER_PICK,
+                "picked starters must be distinct"
+            );
+            for picked in &snap.starters {
+                assert!(STARTER_POOL.contains(picked));
+            }
+        }
 
-    #[test]
-    fn from_live_projects_display_name_and_effort() {
-        let info = fixture();
-        let snap = snap_for(&info);
-        assert_eq!(snap.version, "0.1.0");
-        assert_eq!(snap.model_label, "Claude Opus 5.5");
-        assert_eq!(snap.effort_label, "xhigh");
-        assert_eq!(snap.auth_label, "OAuth");
-        assert_eq!(snap.cwd, "~/github/oxide-code");
-    }
-
-    #[test]
-    fn from_live_labels_a_signed_out_session() {
-        let mut info = fixture();
-        info.config.auth = None;
-        assert_eq!(snap_for(&info).auth_label, "Not signed in");
-    }
-
-    #[test]
-    fn from_live_picks_distinct_starters_from_the_pool() {
-        let info = fixture();
-        let snap = snap_for(&info);
-        let names: Vec<&str> = snap.starters.iter().map(|(n, _)| *n).collect();
-        assert_eq!(names.len(), STARTER_PICK);
-        let mut sorted = names.clone();
-        sorted.sort_unstable();
-        sorted.dedup();
-        assert_eq!(
-            sorted.len(),
-            STARTER_PICK,
-            "picked starters must be distinct"
-        );
-        for picked in &snap.starters {
-            assert!(STARTER_POOL.contains(picked));
+        #[test]
+        fn picks_tip_from_the_pool() {
+            let info = fixture();
+            let snap = snap_for(&info);
+            assert!(TIP_POOL.contains(&snap.tip));
         }
     }
 
-    #[test]
-    fn from_live_picks_tip_from_the_pool() {
-        let info = fixture();
-        let snap = snap_for(&info);
-        assert!(TIP_POOL.contains(&snap.tip));
-    }
+    mod from_live_with_seed {
+        use super::*;
 
-    #[test]
-    fn from_live_with_seed_is_deterministic() {
-        let info = fixture();
-        let a = WelcomeSnapshot::from_live_with_seed(&info, 7);
-        let b = WelcomeSnapshot::from_live_with_seed(&info, 7);
-        assert_eq!(a.starters, b.starters);
-        assert_eq!(a.tip, b.tip);
-    }
-
-    // ── paint ──
-
-    #[test]
-    fn paint_below_narrow_min_is_a_noop() {
-        let snap = snap_for(&fixture());
-        let backend = render(NARROW_MIN - 1, 12, &snap);
-        for cell in &backend.buffer().content {
-            assert_eq!(cell.symbol(), " ", "every cell must remain blank");
+        #[test]
+        fn is_deterministic() {
+            let info = fixture();
+            let a = WelcomeSnapshot::from_live_with_seed(&info, 7);
+            let b = WelcomeSnapshot::from_live_with_seed(&info, 7);
+            assert_eq!(a.starters, b.starters);
+            assert_eq!(a.tip, b.tip);
         }
     }
 
-    #[test]
-    fn paint_full_width_renders_box_environment_starters_and_trailer() {
-        let snap = snap_for(&fixture());
-        insta::assert_snapshot!(render(80, 14, &snap));
+    mod paint {
+        use super::*;
+
+        fn render(width: u16, height: u16, snap: &WelcomeSnapshot) -> TestBackend {
+            let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+            let theme = Theme::default();
+            terminal
+                .draw(|frame| {
+                    paint(frame, Rect::new(0, 0, width, height), &theme, snap);
+                })
+                .unwrap();
+            terminal.backend().clone()
+        }
+
+        #[test]
+        fn below_narrow_min_is_a_noop() {
+            let snap = snap_for(&fixture());
+            let backend = render(NARROW_MIN - 1, 12, &snap);
+            for cell in &backend.buffer().content {
+                assert_eq!(cell.symbol(), " ", "every cell must remain blank");
+            }
+        }
+
+        #[test]
+        fn full_width_renders_box_environment_starters_and_trailer() {
+            let snap = snap_for(&fixture());
+            insta::assert_snapshot!(render(80, 14, &snap));
+        }
+
+        #[test]
+        fn at_60_col_minimum_full_layout_still_includes_starters() {
+            let snap = snap_for(&fixture());
+            insta::assert_snapshot!(render(60, 14, &snap));
+        }
+
+        #[test]
+        fn collapsed_drops_box_but_keeps_starters() {
+            let snap = snap_for(&fixture());
+            insta::assert_snapshot!(render(50, 14, &snap));
+        }
+
+        #[test]
+        fn narrow_drops_starters_and_truncates_cwd_in_the_middle() {
+            let mut info = fixture();
+            info.cwd = "~/very/long/working/directory/path/oxide-code".to_owned();
+            let snap = snap_for(&info);
+            insta::assert_snapshot!(render(30, 8, &snap));
+        }
+
+        #[test]
+        fn at_narrow_min_does_not_clip_environment_text() {
+            let snap = snap_for(&fixture());
+            let backend = render(NARROW_MIN, 8, &snap);
+            let row: String = (0..NARROW_MIN)
+                .map(|x| {
+                    backend
+                        .buffer()
+                        .cell((x, 3))
+                        .map_or(' ', |c| c.symbol().chars().next().unwrap_or(' '))
+                })
+                .collect();
+            assert!(row.contains("xhigh"), "narrow env must not clip: {row:?}");
+        }
+
+        #[test]
+        fn below_starters_min_height_centers_env_on_its_own_width() {
+            let snap = snap_for(&fixture());
+            let backend = render(80, STARTERS_MIN_HEIGHT - 1, &snap);
+            let env_row: String = (0..80)
+                .map(|x| {
+                    backend
+                        .buffer()
+                        .cell((x, 5))
+                        .map_or(' ', |c| c.symbol().chars().next().unwrap_or(' '))
+                })
+                .collect();
+            let leading = env_row.chars().take_while(|c| *c == ' ').count();
+            let trailing = env_row.chars().rev().take_while(|c| *c == ' ').count();
+            assert!(
+                leading.abs_diff(trailing) <= 1,
+                "env row must be centered, got leading={leading} trailing={trailing}: {env_row:?}",
+            );
+        }
+
+        #[test]
+        fn just_below_collapsed_min_drops_starters() {
+            let snap = snap_for(&fixture());
+            let backend = render(COLLAPSED_MIN - 1, 12, &snap);
+            let body: String = backend
+                .buffer()
+                .content
+                .iter()
+                .map(|c| c.symbol().chars().next().unwrap_or(' '))
+                .collect();
+            assert!(
+                !body.contains(STARTER_HEADER),
+                "starter header must disappear"
+            );
+            assert!(!body.contains(TIP_LABEL), "tip row must disappear");
+        }
+
+        #[test]
+        fn just_below_full_min_drops_ribbon() {
+            let snap = snap_for(&fixture());
+            let backend = render(FULL_MIN - 1, 14, &snap);
+            let body: String = backend
+                .buffer()
+                .content
+                .iter()
+                .map(|c| c.symbol().chars().next().unwrap_or(' '))
+                .collect();
+            assert!(body.contains(WORDMARK), "wordmark must still render");
+            assert!(!body.contains(RIBBON_FLANK), "ribbon flanks must disappear");
+        }
+
+        #[test]
+        fn zero_height_is_a_noop() {
+            let snap = snap_for(&fixture());
+            let backend = render(80, 0, &snap);
+            assert!(
+                backend.buffer().content.is_empty(),
+                "zero-height area paints nothing",
+            );
+        }
     }
 
-    #[test]
-    fn paint_60_col_minimum_full_layout_still_includes_starters() {
-        let snap = snap_for(&fixture());
-        insta::assert_snapshot!(render(60, 14, &snap));
-    }
+    mod starter_pool {
+        use super::*;
 
-    #[test]
-    fn paint_collapsed_drops_box_but_keeps_starters() {
-        let snap = snap_for(&fixture());
-        insta::assert_snapshot!(render(50, 14, &snap));
-    }
-
-    #[test]
-    fn paint_narrow_drops_starters_and_truncates_cwd_in_the_middle() {
-        let mut info = fixture();
-        info.cwd = "~/very/long/working/directory/path/oxide-code".to_owned();
-        let snap = snap_for(&info);
-        insta::assert_snapshot!(render(30, 8, &snap));
-    }
-
-    #[test]
-    fn paint_at_narrow_min_does_not_clip_environment_text() {
-        let snap = snap_for(&fixture());
-        let backend = render(NARROW_MIN, 8, &snap);
-        let row: String = (0..NARROW_MIN)
-            .map(|x| {
-                backend
-                    .buffer()
-                    .cell((x, 3))
-                    .map_or(' ', |c| c.symbol().chars().next().unwrap_or(' '))
-            })
-            .collect();
-        assert!(row.contains("xhigh"), "narrow env must not clip: {row:?}");
-    }
-
-    #[test]
-    fn paint_below_starters_min_height_centers_env_on_its_own_width() {
-        let snap = snap_for(&fixture());
-        let backend = render(80, STARTERS_MIN_HEIGHT - 1, &snap);
-        let env_row: String = (0..80)
-            .map(|x| {
-                backend
-                    .buffer()
-                    .cell((x, 5))
-                    .map_or(' ', |c| c.symbol().chars().next().unwrap_or(' '))
-            })
-            .collect();
-        let leading = env_row.chars().take_while(|c| *c == ' ').count();
-        let trailing = env_row.chars().rev().take_while(|c| *c == ' ').count();
-        assert!(
-            leading.abs_diff(trailing) <= 1,
-            "env row must be centered, got leading={leading} trailing={trailing}: {env_row:?}",
-        );
-    }
-
-    #[test]
-    fn paint_just_below_collapsed_min_drops_starters() {
-        let snap = snap_for(&fixture());
-        let backend = render(COLLAPSED_MIN - 1, 12, &snap);
-        let body: String = backend
-            .buffer()
-            .content
-            .iter()
-            .map(|c| c.symbol().chars().next().unwrap_or(' '))
-            .collect();
-        assert!(
-            !body.contains(STARTER_HEADER),
-            "starter header must disappear"
-        );
-        assert!(!body.contains(TIP_LABEL), "tip row must disappear");
-    }
-
-    #[test]
-    fn paint_just_below_full_min_drops_ribbon() {
-        let snap = snap_for(&fixture());
-        let backend = render(FULL_MIN - 1, 14, &snap);
-        let body: String = backend
-            .buffer()
-            .content
-            .iter()
-            .map(|c| c.symbol().chars().next().unwrap_or(' '))
-            .collect();
-        assert!(body.contains(WORDMARK), "wordmark must still render");
-        assert!(!body.contains(RIBBON_FLANK), "ribbon flanks must disappear");
-    }
-
-    #[test]
-    fn paint_zero_height_is_a_noop() {
-        let snap = snap_for(&fixture());
-        let backend = render(80, 0, &snap);
-        assert!(
-            backend.buffer().content.is_empty(),
-            "zero-height area paints nothing",
-        );
+        #[test]
+        fn lists_every_built_in_that_runs_bare_on_an_empty_session() {
+            // `/delete` and `/unarchive` need an id, `/archive` has nothing to archive yet, and
+            // `/logout` only undoes a `/login`.
+            let mut built_ins: Vec<String> = crate::slash::filter_built_ins("")
+                .into_iter()
+                .map(|cmd| format!("/{}", cmd.name))
+                .filter(|name| {
+                    !["/archive", "/delete", "/logout", "/unarchive"].contains(&name.as_str())
+                })
+                .collect();
+            built_ins.sort_unstable();
+            let starters: Vec<&str> = STARTER_POOL.iter().map(|(name, _)| *name).collect();
+            assert_eq!(starters, built_ins);
+        }
     }
 }

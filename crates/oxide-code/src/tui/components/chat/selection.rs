@@ -441,691 +441,711 @@ mod tests {
     use crate::tui::components::chat::blocks::{ChatBlock, RenderCtx};
     use crate::tui::theme::Theme;
 
-    // ── Fixtures ──
+    mod click_counter {
+        use super::*;
 
-    /// Chat area one row below the top of a 6-row screen, so screen rows differ from chat rows.
-    const AREA: Rect = Rect::new(0, 1, 20, 4);
+        mod press {
+            use super::*;
 
-    /// Renders fixed rows flush against its neighbors.
-    struct Rows(Vec<&'static str>);
+            #[test]
+            fn counts_quick_presses_on_one_cell_up_to_a_row() {
+                let mut clicks = ClickCounter::default();
+                let start = Instant::now();
+                let at = |ms| start + Duration::from_millis(ms);
 
-    impl ChatBlock for Rows {
-        fn render(&self, _ctx: &RenderCtx<'_>) -> Vec<Line<'static>> {
-            self.0.iter().map(|row| Line::raw(*row)).collect()
-        }
+                let units: Vec<Unit> = [0, 100, 200, 300]
+                    .into_iter()
+                    .map(|ms| clicks.press((3, 1), at(ms)))
+                    .collect();
 
-        fn standalone(&self) -> bool {
-            false
-        }
-    }
-
-    fn chat_of(rows: Vec<&'static str>) -> ChatView {
-        let mut chat = ChatView::new(&Theme::default(), false);
-        chat.push_block(Rows(rows));
-        paint_in(&mut chat, AREA);
-        chat
-    }
-
-    fn paint_in(chat: &mut ChatView, area: Rect) -> Buffer {
-        let mut terminal = Terminal::new(TestBackend::new(area.width, 6)).unwrap();
-        terminal.draw(|frame| chat.render(frame, area)).unwrap();
-        terminal.backend().buffer().clone()
-    }
-
-    fn paint(chat: &mut ChatView) -> Buffer {
-        paint_in(chat, AREA)
-    }
-
-    fn mouse(
-        chat: &mut ChatView,
-        kind: MouseEventKind,
-        (x, y): (u16, u16),
-        now: Instant,
-    ) -> Option<String> {
-        chat.handle_mouse(
-            MouseEvent {
-                kind,
-                column: x,
-                row: y,
-                modifiers: KeyModifiers::NONE,
-            },
-            now,
-        )
-    }
-
-    /// Presses at `from`, drags to `to`, and releases there, returning the copied text.
-    fn drag(chat: &mut ChatView, from: (u16, u16), to: (u16, u16)) -> Option<String> {
-        let now = Instant::now();
-        mouse(chat, MouseEventKind::Down(MouseButton::Left), from, now);
-        mouse(chat, MouseEventKind::Drag(MouseButton::Left), to, now);
-        mouse(chat, MouseEventKind::Up(MouseButton::Left), to, now)
-    }
-
-    fn click(chat: &mut ChatView, cell: (u16, u16), now: Instant) -> Option<String> {
-        mouse(chat, MouseEventKind::Down(MouseButton::Left), cell, now);
-        mouse(chat, MouseEventKind::Up(MouseButton::Left), cell, now)
-    }
-
-    fn highlighted(buf: &Buffer, x: u16, y: u16) -> bool {
-        buf[(x, y)].bg == Theme::default().selection().bg.unwrap()
-    }
-
-    /// Screen cell where `needle` first shows in `buf`.
-    fn find(buf: &Buffer, needle: &str) -> (u16, u16) {
-        for y in 0..buf.area.height {
-            let row: String = (0..buf.area.width).map(|x| buf[(x, y)].symbol()).collect();
-            if let Some(byte) = row.find(needle) {
-                return (u16::try_from(row[..byte].width()).unwrap(), y);
+                assert_eq!(units, [Unit::Cell, Unit::Word, Unit::Row, Unit::Cell]);
+                assert_eq!(clicks.press((3, 1), at(1000)), Unit::Cell, "too slow");
+                assert_eq!(clicks.press((4, 1), at(1100)), Unit::Cell, "another cell");
             }
         }
-        panic!("{needle:?} is not on screen")
     }
 
-    fn tool_call(label: &str) -> ToolCall {
-        ToolCall {
-            id: label.to_owned(),
-            name: "grep".to_owned(),
-            input: serde_json::json!({}),
-            icon: "*".to_owned(),
-            label: label.to_owned(),
+    mod chat_view {
+        use super::*;
+
+        /// Chat area one row below the top of a 6-row screen, so screen rows differ from chat rows.
+        const AREA: Rect = Rect::new(0, 1, 20, 4);
+
+        /// Renders fixed rows flush against its neighbors.
+        struct Rows(Vec<&'static str>);
+
+        impl ChatBlock for Rows {
+            fn render(&self, _ctx: &RenderCtx<'_>) -> Vec<Line<'static>> {
+                self.0.iter().map(|row| Line::raw(*row)).collect()
+            }
+
+            fn standalone(&self) -> bool {
+                false
+            }
+        }
+
+        fn chat_of(rows: Vec<&'static str>) -> ChatView {
+            let mut chat = ChatView::new(&Theme::default(), false);
+            chat.push_block(Rows(rows));
+            paint_in(&mut chat, AREA);
+            chat
+        }
+
+        fn paint_in(chat: &mut ChatView, area: Rect) -> Buffer {
+            let mut terminal = Terminal::new(TestBackend::new(area.width, 6)).unwrap();
+            terminal.draw(|frame| chat.render(frame, area)).unwrap();
+            terminal.backend().buffer().clone()
+        }
+
+        fn paint(chat: &mut ChatView) -> Buffer {
+            paint_in(chat, AREA)
+        }
+
+        fn mouse(
+            chat: &mut ChatView,
+            kind: MouseEventKind,
+            (x, y): (u16, u16),
+            now: Instant,
+        ) -> Option<String> {
+            chat.handle_mouse(
+                MouseEvent {
+                    kind,
+                    column: x,
+                    row: y,
+                    modifiers: KeyModifiers::NONE,
+                },
+                now,
+            )
+        }
+
+        /// Presses at `from`, drags to `to`, and releases there, returning the copied text.
+        fn drag(chat: &mut ChatView, from: (u16, u16), to: (u16, u16)) -> Option<String> {
+            let now = Instant::now();
+            mouse(chat, MouseEventKind::Down(MouseButton::Left), from, now);
+            mouse(chat, MouseEventKind::Drag(MouseButton::Left), to, now);
+            mouse(chat, MouseEventKind::Up(MouseButton::Left), to, now)
+        }
+
+        fn highlighted(buf: &Buffer, x: u16, y: u16) -> bool {
+            buf[(x, y)].bg == Theme::default().selection().bg.unwrap()
+        }
+
+        mod handle_mouse {
+            use super::*;
+
+            fn click(chat: &mut ChatView, cell: (u16, u16), now: Instant) -> Option<String> {
+                mouse(chat, MouseEventKind::Down(MouseButton::Left), cell, now);
+                mouse(chat, MouseEventKind::Up(MouseButton::Left), cell, now)
+            }
+
+            /// Screen cell where `needle` first shows in `buf`.
+            fn find(buf: &Buffer, needle: &str) -> (u16, u16) {
+                for y in 0..buf.area.height {
+                    let row: String = (0..buf.area.width).map(|x| buf[(x, y)].symbol()).collect();
+                    if let Some(byte) = row.find(needle) {
+                        return (u16::try_from(row[..byte].width()).unwrap(), y);
+                    }
+                }
+                panic!("{needle:?} is not on screen")
+            }
+
+            fn tool_call(label: &str) -> ToolCall {
+                ToolCall {
+                    id: label.to_owned(),
+                    name: "grep".to_owned(),
+                    input: serde_json::json!({}),
+                    icon: "*".to_owned(),
+                    label: label.to_owned(),
+                }
+            }
+
+            fn tool_result(id: &str, content: &str) -> ToolResult {
+                ToolResult {
+                    id: id.to_owned(),
+                    content: content.to_owned(),
+                    is_error: false,
+                    title: None,
+                    view: ToolResultView::Text {
+                        content: content.to_owned(),
+                    },
+                }
+            }
+
+            #[test]
+            fn drag_copies_from_the_press_through_the_pointer_in_either_direction() {
+                let mut chat = chat_of(vec!["alpha beta", "gamma delta", "epsilon"]);
+
+                let forward = drag(&mut chat, (6, 1), (4, 2));
+                let backward = drag(&mut chat, (4, 2), (6, 1));
+
+                assert_eq!(forward.as_deref(), Some("beta\ngamma"));
+                assert_eq!(backward, forward);
+            }
+
+            #[test]
+            fn plain_click_selects_nothing() {
+                let mut chat = chat_of(vec!["alpha beta"]);
+                drag(&mut chat, (0, 1), (4, 1));
+
+                let copied = click(&mut chat, (2, 1), Instant::now());
+
+                assert_eq!(copied, None);
+                assert!(chat.selection.is_none(), "a click clears the old selection");
+            }
+
+            #[test]
+            fn double_and_triple_clicks_select_a_word_and_a_row() {
+                let mut chat = chat_of(vec!["let x = foo(bar_baz);"]);
+                let now = Instant::now();
+
+                assert_eq!(click(&mut chat, (13, 1), now), None);
+                let word = click(&mut chat, (13, 1), now);
+                let row = click(&mut chat, (13, 1), now);
+
+                assert_eq!(word.as_deref(), Some("bar_baz"));
+                assert_eq!(row.as_deref(), Some("let x = foo(bar_baz);"));
+            }
+
+            #[test]
+            fn ignores_presses_outside_the_chat_and_stray_events() {
+                let mut chat = chat_of(vec!["alpha beta"]);
+                let now = Instant::now();
+
+                let outside = drag(&mut chat, (0, 0), (4, 1));
+                mouse(
+                    &mut chat,
+                    MouseEventKind::Drag(MouseButton::Left),
+                    (4, 1),
+                    now,
+                );
+                let moved = mouse(&mut chat, MouseEventKind::Moved, (4, 1), now);
+
+                assert_eq!((outside, moved), (None, None));
+                assert!(chat.selection.is_none());
+            }
+
+            #[test]
+            fn selection_keeps_its_text_as_blocks_arrive_around_it() {
+                let mut chat = chat_of(vec!["alpha beta", "gamma delta"]);
+                let now = Instant::now();
+                mouse(
+                    &mut chat,
+                    MouseEventKind::Down(MouseButton::Left),
+                    (6, 1),
+                    now,
+                );
+                mouse(
+                    &mut chat,
+                    MouseEventKind::Drag(MouseButton::Left),
+                    (4, 2),
+                    now,
+                );
+                assert!(chat.is_scrolled_up(), "a drag pauses following the tail");
+
+                chat.insert_block(0, Rows(vec!["inserted above"]));
+                chat.push_block(Rows(vec!["streamed"; 6]));
+                let buf = paint(&mut chat);
+                let copied = mouse(
+                    &mut chat,
+                    MouseEventKind::Up(MouseButton::Left),
+                    (4, 2),
+                    now,
+                );
+
+                assert_eq!(copied.as_deref(), Some("beta\ngamma"));
+                assert!(
+                    highlighted(&buf, 6, 1),
+                    "the paused view keeps the text in place"
+                );
+            }
+
+            #[test]
+            fn width_change_drops_the_selection() {
+                let mut chat = chat_of(vec!["alpha beta"]);
+                let now = Instant::now();
+                mouse(
+                    &mut chat,
+                    MouseEventKind::Down(MouseButton::Left),
+                    (0, 1),
+                    now,
+                );
+                mouse(
+                    &mut chat,
+                    MouseEventKind::Drag(MouseButton::Left),
+                    (4, 1),
+                    now,
+                );
+
+                paint_in(&mut chat, Rect { width: 12, ..AREA });
+
+                assert!(chat.selection.is_none());
+            }
+
+            #[test]
+            fn height_change_keeps_the_selection() {
+                let mut chat = chat_of(vec!["alpha beta"]);
+                let now = Instant::now();
+                mouse(
+                    &mut chat,
+                    MouseEventKind::Down(MouseButton::Left),
+                    (6, 1),
+                    now,
+                );
+                mouse(
+                    &mut chat,
+                    MouseEventKind::Drag(MouseButton::Left),
+                    (9, 1),
+                    now,
+                );
+
+                paint_in(&mut chat, Rect { height: 3, ..AREA });
+                let copied = mouse(
+                    &mut chat,
+                    MouseEventKind::Up(MouseButton::Left),
+                    (9, 1),
+                    now,
+                );
+
+                assert_eq!(copied.as_deref(), Some("beta"));
+            }
+
+            #[test]
+            fn selection_on_a_call_stays_put_when_a_result_lands_above_it() {
+                let area = Rect::new(0, 1, 30, 5);
+                let mut chat = ChatView::new(&Theme::default(), false);
+                chat.push_tool_call(tool_call("Grep(a)"));
+                chat.push_tool_call(tool_call("Grep(b)"));
+                let (x, y) = find(&paint_in(&mut chat, area), "Grep(b)");
+                let now = Instant::now();
+                mouse(
+                    &mut chat,
+                    MouseEventKind::Down(MouseButton::Left),
+                    (x, y),
+                    now,
+                );
+                mouse(
+                    &mut chat,
+                    MouseEventKind::Drag(MouseButton::Left),
+                    (x + 6, y),
+                    now,
+                );
+
+                chat.push_tool_result(tool_result("Grep(a)", "a hits"));
+                let buf = paint_in(&mut chat, area);
+                let copied = mouse(
+                    &mut chat,
+                    MouseEventKind::Up(MouseButton::Left),
+                    (x + 6, y),
+                    now,
+                );
+
+                assert_eq!(copied.as_deref(), Some("Grep(b)"));
+                let (x, y) = find(&buf, "Grep(b)");
+                assert!(highlighted(&buf, x, y) && highlighted(&buf, x + 6, y));
+                assert!(
+                    !highlighted(&buf, x, y - 1),
+                    "the separator above stays plain"
+                );
+            }
+
+            #[test]
+            fn release_reads_a_block_pushed_since_the_last_frame() {
+                let mut chat = chat_of(vec!["alpha"]);
+                chat.append_stream_token("beta gamma");
+                let (x, y) = find(&paint(&mut chat), "beta");
+                let now = Instant::now();
+                mouse(
+                    &mut chat,
+                    MouseEventKind::Down(MouseButton::Left),
+                    (x, y),
+                    now,
+                );
+                mouse(
+                    &mut chat,
+                    MouseEventKind::Drag(MouseButton::Left),
+                    (x + 3, y),
+                    now,
+                );
+
+                chat.commit_streaming();
+                let copied = mouse(
+                    &mut chat,
+                    MouseEventKind::Up(MouseButton::Left),
+                    (x + 3, y),
+                    now,
+                );
+
+                assert_eq!(copied.as_deref(), Some("beta"));
+            }
+
+            #[test]
+            fn drag_into_blank_space_ends_at_the_last_painted_row() {
+                let mut chat = chat_of(vec!["alpha beta"]);
+                let now = Instant::now();
+                mouse(
+                    &mut chat,
+                    MouseEventKind::Down(MouseButton::Left),
+                    (6, 1),
+                    now,
+                );
+                mouse(
+                    &mut chat,
+                    MouseEventKind::Drag(MouseButton::Left),
+                    (2, 3),
+                    now,
+                );
+
+                chat.push_block(Rows(vec!["pushed"]));
+                paint(&mut chat);
+                let copied = mouse(
+                    &mut chat,
+                    MouseEventKind::Up(MouseButton::Left),
+                    (2, 3),
+                    now,
+                );
+
+                assert_eq!(copied.as_deref(), Some("beta"));
+            }
+
+            #[test]
+            fn selects_nothing_once_the_chat_is_cleared() {
+                let mut chat = chat_of(vec!["old text"]);
+                let now = Instant::now();
+                mouse(
+                    &mut chat,
+                    MouseEventKind::Down(MouseButton::Left),
+                    (0, 1),
+                    now,
+                );
+                mouse(
+                    &mut chat,
+                    MouseEventKind::Drag(MouseButton::Left),
+                    (2, 1),
+                    now,
+                );
+
+                chat.clear_history();
+                let across_clear = mouse(
+                    &mut chat,
+                    MouseEventKind::Up(MouseButton::Left),
+                    (2, 1),
+                    now,
+                );
+                let cleared = !chat.has_selection();
+                let over_welcome = drag(&mut chat, (1, 1), (2, 1));
+                let welcome_untouched = !chat.has_selection();
+                chat.push_block(Rows(vec!["new text"]));
+                paint(&mut chat);
+                let after_content = drag(&mut chat, (0, 1), (2, 1));
+
+                assert_eq!((across_clear, cleared), (None, true));
+                assert_eq!((over_welcome, welcome_untouched), (None, true));
+                assert_eq!(after_content.as_deref(), Some("new"));
+            }
+
+            #[test]
+            fn whitespace_only_drag_copies_nothing() {
+                let mut chat = chat_of(vec!["a      b"]);
+
+                let copied = drag(&mut chat, (2, 1), (5, 1));
+
+                assert_eq!(copied, None);
+            }
+
+            #[test]
+            fn press_on_a_wide_character_takes_all_of_it() {
+                let mut chat = chat_of(vec!["日本語"]);
+                let now = Instant::now();
+                mouse(
+                    &mut chat,
+                    MouseEventKind::Down(MouseButton::Left),
+                    (1, 1),
+                    now,
+                );
+                mouse(
+                    &mut chat,
+                    MouseEventKind::Drag(MouseButton::Left),
+                    (2, 1),
+                    now,
+                );
+
+                let buf = paint(&mut chat);
+
+                assert!(highlighted(&buf, 0, 1), "the press moved to the lead cell");
+                assert!(!highlighted(&buf, 4, 1));
+            }
+
+            #[test]
+            fn measures_rows_as_ratatui_paints_them() {
+                let mut chat = chat_of(vec!["a\x1b[1mb\u{200b} word"]);
+                let (x, y) = find(&paint(&mut chat), "word");
+                let now = Instant::now();
+
+                let row = drag(&mut chat, (0, y), (x + 3, y));
+                click(&mut chat, (x, y), now);
+                let word = click(&mut chat, (x, y), now);
+
+                assert_eq!(row.as_deref(), Some("a[1mb word"));
+                assert_eq!(word.as_deref(), Some("word"));
+            }
+        }
+
+        mod tick_selection {
+            use super::*;
+
+            #[test]
+            fn scrolls_toward_a_pointer_held_past_the_edge() {
+                let mut chat = chat_of(vec![
+                    "r0", "r1", "r2", "r3", "r4", "r5", "r6", "r7", "r8", "r9",
+                ]);
+                let now = Instant::now();
+                mouse(
+                    &mut chat,
+                    MouseEventKind::Down(MouseButton::Left),
+                    (0, 3),
+                    now,
+                );
+                mouse(
+                    &mut chat,
+                    MouseEventKind::Drag(MouseButton::Left),
+                    (0, 0),
+                    now,
+                );
+
+                assert!(chat.tick_selection(now));
+                assert!(
+                    !chat.tick_selection(now + Duration::from_millis(10)),
+                    "throttled"
+                );
+                paint(&mut chat);
+                assert!(chat.tick_selection(now + EDGE_SCROLL_INTERVAL));
+                let buf = paint(&mut chat);
+                let copied = mouse(
+                    &mut chat,
+                    MouseEventKind::Up(MouseButton::Left),
+                    (0, 0),
+                    now,
+                );
+
+                assert_eq!(copied.as_deref(), Some("r4\nr5\nr6\nr7\nr"));
+                assert!(
+                    highlighted(&buf, 0, 1),
+                    "the head follows the content under the edge"
+                );
+                assert!(
+                    !chat.tick_selection(now + 2 * EDGE_SCROLL_INTERVAL),
+                    "released"
+                );
+            }
+
+            #[test]
+            fn scrolls_down_toward_a_pointer_below_the_chat() {
+                let mut chat = chat_of(vec![
+                    "r0", "r1", "r2", "r3", "r4", "r5", "r6", "r7", "r8", "r9",
+                ]);
+                chat.scroll_up(10);
+                paint(&mut chat);
+                let now = Instant::now();
+                mouse(
+                    &mut chat,
+                    MouseEventKind::Down(MouseButton::Left),
+                    (0, 1),
+                    now,
+                );
+                mouse(
+                    &mut chat,
+                    MouseEventKind::Drag(MouseButton::Left),
+                    (0, 5),
+                    now,
+                );
+
+                assert!(chat.tick_selection(now));
+                paint(&mut chat);
+                let copied = mouse(
+                    &mut chat,
+                    MouseEventKind::Up(MouseButton::Left),
+                    (0, 5),
+                    now,
+                );
+
+                assert_eq!(copied.as_deref(), Some("r0\nr1\nr2\nr3\nr4"));
+            }
+
+            #[test]
+            fn stops_at_the_bottom_and_the_release_follows_the_tail_again() {
+                let mut chat = chat_of(vec![
+                    "r0", "r1", "r2", "r3", "r4", "r5", "r6", "r7", "r8", "r9",
+                ]);
+                let now = Instant::now();
+                mouse(
+                    &mut chat,
+                    MouseEventKind::Down(MouseButton::Left),
+                    (0, 2),
+                    now,
+                );
+                mouse(
+                    &mut chat,
+                    MouseEventKind::Drag(MouseButton::Left),
+                    (0, 5),
+                    now,
+                );
+
+                assert!(!chat.tick_selection(now), "already at the bottom");
+                chat.handle_event(&crossterm::event::Event::Mouse(MouseEvent {
+                    kind: MouseEventKind::ScrollDown,
+                    column: 0,
+                    row: 2,
+                    modifiers: KeyModifiers::NONE,
+                }));
+                chat.push_block(Rows(vec!["streamed"]));
+                paint(&mut chat);
+                assert!(chat.is_scrolled_up(), "a held drag keeps the paint paused");
+                let copied = mouse(
+                    &mut chat,
+                    MouseEventKind::Up(MouseButton::Left),
+                    (0, 5),
+                    now,
+                );
+
+                assert_eq!(copied.as_deref(), Some("r7\nr8\nr9\nstreamed"));
+                assert!(!chat.is_scrolled_up(), "the release follows the tail again");
+            }
+
+            #[test]
+            fn gives_up_after_max_edge_scrolls_without_a_mouse_event() {
+                let mut chat = chat_of(vec!["row"; 300]);
+                let start = Instant::now();
+                mouse(
+                    &mut chat,
+                    MouseEventKind::Down(MouseButton::Left),
+                    (0, 2),
+                    start,
+                );
+                mouse(
+                    &mut chat,
+                    MouseEventKind::Drag(MouseButton::Left),
+                    (0, 0),
+                    start,
+                );
+                let mut now = start;
+                let mut scrolls = 0;
+
+                while chat.tick_selection(now) && scrolls <= MAX_EDGE_SCROLLS {
+                    scrolls += 1;
+                    paint(&mut chat);
+                    now += EDGE_SCROLL_INTERVAL;
+                }
+                mouse(
+                    &mut chat,
+                    MouseEventKind::Drag(MouseButton::Left),
+                    (0, 0),
+                    now,
+                );
+
+                assert_eq!(scrolls, MAX_EDGE_SCROLLS);
+                assert!(chat.tick_selection(now), "a drag event starts it over");
+            }
+
+            #[test]
+            fn leaves_a_pointer_inside_the_chat_alone() {
+                let mut chat = chat_of(vec!["alpha beta"]);
+                let now = Instant::now();
+                mouse(
+                    &mut chat,
+                    MouseEventKind::Down(MouseButton::Left),
+                    (0, 1),
+                    now,
+                );
+                mouse(
+                    &mut chat,
+                    MouseEventKind::Drag(MouseButton::Left),
+                    (4, 1),
+                    now,
+                );
+
+                assert!(!chat.tick_selection(now));
+            }
+        }
+
+        mod paint_selection {
+            use super::*;
+
+            #[test]
+            fn highlights_only_the_selected_cells() {
+                let mut chat = chat_of(vec!["alpha beta", "gamma delta"]);
+                let now = Instant::now();
+                mouse(
+                    &mut chat,
+                    MouseEventKind::Down(MouseButton::Left),
+                    (6, 1),
+                    now,
+                );
+                mouse(
+                    &mut chat,
+                    MouseEventKind::Drag(MouseButton::Left),
+                    (4, 2),
+                    now,
+                );
+
+                let buf = paint(&mut chat);
+
+                assert!(!highlighted(&buf, 5, 1));
+                assert!(highlighted(&buf, 6, 1));
+                assert!(
+                    highlighted(&buf, 19, 1),
+                    "middle and first rows run to the edge"
+                );
+                assert!(highlighted(&buf, 4, 2));
+                assert!(!highlighted(&buf, 5, 2));
+                assert!(!highlighted(&buf, 0, 3));
+            }
         }
     }
 
-    fn tool_result(id: &str, content: &str) -> ToolResult {
-        ToolResult {
-            id: id.to_owned(),
-            content: content.to_owned(),
-            is_error: false,
-            title: None,
-            view: ToolResultView::Text {
-                content: content.to_owned(),
-            },
+    mod row_text {
+        use super::*;
+
+        #[test]
+        fn takes_each_grapheme_that_overlaps_the_columns() {
+            let line = Line::raw("日本語 text   ");
+
+            assert_eq!(row_text(&line, 1..3), "日本");
+            assert_eq!(row_text(&line, 4..u16::MAX), "語 text");
         }
     }
 
-    // ── ClickCounter::press ──
+    mod grapheme_bounds {
+        use super::*;
 
-    #[test]
-    fn press_counts_quick_presses_on_one_cell_up_to_a_row() {
-        let mut clicks = ClickCounter::default();
-        let start = Instant::now();
-        let at = |ms| start + Duration::from_millis(ms);
+        #[test]
+        fn covers_every_cell_of_a_wide_character() {
+            let line = Line::raw("a日b");
 
-        let units: Vec<Unit> = [0, 100, 200, 300]
-            .into_iter()
-            .map(|ms| clicks.press((3, 1), at(ms)))
-            .collect();
-
-        assert_eq!(units, [Unit::Cell, Unit::Word, Unit::Row, Unit::Cell]);
-        assert_eq!(clicks.press((3, 1), at(1000)), Unit::Cell, "too slow");
-        assert_eq!(clicks.press((4, 1), at(1100)), Unit::Cell, "another cell");
-    }
-
-    // ── handle_mouse ──
-
-    #[test]
-    fn handle_mouse_drag_copies_from_the_press_through_the_pointer_in_either_direction() {
-        let mut chat = chat_of(vec!["alpha beta", "gamma delta", "epsilon"]);
-
-        let forward = drag(&mut chat, (6, 1), (4, 2));
-        let backward = drag(&mut chat, (4, 2), (6, 1));
-
-        assert_eq!(forward.as_deref(), Some("beta\ngamma"));
-        assert_eq!(backward, forward);
-    }
-
-    #[test]
-    fn handle_mouse_plain_click_selects_nothing() {
-        let mut chat = chat_of(vec!["alpha beta"]);
-        drag(&mut chat, (0, 1), (4, 1));
-
-        let copied = click(&mut chat, (2, 1), Instant::now());
-
-        assert_eq!(copied, None);
-        assert!(chat.selection.is_none(), "a click clears the old selection");
-    }
-
-    #[test]
-    fn handle_mouse_double_and_triple_clicks_select_a_word_and_a_row() {
-        let mut chat = chat_of(vec!["let x = foo(bar_baz);"]);
-        let now = Instant::now();
-
-        assert_eq!(click(&mut chat, (13, 1), now), None);
-        let word = click(&mut chat, (13, 1), now);
-        let row = click(&mut chat, (13, 1), now);
-
-        assert_eq!(word.as_deref(), Some("bar_baz"));
-        assert_eq!(row.as_deref(), Some("let x = foo(bar_baz);"));
-    }
-
-    #[test]
-    fn handle_mouse_ignores_presses_outside_the_chat_and_stray_events() {
-        let mut chat = chat_of(vec!["alpha beta"]);
-        let now = Instant::now();
-
-        let outside = drag(&mut chat, (0, 0), (4, 1));
-        mouse(
-            &mut chat,
-            MouseEventKind::Drag(MouseButton::Left),
-            (4, 1),
-            now,
-        );
-        let moved = mouse(&mut chat, MouseEventKind::Moved, (4, 1), now);
-
-        assert_eq!((outside, moved), (None, None));
-        assert!(chat.selection.is_none());
-    }
-
-    #[test]
-    fn handle_mouse_selection_keeps_its_text_as_blocks_arrive_around_it() {
-        let mut chat = chat_of(vec!["alpha beta", "gamma delta"]);
-        let now = Instant::now();
-        mouse(
-            &mut chat,
-            MouseEventKind::Down(MouseButton::Left),
-            (6, 1),
-            now,
-        );
-        mouse(
-            &mut chat,
-            MouseEventKind::Drag(MouseButton::Left),
-            (4, 2),
-            now,
-        );
-        assert!(chat.is_scrolled_up(), "a drag pauses following the tail");
-
-        chat.insert_block(0, Rows(vec!["inserted above"]));
-        chat.push_block(Rows(vec!["streamed"; 6]));
-        let buf = paint(&mut chat);
-        let copied = mouse(
-            &mut chat,
-            MouseEventKind::Up(MouseButton::Left),
-            (4, 2),
-            now,
-        );
-
-        assert_eq!(copied.as_deref(), Some("beta\ngamma"));
-        assert!(
-            highlighted(&buf, 6, 1),
-            "the paused view keeps the text in place"
-        );
-    }
-
-    #[test]
-    fn handle_mouse_width_change_drops_the_selection() {
-        let mut chat = chat_of(vec!["alpha beta"]);
-        let now = Instant::now();
-        mouse(
-            &mut chat,
-            MouseEventKind::Down(MouseButton::Left),
-            (0, 1),
-            now,
-        );
-        mouse(
-            &mut chat,
-            MouseEventKind::Drag(MouseButton::Left),
-            (4, 1),
-            now,
-        );
-
-        paint_in(&mut chat, Rect { width: 12, ..AREA });
-
-        assert!(chat.selection.is_none());
-    }
-
-    #[test]
-    fn handle_mouse_height_change_keeps_the_selection() {
-        let mut chat = chat_of(vec!["alpha beta"]);
-        let now = Instant::now();
-        mouse(
-            &mut chat,
-            MouseEventKind::Down(MouseButton::Left),
-            (6, 1),
-            now,
-        );
-        mouse(
-            &mut chat,
-            MouseEventKind::Drag(MouseButton::Left),
-            (9, 1),
-            now,
-        );
-
-        paint_in(&mut chat, Rect { height: 3, ..AREA });
-        let copied = mouse(
-            &mut chat,
-            MouseEventKind::Up(MouseButton::Left),
-            (9, 1),
-            now,
-        );
-
-        assert_eq!(copied.as_deref(), Some("beta"));
-    }
-
-    #[test]
-    fn handle_mouse_selection_on_a_call_stays_put_when_a_result_lands_above_it() {
-        let area = Rect::new(0, 1, 30, 5);
-        let mut chat = ChatView::new(&Theme::default(), false);
-        chat.push_tool_call(tool_call("Grep(a)"));
-        chat.push_tool_call(tool_call("Grep(b)"));
-        let (x, y) = find(&paint_in(&mut chat, area), "Grep(b)");
-        let now = Instant::now();
-        mouse(
-            &mut chat,
-            MouseEventKind::Down(MouseButton::Left),
-            (x, y),
-            now,
-        );
-        mouse(
-            &mut chat,
-            MouseEventKind::Drag(MouseButton::Left),
-            (x + 6, y),
-            now,
-        );
-
-        chat.push_tool_result(tool_result("Grep(a)", "a hits"));
-        let buf = paint_in(&mut chat, area);
-        let copied = mouse(
-            &mut chat,
-            MouseEventKind::Up(MouseButton::Left),
-            (x + 6, y),
-            now,
-        );
-
-        assert_eq!(copied.as_deref(), Some("Grep(b)"));
-        let (x, y) = find(&buf, "Grep(b)");
-        assert!(highlighted(&buf, x, y) && highlighted(&buf, x + 6, y));
-        assert!(
-            !highlighted(&buf, x, y - 1),
-            "the separator above stays plain"
-        );
-    }
-
-    #[test]
-    fn handle_mouse_release_reads_a_block_pushed_since_the_last_frame() {
-        let mut chat = chat_of(vec!["alpha"]);
-        chat.append_stream_token("beta gamma");
-        let (x, y) = find(&paint(&mut chat), "beta");
-        let now = Instant::now();
-        mouse(
-            &mut chat,
-            MouseEventKind::Down(MouseButton::Left),
-            (x, y),
-            now,
-        );
-        mouse(
-            &mut chat,
-            MouseEventKind::Drag(MouseButton::Left),
-            (x + 3, y),
-            now,
-        );
-
-        chat.commit_streaming();
-        let copied = mouse(
-            &mut chat,
-            MouseEventKind::Up(MouseButton::Left),
-            (x + 3, y),
-            now,
-        );
-
-        assert_eq!(copied.as_deref(), Some("beta"));
-    }
-
-    #[test]
-    fn handle_mouse_drag_into_blank_space_ends_at_the_last_painted_row() {
-        let mut chat = chat_of(vec!["alpha beta"]);
-        let now = Instant::now();
-        mouse(
-            &mut chat,
-            MouseEventKind::Down(MouseButton::Left),
-            (6, 1),
-            now,
-        );
-        mouse(
-            &mut chat,
-            MouseEventKind::Drag(MouseButton::Left),
-            (2, 3),
-            now,
-        );
-
-        chat.push_block(Rows(vec!["pushed"]));
-        paint(&mut chat);
-        let copied = mouse(
-            &mut chat,
-            MouseEventKind::Up(MouseButton::Left),
-            (2, 3),
-            now,
-        );
-
-        assert_eq!(copied.as_deref(), Some("beta"));
-    }
-
-    #[test]
-    fn handle_mouse_selects_nothing_once_the_chat_is_cleared() {
-        let mut chat = chat_of(vec!["old text"]);
-        let now = Instant::now();
-        mouse(
-            &mut chat,
-            MouseEventKind::Down(MouseButton::Left),
-            (0, 1),
-            now,
-        );
-        mouse(
-            &mut chat,
-            MouseEventKind::Drag(MouseButton::Left),
-            (2, 1),
-            now,
-        );
-
-        chat.clear_history();
-        let across_clear = mouse(
-            &mut chat,
-            MouseEventKind::Up(MouseButton::Left),
-            (2, 1),
-            now,
-        );
-        let cleared = !chat.has_selection();
-        let over_welcome = drag(&mut chat, (1, 1), (2, 1));
-        let welcome_untouched = !chat.has_selection();
-        chat.push_block(Rows(vec!["new text"]));
-        paint(&mut chat);
-        let after_content = drag(&mut chat, (0, 1), (2, 1));
-
-        assert_eq!((across_clear, cleared), (None, true));
-        assert_eq!((over_welcome, welcome_untouched), (None, true));
-        assert_eq!(after_content.as_deref(), Some("new"));
-    }
-
-    #[test]
-    fn handle_mouse_whitespace_only_drag_copies_nothing() {
-        let mut chat = chat_of(vec!["a      b"]);
-
-        let copied = drag(&mut chat, (2, 1), (5, 1));
-
-        assert_eq!(copied, None);
-    }
-
-    #[test]
-    fn handle_mouse_press_on_a_wide_character_takes_all_of_it() {
-        let mut chat = chat_of(vec!["日本語"]);
-        let now = Instant::now();
-        mouse(
-            &mut chat,
-            MouseEventKind::Down(MouseButton::Left),
-            (1, 1),
-            now,
-        );
-        mouse(
-            &mut chat,
-            MouseEventKind::Drag(MouseButton::Left),
-            (2, 1),
-            now,
-        );
-
-        let buf = paint(&mut chat);
-
-        assert!(highlighted(&buf, 0, 1), "the press moved to the lead cell");
-        assert!(!highlighted(&buf, 4, 1));
-    }
-
-    #[test]
-    fn handle_mouse_measures_rows_as_ratatui_paints_them() {
-        let mut chat = chat_of(vec!["a\x1b[1mb\u{200b} word"]);
-        let (x, y) = find(&paint(&mut chat), "word");
-        let now = Instant::now();
-
-        let row = drag(&mut chat, (0, y), (x + 3, y));
-        click(&mut chat, (x, y), now);
-        let word = click(&mut chat, (x, y), now);
-
-        assert_eq!(row.as_deref(), Some("a[1mb word"));
-        assert_eq!(word.as_deref(), Some("word"));
-    }
-
-    // ── tick_selection ──
-
-    #[test]
-    fn tick_selection_scrolls_toward_a_pointer_held_past_the_edge() {
-        let mut chat = chat_of(vec![
-            "r0", "r1", "r2", "r3", "r4", "r5", "r6", "r7", "r8", "r9",
-        ]);
-        let now = Instant::now();
-        mouse(
-            &mut chat,
-            MouseEventKind::Down(MouseButton::Left),
-            (0, 3),
-            now,
-        );
-        mouse(
-            &mut chat,
-            MouseEventKind::Drag(MouseButton::Left),
-            (0, 0),
-            now,
-        );
-
-        assert!(chat.tick_selection(now));
-        assert!(
-            !chat.tick_selection(now + Duration::from_millis(10)),
-            "throttled"
-        );
-        paint(&mut chat);
-        assert!(chat.tick_selection(now + EDGE_SCROLL_INTERVAL));
-        let buf = paint(&mut chat);
-        let copied = mouse(
-            &mut chat,
-            MouseEventKind::Up(MouseButton::Left),
-            (0, 0),
-            now,
-        );
-
-        assert_eq!(copied.as_deref(), Some("r4\nr5\nr6\nr7\nr"));
-        assert!(
-            highlighted(&buf, 0, 1),
-            "the head follows the content under the edge"
-        );
-        assert!(
-            !chat.tick_selection(now + 2 * EDGE_SCROLL_INTERVAL),
-            "released"
-        );
-    }
-
-    #[test]
-    fn tick_selection_scrolls_down_toward_a_pointer_below_the_chat() {
-        let mut chat = chat_of(vec![
-            "r0", "r1", "r2", "r3", "r4", "r5", "r6", "r7", "r8", "r9",
-        ]);
-        chat.scroll_up(10);
-        paint(&mut chat);
-        let now = Instant::now();
-        mouse(
-            &mut chat,
-            MouseEventKind::Down(MouseButton::Left),
-            (0, 1),
-            now,
-        );
-        mouse(
-            &mut chat,
-            MouseEventKind::Drag(MouseButton::Left),
-            (0, 5),
-            now,
-        );
-
-        assert!(chat.tick_selection(now));
-        paint(&mut chat);
-        let copied = mouse(
-            &mut chat,
-            MouseEventKind::Up(MouseButton::Left),
-            (0, 5),
-            now,
-        );
-
-        assert_eq!(copied.as_deref(), Some("r0\nr1\nr2\nr3\nr4"));
-    }
-
-    #[test]
-    fn tick_selection_stops_at_the_bottom_and_the_release_follows_the_tail_again() {
-        let mut chat = chat_of(vec![
-            "r0", "r1", "r2", "r3", "r4", "r5", "r6", "r7", "r8", "r9",
-        ]);
-        let now = Instant::now();
-        mouse(
-            &mut chat,
-            MouseEventKind::Down(MouseButton::Left),
-            (0, 2),
-            now,
-        );
-        mouse(
-            &mut chat,
-            MouseEventKind::Drag(MouseButton::Left),
-            (0, 5),
-            now,
-        );
-
-        assert!(!chat.tick_selection(now), "already at the bottom");
-        chat.handle_event(&crossterm::event::Event::Mouse(MouseEvent {
-            kind: MouseEventKind::ScrollDown,
-            column: 0,
-            row: 2,
-            modifiers: KeyModifiers::NONE,
-        }));
-        chat.push_block(Rows(vec!["streamed"]));
-        paint(&mut chat);
-        assert!(chat.is_scrolled_up(), "a held drag keeps the paint paused");
-        let copied = mouse(
-            &mut chat,
-            MouseEventKind::Up(MouseButton::Left),
-            (0, 5),
-            now,
-        );
-
-        assert_eq!(copied.as_deref(), Some("r7\nr8\nr9\nstreamed"));
-        assert!(!chat.is_scrolled_up(), "the release follows the tail again");
-    }
-
-    #[test]
-    fn tick_selection_gives_up_after_max_edge_scrolls_without_a_mouse_event() {
-        let mut chat = chat_of(vec!["row"; 300]);
-        let start = Instant::now();
-        mouse(
-            &mut chat,
-            MouseEventKind::Down(MouseButton::Left),
-            (0, 2),
-            start,
-        );
-        mouse(
-            &mut chat,
-            MouseEventKind::Drag(MouseButton::Left),
-            (0, 0),
-            start,
-        );
-        let mut now = start;
-        let mut scrolls = 0;
-
-        while chat.tick_selection(now) && scrolls <= MAX_EDGE_SCROLLS {
-            scrolls += 1;
-            paint(&mut chat);
-            now += EDGE_SCROLL_INTERVAL;
+            assert_eq!(grapheme_bounds(&line, 2), 1..3, "the second cell of 日");
+            assert_eq!(grapheme_bounds(&line, 3), 3..4);
+            assert_eq!(grapheme_bounds(&line, 9), 9..10, "past the end of the row");
         }
-        mouse(
-            &mut chat,
-            MouseEventKind::Drag(MouseButton::Left),
-            (0, 0),
-            now,
-        );
-
-        assert_eq!(scrolls, MAX_EDGE_SCROLLS);
-        assert!(chat.tick_selection(now), "a drag event starts it over");
     }
 
-    #[test]
-    fn tick_selection_leaves_a_pointer_inside_the_chat_alone() {
-        let mut chat = chat_of(vec!["alpha beta"]);
-        let now = Instant::now();
-        mouse(
-            &mut chat,
-            MouseEventKind::Down(MouseButton::Left),
-            (0, 1),
-            now,
-        );
-        mouse(
-            &mut chat,
-            MouseEventKind::Drag(MouseButton::Left),
-            (4, 1),
-            now,
-        );
+    mod word_bounds {
+        use super::*;
 
-        assert!(!chat.tick_selection(now));
-    }
+        #[test]
+        fn stops_at_whitespace_and_delimiters() {
+            let line = Line::raw("let x = foo(bar_baz);");
 
-    // ── paint_selection ──
+            assert_eq!(word_bounds(&line, 14), 12..19, "bar_baz");
+            assert_eq!(word_bounds(&line, 11), 11..12, "a delimiter selects itself");
+            assert_eq!(word_bounds(&line, 3), 3..4, "so does a space");
+            assert_eq!(word_bounds(&line, 40), 40..41, "past the end of the row");
+        }
 
-    #[test]
-    fn paint_selection_highlights_only_the_selected_cells() {
-        let mut chat = chat_of(vec!["alpha beta", "gamma delta"]);
-        let now = Instant::now();
-        mouse(
-            &mut chat,
-            MouseEventKind::Down(MouseButton::Left),
-            (6, 1),
-            now,
-        );
-        mouse(
-            &mut chat,
-            MouseEventKind::Drag(MouseButton::Left),
-            (4, 2),
-            now,
-        );
+        #[test]
+        fn measures_wide_graphemes_by_cells() {
+            let line = Line::from(vec!["日本".into(), "語 text".into()]);
 
-        let buf = paint(&mut chat);
-
-        assert!(!highlighted(&buf, 5, 1));
-        assert!(highlighted(&buf, 6, 1));
-        assert!(
-            highlighted(&buf, 19, 1),
-            "middle and first rows run to the edge"
-        );
-        assert!(highlighted(&buf, 4, 2));
-        assert!(!highlighted(&buf, 5, 2));
-        assert!(!highlighted(&buf, 0, 3));
-    }
-
-    // ── row_text ──
-
-    #[test]
-    fn row_text_takes_each_grapheme_that_overlaps_the_columns() {
-        let line = Line::raw("日本語 text   ");
-
-        assert_eq!(row_text(&line, 1..3), "日本");
-        assert_eq!(row_text(&line, 4..u16::MAX), "語 text");
-    }
-
-    // ── grapheme_bounds ──
-
-    #[test]
-    fn grapheme_bounds_covers_every_cell_of_a_wide_character() {
-        let line = Line::raw("a日b");
-
-        assert_eq!(grapheme_bounds(&line, 2), 1..3, "the second cell of 日");
-        assert_eq!(grapheme_bounds(&line, 3), 3..4);
-        assert_eq!(grapheme_bounds(&line, 9), 9..10, "past the end of the row");
-    }
-
-    // ── word_bounds ──
-
-    #[test]
-    fn word_bounds_stops_at_whitespace_and_delimiters() {
-        let line = Line::raw("let x = foo(bar_baz);");
-
-        assert_eq!(word_bounds(&line, 14), 12..19, "bar_baz");
-        assert_eq!(word_bounds(&line, 11), 11..12, "a delimiter selects itself");
-        assert_eq!(word_bounds(&line, 3), 3..4, "so does a space");
-        assert_eq!(word_bounds(&line, 40), 40..41, "past the end of the row");
-    }
-
-    #[test]
-    fn word_bounds_measures_wide_graphemes_by_cells() {
-        let line = Line::from(vec!["日本".into(), "語 text".into()]);
-
-        assert_eq!(word_bounds(&line, 3), 0..6);
-        assert_eq!(word_bounds(&line, 8), 7..11);
+            assert_eq!(word_bounds(&line, 3), 0..6);
+            assert_eq!(word_bounds(&line, 8), 7..11);
+        }
     }
 }

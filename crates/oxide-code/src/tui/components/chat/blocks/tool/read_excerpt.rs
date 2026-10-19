@@ -60,103 +60,107 @@ mod tests {
     use super::*;
     use crate::tui::theme::Theme;
 
-    fn render_rows(path: &str, lines: &[ReadExcerptLine], total_lines: usize) -> Vec<String> {
-        let theme = Theme::default();
-        let ctx = RenderCtx {
-            width: 80,
-            theme: &theme,
-            show_thinking: false,
-        };
-        let mut out = Vec::new();
-        render(
-            &mut out,
-            &ctx,
-            theme.tool_border(),
-            path,
-            lines,
-            total_lines,
-        );
-        out.iter().map(ToString::to_string).collect()
-    }
+    mod render {
+        use super::*;
 
-    /// Excerpt lines numbered `numbers`, each reading `line {number}`.
-    fn excerpt(numbers: RangeInclusive<usize>) -> Vec<ReadExcerptLine> {
-        numbers
-            .map(|number| ReadExcerptLine {
-                number,
-                text: format!("line {number}"),
-            })
-            .collect()
-    }
+        fn render_rows(path: &str, lines: &[ReadExcerptLine], total_lines: usize) -> Vec<String> {
+            let theme = Theme::default();
+            let ctx = RenderCtx {
+                width: 80,
+                theme: &theme,
+                show_thinking: false,
+            };
+            let mut out = Vec::new();
+            render(
+                &mut out,
+                &ctx,
+                theme.tool_border(),
+                path,
+                lines,
+                total_lines,
+            );
+            out.iter().map(ToString::to_string).collect()
+        }
 
-    // ── render ──
+        /// Excerpt lines numbered `numbers`, each reading `line {number}`.
+        fn excerpt(numbers: RangeInclusive<usize>) -> Vec<ReadExcerptLine> {
+            numbers
+                .map(|number| ReadExcerptLine {
+                    number,
+                    text: format!("line {number}"),
+                })
+                .collect()
+        }
 
-    #[test]
-    fn render_numbers_rows_under_the_path_and_range_header() {
-        let rows = render_rows("/tmp/example.rs", &excerpt(9..=10), 12);
+        #[test]
+        fn numbers_rows_under_the_path_and_range_header() {
+            let rows = render_rows("/tmp/example.rs", &excerpt(9..=10), 12);
 
-        assert_eq!(
-            rows,
-            [
-                "▎   /tmp/example.rs:9-10 of 12",
-                "▎    9 │ line 9",
-                "▎   10 │ line 10",
-            ]
-        );
-    }
+            assert_eq!(
+                rows,
+                [
+                    "▎   /tmp/example.rs:9-10 of 12",
+                    "▎    9 │ line 9",
+                    "▎   10 │ line 10",
+                ]
+            );
+        }
 
-    #[test]
-    fn render_caps_rows_and_counts_the_hidden_ones() {
-        for (extra, footer) in [(1, "... +1 line"), (2, "... +2 lines")] {
-            let total = MAX_TOOL_OUTPUT_LINES + extra;
+        #[test]
+        fn caps_rows_and_counts_the_hidden_ones() {
+            for (extra, footer) in [(1, "... +1 line"), (2, "... +2 lines")] {
+                let total = MAX_TOOL_OUTPUT_LINES + extra;
 
-            let rows = render_rows("/tmp/example.rs", &excerpt(1..=total), total);
+                let rows = render_rows("/tmp/example.rs", &excerpt(1..=total), total);
 
-            let mut expected = vec![format!("▎   /tmp/example.rs:1-{total}")];
-            expected.extend((1..=MAX_TOOL_OUTPUT_LINES).map(|n| format!("▎   {n} │ line {n}")));
-            expected.push(format!("▎   {footer}"));
-            assert_eq!(rows, expected, "{extra} extra lines");
+                let mut expected = vec![format!("▎   /tmp/example.rs:1-{total}")];
+                expected.extend((1..=MAX_TOOL_OUTPUT_LINES).map(|n| format!("▎   {n} │ line {n}")));
+                expected.push(format!("▎   {footer}"));
+                assert_eq!(rows, expected, "{extra} extra lines");
+            }
+        }
+
+        #[test]
+        fn empty_file_keeps_only_the_header() {
+            let rows = render_rows("/tmp/empty.rs", &[], 0);
+
+            assert_eq!(rows, ["▎   /tmp/empty.rs (empty file)"]);
         }
     }
 
-    #[test]
-    fn render_empty_file_keeps_only_the_header() {
-        let rows = render_rows("/tmp/empty.rs", &[], 0);
+    mod context_label {
+        use super::*;
 
-        assert_eq!(rows, ["▎   /tmp/empty.rs (empty file)"]);
-    }
+        #[test]
+        fn full_file_omits_total_suffix() {
+            let lines = vec![
+                ReadExcerptLine {
+                    number: 1,
+                    text: "alpha".to_owned(),
+                },
+                ReadExcerptLine {
+                    number: 2,
+                    text: "beta".to_owned(),
+                },
+            ];
 
-    // ── context_label ──
+            assert_eq!(
+                context_label("/tmp/example.rs", &lines, 2),
+                "/tmp/example.rs:1-2"
+            );
+        }
 
-    #[test]
-    fn context_label_full_file_omits_total_suffix() {
-        let lines = vec![
-            ReadExcerptLine {
-                number: 1,
-                text: "alpha".to_owned(),
-            },
-            ReadExcerptLine {
-                number: 2,
-                text: "beta".to_owned(),
-            },
-        ];
+        #[test]
+        fn single_line_uses_single_number() {
+            let lines = vec![ReadExcerptLine {
+                number: 4,
+                text: "delta".to_owned(),
+            }];
 
-        assert_eq!(
-            context_label("/tmp/example.rs", &lines, 2),
-            "/tmp/example.rs:1-2"
-        );
-    }
-
-    #[test]
-    fn context_label_single_line_uses_single_number() {
-        let lines = vec![ReadExcerptLine {
-            number: 4,
-            text: "delta".to_owned(),
-        }];
-
-        assert_eq!(
-            context_label("/tmp/example.rs", &lines, 10),
-            "/tmp/example.rs:4 of 10"
-        );
+            assert_eq!(
+                context_label("/tmp/example.rs", &lines, 10),
+                "/tmp/example.rs:4 of 10"
+            );
+        }
     }
 }

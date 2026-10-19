@@ -66,112 +66,115 @@ mod tests {
     use crate::tool::GrepMatchLine;
     use crate::tui::theme::Theme;
 
-    /// A file group of `(number, text, is_match)` lines.
-    fn group(path: &str, lines: &[(usize, &str, bool)]) -> GrepFileGroup {
-        GrepFileGroup {
-            path: path.to_owned(),
-            lines: lines
-                .iter()
-                .map(|&(number, text, is_match)| GrepMatchLine {
-                    number,
-                    text: text.to_owned(),
-                    is_match,
-                })
-                .collect(),
+    mod render {
+        use super::*;
+
+        /// A file group of `(number, text, is_match)` lines.
+        fn group(path: &str, lines: &[(usize, &str, bool)]) -> GrepFileGroup {
+            GrepFileGroup {
+                path: path.to_owned(),
+                lines: lines
+                    .iter()
+                    .map(|&(number, text, is_match)| GrepMatchLine {
+                        number,
+                        text: text.to_owned(),
+                        is_match,
+                    })
+                    .collect(),
+            }
         }
-    }
 
-    fn render_rows(groups: &[GrepFileGroup], truncated: bool) -> Vec<String> {
-        let theme = Theme::default();
-        let ctx = RenderCtx {
-            width: 80,
-            theme: &theme,
-            show_thinking: true,
-        };
-        let mut out = Vec::new();
-        render(&mut out, &ctx, theme.tool_border(), groups, truncated);
-        out.iter().map(ToString::to_string).collect()
-    }
+        fn render_rows(groups: &[GrepFileGroup], truncated: bool) -> Vec<String> {
+            let theme = Theme::default();
+            let ctx = RenderCtx {
+                width: 80,
+                theme: &theme,
+                show_thinking: true,
+            };
+            let mut out = Vec::new();
+            render(&mut out, &ctx, theme.tool_border(), groups, truncated);
+            out.iter().map(ToString::to_string).collect()
+        }
 
-    // ── render ──
+        #[test]
+        fn groups_numbered_rows_under_each_path() {
+            let theme = Theme::default();
+            let ctx = RenderCtx {
+                width: 80,
+                theme: &theme,
+                show_thinking: true,
+            };
+            let groups = [
+                group(
+                    "src/main.rs",
+                    &[(10, "fn main() {", true), (11, "    helper();", false)],
+                ),
+                group("src/lib.rs", &[(5, "fn lib_func()", true)]),
+            ];
+            let mut out = Vec::new();
 
-    #[test]
-    fn render_groups_numbered_rows_under_each_path() {
-        let theme = Theme::default();
-        let ctx = RenderCtx {
-            width: 80,
-            theme: &theme,
-            show_thinking: true,
-        };
-        let groups = [
-            group(
-                "src/main.rs",
-                &[(10, "fn main() {", true), (11, "    helper();", false)],
-            ),
-            group("src/lib.rs", &[(5, "fn lib_func()", true)]),
-        ];
-        let mut out = Vec::new();
+            render(&mut out, &ctx, theme.tool_border(), &groups, false);
 
-        render(&mut out, &ctx, theme.tool_border(), &groups, false);
+            let rows: Vec<String> = out.iter().map(ToString::to_string).collect();
+            assert_eq!(
+                rows,
+                [
+                    "▎   src/main.rs",
+                    "▎   10 │ fn main() {",
+                    "▎   11 │     helper();",
+                    "▎   src/lib.rs",
+                    "▎    5 │ fn lib_func()",
+                ]
+            );
+            assert_eq!(out[1].spans[3].style, theme.text(), "a match is full color");
+            assert_eq!(out[2].spans[3].style, theme.dim(), "a context line is dim");
+        }
 
-        let rows: Vec<String> = out.iter().map(ToString::to_string).collect();
-        assert_eq!(
-            rows,
-            [
-                "▎   src/main.rs",
-                "▎   10 │ fn main() {",
-                "▎   11 │     helper();",
-                "▎   src/lib.rs",
-                "▎    5 │ fn lib_func()",
-            ]
-        );
-        assert_eq!(out[1].spans[3].style, theme.text(), "a match is full color");
-        assert_eq!(out[2].spans[3].style, theme.dim(), "a context line is dim");
-    }
+        #[test]
+        fn footer_counts_hidden_rows_and_flags_the_tool_limit() {
+            let hits: Vec<(usize, &str, bool)> = (1..=MAX_TOOL_OUTPUT_LINES)
+                .map(|n| (n, "hit", true))
+                .collect();
 
-    #[test]
-    fn render_footer_counts_hidden_rows_and_flags_the_tool_limit() {
-        let hits: Vec<(usize, &str, bool)> = (1..=MAX_TOOL_OUTPUT_LINES)
-            .map(|n| (n, "hit", true))
-            .collect();
+            let capped = render_rows(&[group("src/main.rs", &hits)], false);
+            let limited = render_rows(&[group("src/main.rs", &hits[..1])], true);
 
-        let capped = render_rows(&[group("src/main.rs", &hits)], false);
-        let limited = render_rows(&[group("src/main.rs", &hits[..1])], true);
+            let mut expected = vec!["▎   src/main.rs".to_owned()];
+            expected.extend((1..MAX_TOOL_OUTPUT_LINES).map(|n| format!("▎   {n} │ hit")));
+            expected.push("▎   ... +1 line".to_owned());
+            assert_eq!(capped, expected);
+            assert_eq!(
+                limited,
+                ["▎   src/main.rs", "▎   1 │ hit", "▎   ... limit reached"]
+            );
+        }
 
-        let mut expected = vec!["▎   src/main.rs".to_owned()];
-        expected.extend((1..MAX_TOOL_OUTPUT_LINES).map(|n| format!("▎   {n} │ hit")));
-        expected.push("▎   ... +1 line".to_owned());
-        assert_eq!(capped, expected);
-        assert_eq!(
-            limited,
-            ["▎   src/main.rs", "▎   1 │ hit", "▎   ... limit reached"]
-        );
-    }
+        #[test]
+        fn empty_groups_emits_nothing() {
+            // truncated=true is intentional: empty groups short-circuit before the footer.
+            assert_eq!(render_rows(&[], true), [] as [String; 0]);
+        }
 
-    #[test]
-    fn render_empty_groups_emits_nothing() {
-        // truncated=true is intentional: empty groups short-circuit before the footer.
-        assert_eq!(render_rows(&[], true), [] as [String; 0]);
-    }
+        #[test]
+        fn stops_when_budget_fills_at_path_boundary() {
+            // Six 0-line groups overflow the 5-row budget on path headers alone, hitting the outer
+            // guard that `break 'outer` does not reach when groups have no match rows.
+            let groups: Vec<GrepFileGroup> =
+                (0..6).map(|i| group(&format!("f{i}.rs"), &[])).collect();
 
-    #[test]
-    fn render_stops_when_budget_fills_at_path_boundary() {
-        // Six 0-line groups overflow the 5-row budget on path headers alone, hitting the outer
-        // guard that `break 'outer` does not reach when groups have no match rows.
-        let groups: Vec<GrepFileGroup> = (0..6).map(|i| group(&format!("f{i}.rs"), &[])).collect();
+            let rows = render_rows(&groups, false);
 
-        let rows = render_rows(&groups, false);
-
-        assert_eq!(
-            rows,
-            [
-                "▎   f0.rs",
-                "▎   f1.rs",
-                "▎   f2.rs",
-                "▎   f3.rs",
-                "▎   f4.rs",
-                "▎   ... +1 line",
-            ]
-        );
+            assert_eq!(
+                rows,
+                [
+                    "▎   f0.rs",
+                    "▎   f1.rs",
+                    "▎   f2.rs",
+                    "▎   f3.rs",
+                    "▎   f4.rs",
+                    "▎   ... +1 line",
+                ]
+            );
+        }
     }
 }

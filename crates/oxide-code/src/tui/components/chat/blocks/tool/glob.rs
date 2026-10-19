@@ -49,81 +49,83 @@ mod tests {
     use super::*;
     use crate::tui::theme::Theme;
 
-    /// Rows of `files` from a `pattern` search that found `total`.
-    fn render_rows(pattern: &str, files: &[String], total: usize) -> Vec<String> {
-        let theme = Theme::default();
-        let ctx = RenderCtx {
-            width: 80,
-            theme: &theme,
-            show_thinking: true,
-        };
-        let mut out = Vec::new();
-        render(&mut out, &ctx, theme.tool_border(), pattern, files, total);
-        out.iter().map(ToString::to_string).collect()
-    }
+    mod render {
+        use super::*;
 
-    fn numbered_files(count: usize) -> Vec<String> {
-        (0..count).map(|i| format!("f{i}.rs")).collect()
-    }
+        /// Rows of `files` from a `pattern` search that found `total`.
+        fn render_rows(pattern: &str, files: &[String], total: usize) -> Vec<String> {
+            let theme = Theme::default();
+            let ctx = RenderCtx {
+                width: 80,
+                theme: &theme,
+                show_thinking: true,
+            };
+            let mut out = Vec::new();
+            render(&mut out, &ctx, theme.tool_border(), pattern, files, total);
+            out.iter().map(ToString::to_string).collect()
+        }
 
-    // ── render ──
+        fn numbered_files(count: usize) -> Vec<String> {
+            (0..count).map(|i| format!("f{i}.rs")).collect()
+        }
 
-    #[test]
-    fn render_empty_files_shows_no_files_found_row() {
-        let rows = render_rows("**/*.rs", &[], 0);
+        #[test]
+        fn empty_files_shows_no_files_found_row() {
+            let rows = render_rows("**/*.rs", &[], 0);
 
-        assert_eq!(rows, ["▎   No files found"]);
-    }
+            assert_eq!(rows, ["▎   No files found"]);
+        }
 
-    #[test]
-    fn render_short_list_emits_header_and_no_footer() {
-        let files = vec!["src/main.rs".to_owned(), "src/lib.rs".to_owned()];
+        #[test]
+        fn short_list_emits_header_and_no_footer() {
+            let files = vec!["src/main.rs".to_owned(), "src/lib.rs".to_owned()];
 
-        let rows = render_rows("**/*.rs", &files, 2);
+            let rows = render_rows("**/*.rs", &files, 2);
 
-        assert_eq!(
-            rows,
-            ["▎   **/*.rs (2 of 2)", "▎   src/main.rs", "▎   src/lib.rs"]
-        );
-    }
+            assert_eq!(
+                rows,
+                ["▎   **/*.rs (2 of 2)", "▎   src/main.rs", "▎   src/lib.rs"]
+            );
+        }
 
-    #[test]
-    fn render_caps_at_max_output_lines_with_hidden_footer() {
-        let files = numbered_files(8);
+        #[test]
+        fn caps_at_max_output_lines_with_hidden_footer() {
+            let files = numbered_files(8);
 
-        let rows = render_rows("**/*.rs", &files, 8);
+            let rows = render_rows("**/*.rs", &files, 8);
 
-        assert_eq!(
-            rows,
-            [
-                "▎   **/*.rs (5 of 8)",
-                "▎   f0.rs",
-                "▎   f1.rs",
-                "▎   f2.rs",
-                "▎   f3.rs",
-                "▎   f4.rs",
-                "▎   ... +3 files",
-            ]
-        );
-    }
+            assert_eq!(
+                rows,
+                [
+                    "▎   **/*.rs (5 of 8)",
+                    "▎   f0.rs",
+                    "▎   f1.rs",
+                    "▎   f2.rs",
+                    "▎   f3.rs",
+                    "▎   f4.rs",
+                    "▎   ... +3 files",
+                ]
+            );
+        }
 
-    #[test]
-    fn render_tool_truncation_surfaces_total_in_footer() {
-        let files = numbered_files(10);
+        #[test]
+        fn tool_truncation_surfaces_total_in_footer() {
+            let files = numbered_files(10);
 
-        let rows = render_rows("**/*.rs", &files, 1234);
+            let rows = render_rows("**/*.rs", &files, 1234);
 
-        assert_eq!(
-            rows,
-            [
-                "▎   **/*.rs (5 of 1234)",
-                "▎   f0.rs",
-                "▎   f1.rs",
-                "▎   f2.rs",
-                "▎   f3.rs",
-                "▎   f4.rs",
-                "▎   ... +5 files (limit reached)",
-            ]
-        );
+            assert_eq!(
+                rows,
+                [
+                    "▎   **/*.rs (5 of 1234)",
+                    "▎   f0.rs",
+                    "▎   f1.rs",
+                    "▎   f2.rs",
+                    "▎   f3.rs",
+                    "▎   f4.rs",
+                    "▎   ... +5 files (limit reached)",
+                ]
+            );
+        }
     }
 }

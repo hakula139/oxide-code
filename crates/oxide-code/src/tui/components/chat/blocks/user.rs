@@ -43,32 +43,34 @@ mod tests {
     use super::*;
     use crate::tui::theme::Theme;
 
-    fn ctx_at(width: u16, theme: &Theme) -> RenderCtx<'_> {
-        RenderCtx {
-            width,
-            theme,
-            show_thinking: false,
+    mod render {
+        use super::*;
+
+        fn ctx_at(width: u16, theme: &Theme) -> RenderCtx<'_> {
+            RenderCtx {
+                width,
+                theme,
+                show_thinking: false,
+            }
         }
-    }
 
-    // ── render ──
+        #[test]
+        fn expands_tabs_to_stops() {
+            let theme = Theme::default();
+            let lines = UserMessage::new("a\tb\n\tc").render(&ctx_at(40, &theme));
+            let rows: Vec<String> = lines.iter().map(ToString::to_string).collect();
+            assert_eq!(rows, ["❯ a   b", "      c"]);
+        }
 
-    #[test]
-    fn render_expands_tabs_to_stops() {
-        let theme = Theme::default();
-        let lines = UserMessage::new("a\tb\n\tc").render(&ctx_at(40, &theme));
-        let rows: Vec<String> = lines.iter().map(ToString::to_string).collect();
-        assert_eq!(rows, ["❯ a   b", "      c"]);
-    }
+        #[test]
+        fn keeps_the_first_line_indent_and_drops_blank_edges() {
+            let theme = Theme::default();
 
-    #[test]
-    fn render_keeps_the_first_line_indent_and_drops_blank_edges() {
-        let theme = Theme::default();
+            let lines = UserMessage::new("\n    fn main() {\n        body\n    }\n\n")
+                .render(&ctx_at(40, &theme));
 
-        let lines = UserMessage::new("\n    fn main() {\n        body\n    }\n\n")
-            .render(&ctx_at(40, &theme));
-
-        let rows: Vec<String> = lines.iter().map(ToString::to_string).collect();
-        assert_eq!(rows, ["❯     fn main() {", "          body", "      }"]);
+            let rows: Vec<String> = lines.iter().map(ToString::to_string).collect();
+            assert_eq!(rows, ["❯     fn main() {", "          body", "      }"]);
+        }
     }
 }

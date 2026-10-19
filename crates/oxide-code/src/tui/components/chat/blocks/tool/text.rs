@@ -55,97 +55,99 @@ mod tests {
     use crate::tui::glyphs::TOOL_BORDER_CONT;
     use crate::tui::theme::Theme;
 
-    /// Rows of `content` under `label`, wide enough that no row wraps.
-    fn render_rows(content: &str, label: &str) -> Vec<String> {
-        let theme = Theme::default();
-        let ctx = RenderCtx {
-            width: 4096,
-            theme: &theme,
-            show_thinking: false,
-        };
-        let mut out = Vec::new();
-        render(&mut out, &ctx, theme.tool_border(), content, label);
-        out.iter().map(ToString::to_string).collect()
-    }
+    mod render {
+        use super::*;
 
-    fn body(texts: &[&str]) -> Vec<String> {
-        texts
-            .iter()
-            .map(|text| format!("{TOOL_BORDER_CONT}{text}"))
-            .collect()
-    }
+        /// Rows of `content` under `label`, wide enough that no row wraps.
+        fn render_rows(content: &str, label: &str) -> Vec<String> {
+            let theme = Theme::default();
+            let ctx = RenderCtx {
+                width: 4096,
+                theme: &theme,
+                show_thinking: false,
+            };
+            let mut out = Vec::new();
+            render(&mut out, &ctx, theme.tool_border(), content, label);
+            out.iter().map(ToString::to_string).collect()
+        }
 
-    // ── render ──
+        fn body(texts: &[&str]) -> Vec<String> {
+            texts
+                .iter()
+                .map(|text| format!("{TOOL_BORDER_CONT}{text}"))
+                .collect()
+        }
 
-    #[test]
-    fn render_caps_rows_and_counts_the_hidden_ones() {
-        let shown: Vec<String> = (0..MAX_TOOL_OUTPUT_LINES)
-            .map(|i| format!("line {i}"))
-            .collect();
-        for (extra, footer) in [
-            (0, None),
-            (1, Some("... +1 line")),
-            (5, Some("... +5 lines")),
-        ] {
-            let content = (0..MAX_TOOL_OUTPUT_LINES + extra)
+        #[test]
+        fn caps_rows_and_counts_the_hidden_ones() {
+            let shown: Vec<String> = (0..MAX_TOOL_OUTPUT_LINES)
                 .map(|i| format!("line {i}"))
-                .collect::<Vec<_>>()
-                .join("\n");
+                .collect();
+            for (extra, footer) in [
+                (0, None),
+                (1, Some("... +1 line")),
+                (5, Some("... +5 lines")),
+            ] {
+                let content = (0..MAX_TOOL_OUTPUT_LINES + extra)
+                    .map(|i| format!("line {i}"))
+                    .collect::<Vec<_>>()
+                    .join("\n");
 
-            let rows = render_rows(&content, "result");
+                let rows = render_rows(&content, "result");
 
-            let mut expected: Vec<&str> = shown.iter().map(String::as_str).collect();
-            expected.extend(footer);
-            assert_eq!(rows, body(&expected), "{extra} extra lines");
+                let mut expected: Vec<&str> = shown.iter().map(String::as_str).collect();
+                expected.extend(footer);
+                assert_eq!(rows, body(&expected), "{extra} extra lines");
+            }
         }
-    }
 
-    #[test]
-    fn render_blank_content_emits_nothing() {
-        for content in ["", "  \n  "] {
-            assert_eq!(render_rows(content, "result"), body(&[]), "{content:?}");
+        #[test]
+        fn blank_content_emits_nothing() {
+            for content in ["", "  \n  "] {
+                assert_eq!(render_rows(content, "result"), body(&[]), "{content:?}");
+            }
         }
-    }
 
-    #[test]
-    fn render_drops_a_first_line_that_repeats_the_label() {
-        let cases: [(&str, &[&str]); 4] = [
-            ("Found 2 files\na.rs\nb.rs", &["a.rs", "b.rs"]),
-            ("  Found 2 files  \na.rs", &["a.rs"]),
-            (
-                "Found 2 files in cache\na.rs",
-                &["Found 2 files in cache", "a.rs"],
-            ),
-            ("Found 2 files", &[]),
-        ];
-        for (content, texts) in cases {
-            assert_eq!(
-                render_rows(content, "Found 2 files"),
-                body(texts),
-                "{content:?}"
-            );
+        #[test]
+        fn drops_a_first_line_that_repeats_the_label() {
+            let cases: [(&str, &[&str]); 4] = [
+                ("Found 2 files\na.rs\nb.rs", &["a.rs", "b.rs"]),
+                ("  Found 2 files  \na.rs", &["a.rs"]),
+                (
+                    "Found 2 files in cache\na.rs",
+                    &["Found 2 files in cache", "a.rs"],
+                ),
+                ("Found 2 files", &[]),
+            ];
+            for (content, texts) in cases {
+                assert_eq!(
+                    render_rows(content, "Found 2 files"),
+                    body(texts),
+                    "{content:?}"
+                );
+            }
         }
-    }
 
-    #[test]
-    fn render_trims_blank_edge_lines_and_keeps_indents() {
-        let cases: [(&str, &[&str]); 3] = [
-            ("\n\n real line\n\n\n", &[" real line"]),
-            (" a.rs | 1 +\n b.rs | 2 +", &[" a.rs | 1 +", " b.rs | 2 +"]),
-            ("first\n\nlast", &["first", "", "last"]),
-        ];
-        for (content, texts) in cases {
-            assert_eq!(render_rows(content, "out"), body(texts), "{content:?}");
+        #[test]
+        fn trims_blank_edge_lines_and_keeps_indents() {
+            let cases: [(&str, &[&str]); 3] = [
+                ("\n\n real line\n\n\n", &[" real line"]),
+                (" a.rs | 1 +\n b.rs | 2 +", &[" a.rs | 1 +", " b.rs | 2 +"]),
+                ("first\n\nlast", &["first", "", "last"]),
+            ];
+            for (content, texts) in cases {
+                assert_eq!(render_rows(content, "out"), body(texts), "{content:?}");
+            }
         }
-    }
 
-    #[test]
-    fn render_truncates_a_long_line_to_the_byte_budget() {
-        let long_line = "x".repeat(MAX_ROW_BYTES + 100);
+        #[test]
+        fn truncates_a_long_line_to_the_byte_budget() {
+            let long_line = "x".repeat(MAX_ROW_BYTES + 100);
 
-        let rows = render_rows(&long_line, "result");
+            let rows = render_rows(&long_line, "result");
 
-        let kept = format!("{}...", "x".repeat(MAX_ROW_BYTES));
-        assert_eq!(rows, body(&[&kept]));
+            let kept = format!("{}...", "x".repeat(MAX_ROW_BYTES));
+            assert_eq!(rows, body(&[&kept]));
+        }
     }
 }
