@@ -139,161 +139,177 @@ pub(crate) fn escape_hidden(text: &str) -> String {
 mod tests {
     use super::*;
 
-    // ── plural ──
+    mod plural {
+        use super::*;
 
-    #[test]
-    fn plural_uses_singular_only_for_one() {
-        for (count, expected) in [(0, "files"), (1, "file"), (2, "files")] {
-            assert_eq!(plural(count, "file", "files"), expected);
+        #[test]
+        fn uses_singular_only_for_one() {
+            for (count, expected) in [(0, "files"), (1, "file"), (2, "files")] {
+                assert_eq!(plural(count, "file", "files"), expected);
+            }
         }
     }
 
-    // ── join_sentences ──
+    mod join_sentences {
+        use super::*;
 
-    #[test]
-    fn join_sentences_adds_a_period_only_after_text_that_does_not_end_a_sentence() {
-        for (text, expected) in [
-            ("Upstream is down.", "Upstream is down. Retry later."),
-            ("Is it down?", "Is it down? Retry later."),
-            ("It is down!", "It is down! Retry later."),
-            (
-                "Upstream timed out...",
-                "Upstream timed out... Retry later.",
-            ),
-            (
-                "Upstream timed out\u{2026}",
-                "Upstream timed out\u{2026} Retry later.",
-            ),
-            ("上游已断开。", "上游已断开。 Retry later."),
-            ("上游断开了吗？", "上游断开了吗？ Retry later."),
-            ("上游断开了！", "上游断开了！ Retry later."),
-            ("Upstream is down", "Upstream is down. Retry later."),
-        ] {
-            assert_eq!(join_sentences(text, "Retry later."), expected);
+        #[test]
+        fn adds_a_period_only_after_text_that_does_not_end_a_sentence() {
+            for (text, expected) in [
+                ("Upstream is down.", "Upstream is down. Retry later."),
+                ("Is it down?", "Is it down? Retry later."),
+                ("It is down!", "It is down! Retry later."),
+                (
+                    "Upstream timed out...",
+                    "Upstream timed out... Retry later.",
+                ),
+                (
+                    "Upstream timed out\u{2026}",
+                    "Upstream timed out\u{2026} Retry later.",
+                ),
+                ("上游已断开。", "上游已断开。 Retry later."),
+                ("上游断开了吗？", "上游断开了吗？ Retry later."),
+                ("上游断开了！", "上游断开了！ Retry later."),
+                ("Upstream is down", "Upstream is down. Retry later."),
+            ] {
+                assert_eq!(join_sentences(text, "Retry later."), expected);
+            }
         }
     }
 
-    // ── trim_blank_edges ──
+    mod trim_blank_edges {
+        use super::*;
 
-    #[test]
-    fn trim_blank_edges_keeps_the_indent_of_the_first_line_with_text() {
-        assert_eq!(
-            trim_blank_edges("\n \t\n    fn main() {}\n  done \n\n"),
-            "    fn main() {}\n  done",
-        );
-        assert_eq!(trim_blank_edges("  single"), "  single");
-    }
-
-    #[test]
-    fn trim_blank_edges_empties_all_blank_text() {
-        assert_eq!(trim_blank_edges(" \n\t\n "), "");
-    }
-
-    // ── truncate_to_width ──
-
-    #[test]
-    fn truncate_to_width_passes_through_strings_that_fit() {
-        assert_eq!(truncate_to_width("short", 10), "short");
-        assert_eq!(truncate_to_width("exact", 5), "exact");
-        assert_eq!(truncate_to_width("", 5), "");
-    }
-
-    #[test]
-    fn truncate_to_width_appends_ellipsis_on_ascii_overflow() {
-        assert_eq!(truncate_to_width("abcdefghij", 5), "ab...");
-    }
-
-    #[test]
-    fn truncate_to_width_accounts_for_cjk_double_width() {
-        // Width 5 leaves 2 columns beside the ellipsis, room for one 2-column char.
-        assert_eq!(truncate_to_width("测试文本", 5), "测...");
-    }
-
-    #[test]
-    fn truncate_to_width_zero_produces_empty() {
-        assert_eq!(truncate_to_width("anything", 0), "");
-    }
-
-    #[test]
-    fn truncate_to_width_drops_ellipsis_when_budget_below_ellipsis_width() {
-        assert_eq!(truncate_to_width("abc", 1), "a");
-        assert_eq!(truncate_to_width("abc", 2), "ab");
-    }
-
-    #[test]
-    fn truncate_to_width_keeps_zwj_emoji_whole() {
-        assert_eq!(truncate_to_width("👨‍👩‍👧 family photo", 5), "👨‍👩‍👧...");
-    }
-
-    // ── center_truncate_to_width ──
-
-    #[test]
-    fn center_truncate_to_width_passes_through_strings_that_fit() {
-        assert_eq!(center_truncate_to_width("short", 10), "short");
-        assert_eq!(center_truncate_to_width("exact", 5), "exact");
-        assert_eq!(center_truncate_to_width("", 5), "");
-    }
-
-    #[test]
-    fn center_truncate_to_width_keeps_head_and_tail_around_ellipsis() {
-        assert_eq!(
-            center_truncate_to_width("~/work/project/src/x.rs", 13),
-            "~/wor.../x.rs",
-        );
-    }
-
-    #[test]
-    fn center_truncate_to_width_falls_back_to_right_truncation_when_budget_too_small() {
-        assert_eq!(center_truncate_to_width("abcdef", 2), "ab");
-        assert_eq!(center_truncate_to_width("abcdef", 1), "a");
-    }
-
-    #[test]
-    fn center_truncate_to_width_accounts_for_cjk_double_width() {
-        // Width 9 leaves 3 columns per side, room for one 2-column char each.
-        assert_eq!(center_truncate_to_width("测试文本编辑", 9), "测...辑");
-    }
-
-    #[test]
-    fn center_truncate_to_width_falls_back_to_right_truncate_when_cjk_overflows_both_halves() {
-        // Width 5 leaves 1 column per side, too narrow for a 2-column char.
-        assert_eq!(center_truncate_to_width("中文测试", 5), "中...");
-    }
-
-    #[test]
-    fn center_truncate_to_width_keeps_zwj_emoji_whole_on_both_sides() {
-        assert_eq!(center_truncate_to_width("👨‍👩‍👧 photos/2026 👨‍👩‍👧", 7), "👨‍👩‍👧...👨‍👩‍👧",);
-    }
-
-    // ── is_hidden ──
-
-    #[test]
-    fn is_hidden_flags_control_and_zero_width_characters_only() {
-        for c in ['\u{1b}', '\n', '\u{200b}', '\u{200d}'] {
-            assert!(is_hidden(c), "{c:?}");
+        #[test]
+        fn keeps_the_indent_of_the_first_line_with_text() {
+            assert_eq!(
+                trim_blank_edges("\n \t\n    fn main() {}\n  done \n\n"),
+                "    fn main() {}\n  done",
+            );
+            assert_eq!(trim_blank_edges("  single"), "  single");
         }
-        for c in ['a', ' ', '中', '·'] {
-            assert!(!is_hidden(c), "{c:?}");
+
+        #[test]
+        fn empties_all_blank_text() {
+            assert_eq!(trim_blank_edges(" \n\t\n "), "");
         }
     }
 
-    // ── escape_controls ──
+    mod truncate_to_width {
+        use super::*;
 
-    #[test]
-    fn escape_controls_escapes_terminal_sequences_but_keeps_tabs_and_line_breaks() {
-        assert_eq!(
-            escape_controls("a\tb\r\nc\n\u{1b}[2K\rd\u{7}\u{200b}"),
-            "a\tb\r\nc\n\\u{1b}[2K\\rd\\u{7}\u{200b}",
-        );
+        #[test]
+        fn passes_through_strings_that_fit() {
+            assert_eq!(truncate_to_width("short", 10), "short");
+            assert_eq!(truncate_to_width("exact", 5), "exact");
+            assert_eq!(truncate_to_width("", 5), "");
+        }
+
+        #[test]
+        fn appends_ellipsis_on_ascii_overflow() {
+            assert_eq!(truncate_to_width("abcdefghij", 5), "ab...");
+        }
+
+        #[test]
+        fn accounts_for_cjk_double_width() {
+            // Width 5 leaves 2 columns beside the ellipsis, room for one 2-column char.
+            assert_eq!(truncate_to_width("测试文本", 5), "测...");
+        }
+
+        #[test]
+        fn zero_produces_empty() {
+            assert_eq!(truncate_to_width("anything", 0), "");
+        }
+
+        #[test]
+        fn drops_ellipsis_when_budget_below_ellipsis_width() {
+            assert_eq!(truncate_to_width("abc", 1), "a");
+            assert_eq!(truncate_to_width("abc", 2), "ab");
+        }
+
+        #[test]
+        fn keeps_zwj_emoji_whole() {
+            assert_eq!(truncate_to_width("👨‍👩‍👧 family photo", 5), "👨‍👩‍👧...");
+        }
     }
 
-    // ── escape_hidden ──
+    mod center_truncate_to_width {
+        use super::*;
 
-    #[test]
-    fn escape_hidden_escapes_controls_line_breaks_and_zero_width_characters_but_keeps_tabs() {
-        assert_eq!(
-            escape_hidden("a\tb\r\nc\u{1b}[2K\u{200b}d 中"),
-            "a\tb\\r\\nc\\u{1b}[2K\\u{200b}d 中",
-        );
+        #[test]
+        fn passes_through_strings_that_fit() {
+            assert_eq!(center_truncate_to_width("short", 10), "short");
+            assert_eq!(center_truncate_to_width("exact", 5), "exact");
+            assert_eq!(center_truncate_to_width("", 5), "");
+        }
+
+        #[test]
+        fn keeps_head_and_tail_around_ellipsis() {
+            assert_eq!(
+                center_truncate_to_width("~/work/project/src/x.rs", 13),
+                "~/wor.../x.rs",
+            );
+        }
+
+        #[test]
+        fn falls_back_to_right_truncation_when_budget_too_small() {
+            assert_eq!(center_truncate_to_width("abcdef", 2), "ab");
+            assert_eq!(center_truncate_to_width("abcdef", 1), "a");
+        }
+
+        #[test]
+        fn accounts_for_cjk_double_width() {
+            // Width 9 leaves 3 columns per side, room for one 2-column char each.
+            assert_eq!(center_truncate_to_width("测试文本编辑", 9), "测...辑");
+        }
+
+        #[test]
+        fn falls_back_to_right_truncate_when_cjk_overflows_both_halves() {
+            // Width 5 leaves 1 column per side, too narrow for a 2-column char.
+            assert_eq!(center_truncate_to_width("中文测试", 5), "中...");
+        }
+
+        #[test]
+        fn keeps_zwj_emoji_whole_on_both_sides() {
+            assert_eq!(center_truncate_to_width("👨‍👩‍👧 photos/2026 👨‍👩‍👧", 7), "👨‍👩‍👧...👨‍👩‍👧",);
+        }
+    }
+
+    mod is_hidden {
+        use super::*;
+
+        #[test]
+        fn flags_control_and_zero_width_characters_only() {
+            for c in ['\u{1b}', '\n', '\u{200b}', '\u{200d}'] {
+                assert!(is_hidden(c), "{c:?}");
+            }
+            for c in ['a', ' ', '中', '·'] {
+                assert!(!is_hidden(c), "{c:?}");
+            }
+        }
+    }
+
+    mod escape_controls {
+        use super::*;
+
+        #[test]
+        fn escapes_terminal_sequences_but_keeps_tabs_and_line_breaks() {
+            assert_eq!(
+                escape_controls("a\tb\r\nc\n\u{1b}[2K\rd\u{7}\u{200b}"),
+                "a\tb\r\nc\n\\u{1b}[2K\\rd\\u{7}\u{200b}",
+            );
+        }
+    }
+
+    mod escape_hidden {
+        use super::*;
+
+        #[test]
+        fn escapes_controls_line_breaks_and_zero_width_characters_but_keeps_tabs() {
+            assert_eq!(
+                escape_hidden("a\tb\r\nc\u{1b}[2K\u{200b}d 中"),
+                "a\tb\\r\\nc\\u{1b}[2K\\u{200b}d 中",
+            );
+        }
     }
 }

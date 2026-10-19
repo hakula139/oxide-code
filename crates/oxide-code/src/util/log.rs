@@ -115,128 +115,6 @@ mod tests {
     use super::*;
     use crate::util::path::testing::abs;
 
-    // ── make_filter ──
-
-    #[test]
-    fn make_filter_defaults_to_warn_when_rust_log_unset() {
-        temp_env::with_var_unset("RUST_LOG", || {
-            assert_eq!(make_filter().to_string(), "warn");
-        });
-    }
-
-    #[test]
-    fn make_filter_empty_rust_log_yields_empty_filter() {
-        temp_env::with_var("RUST_LOG", Some(""), || {
-            assert_eq!(make_filter().to_string(), "");
-        });
-    }
-
-    #[test]
-    fn make_filter_honors_rust_log_level() {
-        temp_env::with_var("RUST_LOG", Some("debug"), || {
-            assert_eq!(make_filter().to_string(), "debug");
-        });
-    }
-
-    #[test]
-    fn make_filter_honors_rust_log_directive_language() {
-        temp_env::with_var("RUST_LOG", Some("info,reqwest=warn"), || {
-            assert_eq!(make_filter().to_string(), "reqwest=warn,info");
-        });
-    }
-
-    // ── log_dir ──
-
-    #[test]
-    fn log_dir_sits_in_the_app_state_directory() {
-        let state = abs("/state");
-
-        let dir = temp_env::with_var("XDG_STATE_HOME", Some(&state), log_dir);
-
-        assert_eq!(dir.unwrap(), Path::new(&state).join("ox").join("log"));
-    }
-
-    // ── open_file_appender ──
-
-    #[test]
-    fn open_file_appender_creates_missing_directory() {
-        let tmp = tempfile::tempdir().unwrap();
-        let dir = tmp.path().join("nested").join("log");
-        assert!(!dir.exists());
-
-        let (_writer, _guard) = open_file_appender(&dir).unwrap();
-        assert!(dir.is_dir());
-    }
-
-    #[test]
-    fn open_file_appender_appends_across_sessions() {
-        let tmp = tempfile::tempdir().unwrap();
-        for line in ["first\n", "second\n"] {
-            let (mut writer, guard) = open_file_appender(tmp.path()).unwrap();
-            writer.write_all(line.as_bytes()).unwrap();
-            drop(guard);
-        }
-
-        assert_eq!(read_log(tmp.path(), LOG_FILE), "first\nsecond\n");
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn open_file_appender_keeps_directory_and_file_private() {
-        let tmp = tempfile::tempdir().unwrap();
-        let dir = tmp.path().join("log");
-
-        let (_writer, _guard) = open_file_appender(&dir).unwrap();
-        assert_eq!(mode(&dir), 0o700);
-        assert_eq!(mode(&dir.join(LOG_FILE)), 0o600);
-    }
-
-    // ── RotatingFile::open ──
-
-    #[test]
-    fn rotating_file_open_counts_existing_bytes_toward_cap() {
-        let tmp = tempfile::tempdir().unwrap();
-        std::fs::write(tmp.path().join(LOG_FILE), b"0123456789").unwrap();
-
-        let mut file = RotatingFile::open(tmp.path(), 12).unwrap();
-        file.write_all(b"abc").unwrap();
-
-        assert_eq!(read_log(tmp.path(), BACKUP_LOG_FILE), "0123456789");
-        assert_eq!(read_log(tmp.path(), LOG_FILE), "abc");
-    }
-
-    // ── RotatingFile::write ──
-
-    #[test]
-    fn rotating_file_write_rotates_into_a_single_backup_past_the_cap() {
-        let tmp = tempfile::tempdir().unwrap();
-        let mut file = RotatingFile::open(tmp.path(), 14).unwrap();
-
-        file.write_all(b"first-line\n").unwrap();
-        file.write_all(b"second\n").unwrap();
-        assert_eq!(read_log(tmp.path(), BACKUP_LOG_FILE), "first-line\n");
-        assert_eq!(read_log(tmp.path(), LOG_FILE), "second\n");
-
-        file.write_all(b"third\n").unwrap();
-        assert_eq!(read_log(tmp.path(), LOG_FILE), "second\nthird\n");
-
-        file.write_all(b"fourth\n").unwrap();
-        assert_eq!(read_log(tmp.path(), BACKUP_LOG_FILE), "second\nthird\n");
-        assert_eq!(read_log(tmp.path(), LOG_FILE), "fourth\n");
-        #[cfg(unix)]
-        assert_eq!(mode(&tmp.path().join(LOG_FILE)), 0o600);
-    }
-
-    #[test]
-    fn rotating_file_write_keeps_an_oversized_record_in_an_empty_file() {
-        let tmp = tempfile::tempdir().unwrap();
-        let mut file = RotatingFile::open(tmp.path(), 4).unwrap();
-
-        file.write_all(b"oversized\n").unwrap();
-        assert_eq!(read_log(tmp.path(), LOG_FILE), "oversized\n");
-        assert!(!tmp.path().join(BACKUP_LOG_FILE).exists());
-    }
-
     fn read_log(dir: &Path, name: &str) -> String {
         std::fs::read_to_string(dir.join(name)).unwrap()
     }
@@ -246,5 +124,141 @@ mod tests {
         use std::os::unix::fs::PermissionsExt;
 
         std::fs::metadata(path).unwrap().permissions().mode() & 0o777
+    }
+
+    mod make_filter {
+        use super::*;
+
+        #[test]
+        fn defaults_to_warn_when_rust_log_unset() {
+            temp_env::with_var_unset("RUST_LOG", || {
+                assert_eq!(make_filter().to_string(), "warn");
+            });
+        }
+
+        #[test]
+        fn empty_rust_log_yields_empty_filter() {
+            temp_env::with_var("RUST_LOG", Some(""), || {
+                assert_eq!(make_filter().to_string(), "");
+            });
+        }
+
+        #[test]
+        fn honors_rust_log_level() {
+            temp_env::with_var("RUST_LOG", Some("debug"), || {
+                assert_eq!(make_filter().to_string(), "debug");
+            });
+        }
+
+        #[test]
+        fn honors_rust_log_directive_language() {
+            temp_env::with_var("RUST_LOG", Some("info,reqwest=warn"), || {
+                assert_eq!(make_filter().to_string(), "reqwest=warn,info");
+            });
+        }
+    }
+
+    mod log_dir {
+        use super::*;
+
+        #[test]
+        fn sits_in_the_app_state_directory() {
+            let state = abs("/state");
+
+            let dir = temp_env::with_var("XDG_STATE_HOME", Some(&state), log_dir);
+
+            assert_eq!(dir.unwrap(), Path::new(&state).join("ox").join("log"));
+        }
+    }
+
+    mod open_file_appender {
+        use super::*;
+
+        #[test]
+        fn creates_missing_directory() {
+            let tmp = tempfile::tempdir().unwrap();
+            let dir = tmp.path().join("nested").join("log");
+            assert!(!dir.exists());
+
+            let (_writer, _guard) = open_file_appender(&dir).unwrap();
+            assert!(dir.is_dir());
+        }
+
+        #[test]
+        fn appends_across_sessions() {
+            let tmp = tempfile::tempdir().unwrap();
+            for line in ["first\n", "second\n"] {
+                let (mut writer, guard) = open_file_appender(tmp.path()).unwrap();
+                writer.write_all(line.as_bytes()).unwrap();
+                drop(guard);
+            }
+
+            assert_eq!(read_log(tmp.path(), LOG_FILE), "first\nsecond\n");
+        }
+
+        #[cfg(unix)]
+        #[test]
+        fn keeps_directory_and_file_private() {
+            let tmp = tempfile::tempdir().unwrap();
+            let dir = tmp.path().join("log");
+
+            let (_writer, _guard) = open_file_appender(&dir).unwrap();
+            assert_eq!(mode(&dir), 0o700);
+            assert_eq!(mode(&dir.join(LOG_FILE)), 0o600);
+        }
+    }
+
+    mod rotating_file {
+        use super::*;
+
+        mod open {
+            use super::*;
+
+            #[test]
+            fn counts_existing_bytes_toward_cap() {
+                let tmp = tempfile::tempdir().unwrap();
+                std::fs::write(tmp.path().join(LOG_FILE), b"0123456789").unwrap();
+
+                let mut file = RotatingFile::open(tmp.path(), 12).unwrap();
+                file.write_all(b"abc").unwrap();
+
+                assert_eq!(read_log(tmp.path(), BACKUP_LOG_FILE), "0123456789");
+                assert_eq!(read_log(tmp.path(), LOG_FILE), "abc");
+            }
+        }
+
+        mod write {
+            use super::*;
+
+            #[test]
+            fn rotates_into_a_single_backup_past_the_cap() {
+                let tmp = tempfile::tempdir().unwrap();
+                let mut file = RotatingFile::open(tmp.path(), 14).unwrap();
+
+                file.write_all(b"first-line\n").unwrap();
+                file.write_all(b"second\n").unwrap();
+                assert_eq!(read_log(tmp.path(), BACKUP_LOG_FILE), "first-line\n");
+                assert_eq!(read_log(tmp.path(), LOG_FILE), "second\n");
+
+                file.write_all(b"third\n").unwrap();
+                assert_eq!(read_log(tmp.path(), LOG_FILE), "second\nthird\n");
+
+                file.write_all(b"fourth\n").unwrap();
+                assert_eq!(read_log(tmp.path(), BACKUP_LOG_FILE), "second\nthird\n");
+                assert_eq!(read_log(tmp.path(), LOG_FILE), "fourth\n");
+                #[cfg(unix)]
+                assert_eq!(mode(&tmp.path().join(LOG_FILE)), 0o600);
+            }
+
+            #[test]
+            fn keeps_an_oversized_record_in_an_empty_file() {
+                let tmp = tempfile::tempdir().unwrap();
+                let mut file = RotatingFile::open(tmp.path(), 4).unwrap();
+
+                file.write_all(b"oversized\n").unwrap();
+                assert_eq!(read_log(tmp.path(), LOG_FILE), "oversized\n");
+                assert!(!tmp.path().join(BACKUP_LOG_FILE).exists());
+            }
+        }
     }
 }

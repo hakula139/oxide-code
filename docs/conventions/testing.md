@@ -10,9 +10,13 @@ Conventions for tests, their environment, timing, coverage, mutation testing, an
 
 ## Grouping and Naming
 
-- Group tests by the function they cover under `// ── function_name ──` banners, following the order of functions in production code. When several sections cover one function, add a topic after a colon, as in `// ── parse_color: hex ──`.
-- Within each section, put portable tests before platform-specific ones. Order each group from happy path to variants, then edge and error cases.
-- Name each test for its function and the scenario it covers, as in `parse_color_hex_rejects_three_digit_shorthand`. Describe the scenario and outcome in domain terms, as in `string_unset_or_empty_is_absent`, and omit mechanisms such as a returned `None` from the name.
+- Group each function's tests in a child module of `mod tests` named after the function, as in `mod parse_color`, so that `cargo test parse_color::` runs them. Order these modules to match the functions in production code, and omit banners since the module names mark each group.
+- Nest the module of a method or variant in a module named for its type, as in `mod model_spec { mod resolve { ... } }`, unless the file is named for that type, as `file_tracker.rs` is for `FileTracker`. Put tests of a type as a whole, such as its serde form or `Display` output, directly in the type's module, before its method modules.
+- Put tests that exercise several functions together, such as a file format or an invariant, in a module named for that behavior, as in `mod jsonl_format`.
+- When a function's tests fall into topics, keep each topic's tests together in the function's module and prefix each test name with its topic, as in `parse_color::hex_rejects_three_digit_shorthand`.
+- Start each module with `use super::*;` to bring in the code under test along with the imports and helpers of each enclosing module. Put the `use` declarations at the top of `mod tests`. Put each helper, constant, or fixture in the narrowest module enclosing every test that uses it, which is the top of `mod tests` for one that several functions share. Fixtures that tests in other files also use belong in the `testing` child described above.
+- Within each module, put portable tests before platform-specific ones, ordering each group from happy paths to variants, then edge and error cases. When every test in a module is platform-specific, gate the module once, as in `#[cfg(target_os = "macos")] mod evaluation_error`, because `use super::*` in a module left empty on other platforms fails the unused-import lint.
+- Name each test for the scenario it covers, leaving the function to its module, as in `string::unset_or_empty_is_absent`. Describe the scenario and outcome in domain terms, omitting mechanisms such as a returned `None` from the name.
 
 ## Data and Infrastructure
 
@@ -42,7 +46,9 @@ The [live tests](#live-tests) are the sole exception because they send paid requ
 
 ## Snapshots
 
-`insta` snapshot tests compare TUI renders, session JSONL, and headless output against baselines in the module's `snapshots/` directory. When output changes, the test fails and writes a `.snap.new` file beside the baseline. Review the difference, then accept it with `INSTA_UPDATE=always cargo test <filter>` or `cargo insta review` if cargo-insta is installed, and commit the updated `.snap`. Delete baselines left behind by renamed or removed tests.
+`insta` snapshot tests compare TUI renders, session JSONL, and headless output against baselines in the module's `snapshots/` directory. When output changes, the test fails and writes a `.snap.new` file beside the baseline. Review the difference, accept it with `INSTA_UPDATE=always cargo test <filter>` or, if cargo-insta is installed, `cargo insta review`, and commit the updated `.snap`.
+
+A baseline's file name joins the crate name, the test's module path, and the snapshot name with `__`, as in `ox__<module path>__tests__<function>__<test>.snap`. The snapshot name is the test name unless the assertion passes its own, so moving or renaming a test renames its baseline. Rename the `.snap` file with the test, and delete baselines left behind by removed tests. If cargo-insta is installed, `cargo insta test --unreferenced=reject` fails whenever any baseline is left without a test.
 
 The session fixtures in `crates/oxide-code/src/session/fixtures/` are frozen release output, with one fixture per stable release starting at `v0.1.0`. Never edit them. A changed `session_resumes_from_every_release_fixture@<tag>` snapshot means an older release's sessions now resume differently, so accept it only as [Compatibility](../design/session/persistence.md#compatibility) allows.
 
