@@ -62,81 +62,90 @@ impl PendingCalls {
 mod tests {
     use super::*;
 
-    // ── result_header ──
+    mod result_header {
+        use super::*;
 
-    #[test]
-    fn result_header_prefers_the_tool_title() {
-        let header = result_header(
-            Some("Edited f.rs".to_owned()),
-            Some("Edit(/tmp/f.rs)".to_owned()),
-        );
+        #[test]
+        fn prefers_the_tool_title() {
+            let header = result_header(
+                Some("Edited f.rs".to_owned()),
+                Some("Edit(/tmp/f.rs)".to_owned()),
+            );
 
-        assert_eq!(header, "Edited f.rs");
-    }
-
-    #[test]
-    fn result_header_falls_back_to_the_call_label() {
-        let header = result_header(None, Some("Edit(/tmp/f.rs)".to_owned()));
-
-        assert_eq!(header, "Edit(/tmp/f.rs)");
-    }
-
-    #[test]
-    fn result_header_falls_back_to_generic_header_for_orphans() {
-        let header = result_header(None, None);
-
-        assert_eq!(header, FALLBACK_RESULT_HEADER);
-    }
-
-    // ── PendingCalls::insert ──
-
-    #[test]
-    fn insert_overwrites_existing_entry() {
-        let mut calls = PendingCalls::default();
-        calls.insert("t1".to_owned(), "Edit(/tmp/f.rs)".to_owned(), 0);
-
-        calls.insert("t1".to_owned(), "Edit(retry)".to_owned(), 3);
-
-        assert_eq!(
-            calls.remove("t1"),
-            Some(PendingCall {
-                label: "Edit(retry)".to_owned(),
-                block: 3,
-            }),
-        );
-    }
-
-    // ── PendingCalls::remove ──
-
-    #[test]
-    fn remove_drains_the_entry() {
-        let mut calls = PendingCalls::default();
-        calls.insert("t1".to_owned(), "Edit(/tmp/f.rs)".to_owned(), 0);
-
-        let removed = calls.remove("t1");
-
-        assert_eq!(
-            removed,
-            Some(PendingCall {
-                label: "Edit(/tmp/f.rs)".to_owned(),
-                block: 0,
-            }),
-        );
-        assert_eq!(calls.remove("t1"), None);
-    }
-
-    // ── PendingCalls::shift_from ──
-
-    #[test]
-    fn shift_from_moves_only_the_calls_at_or_after_the_insertion() {
-        let mut calls = PendingCalls::default();
-        for (id, block) in [("before", 1), ("at", 2), ("after", 4)] {
-            calls.insert(id.to_owned(), id.to_owned(), block);
+            assert_eq!(header, "Edited f.rs");
         }
 
-        calls.shift_from(2);
+        #[test]
+        fn falls_back_to_the_call_label() {
+            let header = result_header(None, Some("Edit(/tmp/f.rs)".to_owned()));
 
-        let blocks = ["before", "at", "after"].map(|id| calls.remove(id).map(|call| call.block));
-        assert_eq!(blocks, [Some(1), Some(3), Some(5)]);
+            assert_eq!(header, "Edit(/tmp/f.rs)");
+        }
+
+        #[test]
+        fn falls_back_to_generic_header_for_orphans() {
+            let header = result_header(None, None);
+
+            assert_eq!(header, FALLBACK_RESULT_HEADER);
+        }
+    }
+
+    mod insert {
+        use super::*;
+
+        #[test]
+        fn overwrites_existing_entry() {
+            let mut calls = PendingCalls::default();
+            calls.insert("t1".to_owned(), "Edit(/tmp/f.rs)".to_owned(), 0);
+
+            calls.insert("t1".to_owned(), "Edit(retry)".to_owned(), 3);
+
+            assert_eq!(
+                calls.remove("t1"),
+                Some(PendingCall {
+                    label: "Edit(retry)".to_owned(),
+                    block: 3,
+                }),
+            );
+        }
+    }
+
+    mod remove {
+        use super::*;
+
+        #[test]
+        fn drains_the_entry() {
+            let mut calls = PendingCalls::default();
+            calls.insert("t1".to_owned(), "Edit(/tmp/f.rs)".to_owned(), 0);
+
+            let removed = calls.remove("t1");
+
+            assert_eq!(
+                removed,
+                Some(PendingCall {
+                    label: "Edit(/tmp/f.rs)".to_owned(),
+                    block: 0,
+                }),
+            );
+            assert_eq!(calls.remove("t1"), None);
+        }
+    }
+
+    mod shift_from {
+        use super::*;
+
+        #[test]
+        fn moves_only_the_calls_at_or_after_the_insertion() {
+            let mut calls = PendingCalls::default();
+            for (id, block) in [("before", 1), ("at", 2), ("after", 4)] {
+                calls.insert(id.to_owned(), id.to_owned(), block);
+            }
+
+            calls.shift_from(2);
+
+            let blocks =
+                ["before", "at", "after"].map(|id| calls.remove(id).map(|call| call.block));
+            assert_eq!(blocks, [Some(1), Some(3), Some(5)]);
+        }
     }
 }

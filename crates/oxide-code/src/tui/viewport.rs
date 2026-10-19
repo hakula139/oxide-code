@@ -60,106 +60,118 @@ impl Viewport {
 mod tests {
     use super::*;
 
-    // ── wrap_next ──
+    mod wrap_next {
+        use super::*;
 
-    #[test]
-    fn wrap_next_advances_then_wraps_to_the_first_row() {
-        assert_eq!(wrap_next(0, 3), 1);
-        assert_eq!(wrap_next(2, 3), 0);
-        assert_eq!(wrap_next(0, 1), 0);
+        #[test]
+        fn advances_then_wraps_to_the_first_row() {
+            assert_eq!(wrap_next(0, 3), 1);
+            assert_eq!(wrap_next(2, 3), 0);
+            assert_eq!(wrap_next(0, 1), 0);
+        }
     }
 
-    // ── wrap_prev ──
+    mod wrap_prev {
+        use super::*;
 
-    #[test]
-    fn wrap_prev_retreats_then_wraps_to_the_last_row() {
-        assert_eq!(wrap_prev(2, 3), 1);
-        assert_eq!(wrap_prev(0, 3), 2);
-        assert_eq!(wrap_prev(0, 1), 0);
+        #[test]
+        fn retreats_then_wraps_to_the_last_row() {
+            assert_eq!(wrap_prev(2, 3), 1);
+            assert_eq!(wrap_prev(0, 3), 2);
+            assert_eq!(wrap_prev(0, 1), 0);
+        }
     }
 
-    // ── Viewport::window ──
+    mod window {
+        use super::*;
 
-    #[test]
-    fn window_follows_the_cursor_with_minimal_movement() {
-        let viewport = Viewport::default();
-        assert_eq!(viewport.window(10, 4, Some(0)), 0..4);
-        assert_eq!(viewport.window(10, 4, Some(3)), 0..4, "still in view");
-        assert_eq!(viewport.window(10, 4, Some(5)), 2..6, "bottom edge follows");
-        assert_eq!(
-            viewport.window(10, 4, Some(4)),
-            2..6,
-            "back inside the window"
-        );
-        assert_eq!(viewport.window(10, 4, Some(1)), 1..5, "top edge follows");
+        #[test]
+        fn follows_the_cursor_with_minimal_movement() {
+            let viewport = Viewport::default();
+            assert_eq!(viewport.window(10, 4, Some(0)), 0..4);
+            assert_eq!(viewport.window(10, 4, Some(3)), 0..4, "still in view");
+            assert_eq!(viewport.window(10, 4, Some(5)), 2..6, "bottom edge follows");
+            assert_eq!(
+                viewport.window(10, 4, Some(4)),
+                2..6,
+                "back inside the window"
+            );
+            assert_eq!(viewport.window(10, 4, Some(1)), 1..5, "top edge follows");
+        }
+
+        #[test]
+        fn reclamps_when_the_granted_height_changes() {
+            let viewport = Viewport::default();
+            assert_eq!(viewport.window(10, 3, Some(9)), 7..10);
+            assert_eq!(
+                viewport.window(10, 6, Some(9)),
+                4..10,
+                "taller window shows more"
+            );
+            assert_eq!(
+                viewport.window(10, 2, Some(9)),
+                8..10,
+                "shorter window keeps the cursor"
+            );
+        }
+
+        #[test]
+        fn on_a_short_list_shows_every_row() {
+            let viewport = Viewport::default();
+            assert_eq!(viewport.window(2, 5, Some(1)), 0..2);
+            assert_eq!(viewport.window(0, 5, None), 0..0);
+        }
+
+        #[test]
+        fn with_zero_height_is_empty_without_moving() {
+            let viewport = Viewport::default();
+            viewport.window(10, 3, Some(4));
+            assert_eq!(viewport.window(10, 0, Some(9)), 2..2);
+            assert_eq!(viewport.page(), 1, "paging still moves by at least one row");
+        }
     }
 
-    #[test]
-    fn window_reclamps_when_the_granted_height_changes() {
-        let viewport = Viewport::default();
-        assert_eq!(viewport.window(10, 3, Some(9)), 7..10);
-        assert_eq!(
-            viewport.window(10, 6, Some(9)),
-            4..10,
-            "taller window shows more"
-        );
-        assert_eq!(
-            viewport.window(10, 2, Some(9)),
-            8..10,
-            "shorter window keeps the cursor"
-        );
+    mod page {
+        use super::*;
+
+        #[test]
+        fn reports_the_last_rendered_height() {
+            let viewport = Viewport::default();
+            assert_eq!(viewport.page(), 1, "no render yet");
+            viewport.window(20, 7, Some(0));
+            assert_eq!(viewport.page(), 7);
+        }
     }
 
-    #[test]
-    fn window_on_a_short_list_shows_every_row() {
-        let viewport = Viewport::default();
-        assert_eq!(viewport.window(2, 5, Some(1)), 0..2);
-        assert_eq!(viewport.window(0, 5, None), 0..0);
+    mod scroll_by {
+        use super::*;
+
+        #[test]
+        fn stops_at_both_ends() {
+            let viewport = Viewport::default();
+            viewport.window(10, 4, None);
+            viewport.scroll_by(3, 10);
+            assert_eq!(viewport.window(10, 4, None), 3..7);
+            viewport.scroll_by(100, 10);
+            assert_eq!(
+                viewport.window(10, 4, None),
+                6..10,
+                "last row pins the bottom"
+            );
+            viewport.scroll_by(-100, 10);
+            assert_eq!(viewport.window(10, 4, None), 0..4);
+        }
     }
 
-    #[test]
-    fn window_with_zero_height_is_empty_without_moving() {
-        let viewport = Viewport::default();
-        viewport.window(10, 3, Some(4));
-        assert_eq!(viewport.window(10, 0, Some(9)), 2..2);
-        assert_eq!(viewport.page(), 1, "paging still moves by at least one row");
-    }
+    mod reset {
+        use super::*;
 
-    // ── Viewport::page ──
-
-    #[test]
-    fn page_reports_the_last_rendered_height() {
-        let viewport = Viewport::default();
-        assert_eq!(viewport.page(), 1, "no render yet");
-        viewport.window(20, 7, Some(0));
-        assert_eq!(viewport.page(), 7);
-    }
-
-    // ── Viewport::scroll_by ──
-
-    #[test]
-    fn scroll_by_stops_at_both_ends() {
-        let viewport = Viewport::default();
-        viewport.window(10, 4, None);
-        viewport.scroll_by(3, 10);
-        assert_eq!(viewport.window(10, 4, None), 3..7);
-        viewport.scroll_by(100, 10);
-        assert_eq!(
-            viewport.window(10, 4, None),
-            6..10,
-            "last row pins the bottom"
-        );
-        viewport.scroll_by(-100, 10);
-        assert_eq!(viewport.window(10, 4, None), 0..4);
-    }
-
-    // ── Viewport::reset ──
-
-    #[test]
-    fn reset_returns_the_window_to_the_top() {
-        let viewport = Viewport::default();
-        viewport.window(10, 4, Some(8));
-        viewport.reset();
-        assert_eq!(viewport.window(10, 4, None), 0..4);
+        #[test]
+        fn returns_the_window_to_the_top() {
+            let viewport = Viewport::default();
+            viewport.window(10, 4, Some(8));
+            viewport.reset();
+            assert_eq!(viewport.window(10, 4, None), 0..4);
+        }
     }
 }

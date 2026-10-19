@@ -262,224 +262,234 @@ mod tests {
         lines.iter().map(ToString::to_string).collect()
     }
 
-    // ── wrap_line ──
+    mod wrap_line {
+        use super::*;
 
-    #[test]
-    fn wrap_line_short_line_is_unchanged() {
-        let line = Line::from("Hello, world!");
-        assert_eq!(wrap_line(line.clone(), 80, 4, None), [line]);
+        #[test]
+        fn short_line_is_unchanged() {
+            let line = Line::from("Hello, world!");
+            assert_eq!(wrap_line(line.clone(), 80, 4, None), [line]);
+        }
+
+        #[test]
+        fn zero_width_passes_through_unchanged() {
+            let line = Line::from("Hello, world!");
+            assert_eq!(wrap_line(line.clone(), 0, 4, None), [line]);
+        }
+
+        #[test]
+        fn wraps_at_word_boundary() {
+            let result = wrap_line(Line::from("Hello world foo bar"), 12, 0, None);
+            assert_eq!(texts(&result), ["Hello world ", "foo bar"]);
+        }
+
+        #[test]
+        fn indents_continuation_rows() {
+            let line = Line::from(vec![Span::raw("    "), Span::raw("Hello world foo bar")]);
+            let result = wrap_line(line, 16, 4, None);
+            assert_eq!(texts(&result), ["    Hello world ", "    foo bar"]);
+        }
+
+        #[test]
+        fn preserves_styles_across_wrap() {
+            let bold = Style::default().add_modifier(Modifier::BOLD);
+            let line = Line::from(vec![
+                Span::styled("Bold ", bold),
+                Span::raw("normal text that is long enough to wrap"),
+            ]);
+            let result = wrap_line(line, 20, 0, None);
+            assert_eq!(
+                result,
+                [
+                    Line::from(vec![Span::styled("Bold ", bold), Span::raw("normal text ")]),
+                    Line::from("that is long enough "),
+                    Line::from("to wrap"),
+                ]
+            );
+        }
+
+        #[test]
+        fn keeps_line_style_and_alignment_on_every_row() {
+            let style = Style::default().fg(Color::Green);
+            let line = Line::from("one two three").style(style).right_aligned();
+
+            let result = wrap_line(line, 8, 2, None);
+
+            let row = |spans: Vec<Span<'static>>| Line::from(spans).style(style).right_aligned();
+            assert_eq!(
+                result,
+                [
+                    row(vec![Span::raw("one two ")]),
+                    row(vec![Span::raw("  "), Span::raw("three")]),
+                ]
+            );
+        }
+
+        #[test]
+        fn force_breaks_a_word_wider_than_the_row() {
+            let input = "abcdefghijklmnopqrstuvwxyz";
+            let result = wrap_line(Line::from(input), 10, 0, None);
+            assert_eq!(texts(&result), [&input[..10], &input[10..20], &input[20..]]);
+        }
+
+        #[test]
+        fn keeps_span_style_on_indented_continuations() {
+            let code_style = Style::default().fg(Color::Green);
+            let line = Line::from(vec![
+                Span::raw("  "),
+                Span::styled("a b c d e f g h i j k l", code_style),
+            ]);
+            let result = wrap_line(line, 14, 2, None);
+            assert_eq!(
+                result,
+                [
+                    Line::from(vec![
+                        Span::raw("  "),
+                        Span::styled("a b c d e f ", code_style)
+                    ]),
+                    Line::from(vec![
+                        Span::raw("  "),
+                        Span::styled("g h i j k l", code_style)
+                    ]),
+                ]
+            );
+        }
+
+        #[test]
+        fn repeats_styled_prefix_on_continuations() {
+            let marker_style = Style::default().fg(Color::Green);
+            let line = Line::from(vec![
+                Span::styled("> ", marker_style),
+                Span::raw("one two three four five six"),
+            ]);
+            let prefix = vec![Span::styled("> ", marker_style)];
+            let result = wrap_line(line, 12, 2, Some(&prefix));
+            let row = |text| Line::from(vec![Span::styled("> ", marker_style), Span::raw(text)]);
+            assert_eq!(
+                result,
+                [row("one two "), row("three four"), row("five six")]
+            );
+        }
+
+        #[test]
+        fn breaks_cjk_by_display_width() {
+            let result = wrap_line(Line::from("你好世界再见"), 5, 0, None);
+            assert_eq!(texts(&result), ["你好", "世界", "再见"]);
+            let too_narrow = wrap_line(Line::from("你好"), 1, 0, None);
+            assert_eq!(texts(&too_narrow), ["你", "好"]);
+        }
+
+        #[test]
+        fn keeps_zwj_emoji_whole() {
+            let family = "👨‍👩‍👧";
+            let result = wrap_line(Line::from(format!("ab{family}{family}")), 3, 0, None);
+            assert_eq!(texts(&result), ["ab", family, family]);
+        }
+
+        #[test]
+        fn breaks_between_wide_characters_and_their_neighbors() {
+            let wrap = |s, width| texts(&wrap_line(Line::from(s), width, 0, None));
+            assert_eq!(
+                wrap("中文 Rust 代码很长", 8),
+                ["中文 ", "Rust 代", "码很长"]
+            );
+            assert_eq!(wrap("中 文abcd", 5), ["中 文", "abcd"]);
+            assert_eq!(wrap("中 ab文字", 5), ["中 ab", "文字"]);
+        }
+
+        #[test]
+        fn keeps_closing_punctuation_off_the_row_start() {
+            let wrap = |s, width| texts(&wrap_line(Line::from(s), width, 0, None));
+            assert_eq!(wrap("中文字，好", 6), ["中文", "字，好"]);
+            assert_eq!(wrap("中文字.", 6), ["中文", "字."]);
+            assert_eq!(wrap("abcde，", 5), ["abcd", "e，"]);
+        }
+
+        #[test]
+        fn drops_whitespace_left_over_at_a_break() {
+            let wrap = |s| texts(&wrap_line(Line::from(s), 3, 0, None));
+            assert_eq!(wrap("ab   cd"), ["ab ", "cd"]);
+            assert_eq!(wrap("abc de"), ["abc", "de"]);
+            assert_eq!(wrap("abc   de"), ["abc", "de"]);
+            assert_eq!(
+                texts(&wrap_line(Line::from("✅ ab"), 1, 0, None)),
+                ["✅", "a", "b"],
+                "a grapheme wider than the row splits off without a blank row after it"
+            );
+        }
     }
 
-    #[test]
-    fn wrap_line_zero_width_passes_through_unchanged() {
-        let line = Line::from("Hello, world!");
-        assert_eq!(wrap_line(line.clone(), 0, 4, None), [line]);
+    mod wrap_line_keeping_lead {
+        use super::*;
+
+        #[test]
+        fn breaks_only_from_the_lead_column_on() {
+            let wrap = |lead| {
+                texts(&wrap_line_keeping_lead(
+                    Line::from("  ab cd ef"),
+                    6,
+                    2,
+                    None,
+                    lead,
+                ))
+            };
+            assert_eq!(wrap(4), ["  ab ", "  cd ", "  ef"]);
+            assert_eq!(wrap(5), ["  ab c", "  d ef"]);
+        }
     }
 
-    #[test]
-    fn wrap_line_wraps_at_word_boundary() {
-        let result = wrap_line(Line::from("Hello world foo bar"), 12, 0, None);
-        assert_eq!(texts(&result), ["Hello world ", "foo bar"]);
+    mod longest_word_width {
+        use super::*;
+
+        #[test]
+        fn spans_style_changes_and_stops_at_wrap_breaks() {
+            let bold = Style::default().add_modifier(Modifier::BOLD);
+            let styled = Line::from(vec![
+                Span::raw("ab cd"),
+                Span::styled("ef ", bold),
+                Span::raw("g"),
+            ]);
+
+            assert_eq!(longest_word_width(&styled), 4);
+            assert_eq!(longest_word_width(&Line::from("中文，好")), 4);
+            assert_eq!(longest_word_width(&Line::from("✅ a")), 2);
+            assert_eq!(longest_word_width(&Line::default()), 0);
+        }
     }
 
-    #[test]
-    fn wrap_line_indents_continuation_rows() {
-        let line = Line::from(vec![Span::raw("    "), Span::raw("Hello world foo bar")]);
-        let result = wrap_line(line, 16, 4, None);
-        assert_eq!(texts(&result), ["    Hello world ", "    foo bar"]);
+    mod expand_tabs {
+        use super::*;
+
+        #[test]
+        fn no_tabs_unchanged() {
+            assert_eq!(expand_tabs("hello world"), "hello world");
+        }
+
+        #[test]
+        fn line_number_format() {
+            assert_eq!(expand_tabs("1\tuse std::io;"), "1   use std::io;");
+            assert_eq!(expand_tabs("10\tuse std::io;"), "10  use std::io;");
+            assert_eq!(expand_tabs("100\tuse std::io;"), "100 use std::io;");
+        }
+
+        #[test]
+        fn mid_line_aligns_to_stop() {
+            assert_eq!(expand_tabs("ab\tcd"), "ab  cd");
+            assert_eq!(expand_tabs("abcd\tx"), "abcd    x");
+        }
     }
 
-    #[test]
-    fn wrap_line_preserves_styles_across_wrap() {
-        let bold = Style::default().add_modifier(Modifier::BOLD);
-        let line = Line::from(vec![
-            Span::styled("Bold ", bold),
-            Span::raw("normal text that is long enough to wrap"),
-        ]);
-        let result = wrap_line(line, 20, 0, None);
-        assert_eq!(
-            result,
-            [
-                Line::from(vec![Span::styled("Bold ", bold), Span::raw("normal text ")]),
-                Line::from("that is long enough "),
-                Line::from("to wrap"),
-            ]
-        );
-    }
+    mod expand_tabs_in_spans {
+        use super::*;
 
-    #[test]
-    fn wrap_line_keeps_line_style_and_alignment_on_every_row() {
-        let style = Style::default().fg(Color::Green);
-        let line = Line::from("one two three").style(style).right_aligned();
-
-        let result = wrap_line(line, 8, 2, None);
-
-        let row = |spans: Vec<Span<'static>>| Line::from(spans).style(style).right_aligned();
-        assert_eq!(
-            result,
-            [
-                row(vec![Span::raw("one two ")]),
-                row(vec![Span::raw("  "), Span::raw("three")]),
-            ]
-        );
-    }
-
-    #[test]
-    fn wrap_line_force_breaks_a_word_wider_than_the_row() {
-        let input = "abcdefghijklmnopqrstuvwxyz";
-        let result = wrap_line(Line::from(input), 10, 0, None);
-        assert_eq!(texts(&result), [&input[..10], &input[10..20], &input[20..]]);
-    }
-
-    #[test]
-    fn wrap_line_keeps_span_style_on_indented_continuations() {
-        let code_style = Style::default().fg(Color::Green);
-        let line = Line::from(vec![
-            Span::raw("  "),
-            Span::styled("a b c d e f g h i j k l", code_style),
-        ]);
-        let result = wrap_line(line, 14, 2, None);
-        assert_eq!(
-            result,
-            [
-                Line::from(vec![
-                    Span::raw("  "),
-                    Span::styled("a b c d e f ", code_style)
-                ]),
-                Line::from(vec![
-                    Span::raw("  "),
-                    Span::styled("g h i j k l", code_style)
-                ]),
-            ]
-        );
-    }
-
-    #[test]
-    fn wrap_line_repeats_styled_prefix_on_continuations() {
-        let marker_style = Style::default().fg(Color::Green);
-        let line = Line::from(vec![
-            Span::styled("> ", marker_style),
-            Span::raw("one two three four five six"),
-        ]);
-        let prefix = vec![Span::styled("> ", marker_style)];
-        let result = wrap_line(line, 12, 2, Some(&prefix));
-        let row = |text| Line::from(vec![Span::styled("> ", marker_style), Span::raw(text)]);
-        assert_eq!(
-            result,
-            [row("one two "), row("three four"), row("five six")]
-        );
-    }
-
-    #[test]
-    fn wrap_line_breaks_cjk_by_display_width() {
-        let result = wrap_line(Line::from("你好世界再见"), 5, 0, None);
-        assert_eq!(texts(&result), ["你好", "世界", "再见"]);
-        let too_narrow = wrap_line(Line::from("你好"), 1, 0, None);
-        assert_eq!(texts(&too_narrow), ["你", "好"]);
-    }
-
-    #[test]
-    fn wrap_line_keeps_zwj_emoji_whole() {
-        let family = "👨‍👩‍👧";
-        let result = wrap_line(Line::from(format!("ab{family}{family}")), 3, 0, None);
-        assert_eq!(texts(&result), ["ab", family, family]);
-    }
-
-    #[test]
-    fn wrap_line_breaks_between_wide_characters_and_their_neighbors() {
-        let wrap = |s, width| texts(&wrap_line(Line::from(s), width, 0, None));
-        assert_eq!(
-            wrap("中文 Rust 代码很长", 8),
-            ["中文 ", "Rust 代", "码很长"]
-        );
-        assert_eq!(wrap("中 文abcd", 5), ["中 文", "abcd"]);
-        assert_eq!(wrap("中 ab文字", 5), ["中 ab", "文字"]);
-    }
-
-    #[test]
-    fn wrap_line_keeps_closing_punctuation_off_the_row_start() {
-        let wrap = |s, width| texts(&wrap_line(Line::from(s), width, 0, None));
-        assert_eq!(wrap("中文字，好", 6), ["中文", "字，好"]);
-        assert_eq!(wrap("中文字.", 6), ["中文", "字."]);
-        assert_eq!(wrap("abcde，", 5), ["abcd", "e，"]);
-    }
-
-    #[test]
-    fn wrap_line_drops_whitespace_left_over_at_a_break() {
-        let wrap = |s| texts(&wrap_line(Line::from(s), 3, 0, None));
-        assert_eq!(wrap("ab   cd"), ["ab ", "cd"]);
-        assert_eq!(wrap("abc de"), ["abc", "de"]);
-        assert_eq!(wrap("abc   de"), ["abc", "de"]);
-        assert_eq!(
-            texts(&wrap_line(Line::from("✅ ab"), 1, 0, None)),
-            ["✅", "a", "b"],
-            "a grapheme wider than the row splits off without a blank row after it"
-        );
-    }
-
-    // ── wrap_line_keeping_lead ──
-
-    #[test]
-    fn wrap_line_keeping_lead_breaks_only_from_the_lead_column_on() {
-        let wrap = |lead| {
-            texts(&wrap_line_keeping_lead(
-                Line::from("  ab cd ef"),
-                6,
-                2,
-                None,
-                lead,
-            ))
-        };
-        assert_eq!(wrap(4), ["  ab ", "  cd ", "  ef"]);
-        assert_eq!(wrap(5), ["  ab c", "  d ef"]);
-    }
-
-    // ── longest_word_width ──
-
-    #[test]
-    fn longest_word_width_spans_style_changes_and_stops_at_wrap_breaks() {
-        let bold = Style::default().add_modifier(Modifier::BOLD);
-        let styled = Line::from(vec![
-            Span::raw("ab cd"),
-            Span::styled("ef ", bold),
-            Span::raw("g"),
-        ]);
-
-        assert_eq!(longest_word_width(&styled), 4);
-        assert_eq!(longest_word_width(&Line::from("中文，好")), 4);
-        assert_eq!(longest_word_width(&Line::from("✅ a")), 2);
-        assert_eq!(longest_word_width(&Line::default()), 0);
-    }
-
-    // ── expand_tabs ──
-
-    #[test]
-    fn expand_tabs_no_tabs_unchanged() {
-        assert_eq!(expand_tabs("hello world"), "hello world");
-    }
-
-    #[test]
-    fn expand_tabs_line_number_format() {
-        assert_eq!(expand_tabs("1\tuse std::io;"), "1   use std::io;");
-        assert_eq!(expand_tabs("10\tuse std::io;"), "10  use std::io;");
-        assert_eq!(expand_tabs("100\tuse std::io;"), "100 use std::io;");
-    }
-
-    #[test]
-    fn expand_tabs_mid_line_aligns_to_stop() {
-        assert_eq!(expand_tabs("ab\tcd"), "ab  cd");
-        assert_eq!(expand_tabs("abcd\tx"), "abcd    x");
-    }
-
-    // ── expand_tabs_in_spans ──
-
-    #[test]
-    fn expand_tabs_in_spans_aligns_stops_across_span_boundaries() {
-        let red = Style::default().fg(Color::Red);
-        let spans = vec![Span::raw("ab"), Span::styled("\tx", red)];
-        let expanded = expand_tabs_in_spans(spans);
-        assert_eq!(expanded[0].content, "ab");
-        assert_eq!(expanded[1].content, "  x");
-        assert_eq!(expanded[1].style, red);
+        #[test]
+        fn aligns_stops_across_span_boundaries() {
+            let red = Style::default().fg(Color::Red);
+            let spans = vec![Span::raw("ab"), Span::styled("\tx", red)];
+            let expanded = expand_tabs_in_spans(spans);
+            assert_eq!(expanded[0].content, "ab");
+            assert_eq!(expanded[1].content, "  x");
+            assert_eq!(expanded[1].style, red);
+        }
     }
 }

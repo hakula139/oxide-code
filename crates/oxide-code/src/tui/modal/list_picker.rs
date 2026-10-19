@@ -178,8 +178,6 @@ mod tests {
     use super::*;
     use crate::tui::modal::testing::render_rows_with;
 
-    // ── Test fixture ──
-
     /// Minimal `PickerItem` covering all trait methods so tests can pin behavior without
     /// coupling to any concrete picker.
     struct FakeItem {
@@ -222,70 +220,6 @@ mod tests {
         ListPicker::new("Pick one", items)
     }
 
-    fn render_rows<T: PickerItem>(picker: &ListPicker<T>, width: u16, height: u16) -> Vec<String> {
-        render_rows_with(width, height, |frame, area, theme| {
-            picker.render(frame, area, theme);
-        })
-    }
-
-    // ── numeric_hint ──
-
-    #[test]
-    fn numeric_hint_numbers_the_first_nine_rows_only() {
-        assert_eq!(numeric_hint(0), Some('1'));
-        assert_eq!(numeric_hint(8), Some('9'));
-        assert_eq!(numeric_hint(9), None);
-        assert_eq!(numeric_hint(42), None);
-    }
-
-    // ── cursor_to ──
-
-    #[test]
-    fn cursor_to_seeks_first_matching_item() {
-        let mut p = picker(vec![
-            FakeItem::new("a"),
-            FakeItem::new("b"),
-            FakeItem::new("c"),
-        ]);
-
-        p.cursor_to(|i| i.label() == "b");
-
-        assert_eq!(p.cursor_index(), 1);
-    }
-
-    #[test]
-    fn cursor_to_no_match_leaves_cursor_at_zero() {
-        let mut p = picker(vec![FakeItem::new("a"), FakeItem::new("b")]);
-
-        p.cursor_to(|i| i.label() == "missing");
-
-        assert_eq!(p.cursor_index(), 0);
-    }
-
-    // ── select_next / select_prev ──
-
-    #[test]
-    fn select_next_advances_and_wraps_at_end() {
-        let mut p = picker(vec![FakeItem::new("a"), FakeItem::new("b")]);
-
-        p.select_next();
-        assert_eq!(p.cursor_index(), 1);
-
-        p.select_next();
-        assert_eq!(p.cursor_index(), 0, "wraps past the last row");
-    }
-
-    #[test]
-    fn select_prev_retreats_and_wraps_at_zero() {
-        let mut p = picker(vec![FakeItem::new("a"), FakeItem::new("b")]);
-
-        p.select_prev();
-        assert_eq!(p.cursor_index(), 1, "wraps past the first row");
-
-        p.select_prev();
-        assert_eq!(p.cursor_index(), 0);
-    }
-
     #[test]
     fn select_next_and_prev_on_empty_list_are_noops() {
         let mut p = picker(Vec::new());
@@ -297,146 +231,230 @@ mod tests {
         assert!(p.selected().is_none());
     }
 
-    // ── select_by_hint ──
+    mod numeric_hint {
+        use super::*;
 
-    #[test]
-    fn select_by_hint_jumps_to_matching_item() {
-        let mut p = picker(vec![
-            FakeItem {
-                hint: Some('1'),
-                ..FakeItem::new("a")
-            },
-            FakeItem {
-                hint: Some('2'),
-                ..FakeItem::new("b")
-            },
-            FakeItem {
-                hint: Some('3'),
-                ..FakeItem::new("c")
-            },
-        ]);
-
-        assert!(p.select_by_hint('2'));
-        assert_eq!(p.cursor_index(), 1);
+        #[test]
+        fn numbers_the_first_nine_rows_only() {
+            assert_eq!(numeric_hint(0), Some('1'));
+            assert_eq!(numeric_hint(8), Some('9'));
+            assert_eq!(numeric_hint(9), None);
+            assert_eq!(numeric_hint(42), None);
+        }
     }
 
-    #[test]
-    fn select_by_hint_unknown_key_leaves_cursor() {
-        let mut p = picker(vec![FakeItem {
-            hint: Some('1'),
-            ..FakeItem::new("a")
-        }]);
+    mod cursor_to {
+        use super::*;
 
-        assert!(!p.select_by_hint('9'));
-        assert_eq!(p.cursor_index(), 0, "cursor stays put on miss");
-    }
+        #[test]
+        fn seeks_first_matching_item() {
+            let mut p = picker(vec![
+                FakeItem::new("a"),
+                FakeItem::new("b"),
+                FakeItem::new("c"),
+            ]);
 
-    // ── height ──
+            p.cursor_to(|i| i.label() == "b");
 
-    #[test]
-    fn height_with_no_description_is_two_header_rows_plus_items() {
-        // Title (1) + blank (1) + items.
-        let p = picker(vec![FakeItem::new("a"), FakeItem::new("b")]);
-
-        assert_eq!(p.height(80, 40), 4);
-    }
-
-    #[test]
-    fn height_with_description_adds_one_more_row() {
-        // Title (1) + description (1) + blank (1) = 3 header rows + items.
-        let p = picker(vec![FakeItem::new("a")]).with_description("a small picker");
-
-        assert_eq!(p.height(80, 40), 4);
-    }
-
-    #[test]
-    fn height_with_empty_items_is_just_header_rows() {
-        let p: ListPicker<FakeItem> = picker(Vec::new());
-
-        assert_eq!(p.height(80, 40), 2, "empty list still draws title + blank");
-    }
-
-    #[test]
-    fn height_caps_long_lists_at_the_max() {
-        let items = (0..20).map(|_| FakeItem::new("x")).collect();
-
-        assert_eq!(picker(items).height(80, 7), 7);
-    }
-
-    // ── render ──
-
-    #[test]
-    fn render_aligns_columns_by_display_width() {
-        let p = picker(vec![
-            FakeItem {
-                description: Some("abcdefghij"),
-                ..FakeItem::new("中文")
-            },
-            FakeItem {
-                description: Some("xyz"),
-                active: true,
-                ..FakeItem::new("a")
-            },
-        ]);
-
-        let rows = render_rows(&p, 20, p.height(20, 20));
-
-        assert_eq!(rows[2].trim_end(), ">    中文    ab...");
-        assert_eq!(rows[3].trim_end(), "     a     ✓ xyz");
-    }
-
-    #[test]
-    fn render_truncates_the_description_at_a_narrow_width() {
-        let p = picker(vec![FakeItem {
-            description: Some("a long description"),
-            ..FakeItem::new("very-long-label")
-        }])
-        .with_description("title-line");
-
-        let rows = render_rows(&p, 32, p.height(32, 8));
-
-        let rows: Vec<&str> = rows.iter().map(|row| row.trim_end()).collect();
-        assert_eq!(
-            rows,
-            [
-                "Pick one",
-                "title-line",
-                "",
-                ">    very-long-label    a l..."
-            ]
-        );
-    }
-
-    #[test]
-    fn render_label_only_items_show_no_marker_or_description() {
-        struct MinimalItem(&'static str);
-
-        impl PickerItem for MinimalItem {
-            fn label(&self) -> &str {
-                self.0
-            }
+            assert_eq!(p.cursor_index(), 1);
         }
 
-        let p = ListPicker::new("Pick one", vec![MinimalItem("a"), MinimalItem("b")]);
+        #[test]
+        fn no_match_leaves_cursor_at_zero() {
+            let mut p = picker(vec![FakeItem::new("a"), FakeItem::new("b")]);
 
-        let rows = render_rows(&p, 40, p.height(40, 40));
+            p.cursor_to(|i| i.label() == "missing");
 
-        let rows: Vec<&str> = rows.iter().map(|row| row.trim_end()).collect();
-        assert_eq!(rows, ["Pick one", "", ">    a", "     b"]);
+            assert_eq!(p.cursor_index(), 0);
+        }
     }
 
-    #[test]
-    fn render_scrolls_the_cursor_row_into_a_short_area() {
-        const LABELS: [&str; 6] = ["r0", "r1", "r2", "r3", "r4", "r5"];
-        let mut p = picker(LABELS.into_iter().map(FakeItem::new).collect());
-        p.cursor_to(|item| item.label == "r4");
+    mod select_next {
+        use super::*;
 
-        let rows = render_rows(&p, 20, p.height(20, 5));
+        #[test]
+        fn advances_and_wraps_at_end() {
+            let mut p = picker(vec![FakeItem::new("a"), FakeItem::new("b")]);
 
-        assert_eq!(
-            rows.iter().map(|row| row.trim_end()).collect::<Vec<_>>(),
-            ["Pick one", "", "     r2", "     r3", ">    r4"],
-            "the header stays pinned and the cursor row lands at the bottom",
-        );
+            p.select_next();
+            assert_eq!(p.cursor_index(), 1);
+
+            p.select_next();
+            assert_eq!(p.cursor_index(), 0, "wraps past the last row");
+        }
+    }
+
+    mod select_prev {
+        use super::*;
+
+        #[test]
+        fn retreats_and_wraps_at_zero() {
+            let mut p = picker(vec![FakeItem::new("a"), FakeItem::new("b")]);
+
+            p.select_prev();
+            assert_eq!(p.cursor_index(), 1, "wraps past the first row");
+
+            p.select_prev();
+            assert_eq!(p.cursor_index(), 0);
+        }
+    }
+
+    mod select_by_hint {
+        use super::*;
+
+        #[test]
+        fn jumps_to_matching_item() {
+            let mut p = picker(vec![
+                FakeItem {
+                    hint: Some('1'),
+                    ..FakeItem::new("a")
+                },
+                FakeItem {
+                    hint: Some('2'),
+                    ..FakeItem::new("b")
+                },
+                FakeItem {
+                    hint: Some('3'),
+                    ..FakeItem::new("c")
+                },
+            ]);
+
+            assert!(p.select_by_hint('2'));
+            assert_eq!(p.cursor_index(), 1);
+        }
+
+        #[test]
+        fn unknown_key_leaves_cursor() {
+            let mut p = picker(vec![FakeItem {
+                hint: Some('1'),
+                ..FakeItem::new("a")
+            }]);
+
+            assert!(!p.select_by_hint('9'));
+            assert_eq!(p.cursor_index(), 0, "cursor stays put on miss");
+        }
+    }
+
+    mod height {
+        use super::*;
+
+        #[test]
+        fn with_no_description_is_two_header_rows_plus_items() {
+            // Title (1) + blank (1) + items.
+            let p = picker(vec![FakeItem::new("a"), FakeItem::new("b")]);
+
+            assert_eq!(p.height(80, 40), 4);
+        }
+
+        #[test]
+        fn with_description_adds_one_more_row() {
+            // Title (1) + description (1) + blank (1) = 3 header rows + items.
+            let p = picker(vec![FakeItem::new("a")]).with_description("a small picker");
+
+            assert_eq!(p.height(80, 40), 4);
+        }
+
+        #[test]
+        fn with_empty_items_is_just_header_rows() {
+            let p: ListPicker<FakeItem> = picker(Vec::new());
+
+            assert_eq!(p.height(80, 40), 2, "empty list still draws title + blank");
+        }
+
+        #[test]
+        fn caps_long_lists_at_the_max() {
+            let items = (0..20).map(|_| FakeItem::new("x")).collect();
+
+            assert_eq!(picker(items).height(80, 7), 7);
+        }
+    }
+
+    mod render {
+        use super::*;
+
+        fn render_rows<T: PickerItem>(
+            picker: &ListPicker<T>,
+            width: u16,
+            height: u16,
+        ) -> Vec<String> {
+            render_rows_with(width, height, |frame, area, theme| {
+                picker.render(frame, area, theme);
+            })
+        }
+
+        #[test]
+        fn aligns_columns_by_display_width() {
+            let p = picker(vec![
+                FakeItem {
+                    description: Some("abcdefghij"),
+                    ..FakeItem::new("中文")
+                },
+                FakeItem {
+                    description: Some("xyz"),
+                    active: true,
+                    ..FakeItem::new("a")
+                },
+            ]);
+
+            let rows = render_rows(&p, 20, p.height(20, 20));
+
+            assert_eq!(rows[2].trim_end(), ">    中文    ab...");
+            assert_eq!(rows[3].trim_end(), "     a     ✓ xyz");
+        }
+
+        #[test]
+        fn truncates_the_description_at_a_narrow_width() {
+            let p = picker(vec![FakeItem {
+                description: Some("a long description"),
+                ..FakeItem::new("very-long-label")
+            }])
+            .with_description("title-line");
+
+            let rows = render_rows(&p, 32, p.height(32, 8));
+
+            let rows: Vec<&str> = rows.iter().map(|row| row.trim_end()).collect();
+            assert_eq!(
+                rows,
+                [
+                    "Pick one",
+                    "title-line",
+                    "",
+                    ">    very-long-label    a l..."
+                ]
+            );
+        }
+
+        #[test]
+        fn label_only_items_show_no_marker_or_description() {
+            struct MinimalItem(&'static str);
+
+            impl PickerItem for MinimalItem {
+                fn label(&self) -> &str {
+                    self.0
+                }
+            }
+
+            let p = ListPicker::new("Pick one", vec![MinimalItem("a"), MinimalItem("b")]);
+
+            let rows = render_rows(&p, 40, p.height(40, 40));
+
+            let rows: Vec<&str> = rows.iter().map(|row| row.trim_end()).collect();
+            assert_eq!(rows, ["Pick one", "", ">    a", "     b"]);
+        }
+
+        #[test]
+        fn scrolls_the_cursor_row_into_a_short_area() {
+            const LABELS: [&str; 6] = ["r0", "r1", "r2", "r3", "r4", "r5"];
+            let mut p = picker(LABELS.into_iter().map(FakeItem::new).collect());
+            p.cursor_to(|item| item.label == "r4");
+
+            let rows = render_rows(&p, 20, p.height(20, 5));
+
+            assert_eq!(
+                rows.iter().map(|row| row.trim_end()).collect::<Vec<_>>(),
+                ["Pick one", "", "     r2", "     r3", ">    r4"],
+                "the header stays pinned and the cursor row lands at the bottom",
+            );
+        }
     }
 }

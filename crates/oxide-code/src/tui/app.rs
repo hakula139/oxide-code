@@ -251,202 +251,208 @@ mod tests {
     use crate::tui::terminal::testing::capture_terminal;
     use crate::tui::testing::{buffer_rows, key_event};
 
-    // ── App::new ──
+    mod new {
+        use super::*;
 
-    #[test]
-    fn new_plumbs_resumed_title_and_branch_into_status_bar() {
-        let (app, _rx, _event_tx) = test_app(Some("Resumed title"));
-        assert_eq!(app.status_bar.title(), Some("Resumed title"));
-        assert_eq!(app.status_bar.git_branch(), Some("main"));
-        assert_eq!(app.status_bar.status(), &Status::Idle);
-        assert_eq!(app.chat.entry_count(), 0);
-        assert!(app.input.is_enabled());
-        assert!(!app.should_quit);
-        assert!(app.dirty, "first frame must render");
+        #[test]
+        fn plumbs_resumed_title_and_branch_into_status_bar() {
+            let (app, _rx, _event_tx) = test_app(Some("Resumed title"));
+            assert_eq!(app.status_bar.title(), Some("Resumed title"));
+            assert_eq!(app.status_bar.git_branch(), Some("main"));
+            assert_eq!(app.status_bar.status(), &Status::Idle);
+            assert_eq!(app.chat.entry_count(), 0);
+            assert!(app.input.is_enabled());
+            assert!(!app.should_quit);
+            assert!(app.dirty, "first frame must render");
+        }
+
+        #[test]
+        fn without_title_leaves_slot_unset() {
+            let (app, _rx, _event_tx) = test_app(None);
+            assert!(app.status_bar.title().is_none());
+        }
+
+        #[test]
+        fn whitespace_title_is_filtered_by_status_bar() {
+            // The status bar drops whitespace-only titles, so a blank resumed title leaves no slot.
+            let (app, _rx, _event_tx) = test_app(Some("   \n "));
+            assert!(app.status_bar.title().is_none());
+        }
+
+        #[test]
+        fn after_resume_unarchived_the_session_opens_with_a_notice() {
+            let (_event_tx, events) = mpsc::unbounded_channel::<Event>();
+            let (ops, _op_rx) = mpsc::channel::<Op>(1);
+            let mut app = App::new(
+                &Theme::default(),
+                test_session_info(),
+                None,
+                false,
+                events,
+                ops,
+                AppHistory {
+                    interactions: vec![Interaction::UserText("earlier".to_owned())],
+                    title: None,
+                    unarchived: true,
+                },
+            );
+
+            assert_eq!(app.chat.entry_count(), 2);
+            let text = rendered_text(&mut app, 80, 12);
+            assert!(text.contains("Unarchived session test-ses"), "{text}");
+        }
     }
 
-    #[test]
-    fn new_without_title_leaves_slot_unset() {
-        let (app, _rx, _event_tx) = test_app(None);
-        assert!(app.status_bar.title().is_none());
+    mod push_system_message {
+        use super::*;
+
+        #[test]
+        fn replaces_welcome_with_notice() {
+            let (mut app, _rx, _event_tx) = test_app(None);
+            app.push_system_message("Model not supported.".to_owned());
+            assert!(rendered_text(&mut app, 80, 24).contains("Model not supported."));
+            assert!(!app.chat.is_empty());
+        }
     }
 
-    #[test]
-    fn new_whitespace_title_is_filtered_by_status_bar() {
-        // Status bar filters whitespace-only titles so a resumed blank title doesn't leave a slot.
-        let (app, _rx, _event_tx) = test_app(Some("   \n "));
-        assert!(app.status_bar.title().is_none());
-    }
+    mod run_with_events {
+        use super::*;
 
-    #[test]
-    fn new_after_resume_unarchived_the_session_opens_with_a_notice() {
-        let (_event_tx, events) = mpsc::unbounded_channel::<Event>();
-        let (ops, _op_rx) = mpsc::channel::<Op>(1);
-        let mut app = App::new(
-            &Theme::default(),
-            test_session_info(),
-            None,
-            false,
-            events,
-            ops,
-            AppHistory {
-                interactions: vec![Interaction::UserText("earlier".to_owned())],
-                title: None,
-                unarchived: true,
-            },
-        );
+        #[tokio::test(start_paused = true)]
+        async fn expires_armed_exit_on_tick_before_channel_close() {
+            let (mut app, _rx, event_tx) = test_app(None);
+            let until = now()
+                .checked_sub(EXIT_WINDOW)
+                .expect("monotonic clock has run long enough for a test deadline");
+            app.status_bar.set_status(Status::ExitArmed { until });
+            app.dirty = false;
 
-        assert_eq!(app.chat.entry_count(), 2);
-        let text = rendered_text(&mut app, 80, 12);
-        assert!(text.contains("Unarchived session test-ses"), "{text}");
-    }
+            let mut terminal = capture_terminal(60, 8);
+            let closer = tokio::spawn(async move {
+                tokio::time::sleep(TICK_INTERVAL * 2).await;
+                drop(event_tx);
+            });
 
-    // ── push_system_message ──
-
-    #[test]
-    fn push_system_message_replaces_welcome_with_notice() {
-        let (mut app, _rx, _event_tx) = test_app(None);
-        app.push_system_message("Model not supported.".to_owned());
-        assert!(rendered_text(&mut app, 80, 24).contains("Model not supported."));
-        assert!(!app.chat.is_empty());
-    }
-
-    // ── run_with_events ──
-
-    #[tokio::test(start_paused = true)]
-    async fn run_with_events_expires_armed_exit_on_tick_before_channel_close() {
-        let (mut app, _rx, event_tx) = test_app(None);
-        let until = now()
-            .checked_sub(EXIT_WINDOW)
-            .expect("monotonic clock has run long enough for a test deadline");
-        app.status_bar.set_status(Status::ExitArmed { until });
-        app.dirty = false;
-
-        let mut terminal = capture_terminal(60, 8);
-        let closer = tokio::spawn(async move {
-            tokio::time::sleep(TICK_INTERVAL * 2).await;
-            drop(event_tx);
-        });
-
-        app.run_with_events(
-            &mut terminal,
-            futures::stream::pending::<io::Result<CrosstermEvent>>(),
-        )
-        .await
-        .unwrap();
-        closer.await.unwrap();
-
-        assert_eq!(app.status_bar.status(), &Status::Idle);
-        assert!(app.should_quit);
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn run_with_events_repaints_when_the_spinner_frame_advances() {
-        // Sleep past the spinner interval so `tick()` reports a visible frame change.
-        let (mut app, _rx, event_tx) = test_app(None);
-        app.status_bar.set_status(Status::Streaming);
-        app.dirty = false;
-
-        let mut terminal = capture_terminal(60, 8);
-        let frame = TICK_INTERVAL * u32::try_from(TICKS_PER_FRAME).unwrap();
-        let driver = tokio::spawn(async move {
-            tokio::time::sleep(frame).await;
-            drop(event_tx);
-        });
-
-        app.run_with_events(
-            &mut terminal,
-            futures::stream::pending::<io::Result<CrosstermEvent>>(),
-        )
-        .await
-        .unwrap();
-        driver.await.unwrap();
-
-        let status = &buffer_rows(terminal.backend().buffer())[0];
-        assert_eq!(
-            status.trim_end(),
-            format!(
-                "  test-model (high) │ {} Streaming · Esc to interrupt",
-                SPINNER_FRAMES[1],
-            ),
-        );
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn run_with_events_pumps_crossterm_and_engine_events_through_select() {
-        let (mut app, _rx, event_tx) = test_app(None);
-        let mut terminal = capture_terminal(60, 8);
-
-        let key = Ok(key_event(KeyCode::Char('x'), KeyModifiers::NONE));
-        let stream = futures::stream::iter(vec![key]).chain(futures::stream::pending());
-
-        let driver = tokio::spawn(async move {
-            event_tx.send(Event::StreamToken("hi".to_owned())).unwrap();
-            tokio::time::sleep(TICK_INTERVAL * 2).await;
-            drop(event_tx);
-        });
-
-        app.run_with_events(&mut terminal, stream).await.unwrap();
-        driver.await.unwrap();
-
-        assert!(app.should_quit);
-        assert_eq!(app.input.lines(), vec!["x"], "crossterm key reached input");
-        assert!(
-            !app.input.is_enabled(),
-            "engine StreamToken disabled the input",
-        );
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn run_with_events_applies_git_probe_results() {
-        let (mut app, _rx, event_tx) = test_app(None);
-        app.git_probes
-            .inject(GitUpdate::Branch(Some("feat/x".to_owned())));
-
-        let mut terminal = capture_terminal(60, 8);
-        let closer = tokio::spawn(async move {
-            tokio::time::sleep(TICK_INTERVAL * 2).await;
-            drop(event_tx);
-        });
-
-        app.run_with_events(
-            &mut terminal,
-            futures::stream::pending::<io::Result<CrosstermEvent>>(),
-        )
-        .await
-        .unwrap();
-        closer.await.unwrap();
-
-        assert_eq!(app.status_bar.git_branch(), Some("feat/x"));
-    }
-
-    #[tokio::test]
-    async fn run_with_events_returns_terminal_read_errors() {
-        let (mut app, _rx, _event_tx) = test_app(None);
-        let mut terminal = capture_terminal(60, 8);
-        let stream = futures::stream::iter(vec![Err(io::Error::other("tty gone"))]);
-
-        let err = app
-            .run_with_events(&mut terminal, stream)
+            app.run_with_events(
+                &mut terminal,
+                futures::stream::pending::<io::Result<CrosstermEvent>>(),
+            )
             .await
-            .unwrap_err();
+            .unwrap();
+            closer.await.unwrap();
 
-        assert_eq!(format!("{err:#}"), "cannot read terminal input: tty gone");
-    }
+            assert_eq!(app.status_bar.status(), &Status::Idle);
+            assert!(app.should_quit);
+        }
 
-    #[tokio::test]
-    async fn run_with_events_quits_when_the_terminal_stream_ends() {
-        let (mut app, _rx, _event_tx) = test_app(None);
-        let mut terminal = capture_terminal(60, 8);
+        #[tokio::test(start_paused = true)]
+        async fn repaints_when_the_spinner_frame_advances() {
+            // Sleep past the spinner interval so `tick()` reports a visible frame change.
+            let (mut app, _rx, event_tx) = test_app(None);
+            app.status_bar.set_status(Status::Streaming);
+            app.dirty = false;
 
-        tokio::time::timeout(
-            Duration::from_secs(5),
-            app.run_with_events(&mut terminal, futures::stream::empty()),
-        )
-        .await
-        .expect("an ended stream must stop the loop")
-        .unwrap();
+            let mut terminal = capture_terminal(60, 8);
+            let frame = TICK_INTERVAL * u32::try_from(TICKS_PER_FRAME).unwrap();
+            let driver = tokio::spawn(async move {
+                tokio::time::sleep(frame).await;
+                drop(event_tx);
+            });
 
-        assert!(app.should_quit);
+            app.run_with_events(
+                &mut terminal,
+                futures::stream::pending::<io::Result<CrosstermEvent>>(),
+            )
+            .await
+            .unwrap();
+            driver.await.unwrap();
+
+            let status = &buffer_rows(terminal.backend().buffer())[0];
+            assert_eq!(
+                status.trim_end(),
+                format!(
+                    "  test-model (high) │ {} Streaming · Esc to interrupt",
+                    SPINNER_FRAMES[1],
+                ),
+            );
+        }
+
+        #[tokio::test(start_paused = true)]
+        async fn pumps_crossterm_and_engine_events_through_select() {
+            let (mut app, _rx, event_tx) = test_app(None);
+            let mut terminal = capture_terminal(60, 8);
+
+            let key = Ok(key_event(KeyCode::Char('x'), KeyModifiers::NONE));
+            let stream = futures::stream::iter(vec![key]).chain(futures::stream::pending());
+
+            let driver = tokio::spawn(async move {
+                event_tx.send(Event::StreamToken("hi".to_owned())).unwrap();
+                tokio::time::sleep(TICK_INTERVAL * 2).await;
+                drop(event_tx);
+            });
+
+            app.run_with_events(&mut terminal, stream).await.unwrap();
+            driver.await.unwrap();
+
+            assert!(app.should_quit);
+            assert_eq!(app.input.lines(), vec!["x"], "crossterm key reached input");
+            assert!(
+                !app.input.is_enabled(),
+                "engine StreamToken disabled the input",
+            );
+        }
+
+        #[tokio::test(start_paused = true)]
+        async fn applies_git_probe_results() {
+            let (mut app, _rx, event_tx) = test_app(None);
+            app.git_probes
+                .inject(GitUpdate::Branch(Some("feat/x".to_owned())));
+
+            let mut terminal = capture_terminal(60, 8);
+            let closer = tokio::spawn(async move {
+                tokio::time::sleep(TICK_INTERVAL * 2).await;
+                drop(event_tx);
+            });
+
+            app.run_with_events(
+                &mut terminal,
+                futures::stream::pending::<io::Result<CrosstermEvent>>(),
+            )
+            .await
+            .unwrap();
+            closer.await.unwrap();
+
+            assert_eq!(app.status_bar.git_branch(), Some("feat/x"));
+        }
+
+        #[tokio::test]
+        async fn returns_terminal_read_errors() {
+            let (mut app, _rx, _event_tx) = test_app(None);
+            let mut terminal = capture_terminal(60, 8);
+            let stream = futures::stream::iter(vec![Err(io::Error::other("tty gone"))]);
+
+            let err = app
+                .run_with_events(&mut terminal, stream)
+                .await
+                .unwrap_err();
+
+            assert_eq!(format!("{err:#}"), "cannot read terminal input: tty gone");
+        }
+
+        #[tokio::test]
+        async fn quits_when_the_terminal_stream_ends() {
+            let (mut app, _rx, _event_tx) = test_app(None);
+            let mut terminal = capture_terminal(60, 8);
+
+            tokio::time::timeout(
+                Duration::from_secs(5),
+                app.run_with_events(&mut terminal, futures::stream::empty()),
+            )
+            .await
+            .expect("an ended stream must stop the loop")
+            .unwrap();
+
+            assert!(app.should_quit);
+        }
     }
 }
