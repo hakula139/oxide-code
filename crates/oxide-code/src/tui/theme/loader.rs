@@ -598,7 +598,7 @@ mod tests {
             }
 
             #[test]
-            fn inline_none_modifiers_preserve_every_base_flag() {
+            fn inline_without_modifiers_preserves_every_base_flag() {
                 // A patch that names no modifier leaves every base modifier set. Reading an absent
                 // flag as `false` would clear them whenever an unrelated field changes.
                 let base = Slot {

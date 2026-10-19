@@ -485,6 +485,166 @@ mod tests {
             app.clipboard.recv().await.expect("the release copied");
         }
 
+        #[test]
+        fn key_release_is_ignored() {
+            let (mut app, mut rx, _event_tx) = test_app(None);
+            app.input.set_text("hi");
+            app.dirty = false;
+
+            app.handle_crossterm_event(&CrosstermEvent::Key(KeyEvent::new_with_kind(
+                KeyCode::Enter,
+                KeyModifiers::NONE,
+                KeyEventKind::Release,
+            )));
+
+            assert_eq!(
+                rx.try_recv(),
+                Err(TryRecvError::Empty),
+                "a release must not submit"
+            );
+            assert_eq!(app.input.lines(), vec!["hi".to_owned()]);
+            assert!(!app.dirty);
+        }
+
+        #[tokio::test(start_paused = true)]
+        async fn ctrl_c_copies_the_selection_without_interrupting() {
+            let (mut app, mut rx, _event_tx) = test_app(None);
+            app.chat.push_system_message("copy this word");
+            app.handle_engine_event(Event::StreamToken("partial".to_owned()));
+            select_word(&mut app, "this").await;
+
+            app.handle_crossterm_event(&key_event(KeyCode::Char('c'), KeyModifiers::CONTROL));
+            let report = app.clipboard.recv().await.expect("Ctrl+C copied");
+
+            assert_eq!(report.chars, 4);
+            assert!(!app.chat.has_selection(), "the copy clears the selection");
+            assert_eq!(
+                rx.try_recv(),
+                Err(TryRecvError::Empty),
+                "a copying Ctrl+C must not interrupt"
+            );
+            assert_eq!(app.status_bar.status(), &Status::Streaming);
+        }
+
+        #[tokio::test(start_paused = true)]
+        async fn any_other_key_clears_the_selection_and_still_acts() {
+            let (mut app, _rx, _event_tx) = test_app(None);
+            app.chat.push_system_message("copy this word");
+            select_word(&mut app, "this").await;
+
+            app.handle_crossterm_event(&key_event(KeyCode::Char('x'), KeyModifiers::NONE));
+
+            assert!(!app.chat.has_selection());
+            assert_eq!(app.input.lines(), vec!["x"]);
+        }
+
+        #[tokio::test]
+        async fn modal_gate_intercepts_keys_before_input_sees_them() {
+            let (mut app, mut rx, _event_tx) = test_app(None);
+            app.push_modal(Box::new(ScriptedModal::new(ModalAction::Dispatch(
+                Action::Op(Op::Interrupt),
+            ))));
+
+            app.handle_crossterm_event(&key_event(KeyCode::Char('x'), KeyModifiers::NONE));
+            assert!(
+                app.input.lines().iter().all(String::is_empty),
+                "input must stay empty while modal is active",
+            );
+            assert_eq!(
+                rx.try_recv(),
+                Err(TryRecvError::Empty),
+                "no Op must reach ops for a key the modal consumed"
+            );
+
+            // Modal submit flows through the normal dispatch path.
+            app.handle_crossterm_event(&key_event(KeyCode::Char('s'), KeyModifiers::NONE));
+            let forwarded = rx.recv().await.expect("modal-submitted action forwarded");
+            assert!(matches!(forwarded, Op::Interrupt));
+        }
+
+        #[tokio::test]
+        async fn modal_gate_routes_pastes_to_the_top_modal() {
+            let (mut app, mut rx, _event_tx) = test_app(None);
+            app.dispatch_action(Action::Submit("/rename".to_owned()));
+
+            app.handle_crossterm_event(&CrosstermEvent::Paste("Fix auth\r\nflow".to_owned()));
+            app.handle_crossterm_event(&key_event(KeyCode::Enter, KeyModifiers::NONE));
+
+            let forwarded = rx.recv().await.expect("rename forwarded");
+            assert_eq!(
+                forwarded,
+                Op::Rename {
+                    title: "Fix auth flow".to_owned(),
+                },
+            );
+            assert!(app.input.is_empty(), "the hidden input must stay empty");
+        }
+
+        #[test]
+        fn modal_gate_paste_never_answers_an_approval() {
+            let (mut app, mut rx, _event_tx) = test_app(None);
+            push_answerable_approval(&mut app, "rm -rf build");
+            _ = render_app(&mut app, 60, 20);
+
+            app.handle_crossterm_event(&CrosstermEvent::Paste("y\n".to_owned()));
+
+            assert_eq!(
+                rx.try_recv(),
+                Err(TryRecvError::Empty),
+                "a paste must not decide the call"
+            );
+            assert!(app.modals.is_active());
+            assert!(app.input.is_empty());
+        }
+
+        #[test]
+        fn modal_gate_steps_the_modal_with_the_wheel_instead_of_chat() {
+            let keys = Arc::new(Mutex::new(Vec::new()));
+            let (mut app, _rx, _event_tx) = test_app(None);
+            app.chat.push_system_message(long_chat_block());
+            app.push_modal(Box::new(KeyLogModal(Arc::clone(&keys))));
+            _ = render_app(&mut app, 60, 20);
+
+            for kind in [
+                MouseEventKind::ScrollUp,
+                MouseEventKind::ScrollDown,
+                MouseEventKind::Moved,
+            ] {
+                app.handle_crossterm_event(&mouse_event(kind));
+            }
+
+            assert_eq!(*keys.lock().unwrap(), [KeyCode::Up, KeyCode::Down]);
+            assert!(!app.chat.is_scrolled_up(), "chat under the modal stays put");
+            assert!(app.modals.is_active());
+        }
+
+        #[test]
+        fn modal_gate_cancel_closes_modal_without_dispatching() {
+            let (mut app, mut rx, _event_tx) = test_app(None);
+            app.push_modal(Box::new(ScriptedModal::new(ModalAction::Cancelled)));
+            app.handle_crossterm_event(&key_event(KeyCode::Char('c'), KeyModifiers::NONE));
+
+            assert_eq!(
+                rx.try_recv(),
+                Err(TryRecvError::Empty),
+                "Cancelled must not dispatch any Op"
+            );
+            // With the modal closed, later keys reach the input.
+            app.handle_crossterm_event(&key_event(KeyCode::Char('y'), KeyModifiers::NONE));
+            assert_eq!(app.input.lines(), vec!["y".to_owned()]);
+        }
+
+        #[tokio::test]
+        async fn key_esc_busy_forwards_interrupt() {
+            let (mut app, mut rx, _event_tx) = test_app(None);
+            app.handle_engine_event(Event::StreamToken("partial".to_owned()));
+
+            app.handle_crossterm_event(&key_event(KeyCode::Esc, KeyModifiers::NONE));
+            assert!(!app.should_quit);
+            let forwarded = rx.recv().await.expect("Interrupt forwarded to the engine");
+            assert!(matches!(forwarded, Op::Interrupt));
+        }
+
         #[tokio::test]
         async fn key_submit_forwards_through_input_to_dispatch() {
             let (mut app, mut rx, _event_tx) = test_app(None);
@@ -543,205 +703,6 @@ mod tests {
             assert!(!app.should_quit, "busy Ctrl+C must not exit");
             let forwarded = rx.recv().await.expect("Interrupt forwarded to the engine");
             assert!(matches!(forwarded, Op::Interrupt));
-        }
-
-        #[tokio::test]
-        async fn key_esc_busy_forwards_interrupt() {
-            let (mut app, mut rx, _event_tx) = test_app(None);
-            app.handle_engine_event(Event::StreamToken("partial".to_owned()));
-
-            app.handle_crossterm_event(&key_event(KeyCode::Esc, KeyModifiers::NONE));
-            assert!(!app.should_quit);
-            let forwarded = rx.recv().await.expect("Interrupt forwarded to the engine");
-            assert!(matches!(forwarded, Op::Interrupt));
-        }
-
-        #[test]
-        fn wheel_scroll_is_forwarded_to_chat() {
-            let (mut app, _rx, _event_tx) = test_app(None);
-            app.chat.push_system_message(long_chat_block());
-            _ = render_app(&mut app, 60, 10);
-
-            app.handle_crossterm_event(&mouse_event(MouseEventKind::ScrollUp));
-            let text = rendered_text(&mut app, 60, 10);
-
-            assert!(text.contains("Jump to bottom"), "{text}");
-            assert!(app.dirty);
-        }
-
-        #[test]
-        fn plain_click_opens_the_status_link_under_it() {
-            let (mut app, _rx, _event_tx) = test_app(None);
-            app.status_links = vec![StatusHyperlink {
-                rect: Rect::new(10, 0, 3, 1),
-                url: "https://example.com/pull/7".to_owned(),
-                cells: Vec::new(),
-            }];
-            let press = |column, modifiers| {
-                CrosstermEvent::Mouse(MouseEvent {
-                    kind: MouseEventKind::Down(MouseButton::Left),
-                    column,
-                    row: 0,
-                    modifiers,
-                })
-            };
-
-            app.open_browser = |_| panic!("only a plain click on the link opens it");
-            app.handle_crossterm_event(&press(9, KeyModifiers::NONE));
-            app.handle_crossterm_event(&press(10, KeyModifiers::CONTROL));
-            app.handle_crossterm_event(&press(12, KeyModifiers::SUPER));
-            app.open_browser = |_| Ok(());
-            app.handle_crossterm_event(&press(10, KeyModifiers::NONE));
-            assert_eq!(
-                app.chat.last_system_text(),
-                None,
-                "an opened link needs no note"
-            );
-            app.open_browser = |url| {
-                assert_eq!(url, "https://example.com/pull/7");
-                Err(io::Error::other("no browser"))
-            };
-            app.handle_crossterm_event(&press(12, KeyModifiers::NONE));
-
-            assert_eq!(
-                app.chat.last_system_text(),
-                Some("Could not open the browser. Open https://example.com/pull/7 in a browser."),
-            );
-        }
-
-        #[test]
-        fn wheel_steps_the_slash_popup_like_arrows() {
-            let open_popup = |app: &mut App| {
-                app.chat.push_system_message(long_chat_block());
-                _ = render_app(app, 80, 20);
-                app.handle_crossterm_event(&key_event(KeyCode::Char('/'), KeyModifiers::NONE));
-                assert!(app.input.popup_visible());
-            };
-            let (mut by_key, _rx, _event_tx) = test_app(None);
-            let (mut by_wheel, _rx2, _event_tx2) = test_app(None);
-            open_popup(&mut by_key);
-            open_popup(&mut by_wheel);
-
-            by_key.handle_crossterm_event(&key_event(KeyCode::Down, KeyModifiers::NONE));
-            by_wheel.handle_crossterm_event(&mouse_event(MouseEventKind::ScrollDown));
-            for app in [&mut by_key, &mut by_wheel] {
-                app.handle_crossterm_event(&key_event(KeyCode::Tab, KeyModifiers::NONE));
-            }
-
-            assert_eq!(by_wheel.input.lines(), by_key.input.lines());
-            assert_ne!(
-                by_wheel.input.lines(),
-                vec!["/archive ".to_owned()],
-                "moved off the first"
-            );
-            assert!(!by_wheel.chat.is_scrolled_up(), "the popup took the wheel");
-        }
-
-        #[tokio::test]
-        async fn drag_release_copies_the_selection() {
-            let (mut app, _rx, _event_tx) = test_app(None);
-            app.chat.push_system_message("copy this word");
-            let (x, y) = cell_of(&mut app, "this");
-
-            for (kind, column) in [
-                (MouseEventKind::Down(MouseButton::Left), x),
-                (MouseEventKind::Drag(MouseButton::Left), x + 3),
-                (MouseEventKind::Up(MouseButton::Left), x + 3),
-            ] {
-                app.handle_crossterm_event(&mouse_event_at(kind, column, y));
-            }
-            let report = app.clipboard.recv().await.expect("the copy reports back");
-            app.apply_copy_report(report);
-
-            let encoded = base64::engine::general_purpose::STANDARD.encode("this");
-            assert_eq!(
-                app.pending_clipboard,
-                Some(format!("\x1b]52;c;{encoded}\x07")),
-            );
-            let notice = app.copy_notice.as_ref().expect("copy noted");
-            assert_eq!(
-                (notice.text.as_str(), notice.failed),
-                ("Copied 4 characters", false)
-            );
-            assert!(app.dirty);
-        }
-
-        #[tokio::test(start_paused = true)]
-        async fn ctrl_c_copies_the_selection_without_interrupting() {
-            let (mut app, mut rx, _event_tx) = test_app(None);
-            app.chat.push_system_message("copy this word");
-            app.handle_engine_event(Event::StreamToken("partial".to_owned()));
-            select_word(&mut app, "this").await;
-
-            app.handle_crossterm_event(&key_event(KeyCode::Char('c'), KeyModifiers::CONTROL));
-            let report = app.clipboard.recv().await.expect("Ctrl+C copied");
-
-            assert_eq!(report.chars, 4);
-            assert!(!app.chat.has_selection(), "the copy clears the selection");
-            assert_eq!(
-                rx.try_recv(),
-                Err(TryRecvError::Empty),
-                "a copying Ctrl+C must not interrupt"
-            );
-            assert_eq!(app.status_bar.status(), &Status::Streaming);
-        }
-
-        #[tokio::test(start_paused = true)]
-        async fn any_other_key_clears_the_selection_and_still_acts() {
-            let (mut app, _rx, _event_tx) = test_app(None);
-            app.chat.push_system_message("copy this word");
-            select_word(&mut app, "this").await;
-
-            app.handle_crossterm_event(&key_event(KeyCode::Char('x'), KeyModifiers::NONE));
-
-            assert!(!app.chat.has_selection());
-            assert_eq!(app.input.lines(), vec!["x"]);
-        }
-
-        #[test]
-        fn resize_schedules_dirty_for_relayout() {
-            // Resize falls through to `dirty = true` so the next tick re-splits with the new area.
-            let (mut app, _rx, _event_tx) = test_app(None);
-            app.dirty = false;
-            app.handle_crossterm_event(&CrosstermEvent::Resize(80, 24));
-            assert!(app.dirty, "Resize must trigger a re-layout render");
-        }
-
-        #[test]
-        fn unhandled_events_skip_the_rerender() {
-            let (mut app, _rx, _event_tx) = test_app(None);
-            app.dirty = false;
-
-            for event in [
-                CrosstermEvent::FocusGained,
-                mouse_event(MouseEventKind::Moved),
-                mouse_event(MouseEventKind::Down(MouseButton::Right)),
-                mouse_event(MouseEventKind::Up(MouseButton::Middle)),
-            ] {
-                app.handle_crossterm_event(&event);
-                assert!(!app.dirty, "{event:?}");
-            }
-        }
-
-        #[test]
-        fn key_release_is_ignored() {
-            let (mut app, mut rx, _event_tx) = test_app(None);
-            app.input.set_text("hi");
-            app.dirty = false;
-
-            app.handle_crossterm_event(&CrosstermEvent::Key(KeyEvent::new_with_kind(
-                KeyCode::Enter,
-                KeyModifiers::NONE,
-                KeyEventKind::Release,
-            )));
-
-            assert_eq!(
-                rx.try_recv(),
-                Err(TryRecvError::Empty),
-                "a release must not submit"
-            );
-            assert_eq!(app.input.lines(), vec!["hi".to_owned()]);
-            assert!(!app.dirty);
         }
 
         #[test]
@@ -857,100 +818,139 @@ mod tests {
             );
         }
 
-        #[tokio::test]
-        async fn modal_gate_intercepts_keys_before_input_sees_them() {
-            let (mut app, mut rx, _event_tx) = test_app(None);
-            app.push_modal(Box::new(ScriptedModal::new(ModalAction::Dispatch(
-                Action::Op(Op::Interrupt),
-            ))));
-
-            app.handle_crossterm_event(&key_event(KeyCode::Char('x'), KeyModifiers::NONE));
-            assert!(
-                app.input.lines().iter().all(String::is_empty),
-                "input must stay empty while modal is active",
-            );
-            assert_eq!(
-                rx.try_recv(),
-                Err(TryRecvError::Empty),
-                "no Op must reach ops for a key the modal consumed"
-            );
-
-            // Modal submit flows through the normal dispatch path.
-            app.handle_crossterm_event(&key_event(KeyCode::Char('s'), KeyModifiers::NONE));
-            let forwarded = rx.recv().await.expect("modal-submitted action forwarded");
-            assert!(matches!(forwarded, Op::Interrupt));
-        }
-
-        #[tokio::test]
-        async fn modal_gate_routes_pastes_to_the_top_modal() {
-            let (mut app, mut rx, _event_tx) = test_app(None);
-            app.dispatch_action(Action::Submit("/rename".to_owned()));
-
-            app.handle_crossterm_event(&CrosstermEvent::Paste("Fix auth\r\nflow".to_owned()));
-            app.handle_crossterm_event(&key_event(KeyCode::Enter, KeyModifiers::NONE));
-
-            let forwarded = rx.recv().await.expect("rename forwarded");
-            assert_eq!(
-                forwarded,
-                Op::Rename {
-                    title: "Fix auth flow".to_owned(),
-                },
-            );
-            assert!(app.input.is_empty(), "the hidden input must stay empty");
-        }
-
         #[test]
-        fn modal_gate_paste_never_answers_an_approval() {
-            let (mut app, mut rx, _event_tx) = test_app(None);
-            push_answerable_approval(&mut app, "rm -rf build");
-            _ = render_app(&mut app, 60, 20);
-
-            app.handle_crossterm_event(&CrosstermEvent::Paste("y\n".to_owned()));
-
-            assert_eq!(
-                rx.try_recv(),
-                Err(TryRecvError::Empty),
-                "a paste must not decide the call"
-            );
-            assert!(app.modals.is_active());
-            assert!(app.input.is_empty());
-        }
-
-        #[test]
-        fn modal_gate_steps_the_modal_with_the_wheel_instead_of_chat() {
-            let keys = Arc::new(Mutex::new(Vec::new()));
+        fn wheel_scroll_is_forwarded_to_chat() {
             let (mut app, _rx, _event_tx) = test_app(None);
             app.chat.push_system_message(long_chat_block());
-            app.push_modal(Box::new(KeyLogModal(Arc::clone(&keys))));
-            _ = render_app(&mut app, 60, 20);
+            _ = render_app(&mut app, 60, 10);
 
-            for kind in [
-                MouseEventKind::ScrollUp,
-                MouseEventKind::ScrollDown,
-                MouseEventKind::Moved,
-            ] {
-                app.handle_crossterm_event(&mouse_event(kind));
-            }
+            app.handle_crossterm_event(&mouse_event(MouseEventKind::ScrollUp));
+            let text = rendered_text(&mut app, 60, 10);
 
-            assert_eq!(*keys.lock().unwrap(), [KeyCode::Up, KeyCode::Down]);
-            assert!(!app.chat.is_scrolled_up(), "chat under the modal stays put");
-            assert!(app.modals.is_active());
+            assert!(text.contains("Jump to bottom"), "{text}");
+            assert!(app.dirty);
         }
 
         #[test]
-        fn modal_gate_cancel_closes_modal_without_dispatching() {
-            let (mut app, mut rx, _event_tx) = test_app(None);
-            app.push_modal(Box::new(ScriptedModal::new(ModalAction::Cancelled)));
-            app.handle_crossterm_event(&key_event(KeyCode::Char('c'), KeyModifiers::NONE));
+        fn wheel_steps_the_slash_popup_like_arrows() {
+            let open_popup = |app: &mut App| {
+                app.chat.push_system_message(long_chat_block());
+                _ = render_app(app, 80, 20);
+                app.handle_crossterm_event(&key_event(KeyCode::Char('/'), KeyModifiers::NONE));
+                assert!(app.input.popup_visible());
+            };
+            let (mut by_key, _rx, _event_tx) = test_app(None);
+            let (mut by_wheel, _rx2, _event_tx2) = test_app(None);
+            open_popup(&mut by_key);
+            open_popup(&mut by_wheel);
+
+            by_key.handle_crossterm_event(&key_event(KeyCode::Down, KeyModifiers::NONE));
+            by_wheel.handle_crossterm_event(&mouse_event(MouseEventKind::ScrollDown));
+            for app in [&mut by_key, &mut by_wheel] {
+                app.handle_crossterm_event(&key_event(KeyCode::Tab, KeyModifiers::NONE));
+            }
+
+            assert_eq!(by_wheel.input.lines(), by_key.input.lines());
+            assert_ne!(
+                by_wheel.input.lines(),
+                vec!["/archive ".to_owned()],
+                "moved off the first"
+            );
+            assert!(!by_wheel.chat.is_scrolled_up(), "the popup took the wheel");
+        }
+
+        #[test]
+        fn plain_click_opens_the_status_link_under_it() {
+            let (mut app, _rx, _event_tx) = test_app(None);
+            app.status_links = vec![StatusHyperlink {
+                rect: Rect::new(10, 0, 3, 1),
+                url: "https://example.com/pull/7".to_owned(),
+                cells: Vec::new(),
+            }];
+            let press = |column, modifiers| {
+                CrosstermEvent::Mouse(MouseEvent {
+                    kind: MouseEventKind::Down(MouseButton::Left),
+                    column,
+                    row: 0,
+                    modifiers,
+                })
+            };
+
+            app.open_browser = |_| panic!("only a plain click on the link opens it");
+            app.handle_crossterm_event(&press(9, KeyModifiers::NONE));
+            app.handle_crossterm_event(&press(10, KeyModifiers::CONTROL));
+            app.handle_crossterm_event(&press(12, KeyModifiers::SUPER));
+            app.open_browser = |_| Ok(());
+            app.handle_crossterm_event(&press(10, KeyModifiers::NONE));
+            assert_eq!(
+                app.chat.last_system_text(),
+                None,
+                "an opened link needs no note"
+            );
+            app.open_browser = |url| {
+                assert_eq!(url, "https://example.com/pull/7");
+                Err(io::Error::other("no browser"))
+            };
+            app.handle_crossterm_event(&press(12, KeyModifiers::NONE));
 
             assert_eq!(
-                rx.try_recv(),
-                Err(TryRecvError::Empty),
-                "Cancelled must not dispatch any Op"
+                app.chat.last_system_text(),
+                Some("Could not open the browser. Open https://example.com/pull/7 in a browser."),
             );
-            // With the modal closed, later keys reach the input.
-            app.handle_crossterm_event(&key_event(KeyCode::Char('y'), KeyModifiers::NONE));
-            assert_eq!(app.input.lines(), vec!["y".to_owned()]);
+        }
+
+        #[tokio::test]
+        async fn drag_release_copies_the_selection() {
+            let (mut app, _rx, _event_tx) = test_app(None);
+            app.chat.push_system_message("copy this word");
+            let (x, y) = cell_of(&mut app, "this");
+
+            for (kind, column) in [
+                (MouseEventKind::Down(MouseButton::Left), x),
+                (MouseEventKind::Drag(MouseButton::Left), x + 3),
+                (MouseEventKind::Up(MouseButton::Left), x + 3),
+            ] {
+                app.handle_crossterm_event(&mouse_event_at(kind, column, y));
+            }
+            let report = app.clipboard.recv().await.expect("the copy reports back");
+            app.apply_copy_report(report);
+
+            let encoded = base64::engine::general_purpose::STANDARD.encode("this");
+            assert_eq!(
+                app.pending_clipboard,
+                Some(format!("\x1b]52;c;{encoded}\x07")),
+            );
+            let notice = app.copy_notice.as_ref().expect("copy noted");
+            assert_eq!(
+                (notice.text.as_str(), notice.failed),
+                ("Copied 4 characters", false)
+            );
+            assert!(app.dirty);
+        }
+
+        #[test]
+        fn resize_schedules_dirty_for_relayout() {
+            // Resize falls through to `dirty = true` so the next tick re-splits with the new area.
+            let (mut app, _rx, _event_tx) = test_app(None);
+            app.dirty = false;
+            app.handle_crossterm_event(&CrosstermEvent::Resize(80, 24));
+            assert!(app.dirty, "Resize must trigger a re-layout render");
+        }
+
+        #[test]
+        fn unhandled_events_skip_the_rerender() {
+            let (mut app, _rx, _event_tx) = test_app(None);
+            app.dirty = false;
+
+            for event in [
+                CrosstermEvent::FocusGained,
+                mouse_event(MouseEventKind::Moved),
+                mouse_event(MouseEventKind::Down(MouseButton::Right)),
+                mouse_event(MouseEventKind::Up(MouseButton::Middle)),
+            ] {
+                app.handle_crossterm_event(&event);
+                assert!(!app.dirty, "{event:?}");
+            }
         }
     }
 
@@ -1561,27 +1561,6 @@ mod tests {
         }
 
         #[tokio::test]
-        async fn forwards_engine_ops_unchanged() {
-            // A modal-emitted `SetModel` must reach the engine so it can emit `ConfigChanged`.
-            for op in [
-                Op::SetModel(ConfigPick::Model {
-                    id: ResolvedModelId::new("claude-opus-5-5".to_owned()),
-                    effort: None,
-                }),
-                Op::SetModel(ConfigPick::Effort(Effort::High)),
-                Op::Clear,
-            ] {
-                let (mut app, mut rx, _event_tx) = test_app(None);
-                app.dispatch_op(op.clone());
-
-                let forwarded = rx.recv().await.expect("op forwarded to the engine");
-                assert_eq!(forwarded, op);
-                assert!(!app.should_quit);
-                assert_eq!(app.chat.entry_count(), 0);
-            }
-        }
-
-        #[tokio::test]
         async fn resume_forwards_to_the_engine_and_disables_input_until_event() {
             // Between forwarding `Resume` and the `SessionResumed` event, input stays gated so a
             // typed prompt doesn't push into chat just before `apply_session_resumed` clears it.
@@ -1639,6 +1618,27 @@ mod tests {
                 app.pending_prompts.iter().cloned().collect::<Vec<_>>(),
                 vec!["typed-while-signing-in".to_owned()],
             );
+        }
+
+        #[tokio::test]
+        async fn forwards_engine_ops_unchanged() {
+            // A modal-emitted `SetModel` must reach the engine so it can emit `ConfigChanged`.
+            for op in [
+                Op::SetModel(ConfigPick::Model {
+                    id: ResolvedModelId::new("claude-opus-5-5".to_owned()),
+                    effort: None,
+                }),
+                Op::SetModel(ConfigPick::Effort(Effort::High)),
+                Op::Clear,
+            ] {
+                let (mut app, mut rx, _event_tx) = test_app(None);
+                app.dispatch_op(op.clone());
+
+                let forwarded = rx.recv().await.expect("op forwarded to the engine");
+                assert_eq!(forwarded, op);
+                assert!(!app.should_quit);
+                assert_eq!(app.chat.entry_count(), 0);
+            }
         }
     }
 

@@ -123,17 +123,13 @@ mod tests {
     mod key_chord {
         use super::*;
 
-        mod fmt {
-            use super::*;
-
-            #[test]
-            fn names_ctrl_chords_and_plain_keys() {
-                assert_eq!(KeyChord::ctrl('x').to_string(), "Ctrl+X");
-                assert_eq!(KeyChord::plain(KeyCode::Char('y')).to_string(), "Y");
-                assert_eq!(KeyChord::plain(KeyCode::Enter).to_string(), "Enter");
-                assert_eq!(KeyChord::plain(KeyCode::Esc).to_string(), "Esc");
-                assert_eq!(KeyChord::plain(KeyCode::Tab).to_string(), "Tab");
-            }
+        #[test]
+        fn display_names_ctrl_chords_and_plain_keys() {
+            assert_eq!(KeyChord::ctrl('x').to_string(), "Ctrl+X");
+            assert_eq!(KeyChord::plain(KeyCode::Char('y')).to_string(), "Y");
+            assert_eq!(KeyChord::plain(KeyCode::Enter).to_string(), "Enter");
+            assert_eq!(KeyChord::plain(KeyCode::Esc).to_string(), "Esc");
+            assert_eq!(KeyChord::plain(KeyCode::Tab).to_string(), "Tab");
         }
     }
 

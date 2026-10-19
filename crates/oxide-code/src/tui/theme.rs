@@ -200,6 +200,19 @@ impl Theme {
 mod tests {
     use super::*;
 
+    #[test]
+    fn diff_add_row_and_diff_del_row_set_only_background() {
+        let t = Theme::default();
+        assert_eq!(
+            t.diff_add_row(),
+            Style::default().bg(t.diff_add.bg.unwrap())
+        );
+        assert_eq!(
+            t.diff_del_row(),
+            Style::default().bg(t.diff_del.bg.unwrap())
+        );
+    }
+
     mod slot {
         use super::*;
 
@@ -350,23 +363,6 @@ mod tests {
             assert_eq!(t.task_style(TaskStatus::Pending), t.text());
             assert_eq!(t.task_style(TaskStatus::InProgress), t.info());
             assert_eq!(t.task_style(TaskStatus::Completed), t.dim());
-        }
-    }
-
-    mod diff_rows {
-        use super::*;
-
-        #[test]
-        fn set_only_background() {
-            let t = Theme::default();
-            assert_eq!(
-                t.diff_add_row(),
-                Style::default().bg(t.diff_add.bg.unwrap())
-            );
-            assert_eq!(
-                t.diff_del_row(),
-                Style::default().bg(t.diff_del.bg.unwrap())
-            );
         }
     }
 }

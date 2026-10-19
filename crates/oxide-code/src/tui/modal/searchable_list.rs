@@ -331,6 +331,19 @@ mod tests {
         Box::leak(format!("item-{i}").into_boxed_str())
     }
 
+    #[test]
+    fn select_next_prev_and_paging_with_nothing_visible_keep_the_cursor() {
+        // Without the `is_empty` guards, wrapping would divide by zero and paging underflow.
+        let mut l = list(vec![FakeItem::new("alpha"), FakeItem::new("beta")]);
+        l.set_query("zzz");
+        assert_eq!(l.visible_len(), 0);
+        l.select_next();
+        l.select_prev();
+        l.page_down();
+        l.page_up();
+        assert_eq!(l.cursor_index(), 0);
+    }
+
     mod set_query {
         use super::*;
 
@@ -728,23 +741,6 @@ mod tests {
             terminal
                 .draw(|frame| l.render(frame, Rect::new(0, 0, 40, 1), &theme))
                 .expect("render must not panic when area is too short for the search row");
-        }
-    }
-
-    mod navigation {
-        use super::*;
-
-        #[test]
-        fn select_next_prev_and_paging_with_nothing_visible_keep_the_cursor() {
-            // Without the `is_empty` guards, wrapping would divide by zero and paging underflow.
-            let mut l = list(vec![FakeItem::new("alpha"), FakeItem::new("beta")]);
-            l.set_query("zzz");
-            assert_eq!(l.visible_len(), 0);
-            l.select_next();
-            l.select_prev();
-            l.page_down();
-            l.page_up();
-            assert_eq!(l.cursor_index(), 0);
         }
     }
 }

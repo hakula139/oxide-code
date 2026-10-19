@@ -220,6 +220,17 @@ mod tests {
         ListPicker::new("Pick one", items)
     }
 
+    #[test]
+    fn select_next_and_prev_on_empty_list_are_noops() {
+        let mut p = picker(Vec::new());
+
+        p.select_next();
+        p.select_prev();
+
+        assert_eq!(p.cursor_index(), 0);
+        assert!(p.selected().is_none());
+    }
+
     mod numeric_hint {
         use super::*;
 
@@ -444,21 +455,6 @@ mod tests {
                 ["Pick one", "", "     r2", "     r3", ">    r4"],
                 "the header stays pinned and the cursor row lands at the bottom",
             );
-        }
-    }
-
-    mod navigation {
-        use super::*;
-
-        #[test]
-        fn select_next_and_prev_on_empty_list_are_noops() {
-            let mut p = picker(Vec::new());
-
-            p.select_next();
-            p.select_prev();
-
-            assert_eq!(p.cursor_index(), 0);
-            assert!(p.selected().is_none());
         }
     }
 }

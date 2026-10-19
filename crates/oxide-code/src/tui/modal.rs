@@ -381,6 +381,13 @@ mod tests {
         }
     }
 
+    #[test]
+    fn empty_stack_is_inactive_with_zero_height() {
+        let stack = ModalStack::default();
+        assert!(!stack.is_active());
+        assert_eq!(stack.height(80, 40), 0);
+    }
+
     mod modal {
         use super::*;
 
@@ -406,36 +413,21 @@ mod tests {
     mod modal_key {
         use super::*;
 
-        mod fmt {
-            use super::*;
-
-            #[test]
-            fn names_each_variant_and_its_action() {
-                assert_eq!(format!("{:?}", ModalKey::Consumed), "Consumed");
-                assert_eq!(format!("{:?}", ModalKey::Cancelled), "Cancelled");
-                assert_eq!(
-                    format!("{:?}", ModalKey::Submitted(ModalAction::Cancelled)),
-                    "Submitted(Cancelled)"
-                );
-                assert_eq!(
-                    format!("{:?}", ModalKey::Preview(ModalAction::Cancelled)),
-                    "Preview(Cancelled)"
-                );
-                let push: ModalKey =
-                    ModalKey::Push(Box::new(ScriptedModal::new(ModalAction::Cancelled)));
-                assert_eq!(format!("{push:?}"), "Push(<modal>)");
-            }
-        }
-    }
-
-    mod is_active {
-        use super::*;
-
         #[test]
-        fn empty_stack_is_inactive_with_zero_height() {
-            let stack = ModalStack::default();
-            assert!(!stack.is_active());
-            assert_eq!(stack.height(80, 40), 0);
+        fn debug_names_each_variant_and_its_action() {
+            assert_eq!(format!("{:?}", ModalKey::Consumed), "Consumed");
+            assert_eq!(format!("{:?}", ModalKey::Cancelled), "Cancelled");
+            assert_eq!(
+                format!("{:?}", ModalKey::Submitted(ModalAction::Cancelled)),
+                "Submitted(Cancelled)"
+            );
+            assert_eq!(
+                format!("{:?}", ModalKey::Preview(ModalAction::Cancelled)),
+                "Preview(Cancelled)"
+            );
+            let push: ModalKey =
+                ModalKey::Push(Box::new(ScriptedModal::new(ModalAction::Cancelled)));
+            assert_eq!(format!("{push:?}"), "Push(<modal>)");
         }
     }
 
