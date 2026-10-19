@@ -11,6 +11,7 @@ use bytes::Bytes;
 use regex::Regex;
 use reqwest::StatusCode;
 use reqwest::header::HeaderMap;
+use tokio_util::task::TaskTracker;
 use tracing::{debug, warn};
 
 use super::Client;
@@ -44,6 +45,8 @@ pub(super) struct MessagesRequest {
     pub(super) auth: Auth,
     /// Verifies the token endpoint when a stored login refreshes.
     pub(super) trust: Arc<dyn Trust>,
+    /// Tracks a stored login's refresh, which outlives a dropped request.
+    pub(super) reloads: TaskTracker,
 }
 
 impl Client {
@@ -60,6 +63,7 @@ impl Client {
             body: body.into(),
             auth: auth.clone(),
             trust: Arc::clone(&self.trust),
+            reloads: self.reloads.clone(),
         }
     }
 }
@@ -171,14 +175,14 @@ pub(super) async fn post_messages(
 ) -> Result<reqwest::Response, AttemptError> {
     let credential = request
         .auth
-        .credential(&request.trust)
+        .credential(&request.trust, &request.reloads)
         .await
         .map_err(credential_failure)?;
     let mut response = send(http, request, &credential, retry).await?;
     if response.status() == StatusCode::UNAUTHORIZED
         && let Some(reloaded) = request
             .auth
-            .reload(&credential, &request.trust)
+            .reload(&credential, &request.trust, &request.reloads)
             .await
             .map_err(credential_failure)?
     {

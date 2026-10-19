@@ -9,6 +9,7 @@ use std::time::Duration;
 use anyhow::{Context, Result, anyhow, bail};
 use serde::{Deserialize, Serialize};
 use tokio::sync::{Mutex, OwnedMutexGuard};
+use tokio_util::task::TaskTracker;
 use tracing::{debug, warn};
 
 #[cfg(target_os = "macos")]
@@ -333,12 +334,16 @@ impl SessionLogin {
     }
 
     /// The access token for the next request, reloaded from the store first when it nears expiry.
-    pub(super) async fn access_token(&self, trust: &Arc<dyn Trust>) -> Result<String, LoginError> {
+    pub(super) async fn access_token(
+        &self,
+        trust: &Arc<dyn Trust>,
+        reloads: &TaskTracker,
+    ) -> Result<String, LoginError> {
         let token = Arc::clone(&self.token).lock_owned().await;
         if !is_near_expiry(token.expires_at_ms) {
             return Ok(token.access_token.clone());
         }
-        self.reload_detached(token, trust, None).await
+        self.reload_detached(token, trust, reloads, None).await
     }
 
     /// A token to send in place of `rejected`, which the API rejected with HTTP 401: one another
@@ -348,40 +353,40 @@ impl SessionLogin {
         &self,
         rejected: &str,
         trust: &Arc<dyn Trust>,
+        reloads: &TaskTracker,
     ) -> Result<String, LoginError> {
         let token = Arc::clone(&self.token).lock_owned().await;
         if token.access_token != rejected {
             return Ok(token.access_token.clone());
         }
-        self.reload_detached(token, trust, Some(rejected)).await
+        self.reload_detached(token, trust, reloads, Some(rejected))
+            .await
     }
 
-    /// Waits for a reload in flight to finish.
-    pub(super) async fn settle(&self) {
-        drop(self.token.lock().await);
-    }
-
-    /// Reloads `token` from the store on a task of its own, which holds the lock until it finishes.
-    /// A refresh invalidates the stored refresh token, so the rotated tokens must reach the store
-    /// and `token` even when the request awaiting them is dropped. Nothing aborts the task, so
-    /// awaiting it fails only when it panics, and the panic resumes in the caller.
+    /// Reloads `token` from the store on a task of its own, which holds the lock until it finishes
+    /// and joins `reloads`, so the session can wait for it before exiting. A refresh invalidates
+    /// the stored refresh token, so the rotated tokens must reach the store and `token` even when
+    /// the request awaiting them is dropped. Nothing aborts the task, so awaiting it fails only
+    /// when it panics, and the panic resumes in the caller.
     async fn reload_detached(
         &self,
         mut token: OwnedMutexGuard<Token>,
         trust: &Arc<dyn Trust>,
+        reloads: &TaskTracker,
         rejected: Option<&str>,
     ) -> Result<String, LoginError> {
         let store = self.store.clone();
         let refresh_url = self.refresh_url.clone();
         let trust = Arc::clone(trust);
         let rejected = rejected.map(str::to_owned);
-        tokio::spawn(async move {
-            *token =
-                load_token_from(&store, &refresh_url, trust.as_ref(), rejected.as_deref()).await?;
-            Ok(token.access_token.clone())
-        })
-        .await
-        .unwrap_or_else(|e| std::panic::resume_unwind(e.into_panic()))
+        reloads
+            .spawn(async move {
+                *token = load_token_from(&store, &refresh_url, trust.as_ref(), rejected.as_deref())
+                    .await?;
+                Ok(token.access_token.clone())
+            })
+            .await
+            .unwrap_or_else(|e| std::panic::resume_unwind(e.into_panic()))
     }
 }
 
@@ -1221,7 +1226,10 @@ mod tests {
                     9_999_999_999_999,
                 );
 
-                let token = login.access_token(&no_roots()).await.unwrap();
+                let token = login
+                    .access_token(&no_roots(), &TaskTracker::new())
+                    .await
+                    .unwrap();
 
                 assert_eq!(token, "held");
             }
@@ -1259,10 +1267,12 @@ mod tests {
                     "stale",
                     near_expiry,
                 );
-                let trust = no_roots();
+                let (trust, reloads) = (no_roots(), TaskTracker::new());
 
-                let (first, second) =
-                    tokio::join!(login.access_token(&trust), login.access_token(&trust));
+                let (first, second) = tokio::join!(
+                    login.access_token(&trust, &reloads),
+                    login.access_token(&trust, &reloads)
+                );
 
                 assert_eq!(first.unwrap(), "fresh-access");
                 assert_eq!(second.unwrap(), "fresh-access");
@@ -1282,15 +1292,17 @@ mod tests {
                     "expired",
                     0,
                 ));
+                let reloads = TaskTracker::new();
 
                 refresh
                     .abort_mid_refresh({
-                        let login = Arc::clone(&login);
-                        async move { login.access_token(&no_roots()).await }
+                        let (login, reloads) = (Arc::clone(&login), reloads.clone());
+                        async move { login.access_token(&no_roots(), &reloads).await }
                     })
                     .await;
                 refresh.release();
-                login.settle().await;
+                reloads.close();
+                reloads.wait().await;
 
                 assert_eq!(login.cached_token(), "fresh-access");
                 let stored = &read_json(&creds)["claudeAiOauth"];
@@ -1317,7 +1329,7 @@ mod tests {
 
                 let request = tokio::spawn({
                     let login = Arc::clone(&login);
-                    async move { login.access_token(&no_roots()).await }
+                    async move { login.access_token(&no_roots(), &TaskTracker::new()).await }
                 });
                 let panic = request.await.unwrap_err().into_panic();
 
@@ -1343,10 +1355,11 @@ mod tests {
                     "rejected",
                     9_999_999_999_999,
                 );
+                let (trust, reloads) = (no_roots(), TaskTracker::new());
 
-                let reloaded = login.reload("rejected", &no_roots()).await.unwrap();
+                let reloaded = login.reload("rejected", &trust, &reloads).await.unwrap();
                 write_creds(&creds, "rotated-again", Some("ref"), 9_999_999_999_999);
-                let late = login.reload("rejected", &no_roots()).await.unwrap();
+                let late = login.reload("rejected", &trust, &reloads).await.unwrap();
 
                 assert_eq!(reloaded, "rotated");
                 assert_eq!(late, "rotated", "a replaced token is not reloaded again");
@@ -1365,15 +1378,17 @@ mod tests {
                     "rejected",
                     9_999_999_999_999,
                 ));
+                let reloads = TaskTracker::new();
 
                 refresh
                     .abort_mid_refresh({
-                        let login = Arc::clone(&login);
-                        async move { login.reload("rejected", &no_roots()).await }
+                        let (login, reloads) = (Arc::clone(&login), reloads.clone());
+                        async move { login.reload("rejected", &no_roots(), &reloads).await }
                     })
                     .await;
                 refresh.release();
-                login.settle().await;
+                reloads.close();
+                reloads.wait().await;
 
                 assert_eq!(login.cached_token(), "fresh-access");
                 let stored = &read_json(&creds)["claudeAiOauth"];

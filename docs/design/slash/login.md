@@ -14,7 +14,7 @@ A session loads its stored login at startup or sign-in, keeping the access token
 
 When the API rejects a stored login with HTTP 401, the session reloads it and resends the request once, using the token another process stored or, if the store still holds the rejected token, one refreshed regardless of its expiry. If that refresh fails or no refresh token is stored, nothing is resent, and the error names the login's sign-in step, as it does when the resent request also gets a 401. Env vars and `client.api_key` are never reloaded, and their 401 fails at once.
 
-Either reload runs on a task of its own, which keeps the token locked until the reload finishes. A request cancelled mid-refresh, such as a turn interrupted with Esc or a title request that `/rename` stops, therefore still leaves the rotated tokens in the store and in the session. Since the refresh invalidates the old refresh token, losing them would force a new sign-in. Shutting down would still cancel the task, so exiting waits for a reload in flight, and `/login` waits for the reload of the login it replaces. Such a wait lasts at most the lock's 5 one-second retries plus the 15-second token request.
+Either reload runs on a task of its own, which keeps the token locked until the reload finishes. A request cancelled mid-refresh, such as a turn interrupted with Esc or a title request that `/rename` stops, therefore still leaves the rotated tokens in the store and in the session. Since the refresh invalidates the old refresh token, losing them would force a new sign-in. Shutting down would still cancel the task, so exiting waits for every reload in flight, including one for a login that `/login` replaced. A reload spends at most the lock's 5 one-second retries and the 15-second token request, plus any Keychain prompt it raises.
 
 A refresh required by a request, whether for an expired token or after a 401, retries the request with backoff when the token endpoint sends no response or a server error, as a transient API failure does. Any other refresh failure ends the request with the sign-in step.
 
@@ -44,13 +44,13 @@ A refresh required by a request, whether for an expired token or after a 401, re
 
 ## Sources
 
-- `crates/oxide-code/src/client/anthropic.rs`: `Client::set_auth`, which swaps the credential that each request sends.
+- `crates/oxide-code/src/client/anthropic.rs`: `Client::set_auth`, which swaps the credential that each request sends, and `Client::finish_reloads`, which waits for the reloads in flight.
 - `crates/oxide-code/src/client/anthropic/transport.rs`: `MessagesRequest`, which carries the credential into every attempt, and `post_messages`, which resends a request after a 401.
 - `crates/oxide-code/src/config.rs`: `Config::load`, which starts an interactive session signed out.
-- `crates/oxide-code/src/config/auth.rs`: `AuthSource`, resolution order, the stored-login search, `Auth::credential`, which refreshes a stored login before a request, and `Auth::settle`, which waits for its reload in flight.
+- `crates/oxide-code/src/config/auth.rs`: `AuthSource`, resolution order, the stored-login search, and `Auth::credential`, which refreshes a stored login before a request.
 - `crates/oxide-code/src/config/login.rs`: PKCE, the loopback listener, and code exchange.
 - `crates/oxide-code/src/config/oauth.rs`: credential stores, refresh, write-back, and `SessionLogin`, the token a session holds.
-- `crates/oxide-code/src/engine.rs`: `Engine::login` and `Engine::logout`, which swap the client's credential, and `Engine::finalize`, which waits at exit for a reload in flight.
+- `crates/oxide-code/src/engine.rs`: `Engine::login` and `Engine::logout`, which swap the client's credential, and `Engine::finalize`, which waits at exit for the reloads in flight.
 - `crates/oxide-code/src/protocol.rs`: `Op::Login`, `Op::Logout`, `Event::LoginStarted`, `Event::SignedIn`, and `Event::SignedOut`.
 - `crates/oxide-code/src/slash/login.rs`: `LoginCmd` and `LogoutCmd`.
 - `crates/oxide-code/src/tui/app/events.rs`: browser launch and sign-in messages.

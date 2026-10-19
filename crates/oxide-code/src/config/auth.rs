@@ -7,6 +7,7 @@ use std::sync::Arc;
 use anyhow::{Context, Result};
 use reqwest::header::{AUTHORIZATION, HeaderName, HeaderValue};
 use serde::{Deserialize, Serialize};
+use tokio_util::task::TaskTracker;
 use tracing::warn;
 
 use super::oauth::{ClaudeCodeKeychain, LOGIN_STORES, Login, LoginError, SessionLogin};
@@ -183,42 +184,42 @@ impl Auth {
         }
     }
 
-    /// The credential the next request sends, refreshing a stored login near expiry first. When
-    /// the refresh fails for a reason a later attempt may clear, [`is_transient`] says so.
-    pub(crate) async fn credential(&self, trust: &Arc<dyn Trust>) -> Result<Credential> {
+    /// The credential the next request sends, refreshing a stored login near expiry first. The
+    /// refresh runs on a task in `reloads`, which outlives a dropped request. When the refresh
+    /// fails for a reason a later attempt may clear, [`is_transient`] says so.
+    pub(crate) async fn credential(
+        &self,
+        trust: &Arc<dyn Trust>,
+        reloads: &TaskTracker,
+    ) -> Result<Credential> {
         let secret = match &self.secret {
             Secret::Fixed(secret) => secret.clone(),
-            Secret::Stored(login) => login.access_token(trust).await?,
+            Secret::Stored(login) => login.access_token(trust, reloads).await?,
         };
         Credential::new(self.source, secret)
     }
 
     /// The credential to resend a request with after the API rejected `rejected` with HTTP 401: a
     /// stored login's token that another process stored or a refresh issued. `None` for other
-    /// credentials and for a login that cannot be refreshed. When the refresh fails for a reason a
-    /// later attempt may clear, [`is_transient`] says so.
+    /// credentials and for a login that cannot be refreshed. The refresh runs in `reloads`, as in
+    /// [`Self::credential`]. When it fails for a reason a later attempt may clear,
+    /// [`is_transient`] says so.
     pub(crate) async fn reload(
         &self,
         rejected: &Credential,
         trust: &Arc<dyn Trust>,
+        reloads: &TaskTracker,
     ) -> Result<Option<Credential>> {
         let Secret::Stored(login) = &self.secret else {
             return Ok(None);
         };
-        match login.reload(&rejected.secret, trust).await {
+        match login.reload(&rejected.secret, trust, reloads).await {
             Ok(secret) => Credential::new(self.source, secret).map(Some),
             Err(e) if e.is_transient() => Err(e.into()),
             Err(e) => {
                 warn!("failed to reload the stored login after HTTP 401: {e:#}");
                 Ok(None)
             }
-        }
-    }
-
-    /// Waits for a stored login's reload in flight, which ends once its rotated tokens are stored.
-    pub(crate) async fn settle(&self) {
-        if let Secret::Stored(login) = &self.secret {
-            login.settle().await;
         }
     }
 }
@@ -398,10 +399,8 @@ async fn load_login(
 
 #[cfg(test)]
 mod tests {
-    use wiremock::MockServer;
-
     use super::*;
-    use crate::config::oauth::testing::{HeldRefresh, ox_login_in, write_creds};
+    use crate::config::oauth::testing::{ox_login_in, write_creds};
     use crate::util::tls::testing::{NoRoots, no_roots};
 
     const ALL_SOURCES: [AuthSource; 6] = [
@@ -541,7 +540,7 @@ mod tests {
                 ),
             ] {
                 let credential = Auth::new(source, "secret-value")
-                    .credential(&no_roots())
+                    .credential(&no_roots(), &TaskTracker::new())
                     .await
                     .unwrap();
 
@@ -568,9 +567,10 @@ mod tests {
                     9_999_999_999_999,
                 ),
             ] {
-                let rejected = auth.credential(&no_roots()).await.unwrap();
+                let (trust, reloads) = (no_roots(), TaskTracker::new());
+                let rejected = auth.credential(&trust, &reloads).await.unwrap();
 
-                let reloaded = auth.reload(&rejected, &no_roots()).await.unwrap();
+                let reloaded = auth.reload(&rejected, &trust, &reloads).await.unwrap();
 
                 assert!(reloaded.is_none(), "{auth:?}");
             }
@@ -587,41 +587,16 @@ mod tests {
                 "rejected",
                 9_999_999_999_999,
             );
-            let rejected = auth.credential(&no_roots()).await.unwrap();
+            let (trust, reloads) = (no_roots(), TaskTracker::new());
+            let rejected = auth.credential(&trust, &reloads).await.unwrap();
 
             let err = auth
-                .reload(&rejected, &no_roots())
+                .reload(&rejected, &trust, &reloads)
                 .await
                 .err()
                 .expect("the refresh of the rejected token fails");
 
             assert!(is_transient(&err), "{err:#}");
-        }
-    }
-
-    mod settle {
-        use super::*;
-
-        #[tokio::test]
-        async fn waits_for_a_stored_login_reload_a_dropped_request_left_in_flight() {
-            let server = MockServer::start().await;
-            let refresh = HeldRefresh::mount(&server).await;
-            let dir = tempfile::tempdir().unwrap();
-            let file = dir.path().join("credentials.json");
-            write_creds(&file, "expired", Some("ref"), 0);
-            let auth = ox_login_in(&file, &server.uri(), "expired", 0);
-
-            refresh
-                .abort_mid_refresh({
-                    let auth = auth.clone();
-                    async move { auth.credential(&no_roots()).await }
-                })
-                .await;
-            refresh.release();
-            auth.settle().await;
-
-            assert_eq!(auth.secret(), "fresh-access");
-            server.verify().await;
         }
     }
 

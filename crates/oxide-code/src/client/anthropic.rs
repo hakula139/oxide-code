@@ -24,6 +24,7 @@ use std::time::Duration;
 use anyhow::{Context, Result};
 use reqwest::header::{CONTENT_TYPE, HeaderMap, HeaderValue, USER_AGENT};
 use tokio::sync::mpsc;
+use tokio_util::task::TaskTracker;
 use tracing::debug;
 use uuid::Uuid;
 
@@ -74,6 +75,8 @@ pub(crate) struct Client {
     auth: Option<Auth>,
     base_url: String,
     trust: Arc<dyn Trust>,
+    /// Stored-login refreshes that outlive their requests, which the session waits for at exit.
+    reloads: TaskTracker,
     gateway: GatewayCompat,
     /// User-set output cap. `None` defers to [`ModelSpec::resolve_max_tokens`].
     max_tokens: Option<u32>,
@@ -114,6 +117,7 @@ impl Client {
             auth: auth.clone(),
             base_url: base_url.clone(),
             trust: Arc::new(trust),
+            reloads: TaskTracker::new(),
             gateway: gateway.clone(),
             max_tokens: *max_tokens,
             prompt_cache_ttl: *prompt_cache_ttl,
@@ -191,11 +195,11 @@ impl Client {
         self.auth = auth;
     }
 
-    /// Waits for a reload of the stored login in flight, as [`Auth::settle`] does.
-    pub(crate) async fn settle_auth(&self) {
-        if let Some(auth) = &self.auth {
-            auth.settle().await;
-        }
+    /// Waits for the stored-login refreshes in flight from this client or a clone of it, including
+    /// one for a credential since replaced, so exiting does not cancel their write-back.
+    pub(crate) async fn finish_reloads(&self) {
+        self.reloads.close();
+        self.reloads.wait().await;
     }
 
     /// Streams one request. The receiver closes when the stream ends, the receiver is dropped, or
@@ -506,7 +510,7 @@ mod tests {
     use super::*;
     use crate::client::{Response, StopReason};
     use crate::config::auth::{Auth, AuthSource};
-    use crate::config::oauth::testing::{ok_refresh_body, ox_login_in, write_creds};
+    use crate::config::oauth::testing::{HeldRefresh, ok_refresh_body, ox_login_in, write_creds};
     use crate::config::{Effort, PromptCacheTtl};
     use crate::model::TokenUsage;
     use crate::util::tls::PlatformTrust;
@@ -873,6 +877,47 @@ mod tests {
         assert_eq!(request_header(&request, "x-api-key"), None);
         assert_eq!(client.auth_source(), None);
         assert_eq!(signed_out.to_string(), "not signed in");
+    }
+
+    // ── Client::finish_reloads ──
+
+    #[tokio::test]
+    async fn finish_reloads_waits_for_a_refresh_that_a_replaced_login_left_in_flight() {
+        for (token, expires_at) in [("expired", 0), ("rejected", 9_999_999_999_999)] {
+            let server = MockServer::start().await;
+            Mock::given(method("POST"))
+                .and(path("/v1/messages"))
+                .respond_with(ResponseTemplate::new(401))
+                .mount(&server)
+                .await;
+            let refresh = HeldRefresh::mount(&server).await;
+            let dir = tempfile::tempdir().unwrap();
+            let creds = dir.path().join("credentials.json");
+            write_creds(&creds, token, Some("old-refresh"), expires_at);
+            let replaced = ox_login_in(&creds, &server.uri(), token, expires_at);
+            let mut client = Client::new(
+                &test_config(server.uri(), replaced.clone(), TEST_MODEL),
+                NoRoots,
+                None,
+                DEVICE_ID.to_owned(),
+            )
+            .unwrap();
+
+            refresh
+                .abort_mid_refresh({
+                    let http = client.http.clone();
+                    let request =
+                        client.messages_request(String::new(), "{}".to_owned(), &replaced);
+                    async move { transport::post_messages(&http, &request, 0).await }
+                })
+                .await;
+            client.set_auth(Some(Auth::new(AuthSource::OxLogin, "ox-token")));
+            refresh.release();
+            client.finish_reloads().await;
+
+            assert_eq!(replaced.secret(), "fresh-access", "{token}");
+            server.verify().await;
+        }
     }
 
     // ── Client::stream_message ──
