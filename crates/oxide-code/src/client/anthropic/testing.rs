@@ -14,7 +14,7 @@ use crate::config::auth::{Auth, AuthSource};
 use crate::config::compaction::CompactionConfig;
 use crate::config::gateway::GatewayCompat;
 use crate::config::{Config, DEFAULT_THEME, PromptCacheTtl, StatusLineSegment, ThemeConfig};
-use crate::model::ModelSpec;
+use crate::model::{ModelSpec, TokenUsage};
 use crate::util::tls::Trust as _;
 use crate::util::tls::testing::NoRoots;
 
@@ -79,19 +79,21 @@ pub(super) fn plain_http() -> reqwest::Client {
 
 /// A `/v1/messages` call to `url` with an empty body and an API key.
 pub(super) fn messages_request(url: impl Into<String>) -> MessagesRequest {
-    let auth = Auth::new(AuthSource::ApiKeyEnv, "k");
     MessagesRequest {
         url: url.into(),
         betas: String::new(),
         session_id: "sid".to_owned(),
         body: Bytes::from_static(b"{}"),
-        auth: auth.source(),
-        credential: auth.header().unwrap(),
+        auth: api_key(),
+        trust: Arc::new(NoRoots),
     }
 }
 
-/// Non-streaming response body with the given text. The model is fixed because `CompletionResponse`
-/// deserializes only `content`.
+/// Usage that [`completion_body`] reports.
+pub(crate) const COMPLETION_USAGE: TokenUsage = TokenUsage::new(5, 3);
+
+/// Non-streaming response body with the given text, billed at [`COMPLETION_USAGE`]. The model is
+/// fixed because `CompletionResponse` deserializes only `content` and `usage`.
 pub(crate) fn completion_body(text: &str) -> String {
     serde_json::json!({
         "id": "msg_1",
@@ -100,7 +102,7 @@ pub(crate) fn completion_body(text: &str) -> String {
         "model": "claude-haiku-5-5",
         "stop_reason": "end_turn",
         "content": [{"type": "text", "text": text}],
-        "usage": {"input_tokens": 5, "output_tokens": 3}
+        "usage": COMPLETION_USAGE,
     })
     .to_string()
 }

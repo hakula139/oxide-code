@@ -249,29 +249,6 @@ mod tests {
 
     const SESSION_ID: &str = "session-1";
 
-    /// A read-class tool, which the default policy runs without asking, with a fixed result.
-    struct LookTool;
-
-    impl Tool for LookTool {
-        fn spec(&self) -> ToolSpec {
-            ToolSpec {
-                name: "look".to_owned(),
-                description: "Looks around the project.".to_owned(),
-                input_schema: serde_json::json!({"type": "object"}),
-                class: PermissionClass::Read,
-                parallel_safe: true,
-            }
-        }
-
-        fn run<'a>(
-            &'a self,
-            _prepared: Prepared,
-            _ctx: &'a ToolCtx,
-        ) -> Pin<Box<dyn Future<Output = ToolOutput> + Send + 'a>> {
-            Box::pin(async { ToolOutput::success("README.md") })
-        }
-    }
-
     /// A stdout whose reader went away.
     struct ClosedPipe;
 
@@ -304,236 +281,270 @@ mod tests {
         record["data"].take()
     }
 
-    // ── drive ──
+    mod drive {
+        use super::*;
 
-    #[tokio::test]
-    async fn drive_prints_each_format_for_a_turn_with_a_tool_call_and_a_denied_call() {
-        with_pinned_home(async {
-            let mut stderrs = Vec::new();
-            for &format in OutputFormat::value_variants() {
+        /// A read-class tool, which the default policy runs without asking, with a fixed result.
+        struct LookTool;
+
+        impl Tool for LookTool {
+            fn spec(&self) -> ToolSpec {
+                ToolSpec {
+                    name: "look".to_owned(),
+                    description: "Looks around the project.".to_owned(),
+                    input_schema: serde_json::json!({"type": "object"}),
+                    class: PermissionClass::Read,
+                    parallel_safe: true,
+                }
+            }
+
+            fn run<'a>(
+                &'a self,
+                _prepared: Prepared,
+                _ctx: &'a ToolCtx,
+            ) -> Pin<Box<dyn Future<Output = ToolOutput> + Send + 'a>> {
+                Box::pin(async { ToolOutput::success("README.md") })
+            }
+        }
+
+        #[tokio::test]
+        async fn prints_each_format_for_a_turn_with_a_tool_call_and_a_denied_call() {
+            with_pinned_home(async {
+                let mut stderrs = Vec::new();
+                for &format in OutputFormat::value_variants() {
+                    let server = MockServer::start().await;
+                    mount_tool_call_once(&server, "call-1", "look", "{}").await;
+                    mount_tool_call_once(&server, "call-2", "bash", r#"{"command":"git push"}"#)
+                        .await;
+                    mount_reply(&server, "Done.").await;
+                    let dir = tempfile::tempdir().unwrap();
+                    let tools =
+                        ToolRegistry::new(vec![Box::new(LookTool), Box::new(BashTool::default())]);
+                    let engine = engine(server.uri(), &test_store(dir.path()), dir.path())
+                        .await
+                        .with_tools(tools);
+                    let session_id = engine.session_id().to_owned();
+                    let printer =
+                        Printer::new(format, false, session_id.clone(), Vec::new(), Vec::new());
+
+                    let exit = Box::pin(drive(engine.spawn(&[]), &printer, "Look around."))
+                        .await
+                        .unwrap();
+
+                    assert_eq!(exit, Exit::Success);
+                    let (stdout, stderr) = printed(printer);
+                    let stdout = String::from_utf8(stdout)
+                        .unwrap()
+                        .replace(&session_id, SESSION_ID);
+                    let name = format.to_possible_value().unwrap();
+                    insta::assert_snapshot!(format!("{}_stdout", name.get_name()), stdout);
+                    stderrs.push(stderr);
+                }
+                insta::assert_snapshot!("stderr", stderrs[0]);
+                assert!(stderrs.iter().all(|stderr| *stderr == stderrs[0]));
+            })
+            .await;
+        }
+
+        #[tokio::test]
+        async fn unescapes_the_prompt_and_reports_the_completed_reply() {
+            with_pinned_home(async {
                 let server = MockServer::start().await;
-                mount_tool_call_once(&server, "call-1", "look", "{}").await;
-                mount_tool_call_once(&server, "call-2", "bash", r#"{"command":"git push"}"#).await;
-                mount_reply(&server, "Done.").await;
+                mount_reply(&server, "reply").await;
                 let dir = tempfile::tempdir().unwrap();
-                let tools =
-                    ToolRegistry::new(vec![Box::new(LookTool), Box::new(BashTool::default())]);
-                let engine = engine(server.uri(), &test_store(dir.path()), dir.path())
-                    .await
-                    .with_tools(tools);
-                let session_id = engine.session_id().to_owned();
-                let printer =
-                    Printer::new(format, false, session_id.clone(), Vec::new(), Vec::new());
+                let engine = engine(server.uri(), &test_store(dir.path()), dir.path()).await;
+                let printer = printer(OutputFormat::Json);
 
-                let exit = Box::pin(drive(engine.spawn(&[]), &printer, "Look around."))
+                let exit = Box::pin(drive(engine.spawn(&[]), &printer, "//hello"))
                     .await
                     .unwrap();
 
                 assert_eq!(exit, Exit::Success);
                 let (stdout, stderr) = printed(printer);
-                let stdout = String::from_utf8(stdout)
-                    .unwrap()
-                    .replace(&session_id, SESSION_ID);
-                let name = format.to_possible_value().unwrap();
-                insta::assert_snapshot!(format!("drive_{}_stdout", name.get_name()), stdout);
-                stderrs.push(stderr);
-            }
-            insta::assert_snapshot!("drive_stderr", stderrs[0]);
-            assert!(stderrs.iter().all(|stderr| *stderr == stderrs[0]));
-        })
-        .await;
-    }
+                let result = result_data(&stdout);
+                assert_eq!(result["stop_reason"], "completed");
+                assert_eq!(result["error"], serde_json::Value::Null);
+                assert_eq!(result["message"], "reply");
+                assert_eq!(stderr, "");
+                let requests = request_bodies(&server).await;
+                assert_eq!(requests[0]["messages"][1]["content"][0]["text"], "/hello");
+            })
+            .await;
+        }
 
-    #[tokio::test]
-    async fn drive_unescapes_the_prompt_and_reports_the_completed_reply() {
-        with_pinned_home(async {
-            let server = MockServer::start().await;
-            mount_reply(&server, "reply").await;
-            let dir = tempfile::tempdir().unwrap();
-            let engine = engine(server.uri(), &test_store(dir.path()), dir.path()).await;
-            let printer = printer(OutputFormat::Json);
+        #[tokio::test]
+        async fn fails_with_the_api_error_when_the_request_is_rejected() {
+            with_pinned_home(async {
+                let server = MockServer::start().await;
+                Mock::given(method("POST"))
+                    .and(path("/v1/messages"))
+                    .respond_with(ResponseTemplate::new(400))
+                    .mount(&server)
+                    .await;
+                let dir = tempfile::tempdir().unwrap();
+                let engine = engine(server.uri(), &test_store(dir.path()), dir.path()).await;
+                let printer = printer(OutputFormat::Json);
 
-            let exit = Box::pin(drive(engine.spawn(&[]), &printer, "//hello"))
+                let exit = Box::pin(drive(engine.spawn(&[]), &printer, "hello"))
+                    .await
+                    .unwrap();
+
+                assert_eq!(exit, Exit::Failure);
+                let (stdout, stderr) = printed(printer);
+                let result = result_data(&stdout);
+                assert_eq!(result["stop_reason"], "failed");
+                assert_eq!(result["error"], "API error (HTTP 400 Bad Request)");
+                assert_eq!(result["message"], serde_json::Value::Null);
+                assert_eq!(stderr, "Error: API error (HTTP 400 Bad Request)\n");
+            })
+            .await;
+        }
+
+        #[tokio::test]
+        async fn prints_the_failed_result_before_handing_back_an_engine_panic() {
+            let printer = printer(OutputFormat::StreamJson);
+
+            let panic = Box::pin(drive(panicked_engine(), &printer, "hello"))
                 .await
-                .unwrap();
+                .unwrap_err();
 
-            assert_eq!(exit, Exit::Success);
+            assert_eq!(panic_message(panic), "engine bug");
             let (stdout, stderr) = printed(printer);
-            let result = result_data(&stdout);
-            assert_eq!(result["stop_reason"], "completed");
-            assert_eq!(result["error"], serde_json::Value::Null);
-            assert_eq!(result["message"], "reply");
-            assert_eq!(stderr, "");
-            let requests = request_bodies(&server).await;
-            assert_eq!(requests[0]["messages"][1]["content"][0]["text"], "/hello");
-        })
-        .await;
-    }
-
-    #[tokio::test]
-    async fn drive_fails_with_the_api_error_when_the_request_is_rejected() {
-        with_pinned_home(async {
-            let server = MockServer::start().await;
-            Mock::given(method("POST"))
-                .and(path("/v1/messages"))
-                .respond_with(ResponseTemplate::new(400))
-                .mount(&server)
-                .await;
-            let dir = tempfile::tempdir().unwrap();
-            let engine = engine(server.uri(), &test_store(dir.path()), dir.path()).await;
-            let printer = printer(OutputFormat::Json);
-
-            let exit = Box::pin(drive(engine.spawn(&[]), &printer, "hello"))
-                .await
-                .unwrap();
-
-            assert_eq!(exit, Exit::Failure);
-            let (stdout, stderr) = printed(printer);
-            let result = result_data(&stdout);
-            assert_eq!(result["stop_reason"], "failed");
-            assert_eq!(result["error"], "API error (HTTP 400 Bad Request)");
-            assert_eq!(result["message"], serde_json::Value::Null);
-            assert_eq!(stderr, "Error: API error (HTTP 400 Bad Request)\n");
-        })
-        .await;
-    }
-
-    #[tokio::test]
-    async fn drive_prints_the_failed_result_before_handing_back_an_engine_panic() {
-        let printer = printer(OutputFormat::StreamJson);
-
-        let panic = Box::pin(drive(panicked_engine(), &printer, "hello"))
-            .await
-            .unwrap_err();
-
-        assert_eq!(panic_message(panic), "engine bug");
-        let (stdout, stderr) = printed(printer);
-        assert_eq!(
-            String::from_utf8(stdout).unwrap(),
-            indoc! {r#"
-                {"type":"turn_failed","data":"The engine stopped before the turn ended"}
-                {"type":"result","data":{"stop_reason":"failed","error":"The engine stopped before the turn ended","message":null,"usage":null,"session_id":"session-1"}}
-            "#},
-        );
-        assert_eq!(stderr, "Error: The engine stopped before the turn ended\n");
-    }
-
-    #[tokio::test]
-    async fn drive_fails_a_completed_turn_whose_result_cannot_be_printed() {
-        with_pinned_home(async {
-            let server = MockServer::start().await;
-            mount_reply(&server, "reply").await;
-            let dir = tempfile::tempdir().unwrap();
-            let engine = engine(server.uri(), &test_store(dir.path()), dir.path()).await;
-            let printer = Printer::new(
-                OutputFormat::Json,
-                false,
-                SESSION_ID.to_owned(),
-                ClosedPipe,
-                Vec::new(),
+            assert_eq!(
+                String::from_utf8(stdout).unwrap(),
+                indoc! {r#"
+                    {"type":"turn_failed","data":"The engine stopped before the turn ended"}
+                    {"type":"result","data":{"stop_reason":"failed","error":"The engine stopped before the turn ended","message":null,"usage":null,"session_id":"session-1"}}
+                "#},
             );
-
-            let exit = Box::pin(drive(engine.spawn(&[]), &printer, "hello"))
-                .await
-                .unwrap();
-
-            assert_eq!(exit, Exit::Failure);
-        })
-        .await;
-    }
-
-    // ── Printer::finish ──
-
-    #[test]
-    fn finish_reports_the_reply_after_the_last_tool_call_and_the_latest_usage() {
-        let usage = |tokens| UsageSnapshot {
-            context_tokens: Some(tokens),
-            context_window: Some(200_000),
-            estimated_cost_usd: Some(0.5),
-        };
-        let printer = printer(OutputFormat::Json);
-        for event in [
-            Event::StreamToken("Let me ".to_owned()),
-            Event::StreamToken("look.".to_owned()),
-            Event::ToolCallStart(ls_call()),
-            Event::UsageUpdated(usage(1_000)),
-            Event::StreamToken("Found ".to_owned()),
-            Event::StreamToken("it.".to_owned()),
-            Event::UsageUpdated(usage(2_000)),
-            Event::TurnComplete,
-        ] {
-            printer.send(event).unwrap();
+            assert_eq!(stderr, "Error: The engine stopped before the turn ended\n");
         }
 
-        printer.finish(TurnEnd::Completed).unwrap();
+        #[tokio::test]
+        async fn fails_a_completed_turn_whose_result_cannot_be_printed() {
+            with_pinned_home(async {
+                let server = MockServer::start().await;
+                mount_reply(&server, "reply").await;
+                let dir = tempfile::tempdir().unwrap();
+                let engine = engine(server.uri(), &test_store(dir.path()), dir.path()).await;
+                let printer = Printer::new(
+                    OutputFormat::Json,
+                    false,
+                    SESSION_ID.to_owned(),
+                    ClosedPipe,
+                    Vec::new(),
+                );
 
-        let stdout = String::from_utf8(printed(printer).0).unwrap();
-        assert_eq!(stdout.lines().count(), 1, "{stdout}");
-        assert_eq!(
-            result_data(stdout.as_bytes()),
-            serde_json::json!({
-                "stop_reason": "completed",
-                "error": null,
-                "message": "Found it.",
-                "usage": {
-                    "context_tokens": 2_000,
-                    "context_window": 200_000,
-                    "estimated_cost_usd": 0.5,
-                },
-                "session_id": SESSION_ID,
-            }),
-        );
+                let exit = Box::pin(drive(engine.spawn(&[]), &printer, "hello"))
+                    .await
+                    .unwrap();
+
+                assert_eq!(exit, Exit::Failure);
+            })
+            .await;
+        }
     }
 
-    #[test]
-    fn finish_prints_nothing_in_the_text_format() {
-        let printer = printer(OutputFormat::Text);
-        printer
-            .send(Event::StreamToken("reply".to_owned()))
-            .unwrap();
+    mod printer {
+        use super::*;
 
-        printer.finish(TurnEnd::Completed).unwrap();
+        mod finish {
+            use super::*;
 
-        assert_eq!(printed(printer), (b"reply".to_vec(), String::new()));
-    }
+            #[test]
+            fn reports_the_reply_after_the_last_tool_call_and_the_latest_usage() {
+                let usage = |tokens| UsageSnapshot {
+                    context_tokens: Some(tokens),
+                    context_window: Some(200_000),
+                    estimated_cost_usd: Some(0.5),
+                };
+                let printer = printer(OutputFormat::Json);
+                for event in [
+                    Event::StreamToken("Let me ".to_owned()),
+                    Event::StreamToken("look.".to_owned()),
+                    Event::ToolCallStart(ls_call()),
+                    Event::UsageUpdated(usage(1_000)),
+                    Event::StreamToken("Found ".to_owned()),
+                    Event::StreamToken("it.".to_owned()),
+                    Event::UsageUpdated(usage(2_000)),
+                    Event::TurnComplete,
+                ] {
+                    printer.send(event).unwrap();
+                }
 
-    // ── Printer::send ──
+                printer.finish(TurnEnd::Completed).unwrap();
 
-    #[test]
-    fn send_keeps_progress_notes_on_stderr_when_json_runs_show_thinking() {
-        let printer = Printer::new(
-            OutputFormat::Json,
-            true,
-            SESSION_ID.to_owned(),
-            Vec::new(),
-            Vec::new(),
-        );
-        for event in [
-            Event::ThinkingToken("Hmm.".to_owned()),
-            Event::ProgressUpdate("Checking the loader.".to_owned()),
-        ] {
-            printer.send(event).unwrap();
+                let stdout = String::from_utf8(printed(printer).0).unwrap();
+                assert_eq!(stdout.lines().count(), 1, "{stdout}");
+                assert_eq!(
+                    result_data(stdout.as_bytes()),
+                    serde_json::json!({
+                        "stop_reason": "completed",
+                        "error": null,
+                        "message": "Found it.",
+                        "usage": {
+                            "context_tokens": 2_000,
+                            "context_window": 200_000,
+                            "estimated_cost_usd": 0.5,
+                        },
+                        "session_id": SESSION_ID,
+                    }),
+                );
+            }
+
+            #[test]
+            fn prints_nothing_in_the_text_format() {
+                let printer = printer(OutputFormat::Text);
+                printer
+                    .send(Event::StreamToken("reply".to_owned()))
+                    .unwrap();
+
+                printer.finish(TurnEnd::Completed).unwrap();
+
+                assert_eq!(printed(printer), (b"reply".to_vec(), String::new()));
+            }
         }
 
-        assert_eq!(
-            printed(printer),
-            (Vec::new(), "Checking the loader.\n".to_owned()),
-        );
-    }
+        mod send {
+            use super::*;
 
-    #[test]
-    fn send_renders_stderr_even_when_stdout_is_closed() {
-        let printer = Printer::new(
-            OutputFormat::StreamJson,
-            false,
-            SESSION_ID.to_owned(),
-            ClosedPipe,
-            Vec::new(),
-        );
+            #[test]
+            fn keeps_progress_notes_on_stderr_when_json_runs_show_thinking() {
+                let printer = Printer::new(
+                    OutputFormat::Json,
+                    true,
+                    SESSION_ID.to_owned(),
+                    Vec::new(),
+                    Vec::new(),
+                );
+                for event in [
+                    Event::ThinkingToken("Hmm.".to_owned()),
+                    Event::ProgressUpdate("Checking the loader.".to_owned()),
+                ] {
+                    printer.send(event).unwrap();
+                }
 
-        let sent = printer.send(Event::Error("boom".to_owned()));
+                assert_eq!(
+                    printed(printer),
+                    (Vec::new(), "Checking the loader.\n".to_owned()),
+                );
+            }
 
-        assert!(sent.is_err());
-        assert_eq!(printed(printer).1, "Error: boom\n");
+            #[test]
+            fn renders_stderr_even_when_stdout_is_closed() {
+                let printer = Printer::new(
+                    OutputFormat::StreamJson,
+                    false,
+                    SESSION_ID.to_owned(),
+                    ClosedPipe,
+                    Vec::new(),
+                );
+
+                let sent = printer.send(Event::Error("boom".to_owned()));
+
+                assert!(sent.is_err());
+                assert_eq!(printed(printer).1, "Error: boom\n");
+            }
+        }
     }
 }

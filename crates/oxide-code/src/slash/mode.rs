@@ -168,21 +168,6 @@ mod tests {
     use crate::slash::registry::testing::run_execute;
     use crate::tui::modal::testing::render_rows;
 
-    fn submitted(current: Mode, keys: &[KeyCode]) -> Option<Op> {
-        let mut picker = ModePicker::new(current);
-        for &code in keys {
-            let outcome = picker.handle_key(&KeyEvent::from(code));
-            assert!(matches!(outcome, ModalKey::Consumed));
-        }
-        match picker.handle_key(&KeyEvent::from(KeyCode::Enter)) {
-            ModalKey::Submitted(ModalAction::Dispatch(Action::Op(op))) => Some(op),
-            ModalKey::Cancelled => None,
-            other => panic!("expected a submit or a cancel, got {other:?}"),
-        }
-    }
-
-    // ── ModeCmd::name ──
-
     #[test]
     fn name_and_metadata_match_built_ins_contract() {
         assert_eq!(ModeCmd.name(), "mode");
@@ -191,113 +176,140 @@ mod tests {
         assert_eq!(ModeCmd.usage(), Some("[<mode>]"));
     }
 
-    // ── ModeCmd::classify ──
+    mod classify {
+        use super::*;
 
-    #[test]
-    fn classify_opens_the_picker_read_only_and_steers_with_a_mode() {
-        assert_eq!(ModeCmd.classify("  "), SlashKind::ReadOnly);
-        assert_eq!(ModeCmd.classify("plan"), SlashKind::Steering);
+        #[test]
+        fn opens_the_picker_read_only_and_steers_with_a_mode() {
+            assert_eq!(ModeCmd.classify("  "), SlashKind::ReadOnly);
+            assert_eq!(ModeCmd.classify("plan"), SlashKind::Steering);
+        }
     }
 
-    // ── ModeCmd::complete_arg ──
+    mod complete_arg {
+        use super::*;
 
-    #[test]
-    fn complete_arg_ranks_the_modes_by_prefix_with_their_descriptions() {
-        let rows = |prefix| -> Vec<(String, String)> {
-            ModeCmd
-                .complete_arg(prefix)
-                .into_iter()
-                .map(|c| (c.value.into_owned(), c.description.into_owned()))
-                .collect()
-        };
+        #[test]
+        fn ranks_the_modes_by_prefix_with_their_descriptions() {
+            let rows = |prefix| -> Vec<(String, String)> {
+                ModeCmd
+                    .complete_arg(prefix)
+                    .into_iter()
+                    .map(|c| (c.value.into_owned(), c.description.into_owned()))
+                    .collect()
+            };
 
-        assert_eq!(
-            rows("")
-                .into_iter()
-                .map(|(value, _)| value)
-                .collect::<Vec<_>>(),
-            ["manual", "plan", "yolo"]
-        );
-        assert_eq!(
-            rows("Y"),
-            [("yolo".to_owned(), Mode::Yolo.description().to_owned())]
-        );
+            assert_eq!(
+                rows("")
+                    .into_iter()
+                    .map(|(value, _)| value)
+                    .collect::<Vec<_>>(),
+                ["manual", "plan", "yolo"]
+            );
+            assert_eq!(
+                rows("Y"),
+                [("yolo".to_owned(), Mode::Yolo.description().to_owned())]
+            );
+        }
     }
 
-    // ── ModeCmd::execute ──
+    mod execute {
+        use super::*;
 
-    #[test]
-    fn execute_no_args_opens_the_picker() {
-        run_execute(&ModeCmd, "").unwrap().into_modal();
+        #[test]
+        fn no_args_opens_the_picker() {
+            run_execute(&ModeCmd, "").unwrap().into_modal();
+        }
+
+        #[test]
+        fn with_a_mode_forwards_the_switch() {
+            assert_eq!(
+                run_execute(&ModeCmd, " Yolo ").unwrap().into_forward(),
+                Action::Op(Op::SetMode(Mode::Yolo)),
+            );
+        }
+
+        #[test]
+        fn unknown_mode_errors_listing_valid_options() {
+            assert_eq!(
+                run_execute(&ModeCmd, "turbo").unwrap_err(),
+                "Unknown mode: `turbo`. Valid: manual, plan, yolo."
+            );
+        }
     }
 
-    #[test]
-    fn execute_with_a_mode_forwards_the_switch() {
-        assert_eq!(
-            run_execute(&ModeCmd, " Yolo ").unwrap().into_forward(),
-            Action::Op(Op::SetMode(Mode::Yolo)),
-        );
-    }
+    mod mode_picker {
+        use super::*;
 
-    #[test]
-    fn execute_unknown_mode_errors_listing_valid_options() {
-        assert_eq!(
-            run_execute(&ModeCmd, "turbo").unwrap_err(),
-            "Unknown mode: `turbo`. Valid: manual, plan, yolo."
-        );
-    }
+        mod render {
+            use super::*;
 
-    // ── ModePicker::render ──
+            #[test]
+            fn marks_the_current_mode_above_the_footer() {
+                let picker = ModePicker::new(Mode::Plan);
 
-    #[test]
-    fn render_marks_the_current_mode_above_the_footer() {
-        let picker = ModePicker::new(Mode::Plan);
+                let rows = render_rows(&picker, 80, picker.height(80, 20));
 
-        let rows = render_rows(&picker, 80, picker.height(80, 20));
+                let rows: Vec<&str> = rows.iter().map(|row| row.trim_end()).collect();
+                assert_eq!(
+                    rows,
+                    [
+                        "Select permission mode",
+                        "Switch the permission mode for this session. Restarting returns to your config.",
+                        "",
+                        "  1. manual    Ask about calls no rule settles",
+                        "> 2. plan    ✓ Read-only: deny edits and commands",
+                        "  3. yolo      Run calls no rule settles",
+                        "",
+                        "Enter to confirm  ·  Esc to cancel",
+                    ]
+                );
+            }
+        }
 
-        let rows: Vec<&str> = rows.iter().map(|row| row.trim_end()).collect();
-        assert_eq!(
-            rows,
-            [
-                "Select permission mode",
-                "Switch the permission mode for this session. Restarting returns to your config.",
-                "",
-                "  1. manual    Ask about calls no rule settles",
-                "> 2. plan    ✓ Read-only: deny edits and commands",
-                "  3. yolo      Run calls no rule settles",
-                "",
-                "Enter to confirm  ·  Esc to cancel",
-            ]
-        );
-    }
+        mod handle_key {
+            use super::*;
 
-    // ── ModePicker::handle_key ──
+            fn submitted(current: Mode, keys: &[KeyCode]) -> Option<Op> {
+                let mut picker = ModePicker::new(current);
+                for &code in keys {
+                    let outcome = picker.handle_key(&KeyEvent::from(code));
+                    assert!(matches!(outcome, ModalKey::Consumed));
+                }
+                match picker.handle_key(&KeyEvent::from(KeyCode::Enter)) {
+                    ModalKey::Submitted(ModalAction::Dispatch(Action::Op(op))) => Some(op),
+                    ModalKey::Cancelled => None,
+                    other => panic!("expected a submit or a cancel, got {other:?}"),
+                }
+            }
 
-    #[test]
-    fn handle_key_enter_switches_to_the_row_under_the_cursor() {
-        assert_eq!(
-            submitted(Mode::Manual, &[KeyCode::Down]),
-            Some(Op::SetMode(Mode::Plan))
-        );
-        assert_eq!(
-            submitted(Mode::Manual, &[KeyCode::Char('k')]),
-            Some(Op::SetMode(Mode::Yolo))
-        );
-        assert_eq!(
-            submitted(Mode::Yolo, &[KeyCode::Char('1')]),
-            Some(Op::SetMode(Mode::Manual))
-        );
-    }
+            #[test]
+            fn enter_switches_to_the_row_under_the_cursor() {
+                assert_eq!(
+                    submitted(Mode::Manual, &[KeyCode::Down]),
+                    Some(Op::SetMode(Mode::Plan))
+                );
+                assert_eq!(
+                    submitted(Mode::Manual, &[KeyCode::Char('k')]),
+                    Some(Op::SetMode(Mode::Yolo))
+                );
+                assert_eq!(
+                    submitted(Mode::Yolo, &[KeyCode::Char('1')]),
+                    Some(Op::SetMode(Mode::Manual))
+                );
+            }
 
-    #[test]
-    fn handle_key_enter_on_the_current_mode_cancels() {
-        assert_eq!(submitted(Mode::Plan, &[]), None);
-        assert_eq!(
-            submitted(
-                Mode::Plan,
-                &[KeyCode::Char('j'), KeyCode::Char('x'), KeyCode::Up]
-            ),
-            None
-        );
+            #[test]
+            fn enter_on_the_current_mode_cancels() {
+                assert_eq!(submitted(Mode::Plan, &[]), None);
+                assert_eq!(
+                    submitted(
+                        Mode::Plan,
+                        &[KeyCode::Char('j'), KeyCode::Char('x'), KeyCode::Up]
+                    ),
+                    None
+                );
+            }
+        }
     }
 }

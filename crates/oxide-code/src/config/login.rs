@@ -14,7 +14,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tracing::debug;
 
-use super::auth::{Auth, AuthSource};
+use super::auth::Auth;
 use super::oauth::{self, CodeGrant, OAUTH_CLIENT_ID, OAUTH_SCOPES};
 use crate::util::tls::Trust;
 
@@ -80,8 +80,7 @@ impl PendingLogin {
         };
         let result = async {
             let tokens = oauth::exchange_code(token_url, &grant, trust).await?;
-            oauth::save_login(&tokens).await?;
-            Ok(Auth::new(AuthSource::OxLogin, tokens.access_token))
+            Ok(Auth::stored(oauth::save_login(&tokens, token_url).await?))
         }
         .await;
         let reply = match &result {
@@ -278,12 +277,9 @@ mod tests {
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
     use super::*;
-    use crate::config::oauth::{ClaudeCodeKeychain, Login};
+    use crate::config::auth::AuthSource;
+    use crate::config::oauth::{ClaudeCodeKeychain, Login, SessionLogin};
     use crate::util::tls::testing::NoRoots;
-
-    /// A token endpoint nothing listens on, for flows that end before the exchange.
-    const UNUSED_TOKEN_URL: &str = "http://127.0.0.1:9/token";
-    const FAILED_PAGE: &str = "Sign-in failed. Return to the terminal for details.";
 
     fn port(pending: &PendingLogin) -> u16 {
         pending.listener.local_addr().unwrap().port()
@@ -309,354 +305,374 @@ mod tests {
         send(port, &request).await
     }
 
-    /// Writes `request` from a client that then stops sending, and reads its target server-side.
-    async fn request_target(request: &[u8]) -> Result<String> {
-        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
-        let mut client = TcpStream::connect(listener.local_addr().unwrap())
-            .await
+    mod start {
+        use super::*;
+
+        #[tokio::test]
+        async fn points_the_redirect_at_its_own_listener() {
+            let pending = PendingLogin::start().await.unwrap();
+
+            let url = reqwest::Url::parse(pending.url()).unwrap();
+            let param = |name: &str| {
+                url.query_pairs()
+                    .find(|(key, _)| key == name)
+                    .map(|(_, value)| value.into_owned())
+                    .unwrap()
+            };
+            let redirect_uri = format!("http://localhost:{}/callback", port(&pending));
+            assert_eq!(param("redirect_uri"), redirect_uri);
+            assert_eq!(pending.redirect_uri, redirect_uri);
+            assert_eq!(param("state"), pending.state);
+            assert_eq!(param("code_challenge"), code_challenge(&pending.verifier));
+            assert_ne!(pending.state, pending.verifier);
+        }
+    }
+
+    mod finish {
+        use super::*;
+
+        /// A token endpoint nothing listens on, for flows that end before the exchange.
+        const UNUSED_TOKEN_URL: &str = "http://127.0.0.1:9/token";
+        const FAILED_PAGE: &str = "Sign-in failed. Return to the terminal for details.";
+
+        #[tokio::test]
+        async fn exchanges_the_code_and_stores_the_oxide_code_login() {
+            let data = tempfile::tempdir().unwrap();
+            let server = MockServer::start().await;
+            let pending = PendingLogin::start().await.unwrap();
+            Mock::given(method("POST"))
+                .and(body_json(json!({
+                    "grant_type": "authorization_code",
+                    "client_id": OAUTH_CLIENT_ID,
+                    "code": "auth-code",
+                    "redirect_uri": pending.redirect_uri,
+                    "code_verifier": pending.verifier,
+                    "state": pending.state,
+                })))
+                .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                    "access_token": "fresh-access",
+                    "refresh_token": "fresh-refresh",
+                    "expires_in": 3600,
+                    "scope": "user:inference user:profile",
+                })))
+                .expect(1)
+                .mount(&server)
+                .await;
+            let port = port(&pending);
+            let token_url = server.uri();
+            let target = format!("/callback?code=auth-code&state={}", pending.state);
+
+            let (auth, reply, reloaded) =
+                temp_env::async_with_vars([("XDG_DATA_HOME", Some(data.path()))], async {
+                    let (auth, reply) =
+                        tokio::join!(pending.finish(&token_url, &NoRoots), browse(port, &target));
+                    (
+                        auth,
+                        reply,
+                        SessionLogin::load(Login::Ox, ClaudeCodeKeychain::NONE, &NoRoots).await,
+                    )
+                })
+                .await;
+
+            let auth = auth.unwrap();
+            assert_eq!(auth.source(), AuthSource::OxLogin);
+            assert_eq!(auth.secret(), "fresh-access");
+            assert!(
+                reply.starts_with(&format!(
+                    "HTTP/1.1 302 Found\r\nLocation: {SUCCESS_URL}\r\n"
+                )),
+                "{reply}"
+            );
+            assert_eq!(reloaded.unwrap().cached_token(), "fresh-access");
+            let stored: serde_json::Value = serde_json::from_str(
+                &std::fs::read_to_string(data.path().join("ox").join("credentials.json")).unwrap(),
+            )
             .unwrap();
-        let (server, _) = listener.accept().await.unwrap();
-        client.write_all(request).await.unwrap();
-        client.shutdown().await.unwrap();
-        read_request_target(server).await.1
-    }
-
-    // ── PendingLogin::start ──
-
-    #[tokio::test]
-    async fn start_points_the_redirect_at_its_own_listener() {
-        let pending = PendingLogin::start().await.unwrap();
-
-        let url = reqwest::Url::parse(pending.url()).unwrap();
-        let param = |name: &str| {
-            url.query_pairs()
-                .find(|(key, _)| key == name)
-                .map(|(_, value)| value.into_owned())
-                .unwrap()
-        };
-        let redirect_uri = format!("http://localhost:{}/callback", port(&pending));
-        assert_eq!(param("redirect_uri"), redirect_uri);
-        assert_eq!(pending.redirect_uri, redirect_uri);
-        assert_eq!(param("state"), pending.state);
-        assert_eq!(param("code_challenge"), code_challenge(&pending.verifier));
-        assert_ne!(pending.state, pending.verifier);
-    }
-
-    // ── PendingLogin::finish ──
-
-    #[tokio::test]
-    async fn finish_exchanges_the_code_and_stores_the_oxide_code_login() {
-        let data = tempfile::tempdir().unwrap();
-        let server = MockServer::start().await;
-        let pending = PendingLogin::start().await.unwrap();
-        Mock::given(method("POST"))
-            .and(body_json(json!({
-                "grant_type": "authorization_code",
-                "client_id": OAUTH_CLIENT_ID,
-                "code": "auth-code",
-                "redirect_uri": pending.redirect_uri,
-                "code_verifier": pending.verifier,
-                "state": pending.state,
-            })))
-            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-                "access_token": "fresh-access",
-                "refresh_token": "fresh-refresh",
-                "expires_in": 3600,
-                "scope": "user:inference user:profile",
-            })))
-            .expect(1)
-            .mount(&server)
-            .await;
-        let port = port(&pending);
-        let token_url = server.uri();
-        let target = format!("/callback?code=auth-code&state={}", pending.state);
-
-        let (auth, reply, reloaded) =
-            temp_env::async_with_vars([("XDG_DATA_HOME", Some(data.path()))], async {
-                let (auth, reply) =
-                    tokio::join!(pending.finish(&token_url, &NoRoots), browse(port, &target));
-                (
-                    auth,
-                    reply,
-                    oauth::load_token(Login::Ox, ClaudeCodeKeychain::NONE, &NoRoots).await,
-                )
-            })
-            .await;
-
-        let auth = auth.unwrap();
-        assert_eq!(auth.source(), AuthSource::OxLogin);
-        assert_eq!(auth.secret(), "fresh-access");
-        assert!(
-            reply.starts_with(&format!(
-                "HTTP/1.1 302 Found\r\nLocation: {SUCCESS_URL}\r\n"
-            )),
-            "{reply}"
-        );
-        assert_eq!(reloaded.unwrap(), "fresh-access");
-        let stored: serde_json::Value = serde_json::from_str(
-            &std::fs::read_to_string(data.path().join("ox").join("credentials.json")).unwrap(),
-        )
-        .unwrap();
-        assert_eq!(stored["claudeAiOauth"]["refreshToken"], "fresh-refresh");
-        assert_eq!(
-            stored["claudeAiOauth"]["scopes"],
-            json!(["user:inference", "user:profile"])
-        );
-    }
-
-    #[tokio::test]
-    async fn finish_reports_a_failed_exchange_to_the_browser_and_stores_nothing() {
-        let data = tempfile::tempdir().unwrap();
-        let server = MockServer::start().await;
-        Mock::given(method("POST"))
-            .respond_with(ResponseTemplate::new(400).set_body_string("invalid_grant"))
-            .mount(&server)
-            .await;
-        let pending = PendingLogin::start().await.unwrap();
-        let port = port(&pending);
-        let token_url = server.uri();
-        let target = format!("/callback?code=auth-code&state={}", pending.state);
-
-        let (auth, reply) =
-            temp_env::async_with_vars([("XDG_DATA_HOME", Some(data.path()))], async {
-                tokio::join!(pending.finish(&token_url, &NoRoots), browse(port, &target))
-            })
-            .await;
-
-        assert_eq!(
-            format!("{:#}", auth.unwrap_err()),
-            "token exchange failed with 400 Bad Request: invalid_grant",
-        );
-        assert!(
-            reply.starts_with("HTTP/1.1 500 Internal Server Error\r\n"),
-            "{reply}"
-        );
-        assert!(reply.ends_with(FAILED_PAGE), "{reply}");
-        assert!(!data.path().join("ox").exists());
-    }
-
-    #[tokio::test]
-    async fn finish_ends_when_the_browser_returns_a_refusal() {
-        let pending = PendingLogin::start().await.unwrap();
-        let port = port(&pending);
-        let target = format!("/callback?error=access_denied&state={}", pending.state);
-
-        let (auth, reply) = tokio::join!(
-            pending.finish(UNUSED_TOKEN_URL, &NoRoots),
-            browse(port, &target),
-        );
-
-        assert_eq!(
-            auth.unwrap_err().to_string(),
-            "authorization was refused (access_denied)",
-        );
-        assert!(reply.starts_with("HTTP/1.1 400 Bad Request\r\n"), "{reply}");
-        assert!(reply.ends_with(FAILED_PAGE), "{reply}");
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn finish_gives_up_when_the_browser_never_returns() {
-        let pending = PendingLogin::start().await.unwrap();
-
-        let err = pending
-            .finish(UNUSED_TOKEN_URL, &NoRoots)
-            .await
-            .unwrap_err();
-
-        assert_eq!(
-            err.to_string(),
-            "the browser did not return within 5 minutes"
-        );
-    }
-
-    // ── PendingLogin::await_code ──
-
-    #[tokio::test]
-    async fn await_code_answers_other_requests_until_the_callback_arrives() {
-        let pending = PendingLogin::start().await.unwrap();
-        let port = port(&pending);
-        let callback = format!(
-            "GET /callback?code=auth-code&state={} HTTP/1.1\r\n\r\n",
-            pending.state
-        );
-        let browser = async {
-            let idle = TcpStream::connect((Ipv4Addr::LOCALHOST, port))
-                .await
-                .unwrap();
-            let not_found = browse(port, "/favicon.ico").await;
-            let foreign = browse(port, "/callback?error=access_denied&state=other").await;
-            let malformed = send(port, "POST /callback HTTP/1.1\r\n\r\n").await;
-            let mut redirect = TcpStream::connect((Ipv4Addr::LOCALHOST, port))
-                .await
-                .unwrap();
-            redirect.write_all(callback.as_bytes()).await.unwrap();
-            (idle, not_found, foreign, malformed, redirect)
-        };
-
-        let (code, (_idle, not_found, foreign, malformed, _redirect)) =
-            tokio::time::timeout(Duration::from_secs(5), async {
-                tokio::join!(pending.await_code(), browser)
-            })
-            .await
-            .expect("an idle connection must not hold up the others");
-
-        assert_eq!(code.unwrap().1, "auth-code");
-        assert!(
-            not_found.starts_with("HTTP/1.1 404 Not Found\r\n"),
-            "{not_found}"
-        );
-        assert!(not_found.ends_with("\r\n\r\nNot found"), "{not_found}");
-        assert!(
-            foreign.starts_with("HTTP/1.1 400 Bad Request\r\n"),
-            "{foreign}"
-        );
-        assert_eq!(malformed, "");
-    }
-
-    // ── random_token ──
-
-    #[test]
-    fn random_token_encodes_32_fresh_bytes() {
-        let token = random_token().unwrap();
-        assert_eq!(URL_SAFE_NO_PAD.decode(&token).unwrap().len(), 32);
-        assert_ne!(token, random_token().unwrap());
-    }
-
-    // ── code_challenge ──
-
-    #[test]
-    fn code_challenge_matches_the_rfc_7636_example() {
-        assert_eq!(
-            code_challenge("dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk"),
-            "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM",
-        );
-    }
-
-    // ── authorize_url ──
-
-    #[test]
-    fn authorize_url_asks_claude_ai_for_a_pkce_code_sent_to_the_loopback_redirect() {
-        let url = reqwest::Url::parse(&authorize_url(
-            "http://localhost:1234/callback",
-            "challenge-1",
-            "state-1",
-        ))
-        .unwrap();
-
-        assert_eq!(url.host_str(), Some("claude.ai"));
-        assert_eq!(url.path(), "/oauth/authorize");
-        let pairs: Vec<(String, String)> = url.query_pairs().into_owned().collect();
-        let expected = [
-            ("code", "true"),
-            ("client_id", "9d1c250a-e61b-44d9-88ed-5944d1962f5e"),
-            ("response_type", "code"),
-            ("redirect_uri", "http://localhost:1234/callback"),
-            (
-                "scope",
-                "org:create_api_key user:file_upload user:inference user:mcp_servers user:profile \
-                 user:sessions:claude_code",
-            ),
-            ("code_challenge", "challenge-1"),
-            ("code_challenge_method", "S256"),
-            ("state", "state-1"),
-        ]
-        .map(|(key, value)| (key.to_owned(), value.to_owned()));
-        assert_eq!(pairs, expected);
-    }
-
-    // ── read_request_target ──
-
-    #[tokio::test]
-    async fn read_request_target_returns_the_target_of_a_get() {
-        let request = indoc! {b"
-            GET /callback?code=abc HTTP/1.1\r
-            Host: localhost\r
-            \r
-        "};
-
-        let target = request_target(request).await.unwrap();
-
-        assert_eq!(target, "/callback?code=abc");
-    }
-
-    #[tokio::test]
-    async fn read_request_target_rejects_other_methods_oversized_and_truncated_requests() {
-        let oversized = format!("GET /{} HTTP/1.1", "a".repeat(MAX_REQUEST_BYTES + 1024));
-        for (request, expected) in [
-            (
-                "POST /callback HTTP/1.1\r\n\r\n",
-                r#"unexpected request line "POST /callback HTTP/1.1""#,
-            ),
-            (oversized.as_str(), "request headers exceed 8192 bytes"),
-            (
-                "GET /callback HTTP/1.1\r\n",
-                "connection closed before the request ended",
-            ),
-        ] {
-            let err = request_target(request.as_bytes()).await.unwrap_err();
-            assert_eq!(err.to_string(), expected);
-        }
-    }
-
-    // ── parse_callback ──
-
-    #[test]
-    fn parse_callback_takes_the_code_of_a_matching_state() {
-        assert!(matches!(
-            parse_callback("/callback?code=abc&state=s1", "s1"),
-            Callback::Code(code) if code == "abc"
-        ));
-    }
-
-    #[test]
-    fn parse_callback_ignores_other_paths() {
-        for target in [
-            "/favicon.ico",
-            "/",
-            "/callback/extra?code=abc&state=s1",
-            ":99999",
-        ] {
-            assert!(
-                matches!(parse_callback(target, "s1"), Callback::Elsewhere),
-                "{target}"
+            assert_eq!(stored["claudeAiOauth"]["refreshToken"], "fresh-refresh");
+            assert_eq!(
+                stored["claudeAiOauth"]["scopes"],
+                json!(["user:inference", "user:profile"])
             );
         }
-    }
 
-    #[test]
-    fn parse_callback_refuses_a_callback_from_another_attempt() {
-        for target in [
-            "/callback?code=abc&state=s2",
-            "/callback?code=abc",
-            "/callback?error=access_denied&state=s2",
-            "/callback?error=access_denied",
-        ] {
-            assert!(
-                matches!(parse_callback(target, "s1"), Callback::Foreign),
-                "{target}"
+        #[tokio::test]
+        async fn reports_a_failed_exchange_to_the_browser_and_stores_nothing() {
+            let data = tempfile::tempdir().unwrap();
+            let server = MockServer::start().await;
+            Mock::given(method("POST"))
+                .respond_with(ResponseTemplate::new(400).set_body_string("invalid_grant"))
+                .mount(&server)
+                .await;
+            let pending = PendingLogin::start().await.unwrap();
+            let port = port(&pending);
+            let token_url = server.uri();
+            let target = format!("/callback?code=auth-code&state={}", pending.state);
+
+            let (auth, reply) =
+                temp_env::async_with_vars([("XDG_DATA_HOME", Some(data.path()))], async {
+                    tokio::join!(pending.finish(&token_url, &NoRoots), browse(port, &target))
+                })
+                .await;
+
+            assert_eq!(
+                format!("{:#}", auth.unwrap_err()),
+                "token exchange failed with 400 Bad Request: invalid_grant",
             );
+            assert!(
+                reply.starts_with("HTTP/1.1 500 Internal Server Error\r\n"),
+                "{reply}"
+            );
+            assert!(reply.ends_with(FAILED_PAGE), "{reply}");
+            assert!(!data.path().join("ox").exists());
         }
-    }
 
-    #[test]
-    fn parse_callback_rejects_refusals_and_missing_codes() {
-        for (target, expected) in [
-            (
-                "/callback?error=access_denied&error_description=User%20declined&state=s1",
-                "authorization was refused (access_denied: User declined)",
-            ),
-            (
-                "/callback?error=access_denied&state=s1",
+        #[tokio::test]
+        async fn ends_when_the_browser_returns_a_refusal() {
+            let pending = PendingLogin::start().await.unwrap();
+            let port = port(&pending);
+            let target = format!("/callback?error=access_denied&state={}", pending.state);
+
+            let (auth, reply) = tokio::join!(
+                pending.finish(UNUSED_TOKEN_URL, &NoRoots),
+                browse(port, &target),
+            );
+
+            assert_eq!(
+                auth.unwrap_err().to_string(),
                 "authorization was refused (access_denied)",
-            ),
-            (
-                "/callback?state=s1",
-                "the browser returned without an authorization code",
-            ),
-        ] {
-            match parse_callback(target, "s1") {
-                Callback::Rejected(e) => assert_eq!(e.to_string(), expected, "{target}"),
-                other => panic!("{target}: expected a rejection, got {other:?}"),
+            );
+            assert!(reply.starts_with("HTTP/1.1 400 Bad Request\r\n"), "{reply}");
+            assert!(reply.ends_with(FAILED_PAGE), "{reply}");
+        }
+
+        #[tokio::test(start_paused = true)]
+        async fn gives_up_when_the_browser_never_returns() {
+            let pending = PendingLogin::start().await.unwrap();
+
+            let err = pending
+                .finish(UNUSED_TOKEN_URL, &NoRoots)
+                .await
+                .unwrap_err();
+
+            assert_eq!(
+                err.to_string(),
+                "the browser did not return within 5 minutes"
+            );
+        }
+    }
+
+    mod await_code {
+        use super::*;
+
+        #[tokio::test]
+        async fn answers_other_requests_until_the_callback_arrives() {
+            let pending = PendingLogin::start().await.unwrap();
+            let port = port(&pending);
+            let callback = format!(
+                "GET /callback?code=auth-code&state={} HTTP/1.1\r\n\r\n",
+                pending.state
+            );
+            let browser = async {
+                let idle = TcpStream::connect((Ipv4Addr::LOCALHOST, port))
+                    .await
+                    .unwrap();
+                let not_found = browse(port, "/favicon.ico").await;
+                let foreign = browse(port, "/callback?error=access_denied&state=other").await;
+                let malformed = send(port, "POST /callback HTTP/1.1\r\n\r\n").await;
+                let mut redirect = TcpStream::connect((Ipv4Addr::LOCALHOST, port))
+                    .await
+                    .unwrap();
+                redirect.write_all(callback.as_bytes()).await.unwrap();
+                (idle, not_found, foreign, malformed, redirect)
+            };
+
+            let (code, (_idle, not_found, foreign, malformed, _redirect)) =
+                tokio::time::timeout(Duration::from_secs(5), async {
+                    tokio::join!(pending.await_code(), browser)
+                })
+                .await
+                .expect("an idle connection must not hold up the others");
+
+            assert_eq!(code.unwrap().1, "auth-code");
+            assert!(
+                not_found.starts_with("HTTP/1.1 404 Not Found\r\n"),
+                "{not_found}"
+            );
+            assert!(not_found.ends_with("\r\n\r\nNot found"), "{not_found}");
+            assert!(
+                foreign.starts_with("HTTP/1.1 400 Bad Request\r\n"),
+                "{foreign}"
+            );
+            assert_eq!(malformed, "");
+        }
+    }
+
+    mod random_token {
+        use super::*;
+
+        #[test]
+        fn encodes_32_fresh_bytes() {
+            let token = random_token().unwrap();
+            assert_eq!(URL_SAFE_NO_PAD.decode(&token).unwrap().len(), 32);
+            assert_ne!(token, random_token().unwrap());
+        }
+    }
+
+    mod code_challenge {
+        use super::*;
+
+        #[test]
+        fn matches_the_rfc_7636_example() {
+            assert_eq!(
+                code_challenge("dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk"),
+                "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM",
+            );
+        }
+    }
+
+    mod authorize_url {
+        use super::*;
+
+        #[test]
+        fn asks_claude_ai_for_a_pkce_code_sent_to_the_loopback_redirect() {
+            let url = reqwest::Url::parse(&authorize_url(
+                "http://localhost:1234/callback",
+                "challenge-1",
+                "state-1",
+            ))
+            .unwrap();
+
+            assert_eq!(url.host_str(), Some("claude.ai"));
+            assert_eq!(url.path(), "/oauth/authorize");
+            let pairs: Vec<(String, String)> = url.query_pairs().into_owned().collect();
+            let expected = [
+                ("code", "true"),
+                ("client_id", "9d1c250a-e61b-44d9-88ed-5944d1962f5e"),
+                ("response_type", "code"),
+                ("redirect_uri", "http://localhost:1234/callback"),
+                (
+                    "scope",
+                    "org:create_api_key user:file_upload user:inference user:mcp_servers \
+                     user:profile user:sessions:claude_code",
+                ),
+                ("code_challenge", "challenge-1"),
+                ("code_challenge_method", "S256"),
+                ("state", "state-1"),
+            ]
+            .map(|(key, value)| (key.to_owned(), value.to_owned()));
+            assert_eq!(pairs, expected);
+        }
+    }
+
+    mod read_request_target {
+        use super::*;
+
+        /// Writes `request` from a client that stops sending, and reads its target server-side.
+        async fn request_target(request: &[u8]) -> Result<String> {
+            let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+            let mut client = TcpStream::connect(listener.local_addr().unwrap())
+                .await
+                .unwrap();
+            let (server, _) = listener.accept().await.unwrap();
+            client.write_all(request).await.unwrap();
+            client.shutdown().await.unwrap();
+            read_request_target(server).await.1
+        }
+
+        #[tokio::test]
+        async fn returns_the_target_of_a_get() {
+            let request = indoc! {b"
+                GET /callback?code=abc HTTP/1.1\r
+                Host: localhost\r
+                \r
+            "};
+
+            let target = request_target(request).await.unwrap();
+
+            assert_eq!(target, "/callback?code=abc");
+        }
+
+        #[tokio::test]
+        async fn rejects_other_methods_oversized_and_truncated_requests() {
+            let oversized = format!("GET /{} HTTP/1.1", "a".repeat(MAX_REQUEST_BYTES + 1024));
+            for (request, expected) in [
+                (
+                    "POST /callback HTTP/1.1\r\n\r\n",
+                    r#"unexpected request line "POST /callback HTTP/1.1""#,
+                ),
+                (oversized.as_str(), "request headers exceed 8192 bytes"),
+                (
+                    "GET /callback HTTP/1.1\r\n",
+                    "connection closed before the request ended",
+                ),
+            ] {
+                let err = request_target(request.as_bytes()).await.unwrap_err();
+                assert_eq!(err.to_string(), expected);
+            }
+        }
+    }
+
+    mod parse_callback {
+        use super::*;
+
+        #[test]
+        fn takes_the_code_of_a_matching_state() {
+            assert!(matches!(
+                parse_callback("/callback?code=abc&state=s1", "s1"),
+                Callback::Code(code) if code == "abc"
+            ));
+        }
+
+        #[test]
+        fn ignores_other_paths() {
+            for target in [
+                "/favicon.ico",
+                "/",
+                "/callback/extra?code=abc&state=s1",
+                ":99999",
+            ] {
+                assert!(
+                    matches!(parse_callback(target, "s1"), Callback::Elsewhere),
+                    "{target}"
+                );
+            }
+        }
+
+        #[test]
+        fn refuses_a_callback_from_another_attempt() {
+            for target in [
+                "/callback?code=abc&state=s2",
+                "/callback?code=abc",
+                "/callback?error=access_denied&state=s2",
+                "/callback?error=access_denied",
+            ] {
+                assert!(
+                    matches!(parse_callback(target, "s1"), Callback::Foreign),
+                    "{target}"
+                );
+            }
+        }
+
+        #[test]
+        fn rejects_refusals_and_missing_codes() {
+            for (target, expected) in [
+                (
+                    "/callback?error=access_denied&error_description=User%20declined&state=s1",
+                    "authorization was refused (access_denied: User declined)",
+                ),
+                (
+                    "/callback?error=access_denied&state=s1",
+                    "authorization was refused (access_denied)",
+                ),
+                (
+                    "/callback?state=s1",
+                    "the browser returned without an authorization code",
+                ),
+            ] {
+                match parse_callback(target, "s1") {
+                    Callback::Rejected(e) => assert_eq!(e.to_string(), expected, "{target}"),
+                    other => panic!("{target}: expected a rejection, got {other:?}"),
+                }
             }
         }
     }

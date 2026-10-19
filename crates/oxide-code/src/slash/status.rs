@@ -93,8 +93,6 @@ mod tests {
     use crate::tui::modal::Modal;
     use crate::tui::modal::testing::rendered_text;
 
-    // ── StatusCmd::name ──
-
     #[test]
     fn name_and_metadata_match_built_ins_contract() {
         assert_eq!(StatusCmd.name(), "status");
@@ -102,104 +100,110 @@ mod tests {
         assert_ne!(StatusCmd.description(), "");
     }
 
-    // ── StatusCmd::execute ──
+    mod execute {
+        use super::*;
 
-    #[test]
-    fn execute_opens_the_overview_modal() {
-        let info = test_session_info();
-        let outcome = StatusCmd.execute("", &SlashContext::new(&info, None));
-        outcome.unwrap().into_modal();
+        #[test]
+        fn opens_the_overview_modal() {
+            let info = test_session_info();
+            let outcome = StatusCmd.execute("", &SlashContext::new(&info, None));
+            outcome.unwrap().into_modal();
+        }
     }
 
-    // ── build_modal ──
+    mod build_modal {
+        use super::*;
 
-    #[test]
-    fn build_modal_renders_one_row_per_session_descriptor() {
-        let info = test_session_info();
-        let m = build_modal(&info);
-        // Title + blank + 10 rows + blank + footer = 14.
-        assert_eq!(m.height(80, u16::MAX), 14);
-    }
+        #[test]
+        fn renders_one_row_per_session_descriptor() {
+            let info = test_session_info();
+            let m = build_modal(&info);
+            // Title + blank + 10 rows + blank + footer = 14.
+            assert_eq!(m.height(80, u16::MAX), 14);
+        }
 
-    #[test]
-    fn build_modal_lists_session_rules_under_their_own_heading() {
-        let mut info = test_session_info();
-        let without = rendered_text(&build_modal(&info), 80);
-        assert!(!without.contains("Session Rules"), "{without}");
+        #[test]
+        fn lists_session_rules_under_their_own_heading() {
+            let mut info = test_session_info();
+            let without = rendered_text(&build_modal(&info), 80);
+            assert!(!without.contains("Session Rules"), "{without}");
 
-        info.session_allow = [
-            (PermissionClass::Exec, "cargo test *"),
-            (PermissionClass::Edit, "./out/**"),
-        ]
-        .map(|(class, pattern)| Rule::parse(class, pattern).unwrap())
-        .to_vec();
-        let rendered = rendered_text(&build_modal(&info), 80);
-        let rules: Vec<Vec<&str>> = rendered
-            .lines()
-            .skip_while(|line| !line.contains("Session Rules"))
-            .skip(1)
-            .map(|line| line.split_whitespace().collect::<Vec<_>>())
-            .filter(|words| !words.is_empty())
-            .collect();
-        assert_eq!(
-            rules,
-            [
-                vec!["allow.exec", "cargo", "test", "*"],
-                vec!["allow.edit", "./out/**"],
-                vec!["Esc", "to", "close"],
-            ],
-            "{rendered}"
-        );
-    }
-
-    #[test]
-    fn build_modal_lists_background_shells_with_their_state() {
-        let mut info = test_session_info();
-        let without = rendered_text(&build_modal(&info), 80);
-        assert!(!without.contains("Background Shells"), "{without}");
-
-        info.background_shells = shells_in_each_state();
-        let rendered = rendered_text(&build_modal(&info), 80);
-
-        let shells: Vec<&str> = rendered
-            .lines()
-            .skip_while(|line| !line.contains("Background Shells"))
-            .filter(|line| line.contains("shell-"))
-            .map(str::trim)
-            .collect();
-        assert_eq!(
-            shells,
-            [
-                "shell-1            running              cargo watch",
-                "shell-2            exit code 2          make test",
-                "shell-3            killed by signal 15  sleep 60",
-            ],
-            "{rendered}",
-        );
-    }
-
-    #[test]
-    fn build_modal_renders_the_auto_compaction_threshold_until_paused() {
-        let mut info = test_session_info();
-        let auto_compaction_row = |info: &LiveSessionInfo| {
-            let rendered = rendered_text(&build_modal(info), 80);
-            rendered
+            info.session_allow = [
+                (PermissionClass::Exec, "cargo test *"),
+                (PermissionClass::Edit, "./out/**"),
+            ]
+            .map(|(class, pattern)| Rule::parse(class, pattern).unwrap())
+            .to_vec();
+            let rendered = rendered_text(&build_modal(&info), 80);
+            let rules: Vec<Vec<&str>> = rendered
                 .lines()
-                .find(|line| line.contains("Auto Compaction"))
-                .map(|line| line.trim().to_owned())
-        };
+                .skip_while(|line| !line.contains("Session Rules"))
+                .skip(1)
+                .map(|line| line.split_whitespace().collect::<Vec<_>>())
+                .filter(|words| !words.is_empty())
+                .collect();
+            assert_eq!(
+                rules,
+                [
+                    vec!["allow.exec", "cargo", "test", "*"],
+                    vec!["allow.edit", "./out/**"],
+                    vec!["Esc", "to", "close"],
+                ],
+                "{rendered}"
+            );
+        }
 
-        let threshold = auto_compaction_row(&info);
-        info.auto_compaction_paused_after = Some(3);
-        let paused = auto_compaction_row(&info);
+        #[test]
+        fn lists_background_shells_with_their_state() {
+            let mut info = test_session_info();
+            let without = rendered_text(&build_modal(&info), 80);
+            assert!(!without.contains("Background Shells"), "{without}");
 
-        assert_eq!(
-            threshold.as_deref(),
-            Some("Auto Compaction    at 155000 tokens"),
-        );
-        assert_eq!(
-            paused.as_deref(),
-            Some("Auto Compaction    paused after 3 failures in a row (run `/compact` to resume)"),
-        );
+            info.background_shells = shells_in_each_state();
+            let rendered = rendered_text(&build_modal(&info), 80);
+
+            let shells: Vec<&str> = rendered
+                .lines()
+                .skip_while(|line| !line.contains("Background Shells"))
+                .filter(|line| line.contains("shell-"))
+                .map(str::trim)
+                .collect();
+            assert_eq!(
+                shells,
+                [
+                    "shell-1            running              cargo watch",
+                    "shell-2            exit code 2          make test",
+                    "shell-3            killed by signal 15  sleep 60",
+                ],
+                "{rendered}",
+            );
+        }
+
+        #[test]
+        fn renders_the_auto_compaction_threshold_until_paused() {
+            let mut info = test_session_info();
+            let auto_compaction_row = |info: &LiveSessionInfo| {
+                let rendered = rendered_text(&build_modal(info), 80);
+                rendered
+                    .lines()
+                    .find(|line| line.contains("Auto Compaction"))
+                    .map(|line| line.trim().to_owned())
+            };
+
+            let threshold = auto_compaction_row(&info);
+            info.auto_compaction_paused_after = Some(3);
+            let paused = auto_compaction_row(&info);
+
+            assert_eq!(
+                threshold.as_deref(),
+                Some("Auto Compaction    at 155000 tokens"),
+            );
+            assert_eq!(
+                paused.as_deref(),
+                Some(
+                    "Auto Compaction    paused after 3 failures in a row (run `/compact` to resume)"
+                ),
+            );
+        }
     }
 }

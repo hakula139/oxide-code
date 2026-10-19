@@ -158,8 +158,6 @@ mod tests {
     use crate::tui::modal::testing::rendered_text;
     use crate::util::path::testing::HOME_VAR;
 
-    // ── ConfigCmd::name ──
-
     #[test]
     fn name_and_metadata_match_built_ins_contract() {
         assert_eq!(ConfigCmd.name(), "config");
@@ -167,179 +165,187 @@ mod tests {
         assert_ne!(ConfigCmd.description(), "");
     }
 
-    // ── ConfigCmd::execute ──
+    mod execute {
+        use super::*;
 
-    #[test]
-    fn execute_opens_the_overview_modal() {
-        let info = test_session_info();
-        let outcome = ConfigCmd.execute("", &SlashContext::new(&info, None));
-        outcome.unwrap().into_modal();
+        #[test]
+        fn opens_the_overview_modal() {
+            let info = test_session_info();
+            let outcome = ConfigCmd.execute("", &SlashContext::new(&info, None));
+            outcome.unwrap().into_modal();
+        }
     }
 
-    // ── build_modal ──
+    mod build_modal {
+        use super::*;
 
-    #[test]
-    fn build_modal_height_accounts_for_both_sections() {
-        // title + blank + (heading + blank + 15 rows) + blank + (heading + blank + 1 row)
-        //   + blank + footer = 2 + 17 + 1 + 3 + 2 = 25.
-        let info = test_session_info();
-        let m = build_modal(&info, None);
-        assert_eq!(m.height(80, u16::MAX), 25);
-    }
+        fn row<'a>(rendered: &'a str, key: &str) -> &'a str {
+            rendered
+                .lines()
+                .find(|line| line.contains(key))
+                .map_or_else(|| panic!("no {key} row: {rendered}"), str::trim_end)
+        }
 
-    #[test]
-    fn build_modal_renders_resolved_auto_compaction() {
-        let info = test_session_info();
-        let m = build_modal(&info, None);
-        let rendered = rendered_text(&m, 80);
+        #[test]
+        fn height_accounts_for_both_sections() {
+            // title + blank + (heading + blank + 15 rows) + blank + (heading + blank + 1 row)
+            //   + blank + footer = 2 + 17 + 1 + 3 + 2 = 25.
+            let info = test_session_info();
+            let m = build_modal(&info, None);
+            assert_eq!(m.height(80, u16::MAX), 25);
+        }
 
-        assert!(rendered.contains("Auto Compaction"), "{rendered}");
-        assert!(rendered.contains("at 155000 tokens"), "{rendered}");
-    }
-
-    #[test]
-    fn build_modal_tildifies_extra_ca_certs_path() {
-        temp_env::with_var(HOME_VAR, Some("/tmp/oxide-fake-home"), || {
-            let mut info = test_session_info();
-            info.config.extra_ca_certs = Some(PathBuf::from("/tmp/oxide-fake-home/certs/corp.pem"));
+        #[test]
+        fn renders_resolved_auto_compaction() {
+            let info = test_session_info();
             let m = build_modal(&info, None);
             let rendered = rendered_text(&m, 80);
 
-            assert!(rendered.contains("Extra CA Certs"), "{rendered}");
-            assert!(rendered.contains("~/certs/corp.pem"), "{rendered}");
-        });
-    }
+            assert!(rendered.contains("Auto Compaction"), "{rendered}");
+            assert!(rendered.contains("at 155000 tokens"), "{rendered}");
+        }
 
-    #[test]
-    fn build_modal_renders_extra_ca_certs_none_as_placeholder() {
-        let info = test_session_info();
-        assert!(info.config.extra_ca_certs.is_none(), "precondition: unset");
-        let m = build_modal(&info, None);
-        let rendered = rendered_text(&m, 80);
+        #[test]
+        fn tildifies_extra_ca_certs_path() {
+            temp_env::with_var(HOME_VAR, Some("/tmp/oxide-fake-home"), || {
+                let mut info = test_session_info();
+                info.config.extra_ca_certs =
+                    Some(PathBuf::from("/tmp/oxide-fake-home/certs/corp.pem"));
+                let m = build_modal(&info, None);
+                let rendered = rendered_text(&m, 80);
 
-        assert!(
-            row(&rendered, "Extra CA Certs").contains("(none)"),
-            "{rendered}"
-        );
-    }
+                assert!(rendered.contains("Extra CA Certs"), "{rendered}");
+                assert!(rendered.contains("~/certs/corp.pem"), "{rendered}");
+            });
+        }
 
-    #[test]
-    fn build_modal_shows_gateway_settings() {
-        let mut info = test_session_info();
-        let rendered = rendered_text(&build_modal(&info, None), 80);
-        assert!(
-            row(&rendered, "Custom Headers").contains("(none)"),
-            "{rendered}"
-        );
+        #[test]
+        fn renders_unset_extra_ca_certs_as_placeholder() {
+            let info = test_session_info();
+            assert!(info.config.extra_ca_certs.is_none(), "precondition: unset");
+            let m = build_modal(&info, None);
+            let rendered = rendered_text(&m, 80);
 
-        info.config.gateway.custom_header_names =
-            vec!["x-team".to_owned(), "x-gateway-key".to_owned()];
-        let rendered = rendered_text(&build_modal(&info, None), 80);
-        assert!(
-            row(&rendered, "Custom Headers").contains("x-team, x-gateway-key"),
-            "{rendered}"
-        );
-
-        info.config.gateway.attribution = false;
-        let rendered = rendered_text(&build_modal(&info, None), 80);
-        assert!(
-            row(&rendered, "Attribution Header").contains(display_bool(false)),
-            "{rendered}"
-        );
-        assert!(
-            row(&rendered, "Structured Outputs").contains(display_bool(true)),
-            "{rendered}"
-        );
-    }
-
-    #[test]
-    fn build_modal_resolves_max_tokens_for_the_current_model() {
-        let mut info = test_session_info();
-        let assert_max_tokens = |info: &LiveSessionInfo, expected: &str| {
-            let rendered = rendered_text(&build_modal(info, None), 80);
-            let row = row(&rendered, "Max Tokens");
-            assert!(row.contains(&format!(" {expected} ")), "{row}");
-        };
-        assert_max_tokens(&info, "64000");
-
-        info.config.model = crate::model::ModelSpec::resolve("custom-model".to_owned());
-        assert_max_tokens(&info, "16000");
-
-        info.config.max_tokens = Some(1_000);
-        assert_max_tokens(&info, "1000");
-    }
-
-    #[test]
-    fn build_modal_shows_where_each_value_came_from() {
-        let mut info = test_session_info();
-        let drop_in = Layer::DropIn(PathBuf::from("/cfg/ox/config.d/10-nix.toml"));
-        info.config.provenance.layers = vec![drop_in.clone()];
-        info.config.provenance.model = Source::Env("ANTHROPIC_MODEL");
-        info.config.provenance.effort = Source::Session;
-        info.config.provenance.max_tokens = Source::File(drop_in);
-        let rendered = rendered_text(&build_modal(&info, None), 100);
-
-        assert!(
-            row(&rendered, "Model ID").ends_with("claude-opus-5-5              $ANTHROPIC_MODEL"),
-            "{rendered}"
-        );
-        assert!(row(&rendered, "Effort").ends_with("session"), "{rendered}");
-        assert!(
-            row(&rendered, "Max Tokens").ends_with("config.d/10-nix.toml"),
-            "{rendered}"
-        );
-        assert!(row(&rendered, "Base URL").contains("default"), "{rendered}");
-    }
-
-    fn row<'a>(rendered: &'a str, key: &str) -> &'a str {
-        rendered
-            .lines()
-            .find(|line| line.contains(key))
-            .map_or_else(|| panic!("no {key} row: {rendered}"), str::trim_end)
-    }
-
-    // ── file_rows ──
-
-    #[test]
-    fn file_rows_list_loaded_layers_lowest_first() {
-        temp_env::with_var(HOME_VAR, Some("/home/user"), || {
-            let layers = [
-                Layer::User(PathBuf::from("/home/user/.config/ox/config.toml")),
-                Layer::DropIn(PathBuf::from("/home/user/.config/ox/config.d/10-nix.toml")),
-                Layer::Project(PathBuf::from("/repo/.ox/config.toml")),
-            ];
-            let user = PathBuf::from("/home/user/.config/ox/config.toml");
-            let pair = |label: &str, path: &str| (label.to_owned(), path.to_owned());
-            assert_eq!(
-                file_rows(&layers, Some(&user)),
-                [
-                    pair("User", "~/.config/ox/config.toml"),
-                    pair("Drop-in", "~/.config/ox/config.d/10-nix.toml"),
-                    pair("Project", "/repo/.ox/config.toml"),
-                ],
+            assert!(
+                row(&rendered, "Extra CA Certs").contains("(none)"),
+                "{rendered}"
             );
-        });
+        }
+
+        #[test]
+        fn shows_gateway_settings() {
+            let mut info = test_session_info();
+            let rendered = rendered_text(&build_modal(&info, None), 80);
+            assert!(
+                row(&rendered, "Custom Headers").contains("(none)"),
+                "{rendered}"
+            );
+
+            info.config.gateway.custom_header_names =
+                vec!["x-team".to_owned(), "x-gateway-key".to_owned()];
+            let rendered = rendered_text(&build_modal(&info, None), 80);
+            assert!(
+                row(&rendered, "Custom Headers").contains("x-team, x-gateway-key"),
+                "{rendered}"
+            );
+
+            info.config.gateway.attribution = false;
+            let rendered = rendered_text(&build_modal(&info, None), 80);
+            assert!(
+                row(&rendered, "Attribution Header").contains(display_bool(false)),
+                "{rendered}"
+            );
+            assert!(
+                row(&rendered, "Structured Outputs").contains(display_bool(true)),
+                "{rendered}"
+            );
+        }
+
+        #[test]
+        fn resolves_max_tokens_for_the_current_model() {
+            let mut info = test_session_info();
+            let assert_max_tokens = |info: &LiveSessionInfo, expected: &str| {
+                let rendered = rendered_text(&build_modal(info, None), 80);
+                let row = row(&rendered, "Max Tokens");
+                assert!(row.contains(&format!(" {expected} ")), "{row}");
+            };
+            assert_max_tokens(&info, "64000");
+
+            info.config.model = crate::model::ModelSpec::resolve("custom-model".to_owned());
+            assert_max_tokens(&info, "16000");
+
+            info.config.max_tokens = Some(1_000);
+            assert_max_tokens(&info, "1000");
+        }
+
+        #[test]
+        fn shows_where_each_value_came_from() {
+            let mut info = test_session_info();
+            let drop_in = Layer::DropIn(PathBuf::from("/cfg/ox/config.d/10-nix.toml"));
+            info.config.provenance.layers = vec![drop_in.clone()];
+            info.config.provenance.model = Source::Env("ANTHROPIC_MODEL");
+            info.config.provenance.effort = Source::Session;
+            info.config.provenance.max_tokens = Source::File(drop_in);
+            let rendered = rendered_text(&build_modal(&info, None), 100);
+
+            assert!(
+                row(&rendered, "Model ID")
+                    .ends_with("claude-opus-5-5              $ANTHROPIC_MODEL"),
+                "{rendered}"
+            );
+            assert!(row(&rendered, "Effort").ends_with("session"), "{rendered}");
+            assert!(
+                row(&rendered, "Max Tokens").ends_with("config.d/10-nix.toml"),
+                "{rendered}"
+            );
+            assert!(row(&rendered, "Base URL").contains("default"), "{rendered}");
+        }
     }
 
-    #[test]
-    fn file_rows_point_to_a_missing_user_file() {
-        temp_env::with_var(HOME_VAR, Some("/home/user"), || {
-            let project = [Layer::Project(PathBuf::from("/repo/.ox/config.toml"))];
-            let user = PathBuf::from("/home/user/.config/ox/config.toml");
-            assert_eq!(
-                file_rows(&project, Some(&user)),
-                [
-                    (
-                        "User".to_owned(),
-                        "~/.config/ox/config.toml (not found)".to_owned()
-                    ),
-                    ("Project".to_owned(), "/repo/.ox/config.toml".to_owned()),
-                ],
-            );
-            assert_eq!(
-                file_rows(&[], None),
-                [("User".to_owned(), "(not configured)".to_owned())],
-            );
-        });
+    mod file_rows {
+        use super::*;
+
+        #[test]
+        fn list_loaded_layers_lowest_first() {
+            temp_env::with_var(HOME_VAR, Some("/home/user"), || {
+                let layers = [
+                    Layer::User(PathBuf::from("/home/user/.config/ox/config.toml")),
+                    Layer::DropIn(PathBuf::from("/home/user/.config/ox/config.d/10-nix.toml")),
+                    Layer::Project(PathBuf::from("/repo/.ox/config.toml")),
+                ];
+                let user = PathBuf::from("/home/user/.config/ox/config.toml");
+                let pair = |label: &str, path: &str| (label.to_owned(), path.to_owned());
+                assert_eq!(
+                    file_rows(&layers, Some(&user)),
+                    [
+                        pair("User", "~/.config/ox/config.toml"),
+                        pair("Drop-in", "~/.config/ox/config.d/10-nix.toml"),
+                        pair("Project", "/repo/.ox/config.toml"),
+                    ],
+                );
+            });
+        }
+
+        #[test]
+        fn point_to_a_missing_user_file() {
+            temp_env::with_var(HOME_VAR, Some("/home/user"), || {
+                let project = [Layer::Project(PathBuf::from("/repo/.ox/config.toml"))];
+                let user = PathBuf::from("/home/user/.config/ox/config.toml");
+                assert_eq!(
+                    file_rows(&project, Some(&user)),
+                    [
+                        (
+                            "User".to_owned(),
+                            "~/.config/ox/config.toml (not found)".to_owned()
+                        ),
+                        ("Project".to_owned(), "/repo/.ox/config.toml".to_owned()),
+                    ],
+                );
+                assert_eq!(
+                    file_rows(&[], None),
+                    [("User".to_owned(), "(not configured)".to_owned())],
+                );
+            });
+        }
     }
 }
