@@ -1,6 +1,10 @@
 //! Typed slash-command forms parsed into the [`Op`] each one runs, shared by the TUI's slash
 //! commands and the bare REPL. The TUI adds the pickers and modals behind the bare forms.
 
+pub(crate) mod init;
+
+use std::path::Path;
+
 use indoc::formatdoc;
 
 use crate::config::Effort;
@@ -10,18 +14,20 @@ use crate::protocol::{ConfigPick, Op, ResumeTarget};
 use crate::session::display::fit_title;
 
 /// Canonical names of the commands [`parse`] knows, without their leading `/`.
-pub(crate) const NAMES: [&str; 7] = [
-    "clear", "compact", "effort", "mode", "model", "rename", "resume",
+pub(crate) const NAMES: [&str; 8] = [
+    "clear", "compact", "effort", "init", "mode", "model", "rename", "resume",
 ];
 
 /// Parses the typed form of the command `name`, canonical and without its `/`, into the op it
-/// runs. `None` when `name` is not one of [`NAMES`]. `Err` carries the message for a malformed
-/// form, including a bare form only a picker can complete.
-pub(crate) fn parse(name: &str, args: &str) -> Option<Result<Op, String>> {
+/// runs, where `/init` reads the instruction files at `project_root`. `None` when `name` is not
+/// one of [`NAMES`]. `Err` carries the message for a malformed form, including a bare form only a
+/// picker can complete.
+pub(crate) fn parse(name: &str, args: &str, project_root: &Path) -> Option<Result<Op, String>> {
     Some(match name {
         "clear" => Ok(Op::Clear),
         "compact" => Ok(compact(args)),
         "effort" => effort(args),
+        "init" => init::parse(args, project_root),
         "mode" => mode(args),
         "model" => model(args),
         "rename" => rename(args),
@@ -167,10 +173,16 @@ mod tests {
 
         #[test]
         fn routes_each_name_to_its_form() {
+            let root = tempfile::tempdir().unwrap();
             let cases = [
                 ("clear", "", Op::Clear),
                 ("compact", "auth", compact("auth")),
                 ("effort", "low", set_effort(Effort::Low)),
+                (
+                    "init",
+                    "AGENTS.md",
+                    Op::Prompt(init::create_prompt(root.path(), "AGENTS.md")),
+                ),
                 ("mode", "plan", Op::SetMode(Mode::Plan)),
                 ("model", "haiku", set_model("claude-haiku-5-5")),
                 ("rename", "Fix login", rename("Fix login").unwrap()),
@@ -179,14 +191,14 @@ mod tests {
 
             assert_eq!(cases.each_ref().map(|(name, ..)| *name), NAMES);
             for (name, args, op) in cases {
-                assert_eq!(parse(name, args), Some(Ok(op)), "{name}");
+                assert_eq!(parse(name, args, root.path()), Some(Ok(op)), "{name}");
             }
         }
 
         #[test]
         fn knows_no_other_name() {
             for name in ["help", "new", "theme", "compact-all", ""] {
-                assert_eq!(parse(name, "x"), None, "{name}");
+                assert_eq!(parse(name, "x", Path::new("/repo")), None, "{name}");
             }
         }
 
@@ -202,7 +214,11 @@ mod tests {
                     "Missing session ID. Usage: `/resume <id-prefix>`.",
                 ),
             ] {
-                assert_eq!(parse(name, "  "), Some(Err(usage.to_owned())), "{name}");
+                assert_eq!(
+                    parse(name, "  ", Path::new("/repo")),
+                    Some(Err(usage.to_owned())),
+                    "{name}",
+                );
             }
         }
     }

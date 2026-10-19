@@ -4,32 +4,37 @@
 
 ## Implementation
 
-`/init` looks for `AGENTS.md` and `CLAUDE.md` at the project root and in its `.claude/` directory, the two locations checked when loading root-level instructions. Paths that resolve to the same file, such as a `CLAUDE.md` symlink to `AGENTS.md`, count once, under the path that is not a symlink. The project root is the Git repository root, or the working directory when outside a repository. At startup, the TUI driver resolves it once through `util::git::repo_root`, the same lookup prompt assembly uses, and stores it in `LiveSessionInfo`. The working directory stays fixed for the session, so the root cannot change.
+`/init` looks for `AGENTS.md` and `CLAUDE.md` at the project root and in its `.claude/` directory, the two locations checked when loading root-level instructions. Paths that resolve to the same file, such as a `CLAUDE.md` symlink to `AGENTS.md`, count once, under the path that is not a symlink. The project root is the Git repository root, or the working directory when outside a repository. At startup, the TUI and the `--no-tui` REPL each resolve it once through `util::git::project_root`, which builds on `util::git::repo_root`, the same lookup prompt assembly uses. The working directory stays fixed for the session, so the root cannot change.
 
-- **No file exists.** A picker asks which file to create. Besides oxide-code, Codex and other agents that follow the `AGENTS.md` convention read `AGENTS.md`, and Claude Code reads `CLAUDE.md`. Choosing a file forwards a prompt that names it. Pressing Esc closes the picker without starting a turn, and the `/init` line stays in the chat, as the command line does when the `/model` or `/theme` picker is cancelled. If auto-compaction clears the chat during a turn started from the picker, the `/init` line is not replayed above the summary.
-- **A file exists.** `/init` asks no questions. It forwards a prompt that names each existing file and asks the model to read it, explore the codebase, show proposed changes as a unified diff with a reason for each, and end the turn. The model edits the file only after the user confirms in a later prompt.
+- **A file exists.** Bare `/init` asks no questions. It forwards a prompt that names each existing file and asks the model to read it, explore the codebase, show proposed changes as a unified diff with a reason for each, and end the turn. The model edits the file only after the user confirms in a later prompt.
+- **No file exists.** `/init AGENTS.md` or `/init CLAUDE.md` forwards a prompt that names the file to create, matching the name ignoring case. Besides oxide-code, Codex and other agents that follow the `AGENTS.md` convention read `AGENTS.md`, and Claude Code reads `CLAUDE.md`. Bare `/init` needs that choice first. In the TUI, it opens a picker whose choice forwards the same prompt. Pressing Esc closes the picker without starting a turn, and the `/init` line stays in the chat, as the command line does when the `/model` or `/theme` picker is cancelled. If auto-compaction clears the chat during a turn started from the picker, the `/init` line is not replayed above the summary. The REPL has no picker, so it rejects bare `/init` with an error naming both commands.
+- **A file name with a file present.** Naming a file the project has, as `/init CLAUDE.md` does when `.claude/CLAUDE.md` exists, forwards the update prompt that bare `/init` forwards. Naming the other file is rejected with the existing paths and a pointer to bare `/init`. A name other than `AGENTS.md` or `CLAUDE.md` is rejected with a list of the two.
+
+`command::init` holds the discovery, both prompts, and `resolve`, which turns the arguments into the prompt to forward or reports that the file must be picked first. The TUI's `slash/init.rs` adds only the picker. Because `-p` runs no slash commands, it sends `/init` to the model as text.
 
 Both prompts share one rubric: include only information an agent would otherwise get wrong, such as commands that differ from language defaults, architecture spanning several files, conventions that diverge from defaults, and constraints that the code cannot reveal. Omit standard conventions, file listings, generic advice, and anything not grounded in files the model has read.
 
 ## Design Decisions
 
-1. **Ask only for the file name.** The model can learn the commands, conventions, and architecture by reading the repository. If neither file exists, the repository cannot determine which name to use: either works, and the choice depends on which other tools the team runs. If a file already exists, updating it in place is the only reasonable choice, so there is nothing to ask.
+1. **Ask only for the file name.** The model can learn the commands, conventions, and architecture by reading the repository. If neither file exists, the repository cannot determine which name to use: either works, and the choice depends on which other tools the team runs. If a file already exists, updating it in place is the only reasonable choice, so there is nothing to ask. Naming that file runs the same update, while naming the other one is an error, since creating it would add the second file decision 2 rules out.
 
 2. **No option to create both.** oxide-code loads the first file with content at each location, checking `CLAUDE.md` before `AGENTS.md`, and does not resolve `@` imports. A second file beside the first would never reach an oxide-code session and would drift out of sync.
 
 3. **The diff is a prompt contract.** In `manual` mode, edits inside the workspace run without approval, so the permission gate could let the model overwrite an existing instruction file without showing anything. The update prompt therefore asks the model to show the diff and stop the turn before editing, and Claude Code's newer `/init` likewise asks for diffs on an existing `CLAUDE.md`. This depends on the model following the prompt. Protecting instruction files would enforce the contract, but would require approval for every edit to them in every session, and headless runs could edit them only with that protection turned off.
 
-4. **The picker is client-side.** oxide-code has no tool for the model to ask the user a question, so the TUI presents the question in a modal before the turn starts. The prompt then includes the answer, and the turn needs no further input.
+4. **The answer comes before the turn.** oxide-code has no tool for the model to ask the user a question, so the file name arrives with the command, typed as its argument or chosen in the TUI's picker. The prompt then includes the answer, and the turn needs no further input.
 
 ## Out of Scope
 
 - **Enforcing the diff.** A guard scoped to the `/init` turn could require approval for edits to instruction files, ensuring the approval preview shows the diff regardless of what the model does. This requires per-turn state in the permission gate, tracked in [#261](https://github.com/hakula139/oxide-code/issues/261).
-- **Other frontends.** `/init` runs only in the TUI. The `--no-tui` REPL rejects it like every command without a typed form, and `-p` sends `/init` to the model as plain text.
 
 ## Sources
 
+- `crates/oxide-code/src/command.rs`: `parse`, which routes `/init` to `command::init`.
+- `crates/oxide-code/src/command/init.rs`: `FILE_CHOICES`, `resolve`, the instruction-file discovery, and the create and update prompts.
+- `crates/oxide-code/src/driver/repl.rs`: resolves the project root and runs `/init` in the bare REPL.
 - `crates/oxide-code/src/driver/tui.rs`: resolves the project root and stores it in `LiveSessionInfo`.
 - `crates/oxide-code/src/prompt/instructions.rs`: `INSTRUCTION_FILENAMES` and `INSTRUCTION_DIRS`, the files and directories checked by `/init`.
 - `crates/oxide-code/src/slash/context.rs`: `LiveSessionInfo::project_root`.
-- `crates/oxide-code/src/slash/init.rs`: `InitCmd`, the file picker, and the create and update prompts.
-- `crates/oxide-code/src/util/git.rs`: `repo_root`, the async lookup for the repository root.
+- `crates/oxide-code/src/slash/init.rs`: `InitCmd` and the file picker.
+- `crates/oxide-code/src/util/git.rs`: `project_root` and `repo_root`, the async lookups for the project and repository roots.

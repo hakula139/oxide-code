@@ -43,6 +43,11 @@ pub(crate) async fn repo_root(cwd: &Path) -> Option<PathBuf> {
     stdout_line(&output.stdout).map(PathBuf::from)
 }
 
+/// The project root: the [`repo_root`] of `cwd`, or `cwd` itself outside a repository.
+pub(crate) async fn project_root(cwd: &Path) -> PathBuf {
+    repo_root(cwd).await.unwrap_or_else(|| cwd.to_owned())
+}
+
 /// The trimmed stdout of a one-line probe, or `None` when it is empty or not UTF-8.
 fn stdout_line(stdout: &[u8]) -> Option<String> {
     let line = std::str::from_utf8(stdout).ok()?.trim();
@@ -403,6 +408,35 @@ mod tests {
                 with_isolated_git_env_async(repo_root(dir.path())).await,
                 None
             );
+        }
+    }
+
+    mod project_root {
+        use super::*;
+
+        #[tokio::test]
+        async fn in_a_subdirectory_is_the_repository_top_level() {
+            let dir = tempfile::tempdir().unwrap();
+            init_fixture_repo(dir.path());
+            let nested = dir.path().join("crates/app");
+            std::fs::create_dir_all(&nested).unwrap();
+
+            let root = with_isolated_git_env_async(project_root(&nested)).await;
+
+            // macOS routes tempdirs through `/private`.
+            assert_eq!(
+                root.canonicalize().unwrap(),
+                dir.path().canonicalize().unwrap()
+            );
+        }
+
+        #[tokio::test]
+        async fn outside_a_repo_is_the_working_directory() {
+            let dir = tempfile::tempdir().unwrap();
+
+            let root = with_isolated_git_env_async(project_root(dir.path())).await;
+
+            assert_eq!(root, dir.path());
         }
     }
 
