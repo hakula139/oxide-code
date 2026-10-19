@@ -167,162 +167,176 @@ mod tests {
 
     const PULL_REQUEST: &[StatusLineSegment] = &[StatusLineSegment::PullRequest];
 
-    // ── GitProbes::new ──
+    mod new {
+        use super::*;
 
-    #[test]
-    fn new_defers_the_branch_probe_and_runs_the_pull_request_probe_first() {
-        let now = Instant::now();
-        let probes = GitProbes::new(Some(PathBuf::from("/tmp")), PULL_REQUEST, now);
-        assert_eq!(probes.branch.next_due, Some(now + BRANCH_REFRESH_INTERVAL));
-        assert_eq!(
-            probes.pull_request.as_ref().and_then(|s| s.next_due),
-            Some(now),
-        );
+        #[test]
+        fn defers_the_branch_probe_and_runs_the_pull_request_probe_first() {
+            let now = Instant::now();
+            let probes = GitProbes::new(Some(PathBuf::from("/tmp")), PULL_REQUEST, now);
+            assert_eq!(probes.branch.next_due, Some(now + BRANCH_REFRESH_INTERVAL));
+            assert_eq!(
+                probes.pull_request.as_ref().and_then(|s| s.next_due),
+                Some(now),
+            );
 
-        let untracked = GitProbes::new(
-            Some(PathBuf::from("/tmp")),
-            &[StatusLineSegment::GitBranch],
-            now,
-        );
-        assert!(untracked.pull_request.is_none());
+            let untracked = GitProbes::new(
+                Some(PathBuf::from("/tmp")),
+                &[StatusLineSegment::GitBranch],
+                now,
+            );
+            assert!(untracked.pull_request.is_none());
+        }
+
+        #[test]
+        fn reads_the_pull_request_status_only_for_a_segment_that_shows_it() {
+            let detail = |segments: &[StatusLineSegment]| {
+                GitProbes::new(None, segments, Instant::now()).pull_request_detail
+            };
+            assert_eq!(detail(PULL_REQUEST), PullRequestDetail::Link);
+            for status_segment in [
+                StatusLineSegment::PullRequestChecks,
+                StatusLineSegment::PullRequestReview,
+            ] {
+                assert_eq!(
+                    detail(&[StatusLineSegment::PullRequest, status_segment]),
+                    PullRequestDetail::Status,
+                    "{status_segment:?}",
+                );
+            }
+        }
     }
 
-    #[test]
-    fn new_reads_the_pull_request_status_only_for_a_segment_that_shows_it() {
-        let detail = |segments: &[StatusLineSegment]| {
-            GitProbes::new(None, segments, Instant::now()).pull_request_detail
-        };
-        assert_eq!(detail(PULL_REQUEST), PullRequestDetail::Link);
-        for status_segment in [
-            StatusLineSegment::PullRequestChecks,
-            StatusLineSegment::PullRequestReview,
-        ] {
+    mod poll {
+        use super::*;
+
+        #[tokio::test]
+        async fn claims_each_probe_once_it_is_due() {
+            let dir = tempfile::tempdir().unwrap();
+            let now = Instant::now();
+            let mut probes = GitProbes::new(Some(dir.path().to_path_buf()), PULL_REQUEST, now);
+
+            probes.poll(now);
             assert_eq!(
-                detail(&[StatusLineSegment::PullRequest, status_segment]),
-                PullRequestDetail::Status,
-                "{status_segment:?}",
+                probes.branch.next_due,
+                Some(now + BRANCH_REFRESH_INTERVAL),
+                "branch not yet due",
+            );
+            assert_eq!(probes.pull_request.as_ref().unwrap().next_due, None);
+
+            probes.poll(now + BRANCH_REFRESH_INTERVAL);
+            assert_eq!(probes.branch.next_due, None);
+        }
+
+        #[tokio::test]
+        async fn reports_a_finished_pull_request_probe_to_recv() {
+            let dir = tempfile::tempdir().unwrap();
+            let now = Instant::now();
+            let mut probes = GitProbes::new(Some(dir.path().to_path_buf()), PULL_REQUEST, now);
+
+            let update = with_isolated_git_env_async(async {
+                probes.poll(now);
+                probes.recv().await
+            })
+            .await;
+
+            assert_eq!(update, Some(GitUpdate::PullRequest(None)), "not a repo");
+        }
+
+        #[test]
+        fn without_a_cwd_starts_nothing() {
+            let now = Instant::now();
+            let mut probes = GitProbes::new(None, PULL_REQUEST, now);
+
+            probes.poll(now + PULL_REQUEST_REFRESH_INTERVAL);
+            assert_eq!(probes.branch.next_due, Some(now + BRANCH_REFRESH_INTERVAL));
+            assert_eq!(probes.pull_request.unwrap().next_due, Some(now));
+        }
+    }
+
+    mod recv {
+        use super::*;
+
+        #[tokio::test(start_paused = true)]
+        async fn reschedules_only_the_probe_that_finished() {
+            let start = now();
+            let mut probes = GitProbes::new(None, PULL_REQUEST, start);
+            assert!(probes.branch.start(start + BRANCH_REFRESH_INTERVAL));
+            assert!(probes.pull_request.as_mut().unwrap().start(start));
+
+            tokio::time::advance(Duration::from_secs(1)).await;
+            probes.inject(GitUpdate::Branch(Some("main".to_owned())));
+            assert_eq!(
+                probes.recv().await,
+                Some(GitUpdate::Branch(Some("main".to_owned())))
+            );
+            let branch_due = now() + BRANCH_REFRESH_INTERVAL;
+            assert_eq!(probes.branch.next_due, Some(branch_due));
+            assert_eq!(probes.pull_request.as_ref().unwrap().next_due, None);
+
+            tokio::time::advance(Duration::from_secs(1)).await;
+            probes.inject(GitUpdate::PullRequest(None));
+            assert_eq!(probes.recv().await, Some(GitUpdate::PullRequest(None)));
+            assert_eq!(
+                probes.pull_request.unwrap().next_due,
+                Some(now() + PULL_REQUEST_REFRESH_INTERVAL)
+            );
+            assert_eq!(probes.branch.next_due, Some(branch_due));
+        }
+
+        #[tokio::test]
+        async fn reschedules_a_panicked_run_and_returns_the_next_update() {
+            let now = Instant::now();
+            let mut probes = GitProbes::new(None, PULL_REQUEST, now);
+            assert!(probes.branch.start(now + BRANCH_REFRESH_INTERVAL));
+            probes.tx.send((Probe::Branch, None)).unwrap();
+            probes.inject(GitUpdate::PullRequest(None));
+
+            let update = probes.recv().await;
+
+            assert_eq!(update, Some(GitUpdate::PullRequest(None)));
+            assert!(
+                probes.branch.next_due.is_some(),
+                "branch probe stuck in flight"
             );
         }
     }
 
-    // ── GitProbes::poll ──
+    mod spawn_probe {
+        use super::*;
 
-    #[tokio::test]
-    async fn poll_claims_each_probe_once_it_is_due() {
-        let dir = tempfile::tempdir().unwrap();
-        let now = Instant::now();
-        let mut probes = GitProbes::new(Some(dir.path().to_path_buf()), PULL_REQUEST, now);
+        #[tokio::test]
+        async fn reports_a_panicked_run_without_an_update() {
+            let (tx, mut rx) = mpsc::unbounded_channel();
 
-        probes.poll(now);
-        assert_eq!(
-            probes.branch.next_due,
-            Some(now + BRANCH_REFRESH_INTERVAL),
-            "branch not yet due",
-        );
-        assert_eq!(probes.pull_request.as_ref().unwrap().next_due, None);
+            spawn_probe(&tx, Probe::Branch, async { panic!("probe failed") });
+            drop(tx);
 
-        probes.poll(now + BRANCH_REFRESH_INTERVAL);
-        assert_eq!(probes.branch.next_due, None);
+            assert_eq!(rx.recv().await, Some((Probe::Branch, None)));
+        }
     }
 
-    #[tokio::test]
-    async fn poll_reports_a_finished_pull_request_probe_to_recv() {
-        let dir = tempfile::tempdir().unwrap();
-        let now = Instant::now();
-        let mut probes = GitProbes::new(Some(dir.path().to_path_buf()), PULL_REQUEST, now);
+    mod schedule {
+        use super::*;
 
-        let update = with_isolated_git_env_async(async {
-            probes.poll(now);
-            probes.recv().await
-        })
-        .await;
+        mod start {
+            use super::*;
 
-        assert_eq!(update, Some(GitUpdate::PullRequest(None)), "not a repo");
-    }
+            #[test]
+            fn claims_a_due_slot_once_until_finish() {
+                let now = Instant::now();
+                let mut schedule = Schedule::new(BRANCH_REFRESH_INTERVAL, now);
 
-    #[test]
-    fn poll_without_a_cwd_starts_nothing() {
-        let now = Instant::now();
-        let mut probes = GitProbes::new(None, PULL_REQUEST, now);
+                assert!(schedule.start(now));
+                assert!(
+                    !schedule.start(now + BRANCH_REFRESH_INTERVAL * 10),
+                    "in-flight run blocks the next start",
+                );
 
-        probes.poll(now + PULL_REQUEST_REFRESH_INTERVAL);
-        assert_eq!(probes.branch.next_due, Some(now + BRANCH_REFRESH_INTERVAL));
-        assert_eq!(probes.pull_request.unwrap().next_due, Some(now));
-    }
-
-    // ── GitProbes::recv ──
-
-    #[tokio::test(start_paused = true)]
-    async fn recv_reschedules_only_the_probe_that_finished() {
-        let start = now();
-        let mut probes = GitProbes::new(None, PULL_REQUEST, start);
-        assert!(probes.branch.start(start + BRANCH_REFRESH_INTERVAL));
-        assert!(probes.pull_request.as_mut().unwrap().start(start));
-
-        tokio::time::advance(Duration::from_secs(1)).await;
-        probes.inject(GitUpdate::Branch(Some("main".to_owned())));
-        assert_eq!(
-            probes.recv().await,
-            Some(GitUpdate::Branch(Some("main".to_owned())))
-        );
-        let branch_due = now() + BRANCH_REFRESH_INTERVAL;
-        assert_eq!(probes.branch.next_due, Some(branch_due));
-        assert_eq!(probes.pull_request.as_ref().unwrap().next_due, None);
-
-        tokio::time::advance(Duration::from_secs(1)).await;
-        probes.inject(GitUpdate::PullRequest(None));
-        assert_eq!(probes.recv().await, Some(GitUpdate::PullRequest(None)));
-        assert_eq!(
-            probes.pull_request.unwrap().next_due,
-            Some(now() + PULL_REQUEST_REFRESH_INTERVAL)
-        );
-        assert_eq!(probes.branch.next_due, Some(branch_due));
-    }
-
-    #[tokio::test]
-    async fn recv_reschedules_a_panicked_run_and_returns_the_next_update() {
-        let now = Instant::now();
-        let mut probes = GitProbes::new(None, PULL_REQUEST, now);
-        assert!(probes.branch.start(now + BRANCH_REFRESH_INTERVAL));
-        probes.tx.send((Probe::Branch, None)).unwrap();
-        probes.inject(GitUpdate::PullRequest(None));
-
-        let update = probes.recv().await;
-
-        assert_eq!(update, Some(GitUpdate::PullRequest(None)));
-        assert!(
-            probes.branch.next_due.is_some(),
-            "branch probe stuck in flight"
-        );
-    }
-
-    // ── spawn_probe ──
-
-    #[tokio::test]
-    async fn spawn_probe_reports_a_panicked_run_without_an_update() {
-        let (tx, mut rx) = mpsc::unbounded_channel();
-
-        spawn_probe(&tx, Probe::Branch, async { panic!("probe failed") });
-        drop(tx);
-
-        assert_eq!(rx.recv().await, Some((Probe::Branch, None)));
-    }
-
-    // ── Schedule::start ──
-
-    #[test]
-    fn start_claims_a_due_slot_once_until_finish() {
-        let now = Instant::now();
-        let mut schedule = Schedule::new(BRANCH_REFRESH_INTERVAL, now);
-
-        assert!(schedule.start(now));
-        assert!(
-            !schedule.start(now + BRANCH_REFRESH_INTERVAL * 10),
-            "in-flight run blocks the next start",
-        );
-
-        schedule.finish(now);
-        assert!(!schedule.start(now + Duration::from_millis(100)));
-        assert!(schedule.start(now + BRANCH_REFRESH_INTERVAL));
+                schedule.finish(now);
+                assert!(!schedule.start(now + Duration::from_millis(100)));
+                assert!(schedule.start(now + BRANCH_REFRESH_INTERVAL));
+            }
+        }
     }
 }

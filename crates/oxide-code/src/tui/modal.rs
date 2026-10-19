@@ -381,380 +381,406 @@ mod tests {
         }
     }
 
-    // ── Modal::captures_esc ──
+    mod modal {
+        use super::*;
 
-    #[test]
-    fn captures_esc_default_leaves_esc_to_close_the_modal_silently() {
-        let mut stack = ModalStack::default();
-        stack.push(Box::new(BareModal));
+        mod captures_esc {
+            use super::*;
 
-        let outcome = stack.handle_key(&KeyEvent::from(KeyCode::Esc));
+            #[test]
+            fn default_leaves_esc_to_close_the_modal_silently() {
+                let mut stack = ModalStack::default();
+                stack.push(Box::new(BareModal));
 
-        assert!(
-            matches!(outcome, Some(ModalAction::Cancelled)),
-            "{outcome:?}"
-        );
-        assert!(!stack.is_active());
+                let outcome = stack.handle_key(&KeyEvent::from(KeyCode::Esc));
+
+                assert!(
+                    matches!(outcome, Some(ModalAction::Cancelled)),
+                    "{outcome:?}"
+                );
+                assert!(!stack.is_active());
+            }
+        }
     }
 
-    // ── ModalKey::fmt ──
+    mod modal_key {
+        use super::*;
 
-    #[test]
-    fn fmt_names_each_variant_and_its_action() {
-        assert_eq!(format!("{:?}", ModalKey::Consumed), "Consumed");
-        assert_eq!(format!("{:?}", ModalKey::Cancelled), "Cancelled");
-        assert_eq!(
-            format!("{:?}", ModalKey::Submitted(ModalAction::Cancelled)),
-            "Submitted(Cancelled)"
-        );
-        assert_eq!(
-            format!("{:?}", ModalKey::Preview(ModalAction::Cancelled)),
-            "Preview(Cancelled)"
-        );
-        let push: ModalKey = ModalKey::Push(Box::new(ScriptedModal::new(ModalAction::Cancelled)));
-        assert_eq!(format!("{push:?}"), "Push(<modal>)");
+        mod fmt {
+            use super::*;
+
+            #[test]
+            fn names_each_variant_and_its_action() {
+                assert_eq!(format!("{:?}", ModalKey::Consumed), "Consumed");
+                assert_eq!(format!("{:?}", ModalKey::Cancelled), "Cancelled");
+                assert_eq!(
+                    format!("{:?}", ModalKey::Submitted(ModalAction::Cancelled)),
+                    "Submitted(Cancelled)"
+                );
+                assert_eq!(
+                    format!("{:?}", ModalKey::Preview(ModalAction::Cancelled)),
+                    "Preview(Cancelled)"
+                );
+                let push: ModalKey =
+                    ModalKey::Push(Box::new(ScriptedModal::new(ModalAction::Cancelled)));
+                assert_eq!(format!("{push:?}"), "Push(<modal>)");
+            }
+        }
     }
 
-    // ── is_active ──
+    mod is_active {
+        use super::*;
 
-    #[test]
-    fn is_active_empty_stack_is_inactive_with_zero_height() {
-        let stack = ModalStack::default();
-        assert!(!stack.is_active());
-        assert_eq!(stack.height(80, 40), 0);
+        #[test]
+        fn empty_stack_is_inactive_with_zero_height() {
+            let stack = ModalStack::default();
+            assert!(!stack.is_active());
+            assert_eq!(stack.height(80, 40), 0);
+        }
     }
 
-    // ── push ──
+    mod push {
+        use super::*;
 
-    #[test]
-    fn push_activates_stack_and_height_reflects_top_modal() {
-        let mut stack = ModalStack::default();
-        stack.push(Box::new(ScriptedModal::new(ModalAction::Cancelled)));
-        assert!(stack.is_active());
-        assert_eq!(stack.height(80, 40), 3 + TOP_BORDER_HEIGHT);
+        #[test]
+        fn activates_stack_and_height_reflects_top_modal() {
+            let mut stack = ModalStack::default();
+            stack.push(Box::new(ScriptedModal::new(ModalAction::Cancelled)));
+            assert!(stack.is_active());
+            assert_eq!(stack.height(80, 40), 3 + TOP_BORDER_HEIGHT);
+        }
     }
 
-    // ── clear ──
+    mod clear {
+        use super::*;
 
-    #[test]
-    fn clear_drops_every_modal_on_the_stack() {
-        let mut stack = ModalStack::default();
-        stack.push(Box::new(ScriptedModal::new(ModalAction::Cancelled)));
-        stack.push(Box::new(ScriptedModal::new(ModalAction::Cancelled)));
-        assert!(stack.is_active());
-        let actions = stack.clear();
-        assert!(!stack.is_active(), "clear must empty the stack");
-        assert_eq!(stack.height(80, 40), 0);
-        assert!(
-            actions.is_empty(),
-            "modals without an on_cancel override surface no action",
-        );
+        #[test]
+        fn drops_every_modal_on_the_stack() {
+            let mut stack = ModalStack::default();
+            stack.push(Box::new(ScriptedModal::new(ModalAction::Cancelled)));
+            stack.push(Box::new(ScriptedModal::new(ModalAction::Cancelled)));
+            assert!(stack.is_active());
+            let actions = stack.clear();
+            assert!(!stack.is_active(), "clear must empty the stack");
+            assert_eq!(stack.height(80, 40), 0);
+            assert!(
+                actions.is_empty(),
+                "modals without an on_cancel override surface no action",
+            );
+        }
+
+        #[test]
+        fn returns_each_modals_on_cancel_action() {
+            let mut stack = ModalStack::default();
+            let mut bottom = ScriptedModal::new(ModalAction::Cancelled);
+            bottom.cancel_action = Some(ModalAction::Dispatch(Action::Op(Op::Clear)));
+            let mut top = ScriptedModal::new(ModalAction::Cancelled);
+            top.cancel_action = Some(ModalAction::Dispatch(Action::Op(Op::Interrupt)));
+            stack.push(Box::new(bottom));
+            stack.push(Box::new(top));
+
+            let actions = stack.clear();
+            assert!(!stack.is_active());
+            assert!(
+                matches!(
+                    actions.as_slice(),
+                    [
+                        ModalAction::Dispatch(Action::Op(Op::Clear)),
+                        ModalAction::Dispatch(Action::Op(Op::Interrupt)),
+                    ],
+                ),
+                "clear must surface each modal's cancel action in stack order: {actions:?}",
+            );
+        }
     }
 
-    #[test]
-    fn clear_returns_each_modals_on_cancel_action() {
-        let mut stack = ModalStack::default();
-        let mut bottom = ScriptedModal::new(ModalAction::Cancelled);
-        bottom.cancel_action = Some(ModalAction::Dispatch(Action::Op(Op::Clear)));
-        let mut top = ScriptedModal::new(ModalAction::Cancelled);
-        top.cancel_action = Some(ModalAction::Dispatch(Action::Op(Op::Interrupt)));
-        stack.push(Box::new(bottom));
-        stack.push(Box::new(top));
+    mod height {
+        use super::*;
 
-        let actions = stack.clear();
-        assert!(!stack.is_active());
-        assert!(
-            matches!(
-                actions.as_slice(),
-                [
-                    ModalAction::Dispatch(Action::Op(Op::Clear)),
-                    ModalAction::Dispatch(Action::Op(Op::Interrupt)),
-                ],
-            ),
-            "clear must surface each modal's cancel action in stack order: {actions:?}",
-        );
-    }
-
-    // ── height ──
-
-    #[test]
-    fn height_clips_the_top_modal_and_separator_to_the_max() {
-        let mut stack = ModalStack::default();
-        let mut modal = ScriptedModal::new(ModalAction::Cancelled);
-        modal.declared_height = 30;
-        stack.push(Box::new(modal));
-
-        assert_eq!(
-            stack.height(80, 12),
-            12,
-            "body clipped to fit beside the separator"
-        );
-        assert_eq!(stack.height(80, 1), 1, "only the separator fits");
-        assert_eq!(stack.height(80, 0), 0);
-    }
-
-    // ── render ──
-
-    #[test]
-    fn render_paints_top_border_then_delegates_body_below_it() {
-        let mut stack = ModalStack::default();
-        let modal = ScriptedModal::new(ModalAction::Cancelled);
-        let body_height = modal.declared_height;
-        stack.push(Box::new(modal));
-
-        let total_height = stack.height(12, 40);
-        assert_eq!(total_height, body_height + TOP_BORDER_HEIGHT);
-
-        let rows = render_rows_with(12, total_height, |frame, area, theme| {
-            stack.render(frame, area, theme);
-        });
-
-        let blank = " ".repeat(12);
-        assert_eq!(
-            rows,
-            [
-                HORIZONTAL_RULE.repeat(12),
-                blank.clone(),
-                blank.clone(),
-                blank
-            ]
-        );
-    }
-
-    #[test]
-    fn render_no_ops_when_stack_empty_or_area_smaller_than_body() {
-        let empty = ModalStack::default();
-        let mut stack = ModalStack::default();
-        stack.push(Box::new(ScriptedModal::new(ModalAction::Cancelled)));
-
-        let empty_rows = render_rows_with(8, 2, |frame, area, theme| {
-            empty.render(frame, area, theme);
-        });
-        let zero_height_rows = render_rows_with(8, 1, |frame, area, theme| {
-            stack.render(frame, Rect { height: 0, ..area }, theme);
-        });
-        let border_only_rows = render_rows_with(8, TOP_BORDER_HEIGHT, |frame, area, theme| {
-            stack.render(frame, area, theme);
-        });
-
-        assert_eq!(empty_rows, [" ".repeat(8), " ".repeat(8)]);
-        assert_eq!(zero_height_rows, [" ".repeat(8)]);
-        assert_eq!(border_only_rows, [HORIZONTAL_RULE.repeat(8)]);
-    }
-
-    // ── handle_key ──
-
-    #[test]
-    fn handle_key_cancel_pops_and_yields_modal_action_cancelled() {
-        // A silent close surfaces as `Some(Cancelled)` so the App can tell it from a consumed key.
-        let mut stack = ModalStack::default();
-        stack.push(Box::new(ScriptedModal::new(ModalAction::Cancelled)));
-
-        let outcome = stack.handle_key(&KeyEvent::from(KeyCode::Char('c')));
-
-        assert!(matches!(outcome, Some(ModalAction::Cancelled)));
-        assert!(!stack.is_active());
-    }
-
-    #[test]
-    fn handle_key_cancel_surfaces_the_modals_on_cancel_action() {
-        let mut stack = ModalStack::default();
-        let mut modal = ScriptedModal::new(ModalAction::Cancelled);
-        modal.cancel_action = Some(ModalAction::Dispatch(Action::Op(Op::Interrupt)));
-        stack.push(Box::new(modal));
-
-        let outcome = stack.handle_key(&KeyEvent::from(KeyCode::Char('c')));
-
-        assert!(matches!(
-            outcome,
-            Some(ModalAction::Dispatch(Action::Op(Op::Interrupt)))
-        ));
-        assert!(!stack.is_active());
-    }
-
-    #[test]
-    fn handle_key_universal_cancel_pops_before_the_modal_sees_the_key() {
-        for cancel in [
-            KeyEvent::from(KeyCode::Esc),
-            KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL),
-        ] {
+        #[test]
+        fn clips_the_top_modal_and_separator_to_the_max() {
             let mut stack = ModalStack::default();
             let mut modal = ScriptedModal::new(ModalAction::Cancelled);
-            // Moves the cancel sentinel off `c`, so a Ctrl+C reaching the modal would be consumed.
-            modal.on_cancel_key = 'x';
+            modal.declared_height = 30;
+            stack.push(Box::new(modal));
+
+            assert_eq!(
+                stack.height(80, 12),
+                12,
+                "body clipped to fit beside the separator"
+            );
+            assert_eq!(stack.height(80, 1), 1, "only the separator fits");
+            assert_eq!(stack.height(80, 0), 0);
+        }
+    }
+
+    mod render {
+        use super::*;
+
+        #[test]
+        fn paints_top_border_then_delegates_body_below_it() {
+            let mut stack = ModalStack::default();
+            let modal = ScriptedModal::new(ModalAction::Cancelled);
+            let body_height = modal.declared_height;
+            stack.push(Box::new(modal));
+
+            let total_height = stack.height(12, 40);
+            assert_eq!(total_height, body_height + TOP_BORDER_HEIGHT);
+
+            let rows = render_rows_with(12, total_height, |frame, area, theme| {
+                stack.render(frame, area, theme);
+            });
+
+            let blank = " ".repeat(12);
+            assert_eq!(
+                rows,
+                [
+                    HORIZONTAL_RULE.repeat(12),
+                    blank.clone(),
+                    blank.clone(),
+                    blank
+                ]
+            );
+        }
+
+        #[test]
+        fn no_ops_when_stack_empty_or_area_smaller_than_body() {
+            let empty = ModalStack::default();
+            let mut stack = ModalStack::default();
+            stack.push(Box::new(ScriptedModal::new(ModalAction::Cancelled)));
+
+            let empty_rows = render_rows_with(8, 2, |frame, area, theme| {
+                empty.render(frame, area, theme);
+            });
+            let zero_height_rows = render_rows_with(8, 1, |frame, area, theme| {
+                stack.render(frame, Rect { height: 0, ..area }, theme);
+            });
+            let border_only_rows = render_rows_with(8, TOP_BORDER_HEIGHT, |frame, area, theme| {
+                stack.render(frame, area, theme);
+            });
+
+            assert_eq!(empty_rows, [" ".repeat(8), " ".repeat(8)]);
+            assert_eq!(zero_height_rows, [" ".repeat(8)]);
+            assert_eq!(border_only_rows, [HORIZONTAL_RULE.repeat(8)]);
+        }
+    }
+
+    mod handle_key {
+        use super::*;
+
+        #[test]
+        fn cancel_pops_and_yields_modal_action_cancelled() {
+            // A silent close yields `Some(Cancelled)`, so the App can tell it from a consumed key.
+            let mut stack = ModalStack::default();
+            stack.push(Box::new(ScriptedModal::new(ModalAction::Cancelled)));
+
+            let outcome = stack.handle_key(&KeyEvent::from(KeyCode::Char('c')));
+
+            assert!(matches!(outcome, Some(ModalAction::Cancelled)));
+            assert!(!stack.is_active());
+        }
+
+        #[test]
+        fn cancel_surfaces_the_modals_on_cancel_action() {
+            let mut stack = ModalStack::default();
+            let mut modal = ScriptedModal::new(ModalAction::Cancelled);
             modal.cancel_action = Some(ModalAction::Dispatch(Action::Op(Op::Interrupt)));
             stack.push(Box::new(modal));
 
-            let outcome = stack.handle_key(&cancel);
+            let outcome = stack.handle_key(&KeyEvent::from(KeyCode::Char('c')));
+
+            assert!(matches!(
+                outcome,
+                Some(ModalAction::Dispatch(Action::Op(Op::Interrupt)))
+            ));
+            assert!(!stack.is_active());
+        }
+
+        #[test]
+        fn universal_cancel_pops_before_the_modal_sees_the_key() {
+            for cancel in [
+                KeyEvent::from(KeyCode::Esc),
+                KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL),
+            ] {
+                let mut stack = ModalStack::default();
+                let mut modal = ScriptedModal::new(ModalAction::Cancelled);
+                // Moves the cancel sentinel off `c`, so a Ctrl+C the modal saw would be consumed.
+                modal.on_cancel_key = 'x';
+                modal.cancel_action = Some(ModalAction::Dispatch(Action::Op(Op::Interrupt)));
+                stack.push(Box::new(modal));
+
+                let outcome = stack.handle_key(&cancel);
+
+                assert!(
+                    matches!(
+                        outcome,
+                        Some(ModalAction::Dispatch(Action::Op(Op::Interrupt)))
+                    ),
+                    "{cancel:?} must surface the on_cancel action",
+                );
+                assert!(!stack.is_active());
+            }
+        }
+
+        #[test]
+        fn esc_reaches_a_modal_that_captures_it_while_ctrl_c_still_cancels() {
+            let mut stack = ModalStack::default();
+            let mut modal = ScriptedModal::new(ModalAction::Cancelled);
+            modal.cancel_action = Some(ModalAction::Dispatch(Action::Op(Op::Interrupt)));
+            modal.captures_esc = true;
+            stack.push(Box::new(modal));
+
+            let outcome = stack.handle_key(&KeyEvent::from(KeyCode::Esc));
+            assert!(outcome.is_none());
+            assert!(stack.is_active());
+
+            let outcome =
+                stack.handle_key(&KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL));
+            assert!(matches!(
+                outcome,
+                Some(ModalAction::Dispatch(Action::Op(Op::Interrupt)))
+            ));
+            assert!(!stack.is_active());
+        }
+
+        #[test]
+        fn submit_pops_and_yields_the_dispatched_action() {
+            let mut stack = ModalStack::default();
+            let action = Action::Op(Op::Interrupt);
+            stack.push(Box::new(ScriptedModal::new(ModalAction::Dispatch(
+                action.clone(),
+            ))));
+
+            let outcome = stack.handle_key(&KeyEvent::from(KeyCode::Char('s')));
+
+            assert!(
+                matches!(outcome, Some(ModalAction::Dispatch(a)) if a == action),
+                "submit must surface the modal's Action unchanged",
+            );
+            assert!(!stack.is_active());
+        }
+
+        #[test]
+        fn preview_yields_action_without_popping_stack() {
+            let mut stack = ModalStack::default();
+            let mut modal = ScriptedModal::new(ModalAction::Cancelled);
+            modal.preview_action = ModalAction::Dispatch(Action::Op(Op::Interrupt));
+            stack.push(Box::new(modal));
+
+            let outcome = stack.handle_key(&KeyEvent::from(KeyCode::Char('p')));
 
             assert!(
                 matches!(
                     outcome,
                     Some(ModalAction::Dispatch(Action::Op(Op::Interrupt)))
                 ),
-                "{cancel:?} must surface the on_cancel action",
+                "preview must surface the modal's Action unchanged",
             );
+            assert!(stack.is_active(), "preview must not pop the stack");
+        }
+
+        #[test]
+        fn empty_stack_delivers_nothing() {
+            let mut stack = ModalStack::default();
+
+            let outcome = stack.handle_key(&KeyEvent::from(KeyCode::Char('s')));
+
+            assert!(outcome.is_none());
             assert!(!stack.is_active());
         }
-    }
 
-    #[test]
-    fn handle_key_esc_reaches_a_modal_that_captures_it_while_ctrl_c_still_cancels() {
-        let mut stack = ModalStack::default();
-        let mut modal = ScriptedModal::new(ModalAction::Cancelled);
-        modal.cancel_action = Some(ModalAction::Dispatch(Action::Op(Op::Interrupt)));
-        modal.captures_esc = true;
-        stack.push(Box::new(modal));
+        #[test]
+        fn modifier_less_key_routes_to_modal_unchanged() {
+            // `x` because ScriptedModal consumes `c` as its own cancel sentinel.
+            let mut stack = ModalStack::default();
+            stack.push(Box::new(ScriptedModal::new(ModalAction::Cancelled)));
 
-        let outcome = stack.handle_key(&KeyEvent::from(KeyCode::Esc));
-        assert!(outcome.is_none());
-        assert!(stack.is_active());
+            let outcome = stack.handle_key(&KeyEvent::from(KeyCode::Char('x')));
 
-        let outcome = stack.handle_key(&KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL));
-        assert!(matches!(
-            outcome,
-            Some(ModalAction::Dispatch(Action::Op(Op::Interrupt)))
-        ));
-        assert!(!stack.is_active());
-    }
+            assert!(outcome.is_none(), "non-cancel key must not pop the stack");
+            assert!(stack.is_active());
+        }
 
-    #[test]
-    fn handle_key_submit_pops_and_yields_the_dispatched_action() {
-        let mut stack = ModalStack::default();
-        let action = Action::Op(Op::Interrupt);
-        stack.push(Box::new(ScriptedModal::new(ModalAction::Dispatch(
-            action.clone(),
-        ))));
+        #[test]
+        fn with_nested_stack_routes_to_top_modal_only() {
+            let mut stack = ModalStack::default();
+            stack.push(Box::new(ScriptedModal::new(ModalAction::Dispatch(
+                Action::Op(Op::Clear),
+            ))));
+            let mut top = ScriptedModal::new(ModalAction::Cancelled);
+            top.declared_height = 5;
+            stack.push(Box::new(top));
+            assert_eq!(
+                stack.height(80, 40),
+                5 + TOP_BORDER_HEIGHT,
+                "top modal's height wins (plus border)",
+            );
 
-        let outcome = stack.handle_key(&KeyEvent::from(KeyCode::Char('s')));
+            let outcome = stack.handle_key(&KeyEvent::from(KeyCode::Char('s')));
 
-        assert!(
-            matches!(outcome, Some(ModalAction::Dispatch(a)) if a == action),
-            "submit must surface the modal's Action unchanged",
-        );
-        assert!(!stack.is_active());
-    }
+            assert!(matches!(outcome, Some(ModalAction::Cancelled)));
+            assert!(stack.is_active(), "inner modal still active");
+            assert_eq!(
+                stack.height(80, 40),
+                3 + TOP_BORDER_HEIGHT,
+                "inner modal's height resumes (plus border)",
+            );
+        }
 
-    #[test]
-    fn handle_key_preview_yields_action_without_popping_stack() {
-        let mut stack = ModalStack::default();
-        let mut modal = ScriptedModal::new(ModalAction::Cancelled);
-        modal.preview_action = ModalAction::Dispatch(Action::Op(Op::Interrupt));
-        stack.push(Box::new(modal));
-
-        let outcome = stack.handle_key(&KeyEvent::from(KeyCode::Char('p')));
-
-        assert!(
-            matches!(
-                outcome,
-                Some(ModalAction::Dispatch(Action::Op(Op::Interrupt)))
-            ),
-            "preview must surface the modal's Action unchanged",
-        );
-        assert!(stack.is_active(), "preview must not pop the stack");
-    }
-
-    #[test]
-    fn handle_key_empty_stack_delivers_nothing() {
-        let mut stack = ModalStack::default();
-
-        let outcome = stack.handle_key(&KeyEvent::from(KeyCode::Char('s')));
-
-        assert!(outcome.is_none());
-        assert!(!stack.is_active());
-    }
-
-    #[test]
-    fn handle_key_modifier_less_key_routes_to_modal_unchanged() {
-        // `x` because ScriptedModal consumes `c` as its own cancel sentinel.
-        let mut stack = ModalStack::default();
-        stack.push(Box::new(ScriptedModal::new(ModalAction::Cancelled)));
-
-        let outcome = stack.handle_key(&KeyEvent::from(KeyCode::Char('x')));
-
-        assert!(outcome.is_none(), "non-cancel key must not pop the stack");
-        assert!(stack.is_active());
-    }
-
-    #[test]
-    fn handle_key_with_nested_stack_routes_to_top_modal_only() {
-        let mut stack = ModalStack::default();
-        stack.push(Box::new(ScriptedModal::new(ModalAction::Dispatch(
-            Action::Op(Op::Clear),
-        ))));
-        let mut top = ScriptedModal::new(ModalAction::Cancelled);
-        top.declared_height = 5;
-        stack.push(Box::new(top));
-        assert_eq!(
-            stack.height(80, 40),
-            5 + TOP_BORDER_HEIGHT,
-            "top modal's height wins (plus border)",
-        );
-
-        let outcome = stack.handle_key(&KeyEvent::from(KeyCode::Char('s')));
-
-        assert!(matches!(outcome, Some(ModalAction::Cancelled)));
-        assert!(stack.is_active(), "inner modal still active");
-        assert_eq!(
-            stack.height(80, 40),
-            3 + TOP_BORDER_HEIGHT,
-            "inner modal's height resumes (plus border)",
-        );
-    }
-
-    #[test]
-    fn handle_key_push_nests_child_modal_without_popping_parent() {
-        let mut parent = ScriptedModal::new(ModalAction::Cancelled);
-        let mut child = ScriptedModal::new(ModalAction::Cancelled);
-        child.declared_height = 7;
-        parent.push_child = Some(Box::new(child));
-
-        let mut stack = ModalStack::default();
-        stack.push(Box::new(parent));
-        assert_eq!(stack.height(80, 40), 3 + TOP_BORDER_HEIGHT, "parent height");
-
-        let outcome = stack.handle_key(&KeyEvent::from(KeyCode::Char('h')));
-
-        assert!(outcome.is_none(), "Push must not surface a ModalAction");
-        assert_eq!(
-            stack.height(80, 40),
-            7 + TOP_BORDER_HEIGHT,
-            "child becomes top"
-        );
-    }
-
-    #[test]
-    fn handle_key_pop_notifies_underlying_top_via_on_focus_regained() {
-        for (label, exit_key) in [
-            ("Esc universal-cancel", KeyEvent::from(KeyCode::Esc)),
-            (
-                "Ctrl+C universal-cancel",
-                KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL),
-            ),
-            ("modal Cancelled", KeyEvent::from(KeyCode::Char('c'))),
-            ("modal Submitted", KeyEvent::from(KeyCode::Char('s'))),
-        ] {
-            let parent = ScriptedModal::new(ModalAction::Cancelled);
-            let counter = Arc::clone(&parent.focus_regained_count);
-            let child = ScriptedModal::new(ModalAction::Cancelled);
+        #[test]
+        fn push_nests_child_modal_without_popping_parent() {
+            let mut parent = ScriptedModal::new(ModalAction::Cancelled);
+            let mut child = ScriptedModal::new(ModalAction::Cancelled);
+            child.declared_height = 7;
+            parent.push_child = Some(Box::new(child));
 
             let mut stack = ModalStack::default();
             stack.push(Box::new(parent));
-            stack.push(Box::new(child));
-            assert_eq!(
-                counter.load(Ordering::Relaxed),
-                0,
-                "{label}: pre-push baseline"
-            );
+            assert_eq!(stack.height(80, 40), 3 + TOP_BORDER_HEIGHT, "parent height");
 
-            stack.handle_key(&exit_key);
+            let outcome = stack.handle_key(&KeyEvent::from(KeyCode::Char('h')));
 
+            assert!(outcome.is_none(), "Push must not surface a ModalAction");
             assert_eq!(
-                counter.load(Ordering::Relaxed),
-                1,
-                "{label}: parent must be notified exactly once after child pops",
+                stack.height(80, 40),
+                7 + TOP_BORDER_HEIGHT,
+                "child becomes top"
             );
-            assert!(stack.is_active(), "{label}: parent stays on the stack");
+        }
+
+        #[test]
+        fn pop_notifies_underlying_top_via_on_focus_regained() {
+            for (label, exit_key) in [
+                ("Esc universal-cancel", KeyEvent::from(KeyCode::Esc)),
+                (
+                    "Ctrl+C universal-cancel",
+                    KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL),
+                ),
+                ("modal Cancelled", KeyEvent::from(KeyCode::Char('c'))),
+                ("modal Submitted", KeyEvent::from(KeyCode::Char('s'))),
+            ] {
+                let parent = ScriptedModal::new(ModalAction::Cancelled);
+                let counter = Arc::clone(&parent.focus_regained_count);
+                let child = ScriptedModal::new(ModalAction::Cancelled);
+
+                let mut stack = ModalStack::default();
+                stack.push(Box::new(parent));
+                stack.push(Box::new(child));
+                assert_eq!(
+                    counter.load(Ordering::Relaxed),
+                    0,
+                    "{label}: pre-push baseline"
+                );
+
+                stack.handle_key(&exit_key);
+
+                assert_eq!(
+                    counter.load(Ordering::Relaxed),
+                    1,
+                    "{label}: parent must be notified exactly once after child pops",
+                );
+                assert!(stack.is_active(), "{label}: parent stays on the stack");
+            }
         }
     }
 }

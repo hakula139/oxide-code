@@ -908,1312 +908,1299 @@ mod tests {
     use super::*;
     use crate::tui::markdown::render_markdown;
 
-    fn theme() -> Theme {
-        Theme::default()
-    }
+    mod render_markdown {
+        use super::*;
 
-    /// Renders `input` at `width` and joins each row's raw span text, with `width == 0` disabling
-    /// wrapping. `Line::to_string` would drop a line ending left in a span.
-    fn rendered_text_at_width(input: &str, width: usize) -> Vec<String> {
-        render_markdown(input, &theme(), width)
-            .lines
-            .iter()
-            .map(|l| l.spans.iter().map(|s| s.content.as_ref()).collect())
-            .collect()
-    }
+        fn theme() -> Theme {
+            Theme::default()
+        }
 
-    /// Renders without wrapping.
-    fn rendered_text(input: &str) -> Vec<String> {
-        rendered_text_at_width(input, 0)
-    }
-
-    /// Builds columns from `(natural, min)` pairs.
-    fn column_widths(widths: &[(usize, usize)]) -> Vec<ColumnWidth> {
-        widths
-            .iter()
-            .map(|&(natural, min)| ColumnWidth { natural, min })
-            .collect()
-    }
-
-    // ── render_markdown ──
-
-    #[test]
-    fn render_markdown_plain_text_is_one_row() {
-        let lines = rendered_text("Hello, world!");
-        assert_eq!(lines, vec!["Hello, world!"]);
-    }
-
-    // ── render_markdown: paragraphs ──
-
-    #[test]
-    fn render_markdown_paragraphs_are_separated_by_one_blank_row() {
-        let lines = rendered_text(indoc! {"
-            First paragraph
-
-            Second paragraph
-        "});
-        assert_eq!(lines, ["First paragraph", "", "Second paragraph"]);
-    }
-
-    #[test]
-    fn render_markdown_paragraph_soft_break_joins() {
-        let lines = rendered_text(indoc! {"
-            Hello
-            World
-        "});
-        assert_eq!(lines, vec!["Hello World"]);
-    }
-
-    // ── render_markdown: headings ──
-
-    #[test]
-    fn render_markdown_heading_levels_text_and_styles() {
-        let t = theme();
-        let text = render_markdown(
-            indoc! {"
-                # H1
-                ## H2
-                ### H3
-                #### H4
-            "},
-            &t,
-            0,
-        );
-
-        let find_heading = |prefix: &str| {
-            text.lines
+        /// Renders `input` at `width` and joins each row's raw span text, with `width == 0`
+        /// disabling wrapping. `Line::to_string` would drop a line ending left in a span.
+        fn rendered_text_at_width(input: &str, width: usize) -> Vec<String> {
+            render_markdown(input, &theme(), width)
+                .lines
                 .iter()
-                .find(|l| l.spans.iter().any(|s| s.content.starts_with(prefix)))
-                .unwrap_or_else(|| panic!("no line starting with {prefix}"))
-                .clone()
-        };
+                .map(|l| l.spans.iter().map(|s| s.content.as_ref()).collect())
+                .collect()
+        }
 
-        let h1 = find_heading("# ");
-        assert!(h1.spans[0].style.add_modifier.contains(Modifier::BOLD));
-        assert!(
-            h1.spans[0]
-                .style
-                .add_modifier
-                .contains(Modifier::UNDERLINED)
-        );
-        assert_eq!(h1.spans[0].style.fg, t.text.fg);
+        /// Renders without wrapping.
+        fn rendered_text(input: &str) -> Vec<String> {
+            rendered_text_at_width(input, 0)
+        }
 
-        let h2 = find_heading("## ");
-        assert!(h2.spans[0].style.add_modifier.contains(Modifier::BOLD));
-        assert!(
-            !h2.spans[0]
-                .style
-                .add_modifier
-                .contains(Modifier::UNDERLINED)
-        );
+        #[test]
+        fn plain_text_is_one_row() {
+            let lines = rendered_text("Hello, world!");
+            assert_eq!(lines, vec!["Hello, world!"]);
+        }
 
-        let h3 = find_heading("### ");
-        assert!(h3.spans[0].style.add_modifier.contains(Modifier::BOLD));
-        assert!(h3.spans[0].style.add_modifier.contains(Modifier::ITALIC));
+        #[test]
+        fn paragraphs_are_separated_by_one_blank_row() {
+            let lines = rendered_text(indoc! {"
+                First paragraph
 
-        let h4 = find_heading("#### ");
-        assert!(h4.spans[0].style.add_modifier.contains(Modifier::ITALIC));
-        assert!(!h4.spans[0].style.add_modifier.contains(Modifier::BOLD));
-    }
+                Second paragraph
+            "});
+            assert_eq!(lines, ["First paragraph", "", "Second paragraph"]);
+        }
 
-    // ── render_markdown: blockquotes ──
+        #[test]
+        fn paragraph_soft_break_joins() {
+            let lines = rendered_text(indoc! {"
+                Hello
+                World
+            "});
+            assert_eq!(lines, vec!["Hello World"]);
+        }
 
-    #[test]
-    fn render_markdown_blockquote_text_and_style() {
-        let t = theme();
-        let text = render_markdown("> Quoted text", &t, 0);
-        let bq_line = text
-            .lines
-            .iter()
-            .find(|l| l.spans.iter().any(|s| s.content.contains("Quoted")))
-            .expect("blockquote line not found");
-        let marker_span = bq_line
-            .spans
-            .iter()
-            .find(|s| s.content.contains("> "))
-            .expect("> marker not found");
-        assert_eq!(marker_span.style.fg, t.success.fg);
-    }
+        #[test]
+        fn heading_levels_text_and_styles() {
+            let t = theme();
+            let text = render_markdown(
+                indoc! {"
+                    # H1
+                    ## H2
+                    ### H3
+                    #### H4
+                "},
+                &t,
+                0,
+            );
 
-    #[test]
-    fn render_markdown_nested_blockquote_repeats_both_markers() {
-        let lines = rendered_text(indoc! {"
-            > Outer
-            > > Inner
-        "});
-        assert_eq!(lines, ["> Outer", "", "> > Inner"]);
-    }
+            let find_heading = |prefix: &str| {
+                text.lines
+                    .iter()
+                    .find(|l| l.spans.iter().any(|s| s.content.starts_with(prefix)))
+                    .unwrap_or_else(|| panic!("no line starting with {prefix}"))
+                    .clone()
+            };
 
-    // ── render_markdown: horizontal rule ──
+            let h1 = find_heading("# ");
+            assert!(h1.spans[0].style.add_modifier.contains(Modifier::BOLD));
+            assert!(
+                h1.spans[0]
+                    .style
+                    .add_modifier
+                    .contains(Modifier::UNDERLINED)
+            );
+            assert_eq!(h1.spans[0].style.fg, t.text.fg);
 
-    #[test]
-    fn render_markdown_horizontal_rule_text_and_style() {
-        let t = theme();
-        let text = render_markdown(
-            indoc! {"
-                Above
+            let h2 = find_heading("## ");
+            assert!(h2.spans[0].style.add_modifier.contains(Modifier::BOLD));
+            assert!(
+                !h2.spans[0]
+                    .style
+                    .add_modifier
+                    .contains(Modifier::UNDERLINED)
+            );
 
-                ---
+            let h3 = find_heading("### ");
+            assert!(h3.spans[0].style.add_modifier.contains(Modifier::BOLD));
+            assert!(h3.spans[0].style.add_modifier.contains(Modifier::ITALIC));
 
-                Below
-            "},
-            &t,
-            0,
-        );
-        let rule_span = text
-            .lines
-            .iter()
-            .find_map(|l| l.spans.iter().find(|s| s.content.contains('─')))
-            .expect("rule span not found");
-        assert_eq!(rule_span.style.fg, t.dim.fg);
-    }
+            let h4 = find_heading("#### ");
+            assert!(h4.spans[0].style.add_modifier.contains(Modifier::ITALIC));
+            assert!(!h4.spans[0].style.add_modifier.contains(Modifier::BOLD));
+        }
 
-    // ── render_markdown: lists ──
+        #[test]
+        fn blockquote_text_and_style() {
+            let t = theme();
+            let text = render_markdown("> Quoted text", &t, 0);
+            let bq_line = text
+                .lines
+                .iter()
+                .find(|l| l.spans.iter().any(|s| s.content.contains("Quoted")))
+                .expect("blockquote line not found");
+            let marker_span = bq_line
+                .spans
+                .iter()
+                .find(|s| s.content.contains("> "))
+                .expect("> marker not found");
+            assert_eq!(marker_span.style.fg, t.success.fg);
+        }
 
-    #[test]
-    fn render_markdown_ordered_list_puts_each_marker_on_its_item_row() {
-        let tight = rendered_text(indoc! {"
-            1. First
-            2. Second
-            3. Third
-        "});
-        let loose = rendered_text(indoc! {"
-            1. First
+        #[test]
+        fn nested_blockquote_repeats_both_markers() {
+            let lines = rendered_text(indoc! {"
+                > Outer
+                > > Inner
+            "});
+            assert_eq!(lines, ["> Outer", "", "> > Inner"]);
+        }
 
-            2. Second
+        #[test]
+        fn horizontal_rule_text_and_style() {
+            let t = theme();
+            let text = render_markdown(
+                indoc! {"
+                    Above
 
-            3. Third
-        "});
+                    ---
 
-        assert_eq!(tight, ["1. First", "2. Second", "3. Third"]);
-        assert_eq!(loose, tight, "loose items render without blank rows");
-    }
+                    Below
+                "},
+                &t,
+                0,
+            );
+            let rule_span = text
+                .lines
+                .iter()
+                .find_map(|l| l.spans.iter().find(|s| s.content.contains('─')))
+                .expect("rule span not found");
+            assert_eq!(rule_span.style.fg, t.dim.fg);
+        }
 
-    #[test]
-    fn render_markdown_double_digit_marker_stays_on_the_item_row() {
-        let items: Vec<String> = (1..=12).map(|i| format!("{i}. Item {i}")).collect();
+        #[test]
+        fn ordered_list_puts_each_marker_on_its_item_row() {
+            let tight = rendered_text(indoc! {"
+                1. First
+                2. Second
+                3. Third
+            "});
+            let loose = rendered_text(indoc! {"
+                1. First
 
-        assert_eq!(rendered_text(&items.join("\n")), items);
-    }
+                2. Second
 
-    #[test]
-    fn render_markdown_unordered_list_puts_each_marker_on_its_item_row() {
-        let tight = rendered_text(indoc! {"
-            - Alpha
-            - Beta
-        "});
-        let loose = rendered_text(indoc! {"
-            - Alpha
+                3. Third
+            "});
 
-            - Beta
-        "});
+            assert_eq!(tight, ["1. First", "2. Second", "3. Third"]);
+            assert_eq!(loose, tight, "loose items render without blank rows");
+        }
 
-        assert_eq!(tight, ["- Alpha", "- Beta"]);
-        assert_eq!(loose, tight, "loose items render without blank rows");
-    }
+        #[test]
+        fn double_digit_marker_stays_on_the_item_row() {
+            let items: Vec<String> = (1..=12).map(|i| format!("{i}. Item {i}")).collect();
 
-    #[test]
-    fn render_markdown_nested_list_indents_the_inner_item() {
-        let lines = rendered_text(indoc! {"
-            - Outer
-              - Inner
-        "});
-        assert_eq!(lines, ["- Outer", "  - Inner"]);
-    }
+            assert_eq!(rendered_text(&items.join("\n")), items);
+        }
 
-    #[test]
-    fn render_markdown_list_item_keeps_its_marker_in_front_of_a_first_child_prefix() {
-        let quote = rendered_text_at_width("- > one two three four", 12);
-        let nested = rendered_text(indoc! {"
-            - - inner
-              - second
-        "});
+        #[test]
+        fn unordered_list_puts_each_marker_on_its_item_row() {
+            let tight = rendered_text(indoc! {"
+                - Alpha
+                - Beta
+            "});
+            let loose = rendered_text(indoc! {"
+                - Alpha
 
-        assert_eq!(quote, ["- > one two ", "  > three ", "  > four"]);
-        assert_eq!(nested, ["- - inner", "  - second"]);
-    }
+                - Beta
+            "});
 
-    #[test]
-    fn render_markdown_empty_list_item_drops_only_its_own_marker() {
-        let empty_first_inner = rendered_text(indoc! {"
-            1. 1.
-               2. second
-        "});
-        let empty_then_quote = rendered_text(indoc! {"
-            -
+            assert_eq!(tight, ["- Alpha", "- Beta"]);
+            assert_eq!(loose, tight, "loose items render without blank rows");
+        }
 
-            > after
-        "});
+        #[test]
+        fn nested_list_indents_the_inner_item() {
+            let lines = rendered_text(indoc! {"
+                - Outer
+                  - Inner
+            "});
+            assert_eq!(lines, ["- Outer", "  - Inner"]);
+        }
 
-        assert_eq!(empty_first_inner, ["1. 2. second"]);
-        assert_eq!(empty_then_quote, ["", "> after"]);
-    }
+        #[test]
+        fn list_item_keeps_its_marker_in_front_of_a_first_child_prefix() {
+            let quote = rendered_text_at_width("- > one two three four", 12);
+            let nested = rendered_text(indoc! {"
+                - - inner
+                  - second
+            "});
 
-    #[test]
-    fn render_markdown_list_item_starting_with_inline_html_or_an_empty_link_keeps_its_marker() {
-        let kbd = rendered_text("- a\n- <kbd>Ctrl</kbd>+C");
-        let sup = rendered_text("- a\n- <sup>1</sup> note");
-        let empty_link = rendered_text("- a\n- [](https://x.io)");
+            assert_eq!(quote, ["- > one two ", "  > three ", "  > four"]);
+            assert_eq!(nested, ["- - inner", "  - second"]);
+        }
 
-        assert_eq!(kbd, ["- a", "- <kbd>Ctrl</kbd>+C"]);
-        assert_eq!(sup, ["- a", "- <sup>1</sup> note"]);
-        assert_eq!(empty_link, ["- a", "-  (https://x.io)"]);
-    }
+        #[test]
+        fn empty_list_item_drops_only_its_own_marker() {
+            let empty_first_inner = rendered_text(indoc! {"
+                1. 1.
+                   2. second
+            "});
+            let empty_then_quote = rendered_text(indoc! {"
+                -
 
-    #[test]
-    fn render_markdown_list_marker_uses_accent_color() {
-        let t = theme();
-        let text = render_markdown("- Item", &t, 0);
-        let marker_span = text
-            .lines
-            .iter()
-            .find_map(|l| l.spans.iter().find(|s| s.content.contains("- ")));
-        let span = marker_span.expect("list marker span not found");
-        assert_eq!(span.style.fg, t.accent.fg);
-    }
+                > after
+            "});
 
-    #[test]
-    fn render_markdown_inline_code_leading_a_list_item_keeps_its_style_after_the_marker() {
-        let t = theme();
+            assert_eq!(empty_first_inner, ["1. 2. second"]);
+            assert_eq!(empty_then_quote, ["", "> after"]);
+        }
 
-        let text = render_markdown("- a\n- `foo()` here", &t, 0);
+        #[test]
+        fn list_item_starting_with_inline_html_or_an_empty_link_keeps_its_marker() {
+            let kbd = rendered_text("- a\n- <kbd>Ctrl</kbd>+C");
+            let sup = rendered_text("- a\n- <sup>1</sup> note");
+            let empty_link = rendered_text("- a\n- [](https://x.io)");
 
-        assert_eq!(
-            text.lines[1].spans,
-            [
-                Span::styled("- ", t.list_marker()),
-                Span::styled("foo()", t.inline_code()),
-                Span::raw(" here"),
-            ]
-        );
-    }
+            assert_eq!(kbd, ["- a", "- <kbd>Ctrl</kbd>+C"]);
+            assert_eq!(sup, ["- a", "- <sup>1</sup> note"]);
+            assert_eq!(empty_link, ["- a", "-  (https://x.io)"]);
+        }
 
-    #[test]
-    fn render_markdown_link_in_list_item_appends_url_on_the_item_row() {
-        assert_eq!(
-            rendered_text("- [Click](https://example.com)"),
-            ["- Click (https://example.com)"],
-        );
-    }
+        #[test]
+        fn list_marker_uses_accent_color() {
+            let t = theme();
+            let text = render_markdown("- Item", &t, 0);
+            let marker_span = text
+                .lines
+                .iter()
+                .find_map(|l| l.spans.iter().find(|s| s.content.contains("- ")));
+            let span = marker_span.expect("list marker span not found");
+            assert_eq!(span.style.fg, t.accent.fg);
+        }
 
-    // ── render_markdown: code blocks ──
+        #[test]
+        fn inline_code_leading_a_list_item_keeps_its_style_after_the_marker() {
+            let t = theme();
 
-    #[test]
-    fn render_markdown_indented_code_preserves_content_without_language() {
-        assert_eq!(rendered_text("    let x = 1;\n"), ["let x = 1;"]);
-    }
+            let text = render_markdown("- a\n- `foo()` here", &t, 0);
 
-    #[test]
-    fn render_markdown_fenced_code_block_without_language_keeps_content() {
-        let lines = rendered_text(indoc! {"
-            ```
-            fn main() {}
-            ```
-        "});
-        assert_eq!(lines, ["fn main() {}"]);
-    }
+            assert_eq!(
+                text.lines[1].spans,
+                [
+                    Span::styled("- ", t.list_marker()),
+                    Span::styled("foo()", t.inline_code()),
+                    Span::raw(" here"),
+                ]
+            );
+        }
 
-    #[test]
-    fn render_markdown_fenced_code_block_plain_has_no_background() {
-        // Plain fenced blocks (no language) use the `code` style, which omits the bg fill
-        // so wrapping / width variance across lines doesn't leave ragged highlight edges.
-        //
-        // The fallback path builds each line via `Line::styled(..)`, so the style lands on the Line
-        // and the spans stay unstyled. Walk both layers to guard against either placement.
-        let t = theme();
-        let text = render_markdown(
-            indoc! {"
+        #[test]
+        fn link_in_list_item_appends_url_on_the_item_row() {
+            assert_eq!(
+                rendered_text("- [Click](https://example.com)"),
+                ["- Click (https://example.com)"],
+            );
+        }
+
+        #[test]
+        fn indented_code_preserves_content_without_language() {
+            assert_eq!(rendered_text("    let x = 1;\n"), ["let x = 1;"]);
+        }
+
+        #[test]
+        fn fenced_code_block_without_language_keeps_content() {
+            let lines = rendered_text(indoc! {"
                 ```
                 fn main() {}
-                let x = 1;
                 ```
-            "},
-            &t,
-            0,
-        );
-        let code_lines: Vec<_> = text
-            .lines
-            .iter()
-            .filter(|l| {
-                l.spans
-                    .iter()
-                    .any(|s| s.content.contains("fn") || s.content.contains("let"))
-            })
-            .collect();
-        assert!(
-            !code_lines.is_empty(),
-            "fenced block content missing from render"
-        );
-        for line in code_lines {
-            assert_eq!(
-                line.style.bg, None,
-                "fenced block line style must not have a bg fill: {line:?}"
+            "});
+            assert_eq!(lines, ["fn main() {}"]);
+        }
+
+        #[test]
+        fn fenced_code_block_plain_has_no_background() {
+            // Plain fenced blocks (no language) use the `code` style, which omits the bg fill so
+            // wrapping / width variance across lines doesn't leave ragged highlight edges.
+            //
+            // The fallback path builds each line via `Line::styled(..)`, so the style lands on the
+            // Line and the spans stay unstyled. Walk both layers to guard against either placement.
+            let t = theme();
+            let text = render_markdown(
+                indoc! {"
+                    ```
+                    fn main() {}
+                    let x = 1;
+                    ```
+                "},
+                &t,
+                0,
             );
-            let effective_fg = line
-                .style
-                .fg
-                .or_else(|| line.spans.iter().find_map(|s| s.style.fg));
-            assert_eq!(
-                effective_fg, t.code.fg,
-                "plain fenced block falls back to `code` fg: {line:?}"
+            let code_lines: Vec<_> = text
+                .lines
+                .iter()
+                .filter(|l| {
+                    l.spans
+                        .iter()
+                        .any(|s| s.content.contains("fn") || s.content.contains("let"))
+                })
+                .collect();
+            assert!(
+                !code_lines.is_empty(),
+                "fenced block content missing from render"
             );
-            for span in &line.spans {
+            for line in code_lines {
                 assert_eq!(
-                    span.style.bg, None,
-                    "fenced block span must not have a bg fill: {span:?}"
+                    line.style.bg, None,
+                    "fenced block line style must not have a bg fill: {line:?}"
                 );
+                let effective_fg = line
+                    .style
+                    .fg
+                    .or_else(|| line.spans.iter().find_map(|s| s.style.fg));
+                assert_eq!(
+                    effective_fg, t.code.fg,
+                    "plain fenced block falls back to `code` fg: {line:?}"
+                );
+                for span in &line.spans {
+                    assert_eq!(
+                        span.style.bg, None,
+                        "fenced block span must not have a bg fill: {span:?}"
+                    );
+                }
             }
         }
-    }
 
-    #[test]
-    fn render_markdown_fenced_code_block_with_lang_highlights() {
-        let text = render_markdown(
-            indoc! {"
-                ```rust
-                fn main() {}
+        #[test]
+        fn fenced_code_block_with_lang_highlights() {
+            let text = render_markdown(
+                indoc! {"
+                    ```rust
+                    fn main() {}
+                    ```
+                "},
+                &theme(),
+                0,
+            );
+            let has_rgb = text.lines.iter().any(|line| {
+                line.spans
+                    .iter()
+                    .any(|s| matches!(s.style.fg, Some(Color::Rgb(..))))
+            });
+            assert!(has_rgb, "syntax highlighting should produce RGB colors");
+        }
+
+        #[test]
+        fn fenced_code_block_expands_tabs_to_stops() {
+            let lines = rendered_text(indoc! {"
+                ```go
+                func f() {
+                \treturn
+                }
                 ```
-            "},
-            &theme(),
-            0,
-        );
-        let has_rgb = text.lines.iter().any(|line| {
-            line.spans
-                .iter()
-                .any(|s| matches!(s.style.fg, Some(Color::Rgb(..))))
-        });
-        assert!(has_rgb, "syntax highlighting should produce RGB colors");
-    }
+            "});
+            assert_eq!(lines, ["func f() {", "    return", "}"]);
+        }
 
-    #[test]
-    fn render_markdown_fenced_code_block_expands_tabs_to_stops() {
-        let lines = rendered_text(indoc! {"
-            ```go
-            func f() {
-            \treturn
-            }
-            ```
-        "});
-        assert_eq!(lines, ["func f() {", "    return", "}"]);
-    }
+        #[test]
+        fn fenced_code_block_wraps_long_lines_and_keeps_line_style() {
+            let t = theme();
+            let text = render_markdown(
+                indoc! {"
+                    ```
+                    alpha beta gamma delta epsilon
+                    ```
+                "},
+                &t,
+                12,
+            );
+            let rows: Vec<String> = text.lines.iter().map(ToString::to_string).collect();
+            assert_eq!(rows, ["alpha beta ", "gamma delta ", "epsilon"]);
+            assert!(text.lines.iter().all(|l| l.style == t.code()), "{text:?}");
+        }
 
-    #[test]
-    fn render_markdown_fenced_code_block_wraps_long_lines_and_keeps_line_style() {
-        let t = theme();
-        let text = render_markdown(
-            indoc! {"
-                ```
-                alpha beta gamma delta epsilon
-                ```
-            "},
-            &t,
-            12,
-        );
-        let rows: Vec<String> = text.lines.iter().map(ToString::to_string).collect();
-        assert_eq!(rows, ["alpha beta ", "gamma delta ", "epsilon"]);
-        assert!(text.lines.iter().all(|l| l.style == t.code()), "{text:?}");
-    }
+        #[test]
+        fn fenced_code_block_wrapped_rows_hang_at_the_code_indent_up_to_half_width() {
+            let lines = rendered_text_at_width(
+                indoc! {"
+                    ```
+                            format value;
+                    ```
+                "},
+                12,
+            );
+            assert_eq!(lines, ["        form", "      at ", "      value;"]);
+        }
 
-    #[test]
-    fn render_markdown_fenced_code_block_wrapped_rows_hang_at_the_code_indent_up_to_half_width() {
-        let lines = rendered_text_at_width(
-            indoc! {"
-                ```
-                        format value;
-                ```
-            "},
-            12,
-        );
-        assert_eq!(lines, ["        form", "      at ", "      value;"]);
-    }
-
-    #[test]
-    fn render_markdown_fenced_code_block_in_list_item_keeps_item_indent() {
-        let lines = rendered_text(indoc! {"
-            - item
-
-              ```
-              let x = 1;
-              ```
-        "});
-        assert_eq!(lines, ["- item", "", "  let x = 1;"]);
-    }
-
-    #[test]
-    fn render_markdown_fenced_code_block_in_list_item_hangs_wrapped_rows_past_the_item_indent() {
-        let lines = rendered_text_at_width(
-            indoc! {"
+        #[test]
+        fn fenced_code_block_in_list_item_keeps_item_indent() {
+            let lines = rendered_text(indoc! {"
                 - item
 
                   ```
-                      foo bar baz
+                  let x = 1;
                   ```
-            "},
-            12,
-        );
-        assert_eq!(
-            lines,
-            ["- item", "", "      foo ", "      bar ", "      baz"]
-        );
-    }
-
-    #[test]
-    fn render_markdown_fenced_code_block_as_first_item_child_takes_the_marker() {
-        let lines = rendered_text(indoc! {"
-            - ```
-              let x = 1;
-              ```
-        "});
-        assert_eq!(lines, ["- let x = 1;"]);
-    }
-
-    #[test]
-    fn render_markdown_fenced_code_block_in_blockquote_keeps_marker_on_wrapped_rows() {
-        let lines = rendered_text_at_width(
-            indoc! {"
-                > ```
-                > alpha beta gamma
-                > ```
-            "},
-            12,
-        );
-        assert_eq!(lines, ["> alpha beta", "> gamma"]);
-    }
-
-    // ── render_markdown: tables ──
-
-    #[test]
-    fn render_markdown_table_draws_borders_and_a_rule_between_every_row() {
-        let lines = rendered_text(indoc! {"
-            | A | B |
-            |---|---|
-            | 1 | 2 |
-            | 3 | 4 |
-        "});
-        assert_eq!(
-            lines,
-            [
-                "┌───┬───┐",
-                "│ A │ B │",
-                "├───┼───┤",
-                "│ 1 │ 2 │",
-                "├───┼───┤",
-                "│ 3 │ 4 │",
-                "└───┴───┘",
-            ]
-        );
-    }
-
-    #[test]
-    fn render_markdown_table_aligns_cells_per_column() {
-        let lines = rendered_text(indoc! {"
-            | Left | Center | Right |
-            |:-----|:------:|------:|
-            | a    |   b    |     c |
-        "});
-        assert_eq!(
-            lines,
-            [
-                "┌──────┬────────┬───────┐",
-                "│ Left │ Center │ Right │",
-                "├──────┼────────┼───────┤",
-                "│ a    │   b    │     c │",
-                "└──────┴────────┴───────┘",
-            ]
-        );
-    }
-
-    #[test]
-    fn render_markdown_table_styles_header_cells_and_borders_from_their_slots() {
-        let t = theme();
-        let input = indoc! {"
-            | Name |
-            |------|
-            | a    |
-            | b    |
-        "};
-
-        let boxed = render_markdown(input, &t, 0).lines;
-        let stacked = render_markdown(input, &t, 7).lines;
-
-        assert_eq!(boxed[1].spans[2], Span::styled("Name", t.table_header()));
-        assert_eq!(boxed[3].spans[2], Span::raw("a"));
-        assert_eq!(boxed[1].spans[0], Span::styled("│", t.table_border()));
-        for rule in [&boxed[0], &boxed[2], &boxed[4], &boxed[6]] {
-            assert_eq!(rule.spans[0].style, t.table_border(), "{rule}");
+            "});
+            assert_eq!(lines, ["- item", "", "  let x = 1;"]);
         }
-        assert_eq!(
-            stacked[0].spans,
-            [
-                Span::styled("Name", t.table_header()),
-                Span::styled(":", t.table_header()),
-                Span::raw(" "),
-                Span::raw("a"),
-            ]
-        );
-        assert_eq!(
-            stacked[1].spans,
-            [Span::styled("───────", t.table_border())]
-        );
+
+        #[test]
+        fn fenced_code_block_in_list_item_hangs_wrapped_rows_past_the_item_indent() {
+            let lines = rendered_text_at_width(
+                indoc! {"
+                    - item
+
+                      ```
+                          foo bar baz
+                      ```
+                "},
+                12,
+            );
+            assert_eq!(
+                lines,
+                ["- item", "", "      foo ", "      bar ", "      baz"]
+            );
+        }
+
+        #[test]
+        fn fenced_code_block_as_first_item_child_takes_the_marker() {
+            let lines = rendered_text(indoc! {"
+                - ```
+                  let x = 1;
+                  ```
+            "});
+            assert_eq!(lines, ["- let x = 1;"]);
+        }
+
+        #[test]
+        fn fenced_code_block_in_blockquote_keeps_marker_on_wrapped_rows() {
+            let lines = rendered_text_at_width(
+                indoc! {"
+                    > ```
+                    > alpha beta gamma
+                    > ```
+                "},
+                12,
+            );
+            assert_eq!(lines, ["> alpha beta", "> gamma"]);
+        }
+
+        #[test]
+        fn table_draws_borders_and_a_rule_between_every_row() {
+            let lines = rendered_text(indoc! {"
+                | A | B |
+                |---|---|
+                | 1 | 2 |
+                | 3 | 4 |
+            "});
+            assert_eq!(
+                lines,
+                [
+                    "┌───┬───┐",
+                    "│ A │ B │",
+                    "├───┼───┤",
+                    "│ 1 │ 2 │",
+                    "├───┼───┤",
+                    "│ 3 │ 4 │",
+                    "└───┴───┘",
+                ]
+            );
+        }
+
+        #[test]
+        fn table_aligns_cells_per_column() {
+            let lines = rendered_text(indoc! {"
+                | Left | Center | Right |
+                |:-----|:------:|------:|
+                | a    |   b    |     c |
+            "});
+            assert_eq!(
+                lines,
+                [
+                    "┌──────┬────────┬───────┐",
+                    "│ Left │ Center │ Right │",
+                    "├──────┼────────┼───────┤",
+                    "│ a    │   b    │     c │",
+                    "└──────┴────────┴───────┘",
+                ]
+            );
+        }
+
+        #[test]
+        fn table_styles_header_cells_and_borders_from_their_slots() {
+            let t = theme();
+            let input = indoc! {"
+                | Name |
+                |------|
+                | a    |
+                | b    |
+            "};
+
+            let boxed = render_markdown(input, &t, 0).lines;
+            let stacked = render_markdown(input, &t, 7).lines;
+
+            assert_eq!(boxed[1].spans[2], Span::styled("Name", t.table_header()));
+            assert_eq!(boxed[3].spans[2], Span::raw("a"));
+            assert_eq!(boxed[1].spans[0], Span::styled("│", t.table_border()));
+            for rule in [&boxed[0], &boxed[2], &boxed[4], &boxed[6]] {
+                assert_eq!(rule.spans[0].style, t.table_border(), "{rule}");
+            }
+            assert_eq!(
+                stacked[0].spans,
+                [
+                    Span::styled("Name", t.table_header()),
+                    Span::styled(":", t.table_header()),
+                    Span::raw(" "),
+                    Span::raw("a"),
+                ]
+            );
+            assert_eq!(
+                stacked[1].spans,
+                [Span::styled("───────", t.table_border())]
+            );
+        }
+
+        #[test]
+        fn table_inline_code_keeps_its_color_in_header_and_body_cells() {
+            let t = theme();
+
+            let text = render_markdown(
+                indoc! {"
+                    | `head` |
+                    |--------|
+                    | `body` |
+                "},
+                &t,
+                0,
+            );
+
+            assert_eq!(
+                text.lines[1].spans[2],
+                Span::styled("head", t.table_header().patch(t.inline_code()))
+            );
+            assert_eq!(
+                text.lines[3].spans[2],
+                Span::styled("body", t.inline_code())
+            );
+        }
+
+        #[test]
+        fn table_empty_cell_keeps_its_borders() {
+            let lines = rendered_text(indoc! {"
+                | A | B |
+                |---|---|
+                |   | x |
+            "});
+            assert_eq!(
+                lines,
+                [
+                    "┌───┬───┐",
+                    "│ A │ B │",
+                    "├───┼───┤",
+                    "│   │ x │",
+                    "└───┴───┘"
+                ]
+            );
+        }
+
+        #[test]
+        fn table_pads_short_rows_to_the_column_count() {
+            let lines = rendered_text(indoc! {"
+                | A | B | C |
+                |---|---|---|
+                | 1 | 2 |
+            "});
+            assert_eq!(
+                lines,
+                [
+                    "┌───┬───┬───┐",
+                    "│ A │ B │ C │",
+                    "├───┼───┼───┤",
+                    "│ 1 │ 2 │   │",
+                    "└───┴───┴───┘",
+                ]
+            );
+        }
+
+        #[test]
+        fn table_without_body_omits_the_header_rule() {
+            let lines = rendered_text(indoc! {"
+                | A | B |
+                |---|---|
+            "});
+            assert_eq!(lines, ["┌───┬───┐", "│ A │ B │", "└───┴───┘"]);
+        }
+
+        #[test]
+        fn table_fits_width_budget_and_rules_off_a_wrapped_row() {
+            let lines = rendered_text_at_width(
+                indoc! {"
+                    | Check  | Result |
+                    |--------|--------|
+                    | Build  | passed |
+                    | Tests  | 2798 passed after the flaky one was retried |
+                    | Lint   | clean  |
+                    | 格式化 | 通过   |
+                "},
+                40,
+            );
+
+            assert_eq!(
+                lines,
+                [
+                    "┌────────┬─────────────────────────────┐",
+                    "│ Check  │ Result                      │",
+                    "├────────┼─────────────────────────────┤",
+                    "│ Build  │ passed                      │",
+                    "├────────┼─────────────────────────────┤",
+                    "│ Tests  │ 2798 passed after the flaky │",
+                    "│        │ one was retried             │",
+                    "├────────┼─────────────────────────────┤",
+                    "│ Lint   │ clean                       │",
+                    "├────────┼─────────────────────────────┤",
+                    "│ 格式化 │ 通过                        │",
+                    "└────────┴─────────────────────────────┘",
+                ]
+            );
+        }
+
+        #[test]
+        fn table_narrow_width_shrinks_the_wide_columns_and_keeps_the_rules_aligned() {
+            let lines = rendered_text_at_width(
+                indoc! {"
+                    | Step | Run         | Note             |
+                    |------|-------------|------------------|
+                    | 1    | cargo build | makes the binary |
+                    | 2    | cargo test  | runs all tests   |
+                "},
+                26,
+            );
+
+            assert_eq!(
+                lines,
+                [
+                    "┌──────┬────────┬────────┐",
+                    "│ Step │ Run    │ Note   │",
+                    "├──────┼────────┼────────┤",
+                    "│ 1    │ cargo  │ makes  │",
+                    "│      │ build  │ the    │",
+                    "│      │        │ binary │",
+                    "├──────┼────────┼────────┤",
+                    "│ 2    │ cargo  │ runs   │",
+                    "│      │ test   │ all    │",
+                    "│      │        │ tests  │",
+                    "└──────┴────────┴────────┘",
+                ]
+            );
+        }
+
+        #[test]
+        fn table_narrow_width_keeps_each_column_as_wide_as_its_longest_word() {
+            let lines = rendered_text_at_width(
+                indoc! {"
+                    | Command                    | Purpose            |
+                    |----------------------------|--------------------|
+                    | cargo clippy --all-targets | lints every target |
+                "},
+                30,
+            );
+
+            assert_eq!(
+                lines,
+                [
+                    "┌─────────────────┬──────────┐",
+                    "│ Command         │ Purpose  │",
+                    "├─────────────────┼──────────┤",
+                    "│ cargo clippy    │ lints    │",
+                    "│ --all-targets   │ every    │",
+                    "│                 │ target   │",
+                    "└─────────────────┴──────────┘",
+                ]
+            );
+        }
+
+        #[test]
+        fn table_wide_and_ligature_characters_keep_every_row_as_wide_as_the_rules() {
+            let narrowest_tables = [
+                indoc! {"
+                    | Note            | 级 |
+                    |-----------------|----|
+                    | runs every test | 高 |
+                    | lints the code  | ✅ |
+                "},
+                indoc! {"
+                    | A  | B             |
+                    |----|---------------|
+                    | لا | one two three |
+                "},
+            ];
+
+            for input in narrowest_tables {
+                let lines = render_markdown(input, &theme(), 14).lines;
+
+                assert_eq!(lines[0].width(), 14, "{lines:?}");
+                for line in &lines {
+                    assert_eq!(line.width(), 14, "{line}");
+                }
+            }
+        }
+
+        #[test]
+        fn table_aligns_wrapped_lines_without_the_space_at_each_break() {
+            let lines = rendered_text_at_width(
+                indoc! {"
+                    | C       | R       |
+                    |:-------:|--------:|
+                    | cc dddd | aa bbbb |
+                "},
+                18,
+            );
+
+            assert_eq!(
+                lines,
+                [
+                    "┌────────┬───────┐",
+                    "│   C    │     R │",
+                    "├────────┼───────┤",
+                    "│   cc   │    aa │",
+                    "│  dddd  │  bbbb │",
+                    "└────────┴───────┘",
+                ]
+            );
+        }
+
+        #[test]
+        fn table_narrower_than_its_longest_words_stacks_each_row_under_its_headers() {
+            let lines = rendered_text_at_width(
+                indoc! {"
+                    | Command                    | Purpose            |
+                    |----------------------------|--------------------|
+                    | cargo clippy --all-targets | lints every target |
+                    | cargo test                 | runs the tests     |
+                "},
+                20,
+            );
+
+            assert_eq!(
+                lines,
+                [
+                    "Command: cargo ",
+                    "  clippy ",
+                    "  --all-targets",
+                    "Purpose: lints every",
+                    "  target",
+                    "────────────────────",
+                    "Command: cargo test",
+                    "Purpose: runs the ",
+                    "  tests",
+                ]
+            );
+        }
+
+        #[test]
+        fn table_narrower_than_its_borders_stacks_each_row() {
+            let body = rendered_text_at_width(
+                indoc! {"
+                    |   | B        | C |
+                    |---|----------|---|
+                    | 1 | 2<br>two | 3 |
+                    | 4 | 5        | 6 |
+                "},
+                8,
+            );
+            let head_only = rendered_text_at_width(
+                indoc! {"
+                    | A | B | C |
+                    |---|---|---|
+                "},
+                8,
+            );
+
+            assert_eq!(
+                body,
+                ["1", "B: 2 two", "C: 3", "────────", "4", "B: 5", "C: 6"]
+            );
+            assert_eq!(head_only, ["A", "B", "C"]);
+        }
+
+        #[test]
+        fn table_br_breaks_a_cell_line_and_other_inline_html_stays_in_the_cell() {
+            let lines = rendered_text(indoc! {"
+                Intro.
+
+                | A | B |
+                |---|---|
+                | one <br> two three four | `x` <br> y |
+                | five<br> | <br> |
+                | <b>bold</b><br><br> | w <br> `z` |
+            "});
+
+            assert_eq!(
+                lines,
+                [
+                    "Intro.",
+                    "",
+                    "┌────────────────┬───┐",
+                    "│ A              │ B │",
+                    "├────────────────┼───┤",
+                    "│ one            │ x │",
+                    "│ two three four │ y │",
+                    "├────────────────┼───┤",
+                    "│ five           │   │",
+                    "├────────────────┼───┤",
+                    "│ <b>bold</b>    │ w │",
+                    "│                │ z │",
+                    "└────────────────┴───┘",
+                ]
+            );
+        }
+
+        #[test]
+        fn table_in_list_item_keeps_the_item_indent_and_fits_inside_it() {
+            let lines = rendered_text_at_width(
+                indoc! {"
+                    - Settings:
+                      | Key  | Value     |
+                      |------|-----------|
+                      | mode | very fast |
+                    - | A |
+                      |---|
+                      | 1 |
+                "},
+                21,
+            );
+
+            assert_eq!(
+                lines,
+                [
+                    "- Settings:",
+                    "  ┌──────┬──────────┐",
+                    "  │ Key  │ Value    │",
+                    "  ├──────┼──────────┤",
+                    "  │ mode │ very     │",
+                    "  │      │ fast     │",
+                    "  └──────┴──────────┘",
+                    "- ┌───┐",
+                    "  │ A │",
+                    "  ├───┤",
+                    "  │ 1 │",
+                    "  └───┘",
+                ]
+            );
+        }
+
+        #[test]
+        fn table_in_blockquote_keeps_the_marker_on_every_row() {
+            let input = indoc! {"
+                > | Key  | Value      |
+                > |------|------------|
+                > | mode | fast       |
+                > | size | very large |
+            "};
+
+            let boxed = rendered_text_at_width(input, 18);
+            let stacked = rendered_text_at_width(input, 14);
+
+            assert_eq!(
+                boxed,
+                [
+                    "> ┌──────┬───────┐",
+                    "> │ Key  │ Value │",
+                    "> ├──────┼───────┤",
+                    "> │ mode │ fast  │",
+                    "> ├──────┼───────┤",
+                    "> │ size │ very  │",
+                    "> │      │ large │",
+                    "> └──────┴───────┘",
+                ]
+            );
+            assert_eq!(
+                stacked,
+                [
+                    "> Key: mode",
+                    "> Value: fast",
+                    "> ────────────",
+                    "> Key: size",
+                    "> Value: very ",
+                    ">   large",
+                ]
+            );
+        }
+
+        #[test]
+        fn strong_and_emphasis_set_bold_and_italic() {
+            let text = render_markdown("**bold** and *italic*", &theme(), 0);
+            assert_eq!(
+                text.lines[0].spans,
+                [
+                    Span::raw("bold").bold(),
+                    Span::raw(" and "),
+                    Span::raw("italic").italic(),
+                ]
+            );
+        }
+
+        #[test]
+        fn strong_emphasis_sets_bold_and_italic_together() {
+            let text = render_markdown("***bold italic***", &theme(), 0);
+            assert_eq!(
+                text.lines[0].spans,
+                [Span::raw("bold italic").bold().italic()]
+            );
+        }
+
+        #[test]
+        fn strikethrough_crosses_out_text() {
+            let text = render_markdown("~~struck~~", &theme(), 0);
+            assert_eq!(text.lines[0].spans, [Span::raw("struck").crossed_out()]);
+        }
+
+        #[test]
+        fn inline_code_uses_the_inline_code_style() {
+            let t = theme();
+            let text = render_markdown("Use `foo()` here", &t, 0);
+            assert_eq!(
+                text.lines[0].spans,
+                [
+                    Span::raw("Use "),
+                    Span::styled("foo()", t.inline_code()),
+                    Span::raw(" here"),
+                ]
+            );
+        }
+
+        #[test]
+        fn image_renders_its_alt_text_inline() {
+            assert_eq!(
+                rendered_text("before ![alt](https://example.com) after"),
+                ["before alt after"],
+            );
+        }
+
+        #[test]
+        fn inline_code_inside_bold_inherits_bold() {
+            let t = theme();
+            let text = render_markdown("**use `foo()` here**", &t, 0);
+            let span = text.lines[0]
+                .spans
+                .iter()
+                .find(|s| s.content.contains("foo()"))
+                .expect("code span not found");
+            assert_eq!(
+                span.style.fg, t.user.fg,
+                "code span keeps its distinctive fg"
+            );
+            assert_eq!(span.style.bg, None, "code span stays fg-only");
+            assert!(
+                span.style.add_modifier.contains(Modifier::BOLD),
+                "code span inside **bold** should inherit BOLD modifier"
+            );
+        }
+
+        #[test]
+        fn inline_code_inside_heading_inherits_modifiers() {
+            let t = theme();
+            let text = render_markdown("# see `foo()`", &t, 0);
+            let span = text
+                .lines
+                .iter()
+                .find_map(|l| l.spans.iter().find(|s| s.content.contains("foo()")))
+                .expect("code span not found in heading");
+            assert_eq!(span.style.fg, t.user.fg);
+            assert_eq!(span.style.bg, None);
+            assert!(
+                span.style.add_modifier.contains(Modifier::BOLD),
+                "code inside an H1 should inherit the heading's BOLD"
+            );
+            assert!(
+                span.style.add_modifier.contains(Modifier::UNDERLINED),
+                "code inside an H1 should inherit the heading's UNDERLINED"
+            );
+        }
+
+        #[test]
+        fn html_block_renders_one_row_per_line_between_blank_separators() {
+            let lines = rendered_text(indoc! {"
+                para
+
+                <div>
+                hello
+                </div>
+
+                after
+            "});
+            assert_eq!(lines, ["para", "", "<div>", "hello", "</div>", "", "after"]);
+        }
+
+        #[test]
+        fn html_block_in_blockquote_keeps_the_marker_on_every_row() {
+            let lines = rendered_text(indoc! {"
+                > <div>
+                > x
+                > </div>
+            "});
+            assert_eq!(lines, ["> <div>", "> x", "> </div>"]);
+        }
+
+        #[test]
+        fn inline_html_is_kept_as_text() {
+            assert_eq!(rendered_text("text <br> more"), ["text <br> more"]);
+        }
+
+        #[test]
+        fn link_appends_url() {
+            let lines = rendered_text("[Click](https://example.com)");
+            assert_eq!(lines, vec!["Click (https://example.com)"]);
+        }
+
+        #[test]
+        fn link_url_has_accent_underline_style() {
+            let t = theme();
+            let text = render_markdown("[text](https://example.com)", &t, 0);
+            let url_span = text.lines[0]
+                .spans
+                .iter()
+                .find(|s| s.content.contains("https://example.com"))
+                .unwrap();
+            assert!(url_span.style.add_modifier.contains(Modifier::UNDERLINED));
+            assert_eq!(url_span.style.fg, t.accent.fg);
+        }
+
+        #[test]
+        fn link_autolink_renders_url_once_in_link_style() {
+            let t = theme();
+            let text = render_markdown("<https://x.io>", &t, 0);
+            assert_eq!(
+                text.lines[0].spans,
+                [Span::styled("https://x.io", t.link())]
+            );
+        }
+
+        #[test]
+        fn link_email_autolink_renders_address_once() {
+            assert_eq!(rendered_text("<me@x.io>"), ["me@x.io"]);
+        }
+
+        #[test]
+        fn link_in_table_cell_keeps_url_in_the_cell() {
+            let lines = rendered_text(indoc! {"
+                intro
+
+                | site |
+                | ---- |
+                | [x](https://x.io) |
+            "});
+            assert_eq!(
+                lines,
+                [
+                    "intro",
+                    "",
+                    "┌──────────────────┐",
+                    "│ site             │",
+                    "├──────────────────┤",
+                    "│ x (https://x.io) │",
+                    "└──────────────────┘",
+                ]
+            );
+        }
+
+        #[test]
+        fn paragraph_wraps_at_width() {
+            assert_eq!(
+                rendered_text_at_width("one two three four five six", 15),
+                ["one two three ", "four five six"],
+            );
+        }
+
+        #[test]
+        fn heading_wraps_at_width() {
+            assert_eq!(
+                rendered_text_at_width("# one two three four five six", 15),
+                ["# one two three", "four five six"],
+            );
+        }
+
+        #[test]
+        fn blockquote_wraps_with_marker_on_continuations() {
+            assert_eq!(
+                rendered_text_at_width("> one two three four five six seven eight", 15),
+                ["> one two three", "> four five six", "> seven eight"],
+            );
+        }
+
+        #[test]
+        fn nested_blockquote_wraps_with_nested_markers() {
+            assert_eq!(
+                rendered_text_at_width("> > one two three four five six seven eight", 20),
+                [
+                    "> > one two three ",
+                    "> > four five six ",
+                    "> > seven eight"
+                ],
+            );
+        }
+
+        #[test]
+        fn tight_list_item_wraps_without_repeating_marker() {
+            assert_eq!(
+                rendered_text_at_width("- one two three four five six seven eight", 15),
+                ["- one two three", "  four five six", "  seven eight"],
+            );
+        }
+
+        #[test]
+        fn list_item_wraps_its_text_before_a_nested_block() {
+            let nested_list = rendered_text_at_width(
+                indoc! {"
+                    - one two three four five
+                      - inner
+                "},
+                15,
+            );
+            let loose_nested_list = rendered_text_at_width(
+                indoc! {"
+                    - one two three four five
+
+                      - inner
+                "},
+                15,
+            );
+            let blockquote = rendered_text_at_width(
+                indoc! {"
+                    - one two three four five
+                      > quoted
+                "},
+                15,
+            );
+            let code_block = rendered_text_at_width(
+                indoc! {"
+                    - one two three four five
+                      ```
+                      code
+                      ```
+                "},
+                15,
+            );
+            let table = rendered_text_at_width(
+                indoc! {"
+                    - one two three four five
+                      | A |
+                      |---|
+                      | 1 |
+                "},
+                15,
+            );
+
+            assert_eq!(nested_list, ["- one two three", "  four five", "  - inner"]);
+            assert_eq!(loose_nested_list, nested_list);
+            assert_eq!(blockquote, ["- one two three", "  four five", "  > quoted"]);
+            assert_eq!(code_block, ["- one two three", "  four five", "  code"]);
+            assert_eq!(
+                table,
+                [
+                    "- one two three",
+                    "  four five",
+                    "  ┌───┐",
+                    "  │ A │",
+                    "  ├───┤",
+                    "  │ 1 │",
+                    "  └───┘",
+                ]
+            );
+        }
+
+        #[test]
+        fn hard_break_wraps_the_line_it_ends() {
+            let paragraph =
+                rendered_text_at_width("one two three four five six  \nseven eight", 15);
+            let tight_item = rendered_text_at_width("- one two three four  \n  five six", 15);
+            let blockquote = rendered_text_at_width("> one two three four  \n> five six", 15);
+
+            assert_eq!(
+                paragraph,
+                ["one two three ", "four five six", "seven eight"]
+            );
+            assert_eq!(tight_item, ["- one two three", "  four", "  five six"]);
+            assert_eq!(blockquote, ["> one two three", "> four", "> five six"]);
+        }
+
+        #[test]
+        fn narrow_blockquote_keeps_its_marker_on_every_row_when_a_block_follows() {
+            let lines = rendered_text_at_width("> quote quote\n\npara text", 2);
+
+            assert_eq!(
+                lines,
+                [
+                    "> ", "> q", "> u", "> o", "> t", "> e", "> q", "> u", "> o", "> t", "> e", "",
+                    "pa", "ra", "te", "xt",
+                ]
+            );
+        }
+
+        #[test]
+        fn blockquote_list_item_wraps_with_blockquote_marker_only() {
+            assert_eq!(
+                rendered_text_at_width("> - one two three four five six seven eight", 20),
+                [
+                    "> - one two three ",
+                    ">   four five six ",
+                    ">   seven eight"
+                ],
+            );
+        }
     }
 
-    #[test]
-    fn render_markdown_table_inline_code_keeps_its_color_in_header_and_body_cells() {
-        let t = theme();
+    mod is_line_break_tag {
+        use super::*;
 
-        let text = render_markdown(
-            indoc! {"
-                | `head` |
-                |--------|
-                | `body` |
-            "},
-            &t,
-            0,
-        );
-
-        assert_eq!(
-            text.lines[1].spans[2],
-            Span::styled("head", t.table_header().patch(t.inline_code()))
-        );
-        assert_eq!(
-            text.lines[3].spans[2],
-            Span::styled("body", t.inline_code())
-        );
-    }
-
-    #[test]
-    fn render_markdown_table_empty_cell_keeps_its_borders() {
-        let lines = rendered_text(indoc! {"
-            | A | B |
-            |---|---|
-            |   | x |
-        "});
-        assert_eq!(
-            lines,
-            [
-                "┌───┬───┐",
-                "│ A │ B │",
-                "├───┼───┤",
-                "│   │ x │",
-                "└───┴───┘"
-            ]
-        );
-    }
-
-    #[test]
-    fn render_markdown_table_pads_short_rows_to_the_column_count() {
-        let lines = rendered_text(indoc! {"
-            | A | B | C |
-            |---|---|---|
-            | 1 | 2 |
-        "});
-        assert_eq!(
-            lines,
-            [
-                "┌───┬───┬───┐",
-                "│ A │ B │ C │",
-                "├───┼───┼───┤",
-                "│ 1 │ 2 │   │",
-                "└───┴───┴───┘",
-            ]
-        );
-    }
-
-    #[test]
-    fn render_markdown_table_without_body_omits_the_header_rule() {
-        let lines = rendered_text(indoc! {"
-            | A | B |
-            |---|---|
-        "});
-        assert_eq!(lines, ["┌───┬───┐", "│ A │ B │", "└───┴───┘"]);
-    }
-
-    #[test]
-    fn render_markdown_table_fits_width_budget_and_rules_off_a_wrapped_row() {
-        let lines = rendered_text_at_width(
-            indoc! {"
-                | Check  | Result |
-                |--------|--------|
-                | Build  | passed |
-                | Tests  | 2798 passed after the flaky one was retried |
-                | Lint   | clean  |
-                | 格式化 | 通过   |
-            "},
-            40,
-        );
-
-        assert_eq!(
-            lines,
-            [
-                "┌────────┬─────────────────────────────┐",
-                "│ Check  │ Result                      │",
-                "├────────┼─────────────────────────────┤",
-                "│ Build  │ passed                      │",
-                "├────────┼─────────────────────────────┤",
-                "│ Tests  │ 2798 passed after the flaky │",
-                "│        │ one was retried             │",
-                "├────────┼─────────────────────────────┤",
-                "│ Lint   │ clean                       │",
-                "├────────┼─────────────────────────────┤",
-                "│ 格式化 │ 通过                        │",
-                "└────────┴─────────────────────────────┘",
-            ]
-        );
-    }
-
-    #[test]
-    fn render_markdown_table_narrow_width_shrinks_the_wide_columns_and_keeps_the_rules_aligned() {
-        let lines = rendered_text_at_width(
-            indoc! {"
-                | Step | Run         | Note             |
-                |------|-------------|------------------|
-                | 1    | cargo build | makes the binary |
-                | 2    | cargo test  | runs all tests   |
-            "},
-            26,
-        );
-
-        assert_eq!(
-            lines,
-            [
-                "┌──────┬────────┬────────┐",
-                "│ Step │ Run    │ Note   │",
-                "├──────┼────────┼────────┤",
-                "│ 1    │ cargo  │ makes  │",
-                "│      │ build  │ the    │",
-                "│      │        │ binary │",
-                "├──────┼────────┼────────┤",
-                "│ 2    │ cargo  │ runs   │",
-                "│      │ test   │ all    │",
-                "│      │        │ tests  │",
-                "└──────┴────────┴────────┘",
-            ]
-        );
-    }
-
-    #[test]
-    fn render_markdown_table_narrow_width_keeps_each_column_as_wide_as_its_longest_word() {
-        let lines = rendered_text_at_width(
-            indoc! {"
-                | Command                    | Purpose            |
-                |----------------------------|--------------------|
-                | cargo clippy --all-targets | lints every target |
-            "},
-            30,
-        );
-
-        assert_eq!(
-            lines,
-            [
-                "┌─────────────────┬──────────┐",
-                "│ Command         │ Purpose  │",
-                "├─────────────────┼──────────┤",
-                "│ cargo clippy    │ lints    │",
-                "│ --all-targets   │ every    │",
-                "│                 │ target   │",
-                "└─────────────────┴──────────┘",
-            ]
-        );
-    }
-
-    #[test]
-    fn render_markdown_table_wide_and_ligature_characters_keep_every_row_as_wide_as_the_rules() {
-        let narrowest_tables = [
-            indoc! {"
-                | Note            | 级 |
-                |-----------------|----|
-                | runs every test | 高 |
-                | lints the code  | ✅ |
-            "},
-            indoc! {"
-                | A  | B             |
-                |----|---------------|
-                | لا | one two three |
-            "},
-        ];
-
-        for input in narrowest_tables {
-            let lines = render_markdown(input, &theme(), 14).lines;
-
-            assert_eq!(lines[0].width(), 14, "{lines:?}");
-            for line in &lines {
-                assert_eq!(line.width(), 14, "{line}");
+        #[test]
+        fn accepts_every_br_spelling_and_rejects_other_tags() {
+            for html in ["<br>", "<br/>", "<br />", "<BR>", " <Br > "] {
+                assert!(is_line_break_tag(html), "{html:?}");
+            }
+            for html in ["<b>", "<brand>", "</br>", "<br"] {
+                assert!(!is_line_break_tag(html), "{html:?}");
             }
         }
     }
 
-    #[test]
-    fn render_markdown_table_aligns_wrapped_lines_without_the_space_at_each_break() {
-        let lines = rendered_text_at_width(
-            indoc! {"
-                | C       | R       |
-                |:-------:|--------:|
-                | cc dddd | aa bbbb |
-            "},
-            18,
-        );
+    mod fit_column_widths {
+        use super::*;
 
-        assert_eq!(
-            lines,
-            [
-                "┌────────┬───────┐",
-                "│   C    │     R │",
-                "├────────┼───────┤",
-                "│   cc   │    aa │",
-                "│  dddd  │  bbbb │",
-                "└────────┴───────┘",
-            ]
-        );
-    }
-
-    #[test]
-    fn render_markdown_table_narrower_than_its_longest_words_stacks_each_row_under_its_headers() {
-        let lines = rendered_text_at_width(
-            indoc! {"
-                | Command                    | Purpose            |
-                |----------------------------|--------------------|
-                | cargo clippy --all-targets | lints every target |
-                | cargo test                 | runs the tests     |
-            "},
-            20,
-        );
-
-        assert_eq!(
-            lines,
-            [
-                "Command: cargo ",
-                "  clippy ",
-                "  --all-targets",
-                "Purpose: lints every",
-                "  target",
-                "────────────────────",
-                "Command: cargo test",
-                "Purpose: runs the ",
-                "  tests",
-            ]
-        );
-    }
-
-    #[test]
-    fn render_markdown_table_narrower_than_its_borders_stacks_each_row() {
-        let body = rendered_text_at_width(
-            indoc! {"
-                |   | B        | C |
-                |---|----------|---|
-                | 1 | 2<br>two | 3 |
-                | 4 | 5        | 6 |
-            "},
-            8,
-        );
-        let head_only = rendered_text_at_width(
-            indoc! {"
-                | A | B | C |
-                |---|---|---|
-            "},
-            8,
-        );
-
-        assert_eq!(
-            body,
-            ["1", "B: 2 two", "C: 3", "────────", "4", "B: 5", "C: 6"]
-        );
-        assert_eq!(head_only, ["A", "B", "C"]);
-    }
-
-    #[test]
-    fn render_markdown_table_br_breaks_a_cell_line_and_other_inline_html_stays_in_the_cell() {
-        let lines = rendered_text(indoc! {"
-            Intro.
-
-            | A | B |
-            |---|---|
-            | one <br> two three four | `x` <br> y |
-            | five<br> | <br> |
-            | <b>bold</b><br><br> | w <br> `z` |
-        "});
-
-        assert_eq!(
-            lines,
-            [
-                "Intro.",
-                "",
-                "┌────────────────┬───┐",
-                "│ A              │ B │",
-                "├────────────────┼───┤",
-                "│ one            │ x │",
-                "│ two three four │ y │",
-                "├────────────────┼───┤",
-                "│ five           │   │",
-                "├────────────────┼───┤",
-                "│ <b>bold</b>    │ w │",
-                "│                │ z │",
-                "└────────────────┴───┘",
-            ]
-        );
-    }
-
-    #[test]
-    fn render_markdown_table_in_list_item_keeps_the_item_indent_and_fits_inside_it() {
-        let lines = rendered_text_at_width(
-            indoc! {"
-                - Settings:
-                  | Key  | Value     |
-                  |------|-----------|
-                  | mode | very fast |
-                - | A |
-                  |---|
-                  | 1 |
-            "},
-            21,
-        );
-
-        assert_eq!(
-            lines,
-            [
-                "- Settings:",
-                "  ┌──────┬──────────┐",
-                "  │ Key  │ Value    │",
-                "  ├──────┼──────────┤",
-                "  │ mode │ very     │",
-                "  │      │ fast     │",
-                "  └──────┴──────────┘",
-                "- ┌───┐",
-                "  │ A │",
-                "  ├───┤",
-                "  │ 1 │",
-                "  └───┘",
-            ]
-        );
-    }
-
-    #[test]
-    fn render_markdown_table_in_blockquote_keeps_the_marker_on_every_row() {
-        let input = indoc! {"
-            > | Key  | Value      |
-            > |------|------------|
-            > | mode | fast       |
-            > | size | very large |
-        "};
-
-        let boxed = rendered_text_at_width(input, 18);
-        let stacked = rendered_text_at_width(input, 14);
-
-        assert_eq!(
-            boxed,
-            [
-                "> ┌──────┬───────┐",
-                "> │ Key  │ Value │",
-                "> ├──────┼───────┤",
-                "> │ mode │ fast  │",
-                "> ├──────┼───────┤",
-                "> │ size │ very  │",
-                "> │      │ large │",
-                "> └──────┴───────┘",
-            ]
-        );
-        assert_eq!(
-            stacked,
-            [
-                "> Key: mode",
-                "> Value: fast",
-                "> ────────────",
-                "> Key: size",
-                "> Value: very ",
-                ">   large",
-            ]
-        );
-    }
-
-    // ── render_markdown: inline content ──
-
-    #[test]
-    fn render_markdown_strong_and_emphasis_set_bold_and_italic() {
-        let text = render_markdown("**bold** and *italic*", &theme(), 0);
-        assert_eq!(
-            text.lines[0].spans,
-            [
-                Span::raw("bold").bold(),
-                Span::raw(" and "),
-                Span::raw("italic").italic(),
-            ]
-        );
-    }
-
-    #[test]
-    fn render_markdown_strong_emphasis_sets_bold_and_italic_together() {
-        let text = render_markdown("***bold italic***", &theme(), 0);
-        assert_eq!(
-            text.lines[0].spans,
-            [Span::raw("bold italic").bold().italic()]
-        );
-    }
-
-    #[test]
-    fn render_markdown_strikethrough_crosses_out_text() {
-        let text = render_markdown("~~struck~~", &theme(), 0);
-        assert_eq!(text.lines[0].spans, [Span::raw("struck").crossed_out()]);
-    }
-
-    #[test]
-    fn render_markdown_inline_code_uses_the_inline_code_style() {
-        let t = theme();
-        let text = render_markdown("Use `foo()` here", &t, 0);
-        assert_eq!(
-            text.lines[0].spans,
-            [
-                Span::raw("Use "),
-                Span::styled("foo()", t.inline_code()),
-                Span::raw(" here"),
-            ]
-        );
-    }
-
-    #[test]
-    fn render_markdown_image_renders_its_alt_text_inline() {
-        assert_eq!(
-            rendered_text("before ![alt](https://example.com) after"),
-            ["before alt after"],
-        );
-    }
-
-    #[test]
-    fn render_markdown_inline_code_inside_bold_inherits_bold() {
-        let t = theme();
-        let text = render_markdown("**use `foo()` here**", &t, 0);
-        let span = text.lines[0]
-            .spans
-            .iter()
-            .find(|s| s.content.contains("foo()"))
-            .expect("code span not found");
-        assert_eq!(
-            span.style.fg, t.user.fg,
-            "code span keeps its distinctive fg"
-        );
-        assert_eq!(span.style.bg, None, "code span stays fg-only");
-        assert!(
-            span.style.add_modifier.contains(Modifier::BOLD),
-            "code span inside **bold** should inherit BOLD modifier"
-        );
-    }
-
-    #[test]
-    fn render_markdown_inline_code_inside_heading_inherits_modifiers() {
-        let t = theme();
-        let text = render_markdown("# see `foo()`", &t, 0);
-        let span = text
-            .lines
-            .iter()
-            .find_map(|l| l.spans.iter().find(|s| s.content.contains("foo()")))
-            .expect("code span not found in heading");
-        assert_eq!(span.style.fg, t.user.fg);
-        assert_eq!(span.style.bg, None);
-        assert!(
-            span.style.add_modifier.contains(Modifier::BOLD),
-            "code inside an H1 should inherit the heading's BOLD"
-        );
-        assert!(
-            span.style.add_modifier.contains(Modifier::UNDERLINED),
-            "code inside an H1 should inherit the heading's UNDERLINED"
-        );
-    }
-
-    // ── render_markdown: html ──
-
-    #[test]
-    fn render_markdown_html_block_renders_one_row_per_line_between_blank_separators() {
-        let lines = rendered_text(indoc! {"
-            para
-
-            <div>
-            hello
-            </div>
-
-            after
-        "});
-        assert_eq!(lines, ["para", "", "<div>", "hello", "</div>", "", "after"]);
-    }
-
-    #[test]
-    fn render_markdown_html_block_in_blockquote_keeps_the_marker_on_every_row() {
-        let lines = rendered_text(indoc! {"
-            > <div>
-            > x
-            > </div>
-        "});
-        assert_eq!(lines, ["> <div>", "> x", "> </div>"]);
-    }
-
-    #[test]
-    fn render_markdown_inline_html_is_kept_as_text() {
-        assert_eq!(rendered_text("text <br> more"), ["text <br> more"]);
-    }
-
-    // ── render_markdown: links ──
-
-    #[test]
-    fn render_markdown_link_appends_url() {
-        let lines = rendered_text("[Click](https://example.com)");
-        assert_eq!(lines, vec!["Click (https://example.com)"]);
-    }
-
-    #[test]
-    fn render_markdown_link_url_has_accent_underline_style() {
-        let t = theme();
-        let text = render_markdown("[text](https://example.com)", &t, 0);
-        let url_span = text.lines[0]
-            .spans
-            .iter()
-            .find(|s| s.content.contains("https://example.com"))
-            .unwrap();
-        assert!(url_span.style.add_modifier.contains(Modifier::UNDERLINED));
-        assert_eq!(url_span.style.fg, t.accent.fg);
-    }
-
-    #[test]
-    fn render_markdown_link_autolink_renders_url_once_in_link_style() {
-        let t = theme();
-        let text = render_markdown("<https://x.io>", &t, 0);
-        assert_eq!(
-            text.lines[0].spans,
-            [Span::styled("https://x.io", t.link())]
-        );
-    }
-
-    #[test]
-    fn render_markdown_link_email_autolink_renders_address_once() {
-        assert_eq!(rendered_text("<me@x.io>"), ["me@x.io"]);
-    }
-
-    #[test]
-    fn render_markdown_link_in_table_cell_keeps_url_in_the_cell() {
-        let lines = rendered_text(indoc! {"
-            intro
-
-            | site |
-            | ---- |
-            | [x](https://x.io) |
-        "});
-        assert_eq!(
-            lines,
-            [
-                "intro",
-                "",
-                "┌──────────────────┐",
-                "│ site             │",
-                "├──────────────────┤",
-                "│ x (https://x.io) │",
-                "└──────────────────┘",
-            ]
-        );
-    }
-
-    // ── render_markdown: word wrapping ──
-
-    #[test]
-    fn render_markdown_paragraph_wraps_at_width() {
-        assert_eq!(
-            rendered_text_at_width("one two three four five six", 15),
-            ["one two three ", "four five six"],
-        );
-    }
-
-    #[test]
-    fn render_markdown_heading_wraps_at_width() {
-        assert_eq!(
-            rendered_text_at_width("# one two three four five six", 15),
-            ["# one two three", "four five six"],
-        );
-    }
-
-    #[test]
-    fn render_markdown_blockquote_wraps_with_marker_on_continuations() {
-        assert_eq!(
-            rendered_text_at_width("> one two three four five six seven eight", 15),
-            ["> one two three", "> four five six", "> seven eight"],
-        );
-    }
-
-    #[test]
-    fn render_markdown_nested_blockquote_wraps_with_nested_markers() {
-        assert_eq!(
-            rendered_text_at_width("> > one two three four five six seven eight", 20),
-            [
-                "> > one two three ",
-                "> > four five six ",
-                "> > seven eight"
-            ],
-        );
-    }
-
-    #[test]
-    fn render_markdown_tight_list_item_wraps_without_repeating_marker() {
-        assert_eq!(
-            rendered_text_at_width("- one two three four five six seven eight", 15),
-            ["- one two three", "  four five six", "  seven eight"],
-        );
-    }
-
-    #[test]
-    fn render_markdown_list_item_wraps_its_text_before_a_nested_block() {
-        let nested_list = rendered_text_at_width(
-            indoc! {"
-                - one two three four five
-                  - inner
-            "},
-            15,
-        );
-        let loose_nested_list = rendered_text_at_width(
-            indoc! {"
-                - one two three four five
-
-                  - inner
-            "},
-            15,
-        );
-        let blockquote = rendered_text_at_width(
-            indoc! {"
-                - one two three four five
-                  > quoted
-            "},
-            15,
-        );
-        let code_block = rendered_text_at_width(
-            indoc! {"
-                - one two three four five
-                  ```
-                  code
-                  ```
-            "},
-            15,
-        );
-        let table = rendered_text_at_width(
-            indoc! {"
-                - one two three four five
-                  | A |
-                  |---|
-                  | 1 |
-            "},
-            15,
-        );
-
-        assert_eq!(nested_list, ["- one two three", "  four five", "  - inner"]);
-        assert_eq!(loose_nested_list, nested_list);
-        assert_eq!(blockquote, ["- one two three", "  four five", "  > quoted"]);
-        assert_eq!(code_block, ["- one two three", "  four five", "  code"]);
-        assert_eq!(
-            table,
-            [
-                "- one two three",
-                "  four five",
-                "  ┌───┐",
-                "  │ A │",
-                "  ├───┤",
-                "  │ 1 │",
-                "  └───┘",
-            ]
-        );
-    }
-
-    #[test]
-    fn render_markdown_hard_break_wraps_the_line_it_ends() {
-        let paragraph = rendered_text_at_width("one two three four five six  \nseven eight", 15);
-        let tight_item = rendered_text_at_width("- one two three four  \n  five six", 15);
-        let blockquote = rendered_text_at_width("> one two three four  \n> five six", 15);
-
-        assert_eq!(
-            paragraph,
-            ["one two three ", "four five six", "seven eight"]
-        );
-        assert_eq!(tight_item, ["- one two three", "  four", "  five six"]);
-        assert_eq!(blockquote, ["> one two three", "> four", "> five six"]);
-    }
-
-    #[test]
-    fn render_markdown_narrow_blockquote_keeps_its_marker_on_every_row_when_a_block_follows() {
-        let lines = rendered_text_at_width("> quote quote\n\npara text", 2);
-
-        assert_eq!(
-            lines,
-            [
-                "> ", "> q", "> u", "> o", "> t", "> e", "> q", "> u", "> o", "> t", "> e", "",
-                "pa", "ra", "te", "xt",
-            ]
-        );
-    }
-
-    #[test]
-    fn render_markdown_blockquote_list_item_wraps_with_blockquote_marker_only() {
-        assert_eq!(
-            rendered_text_at_width("> - one two three four five six seven eight", 20),
-            [
-                "> - one two three ",
-                ">   four five six ",
-                ">   seven eight"
-            ],
-        );
-    }
-
-    // ── is_line_break_tag ──
-
-    #[test]
-    fn is_line_break_tag_accepts_every_br_spelling_and_rejects_other_tags() {
-        for html in ["<br>", "<br/>", "<br />", "<BR>", " <Br > "] {
-            assert!(is_line_break_tag(html), "{html:?}");
+        /// Builds columns from `(natural, min)` pairs.
+        fn column_widths(widths: &[(usize, usize)]) -> Vec<ColumnWidth> {
+            widths
+                .iter()
+                .map(|&(natural, min)| ColumnWidth { natural, min })
+                .collect()
         }
-        for html in ["<b>", "<brand>", "</br>", "<br"] {
-            assert!(!is_line_break_tag(html), "{html:?}");
+
+        #[test]
+        fn keeps_natural_widths_that_fit() {
+            let columns = column_widths(&[(5, 3), (5, 2)]);
+
+            assert_eq!(fit_column_widths(&columns, 17), Some(vec![5, 5]));
+        }
+
+        #[test]
+        fn shares_the_spare_width_by_how_far_each_column_falls_short() {
+            let columns = column_widths(&[(0, 0), (3, 3), (30, 6), (12, 6)]);
+
+            let col_widths = fit_column_widths(&columns, 34);
+
+            assert_eq!(col_widths, Some(vec![0, 3, 11, 7]));
+        }
+
+        #[test]
+        fn minimums_or_borders_that_do_not_fit_stack_the_table() {
+            let words = column_widths(&[(10, 8), (10, 8)]);
+            let empty = column_widths(&[(0, 0)]);
+
+            assert_eq!(fit_column_widths(&words, 23), Some(vec![8, 8]));
+            assert_eq!(fit_column_widths(&words, 22), None);
+            assert_eq!(fit_column_widths(&empty, 4), Some(vec![0]));
+            assert_eq!(fit_column_widths(&empty, 3), None);
         }
     }
 
-    // ── fit_column_widths ──
+    mod wrap_cell {
+        use super::*;
 
-    #[test]
-    fn fit_column_widths_keeps_natural_widths_that_fit() {
-        let columns = column_widths(&[(5, 3), (5, 2)]);
+        #[test]
+        fn wraps_each_line_in_order_without_the_space_at_each_break() {
+            let cell = [Line::from("one two three"), Line::from("four")];
 
-        assert_eq!(fit_column_widths(&columns, 17), Some(vec![5, 5]));
-    }
+            let out = wrap_cell(&cell, 8);
 
-    #[test]
-    fn fit_column_widths_shares_the_spare_width_by_how_far_each_column_falls_short() {
-        let columns = column_widths(&[(0, 0), (3, 3), (30, 6), (12, 6)]);
+            assert_eq!(
+                out,
+                [
+                    Line::from("one two"),
+                    Line::from("three"),
+                    Line::from("four")
+                ]
+            );
+        }
 
-        let col_widths = fit_column_widths(&columns, 34);
-
-        assert_eq!(col_widths, Some(vec![0, 3, 11, 7]));
-    }
-
-    #[test]
-    fn fit_column_widths_minimums_or_borders_that_do_not_fit_stack_the_table() {
-        let words = column_widths(&[(10, 8), (10, 8)]);
-        let empty = column_widths(&[(0, 0)]);
-
-        assert_eq!(fit_column_widths(&words, 23), Some(vec![8, 8]));
-        assert_eq!(fit_column_widths(&words, 22), None);
-        assert_eq!(fit_column_widths(&empty, 4), Some(vec![0]));
-        assert_eq!(fit_column_widths(&empty, 3), None);
-    }
-
-    // ── wrap_cell ──
-
-    #[test]
-    fn wrap_cell_wraps_each_line_in_order_without_the_space_at_each_break() {
-        let cell = [Line::from("one two three"), Line::from("four")];
-
-        let out = wrap_cell(&cell, 8);
-
-        assert_eq!(
-            out,
-            [
-                Line::from("one two"),
-                Line::from("three"),
-                Line::from("four")
-            ]
-        );
-    }
-
-    #[test]
-    fn wrap_cell_missing_cell_produces_single_empty_sub_line() {
-        assert_eq!(wrap_cell(&[], 10), [Line::default()]);
+        #[test]
+        fn missing_cell_produces_single_empty_sub_line() {
+            assert_eq!(wrap_cell(&[], 10), [Line::default()]);
+        }
     }
 }

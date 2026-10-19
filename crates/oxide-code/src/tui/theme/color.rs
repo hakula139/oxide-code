@@ -85,170 +85,166 @@ fn parse_named(s: &str) -> Result<Color> {
 mod tests {
     use super::*;
 
-    const FORMATS_HINT: &str = "expected hex (#rrggbb), ANSI name (red, bright_blue, ...), \
-                                indexed (ansi:0..255), or reset";
+    mod parse_color {
+        use super::*;
 
-    fn error_text(input: &str) -> String {
-        format!("{:#}", parse_color(input).unwrap_err())
-    }
+        const FORMATS_HINT: &str = "expected hex (#rrggbb), ANSI name (red, bright_blue, ...), \
+                                    indexed (ansi:0..255), or reset";
 
-    // ── parse_color: hex ──
+        fn error_text(input: &str) -> String {
+            format!("{:#}", parse_color(input).unwrap_err())
+        }
 
-    #[test]
-    fn parse_color_hex_is_case_insensitive() {
-        assert_eq!(
-            parse_color("#cdd6f4").unwrap(),
-            Color::Rgb(0xcd, 0xd6, 0xf4)
-        );
-        assert_eq!(
-            parse_color("#CDD6F4").unwrap(),
-            Color::Rgb(0xcd, 0xd6, 0xf4)
-        );
-    }
-
-    #[test]
-    fn parse_color_hex_pure_red_green_blue() {
-        assert_eq!(parse_color("#ff0000").unwrap(), Color::Rgb(255, 0, 0));
-        assert_eq!(parse_color("#00ff00").unwrap(), Color::Rgb(0, 255, 0));
-        assert_eq!(parse_color("#0000ff").unwrap(), Color::Rgb(0, 0, 255));
-    }
-
-    #[test]
-    fn parse_color_hex_rejects_three_digit_shorthand() {
-        assert_eq!(
-            error_text("#fff"),
-            r##"invalid hex color "#fff": expected 6-digit hex (e.g., #cdd6f4)"##,
-        );
-    }
-
-    #[test]
-    fn parse_color_hex_rejects_non_hex_chars() {
-        for input in ["#zzzzzz", "#+abcde"] {
+        #[test]
+        fn hex_is_case_insensitive() {
             assert_eq!(
-                error_text(input),
-                format!("invalid hex color {input:?}: non-hex characters in color"),
+                parse_color("#cdd6f4").unwrap(),
+                Color::Rgb(0xcd, 0xd6, 0xf4)
+            );
+            assert_eq!(
+                parse_color("#CDD6F4").unwrap(),
+                Color::Rgb(0xcd, 0xd6, 0xf4)
             );
         }
-    }
 
-    #[test]
-    fn parse_color_hex_rejects_missing_hash_prefix() {
-        assert_eq!(
-            error_text("cdd6f4"),
-            format!(r#"unknown color "cdd6f4": {FORMATS_HINT}"#),
-        );
-    }
+        #[test]
+        fn hex_pure_red_green_blue() {
+            assert_eq!(parse_color("#ff0000").unwrap(), Color::Rgb(255, 0, 0));
+            assert_eq!(parse_color("#00ff00").unwrap(), Color::Rgb(0, 255, 0));
+            assert_eq!(parse_color("#0000ff").unwrap(), Color::Rgb(0, 0, 255));
+        }
 
-    // ── parse_color: indexed ──
+        #[test]
+        fn hex_rejects_three_digit_shorthand() {
+            assert_eq!(
+                error_text("#fff"),
+                r##"invalid hex color "#fff": expected 6-digit hex (e.g., #cdd6f4)"##,
+            );
+        }
 
-    #[test]
-    fn parse_color_indexed_min_max() {
-        assert_eq!(parse_color("ansi:0").unwrap(), Color::Indexed(0));
-        assert_eq!(parse_color("ansi:255").unwrap(), Color::Indexed(255));
-    }
+        #[test]
+        fn hex_rejects_non_hex_chars() {
+            for input in ["#zzzzzz", "#+abcde"] {
+                assert_eq!(
+                    error_text(input),
+                    format!("invalid hex color {input:?}: non-hex characters in color"),
+                );
+            }
+        }
 
-    #[test]
-    fn parse_color_indexed_mid_value() {
-        assert_eq!(parse_color("ansi:174").unwrap(), Color::Indexed(174));
-    }
+        #[test]
+        fn hex_rejects_missing_hash_prefix() {
+            assert_eq!(
+                error_text("cdd6f4"),
+                format!(r#"unknown color "cdd6f4": {FORMATS_HINT}"#),
+            );
+        }
 
-    #[test]
-    fn parse_color_indexed_rejects_out_of_range() {
-        assert_eq!(
-            error_text("ansi:256"),
-            "invalid indexed color \"ansi:256\": expected 0-255 (e.g., ansi:174): \
-             number too large to fit in target type",
-        );
-    }
+        #[test]
+        fn indexed_min_max() {
+            assert_eq!(parse_color("ansi:0").unwrap(), Color::Indexed(0));
+            assert_eq!(parse_color("ansi:255").unwrap(), Color::Indexed(255));
+        }
 
-    #[test]
-    fn parse_color_indexed_rejects_non_numeric() {
-        assert_eq!(
-            error_text("ansi:abc"),
-            "invalid indexed color \"ansi:abc\": expected 0-255 (e.g., ansi:174): \
-             invalid digit found in string",
-        );
-    }
+        #[test]
+        fn indexed_mid_value() {
+            assert_eq!(parse_color("ansi:174").unwrap(), Color::Indexed(174));
+        }
 
-    #[test]
-    fn parse_color_indexed_prefix_is_case_insensitive() {
-        assert_eq!(parse_color("ANSI:5").unwrap(), Color::Indexed(5));
-        assert_eq!(parse_color("Ansi:174").unwrap(), Color::Indexed(174));
-    }
+        #[test]
+        fn indexed_rejects_out_of_range() {
+            assert_eq!(
+                error_text("ansi:256"),
+                "invalid indexed color \"ansi:256\": expected 0-255 (e.g., ansi:174): \
+                 number too large to fit in target type",
+            );
+        }
 
-    // ── parse_color: named ──
+        #[test]
+        fn indexed_rejects_non_numeric() {
+            assert_eq!(
+                error_text("ansi:abc"),
+                "invalid indexed color \"ansi:abc\": expected 0-255 (e.g., ansi:174): \
+                 invalid digit found in string",
+            );
+        }
 
-    #[test]
-    fn parse_color_named_standard_8() {
-        assert_eq!(parse_color("black").unwrap(), Color::Black);
-        assert_eq!(parse_color("red").unwrap(), Color::Red);
-        assert_eq!(parse_color("green").unwrap(), Color::Green);
-        assert_eq!(parse_color("yellow").unwrap(), Color::Yellow);
-        assert_eq!(parse_color("blue").unwrap(), Color::Blue);
-        assert_eq!(parse_color("magenta").unwrap(), Color::Magenta);
-        assert_eq!(parse_color("cyan").unwrap(), Color::Cyan);
-        assert_eq!(parse_color("gray").unwrap(), Color::Gray);
-    }
+        #[test]
+        fn indexed_prefix_is_case_insensitive() {
+            assert_eq!(parse_color("ANSI:5").unwrap(), Color::Indexed(5));
+            assert_eq!(parse_color("Ansi:174").unwrap(), Color::Indexed(174));
+        }
 
-    #[test]
-    fn parse_color_named_bright_8() {
-        assert_eq!(parse_color("dark_gray").unwrap(), Color::DarkGray);
-        assert_eq!(parse_color("bright_red").unwrap(), Color::LightRed);
-        assert_eq!(parse_color("bright_green").unwrap(), Color::LightGreen);
-        assert_eq!(parse_color("bright_yellow").unwrap(), Color::LightYellow);
-        assert_eq!(parse_color("bright_blue").unwrap(), Color::LightBlue);
-        assert_eq!(parse_color("bright_magenta").unwrap(), Color::LightMagenta);
-        assert_eq!(parse_color("bright_cyan").unwrap(), Color::LightCyan);
-        assert_eq!(parse_color("white").unwrap(), Color::White);
-    }
+        #[test]
+        fn named_standard_8() {
+            assert_eq!(parse_color("black").unwrap(), Color::Black);
+            assert_eq!(parse_color("red").unwrap(), Color::Red);
+            assert_eq!(parse_color("green").unwrap(), Color::Green);
+            assert_eq!(parse_color("yellow").unwrap(), Color::Yellow);
+            assert_eq!(parse_color("blue").unwrap(), Color::Blue);
+            assert_eq!(parse_color("magenta").unwrap(), Color::Magenta);
+            assert_eq!(parse_color("cyan").unwrap(), Color::Cyan);
+            assert_eq!(parse_color("gray").unwrap(), Color::Gray);
+        }
 
-    #[test]
-    fn parse_color_named_light_alias_matches_bright() {
-        assert_eq!(parse_color("light_red").unwrap(), Color::LightRed);
-        assert_eq!(parse_color("light_blue").unwrap(), Color::LightBlue);
-        assert_eq!(parse_color("light_white").unwrap(), Color::White);
-    }
+        #[test]
+        fn named_bright_8() {
+            assert_eq!(parse_color("dark_gray").unwrap(), Color::DarkGray);
+            assert_eq!(parse_color("bright_red").unwrap(), Color::LightRed);
+            assert_eq!(parse_color("bright_green").unwrap(), Color::LightGreen);
+            assert_eq!(parse_color("bright_yellow").unwrap(), Color::LightYellow);
+            assert_eq!(parse_color("bright_blue").unwrap(), Color::LightBlue);
+            assert_eq!(parse_color("bright_magenta").unwrap(), Color::LightMagenta);
+            assert_eq!(parse_color("bright_cyan").unwrap(), Color::LightCyan);
+            assert_eq!(parse_color("white").unwrap(), Color::White);
+        }
 
-    #[test]
-    fn parse_color_named_grey_alias_matches_gray() {
-        assert_eq!(parse_color("grey").unwrap(), Color::Gray);
-        assert_eq!(parse_color("dark_grey").unwrap(), Color::DarkGray);
-    }
+        #[test]
+        fn named_light_alias_matches_bright() {
+            assert_eq!(parse_color("light_red").unwrap(), Color::LightRed);
+            assert_eq!(parse_color("light_blue").unwrap(), Color::LightBlue);
+            assert_eq!(parse_color("light_white").unwrap(), Color::White);
+        }
 
-    #[test]
-    fn parse_color_named_case_insensitive() {
-        assert_eq!(parse_color("RED").unwrap(), Color::Red);
-        assert_eq!(parse_color("Bright_Blue").unwrap(), Color::LightBlue);
-        assert_eq!(parse_color("Reset").unwrap(), Color::Reset);
-    }
+        #[test]
+        fn named_grey_alias_matches_gray() {
+            assert_eq!(parse_color("grey").unwrap(), Color::Gray);
+            assert_eq!(parse_color("dark_grey").unwrap(), Color::DarkGray);
+        }
 
-    #[test]
-    fn parse_color_named_reset_is_terminal_default() {
-        assert_eq!(parse_color("reset").unwrap(), Color::Reset);
-    }
+        #[test]
+        fn named_case_insensitive() {
+            assert_eq!(parse_color("RED").unwrap(), Color::Red);
+            assert_eq!(parse_color("Bright_Blue").unwrap(), Color::LightBlue);
+            assert_eq!(parse_color("Reset").unwrap(), Color::Reset);
+        }
 
-    #[test]
-    fn parse_color_named_rejects_unknown_color() {
-        assert_eq!(
-            error_text("orange"),
-            format!(r#"unknown color "orange": {FORMATS_HINT}"#),
-        );
-    }
+        #[test]
+        fn named_reset_is_terminal_default() {
+            assert_eq!(parse_color("reset").unwrap(), Color::Reset);
+        }
 
-    // ── parse_color: edge cases ──
+        #[test]
+        fn named_rejects_unknown_color() {
+            assert_eq!(
+                error_text("orange"),
+                format!(r#"unknown color "orange": {FORMATS_HINT}"#),
+            );
+        }
 
-    #[test]
-    fn parse_color_rejects_empty_string() {
-        assert_eq!(error_text(""), "empty color value");
-    }
+        #[test]
+        fn rejects_empty_string() {
+            assert_eq!(error_text(""), "empty color value");
+        }
 
-    #[test]
-    fn parse_color_trims_surrounding_whitespace() {
-        assert_eq!(parse_color("  red  ").unwrap(), Color::Red);
-        assert_eq!(
-            parse_color(" #cdd6f4 ").unwrap(),
-            Color::Rgb(0xcd, 0xd6, 0xf4),
-        );
-        assert_eq!(parse_color("\tansi:5\n").unwrap(), Color::Indexed(5));
+        #[test]
+        fn trims_surrounding_whitespace() {
+            assert_eq!(parse_color("  red  ").unwrap(), Color::Red);
+            assert_eq!(
+                parse_color(" #cdd6f4 ").unwrap(),
+                Color::Rgb(0xcd, 0xd6, 0xf4),
+            );
+            assert_eq!(parse_color("\tansi:5\n").unwrap(), Color::Indexed(5));
+        }
     }
 }

@@ -47,15 +47,17 @@ mod tests {
 
     use super::*;
 
-    // ── buffer_rows ──
+    mod buffer_rows {
+        use super::*;
 
-    #[test]
-    fn buffer_rows_read_an_offset_area_and_skip_the_cells_wide_symbols_cover() {
-        let mut buffer = Buffer::empty(Rect::new(3, 1, 6, 2));
-        buffer.set_string(3, 1, "界ｶﾞa", Style::default());
+        #[test]
+        fn read_an_offset_area_and_skip_the_cells_wide_symbols_cover() {
+            let mut buffer = Buffer::empty(Rect::new(3, 1, 6, 2));
+            buffer.set_string(3, 1, "界ｶﾞa", Style::default());
 
-        let rows = buffer_rows(&buffer);
+            let rows = buffer_rows(&buffer);
 
-        assert_eq!(rows, ["界ｶﾞa ", "      "]);
+            assert_eq!(rows, ["界ｶﾞa ", "      "]);
+        }
     }
 }

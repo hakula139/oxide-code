@@ -65,101 +65,105 @@ mod tests {
 
     use super::*;
 
-    // ── render_markdown_chunk ──
+    mod render_markdown_chunk {
+        use super::*;
 
-    #[test]
-    fn render_markdown_chunk_carries_the_block_flag_across_chunks() {
-        let theme = Theme::default();
-        let chunk = |input, after_block| {
-            let (text, after) = render_markdown_chunk(input, &theme, 0, after_block);
-            let rows: Vec<String> = text.lines.iter().map(ToString::to_string).collect();
-            (rows, after)
-        };
-        assert_eq!(
-            chunk("para\n", true),
-            (vec![String::new(), "para".to_owned()], true)
-        );
-        assert_eq!(chunk("```\n```\n", false), (vec![], true));
-        for after_block in [false, true] {
-            let definition = chunk("[a]: https://example.com\n", after_block);
-            assert_eq!(definition, (vec![], after_block));
+        #[test]
+        fn carries_the_block_flag_across_chunks() {
+            let theme = Theme::default();
+            let chunk = |input, after_block| {
+                let (text, after) = render_markdown_chunk(input, &theme, 0, after_block);
+                let rows: Vec<String> = text.lines.iter().map(ToString::to_string).collect();
+                (rows, after)
+            };
+            assert_eq!(
+                chunk("para\n", true),
+                (vec![String::new(), "para".to_owned()], true)
+            );
+            assert_eq!(chunk("```\n```\n", false), (vec![], true));
+            for after_block in [false, true] {
+                let definition = chunk("[a]: https://example.com\n", after_block);
+                assert_eq!(definition, (vec![], after_block));
+            }
+        }
+
+        #[test]
+        fn matches_a_single_render_when_rows_overflow_the_width() {
+            let theme = Theme::default();
+            let input = "> quote quote\n\npara text";
+            let split = complete_blocks_len(input);
+
+            let (head, after_block) = render_markdown_chunk(&input[..split], &theme, 2, false);
+            let (tail, _) = render_markdown_chunk(&input[split..], &theme, 2, after_block);
+            let chunked: Vec<_> = head.lines.into_iter().chain(tail.lines).collect();
+
+            assert_eq!(split, "> quote quote\n\n".len());
+            assert_eq!(chunked, render_markdown(input, &theme, 2).lines);
         }
     }
 
-    #[test]
-    fn render_markdown_chunk_matches_a_single_render_when_rows_overflow_the_width() {
-        let theme = Theme::default();
-        let input = "> quote quote\n\npara text";
-        let split = complete_blocks_len(input);
+    mod complete_blocks_len {
+        use super::*;
 
-        let (head, after_block) = render_markdown_chunk(&input[..split], &theme, 2, false);
-        let (tail, _) = render_markdown_chunk(&input[split..], &theme, 2, after_block);
-        let chunked: Vec<_> = head.lines.into_iter().chain(tail.lines).collect();
+        #[test]
+        fn ends_at_last_block_start() {
+            let input = indoc! {"
+                para one
 
-        assert_eq!(split, "> quote quote\n\n".len());
-        assert_eq!(chunked, render_markdown(input, &theme, 2).lines);
-    }
+                para two
 
-    // ── complete_blocks_len ──
+                - tail"
+            };
+            assert_eq!(complete_blocks_len(input), "para one\n\npara two\n\n".len());
+        }
 
-    #[test]
-    fn complete_blocks_len_ends_at_last_block_start() {
-        let input = indoc! {"
-            para one
+        #[test]
+        fn single_block_is_incomplete() {
+            assert_eq!(complete_blocks_len("only paragraph\n\n"), 0);
+            assert_eq!(complete_blocks_len("\n\n"), 0);
+        }
 
-            para two
+        #[test]
+        fn keeps_blank_lines_inside_open_fence() {
+            let input = indoc! {"
+                Here:
 
-            - tail"
-        };
-        assert_eq!(complete_blocks_len(input), "para one\n\npara two\n\n".len());
-    }
+                ```c
+                #include <a.h>
 
-    #[test]
-    fn complete_blocks_len_single_block_is_incomplete() {
-        assert_eq!(complete_blocks_len("only paragraph\n\n"), 0);
-        assert_eq!(complete_blocks_len("\n\n"), 0);
-    }
+                #define X 1
+                - not a bullet
+            "};
+            assert_eq!(complete_blocks_len(input), "Here:\n\n".len());
+        }
 
-    #[test]
-    fn complete_blocks_len_keeps_blank_lines_inside_open_fence() {
-        let input = indoc! {"
-            Here:
+        #[test]
+        fn keeps_loose_list_items_together() {
+            assert_eq!(
+                complete_blocks_len(indoc! {"
+                    - a
 
-            ```c
-            #include <a.h>
+                    - b
 
-            #define X 1
-            - not a bullet
-        "};
-        assert_eq!(complete_blocks_len(input), "Here:\n\n".len());
-    }
+                      more"
+                }),
+                0
+            );
+        }
 
-    #[test]
-    fn complete_blocks_len_keeps_loose_list_items_together() {
-        assert_eq!(
-            complete_blocks_len(indoc! {"
-                - a
+        #[test]
+        fn snaps_indented_block_to_line_start() {
+            let input = indoc! {"
+                para
 
-                - b
+                    indented code"
+            };
+            assert_eq!(complete_blocks_len(input), "para\n\n".len());
+        }
 
-                  more"
-            }),
-            0
-        );
-    }
-
-    #[test]
-    fn complete_blocks_len_snaps_indented_block_to_line_start() {
-        let input = indoc! {"
-            para
-
-                indented code"
-        };
-        assert_eq!(complete_blocks_len(input), "para\n\n".len());
-    }
-
-    #[test]
-    fn complete_blocks_len_counts_thematic_break_as_block() {
-        assert_eq!(complete_blocks_len("---\ntext"), "---\n".len());
+        #[test]
+        fn counts_thematic_break_as_block() {
+            assert_eq!(complete_blocks_len("---\ntext"), "---\n".len());
+        }
     }
 }

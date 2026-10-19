@@ -424,129 +424,6 @@ mod tests {
     use super::testing::{BEGIN_SYNC, END_SYNC, FLUSH, capture_terminal};
     use super::*;
 
-    // ── enter_tui_mode ──
-
-    const ENTER_ALT_SCREEN: &[u8] = b"\x1b[?1049h";
-    const ENABLE_BRACKETED_PASTE: &[u8] = b"\x1b[?2004h";
-    #[cfg(not(windows))]
-    const PUSH_KITTY_DISAMBIGUATE: &[u8] = b"\x1b[>1u";
-    #[cfg(not(windows))]
-    const ENABLE_MOUSE: &[u8] = b"\x1b[?1000h\x1b[?1002h\x1b[?1003h\x1b[?1015h\x1b[?1006h";
-    const CLEAR_SCREEN: &[u8] = b"\x1b[2J";
-
-    #[test]
-    fn enter_tui_mode_writes_setup_sequences() {
-        let mut buf = Vec::new();
-
-        enter_tui_mode(&mut buf).unwrap();
-
-        #[cfg(not(windows))]
-        let expected = [
-            ENTER_ALT_SCREEN,
-            ENABLE_BRACKETED_PASTE,
-            PUSH_KITTY_DISAMBIGUATE,
-            ENABLE_MOUSE,
-            CLEAR_SCREEN,
-        ];
-        #[cfg(windows)]
-        let expected = [ENTER_ALT_SCREEN, ENABLE_BRACKETED_PASTE, CLEAR_SCREEN];
-        assert_eq!(
-            buf.escape_ascii().to_string(),
-            expected.concat().escape_ascii().to_string()
-        );
-    }
-
-    // ── leave_tui_mode ──
-
-    const DISABLE_BRACKETED_PASTE: &[u8] = b"\x1b[?2004l";
-    #[cfg(not(windows))]
-    const POP_KITTY_FLAGS: &[u8] = b"\x1b[<1u";
-    #[cfg(not(windows))]
-    const DISABLE_MOUSE: &[u8] = b"\x1b[?1006l\x1b[?1015l\x1b[?1003l\x1b[?1002l\x1b[?1000l";
-    const LEAVE_ALT_SCREEN: &[u8] = b"\x1b[?1049l";
-    const SHOW_CURSOR: &[u8] = b"\x1b[?25h";
-
-    #[test]
-    fn leave_tui_mode_writes_restore_sequences() {
-        let mut buf = Vec::new();
-
-        leave_tui_mode(&mut buf).unwrap();
-
-        #[cfg(not(windows))]
-        let expected = [
-            DISABLE_BRACKETED_PASTE,
-            POP_KITTY_FLAGS,
-            DISABLE_MOUSE,
-            LEAVE_ALT_SCREEN,
-            SHOW_CURSOR,
-        ];
-        #[cfg(windows)]
-        let expected = [DISABLE_BRACKETED_PASTE, LEAVE_ALT_SCREEN, SHOW_CURSOR];
-        assert_eq!(
-            buf.escape_ascii().to_string(),
-            expected.concat().escape_ascii().to_string()
-        );
-    }
-
-    #[test]
-    fn leave_tui_mode_write_failure_returns_the_io_error() {
-        let mut out = &mut [][..];
-
-        let error = leave_tui_mode(&mut out).unwrap_err();
-
-        assert_eq!(
-            error.downcast_ref::<io::Error>().unwrap().kind(),
-            io::ErrorKind::WriteZero,
-        );
-    }
-
-    // ── write_sgr_mouse ──
-
-    #[test]
-    fn write_sgr_mouse_toggles_dec_mode_1006() {
-        let (mut enable, mut disable) = (Vec::new(), Vec::new());
-
-        write_sgr_mouse(&mut enable, true).unwrap();
-        write_sgr_mouse(&mut disable, false).unwrap();
-
-        assert_eq!(
-            (enable.as_slice(), disable.as_slice()),
-            (&b"\x1b[?1006h"[..], &b"\x1b[?1006l"[..])
-        );
-    }
-
-    // ── write_deferred_panics ──
-
-    #[test]
-    fn write_deferred_panics_prints_each_report_once() {
-        let deferred = Mutex::new(DeferredPanics::default());
-        route_panic(&deferred, false, Some("a"), &"panicked at x.rs:1:1:\nfirst");
-        route_panic(
-            &deferred,
-            false,
-            Some("b"),
-            &"panicked at y.rs:2:2:\nsecond",
-        );
-
-        let mut first = Vec::new();
-        write_deferred_panics(&deferred, &mut first).unwrap();
-        let mut second = Vec::new();
-        write_deferred_panics(&deferred, &mut second).unwrap();
-
-        assert_eq!(
-            String::from_utf8(first).unwrap(),
-            indoc! {"
-                thread 'a' panicked at x.rs:1:1:
-                first
-                thread 'b' panicked at y.rs:2:2:
-                second
-            "},
-        );
-        assert!(second.is_empty(), "a repeat restore must not reprint");
-    }
-
-    // ── synchronized_update ──
-
     fn plain_hyperlink(rect: Rect, url: &str, symbols: &[&str]) -> StatusHyperlink {
         StatusHyperlink {
             rect,
@@ -561,200 +438,339 @@ mod tests {
         }
     }
 
-    #[test]
-    fn synchronized_update_brackets_everything_the_closure_writes() {
-        let mut terminal = capture_terminal(4, 1);
+    mod enter_tui_mode {
+        use super::*;
 
-        synchronized_update(&mut terminal, |terminal| {
-            terminal.backend_mut().write_all(b"LINKS")?;
-            Ok(())
-        })
-        .unwrap();
+        const ENTER_ALT_SCREEN: &[u8] = b"\x1b[?1049h";
+        const ENABLE_BRACKETED_PASTE: &[u8] = b"\x1b[?2004h";
+        #[cfg(not(windows))]
+        const PUSH_KITTY_DISAMBIGUATE: &[u8] = b"\x1b[>1u";
+        #[cfg(not(windows))]
+        const ENABLE_MOUSE: &[u8] = b"\x1b[?1000h\x1b[?1002h\x1b[?1003h\x1b[?1015h\x1b[?1006h";
+        const CLEAR_SCREEN: &[u8] = b"\x1b[2J";
 
-        assert_eq!(
-            terminal.backend().bytes(),
-            [BEGIN_SYNC, b"LINKS", END_SYNC, FLUSH].concat(),
-        );
-    }
+        #[test]
+        fn writes_setup_sequences() {
+            let mut buf = Vec::new();
 
-    #[test]
-    fn synchronized_update_ends_the_update_when_the_closure_fails() {
-        let mut terminal = capture_terminal(4, 1);
+            enter_tui_mode(&mut buf).unwrap();
 
-        let result = synchronized_update(&mut terminal, |_| Err(anyhow!("draw failed")));
-
-        assert_eq!(result.unwrap_err().to_string(), "draw failed");
-        assert_eq!(
-            terminal.backend().bytes(),
-            [BEGIN_SYNC, END_SYNC, FLUSH].concat()
-        );
-    }
-
-    // ── write_status_hyperlinks ──
-
-    #[test]
-    fn write_status_hyperlinks_writes_the_envelope() {
-        let link = plain_hyperlink(Rect::new(0, 0, 1, 1), "https://example.com", &["x"]);
-        let mut buf = Vec::new();
-
-        write_status_hyperlinks(&mut buf, &[link]).unwrap();
-
-        assert_eq!(
-            String::from_utf8(buf).unwrap(),
-            "\x1b7\x1b[1;1H\x1b]8;;https://example.com\x07x\x1b]8;;\x07\x1b8",
-        );
-    }
-
-    #[test]
-    fn write_status_hyperlinks_is_a_noop_when_no_links_pending() {
-        let mut buf: Vec<u8> = Vec::new();
-
-        write_status_hyperlinks(&mut buf, &[]).unwrap();
-
-        assert_eq!(buf, b"");
-    }
-
-    // ── build_status_hyperlink_envelope ──
-
-    #[test]
-    fn build_status_hyperlink_envelope_wraps_each_link_in_cup_and_osc8() {
-        let links = [
-            plain_hyperlink(
-                Rect::new(2, 0, 3, 1),
-                "https://example.com/pull/86",
-                &["#", "8", "6"],
-            ),
-            plain_hyperlink(Rect::new(9, 1, 2, 1), "https://example.com/ci", &["C", "I"]),
-        ];
-
-        let bytes = build_status_hyperlink_envelope(&links).unwrap();
-
-        assert_eq!(
-            String::from_utf8(bytes).unwrap(),
-            "\x1b7\
-             \x1b[1;3H\x1b]8;;https://example.com/pull/86\x07#86\x1b]8;;\x07\
-             \x1b[2;10H\x1b]8;;https://example.com/ci\x07CI\x1b]8;;\x07\
-             \x1b8",
-        );
-    }
-
-    #[test]
-    fn build_status_hyperlink_envelope_replays_each_cell_style_and_resets_it() {
-        const CHILD: &str = "OX_TEST_HYPERLINK_STYLES_CHILD";
-        if std::env::var_os(CHILD).is_none() {
-            let thread = std::thread::current();
-            let test_name = thread.name().unwrap();
-
-            // crossterm caches NO_COLOR globally, so isolate the exact-color fixture from the suite.
-            let output = std::process::Command::new(std::env::current_exe().unwrap())
-                .args(["--exact", test_name, "--nocapture"])
-                .env(CHILD, "1")
-                .env_remove("NO_COLOR")
-                .output()
-                .unwrap();
-
-            let stdout = String::from_utf8_lossy(&output.stdout);
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            assert!(
-                output.status.success() && stdout.contains(&format!("test {test_name} ... ok")),
-                "{stdout}{stderr}",
+            #[cfg(not(windows))]
+            let expected = [
+                ENTER_ALT_SCREEN,
+                ENABLE_BRACKETED_PASTE,
+                PUSH_KITTY_DISAMBIGUATE,
+                ENABLE_MOUSE,
+                CLEAR_SCREEN,
+            ];
+            #[cfg(windows)]
+            let expected = [ENTER_ALT_SCREEN, ENABLE_BRACKETED_PASTE, CLEAR_SCREEN];
+            assert_eq!(
+                buf.escape_ascii().to_string(),
+                expected.concat().escape_ascii().to_string()
             );
-            return;
+        }
+    }
+
+    mod leave_tui_mode {
+        use super::*;
+
+        const DISABLE_BRACKETED_PASTE: &[u8] = b"\x1b[?2004l";
+        #[cfg(not(windows))]
+        const POP_KITTY_FLAGS: &[u8] = b"\x1b[<1u";
+        #[cfg(not(windows))]
+        const DISABLE_MOUSE: &[u8] = b"\x1b[?1006l\x1b[?1015l\x1b[?1003l\x1b[?1002l\x1b[?1000l";
+        const LEAVE_ALT_SCREEN: &[u8] = b"\x1b[?1049l";
+        const SHOW_CURSOR: &[u8] = b"\x1b[?25h";
+
+        #[test]
+        fn writes_restore_sequences() {
+            let mut buf = Vec::new();
+
+            leave_tui_mode(&mut buf).unwrap();
+
+            #[cfg(not(windows))]
+            let expected = [
+                DISABLE_BRACKETED_PASTE,
+                POP_KITTY_FLAGS,
+                DISABLE_MOUSE,
+                LEAVE_ALT_SCREEN,
+                SHOW_CURSOR,
+            ];
+            #[cfg(windows)]
+            let expected = [DISABLE_BRACKETED_PASTE, LEAVE_ALT_SCREEN, SHOW_CURSOR];
+            assert_eq!(
+                buf.escape_ascii().to_string(),
+                expected.concat().escape_ascii().to_string()
+            );
         }
 
-        let link = StatusHyperlink {
-            rect: Rect::new(0, 0, 2, 1),
-            url: "https://x".to_owned(),
-            cells: vec![
-                HyperlinkCell {
-                    symbol: "A".to_owned(),
-                    style: Style::default()
-                        .fg(Color::Red)
-                        .bg(Color::Blue)
-                        .underline_color(Color::Green)
-                        .add_modifier(Modifier::BOLD),
-                },
-                HyperlinkCell {
-                    symbol: "B".to_owned(),
-                    style: Style::default().add_modifier(Modifier::ITALIC),
-                },
-            ],
-        };
+        #[test]
+        fn write_failure_returns_the_io_error() {
+            let mut out = &mut [][..];
 
-        let bytes = build_status_hyperlink_envelope(&[link]).unwrap();
+            let error = leave_tui_mode(&mut out).unwrap_err();
 
-        assert_eq!(
-            String::from_utf8(bytes).unwrap(),
-            "\x1b7\x1b[1;1H\x1b]8;;https://x\x07\
-             \x1b[48;5;4m\x1b[38;5;1m\x1b[58;5;2m\x1b[1mA\x1b[0m\x1b[3mB\x1b[0m\
-             \x1b]8;;\x07\x1b8",
-        );
-    }
-
-    #[test]
-    fn build_status_hyperlink_envelope_strips_control_chars_from_url() {
-        let link = plain_hyperlink(
-            Rect::new(0, 0, 1, 1),
-            "https://example.com/\x1b\x07\x00ok",
-            &["x"],
-        );
-
-        let bytes = build_status_hyperlink_envelope(&[link]).unwrap();
-
-        assert_eq!(
-            String::from_utf8(bytes).unwrap(),
-            "\x1b7\x1b[1;1H\x1b]8;;https://example.com/ok\x07x\x1b]8;;\x07\x1b8",
-        );
-    }
-
-    #[test]
-    fn build_status_hyperlink_envelope_is_empty_when_safe_url_is_empty() {
-        let link = plain_hyperlink(Rect::new(0, 0, 1, 1), "\x1b\x07", &["x"]);
-
-        let bytes = build_status_hyperlink_envelope(&[link]).unwrap();
-
-        assert_eq!(bytes, b"");
-    }
-
-    // ── route_panic ──
-
-    #[test]
-    fn route_panic_restores_before_printing_a_ui_thread_panic() {
-        let deferred = Mutex::new(DeferredPanics::default());
-        let route = route_panic(
-            &deferred,
-            true,
-            Some("main"),
-            &"panicked at x.rs:1:1:\nboom",
-        );
-        assert_eq!(route, PanicRoute::RestoreThenPrint);
-        assert_eq!(deferred.lock().unwrap().reports, [] as [String; 0]);
-    }
-
-    #[test]
-    fn route_panic_defers_a_background_panic_and_names_its_thread() {
-        let deferred = Mutex::new(DeferredPanics::default());
-        let route = route_panic(&deferred, false, None, &"panicked at x.rs:1:1:\nboom");
-        assert_eq!(route, PanicRoute::Deferred);
-        assert_eq!(
-            deferred.lock().unwrap().reports,
-            ["thread '<unnamed>' panicked at x.rs:1:1:\nboom"],
-        );
-    }
-
-    #[test]
-    fn route_panic_prints_directly_once_the_terminal_is_restored() {
-        let deferred = Mutex::new(DeferredPanics::default());
-        write_deferred_panics(&deferred, &mut Vec::new()).unwrap();
-
-        for on_ui_thread in [false, true] {
-            let route = route_panic(&deferred, on_ui_thread, Some("worker"), &"late");
-            assert_eq!(route, PanicRoute::Print, "on_ui_thread = {on_ui_thread}");
+            assert_eq!(
+                error.downcast_ref::<io::Error>().unwrap().kind(),
+                io::ErrorKind::WriteZero,
+            );
         }
-        assert_eq!(
-            deferred.lock().unwrap().reports,
-            [] as [String; 0],
-            "nothing is left for a restore that already ran",
-        );
+    }
+
+    mod write_sgr_mouse {
+        use super::*;
+
+        #[test]
+        fn toggles_dec_mode_1006() {
+            let (mut enable, mut disable) = (Vec::new(), Vec::new());
+
+            write_sgr_mouse(&mut enable, true).unwrap();
+            write_sgr_mouse(&mut disable, false).unwrap();
+
+            assert_eq!(
+                (enable.as_slice(), disable.as_slice()),
+                (&b"\x1b[?1006h"[..], &b"\x1b[?1006l"[..])
+            );
+        }
+    }
+
+    mod write_deferred_panics {
+        use super::*;
+
+        #[test]
+        fn prints_each_report_once() {
+            let deferred = Mutex::new(DeferredPanics::default());
+            route_panic(&deferred, false, Some("a"), &"panicked at x.rs:1:1:\nfirst");
+            route_panic(
+                &deferred,
+                false,
+                Some("b"),
+                &"panicked at y.rs:2:2:\nsecond",
+            );
+
+            let mut first = Vec::new();
+            write_deferred_panics(&deferred, &mut first).unwrap();
+            let mut second = Vec::new();
+            write_deferred_panics(&deferred, &mut second).unwrap();
+
+            assert_eq!(
+                String::from_utf8(first).unwrap(),
+                indoc! {"
+                    thread 'a' panicked at x.rs:1:1:
+                    first
+                    thread 'b' panicked at y.rs:2:2:
+                    second
+                "},
+            );
+            assert!(second.is_empty(), "a repeat restore must not reprint");
+        }
+    }
+
+    mod synchronized_update {
+        use super::*;
+
+        #[test]
+        fn brackets_everything_the_closure_writes() {
+            let mut terminal = capture_terminal(4, 1);
+
+            synchronized_update(&mut terminal, |terminal| {
+                terminal.backend_mut().write_all(b"LINKS")?;
+                Ok(())
+            })
+            .unwrap();
+
+            assert_eq!(
+                terminal.backend().bytes(),
+                [BEGIN_SYNC, b"LINKS", END_SYNC, FLUSH].concat(),
+            );
+        }
+
+        #[test]
+        fn ends_the_update_when_the_closure_fails() {
+            let mut terminal = capture_terminal(4, 1);
+
+            let result = synchronized_update(&mut terminal, |_| Err(anyhow!("draw failed")));
+
+            assert_eq!(result.unwrap_err().to_string(), "draw failed");
+            assert_eq!(
+                terminal.backend().bytes(),
+                [BEGIN_SYNC, END_SYNC, FLUSH].concat()
+            );
+        }
+    }
+
+    mod write_status_hyperlinks {
+        use super::*;
+
+        #[test]
+        fn writes_the_envelope() {
+            let link = plain_hyperlink(Rect::new(0, 0, 1, 1), "https://example.com", &["x"]);
+            let mut buf = Vec::new();
+
+            write_status_hyperlinks(&mut buf, &[link]).unwrap();
+
+            assert_eq!(
+                String::from_utf8(buf).unwrap(),
+                "\x1b7\x1b[1;1H\x1b]8;;https://example.com\x07x\x1b]8;;\x07\x1b8",
+            );
+        }
+
+        #[test]
+        fn is_a_noop_when_no_links_pending() {
+            let mut buf: Vec<u8> = Vec::new();
+
+            write_status_hyperlinks(&mut buf, &[]).unwrap();
+
+            assert_eq!(buf, b"");
+        }
+    }
+
+    mod build_status_hyperlink_envelope {
+        use super::*;
+
+        #[test]
+        fn wraps_each_link_in_cup_and_osc8() {
+            let links = [
+                plain_hyperlink(
+                    Rect::new(2, 0, 3, 1),
+                    "https://example.com/pull/86",
+                    &["#", "8", "6"],
+                ),
+                plain_hyperlink(Rect::new(9, 1, 2, 1), "https://example.com/ci", &["C", "I"]),
+            ];
+
+            let bytes = build_status_hyperlink_envelope(&links).unwrap();
+
+            assert_eq!(
+                String::from_utf8(bytes).unwrap(),
+                "\x1b7\
+                 \x1b[1;3H\x1b]8;;https://example.com/pull/86\x07#86\x1b]8;;\x07\
+                 \x1b[2;10H\x1b]8;;https://example.com/ci\x07CI\x1b]8;;\x07\
+                 \x1b8",
+            );
+        }
+
+        #[test]
+        fn replays_each_cell_style_and_resets_it() {
+            const CHILD: &str = "OX_TEST_HYPERLINK_STYLES_CHILD";
+            if std::env::var_os(CHILD).is_none() {
+                let thread = std::thread::current();
+                let test_name = thread.name().unwrap();
+
+                // crossterm caches NO_COLOR globally, so isolate this exact-color fixture.
+                let output = std::process::Command::new(std::env::current_exe().unwrap())
+                    .args(["--exact", test_name, "--nocapture"])
+                    .env(CHILD, "1")
+                    .env_remove("NO_COLOR")
+                    .output()
+                    .unwrap();
+
+                let stdout = String::from_utf8_lossy(&output.stdout);
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                assert!(
+                    output.status.success() && stdout.contains(&format!("test {test_name} ... ok")),
+                    "{stdout}{stderr}",
+                );
+                return;
+            }
+
+            let link = StatusHyperlink {
+                rect: Rect::new(0, 0, 2, 1),
+                url: "https://x".to_owned(),
+                cells: vec![
+                    HyperlinkCell {
+                        symbol: "A".to_owned(),
+                        style: Style::default()
+                            .fg(Color::Red)
+                            .bg(Color::Blue)
+                            .underline_color(Color::Green)
+                            .add_modifier(Modifier::BOLD),
+                    },
+                    HyperlinkCell {
+                        symbol: "B".to_owned(),
+                        style: Style::default().add_modifier(Modifier::ITALIC),
+                    },
+                ],
+            };
+
+            let bytes = build_status_hyperlink_envelope(&[link]).unwrap();
+
+            assert_eq!(
+                String::from_utf8(bytes).unwrap(),
+                "\x1b7\x1b[1;1H\x1b]8;;https://x\x07\
+                 \x1b[48;5;4m\x1b[38;5;1m\x1b[58;5;2m\x1b[1mA\x1b[0m\x1b[3mB\x1b[0m\
+                 \x1b]8;;\x07\x1b8",
+            );
+        }
+
+        #[test]
+        fn strips_control_chars_from_url() {
+            let link = plain_hyperlink(
+                Rect::new(0, 0, 1, 1),
+                "https://example.com/\x1b\x07\x00ok",
+                &["x"],
+            );
+
+            let bytes = build_status_hyperlink_envelope(&[link]).unwrap();
+
+            assert_eq!(
+                String::from_utf8(bytes).unwrap(),
+                "\x1b7\x1b[1;1H\x1b]8;;https://example.com/ok\x07x\x1b]8;;\x07\x1b8",
+            );
+        }
+
+        #[test]
+        fn is_empty_when_safe_url_is_empty() {
+            let link = plain_hyperlink(Rect::new(0, 0, 1, 1), "\x1b\x07", &["x"]);
+
+            let bytes = build_status_hyperlink_envelope(&[link]).unwrap();
+
+            assert_eq!(bytes, b"");
+        }
+    }
+
+    mod route_panic {
+        use super::*;
+
+        #[test]
+        fn restores_before_printing_a_ui_thread_panic() {
+            let deferred = Mutex::new(DeferredPanics::default());
+            let route = route_panic(
+                &deferred,
+                true,
+                Some("main"),
+                &"panicked at x.rs:1:1:\nboom",
+            );
+            assert_eq!(route, PanicRoute::RestoreThenPrint);
+            assert_eq!(deferred.lock().unwrap().reports, [] as [String; 0]);
+        }
+
+        #[test]
+        fn defers_a_background_panic_and_names_its_thread() {
+            let deferred = Mutex::new(DeferredPanics::default());
+            let route = route_panic(&deferred, false, None, &"panicked at x.rs:1:1:\nboom");
+            assert_eq!(route, PanicRoute::Deferred);
+            assert_eq!(
+                deferred.lock().unwrap().reports,
+                ["thread '<unnamed>' panicked at x.rs:1:1:\nboom"],
+            );
+        }
+
+        #[test]
+        fn prints_directly_once_the_terminal_is_restored() {
+            let deferred = Mutex::new(DeferredPanics::default());
+            write_deferred_panics(&deferred, &mut Vec::new()).unwrap();
+
+            for on_ui_thread in [false, true] {
+                let route = route_panic(&deferred, on_ui_thread, Some("worker"), &"late");
+                assert_eq!(route, PanicRoute::Print, "on_ui_thread = {on_ui_thread}");
+            }
+            assert_eq!(
+                deferred.lock().unwrap().reports,
+                [] as [String; 0],
+                "nothing is left for a restore that already ran",
+            );
+        }
     }
 }

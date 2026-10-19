@@ -90,8 +90,6 @@ impl<A: Copy, V> Keymap<A, V> {
 mod tests {
     use super::*;
 
-    // ── Test fixture ──
-
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
     enum TestAction {
         Toggle,
@@ -122,68 +120,78 @@ mod tests {
         Keymap::new(ACTIONS)
     }
 
-    // ── KeyChord::fmt ──
+    mod key_chord {
+        use super::*;
 
-    #[test]
-    fn fmt_names_ctrl_chords_and_plain_keys() {
-        assert_eq!(KeyChord::ctrl('x').to_string(), "Ctrl+X");
-        assert_eq!(KeyChord::plain(KeyCode::Char('y')).to_string(), "Y");
-        assert_eq!(KeyChord::plain(KeyCode::Enter).to_string(), "Enter");
-        assert_eq!(KeyChord::plain(KeyCode::Esc).to_string(), "Esc");
-        assert_eq!(KeyChord::plain(KeyCode::Tab).to_string(), "Tab");
+        mod fmt {
+            use super::*;
+
+            #[test]
+            fn names_ctrl_chords_and_plain_keys() {
+                assert_eq!(KeyChord::ctrl('x').to_string(), "Ctrl+X");
+                assert_eq!(KeyChord::plain(KeyCode::Char('y')).to_string(), "Y");
+                assert_eq!(KeyChord::plain(KeyCode::Enter).to_string(), "Enter");
+                assert_eq!(KeyChord::plain(KeyCode::Esc).to_string(), "Esc");
+                assert_eq!(KeyChord::plain(KeyCode::Tab).to_string(), "Tab");
+            }
+        }
     }
 
-    // ── Keymap::action_for ──
+    mod action_for {
+        use super::*;
 
-    #[test]
-    fn action_for_matches_ctrl_exactly_on_characters_and_ignores_it_on_other_keys() {
-        let keymap = keymap();
-        let press = |code, modifiers| keymap.action_for(&KeyEvent::new(code, modifiers));
+        #[test]
+        fn matches_ctrl_exactly_on_characters_and_ignores_it_on_other_keys() {
+            let keymap = keymap();
+            let press = |code, modifiers| keymap.action_for(&KeyEvent::new(code, modifiers));
 
-        assert_eq!(
-            press(KeyCode::Char('x'), KeyModifiers::CONTROL),
-            Some(TestAction::Toggle),
-        );
-        assert_eq!(press(KeyCode::Char('x'), KeyModifiers::NONE), None);
-        assert_eq!(
-            press(KeyCode::Char('y'), KeyModifiers::NONE),
-            Some(TestAction::Confirm),
-        );
-        assert_eq!(press(KeyCode::Char('y'), KeyModifiers::CONTROL), None);
-        for modifiers in [
-            KeyModifiers::NONE,
-            KeyModifiers::SHIFT,
-            KeyModifiers::CONTROL,
-        ] {
             assert_eq!(
-                press(KeyCode::Enter, modifiers),
-                Some(TestAction::Reset),
-                "{modifiers:?}",
+                press(KeyCode::Char('x'), KeyModifiers::CONTROL),
+                Some(TestAction::Toggle),
+            );
+            assert_eq!(press(KeyCode::Char('x'), KeyModifiers::NONE), None);
+            assert_eq!(
+                press(KeyCode::Char('y'), KeyModifiers::NONE),
+                Some(TestAction::Confirm),
+            );
+            assert_eq!(press(KeyCode::Char('y'), KeyModifiers::CONTROL), None);
+            for modifiers in [
+                KeyModifiers::NONE,
+                KeyModifiers::SHIFT,
+                KeyModifiers::CONTROL,
+            ] {
+                assert_eq!(
+                    press(KeyCode::Enter, modifiers),
+                    Some(TestAction::Reset),
+                    "{modifiers:?}",
+                );
+            }
+            assert_eq!(press(KeyCode::Tab, KeyModifiers::NONE), None);
+        }
+    }
+
+    mod hints {
+        use super::*;
+
+        #[test]
+        fn follow_the_view_and_skip_unlabeled_actions() {
+            let keymap = keymap();
+
+            assert_eq!(
+                keymap.hints(&false).collect::<Vec<_>>(),
+                [
+                    (TestAction::Toggle, "Ctrl+X to start".to_owned()),
+                    (TestAction::Confirm, "Y to confirm".to_owned()),
+                ],
+            );
+            assert_eq!(
+                keymap.hints(&true).collect::<Vec<_>>(),
+                [
+                    (TestAction::Toggle, "Ctrl+X to stop".to_owned()),
+                    (TestAction::Reset, "Enter to reset".to_owned()),
+                    (TestAction::Confirm, "Y to confirm".to_owned()),
+                ],
             );
         }
-        assert_eq!(press(KeyCode::Tab, KeyModifiers::NONE), None);
-    }
-
-    // ── Keymap::hints ──
-
-    #[test]
-    fn hints_follow_the_view_and_skip_unlabeled_actions() {
-        let keymap = keymap();
-
-        assert_eq!(
-            keymap.hints(&false).collect::<Vec<_>>(),
-            [
-                (TestAction::Toggle, "Ctrl+X to start".to_owned()),
-                (TestAction::Confirm, "Y to confirm".to_owned()),
-            ],
-        );
-        assert_eq!(
-            keymap.hints(&true).collect::<Vec<_>>(),
-            [
-                (TestAction::Toggle, "Ctrl+X to stop".to_owned()),
-                (TestAction::Reset, "Enter to reset".to_owned()),
-                (TestAction::Confirm, "Y to confirm".to_owned()),
-            ],
-        );
     }
 }

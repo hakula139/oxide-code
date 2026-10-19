@@ -454,321 +454,349 @@ mod tests {
         (args.collect(), stdin.to_owned())
     }
 
-    async fn copy_with(clipboard: &mut Clipboard, text: &str) -> CopyReport {
-        clipboard.copy(text.to_owned());
-        clipboard.recv().await.expect("the copy reports back")
+    mod terminal {
+        use super::*;
+
+        mod from_vars {
+            use super::*;
+
+            #[test]
+            fn names_the_terminals_without_default_osc52() {
+                assert_eq!(
+                    Terminal::from_vars(Some("Apple_Terminal"), None, Some("xterm-256color")),
+                    Terminal::Apple,
+                );
+                assert_eq!(
+                    Terminal::from_vars(Some("iTerm.app"), None, None),
+                    Terminal::ITerm2
+                );
+                assert_eq!(
+                    Terminal::from_vars(Some("tmux"), Some("iTerm2"), None),
+                    Terminal::ITerm2,
+                    "inside tmux or over SSH only LC_TERMINAL names iTerm2",
+                );
+                assert_eq!(
+                    Terminal::from_vars(None, None, Some("linux")),
+                    Terminal::LinuxConsole
+                );
+                assert_eq!(
+                    Terminal::from_vars(Some("ghostty"), None, Some("xterm-ghostty")),
+                    Terminal::Other
+                );
+            }
+        }
     }
 
-    // ── Terminal::from_vars ──
+    mod copy_error {
+        use super::*;
 
-    #[test]
-    fn from_vars_names_the_terminals_without_default_osc52() {
-        assert_eq!(
-            Terminal::from_vars(Some("Apple_Terminal"), None, Some("xterm-256color")),
-            Terminal::Apple,
-        );
-        assert_eq!(
-            Terminal::from_vars(Some("iTerm.app"), None, None),
-            Terminal::ITerm2
-        );
-        assert_eq!(
-            Terminal::from_vars(Some("tmux"), Some("iTerm2"), None),
-            Terminal::ITerm2,
-            "inside tmux or over SSH only LC_TERMINAL names iTerm2",
-        );
-        assert_eq!(
-            Terminal::from_vars(None, None, Some("linux")),
-            Terminal::LinuxConsole
-        );
-        assert_eq!(
-            Terminal::from_vars(Some("ghostty"), None, Some("xterm-ghostty")),
-            Terminal::Other
-        );
+        #[test]
+        fn messages_name_the_cause() {
+            assert_eq!(
+                CopyError::TooLarge(MAX_TERMINAL_COPY_BYTES + 1).to_string(),
+                "Not copied: the selection is 101 KB, over the 100 KB limit",
+            );
+            assert_eq!(
+                CopyError::Unsupported(Terminal::LinuxConsole).to_string(),
+                "Not copied: the Linux console has no clipboard. Shift-drag to select.",
+            );
+            assert_eq!(
+                CopyError::TimedOut.to_string(),
+                "Not copied: the clipboard did not answer within 2 s",
+            );
+        }
     }
 
-    // ── CopyError ──
+    mod copy_report {
+        use super::*;
 
-    #[test]
-    fn copy_error_messages_name_the_cause() {
-        assert_eq!(
-            CopyError::TooLarge(MAX_TERMINAL_COPY_BYTES + 1).to_string(),
-            "Not copied: the selection is 101 KB, over the 100 KB limit",
-        );
-        assert_eq!(
-            CopyError::Unsupported(Terminal::LinuxConsole).to_string(),
-            "Not copied: the Linux console has no clipboard. Shift-drag to select.",
-        );
-        assert_eq!(
-            CopyError::TimedOut.to_string(),
-            "Not copied: the clipboard did not answer within 2 s",
-        );
+        mod notice {
+            use super::*;
+
+            #[test]
+            fn counts_characters_and_names_the_fix_for_a_failed_copy() {
+                let notice = |chars, outcome| CopyReport { chars, outcome }.notice();
+                let osc52 = |terminal| {
+                    Ok(Delivery::Osc52 {
+                        sequence: String::new(),
+                        terminal,
+                    })
+                };
+
+                assert_eq!(
+                    notice(1, Ok(Delivery::Copied)),
+                    ("Copied 1 character".to_owned(), false)
+                );
+                assert_eq!(
+                    notice(9, osc52(Terminal::Other)),
+                    ("Copied 9 characters".to_owned(), false)
+                );
+                assert_eq!(
+                    notice(9, osc52(Terminal::ITerm2)),
+                    (
+                        "Copied 9 characters \
+                         if iTerm2's \"Applications in terminal may access clipboard\" is on"
+                            .to_owned(),
+                        true,
+                    ),
+                );
+                assert_eq!(
+                    notice(9, Ok(Delivery::TmuxBuffer)),
+                    (
+                        "Copied 9 characters to a tmux buffer. \
+                         tmux 3.2 or later also copies to the clipboard."
+                            .to_owned(),
+                        true,
+                    ),
+                );
+                assert_eq!(
+                    notice(9, Err(CopyError::Unsupported(Terminal::Apple))),
+                    (
+                        "Not copied: Terminal.app ignores OSC 52. \
+                         Fn-drag to select, or press Cmd-R to turn off mouse reporting."
+                            .to_owned(),
+                        true,
+                    ),
+                );
+            }
+        }
     }
 
-    // ── CopyReport::notice ──
+    mod copy {
+        use super::*;
 
-    #[test]
-    fn notice_counts_characters_and_names_the_fix_for_a_failed_copy() {
-        let notice = |chars, outcome| CopyReport { chars, outcome }.notice();
-        let osc52 = |terminal| {
-            Ok(Delivery::Osc52 {
-                sequence: String::new(),
-                terminal,
-            })
-        };
+        async fn copy_with(clipboard: &mut Clipboard, text: &str) -> CopyReport {
+            clipboard.copy(text.to_owned());
+            clipboard.recv().await.expect("the copy reports back")
+        }
 
-        assert_eq!(
-            notice(1, Ok(Delivery::Copied)),
-            ("Copied 1 character".to_owned(), false)
-        );
-        assert_eq!(
-            notice(9, osc52(Terminal::Other)),
-            ("Copied 9 characters".to_owned(), false)
-        );
-        assert_eq!(
-            notice(9, osc52(Terminal::ITerm2)),
-            (
-                "Copied 9 characters \
-                 if iTerm2's \"Applications in terminal may access clipboard\" is on"
-                    .to_owned(),
-                true,
-            ),
-        );
-        assert_eq!(
-            notice(9, Ok(Delivery::TmuxBuffer)),
-            (
-                "Copied 9 characters to a tmux buffer. \
-                 tmux 3.2 or later also copies to the clipboard."
-                    .to_owned(),
-                true,
-            ),
-        );
-        assert_eq!(
-            notice(9, Err(CopyError::Unsupported(Terminal::Apple))),
-            (
-                "Not copied: Terminal.app ignores OSC 52. \
-                 Fn-drag to select, or press Cmd-R to turn off mouse reporting."
-                    .to_owned(),
-                true,
-            ),
-        );
-    }
+        #[tokio::test]
+        async fn in_a_remote_session_sends_osc52() {
+            let mut clipboard = Clipboard::new(REMOTE);
 
-    // ── Clipboard::copy ──
+            let report = copy_with(&mut clipboard, "café").await;
 
-    #[tokio::test]
-    async fn copy_in_a_remote_session_sends_osc52() {
-        let mut clipboard = Clipboard::new(REMOTE);
-
-        let report = copy_with(&mut clipboard, "café").await;
-
-        assert_eq!(
-            report,
-            CopyReport {
-                chars: 4,
-                outcome: Ok(Delivery::Osc52 {
-                    sequence: "\x1b]52;c;Y2Fmw6k=\x07".to_owned(),
-                    terminal: Terminal::Other,
-                }),
-            },
-        );
-    }
-
-    #[tokio::test]
-    async fn copy_inside_tmux_hands_the_text_to_tmux() {
-        let tmux = FakeTmux::new([Ok(())]);
-        let mut clipboard = Clipboard::new(Environment {
-            tmux: true,
-            ..REMOTE
-        });
-        clipboard.tmux = tmux.clone();
-
-        let report = copy_with(&mut clipboard, "text").await;
-
-        assert_eq!(report.outcome, Ok(Delivery::Copied));
-        assert_eq!(tmux.runs(), [load_buffer(&["-w", "-"], "text")]);
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn copy_reports_a_route_that_outlasts_the_timeout() {
-        let mut clipboard = Clipboard::new(Environment {
-            tmux: true,
-            ..REMOTE
-        });
-        clipboard.tmux = Arc::new(PendingTmux);
-
-        let report = copy_with(&mut clipboard, "text").await;
-
-        assert_eq!(report.outcome, Err(CopyError::TimedOut));
-    }
-
-    // ── settle ──
-
-    #[test]
-    fn settle_takes_a_confirmed_route_before_osc52() {
-        let settle_with = |native: Option<Result<(), String>>,
-                           tmux: Option<Result<TmuxLoad, String>>| {
-            settle("text", REMOTE, native.as_ref(), tmux.as_ref())
-        };
-
-        assert_eq!(settle_with(Some(Ok(())), None), Ok(Delivery::Copied));
-        assert_eq!(
-            settle_with(Some(Ok(())), Some(Err("no server running".to_owned()))),
-            Ok(Delivery::Copied),
-            "a native write needs no tmux",
-        );
-        assert_eq!(
-            settle_with(
-                Some(Err("no display".to_owned())),
-                Some(Ok(TmuxLoad::Forwarded))
-            ),
-            Ok(Delivery::Copied),
-        );
-        assert_eq!(
-            settle_with(None, Some(Ok(TmuxLoad::BufferOnly))),
-            Ok(Delivery::TmuxBuffer)
-        );
-        assert!(matches!(
-            settle_with(Some(Err("no display".to_owned())), None),
-            Ok(Delivery::Osc52 { .. })
-        ));
-        let screen = Environment {
-            screen: true,
-            ..REMOTE
-        };
-        assert!(matches!(
-            settle("text", screen, None, None),
-            Ok(Delivery::Osc52 { sequence, .. }) if sequence.starts_with("\x1bP")
-        ));
-    }
-
-    #[test]
-    fn settle_refuses_oversized_text_and_terminals_without_osc52() {
-        let at_limit = "x".repeat(MAX_TERMINAL_COPY_BYTES);
-        let over_limit = "x".repeat(MAX_TERMINAL_COPY_BYTES + 1);
-
-        assert!(settle(&at_limit, REMOTE, None, None).is_ok());
-        assert_eq!(
-            settle(&over_limit, REMOTE, None, None),
-            Err(CopyError::TooLarge(MAX_TERMINAL_COPY_BYTES + 1)),
-        );
-        assert_eq!(
-            settle(&over_limit, REMOTE, Some(&Ok(())), None),
-            Ok(Delivery::Copied),
-            "the native clipboard has no limit",
-        );
-        assert_eq!(
-            settle(
-                "text",
-                Environment {
-                    terminal: Terminal::Apple,
-                    ..REMOTE
+            assert_eq!(
+                report,
+                CopyReport {
+                    chars: 4,
+                    outcome: Ok(Delivery::Osc52 {
+                        sequence: "\x1b]52;c;Y2Fmw6k=\x07".to_owned(),
+                        terminal: Terminal::Other,
+                    }),
                 },
-                Some(&Err("denied".to_owned())),
-                None
-            ),
-            Err(CopyError::Unsupported(Terminal::Apple)),
-        );
-        assert_eq!(
-            settle(
-                "text",
-                Environment {
-                    terminal: Terminal::LinuxConsole,
-                    ..REMOTE
-                },
-                None,
-                None
-            ),
-            Err(CopyError::Unsupported(Terminal::LinuxConsole)),
-        );
+            );
+        }
+
+        #[tokio::test]
+        async fn inside_tmux_hands_the_text_to_tmux() {
+            let tmux = FakeTmux::new([Ok(())]);
+            let mut clipboard = Clipboard::new(Environment {
+                tmux: true,
+                ..REMOTE
+            });
+            clipboard.tmux = tmux.clone();
+
+            let report = copy_with(&mut clipboard, "text").await;
+
+            assert_eq!(report.outcome, Ok(Delivery::Copied));
+            assert_eq!(tmux.runs(), [load_buffer(&["-w", "-"], "text")]);
+        }
+
+        #[tokio::test(start_paused = true)]
+        async fn reports_a_route_that_outlasts_the_timeout() {
+            let mut clipboard = Clipboard::new(Environment {
+                tmux: true,
+                ..REMOTE
+            });
+            clipboard.tmux = Arc::new(PendingTmux);
+
+            let report = copy_with(&mut clipboard, "text").await;
+
+            assert_eq!(report.outcome, Err(CopyError::TimedOut));
+        }
     }
 
-    // ── Program::run ──
+    mod settle {
+        use super::*;
 
-    #[tokio::test]
-    async fn run_feeds_stdin_and_reports_stderr_or_the_exit_status_on_failure() {
-        // `git config --file -` parses its stdin, and every platform the tests run on has git.
-        let git = Program("git");
-        let config = "[a]\n\tb = c\n";
-        let exit_1 = if cfg!(windows) {
-            "exit code: 1"
-        } else {
-            "exit status: 1"
-        };
+        #[test]
+        fn takes_a_confirmed_route_before_osc52() {
+            let settle_with =
+                |native: Option<Result<(), String>>, tmux: Option<Result<TmuxLoad, String>>| {
+                    settle("text", REMOTE, native.as_ref(), tmux.as_ref())
+                };
 
-        assert_eq!(
-            git.run(&["config", "--file", "-", "--get", "a.b"], config)
-                .await,
-            Ok(())
-        );
-        assert_eq!(
-            git.run(
-                &[
-                    "-c",
-                    "alias.fixture=!echo '  fixture error  ' >&2; exit 3",
-                    "fixture",
-                ],
-                "",
-            )
-            .await,
-            Err("fixture error".to_owned()),
-        );
-        assert_eq!(
-            git.run(&["config", "--file", "-", "--get", "a.c"], config)
-                .await,
-            Err(exit_1.to_owned()),
-        );
+            assert_eq!(settle_with(Some(Ok(())), None), Ok(Delivery::Copied));
+            assert_eq!(
+                settle_with(Some(Ok(())), Some(Err("no server running".to_owned()))),
+                Ok(Delivery::Copied),
+                "a native write needs no tmux",
+            );
+            assert_eq!(
+                settle_with(
+                    Some(Err("no display".to_owned())),
+                    Some(Ok(TmuxLoad::Forwarded))
+                ),
+                Ok(Delivery::Copied),
+            );
+            assert_eq!(
+                settle_with(None, Some(Ok(TmuxLoad::BufferOnly))),
+                Ok(Delivery::TmuxBuffer)
+            );
+            assert!(matches!(
+                settle_with(Some(Err("no display".to_owned())), None),
+                Ok(Delivery::Osc52 { .. })
+            ));
+            let screen = Environment {
+                screen: true,
+                ..REMOTE
+            };
+            assert!(matches!(
+                settle("text", screen, None, None),
+                Ok(Delivery::Osc52 { sequence, .. }) if sequence.starts_with("\x1bP")
+            ));
+        }
+
+        #[test]
+        fn refuses_oversized_text_and_terminals_without_osc52() {
+            let at_limit = "x".repeat(MAX_TERMINAL_COPY_BYTES);
+            let over_limit = "x".repeat(MAX_TERMINAL_COPY_BYTES + 1);
+
+            assert!(settle(&at_limit, REMOTE, None, None).is_ok());
+            assert_eq!(
+                settle(&over_limit, REMOTE, None, None),
+                Err(CopyError::TooLarge(MAX_TERMINAL_COPY_BYTES + 1)),
+            );
+            assert_eq!(
+                settle(&over_limit, REMOTE, Some(&Ok(())), None),
+                Ok(Delivery::Copied),
+                "the native clipboard has no limit",
+            );
+            assert_eq!(
+                settle(
+                    "text",
+                    Environment {
+                        terminal: Terminal::Apple,
+                        ..REMOTE
+                    },
+                    Some(&Err("denied".to_owned())),
+                    None
+                ),
+                Err(CopyError::Unsupported(Terminal::Apple)),
+            );
+            assert_eq!(
+                settle(
+                    "text",
+                    Environment {
+                        terminal: Terminal::LinuxConsole,
+                        ..REMOTE
+                    },
+                    None,
+                    None
+                ),
+                Err(CopyError::Unsupported(Terminal::LinuxConsole)),
+            );
+        }
     }
 
-    // ── load_tmux_buffer ──
+    mod program {
+        use super::*;
 
-    #[tokio::test]
-    async fn load_tmux_buffer_retries_without_w_for_tmux_before_3_2() {
-        let old = FakeTmux::new([Err("usage: load-buffer [-b buffer-name] path"), Ok(())]);
-        let down = FakeTmux::new([Err("no server running"), Err("usage: load-buffer")]);
+        mod run {
+            use super::*;
 
-        assert_eq!(
-            load_tmux_buffer(&*old, "text").await,
-            Ok(TmuxLoad::BufferOnly)
-        );
-        assert_eq!(
-            old.runs(),
-            [
-                load_buffer(&["-w", "-"], "text"),
-                load_buffer(&["-"], "text")
-            ]
-        );
-        assert_eq!(
-            load_tmux_buffer(&*down, "text").await,
-            Err("no server running".to_owned()),
-            "the first error explains the failure",
-        );
-        assert_eq!(
-            down.runs(),
-            [
-                load_buffer(&["-w", "-"], "text"),
-                load_buffer(&["-"], "text")
-            ]
-        );
+            #[tokio::test]
+            async fn feeds_stdin_and_reports_stderr_or_the_exit_status_on_failure() {
+                // `git config --file -` parses stdin, and every platform the tests run on has git.
+                let git = Program("git");
+                let config = "[a]\n\tb = c\n";
+                let exit_1 = if cfg!(windows) {
+                    "exit code: 1"
+                } else {
+                    "exit status: 1"
+                };
+
+                assert_eq!(
+                    git.run(&["config", "--file", "-", "--get", "a.b"], config)
+                        .await,
+                    Ok(())
+                );
+                assert_eq!(
+                    git.run(
+                        &[
+                            "-c",
+                            "alias.fixture=!echo '  fixture error  ' >&2; exit 3",
+                            "fixture",
+                        ],
+                        "",
+                    )
+                    .await,
+                    Err("fixture error".to_owned()),
+                );
+                assert_eq!(
+                    git.run(&["config", "--file", "-", "--get", "a.c"], config)
+                        .await,
+                    Err(exit_1.to_owned()),
+                );
+            }
+        }
     }
 
-    // ── osc52_sequence ──
+    mod load_tmux_buffer {
+        use super::*;
 
-    #[test]
-    fn osc52_sequence_inside_screen_splits_into_dcs_passthrough_strings() {
-        let text = "x".repeat(60);
-        let encoded = STANDARD.encode(&text);
-        assert_eq!(encoded.len(), 80);
+        #[tokio::test]
+        async fn retries_without_w_for_tmux_before_3_2() {
+            let old = FakeTmux::new([Err("usage: load-buffer [-b buffer-name] path"), Ok(())]);
+            let down = FakeTmux::new([Err("no server running"), Err("usage: load-buffer")]);
 
-        let sequence = osc52_sequence(&text, true);
+            assert_eq!(
+                load_tmux_buffer(&*old, "text").await,
+                Ok(TmuxLoad::BufferOnly)
+            );
+            assert_eq!(
+                old.runs(),
+                [
+                    load_buffer(&["-w", "-"], "text"),
+                    load_buffer(&["-"], "text")
+                ]
+            );
+            assert_eq!(
+                load_tmux_buffer(&*down, "text").await,
+                Err("no server running".to_owned()),
+                "the first error explains the failure",
+            );
+            assert_eq!(
+                down.runs(),
+                [
+                    load_buffer(&["-w", "-"], "text"),
+                    load_buffer(&["-"], "text")
+                ]
+            );
+        }
+    }
 
-        assert_eq!(
-            sequence,
-            format!(
-                "\x1bP\x1b]52;c;{}\x1b\\\x1bP{}\x07\x1b\\",
-                &encoded[..76],
-                &encoded[76..],
-            ),
-        );
-        assert_eq!(osc52_sequence("x", false), "\x1b]52;c;eA==\x07");
+    mod osc52_sequence {
+        use super::*;
+
+        #[test]
+        fn inside_screen_splits_into_dcs_passthrough_strings() {
+            let text = "x".repeat(60);
+            let encoded = STANDARD.encode(&text);
+            assert_eq!(encoded.len(), 80);
+
+            let sequence = osc52_sequence(&text, true);
+
+            assert_eq!(
+                sequence,
+                format!(
+                    "\x1bP\x1b]52;c;{}\x1b\\\x1bP{}\x07\x1b\\",
+                    &encoded[..76],
+                    &encoded[76..],
+                ),
+            );
+            assert_eq!(osc52_sequence("x", false), "\x1b]52;c;eA==\x07");
+        }
     }
 }

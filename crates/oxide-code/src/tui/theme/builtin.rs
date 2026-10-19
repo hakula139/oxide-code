@@ -50,19 +50,22 @@ pub(super) fn lookup(name: &str) -> Option<&'static str> {
 mod tests {
     use super::*;
 
-    // ── lookup ──
+    mod lookup {
+        use super::*;
 
-    #[test]
-    fn lookup_finds_each_builtin_by_name() {
-        for BuiltinTheme { name, body, .. } in BUILT_IN {
-            let resolved = lookup(name).unwrap_or_else(|| panic!("lookup({name:?}) returned None"));
-            assert_eq!(resolved, *body, "wrong body for {name:?}");
+        #[test]
+        fn finds_each_builtin_by_name() {
+            for BuiltinTheme { name, body, .. } in BUILT_IN {
+                let resolved =
+                    lookup(name).unwrap_or_else(|| panic!("lookup({name:?}) returned None"));
+                assert_eq!(resolved, *body, "wrong body for {name:?}");
+            }
         }
-    }
 
-    #[test]
-    fn lookup_unknown_name_is_absent() {
-        assert!(lookup("solarized").is_none());
-        assert!(lookup("").is_none());
+        #[test]
+        fn unknown_name_is_absent() {
+            assert!(lookup("solarized").is_none());
+            assert!(lookup("").is_none());
+        }
     }
 }
