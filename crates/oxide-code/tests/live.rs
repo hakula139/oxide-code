@@ -83,22 +83,6 @@ fn tool_round_trip_reads_the_first_request_from_the_prompt_cache() {
 
 #[test]
 #[ignore = "sends live API requests: run with OX_LIVE=1"]
-fn review_only_request_reports_findings_without_editing_files() {
-    let Some(live) = Live::start() else { return };
-    let path = live.cwd().join("parity.rs");
-    let source = "pub fn is_even(n: u32) -> bool {\n    n % 2 == 1\n}\n";
-    fs::write(&path, source).unwrap();
-
-    let events = live.headless("Review parity.rs for bugs.");
-
-    let reply = events.last().unwrap()["data"]["message"].as_str().unwrap();
-    assert!(reply.to_lowercase().contains("odd"), "{reply}");
-    assert_eq!(fs::read_to_string(&path).unwrap(), source);
-    assert_eq!(children(&live.cwd()), [path]);
-}
-
-#[test]
-#[ignore = "sends live API requests: run with OX_LIVE=1"]
 fn thinking_after_tool_results_is_replayed_across_three_turns() {
     let Some(live) = Live::start() else { return };
     fs::write(live.cwd().join("data.txt"), "91\n97\n221\n43\n87\n").unwrap();

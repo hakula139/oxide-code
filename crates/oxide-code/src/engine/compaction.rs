@@ -1867,6 +1867,17 @@ mod tests {
     }
 
     #[test]
+    fn build_user_message_asks_which_checks_ran() {
+        let message = build_user_message(None);
+
+        let prose = message.split_whitespace().collect::<Vec<_>>().join(" ");
+        assert!(
+            prose.contains("which checks passed, failed, or have not run"),
+            "{message}"
+        );
+    }
+
+    #[test]
     fn build_user_message_with_instructions_appends_them_under_an_anchor() {
         let message = build_user_message(Some("  focus on the build error\n"));
 

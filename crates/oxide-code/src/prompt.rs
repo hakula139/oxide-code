@@ -641,8 +641,8 @@ mod tests {
                     "Report a task as done only after the checks that prove it",
                     "Create commits only when the user asks.",
                     "without references to the change, the task, or an issue number",
-                    "Don't leave commented-out code.",
-                    "Write tests that fail against a plausible bug",
+                    "Delete code instead of commenting it out.",
+                    "Tests you write must fail against a plausible bug",
                 ],
             ),
             (
@@ -654,8 +654,8 @@ mod tests {
                 "OUTPUT_EFFICIENCY",
                 OUTPUT_EFFICIENCY,
                 &[
-                    "close with what you verified and how",
-                    "what you did not verify",
+                    "task that changed files or ran commands, close with what you verified and how",
+                    "Skip this for questions.",
                 ],
             ),
         ];
