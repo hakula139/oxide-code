@@ -27,13 +27,13 @@ Before 0.1.0, config, environment variable, and session format changes may freel
 
 ## Changelog
 
-[git-cliff](https://git-cliff.org) drafts each release's `CHANGELOG.md` section from `cliff.toml`, and the release PR curates the draft into the published notes. Curate a section only in its release PR, after the script runs, and never regenerate an older section. The GitHub Release keeps its own copy of the notes, so a later PR that corrects a published section also needs `gh release edit vX.Y.Z --notes-file <(parse-changelog CHANGELOG.md X.Y.Z)` once it merges. `cargo install parse-changelog` provides the parser `release.yml` uses.
+[git-cliff](https://git-cliff.org) drafts each release's `CHANGELOG.md` section from `cliff.toml`, and the release PR curates the draft into the published notes. Curate a section only in its release PR after git-cliff drafts it, and never regenerate an older section. The GitHub Release keeps its own copy of the notes, so a later PR that corrects a published section also needs `gh release edit vX.Y.Z --notes-file <(parse-changelog CHANGELOG.md X.Y.Z)` once it merges. `cargo install parse-changelog` provides the parser `release.yml` uses.
 
 - Each squash-merged PR title becomes one draft entry, so write titles for users.
 - `feat`, `fix`, `perf`, and `revert` titles appear under Added, Fixed, Changed, and Removed, respectively. Titles with `!` appear under Breaking changes. All other types are skipped, including routine `chore(deps)` and `chore(flake)` bumps. Use `fix(deps): ...` for a bump that fixes an advisory or changes behavior in the shipped `ox`. `.github/dependabot.yml` applies this title to every Cargo security update. npm packages are development tools that never ship in `ox`, so their bumps remain `chore`, including advisory fixes.
 - Within each group, the draft lists unscoped entries first, then the rest sorted by scope in merge order, so related entries sit together. Each `(#N)` links to its PR.
 - A stable section includes every change since the previous stable release. A prerelease section includes only changes since the previous tag.
-- A highlights file passed to the script holds only bullets, which render under `### Highlights` at the top of the section. The merged section is their only source, and the [tag](#tag) annotation is extracted from it.
+- Highlights passed to git-cliff hold only bullets, which render under `### Highlights` at the top of the section. Their only source is the merged section, from which the [tag](#tag) annotation is extracted.
 - `--prepend` adds one section while preserving the rest. Avoid `--output CHANGELOG.md`, which regenerates the whole file with a single tag pattern, so it drops every curated section and compare link, along with either the prerelease sections or the stable roll-ups.
 
 ### Curate the Section
@@ -52,18 +52,53 @@ The draft lists PR titles, which are short and written for reviewers at merge ti
 ## Prepare a Release
 
 1. Branch off `main` as `chore/release-vX.Y.Z`.
-2. Inside the Nix dev shell, which provides git-cliff, run:
+
+2. Set `version` under `[workspace.package]` in `Cargo.toml` to `X.Y.Z`, then refresh `Cargo.lock`:
 
    ```bash
-   ./scripts/prepare-release.sh vX.Y.Z [highlights.md]
+   cargo update --workspace
    ```
 
-   The script sets `workspace.package.version`, refreshes `Cargo.lock`, prepends the changelog section with its compare link, and points the `VERSION=` install snippets in `README.md` and `docs/guide/install.md` at the tag. For a stable tag, it also adds the release's [session resume fixture](docs/design/session/persistence.md#compatibility), records how the fixture resumes, and fails if an earlier release's fixture now resumes differently. For a notable release, pass a Markdown file that lists the highlights as bullets.
+3. Pin the install snippets to the tag by setting the `VERSION=` line in `README.md` and `docs/guide/install.md` to `VERSION=vX.Y.Z`.
 
-3. [Curate the section](#curate-the-section) that the script prepended.
-4. Run the [verification block](AGENTS.md#verification). Because `cspell` scans `CHANGELOG.md`, add any unknown words from the section to `.cspell/words.txt`.
-5. Commit, then open a PR titled `chore(release): vX.Y.Z`. Its title becomes the squash commit on `main`. Record the checks in the PR's Test plan. The diff should touch only `Cargo.toml`, `Cargo.lock`, `CHANGELOG.md`, `README.md`, `docs/guide/install.md`, and possibly `.cspell/words.txt`, plus, for a stable tag, the new fixture under `crates/oxide-code/src/session/fixtures/` and its snapshot.
-6. Merge after CI passes and the review is approved. If another PR merges first, recreate the branch from `main` and run the script again because updating the branch leaves a section that misses the new commit. Carry the curated entries over from the old branch, then curate the new ones.
+4. For a stable tag, add the release's [session resume fixture](docs/design/session/persistence.md#compatibility), which is the byte-compatibility snapshot with its insta header deleted by `sed` from the first line through the second `---` line. `INSTA_UPDATE=unseen` then records how the new fixture resumes, while still failing if an earlier release's fixture now resumes differently:
+
+   ```bash
+   session=crates/oxide-code/src/session
+   mkdir -p "$session/fixtures"
+   sed '1,/^---$/d' "$session/snapshots/ox__session__handle__tests__session_writes_every_entry_type_as_byte_compatible_jsonl.snap" >"$session/fixtures/vX.Y.Z.jsonl"
+   INSTA_UPDATE=unseen cargo test --bin ox session_resumes_from_every_release_fixture
+   ```
+
+5. Inside the Nix dev shell, which provides git-cliff, prepend the changelog section. Because `cliff.toml` bounds sections at stable tags only, a prerelease adds a `--tag-pattern` that bounds its section at every tag:
+
+   ```bash
+   git cliff --unreleased --tag vX.Y.Z --prepend CHANGELOG.md                                # Stable
+   git cliff --unreleased --tag vX.Y.Z --tag-pattern '^v[0-9]+\.' --prepend CHANGELOG.md     # Prerelease
+   ```
+
+   For a notable release, list the highlights as Markdown bullets in `highlights.md` and add `--with-tag-message="$(<highlights.md)"`. The `=` form prevents a message starting with a `-` bullet from parsing as a flag.
+
+6. Because `--prepend` writes no compare link, add the section's link reference above the first one at the end of `CHANGELOG.md`. A stable release compares against the previous stable tag, and a prerelease against the previous tag:
+
+   ```bash
+   git describe --tags --abbrev=0 --match 'v[0-9]*' --exclude '*-*'    # Previous stable tag
+   git describe --tags --abbrev=0 --match 'v[0-9]*'                    # Previous tag
+   ```
+
+   ```markdown
+   [X.Y.Z]: https://github.com/hakula139/oxide-code/compare/<previous-tag>..vX.Y.Z
+   ```
+
+   When the stable lookup finds no tag, as for `v0.1.0`, link `https://github.com/hakula139/oxide-code/releases/tag/vX.Y.Z` instead.
+
+7. [Curate the section](#curate-the-section) that git-cliff prepended.
+
+8. Run the [verification block](AGENTS.md#verification). Because `cspell` scans `CHANGELOG.md`, add any unknown words from the section to `.cspell/words.txt`.
+
+9. Commit, then open a PR titled `chore(release): vX.Y.Z`, whose title becomes the squash commit title on `main`. Record the checks in the PR's Test plan. The diff should touch only `Cargo.toml`, `Cargo.lock`, `CHANGELOG.md`, `README.md`, `docs/guide/install.md`, and possibly `.cspell/words.txt`, plus, for a stable tag, the new fixture under `crates/oxide-code/src/session/fixtures/` and its snapshot.
+
+10. Merge after CI passes and the review is approved. If another PR merges first, recreate the branch from `main` and repeat the steps before curation, because updating the branch leaves a section that misses the new commit. Carry the curated entries over from the old branch, then curate the new ones.
 
 ## Tag
 
@@ -119,7 +154,7 @@ Before tagging `v0.1.0`:
 - A whole-repo review at the rc commit has no open findings. Fix each finding or file it into the milestone.
 - The rc serves as the daily driver for the full soak without a new bug.
 
-The `v0.1.0` release PR also switches the install snippets to `releases/latest/download/`, then removes the `VERSION=` lines and the step in `scripts/prepare-release.sh` that rewrites them. Because it adds the first session resume fixture, it also drops `allow_empty_glob` from the fixture test in `crates/oxide-code/src/session/handle.rs`, so the test fails again when no fixture matches.
+The `v0.1.0` release PR also switches the install snippets to `releases/latest/download/`, then removes the `VERSION=` lines and the [Prepare a Release](#prepare-a-release) step that pins them. Because it adds the first session resume fixture, it also drops `allow_empty_glob` from the fixture test in `crates/oxide-code/src/session/handle.rs`, so the test fails again when no fixture matches.
 
 ## Targets
 
