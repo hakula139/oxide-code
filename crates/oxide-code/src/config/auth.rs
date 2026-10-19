@@ -215,8 +215,7 @@ impl Auth {
         }
     }
 
-    /// Waits for a stored login's reload in flight, so the rotated tokens reach its store before
-    /// the session ends.
+    /// Waits for a stored login's reload in flight, which ends once its rotated tokens are stored.
     pub(crate) async fn settle(&self) {
         if let Secret::Stored(login) = &self.secret {
             login.settle().await;

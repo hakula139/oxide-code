@@ -191,6 +191,13 @@ impl Client {
         self.auth = auth;
     }
 
+    /// Waits for a reload of the stored login in flight, as [`Auth::settle`] does.
+    pub(crate) async fn settle_auth(&self) {
+        if let Some(auth) = &self.auth {
+            auth.settle().await;
+        }
+    }
+
     /// Streams one request. The receiver closes when the stream ends, the receiver is dropped, or
     /// an unrecoverable error is forwarded as a final `Err`.
     ///

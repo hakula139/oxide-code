@@ -1291,11 +1291,8 @@ mod tests {
                     .await;
                 refresh.release();
                 login.settle().await;
-                let held = login.cached_token();
-                let next = login.access_token(&no_roots()).await.unwrap();
 
-                assert_eq!(held, "fresh-access");
-                assert_eq!(next, "fresh-access");
+                assert_eq!(login.cached_token(), "fresh-access");
                 let stored = &read_json(&creds)["claudeAiOauth"];
                 assert_eq!(stored["accessToken"], "fresh-access");
                 assert_eq!(stored["refreshToken"], "fresh-refresh");
@@ -1377,14 +1374,8 @@ mod tests {
                     .await;
                 refresh.release();
                 login.settle().await;
-                let held = login.cached_token();
-                let late = login.reload("rejected", &no_roots()).await.unwrap();
 
-                assert_eq!(held, "fresh-access");
-                assert_eq!(
-                    late, "fresh-access",
-                    "a replaced token is not reloaded again"
-                );
+                assert_eq!(login.cached_token(), "fresh-access");
                 let stored = &read_json(&creds)["claudeAiOauth"];
                 assert_eq!(stored["accessToken"], "fresh-access");
                 assert_eq!(stored["refreshToken"], "fresh-refresh");

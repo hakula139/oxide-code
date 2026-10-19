@@ -715,7 +715,7 @@ impl Engine {
         self.adopt_mode(&mut inbox);
         match signed_in {
             Ok(Ok(auth)) => {
-                self.adopt_login(sink, auth);
+                self.adopt_login(sink, auth).await;
                 TurnEnd::Completed
             }
             Ok(Err(e)) => report_abort(sink, sign_in_failed(&e), "login-failed"),
@@ -724,10 +724,12 @@ impl Engine {
     }
 
     /// Uses a new oxide-code login for requests unless an env var or `client.api_key` outranks it.
-    fn adopt_login(&mut self, sink: &dyn EventSink, auth: Auth) {
+    /// First waits for the replaced login's reload in flight, which exiting no longer waits for.
+    async fn adopt_login(&mut self, sink: &dyn EventSink, auth: Auth) {
         let active = match self.client.auth_source() {
             Some(source) if !source.is_stored_login() => source,
             _ => {
+                self.client.settle_auth().await;
                 self.client.set_auth(Some(auth));
                 AuthSource::OxLogin
             }
@@ -862,18 +864,16 @@ impl Engine {
         self.title_usage = None;
     }
 
-    /// Ends the background shells, then flushes and closes the live session, returning the write
-    /// failure if any. Then waits for a stored-login reload still in flight, such as one the
-    /// aborted title request started, so exiting does not cancel its write-back.
+    /// Ends the background shells, flushes and closes the live session, then waits for a
+    /// stored-login reload still in flight, such as one the aborted title request started, so
+    /// exiting does not cancel its write-back. Returns the session's write failure, if any.
     async fn finalize(self) -> Option<String> {
         self.shells.stop_all().await;
         let failure = self
             .session
             .finalize(self.file_tracker.snapshot_all())
             .await;
-        if let Ok(auth) = self.client.auth() {
-            auth.settle().await;
-        }
+        self.client.settle_auth().await;
         failure
     }
 }
@@ -1028,6 +1028,7 @@ mod tests {
         test_config, text_stream_body,
     };
     use crate::config::compaction::{CompactionConfig, test_thresholds};
+    use crate::config::oauth::testing::{HeldRefresh, ox_login_in, write_creds};
     use crate::config::{Effort, PromptCacheTtl};
     use crate::file_tracker::testing::seed_full_read;
     use crate::message::{Replay, Role};
@@ -1043,7 +1044,7 @@ mod tests {
     use crate::tool::tasks::TasksTool;
     use crate::tool::tasks::testing::plan;
     use crate::util::git::testing::{init_fixture_repo, with_isolated_git_env_async};
-    use crate::util::tls::testing::NoRoots;
+    use crate::util::tls::testing::{NoRoots, no_roots};
 
     const TITLE_MODEL: &str = "claude-haiku-5-5";
 
@@ -3919,14 +3920,14 @@ mod tests {
             let sink = CapturingSink::default();
             let ox_login = || Auth::new(AuthSource::OxLogin, "ox-token");
 
-            engine.adopt_login(&sink, ox_login());
+            engine.adopt_login(&sink, ox_login()).await;
             assert_eq!(engine.client.auth_source(), Some(AuthSource::ApiKeyEnv));
             for before in [
                 None,
                 Some(Auth::new(AuthSource::ClaudeCodeLogin, "claude-code-token")),
             ] {
                 engine.client.set_auth(before);
-                engine.adopt_login(&sink, ox_login());
+                engine.adopt_login(&sink, ox_login()).await;
                 assert_eq!(engine.client.auth().unwrap().secret(), "ox-token");
             }
 
@@ -3948,6 +3949,37 @@ mod tests {
                 ),
                 "{events:?}"
             );
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn adopt_login_waits_for_the_replaced_login_reload_a_dropped_request_left_in_flight() {
+        with_pinned_home(async {
+            let server = MockServer::start().await;
+            let refresh = HeldRefresh::mount(&server).await;
+            let dir = tempfile::tempdir().unwrap();
+            let mut engine = engine(server.uri(), &test_store(dir.path()), dir.path()).await;
+            let creds = dir.path().join("credentials.json");
+            write_creds(&creds, "expired", Some("old-refresh"), 0);
+            let replaced = ox_login_in(&creds, &server.uri(), "expired", 0);
+            engine.client.set_auth(Some(replaced.clone()));
+            let sink = CapturingSink::default();
+
+            refresh
+                .abort_mid_refresh({
+                    let replaced = replaced.clone();
+                    async move { replaced.credential(&no_roots()).await }
+                })
+                .await;
+            refresh.release();
+            engine
+                .adopt_login(&sink, Auth::new(AuthSource::OxLogin, "ox-token"))
+                .await;
+
+            assert_eq!(replaced.secret(), "fresh-access");
+            assert_eq!(engine.client.auth().unwrap().secret(), "ox-token");
+            server.verify().await;
         })
         .await;
     }
