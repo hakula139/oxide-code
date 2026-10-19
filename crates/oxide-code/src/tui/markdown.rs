@@ -22,7 +22,8 @@ pub(super) fn render_markdown(input: &str, theme: &Theme, width: usize) -> Text<
 }
 
 /// Renders markdown like [`render_markdown`] for the body of a block styled `base`, such as
-/// thinking. Text without a color of its own takes `base`.
+/// thinking. Text without a color of its own takes `base`, while quoted text takes `muted` over a
+/// `base` with no color or in `text`, and `base` itself otherwise.
 pub(super) fn render_markdown_on(
     input: &str,
     theme: &Theme,
