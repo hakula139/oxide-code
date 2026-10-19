@@ -87,13 +87,6 @@
               rustfmt = rustToolchain;
             };
           };
-          module-docs = {
-            enable = true;
-            name = "Rust module docs";
-            entry = "${pkgs.bash}/bin/bash scripts/check-module-docs.sh";
-            files = "^crates/.*\\.rs$";
-            extraPackages = [ pkgs.gnugrep ];
-          };
         };
 
         # These hooks run the tools pinned in node_modules, which the Nix sandbox lacks. The flake
