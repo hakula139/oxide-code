@@ -3,9 +3,11 @@
 use anyhow::{Context, Result, bail};
 use indoc::indoc;
 use serde::Deserialize;
+use tokio::sync::oneshot;
 use tracing::warn;
 use unicode_width::UnicodeWidthStr;
 
+use super::entry::UsageRecord;
 use super::handle::SessionHandle;
 use crate::client::anthropic::Client;
 use crate::client::anthropic::wire::OutputFormat;
@@ -46,33 +48,45 @@ const SYSTEM_PROMPT: &str = indoc! {r#"
 // ── Public API ──
 
 /// Spawns a task that asks Haiku for a title, appends it to `session`, and emits
-/// `SessionTitleUpdated` through `sink`. Finalizing `session` aborts the task. A generation failure
-/// only warns, while an append failure shows as a session write error.
-pub(crate) fn spawn<S>(client: Client, session: SessionHandle, sink: S, first_prompt: String)
+/// `SessionTitleUpdated` through `sink`. The returned receiver gets the usage the response reports,
+/// even for a reply that holds no title. Finalizing `session` aborts the task. A generation failure
+/// only warns, while a write failure shows as a session write error.
+pub(crate) fn spawn<S>(
+    client: Client,
+    session: SessionHandle,
+    sink: S,
+    first_prompt: String,
+) -> oneshot::Receiver<UsageRecord>
 where
     S: EventSink + Clone + Send + 'static,
 {
+    let (billed, usage) = oneshot::channel();
     let owner = session.clone();
     let task = tokio::spawn(async move {
-        if let Err(e) = generate_and_record(&client, &session, &sink, &first_prompt).await {
+        if let Err(e) = generate_and_record(&client, &session, &sink, &first_prompt, billed).await {
             warn!("AI title generation failed: {e:#}");
         }
     });
     owner.set_title_task(task);
+    usage
 }
 
 // ── Generation ──
 
 /// Asks Haiku for a title, then appends it and notifies `sink` unless a `/rename` won the race.
+/// Sends the request's usage on `billed` and records it in `session` before parsing the reply,
+/// since the API bills a reply that holds no title. The send goes first, so a `/rename` that
+/// aborts the task during the write still leaves the cost counted.
 async fn generate_and_record(
     client: &Client,
     session: &SessionHandle,
     sink: &impl EventSink,
     first_prompt: &str,
+    billed: oneshot::Sender<UsageRecord>,
 ) -> Result<()> {
     let prompt = truncate_prompt(first_prompt, MAX_PROMPT_CHARS);
     let output_format = title_output_format();
-    let raw = client
+    let (raw, usage) = client
         .complete(
             &ModelSpec::resolve(HAIKU_MODEL.to_owned()),
             SYSTEM_PROMPT,
@@ -83,6 +97,18 @@ async fn generate_and_record(
         )
         .await
         .context("Haiku completion failed")?;
+
+    if let Some(tokens) = usage {
+        let record = UsageRecord {
+            model: HAIKU_MODEL.to_owned(),
+            cache_ttl: client.prompt_cache_ttl(),
+            tokens,
+        };
+        _ = billed.send(record.clone());
+        let outcome = session.record_usage(vec![record]).await;
+        sink.session_write_error(outcome.failure.as_deref());
+    }
+
     let title = parse_title(&raw).context("Haiku returned a malformed title")?;
 
     if session.manual_title_set() {
@@ -181,7 +207,7 @@ mod tests {
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
     use super::*;
-    use crate::client::anthropic::testing::{completion_body, test_client};
+    use crate::client::anthropic::testing::{COMPLETION_USAGE, completion_body, test_client};
     use crate::config::auth::{Auth, AuthSource};
     use crate::message::Message;
     use crate::protocol::testing::CapturingSink;
@@ -198,6 +224,15 @@ mod tests {
         )
     }
 
+    /// The usage record of one title request that `client` sent.
+    fn title_record(client: &Client) -> UsageRecord {
+        UsageRecord {
+            model: HAIKU_MODEL.to_owned(),
+            cache_ttl: client.prompt_cache_ttl(),
+            tokens: COMPLETION_USAGE,
+        }
+    }
+
     /// Session handle with one recorded message, so `append_ai_title` writes to an existing file.
     async fn prepared_session(dir: &Path) -> SessionHandle {
         let store = test_store(dir);
@@ -209,7 +244,7 @@ mod tests {
     // ── spawn ──
 
     #[tokio::test]
-    async fn spawn_success_notifies_sink_with_session_title_event() {
+    async fn spawn_success_notifies_sink_and_delivers_the_request_usage() {
         let server = MockServer::start().await;
         Mock::given(method("POST"))
             .and(wm_path("/v1/messages"))
@@ -224,9 +259,10 @@ mod tests {
         let session = prepared_session(dir.path()).await;
         let session_id = session.session_id().to_owned();
         let client = title_client(server.uri());
+        let billed = title_record(&client);
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
 
-        spawn(client, session, tx, "first prompt".to_owned());
+        let usage = spawn(client, session, tx, "first prompt".to_owned());
 
         assert_eq!(
             rx.recv().await,
@@ -236,10 +272,11 @@ mod tests {
             }),
         );
         assert_eq!(rx.recv().await, None);
+        assert_eq!(usage.await.unwrap(), billed);
     }
 
     #[tokio::test]
-    async fn spawn_error_does_not_emit_session_title_event() {
+    async fn spawn_error_emits_no_title_event_and_bills_nothing() {
         // A 400 is fatal, so the task fails without waiting out the retry backoff.
         let server = MockServer::start().await;
         Mock::given(method("POST"))
@@ -254,9 +291,10 @@ mod tests {
         let client = title_client(server.uri());
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
 
-        spawn(client, session, tx, "first prompt".to_owned());
+        let usage = spawn(client, session, tx, "first prompt".to_owned());
 
         assert_eq!(rx.recv().await, None);
+        assert!(usage.await.is_err(), "a failed request bills nothing");
     }
 
     // ── generate_and_record ──
@@ -283,9 +321,15 @@ mod tests {
         let client = title_client(server.uri());
         let sink = CapturingSink::default();
 
-        generate_and_record(&client, &session, &sink, "first prompt")
-            .await
-            .unwrap();
+        generate_and_record(
+            &client,
+            &session,
+            &sink,
+            "first prompt",
+            oneshot::channel().0,
+        )
+        .await
+        .unwrap();
 
         let events = sink.events();
         assert!(
@@ -297,7 +341,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn generate_and_record_skips_emit_when_manual_title_was_set_during_haiku_call() {
+    async fn generate_and_record_bills_but_skips_emit_when_renamed_during_haiku_call() {
         let server = MockServer::start().await;
         Mock::given(method("POST"))
             .and(wm_path("/v1/messages"))
@@ -314,8 +358,9 @@ mod tests {
 
         let client = title_client(server.uri());
         let sink = CapturingSink::default();
+        let (billed, usage) = oneshot::channel();
 
-        generate_and_record(&client, &session, &sink, "first prompt")
+        generate_and_record(&client, &session, &sink, "first prompt", billed)
             .await
             .unwrap();
 
@@ -326,6 +371,11 @@ mod tests {
                 .any(|e| matches!(e, Event::SessionTitleUpdated { .. })),
             "AI title must not emit when manual title is already set: {events:?}",
         );
+        assert_eq!(usage.await.unwrap(), title_record(&client));
+        let data = test_store(dir.path())
+            .load_session_data(session.session_id())
+            .unwrap();
+        assert_eq!(data.usage, [title_record(&client)]);
     }
 
     #[tokio::test]
@@ -347,7 +397,7 @@ mod tests {
         let client = title_client(server.uri());
         let sink = CapturingSink::default();
 
-        generate_and_record(&client, &session, &sink, "prompt")
+        generate_and_record(&client, &session, &sink, "prompt", oneshot::channel().0)
             .await
             .unwrap();
 
@@ -361,7 +411,43 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn generate_and_record_conversational_reply_bails_without_updating_title() {
+    async fn generate_and_record_titles_a_reply_without_usage_and_bills_nothing() {
+        let server = MockServer::start().await;
+        let body = serde_json::json!({
+            "content": [{"type": "text", "text": r#"{"title":"Fix auth"}"#}],
+        });
+        Mock::given(method("POST"))
+            .and(wm_path("/v1/messages"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(body))
+            .mount(&server)
+            .await;
+
+        let dir = tempfile::tempdir().unwrap();
+        let session = prepared_session(dir.path()).await;
+        let client = title_client(server.uri());
+        let sink = CapturingSink::default();
+        let (billed, usage) = oneshot::channel();
+
+        generate_and_record(&client, &session, &sink, "first prompt", billed)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            sink.events(),
+            [Event::SessionTitleUpdated {
+                session_id: session.session_id().to_owned(),
+                title: "Fix auth".to_owned(),
+            }],
+        );
+        assert!(usage.await.is_err(), "no usage, no record");
+        let data = test_store(dir.path())
+            .load_session_data(session.session_id())
+            .unwrap();
+        assert_eq!(data.usage, []);
+    }
+
+    #[tokio::test]
+    async fn generate_and_record_conversational_reply_bails_without_a_title_but_bills_it() {
         let server = MockServer::start().await;
         Mock::given(method("POST"))
             .and(wm_path("/v1/messages"))
@@ -375,10 +461,12 @@ mod tests {
         let session = prepared_session(dir.path()).await;
         let client = title_client(server.uri());
         let sink = CapturingSink::default();
+        let (billed, usage) = oneshot::channel();
 
-        let err = generate_and_record(&client, &session, &sink, "hi")
+        let err = generate_and_record(&client, &session, &sink, "hi", billed)
             .await
             .expect_err("plain prose must fail parsing");
+
         assert!(format!("{err:#}").contains("title envelope"));
         assert!(
             !sink
@@ -387,10 +475,15 @@ mod tests {
                 .any(|e| matches!(e, Event::SessionTitleUpdated { .. })),
             "no title event on parse failure",
         );
+        assert_eq!(usage.await.unwrap(), title_record(&client));
+        let data = test_store(dir.path())
+            .load_session_data(session.session_id())
+            .unwrap();
+        assert_eq!(data.usage, [title_record(&client)]);
     }
 
     #[tokio::test]
-    async fn generate_and_record_surfaces_an_append_failure_before_the_title_event() {
+    async fn generate_and_record_surfaces_a_write_failure_before_the_title_event() {
         let server = MockServer::start().await;
         Mock::given(method("POST"))
             .and(wm_path("/v1/messages"))
@@ -405,9 +498,15 @@ mod tests {
         let client = title_client(server.uri());
         let sink = CapturingSink::default();
 
-        generate_and_record(&client, &session, &sink, "first prompt")
-            .await
-            .unwrap();
+        generate_and_record(
+            &client,
+            &session,
+            &sink,
+            "first prompt",
+            oneshot::channel().0,
+        )
+        .await
+        .unwrap();
 
         assert_eq!(
             sink.events(),
@@ -439,7 +538,7 @@ mod tests {
         let client = title_client(server.uri());
         let sink = CapturingSink::default();
 
-        let err = generate_and_record(&client, &session, &sink, "hi")
+        let err = generate_and_record(&client, &session, &sink, "hi", oneshot::channel().0)
             .await
             .expect_err("HTTP error must propagate");
         assert_eq!(

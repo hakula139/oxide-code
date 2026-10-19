@@ -83,6 +83,7 @@ pub(crate) async fn engine(base_url: String, store: &SessionStore, cwd: &Path) -
         last_usage: None,
         displayed_usage: None,
         total_estimated_cost_usd: 0.0,
+        title_usage: None,
     }
 }
 
