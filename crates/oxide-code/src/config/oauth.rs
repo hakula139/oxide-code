@@ -5,7 +5,7 @@ use std::fmt;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result, anyhow, bail};
 use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex;
 use tracing::{debug, warn};
@@ -96,20 +96,39 @@ pub(super) enum LoginError {
     /// The token expired, and no refresh token is stored.
     #[error("{0} has expired. {step}", step = .0.sign_in_step())]
     Expired(Login),
+    /// `transient` when the token endpoint sent no response or a server error, so a later attempt
+    /// may succeed.
     #[error(
         "{}",
         join_sentences(
-            &format!("failed to refresh the expired {}: {:#}", .0, .1),
-            .0.sign_in_step(),
+            &format!("failed to refresh the expired {}: {:#}", .login, .error),
+            .login.sign_in_step(),
         )
     )]
-    RefreshFailed(Login, anyhow::Error),
+    RefreshFailed {
+        login: Login,
+        error: anyhow::Error,
+        transient: bool,
+    },
     /// The stored login exists but cannot be read or parsed.
     #[error(
         "{}",
         join_sentences(&format!("failed to load the {}: {:#}", .0, .1), .0.sign_in_step())
     )]
     Unreadable(Login, anyhow::Error),
+}
+
+impl LoginError {
+    /// Whether a later attempt may load the token without the user signing in again.
+    pub(super) const fn is_transient(&self) -> bool {
+        matches!(
+            self,
+            Self::RefreshFailed {
+                transient: true,
+                ..
+            }
+        )
+    }
 }
 
 // ── Credential Types ──
@@ -289,7 +308,7 @@ impl SessionLogin<'static> {
     ) -> Result<Self, LoginError> {
         let store =
             Store::locate(login, keychain.0).map_err(|e| LoginError::Unreadable(login, e))?;
-        let token = load_token_from(&store, OAUTH_TOKEN_URL, trust).await?;
+        let token = load_token_from(&store, OAUTH_TOKEN_URL, trust, None).await?;
         Ok(Self::new(store, OAUTH_TOKEN_URL, token))
     }
 }
@@ -320,13 +339,14 @@ impl<'a> SessionLogin<'a> {
     pub(super) async fn access_token(&self, trust: &dyn Trust) -> Result<String, LoginError> {
         let mut token = self.token.lock().await;
         if is_near_expiry(token.expires_at_ms) {
-            *token = load_token_from(&self.store, &self.refresh_url, trust).await?;
+            *token = load_token_from(&self.store, &self.refresh_url, trust, None).await?;
         }
         Ok(token.access_token.clone())
     }
 
-    /// Reloads the token after the API rejected `rejected`, picking up one another process
-    /// refreshed. Once another request has replaced `rejected`, returns its token unread.
+    /// A token to send in place of `rejected`, which the API rejected with HTTP 401: one another
+    /// process stored, or else one refreshed whatever the stored expiry. Once another request has
+    /// replaced `rejected`, returns its token unread.
     pub(super) async fn reload(
         &self,
         rejected: &str,
@@ -334,7 +354,7 @@ impl<'a> SessionLogin<'a> {
     ) -> Result<String, LoginError> {
         let mut token = self.token.lock().await;
         if token.access_token == rejected {
-            *token = load_token_from(&self.store, &self.refresh_url, trust).await?;
+            *token = load_token_from(&self.store, &self.refresh_url, trust, Some(rejected)).await?;
         }
         Ok(token.access_token.clone())
     }
@@ -342,13 +362,24 @@ impl<'a> SessionLogin<'a> {
 
 // ── Token Loading ──
 
+/// Loads the stored token, refreshing it near expiry. A token the API rejected, `rejected`,
+/// counts as expired, so it is refreshed whatever its expiry and never returned.
 async fn load_token_from(
     store: &Store<'_>,
     refresh_url: &str,
     trust: &dyn Trust,
+    rejected: Option<&str>,
 ) -> Result<Token, LoginError> {
     let login = store.login;
-    let oauth = load_credentials(store)?.oauth;
+    let load = || {
+        load_credentials(store).map(|mut creds| {
+            if rejected == Some(creds.oauth.access_token.as_str()) {
+                creds.oauth.expires_at = 0;
+            }
+            creds
+        })
+    };
+    let oauth = load()?.oauth;
     if !is_near_expiry(oauth.expires_at_ms()) {
         return Ok(oauth.into_token());
     }
@@ -358,19 +389,23 @@ async fn load_token_from(
 
     let _lock = match acquire_lock(&store.lock).await {
         Ok(lock) => lock,
-        Err(e) => {
+        Err(error) => {
             // The lock holder may have written a fresh token before releasing.
-            let oauth = load_credentials(store)?.oauth;
+            let oauth = load()?.oauth;
             if is_expired(oauth.expires_at_ms()) {
-                return Err(LoginError::RefreshFailed(login, e));
+                return Err(LoginError::RefreshFailed {
+                    login,
+                    error,
+                    transient: false,
+                });
             }
-            warn!("skipping OAuth token refresh, using existing: {e:#}");
+            warn!("skipping OAuth token refresh, using existing: {error:#}");
             return Ok(oauth.into_token());
         }
     };
 
     // A sibling process may have refreshed while this one waited on the lock.
-    let creds = load_credentials(store)?;
+    let creds = load()?;
     let expires_at_ms = creds.oauth.expires_at_ms();
     if !is_near_expiry(expires_at_ms) {
         return Ok(creds.oauth.into_token());
@@ -388,9 +423,15 @@ async fn load_token_from(
             }
             Ok(token)
         }
-        Err(e) if is_expired(expires_at_ms) => Err(LoginError::RefreshFailed(login, e)),
-        Err(e) => {
-            warn!("failed to refresh OAuth token, using existing: {e:#}");
+        Err(TokenRequestError { error, transient }) if is_expired(expires_at_ms) => {
+            Err(LoginError::RefreshFailed {
+                login,
+                error,
+                transient,
+            })
+        }
+        Err(TokenRequestError { error, .. }) => {
+            warn!("failed to refresh OAuth token, using existing: {error:#}");
             Ok(creds.oauth.into_token())
         }
     }
@@ -605,14 +646,16 @@ pub(super) async fn exchange_code(
         client_id: OAUTH_CLIENT_ID,
         grant,
     };
-    request_tokens(url, "token exchange", &request, trust).await
+    request_tokens(url, "token exchange", &request, trust)
+        .await
+        .map_err(|e| e.error)
 }
 
 async fn refresh_oauth_token(
     url: &str,
     refresh_token: &str,
     trust: &dyn Trust,
-) -> Result<TokenResponse> {
+) -> Result<TokenResponse, TokenRequestError> {
     let scope = OAUTH_SCOPES.join(" ");
     let request = RefreshRequest {
         grant_type: "refresh_token",
@@ -623,13 +666,30 @@ async fn refresh_oauth_token(
     request_tokens(url, "token refresh", &request, trust).await
 }
 
+/// A failed token request.
+#[cfg_attr(test, derive(Debug))]
+struct TokenRequestError {
+    error: anyhow::Error,
+    /// The endpoint sent no response or a server error, so the request may succeed when sent again.
+    transient: bool,
+}
+
+impl From<anyhow::Error> for TokenRequestError {
+    fn from(error: anyhow::Error) -> Self {
+        Self {
+            error,
+            transient: false,
+        }
+    }
+}
+
 /// Posts `body` to the token endpoint. `what` names the request in errors.
 async fn request_tokens(
     url: &str,
     what: &str,
     body: &impl Serialize,
     trust: &dyn Trust,
-) -> Result<TokenResponse> {
+) -> Result<TokenResponse, TokenRequestError> {
     let client = trust
         .apply(reqwest::Client::builder().timeout(TOKEN_REQUEST_TIMEOUT))?
         .build()
@@ -640,21 +700,29 @@ async fn request_tokens(
         .json(body)
         .send()
         .await
-        .with_context(|| format!("failed to send {what} request"))?;
+        .with_context(|| format!("failed to send {what} request"))
+        .map_err(|error| TokenRequestError {
+            error,
+            transient: true,
+        })?;
 
-    if !response.status().is_success() {
-        let status = response.status();
+    let status = response.status();
+    if !status.is_success() {
         let body = response.text().await.unwrap_or_default();
-        match body.trim() {
-            "" => bail!("{what} failed with {status}"),
-            body => bail!("{what} failed with {status}: {body}"),
-        }
+        let error = match body.trim() {
+            "" => anyhow!("{what} failed with {status}"),
+            body => anyhow!("{what} failed with {status}: {body}"),
+        };
+        return Err(TokenRequestError {
+            error,
+            transient: status.is_server_error(),
+        });
     }
 
-    response
+    Ok(response
         .json()
         .await
-        .with_context(|| format!("failed to parse {what} response"))
+        .with_context(|| format!("failed to parse {what} response"))?)
 }
 
 fn write_refreshed_credentials(
@@ -1139,6 +1207,7 @@ mod tests {
             &store(None, &creds, &lock),
             "http://should-not-be-called",
             &NoRoots,
+            None,
         )
         .await
         .unwrap();
@@ -1159,7 +1228,7 @@ mod tests {
             now_millis().unwrap() + 1_000,
         );
 
-        let token = load_token_from(&store(None, &creds, &lock), &server.uri(), &NoRoots)
+        let token = load_token_from(&store(None, &creds, &lock), &server.uri(), &NoRoots, None)
             .await
             .unwrap();
         assert_eq!(token.access_token, "fresh-access");
@@ -1191,6 +1260,7 @@ mod tests {
             &store(Some(&keychain), &creds, &lock),
             &server.uri(),
             &NoRoots,
+            None,
         )
         .await
         .unwrap();
@@ -1221,6 +1291,7 @@ mod tests {
             &store(Some(&keychain), &creds, &lock),
             &server.uri(),
             &NoRoots,
+            None,
         )
         .await
         .unwrap();
@@ -1251,6 +1322,7 @@ mod tests {
             &store(Some(&keychain), &creds, &lock),
             &server.uri(),
             &NoRoots,
+            None,
         )
         .await
         .unwrap();
@@ -1275,6 +1347,7 @@ mod tests {
             &store(Some(&keychain), &creds, &lock),
             "http://unused",
             &NoRoots,
+            None,
         )
         .await
         .unwrap();
@@ -1299,6 +1372,7 @@ mod tests {
             &store(Some(&keychain), &creds, &lock),
             &server.uri(),
             &NoRoots,
+            None,
         )
         .await
         .unwrap();
@@ -1316,6 +1390,7 @@ mod tests {
             &store(None, &creds, &lock),
             "http://should-not-be-called",
             &NoRoots,
+            None,
         )
         .await
         .unwrap();
@@ -1341,7 +1416,7 @@ mod tests {
             now_millis().unwrap() + 60_000,
         );
 
-        let token = load_token_from(&store(None, &creds, &lock), &server.uri(), &NoRoots)
+        let token = load_token_from(&store(None, &creds, &lock), &server.uri(), &NoRoots, None)
             .await
             .unwrap();
         assert_eq!(token.access_token, "stale");
@@ -1359,6 +1434,7 @@ mod tests {
             &store(None, &creds, &lock),
             "http://should-not-be-called",
             &NoRoots,
+            None,
         )
         .await
         .unwrap();
@@ -1372,7 +1448,7 @@ mod tests {
         let lock = dir.path().join("lock");
         write_creds(&creds, "tok", None, 0);
 
-        let err = load_token_from(&store(None, &creds, &lock), "http://unused", &NoRoots)
+        let err = load_token_from(&store(None, &creds, &lock), "http://unused", &NoRoots, None)
             .await
             .expect_err("expired without refresh must bail");
         assert!(
@@ -1395,11 +1471,18 @@ mod tests {
         let lock = dir.path().join("lock");
         write_creds(&creds, "dead", Some("old"), 0);
 
-        let err = load_token_from(&store(None, &creds, &lock), &server.uri(), &NoRoots)
+        let err = load_token_from(&store(None, &creds, &lock), &server.uri(), &NoRoots, None)
             .await
             .expect_err("expired + refresh down must bail");
         assert!(
-            matches!(err, LoginError::RefreshFailed(Login::ClaudeCode, _)),
+            matches!(
+                err,
+                LoginError::RefreshFailed {
+                    login: Login::ClaudeCode,
+                    transient: true,
+                    ..
+                }
+            ),
             "{err:?}"
         );
         assert_eq!(
@@ -1423,10 +1506,11 @@ mod tests {
         let lock = dir.path().join("lock");
         write_creds(&creds, "dead", Some("old"), 0);
 
-        let err = load_token_from(&store(None, &creds, &lock), &server.uri(), &NoRoots)
+        let err = load_token_from(&store(None, &creds, &lock), &server.uri(), &NoRoots, None)
             .await
             .expect_err("expired + refresh rejected must bail");
 
+        assert!(!err.is_transient(), "{err:?}");
         assert_eq!(
             format!("{err:#}"),
             "failed to refresh the expired Claude Code login: \
@@ -1447,11 +1531,19 @@ mod tests {
             &store(None, &creds, &lock),
             "http://should-not-be-called",
             &NoRoots,
+            None,
         )
         .await
         .expect_err("expired + lock held must bail");
         assert!(
-            matches!(err, LoginError::RefreshFailed(Login::ClaudeCode, _)),
+            matches!(
+                err,
+                LoginError::RefreshFailed {
+                    login: Login::ClaudeCode,
+                    transient: false,
+                    ..
+                }
+            ),
             "{err:?}"
         );
         assert_eq!(
@@ -1486,6 +1578,7 @@ mod tests {
             &store(None, &creds, &lock),
             "http://should-not-be-called",
             &NoRoots,
+            None,
         )
         .await
         .unwrap();
@@ -1517,6 +1610,7 @@ mod tests {
             &store(None, &creds, &lock),
             "http://should-not-be-called",
             &NoRoots,
+            None,
         )
         .await
         .unwrap();
@@ -1536,9 +1630,14 @@ mod tests {
         );
 
         for keychain in [None, Some(&empty as &dyn Keychain)] {
-            let err = load_token_from(&store(keychain, &missing, &lock), "http://unused", &NoRoots)
-                .await
-                .expect_err("no login anywhere");
+            let err = load_token_from(
+                &store(keychain, &missing, &lock),
+                "http://unused",
+                &NoRoots,
+                None,
+            )
+            .await
+            .expect_err("no login anywhere");
             assert!(matches!(err, LoginError::Missing), "{err:?}");
         }
 
@@ -1546,6 +1645,7 @@ mod tests {
             &store(Some(&denying), &missing, &lock),
             "http://unused",
             &NoRoots,
+            None,
         )
         .await
         .expect_err("a denied Keychain and no file");
@@ -1555,6 +1655,7 @@ mod tests {
             &store(Some(&garbled), &missing, &lock),
             "http://unused",
             &NoRoots,
+            None,
         )
         .await
         .expect_err("an unparsable Keychain entry and no file");
@@ -1572,6 +1673,7 @@ mod tests {
             &store(Some(&empty), &unreadable, &lock),
             "http://unused",
             &NoRoots,
+            None,
         )
         .await
         .expect_err("an unreadable credentials file");
@@ -1731,9 +1833,10 @@ mod tests {
         let err = refresh_oauth_token(&server.uri(), "bad", &NoRoots)
             .await
             .expect_err("expected HTTP error");
-        let msg = format!("{err:#}");
+        let msg = format!("{:#}", err.error);
         assert!(msg.contains("401"), "status: {msg}");
         assert!(msg.contains("invalid_grant"), "body: {msg}");
+        assert!(!err.transient, "a 4xx needs a new sign-in");
     }
 
     #[tokio::test]
@@ -1748,7 +1851,8 @@ mod tests {
         let err = refresh_oauth_token(&server.uri(), "tok", &NoRoots)
             .await
             .expect_err("expected parse error");
-        assert!(format!("{err:#}").contains("parse"));
+        assert!(format!("{:#}", err.error).contains("parse"));
+        assert!(!err.transient, "a malformed reply is not retried");
     }
 
     #[tokio::test]
@@ -1787,7 +1891,7 @@ mod tests {
         )
         .await
         .expect_err("missing CA bundle must error");
-        let msg = format!("{err:#}");
+        let msg = format!("{:#}", err.error);
         assert!(msg.contains("failed to read extra CA bundle"), "{msg}");
         assert!(msg.contains("/definitely/does/not/exist.pem"), "{msg}");
     }

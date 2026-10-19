@@ -10,7 +10,11 @@
 
 Credentials resolve in this order: `ANTHROPIC_AUTH_TOKEN`, `ANTHROPIC_API_KEY`, `client.api_key`, `CLAUDE_CODE_OAUTH_TOKEN`, the oxide-code login, then the Claude Code login. Both stored logins use the same refresh path, with a separate file and lock for each.
 
-A session loads its stored login at startup or sign-in, keeping the access token and its expiry in memory. A request made within 5 minutes of that expiry first reloads the login from its store, which refreshes the token and writes it back unless another process already has. When the API rejects a stored login with HTTP 401, the session reloads it once, picking up a token another process refreshed, and resends the request once. A second 401 reports the login's sign-in step. Because every copy of the client shares the token, concurrent requests, such as the title request during a turn, wait for a single refresh. Env vars and `client.api_key` are never reloaded, and their 401 fails at once.
+A session loads its stored login at startup or sign-in, keeping the access token and its expiry in memory. A request made within 5 minutes of that expiry first reloads the login from its store, which refreshes the token and writes it back unless another process has already done so. Because every copy of the client shares the token, concurrent requests, such as the title request during a turn, wait for a single refresh.
+
+When the API rejects a stored login with HTTP 401, the session reloads it and resends the request once, using the token another process stored or, if the store still holds the rejected token, one refreshed regardless of its expiry. If that refresh fails or no refresh token is stored, nothing is resent, and the error names the login's sign-in step, as it does when the resent request also gets a 401. Env vars and `client.api_key` are never reloaded, and their 401 fails at once.
+
+A refresh required by a request, whether for an expired token or after a 401, retries the request with backoff when the token endpoint sends no response or a server error, as a transient API failure does. Any other refresh failure ends the request with the sign-in step.
 
 ## Design Decisions
 
@@ -28,7 +32,9 @@ A session loads its stored login at startup or sign-in, keeping the access token
 
 7. **TUI only.** `-p` runs no slash commands, and the `--no-tui` REPL runs only the typed session and model commands. To sign in for those modes, run `ox` once and use `/login`, or set `CLAUDE_CODE_OAUTH_TOKEN`.
 
-8. **Requests read the store only near expiry.** Claude Code refreshes its login whenever a request falls within 5 minutes of expiry, so a long session never sees the token expire. oxide-code does the same using the expiry it holds in memory, because reading the macOS Keychain on every request is slow and can prompt.
+8. **Requests read the store only near expiry or after a 401.** Claude Code refreshes its login whenever a request falls within 5 minutes of expiry, so a long session never sees the token expire. Because reading the macOS Keychain on every request is slow and can prompt, oxide-code does the same using the expiry it holds in memory.
+
+9. **A 401 refreshes the login whatever its expiry.** Because the API can reject a token that the local clock still counts as valid, for example when the two clocks disagree, counting a rejected token as expired lets the session recover without a new sign-in while the refresh token still works.
 
 ## Out of Scope
 

@@ -183,7 +183,8 @@ impl Auth {
         }
     }
 
-    /// The credential the next request sends, refreshing a stored login near expiry first.
+    /// The credential the next request sends, refreshing a stored login near expiry first. When
+    /// the refresh fails for a reason a later attempt may clear, [`is_transient`] says so.
     pub(crate) async fn credential(&self, trust: &dyn Trust) -> Result<Credential> {
         let secret = match &self.secret {
             Secret::Fixed(secret) => secret.clone(),
@@ -193,7 +194,9 @@ impl Auth {
     }
 
     /// The credential to resend a request with after the API rejected `rejected` with HTTP 401: a
-    /// stored login reloaded from its store. `None` for other credentials and for a failed reload.
+    /// stored login's token that another process stored or a refresh issued. `None` for other
+    /// credentials and for a login that cannot be refreshed. When the refresh fails for a reason a
+    /// later attempt may clear, [`is_transient`] says so.
     pub(crate) async fn reload(
         &self,
         rejected: &Credential,
@@ -204,6 +207,7 @@ impl Auth {
         };
         match login.reload(&rejected.secret, trust).await {
             Ok(secret) => Credential::new(self.source, secret).map(Some),
+            Err(e) if e.is_transient() => Err(e.into()),
             Err(e) => {
                 warn!("failed to reload the stored login after HTTP 401: {e:#}");
                 Ok(None)
@@ -218,6 +222,14 @@ impl fmt::Debug for Auth {
             .field("source", &self.source)
             .finish_non_exhaustive()
     }
+}
+
+/// Whether `error`, from [`Auth::credential`] or [`Auth::reload`], is a stored login's refresh
+/// that a later attempt may complete.
+pub(crate) fn is_transient(error: &anyhow::Error) -> bool {
+    error
+        .downcast_ref::<LoginError>()
+        .is_some_and(LoginError::is_transient)
 }
 
 // ── Credential ──
@@ -380,7 +392,7 @@ async fn load_login(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::oauth::testing::ox_login_in;
+    use crate::config::oauth::testing::{ox_login_in, write_creds};
     use crate::util::tls::testing::NoRoots;
 
     const ALL_SOURCES: [AuthSource; 6] = [
@@ -556,6 +568,28 @@ mod tests {
 
             assert!(reloaded.is_none(), "{auth:?}");
         }
+    }
+
+    #[tokio::test]
+    async fn reload_fails_transiently_when_the_token_endpoint_sends_no_response() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("credentials.json");
+        write_creds(&file, "rejected", Some("ref"), 9_999_999_999_999);
+        let auth = ox_login_in(
+            &file,
+            "http://127.0.0.1:9/token",
+            "rejected",
+            9_999_999_999_999,
+        );
+        let rejected = auth.credential(&NoRoots).await.unwrap();
+
+        let err = auth
+            .reload(&rejected, &NoRoots)
+            .await
+            .err()
+            .expect("the refresh of the rejected token fails");
+
+        assert!(is_transient(&err), "{err:#}");
     }
 
     // ── Auth::fmt ──

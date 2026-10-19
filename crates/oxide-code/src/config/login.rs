@@ -277,8 +277,8 @@ mod tests {
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
     use super::*;
-    use crate::config::auth::{self, AuthSource};
-    use crate::config::oauth::ClaudeCodeKeychain;
+    use crate::config::auth::AuthSource;
+    use crate::config::oauth::{ClaudeCodeKeychain, Login, SessionLogin};
     use crate::util::tls::testing::NoRoots;
 
     /// A token endpoint nothing listens on, for flows that end before the exchange.
@@ -378,7 +378,7 @@ mod tests {
                 (
                     auth,
                     reply,
-                    auth::stored_login(ClaudeCodeKeychain::NONE, &NoRoots).await,
+                    SessionLogin::load(Login::Ox, ClaudeCodeKeychain::NONE, &NoRoots).await,
                 )
             })
             .await;
@@ -392,7 +392,7 @@ mod tests {
             )),
             "{reply}"
         );
-        assert_eq!(reloaded.unwrap().secret(), "fresh-access");
+        assert_eq!(reloaded.unwrap().cached_token(), "fresh-access");
         let stored: serde_json::Value = serde_json::from_str(
             &std::fs::read_to_string(data.path().join("ox").join("credentials.json")).unwrap(),
         )
