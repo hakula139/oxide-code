@@ -169,7 +169,7 @@ pub(super) async fn post_messages(
     request: &MessagesRequest,
     retry: u32,
 ) -> Result<reqwest::Response, AttemptError> {
-    let trust = request.trust.as_ref();
+    let trust = &request.trust;
     let credential = request
         .auth
         .credential(trust)

@@ -497,6 +497,8 @@ fn evaluation_error(code: isize, description: &str) -> Error {
 
 #[cfg(test)]
 pub(crate) mod testing {
+    use std::sync::Arc;
+
     use anyhow::Result;
     use reqwest::ClientBuilder;
 
@@ -513,6 +515,11 @@ pub(crate) mod testing {
         fn apply(&self, builder: ClientBuilder) -> Result<ClientBuilder> {
             Ok(builder.no_proxy().tls_certs_only([]))
         }
+    }
+
+    /// [`NoRoots`] behind the `Arc` that stored-login refreshes take.
+    pub(crate) fn no_roots() -> Arc<dyn Trust> {
+        Arc::new(NoRoots)
     }
 }
 

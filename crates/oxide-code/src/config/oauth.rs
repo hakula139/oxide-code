@@ -3,11 +3,12 @@
 
 use std::fmt;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow, bail};
 use serde::{Deserialize, Serialize};
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, OwnedMutexGuard};
 use tracing::{debug, warn};
 
 #[cfg(target_os = "macos")]
@@ -206,6 +207,7 @@ impl fmt::Display for Backend<'_> {
 
 /// Where one login lives: an optional Keychain entry read first, then a file holding Claude Code's
 /// credentials JSON, plus the lock directory that serializes writes across processes.
+#[derive(Clone)]
 struct Store<'a> {
     login: Login,
     keychain: Option<&'a dyn Keychain>,
@@ -272,10 +274,7 @@ impl Store<'_> {
 }
 
 /// Stores tokens from `/login` as the oxide-code login, which refreshes at `token_url`.
-pub(super) async fn save_login(
-    tokens: &TokenResponse,
-    token_url: &str,
-) -> Result<SessionLogin<'static>> {
+pub(super) async fn save_login(tokens: &TokenResponse, token_url: &str) -> Result<SessionLogin> {
     let store = Store::locate(Login::Ox, None)?;
     let token = store.save(tokens).await?;
     Ok(SessionLogin::new(store, token_url, token))
@@ -290,14 +289,14 @@ pub(crate) async fn delete_login() -> Result<bool> {
 
 /// A stored login as a session sends it: the store it lives in, the endpoint that refreshes it,
 /// and its current access token. The store is read again only near expiry or after a 401.
-pub(super) struct SessionLogin<'a> {
-    store: Store<'a>,
+pub(super) struct SessionLogin {
+    store: Store<'static>,
     refresh_url: String,
     /// Held across each reload, so concurrent requests wait for a single refresh.
-    token: Mutex<Token>,
+    token: Arc<Mutex<Token>>,
 }
 
-impl SessionLogin<'static> {
+impl SessionLogin {
     /// Loads the login, refreshing it near expiry. The Claude Code login reads `keychain` first,
     /// then `~/.claude/.credentials.json`. The oxide-code login reads
     /// `$XDG_DATA_HOME/ox/credentials.json`.
@@ -311,14 +310,12 @@ impl SessionLogin<'static> {
         let token = load_token_from(&store, OAUTH_TOKEN_URL, trust, None).await?;
         Ok(Self::new(store, OAUTH_TOKEN_URL, token))
     }
-}
 
-impl<'a> SessionLogin<'a> {
-    fn new(store: Store<'a>, refresh_url: &str, token: Token) -> Self {
+    fn new(store: Store<'static>, refresh_url: &str, token: Token) -> Self {
         Self {
             store,
             refresh_url: refresh_url.to_owned(),
-            token: Mutex::new(token),
+            token: Arc::new(Mutex::new(token)),
         }
     }
 
@@ -336,12 +333,12 @@ impl<'a> SessionLogin<'a> {
     }
 
     /// The access token for the next request, reloaded from the store first when it nears expiry.
-    pub(super) async fn access_token(&self, trust: &dyn Trust) -> Result<String, LoginError> {
-        let mut token = self.token.lock().await;
-        if is_near_expiry(token.expires_at_ms) {
-            *token = load_token_from(&self.store, &self.refresh_url, trust, None).await?;
+    pub(super) async fn access_token(&self, trust: &Arc<dyn Trust>) -> Result<String, LoginError> {
+        let token = Arc::clone(&self.token).lock_owned().await;
+        if !is_near_expiry(token.expires_at_ms) {
+            return Ok(token.access_token.clone());
         }
-        Ok(token.access_token.clone())
+        self.reload_detached(token, trust, None).await
     }
 
     /// A token to send in place of `rejected`, which the API rejected with HTTP 401: one another
@@ -350,13 +347,36 @@ impl<'a> SessionLogin<'a> {
     pub(super) async fn reload(
         &self,
         rejected: &str,
-        trust: &dyn Trust,
+        trust: &Arc<dyn Trust>,
     ) -> Result<String, LoginError> {
-        let mut token = self.token.lock().await;
-        if token.access_token == rejected {
-            *token = load_token_from(&self.store, &self.refresh_url, trust, Some(rejected)).await?;
+        let token = Arc::clone(&self.token).lock_owned().await;
+        if token.access_token != rejected {
+            return Ok(token.access_token.clone());
         }
-        Ok(token.access_token.clone())
+        self.reload_detached(token, trust, Some(rejected)).await
+    }
+
+    /// Reloads `token` from the store on a task of its own, which holds the lock until it finishes.
+    /// A refresh invalidates the stored refresh token, so the rotated tokens must reach the store
+    /// and `token` even when the request awaiting them is dropped. The task is never aborted, so
+    /// it fails only by panicking, which resumes in the caller.
+    async fn reload_detached(
+        &self,
+        mut token: OwnedMutexGuard<Token>,
+        trust: &Arc<dyn Trust>,
+        rejected: Option<&str>,
+    ) -> Result<String, LoginError> {
+        let store = self.store.clone();
+        let refresh_url = self.refresh_url.clone();
+        let trust = Arc::clone(trust);
+        let rejected = rejected.map(str::to_owned);
+        tokio::spawn(async move {
+            *token =
+                load_token_from(&store, &refresh_url, trust.as_ref(), rejected.as_deref()).await?;
+            Ok(token.access_token.clone())
+        })
+        .await
+        .unwrap_or_else(|e| std::panic::resume_unwind(e.into_panic()))
     }
 }
 
@@ -888,9 +908,10 @@ pub(crate) mod testing {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::{Arc, Mutex};
+    use std::sync::{Arc, Mutex, mpsc};
 
     use indoc::indoc;
+    use tokio::sync::Notify;
     use wiremock::matchers::{method, path as wm_path};
     use wiremock::{Mock, MockServer, Request, ResponseTemplate};
 
@@ -898,7 +919,7 @@ mod tests {
     use super::*;
     use crate::util::path::testing::{HOME_VAR, abs};
     use crate::util::tls::PlatformTrust;
-    use crate::util::tls::testing::{NoRoots, TEST_CA_PEM};
+    use crate::util::tls::testing::{NoRoots, TEST_CA_PEM, no_roots};
 
     fn store<'a>(keychain: Option<&'a dyn Keychain>, file: &Path, lock: &Path) -> Store<'a> {
         Store {
@@ -907,6 +928,10 @@ mod tests {
             file: file.to_owned(),
             lock: lock.to_owned(),
         }
+    }
+
+    fn read_json(path: &Path) -> serde_json::Value {
+        serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap()
     }
 
     struct FakeKeychain {
@@ -1073,12 +1098,12 @@ mod tests {
     mod session_login {
         use super::*;
 
-        fn session_login<'a>(
-            store: Store<'a>,
+        fn session_login(
+            store: Store<'static>,
             refresh_url: &str,
             access_token: &str,
             expires_at_ms: u64,
-        ) -> SessionLogin<'a> {
+        ) -> SessionLogin {
             let token = Token {
                 access_token: access_token.to_owned(),
                 expires_at_ms,
@@ -1128,7 +1153,7 @@ mod tests {
                     9_999_999_999_999,
                 );
 
-                let token = login.access_token(&NoRoots).await.unwrap();
+                let token = login.access_token(&no_roots()).await.unwrap();
 
                 assert_eq!(token, "held");
             }
@@ -1150,15 +1175,15 @@ mod tests {
                 let near_expiry = now_millis().unwrap() + 60_000;
                 // The refused write-back leaves the store stale, so only the shared token
                 // stops a second refresh.
-                let keychain = FakeKeychain {
+                let keychain: &'static FakeKeychain = Box::leak(Box::new(FakeKeychain {
                     writable: false,
                     ..FakeKeychain::holding(
                         creds_json("stale", Some("old-refresh"), near_expiry).to_string(),
                     )
-                };
+                }));
                 let login = session_login(
                     store(
-                        Some(&keychain),
+                        Some(keychain),
                         &dir.path().join("creds.json"),
                         &dir.path().join("lock"),
                     ),
@@ -1166,12 +1191,64 @@ mod tests {
                     "stale",
                     near_expiry,
                 );
+                let trust = no_roots();
 
                 let (first, second) =
-                    tokio::join!(login.access_token(&NoRoots), login.access_token(&NoRoots),);
+                    tokio::join!(login.access_token(&trust), login.access_token(&trust));
 
                 assert_eq!(first.unwrap(), "fresh-access");
                 assert_eq!(second.unwrap(), "fresh-access");
+                server.verify().await;
+            }
+
+            #[tokio::test]
+            async fn dropped_mid_refresh_still_stores_and_holds_the_rotated_tokens() {
+                let server = MockServer::start().await;
+                let arrived = Arc::new(Notify::new());
+                let (release, gate) = mpsc::channel::<()>();
+                let (notify, gate) = (Arc::clone(&arrived), Mutex::new(gate));
+                Mock::given(method("POST"))
+                    .and(wm_path("/"))
+                    .respond_with(move |_: &Request| {
+                        notify.notify_one();
+                        // Blocks only the mock server's own thread, until `release` drops.
+                        _ = gate.lock().unwrap().recv();
+                        ResponseTemplate::new(200).set_body_json(ok_refresh_body(
+                            "fresh-access",
+                            "fresh-refresh",
+                            3600,
+                        ))
+                    })
+                    .expect(1)
+                    .mount(&server)
+                    .await;
+                let dir = tempfile::tempdir().unwrap();
+                let creds = dir.path().join("creds.json");
+                write_creds(&creds, "expired", Some("old-refresh"), 0);
+                let login = Arc::new(session_login(
+                    store(None, &creds, &dir.path().join("lock")),
+                    &server.uri(),
+                    "expired",
+                    0,
+                ));
+                let trust = no_roots();
+
+                let request = tokio::spawn({
+                    let (login, trust) = (Arc::clone(&login), Arc::clone(&trust));
+                    async move { login.access_token(&trust).await }
+                });
+                arrived.notified().await;
+                request.abort();
+                assert!(request.await.unwrap_err().is_cancelled());
+                drop(release);
+                let held = login.token.lock().await.access_token.clone();
+                let next = login.access_token(&trust).await.unwrap();
+
+                assert_eq!(held, "fresh-access");
+                assert_eq!(next, "fresh-access");
+                let stored = &read_json(&creds)["claudeAiOauth"];
+                assert_eq!(stored["accessToken"], "fresh-access");
+                assert_eq!(stored["refreshToken"], "fresh-refresh");
                 server.verify().await;
             }
         }
@@ -1191,9 +1268,9 @@ mod tests {
                     9_999_999_999_999,
                 );
 
-                let reloaded = login.reload("rejected", &NoRoots).await.unwrap();
+                let reloaded = login.reload("rejected", &no_roots()).await.unwrap();
                 write_creds(&creds, "rotated-again", Some("ref"), 9_999_999_999_999);
-                let late = login.reload("rejected", &NoRoots).await.unwrap();
+                let late = login.reload("rejected", &no_roots()).await.unwrap();
 
                 assert_eq!(reloaded, "rotated");
                 assert_eq!(late, "rotated", "a replaced token is not reloaded again");
@@ -1203,10 +1280,6 @@ mod tests {
 
     mod load_token_from {
         use super::*;
-
-        fn read_json(path: &Path) -> serde_json::Value {
-            serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap()
-        }
 
         async fn mock_refresh_server() -> MockServer {
             let server = MockServer::start().await;
