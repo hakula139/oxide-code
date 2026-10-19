@@ -100,6 +100,7 @@
                 nodejs_24
                 pnpm
               ];
+
               text = ''
                 if [ ! -d node_modules ]; then
                   echo "node_modules is missing. Run pnpm install, then commit again." >&2
@@ -124,6 +125,7 @@
             entry = nodeHook "cspell" "cspell --no-must-find-files --no-progress";
             types = [ "text" ];
           };
+
           markdownlint = {
             enable = true;
             name = "markdownlint-cli2";

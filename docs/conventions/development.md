@@ -50,6 +50,7 @@ The Node-based hooks run tools pinned in `node_modules` and fail when that direc
 - Declare each dependency of a `callPackage` file, such as `package.nix`, as its own argument, as nixpkgs does, so `.override` can replace it. Put `lib` first and the other arguments in alphabetical order. In the flake, reach packages through `pkgs`.
 - Put `inherit` entries first in a `let` block and in a call's argument set. In a set that returns data, keep each `inherit` where its entry belongs.
 - Group related bindings and attributes, and order a `let` block so that each binding follows what it depends on. Within a group, use alphabetical order unless a stronger order applies.
+- Follow a multiline binding or attribute with a blank line before its next sibling. Keep single-line siblings together and separate their groups with a blank line. A single-line binding may lead directly into a related multiline one.
 - Write multiline text, such as a shell hook, as an indented string with literal line breaks.
 
 ## Debug Info

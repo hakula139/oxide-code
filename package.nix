@@ -17,6 +17,7 @@ rustPlatform.buildRustPackage {
       ./crates
     ];
   };
+
   cargoLock.lockFile = ./Cargo.lock;
 
   # Tests bind loopback ports, which the darwin sandbox denies by default.
