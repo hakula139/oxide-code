@@ -414,6 +414,19 @@ mod tests {
         }
 
         #[test]
+        fn multiple_overrides_apply_independently() {
+            let t = resolved(&config(
+                "mocha",
+                indoc! {r##"
+                    error = "#ff0000"
+                    success = "#00ff00"
+                "##},
+            ));
+            assert_eq!(t.error.fg, Some(Color::Rgb(0xff, 0x00, 0x00)));
+            assert_eq!(t.success.fg, Some(Color::Rgb(0x00, 0xff, 0x00)));
+        }
+
+        #[test]
         fn unknown_slot_override_keeps_the_base_with_a_notice() {
             let ResolvedTheme { theme, notices } =
                 resolve_theme(&config("mocha", r##"purple_thing = "#ff0000""##)).unwrap();
@@ -496,19 +509,6 @@ mod tests {
                      {COLOR_FORMATS_HINT}"
                 )]
             );
-        }
-
-        #[test]
-        fn multiple_overrides_apply_independently() {
-            let t = resolved(&config(
-                "mocha",
-                indoc! {r##"
-                    error = "#ff0000"
-                    success = "#00ff00"
-                "##},
-            ));
-            assert_eq!(t.error.fg, Some(Color::Rgb(0xff, 0x00, 0x00)));
-            assert_eq!(t.success.fg, Some(Color::Rgb(0x00, 0xff, 0x00)));
         }
     }
 
@@ -782,6 +782,20 @@ mod tests {
         }
 
         #[test]
+        fn inline_rejects_unknown_modifier_key() {
+            // `sparkle` is not a modifier, so `deny_unknown_fields` rejects it.
+            let body = mocha_with_slot_replacement(
+                r##"accent = { fg = "#89b4fa", bold = true }"##,
+                r##"accent = { fg = "#89b4fa", sparkle = true }"##,
+            );
+            let err = parse_theme(&body).expect_err("unknown modifier rejected");
+            let msg = format!("{err:#}");
+            // The untagged enum reports a generic "did not match any variant" error, but the
+            // rendered TOML context still quotes the offending line.
+            assert!(msg.contains("sparkle"), "{msg}");
+        }
+
+        #[test]
         fn invalid_color_in_slot_names_the_slot() {
             let body = mocha_with_slot_replacement(r##"error = "#f38ba8""##, r#"error = "orange""#);
 
@@ -880,20 +894,6 @@ mod tests {
             assert!(t.thinking.modifiers.contains(Modifier::UNDERLINED));
             assert!(t.thinking.modifiers.contains(Modifier::DIM));
             assert!(t.thinking.modifiers.contains(Modifier::REVERSED));
-        }
-
-        #[test]
-        fn inline_rejects_unknown_modifier_key() {
-            // `sparkle` is not a modifier, so `deny_unknown_fields` rejects it.
-            let body = mocha_with_slot_replacement(
-                r##"accent = { fg = "#89b4fa", bold = true }"##,
-                r##"accent = { fg = "#89b4fa", sparkle = true }"##,
-            );
-            let err = parse_theme(&body).expect_err("unknown modifier rejected");
-            let msg = format!("{err:#}");
-            // The untagged enum reports a generic "did not match any variant" error, but the
-            // rendered TOML context still quotes the offending line.
-            assert!(msg.contains("sparkle"), "{msg}");
         }
 
         #[test]

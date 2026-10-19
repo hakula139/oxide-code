@@ -96,6 +96,21 @@ mod tests {
         }
 
         #[test]
+        fn trims_surrounding_whitespace() {
+            assert_eq!(parse_color("  red  ").unwrap(), Color::Red);
+            assert_eq!(
+                parse_color(" #cdd6f4 ").unwrap(),
+                Color::Rgb(0xcd, 0xd6, 0xf4),
+            );
+            assert_eq!(parse_color("\tansi:5\n").unwrap(), Color::Indexed(5));
+        }
+
+        #[test]
+        fn rejects_empty_string() {
+            assert_eq!(error_text(""), "empty color value");
+        }
+
+        #[test]
         fn hex_is_case_insensitive() {
             assert_eq!(
                 parse_color("#cdd6f4").unwrap(),
@@ -230,21 +245,6 @@ mod tests {
                 error_text("orange"),
                 format!(r#"unknown color "orange": {FORMATS_HINT}"#),
             );
-        }
-
-        #[test]
-        fn rejects_empty_string() {
-            assert_eq!(error_text(""), "empty color value");
-        }
-
-        #[test]
-        fn trims_surrounding_whitespace() {
-            assert_eq!(parse_color("  red  ").unwrap(), Color::Red);
-            assert_eq!(
-                parse_color(" #cdd6f4 ").unwrap(),
-                Color::Rgb(0xcd, 0xd6, 0xf4),
-            );
-            assert_eq!(parse_color("\tansi:5\n").unwrap(), Color::Indexed(5));
         }
     }
 }
