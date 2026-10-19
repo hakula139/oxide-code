@@ -532,7 +532,11 @@ impl Modal for ResumePicker {
 
 #[cfg(test)]
 mod tests {
+    use std::fs::File;
+
     use crossterm::event::KeyModifiers;
+    use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
     use time::OffsetDateTime;
     use time::macros::datetime;
 
@@ -543,7 +547,7 @@ mod tests {
     use crate::session::store::testing::{listed_ids, seed_test_session, test_store};
     use crate::slash::testing::{stamped_id, test_session_info, with_isolated_xdg};
     use crate::tui::modal::chrome::HINT_SEPARATOR;
-    use crate::tui::modal::testing::render_rows;
+    use crate::tui::modal::testing::{render_rows, rendered_text};
 
     fn seed_session(
         store: &SessionStore,
@@ -555,6 +559,34 @@ mod tests {
         seed_test_session(store, id, title, Some(msg_count), created_at);
     }
 
+    /// Seeds active sessions `0x11` and `0x22`, then archived sessions `0x33` and `0x44`, each last
+    /// active a day before the previous one. The fixed dates fall outside the relative-time window,
+    /// so each row reads the same on every run.
+    fn seed_active_and_archived(store: &SessionStore) {
+        let sessions = [
+            (0x11, "Fix login redirect", 12, false),
+            (0x22, "Tidy the config loader", 1, false),
+            (0x33, "Prototype the plugin API", 7, true),
+            (0x44, "Draft the release notes", 4, true),
+        ];
+        for ((byte, title, msg_count, archived), days_ago) in sessions.into_iter().zip(0..) {
+            let id = stamped_id(byte);
+            let last_active_at =
+                datetime!(2026-04-18 09:00:00 UTC) - time::Duration::days(days_ago);
+            seed_session(store, &id, Some(title), msg_count, last_active_at);
+            let path = store.find_session_path(&id).unwrap();
+            File::options()
+                .append(true)
+                .open(&path)
+                .unwrap()
+                .set_modified(last_active_at.into())
+                .unwrap();
+            if archived {
+                set_archived_at(&path, true).unwrap();
+            }
+        }
+    }
+
     fn isolated_store() -> (tempfile::TempDir, SessionStore) {
         let dir = tempfile::tempdir().unwrap();
         let store = test_store(dir.path());
@@ -564,6 +596,16 @@ mod tests {
     fn footer_row(picker: &ResumePicker, width: u16) -> String {
         let rows = render_rows(picker, width, picker.height(width, 40));
         rows.last().unwrap().trim_end().to_owned()
+    }
+
+    /// Renders `picker` at `width` and the height it requests, for a snapshot of the whole frame.
+    fn render_backend(picker: &ResumePicker, width: u16) -> TestBackend {
+        let height = picker.height(width, u16::MAX);
+        let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+        terminal
+            .draw(|frame| picker.render(frame, frame.area(), &Theme::default()))
+            .unwrap();
+        terminal.backend().clone()
     }
 
     /// The footer status after the Esc hint, which counts the loaded rows.
@@ -1192,25 +1234,23 @@ mod tests {
     // ── ResumePicker::render ──
 
     #[test]
-    fn render_paints_every_hint_on_a_wide_footer() {
+    fn render_active_view_lists_only_active_sessions_with_every_hint() {
         let (_dir, store) = isolated_store();
-        seed_session(
-            &store,
-            &stamped_id(0x11),
-            Some("Auth"),
-            3,
-            datetime!(2026-04-18 09:00:00 UTC),
-        );
+        seed_active_and_archived(&store);
         let picker = ResumePicker::new(store, "live-session-id".to_owned());
 
-        let footer = footer_row(&picker, 180);
+        insta::assert_snapshot!(render_backend(&picker, 180));
+    }
 
-        assert_eq!(
-            footer,
-            "Enter to resume  ·  Esc to cancel  ·  1 session  ·  scope: current project  ·  \
-             Ctrl+X to archive  ·  Ctrl+D to delete  ·  Tab for all projects  ·  \
-             Ctrl+A for archived",
-        );
+    #[test]
+    fn render_archived_view_after_ctrl_a_swaps_the_header_rows_and_hints() {
+        let (_dir, store) = isolated_store();
+        seed_active_and_archived(&store);
+        let mut picker = ResumePicker::new(store, "live-session-id".to_owned());
+
+        picker.handle_key(&KeyEvent::new(KeyCode::Char('a'), KeyModifiers::CONTROL));
+
+        insta::assert_snapshot!(render_backend(&picker, 180));
     }
 
     #[test]
@@ -1457,47 +1497,13 @@ mod tests {
     #[test]
     fn handle_key_ctrl_a_toggles_between_active_and_archived_sessions() {
         let (_dir, store) = isolated_store();
-        let active_id = stamped_id(0x11);
-        let archived_id = stamped_id(0x22);
-        seed_session(
-            &store,
-            &active_id,
-            Some("active"),
-            1,
-            datetime!(2026-04-18 09:00:00 UTC),
-        );
-        seed_session(
-            &store,
-            &archived_id,
-            Some("archived"),
-            1,
-            datetime!(2026-04-18 09:01:00 UTC),
-        );
-        let archived_path = store.find_session_path(&archived_id).unwrap();
-        set_archived_at(&archived_path, true).unwrap();
+        seed_active_and_archived(&store);
+        let archived_path = store.find_session_path(&stamped_id(0x33)).unwrap();
         let mut picker = ResumePicker::new(store, "live-session-id".to_owned());
-        let selected_id =
-            |picker: &ResumePicker| picker.list.selected().unwrap().session_id.clone();
         let ctrl_a = KeyEvent::new(KeyCode::Char('a'), KeyModifiers::CONTROL);
-        assert_eq!(footer_count(&picker), "1 session");
-        assert_eq!(selected_id(&picker), active_id);
+        let active_view = rendered_text(&picker, 180);
 
         picker.handle_key(&ctrl_a);
-        assert_eq!(selected_id(&picker), archived_id);
-        assert_eq!(
-            picker.footer_hints()[2..],
-            [
-                "1 archived session",
-                "scope: current project",
-                "Ctrl+X to unarchive",
-                "Ctrl+D to delete",
-                "Tab for all projects",
-                "Ctrl+A for active",
-            ],
-        );
-        let rows = render_rows(&picker, 60, 20);
-        let title = &rows[0];
-        assert_eq!(title.trim_end(), ARCHIVED_PICKER_TITLE);
         let outcome = picker.handle_key(&KeyEvent::from(KeyCode::Enter));
         assert!(
             matches!(
@@ -1510,7 +1516,11 @@ mod tests {
         );
 
         picker.handle_key(&ctrl_a);
-        assert_eq!(selected_id(&picker), active_id);
+        assert_eq!(
+            rendered_text(&picker, 180),
+            active_view,
+            "a second Ctrl+A restores the active view",
+        );
     }
 
     #[test]
