@@ -1,6 +1,6 @@
 # Anthropic API Authentication
 
-Research notes on how to authenticate with the Anthropic Messages API using OAuth tokens from Claude Code. These findings are based on reverse-engineering [Claude Code](https://github.com/hakula139/claude-code) and testing against the production API.
+Research notes on how to authenticate with the Anthropic Messages API using OAuth tokens from Claude Code. These findings are based on reverse-engineering [Claude Code](https://github.com/hakula139/claude-code) and testing against the production API. A claim about what Claude Code sends that names no release was checked against the frozen 2.1.87 source that [Sources](#sources) lists.
 
 ## Authentication Methods
 
@@ -72,7 +72,7 @@ Additional useful betas:
 
 Haiku is the one family whose beta set differs: Claude Code moves `claude-code-20250219` later in the agentic sequence on Haiku and, per the frozen 2.1.87 source, leaves it off Haiku one-shots.
 
-- **`prompt-caching-scope` ships unconditionally.** The header alone is a server-side no-op without a matching `cache_control.scope` field.
+- **`prompt-caching-scope` ships unconditionally.** Claude Code 2.1.296 sends it on every model, and the header alone is a server-side no-op without a matching `cache_control.scope` field.
 - **`effort` and `context-management` betas need a body field.** Sending the header alone is a silent no-op: the request runs at the server default. See [Agentic Request Body Fields](#agentic-request-body-fields) for the matching `output_config.effort` and `context_management.edits` shapes.
 
 On agentic Opus 5.5 and Sonnet 5.5 requests, and by inference Fable 5.1, Claude Code 2.1.296 sends `claude-code-20250219, interleaved-thinking-2025-05-14, thinking-token-count-2026-05-13, context-management-2025-06-27, prompt-caching-scope-2026-01-05, mid-conversation-system-2026-04-07, per-turn-control-2026-07-01, advisor-tool-2026-03-01, effort-2025-11-24`. On Haiku 5.5 it moves `claude-code-20250219` to just after `mid-conversation-system-2026-04-07`. Both sequences were captured from `claude --bare -p` with an API key on 2026-10-15. Fable 5.1 was not captured on 2.1.296, but on Claude Code 2.1.301 `claude --bare -p` sent Fable 5.1 and Opus 5.5 identical betas against a local listener on 2026-10-17. Under OAuth, the frozen 2.1.87 source puts `oauth-2025-04-20` right after the leading `claude-code-20250219`, or first on Haiku. That slot was not captured.
@@ -100,7 +100,7 @@ The API validates that the **first non-attribution text block** matches one of t
 
 ### 3. Attribution Header
 
-Claude Code prepends an attribution header as the very first system block:
+Claude Code prepends an attribution header as the very first system block, as in this 2.1.121 example:
 
 ```json
 {"type": "text", "text": "x-anthropic-billing-header: cc_version=2.1.121.91c; cc_entrypoint=cli; cch=8f81f;"}
@@ -125,11 +125,11 @@ The entrypoint is `cli` for interactive sessions.
 
 #### cch (5-Char Request Integrity Hash)
 
-The `cch` field is a request integrity hash used for feature gating (fast mode) and billing attribution. It was reverse-engineered from Anthropic's custom Bun binary in February 2026 ([a10k.co writeup](https://a10k.co/b/reverse-engineering-claude-code-cch.html)).
+The `cch` field is a request integrity hash used for feature gating (fast mode) and billing attribution. It was reverse-engineered in February 2026 from Anthropic's custom Bun binary, with examples from Claude Code 2.1.37 ([a10k.co writeup](https://a10k.co/b/reverse-engineering-claude-code-cch.html)).
 
 How it works:
 
-1. The JavaScript layer writes a `cch=00000` placeholder into the billing header (controlled by `feature('NATIVE_CLIENT_ATTESTATION')` compile-time flag).
+1. The JavaScript layer writes a `cch=00000` placeholder into the billing header. The 2.1.87 source gates this step on the `feature('NATIVE_CLIENT_ATTESTATION')` compile-time flag.
 2. The request body is serialized to JSON with the placeholder in place.
 3. Bun's native HTTP stack (compiled Zig, `bun-anthropic/src/http/Attestation.zig`) intercepts the `fetch()` call, detects the placeholder, and computes `xxHash64(body_bytes, seed) & 0xFFFFF`.
 4. The five `0` characters are overwritten in-place with the 5-char hex result before sending.
@@ -156,9 +156,9 @@ User-Agent: claude-cli/<version> (external, cli)
 x-app: cli
 ```
 
-Claude Code constructs the `User-Agent` as `claude-cli/<version> (<user_type>, <entrypoint>)` where `user_type` is `external` (or `ant` for Anthropic employees) and `entrypoint` is `cli`.
+Claude Code constructs the `User-Agent` as `claude-cli/<version> (<user_type>, <entrypoint>)` where `user_type` is `external` (or `ant` for Anthropic employees) and `entrypoint` is `cli`. The 2.1.296 bundle keeps this format.
 
-The Stainless TS SDK also emits `x-stainless-lang`, `-package-version`, `-runtime`, `-runtime-version`, `-os`, `-arch`, `-timeout`, and `-retry-count`, and oxide-code sends the same set.
+In Claude Code 2.1.121, the Stainless TS SDK also emitted `x-stainless-lang`, `-package-version`, `-runtime`, `-runtime-version`, `-os`, `-arch`, `-timeout`, and `-retry-count`, and oxide-code sends the same set.
 
 ## What Happens Without These
 
@@ -268,7 +268,7 @@ As of April 4, 2026, Anthropic enforces that OAuth subscription credits (Pro / M
 
 The `cch` hash is the primary technical enforcement mechanism, and both the algorithm (xxHash64, non-cryptographic) and the constants are publicly known. No additional protections exist: no TLS fingerprinting, binary attestation, pre-registration handshake, replay detection, or connection association. Anthropic could escalate enforcement at any time, but today's scheme reads as billing plumbing with no security boundary behind it.
 
-oxide-code attaches the attestation block to every request under every auth mode, as Claude Code does on its turns and side queries. `CLAUDE_CODE_ATTRIBUTION_HEADER=0` drops it everywhere. A relay gateway checks its version and fingerprint (see [Third-Party Gateway Validation](#third-party-gateway-validation)). Requests to the Anthropic API carry a valid `cch` hash. Since 2.1.181, Claude Code sends custom base URLs the block without `cch`, so a gateway that caches on the request body sees a stable prefix, and oxide-code matches that. The fingerprint salt and xxHash64 seed are version-specific constants, so they may change with Claude Code releases. The 2.1.301 bundle keeps the same salt and character indices and changes the message selection, as [Fingerprint](#fingerprint-3-char-version-suffix) describes. Its seed lives in the native Bun HTTP stack, outside the JavaScript bundle, and a scan of the 2.1.301 binary did not find it ([#123](https://github.com/hakula139/oxide-code/issues/123#issuecomment-6210505896)). On 2026-10-16, the Anthropic API accepted oxide-code's requests carrying a `cch` computed with the seed above, which shows that the API accepts the hash but not that it verifies it.
+oxide-code attaches the attestation block to every request under every auth mode, as Claude Code does on its turns and side queries in both the 2.1.87 source and the 2.1.301 bundle. `CLAUDE_CODE_ATTRIBUTION_HEADER=0` drops it everywhere. A relay gateway checks its version and fingerprint (see [Third-Party Gateway Validation](#third-party-gateway-validation)). Requests to the Anthropic API carry a valid `cch` hash. Since 2.1.181, Claude Code sends custom base URLs the block without `cch`, so a gateway that caches on the request body sees a stable prefix, and oxide-code matches that. The fingerprint salt and xxHash64 seed are version-specific constants, so they may change with Claude Code releases. The 2.1.301 bundle keeps the same salt and character indices and changes the message selection, as [Fingerprint](#fingerprint-3-char-version-suffix) describes. Its seed lives in the native Bun HTTP stack, outside the JavaScript bundle, and a scan of the 2.1.301 binary did not find it ([#123](https://github.com/hakula139/oxide-code/issues/123#issuecomment-6210505896)). On 2026-10-16, the Anthropic API accepted oxide-code's requests carrying a `cch` computed with the seed above, which shows that the API accepts the hash but not that it verifies it.
 
 ## Third-Party Gateway Validation
 
@@ -313,6 +313,8 @@ oxide-code implements the same refresh flow: proactive refresh with the 5-minute
 
 ## Sources
 
+The `claude-code/src/` paths are files in the frozen 2.1.87 source.
+
 - `claude-code/src/constants/betas.ts`: beta header constants
 - `claude-code/src/constants/oauth.ts`: OAuth client ID, token URL, scopes
 - `claude-code/src/constants/system.ts`: system prompt prefix, attribution header construction
@@ -329,4 +331,4 @@ oxide-code implements the same refresh flow: proactive refresh with the 5-minute
 - `claude-code/src/utils/secureStorage/macOsKeychainStorage.ts`: macOS Keychain backend
 - `claude-code/src/utils/secureStorage/plainTextStorage.ts`: credential file I/O
 
-Body-field research is empirical. The `cache_control.ttl` wire shape was captured live from a `claude-code --bare -p --model claude-opus-4-7` session against a local SSE proxy on 2026-04-24 and cross-referenced with [Anthropic prompt-caching docs](https://docs.anthropic.com/en/docs/build-with-claude/prompt-caching). The `output_config.effort`, `context_management.edits`, and `max_tokens` values were captured from `claude --bare -p` on Claude Code 2.1.301 against a local listener on 2026-10-17, once per supported model, and cross-referenced with Anthropic's [effort docs](https://platform.claude.com/docs/en/build-with-claude/effort).
+Body-field research is empirical. The `cache_control.ttl` wire shape was captured live from a Claude Code 2.1.119 `claude-code --bare -p --model claude-opus-4-7` session against a local SSE proxy on 2026-04-24 and cross-referenced with [Anthropic prompt-caching docs](https://docs.anthropic.com/en/docs/build-with-claude/prompt-caching). The `output_config.effort`, `context_management.edits`, and `max_tokens` values were captured from `claude --bare -p` on Claude Code 2.1.301 against a local listener on 2026-10-17, once per supported model, and cross-referenced with Anthropic's [effort docs](https://platform.claude.com/docs/en/build-with-claude/effort).
