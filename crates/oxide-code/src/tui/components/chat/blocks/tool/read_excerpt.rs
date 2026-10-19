@@ -1,15 +1,14 @@
 //! `read` tool body: a line-numbered excerpt under a path and range header.
 
 use ratatui::style::Style;
-use ratatui::text::Line;
 
-use super::{MAX_TOOL_OUTPUT_LINES, hidden_footer};
+use super::{MAX_TOOL_OUTPUT_LINES, overflow_footer};
 use crate::tool::ReadExcerptLine;
-use crate::tui::components::chat::blocks::RenderCtx;
 use crate::tui::components::chat::blocks::rows::{NumberedRows, body_row};
+use crate::tui::components::chat::blocks::{BlockRows, RenderCtx};
 
 pub(super) fn render(
-    out: &mut Vec<Line<'static>>,
+    out: &mut BlockRows,
     ctx: &RenderCtx<'_>,
     border_style: Style,
     path: &str,
@@ -17,23 +16,21 @@ pub(super) fn render(
     total_lines: usize,
 ) {
     let context = context_label(path, lines, total_lines);
-    body_row(out, ctx, border_style, context, ctx.theme.dim());
+    body_row(&mut out.lines, ctx, border_style, context, ctx.theme.dim());
     if lines.is_empty() {
         return;
     }
 
-    let visible = &lines[..lines.len().min(MAX_TOOL_OUTPUT_LINES)];
+    let visible = &lines[..lines.len().min(ctx.cap(MAX_TOOL_OUTPUT_LINES))];
     let max_number = visible.iter().map(|line| line.number).max().unwrap_or(0);
     let rows = NumberedRows::new(ctx, border_style, max_number);
 
     for line in visible {
-        rows.render(out, line.number, &line.text, ctx.theme.text());
+        rows.render(&mut out.lines, line.number, &line.text, ctx.theme.text());
     }
 
     let hidden = lines.len() - visible.len();
-    if let Some(footer) = hidden_footer(hidden, "line", "lines", false) {
-        body_row(out, ctx, border_style, footer, ctx.theme.dim());
-    }
+    overflow_footer(out, ctx, border_style, hidden, "line", "lines", false);
 }
 
 fn context_label(path: &str, lines: &[ReadExcerptLine], total_lines: usize) -> String {
@@ -63,14 +60,21 @@ mod tests {
     mod render {
         use super::*;
 
-        fn render_rows(path: &str, lines: &[ReadExcerptLine], total_lines: usize) -> Vec<String> {
+        fn render_rows(
+            path: &str,
+            lines: &[ReadExcerptLine],
+            total_lines: usize,
+            expanded: bool,
+        ) -> Vec<String> {
             let theme = Theme::default();
             let ctx = RenderCtx {
                 width: 80,
                 theme: &theme,
                 show_thinking: false,
+                expanded,
+                expand_hint: None,
             };
-            let mut out = Vec::new();
+            let mut out = BlockRows::default();
             render(
                 &mut out,
                 &ctx,
@@ -79,7 +83,7 @@ mod tests {
                 lines,
                 total_lines,
             );
-            out.iter().map(ToString::to_string).collect()
+            out.lines.iter().map(ToString::to_string).collect()
         }
 
         /// Excerpt lines numbered `numbers`, each reading `line {number}`.
@@ -94,7 +98,7 @@ mod tests {
 
         #[test]
         fn numbers_rows_under_the_path_and_range_header() {
-            let rows = render_rows("/tmp/example.rs", &excerpt(9..=10), 12);
+            let rows = render_rows("/tmp/example.rs", &excerpt(9..=10), 12, false);
 
             assert_eq!(
                 rows,
@@ -111,7 +115,7 @@ mod tests {
             for (extra, footer) in [(1, "... +1 line"), (2, "... +2 lines")] {
                 let total = MAX_TOOL_OUTPUT_LINES + extra;
 
-                let rows = render_rows("/tmp/example.rs", &excerpt(1..=total), total);
+                let rows = render_rows("/tmp/example.rs", &excerpt(1..=total), total, false);
 
                 let mut expected = vec![format!("▎   /tmp/example.rs:1-{total}")];
                 expected.extend((1..=MAX_TOOL_OUTPUT_LINES).map(|n| format!("▎   {n} │ line {n}")));
@@ -121,8 +125,19 @@ mod tests {
         }
 
         #[test]
+        fn expanded_view_numbers_every_row() {
+            let total = MAX_TOOL_OUTPUT_LINES + 2;
+
+            let rows = render_rows("/tmp/example.rs", &excerpt(1..=total), total, true);
+
+            let mut expected = vec![format!("▎   /tmp/example.rs:1-{total}")];
+            expected.extend((1..=total).map(|n| format!("▎   {n} │ line {n}")));
+            assert_eq!(rows, expected);
+        }
+
+        #[test]
         fn empty_file_keeps_only_the_header() {
-            let rows = render_rows("/tmp/empty.rs", &[], 0);
+            let rows = render_rows("/tmp/empty.rs", &[], 0, false);
 
             assert_eq!(rows, ["▎   /tmp/empty.rs (empty file)"]);
         }

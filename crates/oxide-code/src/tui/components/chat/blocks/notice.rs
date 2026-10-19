@@ -41,6 +41,8 @@ mod tests {
                 width: 30,
                 theme: &theme,
                 show_thinking: false,
+                expanded: false,
+                expand_hint: None,
             });
 
             assert!(

@@ -11,6 +11,7 @@ mod components;
 mod cursor;
 mod git_probes;
 pub(crate) mod glyphs;
+pub(crate) mod keymap;
 mod markdown;
 pub(crate) mod modal;
 mod pending_calls;

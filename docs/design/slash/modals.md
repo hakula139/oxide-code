@@ -41,7 +41,7 @@ The modal implementation uses these shared components:
 - `tui/modal` defines the trait, key outcome, and `ModalStack` manager.
 - Generic primitives sit alongside `tui/modal`: `list_picker` (cursor and rendering for selection lists), `kv_overview` (sectioned read-only kv table), and `searchable_list` (substring filter for the `/resume` picker).
 - `chrome` supplies the shared title header and hint footer. `render_footer` joins hint fragments such as `CONFIRM_HINTS` with `HINT_SEPARATOR` and cuts the tail on a narrow row, so callers list the essential hints first. `line_editor` is the single-line text field behind `/rename`, the picker search query, and the approval rule and feedback editors, built on `ratatui-textarea` so readline keys work and Ctrl chords never insert letters.
-- `keymap` binds a modal's named actions to keys and footer labels. `Keymap::action_for` dispatches a key and `Keymap::hints` renders the footer from the same entries, so the `/resume` picker's keys and hints cannot drift apart.
+- `tui::keymap` binds named actions to keys and hint labels, for a modal or the app. `Keymap::action_for` dispatches a key and `Keymap::hints` renders the footer from the same entries, so the `/resume` picker's keys and hints cannot drift apart.
 - Lists scroll through `tui::viewport`, whose window settles at render time from the height the modal was granted.
 
 The modals embed these primitives:
@@ -141,10 +141,10 @@ App owns `ModalStack` and runs the key gate first inside `handle_crossterm_event
 - `crates/oxide-code/src/tui/app/dispatch.rs`: `App::handle_crossterm_event` modal gate, `run_slash`, `apply_slash_outcome`, `apply_modal_action`, `dispatch_action`, `clear_modals`.
 - `crates/oxide-code/src/tui/app/events.rs`: `push_approval_modal`.
 - `crates/oxide-code/src/tui/app/render.rs`: `draw_frame` modal layout band.
+- `crates/oxide-code/src/tui/keymap.rs`: `Keymap`, `KeyAction`, and `KeyChord`.
 - `crates/oxide-code/src/tui/modal.rs`: `Modal` (including the `on_cancel`, `captures_esc`, and `tick` hooks), `ModalKey`, `ModalAction`, `ModalStack`.
 - `crates/oxide-code/src/tui/modal/approval.rs`: `ApprovalModal` approve-or-deny gate for agent tool calls, plus the rule and feedback editors.
 - `crates/oxide-code/src/tui/modal/chrome.rs`: shared `Header`, `render_footer`, and the hint fragments.
-- `crates/oxide-code/src/tui/modal/keymap.rs`: `Keymap`, `KeyAction`, and `KeyChord`.
 - `crates/oxide-code/src/tui/modal/kv_overview.rs`: generic `KvOverview` plus `KvSection`.
 - `crates/oxide-code/src/tui/modal/line_editor.rs`: single-line `LineEditor` over `ratatui-textarea`.
 - `crates/oxide-code/src/tui/modal/list_picker.rs`: generic `ListPicker<T: PickerItem>`.

@@ -19,7 +19,7 @@ The tool returns its list in `ToolOutput::tasks`. Immediately after the call's `
 
 ## Frontends
 
-- **TUI.** A task panel above the queued-prompt preview opens with a blank row that sets it apart from the chat, then uses up to six rows for tasks. For longer lists, it shows five tasks and a final row counting the rest by status, such as `+1 pending, 2 completed`. The window starts one task before the task in progress, or before the first unfinished task if none is in progress, keeping the step just finished beside the work ahead. The input, popup, modal, and queued-prompt preview get their rows first. A shorter panel keeps its summary row and gives up the gap if retaining it would leave no room for a task row. Markers are `○` for pending, `●` for in progress, and `✓` for completed. The opt-in `task-progress` status-line segment shows `Tasks: 1/3` while the list contains a task.
+- **TUI.** A task panel above the queued-prompt preview opens with a blank row that sets it apart from the chat, then uses up to six rows for tasks. For longer lists, it shows five tasks and a final row counting the rest, such as `... +3 tasks`. The window starts one task before the task in progress, or before the first unfinished task if none is in progress, keeping the step just finished beside the work ahead. The input, popup, modal, and queued-prompt preview get their rows first. A shorter panel keeps its count row and gives up the gap if retaining it would leave no room for a task row. Markers are `○` for pending, `●` for in progress, and `✓` for completed. The opt-in `task-progress` status-line segment shows `Tasks: 1/3` while the list contains a task.
 - **REPL.** `--no-tui` prints the list to stderr after each update, under a `Tasks: 1/3` header.
 - **Headless.** Every output format prints the list to stderr, as the REPL does. `stream-json` output also includes the `tasks_updated` event and the `tasks` result view, as described in the [headless guide](../../guide/headless.md#events).
 
@@ -38,7 +38,7 @@ Manual and automatic compaction both pass the engine's list to `replace_session_
 3. **Clear a finished list.** Claude Code's `TodoWrite` also drops the list once every task is completed, so the panel shows only the work that remains. Its description also asks the model to remove tasks that no longer apply and send an empty list when the user changes course, since otherwise a stale list would stay on screen.
 4. **Use the transcript as the source of truth.** The call's input already records the list, so a dedicated entry would duplicate it and could disagree with the resolved branch. Claude Code's `extractTodosFromTranscript` restores the list from the last `TodoWrite` call, while oh-my-pi rehydrates it from the branch's tool results.
 5. **Remind the model once at the boundary.** Compaction is the only point where the calls that built the list leave the model's context. A single reminder in the summary message restores it, avoiding periodic nudges like those Claude Code adds. Those nudges resend the list on turns when the model can already see it.
-6. **Count hidden tasks by status.** The window scrolls past finished tasks, so a long list can hide tasks on both sides of it. Claude Code labels its task list's overflow row by status for the same reason. A plain count below the window would look like tasks still ahead.
+6. **Count hidden tasks like every other overflow.** The panel's last row uses the `... +N` wording of the chat's overflow footers and the queued-prompt preview, so every cut-off list in the TUI reads the same. The window can hide tasks on both sides of it, which the count does not tell apart, while the chat's block for the latest `tasks` call lists every task in the expanded view.
 
 ## Sources
 
@@ -58,5 +58,5 @@ Manual and automatic compaction both pass the engine's list to `replace_session_
 - `crates/oxide-code/src/tui/app/render.rs`: `draw_frame`, which sizes the panel after the higher-priority bands.
 - `crates/oxide-code/src/tui/components/chat/blocks/tool/tasks.rs`: the chat block for a `tasks` call.
 - `crates/oxide-code/src/tui/components/status/line.rs`: the `task-progress` segment.
-- `crates/oxide-code/src/tui/components/tasks.rs`: `TaskPanel`, `window`, and `hidden_summary`.
+- `crates/oxide-code/src/tui/components/tasks.rs`: `TaskPanel` and `window`.
 - `crates/oxide-code/src/tui/glyphs.rs`: `task_marker`.

@@ -1,6 +1,7 @@
 //! Tool call and result blocks. A left-edge bar couples each call to its result and takes the
 //! error color when the tool fails. Each [`ToolResultView`] variant renders its body in a child
-//! module, and unstructured output renders as truncated text.
+//! module, and unstructured output renders as text. The compact view caps each body and ends it
+//! with an overflow footer, which expands the block when clicked.
 
 mod diff;
 mod glob;
@@ -12,12 +13,13 @@ mod text;
 use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 
-use super::rows::wrapped_row;
-use super::{ChatBlock, RenderCtx};
+use super::rows::{body_row, wrapped_row};
+use super::{BlockRows, ChatBlock, RenderCtx};
 use crate::tool::ToolResultView;
+use crate::tui::components::overflow_count;
 use crate::tui::glyphs::{TOOL_BORDER_CONT, TOOL_BORDER_PREFIX, TOOL_ERROR, TOOL_SUCCESS};
-use crate::util::text::plural;
 
+/// Body rows a tool result shows in the compact view.
 const MAX_TOOL_OUTPUT_LINES: usize = 5;
 
 // ── Tool Call ──
@@ -76,13 +78,17 @@ impl ToolResultBlock {
 
 impl ChatBlock for ToolResultBlock {
     fn render(&self, ctx: &RenderCtx<'_>) -> Vec<Line<'static>> {
+        self.render_rows(ctx).lines
+    }
+
+    fn render_rows(&self, ctx: &RenderCtx<'_>) -> BlockRows {
         let border_style = if self.is_error {
             ctx.theme.error()
         } else {
             ctx.theme.tool_border()
         };
-        let mut out = Vec::new();
-        self.render_status_line(&mut out, ctx, border_style);
+        let mut out = BlockRows::default();
+        self.render_status_line(&mut out.lines, ctx, border_style);
         match &self.view {
             ToolResultView::Text { content } => {
                 text::render(&mut out, ctx, border_style, content, &self.label);
@@ -164,21 +170,39 @@ fn status_row(
     wrapped_row(out, ctx, line, TOOL_BORDER_CONT, border_style);
 }
 
-/// Footer counting the rows a body hides and flagging a tool-side result limit, as in
-/// `... +3 lines (limit reached)`, or `None` when neither applies.
-fn hidden_footer(
+/// Emits the footer of a body that hides `hidden` rows in the compact view or that a tool-side
+/// result limit cut, as in `... +3 lines (limit reached) · Ctrl+O to expand`. A footer that counts
+/// hidden rows expands the block when clicked.
+fn overflow_footer(
+    out: &mut BlockRows,
+    ctx: &RenderCtx<'_>,
+    border_style: Style,
     hidden: usize,
     singular: &str,
     plural_form: &str,
     limit_reached: bool,
-) -> Option<String> {
-    let noun = plural(hidden, singular, plural_form);
-    match (hidden, limit_reached) {
-        (0, false) => None,
-        (0, true) => Some("... limit reached".to_owned()),
-        (n, false) => Some(format!("... +{n} {noun}")),
-        (n, true) => Some(format!("... +{n} {noun} (limit reached)")),
+) {
+    let style = ctx.theme.dim();
+    if hidden == 0 {
+        if limit_reached {
+            body_row(
+                &mut out.lines,
+                ctx,
+                border_style,
+                "... limit reached",
+                style,
+            );
+        }
+        return;
     }
+    let count = overflow_count(hidden, singular, plural_form);
+    let text = if limit_reached {
+        format!("{count} (limit reached)")
+    } else {
+        count
+    };
+    let text = ctx.with_expand_hint(&text);
+    out.push_expander(|lines| body_row(lines, ctx, border_style, text, style));
 }
 
 #[cfg(test)]
@@ -267,6 +291,8 @@ mod tests {
                 width: 80,
                 theme: &theme,
                 show_thinking: false,
+                expanded: false,
+                expand_hint: None,
             };
             let outcomes = [
                 (false, theme.tool_border(), TOOL_SUCCESS, theme.success()),
@@ -291,6 +317,114 @@ mod tests {
                     }
                 }
             }
+        }
+    }
+
+    mod render_rows {
+        use super::*;
+
+        #[test]
+        fn marks_the_overflow_footer_below_the_status_line_as_the_row_that_expands_it() {
+            let theme = Theme::default();
+            let ctx = RenderCtx {
+                width: 80,
+                theme: &theme,
+                show_thinking: false,
+                expanded: false,
+                expand_hint: Some("Ctrl+O to expand"),
+            };
+            let content = (1..=MAX_TOOL_OUTPUT_LINES + 2)
+                .map(|n| format!("line {n}"))
+                .collect::<Vec<_>>()
+                .join("\n");
+            let block = ToolResultBlock::new("label", ToolResultView::Text { content }, false);
+
+            let compact = block.render_rows(&ctx);
+            let expanded = block.render_rows(&RenderCtx {
+                expanded: true,
+                ..ctx
+            });
+
+            let footer = 1 + MAX_TOOL_OUTPUT_LINES;
+            assert_eq!(
+                compact.lines.last().map(ToString::to_string),
+                Some(format!("{TOOL_BORDER_CONT}... +2 lines · Ctrl+O to expand")),
+            );
+            assert_eq!(compact.expander_rows(), [footer]);
+            assert_eq!(
+                expanded.lines.last().map(ToString::to_string),
+                Some(format!(
+                    "{TOOL_BORDER_CONT}line {}",
+                    MAX_TOOL_OUTPUT_LINES + 2
+                )),
+            );
+            assert_eq!(expanded.expander_rows(), Vec::<usize>::new());
+        }
+    }
+
+    mod overflow_footer {
+        use super::*;
+
+        /// The footer for `hidden` lines, with the tool limit reached or not.
+        fn footer(hidden: usize, limit_reached: bool, hint: Option<&str>) -> BlockRows {
+            let theme = Theme::default();
+            let ctx = RenderCtx {
+                width: 80,
+                theme: &theme,
+                show_thinking: false,
+                expanded: false,
+                expand_hint: hint,
+            };
+            let mut out = BlockRows::default();
+            overflow_footer(
+                &mut out,
+                &ctx,
+                theme.tool_border(),
+                hidden,
+                "line",
+                "lines",
+                limit_reached,
+            );
+            out
+        }
+
+        fn texts(out: &BlockRows) -> Vec<String> {
+            out.lines.iter().map(ToString::to_string).collect()
+        }
+
+        #[test]
+        fn counts_hidden_rows_and_names_the_expand_key() {
+            let hint = Some("Ctrl+O to expand");
+            let cases = [
+                (1, false, "... +1 line · Ctrl+O to expand"),
+                (3, true, "... +3 lines (limit reached) · Ctrl+O to expand"),
+            ];
+            for (hidden, limit_reached, text) in cases {
+                let out = footer(hidden, limit_reached, hint);
+
+                assert_eq!(texts(&out), [format!("{TOOL_BORDER_CONT}{text}")]);
+                assert_eq!(out.expander_rows(), [0], "{text}");
+            }
+        }
+
+        #[test]
+        fn omits_the_hint_when_no_key_expands_the_chat() {
+            let out = footer(2, false, None);
+
+            assert_eq!(texts(&out), [format!("{TOOL_BORDER_CONT}... +2 lines")]);
+        }
+
+        #[test]
+        fn flags_the_tool_limit_without_expanding_when_nothing_is_hidden() {
+            let limited = footer(0, true, Some("Ctrl+O to expand"));
+            let quiet = footer(0, false, Some("Ctrl+O to expand"));
+
+            assert_eq!(
+                texts(&limited),
+                [format!("{TOOL_BORDER_CONT}... limit reached")]
+            );
+            assert_eq!(limited.expander_rows(), Vec::<usize>::new());
+            assert_eq!(texts(&quiet), Vec::<String>::new());
         }
     }
 }

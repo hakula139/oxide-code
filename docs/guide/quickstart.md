@@ -41,6 +41,7 @@ The assistant uses its built-in tools to read files, run commands, and edit code
 In the chat:
 
 - **Scroll**: Use the mouse wheel or **PageUp** / **PageDown**, and press **Ctrl+End** to follow new output again.
+- **Expand output**: Long tool output shows its first rows and a footer such as `... +3 lines · Ctrl+O to expand`, and finished thinking shows only its `Thought` header. Press **Ctrl+O** to show every block in full and again to collapse them, or click a footer or `Thought` header to expand only that block.
 - **Switch modes**: Press **Shift+Tab** to switch to the read-only `plan` [permission mode](configuration.md#permission-tool-approval) and back.
 - **Select and copy**: Drag over chat text to select it, and release to copy it to the clipboard. Double-click selects a word and triple-click a row. The highlight stays until the next keystroke, and **Ctrl+C** copies it again without interrupting the turn. A notice in the chat's corner reports whether the copy landed and, if not, how to fix it for your terminal. Over SSH, copying goes through tmux 3.2 or later, or else through the terminal's OSC 52 support, which VS Code's Remote SSH terminal lacks. On Linux under X11, the copied text stays on the clipboard only while `ox` runs, unless a clipboard manager keeps it. To use the terminal's own selection instead, hold **Shift** while dragging, **Fn** in Terminal.app, or **Option** in iTerm2 and in VS Code and Cursor on macOS once `terminal.integrated.macOptionClickForcesSelection` is enabled.
 

@@ -23,11 +23,14 @@ pub(super) use system::SystemMessageBlock;
 pub(super) use tool::{ToolCallBlock, ToolResultBlock};
 pub(super) use user::UserMessage;
 
+use std::ops::Range;
+
 use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 use unicode_width::UnicodeWidthStr;
 
 use self::rows::prefixed_row;
+use crate::tui::glyphs::INLINE_SEPARATOR;
 use crate::tui::markdown::render_markdown;
 use crate::tui::theme::Theme;
 
@@ -37,18 +40,79 @@ use crate::tui::theme::Theme;
 ///
 /// `width` is the inner content width (already stripped of any chrome). `show_thinking` lets
 /// thinking blocks elide their content without removing themselves from the block list.
+#[derive(Clone, Copy)]
 pub(super) struct RenderCtx<'a> {
     pub(super) width: u16,
     pub(super) theme: &'a Theme,
     pub(super) show_thinking: bool,
+    /// Whether the block renders in full. A compact block caps its body and ends it with an
+    /// overflow footer.
+    pub(super) expanded: bool,
+    /// The hint an overflow footer ends with, such as `Ctrl+O to expand`, or `None` when no key
+    /// expands the chat.
+    pub(super) expand_hint: Option<&'a str>,
+}
+
+impl RenderCtx<'_> {
+    /// The most items a body shows: `compact` in the compact view, or all of them when expanded.
+    pub(super) fn cap(&self, compact: usize) -> usize {
+        if self.expanded { usize::MAX } else { compact }
+    }
+
+    /// `text` followed by the expand hint, as in `... +3 lines · Ctrl+O to expand`.
+    pub(super) fn with_expand_hint(&self, text: &str) -> String {
+        match self.expand_hint {
+            Some(hint) => format!("{text}{INLINE_SEPARATOR}{hint}"),
+            None => text.to_owned(),
+        }
+    }
+}
+
+/// A block's rendered rows, with the ones a click expands it from.
+#[derive(Default)]
+pub(super) struct BlockRows {
+    pub(super) lines: Vec<Line<'static>>,
+    /// Runs of `lines` that expand the block when clicked, such as its overflow footers.
+    expanders: Vec<Range<usize>>,
+}
+
+impl BlockRows {
+    /// Emits rows through `emit` as a run that expands the block when clicked.
+    pub(super) fn push_expander(&mut self, emit: impl FnOnce(&mut Vec<Line<'static>>)) {
+        let start = self.lines.len();
+        emit(&mut self.lines);
+        self.expanders.push(start..self.lines.len());
+    }
+
+    /// Returns whether a click on row `row` expands the block.
+    pub(super) fn expands_from(&self, row: usize) -> bool {
+        self.expanders.iter().any(|run| run.contains(&row))
+    }
+
+    /// Indices of the rows a click expands the block from.
+    #[cfg(test)]
+    pub(super) fn expander_rows(&self) -> Vec<usize> {
+        (0..self.lines.len())
+            .filter(|&row| self.expands_from(row))
+            .collect()
+    }
 }
 
 /// Render contract for one chat block (assistant prose, tool call, error marker, etc.).
 ///
-/// `render` and `visible` must be pure functions of the block's state and the [`RenderCtx`], since
-/// the chat view caches both until the width or theme changes.
+/// `render`, `render_rows`, and `visible` must be pure functions of the block's state and the
+/// [`RenderCtx`], since the chat view caches them until the width, theme, or view changes.
 pub(super) trait ChatBlock {
     fn render(&self, ctx: &RenderCtx<'_>) -> Vec<Line<'static>>;
+
+    /// Renders the block with the rows a click expands it from. The default marks none, for a
+    /// block that always shows in full.
+    fn render_rows(&self, ctx: &RenderCtx<'_>) -> BlockRows {
+        BlockRows {
+            lines: self.render(ctx),
+            expanders: Vec::new(),
+        }
+    }
 
     /// Returns whether blank rows separate this block from its neighbors. A tool call and its
     /// result return false, so they stay flush.
@@ -149,6 +213,27 @@ mod tests {
     use ratatui::style::{Color, Style};
 
     use super::*;
+
+    mod block_rows {
+        use super::*;
+
+        mod push_expander {
+            use super::*;
+
+            #[test]
+            fn marks_every_row_the_emit_adds() {
+                let mut rows = BlockRows::default();
+                rows.lines.push(Line::raw("head"));
+
+                rows.push_expander(|lines| {
+                    lines.extend([Line::raw("footer"), Line::raw("wrapped")]);
+                });
+                rows.lines.push(Line::raw("tail"));
+
+                assert_eq!(rows.expander_rows(), [1, 2]);
+            }
+        }
+    }
 
     mod fill_plain_spans {
         use super::*;

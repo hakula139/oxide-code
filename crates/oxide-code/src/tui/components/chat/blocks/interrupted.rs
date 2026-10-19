@@ -32,6 +32,8 @@ mod tests {
                 width: 80,
                 theme: &theme,
                 show_thinking: false,
+                expanded: false,
+                expand_hint: None,
             };
 
             let lines = InterruptedMarker.render(&ctx);

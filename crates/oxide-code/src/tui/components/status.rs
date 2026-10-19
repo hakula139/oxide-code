@@ -231,6 +231,11 @@ impl StatusBar {
         &self.status
     }
 
+    /// The spinner frame the bar shows while work is in flight.
+    pub(crate) fn spinner(&self) -> char {
+        SPINNER_FRAMES[self.spinner_frame]
+    }
+
     pub(crate) fn title(&self) -> Option<&str> {
         self.title.as_deref()
     }
@@ -587,6 +592,22 @@ mod tests {
             assert_eq!(bar.spinner_frame, 0);
             assert_eq!(bar.tick_counter, 0);
             assert!(!bar.tick());
+        }
+    }
+
+    mod spinner {
+        use super::*;
+
+        #[test]
+        fn follows_the_animation_frame() {
+            let mut bar = test_bar();
+            bar.set_status(Status::Streaming);
+
+            for _ in 0..TICKS_PER_FRAME * 3 {
+                bar.tick();
+            }
+
+            assert_eq!(bar.spinner(), SPINNER_FRAMES[3]);
         }
     }
 

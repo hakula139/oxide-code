@@ -8,7 +8,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 use unicode_width::UnicodeWidthStr;
 
-use super::LEFT_MARGIN;
+use super::{LEFT_MARGIN, overflow_count};
 use crate::tool::tasks::{Progress, Task, TaskStatus};
 use crate::tui::glyphs::task_marker;
 use crate::tui::saturating_u16;
@@ -18,7 +18,7 @@ use crate::util::text::truncate_to_width;
 /// Blank rows that set the panel apart from the chat above it.
 const GAP_ROWS: u16 = 1;
 
-/// Task rows the panel shows at most, the last one summarizing the tasks a longer list hides.
+/// Task rows the panel shows at most, the last one counting the tasks a longer list hides.
 const MAX_ROWS: usize = 6;
 
 #[derive(Debug, Default)]
@@ -53,8 +53,8 @@ impl TaskPanel {
         GAP_ROWS + rows
     }
 
-    /// Fills `area` with tasks below the gap, giving its last row to a summary of the rest when
-    /// they don't fit.
+    /// Fills `area` with tasks below the gap, giving its last row to a count of the rest when they
+    /// don't fit.
     pub(crate) fn render(&self, frame: &mut Frame<'_>, area: Rect, theme: &Theme) {
         let gap = self.gap(area.height);
         let area = Rect {
@@ -81,9 +81,11 @@ impl TaskPanel {
                 ])
             })
             .collect();
-        if let Some(summary) = hidden_summary(&self.tasks, &shown) {
+        let hidden = self.tasks.len() - shown.len();
+        if hidden > 0 {
+            let count = overflow_count(hidden, "task", "tasks");
             lines.push(Line::from(Span::styled(
-                truncate_to_width(&format!("{LEFT_MARGIN}{summary}"), usize::from(area.width)),
+                truncate_to_width(&format!("{LEFT_MARGIN}{count}"), usize::from(area.width)),
                 theme.dim(),
             )));
         }
@@ -91,7 +93,7 @@ impl TaskPanel {
     }
 
     /// The gap above a panel `height` rows tall. It stays while the rows below fit the whole list,
-    /// or one task and the summary row when the list is longer, so it never displaces every task.
+    /// or one task and the count row when the list is longer, so it never displaces every task.
     fn gap(&self, height: u16) -> u16 {
         let below = usize::from(height.saturating_sub(GAP_ROWS));
         if self.tasks.len() <= below || below >= 2 {
@@ -127,30 +129,6 @@ pub(super) fn window(tasks: &[Task], rows: usize) -> Range<usize> {
         .saturating_sub(usize::from(rows > 1))
         .min(tasks.len() - rows);
     start..start + rows
-}
-
-/// The tasks outside `shown` counted by status, such as `+1 pending, 2 completed`. `None` when
-/// every task shows.
-pub(super) fn hidden_summary(tasks: &[Task], shown: &Range<usize>) -> Option<String> {
-    let hidden: Vec<&Task> = tasks[..shown.start]
-        .iter()
-        .chain(&tasks[shown.end..])
-        .collect();
-    if hidden.is_empty() {
-        return None;
-    }
-    let counts: Vec<String> = [
-        (TaskStatus::InProgress, "in progress"),
-        (TaskStatus::Pending, "pending"),
-        (TaskStatus::Completed, "completed"),
-    ]
-    .into_iter()
-    .filter_map(|(status, label)| {
-        let n = hidden.iter().filter(|task| task.status == status).count();
-        (n > 0).then(|| format!("{n} {label}"))
-    })
-    .collect();
-    Some(format!("+{}", counts.join(", ")))
 }
 
 #[cfg(test)]
@@ -253,7 +231,7 @@ mod tests {
         }
 
         #[test]
-        fn summarizes_the_tasks_beyond_the_window_and_truncates_long_ones() {
+        fn counts_the_tasks_beyond_the_window_and_truncates_long_ones() {
             let mut tasks = long_plan();
             tasks[4].content = "Step 5 needs a very long row to describe it".to_owned();
             let mut panel = TaskPanel::default();
@@ -268,19 +246,19 @@ mod tests {
                     "  ○ Step 5 needs a very...",
                     "  ○ Step 6",
                     "  ○ Step 7",
-                    "  +1 pending, 2 completed",
+                    "  ... +3 tasks",
                 ],
             );
         }
 
         #[test]
-        fn keeps_the_gap_while_a_task_and_the_summary_fit_under_it() {
+        fn keeps_the_gap_while_a_task_and_the_count_fit_under_it() {
             let mut panel = TaskPanel::default();
             panel.set(long_plan());
 
             assert_eq!(
                 texts(render_rows(&panel, 40, 3)),
-                ["", "  ● Step 4", "  +4 pending, 3 completed"],
+                ["", "  ● Step 4", "  ... +7 tasks"],
             );
         }
 
@@ -290,7 +268,7 @@ mod tests {
             panel.set(long_plan());
             assert_eq!(
                 texts(render_rows(&panel, 40, 2)),
-                ["  ● Step 4", "  +4 pending, 3 completed"],
+                ["  ● Step 4", "  ... +7 tasks"],
             );
 
             panel.set(vec![task("Add the entry type", TaskStatus::InProgress)]);
@@ -305,10 +283,7 @@ mod tests {
             let mut panel = TaskPanel::default();
             panel.set(long_plan());
 
-            assert_eq!(
-                texts(render_rows(&panel, 40, 1)),
-                ["  +1 in progress, 4 pending, 3 completed"],
-            );
+            assert_eq!(texts(render_rows(&panel, 40, 1)), ["  ... +8 tasks"],);
         }
     }
 
@@ -357,19 +332,6 @@ mod tests {
                 TaskStatus::InProgress,
             ]);
             assert_eq!(window(&nearly_done, 2), 2..4);
-        }
-    }
-
-    mod hidden_summary {
-        use super::*;
-
-        #[test]
-        fn counts_hidden_tasks_by_status_and_gives_no_summary_when_all_show() {
-            assert_eq!(
-                hidden_summary(&plan(), &(0..0)).as_deref(),
-                Some("+1 in progress, 1 pending, 1 completed"),
-            );
-            assert_eq!(hidden_summary(&plan(), &(0..3)), None);
         }
     }
 }

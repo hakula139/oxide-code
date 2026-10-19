@@ -79,6 +79,8 @@ pub(super) struct Selection {
     pointer: Option<(u16, u16)>,
     /// Whether the selection grew past a plain click, which selects nothing.
     extended: bool,
+    /// Whether the press landed on a painted row, where a plain click can expand a block.
+    on_row: bool,
     /// Whether the selection paused following the tail, which the release resumes.
     paused_follow: bool,
     last_edge_scroll: Option<Instant>,
@@ -232,6 +234,7 @@ impl ChatView {
             return;
         };
         let extended = unit != Unit::Cell;
+        let on_row = usize::from(cell.1 - self.viewport.y) < self.painted_rows.len();
         let paused_follow = extended && self.pause_follow();
         self.selection = Some(Selection {
             unit,
@@ -240,6 +243,7 @@ impl ChatView {
             pressed: cell,
             pointer: Some(cell),
             extended,
+            on_row,
             paused_follow,
             last_edge_scroll: None,
             edge_scrolls: 0,
@@ -267,13 +271,19 @@ impl ChatView {
         }
     }
 
+    /// Ends the press. A plain click on a row a block expands from, such as an overflow footer,
+    /// expands that block.
     fn release(&mut self) -> Option<String> {
         let selection = self.selection.as_mut()?;
         selection.pointer.take()?;
         if selection.paused_follow {
             self.jump_to_bottom();
         }
-        if !self.selection.as_ref()?.extended {
+        let selection = self.selection.as_ref()?;
+        if !selection.extended {
+            if selection.on_row {
+                self.expand_at(selection.origin[0].anchor);
+            }
             self.selection = None;
             return None;
         }
@@ -289,13 +299,13 @@ impl ChatView {
         loop {
             let stack = self.stack(&live);
             let span = self.selection.as_ref()?.span(stack.tops());
+            let ctx = self.settings.ctx(width);
             let stale = stack
                 .tops()
                 .blocks_within(span.start.0..span.end.0 + 1)
-                .find(|&block| !self.blocks[block].is_current(width, self.settings.theme_epoch));
+                .find(|&block| !self.blocks[block].is_current(&ctx, self.settings.theme_epoch));
             if let Some(stale) = stale {
                 drop(stack);
-                let ctx = self.settings.ctx(width);
                 self.blocks[stale].refresh(&ctx, self.settings.theme_epoch);
                 continue;
             }
@@ -439,6 +449,7 @@ mod tests {
     use crate::protocol::{ToolCall, ToolResult};
     use crate::tool::ToolResultView;
     use crate::tui::components::chat::blocks::{ChatBlock, RenderCtx};
+    use crate::tui::glyphs::TOOL_BORDER_CONT;
     use crate::tui::theme::Theme;
 
     mod click_counter {
@@ -611,6 +622,40 @@ mod tests {
                 }
             }
 
+            /// Two results of eight lines, which the compact view caps at five with a footer, painted
+            /// at the tail of a 10-row chat.
+            fn long_results() -> (ChatView, Vec<String>) {
+                let output = (0..8)
+                    .map(|i| format!("line {i}"))
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                let mut chat = ChatView::new(&Theme::default(), false);
+                for id in ["Grep(a)", "Grep(b)"] {
+                    chat.push_tool_call(tool_call(id));
+                    chat.push_tool_result(tool_result(id, &output));
+                }
+                let screen = paint_rows(&mut chat);
+                (chat, screen)
+            }
+
+            fn paint_rows(chat: &mut ChatView) -> Vec<String> {
+                let area = Rect::new(0, 0, 40, 10);
+                let mut terminal =
+                    Terminal::new(TestBackend::new(area.width, area.height)).unwrap();
+                terminal.draw(|frame| chat.render(frame, area)).unwrap();
+                let buf = terminal.backend().buffer();
+                (0..area.height)
+                    .map(|y| {
+                        let row: String = (0..area.width).map(|x| buf[(x, y)].symbol()).collect();
+                        row.trim_end().to_owned()
+                    })
+                    .collect()
+            }
+
+            fn screen_row(index: usize) -> u16 {
+                u16::try_from(index).unwrap()
+            }
+
             #[test]
             fn drag_copies_from_the_press_through_the_pointer_in_either_direction() {
                 let mut chat = chat_of(vec!["alpha beta", "gamma delta", "epsilon"]);
@@ -631,6 +676,67 @@ mod tests {
 
                 assert_eq!(copied, None);
                 assert!(chat.selection.is_none(), "a click clears the old selection");
+            }
+
+            #[test]
+            fn plain_click_on_an_overflow_footer_expands_its_block_below_the_rows_on_screen() {
+                let (mut chat, before) = long_results();
+                let footers: Vec<usize> = (0..before.len())
+                    .filter(|&row| before[row].contains("... +3 lines"))
+                    .collect();
+                assert_eq!(footers.len(), 2, "{before:?}");
+                let footer = footers[1];
+
+                let copied = click(&mut chat, (8, screen_row(footer)), Instant::now());
+
+                let after = paint_rows(&mut chat);
+                assert_eq!(copied, None);
+                assert_eq!(after[..footer], before[..footer], "the rows above stay put");
+                assert_eq!(after[footer], format!("{TOOL_BORDER_CONT}line 5"));
+                assert!(
+                    after[footers[0]].contains("... +3 lines"),
+                    "the other block stays compact"
+                );
+            }
+
+            #[test]
+            fn plain_click_off_a_footer_expands_nothing() {
+                let (mut chat, before) = long_results();
+                let body = before
+                    .iter()
+                    .rposition(|row| row.contains("line 0"))
+                    .unwrap();
+
+                click(&mut chat, (8, screen_row(body)), Instant::now());
+
+                assert_eq!(paint_rows(&mut chat), before);
+                assert!(!chat.is_scrolled_up());
+            }
+
+            #[test]
+            fn drag_from_an_overflow_footer_selects_without_expanding() {
+                let (mut chat, before) = long_results();
+                let footer = before
+                    .iter()
+                    .rposition(|row| row.contains("... +3 lines"))
+                    .unwrap();
+
+                let copied = drag(&mut chat, (0, screen_row(footer)), (39, screen_row(footer)));
+
+                assert_eq!(copied.as_deref(), Some(before[footer].as_str()));
+                assert_eq!(paint_rows(&mut chat), before);
+            }
+
+            #[test]
+            fn plain_click_on_a_live_reply_expands_nothing() {
+                let mut chat = chat_of(vec!["alpha"]);
+                chat.append_stream_token("beta gamma");
+                let cell = find(&paint(&mut chat), "beta");
+
+                let copied = click(&mut chat, cell, Instant::now());
+
+                assert_eq!(copied, None);
+                assert!(!chat.is_scrolled_up(), "the paint keeps following the tail");
             }
 
             #[test]

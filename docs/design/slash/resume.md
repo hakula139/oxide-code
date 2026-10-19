@@ -117,6 +117,6 @@ The picker wraps [`SearchableList`](modals.md) and adds these controls and displ
 - `crates/oxide-code/src/tui/app.rs`: `push_modal`.
 - `crates/oxide-code/src/tui/app/events.rs`: `apply_session_resumed`.
 - `crates/oxide-code/src/tui/components/chat.rs`: `ChatView::load_history`.
-- `crates/oxide-code/src/tui/modal/keymap.rs`: `Keymap`, `KeyAction`, and `KeyChord`, behind the picker's keys and footer hints.
+- `crates/oxide-code/src/tui/keymap.rs`: `Keymap`, `KeyAction`, and `KeyChord`, behind the picker's keys and footer hints.
 - `crates/oxide-code/src/tui/modal/searchable_list.rs`: `SearchableList<T>`, `SearchableItem`, `append_items` and `set_has_more` for paged loading, and `retain_items` and `cursor_to`, which keep the cursor when rows drop.
 - `crates/oxide-code/src/util/text.rs`: `compact_count`, which abbreviates the message count, shared with the status line's token counts.

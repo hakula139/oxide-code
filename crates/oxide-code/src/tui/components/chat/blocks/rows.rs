@@ -90,14 +90,15 @@ pub(super) struct NumberedRows<'a> {
 }
 
 impl<'a> NumberedRows<'a> {
-    /// Plain numbered rows with the pipe separator and no row bg, as read and grep draw them.
+    /// Plain numbered rows with no row bg, as read and grep draw them. The pipe separator is a
+    /// column rule in the tool border's color, whatever outcome `border_style` shows.
     pub(super) fn new(ctx: &'a RenderCtx<'a>, border_style: Style, max_number: usize) -> Self {
         Self::with_style(
             ctx,
             border_style,
             max_number,
             DEFAULT_SEPARATOR,
-            ctx.theme.dim(),
+            ctx.theme.tool_border(),
             None,
         )
     }
@@ -240,6 +241,8 @@ mod tests {
                 width: 80,
                 theme: &theme,
                 show_thinking: true,
+                expanded: false,
+                expand_hint: None,
             };
             let mut out = Vec::new();
 
@@ -268,6 +271,8 @@ mod tests {
                 width: 12,
                 theme: &theme,
                 show_thinking: true,
+                expanded: false,
+                expand_hint: None,
             };
             let mut out = Vec::new();
 
@@ -308,6 +313,8 @@ mod tests {
                 width: 16,
                 theme: &theme,
                 show_thinking: true,
+                expanded: false,
+                expand_hint: None,
             };
             let mut out = Vec::new();
 
@@ -342,6 +349,8 @@ mod tests {
                 width: 12,
                 theme: &theme,
                 show_thinking: true,
+                expanded: false,
+                expand_hint: None,
             };
             let mut out = Vec::new();
 
@@ -387,6 +396,8 @@ mod tests {
                 width: 30,
                 theme: &theme,
                 show_thinking: true,
+                expanded: false,
+                expand_hint: None,
             };
             let renderer = NumberedRows::with_style(
                 &ctx,
@@ -423,6 +434,8 @@ mod tests {
                 width: 80,
                 theme: &theme,
                 show_thinking: true,
+                expanded: false,
+                expand_hint: None,
             };
             let renderer = NumberedRows::with_style(
                 &ctx,
@@ -450,6 +463,8 @@ mod tests {
                 width: 40,
                 theme: &theme,
                 show_thinking: true,
+                expanded: false,
+                expand_hint: None,
             };
             let renderer = NumberedRows::with_style(
                 &ctx,
@@ -483,6 +498,8 @@ mod tests {
                 width: 20,
                 theme: &theme,
                 show_thinking: true,
+                expanded: false,
+                expand_hint: None,
             };
             let renderer = NumberedRows::with_style(
                 &ctx,
@@ -526,14 +543,22 @@ mod tests {
                 width: 80,
                 theme: &theme,
                 show_thinking: true,
+                expanded: false,
+                expand_hint: None,
             };
-            let renderer = NumberedRows::new(&ctx, theme.tool_border(), 100);
+            let renderer = NumberedRows::new(&ctx, theme.error(), 100);
             let mut out = Vec::new();
             renderer.render(&mut out, 7, "hello", theme.text());
 
-            let row = out.first().expect("renders one line");
-            let spans: Vec<&str> = row.spans.iter().map(|s| s.content.as_ref()).collect();
-            assert_eq!(spans, vec![TOOL_BORDER_CONT, "  7", " │ ", "hello"]);
+            assert_eq!(
+                out,
+                [Line::from(vec![
+                    Span::styled(TOOL_BORDER_CONT, theme.error()),
+                    Span::styled("  7", theme.muted()),
+                    Span::styled(" │ ", theme.tool_border()),
+                    Span::styled("hello", theme.text()),
+                ])]
+            );
         }
 
         #[test]
@@ -543,6 +568,8 @@ mod tests {
                 width: 4096,
                 theme: &theme,
                 show_thinking: true,
+                expanded: false,
+                expand_hint: None,
             };
             let renderer = NumberedRows::new(&ctx, theme.tool_border(), 1);
             let mut out = Vec::new();
@@ -563,6 +590,8 @@ mod tests {
                 width: 14,
                 theme: &theme,
                 show_thinking: true,
+                expanded: false,
+                expand_hint: None,
             };
             let renderer = NumberedRows::new(&ctx, theme.tool_border(), 10);
             let mut out = Vec::new();

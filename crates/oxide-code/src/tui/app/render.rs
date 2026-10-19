@@ -10,6 +10,7 @@ use ratatui::widgets::{Block, Paragraph};
 use ratatui::{Frame, Terminal};
 
 use super::App;
+use crate::tui::components::overflow_count;
 use crate::tui::components::status::StatusBar;
 use crate::tui::components::welcome::{self, WelcomeSnapshot};
 use crate::tui::glyphs::{NEWLINE_GLYPH, USER_PROMPT_PREFIX, USER_PROMPT_PREFIX_WIDTH};
@@ -21,7 +22,7 @@ use crate::util::text::{center_truncate_to_width, truncate_to_width};
 /// Chat rows that stay visible however tall the bands below the chat grow.
 const MIN_CHAT_HEIGHT: u16 = 1;
 
-/// Maximum queued prompts shown in the preview before collapsing into `+N more`.
+/// Maximum queued prompts shown in the preview before collapsing into `... +N prompts`.
 const PREVIEW_VISIBLE: usize = 3;
 
 /// Cells a pill's padding takes, one on each side of its label.
@@ -106,6 +107,7 @@ impl App {
             let snap = WelcomeSnapshot::from_live(&self.session_info);
             welcome::paint(frame, chat, &self.theme, &snap);
         } else {
+            self.chat.set_spinner(self.status_bar.spinner());
             self.chat.render(frame, chat);
             let jump = self.jump_pill(chat);
             let jump_width = jump.as_ref().map_or(0, |(pill, _)| pill.width);
@@ -151,8 +153,9 @@ impl App {
         if self.pending_prompts.len() > PREVIEW_VISIBLE {
             let extra = self.pending_prompts.len() - PREVIEW_VISIBLE;
             let gutter = " ".repeat(usize::from(USER_PROMPT_PREFIX_WIDTH));
+            let count = overflow_count(extra, "prompt", "prompts");
             lines.push(Line::from(Span::styled(
-                format!("{gutter}+{extra} more"),
+                format!("{gutter}{count}"),
                 self.theme.dim(),
             )));
         }
@@ -673,10 +676,7 @@ mod tests {
             let text = rendered_text(&mut app, 40, 12);
             let rows: Vec<&str> = text.lines().map(str::trim_end).collect();
 
-            assert_eq!(
-                rows[3..5],
-                ["  ● Add the entry type", "  +1 pending, 1 completed"]
-            );
+            assert_eq!(rows[3..5], ["  ● Add the entry type", "  ... +2 tasks"]);
             assert_eq!(rows[5], "─".repeat(40));
             assert!(rows[6].ends_with("one"), "{text}");
         }
@@ -801,7 +801,7 @@ mod tests {
         use super::*;
 
         #[test]
-        fn overflow_appends_more_count_row() {
+        fn overflow_appends_a_count_row() {
             let (mut app, _rx, _event_tx) = test_app(None);
             app.input.set_enabled(false);
             let extra = 3;
@@ -811,7 +811,7 @@ mod tests {
 
             let text = rendered_text(&mut app, 60, 20);
             assert!(
-                text.contains(&format!("+{extra} more")),
+                text.contains(&format!("... +{extra} prompts")),
                 "overflow hint must show exact extra count: {text}",
             );
         }

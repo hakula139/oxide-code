@@ -1,6 +1,7 @@
 //! Scrollable chat view. Each visible transcript unit is a [`blocks::ChatBlock`] impl.
 //! [`ChatView`] owns the streaming buffer, caches committed block renders, and stacks them with
-//! separator lines, rendering only the blocks near the viewport.
+//! separator lines, rendering only the blocks near the viewport. The compact view caps tool bodies
+//! and collapses committed thinking, while the expanded view renders every block in full.
 
 mod blocks;
 mod selection;
@@ -22,6 +23,8 @@ use self::blocks::{
 use self::selection::{ClickCounter, Selection};
 use self::stack::{Anchor, CachedBlock, SlotTops, Stack};
 use crate::protocol::{Interaction, ToolCall, ToolResult};
+use crate::tui::action::{APP_KEYMAP, AppAction, AppView};
+use crate::tui::glyphs::SPINNER_FRAMES;
 use crate::tui::pending_calls::{PendingCalls, result_header};
 use crate::tui::theme::Theme;
 
@@ -55,6 +58,9 @@ pub(crate) struct ChatView {
     summary_counted: bool,
     /// Slot tops of the last paint, which the next frame anchors the scroll offset on.
     painted: SlotTops,
+    /// Whether blocks expanded or collapsed since the last paint, so the next paint keeps the
+    /// anchored row's index in its block.
+    expansion_changed: bool,
     /// Rows of the last paint, which a double click finds its word in.
     painted_rows: Vec<Line<'static>>,
 
@@ -62,6 +68,8 @@ pub(crate) struct ChatView {
     clicks: ClickCounter,
 
     pending_calls: PendingCalls,
+    /// Spinner frame that heads thinking still streaming in.
+    spinner: char,
 }
 
 /// Inputs shared by every block render.
@@ -70,6 +78,10 @@ struct RenderSettings {
     /// Bumped per theme swap to invalidate cached block renders.
     theme_epoch: u64,
     show_thinking: bool,
+    /// Whether the chat shows the expanded view.
+    expanded: bool,
+    /// The toggle's hint in the compact view, which overflow footers end with.
+    expand_hint: Option<String>,
 }
 
 impl RenderSettings {
@@ -78,6 +90,8 @@ impl RenderSettings {
             width,
             theme: &self.theme,
             show_thinking: self.show_thinking,
+            expanded: self.expanded,
+            expand_hint: self.expand_hint.as_deref(),
         }
     }
 }
@@ -107,6 +121,9 @@ impl ChatView {
                 theme: theme.clone(),
                 theme_epoch: 0,
                 show_thinking,
+                expanded: false,
+                expand_hint: APP_KEYMAP
+                    .hint(AppAction::ToggleExpanded, &AppView { expanded: false }),
             },
             blocks: Vec::new(),
             streaming: None,
@@ -120,10 +137,12 @@ impl ChatView {
             new_content_since_pause: 0,
             summary_counted: false,
             painted: SlotTops::default(),
+            expansion_changed: false,
             painted_rows: Vec::new(),
             selection: None,
             clicks: ClickCounter::default(),
             pending_calls: PendingCalls::default(),
+            spinner: SPINNER_FRAMES[0],
         }
     }
 
@@ -134,6 +153,37 @@ impl ChatView {
         if let Some(s) = &mut self.streaming {
             s.invalidate_cache();
         }
+    }
+
+    /// Sets the spinner frame the next paint heads streaming thinking with.
+    pub(crate) fn set_spinner(&mut self, spinner: char) {
+        self.spinner = spinner;
+    }
+
+    /// Switches between the compact and expanded views, returning each block expanded by a click
+    /// to the view. A paused paint keeps the row on top in place.
+    pub(crate) fn toggle_expanded(&mut self) {
+        self.settings.expanded = !self.settings.expanded;
+        let ctx = self.settings.ctx(self.viewport.width);
+        for block in &mut self.blocks {
+            block.reset_view(&ctx);
+        }
+        self.selection = None;
+        self.expansion_changed = true;
+    }
+
+    /// Expands the block if the row `anchor` names is one a click expands it from. The paint
+    /// pauses, so the rows on screen stay put while the block grows below them.
+    fn expand_at(&mut self, anchor: Anchor) {
+        let Some(block) = self.blocks.get_mut(anchor.block()) else {
+            return;
+        };
+        if !block.expands_from(anchor.row()) {
+            return;
+        }
+        block.expand();
+        self.auto_scroll = false;
+        self.expansion_changed = true;
     }
 
     /// Populates from a resumed transcript's interactions, matching the live block shapes.
@@ -422,6 +472,7 @@ impl ChatView {
 
             let lines = stack.slice(placement.offset, usize::from(area.height));
             self.painted = stack.into_tops();
+            self.expansion_changed = false;
             self.settle_scroll(&placement);
             self.painted_rows.clone_from(&lines);
             self.follow_pointer();
@@ -472,7 +523,8 @@ impl ChatView {
     }
 
     /// Places the paint on `stack`: the tail under auto-scroll, else the anchored row moved by
-    /// the pending scroll and clamped to the content.
+    /// the pending scroll and clamped to the content. After blocks expand or collapse, the
+    /// anchored row keeps its index in its block.
     fn place(&self, stack: &Stack<'_>, anchor: Option<Anchor>) -> Placement {
         let viewport = usize::from(self.viewport.height);
         let max_offset = stack.height().saturating_sub(viewport);
@@ -485,7 +537,11 @@ impl ChatView {
             };
         };
 
-        let anchored = stack.tops().offset_of(anchor);
+        let anchored = if self.expansion_changed {
+            stack.tops().offset_keeping_row(anchor)
+        } else {
+            stack.tops().offset_of(anchor)
+        };
         let offset = anchored
             .saturating_add_signed(self.pending_scroll)
             .min(max_offset);
@@ -500,9 +556,9 @@ impl ChatView {
 
     /// The block within the placement's reach whose render is stale, nearest the pinned row.
     fn nearest_stale(&self, tops: &SlotTops, placement: &Placement) -> Option<usize> {
-        let (width, theme_epoch) = (self.viewport.width, self.settings.theme_epoch);
+        let ctx = self.settings.ctx(self.viewport.width);
         tops.blocks_within(placement.reach.clone())
-            .filter(|&block| !self.blocks[block].is_current(width, theme_epoch))
+            .filter(|&block| !self.blocks[block].is_current(&ctx, self.settings.theme_epoch))
             .min_by_key(|&block| {
                 tops.slot(block)
                     .map_or(0, |slot| rows_between(&slot, placement.pin))
@@ -551,13 +607,11 @@ impl ChatView {
 
     fn render_live(&self, width: u16) -> LiveLines {
         let ctx = self.settings.ctx(width);
-        let mut thinking = Vec::new();
-        if !self.thinking_buffer.is_empty() {
-            let block = AssistantThinking::new(self.thinking_buffer.clone());
-            if block.visible(&ctx) {
-                thinking = block.render(&ctx);
-            }
-        }
+        let thinking = if ctx.show_thinking && !self.thinking_buffer.is_empty() {
+            AssistantThinking::render_streaming(&self.thinking_buffer, self.spinner, &ctx)
+        } else {
+            Vec::new()
+        };
         let streaming_tail = self.streaming.as_ref().map_or_else(Vec::new, |s| {
             s.render_tail(&ctx, self.streaming_continues_turn())
         });
@@ -789,6 +843,98 @@ mod tests {
         }
     }
 
+    mod set_spinner {
+        use super::*;
+
+        #[test]
+        fn heads_streaming_thinking_with_the_frame() {
+            let mut chat = test_chat();
+
+            chat.set_spinner('⣯');
+            chat.append_thinking_token("pondering");
+
+            assert!(all_text(&mut chat).contains("⣯ Thinking"));
+        }
+    }
+
+    mod toggle_expanded {
+        use super::*;
+
+        /// Calls that each print `lines` numbered lines.
+        fn long_results(calls: usize, lines: usize) -> Vec<Interaction> {
+            (0..calls)
+                .flat_map(|run| {
+                    let label = format!("run {run}");
+                    let output = (0..lines)
+                        .map(|i| format!("run {run} line {i}"))
+                        .collect::<Vec<_>>()
+                        .join("\n");
+                    [
+                        Interaction::ToolCall(call("$", &label)),
+                        Interaction::ToolResult(text_result(&label, &output, false, None)),
+                    ]
+                })
+                .collect()
+        }
+
+        #[test]
+        fn keeps_the_top_row_in_place_while_scrolled_up() {
+            let mut chat = test_chat();
+            chat.load_history(long_results(6, 12));
+            render_chat(&mut chat, 60, 8);
+            for _ in 0..3 {
+                chat.handle_event(&key_event(KeyCode::PageUp));
+            }
+            for _ in 0..3 {
+                chat.handle_event(&key_event(KeyCode::Down));
+            }
+            let compact = screen_rows(&render_chat(&mut chat, 60, 8));
+            assert_eq!(compact[0], format!("{TOOL_BORDER_CONT}run 3 line 1"));
+
+            chat.toggle_expanded();
+            let expanded = screen_rows(&render_chat(&mut chat, 60, 8));
+            chat.toggle_expanded();
+            let collapsed = screen_rows(&render_chat(&mut chat, 60, 8));
+
+            assert_eq!(
+                expanded,
+                (1..9)
+                    .map(|i| format!("{TOOL_BORDER_CONT}run 3 line {i}"))
+                    .collect::<Vec<_>>(),
+            );
+            assert_eq!(collapsed, compact);
+        }
+
+        #[test]
+        fn follows_the_tail_when_not_scrolled_up() {
+            let mut chat = test_chat();
+            chat.load_history(long_results(2, 12));
+            render_chat(&mut chat, 60, 8);
+
+            chat.toggle_expanded();
+            let screen = screen_rows(&render_chat(&mut chat, 60, 8));
+
+            assert_eq!(
+                screen.last().map(String::as_str),
+                Some(format!("{TOOL_BORDER_CONT}run 1 line 11").as_str()),
+            );
+        }
+
+        #[test]
+        fn returns_a_block_expanded_by_a_click_to_the_view() {
+            let mut chat = test_chat();
+            chat.load_history(long_results(1, 12));
+            chat.blocks[1].expand();
+
+            chat.toggle_expanded();
+            chat.toggle_expanded();
+
+            let text = all_text(&mut chat);
+            assert!(text.contains("... +7 lines · Ctrl+O to expand"), "{text}");
+            assert!(!text.contains("run 0 line 11"), "{text}");
+        }
+    }
+
     mod load_history {
         use super::*;
 
@@ -865,19 +1011,19 @@ mod tests {
                     Interaction::ToolResult(text_result("cargo test", "ok", false, None)),
                 ]
             };
-            for show_thinking in [false, true] {
+            for (show_thinking, expanded) in [(false, false), (true, false), (true, true)] {
                 let mut chat = ChatView::new(&Theme::default(), show_thinking);
+                if expanded {
+                    chat.toggle_expanded();
+                }
                 chat.load_history(history());
                 let text = all_text(&mut chat);
-                assert_eq!(
-                    text.matches("Running the suite.").count(),
-                    1,
-                    "show_thinking={show_thinking}: {text}",
-                );
-                assert_eq!(text.contains("Thinking..."), show_thinking, "{text}");
+                let case = format!("show_thinking={show_thinking} expanded={expanded}: {text}");
+                assert_eq!(text.matches("Running the suite.").count(), 1, "{case}");
+                assert_eq!(text.contains("Thought"), show_thinking, "{case}");
                 assert!(
                     text.find("Running the suite.") < text.find("cargo test"),
-                    "{text}"
+                    "{case}"
                 );
             }
         }
@@ -969,6 +1115,7 @@ mod tests {
             assert_eq!(chat.thinking_buffer, "");
             assert_eq!(chat.blocks.len(), 1);
 
+            chat.toggle_expanded();
             let text = all_text(&mut chat);
             assert!(text.contains("reasoning here"));
             assert!(text.contains("reply text"));
@@ -1144,7 +1291,7 @@ mod tests {
             let mut chat = test_chat();
             chat.append_thinking_token("pondering...");
             let text = all_text(&mut chat);
-            assert!(text.contains("Thinking..."));
+            assert!(text.contains(&format!("{} Thinking", SPINNER_FRAMES[0])));
             assert!(text.contains("pondering..."));
         }
 
@@ -1153,7 +1300,7 @@ mod tests {
             let mut chat = ChatView::new(&Theme::default(), false);
             chat.append_thinking_token("pondering...");
             let text = all_text(&mut chat);
-            assert!(!text.contains("Thinking..."));
+            assert!(!text.contains("Thinking"));
             assert!(!text.contains("pondering..."));
         }
 
@@ -1318,6 +1465,7 @@ mod tests {
             chat.commit_streaming();
             assert_eq!(chat.blocks.len(), 1);
             assert_eq!(chat.thinking_buffer, "");
+            chat.toggle_expanded();
             let text = all_text(&mut chat);
             assert!(text.contains("plan before tool"));
         }
@@ -1820,6 +1968,37 @@ mod tests {
                 .collect()
         }
 
+        /// Committed thinking, then a long bash result and a long read.
+        fn long_output_chat() -> ChatView {
+            let mut chat = test_chat();
+            chat.push_user_message("look around".to_owned());
+            chat.append_thinking_token("List the files, then read the loader.");
+            chat.push_tool_call(call("$", "ls"));
+            let listing = (0..8)
+                .map(|i| format!("file{i}.rs"))
+                .collect::<Vec<_>>()
+                .join("\n");
+            chat.push_tool_result(text_result("ls", &listing, false, None));
+            chat.push_tool_call(call("→", "Read(src/loader.rs)"));
+            chat.push_tool_result(ToolResult {
+                id: "Read(src/loader.rs)".to_owned(),
+                content: String::new(),
+                is_error: false,
+                title: Some("Read loader.rs".to_owned()),
+                view: ToolResultView::ReadExcerpt {
+                    path: "src/loader.rs".to_owned(),
+                    lines: (1..=8)
+                        .map(|number| ReadExcerptLine {
+                            number,
+                            text: format!("let step_{number} = load({number});"),
+                        })
+                        .collect(),
+                    total_lines: 8,
+                },
+            });
+            chat
+        }
+
         #[test]
         fn auto_scroll_pins_tail_in_one_pass() {
             let mut chat = test_chat();
@@ -2030,6 +2209,9 @@ mod tests {
                 .join("\n\n");
             for thinking in [false, true] {
                 let mut chat = test_chat();
+                if thinking {
+                    chat.toggle_expanded();
+                }
                 chat.push_user_message("go".to_owned());
                 render_chat(&mut chat, 40, 6);
                 if thinking {
@@ -2047,6 +2229,31 @@ mod tests {
                 let after = screen_rows(&render_chat(&mut chat, 40, 6));
                 assert_eq!(after, before, "thinking={thinking}");
             }
+        }
+
+        #[test]
+        fn paused_inside_live_thinking_lands_on_its_header_once_it_collapses() {
+            let thinking = (0..30)
+                .map(|i| format!("paragraph {i}"))
+                .collect::<Vec<_>>()
+                .join("\n\n");
+            let mut chat = test_chat();
+            chat.push_user_message("go".to_owned());
+            render_chat(&mut chat, 40, 6);
+            chat.append_thinking_token(&thinking);
+            render_chat(&mut chat, 40, 6);
+            for _ in 0..3 {
+                chat.handle_event(&key_event(KeyCode::PageUp));
+            }
+            render_chat(&mut chat, 40, 6);
+
+            chat.push_tool_call(call("$", "ls"));
+            let screen = screen_rows(&render_chat(&mut chat, 40, 6));
+
+            assert!(
+                screen.contains(&format!("{BAR} Thought · Ctrl+O to expand")),
+                "{screen:?}"
+            );
         }
 
         #[test]
@@ -2263,15 +2470,16 @@ mod tests {
         }
 
         #[test]
-        fn tool_result_overflow_shows_line_count() {
-            let mut chat = test_chat();
-            chat.push_tool_call(call("$", "ls"));
-            let long = (0..5 + 3)
-                .map(|i| format!("line {i}"))
-                .collect::<Vec<_>>()
-                .join("\n");
-            chat.push_tool_result(titled_result("ls out", &long, false));
-            insta::assert_snapshot!(render_chat(&mut chat, 60, 14));
+        fn long_output_and_thinking_in_the_compact_view() {
+            let mut chat = long_output_chat();
+            insta::assert_snapshot!(render_chat(&mut chat, 60, 22));
+        }
+
+        #[test]
+        fn long_output_and_thinking_in_the_expanded_view() {
+            let mut chat = long_output_chat();
+            chat.toggle_expanded();
+            insta::assert_snapshot!(render_chat(&mut chat, 60, 30));
         }
 
         #[test]
