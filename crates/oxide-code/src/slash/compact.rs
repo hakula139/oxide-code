@@ -36,8 +36,6 @@ mod tests {
     use crate::protocol::Op;
     use crate::slash::registry::testing::run_execute;
 
-    // ── CompactCmd metadata ──
-
     #[test]
     fn metadata_matches_built_ins_contract() {
         assert_eq!(CompactCmd.name(), "compact");
@@ -46,23 +44,29 @@ mod tests {
         assert_eq!(CompactCmd.usage(), Some("[<instructions>]"));
     }
 
-    #[test]
-    fn classify_is_always_mutating() {
-        assert_eq!(CompactCmd.classify(""), SlashKind::Mutating);
-        assert_eq!(CompactCmd.classify("focus on the bug"), SlashKind::Mutating);
+    mod classify {
+        use super::*;
+
+        #[test]
+        fn is_always_mutating() {
+            assert_eq!(CompactCmd.classify(""), SlashKind::Mutating);
+            assert_eq!(CompactCmd.classify("focus on the bug"), SlashKind::Mutating);
+        }
     }
 
-    // ── CompactCmd::execute ──
+    mod execute {
+        use super::*;
 
-    #[test]
-    fn execute_with_args_forwards_trimmed_instructions() {
-        assert_eq!(
-            run_execute(&CompactCmd, "  focus on the build error  ")
-                .unwrap()
-                .into_forward(),
-            Action::Op(Op::Compact {
-                instructions: Some("focus on the build error".to_owned()),
-            }),
-        );
+        #[test]
+        fn with_args_forwards_trimmed_instructions() {
+            assert_eq!(
+                run_execute(&CompactCmd, "  focus on the build error  ")
+                    .unwrap()
+                    .into_forward(),
+                Action::Op(Op::Compact {
+                    instructions: Some("focus on the build error".to_owned()),
+                }),
+            );
+        }
     }
 }
