@@ -698,7 +698,7 @@ mod tests {
             use super::*;
 
             #[test]
-            fn handles_title_present_and_absent() {
+            fn handles_titled_and_untitled_sessions() {
                 let absent = raw_session_info(
                     stamped_id(0xab),
                     "/work/oxide",
@@ -900,6 +900,26 @@ mod tests {
                     "no count when exit is missing: {meta}"
                 );
                 assert!(!meta.contains("msg"), "no singular either: {meta}");
+            }
+        }
+    }
+
+    mod actions {
+        use super::*;
+
+        #[test]
+        fn dispatch_each_key_to_its_own_action() {
+            let ctrl = |c| KeyEvent::new(KeyCode::Char(c), KeyModifiers::CONTROL);
+            for (event, action) in [
+                (KeyEvent::from(KeyCode::Enter), PickerAction::Resume),
+                (KeyEvent::from(KeyCode::Esc), PickerAction::Dismiss),
+                (ctrl('x'), PickerAction::Archive),
+                (ctrl('d'), PickerAction::Delete),
+                (KeyEvent::from(KeyCode::Tab), PickerAction::ToggleScope),
+                (ctrl('a'), PickerAction::ToggleArchivedView),
+                (ctrl('u'), PickerAction::ClearFilter),
+            ] {
+                assert_eq!(ACTIONS.action_for(&event), Some(action), "{event:?}");
             }
         }
     }
@@ -1968,26 +1988,6 @@ mod tests {
 
             let mut slash_picker = ResumePicker::new(store, "live-session-id".to_owned());
             assert!(slash_picker.on_cancel().is_none());
-        }
-    }
-
-    mod actions {
-        use super::*;
-
-        #[test]
-        fn dispatch_each_key_to_its_own_action() {
-            let ctrl = |c| KeyEvent::new(KeyCode::Char(c), KeyModifiers::CONTROL);
-            for (event, action) in [
-                (KeyEvent::from(KeyCode::Enter), PickerAction::Resume),
-                (KeyEvent::from(KeyCode::Esc), PickerAction::Dismiss),
-                (ctrl('x'), PickerAction::Archive),
-                (ctrl('d'), PickerAction::Delete),
-                (KeyEvent::from(KeyCode::Tab), PickerAction::ToggleScope),
-                (ctrl('a'), PickerAction::ToggleArchivedView),
-                (ctrl('u'), PickerAction::ClearFilter),
-            ] {
-                assert_eq!(ACTIONS.action_for(&event), Some(action), "{event:?}");
-            }
         }
     }
 }

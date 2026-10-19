@@ -199,7 +199,7 @@ mod tests {
         use super::*;
 
         #[test]
-        fn is_absent_for_unknown_model() {
+        fn rejects_an_unknown_model() {
             let mut info = test_session_info();
             info.config.model = ModelSpec::resolve("custom-model".to_owned());
             info.config.effort = None;

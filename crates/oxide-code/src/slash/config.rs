@@ -220,7 +220,7 @@ mod tests {
         }
 
         #[test]
-        fn renders_extra_ca_certs_none_as_placeholder() {
+        fn renders_unset_extra_ca_certs_as_placeholder() {
             let info = test_session_info();
             assert!(info.config.extra_ca_certs.is_none(), "precondition: unset");
             let m = build_modal(&info, None);

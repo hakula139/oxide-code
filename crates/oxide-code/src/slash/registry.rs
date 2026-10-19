@@ -267,36 +267,6 @@ mod tests {
         }
     }
 
-    mod lookup_in {
-        use super::*;
-
-        const ALIASED: FakeCmd = FakeCmd {
-            name: "primary",
-            aliases: &["alt", "shortcut"],
-            ..FakeCmd::DEFAULT
-        };
-
-        #[test]
-        fn resolves_canonical_name() {
-            let cmd = lookup_in(BUILT_INS, "help").expect("/help is registered");
-            assert_eq!(cmd.name(), "help");
-        }
-
-        #[test]
-        fn resolves_each_alias_to_canonical_impl() {
-            let registry: &[&dyn SlashCommand] = &[&ALIASED];
-            for alias in ["alt", "shortcut"] {
-                let cmd = lookup_in(registry, alias).expect("alias must resolve");
-                assert_eq!(cmd.name(), "primary");
-            }
-        }
-
-        #[test]
-        fn unknown_name_is_absent() {
-            assert!(lookup_in(BUILT_INS, "nonexistent").is_none());
-        }
-    }
-
     mod built_ins {
         use super::*;
 
@@ -393,6 +363,36 @@ mod tests {
             }
 
             assert!(steering > 0, "no built-in form steers");
+        }
+    }
+
+    mod lookup_in {
+        use super::*;
+
+        const ALIASED: FakeCmd = FakeCmd {
+            name: "primary",
+            aliases: &["alt", "shortcut"],
+            ..FakeCmd::DEFAULT
+        };
+
+        #[test]
+        fn resolves_canonical_name() {
+            let cmd = lookup_in(BUILT_INS, "help").expect("/help is registered");
+            assert_eq!(cmd.name(), "help");
+        }
+
+        #[test]
+        fn resolves_each_alias_to_canonical_impl() {
+            let registry: &[&dyn SlashCommand] = &[&ALIASED];
+            for alias in ["alt", "shortcut"] {
+                let cmd = lookup_in(registry, alias).expect("alias must resolve");
+                assert_eq!(cmd.name(), "primary");
+            }
+        }
+
+        #[test]
+        fn unknown_name_resolves_to_no_command() {
+            assert!(lookup_in(BUILT_INS, "nonexistent").is_none());
         }
     }
 }
