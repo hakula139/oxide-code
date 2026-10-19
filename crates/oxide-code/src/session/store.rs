@@ -64,6 +64,12 @@ impl SessionStore {
         &self.cwd
     }
 
+    /// Where [`Self::create`] puts the file of session `session_id` created at `created_at`.
+    pub(super) fn session_file(&self, session_id: &str, created_at: OffsetDateTime) -> PathBuf {
+        self.project_dir
+            .join(session_filename(session_id, created_at))
+    }
+
     /// Creates the file (`0600`, `O_EXCL`) and writes the header, then the JSONL `lines`, in one
     /// write that unlinks the file on failure.
     pub(crate) fn create(&self, header: &Entry, lines: &[u8]) -> Result<SessionWriter> {
@@ -79,9 +85,7 @@ impl SessionStore {
 
         let mut buf = encode_lines([header])?;
         buf.extend_from_slice(lines);
-        let path = self
-            .project_dir
-            .join(session_filename(session_id, *created_at));
+        let path = self.session_file(session_id, *created_at);
         let file = create_written(&path, |file| Appender(file).write_all(&buf))?;
         Ok(SessionWriter {
             path,
@@ -310,12 +314,31 @@ pub(crate) fn read_session_id_from_path(path: &Path) -> Result<String> {
     Ok(header.session_id)
 }
 
-/// Removes the session file at `path`. Refuses the live session's file, which callers already
-/// filter out, so a bug upstream cannot unlink the file under its open writer.
+/// The directory beside `session_file` that holds the artifacts of session `session_id`, such as
+/// spilled tool output. Nothing creates it until the session writes an artifact, and [`delete_at`]
+/// removes it with the file.
+pub(crate) fn artifact_dir(session_file: &Path, session_id: &str) -> PathBuf {
+    session_file.with_file_name(session_id)
+}
+
+/// Removes the session file at `path` and the session's [`artifact_dir`], the directory first so a
+/// failure leaves the session listed for another try. Refuses the live session's file, which
+/// callers already filter out, so a bug upstream cannot unlink the file under its open writer.
 pub(crate) fn delete_at(path: &Path, live_id: &str) -> Result<()> {
     let session_id = read_session_id_from_path(path)?;
     if session_id == live_id {
         bail!("refusing to delete the live session: {session_id}");
+    }
+    let artifact_dir = artifact_dir(path, &session_id);
+    if let Err(e) = fs::remove_dir_all(&artifact_dir)
+        && e.kind() != io::ErrorKind::NotFound
+    {
+        return Err(e).with_context(|| {
+            format!(
+                "failed to remove session directory {}",
+                artifact_dir.display()
+            )
+        });
     }
     fs::remove_file(path)
         .with_context(|| format!("failed to remove session file {}", path.display()))
@@ -374,6 +397,10 @@ pub(crate) struct SessionWriter {
 }
 
 impl SessionWriter {
+    pub(super) fn path(&self) -> &Path {
+        &self.path
+    }
+
     /// Appends JSONL `lines` in one write, so concurrent appenders interleave only between batches.
     pub(super) fn append_lines(&mut self, lines: &[u8]) -> Result<()> {
         let file = match self.file.take() {
@@ -1709,15 +1736,23 @@ mod tests {
     // ── delete_at ──
 
     #[test]
-    fn delete_at_removes_the_session_file() {
+    fn delete_at_removes_the_session_file_and_its_directory() {
         let dir = tempfile::tempdir().unwrap();
         let store = test_store(dir.path());
         let _writer = store.create(&sample_header("doomed"), &[]).unwrap();
         let path = test_session_file(dir.path(), "doomed");
+        let artifact_dir = test_project_path(dir.path(), "doomed");
+        let spill = artifact_dir.join("tool-results/toolu_1.txt");
+        fs::create_dir_all(spill.parent().unwrap()).unwrap();
+        fs::write(&spill, "output").unwrap();
 
         delete_at(&path, "live-session-id").unwrap();
 
         assert!(!path.exists(), "delete must unlink the file: {path:?}");
+        assert!(
+            !artifact_dir.exists(),
+            "delete must remove the session directory"
+        );
         assert!(
             store.list().unwrap().is_empty(),
             "list reflects the removal"
@@ -1750,6 +1785,24 @@ mod tests {
             err.to_string().contains("session not found"),
             "got: {err:#}"
         );
+    }
+
+    #[test]
+    fn delete_at_keeps_the_session_file_when_its_directory_stays() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = test_store(dir.path());
+        let _writer = store.create(&sample_header("stuck"), &[]).unwrap();
+        let path = test_session_file(dir.path(), "stuck");
+        fs::write(test_project_path(dir.path(), "stuck"), "not a directory").unwrap();
+
+        let err = delete_at(&path, "live-session-id").expect_err("the directory must go first");
+
+        assert!(
+            err.to_string()
+                .contains("failed to remove session directory"),
+            "got: {err:#}"
+        );
+        assert!(path.exists(), "the session stays listed for another try");
     }
 
     // ── set_archived_at ──

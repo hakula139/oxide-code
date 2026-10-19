@@ -362,6 +362,7 @@ impl Engine {
             policy: &mut self.policy,
             workspace: Arc::clone(&self.workspace),
             session_id: self.session.session_id().to_owned(),
+            artifact_dir: Arc::clone(self.session.artifact_dir()),
             tracker: Arc::clone(&self.file_tracker),
         };
         let TurnOutcome { mut report, result } = turn::agent_turn(
@@ -1011,7 +1012,7 @@ mod tests {
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
     use super::testing::{
-        MODEL, SESSION_CONTEXT, engine, inert_ops, mount_reply, mount_stalled_reply_once,
+        EchoTool, MODEL, SESSION_CONTEXT, engine, inert_ops, mount_reply, mount_stalled_reply_once,
         mount_tool_call_once, panic_message, request_bodies, service_log, system_prompt,
         tool_heavy_transcript, until_requested, with_pinned_home,
     };
@@ -1029,7 +1030,8 @@ mod tests {
     use crate::permission::{Mode, PermissionClass, Workspace};
     use crate::protocol::testing::CapturingSink;
     use crate::session::post_compact::synthesize_post_compact_message;
-    use crate::session::store::testing::{test_session_file, test_store};
+    use crate::session::store::delete_at;
+    use crate::session::store::testing::{test_project_dir, test_session_file, test_store};
     use crate::tool::bash::background::ShellState;
     use crate::tool::bash::background::testing::{shell, start_shell};
     use crate::tool::tasks::TasksTool;
@@ -3229,6 +3231,60 @@ mod tests {
         .await;
     }
 
+    /// Runs a turn whose echo call `id` spills its output, and returns the session it ran in.
+    async fn spill_echo_output(server: &MockServer, engine: &mut Engine, id: &str) -> String {
+        let input = serde_json::json!({ "text": "x".repeat(300 << 10) });
+        server.reset().await;
+        mount_tool_call_once(server, id, "echo", &input.to_string()).await;
+        mount_reply(server, "done").await;
+        engine
+            .submit_prompt("echo it", &CapturingSink::default(), &mut inert_ops())
+            .await;
+        engine.session_id().to_owned()
+    }
+
+    /// The names of the spill files in `artifact_dir`, sorted.
+    fn spill_names(artifact_dir: &Path) -> Vec<String> {
+        let mut names: Vec<_> = std::fs::read_dir(artifact_dir.join("tool-results"))
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+            .collect();
+        names.sort();
+        names
+    }
+
+    #[tokio::test]
+    async fn clear_and_resume_spill_tool_output_into_the_live_session() {
+        with_pinned_home(async {
+            let server = MockServer::start().await;
+            let dir = tempfile::tempdir().unwrap();
+            let store = test_store(dir.path());
+            let mut engine = engine(server.uri(), &store, dir.path())
+                .await
+                .with_tools(ToolRegistry::new(vec![Box::new(EchoTool)]));
+            engine.set_mode(&CapturingSink::default(), Mode::Yolo);
+
+            let first = spill_echo_output(&server, &mut engine, "call-1").await;
+            engine.clear(&CapturingSink::default()).await;
+            let cleared = spill_echo_output(&server, &mut engine, "call-2").await;
+            let first_path = store.find_session_path(&first).unwrap();
+            engine
+                .resume(&CapturingSink::default(), ResumeTarget::Path(first_path))
+                .await;
+            let resumed = spill_echo_output(&server, &mut engine, "call-3").await;
+
+            assert_ne!(cleared, first);
+            assert_eq!(resumed, first);
+            let beside_file = |id: &str| store.find_session_path(id).unwrap().with_file_name(id);
+            assert_eq!(
+                spill_names(&beside_file(&first)),
+                ["call-1.txt", "call-3.txt"]
+            );
+            assert_eq!(spill_names(&beside_file(&cleared)), ["call-2.txt"]);
+        })
+        .await;
+    }
+
     #[tokio::test]
     async fn clear_and_resume_end_the_background_shells() {
         with_pinned_home(async {
@@ -3361,6 +3417,38 @@ mod tests {
                 .collect();
             assert_eq!(replayed, ["write a story", "[Request interrupted by user]"]);
             assert_eq!(texts(request)[2..], ["what is 7 times 6?"]);
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn resume_from_another_project_spills_beside_the_file_that_delete_removes() {
+        with_pinned_home(async {
+            let server = MockServer::start().await;
+            let dir = tempfile::tempdir().unwrap();
+            let store = test_store(dir.path());
+            let other = SessionStore::open_at(dir.path().to_path_buf(), "other-project").unwrap();
+            let other_id = finished_session(&other).await;
+            let other_path = store.find_session_path(&other_id).unwrap();
+            let mut engine = engine(server.uri(), &store, dir.path())
+                .await
+                .with_tools(ToolRegistry::new(vec![Box::new(EchoTool)]));
+            engine.set_mode(&CapturingSink::default(), Mode::Yolo);
+            engine
+                .resume(
+                    &CapturingSink::default(),
+                    ResumeTarget::Path(other_path.clone()),
+                )
+                .await;
+
+            spill_echo_output(&server, &mut engine, "call-1").await;
+            let beside_file = other_path.with_file_name(&other_id);
+            assert_eq!(spill_names(&beside_file), ["call-1.txt"]);
+            engine.clear(&CapturingSink::default()).await;
+            delete_at(&other_path, engine.session_id()).unwrap();
+
+            assert!(!beside_file.exists(), "delete removes the spills");
+            assert!(!test_project_dir(dir.path()).join(&other_id).exists());
         })
         .await;
     }

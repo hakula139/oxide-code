@@ -62,6 +62,7 @@ pub(crate) fn acks_then_drops(session_id: &str, succeed: usize) -> SessionHandle
     handle(session_id, cmd_tx, Some(join))
 }
 
+/// A handle on a stand-in session with no file, whose artifact directory is in the temp directory.
 fn handle(
     session_id: &str,
     cmd_tx: mpsc::Sender<SessionCmd>,
@@ -70,6 +71,7 @@ fn handle(
     SessionHandle {
         cmd_tx,
         session_id: Arc::from(session_id),
+        artifact_dir: std::env::temp_dir().join(session_id).into(),
         shared: Arc::new(SharedState::default()),
         actor_join: Arc::new(std::sync::Mutex::new(join)),
         title_task: Arc::default(),

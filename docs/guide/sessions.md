@@ -6,6 +6,8 @@ oxide-code automatically saves every conversation to disk. You can list past ses
 
 Sessions are stored under `$XDG_DATA_HOME/ox/sessions/` (default: `~/.local/share/ox/sessions/`), grouped by project. A session file is created on the first message, so launching `ox` and quitting without typing leaves nothing behind.
 
+When a tool's output is too long to send whole to the model, the full output is saved beside the session file in a directory named after the session ID, where the model can read it back. For a session resumed from a file path outside `$XDG_DATA_HOME/ox/sessions/`, that directory sits beside the resumed file.
+
 ## Listing Sessions
 
 ```bash
@@ -87,7 +89,7 @@ Inside the TUI, `/resume` (alias `/continue`) opens a session picker without res
 
 ### Deleting a Session
 
-Inside the `/resume` picker, **Ctrl+D** on the cursor row opens a Y/N confirm modal. **Y / Enter** unlinks the session JSONL and prints a `Deleted session {id}: {title}` line in chat. **N / Esc / Ctrl+C** dismisses. `/delete <id-prefix>` opens the same confirmation for any saved session except the live one.
+Inside the `/resume` picker, **Ctrl+D** on the cursor row opens a Y/N confirm modal. **Y / Enter** deletes the session file and its saved tool output, and prints a `Deleted session {id}: {title}` line in chat. **N / Esc / Ctrl+C** dismisses. `/delete <id-prefix>` opens the same confirmation for any saved session except the live one.
 
 ### Archiving a Session
 

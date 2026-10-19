@@ -2,6 +2,7 @@
 
 use std::collections::HashMap;
 use std::fmt;
+use std::path::Path;
 use std::sync::Arc;
 
 use anyhow::Context;
@@ -28,6 +29,7 @@ pub(super) struct DispatchContext<'a> {
     pub(super) policy: &'a mut Policy,
     pub(super) workspace: Arc<Workspace>,
     pub(super) session_id: String,
+    pub(super) artifact_dir: Arc<Path>,
     pub(super) tracker: Arc<FileTracker>,
 }
 
@@ -37,6 +39,7 @@ impl DispatchContext<'_> {
         ToolCtx {
             workspace: Arc::clone(&self.workspace),
             session_id: self.session_id.clone(),
+            artifact_dir: Arc::clone(&self.artifact_dir),
             tracker: Arc::clone(&self.tracker),
             tool_use_id: tool_use_id.to_owned(),
             cancel: CancellationToken::new(),

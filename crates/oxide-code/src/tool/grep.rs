@@ -14,6 +14,7 @@ use super::{
     GrepFileGroup, GrepMatchLine, NO_FILES_FOUND, Prepared, SearchRoot, Tool, ToolCtx,
     ToolMetadata, ToolOutput, ToolResultView, ToolSpec, Unreadable, extract_input_field,
 };
+use crate::file_tracker::MAX_TRACKED_FILE_SIZE;
 use crate::permission::{PermissionClass, ReadFilter, WalkFilter};
 use crate::util::text::plural;
 
@@ -22,7 +23,9 @@ const RESULTS_LIMIT_PREFIX: &str = "(Results limited to ";
 
 const DEFAULT_HEAD_LIMIT: usize = 250;
 const MAX_LINE_CHARS: usize = 500;
-const MAX_GREP_FILE_SIZE: u64 = 1024 * 1024;
+/// The largest file a directory walk searches, so a broad search skips large generated files. A
+/// search rooted at one file reads it up to [`MAX_TRACKED_FILE_SIZE`], as `read` does.
+const MAX_WALK_FILE_SIZE: u64 = 1024 * 1024;
 const REGEX_SIZE_LIMIT: usize = 1 << 20;
 
 /// Withholds each file a `read` deny or ask rule matches from the results.
@@ -260,6 +263,7 @@ fn grep_files(params: &GrepParams<'_>) -> Result<String, String> {
     let CollectedFiles {
         files,
         skipped_large,
+        size_limit,
         mut unreadable,
         withheld,
     } = collect_files(
@@ -277,7 +281,7 @@ fn grep_files(params: &GrepParams<'_>) -> Result<String, String> {
         OutputMode::Content => format_content(texts, cwd, &re, params.context, head_limit),
     };
 
-    push_skipped_note(&mut result, &skipped_large, cwd);
+    push_skipped_note(&mut result, &skipped_large, size_limit, cwd);
     super::push_unreadable_note(&mut result, &unreadable, cwd);
     super::push_withheld_note(&mut result, withheld);
 
@@ -287,6 +291,8 @@ fn grep_files(params: &GrepParams<'_>) -> Result<String, String> {
 struct CollectedFiles {
     files: Vec<PathBuf>,
     skipped_large: Vec<(PathBuf, u64)>,
+    /// The size in bytes above which a file went to `skipped_large`.
+    size_limit: u64,
     /// Paths the walk could not read.
     unreadable: Vec<Unreadable>,
     /// Files and unreadable paths a `read` deny or ask rule withheld.
@@ -305,7 +311,7 @@ fn collect_files(
         let mut files = Vec::new();
         let mut skipped_large = Vec::new();
         if let Ok(meta) = base.metadata()
-            && meta.len() > MAX_GREP_FILE_SIZE
+            && meta.len() > MAX_TRACKED_FILE_SIZE
         {
             skipped_large.push((base.to_path_buf(), meta.len()));
         } else {
@@ -314,6 +320,7 @@ fn collect_files(
         return CollectedFiles {
             files,
             skipped_large,
+            size_limit: MAX_TRACKED_FILE_SIZE,
             unreadable: Vec::new(),
             withheld: 0,
         };
@@ -336,7 +343,7 @@ fn collect_files(
         })
         .filter(|entry| {
             if let Ok(meta) = entry.metadata()
-                && meta.len() > MAX_GREP_FILE_SIZE
+                && meta.len() > MAX_WALK_FILE_SIZE
             {
                 skipped_large.push((entry.path().to_path_buf(), meta.len()));
                 return false;
@@ -352,6 +359,7 @@ fn collect_files(
     CollectedFiles {
         files,
         skipped_large,
+        size_limit: MAX_WALK_FILE_SIZE,
         unreadable,
         withheld,
     }
@@ -387,8 +395,8 @@ fn read_text(path: &Path) -> std::io::Result<Option<String>> {
     Ok(Some(String::from_utf8_lossy(&bytes).into_owned()))
 }
 
-fn push_skipped_note(output: &mut String, skipped: &[(PathBuf, u64)], cwd: &Path) {
-    let limit_mb = MAX_GREP_FILE_SIZE / (1024 * 1024);
+fn push_skipped_note(output: &mut String, skipped: &[(PathBuf, u64)], limit: u64, cwd: &Path) {
+    let limit_mb = limit / (1024 * 1024);
     let lines: Vec<String> = skipped
         .iter()
         .map(|(path, size)| {
@@ -1090,6 +1098,27 @@ mod tests {
         }
 
         #[test]
+        fn single_file_over_the_walk_limit_searches_like_read() {
+            // A spill file runs to 10 MiB, so a search rooted at one must not stop at the walk's 1 MiB.
+            let dir = canonical_tempdir();
+            let spill = "session/tool-results/toolu_1.txt";
+            let lines = 21_000;
+            let text = format!(
+                "{}error: last line\n",
+                format!("{}\n", "x".repeat(99)).repeat(lines)
+            );
+            std::fs::create_dir_all(dir.path().join("session/tool-results")).unwrap();
+            std::fs::write(dir.path().join(spill), &text).unwrap();
+            assert!(text.len() as u64 > 2 * MAX_WALK_FILE_SIZE);
+
+            let mut p = params("^error", dir.path());
+            p.root = search_root(dir.path(), Some(spill)).unwrap();
+            let result = grep_files(&p).unwrap();
+
+            assert_eq!(result, format!("{spill}:{}:error: last line", lines + 1));
+        }
+
+        #[test]
         fn renders_paths_relative_to_cwd() {
             let dir = canonical_tempdir();
             let cwd = dir.path().join("project");
@@ -1155,7 +1184,7 @@ mod tests {
             std::fs::write(dir.path().join("small.txt"), "match here\n").unwrap();
             let large = dir.path().join("large.txt");
             let f = std::fs::File::create(&large).unwrap();
-            f.set_len(MAX_GREP_FILE_SIZE + 1).unwrap();
+            f.set_len(MAX_WALK_FILE_SIZE + 1).unwrap();
 
             let result = grep_files(&params("match", dir.path())).unwrap();
 
@@ -1323,13 +1352,21 @@ mod tests {
             let dir = canonical_tempdir();
             let large = dir.path().join("large.txt");
             let f = std::fs::File::create(&large).unwrap();
-            f.set_len(MAX_GREP_FILE_SIZE + 1).unwrap();
+            f.set_len(MAX_TRACKED_FILE_SIZE + 1).unwrap();
 
             let mut p = params("match", dir.path());
             p.root = search_root(dir.path(), Some("large.txt")).unwrap();
             let result = grep_files(&p).unwrap();
-            assert!(result.contains("Skipped"));
-            assert!(result.contains("large.txt"));
+
+            assert_eq!(
+                result,
+                indoc! {"
+                    No matches found
+
+                    Skipped (exceeds 10 MB size limit):
+                      large.txt (10.0 MB)"
+                }
+            );
         }
 
         #[cfg(unix)]

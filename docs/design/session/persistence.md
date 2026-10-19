@@ -57,6 +57,8 @@ Sessions live in `$XDG_DATA_HOME/ox/sessions/{project}/`. `{project}` is a files
 
 File naming: `{unix_timestamp}-{session_id}.jsonl`. Timestamp prefix gives chronological listings, while lookup by session ID uses the suffix.
 
+A session's artifacts, such as [spilled tool output](../tools/truncation.md#spill-files), are stored in a `{session_id}/` directory beside its file wherever the file lives, so a session resumed from a file outside the store keeps them there. Named by `store::artifact_dir`, the directory is created by the first artifact and removed with the file by `delete_at`. Listings skip it because they read only `.jsonl` files.
+
 On Unix, session files are created with mode `0600`.
 
 ## Session Lifecycle

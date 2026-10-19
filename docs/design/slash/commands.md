@@ -15,7 +15,7 @@ Client-side command surface: `/help`, `/clear`, `/model`, `/status`, and friends
 - `/init` asks the model to create the project's AGENTS.md or CLAUDE.md, picking the file first when neither exists, or to propose changes to the existing ones as a diff. Full design: [init.md](init.md).
 - `/rename` sets the session title manually and locks out the AI title generator. Bare opens a single-line editor pre-filled with the current title.
 - `/resume` swaps to a different session in place. Bare opens a searchable picker, while typed-arg jumps directly. Full design: [resume.md](resume.md).
-- `/delete <id-prefix>` unlinks a saved session's JSONL after a Y/N confirm. The `/resume` picker offers the same gesture via Ctrl+D on the cursor row.
+- `/delete <id-prefix>` removes a saved session's JSONL and its artifact directory after a Y/N confirmation. The `/resume` picker offers the same gesture via Ctrl+D on the cursor row.
 - `/archive` and `/unarchive` set whether a session shows in default listings and bare `ox -c`. Bare `/archive` archives the live session and rolls like `/clear`.
 - `/config`, `/help`, and `/status` open a read-only [`KvOverview`](modals.md) modal. `/diff` is the lone printer because its output can run to hundreds of lines, where scrollback value beats modal cropping.
 
