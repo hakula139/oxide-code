@@ -101,6 +101,9 @@ pub(crate) const HORIZONTAL_RULE: &str = "─";
 /// Border between markdown table cells.
 pub(super) const VERTICAL_RULE: &str = "│";
 
+/// Per-line prefix for markdown blockquotes.
+pub(super) const BLOCKQUOTE_PREFIX: &str = "│ ";
+
 /// Corner and junction glyphs of one horizontal rule in a markdown table.
 #[derive(Debug, Clone, Copy)]
 pub(super) struct TableRule {

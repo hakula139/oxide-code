@@ -76,7 +76,7 @@ A theme TOML is a flat document with one entry per slot plus an optional [`synta
 
   ```toml
   user = "#fab387"
-  blockquote = "#a6e3a1"
+  blockquote = "#6c7086"
   ```
 
 - **Inline table**: explicit `fg` / `bg` and any modifier flags:
@@ -95,11 +95,13 @@ Each slot maps to one role in the TUI. Override a slot by name to restyle that r
 
 ### Text Hierarchy
 
-| Slot    | Role                                 |
-| ------- | ------------------------------------ |
-| `text`  | Primary text                         |
-| `muted` | Secondary text, labels, soft borders |
-| `dim`   | Dimmed metadata, timestamps          |
+| Slot    | Role                                                                             |
+| ------- | -------------------------------------------------------------------------------- |
+| `text`  | Primary text                                                                     |
+| `muted` | Secondary text, labels, soft borders                                             |
+| `dim`   | Low-emphasis text such as tool output, hints, modal footers, and unselected rows |
+
+`dim` is the faintest color for text people read, so keep it readable against your background. The built-ins give it at least the contrast of `tool_border`, and at least 4:1 on their dark backgrounds. Rules and unfocused borders (`border_unfocused`, `horizontal_rule`, `table_border`, and `separator`) can sit a step fainter because they only frame content.
 
 ### Surfaces
 
@@ -120,12 +122,12 @@ Each slot maps to one role in the TUI. Override a slot by name to restyle that r
 
 ### Status Indicators
 
-| Slot      | Role                                            |
-| --------- | ----------------------------------------------- |
-| `info`    | In-progress / neutral signals (e.g., streaming) |
-| `success` | Successful tool results, ready status           |
-| `warning` | Caution status (e.g., the **Ctrl+C** exit hint) |
-| `error`   | Errors, failed tools, critical status           |
+| Slot      | Role                                                                                                                 |
+| --------- | -------------------------------------------------------------------------------------------------------------------- |
+| `info`    | In-progress / neutral signals (e.g., streaming)                                                                      |
+| `success` | Successful tool results, added diff lines, passing PR checks and approvals, and success notices (e.g., after a copy) |
+| `warning` | Caution status (e.g., the **Ctrl+C** exit hint)                                                                      |
+| `error`   | Errors, failed tools, critical status                                                                                |
 
 ### Code
 
@@ -162,12 +164,12 @@ Unset, it defaults to `base16-ocean.dark`, which the dark built-ins use. `latte`
 
 ### Markdown Body
 
-| Slot          | Role                                 |
-| ------------- | ------------------------------------ |
-| `thinking`    | Dimmed thinking text (italic)        |
-| `link`        | Markdown links (underlined)          |
-| `blockquote`  | Blockquote prefix marker             |
-| `list_marker` | Bullet / number marker on list items |
+| Slot          | Role                                                |
+| ------------- | --------------------------------------------------- |
+| `thinking`    | Thinking text (italic), as readable as `dim`        |
+| `link`        | Markdown links (underlined)                         |
+| `blockquote`  | Blockquote bar (`│`), beside quoted text in `muted` |
+| `list_marker` | Bullet / number marker on list items                |
 
 ### Markdown Chrome
 
@@ -183,12 +185,14 @@ Unset, it defaults to `base16-ocean.dark`, which the dark built-ins use. `latte`
 | ------------------ | ------------------------------------------- |
 | `tool_border`      | Left border for tool call blocks            |
 | `tool_icon`        | Per-tool icon                               |
-| `border_focused`   | Focused component border (e.g., input)      |
+| `border_focused`   | Input rules while idle                      |
 | `border_unfocused` | Unfocused component border                  |
 | `separator`        | Status-line segment separator (`│`)         |
 | `selection`        | Chat text selected with the mouse (bg-only) |
 
-Declare `selection` as an inline table with `bg`, such as `selection = { bg = "#313244" }`, so selected text keeps its own colors. Pick a background that leaves `dim` and `thinking` text at a contrast of at least 3:1.
+The input box draws its rules in `border_focused` while idle and in `accent` while busy, when **Enter** queues the prompt.
+
+Declare `selection` as an inline table with `bg`, such as `selection = { bg = "#393a4c" }`, so selected text keeps its own colors. Pick a background that leaves `dim` and `thinking` text at a contrast of at least 3:1.
 
 ### Status-Line Segments
 
@@ -206,7 +210,7 @@ Each status-line segment routes to one of the slots above so re-skinning the slo
 | `five-hour-limit`   | `text` / `warning` / `error` |
 | `weekly-limit`      | `text` / `warning` / `error` |
 | `permission-mode`   | `accent` / `error`           |
-| `run-state` (idle)  | `success`                    |
+| `run-state` (idle)  | `muted`                      |
 | `run-state` (busy)  | `info`                       |
 | `run-state` (warn)  | `warning`                    |
 | `queued-prompts`    | `muted`                      |

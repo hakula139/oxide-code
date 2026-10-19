@@ -13,7 +13,8 @@ use unicode_width::UnicodeWidthStr;
 
 use super::highlight::highlight_code;
 use crate::tui::glyphs::{
-    HORIZONTAL_RULE, TABLE_BOTTOM, TABLE_MIDDLE, TABLE_TOP, TableRule, VERTICAL_RULE,
+    BLOCKQUOTE_PREFIX, HORIZONTAL_RULE, TABLE_BOTTOM, TABLE_MIDDLE, TABLE_TOP, TableRule,
+    VERTICAL_RULE,
 };
 use crate::tui::theme::Theme;
 use crate::tui::wrap::{
@@ -42,7 +43,7 @@ pub(super) struct MarkdownRenderer<I> {
     line_open: bool,
 
     /// Block-prefix stack. Each entry holds the spans prepended to every line inside that block
-    /// (blockquote `> `, list-item continuation indent, etc.). Wrapping uses the concatenation
+    /// (blockquote `│ `, list-item continuation indent, etc.). Wrapping uses the concatenation
     /// as the continuation prefix so deep nesting stays visually aligned.
     indent_stack: Vec<Vec<Span<'static>>>,
     /// One entry per nested list: `Some(n)` for ordered (next marker = `n. `) and `None` for
@@ -52,6 +53,8 @@ pub(super) struct MarkdownRenderer<I> {
     /// The next line built by `prefixed` prints every marker in place of the continuation indent
     /// at its depth, so an item whose first child adds a prefix keeps its marker in front.
     pending_markers: Vec<(usize, Vec<Span<'static>>)>,
+    /// Index into `lines` where each open blockquote starts.
+    blockquote_starts: Vec<usize>,
 
     inline_styles: Vec<Style>,
     link: Option<OpenLink>,
@@ -127,6 +130,7 @@ where
             indent_stack: Vec::new(),
             list_stack: Vec::new(),
             pending_markers: Vec::new(),
+            blockquote_starts: Vec::new(),
             inline_styles: Vec::new(),
             link: None,
             code_block: CodeBlockState::default(),
@@ -259,11 +263,24 @@ where
 
     fn start_blockquote(&mut self) {
         self.start_block();
-        self.indent_stack
-            .push(vec![Span::styled("> ", self.theme.blockquote())]);
+        self.indent_stack.push(vec![Span::styled(
+            BLOCKQUOTE_PREFIX,
+            self.theme.blockquote(),
+        )]);
+        self.blockquote_starts.push(self.lines.len());
     }
 
+    /// Fills the quote's uncolored spans with `muted`, so headings, links, code, and table headers
+    /// keep their own colors.
     fn end_blockquote(&mut self) {
+        let start = self
+            .blockquote_starts
+            .pop()
+            .expect("every blockquote end follows its start");
+        let muted = self.theme.muted();
+        for line in &mut self.lines[start..] {
+            fill_uncolored_spans(line, muted);
+        }
         self.indent_stack.pop();
         self.needs_newline = true;
     }
@@ -701,6 +718,20 @@ where
     }
 }
 
+// ── Blockquote Helpers ──
+
+/// Patches `base` onto spans without a foreground, unless the line's style supplies one.
+fn fill_uncolored_spans(line: &mut Line<'_>, base: Style) {
+    if line.style.fg.is_some() {
+        return;
+    }
+    for span in &mut line.spans {
+        if span.style.fg.is_none() {
+            span.style = span.style.patch(base);
+        }
+    }
+}
+
 // ── Code Helpers ──
 
 fn leading_whitespace_width(line: &Line<'_>) -> usize {
@@ -1006,20 +1037,38 @@ mod tests {
         }
 
         #[test]
-        fn blockquote_text_and_style() {
+        fn blockquote_draws_a_bar_before_muted_text() {
             let t = theme();
-            let text = render_markdown("> Quoted text", &t, 0);
-            let bq_line = text
-                .lines
-                .iter()
-                .find(|l| l.spans.iter().any(|s| s.content.contains("Quoted")))
-                .expect("blockquote line not found");
-            let marker_span = bq_line
-                .spans
-                .iter()
-                .find(|s| s.content.contains("> "))
-                .expect("> marker not found");
-            assert_eq!(marker_span.style.fg, t.success.fg);
+
+            let text = render_markdown("> Quoted *text*", &t, 0);
+
+            assert_eq!(
+                text.lines,
+                [Line::from(vec![
+                    Span::styled("│ ", t.blockquote()),
+                    Span::styled("Quoted ", t.muted()),
+                    Span::styled("text", t.muted().add_modifier(Modifier::ITALIC)),
+                ])]
+            );
+        }
+
+        #[test]
+        fn blockquote_text_returns_to_the_default_style_after_the_quote() {
+            let t = theme();
+
+            let text = render_markdown("> quoted\n\nafter", &t, 0);
+
+            assert_eq!(text.lines[2], Line::from(Span::raw("after")));
+        }
+
+        #[test]
+        fn blockquote_leaves_code_in_its_line_color() {
+            let t = theme();
+
+            let text = render_markdown("> ```\n> plain\n> ```", &t, 0);
+
+            let quoted = Line::from(vec![Span::styled("│ ", t.blockquote()), Span::raw("plain")]);
+            assert_eq!(text.lines, [quoted.style(t.code())]);
         }
 
         #[test]
@@ -1028,7 +1077,7 @@ mod tests {
                 > Outer
                 > > Inner
             "});
-            assert_eq!(lines, ["> Outer", "", "> > Inner"]);
+            assert_eq!(lines, ["│ Outer", "", "│ │ Inner"]);
         }
 
         #[test]
@@ -1050,7 +1099,7 @@ mod tests {
                 .iter()
                 .find_map(|l| l.spans.iter().find(|s| s.content.contains('─')))
                 .expect("rule span not found");
-            assert_eq!(rule_span.style.fg, t.dim.fg);
+            assert_eq!(rule_span.style, t.horizontal_rule());
         }
 
         #[test]
@@ -1112,7 +1161,7 @@ mod tests {
                   - second
             "});
 
-            assert_eq!(quote, ["- > one two ", "  > three ", "  > four"]);
+            assert_eq!(quote, ["- │ one two ", "  │ three ", "  │ four"]);
             assert_eq!(nested, ["- - inner", "  - second"]);
         }
 
@@ -1129,7 +1178,7 @@ mod tests {
             "});
 
             assert_eq!(empty_first_inner, ["1. 2. second"]);
-            assert_eq!(empty_then_quote, ["", "> after"]);
+            assert_eq!(empty_then_quote, ["", "│ after"]);
         }
 
         #[test]
@@ -1358,7 +1407,7 @@ mod tests {
                 "},
                 12,
             );
-            assert_eq!(lines, ["> alpha beta", "> gamma"]);
+            assert_eq!(lines, ["│ alpha beta", "│ gamma"]);
         }
 
         #[test]
@@ -1766,6 +1815,19 @@ mod tests {
         }
 
         #[test]
+        fn table_in_blockquote_keeps_its_header_style() {
+            let t = theme();
+
+            let text = render_markdown("> | Name |\n> |------|\n> | a    |", &t, 0);
+
+            assert_eq!(
+                text.lines[1].spans[3],
+                Span::styled("Name", t.table_header())
+            );
+            assert_eq!(text.lines[3].spans[3], Span::styled("a", t.muted()));
+        }
+
+        #[test]
         fn table_in_blockquote_keeps_the_marker_on_every_row() {
             let input = indoc! {"
                 > | Key  | Value      |
@@ -1780,25 +1842,25 @@ mod tests {
             assert_eq!(
                 boxed,
                 [
-                    "> ┌──────┬───────┐",
-                    "> │ Key  │ Value │",
-                    "> ├──────┼───────┤",
-                    "> │ mode │ fast  │",
-                    "> ├──────┼───────┤",
-                    "> │ size │ very  │",
-                    "> │      │ large │",
-                    "> └──────┴───────┘",
+                    "│ ┌──────┬───────┐",
+                    "│ │ Key  │ Value │",
+                    "│ ├──────┼───────┤",
+                    "│ │ mode │ fast  │",
+                    "│ ├──────┼───────┤",
+                    "│ │ size │ very  │",
+                    "│ │      │ large │",
+                    "│ └──────┴───────┘",
                 ]
             );
             assert_eq!(
                 stacked,
                 [
-                    "> Key: mode",
-                    "> Value: fast",
-                    "> ────────────",
-                    "> Key: size",
-                    "> Value: very ",
-                    ">   large",
+                    "│ Key: mode",
+                    "│ Value: fast",
+                    "│ ────────────",
+                    "│ Key: size",
+                    "│ Value: very ",
+                    "│   large",
                 ]
             );
         }
@@ -1863,7 +1925,7 @@ mod tests {
                 .find(|s| s.content.contains("foo()"))
                 .expect("code span not found");
             assert_eq!(
-                span.style.fg, t.user.fg,
+                span.style.fg, t.inline_code.fg,
                 "code span keeps its distinctive fg"
             );
             assert_eq!(span.style.bg, None, "code span stays fg-only");
@@ -1882,7 +1944,7 @@ mod tests {
                 .iter()
                 .find_map(|l| l.spans.iter().find(|s| s.content.contains("foo()")))
                 .expect("code span not found in heading");
-            assert_eq!(span.style.fg, t.user.fg);
+            assert_eq!(span.style.fg, t.inline_code.fg);
             assert_eq!(span.style.bg, None);
             assert!(
                 span.style.add_modifier.contains(Modifier::BOLD),
@@ -1915,7 +1977,7 @@ mod tests {
                 > x
                 > </div>
             "});
-            assert_eq!(lines, ["> <div>", "> x", "> </div>"]);
+            assert_eq!(lines, ["│ <div>", "│ x", "│ </div>"]);
         }
 
         #[test]
@@ -2000,7 +2062,7 @@ mod tests {
         fn blockquote_wraps_with_marker_on_continuations() {
             assert_eq!(
                 rendered_text_at_width("> one two three four five six seven eight", 15),
-                ["> one two three", "> four five six", "> seven eight"],
+                ["│ one two three", "│ four five six", "│ seven eight"],
             );
         }
 
@@ -2009,9 +2071,9 @@ mod tests {
             assert_eq!(
                 rendered_text_at_width("> > one two three four five six seven eight", 20),
                 [
-                    "> > one two three ",
-                    "> > four five six ",
-                    "> > seven eight"
+                    "│ │ one two three ",
+                    "│ │ four five six ",
+                    "│ │ seven eight"
                 ],
             );
         }
@@ -2069,7 +2131,7 @@ mod tests {
 
             assert_eq!(nested_list, ["- one two three", "  four five", "  - inner"]);
             assert_eq!(loose_nested_list, nested_list);
-            assert_eq!(blockquote, ["- one two three", "  four five", "  > quoted"]);
+            assert_eq!(blockquote, ["- one two three", "  four five", "  │ quoted"]);
             assert_eq!(code_block, ["- one two three", "  four five", "  code"]);
             assert_eq!(
                 table,
@@ -2097,7 +2159,7 @@ mod tests {
                 ["one two three ", "four five six", "seven eight"]
             );
             assert_eq!(tight_item, ["- one two three", "  four", "  five six"]);
-            assert_eq!(blockquote, ["> one two three", "> four", "> five six"]);
+            assert_eq!(blockquote, ["│ one two three", "│ four", "│ five six"]);
         }
 
         #[test]
@@ -2107,7 +2169,7 @@ mod tests {
             assert_eq!(
                 lines,
                 [
-                    "> ", "> q", "> u", "> o", "> t", "> e", "> q", "> u", "> o", "> t", "> e", "",
+                    "│ ", "│ q", "│ u", "│ o", "│ t", "│ e", "│ q", "│ u", "│ o", "│ t", "│ e", "",
                     "pa", "ra", "te", "xt",
                 ]
             );
@@ -2118,9 +2180,9 @@ mod tests {
             assert_eq!(
                 rendered_text_at_width("> - one two three four five six seven eight", 20),
                 [
-                    "> - one two three ",
-                    ">   four five six ",
-                    ">   seven eight"
+                    "│ - one two three ",
+                    "│   four five six ",
+                    "│   seven eight"
                 ],
             );
         }

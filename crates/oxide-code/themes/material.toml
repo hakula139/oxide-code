@@ -2,13 +2,14 @@
 # https://m2.material.io/design/color/dark-theme.html
 # Palette: https://m2.material.io/design/color/the-color-system.html
 #
-# Colors are taken directly from Google's M2 baseline dark scheme and
-# the Material 200-tone palette (recommended for dark surfaces).
+# Colors are taken directly from Google's M2 baseline dark scheme and the
+# Material palette, mostly its 200 tones (recommended for dark surfaces),
+# except the text grays, which are tuned for contrast on the dark surface.
 
-# Text hierarchy (M2 dark emphasis: 87% / 60% / 38% white)
+# Text hierarchy (87% / 77% / 54% white)
 text = "#dedede"
 muted = "#c5c5c5"
-dim = "#616161"
+dim = "#8a8a8a"
 
 # Surfaces
 surface = { bg = "reset" }
@@ -27,7 +28,7 @@ error = "#cf6679"
 
 # Code (M2 dark theme baseline secondary)
 code = "#03dac6"
-inline_code = "#ffab91"
+inline_code = "#f8bbd0"
 syntax_theme = "base16-ocean.dark"
 
 # Diff backgrounds (subtle dark tints, harmonized with success / error hues)
@@ -41,9 +42,9 @@ heading_h3 = { fg = "#dedede", bold = true, italic = true }
 heading_minor = { fg = "#dedede", italic = true }
 
 # Markdown body
-thinking = { fg = "#616161", italic = true }
+thinking = { fg = "#8a8a8a", italic = true }
 link = { fg = "#82b1ff", underlined = true }
-blockquote = "#a5d6a7"
+blockquote = "#757575"
 list_marker = "#bb86fc"
 
 # Markdown chrome
@@ -52,9 +53,9 @@ table_header = { fg = "#bb86fc", bold = true }
 table_border = "#424242"
 
 # UI chrome
-tool_border = "#999999"
+tool_border = "#757575"
 tool_icon = "#bb86fc"
-border_focused = "#bb86fc"
+border_focused = "#757575"
 border_unfocused = "#424242"
 separator = "#424242"
-selection = { bg = "#2c3a40" }
+selection = { bg = "#354248" }
