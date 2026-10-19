@@ -135,7 +135,7 @@ pub(crate) fn missing(what: &str, usage: &str, alternative: Option<&str>) -> Str
     format!("Missing {what}. Usage: `{usage}`{alternative}.")
 }
 
-/// Markdown bullet list of `id — display name` rows.
+/// Markdown bullet list pairing each model's ID with its display name.
 fn format_models<'a>(models: impl IntoIterator<Item = &'a ModelInfo>) -> String {
     models
         .into_iter()

@@ -412,7 +412,6 @@ mod tests {
         let snap = snap_for(&info);
         let names: Vec<&str> = snap.starters.iter().map(|(n, _)| *n).collect();
         assert_eq!(names.len(), STARTER_PICK);
-        // No duplicates: shuffle gives distinct picks.
         let mut sorted = names.clone();
         sorted.sort_unstable();
         sorted.dedup();
@@ -421,7 +420,6 @@ mod tests {
             STARTER_PICK,
             "picked starters must be distinct"
         );
-        // Each picked entry is from STARTER_POOL.
         for picked in &snap.starters {
             assert!(STARTER_POOL.contains(picked));
         }

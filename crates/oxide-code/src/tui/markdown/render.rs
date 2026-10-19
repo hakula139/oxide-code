@@ -722,7 +722,8 @@ const TABLE_CELL_PADDING: usize = 1;
 const TABLE_COLUMN_OVERHEAD: usize = 2 * TABLE_CELL_PADDING + 1;
 const TABLE_STACKED_HANG: usize = 2;
 
-/// Widest word a column keeps whole, so a long path or URL wraps instead of stacking the table.
+/// Widest word a column keeps whole. A longer word, such as a path or URL, breaks mid-word so the
+/// column stays narrow enough for the boxed layout.
 const TABLE_MAX_WORD_WIDTH: usize = 30;
 
 /// Returns whether `html` is a `<br>` tag in any of its spellings, such as `<br/>` or `<BR />`.
