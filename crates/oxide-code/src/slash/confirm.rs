@@ -156,200 +156,204 @@ mod tests {
         )
     }
 
-    fn rendered_rows(modal: &ConfirmDeleteSessionModal, width: u16) -> Vec<String> {
-        render_rows(modal, width, modal.height(width, u16::MAX))
-            .into_iter()
-            .map(|row| row.trim_end().to_owned())
-            .collect()
-    }
+    mod render {
+        use super::*;
 
-    // ── ConfirmDeleteSessionModal::render ──
+        fn rendered_rows(modal: &ConfirmDeleteSessionModal, width: u16) -> Vec<String> {
+            render_rows(modal, width, modal.height(width, u16::MAX))
+                .into_iter()
+                .map(|row| row.trim_end().to_owned())
+                .collect()
+        }
 
-    #[test]
-    fn render_paints_title_identity_metadata_and_footer() {
-        let (_dir, store) = isolated_store();
-        let modal = seed_modal(&store, "abcd1234", "Fix auth flow");
-        assert_eq!(
-            rendered_rows(&modal, 60),
-            [
-                "Delete this session?",
-                "",
-                "abcd1234 — Fix auth flow",
-                "3 msgs · 2 hours ago",
-                "",
-                "Y to delete  ·  N to cancel",
-            ],
-        );
-    }
+        #[test]
+        fn paints_title_identity_metadata_and_footer() {
+            let (_dir, store) = isolated_store();
+            let modal = seed_modal(&store, "abcd1234", "Fix auth flow");
+            assert_eq!(
+                rendered_rows(&modal, 60),
+                [
+                    "Delete this session?",
+                    "",
+                    "abcd1234 — Fix auth flow",
+                    "3 msgs · 2 hours ago",
+                    "",
+                    "Y to delete  ·  N to cancel",
+                ],
+            );
+        }
 
-    #[test]
-    fn render_places_the_error_row_above_the_footer() {
-        let (_dir, store) = isolated_store();
-        let mut modal = seed_modal(&store, "abcd1234", "Fix auth flow");
-        modal.error = Some("permission denied".to_owned());
-        assert_eq!(
-            rendered_rows(&modal, 60)[3..],
-            [
-                "3 msgs · 2 hours ago",
-                "! permission denied",
-                "",
-                "Y to delete  ·  N to cancel",
-            ],
-        );
-    }
+        #[test]
+        fn places_the_error_row_above_the_footer() {
+            let (_dir, store) = isolated_store();
+            let mut modal = seed_modal(&store, "abcd1234", "Fix auth flow");
+            modal.error = Some("permission denied".to_owned());
+            assert_eq!(
+                rendered_rows(&modal, 60)[3..],
+                [
+                    "3 msgs · 2 hours ago",
+                    "! permission denied",
+                    "",
+                    "Y to delete  ·  N to cancel",
+                ],
+            );
+        }
 
-    #[test]
-    fn render_does_not_panic_at_minimum_widths() {
-        let (_dir, store) = isolated_store();
-        let modal = seed_modal(&store, "abcd1234", "T");
-        for width in [4_u16, 8, 20] {
-            rendered_rows(&modal, width);
+        #[test]
+        fn does_not_panic_at_minimum_widths() {
+            let (_dir, store) = isolated_store();
+            let modal = seed_modal(&store, "abcd1234", "T");
+            for width in [4_u16, 8, 20] {
+                rendered_rows(&modal, width);
+            }
         }
     }
 
-    // ── ConfirmDeleteSessionModal::handle_key ──
+    mod handle_key {
+        use super::*;
 
-    #[test]
-    fn handle_key_y_press_runs_delete_and_submits_with_chat_confirmation() {
-        let (_dir, store) = isolated_store();
-        let mut modal = seed_modal(&store, "abcd1234", "Fix auth flow");
-        let id_to_delete = modal.session_id.clone();
+        #[test]
+        fn y_press_runs_delete_and_submits_with_chat_confirmation() {
+            let (_dir, store) = isolated_store();
+            let mut modal = seed_modal(&store, "abcd1234", "Fix auth flow");
+            let id_to_delete = modal.session_id.clone();
 
-        let outcome = modal.handle_key(&KeyEvent::from(KeyCode::Char('y')));
-        let ModalKey::Submitted(ModalAction::SystemMessage(msg)) = outcome else {
-            panic!("Y must Submit(SystemMessage), got {outcome:?}");
-        };
-        assert_eq!(msg, "Deleted session abcd1234: Fix auth flow");
-        assert!(
-            store
-                .list()
-                .unwrap()
-                .iter()
-                .all(|s| s.session_id != id_to_delete),
-            "row gone from list",
-        );
-    }
-
-    #[test]
-    fn handle_key_enter_press_is_an_alias_for_y_and_runs_delete() {
-        let (_dir, store) = isolated_store();
-        let mut modal = seed_modal(&store, "abcd1234", "Fix auth flow");
-        let outcome = modal.handle_key(&KeyEvent::from(KeyCode::Enter));
-        assert!(matches!(
-            outcome,
-            ModalKey::Submitted(ModalAction::SystemMessage(_)),
-        ));
-        assert!(store.list().unwrap().is_empty());
-    }
-
-    #[test]
-    fn handle_key_uppercase_y_also_confirms() {
-        let (_dir, store) = isolated_store();
-        let mut modal = seed_modal(&store, "abcd1234", "Fix auth");
-        let outcome = modal.handle_key(&KeyEvent::from(KeyCode::Char('Y')));
-        assert!(matches!(
-            outcome,
-            ModalKey::Submitted(ModalAction::SystemMessage(_)),
-        ));
-    }
-
-    #[test]
-    fn handle_key_control_y_and_control_enter_do_not_confirm_delete() {
-        let (_dir, store) = isolated_store();
-        let mut modal = seed_modal(&store, "abcd1234", "Fix auth");
-        let id_kept = modal.session_id.clone();
-
-        for event in [
-            KeyEvent::new(KeyCode::Char('y'), KeyModifiers::CONTROL),
-            KeyEvent::new(KeyCode::Enter, KeyModifiers::CONTROL),
-        ] {
-            assert!(matches!(modal.handle_key(&event), ModalKey::Consumed));
-        }
-        assert!(
-            store
-                .list()
-                .unwrap()
-                .iter()
-                .any(|s| s.session_id == id_kept),
-            "modified confirmation keys must not delete the session",
-        );
-    }
-
-    #[test]
-    fn handle_key_n_press_cancels_without_running_delete() {
-        let (_dir, store) = isolated_store();
-        let mut modal = seed_modal(&store, "abcd1234", "Fix auth flow");
-        let id_kept = modal.session_id.clone();
-
-        let outcome = modal.handle_key(&KeyEvent::from(KeyCode::Char('n')));
-        assert!(
-            matches!(outcome, ModalKey::Cancelled),
-            "N must Cancel, got {outcome:?}"
-        );
-        assert!(
-            store
-                .list()
-                .unwrap()
-                .iter()
-                .any(|s| s.session_id == id_kept),
-            "session must still exist after cancel",
-        );
-    }
-
-    #[test]
-    fn handle_key_confirm_failure_latches_error_until_a_deliberate_y_or_n_choice() {
-        // Deleting the live session fails, so the modal stays open with the error.
-        let (_dir, store) = isolated_store();
-        let live_id = format!("{:0<36}", "abcd1234");
-        seed_test_session(
-            &store,
-            &live_id,
-            Some("Fix auth flow"),
-            Some(3),
-            time::macros::datetime!(2026-04-18 09:00:00 UTC),
-        );
-        let mut modal = ConfirmDeleteSessionModal::new(
-            store.find_session_path(&live_id).unwrap(),
-            live_id.clone(),
-            "Fix auth flow".to_owned(),
-            "3 msgs · 2 hours ago".to_owned(),
-            live_id.clone(),
-        );
-
-        let outcome = modal.handle_key(&KeyEvent::from(KeyCode::Char('y')));
-        assert!(matches!(outcome, ModalKey::Consumed));
-        assert_eq!(
-            modal.error.as_deref(),
-            Some(
-                format!(
-                    "Failed to delete session abcd1234: \
-                     refusing to delete the live session: {live_id}"
-                )
-                .as_str()
-            ),
-        );
-
-        for stray in [KeyCode::Char('x'), KeyCode::Up, KeyCode::Down, KeyCode::Tab] {
-            let outcome = modal.handle_key(&KeyEvent::from(stray));
-            assert!(matches!(outcome, ModalKey::Consumed), "{stray:?}");
-            assert!(modal.error.is_some(), "{stray:?} must not clear the latch");
+            let outcome = modal.handle_key(&KeyEvent::from(KeyCode::Char('y')));
+            let ModalKey::Submitted(ModalAction::SystemMessage(msg)) = outcome else {
+                panic!("Y must Submit(SystemMessage), got {outcome:?}");
+            };
+            assert_eq!(msg, "Deleted session abcd1234: Fix auth flow");
+            assert!(
+                store
+                    .list()
+                    .unwrap()
+                    .iter()
+                    .all(|s| s.session_id != id_to_delete),
+                "row gone from list",
+            );
         }
 
-        // The retry clears the error, and the same refusal sets it again.
-        let outcome = modal.handle_key(&KeyEvent::from(KeyCode::Char('y')));
-        assert!(matches!(outcome, ModalKey::Consumed));
-        assert!(modal.error.is_some(), "fresh failure re-latches");
-    }
+        #[test]
+        fn enter_press_is_an_alias_for_y_and_runs_delete() {
+            let (_dir, store) = isolated_store();
+            let mut modal = seed_modal(&store, "abcd1234", "Fix auth flow");
+            let outcome = modal.handle_key(&KeyEvent::from(KeyCode::Enter));
+            assert!(matches!(
+                outcome,
+                ModalKey::Submitted(ModalAction::SystemMessage(_)),
+            ));
+            assert!(store.list().unwrap().is_empty());
+        }
 
-    #[test]
-    fn handle_key_unrecognized_keys_consume_silently_without_running_delete() {
-        let (_dir, store) = isolated_store();
-        let mut modal = seed_modal(&store, "abcd1234", "Fix auth flow");
-        let outcome = modal.handle_key(&KeyEvent::from(KeyCode::Char('z')));
-        assert!(matches!(outcome, ModalKey::Consumed));
-        assert!(
-            !store.list().unwrap().is_empty(),
-            "session untouched on unrecognized key",
-        );
+        #[test]
+        fn uppercase_y_also_confirms() {
+            let (_dir, store) = isolated_store();
+            let mut modal = seed_modal(&store, "abcd1234", "Fix auth");
+            let outcome = modal.handle_key(&KeyEvent::from(KeyCode::Char('Y')));
+            assert!(matches!(
+                outcome,
+                ModalKey::Submitted(ModalAction::SystemMessage(_)),
+            ));
+        }
+
+        #[test]
+        fn control_y_and_control_enter_do_not_confirm_delete() {
+            let (_dir, store) = isolated_store();
+            let mut modal = seed_modal(&store, "abcd1234", "Fix auth");
+            let id_kept = modal.session_id.clone();
+
+            for event in [
+                KeyEvent::new(KeyCode::Char('y'), KeyModifiers::CONTROL),
+                KeyEvent::new(KeyCode::Enter, KeyModifiers::CONTROL),
+            ] {
+                assert!(matches!(modal.handle_key(&event), ModalKey::Consumed));
+            }
+            assert!(
+                store
+                    .list()
+                    .unwrap()
+                    .iter()
+                    .any(|s| s.session_id == id_kept),
+                "modified confirmation keys must not delete the session",
+            );
+        }
+
+        #[test]
+        fn n_press_cancels_without_running_delete() {
+            let (_dir, store) = isolated_store();
+            let mut modal = seed_modal(&store, "abcd1234", "Fix auth flow");
+            let id_kept = modal.session_id.clone();
+
+            let outcome = modal.handle_key(&KeyEvent::from(KeyCode::Char('n')));
+            assert!(
+                matches!(outcome, ModalKey::Cancelled),
+                "N must Cancel, got {outcome:?}"
+            );
+            assert!(
+                store
+                    .list()
+                    .unwrap()
+                    .iter()
+                    .any(|s| s.session_id == id_kept),
+                "session must still exist after cancel",
+            );
+        }
+
+        #[test]
+        fn confirm_failure_latches_error_until_a_deliberate_y_or_n_choice() {
+            // Deleting the live session fails, so the modal stays open with the error.
+            let (_dir, store) = isolated_store();
+            let live_id = format!("{:0<36}", "abcd1234");
+            seed_test_session(
+                &store,
+                &live_id,
+                Some("Fix auth flow"),
+                Some(3),
+                time::macros::datetime!(2026-04-18 09:00:00 UTC),
+            );
+            let mut modal = ConfirmDeleteSessionModal::new(
+                store.find_session_path(&live_id).unwrap(),
+                live_id.clone(),
+                "Fix auth flow".to_owned(),
+                "3 msgs · 2 hours ago".to_owned(),
+                live_id.clone(),
+            );
+
+            let outcome = modal.handle_key(&KeyEvent::from(KeyCode::Char('y')));
+            assert!(matches!(outcome, ModalKey::Consumed));
+            assert_eq!(
+                modal.error.as_deref(),
+                Some(
+                    format!(
+                        "Failed to delete session abcd1234: \
+                         refusing to delete the live session: {live_id}"
+                    )
+                    .as_str()
+                ),
+            );
+
+            for stray in [KeyCode::Char('x'), KeyCode::Up, KeyCode::Down, KeyCode::Tab] {
+                let outcome = modal.handle_key(&KeyEvent::from(stray));
+                assert!(matches!(outcome, ModalKey::Consumed), "{stray:?}");
+                assert!(modal.error.is_some(), "{stray:?} must not clear the latch");
+            }
+
+            // The retry clears the error, and the same refusal sets it again.
+            let outcome = modal.handle_key(&KeyEvent::from(KeyCode::Char('y')));
+            assert!(matches!(outcome, ModalKey::Consumed));
+            assert!(modal.error.is_some(), "fresh failure re-latches");
+        }
+
+        #[test]
+        fn unrecognized_keys_consume_silently_without_running_delete() {
+            let (_dir, store) = isolated_store();
+            let mut modal = seed_modal(&store, "abcd1234", "Fix auth flow");
+            let outcome = modal.handle_key(&KeyEvent::from(KeyCode::Char('z')));
+            assert!(matches!(outcome, ModalKey::Consumed));
+            assert!(
+                !store.list().unwrap().is_empty(),
+                "session untouched on unrecognized key",
+            );
+        }
     }
 }

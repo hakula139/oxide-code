@@ -1,4 +1,5 @@
-//! Non-streaming `/v1/messages` one-shot path. Returns flattened assistant text.
+//! Non-streaming `/v1/messages` one-shot path. Returns flattened assistant text and the response's
+//! usage.
 
 use anyhow::{Context, Result};
 use serde::Deserialize;
@@ -13,15 +14,15 @@ use super::wire::{
 use super::{Client, attribution_text, billing, build_metadata, build_system_blocks};
 use crate::config::Effort;
 use crate::message::Message;
-use crate::model::ModelSpec;
+use crate::model::{ModelSpec, TokenUsage};
 
 // ── Client::complete ──
 
 impl Client {
     /// Sends a non-streaming request and returns the concatenated assistant text, dropping tool-use
-    /// and thinking blocks. The request carries no agentic betas or `context_management` directive.
-    /// `output_format` is dropped when the config turns structured outputs off, so callers can pass
-    /// it unconditionally.
+    /// and thinking blocks, with the usage the response reported. The request carries no agentic
+    /// betas or `context_management` directive. `output_format` is dropped when the config turns
+    /// structured outputs off, so callers can pass it unconditionally.
     pub(crate) async fn complete(
         &self,
         model: &ModelSpec,
@@ -30,7 +31,7 @@ impl Client {
         max_tokens: u32,
         effort: Option<Effort>,
         output_format: Option<&OutputFormat>,
-    ) -> Result<String> {
+    ) -> Result<(String, Option<TokenUsage>)> {
         let auth = self.auth()?;
         let attribution = self
             .gateway
@@ -57,7 +58,7 @@ impl Client {
 
         let betas = compute_betas(model, None, auth.kind(), false).join(",");
         let request = &self.messages_request(betas, body, auth);
-        let CompletionResponse { content } = with_retry(
+        let CompletionResponse { content, usage } = with_retry(
             |retry| async move {
                 let response = post_messages(&self.http, request, retry).await?;
                 Ok(response
@@ -68,7 +69,7 @@ impl Client {
             |_| {},
         )
         .await?;
-        Ok(join_text_blocks(content))
+        Ok((join_text_blocks(content), usage))
     }
 }
 
@@ -127,6 +128,7 @@ fn join_text_blocks(content: Vec<ContentBlockInfo>) -> String {
 #[derive(Deserialize)]
 struct CompletionResponse {
     content: Vec<ContentBlockInfo>,
+    usage: Option<TokenUsage>,
 }
 
 #[cfg(test)]
@@ -140,7 +142,7 @@ mod tests {
         test_config,
     };
     use super::*;
-    use crate::client::anthropic::testing::completion_body;
+    use crate::client::anthropic::testing::{COMPLETION_USAGE, completion_body};
     use crate::client::anthropic::{CLAUDE_CLI_VERSION, SYSTEM_PROMPT_PREFIX};
     use crate::util::tls::testing::NoRoots;
 
@@ -179,7 +181,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn complete_happy_path_produces_assistant_text() {
+    async fn complete_happy_path_produces_assistant_text_and_usage() {
         let server = MockServer::start().await;
         Mock::given(method("POST"))
             .and(path("/v1/messages"))
@@ -190,11 +192,12 @@ mod tests {
             .await;
 
         let client = test_client(server.uri(), api_key(), "claude-haiku-5-5");
-        let text = client
+        let (text, usage) = client
             .complete(&haiku(), "sys", "user input", 40, None, None)
             .await
             .unwrap();
         assert_eq!(text, "Fix login bug");
+        assert_eq!(usage, Some(COMPLETION_USAGE));
     }
 
     #[tokio::test]
@@ -215,7 +218,7 @@ mod tests {
             .await;
 
         let client = test_client(server.uri(), api_key(), "claude-haiku-5-5");
-        let text = client
+        let (text, _) = client
             .complete(&haiku(), "sys", "user input", 40, None, None)
             .await
             .unwrap();

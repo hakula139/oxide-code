@@ -238,8 +238,6 @@ mod tests {
         (dir, path)
     }
 
-    // ── DiffCmd::name ──
-
     #[test]
     fn name_and_metadata_match_built_ins_contract() {
         assert_eq!(DiffCmd.name(), "diff");
@@ -247,337 +245,361 @@ mod tests {
         assert_ne!(DiffCmd.description(), "");
     }
 
-    // ── DiffCmd::execute ──
+    mod execute {
+        use super::*;
 
-    fn execute_at(cwd: Option<&Path>) -> Result<SlashOutcome, String> {
-        let mut info = test_session_info();
-        info.working_dir = cwd.map(Path::to_owned);
-        with_isolated_git_env(|| DiffCmd.execute("", &SlashContext::new(&info, None)))
+        fn execute_at(cwd: Option<&Path>) -> Result<SlashOutcome, String> {
+            let mut info = test_session_info();
+            info.working_dir = cwd.map(Path::to_owned);
+            with_isolated_git_env(|| DiffCmd.execute("", &SlashContext::new(&info, None)))
+        }
+
+        #[test]
+        fn clean_repo_reports_a_clean_tree() {
+            let (_dir, repo) = fresh_repo();
+            let outcome = execute_at(Some(&repo)).expect("clean repo execute is Ok");
+            assert!(
+                matches!(&outcome, SlashOutcome::SystemMessage(text) if text == "Working tree clean"),
+                "{outcome:?}",
+            );
+        }
+
+        #[test]
+        fn dirty_repo_returns_the_diff() {
+            let (_dir, repo) = fresh_repo();
+            std::fs::write(repo.join("note.txt"), "hello\n").unwrap();
+            let outcome = execute_at(Some(&repo)).expect("dirty repo execute is Ok");
+            assert!(
+                matches!(&outcome, SlashOutcome::GitDiff(text) if text == "Untracked files:\n  note.txt"),
+                "{outcome:?}",
+            );
+        }
+
+        #[test]
+        fn outside_a_repo_errors() {
+            let dir = tempfile::tempdir().unwrap();
+            let err = execute_at(Some(dir.path())).expect_err("execute must error outside a repo");
+            assert_eq!(
+                err,
+                "Failed to collect working-tree changes: not inside a git repository"
+            );
+        }
+
+        #[test]
+        fn without_a_session_cwd_errors() {
+            let err = execute_at(None).expect_err("execute needs the session cwd");
+            assert_eq!(err, "No working directory for this session");
+        }
     }
 
-    #[test]
-    fn execute_clean_repo_reports_a_clean_tree() {
-        let (_dir, repo) = fresh_repo();
-        let outcome = execute_at(Some(&repo)).expect("clean repo execute is Ok");
-        assert!(
-            matches!(&outcome, SlashOutcome::SystemMessage(text) if text == "Working tree clean"),
-            "{outcome:?}",
-        );
+    mod collect_diff_in {
+        use super::*;
+
+        #[test]
+        fn fresh_repo_is_empty_when_nothing_staged() {
+            let (_dir, repo) = fresh_repo();
+            assert_eq!(
+                with_isolated_git_env(|| collect_diff_in(&repo)).unwrap(),
+                ""
+            );
+        }
+
+        #[test]
+        fn fresh_repo_lists_untracked_files() {
+            let (_dir, repo) = fresh_repo();
+            std::fs::write(repo.join("new.txt"), "hi\n").unwrap();
+            let body = with_isolated_git_env(|| collect_diff_in(&repo)).unwrap();
+            assert_eq!(body, "Untracked files:\n  new.txt");
+        }
+
+        #[test]
+        fn fresh_repo_combines_staged_and_unstaged_diffs() {
+            let (_dir, repo) = fresh_repo();
+            std::fs::write(repo.join("a.txt"), "staged\n").unwrap();
+            git_setup(&repo, &["add", "a.txt"]);
+            std::fs::write(repo.join("a.txt"), "staged\nunstaged\n").unwrap();
+
+            let body = with_isolated_git_env(|| collect_diff_in(&repo)).unwrap();
+
+            assert!(body.contains("+staged"), "staged add missing: {body}");
+            assert!(body.contains("+unstaged"), "unstaged edit missing: {body}");
+        }
+
+        #[test]
+        fn after_commit_shows_unstaged_changes() {
+            let (_dir, repo) = fresh_repo();
+            std::fs::write(repo.join("a.txt"), "first\n").unwrap();
+            git_setup(&repo, &["add", "a.txt"]);
+            git_setup(&repo, &["commit", "--quiet", "-m", "init"]);
+            std::fs::write(repo.join("a.txt"), "first\nsecond\n").unwrap();
+            let body = with_isolated_git_env(|| collect_diff_in(&repo)).unwrap();
+            assert!(body.contains("a.txt"), "diff body missing path: {body}");
+            assert!(body.contains("+second"), "diff body missing add: {body}");
+        }
+
+        #[test]
+        fn separates_tracked_changes_from_untracked_list() {
+            let (_dir, repo) = fresh_repo();
+            std::fs::write(repo.join("a.txt"), "first\n").unwrap();
+            git_setup(&repo, &["add", "a.txt"]);
+            git_setup(&repo, &["commit", "--quiet", "-m", "init"]);
+            std::fs::write(repo.join("a.txt"), "first\nedit\n").unwrap();
+            std::fs::write(repo.join("untracked.txt"), "u\n").unwrap();
+            let body = with_isolated_git_env(|| collect_diff_in(&repo)).unwrap();
+            assert!(body.contains("+edit"), "{body}");
+            assert!(body.contains("Untracked files:"), "{body}");
+            assert!(body.contains("untracked.txt"), "{body}");
+        }
     }
 
-    #[test]
-    fn execute_dirty_repo_returns_the_diff() {
-        let (_dir, repo) = fresh_repo();
-        std::fs::write(repo.join("note.txt"), "hello\n").unwrap();
-        let outcome = execute_at(Some(&repo)).expect("dirty repo execute is Ok");
-        assert!(
-            matches!(&outcome, SlashOutcome::GitDiff(text) if text == "Untracked files:\n  note.txt"),
-            "{outcome:?}",
-        );
+    mod format_diff {
+        use super::*;
+
+        #[test]
+        fn tracked_only_renders_verbatim() {
+            let body = format_diff(
+                indoc! {"
+                    diff --git a/x b/x
+                    +foo
+                "},
+                "",
+            );
+            assert_eq!(
+                body,
+                indoc! {"
+                    diff --git a/x b/x
+                    +foo"
+                }
+            );
+        }
+
+        #[test]
+        fn keeps_trailing_whitespace_on_diff_lines() {
+            let body = format_diff(" context  \n+added  \n", "");
+            assert_eq!(body, " context  \n+added  ");
+        }
+
+        #[test]
+        fn untracked_only_lists_files_under_heading() {
+            let body = format_diff("", "new.rs\nother.rs\n");
+            assert_eq!(
+                body,
+                indoc! {"
+                    Untracked files:
+                      new.rs
+                      other.rs"
+                },
+            );
+        }
+
+        #[test]
+        fn combined_separates_with_blank_line() {
+            let body = format_diff(
+                indoc! {"
+                    diff --git a/x b/x
+                    +foo
+                "},
+                "new.rs\n",
+            );
+            assert_eq!(
+                body,
+                indoc! {"
+                    diff --git a/x b/x
+                    +foo
+
+                    Untracked files:
+                      new.rs"
+                },
+            );
+        }
+
+        #[test]
+        fn both_empty_yields_empty_string() {
+            assert_eq!(format_diff("", ""), "");
+            assert_eq!(format_diff("   \n", "  \n"), "");
+        }
     }
 
-    #[test]
-    fn execute_outside_a_repo_errors() {
-        let dir = tempfile::tempdir().unwrap();
-        let err = execute_at(Some(dir.path())).expect_err("execute must error outside a repo");
-        assert_eq!(
-            err,
-            "Failed to collect working-tree changes: not inside a git repository"
-        );
+    mod join_sections {
+        use super::*;
+
+        #[test]
+        fn keeps_non_empty_sections_with_blank_separator() {
+            assert_eq!(join_sections(&["one\n", " \n", "two\n"]), "one\n\ntwo");
+        }
     }
 
-    #[test]
-    fn execute_without_a_session_cwd_errors() {
-        let err = execute_at(None).expect_err("execute needs the session cwd");
-        assert_eq!(err, "No working directory for this session");
+    mod inside_git_repo {
+        use super::*;
+
+        #[test]
+        fn is_true_for_real_repo() {
+            let (_dir, repo) = fresh_repo();
+            assert!(with_isolated_git_env(|| inside_git_repo(&repo)).unwrap());
+        }
+
+        #[test]
+        fn is_false_outside_a_repo() {
+            let dir = tempfile::tempdir().unwrap();
+            assert!(!with_isolated_git_env(|| inside_git_repo(dir.path())).unwrap());
+        }
     }
 
-    // ── collect_diff_in ──
+    mod has_head {
+        use super::*;
 
-    #[test]
-    fn collect_diff_in_fresh_repo_is_empty_when_nothing_staged() {
-        let (_dir, repo) = fresh_repo();
-        assert_eq!(
-            with_isolated_git_env(|| collect_diff_in(&repo)).unwrap(),
-            ""
-        );
+        #[test]
+        fn is_false_in_fresh_repo_with_no_commits() {
+            let (_dir, repo) = fresh_repo();
+            assert!(!with_isolated_git_env(|| has_head(&repo)));
+        }
+
+        #[test]
+        fn is_true_after_first_commit() {
+            let (_dir, repo) = fresh_repo();
+            std::fs::write(repo.join("a.txt"), "hello\n").unwrap();
+            git_setup(&repo, &["add", "a.txt"]);
+            git_setup(&repo, &["commit", "--quiet", "-m", "init"]);
+            assert!(with_isolated_git_env(|| has_head(&repo)));
+        }
     }
 
-    #[test]
-    fn collect_diff_in_fresh_repo_lists_untracked_files() {
-        let (_dir, repo) = fresh_repo();
-        std::fs::write(repo.join("new.txt"), "hi\n").unwrap();
-        let body = with_isolated_git_env(|| collect_diff_in(&repo)).unwrap();
-        assert_eq!(body, "Untracked files:\n  new.txt");
+    mod run_git_diff_in {
+        use super::*;
+
+        #[test]
+        fn pins_the_output_shape_against_user_config() {
+            let (_dir, repo) = fresh_repo();
+            std::fs::write(repo.join("a.txt"), "first\n\nthird\n").unwrap();
+            git_setup(&repo, &["add", "a.txt"]);
+            git_setup(&repo, &["commit", "--quiet", "-m", "init"]);
+            std::fs::write(repo.join("a.txt"), "first\n\nTHIRD\n").unwrap();
+            git_setup(&repo, &["config", "diff.noprefix", "true"]);
+            git_setup(&repo, &["config", "diff.suppressBlankEmpty", "true"]);
+            git_setup(&repo, &["config", "color.ui", "always"]);
+
+            let body = run_git_diff_in(&repo, &["HEAD"]).unwrap();
+
+            assert!(body.starts_with("diff --git a/a.txt b/a.txt\n"), "{body}");
+            assert!(body.contains(" first\n \n-third\n"), "{body:?}");
+            assert!(
+                body.contains(indoc! {"
+
+                    --- a/a.txt
+                    +++ b/a.txt
+                "}),
+                "{body}"
+            );
+            assert!(!body.contains('\x1b'), "{body:?}");
+        }
     }
 
-    #[test]
-    fn collect_diff_in_fresh_repo_combines_staged_and_unstaged_diffs() {
-        let (_dir, repo) = fresh_repo();
-        std::fs::write(repo.join("a.txt"), "staged\n").unwrap();
-        git_setup(&repo, &["add", "a.txt"]);
-        std::fs::write(repo.join("a.txt"), "staged\nunstaged\n").unwrap();
+    mod run_git_in {
+        use super::*;
 
-        let body = with_isolated_git_env(|| collect_diff_in(&repo)).unwrap();
+        #[test]
+        fn propagates_stderr_on_failure() {
+            let (_dir, repo) = fresh_repo();
+            let args = ["cat-file", "-t", "deadbeef"];
+            let stderr = isolated_git(&repo).args(args).output().unwrap().stderr;
 
-        assert!(body.contains("+staged"), "staged add missing: {body}");
-        assert!(body.contains("+unstaged"), "unstaged edit missing: {body}");
+            let err = with_isolated_git_env(|| run_git_in(&repo, &args)).unwrap_err();
+
+            assert_eq!(format!("{err:#}"), String::from_utf8_lossy(&stderr).trim());
+        }
     }
 
-    #[test]
-    fn collect_diff_in_after_commit_shows_unstaged_changes() {
-        let (_dir, repo) = fresh_repo();
-        std::fs::write(repo.join("a.txt"), "first\n").unwrap();
-        git_setup(&repo, &["add", "a.txt"]);
-        git_setup(&repo, &["commit", "--quiet", "-m", "init"]);
-        std::fs::write(repo.join("a.txt"), "first\nsecond\n").unwrap();
-        let body = with_isolated_git_env(|| collect_diff_in(&repo)).unwrap();
-        assert!(body.contains("a.txt"), "diff body missing path: {body}");
-        assert!(body.contains("+second"), "diff body missing add: {body}");
+    mod git_output {
+        use super::*;
+
+        #[test]
+        fn reports_a_spawn_failure_with_a_recovery_step() {
+            let dir = tempfile::tempdir().unwrap();
+            let missing = dir.path().join("missing");
+            let cause = Command::new("git")
+                .current_dir(&missing)
+                .output()
+                .unwrap_err();
+
+            let err = git_output(&missing, &["status"]).unwrap_err();
+            assert_eq!(
+                format!("{err:#}"),
+                format!(
+                    "failed to spawn git status: {cause}. Check that git is installed and on PATH."
+                ),
+            );
+        }
     }
 
-    #[test]
-    fn collect_diff_in_separates_tracked_changes_from_untracked_list() {
-        let (_dir, repo) = fresh_repo();
-        std::fs::write(repo.join("a.txt"), "first\n").unwrap();
-        git_setup(&repo, &["add", "a.txt"]);
-        git_setup(&repo, &["commit", "--quiet", "-m", "init"]);
-        std::fs::write(repo.join("a.txt"), "first\nedit\n").unwrap();
-        std::fs::write(repo.join("untracked.txt"), "u\n").unwrap();
-        let body = with_isolated_git_env(|| collect_diff_in(&repo)).unwrap();
-        assert!(body.contains("+edit"), "{body}");
-        assert!(body.contains("Untracked files:"), "{body}");
-        assert!(body.contains("untracked.txt"), "{body}");
+    mod git_failure_message {
+        use super::*;
+
+        #[test]
+        fn passes_through_trimmed_stderr() {
+            assert_eq!(
+                git_failure_message(&["status"], b"  fatal: not a git repo\n"),
+                "fatal: not a git repo",
+            );
+        }
+
+        #[test]
+        fn falls_back_to_synthetic_when_stderr_blank() {
+            assert_eq!(git_failure_message(&["status"], b""), "git status failed",);
+            assert_eq!(
+                git_failure_message(&["diff", "HEAD"], b"  \n\t\n  "),
+                "git diff HEAD failed",
+            );
+        }
     }
 
-    // ── format_diff ──
+    mod truncate {
+        use super::*;
 
-    #[test]
-    fn format_diff_tracked_only_renders_verbatim() {
-        let body = format_diff(
-            indoc! {"
-                diff --git a/x b/x
-                +foo
-            "},
-            "",
-        );
-        assert_eq!(
-            body,
-            indoc! {"
-                diff --git a/x b/x
-                +foo"
-            }
-        );
+        #[test]
+        fn under_or_at_cap_is_unchanged() {
+            assert_eq!(truncate("abc".to_owned(), "`git diff HEAD`"), "abc");
+            let exact = "a".repeat(MAX_BYTES);
+            assert_eq!(truncate(exact.clone(), "`git diff HEAD`"), exact);
+        }
+
+        #[test]
+        fn oversized_input_appends_footer_with_human_size() {
+            let s = "a".repeat(MAX_BYTES + 100);
+            let got = truncate(s, "`git diff HEAD`");
+            let footer = "\n\n(Truncated 100 B. Run `git diff HEAD` for the full output.)";
+            assert_eq!(got.len(), MAX_BYTES + footer.len());
+            assert_eq!(&got[..MAX_BYTES], &"a".repeat(MAX_BYTES));
+            let tail = &got[got.len() - 80..];
+            assert!(got.ends_with(footer), "footer drift, tail: {tail}");
+        }
+
+        #[test]
+        fn cuts_on_utf8_boundary_and_never_exceeds_max_bytes() {
+            // The final char straddles the cap, so the cut backs up to the preceding boundary.
+            let prefix = "a".repeat(MAX_BYTES - 1);
+            let s = format!("{prefix}€trailing"); // '€' is 3 bytes
+            let got = truncate(s, "`git diff --cached` and `git diff`");
+            let footer_start = got.find("\n\n(Truncated ").expect("footer present");
+            assert_eq!(footer_start, MAX_BYTES - 1);
+            assert!(got.is_char_boundary(footer_start));
+            assert!(got.contains("`git diff --cached` and `git diff`"));
+        }
     }
 
-    #[test]
-    fn format_diff_keeps_trailing_whitespace_on_diff_lines() {
-        let body = format_diff(" context  \n+added  \n", "");
-        assert_eq!(body, " context  \n+added  ");
-    }
+    mod format_size {
+        use super::*;
 
-    #[test]
-    fn format_diff_untracked_only_lists_files_under_heading() {
-        let body = format_diff("", "new.rs\nother.rs\n");
-        assert_eq!(
-            body,
-            indoc! {"
-                Untracked files:
-                  new.rs
-                  other.rs"
-            },
-        );
-    }
-
-    #[test]
-    fn format_diff_combined_separates_with_blank_line() {
-        let body = format_diff(
-            indoc! {"
-                diff --git a/x b/x
-                +foo
-            "},
-            "new.rs\n",
-        );
-        assert_eq!(
-            body,
-            indoc! {"
-                diff --git a/x b/x
-                +foo
-
-                Untracked files:
-                  new.rs"
-            },
-        );
-    }
-
-    #[test]
-    fn format_diff_both_empty_yields_empty_string() {
-        assert_eq!(format_diff("", ""), "");
-        assert_eq!(format_diff("   \n", "  \n"), "");
-    }
-
-    // ── join_sections ──
-
-    #[test]
-    fn join_sections_keeps_non_empty_sections_with_blank_separator() {
-        assert_eq!(join_sections(&["one\n", " \n", "two\n"]), "one\n\ntwo");
-    }
-
-    // ── inside_git_repo ──
-
-    #[test]
-    fn inside_git_repo_is_true_for_real_repo() {
-        let (_dir, repo) = fresh_repo();
-        assert!(with_isolated_git_env(|| inside_git_repo(&repo)).unwrap());
-    }
-
-    #[test]
-    fn inside_git_repo_is_false_outside_a_repo() {
-        let dir = tempfile::tempdir().unwrap();
-        assert!(!with_isolated_git_env(|| inside_git_repo(dir.path())).unwrap());
-    }
-
-    // ── has_head ──
-
-    #[test]
-    fn has_head_is_false_in_fresh_repo_with_no_commits() {
-        let (_dir, repo) = fresh_repo();
-        assert!(!with_isolated_git_env(|| has_head(&repo)));
-    }
-
-    #[test]
-    fn has_head_is_true_after_first_commit() {
-        let (_dir, repo) = fresh_repo();
-        std::fs::write(repo.join("a.txt"), "hello\n").unwrap();
-        git_setup(&repo, &["add", "a.txt"]);
-        git_setup(&repo, &["commit", "--quiet", "-m", "init"]);
-        assert!(with_isolated_git_env(|| has_head(&repo)));
-    }
-
-    // ── run_git_diff_in ──
-
-    #[test]
-    fn run_git_diff_in_pins_the_output_shape_against_user_config() {
-        let (_dir, repo) = fresh_repo();
-        std::fs::write(repo.join("a.txt"), "first\n\nthird\n").unwrap();
-        git_setup(&repo, &["add", "a.txt"]);
-        git_setup(&repo, &["commit", "--quiet", "-m", "init"]);
-        std::fs::write(repo.join("a.txt"), "first\n\nTHIRD\n").unwrap();
-        git_setup(&repo, &["config", "diff.noprefix", "true"]);
-        git_setup(&repo, &["config", "diff.suppressBlankEmpty", "true"]);
-        git_setup(&repo, &["config", "color.ui", "always"]);
-
-        let body = run_git_diff_in(&repo, &["HEAD"]).unwrap();
-
-        assert!(body.starts_with("diff --git a/a.txt b/a.txt\n"), "{body}");
-        assert!(body.contains(" first\n \n-third\n"), "{body:?}");
-        assert!(
-            body.contains(indoc! {"
-
-                --- a/a.txt
-                +++ b/a.txt
-            "}),
-            "{body}"
-        );
-        assert!(!body.contains('\x1b'), "{body:?}");
-    }
-
-    // ── run_git_in ──
-
-    #[test]
-    fn run_git_in_propagates_stderr_on_failure() {
-        let (_dir, repo) = fresh_repo();
-        let args = ["cat-file", "-t", "deadbeef"];
-        let stderr = isolated_git(&repo).args(args).output().unwrap().stderr;
-
-        let err = with_isolated_git_env(|| run_git_in(&repo, &args)).unwrap_err();
-
-        assert_eq!(format!("{err:#}"), String::from_utf8_lossy(&stderr).trim());
-    }
-
-    // ── git_output ──
-
-    #[test]
-    fn git_output_reports_a_spawn_failure_with_a_recovery_step() {
-        let dir = tempfile::tempdir().unwrap();
-        let missing = dir.path().join("missing");
-        let cause = Command::new("git")
-            .current_dir(&missing)
-            .output()
-            .unwrap_err();
-
-        let err = git_output(&missing, &["status"]).unwrap_err();
-        assert_eq!(
-            format!("{err:#}"),
-            format!(
-                "failed to spawn git status: {cause}. Check that git is installed and on PATH."
-            ),
-        );
-    }
-
-    // ── git_failure_message ──
-
-    #[test]
-    fn git_failure_message_passes_through_trimmed_stderr() {
-        assert_eq!(
-            git_failure_message(&["status"], b"  fatal: not a git repo\n"),
-            "fatal: not a git repo",
-        );
-    }
-
-    #[test]
-    fn git_failure_message_falls_back_to_synthetic_when_stderr_blank() {
-        assert_eq!(git_failure_message(&["status"], b""), "git status failed",);
-        assert_eq!(
-            git_failure_message(&["diff", "HEAD"], b"  \n\t\n  "),
-            "git diff HEAD failed",
-        );
-    }
-
-    // ── truncate ──
-
-    #[test]
-    fn truncate_under_or_at_cap_is_unchanged() {
-        assert_eq!(truncate("abc".to_owned(), "`git diff HEAD`"), "abc");
-        let exact = "a".repeat(MAX_BYTES);
-        assert_eq!(truncate(exact.clone(), "`git diff HEAD`"), exact);
-    }
-
-    #[test]
-    fn truncate_oversized_input_appends_footer_with_human_size() {
-        let s = "a".repeat(MAX_BYTES + 100);
-        let got = truncate(s, "`git diff HEAD`");
-        let footer = "\n\n(Truncated 100 B. Run `git diff HEAD` for the full output.)";
-        assert_eq!(got.len(), MAX_BYTES + footer.len());
-        assert_eq!(&got[..MAX_BYTES], &"a".repeat(MAX_BYTES));
-        let tail = &got[got.len() - 80..];
-        assert!(got.ends_with(footer), "footer drift, tail: {tail}");
-    }
-
-    #[test]
-    fn truncate_cuts_on_utf8_boundary_and_never_exceeds_max_bytes() {
-        // The final char straddles the cap, so the cut backs up to the preceding boundary.
-        let prefix = "a".repeat(MAX_BYTES - 1);
-        let s = format!("{prefix}€trailing"); // '€' is 3 bytes
-        let got = truncate(s, "`git diff --cached` and `git diff`");
-        let footer_start = got.find("\n\n(Truncated ").expect("footer present");
-        assert_eq!(footer_start, MAX_BYTES - 1);
-        assert!(got.is_char_boundary(footer_start));
-        assert!(got.contains("`git diff --cached` and `git diff`"));
-    }
-
-    // ── format_size ──
-
-    #[test]
-    fn format_size_picks_unit_and_truncates_to_one_decimal() {
-        assert_eq!(format_size(0), "0 B");
-        assert_eq!(format_size(512), "512 B");
-        assert_eq!(format_size(1023), "1023 B");
-        assert_eq!(format_size(1024), "1.0 KB");
-        assert_eq!(format_size(1536), "1.5 KB");
-        assert_eq!(format_size(1024 * 1024 - 1), "1023.9 KB");
-        let mb = 1024 * 1024;
-        assert_eq!(format_size(mb), "1.0 MB");
-        assert_eq!(format_size(mb * 3 / 2), "1.5 MB");
+        #[test]
+        fn picks_unit_and_truncates_to_one_decimal() {
+            assert_eq!(format_size(0), "0 B");
+            assert_eq!(format_size(512), "512 B");
+            assert_eq!(format_size(1023), "1023 B");
+            assert_eq!(format_size(1024), "1.0 KB");
+            assert_eq!(format_size(1536), "1.5 KB");
+            assert_eq!(format_size(1024 * 1024 - 1), "1023.9 KB");
+            let mb = 1024 * 1024;
+            assert_eq!(format_size(mb), "1.0 MB");
+            assert_eq!(format_size(mb * 3 / 2), "1.5 MB");
+        }
     }
 }

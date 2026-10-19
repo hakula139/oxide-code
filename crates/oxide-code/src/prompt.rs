@@ -266,10 +266,6 @@ mod tests {
 
     const IDENTITY: &str = "You are powered by the model test-model.";
 
-    fn cwd() -> PathBuf {
-        std::env::current_dir().expect("cwd should be available")
-    }
-
     fn spec(id: &str) -> ModelSpec {
         ModelSpec::resolve(id.to_owned())
     }
@@ -282,388 +278,411 @@ mod tests {
         }
     }
 
-    /// A recording from a machine unlike this one, so a replayed environment is recognizable.
-    fn recorded_context(cwd: &Path) -> SessionContext {
-        serde_json::from_value(serde_json::json!({
-            "environment": {
-                "cwd": cwd,
-                "is_git": false,
-                "platform": "plan9",
-                "shell": "rc",
-                "os_version": "Plan 9 4e",
-            },
-            "user_context": "recorded context",
-            "seen": {
-                "instructions": "Recorded rules.",
-                "date": "2026-04-12",
-                "model": IDENTITY,
-            },
-        }))
-        .unwrap()
-    }
+    mod catch_up {
+        use super::*;
 
-    fn init_git_repo(path: &Path) {
-        let status = isolated_git(path)
-            .args(["init"])
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .status()
-            .expect("failed to spawn git");
-        assert!(status.success(), "git init exited with non-zero status");
-    }
+        #[test]
+        fn reminds_only_of_what_changed() {
+            let mut parts = PromptParts {
+                seen: context("Old rules.", "2026-04-12"),
+                ..PromptParts::default()
+            };
 
-    // ── PromptParts::catch_up ──
+            assert_eq!(parts.catch_up(context("Old rules.", "2026-04-12")), None);
 
-    #[test]
-    fn catch_up_reminds_only_of_what_changed() {
-        let mut parts = PromptParts {
-            seen: context("Old rules.", "2026-04-12"),
-            ..PromptParts::default()
-        };
+            let reminder = parts.catch_up(context("Old rules.", "2026-04-13")).unwrap();
+            assert!(reminder.starts_with("<system-reminder>"));
+            assert!(reminder.contains(indoc! {"
+                # Current date
 
-        assert_eq!(parts.catch_up(context("Old rules.", "2026-04-12")), None);
+                Today's date is 2026-04-13."
+            }));
+            assert!(!reminder.contains("# CLAUDE.md"), "{reminder}");
 
-        let reminder = parts.catch_up(context("Old rules.", "2026-04-13")).unwrap();
-        assert!(reminder.starts_with("<system-reminder>"));
-        assert!(reminder.contains(indoc! {"
-            # Current date
+            let reminder = parts.catch_up(context("New rules.", "2026-04-13")).unwrap();
+            assert!(reminder.contains(indoc! {"
+                # CLAUDE.md
 
-            Today's date is 2026-04-13."
-        }));
-        assert!(!reminder.contains("# CLAUDE.md"), "{reminder}");
+                New rules."
+            }));
+            assert!(!reminder.contains("# Current date"), "{reminder}");
 
-        let reminder = parts.catch_up(context("New rules.", "2026-04-13")).unwrap();
-        assert!(reminder.contains(indoc! {"
-            # CLAUDE.md
-
-            New rules."
-        }));
-        assert!(!reminder.contains("# Current date"), "{reminder}");
-
-        let swapped = UserContext {
-            model: "You are powered by the model other-model.".to_owned(),
-            ..context("New rules.", "2026-04-13")
-        };
-        let reminder = parts.catch_up(swapped).unwrap();
-        assert!(reminder.contains(indoc! {"
-            # Model
-
-            You are powered by the model other-model."
-        }));
-        assert!(!reminder.contains("# CLAUDE.md"), "{reminder}");
-
-        let reminder = parts.catch_up(context("", "2026-04-13")).unwrap();
-        assert!(reminder.contains("The instruction files were removed"));
-        assert_eq!(parts.seen, context("", "2026-04-13"));
-        assert!(
-            parts.user_context.is_empty(),
-            "catching up must leave the first message alone"
-        );
-    }
-
-    // ── PromptParts::refresh ──
-
-    #[test]
-    fn refresh_rerenders_user_context_and_counts_it_as_seen() {
-        let mut parts = PromptParts {
-            user_context: "stale".to_owned(),
-            ..PromptParts::default()
-        };
-
-        parts.refresh(context("Rules.", "2026-04-13"));
-
-        assert_eq!(
-            parts.user_context,
-            render_user_context(&context("Rules.", "2026-04-13"))
-        );
-        assert_eq!(parts.catch_up(context("Rules.", "2026-04-13")), None);
-    }
-
-    // ── build_prompt ──
-
-    #[tokio::test]
-    async fn build_prompt_names_the_model_in_user_context_only() {
-        let model = spec("claude-opus-5-5");
-        let (parts, _) = build_prompt(&model, &cwd()).await;
-        let identity = environment::model_identity(&model);
-        assert!(
-            parts.user_context.contains(&formatdoc! {"
+            let swapped = UserContext {
+                model: "You are powered by the model other-model.".to_owned(),
+                ..context("New rules.", "2026-04-13")
+            };
+            let reminder = parts.catch_up(swapped).unwrap();
+            assert!(reminder.contains(indoc! {"
                 # Model
 
-                {identity}"
-            }),
-            "{}",
-            parts.user_context,
-        );
-        assert_eq!(parts.seen.model, identity);
-        assert!(!parts.system_joined().contains("claude-opus-5-5"));
-    }
+                You are powered by the model other-model."
+            }));
+            assert!(!reminder.contains("# CLAUDE.md"), "{reminder}");
 
-    // ── restore_prompt ──
-
-    #[tokio::test]
-    async fn restore_prompt_replays_the_recording_in_its_directory() {
-        let tmp = tempfile::tempdir().expect("failed to create tempdir");
-
-        let parts = restore_prompt(recorded_context(tmp.path()), tmp.path()).await;
-
-        let joined = parts.system_joined();
-        assert!(joined.contains("- Platform: plan9"), "{joined}");
-        assert_eq!(parts.user_context, "recorded context");
-        assert_eq!(parts.seen, context("Recorded rules.", "2026-04-12"));
-    }
-
-    #[tokio::test]
-    async fn restore_prompt_detects_the_environment_again_in_another_directory() {
-        let recorded_in = tempfile::tempdir().expect("failed to create tempdir");
-        let resumed_in = tempfile::tempdir().expect("failed to create tempdir");
-
-        let parts = restore_prompt(recorded_context(recorded_in.path()), resumed_in.path()).await;
-
-        let joined = parts.system_joined();
-        assert!(!joined.contains("plan9"), "{joined}");
-        assert!(joined.contains(&format!(
-            "Primary working directory: {}",
-            resumed_in.path().display()
-        )));
-        assert_eq!(parts.user_context, "recorded context");
-    }
-
-    // ── assemble ──
-
-    #[tokio::test]
-    async fn assemble_in_git_repo_has_system_and_user_context() {
-        let tmp = tempfile::tempdir().expect("failed to create tempdir");
-        init_git_repo(tmp.path());
-        std::fs::write(tmp.path().join("CLAUDE.md"), "Test project rules.").unwrap();
-
-        let (parts, _) = assemble(&spec("test-model"), tmp.path(), Some(tmp.path())).await;
-
-        let expected_system_sections = [
-            "You are an interactive agent",
-            "# System",
-            "# Doing tasks",
-            "# Executing actions with care",
-            "# Using your tools",
-            "# Tone and style",
-            "# Output efficiency",
-            "# Environment",
-        ];
-        let joined = parts.system_joined();
-        assert!(joined.starts_with(INTRO));
-        let mut prev_pos = 0;
-        for header in &expected_system_sections {
-            let pos = joined
-                .find(header)
-                .unwrap_or_else(|| panic!("missing section: {header}"));
+            let reminder = parts.catch_up(context("", "2026-04-13")).unwrap();
+            assert!(reminder.contains("The instruction files were removed"));
+            assert_eq!(parts.seen, context("", "2026-04-13"));
             assert!(
-                pos >= prev_pos,
-                "{header} should come after previous section"
-            );
-            prev_pos = pos;
-        }
-
-        assert!(joined.contains(&format!(
-            "Primary working directory: {}",
-            tmp.path().display()
-        )));
-        assert!(joined.contains("Is a git repository: true"));
-
-        assert!(
-            parts
-                .system_sections
-                .iter()
-                .any(|s| s == SYSTEM_PROMPT_DYNAMIC_BOUNDARY),
-            "system_sections should contain the boundary marker"
-        );
-
-        assert!(!joined.contains("Test project rules."));
-
-        let ctx = &parts.user_context;
-        assert!(ctx.contains("Test project rules."));
-        assert!(ctx.contains("<system-reminder>"));
-    }
-
-    #[tokio::test]
-    async fn assemble_walks_root_to_cwd_for_instruction_discovery() {
-        let tmp = tempfile::tempdir().expect("failed to create tempdir");
-        let root = tmp.path();
-        init_git_repo(root);
-
-        std::fs::write(root.join("CLAUDE.md"), "Root rules.").unwrap();
-        let sub = root.join("crates").join("core");
-        std::fs::create_dir_all(&sub).unwrap();
-        std::fs::write(sub.join("CLAUDE.md"), "Subdir rules.").unwrap();
-
-        let (parts, _) = assemble(&spec("test-model"), &sub, Some(root)).await;
-        let ctx = &parts.user_context;
-
-        assert!(ctx.contains("Root rules."));
-        assert!(ctx.contains("Subdir rules."));
-
-        let root_pos = ctx.find("Root rules.").unwrap();
-        let sub_pos = ctx.find("Subdir rules.").unwrap();
-        assert!(
-            root_pos < sub_pos,
-            "root instructions should appear before subdirectory"
-        );
-    }
-
-    // ── render_user_context ──
-
-    #[test]
-    fn render_user_context_with_instructions_includes_every_section() {
-        assert_eq!(
-            render_user_context(&context("Project rules.", "2026-04-12")),
-            indoc! {"
-                <system-reminder>
-                As you answer the user's questions, you can use the following context:
-
-                # CLAUDE.md
-
-                Project rules.
-
-                # Current date
-
-                Today's date is 2026-04-12.
-
-                # Model
-
-                You are powered by the model test-model.
-
-                IMPORTANT: this context may or may not be relevant to your tasks. You should
-                not respond to this context unless it is highly relevant to your task.
-                </system-reminder>"
-            },
-        );
-    }
-
-    #[test]
-    fn render_user_context_without_instructions_still_carries_date() {
-        assert_eq!(
-            render_user_context(&context("", "2026-04-12")),
-            indoc! {"
-                <system-reminder>
-                As you answer the user's questions, you can use the following context:
-
-                # Current date
-
-                Today's date is 2026-04-12.
-
-                # Model
-
-                You are powered by the model test-model.
-
-                IMPORTANT: this context may or may not be relevant to your tasks. You should
-                not respond to this context unless it is highly relevant to your task.
-                </system-reminder>"
-            },
-        );
-    }
-
-    // ── render_reminder ──
-
-    #[test]
-    fn render_reminder_includes_every_changed_section_in_order() {
-        assert_eq!(
-            render_reminder(
-                &UserContext::default(),
-                &context("Project rules.", "2026-04-12")
-            ),
-            indoc! {"
-                <system-reminder>
-                The context from the start of this conversation has changed. Use these values from now on:
-
-                # CLAUDE.md
-
-                Project rules.
-
-                # Current date
-
-                Today's date is 2026-04-12.
-
-                # Model
-
-                You are powered by the model test-model.
-                </system-reminder>"
-            },
-        );
-    }
-
-    #[test]
-    fn render_reminder_removed_instructions_revoke_earlier_rules() {
-        assert_eq!(
-            render_reminder(
-                &context("Project rules.", "2026-04-12"),
-                &context("", "2026-04-12")
-            ),
-            indoc! {"
-                <system-reminder>
-                The context from the start of this conversation has changed. Use these values from now on:
-
-                # CLAUDE.md
-
-                The instruction files were removed, so the earlier instructions no longer apply.
-                </system-reminder>"
-            },
-        );
-    }
-
-    // ── sections ──
-
-    #[test]
-    fn prompt_constants_have_no_leading_whitespace() {
-        for (name, content) in [
-            ("INTRO", INTRO),
-            ("SYSTEM_SECTION", SYSTEM_SECTION),
-            ("TASK_GUIDANCE", TASK_GUIDANCE),
-            ("CAUTION", CAUTION),
-            ("TOOL_GUIDANCE", TOOL_GUIDANCE),
-            ("STYLE", STYLE),
-            ("OUTPUT_EFFICIENCY", OUTPUT_EFFICIENCY),
-        ] {
-            assert!(
-                !content.starts_with(' ') && !content.starts_with('\t'),
-                "{name} should not start with whitespace"
+                parts.user_context.is_empty(),
+                "catching up must leave the first message alone"
             );
         }
     }
 
-    #[test]
-    fn prompt_constants_state_their_distinctive_rules() {
-        let sections: [(&str, &str, &[&str]); 3] = [
-            (
-                "TASK_GUIDANCE",
-                TASK_GUIDANCE,
-                &[
-                    "asks only for a review or a report, share your findings without editing files",
-                    "inspect the actual files, logs, or command output",
-                    "Report a task as done only after the checks that prove it",
-                    "Create commits only when the user asks.",
-                    "without references to the change, the task, or an issue number",
-                    "Delete code instead of commenting it out.",
-                    "Tests you write must fail against a plausible bug",
-                ],
-            ),
-            (
-                "CAUTION",
-                CAUTION,
-                &["Never print credentials", "redact any credential"],
-            ),
-            (
-                "OUTPUT_EFFICIENCY",
-                OUTPUT_EFFICIENCY,
-                &[
-                    "task that changed files or ran commands, close with what you verified and how",
-                    "Skip this for questions.",
-                ],
-            ),
-        ];
+    mod refresh {
+        use super::*;
 
-        for (name, content, rules) in sections {
-            let prose = content.split_whitespace().collect::<Vec<_>>().join(" ");
-            for rule in rules {
-                assert!(prose.contains(rule), "{name} should state: {rule}");
+        #[test]
+        fn rerenders_user_context_and_counts_it_as_seen() {
+            let mut parts = PromptParts {
+                user_context: "stale".to_owned(),
+                ..PromptParts::default()
+            };
+
+            parts.refresh(context("Rules.", "2026-04-13"));
+
+            assert_eq!(
+                parts.user_context,
+                render_user_context(&context("Rules.", "2026-04-13"))
+            );
+            assert_eq!(parts.catch_up(context("Rules.", "2026-04-13")), None);
+        }
+    }
+
+    mod build_prompt {
+        use super::*;
+
+        fn cwd() -> PathBuf {
+            std::env::current_dir().expect("cwd should be available")
+        }
+
+        #[tokio::test]
+        async fn names_the_model_in_user_context_only() {
+            let model = spec("claude-opus-5-5");
+            let (parts, _) = build_prompt(&model, &cwd()).await;
+            let identity = environment::model_identity(&model);
+            assert!(
+                parts.user_context.contains(&formatdoc! {"
+                    # Model
+
+                    {identity}"
+                }),
+                "{}",
+                parts.user_context,
+            );
+            assert_eq!(parts.seen.model, identity);
+            assert!(!parts.system_joined().contains("claude-opus-5-5"));
+        }
+    }
+
+    mod restore_prompt {
+        use super::*;
+
+        /// A recording from a machine unlike this one, so a replayed environment is recognizable.
+        fn recorded_context(cwd: &Path) -> SessionContext {
+            serde_json::from_value(serde_json::json!({
+                "environment": {
+                    "cwd": cwd,
+                    "is_git": false,
+                    "platform": "plan9",
+                    "shell": "rc",
+                    "os_version": "Plan 9 4e",
+                },
+                "user_context": "recorded context",
+                "seen": {
+                    "instructions": "Recorded rules.",
+                    "date": "2026-04-12",
+                    "model": IDENTITY,
+                },
+            }))
+            .unwrap()
+        }
+
+        #[tokio::test]
+        async fn replays_the_recording_in_its_directory() {
+            let tmp = tempfile::tempdir().expect("failed to create tempdir");
+
+            let parts = restore_prompt(recorded_context(tmp.path()), tmp.path()).await;
+
+            let joined = parts.system_joined();
+            assert!(joined.contains("- Platform: plan9"), "{joined}");
+            assert_eq!(parts.user_context, "recorded context");
+            assert_eq!(parts.seen, context("Recorded rules.", "2026-04-12"));
+        }
+
+        #[tokio::test]
+        async fn detects_the_environment_again_in_another_directory() {
+            let recorded_in = tempfile::tempdir().expect("failed to create tempdir");
+            let resumed_in = tempfile::tempdir().expect("failed to create tempdir");
+
+            let parts =
+                restore_prompt(recorded_context(recorded_in.path()), resumed_in.path()).await;
+
+            let joined = parts.system_joined();
+            assert!(!joined.contains("plan9"), "{joined}");
+            assert!(joined.contains(&format!(
+                "Primary working directory: {}",
+                resumed_in.path().display()
+            )));
+            assert_eq!(parts.user_context, "recorded context");
+        }
+    }
+
+    mod assemble {
+        use super::*;
+
+        fn init_git_repo(path: &Path) {
+            let status = isolated_git(path)
+                .args(["init"])
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status()
+                .expect("failed to spawn git");
+            assert!(status.success(), "git init exited with non-zero status");
+        }
+
+        #[tokio::test]
+        async fn in_git_repo_has_system_and_user_context() {
+            let tmp = tempfile::tempdir().expect("failed to create tempdir");
+            init_git_repo(tmp.path());
+            std::fs::write(tmp.path().join("CLAUDE.md"), "Test project rules.").unwrap();
+
+            let (parts, _) = assemble(&spec("test-model"), tmp.path(), Some(tmp.path())).await;
+
+            let expected_system_sections = [
+                "You are an interactive agent",
+                "# System",
+                "# Doing tasks",
+                "# Executing actions with care",
+                "# Using your tools",
+                "# Tone and style",
+                "# Output efficiency",
+                "# Environment",
+            ];
+            let joined = parts.system_joined();
+            assert!(joined.starts_with(INTRO));
+            let mut prev_pos = 0;
+            for header in &expected_system_sections {
+                let pos = joined
+                    .find(header)
+                    .unwrap_or_else(|| panic!("missing section: {header}"));
+                assert!(
+                    pos >= prev_pos,
+                    "{header} should come after previous section"
+                );
+                prev_pos = pos;
+            }
+
+            assert!(joined.contains(&format!(
+                "Primary working directory: {}",
+                tmp.path().display()
+            )));
+            assert!(joined.contains("Is a git repository: true"));
+
+            assert!(
+                parts
+                    .system_sections
+                    .iter()
+                    .any(|s| s == SYSTEM_PROMPT_DYNAMIC_BOUNDARY),
+                "system_sections should contain the boundary marker"
+            );
+
+            assert!(!joined.contains("Test project rules."));
+
+            let ctx = &parts.user_context;
+            assert!(ctx.contains("Test project rules."));
+            assert!(ctx.contains("<system-reminder>"));
+        }
+
+        #[tokio::test]
+        async fn walks_root_to_cwd_for_instruction_discovery() {
+            let tmp = tempfile::tempdir().expect("failed to create tempdir");
+            let root = tmp.path();
+            init_git_repo(root);
+
+            std::fs::write(root.join("CLAUDE.md"), "Root rules.").unwrap();
+            let sub = root.join("crates").join("core");
+            std::fs::create_dir_all(&sub).unwrap();
+            std::fs::write(sub.join("CLAUDE.md"), "Subdir rules.").unwrap();
+
+            let (parts, _) = assemble(&spec("test-model"), &sub, Some(root)).await;
+            let ctx = &parts.user_context;
+
+            assert!(ctx.contains("Root rules."));
+            assert!(ctx.contains("Subdir rules."));
+
+            let root_pos = ctx.find("Root rules.").unwrap();
+            let sub_pos = ctx.find("Subdir rules.").unwrap();
+            assert!(
+                root_pos < sub_pos,
+                "root instructions should appear before subdirectory"
+            );
+        }
+    }
+
+    mod render_user_context {
+        use super::*;
+
+        #[test]
+        fn with_instructions_includes_every_section() {
+            assert_eq!(
+                render_user_context(&context("Project rules.", "2026-04-12")),
+                indoc! {"
+                    <system-reminder>
+                    As you answer the user's questions, you can use the following context:
+
+                    # CLAUDE.md
+
+                    Project rules.
+
+                    # Current date
+
+                    Today's date is 2026-04-12.
+
+                    # Model
+
+                    You are powered by the model test-model.
+
+                    IMPORTANT: this context may or may not be relevant to your tasks. You should
+                    not respond to this context unless it is highly relevant to your task.
+                    </system-reminder>"
+                },
+            );
+        }
+
+        #[test]
+        fn without_instructions_still_carries_date() {
+            assert_eq!(
+                render_user_context(&context("", "2026-04-12")),
+                indoc! {"
+                    <system-reminder>
+                    As you answer the user's questions, you can use the following context:
+
+                    # Current date
+
+                    Today's date is 2026-04-12.
+
+                    # Model
+
+                    You are powered by the model test-model.
+
+                    IMPORTANT: this context may or may not be relevant to your tasks. You should
+                    not respond to this context unless it is highly relevant to your task.
+                    </system-reminder>"
+                },
+            );
+        }
+    }
+
+    mod render_reminder {
+        use super::*;
+
+        #[test]
+        fn includes_every_changed_section_in_order() {
+            assert_eq!(
+                render_reminder(
+                    &UserContext::default(),
+                    &context("Project rules.", "2026-04-12")
+                ),
+                indoc! {"
+                    <system-reminder>
+                    The context from the start of this conversation has changed. Use these values from now on:
+
+                    # CLAUDE.md
+
+                    Project rules.
+
+                    # Current date
+
+                    Today's date is 2026-04-12.
+
+                    # Model
+
+                    You are powered by the model test-model.
+                    </system-reminder>"
+                },
+            );
+        }
+
+        #[test]
+        fn removed_instructions_revoke_earlier_rules() {
+            assert_eq!(
+                render_reminder(
+                    &context("Project rules.", "2026-04-12"),
+                    &context("", "2026-04-12")
+                ),
+                indoc! {"
+                    <system-reminder>
+                    The context from the start of this conversation has changed. Use these values from now on:
+
+                    # CLAUDE.md
+
+                    The instruction files were removed, so the earlier instructions no longer apply.
+                    </system-reminder>"
+                },
+            );
+        }
+    }
+
+    mod sections {
+        use super::*;
+
+        #[test]
+        fn have_no_leading_whitespace() {
+            for (name, content) in [
+                ("INTRO", INTRO),
+                ("SYSTEM_SECTION", SYSTEM_SECTION),
+                ("TASK_GUIDANCE", TASK_GUIDANCE),
+                ("CAUTION", CAUTION),
+                ("TOOL_GUIDANCE", TOOL_GUIDANCE),
+                ("STYLE", STYLE),
+                ("OUTPUT_EFFICIENCY", OUTPUT_EFFICIENCY),
+            ] {
+                assert!(
+                    !content.starts_with(' ') && !content.starts_with('\t'),
+                    "{name} should not start with whitespace"
+                );
+            }
+        }
+
+        #[test]
+        fn state_their_distinctive_rules() {
+            let sections: [(&str, &str, &[&str]); 3] = [
+                (
+                    "TASK_GUIDANCE",
+                    TASK_GUIDANCE,
+                    &[
+                        "asks only for a review or a report, \
+                         share your findings without editing files",
+                        "inspect the actual files, logs, or command output",
+                        "Report a task as done only after the checks that prove it",
+                        "Create commits only when the user asks.",
+                        "without references to the change, the task, or an issue number",
+                        "Delete code instead of commenting it out.",
+                        "Tests you write must fail against a plausible bug",
+                    ],
+                ),
+                (
+                    "CAUTION",
+                    CAUTION,
+                    &["Never print credentials", "redact any credential"],
+                ),
+                (
+                    "OUTPUT_EFFICIENCY",
+                    OUTPUT_EFFICIENCY,
+                    &[
+                        "task that changed files or ran commands, \
+                         close with what you verified and how",
+                        "Skip this for questions.",
+                    ],
+                ),
+            ];
+
+            for (name, content, rules) in sections {
+                let prose = content.split_whitespace().collect::<Vec<_>>().join(" ");
+                for rule in rules {
+                    assert!(prose.contains(rule), "{name} should state: {rule}");
+                }
             }
         }
     }

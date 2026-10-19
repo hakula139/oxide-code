@@ -61,8 +61,6 @@ mod tests {
     use crate::protocol::{ConfigPick, Op};
     use crate::slash::registry::testing::run_execute;
 
-    // ── ModelCmd::name ──
-
     #[test]
     fn name_and_metadata_match_built_ins_contract() {
         assert_eq!(ModelCmd.name(), "model");
@@ -71,69 +69,75 @@ mod tests {
         assert_eq!(ModelCmd.usage(), Some("[<id>]"));
     }
 
-    // ── ModelCmd::classify ──
+    mod classify {
+        use super::*;
 
-    #[test]
-    fn classify_is_mutating_for_picker_and_direct_forms() {
-        assert_eq!(ModelCmd.classify(""), SlashKind::Mutating);
-        assert_eq!(ModelCmd.classify("   "), SlashKind::Mutating);
-        assert_eq!(ModelCmd.classify("opus"), SlashKind::Mutating);
-        assert_eq!(ModelCmd.classify("claude-opus-5-5"), SlashKind::Mutating);
+        #[test]
+        fn is_mutating_for_picker_and_direct_forms() {
+            assert_eq!(ModelCmd.classify(""), SlashKind::Mutating);
+            assert_eq!(ModelCmd.classify("   "), SlashKind::Mutating);
+            assert_eq!(ModelCmd.classify("opus"), SlashKind::Mutating);
+            assert_eq!(ModelCmd.classify("claude-opus-5-5"), SlashKind::Mutating);
+        }
     }
 
-    // ── ModelCmd::complete_arg ──
+    mod complete_arg {
+        use super::*;
 
-    fn arg_rows(prefix: &str) -> Vec<(String, String)> {
-        ModelCmd
-            .complete_arg(prefix)
-            .into_iter()
-            .map(|c| (c.value.into_owned(), c.description.into_owned()))
-            .collect()
+        fn arg_rows(prefix: &str) -> Vec<(String, String)> {
+            ModelCmd
+                .complete_arg(prefix)
+                .into_iter()
+                .map(|c| (c.value.into_owned(), c.description.into_owned()))
+                .collect()
+        }
+
+        #[test]
+        fn empty_prefix_lists_catalog_in_picker_order() {
+            assert_eq!(
+                arg_rows(""),
+                [
+                    ("claude-fable-5-1", "Claude Fable 5.1"),
+                    ("claude-opus-5-5", "Claude Opus 5.5"),
+                    ("claude-sonnet-5-5", "Claude Sonnet 5.5"),
+                    ("claude-haiku-5-5", "Claude Haiku 5.5"),
+                ]
+                .map(|(id, name)| (id.to_owned(), name.to_owned())),
+            );
+        }
+
+        #[test]
+        fn filter_is_case_insensitive() {
+            let got: Vec<String> = arg_rows("HAIKU").into_iter().map(|(v, _)| v).collect();
+            assert_eq!(got, vec!["claude-haiku-5-5"]);
+        }
     }
 
-    #[test]
-    fn complete_arg_empty_prefix_lists_catalog_in_picker_order() {
-        assert_eq!(
-            arg_rows(""),
-            [
-                ("claude-fable-5-1", "Claude Fable 5.1"),
-                ("claude-opus-5-5", "Claude Opus 5.5"),
-                ("claude-sonnet-5-5", "Claude Sonnet 5.5"),
-                ("claude-haiku-5-5", "Claude Haiku 5.5"),
-            ]
-            .map(|(id, name)| (id.to_owned(), name.to_owned())),
-        );
-    }
+    mod execute {
+        use super::*;
 
-    #[test]
-    fn complete_arg_filter_is_case_insensitive() {
-        let got: Vec<String> = arg_rows("HAIKU").into_iter().map(|(v, _)| v).collect();
-        assert_eq!(got, vec!["claude-haiku-5-5"]);
-    }
+        #[test]
+        fn no_args_opens_the_picker() {
+            run_execute(&ModelCmd, "  ").unwrap().into_modal();
+        }
 
-    // ── ModelCmd::execute ──
+        #[test]
+        fn typed_id_forwards_the_resolved_model() {
+            assert_eq!(
+                run_execute(&ModelCmd, "sonnet").unwrap().into_forward(),
+                Action::Op(Op::SetModel(ConfigPick::Model {
+                    id: ResolvedModelId::new("claude-sonnet-5-5".to_owned()),
+                    effort: None,
+                })),
+            );
+        }
 
-    #[test]
-    fn execute_no_args_opens_the_picker() {
-        run_execute(&ModelCmd, "  ").unwrap().into_modal();
-    }
-
-    #[test]
-    fn execute_typed_id_forwards_the_resolved_model() {
-        assert_eq!(
-            run_execute(&ModelCmd, "sonnet").unwrap().into_forward(),
-            Action::Op(Op::SetModel(ConfigPick::Model {
-                id: ResolvedModelId::new("claude-sonnet-5-5".to_owned()),
-                effort: None,
-            })),
-        );
-    }
-
-    #[test]
-    fn execute_unknown_id_reports_the_shared_parse_error() {
-        assert_eq!(
-            run_execute(&ModelCmd, "gpt-4").unwrap_err(),
-            command::model("gpt-4").unwrap_err(),
-        );
+        #[test]
+        fn unknown_id_reports_the_shared_parse_error() {
+            assert_eq!(
+                run_execute(&ModelCmd, "gpt-4").unwrap_err(),
+                command::model("gpt-4").unwrap_err(),
+            );
+        }
     }
 }

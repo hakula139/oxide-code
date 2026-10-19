@@ -306,292 +306,316 @@ mod tests {
         ModelSpec::resolve(id.to_owned())
     }
 
-    // ── replacement_for ──
+    mod replacement_for {
+        use super::*;
 
-    #[test]
-    fn replacement_for_maps_1m_suffix_and_family_claude_ids_to_catalog_rows() {
-        for (id, expected) in [
-            ("claude-opus-5-5[1m]", "claude-opus-5-5"),
-            ("opus[1m]", "claude-opus-5-5"),
-            ("CLAUDE-SONNET-5-5[1M]", "claude-sonnet-5-5"),
-            ("claude-haiku-5-5-20261001", "claude-haiku-5-5"),
-            ("claude-fable-latest", "claude-fable-5-1"),
-        ] {
-            assert_eq!(
-                replacement_for(id).map(|info| info.id),
-                Some(expected),
-                "{id}"
-            );
-        }
-    }
-
-    #[test]
-    fn replacement_for_leaves_gateway_and_familyless_ids_without_a_suggestion() {
-        for id in [
-            "gpt-5",
-            "my-opus-gateway",
-            "anthropic.claude-opus-5-5",
-            "claude-future-9",
-        ] {
-            assert!(replacement_for(id).is_none(), "{id}");
-        }
-    }
-
-    // ── cost_rates ──
-
-    #[test]
-    fn cost_rates_route_each_model_to_its_own_card() {
-        // 50K input + 50K cache reads + 1M output stays within Haiku's base card: Fable
-        // $0.50 + $0.0125 + $50, Opus $0.20 + $0.01 + $20, Sonnet $0.10 + $0.005 + $10, and Haiku
-        // $0.005 + $0.0005 + $0.50.
-        let usage = TokenUsage {
-            cache_read_input_tokens: 50_000,
-            ..TokenUsage::new(50_000, 1_000_000)
-        };
-
-        for (id, expected) in [
-            ("claude-fable-5-1", 50.5125),
-            ("claude-opus-5-5", 20.21),
-            ("claude-sonnet-5-5", 10.105),
-            ("claude-haiku-5-5", 0.5055),
-        ] {
-            let cost = cost_rates(id)
-                .unwrap()
-                .estimate_usd(usage, PromptCacheTtl::FiveMin);
-
-            assert!((cost - expected).abs() < 1e-9, "{id}: {cost} vs {expected}");
-        }
-    }
-
-    #[test]
-    fn cost_rates_unknown_model_is_absent() {
-        assert!(cost_rates("claude-future-9").is_none());
-    }
-
-    // ── ModelSpec::resolve ──
-
-    #[test]
-    fn resolve_finds_every_row_by_exact_id() {
-        for info in MODELS {
-            let resolved = spec(info.id).info().map(|row| row.id);
-            assert_eq!(resolved, Some(info.id));
-        }
-    }
-
-    #[test]
-    fn resolve_keeps_near_miss_ids_unknown() {
-        for unknown in [
-            "claude-opus",
-            "claude-opus-5-5[1m]",
-            "claude-opus-5-5-20261001",
-            "anthropic.claude-opus-5-5",
-            "gpt-5",
-        ] {
-            let model = spec(unknown);
-            assert!(model.info().is_none(), "{unknown} must not resolve");
-            assert_eq!(model.id(), unknown);
-        }
-    }
-
-    // ── ModelSpec::resolve_effort ──
-
-    #[test]
-    fn resolve_effort_falls_back_to_per_model_default() {
-        for (id, expected) in [
-            ("claude-fable-5-1", Effort::High),
-            ("claude-opus-5-5", Effort::Medium),
-            ("claude-sonnet-5-5", Effort::High),
-            ("claude-haiku-5-5", Effort::Medium),
-        ] {
-            assert_eq!(spec(id).resolve_effort(None), Some(expected), "{id}");
-        }
-    }
-
-    #[test]
-    fn resolve_effort_passes_every_pick_through_on_supported_models() {
-        for info in MODELS {
-            for level in Effort::ALL {
+        #[test]
+        fn maps_1m_suffix_and_family_claude_ids_to_catalog_rows() {
+            for (id, expected) in [
+                ("claude-opus-5-5[1m]", "claude-opus-5-5"),
+                ("opus[1m]", "claude-opus-5-5"),
+                ("CLAUDE-SONNET-5-5[1M]", "claude-sonnet-5-5"),
+                ("claude-haiku-5-5-20261001", "claude-haiku-5-5"),
+                ("claude-fable-latest", "claude-fable-5-1"),
+            ] {
                 assert_eq!(
-                    spec(info.id).resolve_effort(Some(level)),
-                    Some(level),
-                    "{} {level}",
-                    info.id,
+                    replacement_for(id).map(|info| info.id),
+                    Some(expected),
+                    "{id}"
                 );
             }
         }
-    }
 
-    #[test]
-    fn resolve_effort_is_none_for_unknown_model() {
-        let model = spec("custom-model");
-        assert_eq!(model.resolve_effort(None), None);
-        assert_eq!(model.resolve_effort(Some(Effort::High)), None);
-    }
-
-    // ── ModelSpec::resolve_max_tokens ──
-
-    #[test]
-    fn resolve_max_tokens_prefers_pick_then_catalog_default() {
-        for (id, default) in [
-            ("claude-fable-5-1", 64_000),
-            ("claude-opus-5-5", 64_000),
-            ("claude-sonnet-5-5", 64_000),
-            ("claude-haiku-5-5", 64_000),
-            ("custom-model", 16_000),
-        ] {
-            let model = spec(id);
-            assert_eq!(model.resolve_max_tokens(None), default, "{id}");
-            assert_eq!(model.resolve_max_tokens(Some(4_096)), 4_096, "{id}");
-        }
-    }
-
-    // ── ModelSpec::thinking ──
-
-    #[test]
-    fn thinking_known_model_is_adaptive_with_display_following_show_thinking() {
-        let drop_block = serde_json::json!({"prefix_mismatch_behavior": "drop_block"});
-        for (id, hidden_display) in [
-            ("claude-fable-5-1", Some("updates")),
-            ("claude-opus-5-5", Some("updates")),
-            ("claude-sonnet-5-5", Some("updates")),
-            ("claude-haiku-5-5", None),
-        ] {
-            let model = spec(id);
-            assert_eq!(
-                serde_json::to_value(model.thinking(true)).unwrap(),
-                serde_json::json!({
-                    "type": "adaptive",
-                    "display": "summarized",
-                    "block_binding": drop_block,
-                }),
-                "{id}",
-            );
-            let mut hidden = serde_json::json!({"type": "adaptive", "block_binding": drop_block});
-            if let Some(display) = hidden_display {
-                hidden["display"] = display.into();
+        #[test]
+        fn leaves_gateway_and_familyless_ids_without_a_suggestion() {
+            for id in [
+                "gpt-5",
+                "my-opus-gateway",
+                "anthropic.claude-opus-5-5",
+                "claude-future-9",
+            ] {
+                assert!(replacement_for(id).is_none(), "{id}");
             }
-            assert_eq!(
-                serde_json::to_value(model.thinking(false)).unwrap(),
-                hidden,
-                "{id}"
-            );
         }
     }
 
-    #[test]
-    fn thinking_unknown_model_is_omitted() {
-        assert!(spec("custom-model").thinking(true).is_none());
-    }
+    mod cost_rates {
+        use super::*;
 
-    // ── ModelSpec::context_window ──
+        #[test]
+        fn route_each_model_to_its_own_card() {
+            // 50K input + 50K cache reads + 1M output stays within Haiku's base card: Fable
+            // $0.50 + $0.0125 + $50, Opus $0.20 + $0.01 + $20, Sonnet $0.10 + $0.005 + $10, and
+            // Haiku $0.005 + $0.0005 + $0.50.
+            let usage = TokenUsage {
+                cache_read_input_tokens: 50_000,
+                ..TokenUsage::new(50_000, 1_000_000)
+            };
 
-    #[test]
-    fn context_window_supported_models_is_1m() {
-        for info in MODELS {
-            assert_eq!(
-                spec(info.id).context_window(),
-                Some(1_000_000),
-                "{}",
-                info.id
-            );
-        }
-    }
+            for (id, expected) in [
+                ("claude-fable-5-1", 50.5125),
+                ("claude-opus-5-5", 20.21),
+                ("claude-sonnet-5-5", 10.105),
+                ("claude-haiku-5-5", 0.5055),
+            ] {
+                let cost = cost_rates(id)
+                    .unwrap()
+                    .estimate_usd(usage, PromptCacheTtl::FiveMin);
 
-    #[test]
-    fn context_window_unknown_model_is_none() {
-        assert_eq!(spec("claude-future-9").context_window(), None);
-    }
-
-    // ── ModelSpec::display_name ──
-
-    #[test]
-    fn display_name_known_id_renders_row_label() {
-        for (id, expected) in [
-            ("claude-fable-5-1", "Claude Fable 5.1"),
-            ("claude-opus-5-5", "Claude Opus 5.5"),
-            ("claude-sonnet-5-5", "Claude Sonnet 5.5"),
-            ("claude-haiku-5-5", "Claude Haiku 5.5"),
-        ] {
-            assert_eq!(spec(id).display_name(), expected, "{id}");
-        }
-    }
-
-    #[test]
-    fn display_name_unknown_id_falls_through_to_raw() {
-        assert_eq!(spec("custom-model").display_name(), "custom-model");
-    }
-
-    // ── ModelSpec::short_display_name ──
-
-    #[test]
-    fn short_display_name_strips_claude_family_prefix() {
-        for (id, expected) in [
-            ("claude-fable-5-1", "Fable 5.1"),
-            ("claude-opus-5-5", "Opus 5.5"),
-            ("claude-sonnet-5-5", "Sonnet 5.5"),
-            ("claude-haiku-5-5", "Haiku 5.5"),
-        ] {
-            assert_eq!(spec(id).short_display_name(), expected, "{id}");
-        }
-    }
-
-    #[test]
-    fn short_display_name_unknown_id_falls_through_to_raw() {
-        assert_eq!(spec("custom-model").short_display_name(), "custom-model");
-    }
-
-    // ── ModelSpec::unsupported_notice ──
-
-    #[test]
-    fn unsupported_notice_names_lost_features_and_suggests_replacement() {
-        assert_eq!(
-            spec("claude-opus-5-5-20261001")
-                .unsupported_notice()
-                .as_deref(),
-            Some(
-                "`claude-opus-5-5-20261001` is not a supported model, \
-                 so requests go without thinking, effort, and context management, \
-                 and auto-compaction and cost tracking stay off. \
-                 Did you mean `claude-opus-5-5` (Claude Opus 5.5)?"
-            ),
-        );
-        assert_eq!(
-            spec("gateway-model").unsupported_notice().as_deref(),
-            Some(
-                "`gateway-model` is not a supported model, \
-                 so requests go without thinking, effort, and context management, \
-                 and auto-compaction and cost tracking stay off"
-            ),
-        );
-    }
-
-    #[test]
-    fn unsupported_notice_is_absent_for_catalog_models() {
-        for info in MODELS {
-            assert_eq!(spec(info.id).unsupported_notice(), None, "{}", info.id);
-        }
-    }
-
-    // ── ThinkingConfig ──
-
-    #[test]
-    fn thinking_config_adaptive_serializes_display_and_block_binding() {
-        let binding = serde_json::json!({"prefix_mismatch_behavior": "drop_block"});
-        for (display, wire) in [
-            (None, None),
-            (Some(ThinkingDisplay::Summarized), Some("summarized")),
-            (Some(ThinkingDisplay::Updates), Some("updates")),
-        ] {
-            let json = serde_json::to_value(&ThinkingConfig::Adaptive {
-                display,
-                block_binding: BlockBinding::DropBlock,
-            })
-            .unwrap();
-            let mut expected = serde_json::json!({"type": "adaptive", "block_binding": binding});
-            if let Some(wire) = wire {
-                expected["display"] = wire.into();
+                assert!((cost - expected).abs() < 1e-9, "{id}: {cost} vs {expected}");
             }
-            assert_eq!(json, expected);
+        }
+
+        #[test]
+        fn unknown_model_has_no_rates() {
+            assert!(cost_rates("claude-future-9").is_none());
+        }
+    }
+
+    mod resolve {
+        use super::*;
+
+        #[test]
+        fn finds_every_row_by_exact_id() {
+            for info in MODELS {
+                let resolved = spec(info.id).info().map(|row| row.id);
+                assert_eq!(resolved, Some(info.id));
+            }
+        }
+
+        #[test]
+        fn keeps_near_miss_ids_unknown() {
+            for unknown in [
+                "claude-opus",
+                "claude-opus-5-5[1m]",
+                "claude-opus-5-5-20261001",
+                "anthropic.claude-opus-5-5",
+                "gpt-5",
+            ] {
+                let model = spec(unknown);
+                assert!(model.info().is_none(), "{unknown} must not resolve");
+                assert_eq!(model.id(), unknown);
+            }
+        }
+    }
+
+    mod resolve_effort {
+        use super::*;
+
+        #[test]
+        fn falls_back_to_per_model_default() {
+            for (id, expected) in [
+                ("claude-fable-5-1", Effort::High),
+                ("claude-opus-5-5", Effort::Medium),
+                ("claude-sonnet-5-5", Effort::High),
+                ("claude-haiku-5-5", Effort::Medium),
+            ] {
+                assert_eq!(spec(id).resolve_effort(None), Some(expected), "{id}");
+            }
+        }
+
+        #[test]
+        fn passes_every_pick_through_on_supported_models() {
+            for info in MODELS {
+                for level in Effort::ALL {
+                    assert_eq!(
+                        spec(info.id).resolve_effort(Some(level)),
+                        Some(level),
+                        "{} {level}",
+                        info.id,
+                    );
+                }
+            }
+        }
+
+        #[test]
+        fn omits_effort_for_an_unknown_model() {
+            let model = spec("custom-model");
+            assert_eq!(model.resolve_effort(None), None);
+            assert_eq!(model.resolve_effort(Some(Effort::High)), None);
+        }
+    }
+
+    mod resolve_max_tokens {
+        use super::*;
+
+        #[test]
+        fn prefers_pick_then_catalog_default() {
+            for (id, default) in [
+                ("claude-fable-5-1", 64_000),
+                ("claude-opus-5-5", 64_000),
+                ("claude-sonnet-5-5", 64_000),
+                ("claude-haiku-5-5", 64_000),
+                ("custom-model", 16_000),
+            ] {
+                let model = spec(id);
+                assert_eq!(model.resolve_max_tokens(None), default, "{id}");
+                assert_eq!(model.resolve_max_tokens(Some(4_096)), 4_096, "{id}");
+            }
+        }
+    }
+
+    mod thinking {
+        use super::*;
+
+        #[test]
+        fn known_model_is_adaptive_with_display_following_show_thinking() {
+            let drop_block = serde_json::json!({"prefix_mismatch_behavior": "drop_block"});
+            for (id, hidden_display) in [
+                ("claude-fable-5-1", Some("updates")),
+                ("claude-opus-5-5", Some("updates")),
+                ("claude-sonnet-5-5", Some("updates")),
+                ("claude-haiku-5-5", None),
+            ] {
+                let model = spec(id);
+                assert_eq!(
+                    serde_json::to_value(model.thinking(true)).unwrap(),
+                    serde_json::json!({
+                        "type": "adaptive",
+                        "display": "summarized",
+                        "block_binding": drop_block,
+                    }),
+                    "{id}",
+                );
+                let mut hidden =
+                    serde_json::json!({"type": "adaptive", "block_binding": drop_block});
+                if let Some(display) = hidden_display {
+                    hidden["display"] = display.into();
+                }
+                assert_eq!(
+                    serde_json::to_value(model.thinking(false)).unwrap(),
+                    hidden,
+                    "{id}"
+                );
+            }
+        }
+
+        #[test]
+        fn unknown_model_is_omitted() {
+            assert!(spec("custom-model").thinking(true).is_none());
+        }
+    }
+
+    mod context_window {
+        use super::*;
+
+        #[test]
+        fn supported_models_is_1m() {
+            for info in MODELS {
+                assert_eq!(
+                    spec(info.id).context_window(),
+                    Some(1_000_000),
+                    "{}",
+                    info.id
+                );
+            }
+        }
+
+        #[test]
+        fn unknown_model_has_no_known_window() {
+            assert_eq!(spec("claude-future-9").context_window(), None);
+        }
+    }
+
+    mod display_name {
+        use super::*;
+
+        #[test]
+        fn known_id_renders_row_label() {
+            for (id, expected) in [
+                ("claude-fable-5-1", "Claude Fable 5.1"),
+                ("claude-opus-5-5", "Claude Opus 5.5"),
+                ("claude-sonnet-5-5", "Claude Sonnet 5.5"),
+                ("claude-haiku-5-5", "Claude Haiku 5.5"),
+            ] {
+                assert_eq!(spec(id).display_name(), expected, "{id}");
+            }
+        }
+
+        #[test]
+        fn unknown_id_falls_through_to_raw() {
+            assert_eq!(spec("custom-model").display_name(), "custom-model");
+        }
+    }
+
+    mod short_display_name {
+        use super::*;
+
+        #[test]
+        fn strips_claude_family_prefix() {
+            for (id, expected) in [
+                ("claude-fable-5-1", "Fable 5.1"),
+                ("claude-opus-5-5", "Opus 5.5"),
+                ("claude-sonnet-5-5", "Sonnet 5.5"),
+                ("claude-haiku-5-5", "Haiku 5.5"),
+            ] {
+                assert_eq!(spec(id).short_display_name(), expected, "{id}");
+            }
+        }
+
+        #[test]
+        fn unknown_id_falls_through_to_raw() {
+            assert_eq!(spec("custom-model").short_display_name(), "custom-model");
+        }
+    }
+
+    mod unsupported_notice {
+        use super::*;
+
+        #[test]
+        fn names_lost_features_and_suggests_replacement() {
+            assert_eq!(
+                spec("claude-opus-5-5-20261001")
+                    .unsupported_notice()
+                    .as_deref(),
+                Some(
+                    "`claude-opus-5-5-20261001` is not a supported model, \
+                     so requests go without thinking, effort, and context management, \
+                     and auto-compaction and cost tracking stay off. \
+                     Did you mean `claude-opus-5-5` (Claude Opus 5.5)?"
+                ),
+            );
+            assert_eq!(
+                spec("gateway-model").unsupported_notice().as_deref(),
+                Some(
+                    "`gateway-model` is not a supported model, \
+                     so requests go without thinking, effort, and context management, \
+                     and auto-compaction and cost tracking stay off"
+                ),
+            );
+        }
+
+        #[test]
+        fn is_absent_for_catalog_models() {
+            for info in MODELS {
+                assert_eq!(spec(info.id).unsupported_notice(), None, "{}", info.id);
+            }
+        }
+    }
+
+    mod thinking_config {
+        use super::*;
+
+        #[test]
+        fn adaptive_serializes_display_and_block_binding() {
+            let binding = serde_json::json!({"prefix_mismatch_behavior": "drop_block"});
+            for (display, wire) in [
+                (None, None),
+                (Some(ThinkingDisplay::Summarized), Some("summarized")),
+                (Some(ThinkingDisplay::Updates), Some("updates")),
+            ] {
+                let json = serde_json::to_value(&ThinkingConfig::Adaptive {
+                    display,
+                    block_binding: BlockBinding::DropBlock,
+                })
+                .unwrap();
+                let mut expected =
+                    serde_json::json!({"type": "adaptive", "block_binding": binding});
+                if let Some(wire) = wire {
+                    expected["display"] = wire.into();
+                }
+                assert_eq!(json, expected);
+            }
         }
     }
 }

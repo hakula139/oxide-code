@@ -158,297 +158,307 @@ mod tests {
     use super::*;
     use crate::util::path::testing::HOME_VAR;
 
-    // ── load ──
+    mod load {
+        use super::*;
 
-    #[tokio::test]
-    async fn load_uses_cwd_as_fallback_root_when_git_root_is_none() {
-        let dir = tempfile::tempdir().expect("failed to create tempdir");
-        fs::write(dir.path().join("CLAUDE.md"), "Fallback rules.")
-            .await
-            .unwrap();
+        #[tokio::test]
+        async fn uses_cwd_as_the_project_root_outside_a_git_repo() {
+            let dir = tempfile::tempdir().expect("failed to create tempdir");
+            fs::write(dir.path().join("CLAUDE.md"), "Fallback rules.")
+                .await
+                .unwrap();
 
-        let (result, _) = load(dir.path(), None).await;
-        assert!(
-            result.contains("Fallback rules."),
-            "should discover CLAUDE.md using cwd as project root"
-        );
+            let (result, _) = load(dir.path(), None).await;
+            assert!(
+                result.contains("Fallback rules."),
+                "should discover CLAUDE.md using cwd as project root"
+            );
+        }
+
+        #[tokio::test]
+        async fn discovers_claude_dir_instructions() {
+            let dir = tempfile::tempdir().expect("failed to create tempdir");
+            let claude_dir = dir.path().join(".claude");
+            std::fs::create_dir_all(&claude_dir).unwrap();
+            fs::write(claude_dir.join("CLAUDE.md"), "Hidden rules.")
+                .await
+                .unwrap();
+
+            let (result, _) = load(dir.path(), Some(dir.path())).await;
+            assert!(
+                result.contains("Hidden rules."),
+                "should discover .claude/CLAUDE.md"
+            );
+        }
     }
 
-    #[tokio::test]
-    async fn load_discovers_claude_dir_instructions() {
-        let dir = tempfile::tempdir().expect("failed to create tempdir");
-        let claude_dir = dir.path().join(".claude");
-        std::fs::create_dir_all(&claude_dir).unwrap();
-        fs::write(claude_dir.join("CLAUDE.md"), "Hidden rules.")
-            .await
-            .unwrap();
+    mod candidate_slots {
+        use super::*;
 
-        let (result, _) = load(dir.path(), Some(dir.path())).await;
-        assert!(
-            result.contains("Hidden rules."),
-            "should discover .claude/CLAUDE.md"
-        );
+        #[test]
+        fn at_root_includes_project_and_companion_files() {
+            let root = PathBuf::from("/home/user/project");
+            let slots = candidate_slots(&root, &root);
+
+            let project: Vec<_> = slots
+                .iter()
+                .filter(|s| s.label == "project instructions")
+                .collect();
+            assert_eq!(project.len(), 1);
+            assert_eq!(
+                project[0].candidates,
+                vec![root.join("CLAUDE.md"), root.join("AGENTS.md")]
+            );
+
+            let claude_dir: Vec<_> = slots
+                .iter()
+                .filter(|s| s.label == "project instructions (.claude/)")
+                .collect();
+            assert_eq!(claude_dir.len(), 1);
+            assert_eq!(
+                claude_dir[0].candidates,
+                vec![
+                    root.join(".claude").join("CLAUDE.md"),
+                    root.join(".claude").join("AGENTS.md"),
+                ]
+            );
+        }
+
+        #[test]
+        fn walks_root_to_cwd() {
+            let root = PathBuf::from("/repo");
+            let cwd = PathBuf::from("/repo/crates/core");
+            let slots = candidate_slots(&cwd, &root);
+
+            let project: Vec<_> = slots
+                .iter()
+                .filter(|s| s.label == "project instructions")
+                .collect();
+            assert_eq!(project.len(), 3);
+            assert_eq!(project[0].candidates[0], root.join("CLAUDE.md"));
+            assert_eq!(
+                project[1].candidates[0],
+                root.join("crates").join("CLAUDE.md")
+            );
+            assert_eq!(project[2].candidates[0], cwd.join("CLAUDE.md"));
+        }
+
+        #[test]
+        fn lists_global_before_project() {
+            let (home, root) = (Path::new("/home/u"), Path::new("/repo"));
+
+            let slots = temp_env::with_var(HOME_VAR, Some(home), || candidate_slots(root, root));
+
+            let labels: Vec<_> = slots.iter().map(|s| s.label).collect();
+            assert_eq!(
+                labels,
+                [
+                    "user's global instructions",
+                    "project instructions",
+                    "project instructions (.claude/)",
+                ]
+            );
+            assert_eq!(
+                slots[0].candidates,
+                vec![
+                    home.join(".claude").join("CLAUDE.md"),
+                    home.join(".claude").join("AGENTS.md"),
+                ]
+            );
+        }
     }
 
-    // ── candidate_slots ──
+    mod walk_root_to_cwd {
+        use super::*;
 
-    #[test]
-    fn candidate_slots_at_root_includes_project_and_companion_files() {
-        let root = PathBuf::from("/home/user/project");
-        let slots = candidate_slots(&root, &root);
+        #[test]
+        fn same_directory_includes_root_only() {
+            let root = PathBuf::from("/repo");
+            let dirs = walk_root_to_cwd(&root, &root);
+            assert_eq!(dirs, vec![PathBuf::from("/repo")]);
+        }
 
-        let project: Vec<_> = slots
-            .iter()
-            .filter(|s| s.label == "project instructions")
-            .collect();
-        assert_eq!(project.len(), 1);
-        assert_eq!(
-            project[0].candidates,
-            vec![root.join("CLAUDE.md"), root.join("AGENTS.md")]
-        );
+        #[test]
+        fn nested_includes_each_directory_in_order() {
+            let root = PathBuf::from("/repo");
+            let cwd = PathBuf::from("/repo/a/b");
+            let dirs = walk_root_to_cwd(&root, &cwd);
+            assert_eq!(
+                dirs,
+                vec![
+                    PathBuf::from("/repo"),
+                    PathBuf::from("/repo/a"),
+                    PathBuf::from("/repo/a/b"),
+                ]
+            );
+        }
 
-        let claude_dir: Vec<_> = slots
-            .iter()
-            .filter(|s| s.label == "project instructions (.claude/)")
-            .collect();
-        assert_eq!(claude_dir.len(), 1);
-        assert_eq!(
-            claude_dir[0].candidates,
-            vec![
-                root.join(".claude").join("CLAUDE.md"),
-                root.join(".claude").join("AGENTS.md"),
-            ]
-        );
+        #[test]
+        fn outside_root_includes_root_only() {
+            let root = PathBuf::from("/repo");
+            let cwd = PathBuf::from("/other/dir");
+            let dirs = walk_root_to_cwd(&root, &cwd);
+            assert_eq!(dirs, vec![PathBuf::from("/repo")]);
+        }
     }
 
-    #[test]
-    fn candidate_slots_walks_root_to_cwd() {
-        let root = PathBuf::from("/repo");
-        let cwd = PathBuf::from("/repo/crates/core");
-        let slots = candidate_slots(&cwd, &root);
+    mod load_files {
+        use super::*;
 
-        let project: Vec<_> = slots
-            .iter()
-            .filter(|s| s.label == "project instructions")
-            .collect();
-        assert_eq!(project.len(), 3);
-        assert_eq!(project[0].candidates[0], root.join("CLAUDE.md"));
-        assert_eq!(
-            project[1].candidates[0],
-            root.join("crates").join("CLAUDE.md")
-        );
-        assert_eq!(project[2].candidates[0], cwd.join("CLAUDE.md"));
+        #[tokio::test]
+        async fn prefers_first_candidate() {
+            let dir = tempfile::tempdir().expect("failed to create tempdir");
+            let claude_path = dir.path().join("CLAUDE.md");
+            let agents_path = dir.path().join("AGENTS.md");
+            fs::write(&claude_path, "claude content").await.unwrap();
+            fs::write(&agents_path, "agents content").await.unwrap();
+
+            let slots = vec![Slot {
+                candidates: vec![claude_path.clone(), agents_path],
+                label: "test",
+            }];
+            let (files, _) = load_files(slots).await;
+            assert_eq!(files.len(), 1);
+            assert_eq!(files[0].path, claude_path);
+            assert_eq!(files[0].content, "claude content");
+        }
+
+        #[tokio::test]
+        async fn falls_back_to_second_candidate() {
+            let dir = tempfile::tempdir().expect("failed to create tempdir");
+            let agents_path = dir.path().join("AGENTS.md");
+            fs::write(&agents_path, "agents content").await.unwrap();
+
+            let slots = vec![Slot {
+                candidates: vec![dir.path().join("CLAUDE.md"), agents_path.clone()],
+                label: "test",
+            }];
+            let (files, _) = load_files(slots).await;
+            assert_eq!(files.len(), 1);
+            assert_eq!(files[0].path, agents_path);
+            assert_eq!(files[0].content, "agents content");
+        }
+
+        #[tokio::test]
+        async fn collects_one_file_per_slot() {
+            let dir = tempfile::tempdir().expect("failed to create tempdir");
+            let a_path = dir.path().join("a.md");
+            let b_path = dir.path().join("b.md");
+            fs::write(&a_path, "slot 1").await.unwrap();
+            fs::write(&b_path, "slot 2").await.unwrap();
+
+            let slots = vec![
+                Slot {
+                    candidates: vec![a_path.clone()],
+                    label: "first",
+                },
+                Slot {
+                    candidates: vec![b_path.clone()],
+                    label: "second",
+                },
+            ];
+            let (files, _) = load_files(slots).await;
+            assert_eq!(files.len(), 2);
+            assert_eq!(files[0].path, a_path);
+            assert_eq!(files[1].path, b_path);
+        }
+
+        #[tokio::test]
+        async fn skips_whitespace_only_files() {
+            let dir = tempfile::tempdir().expect("failed to create tempdir");
+            let empty_path = dir.path().join("CLAUDE.md");
+            let agents_path = dir.path().join("AGENTS.md");
+            fs::write(&empty_path, "  \n  ").await.unwrap();
+            fs::write(&agents_path, "real content").await.unwrap();
+
+            let slots = vec![Slot {
+                candidates: vec![empty_path, agents_path.clone()],
+                label: "test",
+            }];
+            let (files, _) = load_files(slots).await;
+            assert_eq!(files.len(), 1);
+            assert_eq!(files[0].path, agents_path);
+        }
+
+        #[tokio::test]
+        async fn warns_of_an_unreadable_file_and_falls_back_to_the_next() {
+            let dir = tempfile::tempdir().expect("failed to create tempdir");
+            let claude_path = dir.path().join("CLAUDE.md");
+            let agents_path = dir.path().join("AGENTS.md");
+            fs::write(&claude_path, b"\xff\xfe").await.unwrap();
+            fs::write(&agents_path, "agents content").await.unwrap();
+            let cause = std::fs::read_to_string(&claude_path).unwrap_err();
+            let slots = vec![Slot {
+                candidates: vec![claude_path.clone(), agents_path.clone()],
+                label: "test",
+            }];
+
+            let (files, warnings) = load_files(slots).await;
+
+            assert_eq!(files.len(), 1);
+            assert_eq!(files[0].path, agents_path);
+            assert_eq!(
+                warnings,
+                [format!(
+                    "Skipped instruction file {}: {cause}",
+                    claude_path.display()
+                )],
+            );
+        }
+
+        #[tokio::test]
+        async fn absent_yields_empty_without_warnings() {
+            let dir = tempfile::tempdir().expect("failed to create tempdir");
+            let regular = dir.path().join("regular");
+            fs::write(&regular, "regular file contents").await.unwrap();
+            let slots = vec![Slot {
+                candidates: vec![dir.path().join("CLAUDE.md"), regular.join("CLAUDE.md")],
+                label: "test",
+            }];
+
+            let (files, warnings) = load_files(slots).await;
+
+            assert!(files.is_empty());
+            assert_eq!(warnings, [] as [String; 0]);
+        }
     }
 
-    #[test]
-    fn candidate_slots_lists_global_before_project() {
-        let (home, root) = (Path::new("/home/u"), Path::new("/repo"));
+    mod render {
+        use super::*;
 
-        let slots = temp_env::with_var(HOME_VAR, Some(home), || candidate_slots(root, root));
+        #[test]
+        fn formats_files_with_header_and_preserves_order() {
+            let files = vec![
+                InstructionFile {
+                    path: PathBuf::from("/home/.claude/CLAUDE.md"),
+                    content: "Global rules.".to_owned(),
+                    label: "user's global instructions",
+                },
+                InstructionFile {
+                    path: PathBuf::from("/project/CLAUDE.md"),
+                    content: "Project rules.".to_owned(),
+                    label: "project instructions",
+                },
+            ];
+            let out = render(&files);
 
-        let labels: Vec<_> = slots.iter().map(|s| s.label).collect();
-        assert_eq!(
-            labels,
-            [
-                "user's global instructions",
-                "project instructions",
-                "project instructions (.claude/)",
-            ]
-        );
-        assert_eq!(
-            slots[0].candidates,
-            vec![
-                home.join(".claude").join("CLAUDE.md"),
-                home.join(".claude").join("AGENTS.md"),
-            ]
-        );
-    }
+            assert_eq!(
+                out,
+                indoc! {"
+                    # User instructions
 
-    // ── walk_root_to_cwd ──
+                    Codebase and user instructions are shown below.
+                    Be sure to adhere to these instructions.
 
-    #[test]
-    fn walk_root_to_cwd_same_directory_includes_root_only() {
-        let root = PathBuf::from("/repo");
-        let dirs = walk_root_to_cwd(&root, &root);
-        assert_eq!(dirs, vec![PathBuf::from("/repo")]);
-    }
+                    Contents of /home/.claude/CLAUDE.md (user's global instructions):
 
-    #[test]
-    fn walk_root_to_cwd_nested_includes_each_directory_in_order() {
-        let root = PathBuf::from("/repo");
-        let cwd = PathBuf::from("/repo/a/b");
-        let dirs = walk_root_to_cwd(&root, &cwd);
-        assert_eq!(
-            dirs,
-            vec![
-                PathBuf::from("/repo"),
-                PathBuf::from("/repo/a"),
-                PathBuf::from("/repo/a/b"),
-            ]
-        );
-    }
+                    Global rules.
 
-    #[test]
-    fn walk_root_to_cwd_outside_root_includes_root_only() {
-        let root = PathBuf::from("/repo");
-        let cwd = PathBuf::from("/other/dir");
-        let dirs = walk_root_to_cwd(&root, &cwd);
-        assert_eq!(dirs, vec![PathBuf::from("/repo")]);
-    }
+                    Contents of /project/CLAUDE.md (project instructions):
 
-    // ── load_files ──
-
-    #[tokio::test]
-    async fn load_files_prefers_first_candidate() {
-        let dir = tempfile::tempdir().expect("failed to create tempdir");
-        let claude_path = dir.path().join("CLAUDE.md");
-        let agents_path = dir.path().join("AGENTS.md");
-        fs::write(&claude_path, "claude content").await.unwrap();
-        fs::write(&agents_path, "agents content").await.unwrap();
-
-        let slots = vec![Slot {
-            candidates: vec![claude_path.clone(), agents_path],
-            label: "test",
-        }];
-        let (files, _) = load_files(slots).await;
-        assert_eq!(files.len(), 1);
-        assert_eq!(files[0].path, claude_path);
-        assert_eq!(files[0].content, "claude content");
-    }
-
-    #[tokio::test]
-    async fn load_files_falls_back_to_second_candidate() {
-        let dir = tempfile::tempdir().expect("failed to create tempdir");
-        let agents_path = dir.path().join("AGENTS.md");
-        fs::write(&agents_path, "agents content").await.unwrap();
-
-        let slots = vec![Slot {
-            candidates: vec![dir.path().join("CLAUDE.md"), agents_path.clone()],
-            label: "test",
-        }];
-        let (files, _) = load_files(slots).await;
-        assert_eq!(files.len(), 1);
-        assert_eq!(files[0].path, agents_path);
-        assert_eq!(files[0].content, "agents content");
-    }
-
-    #[tokio::test]
-    async fn load_files_collects_one_file_per_slot() {
-        let dir = tempfile::tempdir().expect("failed to create tempdir");
-        let a_path = dir.path().join("a.md");
-        let b_path = dir.path().join("b.md");
-        fs::write(&a_path, "slot 1").await.unwrap();
-        fs::write(&b_path, "slot 2").await.unwrap();
-
-        let slots = vec![
-            Slot {
-                candidates: vec![a_path.clone()],
-                label: "first",
-            },
-            Slot {
-                candidates: vec![b_path.clone()],
-                label: "second",
-            },
-        ];
-        let (files, _) = load_files(slots).await;
-        assert_eq!(files.len(), 2);
-        assert_eq!(files[0].path, a_path);
-        assert_eq!(files[1].path, b_path);
-    }
-
-    #[tokio::test]
-    async fn load_files_skips_whitespace_only_files() {
-        let dir = tempfile::tempdir().expect("failed to create tempdir");
-        let empty_path = dir.path().join("CLAUDE.md");
-        let agents_path = dir.path().join("AGENTS.md");
-        fs::write(&empty_path, "  \n  ").await.unwrap();
-        fs::write(&agents_path, "real content").await.unwrap();
-
-        let slots = vec![Slot {
-            candidates: vec![empty_path, agents_path.clone()],
-            label: "test",
-        }];
-        let (files, _) = load_files(slots).await;
-        assert_eq!(files.len(), 1);
-        assert_eq!(files[0].path, agents_path);
-    }
-
-    #[tokio::test]
-    async fn load_files_warns_of_an_unreadable_file_and_falls_back_to_the_next() {
-        let dir = tempfile::tempdir().expect("failed to create tempdir");
-        let claude_path = dir.path().join("CLAUDE.md");
-        let agents_path = dir.path().join("AGENTS.md");
-        fs::write(&claude_path, b"\xff\xfe").await.unwrap();
-        fs::write(&agents_path, "agents content").await.unwrap();
-        let cause = std::fs::read_to_string(&claude_path).unwrap_err();
-        let slots = vec![Slot {
-            candidates: vec![claude_path.clone(), agents_path.clone()],
-            label: "test",
-        }];
-
-        let (files, warnings) = load_files(slots).await;
-
-        assert_eq!(files.len(), 1);
-        assert_eq!(files[0].path, agents_path);
-        assert_eq!(
-            warnings,
-            [format!(
-                "Skipped instruction file {}: {cause}",
-                claude_path.display()
-            )],
-        );
-    }
-
-    #[tokio::test]
-    async fn load_files_absent_yields_empty_without_warnings() {
-        let dir = tempfile::tempdir().expect("failed to create tempdir");
-        let regular = dir.path().join("regular");
-        fs::write(&regular, "regular file contents").await.unwrap();
-        let slots = vec![Slot {
-            candidates: vec![dir.path().join("CLAUDE.md"), regular.join("CLAUDE.md")],
-            label: "test",
-        }];
-
-        let (files, warnings) = load_files(slots).await;
-
-        assert!(files.is_empty());
-        assert_eq!(warnings, [] as [String; 0]);
-    }
-
-    // ── render ──
-
-    #[test]
-    fn render_formats_files_with_header_and_preserves_order() {
-        let files = vec![
-            InstructionFile {
-                path: PathBuf::from("/home/.claude/CLAUDE.md"),
-                content: "Global rules.".to_owned(),
-                label: "user's global instructions",
-            },
-            InstructionFile {
-                path: PathBuf::from("/project/CLAUDE.md"),
-                content: "Project rules.".to_owned(),
-                label: "project instructions",
-            },
-        ];
-        let out = render(&files);
-
-        assert_eq!(
-            out,
-            indoc! {"
-                # User instructions
-
-                Codebase and user instructions are shown below.
-                Be sure to adhere to these instructions.
-
-                Contents of /home/.claude/CLAUDE.md (user's global instructions):
-
-                Global rules.
-
-                Contents of /project/CLAUDE.md (project instructions):
-
-                Project rules."
-            },
-        );
+                    Project rules."
+                },
+            );
+        }
     }
 }

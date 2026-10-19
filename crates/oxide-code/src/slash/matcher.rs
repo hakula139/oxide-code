@@ -105,169 +105,176 @@ mod tests {
     use super::*;
     use crate::slash::registry::testing::FakeCmd;
 
-    const HELP: FakeCmd = FakeCmd {
-        name: "help",
-        aliases: &[],
-        description: "list",
-        ..FakeCmd::DEFAULT
-    };
     const CLEAR: FakeCmd = FakeCmd {
         name: "clear",
         aliases: &["new", "reset"],
         description: "wipe",
         ..FakeCmd::DEFAULT
     };
-    const STATUS: FakeCmd = FakeCmd {
-        name: "status",
-        aliases: &[],
-        description: "show",
-        ..FakeCmd::DEFAULT
-    };
-    const COMPACT: FakeCmd = FakeCmd {
-        name: "compact",
-        aliases: &[],
-        description: "fold",
-        ..FakeCmd::DEFAULT
-    };
 
-    fn registry() -> Vec<&'static dyn SlashCommand> {
-        vec![&HELP, &CLEAR, &STATUS, &COMPACT]
-    }
+    mod filter_and_rank {
+        use super::*;
 
-    fn names(rows: &[MatchedCommand]) -> Vec<&'static str> {
-        rows.iter().map(|m| m.name).collect()
-    }
-
-    // ── filter_and_rank ──
-
-    #[test]
-    fn filter_and_rank_empty_query_is_full_registry_in_declared_order() {
-        let rows = filter_and_rank("", &registry());
-        assert_eq!(names(&rows), vec!["help", "clear", "status", "compact"]);
-        assert!(rows.iter().all(|m| m.matched_alias.is_none()));
-    }
-
-    #[test]
-    fn filter_and_rank_name_prefix_beats_substring_within_other_command() {
-        const FORCONFIG: FakeCmd = FakeCmd {
-            name: "forconfig",
+        const HELP: FakeCmd = FakeCmd {
+            name: "help",
             aliases: &[],
-            description: "fake",
+            description: "list",
             ..FakeCmd::DEFAULT
         };
-        let with_substring: Vec<&dyn SlashCommand> = vec![&COMPACT, &FORCONFIG];
-        let rows = filter_and_rank("co", &with_substring);
-        assert_eq!(names(&rows), vec!["compact", "forconfig"]);
-    }
-
-    #[test]
-    fn filter_and_rank_alias_prefix_beats_name_substring() {
-        const RENEW: FakeCmd = FakeCmd {
-            name: "renew",
+        const STATUS: FakeCmd = FakeCmd {
+            name: "status",
             aliases: &[],
-            description: "fake",
+            description: "show",
             ..FakeCmd::DEFAULT
         };
-        let with_substring: Vec<&dyn SlashCommand> = vec![&CLEAR, &RENEW];
-        let rows = filter_and_rank("new", &with_substring);
-        assert_eq!(names(&rows), vec!["clear", "renew"]);
-        assert_eq!(rows[0].matched_alias, Some("new"));
-        assert_eq!(rows[1].matched_alias, None);
-    }
-
-    #[test]
-    fn filter_and_rank_within_tier_sorts_alphabetically_on_canonical_name() {
-        const SELECT: FakeCmd = FakeCmd {
-            name: "select",
+        const COMPACT: FakeCmd = FakeCmd {
+            name: "compact",
             aliases: &[],
-            description: "fake",
+            description: "fold",
             ..FakeCmd::DEFAULT
         };
-        let two_prefix: Vec<&dyn SlashCommand> = vec![&STATUS, &SELECT];
-        let rows = filter_and_rank("s", &two_prefix);
-        assert_eq!(names(&rows), vec!["select", "status"]);
+
+        fn registry() -> Vec<&'static dyn SlashCommand> {
+            vec![&HELP, &CLEAR, &STATUS, &COMPACT]
+        }
+
+        fn names(rows: &[MatchedCommand]) -> Vec<&'static str> {
+            rows.iter().map(|m| m.name).collect()
+        }
+
+        #[test]
+        fn empty_query_is_full_registry_in_declared_order() {
+            let rows = filter_and_rank("", &registry());
+            assert_eq!(names(&rows), vec!["help", "clear", "status", "compact"]);
+            assert!(rows.iter().all(|m| m.matched_alias.is_none()));
+        }
+
+        #[test]
+        fn name_prefix_beats_substring_within_other_command() {
+            const FORCONFIG: FakeCmd = FakeCmd {
+                name: "forconfig",
+                aliases: &[],
+                description: "fake",
+                ..FakeCmd::DEFAULT
+            };
+            let with_substring: Vec<&dyn SlashCommand> = vec![&COMPACT, &FORCONFIG];
+            let rows = filter_and_rank("co", &with_substring);
+            assert_eq!(names(&rows), vec!["compact", "forconfig"]);
+        }
+
+        #[test]
+        fn alias_prefix_beats_name_substring() {
+            const RENEW: FakeCmd = FakeCmd {
+                name: "renew",
+                aliases: &[],
+                description: "fake",
+                ..FakeCmd::DEFAULT
+            };
+            let with_substring: Vec<&dyn SlashCommand> = vec![&CLEAR, &RENEW];
+            let rows = filter_and_rank("new", &with_substring);
+            assert_eq!(names(&rows), vec!["clear", "renew"]);
+            assert_eq!(rows[0].matched_alias, Some("new"));
+            assert_eq!(rows[1].matched_alias, None);
+        }
+
+        #[test]
+        fn within_tier_sorts_alphabetically_on_canonical_name() {
+            const SELECT: FakeCmd = FakeCmd {
+                name: "select",
+                aliases: &[],
+                description: "fake",
+                ..FakeCmd::DEFAULT
+            };
+            let two_prefix: Vec<&dyn SlashCommand> = vec![&STATUS, &SELECT];
+            let rows = filter_and_rank("s", &two_prefix);
+            assert_eq!(names(&rows), vec!["select", "status"]);
+        }
+
+        #[test]
+        fn alias_match_surfaces_only_typed_alias() {
+            let rows = filter_and_rank("res", &registry());
+            assert_eq!(names(&rows), vec!["clear"]);
+            assert_eq!(rows[0].matched_alias, Some("reset"));
+        }
+
+        #[test]
+        fn alias_substring_lands_below_other_tiers() {
+            let rows = filter_and_rank("se", &registry());
+            assert_eq!(names(&rows), vec!["clear"]);
+            assert_eq!(rows[0].matched_alias, Some("reset"));
+        }
+
+        #[test]
+        fn query_is_case_insensitive() {
+            let prefix = filter_and_rank("HE", &registry());
+            assert_eq!(names(&prefix), vec!["help"]);
+
+            let substring = filter_and_rank("EAR", &registry());
+            assert_eq!(names(&substring), vec!["clear"]);
+        }
+
+        #[test]
+        fn unmatched_query_is_empty() {
+            let rows = filter_and_rank("zzz", &registry());
+            assert_eq!(rows, []);
+        }
     }
 
-    #[test]
-    fn filter_and_rank_alias_match_surfaces_only_typed_alias() {
-        let rows = filter_and_rank("res", &registry());
-        assert_eq!(names(&rows), vec!["clear"]);
-        assert_eq!(rows[0].matched_alias, Some("reset"));
+    mod best_match {
+        use super::*;
+
+        #[test]
+        fn prefers_name_prefix_over_any_alias_branch() {
+            const ALSO: FakeCmd = FakeCmd {
+                name: "clearview",
+                aliases: &["cl"],
+                description: "fake",
+                ..FakeCmd::DEFAULT
+            };
+            let (tier, m) = best_match("cl", &ALSO).unwrap();
+            assert_eq!(tier, Tier::NamePrefix);
+            assert_eq!(m.matched_alias, None);
+        }
+
+        #[test]
+        fn finds_nothing_when_neither_name_nor_alias_match() {
+            assert!(best_match("zzz", &CLEAR).is_none());
+        }
     }
 
-    #[test]
-    fn filter_and_rank_alias_substring_lands_below_other_tiers() {
-        let rows = filter_and_rank("se", &registry());
-        assert_eq!(names(&rows), vec!["clear"]);
-        assert_eq!(rows[0].matched_alias, Some("reset"));
-    }
+    mod rank_by_prefix {
+        use super::*;
 
-    #[test]
-    fn filter_and_rank_query_is_case_insensitive() {
-        let prefix = filter_and_rank("HE", &registry());
-        assert_eq!(names(&prefix), vec!["help"]);
+        fn levels() -> Vec<&'static str> {
+            vec!["low", "medium", "high", "xhigh", "max"]
+        }
 
-        let substring = filter_and_rank("EAR", &registry());
-        assert_eq!(names(&substring), vec!["clear"]);
-    }
+        fn ranked(query: &str) -> Vec<&'static str> {
+            let xs = levels();
+            rank_by_prefix(&xs, query, |s| *s)
+                .into_iter()
+                .copied()
+                .collect()
+        }
 
-    #[test]
-    fn filter_and_rank_unmatched_query_is_empty() {
-        let rows = filter_and_rank("zzz", &registry());
-        assert_eq!(rows, []);
-    }
+        #[test]
+        fn empty_query_yields_full_roster_in_declared_order() {
+            assert_eq!(ranked(""), levels());
+        }
 
-    // ── best_match ──
+        #[test]
+        fn promotes_prefix_above_substring() {
+            assert_eq!(ranked("h"), vec!["high", "xhigh"]);
+        }
 
-    #[test]
-    fn best_match_prefers_name_prefix_over_any_alias_branch() {
-        const ALSO: FakeCmd = FakeCmd {
-            name: "clearview",
-            aliases: &["cl"],
-            description: "fake",
-            ..FakeCmd::DEFAULT
-        };
-        let (tier, m) = best_match("cl", &ALSO).unwrap();
-        assert_eq!(tier, Tier::NamePrefix);
-        assert_eq!(m.matched_alias, None);
-    }
+        #[test]
+        fn is_case_insensitive() {
+            assert_eq!(ranked("HI"), vec!["high", "xhigh"]);
+        }
 
-    #[test]
-    fn best_match_is_none_when_neither_name_nor_alias_match() {
-        assert!(best_match("zzz", &CLEAR).is_none());
-    }
-
-    // ── rank_by_prefix ──
-
-    fn levels() -> Vec<&'static str> {
-        vec!["low", "medium", "high", "xhigh", "max"]
-    }
-
-    fn ranked(query: &str) -> Vec<&'static str> {
-        let xs = levels();
-        rank_by_prefix(&xs, query, |s| *s)
-            .into_iter()
-            .copied()
-            .collect()
-    }
-
-    #[test]
-    fn rank_by_prefix_empty_query_yields_full_roster_in_declared_order() {
-        assert_eq!(ranked(""), levels());
-    }
-
-    #[test]
-    fn rank_by_prefix_promotes_prefix_above_substring() {
-        assert_eq!(ranked("h"), vec!["high", "xhigh"]);
-    }
-
-    #[test]
-    fn rank_by_prefix_is_case_insensitive() {
-        assert_eq!(ranked("HI"), vec!["high", "xhigh"]);
-    }
-
-    #[test]
-    fn rank_by_prefix_unmatched_query_is_empty() {
-        assert_eq!(ranked("zzz"), [] as [&str; 0]);
+        #[test]
+        fn unmatched_query_is_empty() {
+            assert_eq!(ranked("zzz"), [] as [&str; 0]);
+        }
     }
 }

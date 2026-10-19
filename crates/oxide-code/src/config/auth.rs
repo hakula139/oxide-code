@@ -404,195 +404,12 @@ mod tests {
         AuthSource::ClaudeCodeLogin,
     ];
 
-    const FIRST_PARTY: &str = "https://api.anthropic.com";
-    const GATEWAY: &str = "https://gateway.example.com/anthropic";
-
-    fn unreachable_store() -> impl Future<Output = Result<Auth, LoginError>> {
-        std::future::poll_fn(|_| panic!("stored credentials must not be read"))
-    }
-
-    fn stored_ox_login() -> std::future::Ready<Result<Auth, LoginError>> {
-        std::future::ready(Ok(Auth::new(AuthSource::OxLogin, "stored-token")))
-    }
-
-    fn explicit(present: &[AuthSource]) -> Vec<(AuthSource, Option<String>)> {
-        ALL_SOURCES[..4]
-            .iter()
-            .map(|&source| {
-                let value = present
-                    .contains(&source)
-                    .then(|| format!("{source:?}-secret"));
-                (source, value)
-            })
-            .collect()
-    }
-
     fn credentials_json(access_token: &str) -> String {
         serde_json::json!({
             "claudeAiOauth": { "accessToken": access_token, "expiresAt": 9_999_999_999_999_u64 },
         })
         .to_string()
     }
-
-    // ── AuthSource::kind ──
-
-    #[test]
-    fn kind_maps_each_source_to_its_wire_scheme() {
-        let kinds = ALL_SOURCES.map(AuthSource::kind);
-        assert_eq!(
-            kinds,
-            [
-                AuthKind::AuthToken,
-                AuthKind::ApiKey,
-                AuthKind::ApiKey,
-                AuthKind::OAuth,
-                AuthKind::OAuth,
-                AuthKind::OAuth,
-            ],
-        );
-    }
-
-    // ── AuthSource::is_stored_login ──
-
-    #[test]
-    fn is_stored_login_holds_only_for_the_two_logins() {
-        assert_eq!(
-            ALL_SOURCES.map(AuthSource::is_stored_login),
-            [false, false, false, false, true, true],
-        );
-    }
-
-    // ── AuthSource::env_var ──
-
-    #[test]
-    fn env_var_names_only_environment_sources() {
-        assert_eq!(
-            ALL_SOURCES.map(AuthSource::env_var),
-            [
-                Some("ANTHROPIC_AUTH_TOKEN"),
-                Some("ANTHROPIC_API_KEY"),
-                None,
-                Some("CLAUDE_CODE_OAUTH_TOKEN"),
-                None,
-                None,
-            ],
-        );
-    }
-
-    // ── AuthSource::rejection_hint ──
-
-    #[test]
-    fn rejection_hint_names_where_to_fix_each_source() {
-        for (source, expected) in [
-            (AuthSource::AuthTokenEnv, "ANTHROPIC_AUTH_TOKEN"),
-            (AuthSource::ApiKeyEnv, "ANTHROPIC_API_KEY"),
-            (AuthSource::ApiKeyFile, "client.api_key in your user config"),
-            (AuthSource::OAuthTokenEnv, "claude setup-token"),
-            (AuthSource::OxLogin, "Run `/login`"),
-            (AuthSource::ClaudeCodeLogin, "Run `claude`"),
-        ] {
-            let hint = source.rejection_hint();
-            assert!(hint.contains(expected), "{source:?}: {hint}");
-        }
-        assert!(
-            AuthSource::OAuthTokenEnv
-                .rejection_hint()
-                .starts_with("CLAUDE_CODE_OAUTH_TOKEN")
-        );
-    }
-
-    // ── AuthSource::fmt ──
-
-    #[test]
-    fn display_names_kind_and_origin_for_each_source() {
-        let labels = ALL_SOURCES.map(|source| source.to_string());
-        assert_eq!(
-            labels,
-            [
-                "Auth token (ANTHROPIC_AUTH_TOKEN)",
-                "API key (ANTHROPIC_API_KEY)",
-                "API key (client.api_key)",
-                "OAuth (CLAUDE_CODE_OAUTH_TOKEN)",
-                "OAuth (oxide-code login)",
-                "OAuth (Claude Code login)",
-            ],
-        );
-    }
-
-    // ── Auth::credential ──
-
-    #[tokio::test]
-    async fn credential_sends_api_keys_raw_and_tokens_as_bearer() {
-        for (source, name, value) in [
-            (AuthSource::ApiKeyEnv, "x-api-key", "secret-value"),
-            (
-                AuthSource::AuthTokenEnv,
-                "authorization",
-                "Bearer secret-value",
-            ),
-            (
-                AuthSource::OAuthTokenEnv,
-                "authorization",
-                "Bearer secret-value",
-            ),
-        ] {
-            let credential = Auth::new(source, "secret-value")
-                .credential(&NoRoots)
-                .await
-                .unwrap();
-
-            let (got_name, got_value) = credential.header();
-            assert_eq!(got_name, name, "{source:?}");
-            assert_eq!(got_value, value, "{source:?}");
-            assert!(got_value.is_sensitive(), "{source:?}");
-        }
-    }
-
-    // ── Auth::reload ──
-
-    #[tokio::test]
-    async fn reload_gives_up_on_env_credentials_and_unreadable_logins() {
-        let dir = tempfile::tempdir().unwrap();
-        for auth in [
-            Auth::new(AuthSource::OAuthTokenEnv, "env-token"),
-            ox_login_in(
-                &dir.path().join("missing.json"),
-                "http://unused",
-                "rejected",
-                9_999_999_999_999,
-            ),
-        ] {
-            let rejected = auth.credential(&NoRoots).await.unwrap();
-
-            let reloaded = auth.reload(&rejected, &NoRoots).await.unwrap();
-
-            assert!(reloaded.is_none(), "{auth:?}");
-        }
-    }
-
-    #[tokio::test]
-    async fn reload_fails_transiently_when_the_token_endpoint_sends_no_response() {
-        let dir = tempfile::tempdir().unwrap();
-        let file = dir.path().join("credentials.json");
-        write_creds(&file, "rejected", Some("ref"), 9_999_999_999_999);
-        let auth = ox_login_in(
-            &file,
-            "http://127.0.0.1:9/token",
-            "rejected",
-            9_999_999_999_999,
-        );
-        let rejected = auth.credential(&NoRoots).await.unwrap();
-
-        let err = auth
-            .reload(&rejected, &NoRoots)
-            .await
-            .err()
-            .expect("the refresh of the rejected token fails");
-
-        assert!(is_transient(&err), "{err:#}");
-    }
-
-    // ── Auth::fmt ──
 
     #[test]
     fn debug_omits_secret() {
@@ -601,233 +418,443 @@ mod tests {
         assert!(debug.contains("ApiKeyEnv"), "{debug}");
     }
 
-    // ── signed_out_notice ──
+    mod auth_source {
+        use super::*;
 
-    #[test]
-    fn signed_out_notice_names_the_step_that_signs_in() {
-        assert_eq!(
-            signed_out_notice(&LoginError::Missing),
-            "Not signed in. Run `/login` to sign in.",
-        );
-        assert_eq!(
-            signed_out_notice(&LoginError::Expired(Login::Ox)),
-            "Not signed in: oxide-code login has expired. Run `/login` to sign in again.",
-        );
-        assert_eq!(
-            signed_out_notice(&LoginError::Unreadable(
-                Login::ClaudeCode,
-                anyhow::anyhow!("failed to parse the credentials in the macOS Keychain"),
-            )),
-            "Not signed in: failed to load the Claude Code login: \
-             failed to parse the credentials in the macOS Keychain. \
-             Run `claude` to sign in again.",
-        );
-    }
+        #[test]
+        fn display_names_kind_and_origin_for_each_source() {
+            let labels = ALL_SOURCES.map(|source| source.to_string());
+            assert_eq!(
+                labels,
+                [
+                    "Auth token (ANTHROPIC_AUTH_TOKEN)",
+                    "API key (ANTHROPIC_API_KEY)",
+                    "API key (client.api_key)",
+                    "OAuth (CLAUDE_CODE_OAUTH_TOKEN)",
+                    "OAuth (oxide-code login)",
+                    "OAuth (Claude Code login)",
+                ],
+            );
+        }
 
-    // ── explicit_credentials ──
+        mod kind {
+            use super::*;
 
-    #[test]
-    fn explicit_credentials_reads_env_in_precedence_order_with_file_key_third() {
-        let vars = [
-            ("ANTHROPIC_AUTH_TOKEN", Some("bearer")),
-            ("ANTHROPIC_API_KEY", None),
-            ("CLAUDE_CODE_OAUTH_TOKEN", Some("oauth")),
-        ];
-        let got = temp_env::with_vars(vars, || explicit_credentials(Some("file-key".to_owned())));
-        assert_eq!(
-            got,
-            [
-                (AuthSource::AuthTokenEnv, Some("bearer".to_owned())),
-                (AuthSource::ApiKeyEnv, None),
-                (AuthSource::ApiKeyFile, Some("file-key".to_owned())),
-                (AuthSource::OAuthTokenEnv, Some("oauth".to_owned())),
-            ],
-        );
-    }
+            #[test]
+            fn maps_each_source_to_its_wire_scheme() {
+                let kinds = ALL_SOURCES.map(AuthSource::kind);
+                assert_eq!(
+                    kinds,
+                    [
+                        AuthKind::AuthToken,
+                        AuthKind::ApiKey,
+                        AuthKind::ApiKey,
+                        AuthKind::OAuth,
+                        AuthKind::OAuth,
+                        AuthKind::OAuth,
+                    ],
+                );
+            }
+        }
 
-    // ── resolve ──
+        mod is_stored_login {
+            use super::*;
 
-    #[tokio::test]
-    async fn resolve_picks_highest_precedence_explicit_credential() {
-        // Each row drops the previous winner, so every adjacent precedence pair is exercised.
-        for (present, winner) in [
-            (&ALL_SOURCES[..4], AuthSource::AuthTokenEnv),
-            (&ALL_SOURCES[1..4], AuthSource::ApiKeyEnv),
-            (&ALL_SOURCES[2..4], AuthSource::ApiKeyFile),
-            (&ALL_SOURCES[3..4], AuthSource::OAuthTokenEnv),
-        ] {
-            let auth = resolve(explicit(present), GATEWAY, unreachable_store())
-                .await
-                .unwrap();
-            assert_eq!(auth.source(), winner);
-            assert_eq!(auth.secret(), format!("{winner:?}-secret"));
+            #[test]
+            fn holds_only_for_the_two_logins() {
+                assert_eq!(
+                    ALL_SOURCES.map(AuthSource::is_stored_login),
+                    [false, false, false, false, true, true],
+                );
+            }
+        }
+
+        mod env_var {
+            use super::*;
+
+            #[test]
+            fn names_only_environment_sources() {
+                assert_eq!(
+                    ALL_SOURCES.map(AuthSource::env_var),
+                    [
+                        Some("ANTHROPIC_AUTH_TOKEN"),
+                        Some("ANTHROPIC_API_KEY"),
+                        None,
+                        Some("CLAUDE_CODE_OAUTH_TOKEN"),
+                        None,
+                        None,
+                    ],
+                );
+            }
+        }
+
+        mod rejection_hint {
+            use super::*;
+
+            #[test]
+            fn names_where_to_fix_each_source() {
+                for (source, expected) in [
+                    (AuthSource::AuthTokenEnv, "ANTHROPIC_AUTH_TOKEN"),
+                    (AuthSource::ApiKeyEnv, "ANTHROPIC_API_KEY"),
+                    (AuthSource::ApiKeyFile, "client.api_key in your user config"),
+                    (AuthSource::OAuthTokenEnv, "claude setup-token"),
+                    (AuthSource::OxLogin, "Run `/login`"),
+                    (AuthSource::ClaudeCodeLogin, "Run `claude`"),
+                ] {
+                    let hint = source.rejection_hint();
+                    assert!(hint.contains(expected), "{source:?}: {hint}");
+                }
+                assert!(
+                    AuthSource::OAuthTokenEnv
+                        .rejection_hint()
+                        .starts_with("CLAUDE_CODE_OAUTH_TOKEN")
+                );
+            }
         }
     }
 
-    #[tokio::test]
-    async fn resolve_falls_back_to_stored_login_on_first_party_host() {
-        let auth = resolve(explicit(&[]), FIRST_PARTY, stored_ox_login())
+    mod credential {
+        use super::*;
+
+        #[tokio::test]
+        async fn sends_api_keys_raw_and_tokens_as_bearer() {
+            for (source, name, value) in [
+                (AuthSource::ApiKeyEnv, "x-api-key", "secret-value"),
+                (
+                    AuthSource::AuthTokenEnv,
+                    "authorization",
+                    "Bearer secret-value",
+                ),
+                (
+                    AuthSource::OAuthTokenEnv,
+                    "authorization",
+                    "Bearer secret-value",
+                ),
+            ] {
+                let credential = Auth::new(source, "secret-value")
+                    .credential(&NoRoots)
+                    .await
+                    .unwrap();
+
+                let (got_name, got_value) = credential.header();
+                assert_eq!(got_name, name, "{source:?}");
+                assert_eq!(got_value, value, "{source:?}");
+                assert!(got_value.is_sensitive(), "{source:?}");
+            }
+        }
+    }
+
+    mod reload {
+        use super::*;
+
+        #[tokio::test]
+        async fn gives_up_on_env_credentials_and_unreadable_logins() {
+            let dir = tempfile::tempdir().unwrap();
+            for auth in [
+                Auth::new(AuthSource::OAuthTokenEnv, "env-token"),
+                ox_login_in(
+                    &dir.path().join("missing.json"),
+                    "http://unused",
+                    "rejected",
+                    9_999_999_999_999,
+                ),
+            ] {
+                let rejected = auth.credential(&NoRoots).await.unwrap();
+
+                let reloaded = auth.reload(&rejected, &NoRoots).await.unwrap();
+
+                assert!(reloaded.is_none(), "{auth:?}");
+            }
+        }
+
+        #[tokio::test]
+        async fn fails_transiently_when_the_token_endpoint_sends_no_response() {
+            let dir = tempfile::tempdir().unwrap();
+            let file = dir.path().join("credentials.json");
+            write_creds(&file, "rejected", Some("ref"), 9_999_999_999_999);
+            let auth = ox_login_in(
+                &file,
+                "http://127.0.0.1:9/token",
+                "rejected",
+                9_999_999_999_999,
+            );
+            let rejected = auth.credential(&NoRoots).await.unwrap();
+
+            let err = auth
+                .reload(&rejected, &NoRoots)
+                .await
+                .err()
+                .expect("the refresh of the rejected token fails");
+
+            assert!(is_transient(&err), "{err:#}");
+        }
+    }
+
+    mod signed_out_notice {
+        use super::*;
+
+        #[test]
+        fn names_the_step_that_signs_in() {
+            assert_eq!(
+                signed_out_notice(&LoginError::Missing),
+                "Not signed in. Run `/login` to sign in.",
+            );
+            assert_eq!(
+                signed_out_notice(&LoginError::Expired(Login::Ox)),
+                "Not signed in: oxide-code login has expired. Run `/login` to sign in again.",
+            );
+            assert_eq!(
+                signed_out_notice(&LoginError::Unreadable(
+                    Login::ClaudeCode,
+                    anyhow::anyhow!("failed to parse the credentials in the macOS Keychain"),
+                )),
+                "Not signed in: failed to load the Claude Code login: \
+                 failed to parse the credentials in the macOS Keychain. \
+                 Run `claude` to sign in again.",
+            );
+        }
+    }
+
+    mod explicit_credentials {
+        use super::*;
+
+        #[test]
+        fn reads_env_in_precedence_order_with_file_key_third() {
+            let vars = [
+                ("ANTHROPIC_AUTH_TOKEN", Some("bearer")),
+                ("ANTHROPIC_API_KEY", None),
+                ("CLAUDE_CODE_OAUTH_TOKEN", Some("oauth")),
+            ];
+            let got =
+                temp_env::with_vars(vars, || explicit_credentials(Some("file-key".to_owned())));
+            assert_eq!(
+                got,
+                [
+                    (AuthSource::AuthTokenEnv, Some("bearer".to_owned())),
+                    (AuthSource::ApiKeyEnv, None),
+                    (AuthSource::ApiKeyFile, Some("file-key".to_owned())),
+                    (AuthSource::OAuthTokenEnv, Some("oauth".to_owned())),
+                ],
+            );
+        }
+    }
+
+    mod resolve {
+        use super::*;
+
+        const FIRST_PARTY: &str = "https://api.anthropic.com";
+        const GATEWAY: &str = "https://gateway.example.com/anthropic";
+
+        fn unreachable_store() -> impl Future<Output = Result<Auth, LoginError>> {
+            std::future::poll_fn(|_| panic!("stored credentials must not be read"))
+        }
+
+        fn stored_ox_login() -> std::future::Ready<Result<Auth, LoginError>> {
+            std::future::ready(Ok(Auth::new(AuthSource::OxLogin, "stored-token")))
+        }
+
+        fn explicit(present: &[AuthSource]) -> Vec<(AuthSource, Option<String>)> {
+            ALL_SOURCES[..4]
+                .iter()
+                .map(|&source| {
+                    let value = present
+                        .contains(&source)
+                        .then(|| format!("{source:?}-secret"));
+                    (source, value)
+                })
+                .collect()
+        }
+
+        #[tokio::test]
+        async fn picks_highest_precedence_explicit_credential() {
+            // Each row drops the previous winner, so every adjacent precedence pair is exercised.
+            for (present, winner) in [
+                (&ALL_SOURCES[..4], AuthSource::AuthTokenEnv),
+                (&ALL_SOURCES[1..4], AuthSource::ApiKeyEnv),
+                (&ALL_SOURCES[2..4], AuthSource::ApiKeyFile),
+                (&ALL_SOURCES[3..4], AuthSource::OAuthTokenEnv),
+            ] {
+                let auth = resolve(explicit(present), GATEWAY, unreachable_store())
+                    .await
+                    .unwrap();
+                assert_eq!(auth.source(), winner);
+                assert_eq!(auth.secret(), format!("{winner:?}-secret"));
+            }
+        }
+
+        #[tokio::test]
+        async fn falls_back_to_stored_login_on_first_party_host() {
+            let auth = resolve(explicit(&[]), FIRST_PARTY, stored_ox_login())
+                .await
+                .unwrap();
+            assert_eq!(auth.source(), AuthSource::OxLogin);
+            assert_eq!(auth.secret(), "stored-token");
+        }
+
+        #[tokio::test]
+        async fn refuses_stored_login_for_third_party_host_without_reading_it() {
+            let err = resolve(explicit(&[]), GATEWAY, unreachable_store())
+                .await
+                .expect_err("stored login must not go to a gateway");
+            assert!(matches!(err, ResolveError::Gateway(_)), "{err:?}");
+            assert_eq!(
+                format!("{err:#}"),
+                format!(
+                    "no credentials for {GATEWAY}. \
+                     Set ANTHROPIC_AUTH_TOKEN, ANTHROPIC_API_KEY, or CLAUDE_CODE_OAUTH_TOKEN, \
+                     or add `api_key` to ~/.config/ox/config.toml. \
+                     Stored logins are sent only to the Anthropic API."
+                ),
+            );
+        }
+
+        #[tokio::test]
+        async fn missing_login_lists_every_credential_option() {
+            let err = resolve(explicit(&[]), FIRST_PARTY, async {
+                Err(LoginError::Missing)
+            })
+            .await
+            .expect_err("no credential anywhere");
+            assert!(
+                matches!(err, ResolveError::SignedOut(LoginError::Missing)),
+                "{err:?}"
+            );
+            assert_eq!(
+                format!("{err:#}"),
+                format!(
+                    "no credentials found: \
+                     no API key or token is set, no oxide-code login is stored, \
+                     and no Claude Code login is in {LOGIN_STORES}. \
+                     Set ANTHROPIC_API_KEY or CLAUDE_CODE_OAUTH_TOKEN, \
+                     add `api_key` to ~/.config/ox/config.toml, \
+                     or sign in with `/login` in the `ox` TUI."
+                ),
+            );
+        }
+
+        #[tokio::test]
+        async fn other_login_failures_keep_their_own_recovery_step() {
+            let err = resolve(explicit(&[]), FIRST_PARTY, async {
+                Err(LoginError::Expired(Login::ClaudeCode))
+            })
+            .await
+            .expect_err("an expired login must fail");
+            assert_eq!(
+                format!("{err:#}"),
+                "Claude Code login has expired. Run `claude` to sign in again.",
+            );
+        }
+    }
+
+    mod stored_login {
+        use super::*;
+
+        #[tokio::test]
+        async fn reads_the_oxide_code_login_from_the_data_dir() {
+            let data = tempfile::tempdir().unwrap();
+            std::fs::create_dir(data.path().join("ox")).unwrap();
+            std::fs::write(
+                data.path().join("ox").join("credentials.json"),
+                credentials_json("ox-token"),
+            )
+            .unwrap();
+
+            let auth = temp_env::async_with_vars(
+                [("XDG_DATA_HOME", Some(data.path()))],
+                stored_login(ClaudeCodeKeychain::NONE, &NoRoots),
+            )
             .await
             .unwrap();
-        assert_eq!(auth.source(), AuthSource::OxLogin);
-        assert_eq!(auth.secret(), "stored-token");
+            assert_eq!(auth.source(), AuthSource::OxLogin);
+            assert_eq!(auth.secret(), "ox-token");
+        }
     }
 
-    #[tokio::test]
-    async fn resolve_refuses_stored_login_for_third_party_host_without_reading_it() {
-        let err = resolve(explicit(&[]), GATEWAY, unreachable_store())
+    mod first_stored_login {
+        use super::*;
+
+        #[tokio::test]
+        async fn prefers_the_oxide_code_login() {
+            let found = first_stored_login(|login| async move {
+                match login {
+                    Login::Ox => Ok("ox-token"),
+                    Login::ClaudeCode => panic!("the Claude Code login must not be read"),
+                }
+            })
             .await
-            .expect_err("stored login must not go to a gateway");
-        assert!(matches!(err, ResolveError::Gateway(_)), "{err:?}");
-        assert_eq!(
-            format!("{err:#}"),
-            format!(
-                "no credentials for {GATEWAY}. \
-                 Set ANTHROPIC_AUTH_TOKEN, ANTHROPIC_API_KEY, or CLAUDE_CODE_OAUTH_TOKEN, \
-                 or add `api_key` to ~/.config/ox/config.toml. \
-                 Stored logins are sent only to the Anthropic API."
-            ),
-        );
-    }
+            .unwrap();
+            assert_eq!(found, "ox-token");
+        }
 
-    #[tokio::test]
-    async fn resolve_missing_login_lists_every_credential_option() {
-        let err = resolve(explicit(&[]), FIRST_PARTY, async {
-            Err(LoginError::Missing)
-        })
-        .await
-        .expect_err("no credential anywhere");
-        assert!(
-            matches!(err, ResolveError::SignedOut(LoginError::Missing)),
-            "{err:?}"
-        );
-        assert_eq!(
-            format!("{err:#}"),
-            format!(
-                "no credentials found: no API key or token is set, no oxide-code login is stored, \
-                 and no Claude Code login is in {LOGIN_STORES}. \
-                 Set ANTHROPIC_API_KEY or CLAUDE_CODE_OAUTH_TOKEN, \
-                 add `api_key` to ~/.config/ox/config.toml, or sign in with `/login` in the `ox` TUI."
-            ),
-        );
-    }
+        #[tokio::test]
+        async fn falls_back_to_claude_code_without_an_oxide_code_login() {
+            let found = first_stored_login(|login| async move {
+                match login {
+                    Login::Ox => Err(LoginError::Missing),
+                    Login::ClaudeCode => Ok("claude-code-token"),
+                }
+            })
+            .await
+            .unwrap();
+            assert_eq!(found, "claude-code-token");
+        }
 
-    #[tokio::test]
-    async fn resolve_other_login_failures_keep_their_own_recovery_step() {
-        let err = resolve(explicit(&[]), FIRST_PARTY, async {
-            Err(LoginError::Expired(Login::ClaudeCode))
-        })
-        .await
-        .expect_err("an expired login must fail");
-        assert_eq!(
-            format!("{err:#}"),
-            "Claude Code login has expired. Run `claude` to sign in again.",
-        );
-    }
-
-    // ── stored_login ──
-
-    #[tokio::test]
-    async fn stored_login_reads_the_oxide_code_login_from_the_data_dir() {
-        let data = tempfile::tempdir().unwrap();
-        std::fs::create_dir(data.path().join("ox")).unwrap();
-        std::fs::write(
-            data.path().join("ox").join("credentials.json"),
-            credentials_json("ox-token"),
-        )
-        .unwrap();
-
-        let auth = temp_env::async_with_vars(
-            [("XDG_DATA_HOME", Some(data.path()))],
-            stored_login(ClaudeCodeKeychain::NONE, &NoRoots),
-        )
-        .await
-        .unwrap();
-        assert_eq!(auth.source(), AuthSource::OxLogin);
-        assert_eq!(auth.secret(), "ox-token");
-    }
-
-    // ── first_stored_login ──
-
-    #[tokio::test]
-    async fn first_stored_login_prefers_the_oxide_code_login() {
-        let found = first_stored_login(|login| async move {
-            match login {
-                Login::Ox => Ok("ox-token"),
-                Login::ClaudeCode => panic!("the Claude Code login must not be read"),
-            }
-        })
-        .await
-        .unwrap();
-        assert_eq!(found, "ox-token");
-    }
-
-    #[tokio::test]
-    async fn first_stored_login_falls_back_to_claude_code_without_an_oxide_code_login() {
-        let found = first_stored_login(|login| async move {
-            match login {
-                Login::Ox => Err(LoginError::Missing),
-                Login::ClaudeCode => Ok("claude-code-token"),
-            }
-        })
-        .await
-        .unwrap();
-        assert_eq!(found, "claude-code-token");
-    }
-
-    #[tokio::test]
-    async fn first_stored_login_stops_at_a_failing_oxide_code_login() {
-        let err = first_stored_login(|login| async move {
-            match login {
-                Login::Ox => Err::<&str, _>(LoginError::Expired(Login::Ox)),
-                Login::ClaudeCode => panic!("a failing oxide-code login must not yield"),
-            }
-        })
-        .await
-        .unwrap_err();
-        assert!(matches!(err, LoginError::Expired(Login::Ox)), "{err:?}");
-    }
-
-    #[tokio::test]
-    async fn first_stored_login_is_missing_without_either_login() {
-        let err = first_stored_login(|_| async { Err::<&str, _>(LoginError::Missing) })
+        #[tokio::test]
+        async fn stops_at_a_failing_oxide_code_login() {
+            let err = first_stored_login(|login| async move {
+                match login {
+                    Login::Ox => Err::<&str, _>(LoginError::Expired(Login::Ox)),
+                    Login::ClaudeCode => panic!("a failing oxide-code login must not yield"),
+                }
+            })
             .await
             .unwrap_err();
-        assert!(matches!(err, LoginError::Missing), "{err:?}");
+            assert!(matches!(err, LoginError::Expired(Login::Ox)), "{err:?}");
+        }
+
+        #[tokio::test]
+        async fn is_missing_without_either_login() {
+            let err = first_stored_login(|_| async { Err::<&str, _>(LoginError::Missing) })
+                .await
+                .unwrap_err();
+            assert!(matches!(err, LoginError::Missing), "{err:?}");
+        }
     }
 
-    // ── claude_code_login ──
+    mod claude_code_login {
+        use super::*;
 
-    #[tokio::test]
-    async fn claude_code_login_reads_the_claude_code_credentials_file() {
-        let home = tempfile::tempdir().unwrap();
-        let file = home.path().join(".claude").join(".credentials.json");
+        #[tokio::test]
+        async fn reads_the_claude_code_credentials_file() {
+            let home = tempfile::tempdir().unwrap();
+            let file = home.path().join(".claude").join(".credentials.json");
 
-        let (missing, unreadable, auth) = temp_env::async_with_vars(
-            [(crate::util::path::testing::HOME_VAR, Some(home.path()))],
-            async {
-                let missing = claude_code_login(ClaudeCodeKeychain::NONE, &NoRoots).await;
-                std::fs::create_dir(file.parent().unwrap()).unwrap();
-                std::fs::write(&file, "not json").unwrap();
-                let unreadable = claude_code_login(ClaudeCodeKeychain::NONE, &NoRoots).await;
-                std::fs::write(&file, credentials_json("claude-code-token")).unwrap();
-                (
-                    missing,
-                    unreadable,
-                    claude_code_login(ClaudeCodeKeychain::NONE, &NoRoots).await,
-                )
-            },
-        )
-        .await;
+            let (missing, unreadable, auth) = temp_env::async_with_vars(
+                [(crate::util::path::testing::HOME_VAR, Some(home.path()))],
+                async {
+                    let missing = claude_code_login(ClaudeCodeKeychain::NONE, &NoRoots).await;
+                    std::fs::create_dir(file.parent().unwrap()).unwrap();
+                    std::fs::write(&file, "not json").unwrap();
+                    let unreadable = claude_code_login(ClaudeCodeKeychain::NONE, &NoRoots).await;
+                    std::fs::write(&file, credentials_json("claude-code-token")).unwrap();
+                    (
+                        missing,
+                        unreadable,
+                        claude_code_login(ClaudeCodeKeychain::NONE, &NoRoots).await,
+                    )
+                },
+            )
+            .await;
 
-        assert!(missing.unwrap().is_none());
-        let unreadable = unreadable.unwrap_err().to_string();
-        assert!(
-            unreadable.ends_with("Run `claude` to sign in again."),
-            "{unreadable}"
-        );
-        let auth = auth.unwrap().unwrap();
-        assert_eq!(auth.source(), AuthSource::ClaudeCodeLogin);
-        assert_eq!(auth.secret(), "claude-code-token");
+            assert!(missing.unwrap().is_none());
+            let unreadable = unreadable.unwrap_err().to_string();
+            assert!(
+                unreadable.ends_with("Run `claude` to sign in again."),
+                "{unreadable}"
+            );
+            let auth = auth.unwrap().unwrap();
+            assert_eq!(auth.source(), AuthSource::ClaudeCodeLogin);
+            assert_eq!(auth.secret(), "claude-code-token");
+        }
     }
 }

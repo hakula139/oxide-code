@@ -272,469 +272,485 @@ mod tests {
     use crate::tool::testing::bash_preview;
     use crate::tool::{DiffChunk, DiffLine, ToolRegistry};
 
-    /// Runs one `decide` over `input`, returning the decision and what the prompter wrote.
-    async fn decide(input: &str, grant: Option<&SessionGrant>) -> (Decision, String) {
-        let mut lines = input.as_bytes().lines();
-        let mut prompter = Prompter {
-            lines: &mut lines,
-            out: Vec::new(),
-            attended: true,
-        };
-        let decision = prompter
-            .decide(
-                &bash_preview("cargo test"),
-                &Basis::Mode(Mode::Manual),
-                grant,
-            )
+    mod drive {
+        use super::*;
+
+        #[tokio::test]
+        async fn skips_blank_lines_and_exits_cleanly_at_eof() {
+            with_pinned_home(async {
+                let server = MockServer::start().await;
+                mount_reply(&server, "reply").await;
+                let dir = tempfile::tempdir().unwrap();
+                let engine = engine(server.uri(), &test_store(dir.path()), dir.path()).await;
+                let sink = CapturingSink::default();
+                let input: &[u8] = b"\n   \nhello\n";
+
+                let exit = Box::pin(drive(engine.spawn(&[]), &sink, input, true))
+                    .await
+                    .unwrap();
+
+                assert_eq!(exit, Exit::Success);
+                let requests = request_bodies(&server).await;
+                assert_eq!(requests.len(), 1, "blank lines never reach the model");
+                let last = requests[0]["messages"].as_array().unwrap().last().unwrap();
+                assert_eq!(last["content"][0]["text"], "hello");
+            })
             .await;
-        (decision, String::from_utf8(prompter.out).unwrap())
-    }
+        }
 
-    // ── drive ──
+        #[tokio::test]
+        async fn keeps_reading_after_a_failed_turn_and_exits_with_failure() {
+            with_pinned_home(async {
+                let server = MockServer::start().await;
+                Mock::given(method("POST"))
+                    .and(path("/v1/messages"))
+                    .respond_with(ResponseTemplate::new(400))
+                    .up_to_n_times(1)
+                    .mount(&server)
+                    .await;
+                mount_reply(&server, "reply").await;
+                let dir = tempfile::tempdir().unwrap();
+                let store = test_store(dir.path());
+                let engine = engine(server.uri(), &store, dir.path()).await;
+                let session_id = engine.session_id().to_owned();
+                let sink = CapturingSink::default();
+                let input: &[u8] = indoc! {b"
+                    first
+                    /resume zzzz
+                    //literal
+                "};
 
-    #[tokio::test]
-    async fn drive_skips_blank_lines_and_exits_cleanly_at_eof() {
-        with_pinned_home(async {
-            let server = MockServer::start().await;
-            mount_reply(&server, "reply").await;
-            let dir = tempfile::tempdir().unwrap();
-            let engine = engine(server.uri(), &test_store(dir.path()), dir.path()).await;
-            let sink = CapturingSink::default();
-            let input: &[u8] = b"\n   \nhello\n";
-
-            let exit = Box::pin(drive(engine.spawn(&[]), &sink, input, true))
+                let exit = Box::pin(drive(
+                    engine.spawn(&[PathBuf::from("drifted.rs")]),
+                    &sink,
+                    input,
+                    true,
+                ))
                 .await
                 .unwrap();
 
-            assert_eq!(exit, Exit::Success);
-            let requests = request_bodies(&server).await;
-            assert_eq!(requests.len(), 1, "blank lines never reach the model");
-            let last = requests[0]["messages"].as_array().unwrap().last().unwrap();
-            assert_eq!(last["content"][0]["text"], "hello");
-        })
-        .await;
-    }
+                assert_eq!(exit, Exit::Failure);
+                let requests = request_bodies(&server).await;
+                assert_eq!(requests.len(), 2, "/resume must not reach the model");
+                let last = requests[1]["messages"].as_array().unwrap().last().unwrap();
+                assert_eq!(last["content"][0]["text"], "/literal");
+                let reports: Vec<String> = sink
+                    .events()
+                    .into_iter()
+                    .filter_map(|event| match event {
+                        Event::Notice(msg) | Event::Error(msg) | Event::TurnFailed(msg) => {
+                            Some(msg)
+                        }
+                        _ => None,
+                    })
+                    .collect();
+                assert_eq!(reports.len(), 3, "{reports:?}");
+                assert!(reports[0].ends_with(": drifted.rs"), "{reports:?}");
+                assert!(reports[1].contains("HTTP 400"), "{reports:?}");
+                assert_eq!(
+                    reports[2],
+                    format!(
+                        "Resume failed (still on session {}): no session matching `zzzz`",
+                        &session_id[..8],
+                    ),
+                );
+                assert!(matches!(sink.events().last(), Some(Event::TurnComplete)));
+                let data = store.load_session_data(&session_id).unwrap();
+                assert_eq!(
+                    data.messages.len(),
+                    3,
+                    "the failed prompt, the literal, and its reply are saved",
+                );
+            })
+            .await;
+        }
 
-    #[tokio::test]
-    async fn drive_keeps_reading_after_a_failed_turn_and_exits_with_failure() {
-        with_pinned_home(async {
-            let server = MockServer::start().await;
-            Mock::given(method("POST"))
-                .and(path("/v1/messages"))
-                .respond_with(ResponseTemplate::new(400))
-                .up_to_n_times(1)
-                .mount(&server)
-                .await;
-            mount_reply(&server, "reply").await;
-            let dir = tempfile::tempdir().unwrap();
-            let store = test_store(dir.path());
-            let engine = engine(server.uri(), &store, dir.path()).await;
-            let session_id = engine.session_id().to_owned();
-            let sink = CapturingSink::default();
-            let input: &[u8] = indoc! {b"
-                first
-                /resume zzzz
-                //literal
-            "};
+        #[tokio::test]
+        async fn runs_each_typed_command_as_its_op() {
+            with_pinned_home(async {
+                let server = MockServer::start().await;
+                mount_reply(&server, "reply").await;
+                let dir = tempfile::tempdir().unwrap();
+                let engine = engine(server.uri(), &test_store(dir.path()), dir.path()).await;
+                let first_id = engine.session_id().to_owned();
+                let sink = CapturingSink::default();
+                let log = (1..=150)
+                    .map(|n| format!("request {n} served in 12 ms."))
+                    .collect::<Vec<_>>()
+                    .join(" ");
+                let prefix = &first_id[..8];
+                let input = formatdoc! {"
+                    Why does the login service log stop here? {log}
+                    second
+                    /compact focus on login
+                    /rename Fix login
+                    /model sonnet
+                    /effort low
+                    /clear
+                    /resume {prefix}
+                "};
 
-            let exit = Box::pin(drive(
-                engine.spawn(&[PathBuf::from("drifted.rs")]),
-                &sink,
+                let exit = Box::pin(drive(engine.spawn(&[]), &sink, input.as_bytes(), true))
+                    .await
+                    .unwrap();
+
+                assert_eq!(exit, Exit::Success);
+                let requests = request_bodies(&server).await;
+                assert_eq!(
+                    requests.len(),
+                    3,
+                    "only the prompts and the summary reach the model"
+                );
+                assert!(
+                    requests[2].to_string().contains("focus on login"),
+                    "{}",
+                    requests[2]
+                );
+                let confirmations: Vec<String> = sink
+                    .events()
+                    .into_iter()
+                    .filter_map(|event| match event {
+                        Event::SessionCompacted { instructions, .. } => {
+                            Some(format!("compacted with {instructions:?}"))
+                        }
+                        Event::SessionTitleUpdated { title, .. } => {
+                            Some(format!("renamed to {title}"))
+                        }
+                        Event::ConfigChanged { model, effort, .. } => {
+                            Some(format!("using {} at {effort:?}", model.id()))
+                        }
+                        Event::SessionRolled { .. } => Some("rolled".to_owned()),
+                        Event::SessionResumed { id, title, .. } => {
+                            Some(format!("resumed {id} titled {title:?}"))
+                        }
+                        _ => None,
+                    })
+                    .collect();
+                let resumed = format!("resumed {first_id} titled Some(\"Fix login\")");
+                assert_eq!(
+                    confirmations,
+                    [
+                        "compacted with Some(\"focus on login\")",
+                        "renamed to Fix login",
+                        "using claude-sonnet-5-5 at Some(High)",
+                        "using claude-sonnet-5-5 at Some(Low)",
+                        "rolled",
+                        resumed.as_str(),
+                    ],
+                );
+            })
+            .await;
+        }
+
+        #[tokio::test]
+        async fn rejects_a_command_it_cannot_run_and_exits_with_failure() {
+            with_pinned_home(async {
+                let server = MockServer::start().await;
+                let dir = tempfile::tempdir().unwrap();
+                let engine = engine(server.uri(), &test_store(dir.path()), dir.path()).await;
+                let sink = CapturingSink::default();
+                let input: &[u8] = indoc! {b"
+                    /model gpt-4
+                    /model
+                    /help
+                "};
+
+                let exit = Box::pin(drive(engine.spawn(&[]), &sink, input, true))
+                    .await
+                    .unwrap();
+
+                assert_eq!(exit, Exit::Failure);
+                assert_eq!(request_bodies(&server).await, [] as [serde_json::Value; 0]);
+                let reports: Vec<String> = sink
+                    .events()
+                    .into_iter()
+                    .filter_map(|event| match event {
+                        Event::Error(msg) => Some(msg),
+                        _ => None,
+                    })
+                    .collect();
+                assert_eq!(reports.len(), 3, "{reports:?}");
+                assert!(
+                    reports[0].starts_with("/model: Unknown model: `gpt-4`."),
+                    "{reports:?}"
+                );
+                assert_eq!(
+                    reports[1],
+                    "/model: Missing model ID. Usage: `/model <id>`."
+                );
+                assert_eq!(
+                    reports[2],
+                    "/help is not a REPL command. \
+                     Available: /clear, /compact, /effort, /mode, /model, /rename, /resume. \
+                     Use //help to send the literal text.",
+                );
+            })
+            .await;
+        }
+
+        #[tokio::test]
+        async fn answers_an_approval_from_the_next_input_line() {
+            with_pinned_home(async {
+                let server = MockServer::start().await;
+                mount_tool_call_once(&server, "call-1", "bash", r#"{"command":"git push"}"#).await;
+                mount_reply(&server, "Done.").await;
+                let dir = tempfile::tempdir().unwrap();
+                let engine = engine(server.uri(), &test_store(dir.path()), dir.path())
+                    .await
+                    .with_tools(ToolRegistry::new(vec![Box::new(BashTool::default())]));
+                let input = indoc! {"
+                    list files
+                    f
+                    Use git ls-files.
+                "};
+
+                let exit = Box::pin(drive(
+                    engine.spawn(&[]),
+                    &CapturingSink::default(),
+                    input.as_bytes(),
+                    true,
+                ))
+                .await
+                .unwrap();
+
+                assert_eq!(exit, Exit::Success);
+                let requests = request_bodies(&server).await;
+                let result =
+                    &requests[1]["messages"].as_array().unwrap().last().unwrap()["content"][0];
+                assert_eq!(result["type"], "tool_result");
+                assert_eq!(
+                    result["content"],
+                    "The bash call was denied with this feedback: Use git ls-files.",
+                );
+            })
+            .await;
+        }
+
+        #[tokio::test]
+        async fn without_a_terminal_denies_approvals_and_keeps_every_line_a_prompt() {
+            with_pinned_home(async {
+                let server = MockServer::start().await;
+                mount_tool_call_once(&server, "call-1", "bash", r#"{"command":"git push"}"#).await;
+                mount_reply(&server, "Done.").await;
+                let dir = tempfile::tempdir().unwrap();
+                let engine = engine(server.uri(), &test_store(dir.path()), dir.path())
+                    .await
+                    .with_tools(ToolRegistry::new(vec![Box::new(BashTool::default())]));
+                let input = indoc! {"
+                    list files
+                    y
+                "};
+
+                let exit = Box::pin(drive(
+                    engine.spawn(&[]),
+                    &CapturingSink::default(),
+                    input.as_bytes(),
+                    false,
+                ))
+                .await
+                .unwrap();
+
+                assert_eq!(exit, Exit::Success);
+                let requests = request_bodies(&server).await;
+                assert_eq!(requests.len(), 3, "the `y` line is the second prompt");
+                let result =
+                    &requests[1]["messages"].as_array().unwrap().last().unwrap()["content"][0];
+                let content = result["content"].as_str().unwrap();
+                assert!(
+                    content.contains("This run cannot ask for approval."),
+                    "{content}"
+                );
+                let last = requests[2]["messages"].as_array().unwrap().last().unwrap();
+                assert_eq!(last["content"][0]["text"], "y");
+            })
+            .await;
+        }
+
+        #[tokio::test]
+        async fn hands_back_the_panic_of_an_engine_that_stops() {
+            let input: &[u8] = b"hello\n";
+
+            let result = Box::pin(drive(
+                panicked_engine(),
+                &CapturingSink::default(),
                 input,
                 true,
             ))
-            .await
-            .unwrap();
+            .await;
 
-            assert_eq!(exit, Exit::Failure);
-            let requests = request_bodies(&server).await;
-            assert_eq!(requests.len(), 2, "/resume must not reach the model");
-            let last = requests[1]["messages"].as_array().unwrap().last().unwrap();
-            assert_eq!(last["content"][0]["text"], "/literal");
-            let reports: Vec<String> = sink
-                .events()
-                .into_iter()
-                .filter_map(|event| match event {
-                    Event::Notice(msg) | Event::Error(msg) | Event::TurnFailed(msg) => Some(msg),
-                    _ => None,
-                })
-                .collect();
-            assert_eq!(reports.len(), 3, "{reports:?}");
-            assert!(reports[0].ends_with(": drifted.rs"), "{reports:?}");
-            assert!(reports[1].contains("HTTP 400"), "{reports:?}");
-            assert_eq!(
-                reports[2],
-                format!(
-                    "Resume failed (still on session {}): no session matching `zzzz`",
-                    &session_id[..8],
-                ),
-            );
-            assert!(matches!(sink.events().last(), Some(Event::TurnComplete)));
-            let data = store.load_session_data(&session_id).unwrap();
-            assert_eq!(
-                data.messages.len(),
-                3,
-                "the failed prompt, the literal, and its reply are saved",
-            );
-        })
-        .await;
-    }
-
-    #[tokio::test]
-    async fn drive_runs_each_typed_command_as_its_op() {
-        with_pinned_home(async {
-            let server = MockServer::start().await;
-            mount_reply(&server, "reply").await;
-            let dir = tempfile::tempdir().unwrap();
-            let engine = engine(server.uri(), &test_store(dir.path()), dir.path()).await;
-            let first_id = engine.session_id().to_owned();
-            let sink = CapturingSink::default();
-            let log = (1..=150)
-                .map(|n| format!("request {n} served in 12 ms."))
-                .collect::<Vec<_>>()
-                .join(" ");
-            let prefix = &first_id[..8];
-            let input = formatdoc! {"
-                Why does the login service log stop here? {log}
-                second
-                /compact focus on login
-                /rename Fix login
-                /model sonnet
-                /effort low
-                /clear
-                /resume {prefix}
-            "};
-
-            let exit = Box::pin(drive(engine.spawn(&[]), &sink, input.as_bytes(), true))
-                .await
-                .unwrap();
-
-            assert_eq!(exit, Exit::Success);
-            let requests = request_bodies(&server).await;
-            assert_eq!(
-                requests.len(),
-                3,
-                "only the prompts and the summary reach the model"
-            );
-            assert!(
-                requests[2].to_string().contains("focus on login"),
-                "{}",
-                requests[2]
-            );
-            let confirmations: Vec<String> = sink
-                .events()
-                .into_iter()
-                .filter_map(|event| match event {
-                    Event::SessionCompacted { instructions, .. } => {
-                        Some(format!("compacted with {instructions:?}"))
-                    }
-                    Event::SessionTitleUpdated { title, .. } => Some(format!("renamed to {title}")),
-                    Event::ConfigChanged { model, effort, .. } => {
-                        Some(format!("using {} at {effort:?}", model.id()))
-                    }
-                    Event::SessionRolled { .. } => Some("rolled".to_owned()),
-                    Event::SessionResumed { id, title, .. } => {
-                        Some(format!("resumed {id} titled {title:?}"))
-                    }
-                    _ => None,
-                })
-                .collect();
-            let resumed = format!("resumed {first_id} titled Some(\"Fix login\")");
-            assert_eq!(
-                confirmations,
-                [
-                    "compacted with Some(\"focus on login\")",
-                    "renamed to Fix login",
-                    "using claude-sonnet-5-5 at Some(High)",
-                    "using claude-sonnet-5-5 at Some(Low)",
-                    "rolled",
-                    resumed.as_str(),
-                ],
-            );
-        })
-        .await;
-    }
-
-    #[tokio::test]
-    async fn drive_rejects_a_command_it_cannot_run_and_exits_with_failure() {
-        with_pinned_home(async {
-            let server = MockServer::start().await;
-            let dir = tempfile::tempdir().unwrap();
-            let engine = engine(server.uri(), &test_store(dir.path()), dir.path()).await;
-            let sink = CapturingSink::default();
-            let input: &[u8] = indoc! {b"
-                /model gpt-4
-                /model
-                /help
-            "};
-
-            let exit = Box::pin(drive(engine.spawn(&[]), &sink, input, true))
-                .await
-                .unwrap();
-
-            assert_eq!(exit, Exit::Failure);
-            assert_eq!(request_bodies(&server).await, [] as [serde_json::Value; 0]);
-            let reports: Vec<String> = sink
-                .events()
-                .into_iter()
-                .filter_map(|event| match event {
-                    Event::Error(msg) => Some(msg),
-                    _ => None,
-                })
-                .collect();
-            assert_eq!(reports.len(), 3, "{reports:?}");
-            assert!(
-                reports[0].starts_with("/model: Unknown model: `gpt-4`."),
-                "{reports:?}"
-            );
-            assert_eq!(
-                reports[1],
-                "/model: Missing model ID. Usage: `/model <id>`."
-            );
-            assert_eq!(
-                reports[2],
-                "/help is not a REPL command. \
-                 Available: /clear, /compact, /effort, /mode, /model, /rename, /resume. \
-                 Use //help to send the literal text.",
-            );
-        })
-        .await;
-    }
-
-    #[tokio::test]
-    async fn drive_answers_an_approval_from_the_next_input_line() {
-        with_pinned_home(async {
-            let server = MockServer::start().await;
-            mount_tool_call_once(&server, "call-1", "bash", r#"{"command":"git push"}"#).await;
-            mount_reply(&server, "Done.").await;
-            let dir = tempfile::tempdir().unwrap();
-            let engine = engine(server.uri(), &test_store(dir.path()), dir.path())
-                .await
-                .with_tools(ToolRegistry::new(vec![Box::new(BashTool::default())]));
-            let input = indoc! {"
-                list files
-                f
-                Use git ls-files.
-            "};
-
-            let exit = Box::pin(drive(
-                engine.spawn(&[]),
-                &CapturingSink::default(),
-                input.as_bytes(),
-                true,
-            ))
-            .await
-            .unwrap();
-
-            assert_eq!(exit, Exit::Success);
-            let requests = request_bodies(&server).await;
-            let result = &requests[1]["messages"].as_array().unwrap().last().unwrap()["content"][0];
-            assert_eq!(result["type"], "tool_result");
-            assert_eq!(
-                result["content"],
-                "The bash call was denied with this feedback: Use git ls-files.",
-            );
-        })
-        .await;
-    }
-
-    #[tokio::test]
-    async fn drive_without_a_terminal_denies_approvals_and_keeps_every_line_a_prompt() {
-        with_pinned_home(async {
-            let server = MockServer::start().await;
-            mount_tool_call_once(&server, "call-1", "bash", r#"{"command":"git push"}"#).await;
-            mount_reply(&server, "Done.").await;
-            let dir = tempfile::tempdir().unwrap();
-            let engine = engine(server.uri(), &test_store(dir.path()), dir.path())
-                .await
-                .with_tools(ToolRegistry::new(vec![Box::new(BashTool::default())]));
-            let input = indoc! {"
-                list files
-                y
-            "};
-
-            let exit = Box::pin(drive(
-                engine.spawn(&[]),
-                &CapturingSink::default(),
-                input.as_bytes(),
-                false,
-            ))
-            .await
-            .unwrap();
-
-            assert_eq!(exit, Exit::Success);
-            let requests = request_bodies(&server).await;
-            assert_eq!(requests.len(), 3, "the `y` line is the second prompt");
-            let result = &requests[1]["messages"].as_array().unwrap().last().unwrap()["content"][0];
-            let content = result["content"].as_str().unwrap();
-            assert!(
-                content.contains("This run cannot ask for approval."),
-                "{content}"
-            );
-            let last = requests[2]["messages"].as_array().unwrap().last().unwrap();
-            assert_eq!(last["content"][0]["text"], "y");
-        })
-        .await;
-    }
-
-    #[tokio::test]
-    async fn drive_hands_back_the_panic_of_an_engine_that_stops() {
-        let input: &[u8] = b"hello\n";
-
-        let result = Box::pin(drive(
-            panicked_engine(),
-            &CapturingSink::default(),
-            input,
-            true,
-        ))
-        .await;
-
-        let panic = result.unwrap_err().downcast::<EnginePanic>().unwrap();
-        assert_eq!(panic_message(panic), "engine bug");
-    }
-
-    // ── Prompter::decide ──
-
-    #[tokio::test]
-    async fn decide_maps_each_answer_to_its_decision() {
-        for (input, decision) in [
-            ("y\n", Decision::Approve),
-            (" YES \n", Decision::Approve),
-            ("n\n", Decision::Deny),
-            (
-                "f\nRun the unit tests only.\n",
-                Decision::DenyWithFeedback {
-                    feedback: "Run the unit tests only.".to_owned(),
-                },
-            ),
-            ("x\n", Decision::Abort),
-            ("f\n", Decision::Abort),
-            ("", Decision::Abort),
-        ] {
-            let (got, out) = decide(input, None).await;
-            assert_eq!(got, decision, "{input:?}");
-            assert!(
-                out.starts_with("Bash needs approval:\n  cargo test\n"),
-                "{out}"
-            );
-            assert!(out.contains(CHOICES), "{out}");
+            let panic = result.unwrap_err().downcast::<EnginePanic>().unwrap();
+            assert_eq!(panic_message(panic), "engine bug");
         }
     }
 
-    #[tokio::test]
-    async fn decide_asks_again_after_an_unknown_answer_or_empty_feedback() {
-        let input = indoc! {"
-            a
-            f
+    mod prompter {
+        use super::*;
 
-            maybe
-            run the tests
-            n
-        "};
-        let (decision, out) = decide(input, None).await;
+        mod decide {
+            use super::*;
 
-        assert_eq!(decision, Decision::Deny);
-        assert_eq!(out.matches(CHOICES).count(), 5, "{out}");
-        assert_eq!(
-            out.matches("Answer with one of the letters").count(),
-            3,
-            "a prompt typed ahead re-asks: {out}"
-        );
+            /// Runs one `decide` over `input`, returning the decision and what the prompter wrote.
+            async fn decide(input: &str, grant: Option<&SessionGrant>) -> (Decision, String) {
+                let mut lines = input.as_bytes().lines();
+                let mut prompter = Prompter {
+                    lines: &mut lines,
+                    out: Vec::new(),
+                    attended: true,
+                };
+                let decision = prompter
+                    .decide(
+                        &bash_preview("cargo test"),
+                        &Basis::Mode(Mode::Manual),
+                        grant,
+                    )
+                    .await;
+                (decision, String::from_utf8(prompter.out).unwrap())
+            }
+
+            #[tokio::test]
+            async fn maps_each_answer_to_its_decision() {
+                for (input, decision) in [
+                    ("y\n", Decision::Approve),
+                    (" YES \n", Decision::Approve),
+                    ("n\n", Decision::Deny),
+                    (
+                        "f\nRun the unit tests only.\n",
+                        Decision::DenyWithFeedback {
+                            feedback: "Run the unit tests only.".to_owned(),
+                        },
+                    ),
+                    ("x\n", Decision::Abort),
+                    ("f\n", Decision::Abort),
+                    ("", Decision::Abort),
+                ] {
+                    let (got, out) = decide(input, None).await;
+                    assert_eq!(got, decision, "{input:?}");
+                    assert!(
+                        out.starts_with("Bash needs approval:\n  cargo test\n"),
+                        "{out}"
+                    );
+                    assert!(out.contains(CHOICES), "{out}");
+                }
+            }
+
+            #[tokio::test]
+            async fn asks_again_after_an_unknown_answer_or_empty_feedback() {
+                let input = indoc! {"
+                    a
+                    f
+
+                    maybe
+                    run the tests
+                    n
+                "};
+                let (decision, out) = decide(input, None).await;
+
+                assert_eq!(decision, Decision::Deny);
+                assert_eq!(out.matches(CHOICES).count(), 5, "{out}");
+                assert_eq!(
+                    out.matches("Answer with one of the letters").count(),
+                    3,
+                    "a prompt typed ahead re-asks: {out}"
+                );
+            }
+
+            #[tokio::test]
+            async fn allows_the_suggested_or_an_edited_rule_for_the_session() {
+                let grant = exec_grant("cargo test");
+                let allowed = |pattern: &str| Decision::AllowForSession {
+                    rule: Box::new(Rule::parse(PermissionClass::Exec, pattern).unwrap()),
+                };
+
+                let (decision, out) = decide("a\n\n", Some(&grant)).await;
+                assert_eq!(decision, allowed("cargo test"));
+                assert!(out.contains(GRANT_CHOICES), "{out}");
+                assert!(out.contains("Pattern to allow [cargo test]: "), "{out}");
+
+                let input = indoc! {"
+                    a
+                    cargo build
+                    a
+                    cargo test *
+                "};
+                let (decision, out) = decide(input, Some(&grant)).await;
+                assert_eq!(decision, allowed("cargo test *"));
+                let (rejected, retried) = out
+                    .split_once("the pattern no longer covers this call")
+                    .unwrap();
+                assert_eq!(rejected.matches(GRANT_CHOICES).count(), 1, "{out}");
+                assert_eq!(
+                    retried.matches(GRANT_CHOICES).count(),
+                    1,
+                    "a rejected rule returns to the choices: {out}"
+                );
+
+                let (decision, _) = decide("a\n", Some(&grant)).await;
+                assert_eq!(
+                    decision,
+                    Decision::Abort,
+                    "the input ending mid-rule aborts"
+                );
+            }
+
+            #[tokio::test]
+            async fn aborts_saying_why_when_the_input_cannot_be_read() {
+                let mut lines = (&b"\xff\n"[..]).lines();
+                let mut prompter = Prompter {
+                    lines: &mut lines,
+                    out: Vec::new(),
+                    attended: true,
+                };
+
+                let decision = prompter
+                    .decide(&bash_preview("ls"), &Basis::Mode(Mode::Manual), None)
+                    .await;
+
+                assert_eq!(decision, Decision::Abort);
+                let out = String::from_utf8(prompter.out).unwrap();
+                assert!(out.contains("Could not read the answer: "), "{out}");
+            }
+        }
     }
 
-    #[tokio::test]
-    async fn decide_allows_the_suggested_or_an_edited_rule_for_the_session() {
-        let grant = exec_grant("cargo test");
-        let allowed = |pattern: &str| Decision::AllowForSession {
-            rule: Box::new(Rule::parse(PermissionClass::Exec, pattern).unwrap()),
-        };
+    mod write_preview {
+        use super::*;
 
-        let (decision, out) = decide("a\n\n", Some(&grant)).await;
-        assert_eq!(decision, allowed("cargo test"));
-        assert!(out.contains(GRANT_CHOICES), "{out}");
-        assert!(out.contains("Pattern to allow [cargo test]: "), "{out}");
+        #[test]
+        fn lists_diff_rows_then_the_rule_and_escapes_hidden_characters() {
+            let basis = Basis::Rule {
+                tier: Tier::Ask,
+                rule: Rule::parse(PermissionClass::Edit, "src/\u{200b}*.rs").unwrap(),
+            };
+            let mut out = Vec::new();
 
-        let input = indoc! {"
-            a
-            cargo build
-            a
-            cargo test *
-        "};
-        let (decision, out) = decide(input, Some(&grant)).await;
-        assert_eq!(decision, allowed("cargo test *"));
-        let (rejected, retried) = out
-            .split_once("the pattern no longer covers this call")
+            write_preview(
+                &mut out,
+                &ApprovalPreview {
+                    title: "Edit(src/a.rs)".to_owned(),
+                    body: ApprovalBody::Diff(vec![DiffChunk {
+                        old: vec![DiffLine {
+                            number: 3,
+                            text: "let a = 1;".to_owned(),
+                        }],
+                        new: vec![DiffLine {
+                            number: 3,
+                            text: "let a = 2;\u{1b}[2K\u{200b}".to_owned(),
+                        }],
+                    }]),
+                },
+                &basis,
+            )
             .unwrap();
-        assert_eq!(rejected.matches(GRANT_CHOICES).count(), 1, "{out}");
-        assert_eq!(
-            retried.matches(GRANT_CHOICES).count(),
-            1,
-            "a rejected rule returns to the choices: {out}"
-        );
 
-        let (decision, _) = decide("a\n", Some(&grant)).await;
-        assert_eq!(
-            decision,
-            Decision::Abort,
-            "the input ending mid-rule aborts"
-        );
-    }
-
-    #[tokio::test]
-    async fn decide_aborts_saying_why_when_the_input_cannot_be_read() {
-        let mut lines = (&b"\xff\n"[..]).lines();
-        let mut prompter = Prompter {
-            lines: &mut lines,
-            out: Vec::new(),
-            attended: true,
-        };
-
-        let decision = prompter
-            .decide(&bash_preview("ls"), &Basis::Mode(Mode::Manual), None)
-            .await;
-
-        assert_eq!(decision, Decision::Abort);
-        let out = String::from_utf8(prompter.out).unwrap();
-        assert!(out.contains("Could not read the answer: "), "{out}");
-    }
-
-    // ── write_preview ──
-
-    #[test]
-    fn write_preview_lists_diff_rows_then_the_rule_and_escapes_hidden_characters() {
-        let basis = Basis::Rule {
-            tier: Tier::Ask,
-            rule: Rule::parse(PermissionClass::Edit, "src/\u{200b}*.rs").unwrap(),
-        };
-        let mut out = Vec::new();
-
-        write_preview(
-            &mut out,
-            &ApprovalPreview {
-                title: "Edit(src/a.rs)".to_owned(),
-                body: ApprovalBody::Diff(vec![DiffChunk {
-                    old: vec![DiffLine {
-                        number: 3,
-                        text: "let a = 1;".to_owned(),
-                    }],
-                    new: vec![DiffLine {
-                        number: 3,
-                        text: "let a = 2;\u{1b}[2K\u{200b}".to_owned(),
-                    }],
-                }]),
-            },
-            &basis,
-        )
-        .unwrap();
-
-        assert_eq!(
-            String::from_utf8(out).unwrap(),
-            indoc! {r"
-                Edit(src/a.rs) needs approval:
-                  - let a = 1;
-                  + let a = 2;\u{1b}[2K\u{200b}
-                Held by the `ask.edit` pattern `src/\u{200b}*.rs`
-            "},
-        );
+            assert_eq!(
+                String::from_utf8(out).unwrap(),
+                indoc! {r"
+                    Edit(src/a.rs) needs approval:
+                      - let a = 1;
+                      + let a = 2;\u{1b}[2K\u{200b}
+                    Held by the `ask.edit` pattern `src/\u{200b}*.rs`
+                "},
+            );
+        }
     }
 }

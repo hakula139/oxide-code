@@ -195,151 +195,157 @@ mod tests {
         Effort::ALL[s.selected]
     }
 
-    // ── EffortSlider::new ──
+    mod new {
+        use super::*;
 
-    #[test]
-    fn new_is_absent_for_unknown_model() {
-        let mut info = test_session_info();
-        info.config.model = ModelSpec::resolve("custom-model".to_owned());
-        info.config.effort = None;
-        assert!(EffortSlider::new(&info).is_none());
-    }
+        #[test]
+        fn rejects_an_unknown_model() {
+            let mut info = test_session_info();
+            info.config.model = ModelSpec::resolve("custom-model".to_owned());
+            info.config.effort = None;
+            assert!(EffortSlider::new(&info).is_none());
+        }
 
-    #[test]
-    fn new_seeds_selected_to_active_effort() {
-        let s = slider_for("claude-opus-5-5", Some(Effort::High));
-        assert_eq!(selected_level(&s), Effort::High);
-        assert_eq!(s.initial, Effort::High);
-    }
+        #[test]
+        fn seeds_selected_to_active_effort() {
+            let s = slider_for("claude-opus-5-5", Some(Effort::High));
+            assert_eq!(selected_level(&s), Effort::High);
+            assert_eq!(s.initial, Effort::High);
+        }
 
-    #[test]
-    fn new_falls_back_to_model_default_when_effort_unset() {
-        let s = slider_for("claude-sonnet-5-5", None);
-        assert_eq!(s.initial, Effort::High);
-        assert_eq!(selected_level(&s), Effort::High);
-    }
-
-    // ── EffortSlider::render ──
-
-    #[test]
-    fn render_centers_the_track_between_title_and_footer() {
-        let s = slider_for("claude-opus-5-5", Some(Effort::High));
-
-        let rows = render_rows(&s, 80, s.height(80, u16::MAX));
-
-        let rows: Vec<&str> = rows.iter().map(|row| row.trim_end()).collect();
-        assert_eq!(
-            rows,
-            [
-                "                                  Select effort",
-                "",
-                "                   Speed                          Intelligence",
-                "                   ───────────────────────────────────────────",
-                "                   ○ low   ○ medium   ● high   ○ xhigh   ○ max",
-                "",
-                "          ← / → to change effort  ·  Enter to confirm  ·  Esc to cancel",
-            ]
-        );
-    }
-
-    #[test]
-    fn render_active_glyph_column_tracks_selected_tier() {
-        let theme = Theme::default();
-        let width: u16 = 80;
-        let mut s = slider_for("claude-opus-5-5", Some(Effort::Low));
-        let height = s.height(width, u16::MAX);
-
-        let active_x = |s: &EffortSlider| -> u16 {
-            let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
-            terminal
-                .draw(|frame| s.render(frame, Rect::new(0, 0, width, height), &theme))
-                .expect("render must not panic");
-            let buf = terminal.backend().buffer().clone();
-            // Row 4 = title + blank + speed / intel + track.
-            (0..width)
-                .find(|x| {
-                    let cell = &buf[(*x, 4)];
-                    cell.symbol() == "●" && cell.style().add_modifier.contains(Modifier::BOLD)
-                })
-                .expect("active bold `●` must appear on the tier-label row")
-        };
-
-        let x_low = active_x(&s);
-        s.handle_key(&KeyEvent::from(KeyCode::Right));
-        let x_medium = active_x(&s);
-        assert!(
-            x_medium > x_low,
-            "Right must shift active glyph to the right (low={x_low}, medium={x_medium})",
-        );
-    }
-
-    // ── EffortSlider::handle_key ──
-
-    #[test]
-    fn handle_key_right_arrow_advances_selected_within_supported() {
-        let mut s = slider_for("claude-opus-5-5", Some(Effort::Low));
-        let before = s.selected;
-        s.handle_key(&KeyEvent::from(KeyCode::Right));
-        assert_eq!(s.selected, before + 1);
-    }
-
-    #[test]
-    fn handle_key_right_arrow_at_top_clamps_without_panicking() {
-        let mut s = slider_for("claude-opus-5-5", Some(Effort::Max));
-        s.handle_key(&KeyEvent::from(KeyCode::Right));
-        assert_eq!(selected_level(&s), Effort::Max, "must stay clamped");
-    }
-
-    #[test]
-    fn handle_key_left_arrow_retreats_selected_until_low() {
-        let mut s = slider_for("claude-opus-5-5", Some(Effort::Medium));
-        s.handle_key(&KeyEvent::from(KeyCode::Left));
-        assert_eq!(selected_level(&s), Effort::Low);
-        s.handle_key(&KeyEvent::from(KeyCode::Left));
-        assert_eq!(selected_level(&s), Effort::Low, "stays clamped");
-    }
-
-    #[test]
-    fn handle_key_vim_keys_mirror_arrow_navigation() {
-        let mut s = slider_for("claude-opus-5-5", Some(Effort::Low));
-        s.handle_key(&KeyEvent::from(KeyCode::Char('l')));
-        assert_eq!(selected_level(&s), Effort::Medium);
-        s.handle_key(&KeyEvent::from(KeyCode::Char('h')));
-        assert_eq!(selected_level(&s), Effort::Low);
-    }
-
-    #[test]
-    fn handle_key_enter_with_no_change_returns_cancelled() {
-        let mut s = slider_for("claude-opus-5-5", Some(Effort::High));
-        let outcome = s.handle_key(&KeyEvent::from(KeyCode::Enter));
-        assert!(matches!(outcome, ModalKey::Cancelled));
-    }
-
-    #[test]
-    fn handle_key_enter_after_change_emits_set_model_with_effort_only() {
-        let mut s = slider_for("claude-opus-5-5", Some(Effort::Low));
-        s.handle_key(&KeyEvent::from(KeyCode::Right));
-        let outcome = s.handle_key(&KeyEvent::from(KeyCode::Enter));
-        match outcome {
-            ModalKey::Submitted(ModalAction::Dispatch(Action::Op(Op::SetModel(pick)))) => {
-                assert_eq!(pick, ConfigPick::Effort(Effort::Medium));
-            }
-            other => panic!("expected Submitted SetModel, got {other:?}"),
+        #[test]
+        fn falls_back_to_model_default_when_effort_unset() {
+            let s = slider_for("claude-sonnet-5-5", None);
+            assert_eq!(s.initial, Effort::High);
+            assert_eq!(selected_level(&s), Effort::High);
         }
     }
 
-    #[test]
-    fn handle_key_unhandled_key_is_consumed_without_state_change() {
-        // ModalStack handles Esc and Ctrl+C before the slider sees them.
-        let mut s = slider_for("claude-opus-5-5", Some(Effort::Medium));
-        let before = s.selected;
-        for code in [KeyCode::Up, KeyCode::Down, KeyCode::Tab, KeyCode::Char('q')] {
-            let outcome = s.handle_key(&KeyEvent::from(code));
-            assert!(
-                matches!(outcome, ModalKey::Consumed),
-                "{code:?} must be consumed"
+    mod render {
+        use super::*;
+
+        #[test]
+        fn centers_the_track_between_title_and_footer() {
+            let s = slider_for("claude-opus-5-5", Some(Effort::High));
+
+            let rows = render_rows(&s, 80, s.height(80, u16::MAX));
+
+            let rows: Vec<&str> = rows.iter().map(|row| row.trim_end()).collect();
+            assert_eq!(
+                rows,
+                [
+                    "                                  Select effort",
+                    "",
+                    "                   Speed                          Intelligence",
+                    "                   ───────────────────────────────────────────",
+                    "                   ○ low   ○ medium   ● high   ○ xhigh   ○ max",
+                    "",
+                    "          ← / → to change effort  ·  Enter to confirm  ·  Esc to cancel",
+                ]
             );
-            assert_eq!(s.selected, before, "{code:?} must not move the cursor");
+        }
+
+        #[test]
+        fn active_glyph_column_tracks_selected_tier() {
+            let theme = Theme::default();
+            let width: u16 = 80;
+            let mut s = slider_for("claude-opus-5-5", Some(Effort::Low));
+            let height = s.height(width, u16::MAX);
+
+            let active_x = |s: &EffortSlider| -> u16 {
+                let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+                terminal
+                    .draw(|frame| s.render(frame, Rect::new(0, 0, width, height), &theme))
+                    .expect("render must not panic");
+                let buf = terminal.backend().buffer().clone();
+                // Row 4 = title + blank + speed / intel + track.
+                (0..width)
+                    .find(|x| {
+                        let cell = &buf[(*x, 4)];
+                        cell.symbol() == "●" && cell.style().add_modifier.contains(Modifier::BOLD)
+                    })
+                    .expect("active bold `●` must appear on the tier-label row")
+            };
+
+            let x_low = active_x(&s);
+            s.handle_key(&KeyEvent::from(KeyCode::Right));
+            let x_medium = active_x(&s);
+            assert!(
+                x_medium > x_low,
+                "Right must shift active glyph to the right (low={x_low}, medium={x_medium})",
+            );
+        }
+    }
+
+    mod handle_key {
+        use super::*;
+
+        #[test]
+        fn right_arrow_advances_selected_within_supported() {
+            let mut s = slider_for("claude-opus-5-5", Some(Effort::Low));
+            let before = s.selected;
+            s.handle_key(&KeyEvent::from(KeyCode::Right));
+            assert_eq!(s.selected, before + 1);
+        }
+
+        #[test]
+        fn right_arrow_at_top_clamps_without_panicking() {
+            let mut s = slider_for("claude-opus-5-5", Some(Effort::Max));
+            s.handle_key(&KeyEvent::from(KeyCode::Right));
+            assert_eq!(selected_level(&s), Effort::Max, "must stay clamped");
+        }
+
+        #[test]
+        fn left_arrow_retreats_selected_until_low() {
+            let mut s = slider_for("claude-opus-5-5", Some(Effort::Medium));
+            s.handle_key(&KeyEvent::from(KeyCode::Left));
+            assert_eq!(selected_level(&s), Effort::Low);
+            s.handle_key(&KeyEvent::from(KeyCode::Left));
+            assert_eq!(selected_level(&s), Effort::Low, "stays clamped");
+        }
+
+        #[test]
+        fn vim_keys_mirror_arrow_navigation() {
+            let mut s = slider_for("claude-opus-5-5", Some(Effort::Low));
+            s.handle_key(&KeyEvent::from(KeyCode::Char('l')));
+            assert_eq!(selected_level(&s), Effort::Medium);
+            s.handle_key(&KeyEvent::from(KeyCode::Char('h')));
+            assert_eq!(selected_level(&s), Effort::Low);
+        }
+
+        #[test]
+        fn enter_with_no_change_returns_cancelled() {
+            let mut s = slider_for("claude-opus-5-5", Some(Effort::High));
+            let outcome = s.handle_key(&KeyEvent::from(KeyCode::Enter));
+            assert!(matches!(outcome, ModalKey::Cancelled));
+        }
+
+        #[test]
+        fn enter_after_change_emits_set_model_with_effort_only() {
+            let mut s = slider_for("claude-opus-5-5", Some(Effort::Low));
+            s.handle_key(&KeyEvent::from(KeyCode::Right));
+            let outcome = s.handle_key(&KeyEvent::from(KeyCode::Enter));
+            match outcome {
+                ModalKey::Submitted(ModalAction::Dispatch(Action::Op(Op::SetModel(pick)))) => {
+                    assert_eq!(pick, ConfigPick::Effort(Effort::Medium));
+                }
+                other => panic!("expected Submitted SetModel, got {other:?}"),
+            }
+        }
+
+        #[test]
+        fn unhandled_key_is_consumed_without_state_change() {
+            // ModalStack handles Esc and Ctrl+C before the slider sees them.
+            let mut s = slider_for("claude-opus-5-5", Some(Effort::Medium));
+            let before = s.selected;
+            for code in [KeyCode::Up, KeyCode::Down, KeyCode::Tab, KeyCode::Char('q')] {
+                let outcome = s.handle_key(&KeyEvent::from(code));
+                assert!(
+                    matches!(outcome, ModalKey::Consumed),
+                    "{code:?} must be consumed"
+                );
+                assert_eq!(s.selected, before, "{code:?} must not move the cursor");
+            }
         }
     }
 }
