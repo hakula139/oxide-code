@@ -4,6 +4,56 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.0-alpha.4] - 2026-10-18
+
+### Highlights
+
+- Permission tables support explicit approval rules, and modes can change during a session.
+- Background shell commands and persistent task lists support longer work.
+- Select and copy chat text with the mouse, including inside tmux.
+
+### Breaking changes
+
+- _(permission)_ Replace flat permission arrays with per-class lists under `[permission.deny]`, `[permission.ask]`, and `[permission.allow]`, and replace mode `auto` with `manual`. Within `[permission]`, project configuration accepts only deny and ask rules. Exec patterns match command words, with a standalone `*` as their only wildcard. Review the [configuration guide](https://github.com/hakula139/oxide-code/blob/main/docs/guide/configuration.md#exec-patterns) when converting existing command patterns ([#306](https://github.com/hakula139/oxide-code/pull/306), [#329](https://github.com/hakula139/oxide-code/pull/329))
+- _(permission)_ In `yolo`, explicit deny and ask rules and enabled built-in protections still apply. The old built-in denies for fork bombs, `dd`, and `mkfs` are removed, so add explicit rules if you need those restrictions ([#306](https://github.com/hakula139/oxide-code/pull/306))
+- _(config)_ Move project `ox.toml` settings to `.ox/config.toml`. The old file is silently ignored, including its permission restrictions. Replace `ANTHROPIC_EFFORT` and `ANTHROPIC_MAX_TOKENS` with `OX_EFFORT` and `OX_MAX_TOKENS` ([#329](https://github.com/hakula139/oxide-code/pull/329))
+- _(session)_ Messages containing legacy reasoning blocks are skipped on resume, which can truncate the resumed history. Reasoning blocks now require `wire`, `model`, and `payload`. File snapshots without `tool_use_id` are also skipped, requiring those files to be read again before editing. Prerelease session compatibility is no longer promised ([#329](https://github.com/hakula139/oxide-code/pull/329))
+- _(theme)_ Custom themes loaded with `base = "<file>"` must define `selection`, for example `selection = { bg = "#313244" }`. Built-in themes and their overrides already provide it ([#301](https://github.com/hakula139/oxide-code/pull/301))
+
+### Added
+
+- _(permission)_ Set `--mode manual|plan|yolo`, switch with `/mode`, and cycle manual and plan with Shift+Tab. Approval prompts and denials identify the rule behind the decision. Configure additional editable directories with `permission.extra_roots` in user configuration ([#276](https://github.com/hakula139/oxide-code/pull/276), [#324](https://github.com/hakula139/oxide-code/pull/324))
+- _(tool)_ Run shell commands in the background, collect their output with `bash_output`, and stop them with `bash_stop`. Background commands survive an interrupted turn and stop when the session is cleared, archived, replaced, or closed ([#284](https://github.com/hakula139/oxide-code/pull/284))
+- _(task)_ Let the model maintain a task list whose progress survives compaction and resume, with an optional task-progress status line ([#274](https://github.com/hakula139/oxide-code/pull/274), [#282](https://github.com/hakula139/oxide-code/pull/282))
+- _(tui)_ Drag to select and copy chat text, double-click words, or triple-click rows. Ctrl+C copies an existing selection, and mouse-wheel scrolling works inside tmux ([#301](https://github.com/hakula139/oxide-code/pull/301), [#290](https://github.com/hakula139/oxide-code/pull/290))
+- _(slash)_ Archive or restore the highlighted session with Ctrl+X in `/resume` ([#294](https://github.com/hakula139/oxide-code/pull/294))
+- _(model)_ Select Claude Fable 5.1 with `/model fable` when your account or gateway provides it. Opus 5.5 remains the default ([#334](https://github.com/hakula139/oxide-code/pull/334))
+
+### Fixed
+
+- _(permission)_ Preserve directory-only path syntax in file tools and report unreachable path components ([#382](https://github.com/hakula139/oxide-code/pull/382))
+- _(session)_ Keep a manual session name when AI title generation is still running, and stop title generation before clearing, resuming, or closing a session. Typed and edited names share an 80-column limit and use the first nonblank line ([#355](https://github.com/hakula139/oxide-code/pull/355), [#351](https://github.com/hakula139/oxide-code/pull/351), [#394](https://github.com/hakula139/oxide-code/pull/394))
+- _(engine)_ Deliver queued prompts once when the input queue fills, and keep a previous session's save failure visible after switching sessions ([#342](https://github.com/hakula139/oxide-code/pull/342), [#353](https://github.com/hakula139/oxide-code/pull/353))
+- _(tool)_ Stop shell descendants created while a command is being terminated on macOS and BSD ([#345](https://github.com/hakula139/oxide-code/pull/345))
+- _(tool)_ Report unreadable paths in `glob` and `grep`. Keep write previews responsive and avoid following symbolic links or blocking on named pipes while preparing them ([#356](https://github.com/hakula139/oxide-code/pull/356))
+- _(compaction)_ Show paused automatic compaction in `/status`, preserve fenced-code colors in summaries, and keep the unread-message count correct when a summary is discarded ([#268](https://github.com/hakula139/oxide-code/pull/268), [#332](https://github.com/hakula139/oxide-code/pull/332))
+- _(client)_ Show concise JSON or HTML error details, omit empty details, and preserve punctuation in external error messages ([#268](https://github.com/hakula139/oxide-code/pull/268), [#349](https://github.com/hakula139/oxide-code/pull/349), [#362](https://github.com/hakula139/oxide-code/pull/362))
+- _(client)_ Match Claude Code request metadata for the first user prompt, including prompts containing emoji, and include its billing block in side requests under every authentication method ([#272](https://github.com/hakula139/oxide-code/pull/272), [#331](https://github.com/hakula139/oxide-code/pull/331))
+- _(client)_ Accept streaming responses whose `message_start` message omits `id` or `model` ([#372](https://github.com/hakula139/oxide-code/pull/372))
+- _(client)_ Accept explicitly trusted, long-lived extra CA certificates on macOS while retaining certificate expiry and hostname checks ([#275](https://github.com/hakula139/oxide-code/pull/275))
+- _(tui)_ Render table rows within the available width, wrap nested Markdown and hard breaks correctly, preserve list markers, preserve the first line's indentation in user messages, and keep sign-in URLs flush left for copying ([#295](https://github.com/hakula139/oxide-code/pull/295), [#389](https://github.com/hakula139/oxide-code/pull/389), [#322](https://github.com/hakula139/oxide-code/pull/322), [#323](https://github.com/hakula139/oxide-code/pull/323), [#333](https://github.com/hakula139/oxide-code/pull/333))
+- _(tui)_ Preserve blank context lines and hunk boundaries in `/diff`, show both paths for renamed files, and keep truncation notices separate from the diff ([#379](https://github.com/hakula139/oxide-code/pull/379))
+- _(tui)_ On Windows, report unsupported ANSI terminals before entering terminal mode ([#387](https://github.com/hakula139/oxide-code/pull/387))
+- _(tui)_ Restore the terminal if initialization fails and make usage indicators easier to read ([#342](https://github.com/hakula139/oxide-code/pull/342), [#288](https://github.com/hakula139/oxide-code/pull/288))
+- _(engine)_ Warn about unreadable instruction files and show changed files on resume as notices. Headless `stream-json` exposes these as `notice` events ([#353](https://github.com/hakula139/oxide-code/pull/353))
+- _(tui)_ Display the home directory itself as `~` ([#344](https://github.com/hakula139/oxide-code/pull/344))
+- _(driver)_ Warn when SIGTERM or SIGHUP handlers cannot be registered ([#352](https://github.com/hakula139/oxide-code/pull/352))
+- _(model)_ Correct Sonnet 5.5 cache-read cost estimates ([#334](https://github.com/hakula139/oxide-code/pull/334))
+
+### Changed
+
+- _(tool)_ Run consecutive read, grep, and glob calls in parallel after their permission checks ([#276](https://github.com/hakula139/oxide-code/pull/276))
+
 ## [0.1.0-alpha.3] - 2026-10-17
 
 ### Highlights
@@ -148,6 +198,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - _(deps)_ Bump rustls-webpki and rand for Dependabot alerts (#17)
 - _(deps)_ Bump rustls-webpki from 0.103.12 to 0.103.13 (#34)
 
+[0.1.0-alpha.4]: https://github.com/hakula139/oxide-code/compare/v0.1.0-alpha.3..v0.1.0-alpha.4
 [0.1.0-alpha.3]: https://github.com/hakula139/oxide-code/compare/v0.1.0-alpha.2..v0.1.0-alpha.3
 [0.1.0-alpha.2]: https://github.com/hakula139/oxide-code/compare/v0.1.0-alpha.1..v0.1.0-alpha.2
 [0.1.0-alpha.1]: https://github.com/hakula139/oxide-code/releases/tag/v0.1.0-alpha.1
