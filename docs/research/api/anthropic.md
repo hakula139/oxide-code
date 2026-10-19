@@ -1,6 +1,6 @@
 # Anthropic API Authentication
 
-Research notes on how to authenticate with the Anthropic Messages API using OAuth tokens from Claude Code. These findings are based on reverse-engineering [Claude Code](https://github.com/hakula139/claude-code) and testing against the production API. A claim about what Claude Code sends that names no release was checked against the frozen 2.1.87 source that [Sources](#sources) lists.
+Research notes on how to authenticate with the Anthropic Messages API using OAuth tokens from Claude Code. These findings are based on reverse-engineering [Claude Code](https://github.com/hakula139/claude-code) and testing against the production API. Unless another source is cited, a claim about what Claude Code sends that names no release was checked against the frozen 2.1.87 source that [Sources](#sources) lists.
 
 ## Authentication Methods
 
@@ -72,7 +72,7 @@ Additional useful betas:
 
 Haiku is the one family whose beta set differs: Claude Code moves `claude-code-20250219` later in the agentic sequence on Haiku and, per the frozen 2.1.87 source, leaves it off Haiku one-shots.
 
-- **`prompt-caching-scope` ships unconditionally.** Claude Code 2.1.296 sends it on every model, and the header alone is a server-side no-op without a matching `cache_control.scope` field.
+- **`prompt-caching-scope` ships on every agentic request.** On agentic requests, Claude Code 2.1.121 sent it to a custom base URL and 2.1.296 sends it on every model. The 2.1.87 source sent it only to the first-party API. The header alone is a server-side no-op without a matching `cache_control.scope` field.
 - **`effort` and `context-management` betas need a body field.** Sending the header alone is a silent no-op: the request runs at the server default. See [Agentic Request Body Fields](#agentic-request-body-fields) for the matching `output_config.effort` and `context_management.edits` shapes.
 
 On agentic Opus 5.5 and Sonnet 5.5 requests, and by inference Fable 5.1, Claude Code 2.1.296 sends `claude-code-20250219, interleaved-thinking-2025-05-14, thinking-token-count-2026-05-13, context-management-2025-06-27, prompt-caching-scope-2026-01-05, mid-conversation-system-2026-04-07, per-turn-control-2026-07-01, advisor-tool-2026-03-01, effort-2025-11-24`. On Haiku 5.5 it moves `claude-code-20250219` to just after `mid-conversation-system-2026-04-07`. Both sequences were captured from `claude --bare -p` with an API key on 2026-10-15. Fable 5.1 was not captured on 2.1.296, but on Claude Code 2.1.301 `claude --bare -p` sent Fable 5.1 and Opus 5.5 identical betas against a local listener on 2026-10-17. Under OAuth, the frozen 2.1.87 source puts `oauth-2025-04-20` right after the leading `claude-code-20250219`, or first on Haiku. That slot was not captured.
@@ -127,14 +127,14 @@ The entrypoint is `cli` for interactive sessions.
 
 The `cch` field is a request integrity hash used for feature gating (fast mode) and billing attribution. It was reverse-engineered in February 2026 from Anthropic's custom Bun binary, with examples from Claude Code 2.1.37 ([a10k.co writeup](https://a10k.co/b/reverse-engineering-claude-code-cch.html)).
 
-How it works:
+How it works in the 2.1.37 binary the writeup analyzed:
 
 1. The JavaScript layer writes a `cch=00000` placeholder into the billing header. The 2.1.87 source gates this step on the `feature('NATIVE_CLIENT_ATTESTATION')` compile-time flag.
 2. The request body is serialized to JSON with the placeholder in place.
 3. Bun's native HTTP stack (compiled Zig, `bun-anthropic/src/http/Attestation.zig`) intercepts the `fetch()` call, detects the placeholder, and computes `xxHash64(body_bytes, seed) & 0xFFFFF`.
 4. The five `0` characters are overwritten in-place with the 5-char hex result before sending.
 
-Constants:
+Constants from the writeup:
 
 - **Seed**: `0x6E52736AC806831E` (64-bit, embedded in the binary's data section).
 - **Mask**: `& 0xFFFFF` (20 bits → 5 hex chars, zero-padded).
@@ -145,7 +145,7 @@ The hash covers the entire serialized body (messages, tools, metadata, model, th
 
 #### Known Bug: cch Substitution Breaks Prompt Cache
 
-The Bun binary performs a global find-and-replace of `cch=` values across the entire serialized request body, including historical tool results. If any tool result in the conversation contains a `cch=XXXXX` string (e.g., from reading proxy logs or session JSONL files), the substitution rewrites those historical bytes on every turn, changing the conversation prefix and permanently invalidating the prompt cache. This wastes 30-50K+ tokens per turn and never self-heals. Tracked as [anthropics/claude-code#40652](https://github.com/anthropics/claude-code/issues/40652), partially mitigated in v2.1.90-91.
+[anthropics/claude-code#40652](https://github.com/anthropics/claude-code/issues/40652) reports that the Bun binary performs a global find-and-replace of `cch=` values across the entire serialized request body, including historical tool results. If any tool result in the conversation contains a `cch=XXXXX` string (e.g., from reading proxy logs or session JSONL files), the substitution rewrites those historical bytes on every turn, changing the conversation prefix and permanently invalidating the prompt cache. This wastes 30-50K+ tokens per turn and never self-heals. The issue reports the behavior partially mitigated in v2.1.90-91.
 
 oxide-code avoids this: it serializes with `serde_json`, replaces only the first occurrence via `str::replacen`, and never mutates historical message content.
 
