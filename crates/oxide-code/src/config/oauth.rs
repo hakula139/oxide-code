@@ -3,11 +3,13 @@
 
 use std::fmt;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow, bail};
 use serde::{Deserialize, Serialize};
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, OwnedMutexGuard};
+use tokio_util::task::TaskTracker;
 use tracing::{debug, warn};
 
 #[cfg(target_os = "macos")]
@@ -206,6 +208,7 @@ impl fmt::Display for Backend<'_> {
 
 /// Where one login lives: an optional Keychain entry read first, then a file holding Claude Code's
 /// credentials JSON, plus the lock directory that serializes writes across processes.
+#[derive(Clone)]
 struct Store<'a> {
     login: Login,
     keychain: Option<&'a dyn Keychain>,
@@ -272,10 +275,7 @@ impl Store<'_> {
 }
 
 /// Stores tokens from `/login` as the oxide-code login, which refreshes at `token_url`.
-pub(super) async fn save_login(
-    tokens: &TokenResponse,
-    token_url: &str,
-) -> Result<SessionLogin<'static>> {
+pub(super) async fn save_login(tokens: &TokenResponse, token_url: &str) -> Result<SessionLogin> {
     let store = Store::locate(Login::Ox, None)?;
     let token = store.save(tokens).await?;
     Ok(SessionLogin::new(store, token_url, token))
@@ -290,14 +290,14 @@ pub(crate) async fn delete_login() -> Result<bool> {
 
 /// A stored login as a session sends it: the store it lives in, the endpoint that refreshes it,
 /// and its current access token. The store is read again only near expiry or after a 401.
-pub(super) struct SessionLogin<'a> {
-    store: Store<'a>,
+pub(super) struct SessionLogin {
+    store: Store<'static>,
     refresh_url: String,
     /// Held across each reload, so concurrent requests wait for a single refresh.
-    token: Mutex<Token>,
+    token: Arc<Mutex<Token>>,
 }
 
-impl SessionLogin<'static> {
+impl SessionLogin {
     /// Loads the login, refreshing it near expiry. The Claude Code login reads `keychain` first,
     /// then `~/.claude/.credentials.json`. The oxide-code login reads
     /// `$XDG_DATA_HOME/ox/credentials.json`.
@@ -311,14 +311,12 @@ impl SessionLogin<'static> {
         let token = load_token_from(&store, OAUTH_TOKEN_URL, trust, None).await?;
         Ok(Self::new(store, OAUTH_TOKEN_URL, token))
     }
-}
 
-impl<'a> SessionLogin<'a> {
-    fn new(store: Store<'a>, refresh_url: &str, token: Token) -> Self {
+    fn new(store: Store<'static>, refresh_url: &str, token: Token) -> Self {
         Self {
             store,
             refresh_url: refresh_url.to_owned(),
-            token: Mutex::new(token),
+            token: Arc::new(Mutex::new(token)),
         }
     }
 
@@ -336,12 +334,16 @@ impl<'a> SessionLogin<'a> {
     }
 
     /// The access token for the next request, reloaded from the store first when it nears expiry.
-    pub(super) async fn access_token(&self, trust: &dyn Trust) -> Result<String, LoginError> {
-        let mut token = self.token.lock().await;
-        if is_near_expiry(token.expires_at_ms) {
-            *token = load_token_from(&self.store, &self.refresh_url, trust, None).await?;
+    pub(super) async fn access_token(
+        &self,
+        trust: &Arc<dyn Trust>,
+        reloads: &TaskTracker,
+    ) -> Result<String, LoginError> {
+        let token = Arc::clone(&self.token).lock_owned().await;
+        if !is_near_expiry(token.expires_at_ms) {
+            return Ok(token.access_token.clone());
         }
-        Ok(token.access_token.clone())
+        self.reload_detached(token, trust, reloads, None).await
     }
 
     /// A token to send in place of `rejected`, which the API rejected with HTTP 401: one another
@@ -350,13 +352,41 @@ impl<'a> SessionLogin<'a> {
     pub(super) async fn reload(
         &self,
         rejected: &str,
-        trust: &dyn Trust,
+        trust: &Arc<dyn Trust>,
+        reloads: &TaskTracker,
     ) -> Result<String, LoginError> {
-        let mut token = self.token.lock().await;
-        if token.access_token == rejected {
-            *token = load_token_from(&self.store, &self.refresh_url, trust, Some(rejected)).await?;
+        let token = Arc::clone(&self.token).lock_owned().await;
+        if token.access_token != rejected {
+            return Ok(token.access_token.clone());
         }
-        Ok(token.access_token.clone())
+        self.reload_detached(token, trust, reloads, Some(rejected))
+            .await
+    }
+
+    /// Reloads `token` from the store on a task in `reloads`, so the session can wait for it before
+    /// exiting. The task holds the lock until it finishes. A refresh invalidates the stored refresh
+    /// token, so the rotated tokens must reach the store and `token` even when the request awaiting
+    /// them is dropped. Nothing aborts the task, so awaiting it fails only when it panics, and the
+    /// panic resumes in the caller.
+    async fn reload_detached(
+        &self,
+        mut token: OwnedMutexGuard<Token>,
+        trust: &Arc<dyn Trust>,
+        reloads: &TaskTracker,
+        rejected: Option<&str>,
+    ) -> Result<String, LoginError> {
+        let store = self.store.clone();
+        let refresh_url = self.refresh_url.clone();
+        let trust = Arc::clone(trust);
+        let rejected = rejected.map(str::to_owned);
+        reloads
+            .spawn(async move {
+                *token = load_token_from(&store, &refresh_url, trust.as_ref(), rejected.as_deref())
+                    .await?;
+                Ok(token.access_token.clone())
+            })
+            .await
+            .unwrap_or_else(|e| std::panic::resume_unwind(e.into_panic()))
     }
 }
 
@@ -826,6 +856,11 @@ fn is_stale_lock(path: &Path) -> bool {
 #[cfg(test)]
 pub(crate) mod testing {
     use std::path::Path;
+    use std::sync::{Arc, Mutex, mpsc};
+
+    use tokio::sync::Notify;
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, Request, ResponseTemplate};
 
     use super::{Login, SessionLogin, Store, Token};
     use crate::config::auth::Auth;
@@ -864,6 +899,55 @@ pub(crate) mod testing {
         })
     }
 
+    /// A token endpoint that holds its reply to a refresh until [`Self::release`], so a test can
+    /// drop the request awaiting the refresh while it is in flight.
+    pub(crate) struct HeldRefresh {
+        arrived: Arc<Notify>,
+        release: mpsc::Sender<()>,
+    }
+
+    impl HeldRefresh {
+        /// Mounts the endpoint at `/` on `server`, expecting exactly one refresh, which it answers
+        /// with `fresh-access` and `fresh-refresh`.
+        pub(crate) async fn mount(server: &MockServer) -> Self {
+            let arrived = Arc::new(Notify::new());
+            let (release, gate) = mpsc::channel();
+            let (notify, gate) = (Arc::clone(&arrived), Mutex::new(gate));
+            Mock::given(method("POST"))
+                .and(path("/"))
+                .respond_with(move |_: &Request| {
+                    notify.notify_one();
+                    // Blocks only the mock server's own thread, until `release` drops.
+                    _ = gate.lock().unwrap().recv();
+                    ResponseTemplate::new(200).set_body_json(ok_refresh_body(
+                        "fresh-access",
+                        "fresh-refresh",
+                        3600,
+                    ))
+                })
+                .expect(1)
+                .mount(server)
+                .await;
+            Self { arrived, release }
+        }
+
+        /// Spawns `request`, then aborts it once its refresh reaches the endpoint.
+        pub(crate) async fn abort_mid_refresh<F>(&self, request: F)
+        where
+            F: Future<Output: Send + 'static> + Send + 'static,
+        {
+            let request = tokio::spawn(request);
+            self.arrived.notified().await;
+            request.abort();
+            assert!(request.await.is_err_and(|e| e.is_cancelled()));
+        }
+
+        /// Lets the endpoint answer the held refresh.
+        pub(crate) fn release(self) {
+            drop(self.release);
+        }
+    }
+
     /// The oxide-code login stored in `file`, as a session holds it: sending `access_token` until
     /// `expires_at_ms`, then refreshing at `refresh_url`.
     pub(crate) fn ox_login_in(
@@ -894,11 +978,11 @@ mod tests {
     use wiremock::matchers::{method, path as wm_path};
     use wiremock::{Mock, MockServer, Request, ResponseTemplate};
 
-    use super::testing::{creds_json, ok_refresh_body, write_creds};
+    use super::testing::{HeldRefresh, creds_json, ok_refresh_body, write_creds};
     use super::*;
     use crate::util::path::testing::{HOME_VAR, abs};
     use crate::util::tls::PlatformTrust;
-    use crate::util::tls::testing::{NoRoots, TEST_CA_PEM};
+    use crate::util::tls::testing::{NoRoots, TEST_CA_PEM, no_roots};
 
     fn store<'a>(keychain: Option<&'a dyn Keychain>, file: &Path, lock: &Path) -> Store<'a> {
         Store {
@@ -909,9 +993,14 @@ mod tests {
         }
     }
 
+    fn read_json(path: &Path) -> serde_json::Value {
+        serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap()
+    }
+
     struct FakeKeychain {
         entry: Mutex<Option<String>>,
         denies: bool,
+        panics: bool,
         writable: bool,
     }
 
@@ -927,6 +1016,7 @@ mod tests {
             Self {
                 entry: Mutex::new(None),
                 denies: false,
+                panics: false,
                 writable: true,
             }
         }
@@ -934,6 +1024,13 @@ mod tests {
         fn denying() -> Self {
             Self {
                 denies: true,
+                ..Self::empty()
+            }
+        }
+
+        fn panicking() -> Self {
+            Self {
+                panics: true,
                 ..Self::empty()
             }
         }
@@ -949,6 +1046,7 @@ mod tests {
 
     impl Keychain for FakeKeychain {
         fn read(&self) -> Result<Option<String>, LoginError> {
+            assert!(!self.panics, "Keychain read panicked");
             if self.denies {
                 return Err(LoginError::KeychainDenied);
             }
@@ -1073,12 +1171,12 @@ mod tests {
     mod session_login {
         use super::*;
 
-        fn session_login<'a>(
-            store: Store<'a>,
+        fn session_login(
+            store: Store<'static>,
             refresh_url: &str,
             access_token: &str,
             expires_at_ms: u64,
-        ) -> SessionLogin<'a> {
+        ) -> SessionLogin {
             let token = Token {
                 access_token: access_token.to_owned(),
                 expires_at_ms,
@@ -1128,7 +1226,10 @@ mod tests {
                     9_999_999_999_999,
                 );
 
-                let token = login.access_token(&NoRoots).await.unwrap();
+                let token = login
+                    .access_token(&no_roots(), &TaskTracker::new())
+                    .await
+                    .unwrap();
 
                 assert_eq!(token, "held");
             }
@@ -1150,15 +1251,15 @@ mod tests {
                 let near_expiry = now_millis().unwrap() + 60_000;
                 // The refused write-back leaves the store stale, so only the shared token
                 // stops a second refresh.
-                let keychain = FakeKeychain {
+                let keychain: &'static FakeKeychain = Box::leak(Box::new(FakeKeychain {
                     writable: false,
                     ..FakeKeychain::holding(
                         creds_json("stale", Some("old-refresh"), near_expiry).to_string(),
                     )
-                };
+                }));
                 let login = session_login(
                     store(
-                        Some(&keychain),
+                        Some(keychain),
                         &dir.path().join("creds.json"),
                         &dir.path().join("lock"),
                     ),
@@ -1166,13 +1267,77 @@ mod tests {
                     "stale",
                     near_expiry,
                 );
+                let (trust, reloads) = (no_roots(), TaskTracker::new());
 
-                let (first, second) =
-                    tokio::join!(login.access_token(&NoRoots), login.access_token(&NoRoots),);
+                let (first, second) = tokio::join!(
+                    login.access_token(&trust, &reloads),
+                    login.access_token(&trust, &reloads)
+                );
 
                 assert_eq!(first.unwrap(), "fresh-access");
                 assert_eq!(second.unwrap(), "fresh-access");
                 server.verify().await;
+            }
+
+            #[tokio::test]
+            async fn dropped_mid_refresh_still_stores_and_holds_the_rotated_tokens() {
+                let server = MockServer::start().await;
+                let refresh = HeldRefresh::mount(&server).await;
+                let dir = tempfile::tempdir().unwrap();
+                let creds = dir.path().join("creds.json");
+                write_creds(&creds, "expired", Some("old-refresh"), 0);
+                let login = Arc::new(session_login(
+                    store(None, &creds, &dir.path().join("lock")),
+                    &server.uri(),
+                    "expired",
+                    0,
+                ));
+                let reloads = TaskTracker::new();
+
+                refresh
+                    .abort_mid_refresh({
+                        let (login, reloads) = (Arc::clone(&login), reloads.clone());
+                        async move { login.access_token(&no_roots(), &reloads).await }
+                    })
+                    .await;
+                refresh.release();
+                reloads.close();
+                reloads.wait().await;
+
+                assert_eq!(login.cached_token(), "fresh-access");
+                let stored = &read_json(&creds)["claudeAiOauth"];
+                assert_eq!(stored["accessToken"], "fresh-access");
+                assert_eq!(stored["refreshToken"], "fresh-refresh");
+                server.verify().await;
+            }
+
+            #[tokio::test]
+            async fn a_panicking_reload_fails_the_request_with_its_panic_and_frees_the_token() {
+                let dir = tempfile::tempdir().unwrap();
+                let keychain: &'static FakeKeychain =
+                    Box::leak(Box::new(FakeKeychain::panicking()));
+                let login = Arc::new(session_login(
+                    store(
+                        Some(keychain),
+                        &dir.path().join("creds.json"),
+                        &dir.path().join("lock"),
+                    ),
+                    "http://should-not-be-called",
+                    "expired",
+                    0,
+                ));
+
+                let request = tokio::spawn({
+                    let login = Arc::clone(&login);
+                    async move { login.access_token(&no_roots(), &TaskTracker::new()).await }
+                });
+                let panic = request.await.unwrap_err().into_panic();
+
+                assert_eq!(
+                    panic.downcast_ref::<&str>(),
+                    Some(&"Keychain read panicked")
+                );
+                assert_eq!(login.cached_token(), "expired");
             }
         }
 
@@ -1190,23 +1355,52 @@ mod tests {
                     "rejected",
                     9_999_999_999_999,
                 );
+                let (trust, reloads) = (no_roots(), TaskTracker::new());
 
-                let reloaded = login.reload("rejected", &NoRoots).await.unwrap();
+                let reloaded = login.reload("rejected", &trust, &reloads).await.unwrap();
                 write_creds(&creds, "rotated-again", Some("ref"), 9_999_999_999_999);
-                let late = login.reload("rejected", &NoRoots).await.unwrap();
+                let late = login.reload("rejected", &trust, &reloads).await.unwrap();
 
                 assert_eq!(reloaded, "rotated");
                 assert_eq!(late, "rotated", "a replaced token is not reloaded again");
+            }
+
+            #[tokio::test]
+            async fn dropped_mid_refresh_still_stores_and_holds_the_rotated_tokens() {
+                let server = MockServer::start().await;
+                let refresh = HeldRefresh::mount(&server).await;
+                let dir = tempfile::tempdir().unwrap();
+                let creds = dir.path().join("creds.json");
+                write_creds(&creds, "rejected", Some("old-refresh"), 9_999_999_999_999);
+                let login = Arc::new(session_login(
+                    store(None, &creds, &dir.path().join("lock")),
+                    &server.uri(),
+                    "rejected",
+                    9_999_999_999_999,
+                ));
+                let reloads = TaskTracker::new();
+
+                refresh
+                    .abort_mid_refresh({
+                        let (login, reloads) = (Arc::clone(&login), reloads.clone());
+                        async move { login.reload("rejected", &no_roots(), &reloads).await }
+                    })
+                    .await;
+                refresh.release();
+                reloads.close();
+                reloads.wait().await;
+
+                assert_eq!(login.cached_token(), "fresh-access");
+                let stored = &read_json(&creds)["claudeAiOauth"];
+                assert_eq!(stored["accessToken"], "fresh-access");
+                assert_eq!(stored["refreshToken"], "fresh-refresh");
+                server.verify().await;
             }
         }
     }
 
     mod load_token_from {
         use super::*;
-
-        fn read_json(path: &Path) -> serde_json::Value {
-            serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap()
-        }
 
         async fn mock_refresh_server() -> MockServer {
             let server = MockServer::start().await;

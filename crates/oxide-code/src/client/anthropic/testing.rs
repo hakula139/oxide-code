@@ -6,6 +6,7 @@ use std::sync::{Arc, Mutex};
 use bytes::Bytes;
 use indoc::writedoc;
 use reqwest::header::HeaderMap;
+use tokio_util::task::TaskTracker;
 use wiremock::ResponseTemplate;
 
 use super::Client;
@@ -86,6 +87,7 @@ pub(super) fn messages_request(url: impl Into<String>) -> MessagesRequest {
         body: Bytes::from_static(b"{}"),
         auth: api_key(),
         trust: Arc::new(NoRoots),
+        reloads: TaskTracker::new(),
     }
 }
 

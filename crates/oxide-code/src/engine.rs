@@ -862,13 +862,17 @@ impl Engine {
         self.title_usage = None;
     }
 
-    /// Ends the background shells, then flushes and closes the live session, returning the write
-    /// failure if any.
+    /// Ends the background shells, flushes and closes the live session, then waits for the
+    /// stored-login reloads still in flight, such as one the aborted title request started, so
+    /// exiting does not cancel their write-back. Returns the session's write failure, if any.
     async fn finalize(self) -> Option<String> {
         self.shells.stop_all().await;
-        self.session
+        let failure = self
+            .session
             .finalize(self.file_tracker.snapshot_all())
-            .await
+            .await;
+        self.client.finish_reloads().await;
+        failure
     }
 }
 
