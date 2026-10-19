@@ -44,7 +44,7 @@ ox -p "<prompt>"                            # Headless: run one turn and print t
 ├── pnpm-workspace.yaml                     # Dependency overrides for pnpm
 ├── RELEASING.md                            # Release procedure, versioning, and stability surface
 ├── rust-toolchain.toml                     # Pinned Rust release
-├── scripts/                                # Release helpers and pre-commit checks
+├── scripts/                                # Homebrew formula updater run by the Release workflow
 └── SECURITY.md                             # Vulnerability reporting and trust model
 ```
 
