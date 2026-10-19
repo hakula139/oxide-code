@@ -25,6 +25,7 @@ ox -p "<prompt>"                            # Headless: run one turn and print t
 ├── .prettierrc                             # Prettier settings for JSON, Markdown, and YAML
 ├── .taplo.toml                             # TOML formatter settings
 ├── .vscode/                                # Shared VS Code settings
+├── .worktreeinclude                        # Gitignored agent memory that Claude Code copies into new worktrees
 ├── about.hbs                               # Plain-text third-party notice template
 ├── about.toml                              # Release dependency license selection
 ├── Cargo.toml                              # Workspace manifest for the MSRV, lints, shared dependencies, and build profiles
