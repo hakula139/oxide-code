@@ -301,20 +301,6 @@ mod tests {
         use super::*;
 
         #[test]
-        fn output_picks_a_headless_format_and_defaults_to_text() {
-            let cli =
-                Cli::try_parse_from(["ox", "-p", "hello", "--output", "stream-json"]).unwrap();
-            assert_eq!(cli.output, OutputFormat::StreamJson);
-            let cli = Cli::try_parse_from(["ox", "-p", "hello"]).unwrap();
-            assert_eq!(cli.output, OutputFormat::Text);
-            let missing = Cli::try_parse_from(["ox", "--output", "json"]).err();
-            assert_eq!(
-                missing.map(|error| error.kind()),
-                Some(ErrorKind::MissingRequiredArgument),
-            );
-        }
-
-        #[test]
         fn mode_takes_a_permission_mode() {
             let cli = Cli::try_parse_from(["ox", "--mode", "plan"]).unwrap();
             assert_eq!(cli.mode, Some(Mode::Plan));
@@ -342,6 +328,20 @@ mod tests {
             ] {
                 assert!(help.contains(line), "{help}");
             }
+        }
+
+        #[test]
+        fn output_picks_a_headless_format_and_defaults_to_text() {
+            let cli =
+                Cli::try_parse_from(["ox", "-p", "hello", "--output", "stream-json"]).unwrap();
+            assert_eq!(cli.output, OutputFormat::StreamJson);
+            let cli = Cli::try_parse_from(["ox", "-p", "hello"]).unwrap();
+            assert_eq!(cli.output, OutputFormat::Text);
+            let missing = Cli::try_parse_from(["ox", "--output", "json"]).err();
+            assert_eq!(
+                missing.map(|error| error.kind()),
+                Some(ErrorKind::MissingRequiredArgument),
+            );
         }
 
         #[test]

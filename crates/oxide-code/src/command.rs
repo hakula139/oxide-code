@@ -298,6 +298,29 @@ mod tests {
         }
 
         #[test]
+        fn ambiguous_substring_lists_only_the_matching_rows() {
+            assert_eq!(
+                model("o").expect_err("ambiguous arg must error"),
+                indoc! {"
+                    Model `o` is ambiguous. Pick one or use a short alias (`fable`, `opus`, `sonnet`, `haiku`):
+
+                    - `claude-opus-5-5` — Claude Opus 5.5
+                    - `claude-sonnet-5-5` — Claude Sonnet 5.5"
+                },
+            );
+        }
+
+        #[test]
+        fn ambiguous_suggests_every_catalog_alias() {
+            let err = model("o").expect_err("ambiguous arg must error");
+
+            for info in MODELS {
+                let alias = format!("`{}`", info.family.id_token());
+                assert!(err.contains(&alias), "missing {alias}: {err}");
+            }
+        }
+
+        #[test]
         fn unknown_id_suggests_a_replacement_and_lists_the_catalog() {
             // IDs naming a family and a `[1m]` suffix also get the matching model as a suggestion.
             for (arg, expected) in [
@@ -336,29 +359,6 @@ mod tests {
                 ),
             ] {
                 assert_eq!(model(arg), Err(expected.to_owned()), "{arg}");
-            }
-        }
-
-        #[test]
-        fn ambiguous_substring_lists_only_the_matching_rows() {
-            assert_eq!(
-                model("o").expect_err("ambiguous arg must error"),
-                indoc! {"
-                    Model `o` is ambiguous. Pick one or use a short alias (`fable`, `opus`, `sonnet`, `haiku`):
-
-                    - `claude-opus-5-5` — Claude Opus 5.5
-                    - `claude-sonnet-5-5` — Claude Sonnet 5.5"
-                },
-            );
-        }
-
-        #[test]
-        fn ambiguous_suggests_every_catalog_alias() {
-            let err = model("o").expect_err("ambiguous arg must error");
-
-            for info in MODELS {
-                let alias = format!("`{}`", info.family.id_token());
-                assert!(err.contains(&alias), "missing {alias}: {err}");
             }
         }
     }

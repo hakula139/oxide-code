@@ -367,7 +367,7 @@ mod tests {
         }
 
         #[test]
-        fn unknown_model_is_absent() {
+        fn unknown_model_has_no_rates() {
             assert!(cost_rates("claude-future-9").is_none());
         }
     }
@@ -429,7 +429,7 @@ mod tests {
         }
 
         #[test]
-        fn is_none_for_unknown_model() {
+        fn omits_effort_for_an_unknown_model() {
             let model = spec("custom-model");
             assert_eq!(model.resolve_effort(None), None);
             assert_eq!(model.resolve_effort(Some(Effort::High)), None);
@@ -512,7 +512,7 @@ mod tests {
         }
 
         #[test]
-        fn unknown_model_is_none() {
+        fn unknown_model_has_no_known_window() {
             assert_eq!(spec("claude-future-9").context_window(), None);
         }
     }
