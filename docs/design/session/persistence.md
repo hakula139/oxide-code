@@ -108,11 +108,11 @@ There is no file-level lock: two processes resuming the same session both append
 
 ### AI-Generated Titles
 
-In the TUI, the first user prompt of a fresh session spawns a tokio task that asks Haiku through `Client::complete` for a 3-7 word sentence-case title, constrained by a structured-outputs JSON schema. The session owns the task, and finalizing the session on a roll or at exit aborts it first, so a late title never writes to or reports on a session that has ended. Generation failures only log a warning, while a failed title write surfaces like any other session write error.
+In the TUI, the first user prompt of a fresh session spawns a tokio task that requests a 3-7 word sentence-case title from Haiku through `Client::complete`, constrained by a structured-outputs JSON schema. Because the session owns this task, finalizing the session on a roll or at exit aborts it first, ensuring that a late title never writes to or reports on a session that has ended. Once the API answers, the task appends the request's `usage` entry before parsing the reply, since a reply without a usable title is billed too. Generation failures only log a warning, while a failed title or usage write surfaces like any other session write error.
 
 ### Session Cost
 
-Each request behind a turn, a `/compact` summary, or an auto-compaction summary appends a `usage` entry, while the background title request goes unrecorded. The entry holds a `uuid`, the request's `model` ID and `cache_ttl` (`"5m"` or `"1h"`), the four provider counts `input_tokens`, `cache_creation_input_tokens`, `cache_read_input_tokens`, and `output_tokens`, and a `timestamp`. The model and TTL let the engine price the request at the rates it ran with, even after a `/model` swap or a TTL change.
+Each request behind a turn, a `/compact` summary, an auto-compaction summary, or an AI title appends a `usage` entry. This entry records a `uuid`, the request's `model` ID, its `cache_ttl` (`"5m"` or `"1h"`), the four provider counts `input_tokens`, `cache_creation_input_tokens`, `cache_read_input_tokens`, and `output_tokens`, and a `timestamp`. Preserving the model and TTL allows the engine to price the request at the rates it ran with, even after a `/model` swap or a TTL change.
 
 On resume, the loader collects every `usage` entry in the file, including those on abandoned branches and before compact boundaries, since the session paid for each. The engine sums their estimated cost into the session total, which `/clear` resets with the fresh session. A file without `usage` entries resumes with a cost of zero. Older binaries skip `usage` lines as unknown entries and still resume the transcript.
 

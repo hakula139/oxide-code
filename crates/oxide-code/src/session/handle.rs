@@ -908,6 +908,9 @@ mod tests {
             TitleSink(tx),
             "prompt".to_owned(),
         );
+        let usage = commands.recv().await.unwrap();
+        assert!(matches!(usage, SessionCmd::Usage { .. }));
+        actor.send(usage).await.unwrap();
         let SessionCmd::AppendAiTitle { title, ack } = commands.recv().await.unwrap() else {
             panic!("title generator must request AI append");
         };
