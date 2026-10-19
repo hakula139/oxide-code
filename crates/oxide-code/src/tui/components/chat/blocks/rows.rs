@@ -160,8 +160,7 @@ impl<'a> NumberedRows<'a> {
         text: &str,
         text_style: Style,
     ) {
-        let expanded = expand_tabs(text);
-        let display_text = truncate_to_bytes(&expanded, MAX_ROW_BYTES);
+        let display_text = self.ctx.cap_row(&expand_tabs(text));
         let line_number = format!("{:>width$}", number, width = self.number_width);
         let bg = self.row_bg.unwrap_or_default();
         let rendered = Line::from(vec![
@@ -213,7 +212,7 @@ fn pad_to_width(line: &mut Line<'static>, target_width: usize, bg: Style) {
 
 // ── Truncation ──
 
-/// Byte budget for the text of one row, past which [`truncate_to_bytes`] cuts it.
+/// Byte budget for one row's text in the compact view, past which [`truncate_to_bytes`] cuts it.
 pub(super) const MAX_ROW_BYTES: usize = 512;
 
 /// Cuts `s` to at most `max_bytes` on a char boundary and marks the cut with [`ELLIPSIS`].
@@ -562,24 +561,31 @@ mod tests {
         }
 
         #[test]
-        fn truncates_overlong_text_to_byte_budget() {
+        fn cuts_overlong_text_to_the_byte_budget_until_expanded() {
             let theme = Theme::default();
-            let ctx = RenderCtx {
-                width: 4096,
-                theme: &theme,
-                show_thinking: true,
-                expanded: false,
-                expand_hint: None,
-            };
-            let renderer = NumberedRows::new(&ctx, theme.tool_border(), 1);
-            let mut out = Vec::new();
             let long = "a".repeat(MAX_ROW_BYTES + 50);
-            renderer.render(&mut out, 1, &long, theme.text());
+            let text_in = |expanded| {
+                let ctx = RenderCtx {
+                    width: 4096,
+                    theme: &theme,
+                    show_thinking: true,
+                    expanded,
+                    expand_hint: None,
+                };
+                let mut out = Vec::new();
+                NumberedRows::new(&ctx, theme.tool_border(), 1).render(
+                    &mut out,
+                    1,
+                    &long,
+                    theme.text(),
+                );
+                out[0].spans[3].content.to_string()
+            };
 
-            assert_eq!(
-                out[0].spans[3].content,
-                format!("{}...", "a".repeat(MAX_ROW_BYTES)),
-            );
+            let (compact, expanded) = (text_in(false), text_in(true));
+
+            assert_eq!(compact, format!("{}...", "a".repeat(MAX_ROW_BYTES)));
+            assert_eq!(expanded, long);
         }
 
         #[test]

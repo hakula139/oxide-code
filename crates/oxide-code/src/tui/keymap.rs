@@ -60,6 +60,13 @@ pub(crate) struct KeyAction<A, V> {
     pub(crate) label: fn(&V) -> Option<&'static str>,
 }
 
+impl<A, V> KeyAction<A, V> {
+    /// The `{key} {label}` hint in `view`, or `None` while the action is unlabeled there.
+    fn hint(&self, view: &V) -> Option<String> {
+        (self.label)(view).map(|label| format!("{} {label}", self.key))
+    }
+}
+
 /// A modal's or the app's key actions, in hint order.
 pub(crate) struct Keymap<A: 'static, V: 'static> {
     actions: &'static [KeyAction<A, V>],
@@ -80,9 +87,9 @@ impl<A: Copy, V> Keymap<A, V> {
 
     /// Each action labeled in `view` with its `{key} {label}` hint, in table order.
     pub(crate) fn hints<'a>(&'a self, view: &'a V) -> impl Iterator<Item = (A, String)> + 'a {
-        self.actions.iter().filter_map(move |entry| {
-            (entry.label)(view).map(|label| (entry.action, format!("{} {label}", entry.key)))
-        })
+        self.actions
+            .iter()
+            .filter_map(move |entry| Some((entry.action, entry.hint(view)?)))
     }
 
     /// The `{key} {label}` hint of `action` in `view`, or `None` while it is unlabeled there.
@@ -90,8 +97,10 @@ impl<A: Copy, V> Keymap<A, V> {
     where
         A: PartialEq,
     {
-        self.hints(view)
-            .find_map(|(entry, hint)| (entry == action).then_some(hint))
+        self.actions
+            .iter()
+            .filter(|entry| entry.action == action)
+            .find_map(|entry| entry.hint(view))
     }
 }
 

@@ -36,23 +36,11 @@ pub(super) enum AppAction {
     ToggleExpanded,
 }
 
-/// The app state that [`APP_KEYMAP`]'s hints read.
-pub(super) struct AppView {
-    /// Whether the chat shows every block in full.
-    pub(super) expanded: bool,
-}
-
 /// The app's key actions, which take their keys before the input box sees them.
-pub(super) const APP_KEYMAP: Keymap<AppAction, AppView> = Keymap::new(&[KeyAction {
+pub(super) const APP_KEYMAP: Keymap<AppAction, ()> = Keymap::new(&[KeyAction {
     action: AppAction::ToggleExpanded,
     key: KeyChord::ctrl('o'),
-    label: |view| {
-        Some(if view.expanded {
-            "to collapse"
-        } else {
-            "to expand"
-        })
-    },
+    label: |()| Some("to expand"),
 }]);
 
 #[cfg(test)]
@@ -72,14 +60,10 @@ mod tests {
                 APP_KEYMAP.action_for(&ctrl_o),
                 Some(AppAction::ToggleExpanded),
             );
-            for (expanded, hint) in [(false, "Ctrl+O to expand"), (true, "Ctrl+O to collapse")] {
-                assert_eq!(
-                    APP_KEYMAP
-                        .hint(AppAction::ToggleExpanded, &AppView { expanded })
-                        .as_deref(),
-                    Some(hint),
-                );
-            }
+            assert_eq!(
+                APP_KEYMAP.hint(AppAction::ToggleExpanded, &()).as_deref(),
+                Some("Ctrl+O to expand"),
+            );
         }
     }
 }

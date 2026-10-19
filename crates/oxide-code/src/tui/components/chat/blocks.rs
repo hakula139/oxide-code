@@ -29,7 +29,7 @@ use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 use unicode_width::UnicodeWidthStr;
 
-use self::rows::prefixed_row;
+use self::rows::{MAX_ROW_BYTES, prefixed_row, truncate_to_bytes};
 use crate::tui::glyphs::INLINE_SEPARATOR;
 use crate::tui::markdown::render_markdown;
 use crate::tui::theme::Theme;
@@ -57,6 +57,16 @@ impl RenderCtx<'_> {
     /// The most items a body shows: `compact` in the compact view, or all of them when expanded.
     pub(super) fn cap(&self, compact: usize) -> usize {
         if self.expanded { usize::MAX } else { compact }
+    }
+
+    /// `text` as one body row shows it: cut to [`MAX_ROW_BYTES`] in the compact view, or whole
+    /// when expanded.
+    pub(super) fn cap_row(&self, text: &str) -> String {
+        if self.expanded {
+            text.to_owned()
+        } else {
+            truncate_to_bytes(text, MAX_ROW_BYTES)
+        }
     }
 
     /// `text` followed by the expand hint, as in `... +3 lines · Ctrl+O to expand`.

@@ -132,8 +132,8 @@ fn thinking_styles(ctx: &RenderCtx<'_>) -> SectionStyles {
 
 // ── ProgressUpdate ──
 
-/// A note the model wrote before a tool call, rendered as assistant prose. Hidden while the
-/// thinking blocks show their bodies, which already hold the same text.
+/// A note the model wrote before a tool call, rendered as assistant prose. Hidden when
+/// `show_thinking` is on, since the thinking block then holds the same text.
 pub(crate) struct ProgressUpdate {
     text: String,
 }
@@ -151,7 +151,7 @@ impl ChatBlock for ProgressUpdate {
     }
 
     fn visible(&self, ctx: &RenderCtx<'_>) -> bool {
-        !(ctx.show_thinking && ctx.expanded)
+        !ctx.show_thinking
     }
 }
 
@@ -336,23 +336,25 @@ mod tests {
         use super::*;
 
         #[test]
-        fn shows_as_assistant_text_unless_expanded_thinking_holds_the_text() {
+        fn shows_as_assistant_text_only_while_thinking_is_hidden() {
             let theme = Theme::default();
             let block = ProgressUpdate::new("Found the loader.");
-            let compact = ctx_at(60, &theme);
-            let mut expanded = expanded_at(60, &theme);
+            let hidden = RenderCtx {
+                show_thinking: false,
+                ..ctx_at(60, &theme)
+            };
 
-            assert!(block.visible(&compact), "collapsed thinking hides the text");
-            assert!(
-                !block.visible(&expanded),
-                "the expanded thinking block already shows the text"
-            );
+            let visible = [ctx_at(60, &theme), expanded_at(60, &theme), hidden]
+                .map(|ctx| block.visible(&ctx));
 
-            expanded.show_thinking = false;
-            assert!(block.visible(&expanded));
             assert_eq!(
-                block.render(&compact),
-                AssistantText::new("Found the loader.").render(&compact),
+                visible,
+                [false, false, true],
+                "the thinking block holds the text in either view"
+            );
+            assert_eq!(
+                block.render(&hidden),
+                AssistantText::new("Found the loader.").render(&hidden),
             );
         }
     }

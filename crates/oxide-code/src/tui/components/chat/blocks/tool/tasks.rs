@@ -5,7 +5,7 @@ use ratatui::style::Style;
 
 use super::{MAX_TOOL_OUTPUT_LINES, overflow_footer};
 use crate::tool::tasks::Task;
-use crate::tui::components::chat::blocks::rows::{MAX_ROW_BYTES, body_row, truncate_to_bytes};
+use crate::tui::components::chat::blocks::rows::body_row;
 use crate::tui::components::chat::blocks::{BlockRows, RenderCtx};
 use crate::tui::components::tasks::{row_text, window};
 
@@ -21,7 +21,7 @@ pub(super) fn render(
             &mut out.lines,
             ctx,
             border_style,
-            truncate_to_bytes(&row_text(task), MAX_ROW_BYTES),
+            ctx.cap_row(&row_text(task)),
             ctx.theme.task_style(task.status),
         );
     }

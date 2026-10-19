@@ -21,7 +21,7 @@ Components are concrete structs (`ChatView`, `InputArea`, `StatusBar`, modals) t
 
 ### Named Keys
 
-The app's own keys live in `APP_KEYMAP` in `tui/action.rs`, a table of named `AppAction`s built from the `KeyAction`, `KeyChord`, and `Keymap` types in `tui/keymap.rs`. Each entry carries its key and a hint that can depend on the app's state, so the hint a block shows comes from the entry the key dispatches through. A key in the table works while no modal holds the keyboard and reaches the app before the input box. The `/resume` picker builds its keys and footer from the same types.
+The app's own keys live in `APP_KEYMAP` in `tui/action.rs`, a table of named `AppAction`s built from the `KeyAction`, `KeyChord`, and `Keymap` types in `tui/keymap.rs`. Each entry carries its key and hint, so the hint a footer shows comes from the entry the key dispatches through. A key in the table works while no modal holds the keyboard and reaches the app before the input box. The `/resume` picker builds its keys and footer from the same types.
 
 ### Async Event Loop
 
@@ -50,17 +50,17 @@ A resize, theme swap, or view toggle invalidates every cached block, so the chat
 
 - **Render near the viewport.** A frame renders the stale blocks within a viewport height of the rows it paints, nearest the anchored row first, and places the paint again after each one. It paints once every block in that range is current at the frame's width, theme, and view. Under auto-scroll, the range extends up from the tail.
 - **Estimate the rest.** A farther block keeps its last render as its height estimate until it comes into range, and a block that has never rendered counts as one blank row. An estimate above the range shifts every row in it equally, so the painted rows and the bottom clamp stay exact.
-- **Anchor on a block.** While scrolled up, a frame names the previous paint's top row by its block and its row within that block. When the block changes height, the row keeps its relative position, so the rows the user was reading stay in place as blocks above them render at a new width. Rows in a live reply are named by their distance from the last committed block, which keeps them in place when the reply commits. After the view toggles or a click expands a block, the row keeps its index in its block, since expanding or collapsing changes only what follows a block's head. Under auto-scroll, the paint stays on the tail.
+- **Anchor on a block.** While scrolled up, a frame names the previous paint's top row by its block and its row within that block. When the block changes height, the row keeps its relative position, so the rows the user was reading stay in place as blocks above them render at a new width. Rows in a live reply are named by their distance from the last committed block, which keeps them in place when the reply commits. After the view toggles or a click expands a block, the row keeps its index in its block, since expanding or collapsing changes only what follows a block's head. Under auto-scroll, the paint stays on the tail, and a paused paint that the change leaves at the bottom follows the tail again.
 - **Apply scrolls at render.** Scroll keys and the wheel add to a pending delta that the next frame applies to the anchored row. The render range spans the anchored row and the new top, so a burst of `PageUp` presses between frames lands on the same row as presses one frame apart. `Ctrl+Home` jumps to row 0, and scrolling down to the bottom re-arms auto-scroll.
 
 ## Compact and Expanded Views
 
 The chat opens in the compact view, and **Ctrl+O** switches between it and the expanded view:
 
-- **Compact.** A tool body shows its first rows, five for most tools and twenty for an edit's diff, and a list of edit locations shows eight. The rest collapse into one overflow footer, such as `... +3 lines · Ctrl+O to expand`, in `dim`, which says `files` or `tasks` for those lists and adds `(limit reached)` when the tool's own cap also cut them. Committed thinking shows only its `Thought` header. A click on a footer or header expands that block alone, as [Mouse Interactions](mouse-interactions.md#expanding-a-block) describes.
-- **Expanded.** Every tool body and thinking block renders in full, though each tool row still stops at 512 bytes. The toggle back drops the expansions made by clicks.
+- **Compact.** A tool body shows its first rows, five for most tools and twenty for an edit's diff, each cut at 512 bytes, and a list of edit locations shows eight. The rest collapse into one overflow footer, such as `... +3 lines · Ctrl+O to expand`, in `dim`, which says `files` or `tasks` for those lists and adds `(limit reached)` when the tool's own cap also cut them. Committed thinking shows only its `Thought` header. A click on a footer or header expands that block alone, as [Mouse Interactions](mouse-interactions.md#expanding-a-block) describes.
+- **Expanded.** Every tool body and thinking block renders in full. A toggle in either direction drops the expansions made by clicks.
 
-Thinking that is still streaming shows its body in both views under the spinner and `Thinking`. A progress note the model wrote before a tool call shows as prose unless the expanded view shows the thinking that holds the same text.
+Thinking that is still streaming shows its body in both views under the spinner and `Thinking`. A progress note the model wrote before a tool call shows as prose only while `show_thinking` is off, since otherwise the thinking block holds the same text.
 
 ## Streaming Markdown
 

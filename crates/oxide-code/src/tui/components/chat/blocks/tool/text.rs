@@ -3,7 +3,7 @@
 use ratatui::style::Style;
 
 use super::{MAX_TOOL_OUTPUT_LINES, overflow_footer};
-use crate::tui::components::chat::blocks::rows::{MAX_ROW_BYTES, body_row, truncate_to_bytes};
+use crate::tui::components::chat::blocks::rows::body_row;
 use crate::tui::components::chat::blocks::{BlockRows, RenderCtx};
 use crate::tui::wrap::expand_tabs;
 
@@ -37,8 +37,7 @@ pub(super) fn render(
     let shown = output_lines.len().min(ctx.cap(MAX_TOOL_OUTPUT_LINES));
 
     for text_line in &output_lines[..shown] {
-        let expanded = expand_tabs(text_line);
-        let display_text = truncate_to_bytes(&expanded, MAX_ROW_BYTES);
+        let display_text = ctx.cap_row(&expand_tabs(text_line));
         body_row(&mut out.lines, ctx, border_style, display_text, text_style);
     }
 
@@ -49,6 +48,7 @@ pub(super) fn render(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::tui::components::chat::blocks::rows::MAX_ROW_BYTES;
     use crate::tui::glyphs::TOOL_BORDER_CONT;
     use crate::tui::theme::Theme;
 
@@ -161,13 +161,15 @@ mod tests {
         }
 
         #[test]
-        fn truncates_a_long_line_to_the_byte_budget() {
+        fn cuts_a_long_line_to_the_byte_budget_until_expanded() {
             let long_line = "x".repeat(MAX_ROW_BYTES + 100);
 
-            let rows = render_rows(&long_line, "result", false);
+            let compact = render_rows(&long_line, "result", false);
+            let expanded = render_rows(&long_line, "result", true);
 
             let kept = format!("{}...", "x".repeat(MAX_ROW_BYTES));
-            assert_eq!(rows, body(&[&kept]));
+            assert_eq!(compact, body(&[&kept]));
+            assert_eq!(expanded, body(&[&long_line]));
         }
     }
 }

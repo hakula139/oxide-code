@@ -23,7 +23,7 @@ use self::blocks::{
 use self::selection::{ClickCounter, Selection};
 use self::stack::{Anchor, CachedBlock, SlotTops, Stack};
 use crate::protocol::{Interaction, ToolCall, ToolResult};
-use crate::tui::action::{APP_KEYMAP, AppAction, AppView};
+use crate::tui::action::{APP_KEYMAP, AppAction};
 use crate::tui::glyphs::SPINNER_FRAMES;
 use crate::tui::pending_calls::{PendingCalls, result_header};
 use crate::tui::theme::Theme;
@@ -122,8 +122,7 @@ impl ChatView {
                 theme_epoch: 0,
                 show_thinking,
                 expanded: false,
-                expand_hint: APP_KEYMAP
-                    .hint(AppAction::ToggleExpanded, &AppView { expanded: false }),
+                expand_hint: APP_KEYMAP.hint(AppAction::ToggleExpanded, &()),
             },
             blocks: Vec::new(),
             streaming: None,
@@ -164,9 +163,8 @@ impl ChatView {
     /// to the view. A paused paint keeps the row on top in place.
     pub(crate) fn toggle_expanded(&mut self) {
         self.settings.expanded = !self.settings.expanded;
-        let ctx = self.settings.ctx(self.viewport.width);
         for block in &mut self.blocks {
-            block.reset_view(&ctx);
+            block.reset_view();
         }
         self.selection = None;
         self.expansion_changed = true;
@@ -472,7 +470,6 @@ impl ChatView {
 
             let lines = stack.slice(placement.offset, usize::from(area.height));
             self.painted = stack.into_tops();
-            self.expansion_changed = false;
             self.settle_scroll(&placement);
             self.painted_rows.clone_from(&lines);
             self.follow_pointer();
@@ -565,14 +562,17 @@ impl ChatView {
             })
     }
 
-    /// Adopts the painted offset, re-arming auto-scroll when a scroll down reached the bottom. A
-    /// held drag keeps the paint paused, so streamed rows do not slide under the pointer.
+    /// Adopts the painted offset, re-arming auto-scroll when a scroll down, an expansion, or a
+    /// collapse left the paint at the bottom. A held drag keeps the paint paused, so streamed rows
+    /// do not slide under the pointer.
     fn settle_scroll(&mut self, placement: &Placement) {
         let dragging = self.selection.as_ref().is_some_and(Selection::held);
-        if self.pending_scroll > 0 && placement.offset == placement.max_offset && !dragging {
+        let moved = self.pending_scroll > 0 || self.expansion_changed;
+        if moved && placement.offset == placement.max_offset && !dragging {
             self.rearm_auto_scroll();
         }
         self.pending_scroll = 0;
+        self.expansion_changed = false;
         self.scroll_offset = placement.offset;
         self.max_offset = placement.max_offset;
     }
@@ -679,8 +679,11 @@ fn rows_between(slot: &Range<usize>, row: usize) -> usize {
 mod tests {
     use std::cell::Cell;
     use std::rc::Rc;
+    use std::time::Instant;
 
-    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseEvent, MouseEventKind};
+    use crossterm::event::{
+        KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
+    };
     use indoc::{formatdoc, indoc};
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
@@ -933,6 +936,57 @@ mod tests {
             assert!(text.contains("... +7 lines · Ctrl+O to expand"), "{text}");
             assert!(!text.contains("run 0 line 11"), "{text}");
         }
+
+        #[test]
+        fn follows_the_tail_again_once_a_collapse_lands_on_it() {
+            let mut chat = test_chat();
+            chat.load_history(long_results(2, 12));
+            let screen = screen_rows(&render_chat(&mut chat, 60, 8));
+            let footer = screen
+                .iter()
+                .rposition(|row| row.contains("... +7 lines"))
+                .unwrap();
+            chat.expand_at(chat.painted.anchor_at(chat.scroll_offset + footer));
+            render_chat(&mut chat, 60, 8);
+            assert!(chat.is_scrolled_up(), "the click pauses the tail");
+
+            chat.toggle_expanded();
+            render_chat(&mut chat, 60, 8);
+            chat.toggle_expanded();
+            render_chat(&mut chat, 60, 8);
+
+            assert!(!chat.is_scrolled_up());
+            chat.push_tool_call(call("$", "later"));
+            let screen = screen_rows(&render_chat(&mut chat, 60, 8));
+            assert_eq!(
+                screen.last().map(String::as_str),
+                Some(format!("{TOOL_BORDER_PREFIX}$ later").as_str()),
+            );
+        }
+
+        #[test]
+        fn drops_a_held_selection() {
+            let mut chat = test_chat();
+            chat.load_history(long_results(1, 12));
+            render_chat(&mut chat, 60, 8);
+            let now = Instant::now();
+            let mouse = |chat: &mut ChatView, kind, row| {
+                let event = MouseEvent {
+                    kind,
+                    column: 4,
+                    row,
+                    modifiers: KeyModifiers::NONE,
+                };
+                chat.handle_mouse(event, now)
+            };
+            mouse(&mut chat, MouseEventKind::Down(MouseButton::Left), 2);
+            mouse(&mut chat, MouseEventKind::Drag(MouseButton::Left), 4);
+
+            chat.toggle_expanded();
+
+            let copied = mouse(&mut chat, MouseEventKind::Up(MouseButton::Left), 4);
+            assert_eq!(copied, None);
+        }
     }
 
     mod load_history {
@@ -1002,7 +1056,7 @@ mod tests {
         }
 
         #[test]
-        fn shows_progress_update_once_ahead_of_its_tool_call() {
+        fn shows_progress_update_ahead_of_its_tool_call_only_while_thinking_is_hidden() {
             let history = || {
                 vec![
                     Interaction::AssistantThinking("Running the suite.".to_owned()),
@@ -1011,7 +1065,9 @@ mod tests {
                     Interaction::ToolResult(text_result("cargo test", "ok", false, None)),
                 ]
             };
-            for (show_thinking, expanded) in [(false, false), (true, false), (true, true)] {
+            for (show_thinking, expanded, shown) in
+                [(false, false, 1), (true, false, 0), (true, true, 1)]
+            {
                 let mut chat = ChatView::new(&Theme::default(), show_thinking);
                 if expanded {
                     chat.toggle_expanded();
@@ -1019,13 +1075,35 @@ mod tests {
                 chat.load_history(history());
                 let text = all_text(&mut chat);
                 let case = format!("show_thinking={show_thinking} expanded={expanded}: {text}");
-                assert_eq!(text.matches("Running the suite.").count(), 1, "{case}");
+                assert_eq!(text.matches("Running the suite.").count(), shown, "{case}");
                 assert_eq!(text.contains("Thought"), show_thinking, "{case}");
                 assert!(
                     text.find("Running the suite.") < text.find("cargo test"),
                     "{case}"
                 );
             }
+        }
+
+        #[test]
+        fn keeps_a_thought_that_doubles_as_the_progress_note_collapsed() {
+            let thinking = (1..=3)
+                .map(|i| format!("Step {i} of reading the loader."))
+                .collect::<Vec<_>>()
+                .join("\n\n");
+            let mut chat = test_chat();
+
+            chat.load_history(vec![
+                Interaction::AssistantThinking(thinking.clone()),
+                Interaction::ProgressUpdate(thinking),
+                Interaction::ToolCall(call("$", "cargo test")),
+            ]);
+
+            let rows = all_rows(&mut chat, 60);
+            assert!(
+                rows.contains(&format!("{BAR} Thought · Ctrl+O to expand")),
+                "{rows:?}"
+            );
+            assert!(!rows.iter().any(|row| row.contains("Step ")), "{rows:?}");
         }
     }
 
@@ -1475,22 +1553,24 @@ mod tests {
         use super::*;
 
         #[test]
-        fn shows_note_once_ahead_of_tool_call() {
+        fn shows_note_ahead_of_tool_call_only_while_thinking_is_hidden() {
             // Live, the note streams as thinking first and arrives again just before its tool call.
-            for show_thinking in [false, true] {
+            for (show_thinking, expanded, shown) in
+                [(false, false, 1), (true, false, 0), (true, true, 1)]
+            {
                 let mut chat = ChatView::new(&Theme::default(), show_thinking);
+                if expanded {
+                    chat.toggle_expanded();
+                }
                 chat.append_thinking_token("Running the suite.");
                 chat.push_progress_update("Running the suite.".to_owned());
                 chat.push_tool_call(call("$", "cargo test"));
                 let text = all_text(&mut chat);
-                assert_eq!(
-                    text.matches("Running the suite.").count(),
-                    1,
-                    "show_thinking={show_thinking}: {text}",
-                );
+                let case = format!("show_thinking={show_thinking} expanded={expanded}: {text}");
+                assert_eq!(text.matches("Running the suite.").count(), shown, "{case}");
                 assert!(
                     text.find("Running the suite.") < text.find("cargo test"),
-                    "{text}"
+                    "{case}"
                 );
             }
         }
@@ -2277,6 +2357,28 @@ mod tests {
                 ["b1 2", "b1 3", "b1 4", "b1 5"],
                 "b0 grew above the viewport, and row 1 of b1's 3 became row 2 of its 6",
             );
+        }
+
+        #[test]
+        fn paused_resize_after_a_view_toggle_keeps_the_relative_row() {
+            let mut chat = test_chat();
+            for index in 0..10 {
+                chat.push_block(WrappingBlock { index });
+            }
+            render_chat(&mut chat, 20, 4);
+            chat.handle_event(&ctrl_key_event(KeyCode::Home));
+            render_chat(&mut chat, 20, 4);
+            for _ in 0..4 {
+                chat.handle_event(&key_event(KeyCode::Down));
+            }
+            render_chat(&mut chat, 20, 4);
+            chat.toggle_expanded();
+            let toggled = screen_rows(&render_chat(&mut chat, 20, 4));
+
+            let resized = screen_rows(&render_chat(&mut chat, 10, 4));
+
+            assert_eq!(toggled, ["b1 1", "b1 2", "b2 0", "b2 1"]);
+            assert_eq!(resized, ["b1 2", "b1 3", "b1 4", "b1 5"]);
         }
 
         #[test]

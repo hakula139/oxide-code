@@ -4,7 +4,7 @@
 use ratatui::style::Style;
 
 use super::{MAX_TOOL_OUTPUT_LINES, overflow_footer};
-use crate::tui::components::chat::blocks::rows::{MAX_ROW_BYTES, body_row, truncate_to_bytes};
+use crate::tui::components::chat::blocks::rows::body_row;
 use crate::tui::components::chat::blocks::{BlockRows, RenderCtx};
 
 pub(super) fn render(
@@ -40,7 +40,7 @@ pub(super) fn render(
     );
 
     for path in &files[..visible] {
-        let display = truncate_to_bytes(path, MAX_ROW_BYTES);
+        let display = ctx.cap_row(path);
         body_row(&mut out.lines, ctx, border_style, display, ctx.theme.text());
     }
 

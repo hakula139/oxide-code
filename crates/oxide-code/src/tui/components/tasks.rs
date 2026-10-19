@@ -283,7 +283,7 @@ mod tests {
             let mut panel = TaskPanel::default();
             panel.set(long_plan());
 
-            assert_eq!(texts(render_rows(&panel, 40, 1)), ["  ... +8 tasks"],);
+            assert_eq!(texts(render_rows(&panel, 40, 1)), ["  ... +8 tasks"]);
         }
     }
 

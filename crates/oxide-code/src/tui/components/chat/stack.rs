@@ -36,7 +36,7 @@ pub(super) struct CachedBlock {
 }
 
 impl CachedBlock {
-    /// Settles the block's visibility in `ctx`'s view.
+    /// Settles the block's visibility, which depends only on settings fixed for the chat's life.
     pub(super) fn new(block: Box<dyn ChatBlock>, ctx: &RenderCtx<'_>) -> Self {
         let visible = block.visible(ctx);
         Self {
@@ -96,15 +96,9 @@ impl CachedBlock {
         self.expanded = true;
     }
 
-    /// Returns the block to `ctx`'s view, dropping a click's expansion. A block whose visibility
-    /// changes drops its render, so it stands in as a blank row the paint can reach.
-    pub(super) fn reset_view(&mut self, ctx: &RenderCtx<'_>) {
+    /// Drops a click's expansion, returning the block to the chat's view.
+    pub(super) fn reset_view(&mut self) {
         self.expanded = false;
-        let visible = self.block.visible(ctx);
-        if visible != self.visible {
-            self.visible = visible;
-            self.key = None;
-        }
     }
 
     fn key_for(&self, ctx: &RenderCtx<'_>, theme_epoch: u64) -> RenderKey {
@@ -353,29 +347,29 @@ mod tests {
     }
 
     /// Renders a head row over two body rows, which the compact view folds into a footer that
-    /// expands the block. A compact-only block shows only in the compact view.
-    struct FoldingBlock {
-        compact_only: bool,
-    }
+    /// expands the block.
+    struct FoldingBlock;
 
     impl ChatBlock for FoldingBlock {
         fn render(&self, ctx: &RenderCtx<'_>) -> Vec<Line<'static>> {
-            self.render_rows(ctx).lines
+            let rows: &[&str] = if ctx.expanded {
+                &["head", "a", "b"]
+            } else {
+                &["head", "... +2 rows"]
+            };
+            rows.iter().map(|row| Line::raw(*row)).collect()
         }
 
         fn render_rows(&self, ctx: &RenderCtx<'_>) -> BlockRows {
+            let mut rows = self.render(ctx).into_iter();
             let mut out = BlockRows::default();
-            out.lines.push(Line::raw("head"));
+            out.lines.extend(rows.next());
             if ctx.expanded {
-                out.lines.extend([Line::raw("a"), Line::raw("b")]);
+                out.lines.extend(rows);
             } else {
-                out.push_expander(|lines| lines.push(Line::raw("... +2 rows")));
+                out.push_expander(|lines| lines.extend(rows));
             }
             out
-        }
-
-        fn visible(&self, ctx: &RenderCtx<'_>) -> bool {
-            !(self.compact_only && ctx.expanded)
         }
     }
 
@@ -424,16 +418,12 @@ mod tests {
         })
     }
 
-    fn folding(compact_only: bool) -> CachedBlock {
-        cached(FoldingBlock { compact_only })
+    fn folding() -> CachedBlock {
+        cached(FoldingBlock)
     }
 
     fn refresh(block: &mut CachedBlock, width: u16) {
-        refresh_in_view(block, width, false);
-    }
-
-    fn refresh_in_view(block: &mut CachedBlock, width: u16, expanded: bool) {
-        with_view_ctx(width, expanded, |ctx| block.refresh(ctx, 0));
+        with_ctx(width, |ctx| block.refresh(ctx, 0));
     }
 
     /// Returns whether `block` rendered at `width` and theme epoch `epoch` in the given view.
@@ -479,7 +469,7 @@ mod tests {
 
             #[test]
             fn holds_on_the_rows_that_expand_the_latest_render() {
-                let mut block = folding(false);
+                let mut block = folding();
 
                 refresh(&mut block, 40);
 
@@ -520,7 +510,7 @@ mod tests {
 
             #[test]
             fn renders_the_block_in_full_while_the_view_is_compact() {
-                let mut block = folding(false);
+                let mut block = folding();
                 refresh(&mut block, 40);
 
                 block.expand();
@@ -541,34 +531,15 @@ mod tests {
 
             #[test]
             fn drops_a_click_expansion() {
-                let mut block = folding(false);
+                let mut block = folding();
                 block.expand();
                 refresh(&mut block, 40);
 
-                with_ctx(40, |ctx| block.reset_view(ctx));
+                block.reset_view();
 
                 assert!(!is_current_in(&block, 40, 0, false));
                 refresh(&mut block, 40);
                 assert_eq!(texts(block.lines()), ["head", "... +2 rows"]);
-            }
-
-            #[test]
-            fn settles_visibility_and_stands_in_as_a_blank_row_once_shown() {
-                let mut block = folding(true);
-                refresh(&mut block, 40);
-
-                with_view_ctx(40, true, |ctx| block.reset_view(ctx));
-                refresh_in_view(&mut block, 40, true);
-                assert!(!block.visible());
-                assert_eq!(texts(block.lines()), Vec::<String>::new());
-
-                with_ctx(40, |ctx| block.reset_view(ctx));
-                assert!(block.visible());
-                assert_eq!(
-                    texts(block.lines()),
-                    [""],
-                    "a stand-in row the paint can reach"
-                );
             }
         }
     }

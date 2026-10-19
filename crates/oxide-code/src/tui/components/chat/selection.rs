@@ -622,15 +622,15 @@ mod tests {
                 }
             }
 
-            /// Two results of eight lines, which the compact view caps at five with a footer, painted
-            /// at the tail of a 10-row chat.
-            fn long_results() -> (ChatView, Vec<String>) {
+            /// Results of eight lines for the calls `ids`, which the compact view caps at five with a
+            /// footer, painted at the tail of a 10-row chat.
+            fn long_results(ids: &[&str]) -> (ChatView, Vec<String>) {
                 let output = (0..8)
                     .map(|i| format!("line {i}"))
                     .collect::<Vec<_>>()
                     .join("\n");
                 let mut chat = ChatView::new(&Theme::default(), false);
-                for id in ["Grep(a)", "Grep(b)"] {
+                for id in ids {
                     chat.push_tool_call(tool_call(id));
                     chat.push_tool_result(tool_result(id, &output));
                 }
@@ -680,7 +680,7 @@ mod tests {
 
             #[test]
             fn plain_click_on_an_overflow_footer_expands_its_block_below_the_rows_on_screen() {
-                let (mut chat, before) = long_results();
+                let (mut chat, before) = long_results(&["Grep(a)", "Grep(b)"]);
                 let footers: Vec<usize> = (0..before.len())
                     .filter(|&row| before[row].contains("... +3 lines"))
                     .collect();
@@ -701,7 +701,7 @@ mod tests {
 
             #[test]
             fn plain_click_off_a_footer_expands_nothing() {
-                let (mut chat, before) = long_results();
+                let (mut chat, before) = long_results(&["Grep(a)", "Grep(b)"]);
                 let body = before
                     .iter()
                     .rposition(|row| row.contains("line 0"))
@@ -715,7 +715,7 @@ mod tests {
 
             #[test]
             fn drag_from_an_overflow_footer_selects_without_expanding() {
-                let (mut chat, before) = long_results();
+                let (mut chat, before) = long_results(&["Grep(a)", "Grep(b)"]);
                 let footer = before
                     .iter()
                     .rposition(|row| row.contains("... +3 lines"))
@@ -724,6 +724,24 @@ mod tests {
                 let copied = drag(&mut chat, (0, screen_row(footer)), (39, screen_row(footer)));
 
                 assert_eq!(copied.as_deref(), Some(before[footer].as_str()));
+                assert_eq!(paint_rows(&mut chat), before);
+            }
+
+            #[test]
+            fn plain_click_below_a_footer_that_ends_the_chat_expands_nothing() {
+                let (mut chat, before) = long_results(&["Grep(a)"]);
+                let footer = before
+                    .iter()
+                    .rposition(|row| row.contains("... +3 lines"))
+                    .unwrap();
+                assert_eq!(
+                    before[footer + 1..],
+                    ["", ""],
+                    "blank space below the footer"
+                );
+
+                click(&mut chat, (8, screen_row(footer + 1)), Instant::now());
+
                 assert_eq!(paint_rows(&mut chat), before);
             }
 

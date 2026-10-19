@@ -100,7 +100,7 @@ macro_rules! for_each_slot {
             (table_border, "Markdown table borders and row rules"),
 
             // UI chrome
-            (tool_border, "Tool call block borders and the read and grep line-number gutter"),
+            (tool_border, "Tool call block borders and the read and grep line-number separator"),
             (tool_icon, "Tool icon accent"),
             (border_focused, "Input rules while idle"),
             (border_unfocused, "Unfocused component border"),
