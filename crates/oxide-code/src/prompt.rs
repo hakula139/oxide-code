@@ -628,4 +628,43 @@ mod tests {
             );
         }
     }
+
+    #[test]
+    fn prompt_constants_state_their_distinctive_rules() {
+        let sections: [(&str, &str, &[&str]); 3] = [
+            (
+                "TASK_GUIDANCE",
+                TASK_GUIDANCE,
+                &[
+                    "asks only for a review or a report, share your findings without editing files",
+                    "inspect the actual files, logs, or command output",
+                    "Report a task as done only after the checks that prove it",
+                    "Create commits only when the user asks.",
+                    "without references to the change, the task, or an issue number",
+                    "Don't leave commented-out code.",
+                    "Write tests that fail against a plausible bug",
+                ],
+            ),
+            (
+                "CAUTION",
+                CAUTION,
+                &["Never print credentials", "redact any credential"],
+            ),
+            (
+                "OUTPUT_EFFICIENCY",
+                OUTPUT_EFFICIENCY,
+                &[
+                    "close with what you verified and how",
+                    "what you did not verify",
+                ],
+            ),
+        ];
+
+        for (name, content, rules) in sections {
+            let prose = content.split_whitespace().collect::<Vec<_>>().join(" ");
+            for rule in rules {
+                assert!(prose.contains(rule), "{name} should state: {rule}");
+            }
+        }
+    }
 }

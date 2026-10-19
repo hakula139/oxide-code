@@ -66,7 +66,7 @@ A surviving mutant usually means an assertion is too loose, so tighten it. If a 
 
 ## Live Tests
 
-`tests/live.rs` covers what only a real endpoint can show: streamed text, a tool round trip, interleaved thinking replayed across turns, prompt cache reads, auto-compaction, and `--continue`. Its tests send paid requests, so they are ignored by default and return early unless `OX_LIVE=1`. Run them after changes to the client, the prompt, thinking, compaction, or session resume:
+`tests/live.rs` covers what only a real endpoint can show: streamed text, a tool round trip, interleaved thinking replayed across turns, prompt cache reads, auto-compaction, `--continue`, and a review-only request that edits no files. Its tests send paid requests, so they are ignored by default and return early unless `OX_LIVE=1`. Run them after changes to the client, the prompt, thinking, compaction, or session resume:
 
 ```bash
 OX_LIVE=1 cargo test --test live -- --ignored

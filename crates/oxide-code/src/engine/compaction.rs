@@ -57,7 +57,8 @@ const SUMMARIZATION_USER_RUBRIC: &str = indoc! {"
     1. The engineer's overall intent and any constraints they stated.
     2. Key technical decisions made and why.
     3. Files, functions, and code paths touched (full paths when known).
-    4. Current state: what is done, what is in progress, what is blocked.
+    4. Current state: what is done, what is in progress, what is blocked, and which checks passed,
+       failed, or have not run.
     5. The next concrete step, if one is obvious.
 
     Be concise. Terse bullets beat paragraphs. Preserve exact identifiers, file paths, error strings,
