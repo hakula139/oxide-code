@@ -244,14 +244,6 @@ mod tests {
     use crate::slash::testing::test_session_info;
     use crate::tui::modal::testing::render_rows;
 
-    fn execute_in(project_root: &Path) -> SlashOutcome {
-        let mut info = test_session_info();
-        info.project_root = project_root.to_owned();
-        InitCmd
-            .execute("", &SlashContext::new(&info, None))
-            .unwrap()
-    }
-
     /// The action `key` submits, or `None` when it leaves the picker open.
     fn submitted(key: ModalKey) -> Option<Action> {
         match key {
@@ -264,195 +256,223 @@ mod tests {
         submitted(picker.handle_key(&KeyEvent::from(code)))
     }
 
-    fn create_action(file: &str) -> Action {
-        prompt(create_prompt(Path::new("/repo"), file))
+    mod init_cmd {
+        use super::*;
+
+        #[test]
+        fn metadata_matches_built_ins_contract() {
+            assert_eq!(InitCmd.name(), "init");
+            assert_eq!(InitCmd.aliases(), [] as [&str; 0]);
+            assert!(InitCmd.usage().is_none());
+        }
+
+        mod classify {
+            use super::*;
+
+            #[test]
+            fn is_mutating() {
+                assert_eq!(InitCmd.classify(""), SlashKind::Mutating);
+            }
+        }
+
+        mod execute {
+            use super::*;
+
+            fn execute_in(project_root: &Path) -> SlashOutcome {
+                let mut info = test_session_info();
+                info.project_root = project_root.to_owned();
+                InitCmd
+                    .execute("", &SlashContext::new(&info, None))
+                    .unwrap()
+            }
+
+            #[test]
+            fn without_an_instruction_file_opens_the_picker() {
+                let root = tempfile::tempdir().unwrap();
+
+                let mut picker = execute_in(root.path()).into_modal();
+
+                assert_eq!(
+                    press(picker.as_mut(), KeyCode::Enter),
+                    Some(prompt(create_prompt(root.path(), "AGENTS.md"))),
+                );
+            }
+
+            #[test]
+            fn with_an_instruction_file_forwards_the_update_prompt() {
+                let root = tempfile::tempdir().unwrap();
+                fs::write(root.path().join("AGENTS.md"), "# AGENTS.md\n").unwrap();
+
+                let action = execute_in(root.path()).into_forward();
+
+                assert_eq!(
+                    action,
+                    prompt(update_prompt(root.path(), &[PathBuf::from("AGENTS.md")])),
+                );
+            }
+        }
     }
 
-    // ── InitCmd metadata ──
+    mod existing_instruction_files {
+        use super::*;
 
-    #[test]
-    fn metadata_matches_built_ins_contract() {
-        assert_eq!(InitCmd.name(), "init");
-        assert_eq!(InitCmd.aliases(), [] as [&str; 0]);
-        assert!(InitCmd.usage().is_none());
-    }
+        #[test]
+        fn finds_root_and_instruction_dir_files() {
+            let root = tempfile::tempdir().unwrap();
+            fs::create_dir(root.path().join(".claude")).unwrap();
+            fs::write(root.path().join("CLAUDE.md"), "").unwrap();
+            fs::write(root.path().join(".claude/AGENTS.md"), "").unwrap();
+            fs::create_dir(root.path().join("AGENTS.md")).unwrap();
 
-    #[test]
-    fn classify_is_mutating() {
-        assert_eq!(InitCmd.classify(""), SlashKind::Mutating);
-    }
-
-    // ── InitCmd::execute ──
-
-    #[test]
-    fn execute_without_an_instruction_file_opens_the_picker() {
-        let root = tempfile::tempdir().unwrap();
-
-        let mut picker = execute_in(root.path()).into_modal();
-
-        assert_eq!(
-            press(picker.as_mut(), KeyCode::Enter),
-            Some(prompt(create_prompt(root.path(), "AGENTS.md"))),
-        );
-    }
-
-    #[test]
-    fn execute_with_an_instruction_file_forwards_the_update_prompt() {
-        let root = tempfile::tempdir().unwrap();
-        fs::write(root.path().join("AGENTS.md"), "# AGENTS.md\n").unwrap();
-
-        let action = execute_in(root.path()).into_forward();
-
-        assert_eq!(
-            action,
-            prompt(update_prompt(root.path(), &[PathBuf::from("AGENTS.md")])),
-        );
-    }
-
-    // ── existing_instruction_files ──
-
-    #[test]
-    fn existing_instruction_files_finds_root_and_instruction_dir_files() {
-        let root = tempfile::tempdir().unwrap();
-        fs::create_dir(root.path().join(".claude")).unwrap();
-        fs::write(root.path().join("CLAUDE.md"), "").unwrap();
-        fs::write(root.path().join(".claude/AGENTS.md"), "").unwrap();
-        fs::create_dir(root.path().join("AGENTS.md")).unwrap();
-
-        assert_eq!(
-            existing_instruction_files(root.path()),
-            [
-                PathBuf::from("CLAUDE.md"),
-                Path::new(".claude").join("AGENTS.md")
-            ],
-        );
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn existing_instruction_files_lists_a_symlinked_file_once_under_its_real_path() {
-        use std::os::unix::fs::symlink;
-
-        let root = tempfile::tempdir().unwrap();
-        fs::write(root.path().join("AGENTS.md"), "").unwrap();
-        symlink("AGENTS.md", root.path().join("CLAUDE.md")).unwrap();
-        fs::create_dir(root.path().join(".claude")).unwrap();
-        symlink("../AGENTS.md", root.path().join(".claude/CLAUDE.md")).unwrap();
-
-        assert_eq!(
-            existing_instruction_files(root.path()),
-            [PathBuf::from("AGENTS.md")],
-        );
-    }
-
-    // ── Prompts ──
-
-    #[test]
-    fn create_prompt_names_the_file_in_its_header() {
-        let prompt = create_prompt(Path::new("/repo"), "CLAUDE.md");
-
-        assert_eq!(
-            prompt,
-            formatdoc! {"
-                Please analyze this codebase and create `CLAUDE.md` in `/repo`. Future AI coding assistants will read it as project instructions when working on this codebase.
-
-                {RUBRIC}
-
-                Prefix the file with:
-
-                ```
-                # CLAUDE.md
-
-                This file provides guidance to AI coding assistants when working with code in this repository.
-                ```"
-            },
-        );
-    }
-
-    #[test]
-    fn update_prompt_lists_every_existing_file_and_defers_edits() {
-        let existing = [
-            PathBuf::from("CLAUDE.md"),
-            Path::new(".claude").join("AGENTS.md"),
-        ];
-
-        let prompt = update_prompt(Path::new("/repo"), &existing);
-
-        let nested = existing[1].display();
-        assert_eq!(
-            prompt,
-            formatdoc! {"
-                Please analyze this codebase and improve its project instructions, which future AI coding assistants read when working on it. They live in these files in `/repo`:
-
-                - `CLAUDE.md`
-                - `{nested}`
-
-                Read each file, but do not edit any file in this turn. Show the changes you propose as a unified diff in a `diff` code block, explain why each change helps, then end your turn. Apply the changes only after the user confirms them. If nothing needs to change, say so. Update each file in place, without moving content between files.
-
-                {RUBRIC}"
-            },
-        );
-    }
-
-    // ── InitPicker::handle_key ──
-
-    #[test]
-    fn enter_creates_the_highlighted_file() {
-        let mut picker = InitPicker::new(Path::new("/repo"));
-        assert_eq!(
-            press(&mut picker, KeyCode::Enter),
-            Some(create_action("AGENTS.md"))
-        );
-
-        for code in [
-            KeyCode::Down,
-            KeyCode::Char('j'),
-            KeyCode::Up,
-            KeyCode::Char('k'),
-            KeyCode::Char('2'),
-        ] {
-            let mut picker = InitPicker::new(Path::new("/repo"));
-            assert_eq!(press(&mut picker, code), None, "{code:?} moves the cursor");
             assert_eq!(
-                press(&mut picker, KeyCode::Enter),
-                Some(create_action("CLAUDE.md")),
-                "{code:?} from the first row lands on the second",
+                existing_instruction_files(root.path()),
+                [
+                    PathBuf::from("CLAUDE.md"),
+                    Path::new(".claude").join("AGENTS.md")
+                ],
+            );
+        }
+
+        #[cfg(unix)]
+        #[test]
+        fn lists_a_symlinked_file_once_under_its_real_path() {
+            use std::os::unix::fs::symlink;
+
+            let root = tempfile::tempdir().unwrap();
+            fs::write(root.path().join("AGENTS.md"), "").unwrap();
+            symlink("AGENTS.md", root.path().join("CLAUDE.md")).unwrap();
+            fs::create_dir(root.path().join(".claude")).unwrap();
+            symlink("../AGENTS.md", root.path().join(".claude/CLAUDE.md")).unwrap();
+
+            assert_eq!(
+                existing_instruction_files(root.path()),
+                [PathBuf::from("AGENTS.md")],
             );
         }
     }
 
-    #[test]
-    fn other_keys_keep_the_picker_open_and_the_cursor_in_place() {
-        let mut picker = InitPicker::new(Path::new("/repo"));
-        for code in [KeyCode::Tab, KeyCode::Char('x'), KeyCode::Char('9')] {
-            assert_eq!(press(&mut picker, code), None, "{code:?}");
+    mod create_prompt {
+        use super::*;
+
+        #[test]
+        fn names_the_file_in_its_header() {
+            let prompt = create_prompt(Path::new("/repo"), "CLAUDE.md");
+
+            assert_eq!(
+                prompt,
+                formatdoc! {"
+                    Please analyze this codebase and create `CLAUDE.md` in `/repo`. Future AI coding assistants will read it as project instructions when working on this codebase.
+
+                    {RUBRIC}
+
+                    Prefix the file with:
+
+                    ```
+                    # CLAUDE.md
+
+                    This file provides guidance to AI coding assistants when working with code in this repository.
+                    ```"
+                },
+            );
         }
-        assert_eq!(
-            press(&mut picker, KeyCode::Enter),
-            Some(create_action("AGENTS.md"))
-        );
     }
 
-    // ── InitPicker::render ──
+    mod update_prompt {
+        use super::*;
 
-    #[test]
-    fn render_lists_both_files_with_who_else_reads_them() {
-        let picker = InitPicker::new(Path::new("/repo"));
+        #[test]
+        fn lists_every_existing_file_and_defers_edits() {
+            let existing = [
+                PathBuf::from("CLAUDE.md"),
+                Path::new(".claude").join("AGENTS.md"),
+            ];
 
-        let rows = render_rows(&picker, 80, picker.height(80, 20));
+            let prompt = update_prompt(Path::new("/repo"), &existing);
 
-        let rows: Vec<&str> = rows.iter().map(|row| row.trim_end()).collect();
-        assert_eq!(
-            rows,
-            [
-                "Create instruction file",
-                "This project has no AGENTS.md or CLAUDE.md. Pick the file the model writes.",
-                "",
-                "> 1. AGENTS.md    Also read by Codex and other agents",
-                "  2. CLAUDE.md    Also read by Claude Code",
-                "",
-                "Enter to confirm  ·  Esc to cancel",
-            ]
-        );
+            let nested = existing[1].display();
+            assert_eq!(
+                prompt,
+                formatdoc! {"
+                    Please analyze this codebase and improve its project instructions, which future AI coding assistants read when working on it. They live in these files in `/repo`:
+
+                    - `CLAUDE.md`
+                    - `{nested}`
+
+                    Read each file, but do not edit any file in this turn. Show the changes you propose as a unified diff in a `diff` code block, explain why each change helps, then end your turn. Apply the changes only after the user confirms them. If nothing needs to change, say so. Update each file in place, without moving content between files.
+
+                    {RUBRIC}"
+                },
+            );
+        }
+    }
+
+    mod render {
+        use super::*;
+
+        #[test]
+        fn lists_both_files_with_who_else_reads_them() {
+            let picker = InitPicker::new(Path::new("/repo"));
+
+            let rows = render_rows(&picker, 80, picker.height(80, 20));
+
+            let rows: Vec<&str> = rows.iter().map(|row| row.trim_end()).collect();
+            assert_eq!(
+                rows,
+                [
+                    "Create instruction file",
+                    "This project has no AGENTS.md or CLAUDE.md. Pick the file the model writes.",
+                    "",
+                    "> 1. AGENTS.md    Also read by Codex and other agents",
+                    "  2. CLAUDE.md    Also read by Claude Code",
+                    "",
+                    "Enter to confirm  ·  Esc to cancel",
+                ]
+            );
+        }
+    }
+
+    mod handle_key {
+        use super::*;
+
+        fn create_action(file: &str) -> Action {
+            prompt(create_prompt(Path::new("/repo"), file))
+        }
+
+        #[test]
+        fn enter_creates_the_highlighted_file() {
+            let mut picker = InitPicker::new(Path::new("/repo"));
+            assert_eq!(
+                press(&mut picker, KeyCode::Enter),
+                Some(create_action("AGENTS.md"))
+            );
+
+            for code in [
+                KeyCode::Down,
+                KeyCode::Char('j'),
+                KeyCode::Up,
+                KeyCode::Char('k'),
+                KeyCode::Char('2'),
+            ] {
+                let mut picker = InitPicker::new(Path::new("/repo"));
+                assert_eq!(press(&mut picker, code), None, "{code:?} moves the cursor");
+                assert_eq!(
+                    press(&mut picker, KeyCode::Enter),
+                    Some(create_action("CLAUDE.md")),
+                    "{code:?} from the first row lands on the second",
+                );
+            }
+        }
+
+        #[test]
+        fn other_keys_keep_the_picker_open_and_the_cursor_in_place() {
+            let mut picker = InitPicker::new(Path::new("/repo"));
+            for code in [KeyCode::Tab, KeyCode::Char('x'), KeyCode::Char('9')] {
+                assert_eq!(press(&mut picker, code), None, "{code:?}");
+            }
+            assert_eq!(
+                press(&mut picker, KeyCode::Enter),
+                Some(create_action("AGENTS.md"))
+            );
+        }
     }
 }

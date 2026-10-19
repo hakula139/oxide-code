@@ -62,49 +62,57 @@ mod tests {
             .into_forward()
     }
 
-    // ── LoginCmd::name ──
-
     #[test]
-    fn name_and_metadata_of_login_match_built_ins_contract() {
+    fn name_and_metadata_match_built_ins_contract() {
         assert_eq!(LoginCmd.name(), "login");
         assert_eq!(LoginCmd.aliases(), [] as [&str; 0]);
         assert_ne!(LoginCmd.description(), "");
     }
 
-    // ── LoginCmd::classify ──
+    mod classify {
+        use super::*;
 
-    #[test]
-    fn classify_login_is_mutating() {
-        assert_eq!(LoginCmd.classify(""), SlashKind::Mutating);
+        #[test]
+        fn is_mutating() {
+            assert_eq!(LoginCmd.classify(""), SlashKind::Mutating);
+        }
     }
 
-    // ── LoginCmd::execute ──
+    mod execute {
+        use super::*;
 
-    #[test]
-    fn execute_login_forwards_the_login_action() {
-        assert_eq!(forwarded(&LoginCmd), Action::Op(Op::Login));
+        #[test]
+        fn forwards_the_login_action() {
+            assert_eq!(forwarded(&LoginCmd), Action::Op(Op::Login));
+        }
     }
 
-    // ── LogoutCmd::name ──
+    mod logout_cmd {
+        use super::*;
 
-    #[test]
-    fn name_and_metadata_of_logout_match_built_ins_contract() {
-        assert_eq!(LogoutCmd.name(), "logout");
-        assert_eq!(LogoutCmd.aliases(), [] as [&str; 0]);
-        assert_ne!(LogoutCmd.description(), "");
-    }
+        #[test]
+        fn name_and_metadata_match_built_ins_contract() {
+            assert_eq!(LogoutCmd.name(), "logout");
+            assert_eq!(LogoutCmd.aliases(), [] as [&str; 0]);
+            assert_ne!(LogoutCmd.description(), "");
+        }
 
-    // ── LogoutCmd::classify ──
+        mod classify {
+            use super::*;
 
-    #[test]
-    fn classify_logout_is_mutating() {
-        assert_eq!(LogoutCmd.classify(""), SlashKind::Mutating);
-    }
+            #[test]
+            fn is_mutating() {
+                assert_eq!(LogoutCmd.classify(""), SlashKind::Mutating);
+            }
+        }
 
-    // ── LogoutCmd::execute ──
+        mod execute {
+            use super::*;
 
-    #[test]
-    fn execute_logout_forwards_the_logout_action() {
-        assert_eq!(forwarded(&LogoutCmd), Action::Op(Op::Logout));
+            #[test]
+            fn forwards_the_logout_action() {
+                assert_eq!(forwarded(&LogoutCmd), Action::Op(Op::Logout));
+            }
+        }
     }
 }

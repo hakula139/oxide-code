@@ -139,181 +139,191 @@ mod tests {
         );
     }
 
-    // ── ArchiveCmd::name ──
-
     #[test]
-    fn name_and_metadata_of_archive_match_built_ins_contract() {
+    fn name_and_metadata_match_built_ins_contract() {
         assert_eq!(ArchiveCmd.name(), "archive");
         assert_ne!(ArchiveCmd.description(), "");
         assert_eq!(ArchiveCmd.usage(), Some("[<id-prefix>]"));
     }
 
-    // ── ArchiveCmd::classify ──
+    mod classify {
+        use super::*;
 
-    #[test]
-    fn classify_archive_is_always_mutating() {
-        assert_eq!(ArchiveCmd.classify(""), SlashKind::Mutating);
-        assert_eq!(ArchiveCmd.classify("ab"), SlashKind::Mutating);
+        #[test]
+        fn is_always_mutating() {
+            assert_eq!(ArchiveCmd.classify(""), SlashKind::Mutating);
+            assert_eq!(ArchiveCmd.classify("ab"), SlashKind::Mutating);
+        }
     }
 
-    // ── ArchiveCmd::execute ──
+    mod execute {
+        use super::*;
 
-    #[test]
-    fn execute_archive_bare_forwards_the_archive_action() {
-        let info = test_session_info();
-        let outcome = ArchiveCmd
-            .execute("", &SlashContext::new(&info, None))
-            .unwrap();
-        assert_eq!(outcome.into_forward(), Action::Op(Op::Archive));
-    }
-
-    #[test]
-    fn execute_archive_prefix_hides_a_saved_session_from_listings_once() {
-        with_isolated_xdg(|_| {
-            let store = open_store(&test_session_info()).unwrap();
-            let target_id = stamped_id(0xab);
-            seed_saved(&store, &target_id);
+        #[test]
+        fn bare_forwards_the_archive_action() {
             let info = test_session_info();
-            let ctx = SlashContext::new(&info, None);
-
-            let note = ArchiveCmd.execute(&target_id[..4], &ctx).unwrap();
-            assert_eq!(note.into_system_message(), archive_notice(&target_id, true));
-            assert_eq!(listed_ids(&store, false), [] as [String; 0]);
-
-            let again = ArchiveCmd.execute(&target_id[..4], &ctx).unwrap();
-            assert_eq!(
-                again.into_system_message(),
-                "Session abababab is already archived"
-            );
-        });
-    }
-
-    #[test]
-    fn execute_archive_prefix_matching_only_the_live_session_points_to_bare_archive() {
-        with_isolated_xdg(|_| {
-            let store = open_store(&test_session_info()).unwrap();
-            seed_saved(&store, "test-session");
-            let info = test_session_info();
-            let ctx = SlashContext::new(&info, None);
-
-            let err = ArchiveCmd.execute("test-", &ctx).unwrap_err();
-            assert_eq!(
-                err,
-                "Session prefix `test-` matches the live session. \
-                 Use bare `/archive` to archive it and start a new one.",
-            );
-            assert_eq!(listed_ids(&store, false), ["test-session"]);
-        });
-    }
-
-    #[test]
-    fn execute_archive_unknown_prefix_reports_no_match() {
-        with_isolated_xdg(|_| {
-            let info = test_session_info();
-            let err = ArchiveCmd
-                .execute("zzzz", &SlashContext::new(&info, None))
-                .unwrap_err();
-            assert_eq!(err, "No session matching `zzzz`");
-        });
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn execute_archive_prefix_reports_a_failed_write() {
-        use std::os::unix::fs::PermissionsExt;
-
-        with_isolated_xdg(|_| {
-            let store = open_store(&test_session_info()).unwrap();
-            let target_id = stamped_id(0xab);
-            seed_saved(&store, &target_id);
-            let path = store.find_session_path(&target_id).unwrap();
-            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o444)).unwrap();
-            let info = test_session_info();
-
-            let err = ArchiveCmd
-                .execute(&target_id[..4], &SlashContext::new(&info, None))
-                .unwrap_err();
-            let cause = set_archived_at(&path, true).unwrap_err();
-            assert_eq!(err, format!("Failed to update session abababab: {cause:#}"));
-        });
-    }
-
-    // ── UnarchiveCmd::name ──
-
-    #[test]
-    fn name_and_metadata_of_unarchive_match_built_ins_contract() {
-        assert_eq!(UnarchiveCmd.name(), "unarchive");
-        assert_ne!(UnarchiveCmd.description(), "");
-        assert_eq!(UnarchiveCmd.usage(), Some("<id-prefix>"));
-    }
-
-    // ── UnarchiveCmd::classify ──
-
-    #[test]
-    fn classify_unarchive_is_mutating() {
-        assert_eq!(UnarchiveCmd.classify("ab"), SlashKind::Mutating);
-    }
-
-    // ── UnarchiveCmd::echoes_input ──
-
-    #[test]
-    fn echoes_input_unarchive_only_with_a_prefix() {
-        assert!(!UnarchiveCmd.echoes_input("  "), "bare form stands alone");
-        assert!(UnarchiveCmd.echoes_input("ab"));
-    }
-
-    // ── UnarchiveCmd::execute ──
-
-    #[test]
-    fn execute_unarchive_bare_points_to_the_archived_picker() {
-        let info = test_session_info();
-        let err = UnarchiveCmd
-            .execute("", &SlashContext::new(&info, None))
-            .unwrap_err();
-        assert_eq!(
-            err,
-            "Missing session ID. \
-             Usage: `/unarchive <id-prefix>`, or press Ctrl+A in the `/resume` picker \
-             to list archived sessions and Ctrl+X to unarchive one.",
-        );
-    }
-
-    #[test]
-    fn execute_unarchive_prefix_lists_an_archived_session_again_once() {
-        with_isolated_xdg(|_| {
-            let store = open_store(&test_session_info()).unwrap();
-            let target_id = stamped_id(0xab);
-            seed_saved(&store, &target_id);
-            set_archived_at(&store.find_session_path(&target_id).unwrap(), true).unwrap();
-            let info = test_session_info();
-            let ctx = SlashContext::new(&info, None);
-
-            let note = UnarchiveCmd.execute(&target_id[..4], &ctx).unwrap();
-            assert_eq!(
-                note.into_system_message(),
-                archive_notice(&target_id, false)
-            );
-            assert_eq!(listed_ids(&store, false), [target_id.as_str()]);
-
-            let again = UnarchiveCmd.execute(&target_id[..4], &ctx).unwrap();
-            assert_eq!(
-                again.into_system_message(),
-                "Session abababab is not archived"
-            );
-        });
-    }
-
-    #[test]
-    fn execute_unarchive_live_session_prefix_is_a_no_op_note() {
-        with_isolated_xdg(|_| {
-            let info = test_session_info();
-            let note = UnarchiveCmd
-                .execute("test-", &SlashContext::new(&info, None))
+            let outcome = ArchiveCmd
+                .execute("", &SlashContext::new(&info, None))
                 .unwrap();
-            assert_eq!(
-                note.into_system_message(),
-                "The live session is not archived"
-            );
-        });
+            assert_eq!(outcome.into_forward(), Action::Op(Op::Archive));
+        }
+
+        #[test]
+        fn prefix_hides_a_saved_session_from_listings_once() {
+            with_isolated_xdg(|_| {
+                let store = open_store(&test_session_info()).unwrap();
+                let target_id = stamped_id(0xab);
+                seed_saved(&store, &target_id);
+                let info = test_session_info();
+                let ctx = SlashContext::new(&info, None);
+
+                let note = ArchiveCmd.execute(&target_id[..4], &ctx).unwrap();
+                assert_eq!(note.into_system_message(), archive_notice(&target_id, true));
+                assert_eq!(listed_ids(&store, false), [] as [String; 0]);
+
+                let again = ArchiveCmd.execute(&target_id[..4], &ctx).unwrap();
+                assert_eq!(
+                    again.into_system_message(),
+                    "Session abababab is already archived"
+                );
+            });
+        }
+
+        #[test]
+        fn prefix_matching_only_the_live_session_points_to_bare_archive() {
+            with_isolated_xdg(|_| {
+                let store = open_store(&test_session_info()).unwrap();
+                seed_saved(&store, "test-session");
+                let info = test_session_info();
+                let ctx = SlashContext::new(&info, None);
+
+                let err = ArchiveCmd.execute("test-", &ctx).unwrap_err();
+                assert_eq!(
+                    err,
+                    "Session prefix `test-` matches the live session. \
+                     Use bare `/archive` to archive it and start a new one.",
+                );
+                assert_eq!(listed_ids(&store, false), ["test-session"]);
+            });
+        }
+
+        #[test]
+        fn unknown_prefix_reports_no_match() {
+            with_isolated_xdg(|_| {
+                let info = test_session_info();
+                let err = ArchiveCmd
+                    .execute("zzzz", &SlashContext::new(&info, None))
+                    .unwrap_err();
+                assert_eq!(err, "No session matching `zzzz`");
+            });
+        }
+
+        #[cfg(unix)]
+        #[test]
+        fn prefix_reports_a_failed_write() {
+            use std::os::unix::fs::PermissionsExt;
+
+            with_isolated_xdg(|_| {
+                let store = open_store(&test_session_info()).unwrap();
+                let target_id = stamped_id(0xab);
+                seed_saved(&store, &target_id);
+                let path = store.find_session_path(&target_id).unwrap();
+                std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o444)).unwrap();
+                let info = test_session_info();
+
+                let err = ArchiveCmd
+                    .execute(&target_id[..4], &SlashContext::new(&info, None))
+                    .unwrap_err();
+                let cause = set_archived_at(&path, true).unwrap_err();
+                assert_eq!(err, format!("Failed to update session abababab: {cause:#}"));
+            });
+        }
+    }
+
+    mod unarchive_cmd {
+        use super::*;
+
+        #[test]
+        fn name_and_metadata_match_built_ins_contract() {
+            assert_eq!(UnarchiveCmd.name(), "unarchive");
+            assert_ne!(UnarchiveCmd.description(), "");
+            assert_eq!(UnarchiveCmd.usage(), Some("<id-prefix>"));
+        }
+
+        mod classify {
+            use super::*;
+
+            #[test]
+            fn is_mutating() {
+                assert_eq!(UnarchiveCmd.classify("ab"), SlashKind::Mutating);
+            }
+        }
+
+        mod echoes_input {
+            use super::*;
+
+            #[test]
+            fn only_with_a_prefix() {
+                assert!(!UnarchiveCmd.echoes_input("  "), "bare form stands alone");
+                assert!(UnarchiveCmd.echoes_input("ab"));
+            }
+        }
+
+        mod execute {
+            use super::*;
+
+            #[test]
+            fn bare_points_to_the_archived_picker() {
+                let info = test_session_info();
+                let err = UnarchiveCmd
+                    .execute("", &SlashContext::new(&info, None))
+                    .unwrap_err();
+                assert_eq!(
+                    err,
+                    "Missing session ID. \
+                     Usage: `/unarchive <id-prefix>`, or press Ctrl+A in the `/resume` picker \
+                     to list archived sessions and Ctrl+X to unarchive one.",
+                );
+            }
+
+            #[test]
+            fn prefix_lists_an_archived_session_again_once() {
+                with_isolated_xdg(|_| {
+                    let store = open_store(&test_session_info()).unwrap();
+                    let target_id = stamped_id(0xab);
+                    seed_saved(&store, &target_id);
+                    set_archived_at(&store.find_session_path(&target_id).unwrap(), true).unwrap();
+                    let info = test_session_info();
+                    let ctx = SlashContext::new(&info, None);
+
+                    let note = UnarchiveCmd.execute(&target_id[..4], &ctx).unwrap();
+                    assert_eq!(
+                        note.into_system_message(),
+                        archive_notice(&target_id, false)
+                    );
+                    assert_eq!(listed_ids(&store, false), [target_id.as_str()]);
+
+                    let again = UnarchiveCmd.execute(&target_id[..4], &ctx).unwrap();
+                    assert_eq!(
+                        again.into_system_message(),
+                        "Session abababab is not archived"
+                    );
+                });
+            }
+
+            #[test]
+            fn live_session_prefix_is_a_no_op_note() {
+                with_isolated_xdg(|_| {
+                    let info = test_session_info();
+                    let note = UnarchiveCmd
+                        .execute("test-", &SlashContext::new(&info, None))
+                        .unwrap();
+                    assert_eq!(
+                        note.into_system_message(),
+                        "The live session is not archived"
+                    );
+                });
+            }
+        }
     }
 }

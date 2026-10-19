@@ -134,8 +134,9 @@ pub(crate) struct UsageSnapshot {
     pub(crate) context_tokens: Option<u32>,
     /// Active model context window. `None` hides the percentage.
     pub(crate) context_window: Option<u32>,
-    /// Running session cost in USD, accumulated across every request, summaries included. Cleared
-    /// when the session rolls or resumes. `None` hides the cost segment.
+    /// Running session cost in USD, accumulated across every request, summaries and the AI title
+    /// included. A roll starts it over, and a resume restores it from the session file. `None`
+    /// hides the cost segment.
     pub(crate) estimated_cost_usd: Option<f64>,
 }
 

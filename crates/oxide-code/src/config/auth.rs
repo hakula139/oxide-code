@@ -2,12 +2,14 @@
 //! travels on the wire.
 
 use std::fmt;
+use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use reqwest::header::{AUTHORIZATION, HeaderName, HeaderValue};
 use serde::{Deserialize, Serialize};
+use tracing::warn;
 
-use super::oauth::{self, ClaudeCodeKeychain, LOGIN_STORES, Login, LoginError};
+use super::oauth::{ClaudeCodeKeychain, LOGIN_STORES, Login, LoginError, SessionLogin};
 use crate::util::env;
 use crate::util::tls::Trust;
 
@@ -53,10 +55,10 @@ pub(crate) enum AuthSource {
     ApiKeyFile,
     OAuthTokenEnv,
     /// oxide-code's stored login from `/login` (`$XDG_DATA_HOME/ox/credentials.json`), refreshed
-    /// near expiry.
+    /// before a request near its expiry and reloaded after a 401.
     OxLogin,
     /// Claude Code's stored login (macOS Keychain or `~/.claude/.credentials.json`), refreshed
-    /// near expiry.
+    /// before a request near its expiry and reloaded after a 401.
     ClaudeCodeLogin,
 }
 
@@ -124,20 +126,44 @@ impl fmt::Display for AuthSource {
     }
 }
 
+impl From<Login> for AuthSource {
+    fn from(login: Login) -> Self {
+        match login {
+            Login::Ox => Self::OxLogin,
+            Login::ClaudeCode => Self::ClaudeCodeLogin,
+        }
+    }
+}
+
 // ── Auth ──
 
-/// Resolved credential. `Debug` omits the secret.
+/// Resolved credential. Clones share a stored login's token, so a refresh made for one request
+/// serves them all. `Debug` omits the secret.
 #[derive(Clone)]
 pub(crate) struct Auth {
     source: AuthSource,
-    secret: String,
+    secret: Secret,
+}
+
+#[derive(Clone)]
+enum Secret {
+    Fixed(String),
+    Stored(Arc<SessionLogin<'static>>),
 }
 
 impl Auth {
+    /// A credential sent unchanged for the whole session, as env vars and the config file supply.
     pub(crate) fn new(source: AuthSource, secret: impl Into<String>) -> Self {
         Self {
             source,
-            secret: secret.into(),
+            secret: Secret::Fixed(secret.into()),
+        }
+    }
+
+    pub(super) fn stored(login: SessionLogin<'static>) -> Self {
+        Self {
+            source: login.login().into(),
+            secret: Secret::Stored(Arc::new(login)),
         }
     }
 
@@ -150,21 +176,43 @@ impl Auth {
     }
 
     #[cfg(test)]
-    pub(crate) fn secret(&self) -> &str {
-        &self.secret
+    pub(crate) fn secret(&self) -> String {
+        match &self.secret {
+            Secret::Fixed(secret) => secret.clone(),
+            Secret::Stored(login) => login.cached_token(),
+        }
     }
 
-    /// The credential header, with its value marked sensitive.
-    pub(crate) fn header(&self) -> Result<(HeaderName, HeaderValue)> {
-        let kind = self.kind();
-        let value = match kind {
-            AuthKind::ApiKey => self.secret.clone(),
-            AuthKind::AuthToken | AuthKind::OAuth => format!("Bearer {}", self.secret),
+    /// The credential the next request sends, refreshing a stored login near expiry first. When
+    /// the refresh fails for a reason a later attempt may clear, [`is_transient`] says so.
+    pub(crate) async fn credential(&self, trust: &dyn Trust) -> Result<Credential> {
+        let secret = match &self.secret {
+            Secret::Fixed(secret) => secret.clone(),
+            Secret::Stored(login) => login.access_token(trust).await?,
         };
-        let mut value = HeaderValue::from_str(&value)
-            .with_context(|| format!("{} is not a valid HTTP header value", self.source))?;
-        value.set_sensitive(true);
-        Ok((kind.header_name(), value))
+        Credential::new(self.source, secret)
+    }
+
+    /// The credential to resend a request with after the API rejected `rejected` with HTTP 401: a
+    /// stored login's token that another process stored or a refresh issued. `None` for other
+    /// credentials and for a login that cannot be refreshed. When the refresh fails for a reason a
+    /// later attempt may clear, [`is_transient`] says so.
+    pub(crate) async fn reload(
+        &self,
+        rejected: &Credential,
+        trust: &dyn Trust,
+    ) -> Result<Option<Credential>> {
+        let Secret::Stored(login) = &self.secret else {
+            return Ok(None);
+        };
+        match login.reload(&rejected.secret, trust).await {
+            Ok(secret) => Credential::new(self.source, secret).map(Some),
+            Err(e) if e.is_transient() => Err(e.into()),
+            Err(e) => {
+                warn!("failed to reload the stored login after HTTP 401: {e:#}");
+                Ok(None)
+            }
+        }
     }
 }
 
@@ -173,6 +221,47 @@ impl fmt::Debug for Auth {
         f.debug_struct("Auth")
             .field("source", &self.source)
             .finish_non_exhaustive()
+    }
+}
+
+/// Whether `error`, from [`Auth::credential`] or [`Auth::reload`], is a stored login's refresh
+/// that a later attempt may complete.
+pub(crate) fn is_transient(error: &anyhow::Error) -> bool {
+    error
+        .downcast_ref::<LoginError>()
+        .is_some_and(LoginError::is_transient)
+}
+
+// ── Credential ──
+
+/// A credential as one request sends it.
+pub(crate) struct Credential {
+    secret: String,
+    name: HeaderName,
+    value: HeaderValue,
+}
+
+impl Credential {
+    /// Fails when `secret` cannot travel in a header.
+    fn new(source: AuthSource, secret: String) -> Result<Self> {
+        let kind = source.kind();
+        let value = match kind {
+            AuthKind::ApiKey => secret.clone(),
+            AuthKind::AuthToken | AuthKind::OAuth => format!("Bearer {secret}"),
+        };
+        let mut value = HeaderValue::from_str(&value)
+            .with_context(|| format!("{source} is not a valid HTTP header value"))?;
+        value.set_sensitive(true);
+        Ok(Self {
+            secret,
+            name: kind.header_name(),
+            value,
+        })
+    }
+
+    /// The header the credential travels in, with its value marked sensitive.
+    pub(crate) const fn header(&self) -> (&HeaderName, &HeaderValue) {
+        (&self.name, &self.value)
     }
 }
 
@@ -259,20 +348,17 @@ pub(super) async fn stored_login(
     keychain: ClaudeCodeKeychain,
     trust: &dyn Trust,
 ) -> Result<Auth, LoginError> {
-    first_stored_login(|login| oauth::load_token(login, keychain, trust)).await
+    first_stored_login(|login| load_login(login, keychain, trust)).await
 }
 
-async fn first_stored_login<F, Fut>(load: F) -> Result<Auth, LoginError>
+async fn first_stored_login<T, F, Fut>(load: F) -> Result<T, LoginError>
 where
     F: Fn(Login) -> Fut,
-    Fut: Future<Output = Result<String, LoginError>>,
+    Fut: Future<Output = Result<T, LoginError>>,
 {
-    for (source, login) in [
-        (AuthSource::OxLogin, Login::Ox),
-        (AuthSource::ClaudeCodeLogin, Login::ClaudeCode),
-    ] {
+    for login in [Login::Ox, Login::ClaudeCode] {
         match load(login).await {
-            Ok(token) => return Ok(Auth::new(source, token)),
+            Ok(found) => return Ok(found),
             Err(LoginError::Missing) => {}
             Err(e) => return Err(e),
         }
@@ -286,16 +372,27 @@ pub(crate) async fn claude_code_login(
     keychain: ClaudeCodeKeychain,
     trust: &dyn Trust,
 ) -> Result<Option<Auth>> {
-    match oauth::load_token(Login::ClaudeCode, keychain, trust).await {
-        Ok(token) => Ok(Some(Auth::new(AuthSource::ClaudeCodeLogin, token))),
+    match load_login(Login::ClaudeCode, keychain, trust).await {
+        Ok(auth) => Ok(Some(auth)),
         Err(LoginError::Missing) => Ok(None),
         Err(e) => Err(e.into()),
     }
 }
 
+async fn load_login(
+    login: Login,
+    keychain: ClaudeCodeKeychain,
+    trust: &dyn Trust,
+) -> Result<Auth, LoginError> {
+    SessionLogin::load(login, keychain, trust)
+        .await
+        .map(Auth::stored)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::oauth::testing::{ox_login_in, write_creds};
     use crate::util::tls::testing::NoRoots;
 
     const ALL_SOURCES: [AuthSource; 6] = [
@@ -422,10 +519,10 @@ mod tests {
         );
     }
 
-    // ── Auth::header ──
+    // ── Auth::credential ──
 
-    #[test]
-    fn header_sends_api_keys_raw_and_tokens_as_bearer() {
+    #[tokio::test]
+    async fn credential_sends_api_keys_raw_and_tokens_as_bearer() {
         for (source, name, value) in [
             (AuthSource::ApiKeyEnv, "x-api-key", "secret-value"),
             (
@@ -439,11 +536,60 @@ mod tests {
                 "Bearer secret-value",
             ),
         ] {
-            let (got_name, got_value) = Auth::new(source, "secret-value").header().unwrap();
+            let credential = Auth::new(source, "secret-value")
+                .credential(&NoRoots)
+                .await
+                .unwrap();
+
+            let (got_name, got_value) = credential.header();
             assert_eq!(got_name, name, "{source:?}");
             assert_eq!(got_value, value, "{source:?}");
             assert!(got_value.is_sensitive(), "{source:?}");
         }
+    }
+
+    // ── Auth::reload ──
+
+    #[tokio::test]
+    async fn reload_gives_up_on_env_credentials_and_unreadable_logins() {
+        let dir = tempfile::tempdir().unwrap();
+        for auth in [
+            Auth::new(AuthSource::OAuthTokenEnv, "env-token"),
+            ox_login_in(
+                &dir.path().join("missing.json"),
+                "http://unused",
+                "rejected",
+                9_999_999_999_999,
+            ),
+        ] {
+            let rejected = auth.credential(&NoRoots).await.unwrap();
+
+            let reloaded = auth.reload(&rejected, &NoRoots).await.unwrap();
+
+            assert!(reloaded.is_none(), "{auth:?}");
+        }
+    }
+
+    #[tokio::test]
+    async fn reload_fails_transiently_when_the_token_endpoint_sends_no_response() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("credentials.json");
+        write_creds(&file, "rejected", Some("ref"), 9_999_999_999_999);
+        let auth = ox_login_in(
+            &file,
+            "http://127.0.0.1:9/token",
+            "rejected",
+            9_999_999_999_999,
+        );
+        let rejected = auth.credential(&NoRoots).await.unwrap();
+
+        let err = auth
+            .reload(&rejected, &NoRoots)
+            .await
+            .err()
+            .expect("the refresh of the rejected token fails");
+
+        assert!(is_transient(&err), "{err:#}");
     }
 
     // ── Auth::fmt ──
@@ -605,37 +751,35 @@ mod tests {
 
     #[tokio::test]
     async fn first_stored_login_prefers_the_oxide_code_login() {
-        let auth = first_stored_login(|login| async move {
+        let found = first_stored_login(|login| async move {
             match login {
-                Login::Ox => Ok("ox-token".to_owned()),
+                Login::Ox => Ok("ox-token"),
                 Login::ClaudeCode => panic!("the Claude Code login must not be read"),
             }
         })
         .await
         .unwrap();
-        assert_eq!(auth.source(), AuthSource::OxLogin);
-        assert_eq!(auth.secret(), "ox-token");
+        assert_eq!(found, "ox-token");
     }
 
     #[tokio::test]
     async fn first_stored_login_falls_back_to_claude_code_without_an_oxide_code_login() {
-        let auth = first_stored_login(|login| async move {
+        let found = first_stored_login(|login| async move {
             match login {
                 Login::Ox => Err(LoginError::Missing),
-                Login::ClaudeCode => Ok("claude-code-token".to_owned()),
+                Login::ClaudeCode => Ok("claude-code-token"),
             }
         })
         .await
         .unwrap();
-        assert_eq!(auth.source(), AuthSource::ClaudeCodeLogin);
-        assert_eq!(auth.secret(), "claude-code-token");
+        assert_eq!(found, "claude-code-token");
     }
 
     #[tokio::test]
     async fn first_stored_login_stops_at_a_failing_oxide_code_login() {
         let err = first_stored_login(|login| async move {
             match login {
-                Login::Ox => Err(LoginError::Expired(Login::Ox)),
+                Login::Ox => Err::<&str, _>(LoginError::Expired(Login::Ox)),
                 Login::ClaudeCode => panic!("a failing oxide-code login must not yield"),
             }
         })
@@ -646,7 +790,7 @@ mod tests {
 
     #[tokio::test]
     async fn first_stored_login_is_missing_without_either_login() {
-        let err = first_stored_login(|_| async { Err(LoginError::Missing) })
+        let err = first_stored_login(|_| async { Err::<&str, _>(LoginError::Missing) })
             .await
             .unwrap_err();
         assert!(matches!(err, LoginError::Missing), "{err:?}");
