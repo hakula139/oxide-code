@@ -82,7 +82,7 @@ Inside the TUI, `/resume` (alias `/continue`) opens a session picker without res
 
 - Type to filter by ID, title, or project. Press **Tab** to toggle current-project / all-projects scope and **Ctrl+A** to toggle active / archived sessions. Press **Enter** to resume the highlighted session in place.
 - To skip the picker, pass `/resume <id-prefix>` to jump directly, which also works in the `--no-tui` REPL. An ambiguous prefix lists the candidates. This form matches active and archived sessions, excluding the live session. It checks the current project first and searches all projects only when there is no match in the current project.
-- The picker loads the 30 most recent sessions in the selected scope and archive view, and notes in its footer when older ones are omitted.
+- The picker lists every session in the selected scope and archive view, most recent first, and loads older ones as you scroll. Typing a query searches all of them.
 - Chat repopulates from the resumed transcript, and any queued prompts are discarded because they were typed for the previous session. The next prompt continues the resumed thread just as it would after `ox -c`.
 
 ### Deleting a Session
@@ -96,7 +96,7 @@ Archiving hides a session from `ox --list`, the `/resume` picker, and bare `ox -
 - `/archive` archives the live session and starts a fresh one, as `/clear` does. A note in the new chat names the archived session.
 - `/archive <id-prefix>` archives another saved session. If the prefix matches only the live session, the command is refused and points to bare `/archive`.
 - `/unarchive <id-prefix>` makes a saved session visible in the list again.
-- In the `/resume` picker, **Ctrl+X** archives the highlighted session or unarchives it when viewing archived sessions. The session disappears from the list immediately, the highlight moves to the next session, and the footer names the session that was moved. The filter and scope remain unchanged.
+- In the `/resume` picker, **Ctrl+X** archives the highlighted session or unarchives it when viewing archived sessions. The session disappears from the list immediately, the highlight moves to the next session, and the footer names the session that was moved for a few seconds. The filter and scope remain unchanged.
 
 The typed commands and **Ctrl+X** leave a session's last-active time unchanged, so an unarchived session returns to its previous position in the list.
 

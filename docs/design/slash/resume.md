@@ -1,6 +1,6 @@
 # Session Resume
 
-`/resume` (alias `/continue`) opens a searchable session picker when bare, or jumps directly when given a session ID. Shares its listing budget with `ox --list`. At startup, `ox --resume` opens the same picker.
+`/resume` (alias `/continue`) opens a searchable session picker when bare, or jumps directly when given a session ID. The picker loads sessions a page at a time as the cursor nears the end of the loaded rows. At startup, `ox --resume` opens the same picker.
 
 Companions: [commands.md](commands.md), [modals.md](modals.md). Underlying research: [research/slash/resume.md](../../research/slash/resume.md).
 
@@ -11,13 +11,14 @@ Companions: [commands.md](commands.md), [modals.md](modals.md). Underlying resea
 The picker wraps [`SearchableList`](modals.md) and adds these controls and display rules:
 
 - The picker's named actions come from `ACTIONS`, a [`Keymap`](modals.md) that pairs each action with its key and footer label, and the footer renders its hints from the same entries. Up / Down and PageUp / PageDown, which move the cursor, are handled outside the table, and other keys edit the query.
-- Each row paints a two-line title plus dim metadata block (ID prefix · relative time · message count · branch · project) followed by a trailing blank.
-- Tab toggles current-project ↔ all-projects, and Ctrl+A toggles the active ↔ archived view, retitling the header to `Resume archived session`. Both reload rows from `SessionStore::list_paged` while preserving the typed query.
+- Each row is one line of columns: the ID prefix, the title, the branch, the project (only in the all-projects view), the message count, abbreviated past 999 as in `12k msgs`, and the relative time, abbreviated as in `3h ago`. The title takes the width the fixed-width columns leave and truncates with an ellipsis. When the title would drop below 24 columns, the ID goes first, then the branch, the project, and the message count, so an 80-column all-projects row keeps the title, project, count, and time, and a narrow row keeps only the title and the time. Below a 12-column title the time drops too, so the title always shows.
+- Rows load in pages of 30 from a `SessionWalk` on a worker thread, which hands each page back to the picker's `Modal::tick`. The picker asks for the next page after each key while fewer than one viewport of rows passing the filter sits below the cursor, so it loads ahead and typical scrolling never waits on the store, and a query keeps loading pages until it fills the viewport with matches or the walk ends. While pages remain, the cursor stops at the last row in place of wrapping, and a query without matches reads `searching for ...`. A worker that dies without a page, which only a panic does, shows as a load error in the footer.
+- Tab toggles current-project ↔ all-projects, and Ctrl+A toggles the active ↔ archived view, retitling the header to `Resume archived session`. Both restart the walk while preserving the typed query. Dropping the old view's worker handle tells the worker to stop before its next file, and its page is discarded.
 - Enter on a focused row submits, while Enter with no selection keeps the picker open so the user can Tab the scope or Esc out.
 - Esc dismisses through the keymap, since the picker captures it, and Ctrl+C cancels via the universal stack gate.
-- The footer leads with the Enter and Esc hints, then counts the loaded rows and names the scope, then lists the other actions whose labels apply. Keeping the status beside Esc leaves it visible on a medium-width footer. Labels follow the view, such as `Ctrl+X to unarchive` in the archived view. The row actions' hints hide while no row is highlighted, and the Ctrl+U hint shows only while a query is typed. If more sessions follow the 30-row cap, it says so (`30 most recent sessions`, then `more not loaded`), since queries search only loaded rows.
-- Ctrl+D on the cursor row pushes [`ConfirmDeleteSessionModal`](modals.md). On focus regain the picker reloads and re-seeks the cursor to the previously selected row, so cancel-delete keeps the user in place. After a delete, the row that followed takes the highlight.
-- Ctrl+X archives the cursor row, or unarchives it in the archived view, through `session::saved::set_archived`, the operation the typed `/archive` and `/unarchive` forms also run. The picker then reloads with the cursor index and scroll position kept, so the cursor lands on the row that followed while the visible rows hold still, and the footer names the moved session until the next key. A refusal or failed write shows in the footer as an error and leaves the row in place.
+- The footer leads with the Enter and Esc hints, then names the scope, then lists the other actions whose labels apply. Keeping the scope beside Esc leaves it visible on a medium-width footer. Labels follow the view, such as `Ctrl+X to unarchive` in the archived view. The row actions' hints hide while no row is highlighted, and the Ctrl+U hint shows only while a query is typed.
+- Ctrl+D on the cursor row pushes [`ConfirmDeleteSessionModal`](modals.md). On focus regain the picker drops the rows whose files are gone and re-seeks the cursor to the previously selected row, so cancel-delete keeps the user in place. After a delete, the row that followed takes the highlight.
+- Ctrl+X archives the cursor row, or unarchives it in the archived view, through `session::saved::set_archived`, the operation the typed `/archive` and `/unarchive` forms also run. The picker then drops the row with the cursor index and scroll position kept, so the cursor lands on the row that followed while the visible rows hold still, and the footer names the moved session until the next key or for 3 seconds, the same `NOTICE_DURATION` as the copy notice. A refusal or failed write shows in the footer as an error and leaves the row in place.
 
 `ox --resume` starts the TUI in a fresh session with no file yet, then opens the picker on the first frame. `main.rs` builds it with `ResumePicker::at_startup`, and `driver::tui::run` pushes `Startup::picker` onto the modal stack before the event loop starts. The startup picker carries `Dismissal::Quit`, so Esc / Ctrl+C call `on_cancel`, which resolves to `Op::Shutdown`, and the footer reads `Esc to quit`. Pressing Enter resumes through the same `roll_into` path as `/resume`. A session file is created only with the first message, so neither path leaves an empty session on disk.
 
@@ -25,7 +26,7 @@ The picker wraps [`SearchableList`](modals.md) and adds these controls and displ
 
 `Engine::resume` in `engine.rs` resolves the target to a session file, drives `roll_into`, and adopts the loaded transcript, which rebinds `Client::set_session_id` and replays the recorded prompt context. It then emits `Event::SessionResumed { id, title, unarchived, history }`, followed in order by the old session's finalize failure as an `Event::Error`, an `Event::UsageUpdated` carrying the restored session cost when it is non-zero, the restored task list, an `Event::Notice` for each instruction file the rebuilt prompt cannot read, an `Event::Notice` for any tracker drift, and the interrupted-response `Event::Error` when the transcript ends mid-reply. `Event::SessionReady` ends the resume, while a prefix without a unique match or a `roll_into` failure ends it with `Event::TurnFailed` and keeps the live session. The history comes from `Engine::take_history`, the same projection the TUI paints at startup, which runs the adopted transcript through `session::history::interactions`: the compaction boundary first, then text, thinking, and each tool call paired with its result, with icons, labels, and result views already resolved.
 
-`SessionStore::list_paged` stats every candidate file, sorts by mtime desc, then parses files in order until it holds one readable session in the requested archive state past the page. `ListPage` carries the page and whether more matching sessions follow it. `SessionStore::list_matching` filters the same walk by the ID in each file name, so a prefix lookup parses only the matching files. Each `SessionInfo` carries the file it was read from, and resume and delete act on that file. `ox --list --limit N` (default `30`, `0` = unbounded) prints ``... more (use `--limit N` to raise the cap or `--limit 0` to list all)`` when more sessions follow the cap.
+`SessionStore::walk` stats every candidate file and sorts by mtime desc, then yields the readable sessions in the requested archive state, parsing each file as it is drawn. `SessionStore::list_paged` takes a page from the walk, reading on until it holds one session past the page. `ListPage` carries the page and whether more matching sessions follow it. `SessionStore::list_matching` filters the same walk by the ID in each file name, so a prefix lookup parses only the matching files. Each `SessionInfo` carries the file it was read from, and resume and delete act on that file. `ox --list --limit N` (default `30`, `0` = unbounded) prints ``... more (use `--limit N` to raise the cap or `--limit 0` to list all)`` when more sessions follow the cap.
 
 ## Design Decisions
 
@@ -51,7 +52,7 @@ The picker wraps [`SearchableList`](modals.md) and adds these controls and displ
 
 11. **Project scoping defaults to current cwd, with Tab widening.** Matches the `ox -c` resolver semantics: CLI `--all` widens up front, in-picker `Tab` toggles, and the typed query persists across the rebuild.
 
-12. **Default to a 30-row page with no background load-more.** Codex's near-bottom prefetch adds a state machine for little gain at typical session counts, and past 30 sessions in a project, search finds a session faster than scrolling.
+12. **Load pages in the background as the cursor nears the end.** Loading the next page while a viewport of matching rows remains below the cursor keeps paging out of sight and lets a query reach every session in scope. Parsing reads each transcript in full, and a page can parse far more files than it keeps when most sessions sit in the other archive view, so the reads run on a worker thread. On 1,000 sessions of 650 KB each, a 30-session page took about 10 ms with a warm cache, while a scan that found no match in the requested view took about 250 ms. Listing and sorting the files stays on the UI thread and took a few milliseconds there.
 
 13. **Listing API centralizes pagination in `list_paged(limit, scope)`.** The page, the archive filter, and whether more sessions follow come from one walk that stops one session past the page, so a listing's cost scales with the page. Listings report no exact total, since counting the sessions in one archive state would parse every file in scope. Bare `ox -c` stops at the first unarchived session through `latest`, and a prefix lookup parses only matching files.
 
@@ -65,7 +66,7 @@ The picker wraps [`SearchableList`](modals.md) and adds these controls and displ
 
 18. **`ox --resume` reuses the in-TUI picker, and dismissing it quits.** Opening the picker over a fresh session lets startup share `/resume`'s modal and its in-process swap, avoiding a separate pre-TUI selection screen. Claude Code's `--resume` and Codex's `resume` subcommand both open a picker at startup. Codex starts a fresh session when you press Esc, but plain `ox` already does that, so Esc quits. Esc always keeps its universal modal meaning, even when you've typed a query, and Ctrl+U clears the query. The picker holds focus until it closes, so resume or compaction can't clear the stack and trigger its quitting `on_cancel` while it's open.
 
-19. **One keymap drives keys and hints.** Each named action carries its key and a footer label that can depend on the view, so `handle_key` dispatches through the table that renders the footer, and adding a key adds its hint. The picker captures Esc so dismissal is one of those actions. Status such as the count and scope stays out of the table. [#278](https://github.com/hakula139/oxide-code/issues/278) tracks rebinding these actions, and [#281](https://github.com/hakula139/oxide-code/issues/281) tracks fitting their hints to narrow footers.
+19. **One keymap drives keys and hints.** Each named action carries its key and a footer label that can depend on the view, so `handle_key` dispatches through the table that renders the footer, and adding a key adds its hint. The picker captures Esc so dismissal is one of those actions. The scope status stays out of the table. [#278](https://github.com/hakula139/oxide-code/issues/278) tracks rebinding these actions, and [#281](https://github.com/hakula139/oxide-code/issues/281) tracks fitting their hints to narrow footers.
 
 20. **Ctrl+X moves a session between views in place.** Clearing out a long list takes one key per session, with no ID prefix to read off and type. Ctrl+X is free among the picker's keys. The filter's `LineEditor` maps it to cutting a selection, which the editor never draws, so the picker shadows it just as it shadows the editor's Ctrl+A (line start), Ctrl+D (delete forward), and Ctrl+U (undo). The highlight moves to the next row, so repeated presses work through a run of sessions.
 
@@ -75,7 +76,7 @@ The picker wraps [`SearchableList`](modals.md) and adds these controls and displ
 
 - **`SessionRow`**: A query matches the ID and title, plus the project when the all-projects view shows it.
 
-- **`SessionStore::list_paged`**: Takes a `ListScope` with project and archive flags.
+- **`SessionStore::walk`**: Takes a `ListScope` with project and archive flags. `list_paged` takes a page from the same walk.
 
 - **`/resume <id>` resolver**: `resolve_saved_prefix` skips the live session, and a prefix that matches only the live session fails the resume with a message saying so.
 
@@ -87,7 +88,7 @@ The picker wraps [`SearchableList`](modals.md) and adds these controls and displ
 
 ## Out of Scope
 
-- **Date grouping in the picker** (`Today` / `Yesterday` / ISO date). A flat mtime list reads fine at 30 rows, and the relative time in each row already encodes recency.
+- **Date grouping in the picker** (`Today` / `Yesterday` / ISO date). A flat mtime list reads fine, and the relative time in each row already encodes recency.
 - **Numeric `1`–`9` mnemonics.** Cursor plus Enter is enough, and mnemonics conflict with type-to-search.
 - **Worktree / branch tree expansion** (Claude Code's `▼` / `▶`) and **side preview pane.** Both double layout complexity for marginal gain.
 - **In-picker rename of other sessions.** `/rename` covers the live session's title.
@@ -102,18 +103,20 @@ The picker wraps [`SearchableList`](modals.md) and adds these controls and displ
 - `crates/oxide-code/src/engine.rs`: `Engine::resume`, `Engine::roll_into`, `Engine::take_history`, `format_drift_warning`.
 - `crates/oxide-code/src/main.rs`: `Cli::archived`, `Cli::limit`, `Cli::resume`.
 - `crates/oxide-code/src/protocol.rs`: `Op::Resume`, `ResumeTarget`, `Event::SessionResumed`, `Interaction`.
-- `crates/oxide-code/src/session/display.rs`: shared `format_metadata_line` used by the picker row.
+- `crates/oxide-code/src/session/display.rs`: `format_short_relative_time` for the picker row's time column, and `format_metadata_line` for the delete confirmation.
 - `crates/oxide-code/src/session/handle.rs`: `roll_into`, `RollIntoOutcome`, `LoadedTranscript`.
 - `crates/oxide-code/src/session/history.rs`: `interactions`, the display projection `SessionResumed` carries.
 - `crates/oxide-code/src/session/list_view.rs`: `render_list` over `list_paged`.
 - `crates/oxide-code/src/session/resolver.rs`: `resolve_saved_prefix`, shared by `Engine::roll_into`, `/archive`, `/unarchive`, and `/delete`, and the `resolve_prefix_to_info` lookup it wraps.
 - `crates/oxide-code/src/session/saved.rs`: `set_archived` behind Ctrl+X, and `delete` behind the confirm-delete modal.
-- `crates/oxide-code/src/session/store/listing.rs`: `list_paged`, `latest`, `list_matching`, `ListPage`, `ListScope`.
+- `crates/oxide-code/src/session/store/listing.rs`: `walk`, `SessionWalk`, `list_paged`, `latest`, `list_matching`, `ListPage`, `ListScope`.
 - `crates/oxide-code/src/slash/confirm.rs`: `ConfirmDeleteSessionModal` pushed by Ctrl+D.
 - `crates/oxide-code/src/slash/registry.rs`: `BUILT_INS` entry `&ResumeCmd`.
-- `crates/oxide-code/src/slash/resume.rs`: `ResumeCmd`, `ResumePicker` and its `at_startup` variant, `PickerAction` and its `ACTIONS` keymap, and `SessionRow`.
+- `crates/oxide-code/src/slash/resume.rs`: `ResumeCmd`, `ResumePicker` and its `at_startup` variant, `PickerAction` and its `ACTIONS` keymap, `Pages`, and `SessionRow` with its `Column` layout.
+- `crates/oxide-code/src/tui.rs`: `NOTICE_DURATION`, shared by the copy notice and the picker's notice.
 - `crates/oxide-code/src/tui/app.rs`: `push_modal`.
 - `crates/oxide-code/src/tui/app/events.rs`: `apply_session_resumed`.
 - `crates/oxide-code/src/tui/components/chat.rs`: `ChatView::load_history`.
 - `crates/oxide-code/src/tui/modal/keymap.rs`: `Keymap`, `KeyAction`, and `KeyChord`, behind the picker's keys and footer hints.
-- `crates/oxide-code/src/tui/modal/searchable_list.rs`: `SearchableList<T>`, `SearchableItem`, and `cursor_to`, which keeps the cursor across a reload.
+- `crates/oxide-code/src/tui/modal/searchable_list.rs`: `SearchableList<T>`, `SearchableItem`, `append_items` and `set_has_more` for paged loading, and `retain_items` and `cursor_to`, which keep the cursor when rows drop.
+- `crates/oxide-code/src/util/text.rs`: `compact_count`, which abbreviates the message count, shared with the status line's token counts.

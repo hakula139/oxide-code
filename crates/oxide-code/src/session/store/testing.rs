@@ -144,9 +144,9 @@ pub(crate) fn listed_ids(store: &SessionStore, archived: bool) -> Vec<String> {
         all: false,
         archived,
     };
-    let page = store.list_paged(None, scope).unwrap();
-    page.into_sessions()
-        .into_iter()
+    store
+        .walk(scope)
+        .unwrap()
         .map(|info| info.session_id)
         .collect()
 }

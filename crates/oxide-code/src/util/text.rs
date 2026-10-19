@@ -1,5 +1,5 @@
-//! Text helpers: display-width-aware truncation, count-based pluralization, sentence joining,
-//! blank-edge trimming, and escaping for terminal output.
+//! Text helpers: display-width-aware truncation, count-based pluralization and abbreviation,
+//! sentence joining, blank-edge trimming, and escaping for terminal output.
 
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
@@ -19,6 +19,18 @@ pub(crate) fn plural<'a, N: Copy + PartialEq + From<u8>>(
         singular
     } else {
         plural
+    }
+}
+
+/// `n` in whole thousands or millions past 999, as in `12k` or `3M`. Below a billion it takes at
+/// most 4 columns.
+pub(crate) fn compact_count(n: u32) -> String {
+    if n >= 1_000_000 {
+        format!("{}M", n / 1_000_000)
+    } else if n >= 1_000 {
+        format!("{}k", n / 1_000)
+    } else {
+        n.to_string()
     }
 }
 
@@ -146,6 +158,25 @@ mod tests {
         fn uses_singular_only_for_one() {
             for (count, expected) in [(0, "files"), (1, "file"), (2, "files")] {
                 assert_eq!(plural(count, "file", "files"), expected);
+            }
+        }
+    }
+
+    mod compact_count {
+        use super::*;
+
+        #[test]
+        fn rounds_down_to_whole_thousands_and_millions() {
+            for (n, expected) in [
+                (999, "999"),
+                (1_000, "1k"),
+                (1_500, "1k"),
+                (12_345, "12k"),
+                (999_999, "999k"),
+                (1_000_000, "1M"),
+                (999_999_999, "999M"),
+            ] {
+                assert_eq!(compact_count(n), expected);
             }
         }
     }

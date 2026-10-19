@@ -11,6 +11,7 @@ pub(crate) mod list_picker;
 pub(crate) mod searchable_list;
 
 use std::fmt;
+use std::time::Instant;
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::Frame;
@@ -45,6 +46,13 @@ pub(crate) trait Modal: Send {
     /// Fires when this modal returns to the top of the stack after a nested modal pops. Default
     /// no-op. Pickers override it to refresh state the nested modal changed.
     fn on_focus_regained(&mut self) {}
+
+    /// Fires on every frame tick while the modal is on top, for state that changes with time, such
+    /// as a notice that expires or rows loading in the background. Returns whether the modal needs
+    /// a repaint. Default no-op.
+    fn tick(&mut self, _now: Instant) -> bool {
+        false
+    }
 
     /// Fires when the modal leaves the stack without submitting: universal-cancel (Esc / Ctrl+C),
     /// a [`ModalKey::Cancelled`], or [`ModalStack::clear`]. Returns an action to dispatch in place
@@ -205,6 +213,11 @@ impl ModalStack {
         }
     }
 
+    /// Ticks the top modal. Returns whether it needs a repaint.
+    pub(crate) fn tick(&mut self, now: Instant) -> bool {
+        self.stack.last_mut().is_some_and(|top| top.tick(now))
+    }
+
     /// Pops the top entry and notifies the new top through [`Modal::on_focus_regained`].
     fn pop_and_notify(&mut self) {
         self.stack.pop();
@@ -296,6 +309,8 @@ pub(crate) mod testing {
         pub(crate) declared_height: u16,
         /// Shared so a test can read the count after the modal moves into the stack.
         pub(crate) focus_regained_count: Arc<AtomicU32>,
+        /// Ticks received, shared like `focus_regained_count`. Each tick asks for a repaint.
+        pub(crate) tick_count: Arc<AtomicU32>,
     }
 
     impl ScriptedModal {
@@ -312,6 +327,7 @@ pub(crate) mod testing {
                 captures_esc: false,
                 declared_height: 3,
                 focus_regained_count: Arc::new(AtomicU32::new(0)),
+                tick_count: Arc::new(AtomicU32::new(0)),
             }
         }
     }
@@ -345,6 +361,11 @@ pub(crate) mod testing {
 
         fn on_focus_regained(&mut self) {
             self.focus_regained_count.fetch_add(1, Ordering::Relaxed);
+        }
+
+        fn tick(&mut self, _now: Instant) -> bool {
+            self.tick_count.fetch_add(1, Ordering::Relaxed);
+            true
         }
 
         fn on_cancel(&mut self) -> Option<ModalAction> {
@@ -773,6 +794,36 @@ mod tests {
                 );
                 assert!(stack.is_active(), "{label}: parent stays on the stack");
             }
+        }
+    }
+
+    mod tick {
+        use super::*;
+
+        #[test]
+        fn reaches_only_the_top_modal_and_reports_its_repaint() {
+            let bottom = ScriptedModal::new(ModalAction::Cancelled);
+            let bottom_ticks = Arc::clone(&bottom.tick_count);
+            let top = ScriptedModal::new(ModalAction::Cancelled);
+            let top_ticks = Arc::clone(&top.tick_count);
+            let mut stack = ModalStack::default();
+            stack.push(Box::new(bottom));
+            stack.push(Box::new(top));
+
+            let repaint = stack.tick(Instant::now());
+
+            assert!(repaint);
+            assert_eq!(top_ticks.load(Ordering::Relaxed), 1);
+            assert_eq!(bottom_ticks.load(Ordering::Relaxed), 0);
+        }
+
+        #[test]
+        fn with_no_modal_or_a_default_hook_asks_for_no_repaint() {
+            let mut stack = ModalStack::default();
+            assert!(!stack.tick(Instant::now()));
+
+            stack.push(Box::new(BareModal));
+            assert!(!stack.tick(Instant::now()));
         }
     }
 }

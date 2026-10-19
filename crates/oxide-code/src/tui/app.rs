@@ -42,9 +42,6 @@ const TICK_INTERVAL: Duration = Duration::from_millis(16);
 /// Window in which a second Ctrl+C confirms exit.
 const EXIT_WINDOW: Duration = Duration::from_secs(1);
 
-/// How long the outcome of a copy stays over the chat.
-const COPY_NOTICE_DURATION: Duration = Duration::from_secs(3);
-
 pub(crate) struct App {
     theme: Theme,
     /// Theme saved when a `/theme` picker opens. Restored if the modal cancels.
@@ -223,6 +220,7 @@ impl App {
                     self.dirty |= self.expire_armed_exit(now);
                     self.dirty |= self.chat.tick_selection(now);
                     self.dirty |= self.expire_copy_notice(now);
+                    self.dirty |= self.modals.tick(now);
                     if self.dirty {
                         self.render(terminal)?;
                         self.dirty = false;

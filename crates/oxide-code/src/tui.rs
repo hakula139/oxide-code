@@ -21,7 +21,12 @@ pub(crate) mod theme;
 pub(crate) mod viewport;
 mod wrap;
 
-use std::time::Instant;
+use std::time::{Duration, Instant};
+
+// ── Constants ──
+
+/// How long a timed notice, such as the outcome of a copy or of a picker action, stays shown.
+pub(crate) const NOTICE_DURATION: Duration = Duration::from_secs(3);
 
 // ── Helpers ──
 
@@ -31,6 +36,6 @@ fn saturating_u16(n: usize) -> u16 {
 
 /// Reads the tokio clock, so a test runtime with paused time controls every UI deadline. Outside a
 /// runtime it reads the system clock.
-fn now() -> Instant {
+pub(crate) fn now() -> Instant {
     tokio::time::Instant::now().into_std()
 }

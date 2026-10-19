@@ -1,0 +1,23 @@
+---
+source: crates/oxide-code/src/slash/resume.rs
+expression: "render_to_backend(&picker, 80)"
+---
+"Resume session                                                                  "
+"Pick a session to resume in place                                               "
+"                                                                                "
+"/ Type to filter (substring match)                                              "
+"                                                                                "
+"> Fix login redirect                 /work/proj              12 msgs  2026-04-18"
+"  Tidy the config loader and mov...  /work/proj                1 msg  2026-04-17"
+"                                                                                "
+"                                                                                "
+"                                                                                "
+"                                                                                "
+"                                                                                "
+"                                                                                "
+"                                                                                "
+"                                                                                "
+"                                                                                "
+"                                                                                "
+"                                                                                "
+"Enter to resume  ·  Esc to quit  ·  scope: all projects  ·  Ctrl+X to archive..."
