@@ -21,7 +21,7 @@ Conventions for comments, docstrings, documentation, commit and PR text, and str
 
 ## Prose
 
-These rules apply to comments, docs, commit messages, PR and issue text, `#[expect]` reasons, and strings shown to users or the model. Many Rust comments predate these rules. Issue [#220](https://github.com/hakula139/oxide-code/issues/220) tracks updating them.
+These rules apply to comments, docs, commit messages, PR and issue text, `#[expect]` reasons, and strings shown to users or the model.
 
 - State conclusions directly and match each claim's strength to its evidence. Describe what you checked, and avoid absolute claims such as "bug-free" or "guaranteed".
 - Say each thing once, using the fewest words that preserve its meaning. Give messages of the same kind a consistent shape, such as stating the cause followed by the step that fixes it.

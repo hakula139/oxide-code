@@ -489,7 +489,6 @@ mod tests {
     #[tokio::test]
     async fn handle_crossterm_key_submit_forwards_through_input_to_dispatch() {
         let (mut app, mut rx, _event_tx) = test_app(None);
-        // Type "hi" then Enter. Input returns `Action::Submit`, which must reach `dispatch_action`.
         app.handle_crossterm_event(&key_event(KeyCode::Char('h'), KeyModifiers::NONE));
         app.handle_crossterm_event(&key_event(KeyCode::Char('i'), KeyModifiers::NONE));
         app.handle_crossterm_event(&key_event(KeyCode::Enter, KeyModifiers::NONE));
@@ -503,7 +502,6 @@ mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn handle_crossterm_key_ctrl_c_idle_arms_exit_then_confirms() {
-        // The first press arms, and a second press inside the window confirms.
         let (mut app, _rx, _event_tx) = test_app(None);
         app.handle_crossterm_event(&key_event(KeyCode::Char('c'), KeyModifiers::CONTROL));
         assert!(!app.should_quit, "first press only arms");
@@ -538,7 +536,6 @@ mod tests {
 
     #[tokio::test]
     async fn handle_crossterm_key_ctrl_c_busy_forwards_interrupt_without_quitting() {
-        // Mid-turn Ctrl+C forwards `Interrupt` to the engine and leaves `should_quit` clear.
         let (mut app, mut rx, _event_tx) = test_app(None);
         app.handle_engine_event(Event::StreamToken("partial".to_owned()));
         assert!(!app.input.is_enabled());
@@ -865,7 +862,6 @@ mod tests {
 
     #[tokio::test]
     async fn modal_gate_intercepts_keys_before_input_sees_them() {
-        // Modal keys must not reach input.
         let (mut app, mut rx, _event_tx) = test_app(None);
         app.push_modal(Box::new(ScriptedModal::new(ModalAction::Dispatch(
             Action::Op(Op::Interrupt),
@@ -946,7 +942,6 @@ mod tests {
 
     #[test]
     fn modal_gate_cancel_closes_modal_without_dispatching() {
-        // `ModalKey::Cancelled` pops the modal without dispatching, so the next key reaches input.
         let (mut app, mut rx, _event_tx) = test_app(None);
         app.push_modal(Box::new(ScriptedModal::new(ModalAction::Cancelled)));
         app.handle_crossterm_event(&key_event(KeyCode::Char('c'), KeyModifiers::NONE));
@@ -1078,7 +1073,6 @@ mod tests {
 
     #[test]
     fn dispatch_slash_command_renders_locally_without_forwarding() {
-        // Slash commands stay client-side, so the engine never sees the prompt.
         let (mut app, mut rx, _event_tx) = test_app(None);
         app.dispatch_action(Action::Submit("/help".to_owned()));
 

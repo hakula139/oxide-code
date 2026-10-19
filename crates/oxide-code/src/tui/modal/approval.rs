@@ -1279,7 +1279,7 @@ mod tests {
             "an empty answer submits nothing"
         );
 
-        // `y` and `n` type into the feedback instead of answering.
+        // The feedback holds the `y` and `n` answer keys, which the editor takes as text.
         type_text(&mut modal, " try nextest ");
         let outcome = modal.handle_key(&KeyEvent::from(KeyCode::Enter));
         let ModalKey::Submitted(ModalAction::Dispatch(Action::Op(Op::Resolve { id, decision }))) =

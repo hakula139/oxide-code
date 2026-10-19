@@ -4,10 +4,10 @@ use anyhow::{Result, bail};
 use sha2::{Digest, Sha256};
 use xxhash_rust::xxh64;
 
-/// Salt hardcoded in the Claude Code JS source.
+/// Claude Code's salt for the `cc_version` fingerprint.
 const FINGERPRINT_SALT: &str = "59cf53e54c78";
 const FINGERPRINT_INDICES: [usize; 3] = [4, 7, 20];
-/// xxHash64 seed for the cch body hash (extracted from the Bun binary).
+/// Claude Code's xxHash64 seed for the `cch` body hash.
 const CCH_SEED: u64 = 0x6E52_736A_C806_831E;
 const CCH_PLACEHOLDER: &str = "cch=00000";
 

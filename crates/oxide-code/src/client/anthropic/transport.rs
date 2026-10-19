@@ -396,8 +396,8 @@ pub(super) fn format_stream_error(error_type: &str, message: &str) -> String {
     )
 }
 
-/// Joins a diagnostic as `headline: details. advice`, leaving out whichever part is absent. Details
-/// that already end in `.`, `?`, `!`, or `...` take the advice after a space alone.
+/// Joins a diagnostic as `headline: details. advice`, leaving out whichever part is absent.
+/// [`join_sentences`] picks the separator between the details and the advice.
 fn with_details(headline: &str, details: Option<&str>, advice: Option<&str>) -> String {
     match (details, advice) {
         (None, None) => headline.to_owned(),

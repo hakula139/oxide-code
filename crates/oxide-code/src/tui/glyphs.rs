@@ -148,7 +148,7 @@ pub(crate) const INTERRUPTED_MARKER: &str = "(interrupted)";
 
 // ── Status Spinner ──
 
-/// 8-dot Braille spinner frames, counterclockwise, indexed modulo their count.
+/// 8-dot Braille spinner frames whose one empty dot moves clockwise, indexed modulo their count.
 pub(super) const SPINNER_FRAMES: &[char] = &['⣷', '⣯', '⣟', '⡿', '⢿', '⣻', '⣽', '⣾'];
 
 #[cfg(test)]

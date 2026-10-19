@@ -1479,7 +1479,6 @@ mod tests {
 
     #[tokio::test]
     async fn stream_message_omits_output_config_when_effort_is_none() {
-        // Unknown models resolve to `Config.effort == None`, so the body omits `output_config`.
         let cfg = test_config(OFFLINE_URL, api_key(), "custom-model");
         assert!(cfg.effort.is_none(), "precondition: effort unset");
         let body = capture_stream_body(cfg).await;

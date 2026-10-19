@@ -319,7 +319,6 @@ mod tests {
 
     #[test]
     fn set_state_clamps_selection_when_row_count_shrinks() {
-        // The selection sits past the surviving row count and must clamp to it.
         let mut popup = name_popup("");
         let n = list(&popup).rows.len();
         for _ in 0..n - 1 {
@@ -335,7 +334,6 @@ mod tests {
 
     #[test]
     fn set_state_resets_selection_on_mode_transition() {
-        // A mode transition resets the selection, since the new roster is unrelated.
         let mut popup = name_popup("");
         popup.select_next();
         popup.select_next();
@@ -512,14 +510,12 @@ mod tests {
 
     #[test]
     fn render_filtered_name_query_shows_only_matching_rows() {
-        // Narrow query → single row. Confirms filter wiring and that unmatched commands disappear.
         let popup = name_popup("hel");
         insta::assert_snapshot!(render_to_backend(&popup, 60));
     }
 
     #[test]
     fn render_arg_mode_lists_curated_roster_without_slash_prefix() {
-        // Arg-mode rows render bare values (`low`, `medium`, ...) with no leading `/`.
         let popup = arg_popup("effort", "");
         insta::assert_snapshot!(render_to_backend(&popup, 60));
     }
@@ -563,7 +559,6 @@ mod tests {
 
     #[test]
     fn render_narrow_terminal_truncates_description() {
-        // At 30 cols the description shrinks and truncates with an ellipsis to fit the row.
         let popup = name_popup("");
         insta::assert_snapshot!(render_to_backend(&popup, 30));
     }
@@ -627,7 +622,6 @@ mod tests {
 
     #[test]
     fn scroll_offset_is_zero_when_total_fits_window() {
-        // total < cap → no scroll regardless of cursor.
         let mut p = long_popup(5);
         p.select_next();
         p.select_next();
