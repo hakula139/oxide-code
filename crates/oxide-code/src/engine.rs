@@ -15,7 +15,8 @@ use std::sync::Arc;
 
 use anyhow::{Result, anyhow};
 use serde::Serialize;
-use tokio::sync::mpsc;
+use tokio::sync::oneshot::error::TryRecvError;
+use tokio::sync::{mpsc, oneshot};
 use tokio::task::{JoinError, JoinHandle};
 
 use self::abort::{AbortResult, Inbox, TurnAbort};
@@ -160,6 +161,9 @@ pub(crate) struct Engine {
     /// The latest usage any turn reported, which the status line shows.
     displayed_usage: Option<TokenUsage>,
     total_estimated_cost_usd: f64,
+    /// Delivers the usage of the live session's title request, which joins the session total once
+    /// it lands.
+    title_usage: Option<oneshot::Receiver<UsageRecord>>,
 }
 
 impl Engine {
@@ -223,6 +227,7 @@ impl Engine {
             last_usage: None,
             displayed_usage: None,
             total_estimated_cost_usd: estimate_cost_usd(&usage),
+            title_usage: None,
         })
     }
 
@@ -250,7 +255,7 @@ impl Engine {
 
     /// Starts the engine task, which first emits what [`Self::emit_session_start`] shows. `drifted`
     /// lists the tracked files that changed on disk since the resumed session read them.
-    pub(crate) fn spawn(self, drifted: &[PathBuf]) -> EngineHandle {
+    pub(crate) fn spawn(mut self, drifted: &[PathBuf]) -> EngineHandle {
         let (ops, op_rx) = mpsc::channel(OP_CHANNEL_CAP);
         // Unbounded, so the engine never waits on or drops events for a frontend that falls behind.
         let (sink, events) = mpsc::unbounded_channel();
@@ -345,12 +350,12 @@ impl Engine {
         if self.interactive
             && let Some(seed) = outcome.ai_title_seed
         {
-            title_generator::spawn(
+            self.title_usage = Some(title_generator::spawn(
                 self.client.clone(),
                 self.session.clone(),
                 sink.clone(),
                 seed,
-            );
+            ));
         }
 
         let mut dispatch_ctx = dispatch::DispatchContext {
@@ -493,7 +498,7 @@ impl Engine {
     }
 
     /// Ends a compaction that left the transcript unchanged, showing the summary's cost first.
-    fn fail_compact(&self, sink: &dyn EventSink, abort: TurnAbort) -> TurnEnd {
+    fn fail_compact(&mut self, sink: &dyn EventSink, abort: TurnAbort) -> TurnEnd {
         self.emit_usage_update(sink);
         report_abort(sink, abort, "compact-failed")
     }
@@ -631,6 +636,7 @@ impl Engine {
         self.policy.clear_session_allow();
         self.reset_context_usage(sink);
         self.total_estimated_cost_usd = estimate_cost_usd(&usage);
+        self.title_usage = None;
     }
 
     async fn rename(&self, sink: &dyn EventSink, title: String) {
@@ -804,7 +810,7 @@ impl Engine {
     /// Shows what a session carries as the engine starts on it: its usage and task list, the
     /// warnings its prompt raised, the tracked files in `drifted`, and a transcript that ends on an
     /// interrupted response. Follows the event that swaps the session, which clears the chat.
-    fn emit_session_start(&self, sink: &dyn EventSink, drifted: &[PathBuf]) {
+    fn emit_session_start(&mut self, sink: &dyn EventSink, drifted: &[PathBuf]) {
         self.emit_usage_update(sink);
         self.emit_restored_tasks(sink);
         for warning in &self.instruction_warnings {
@@ -822,7 +828,10 @@ impl Engine {
         }
     }
 
-    fn emit_usage_update(&self, sink: &dyn EventSink) {
+    /// Shows the context usage and session cost, first adding the title request's cost once its
+    /// usage lands.
+    fn emit_usage_update(&mut self, sink: &dyn EventSink) {
+        self.absorb_title_usage();
         let estimated_cost_usd =
             (self.total_estimated_cost_usd > 0.0).then_some(self.total_estimated_cost_usd);
         if self.displayed_usage.is_none() && estimated_cost_usd.is_none() {
@@ -836,6 +845,20 @@ impl Engine {
             }),
             "usage-updated",
         );
+    }
+
+    /// Adds the title request's cost to the session total once its usage lands, and stops waiting
+    /// once the request has ended, with or without usage.
+    fn absorb_title_usage(&mut self) {
+        let Some(pending) = &mut self.title_usage else {
+            return;
+        };
+        match pending.try_recv() {
+            Ok(record) => self.total_estimated_cost_usd += estimate_cost_usd(&[record]),
+            Err(TryRecvError::Empty) => return,
+            Err(TryRecvError::Closed) => {}
+        }
+        self.title_usage = None;
     }
 
     /// Ends the background shells, then flushes and closes the live session, returning the write
@@ -994,8 +1017,8 @@ mod tests {
     };
     use super::*;
     use crate::client::anthropic::testing::{
-        DEVICE_ID, api_key, client_for, completion_body, sse_body, sse_response, test_config,
-        text_stream_body,
+        COMPLETION_USAGE, DEVICE_ID, api_key, client_for, completion_body, sse_body, sse_response,
+        test_config, text_stream_body,
     };
     use crate::config::compaction::{CompactionConfig, test_thresholds};
     use crate::config::{Effort, PromptCacheTtl};
@@ -1013,6 +1036,11 @@ mod tests {
     use crate::tool::tasks::testing::plan;
     use crate::util::git::testing::{init_fixture_repo, with_isolated_git_env_async};
     use crate::util::tls::testing::NoRoots;
+
+    const TITLE_MODEL: &str = "claude-haiku-5-5";
+
+    /// What each reply from [`mount_reply`] bills, as [`text_stream_body`] reports it.
+    const REPLY_USAGE: TokenUsage = TokenUsage::new(1_000, 100);
 
     /// A toolbox without tools, for an engine that [`Engine::new`] builds.
     fn toolbox() -> Toolbox {
@@ -1047,6 +1075,45 @@ mod tests {
                 return seen;
             }
         }
+    }
+
+    /// Events of the prompt in flight until both its terminal event and its session's AI title
+    /// have arrived, in either order.
+    async fn titled_turn_events(events: &mut mpsc::UnboundedReceiver<Event>) -> Vec<Event> {
+        let prompt = Op::Prompt(String::new());
+        let (mut ended, mut titled) = (false, false);
+        let mut seen = Vec::new();
+        while !(ended && titled) {
+            let event = events.recv().await.expect("the engine stopped early");
+            ended |= TurnEnd::of(&prompt, &event).is_some();
+            titled |= matches!(event, Event::SessionTitleUpdated { .. });
+            seen.push(event);
+        }
+        seen
+    }
+
+    /// Answers each title request with `response`. Mount it before the reply that answers turns.
+    async fn mount_title(server: &MockServer, response: ResponseTemplate) {
+        Mock::given(method("POST"))
+            .and(path("/v1/messages"))
+            .and(body_partial_json(
+                serde_json::json!({ "model": TITLE_MODEL }),
+            ))
+            .respond_with(response)
+            .mount(server)
+            .await;
+    }
+
+    /// A title reply naming the session `Greeting`, billed at [`COMPLETION_USAGE`].
+    fn greeting_title() -> ResponseTemplate {
+        ResponseTemplate::new(200).set_body_string(completion_body(r#"{"title":"Greeting"}"#))
+    }
+
+    /// Estimated cost of one request on `model` that reported `tokens` and wrote no cache.
+    fn request_cost(model: &str, tokens: TokenUsage) -> f64 {
+        model::cost_rates(model)
+            .unwrap()
+            .estimate_usd(tokens, PromptCacheTtl::OneHour)
     }
 
     /// A prompt that pastes two service logs, long enough that its exchange can compact.
@@ -1380,20 +1447,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn run_titles_a_fresh_session_in_the_background_when_interactive() {
+    async fn run_titles_a_fresh_session_when_interactive_and_counts_the_title_cost() {
         with_pinned_home(async {
             let server = MockServer::start().await;
-            Mock::given(method("POST"))
-                .and(path("/v1/messages"))
-                .and(body_partial_json(
-                    serde_json::json!({ "model": "claude-haiku-5-5" }),
-                ))
-                .respond_with(
-                    ResponseTemplate::new(200)
-                        .set_body_string(completion_body(r#"{"title":"Greeting"}"#)),
-                )
-                .mount(&server)
-                .await;
+            mount_title(&server, greeting_title()).await;
             mount_reply(&server, "reply").await;
             let dir = tempfile::tempdir().unwrap();
             let mut engine = engine(server.uri(), &test_store(dir.path()), dir.path()).await;
@@ -1406,14 +1463,97 @@ mod tests {
                 .send(Op::Prompt("hello".to_owned()))
                 .await
                 .unwrap();
-            let titled = next_matching(&mut handle.events, |event| match event {
-                Event::SessionTitleUpdated { session_id, title } => Some((session_id, title)),
-                _ => None,
-            })
-            .await;
+            let first = titled_turn_events(&mut handle.events).await;
+            let second = submit(&mut handle, "again").await;
             handle.shutdown().await.unwrap();
 
-            assert_eq!(titled, (live_id, "Greeting".to_owned()));
+            let titled = first.iter().find_map(|event| match event {
+                Event::SessionTitleUpdated { session_id, title } => {
+                    Some((session_id.as_str(), title.as_str()))
+                }
+                _ => None,
+            });
+            assert_eq!(titled, Some((live_id.as_str(), "Greeting")));
+            let expected = 2.0 * request_cost(MODEL, REPLY_USAGE)
+                + request_cost(TITLE_MODEL, COMPLETION_USAGE);
+            assert!(
+                matches!(
+                    second.as_slice(),
+                    [
+                        Event::StreamToken(_),
+                        Event::UsageUpdated(UsageSnapshot {
+                            estimated_cost_usd: Some(cost),
+                            ..
+                        }),
+                        Event::TurnComplete,
+                    ] if (cost - expected).abs() < 1e-12
+                ),
+                "two turns and the title: {second:?}"
+            );
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn run_saves_the_title_usage_so_a_resume_restores_its_cost() {
+        with_pinned_home(async {
+            let server = MockServer::start().await;
+            mount_title(&server, greeting_title()).await;
+            mount_reply(&server, "reply").await;
+            let dir = tempfile::tempdir().unwrap();
+            let store = test_store(dir.path());
+            let mut engine = engine(server.uri(), &store, dir.path()).await;
+            engine.interactive = true;
+            let session_id = engine.session_id().to_owned();
+            let cache_ttl = engine.client.prompt_cache_ttl();
+            let mut handle = engine.spawn(&[]);
+
+            handle
+                .ops
+                .send(Op::Prompt("hello".to_owned()))
+                .await
+                .unwrap();
+            titled_turn_events(&mut handle.events).await;
+            handle.ops.send(Op::Clear).await.unwrap();
+            next_matching(&mut handle.events, |event| {
+                matches!(event, Event::SessionReady).then_some(())
+            })
+            .await;
+            let target = ResumeTarget::Path(store.find_session_path(&session_id).unwrap());
+            handle.ops.send(Op::Resume { target }).await.unwrap();
+            next_matching(&mut handle.events, |event| {
+                matches!(event, Event::SessionResumed { .. }).then_some(())
+            })
+            .await;
+            let restored = handle.events.recv().await.unwrap();
+            handle.shutdown().await.unwrap();
+
+            let expected =
+                request_cost(MODEL, REPLY_USAGE) + request_cost(TITLE_MODEL, COMPLETION_USAGE);
+            assert!(
+                matches!(
+                    &restored,
+                    Event::UsageUpdated(UsageSnapshot {
+                        context_tokens: None,
+                        estimated_cost_usd: Some(cost),
+                        ..
+                    }) if (cost - expected).abs() < 1e-12
+                ),
+                "the turn and the title: {restored:?}"
+            );
+            let usage = store.load_session_data(&session_id).unwrap().usage;
+            let title_usage: Vec<_> = usage
+                .iter()
+                .filter(|record| record.model == TITLE_MODEL)
+                .collect();
+            assert_eq!(
+                title_usage,
+                [&UsageRecord {
+                    model: TITLE_MODEL.to_owned(),
+                    cache_ttl,
+                    tokens: COMPLETION_USAGE,
+                }]
+            );
         })
         .await;
     }
@@ -2177,6 +2317,54 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn submit_prompt_bills_nothing_for_a_title_request_that_fails() {
+        with_pinned_home(async {
+            let server = MockServer::start().await;
+            let failure = ResponseTemplate::new(500).insert_header("retry-after", "0");
+            mount_title(&server, failure).await;
+            mount_reply(&server, "reply").await;
+            let dir = tempfile::tempdir().unwrap();
+            let store = test_store(dir.path());
+            let mut engine = engine(server.uri(), &store, dir.path()).await;
+            engine.interactive = true;
+            let session_id = engine.session_id().to_owned();
+            let cache_ttl = engine.client.prompt_cache_ttl();
+            let sink = CapturingSink::default();
+
+            engine.submit_prompt("hello", &sink, &mut inert_ops()).await;
+            let title = engine.title_usage.as_mut().expect("a fresh session titles");
+            let delivered = title.await;
+            engine.emit_usage_update(&sink);
+            engine.finalize().await;
+
+            assert!(delivered.is_err(), "the failed request delivers no usage");
+            let shown = sink
+                .events()
+                .into_iter()
+                .rev()
+                .find_map(|event| match event {
+                    Event::UsageUpdated(usage) => usage.estimated_cost_usd,
+                    _ => None,
+                });
+            let expected = request_cost(MODEL, REPLY_USAGE);
+            assert!(
+                shown.is_some_and(|cost| (cost - expected).abs() < 1e-12),
+                "only the turn counts: {shown:?}"
+            );
+            let data = store.load_session_data(&session_id).unwrap();
+            assert_eq!(
+                data.usage,
+                [UsageRecord {
+                    model: MODEL.to_owned(),
+                    cache_ttl,
+                    tokens: REPLY_USAGE,
+                }]
+            );
+        })
+        .await;
+    }
+
+    #[tokio::test]
     async fn submit_prompt_adopts_the_task_list_a_tasks_call_sets() {
         with_pinned_home(async {
             let server = MockServer::start().await;
@@ -2833,6 +3021,48 @@ mod tests {
             assert!(
                 engine.total_estimated_cost_usd.abs() < f64::EPSILON,
                 "a session that recorded no usage resumes at zero"
+            );
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn clear_keeps_a_pending_title_cost_out_of_the_new_session() {
+        with_pinned_home(async {
+            let server = MockServer::start().await;
+            mount_title(&server, greeting_title()).await;
+            let reply_without_usage = sse_body(&[
+                serde_json::json!({"type": "message_start", "message": {"id": "msg_1", "model": MODEL}}),
+                serde_json::json!({"type": "content_block_start", "index": 0, "content_block": {"type": "text", "text": "reply"}}),
+                serde_json::json!({"type": "content_block_stop", "index": 0}),
+                serde_json::json!({"type": "message_delta", "delta": {"stop_reason": "end_turn"}}),
+                serde_json::json!({"type": "message_stop"}),
+            ]);
+            Mock::given(method("POST"))
+                .and(path("/v1/messages"))
+                .respond_with(sse_response(reply_without_usage))
+                .mount(&server)
+                .await;
+            let dir = tempfile::tempdir().unwrap();
+            let mut engine = engine(server.uri(), &test_store(dir.path()), dir.path()).await;
+            engine.interactive = true;
+            let (sink, mut events) = mpsc::unbounded_channel();
+            engine.submit_prompt("hello", &sink, &mut inert_ops()).await;
+            next_matching(&mut events, |event| {
+                matches!(event, Event::SessionTitleUpdated { .. }).then_some(())
+            })
+            .await;
+            assert!(
+                engine.total_estimated_cost_usd.abs() < f64::EPSILON,
+                "a turn without usage emits nothing, so the title cost is still pending"
+            );
+
+            engine.clear(&sink).await;
+
+            assert!(
+                engine.total_estimated_cost_usd.abs() < f64::EPSILON,
+                "the new session starts at zero: {}",
+                engine.total_estimated_cost_usd,
             );
         })
         .await;

@@ -3,22 +3,23 @@
 
 use std::fmt;
 use std::future::Future;
-use std::sync::LazyLock;
+use std::sync::{Arc, LazyLock};
 use std::time::Duration;
 
 use anyhow::{Result, anyhow};
 use bytes::Bytes;
 use regex::Regex;
 use reqwest::StatusCode;
-use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
+use reqwest::header::HeaderMap;
 use tracing::{debug, warn};
 
 use super::Client;
 use super::wire::{ApiError, ErrorResponse};
 use crate::client::PromptTooLong;
 use crate::client::{RateLimitWindow, RateLimits};
-use crate::config::auth::{Auth, AuthSource};
+use crate::config::auth::{self, Auth, AuthSource, Credential};
 use crate::util::text::{join_sentences, truncate_to_width};
+use crate::util::tls::Trust;
 
 // ── Retry Policy ──
 
@@ -40,26 +41,26 @@ pub(super) struct MessagesRequest {
     pub(super) betas: String,
     pub(super) session_id: String,
     pub(super) body: Bytes,
-    pub(super) auth: AuthSource,
-    pub(super) credential: (HeaderName, HeaderValue),
+    pub(super) auth: Auth,
+    /// Verifies the token endpoint when a stored login refreshes.
+    pub(super) trust: Arc<dyn Trust>,
 }
 
 impl Client {
-    /// Fails when the credential cannot travel in a header.
     pub(super) fn messages_request(
         &self,
         betas: String,
         body: String,
         auth: &Auth,
-    ) -> Result<MessagesRequest> {
-        Ok(MessagesRequest {
+    ) -> MessagesRequest {
+        MessagesRequest {
             url: format!("{}/v1/messages?beta=true", self.base_url),
             betas,
             session_id: self.session_id.clone(),
             body: body.into(),
-            auth: auth.source(),
-            credential: auth.header()?,
-        })
+            auth: auth.clone(),
+            trust: Arc::clone(&self.trust),
+        }
     }
 }
 
@@ -160,18 +161,55 @@ fn retry_delay(retry: u32, retry_after: Option<Duration>) -> Option<Duration> {
     Some(backoff.mul_f64(1.0 + MAX_JITTER * fastrand::f64()))
 }
 
-/// Sends one attempt and classifies a transport failure or a non-2xx status.
+/// Sends one attempt and classifies a transport failure or a non-2xx status. A stored login is
+/// refreshed first when near expiry. When the API rejects it with HTTP 401, it is reloaded, or
+/// refreshed when its store still holds the rejected token, and sent once more.
 pub(super) async fn post_messages(
     http: &reqwest::Client,
     request: &MessagesRequest,
     retry: u32,
 ) -> Result<reqwest::Response, AttemptError> {
-    let response = http
-        .post(&request.url)
+    let trust = request.trust.as_ref();
+    let credential = request
+        .auth
+        .credential(trust)
+        .await
+        .map_err(credential_failure)?;
+    let mut response = send(http, request, &credential, retry).await?;
+    if response.status() == StatusCode::UNAUTHORIZED
+        && let Some(reloaded) = request
+            .auth
+            .reload(&credential, trust)
+            .await
+            .map_err(credential_failure)?
+    {
+        response = send(http, request, &reloaded, retry).await?;
+    }
+    error_for_status(response, request.auth.source()).await
+}
+
+/// Retries a stored login's refresh that a later attempt may complete. Any other failure to
+/// produce a credential is fatal.
+fn credential_failure(error: anyhow::Error) -> AttemptError {
+    if auth::is_transient(&error) {
+        AttemptError::retryable("Token refresh failed", error)
+    } else {
+        AttemptError::Fatal(error)
+    }
+}
+
+async fn send(
+    http: &reqwest::Client,
+    request: &MessagesRequest,
+    credential: &Credential,
+    retry: u32,
+) -> Result<reqwest::Response, AttemptError> {
+    let (name, value) = credential.header();
+    http.post(&request.url)
         .header("anthropic-beta", &request.betas)
         .header("x-claude-code-session-id", &request.session_id)
         .header("x-stainless-retry-count", retry)
-        .header(&request.credential.0, &request.credential.1)
+        .header(name, value)
         .body(request.body.clone())
         .send()
         .await
@@ -184,8 +222,7 @@ pub(super) async fn post_messages(
                     anyhow::Error::new(e).context("API connection failed"),
                 )
             }
-        })?;
-    error_for_status(response, request.auth).await
+        })
 }
 
 /// Passes a 2xx response through. Otherwise reads the body into a user-facing error. As in the
@@ -435,14 +472,17 @@ fn condense(text: &str) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
+    use std::path::Path;
     use std::sync::atomic::{AtomicU32, Ordering};
 
     use indoc::indoc;
-    use wiremock::matchers::{method, path};
+    use reqwest::header::{HeaderName, HeaderValue};
+    use wiremock::matchers::{header, method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
     use super::*;
     use crate::client::anthropic::testing::{messages_request, plain_http};
+    use crate::config::oauth::testing::{ok_refresh_body, ox_login_in, write_creds};
 
     fn request(server: &MockServer) -> MessagesRequest {
         messages_request(format!("{}/v1/messages", server.uri()))
@@ -681,6 +721,167 @@ mod tests {
                 "status {status}",
             );
         }
+    }
+
+    #[tokio::test]
+    async fn post_messages_resends_a_rejected_stored_login_with_the_token_another_process_stored() {
+        let server = MockServer::start().await;
+        for (token, status) in [("old", 401), ("new", 200)] {
+            Mock::given(method("POST"))
+                .and(path("/v1/messages"))
+                .and(header("authorization", format!("Bearer {token}")))
+                .respond_with(ResponseTemplate::new(status))
+                .expect(1)
+                .mount(&server)
+                .await;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("credentials.json");
+        write_creds(&file, "new", Some("ref"), 9_999_999_999_999);
+        let mut req = request(&server);
+        req.auth = ox_login_in(&file, "http://unused", "old", 9_999_999_999_999);
+
+        post_messages(&plain_http(), &req, 0)
+            .await
+            .expect("the resend succeeds");
+
+        server.verify().await;
+    }
+
+    /// Answers `/v1/messages` sent with `token` with `status`, expecting `hits` such requests.
+    async fn mount_for_token(server: &MockServer, token: &str, status: u16, hits: u64) {
+        Mock::given(method("POST"))
+            .and(path("/v1/messages"))
+            .and(header("authorization", format!("Bearer {token}")))
+            .respond_with(ResponseTemplate::new(status).set_body_string("token revoked"))
+            .expect(hits)
+            .mount(server)
+            .await;
+    }
+
+    /// Answers the token endpoint at `/token` with `response`, expecting `hits` refreshes.
+    async fn mount_refresh(server: &MockServer, response: ResponseTemplate, hits: u64) {
+        Mock::given(method("POST"))
+            .and(path("/token"))
+            .respond_with(response)
+            .expect(hits)
+            .mount(server)
+            .await;
+    }
+
+    /// A request sending the oxide-code login `token`, which its store at `file` also holds with a
+    /// refresh token and `server` refreshes at `/token`.
+    fn stored_login_request(
+        server: &MockServer,
+        file: &Path,
+        token: &str,
+        expires_at_ms: u64,
+    ) -> MessagesRequest {
+        write_creds(file, token, Some("ref"), expires_at_ms);
+        let mut req = request(server);
+        let refresh_url = format!("{}/token", server.uri());
+        req.auth = ox_login_in(file, &refresh_url, token, expires_at_ms);
+        req
+    }
+
+    fn refreshed() -> ResponseTemplate {
+        ResponseTemplate::new(200).set_body_json(ok_refresh_body("fresh-access", "fresh-ref", 3600))
+    }
+
+    #[tokio::test]
+    async fn post_messages_refreshes_a_rejected_stored_login_its_store_still_holds() {
+        let server = MockServer::start().await;
+        mount_refresh(&server, refreshed(), 1).await;
+        mount_for_token(&server, "revoked", 401, 1).await;
+        mount_for_token(&server, "fresh-access", 200, 1).await;
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("credentials.json");
+        let req = stored_login_request(&server, &file, "revoked", 9_999_999_999_999);
+
+        post_messages(&plain_http(), &req, 0)
+            .await
+            .expect("the resend with the refreshed token succeeds");
+
+        server.verify().await;
+    }
+
+    #[tokio::test]
+    async fn post_messages_reports_a_401_the_refreshed_token_also_gets_with_the_sign_in_step() {
+        let server = MockServer::start().await;
+        mount_refresh(&server, refreshed(), 1).await;
+        mount_for_token(&server, "revoked", 401, 1).await;
+        mount_for_token(&server, "fresh-access", 401, 1).await;
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("credentials.json");
+        let req = stored_login_request(&server, &file, "revoked", 9_999_999_999_999);
+
+        let err = post_messages(&plain_http(), &req, 0)
+            .await
+            .expect_err("the second 401 fails the attempt");
+
+        let AttemptError::Fatal(error) = &err else {
+            panic!("expected a fatal error, got {err:?}");
+        };
+        assert_eq!(
+            format!("{error:#}"),
+            "Anthropic API rejected credentials (HTTP 401): token revoked. \
+             Run `/login` to sign in again.",
+        );
+        server.verify().await;
+    }
+
+    #[tokio::test]
+    async fn post_messages_reports_a_401_without_resending_when_the_refresh_is_rejected() {
+        let server = MockServer::start().await;
+        let invalid_grant =
+            ResponseTemplate::new(400).set_body_string(r#"{"error":"invalid_grant"}"#);
+        mount_refresh(&server, invalid_grant, 1).await;
+        mount_for_token(&server, "revoked", 401, 1).await;
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("credentials.json");
+        let req = stored_login_request(&server, &file, "revoked", 9_999_999_999_999);
+
+        let err = post_messages(&plain_http(), &req, 0)
+            .await
+            .expect_err("a login the refresh cannot restore fails the attempt");
+
+        let AttemptError::Fatal(error) = &err else {
+            panic!("expected a fatal error, got {err:?}");
+        };
+        assert_eq!(
+            format!("{error:#}"),
+            "Anthropic API rejected credentials (HTTP 401): token revoked. \
+             Run `/login` to sign in again.",
+        );
+        server.verify().await;
+    }
+
+    #[tokio::test]
+    async fn post_messages_retries_a_refresh_the_token_endpoint_failed_with_a_server_error() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/token"))
+            .respond_with(ResponseTemplate::new(503))
+            .up_to_n_times(1)
+            .expect(1)
+            .mount(&server)
+            .await;
+        mount_refresh(&server, refreshed(), 1).await;
+        mount_for_token(&server, "fresh-access", 200, 1).await;
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("credentials.json");
+        let req = stored_login_request(&server, &file, "expired", 0);
+        let http = plain_http();
+
+        let first = post_messages(&http, &req, 0).await;
+        let retry = post_messages(&http, &req, 1).await;
+
+        let Err(AttemptError::Retryable { cause, .. }) = &first else {
+            panic!("expected a retryable error, got {first:?}");
+        };
+        assert_eq!(cause, "Token refresh failed");
+        retry.expect("the retry refreshes and sends the request");
+        server.verify().await;
     }
 
     #[tokio::test]

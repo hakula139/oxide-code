@@ -297,258 +297,265 @@ mod tests {
     use crate::session::store::testing::seed_test_session;
     use crate::tool::testing::{canonical_tempdir, ctx, deny_reads, temp_ctx};
 
-    // ── Cli ──
+    mod cli {
+        use super::*;
 
-    #[test]
-    fn cli_output_picks_a_headless_format_and_defaults_to_text() {
-        let cli = Cli::try_parse_from(["ox", "-p", "hello", "--output", "stream-json"]).unwrap();
-        assert_eq!(cli.output, OutputFormat::StreamJson);
-        let cli = Cli::try_parse_from(["ox", "-p", "hello"]).unwrap();
-        assert_eq!(cli.output, OutputFormat::Text);
-        let missing = Cli::try_parse_from(["ox", "--output", "json"]).err();
-        assert_eq!(
-            missing.map(|error| error.kind()),
-            Some(ErrorKind::MissingRequiredArgument),
-        );
-    }
+        #[test]
+        fn mode_takes_a_permission_mode() {
+            let cli = Cli::try_parse_from(["ox", "--mode", "plan"]).unwrap();
+            assert_eq!(cli.mode, Some(Mode::Plan));
+            assert_eq!(Cli::try_parse_from(["ox"]).unwrap().mode, None);
+            let invalid = Cli::try_parse_from(["ox", "--mode", "bypass"])
+                .err()
+                .expect("bypass is not a mode");
+            assert_eq!(invalid.kind(), ErrorKind::InvalidValue);
+            assert!(
+                invalid
+                    .to_string()
+                    .contains("[possible values: manual, plan, yolo]"),
+                "{invalid}",
+            );
+        }
 
-    #[test]
-    fn cli_mode_takes_a_permission_mode() {
-        let cli = Cli::try_parse_from(["ox", "--mode", "plan"]).unwrap();
-        assert_eq!(cli.mode, Some(Mode::Plan));
-        assert_eq!(Cli::try_parse_from(["ox"]).unwrap().mode, None);
-        let invalid = Cli::try_parse_from(["ox", "--mode", "bypass"])
-            .err()
-            .expect("bypass is not a mode");
-        assert_eq!(invalid.kind(), ErrorKind::InvalidValue);
-        assert!(
-            invalid
-                .to_string()
-                .contains("[possible values: manual, plan, yolo]"),
-            "{invalid}",
-        );
-    }
+        #[test]
+        fn mode_long_help_describes_each_mode() {
+            let help = Cli::command().render_long_help().to_string();
 
-    #[test]
-    fn cli_mode_long_help_describes_each_mode() {
-        let help = Cli::command().render_long_help().to_string();
+            for line in [
+                "- manual: Ask about calls no rule settles",
+                "- plan:   Read-only: deny edits and commands",
+                "- yolo:   Run calls no rule settles",
+            ] {
+                assert!(help.contains(line), "{help}");
+            }
+        }
 
-        for line in [
-            "- manual: Ask about calls no rule settles",
-            "- plan:   Read-only: deny edits and commands",
-            "- yolo:   Run calls no rule settles",
-        ] {
-            assert!(help.contains(line), "{help}");
+        #[test]
+        fn output_picks_a_headless_format_and_defaults_to_text() {
+            let cli =
+                Cli::try_parse_from(["ox", "-p", "hello", "--output", "stream-json"]).unwrap();
+            assert_eq!(cli.output, OutputFormat::StreamJson);
+            let cli = Cli::try_parse_from(["ox", "-p", "hello"]).unwrap();
+            assert_eq!(cli.output, OutputFormat::Text);
+            let missing = Cli::try_parse_from(["ox", "--output", "json"]).err();
+            assert_eq!(
+                missing.map(|error| error.kind()),
+                Some(ErrorKind::MissingRequiredArgument),
+            );
+        }
+
+        #[test]
+        fn resume_takes_all_to_widen_the_picker() {
+            let cli = Cli::try_parse_from(["ox", "-r", "--all"]).unwrap();
+            assert!(cli.resume);
+            assert!(cli.all);
+        }
+
+        #[test]
+        fn resume_conflicts_with_every_mode_that_skips_the_picker() {
+            let kinds = [
+                &["ox", "--resume", "--continue"][..],
+                &["ox", "--resume", "--list"],
+                &["ox", "--resume", "--no-tui"],
+                &["ox", "--resume", "-p", "hello"],
+            ]
+            .map(|args| Cli::try_parse_from(args).err().map(|error| error.kind()));
+            assert_eq!(kinds, [Some(ErrorKind::ArgumentConflict); 4]);
         }
     }
 
-    #[test]
-    fn cli_resume_takes_all_to_widen_the_picker() {
-        let cli = Cli::try_parse_from(["ox", "-r", "--all"]).unwrap();
-        assert!(cli.resume);
-        assert!(cli.all);
+    mod list_sessions {
+        use super::*;
+
+        #[test]
+        fn scope_limit_and_archive_state() {
+            let dir = tempfile::tempdir().unwrap();
+            let cwd = Path::new("/work/local");
+            temp_env::with_var("XDG_DATA_HOME", Some(dir.path()), || {
+                let store = SessionStore::open(cwd).unwrap();
+                seed_test_session(
+                    &store,
+                    "local-session",
+                    Some("Local session"),
+                    Some(2),
+                    datetime!(2026-01-01 00:00 UTC),
+                );
+                let other = SessionStore::open_at(dir.path().join("ox/sessions"), "other").unwrap();
+                seed_test_session(
+                    &other,
+                    "other-session",
+                    Some("Other session"),
+                    Some(3),
+                    datetime!(2026-01-02 00:00 UTC),
+                );
+
+                let mut output = Vec::new();
+                list_sessions(&mut output, cwd, ListScope::default(), 0).unwrap();
+                let local = String::from_utf8(output).unwrap();
+                assert!(local.contains("Local session"));
+                assert!(!local.contains("Other session"));
+                assert!(!local.contains("Project"));
+
+                let mut output = Vec::new();
+                list_sessions(
+                    &mut output,
+                    cwd,
+                    ListScope {
+                        all: true,
+                        ..ListScope::default()
+                    },
+                    0,
+                )
+                .unwrap();
+                let all = String::from_utf8(output).unwrap();
+                assert!(all.contains("Local session"));
+                assert!(all.contains("Other session"));
+                assert!(all.contains("Project"));
+                assert!(!all.contains("... more"));
+
+                let mut output = Vec::new();
+                list_sessions(
+                    &mut output,
+                    cwd,
+                    ListScope {
+                        all: true,
+                        ..ListScope::default()
+                    },
+                    1,
+                )
+                .unwrap();
+                let capped = String::from_utf8(output).unwrap();
+                assert!(capped.contains("Other session"));
+                assert!(!capped.contains("Local session"));
+                assert!(capped.contains("... more"));
+
+                set_archived_at(&other.find_session_path("other-session").unwrap(), true).unwrap();
+                let mut output = Vec::new();
+                list_sessions(
+                    &mut output,
+                    cwd,
+                    ListScope {
+                        all: true,
+                        archived: true,
+                    },
+                    0,
+                )
+                .unwrap();
+                let archived = String::from_utf8(output).unwrap();
+                assert!(archived.contains("Other session"));
+                assert!(!archived.contains("Local session"));
+            });
+        }
+
+        #[test]
+        fn storage_error() {
+            let file = tempfile::NamedTempFile::new().unwrap();
+            temp_env::with_var("XDG_DATA_HOME", Some(file.path()), || {
+                assert!(
+                    list_sessions(&mut Vec::new(), Path::new("/work"), ListScope::default(), 0)
+                        .is_err()
+                );
+            });
+        }
     }
 
-    #[test]
-    fn cli_resume_conflicts_with_every_mode_that_skips_the_picker() {
-        let kinds = [
-            &["ox", "--resume", "--continue"][..],
-            &["ox", "--resume", "--list"],
-            &["ox", "--resume", "--no-tui"],
-            &["ox", "--resume", "-p", "hello"],
-        ]
-        .map(|args| Cli::try_parse_from(args).err().map(|error| error.kind()));
-        assert_eq!(kinds, [Some(ErrorKind::ArgumentConflict); 4]);
-    }
+    mod create_toolbox {
+        use super::*;
 
-    // ── list_sessions ──
-
-    #[test]
-    fn list_sessions_scope_limit_and_archive_state() {
-        let dir = tempfile::tempdir().unwrap();
-        let cwd = Path::new("/work/local");
-        temp_env::with_var("XDG_DATA_HOME", Some(dir.path()), || {
-            let store = SessionStore::open(cwd).unwrap();
-            seed_test_session(
-                &store,
-                "local-session",
-                Some("Local session"),
-                Some(2),
-                datetime!(2026-01-01 00:00 UTC),
+        #[test]
+        fn registers_the_built_in_tools() {
+            let tools = create_toolbox(&ReadFilter::default()).tools;
+            let names: Vec<_> = tools
+                .definitions()
+                .into_iter()
+                .map(|tool| tool.name)
+                .collect();
+            assert_eq!(
+                names,
+                [
+                    "bash",
+                    "bash_output",
+                    "bash_stop",
+                    "read",
+                    "write",
+                    "edit",
+                    "glob",
+                    "grep",
+                    "tasks",
+                ],
             );
-            let other = SessionStore::open_at(dir.path().join("ox/sessions"), "other").unwrap();
-            seed_test_session(
-                &other,
-                "other-session",
-                Some("Other session"),
-                Some(3),
-                datetime!(2026-01-02 00:00 UTC),
+        }
+
+        #[tokio::test]
+        async fn shares_its_background_shells_with_the_bash_tools() {
+            let toolbox = create_toolbox(&ReadFilter::default());
+            let tools = &toolbox.tools;
+            let ctx = temp_ctx();
+
+            let started = tools
+                .run_input(
+                    "bash",
+                    serde_json::json!({"command": "echo hi", "run_in_background": true}),
+                    &ctx,
+                )
+                .await;
+            assert!(!started.is_error, "{}", started.content);
+            let listed: Vec<_> = toolbox.shells.list().into_iter().map(|s| s.id).collect();
+            let read = tools
+                .run_input(
+                    "bash_output",
+                    serde_json::json!({"shell_id": "shell-1", "timeout": 5_000}),
+                    &ctx,
+                )
+                .await;
+            let stopped = tools
+                .run_input(
+                    "bash_stop",
+                    serde_json::json!({"shell_id": "shell-1"}),
+                    &ctx,
+                )
+                .await;
+
+            assert_eq!(listed, ["shell-1"]);
+            assert_eq!(read.content, "hi\n\n(exit code 0)");
+            assert_eq!(
+                stopped.content,
+                "(no new output)\n\n(stopped after it exited with code 0)"
             );
+            assert_eq!(toolbox.shells.list(), []);
+        }
 
-            let mut output = Vec::new();
-            list_sessions(&mut output, cwd, ListScope::default(), 0).unwrap();
-            let local = String::from_utf8(output).unwrap();
-            assert!(local.contains("Local session"));
-            assert!(!local.contains("Other session"));
-            assert!(!local.contains("Project"));
+        #[tokio::test]
+        async fn hands_the_read_filter_to_the_search_tools() {
+            let dir = canonical_tempdir();
+            std::fs::write(dir.path().join("notes.txt"), "token").unwrap();
+            std::fs::write(dir.path().join("secret.txt"), "token").unwrap();
+            let read_filter = deny_reads(&["secret.txt"]);
+            let tools = create_toolbox(&read_filter).tools;
+            let ctx = ctx(dir.path());
 
-            let mut output = Vec::new();
-            list_sessions(
-                &mut output,
-                cwd,
-                ListScope {
-                    all: true,
-                    ..ListScope::default()
-                },
-                0,
-            )
-            .unwrap();
-            let all = String::from_utf8(output).unwrap();
-            assert!(all.contains("Local session"));
-            assert!(all.contains("Other session"));
-            assert!(all.contains("Project"));
-            assert!(!all.contains("... more"));
-
-            let mut output = Vec::new();
-            list_sessions(
-                &mut output,
-                cwd,
-                ListScope {
-                    all: true,
-                    ..ListScope::default()
-                },
-                1,
-            )
-            .unwrap();
-            let capped = String::from_utf8(output).unwrap();
-            assert!(capped.contains("Other session"));
-            assert!(!capped.contains("Local session"));
-            assert!(capped.contains("... more"));
-
-            set_archived_at(&other.find_session_path("other-session").unwrap(), true).unwrap();
-            let mut output = Vec::new();
-            list_sessions(
-                &mut output,
-                cwd,
-                ListScope {
-                    all: true,
-                    archived: true,
-                },
-                0,
-            )
-            .unwrap();
-            let archived = String::from_utf8(output).unwrap();
-            assert!(archived.contains("Other session"));
-            assert!(!archived.contains("Local session"));
-        });
-    }
-
-    #[test]
-    fn list_sessions_storage_error() {
-        let file = tempfile::NamedTempFile::new().unwrap();
-        temp_env::with_var("XDG_DATA_HOME", Some(file.path()), || {
-            assert!(
-                list_sessions(&mut Vec::new(), Path::new("/work"), ListScope::default(), 0)
-                    .is_err()
-            );
-        });
-    }
-
-    // ── create_toolbox ──
-
-    #[test]
-    fn create_toolbox_registers_the_built_in_tools() {
-        let tools = create_toolbox(&ReadFilter::default()).tools;
-        let names: Vec<_> = tools
-            .definitions()
-            .into_iter()
-            .map(|tool| tool.name)
-            .collect();
-        assert_eq!(
-            names,
-            [
-                "bash",
-                "bash_output",
-                "bash_stop",
-                "read",
-                "write",
-                "edit",
-                "glob",
-                "grep",
-                "tasks",
-            ],
-        );
-    }
-
-    #[tokio::test]
-    async fn create_toolbox_shares_its_background_shells_with_the_bash_tools() {
-        let toolbox = create_toolbox(&ReadFilter::default());
-        let tools = &toolbox.tools;
-        let ctx = temp_ctx();
-
-        let started = tools
-            .run_input(
-                "bash",
-                serde_json::json!({"command": "echo hi", "run_in_background": true}),
-                &ctx,
-            )
-            .await;
-        assert!(!started.is_error, "{}", started.content);
-        let listed: Vec<_> = toolbox.shells.list().into_iter().map(|s| s.id).collect();
-        let read = tools
-            .run_input(
-                "bash_output",
-                serde_json::json!({"shell_id": "shell-1", "timeout": 5_000}),
-                &ctx,
-            )
-            .await;
-        let stopped = tools
-            .run_input(
-                "bash_stop",
-                serde_json::json!({"shell_id": "shell-1"}),
-                &ctx,
-            )
-            .await;
-
-        assert_eq!(listed, ["shell-1"]);
-        assert_eq!(read.content, "hi\n\n(exit code 0)");
-        assert_eq!(
-            stopped.content,
-            "(no new output)\n\n(stopped after it exited with code 0)"
-        );
-        assert_eq!(toolbox.shells.list(), []);
-    }
-
-    #[tokio::test]
-    async fn create_toolbox_hands_the_read_filter_to_the_search_tools() {
-        let dir = canonical_tempdir();
-        std::fs::write(dir.path().join("notes.txt"), "token").unwrap();
-        std::fs::write(dir.path().join("secret.txt"), "token").unwrap();
-        let read_filter = deny_reads(&["secret.txt"]);
-        let tools = create_toolbox(&read_filter).tools;
-        let ctx = ctx(dir.path());
-
-        for (tool, pattern) in [("glob", "*.txt"), ("grep", "token")] {
-            let input = serde_json::json!({"pattern": pattern});
-            let output = tools.run_input(tool, input, &ctx).await;
-            assert!(!output.is_error, "{tool}: {}", output.content);
-            assert!(
-                output.content.contains("notes.txt"),
-                "{tool}: {}",
-                output.content
-            );
-            assert!(
-                !output.content.contains("secret"),
-                "{tool}: {}",
-                output.content
-            );
-            assert!(
-                output
-                    .content
-                    .ends_with("(1 file withheld by read deny or ask rules)"),
-                "{tool}: {}",
-                output.content
-            );
+            for (tool, pattern) in [("glob", "*.txt"), ("grep", "token")] {
+                let input = serde_json::json!({"pattern": pattern});
+                let output = tools.run_input(tool, input, &ctx).await;
+                assert!(!output.is_error, "{tool}: {}", output.content);
+                assert!(
+                    output.content.contains("notes.txt"),
+                    "{tool}: {}",
+                    output.content
+                );
+                assert!(
+                    !output.content.contains("secret"),
+                    "{tool}: {}",
+                    output.content
+                );
+                assert!(
+                    output
+                        .content
+                        .ends_with("(1 file withheld by read deny or ask rules)"),
+                    "{tool}: {}",
+                    output.content
+                );
+            }
         }
     }
 }
