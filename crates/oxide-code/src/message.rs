@@ -158,188 +158,164 @@ mod tests {
     mod content_block {
         use super::*;
 
-        mod server_tool_use {
-            use super::*;
+        #[test]
+        fn server_tool_use_round_trips_through_json() {
+            let block = ContentBlock::ServerToolUse {
+                id: "stu_01".to_owned(),
+                name: "advisor".to_owned(),
+                input: serde_json::json!({"query": "test"}),
+            };
 
-            #[test]
-            fn round_trips_through_json() {
-                let block = ContentBlock::ServerToolUse {
-                    id: "stu_01".to_owned(),
-                    name: "advisor".to_owned(),
-                    input: serde_json::json!({"query": "test"}),
-                };
+            let json = serde_json::to_value(&block).unwrap();
 
-                let json = serde_json::to_value(&block).unwrap();
-
-                assert_eq!(
-                    json,
-                    serde_json::json!({
-                        "type": "server_tool_use",
-                        "id": "stu_01",
-                        "name": "advisor",
-                        "input": {"query": "test"},
-                    }),
-                );
-                assert_eq!(serde_json::from_value::<ContentBlock>(json).unwrap(), block);
-            }
+            assert_eq!(
+                json,
+                serde_json::json!({
+                    "type": "server_tool_use",
+                    "id": "stu_01",
+                    "name": "advisor",
+                    "input": {"query": "test"},
+                }),
+            );
+            assert_eq!(serde_json::from_value::<ContentBlock>(json).unwrap(), block);
         }
 
-        mod server_tool_result {
-            use super::*;
+        #[test]
+        fn server_tool_result_stores_its_api_type_beside_the_fields_it_keeps() {
+            let fields = serde_json::json!({
+                "caller": {"type": "direct"},
+                "content": [{"type": "web_search_result", "encrypted_content": "opaque"}],
+            });
+            let block = ContentBlock::ServerToolResult {
+                tool_use_id: "stu_01".to_owned(),
+                kind: "web_search_tool_result".to_owned(),
+                fields: fields.as_object().unwrap().clone(),
+            };
 
-            #[test]
-            fn stores_its_api_type_beside_the_fields_it_keeps() {
-                let fields = serde_json::json!({
+            let json = serde_json::to_value(&block).unwrap();
+
+            assert_eq!(
+                json,
+                serde_json::json!({
+                    "type": "server_tool_result",
+                    "tool_use_id": "stu_01",
+                    "kind": "web_search_tool_result",
                     "caller": {"type": "direct"},
                     "content": [{"type": "web_search_result", "encrypted_content": "opaque"}],
-                });
-                let block = ContentBlock::ServerToolResult {
-                    tool_use_id: "stu_01".to_owned(),
-                    kind: "web_search_tool_result".to_owned(),
-                    fields: fields.as_object().unwrap().clone(),
+                }),
+            );
+            assert_eq!(serde_json::from_value::<ContentBlock>(json).unwrap(), block);
+        }
+
+        #[test]
+        fn tool_result_writes_is_error_only_when_set() {
+            for (is_error, expected) in [
+                (
+                    true,
+                    serde_json::json!({
+                        "type": "tool_result",
+                        "tool_use_id": "id",
+                        "content": "out",
+                        "is_error": true,
+                    }),
+                ),
+                (
+                    false,
+                    serde_json::json!({
+                        "type": "tool_result",
+                        "tool_use_id": "id",
+                        "content": "out",
+                    }),
+                ),
+            ] {
+                let block = ContentBlock::ToolResult {
+                    tool_use_id: "id".to_owned(),
+                    content: "out".to_owned(),
+                    is_error,
                 };
 
                 let json = serde_json::to_value(&block).unwrap();
 
-                assert_eq!(
-                    json,
-                    serde_json::json!({
-                        "type": "server_tool_result",
-                        "tool_use_id": "stu_01",
-                        "kind": "web_search_tool_result",
-                        "caller": {"type": "direct"},
-                        "content": [{"type": "web_search_result", "encrypted_content": "opaque"}],
-                    }),
-                );
+                assert_eq!(json, expected);
                 assert_eq!(serde_json::from_value::<ContentBlock>(json).unwrap(), block);
             }
         }
 
-        mod tool_result {
-            use super::*;
+        #[test]
+        fn thinking_stores_its_replay_beside_the_thinking_text() {
+            let block = ContentBlock::Thinking {
+                thinking: "reasoning".to_owned(),
+                replay: Replay::with_model(MODEL, "sig_abc"),
+            };
 
-            #[test]
-            fn writes_is_error_only_when_set() {
-                for (is_error, expected) in [
-                    (
-                        true,
-                        serde_json::json!({
-                            "type": "tool_result",
-                            "tool_use_id": "id",
-                            "content": "out",
-                            "is_error": true,
-                        }),
-                    ),
-                    (
-                        false,
-                        serde_json::json!({
-                            "type": "tool_result",
-                            "tool_use_id": "id",
-                            "content": "out",
-                        }),
-                    ),
-                ] {
-                    let block = ContentBlock::ToolResult {
-                        tool_use_id: "id".to_owned(),
-                        content: "out".to_owned(),
-                        is_error,
-                    };
+            let json = serde_json::to_value(&block).unwrap();
 
-                    let json = serde_json::to_value(&block).unwrap();
-
-                    assert_eq!(json, expected);
-                    assert_eq!(serde_json::from_value::<ContentBlock>(json).unwrap(), block);
-                }
-            }
+            assert_eq!(
+                json,
+                serde_json::json!({
+                    "type": "thinking",
+                    "thinking": "reasoning",
+                    "wire": "anthropic",
+                    "model": "claude-opus-5-5",
+                    "payload": "sig_abc",
+                }),
+            );
+            assert_eq!(serde_json::from_value::<ContentBlock>(json).unwrap(), block);
         }
 
-        mod thinking {
-            use super::*;
-
-            #[test]
-            fn stores_its_replay_beside_the_thinking_text() {
-                let block = ContentBlock::Thinking {
-                    thinking: "reasoning".to_owned(),
-                    replay: Replay::with_model(MODEL, "sig_abc"),
-                };
-
-                let json = serde_json::to_value(&block).unwrap();
-
-                assert_eq!(
-                    json,
+        #[test]
+        fn thinking_without_a_full_replay_fails_to_load() {
+            let cases = [
+                (
+                    serde_json::json!({"type": "thinking", "thinking": "r", "signature": "sig"}),
+                    "missing field `wire`",
+                ),
+                (
                     serde_json::json!({
                         "type": "thinking",
-                        "thinking": "reasoning",
+                        "thinking": "r",
                         "wire": "anthropic",
-                        "model": "claude-opus-5-5",
-                        "payload": "sig_abc",
+                        "payload": "sig",
                     }),
-                );
-                assert_eq!(serde_json::from_value::<ContentBlock>(json).unwrap(), block);
-            }
+                    "missing field `model`",
+                ),
+                (
+                    serde_json::json!({
+                        "type": "thinking",
+                        "thinking": "r",
+                        "signature": "sig",
+                        "wire": "anthropic",
+                        "model": MODEL,
+                    }),
+                    "missing field `payload`",
+                ),
+            ];
 
-            #[test]
-            fn without_a_full_replay_fails_to_load() {
-                let cases = [
-                    (
-                        serde_json::json!({
-                            "type": "thinking",
-                            "thinking": "r",
-                            "signature": "sig",
-                        }),
-                        "missing field `wire`",
-                    ),
-                    (
-                        serde_json::json!({
-                            "type": "thinking",
-                            "thinking": "r",
-                            "wire": "anthropic",
-                            "payload": "sig",
-                        }),
-                        "missing field `model`",
-                    ),
-                    (
-                        serde_json::json!({
-                            "type": "thinking",
-                            "thinking": "r",
-                            "signature": "sig",
-                            "wire": "anthropic",
-                            "model": MODEL,
-                        }),
-                        "missing field `payload`",
-                    ),
-                ];
+            for (json, expected) in cases {
+                let err = serde_json::from_value::<ContentBlock>(json.clone()).unwrap_err();
 
-                for (json, expected) in cases {
-                    let err = serde_json::from_value::<ContentBlock>(json.clone()).unwrap_err();
-
-                    assert_eq!(err.to_string(), expected, "{json}");
-                }
+                assert_eq!(err.to_string(), expected, "{json}");
             }
         }
 
-        mod redacted_thinking {
-            use super::*;
+        #[test]
+        fn redacted_thinking_stores_its_replay_alone() {
+            let block = ContentBlock::RedactedThinking {
+                replay: Replay::with_model(MODEL, "base64data=="),
+            };
 
-            #[test]
-            fn stores_its_replay_alone() {
-                let block = ContentBlock::RedactedThinking {
-                    replay: Replay::with_model(MODEL, "base64data=="),
-                };
+            let json = serde_json::to_value(&block).unwrap();
 
-                let json = serde_json::to_value(&block).unwrap();
-
-                assert_eq!(
-                    json,
-                    serde_json::json!({
-                        "type": "redacted_thinking",
-                        "wire": "anthropic",
-                        "model": "claude-opus-5-5",
-                        "payload": "base64data==",
-                    }),
-                );
-                assert_eq!(serde_json::from_value::<ContentBlock>(json).unwrap(), block);
-            }
+            assert_eq!(
+                json,
+                serde_json::json!({
+                    "type": "redacted_thinking",
+                    "wire": "anthropic",
+                    "model": "claude-opus-5-5",
+                    "payload": "base64data==",
+                }),
+            );
+            assert_eq!(serde_json::from_value::<ContentBlock>(json).unwrap(), block);
         }
     }
 

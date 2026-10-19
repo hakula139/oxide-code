@@ -551,40 +551,6 @@ mod tests {
             });
             assert_eq!(tracker.lock().len(), 8 * 100);
         }
-
-        #[tokio::test]
-        async fn attribution_credits_each_state_to_its_read_or_write_call() {
-            let dir = tempfile::tempdir().unwrap();
-            let tracker = Arc::new(FileTracker::default());
-            let read = Path::new("/tmp/read.rs");
-            let paged = Path::new("/tmp/paged.rs");
-            let written = dir.path().join("written.rs");
-
-            tracker.record_read(read, b"r", LastView::Full, "toolu_read");
-            tracker.record_read(paged, b"p", LastView::lines(1, 1, 2), "toolu_page_1");
-            tracker.record_read(paged, b"p", LastView::lines(2, 2, 2), "toolu_page_2");
-            tracker
-                .write_and_record("toolu_write", write_file(written.clone(), b"w"))
-                .await
-                .unwrap();
-            let reread = tracker.record_read(read, b"r", LastView::Full, "toolu_reread");
-
-            assert_eq!(reread, RecordRead::CacheHit);
-            let origins: BTreeMap<PathBuf, String> = tracker
-                .snapshot_all()
-                .into_iter()
-                .map(|snap| (snap.path, snap.state.tool_use_id))
-                .collect();
-            assert_eq!(
-                origins,
-                BTreeMap::from([
-                    (paged.to_path_buf(), "toolu_page_2".to_owned()),
-                    (read.to_path_buf(), "toolu_read".to_owned()),
-                    (written, "toolu_write".to_owned()),
-                ]),
-                "the newest read that returned content owns the state, and a cache hit keeps it",
-            );
-        }
     }
 
     mod verify_current_content {
@@ -1007,19 +973,19 @@ mod tests {
         use super::*;
 
         #[test]
-        fn display_names_directory() {
+        fn directory_displays_its_kind() {
             let err = TrackableFileError::Directory;
             assert_eq!(err.to_string(), "not a regular file: directory");
         }
 
         #[test]
-        fn display_names_non_regular_file() {
+        fn non_regular_displays_as_not_a_regular_file() {
             let err = TrackableFileError::NonRegular;
             assert_eq!(err.to_string(), "not a regular file");
         }
 
         #[test]
-        fn display_names_size_limit() {
+        fn too_large_displays_the_size_and_limit() {
             let err = TrackableFileError::TooLarge { size: 12, max: 10 };
             assert_eq!(
                 err.to_string(),
@@ -1169,6 +1135,44 @@ mod tests {
             assert!(msg.contains("/tmp/a.rs"), "path is named: {msg}");
             assert!(msg.contains("modified externally"));
             assert!(msg.contains("Re-read"));
+        }
+    }
+
+    mod attribution {
+        use super::*;
+
+        #[tokio::test]
+        async fn credits_each_state_to_its_read_or_write_call() {
+            let dir = tempfile::tempdir().unwrap();
+            let tracker = Arc::new(FileTracker::default());
+            let read = Path::new("/tmp/read.rs");
+            let paged = Path::new("/tmp/paged.rs");
+            let written = dir.path().join("written.rs");
+
+            tracker.record_read(read, b"r", LastView::Full, "toolu_read");
+            tracker.record_read(paged, b"p", LastView::lines(1, 1, 2), "toolu_page_1");
+            tracker.record_read(paged, b"p", LastView::lines(2, 2, 2), "toolu_page_2");
+            tracker
+                .write_and_record("toolu_write", write_file(written.clone(), b"w"))
+                .await
+                .unwrap();
+            let reread = tracker.record_read(read, b"r", LastView::Full, "toolu_reread");
+
+            assert_eq!(reread, RecordRead::CacheHit);
+            let origins: BTreeMap<PathBuf, String> = tracker
+                .snapshot_all()
+                .into_iter()
+                .map(|snap| (snap.path, snap.state.tool_use_id))
+                .collect();
+            assert_eq!(
+                origins,
+                BTreeMap::from([
+                    (paged.to_path_buf(), "toolu_page_2".to_owned()),
+                    (read.to_path_buf(), "toolu_read".to_owned()),
+                    (written, "toolu_write".to_owned()),
+                ]),
+                "the newest read that returned content owns the state, and a cache hit keeps it",
+            );
         }
     }
 }

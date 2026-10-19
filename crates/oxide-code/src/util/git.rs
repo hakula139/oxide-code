@@ -622,6 +622,14 @@ mod tests {
     mod check_output {
         use super::*;
 
+        fn status_with_code(code: i32) -> std::process::ExitStatus {
+            Command::new("sh")
+                .arg("-c")
+                .arg(format!("exit {code}"))
+                .status()
+                .unwrap()
+        }
+
         #[test]
         fn success_preserves_stdout() {
             let output = check_output(
@@ -659,14 +667,6 @@ mod tests {
                 Err(io::Error::new(io::ErrorKind::NotFound, "binary missing")),
             );
             assert!(result.is_none());
-        }
-
-        fn status_with_code(code: i32) -> std::process::ExitStatus {
-            Command::new("sh")
-                .arg("-c")
-                .arg(format!("exit {code}"))
-                .status()
-                .unwrap()
         }
     }
 
