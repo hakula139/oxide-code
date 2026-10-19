@@ -126,160 +126,168 @@ mod tests {
     use super::testing::{HOME_VAR, abs};
     use super::*;
 
-    // ── app_dir ──
+    mod app_dir {
+        use super::*;
 
-    #[test]
-    fn app_dir_prefers_the_base_variable_then_its_home_default() {
-        let (home, xdg) = (abs("/home/u"), abs("/xdg"));
-        for (base, var, home_default) in [
-            (XdgBase::Config, "XDG_CONFIG_HOME", ".config"),
-            (XdgBase::Data, "XDG_DATA_HOME", ".local/share"),
-            (XdgBase::State, "XDG_STATE_HOME", ".local/state"),
-        ] {
-            let (set, unset) = temp_env::with_vars(
-                [(HOME_VAR, Some(home.as_str())), (var, Some(xdg.as_str()))],
-                || {
-                    (
-                        app_dir(base),
-                        temp_env::with_var_unset(var, || app_dir(base)),
-                    )
-                },
-            );
-            assert_eq!(set, Some(Path::new(&xdg).join("ox")), "{var}");
-            assert_eq!(
-                unset,
-                Some(Path::new(&home).join(home_default).join("ox")),
-                "{var}"
-            );
-        }
-    }
-
-    #[test]
-    fn app_dir_ignores_a_relative_base_variable() {
-        let home = abs("/home/u");
-        let dir = temp_env::with_vars(
-            [
-                (HOME_VAR, Some(home.as_str())),
-                ("XDG_STATE_HOME", Some("relative/state")),
-            ],
-            || app_dir(XdgBase::State),
-        );
-        assert_eq!(dir, Some(Path::new(&home).join(".local/state/ox")));
-    }
-
-    // ── tildify ──
-
-    #[test]
-    fn tildify_rewrites_home_prefix_to_tilde() {
-        temp_env::with_var(HOME_VAR, Some("/tmp/oxide-home"), || {
-            assert_eq!(
-                tildify(&PathBuf::from("/tmp/oxide-home/work/project")),
-                "~/work/project",
-            );
-        });
-    }
-
-    #[test]
-    fn tildify_preserves_paths_outside_home() {
-        temp_env::with_var(HOME_VAR, Some("/tmp/oxide-home"), || {
-            assert_eq!(
-                tildify(&PathBuf::from("/tmp/not-home/session")),
-                "/tmp/not-home/session",
-            );
-        });
-    }
-
-    #[test]
-    fn tildify_renders_home_itself_as_a_bare_tilde() {
-        temp_env::with_var(HOME_VAR, Some("/tmp/oxide-home"), || {
-            assert_eq!(tildify(&PathBuf::from("/tmp/oxide-home")), "~");
-        });
-    }
-
-    // ── expand_user ──
-
-    #[test]
-    fn expand_user_rewrites_leading_tilde_slash_to_home() {
-        temp_env::with_var(HOME_VAR, Some("/tmp/oxide-fake-home"), || {
-            assert_eq!(
-                expand_user("~/work/project").unwrap(),
-                PathBuf::from("/tmp/oxide-fake-home/work/project")
-            );
-        });
-    }
-
-    #[test]
-    fn expand_user_collapses_redundant_slashes_after_tilde() {
-        temp_env::with_var(HOME_VAR, Some("/tmp/oxide-fake-home"), || {
-            for (raw, expected) in [
-                ("~//foo", "/tmp/oxide-fake-home/foo"),
-                ("~///foo/bar", "/tmp/oxide-fake-home/foo/bar"),
+        #[test]
+        fn prefers_the_base_variable_then_its_home_default() {
+            let (home, xdg) = (abs("/home/u"), abs("/xdg"));
+            for (base, var, home_default) in [
+                (XdgBase::Config, "XDG_CONFIG_HOME", ".config"),
+                (XdgBase::Data, "XDG_DATA_HOME", ".local/share"),
+                (XdgBase::State, "XDG_STATE_HOME", ".local/state"),
             ] {
+                let (set, unset) = temp_env::with_vars(
+                    [(HOME_VAR, Some(home.as_str())), (var, Some(xdg.as_str()))],
+                    || {
+                        (
+                            app_dir(base),
+                            temp_env::with_var_unset(var, || app_dir(base)),
+                        )
+                    },
+                );
+                assert_eq!(set, Some(Path::new(&xdg).join("ox")), "{var}");
                 assert_eq!(
-                    expand_user(raw).unwrap(),
-                    PathBuf::from(expected),
-                    "{raw:?}"
+                    unset,
+                    Some(Path::new(&home).join(home_default).join("ox")),
+                    "{var}"
                 );
             }
-        });
-    }
+        }
 
-    #[test]
-    fn expand_user_bare_tilde_resolves_to_home() {
-        temp_env::with_var(HOME_VAR, Some("/tmp/oxide-fake-home"), || {
-            assert_eq!(
-                expand_user("~").unwrap(),
-                PathBuf::from("/tmp/oxide-fake-home")
+        #[test]
+        fn ignores_a_relative_base_variable() {
+            let home = abs("/home/u");
+            let dir = temp_env::with_vars(
+                [
+                    (HOME_VAR, Some(home.as_str())),
+                    ("XDG_STATE_HOME", Some("relative/state")),
+                ],
+                || app_dir(XdgBase::State),
             );
-        });
-    }
-
-    #[test]
-    fn expand_user_leaves_absolute_and_relative_paths_untouched() {
-        for raw in ["/etc/ssl/cert.pem", "./certs/ca.pem", ""] {
-            assert_eq!(expand_user(raw).unwrap(), PathBuf::from(raw), "{raw:?}");
+            assert_eq!(dir, Some(Path::new(&home).join(".local/state/ox")));
         }
     }
 
-    #[test]
-    fn expand_user_does_not_handle_per_user_home() {
-        assert_eq!(
-            expand_user("~alice/foo").unwrap(),
-            PathBuf::from("~alice/foo")
-        );
+    mod tildify {
+        use super::*;
+
+        #[test]
+        fn rewrites_home_prefix_to_tilde() {
+            temp_env::with_var(HOME_VAR, Some("/tmp/oxide-home"), || {
+                assert_eq!(
+                    tildify(&PathBuf::from("/tmp/oxide-home/work/project")),
+                    "~/work/project",
+                );
+            });
+        }
+
+        #[test]
+        fn preserves_paths_outside_home() {
+            temp_env::with_var(HOME_VAR, Some("/tmp/oxide-home"), || {
+                assert_eq!(
+                    tildify(&PathBuf::from("/tmp/not-home/session")),
+                    "/tmp/not-home/session",
+                );
+            });
+        }
+
+        #[test]
+        fn renders_home_itself_as_a_bare_tilde() {
+            temp_env::with_var(HOME_VAR, Some("/tmp/oxide-home"), || {
+                assert_eq!(tildify(&PathBuf::from("/tmp/oxide-home")), "~");
+            });
+        }
     }
 
-    // ── lexical_normalize ──
+    mod expand_user {
+        use super::*;
 
-    #[test]
-    fn lexical_normalize_resolves_dot_and_dot_dot_components() {
-        assert_eq!(
-            lexical_normalize(Path::new("/work/./src/../lib/a.rs")),
-            PathBuf::from("/work/lib/a.rs"),
-        );
+        #[test]
+        fn rewrites_leading_tilde_slash_to_home() {
+            temp_env::with_var(HOME_VAR, Some("/tmp/oxide-fake-home"), || {
+                assert_eq!(
+                    expand_user("~/work/project").unwrap(),
+                    PathBuf::from("/tmp/oxide-fake-home/work/project")
+                );
+            });
+        }
+
+        #[test]
+        fn collapses_redundant_slashes_after_tilde() {
+            temp_env::with_var(HOME_VAR, Some("/tmp/oxide-fake-home"), || {
+                for (raw, expected) in [
+                    ("~//foo", "/tmp/oxide-fake-home/foo"),
+                    ("~///foo/bar", "/tmp/oxide-fake-home/foo/bar"),
+                ] {
+                    assert_eq!(
+                        expand_user(raw).unwrap(),
+                        PathBuf::from(expected),
+                        "{raw:?}"
+                    );
+                }
+            });
+        }
+
+        #[test]
+        fn bare_tilde_resolves_to_home() {
+            temp_env::with_var(HOME_VAR, Some("/tmp/oxide-fake-home"), || {
+                assert_eq!(
+                    expand_user("~").unwrap(),
+                    PathBuf::from("/tmp/oxide-fake-home")
+                );
+            });
+        }
+
+        #[test]
+        fn leaves_absolute_and_relative_paths_untouched() {
+            for raw in ["/etc/ssl/cert.pem", "./certs/ca.pem", ""] {
+                assert_eq!(expand_user(raw).unwrap(), PathBuf::from(raw), "{raw:?}");
+            }
+        }
+
+        #[test]
+        fn does_not_handle_per_user_home() {
+            assert_eq!(
+                expand_user("~alice/foo").unwrap(),
+                PathBuf::from("~alice/foo")
+            );
+        }
     }
 
-    #[test]
-    fn lexical_normalize_drops_a_leading_dot_in_relative_paths() {
-        assert_eq!(
-            lexical_normalize(Path::new("./src/a.rs")),
-            PathBuf::from("src/a.rs")
-        );
-    }
+    mod lexical_normalize {
+        use super::*;
 
-    #[test]
-    fn lexical_normalize_clamps_dot_dot_at_the_root() {
-        assert_eq!(
-            lexical_normalize(Path::new("/a/../../b")),
-            PathBuf::from("/b")
-        );
-    }
+        #[test]
+        fn resolves_dot_and_dot_dot_components() {
+            assert_eq!(
+                lexical_normalize(Path::new("/work/./src/../lib/a.rs")),
+                PathBuf::from("/work/lib/a.rs"),
+            );
+        }
 
-    #[test]
-    fn lexical_normalize_keeps_leading_dot_dot_in_relative_paths() {
-        assert_eq!(
-            lexical_normalize(Path::new("../x/./../y")),
-            PathBuf::from("../y")
-        );
+        #[test]
+        fn drops_a_leading_dot_in_relative_paths() {
+            assert_eq!(
+                lexical_normalize(Path::new("./src/a.rs")),
+                PathBuf::from("src/a.rs")
+            );
+        }
+
+        #[test]
+        fn clamps_dot_dot_at_the_root() {
+            assert_eq!(
+                lexical_normalize(Path::new("/a/../../b")),
+                PathBuf::from("/b")
+            );
+        }
+
+        #[test]
+        fn keeps_leading_dot_dot_in_relative_paths() {
+            assert_eq!(
+                lexical_normalize(Path::new("../x/./../y")),
+                PathBuf::from("../y")
+            );
+        }
     }
 }

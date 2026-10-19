@@ -106,197 +106,203 @@ mod tests {
 
     use super::*;
 
-    fn entry_names(dir: &Path) -> Vec<OsString> {
-        let mut names: Vec<OsString> = fs::read_dir(dir)
-            .unwrap()
-            .map(|entry| entry.unwrap().file_name())
-            .collect();
-        names.sort();
-        names
-    }
-
     #[cfg(unix)]
     fn mode(path: &Path) -> u32 {
         fs::metadata(path).unwrap().permissions().mode() & 0o777
     }
 
-    // ── create_private_dir_all ──
+    mod create_private_dir_all {
+        use super::*;
 
-    #[test]
-    fn create_private_dir_all_creates_nested_dirs() {
-        let dir = tempdir().unwrap();
-        let target = dir.path().join("a/b/c");
+        #[test]
+        fn creates_nested_dirs() {
+            let dir = tempdir().unwrap();
+            let target = dir.path().join("a/b/c");
 
-        create_private_dir_all(&target).unwrap();
+            create_private_dir_all(&target).unwrap();
 
-        assert!(target.is_dir());
-    }
-
-    #[test]
-    fn create_private_dir_all_is_idempotent() {
-        let dir = tempdir().unwrap();
-        let target = dir.path().join("nested/leaf");
-        create_private_dir_all(&target).unwrap();
-
-        create_private_dir_all(&target).unwrap();
-
-        assert!(target.is_dir());
-    }
-
-    #[test]
-    fn create_private_dir_all_errors_with_actionable_path_when_parent_is_a_file() {
-        let dir = tempdir().unwrap();
-        let blocker = dir.path().join("blocker");
-        fs::write(&blocker, b"").unwrap();
-        let target = blocker.join("nested");
-
-        let err = create_private_dir_all(&target).unwrap_err();
-
-        assert_eq!(
-            err.to_string(),
-            format!("failed to create {}", target.display()),
-        );
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn create_private_dir_all_sets_mode_0o700_on_new_dirs() {
-        let dir = tempdir().unwrap();
-        let target = dir.path().join("private");
-
-        create_private_dir_all(&target).unwrap();
-
-        assert_eq!(mode(&target), 0o700);
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn create_private_dir_all_tightens_lax_existing_directory() {
-        use std::os::unix::fs::DirBuilderExt;
-
-        let dir = tempdir().unwrap();
-        let target = dir.path().join("lax");
-        fs::DirBuilder::new().mode(0o755).create(&target).unwrap();
-
-        create_private_dir_all(&target).unwrap();
-
-        assert_eq!(mode(&target), 0o700);
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn create_private_dir_all_tolerates_existing_directory_it_cannot_chmod() {
-        use std::os::unix::fs::MetadataExt;
-
-        let root = Path::new("/");
-        let own_uid = fs::metadata(tempdir().unwrap().path()).unwrap().uid();
-        let before = fs::metadata(root).unwrap();
-        if before.uid() == own_uid {
-            return;
+            assert!(target.is_dir());
         }
 
-        create_private_dir_all(root).unwrap();
+        #[test]
+        fn is_idempotent() {
+            let dir = tempdir().unwrap();
+            let target = dir.path().join("nested/leaf");
+            create_private_dir_all(&target).unwrap();
 
-        assert_eq!(fs::metadata(root).unwrap().mode(), before.mode());
+            create_private_dir_all(&target).unwrap();
+
+            assert!(target.is_dir());
+        }
+
+        #[test]
+        fn errors_with_actionable_path_when_parent_is_a_file() {
+            let dir = tempdir().unwrap();
+            let blocker = dir.path().join("blocker");
+            fs::write(&blocker, b"").unwrap();
+            let target = blocker.join("nested");
+
+            let err = create_private_dir_all(&target).unwrap_err();
+
+            assert_eq!(
+                err.to_string(),
+                format!("failed to create {}", target.display()),
+            );
+        }
+
+        #[cfg(unix)]
+        #[test]
+        fn sets_mode_0o700_on_new_dirs() {
+            let dir = tempdir().unwrap();
+            let target = dir.path().join("private");
+
+            create_private_dir_all(&target).unwrap();
+
+            assert_eq!(mode(&target), 0o700);
+        }
+
+        #[cfg(unix)]
+        #[test]
+        fn tightens_lax_existing_directory() {
+            use std::os::unix::fs::DirBuilderExt;
+
+            let dir = tempdir().unwrap();
+            let target = dir.path().join("lax");
+            fs::DirBuilder::new().mode(0o755).create(&target).unwrap();
+
+            create_private_dir_all(&target).unwrap();
+
+            assert_eq!(mode(&target), 0o700);
+        }
+
+        #[cfg(unix)]
+        #[test]
+        fn tolerates_existing_directory_it_cannot_chmod() {
+            use std::os::unix::fs::MetadataExt;
+
+            let root = Path::new("/");
+            let own_uid = fs::metadata(tempdir().unwrap().path()).unwrap().uid();
+            let before = fs::metadata(root).unwrap();
+            if before.uid() == own_uid {
+                return;
+            }
+
+            create_private_dir_all(root).unwrap();
+
+            assert_eq!(fs::metadata(root).unwrap().mode(), before.mode());
+        }
     }
 
-    // ── atomic_write_private ──
+    mod atomic_write_private {
+        use super::*;
 
-    #[test]
-    fn atomic_write_private_writes_bytes_and_replaces_existing() {
-        let dir = tempdir().unwrap();
-        let path = dir.path().join("file");
+        fn entry_names(dir: &Path) -> Vec<OsString> {
+            let mut names: Vec<OsString> = fs::read_dir(dir)
+                .unwrap()
+                .map(|entry| entry.unwrap().file_name())
+                .collect();
+            names.sort();
+            names
+        }
 
-        atomic_write_private(&path, b"first").unwrap();
-        assert_eq!(fs::read(&path).unwrap(), b"first");
+        #[test]
+        fn writes_bytes_and_replaces_existing() {
+            let dir = tempdir().unwrap();
+            let path = dir.path().join("file");
 
-        atomic_write_private(&path, b"second").unwrap();
-        assert_eq!(fs::read(&path).unwrap(), b"second");
+            atomic_write_private(&path, b"first").unwrap();
+            assert_eq!(fs::read(&path).unwrap(), b"first");
+
+            atomic_write_private(&path, b"second").unwrap();
+            assert_eq!(fs::read(&path).unwrap(), b"second");
+        }
+
+        #[test]
+        fn does_not_leave_temp_file_on_success() {
+            let dir = tempdir().unwrap();
+            let path = dir.path().join("file");
+
+            atomic_write_private(&path, b"x").unwrap();
+
+            assert_eq!(entry_names(dir.path()), ["file"]);
+        }
+
+        #[test]
+        fn errors_when_parent_is_missing() {
+            let dir = tempdir().unwrap();
+            let parent = dir.path().join("does/not/exist");
+
+            let err = atomic_write_private(&parent.join("file"), b"x").unwrap_err();
+
+            assert_eq!(
+                err.to_string(),
+                format!("failed to create a temp file in {}", parent.display()),
+            );
+        }
+
+        #[test]
+        fn errors_when_path_has_no_parent() {
+            let err = atomic_write_private(Path::new("/"), b"x").unwrap_err();
+
+            assert_eq!(err.to_string(), "path / has no parent directory");
+        }
+
+        #[test]
+        fn cleans_up_temp_when_rename_fails() {
+            // Renaming a file over an existing directory fails on every platform.
+            let dir = tempdir().unwrap();
+            let target = dir.path().join("target");
+            fs::create_dir(&target).unwrap();
+
+            let err = atomic_write_private(&target, b"x").unwrap_err();
+
+            assert_eq!(
+                err.to_string(),
+                format!("failed to install file at {}", target.display()),
+            );
+            assert_eq!(entry_names(dir.path()), ["target"]);
+        }
+
+        #[cfg(unix)]
+        #[test]
+        fn sets_mode_0o600_on_new_files() {
+            let dir = tempdir().unwrap();
+            let path = dir.path().join("file");
+
+            atomic_write_private(&path, b"x").unwrap();
+
+            assert_eq!(mode(&path), 0o600);
+        }
     }
 
-    #[test]
-    fn atomic_write_private_does_not_leave_temp_file_on_success() {
-        let dir = tempdir().unwrap();
-        let path = dir.path().join("file");
+    mod open_private_append {
+        use super::*;
 
-        atomic_write_private(&path, b"x").unwrap();
+        #[test]
+        fn writes_after_existing_content() {
+            let dir = tempdir().unwrap();
+            let path = dir.path().join("log");
+            fs::write(&path, b"first\n").unwrap();
 
-        assert_eq!(entry_names(dir.path()), ["file"]);
-    }
+            open_private_append(&path)
+                .unwrap()
+                .write_all(b"second\n")
+                .unwrap();
 
-    #[test]
-    fn atomic_write_private_errors_when_parent_is_missing() {
-        let dir = tempdir().unwrap();
-        let parent = dir.path().join("does/not/exist");
+            assert_eq!(fs::read(&path).unwrap(), b"first\nsecond\n");
+        }
 
-        let err = atomic_write_private(&parent.join("file"), b"x").unwrap_err();
+        #[cfg(unix)]
+        #[test]
+        fn tightens_lax_existing_file() {
+            let dir = tempdir().unwrap();
+            let path = dir.path().join("log");
+            fs::write(&path, b"").unwrap();
+            fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).unwrap();
 
-        assert_eq!(
-            err.to_string(),
-            format!("failed to create a temp file in {}", parent.display()),
-        );
-    }
+            open_private_append(&path).unwrap();
 
-    #[test]
-    fn atomic_write_private_errors_when_path_has_no_parent() {
-        let err = atomic_write_private(Path::new("/"), b"x").unwrap_err();
-
-        assert_eq!(err.to_string(), "path / has no parent directory");
-    }
-
-    #[test]
-    fn atomic_write_private_cleans_up_temp_when_rename_fails() {
-        // Renaming a file over an existing directory fails on every platform.
-        let dir = tempdir().unwrap();
-        let target = dir.path().join("target");
-        fs::create_dir(&target).unwrap();
-
-        let err = atomic_write_private(&target, b"x").unwrap_err();
-
-        assert_eq!(
-            err.to_string(),
-            format!("failed to install file at {}", target.display()),
-        );
-        assert_eq!(entry_names(dir.path()), ["target"]);
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn atomic_write_private_sets_mode_0o600_on_new_files() {
-        let dir = tempdir().unwrap();
-        let path = dir.path().join("file");
-
-        atomic_write_private(&path, b"x").unwrap();
-
-        assert_eq!(mode(&path), 0o600);
-    }
-
-    // ── open_private_append ──
-
-    #[test]
-    fn open_private_append_writes_after_existing_content() {
-        let dir = tempdir().unwrap();
-        let path = dir.path().join("log");
-        fs::write(&path, b"first\n").unwrap();
-
-        open_private_append(&path)
-            .unwrap()
-            .write_all(b"second\n")
-            .unwrap();
-
-        assert_eq!(fs::read(&path).unwrap(), b"first\nsecond\n");
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn open_private_append_tightens_lax_existing_file() {
-        let dir = tempdir().unwrap();
-        let path = dir.path().join("log");
-        fs::write(&path, b"").unwrap();
-        fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).unwrap();
-
-        open_private_append(&path).unwrap();
-
-        assert_eq!(mode(&path), 0o600);
+            assert_eq!(mode(&path), 0o600);
+        }
     }
 }

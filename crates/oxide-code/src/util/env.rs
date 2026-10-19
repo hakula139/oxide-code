@@ -56,98 +56,104 @@ mod tests {
 
     const KEY: &str = "OX_TEST_ENV_HELPER";
 
-    // ── string ──
+    mod string {
+        use super::*;
 
-    #[test]
-    fn string_unset_or_empty_is_absent() {
-        temp_env::with_var_unset(KEY, || {
-            assert_eq!(string(KEY), None);
-        });
-        temp_env::with_var(KEY, Some(""), || {
-            assert_eq!(string(KEY), None);
-        });
-    }
+        #[test]
+        fn unset_or_empty_is_absent() {
+            temp_env::with_var_unset(KEY, || {
+                assert_eq!(string(KEY), None);
+            });
+            temp_env::with_var(KEY, Some(""), || {
+                assert_eq!(string(KEY), None);
+            });
+        }
 
-    #[test]
-    fn string_non_empty_reads_value() {
-        temp_env::with_var(KEY, Some("hello"), || {
-            assert_eq!(string(KEY).as_deref(), Some("hello"));
-        });
-    }
-
-    // ── bool ──
-
-    #[test]
-    fn bool_recognizes_true_values_case_insensitively() {
-        for truthy in ["1", "true", "yes", "on", "TRUE", "Yes", "ON"] {
-            temp_env::with_var(KEY, Some(truthy), || {
-                assert_eq!(bool(KEY).unwrap(), Some(true), "input={truthy}");
+        #[test]
+        fn non_empty_reads_value() {
+            temp_env::with_var(KEY, Some("hello"), || {
+                assert_eq!(string(KEY).as_deref(), Some("hello"));
             });
         }
     }
 
-    #[test]
-    fn bool_recognizes_false_values_case_insensitively() {
-        for falsy in ["0", "false", "no", "off", "FALSE", "No", "OFF"] {
-            temp_env::with_var(KEY, Some(falsy), || {
-                assert_eq!(bool(KEY).unwrap(), Some(false), "input={falsy}");
+    mod bool {
+        use super::*;
+
+        #[test]
+        fn recognizes_true_values_case_insensitively() {
+            for truthy in ["1", "true", "yes", "on", "TRUE", "Yes", "ON"] {
+                temp_env::with_var(KEY, Some(truthy), || {
+                    assert_eq!(bool(KEY).unwrap(), Some(true), "input={truthy}");
+                });
+            }
+        }
+
+        #[test]
+        fn recognizes_false_values_case_insensitively() {
+            for falsy in ["0", "false", "no", "off", "FALSE", "No", "OFF"] {
+                temp_env::with_var(KEY, Some(falsy), || {
+                    assert_eq!(bool(KEY).unwrap(), Some(false), "input={falsy}");
+                });
+            }
+        }
+
+        #[test]
+        fn unset_or_empty_is_absent() {
+            temp_env::with_var_unset(KEY, || {
+                assert_eq!(bool(KEY).unwrap(), None);
             });
+            temp_env::with_var(KEY, Some(""), || {
+                assert_eq!(bool(KEY).unwrap(), None);
+            });
+        }
+
+        #[test]
+        fn unrecognized_value_is_an_error_naming_key_and_value() {
+            for bad in ["2", "enabled", " true"] {
+                temp_env::with_var(KEY, Some(bad), || {
+                    let msg = bool(KEY).unwrap_err().to_string();
+                    assert!(msg.contains(KEY), "msg={msg}");
+                    assert!(msg.contains(&format!("{bad:?}")), "msg={msg}");
+                    assert!(msg.contains("expected one of"), "msg={msg}");
+                });
+            }
         }
     }
 
-    #[test]
-    fn bool_unset_or_empty_is_absent() {
-        temp_env::with_var_unset(KEY, || {
-            assert_eq!(bool(KEY).unwrap(), None);
-        });
-        temp_env::with_var(KEY, Some(""), || {
-            assert_eq!(bool(KEY).unwrap(), None);
-        });
-    }
+    mod number {
+        use super::*;
 
-    #[test]
-    fn bool_unrecognized_value_is_an_error_naming_key_and_value() {
-        for bad in ["2", "enabled", " true"] {
-            temp_env::with_var(KEY, Some(bad), || {
-                let msg = bool(KEY).unwrap_err().to_string();
-                assert!(msg.contains(KEY), "msg={msg}");
-                assert!(msg.contains(&format!("{bad:?}")), "msg={msg}");
-                assert!(msg.contains("expected one of"), "msg={msg}");
+        #[test]
+        fn reads_a_value_within_range() {
+            for (raw, expected) in [("1", 1), ("42", 42), ("100", 100)] {
+                temp_env::with_var(KEY, Some(raw), || {
+                    assert_eq!(number::<u8>(KEY, 1..=100).unwrap(), Some(expected));
+                });
+            }
+        }
+
+        #[test]
+        fn unset_or_empty_is_absent() {
+            temp_env::with_var_unset(KEY, || {
+                assert_eq!(number::<u32>(KEY, 1..=10).unwrap(), None);
+            });
+            temp_env::with_var(KEY, Some(""), || {
+                assert_eq!(number::<u32>(KEY, 1..=10).unwrap(), None);
             });
         }
-    }
 
-    // ── number ──
-
-    #[test]
-    fn number_reads_a_value_within_range() {
-        for (raw, expected) in [("1", 1), ("42", 42), ("100", 100)] {
-            temp_env::with_var(KEY, Some(raw), || {
-                assert_eq!(number::<u8>(KEY, 1..=100).unwrap(), Some(expected));
-            });
-        }
-    }
-
-    #[test]
-    fn number_unset_or_empty_is_absent() {
-        temp_env::with_var_unset(KEY, || {
-            assert_eq!(number::<u32>(KEY, 1..=10).unwrap(), None);
-        });
-        temp_env::with_var(KEY, Some(""), || {
-            assert_eq!(number::<u32>(KEY, 1..=10).unwrap(), None);
-        });
-    }
-
-    #[test]
-    fn number_rejects_text_overflow_and_out_of_range_values_with_the_range() {
-        for bad in ["32k", "-1", "0", "101", "256", " 5"] {
-            temp_env::with_var(KEY, Some(bad), || {
-                let msg = number::<u8>(KEY, 1..=100).unwrap_err().to_string();
-                assert_eq!(
-                    msg,
-                    format!("invalid {KEY} {bad:?}: expected a whole number from 1 to 100"),
-                );
-            });
+        #[test]
+        fn rejects_text_overflow_and_out_of_range_values_with_the_range() {
+            for bad in ["32k", "-1", "0", "101", "256", " 5"] {
+                temp_env::with_var(KEY, Some(bad), || {
+                    let msg = number::<u8>(KEY, 1..=100).unwrap_err().to_string();
+                    assert_eq!(
+                        msg,
+                        format!("invalid {KEY} {bad:?}: expected a whole number from 1 to 100"),
+                    );
+                });
+            }
         }
     }
 }

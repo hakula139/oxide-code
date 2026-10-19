@@ -343,344 +343,360 @@ mod tests {
     use super::testing::{init_fixture_repo, with_isolated_git_env_async};
     use super::*;
 
-    // ── current_branch ──
+    mod current_branch {
+        use super::*;
 
-    #[tokio::test]
-    async fn current_branch_in_a_real_repo_yields_the_branch_name() {
-        let dir = tempfile::tempdir().unwrap();
-        init_fixture_repo(dir.path());
+        #[tokio::test]
+        async fn in_a_real_repo_yields_the_branch_name() {
+            let dir = tempfile::tempdir().unwrap();
+            init_fixture_repo(dir.path());
 
-        let branch = with_isolated_git_env_async(current_branch(dir.path())).await;
+            let branch = with_isolated_git_env_async(current_branch(dir.path())).await;
 
-        assert_eq!(branch, Some("fixture-branch".to_owned()));
+            assert_eq!(branch, Some("fixture-branch".to_owned()));
+        }
+
+        #[tokio::test]
+        async fn outside_a_repo_is_absent() {
+            let dir = tempfile::tempdir().unwrap();
+
+            let branch = with_isolated_git_env_async(current_branch(dir.path())).await;
+
+            assert_eq!(branch, None);
+        }
+
+        #[tokio::test]
+        #[cfg(unix)]
+        async fn with_non_utf8_cwd_is_absent() {
+            // Unix paths are bytes, so a non-UTF-8 one fails `cwd_to_str` before git spawns.
+            let cwd = PathBuf::from(OsStr::from_bytes(b"/tmp/\xff"));
+
+            assert_eq!(current_branch(&cwd).await, None);
+        }
     }
 
-    #[tokio::test]
-    async fn current_branch_outside_a_repo_is_absent() {
-        let dir = tempfile::tempdir().unwrap();
+    mod repo_root {
+        use super::*;
 
-        let branch = with_isolated_git_env_async(current_branch(dir.path())).await;
+        #[tokio::test]
+        async fn in_a_subdirectory_finds_the_top_level() {
+            let dir = tempfile::tempdir().unwrap();
+            init_fixture_repo(dir.path());
+            let nested = dir.path().join("crates/app");
+            std::fs::create_dir_all(&nested).unwrap();
 
-        assert_eq!(branch, None);
-    }
+            let root = with_isolated_git_env_async(repo_root(&nested))
+                .await
+                .expect("inside a repository");
 
-    #[tokio::test]
-    #[cfg(unix)]
-    async fn current_branch_with_non_utf8_cwd_is_absent() {
-        // Unix paths are bytes, so a non-UTF-8 one fails `cwd_to_str` before git spawns.
-        let cwd = PathBuf::from(OsStr::from_bytes(b"/tmp/\xff"));
-
-        assert_eq!(current_branch(&cwd).await, None);
-    }
-
-    // ── repo_root ──
-
-    #[tokio::test]
-    async fn repo_root_in_a_subdirectory_finds_the_top_level() {
-        let dir = tempfile::tempdir().unwrap();
-        init_fixture_repo(dir.path());
-        let nested = dir.path().join("crates/app");
-        std::fs::create_dir_all(&nested).unwrap();
-
-        let root = with_isolated_git_env_async(repo_root(&nested))
-            .await
-            .expect("inside a repository");
-
-        // macOS routes tempdirs through `/private`.
-        assert_eq!(
-            root.canonicalize().unwrap(),
-            dir.path().canonicalize().unwrap()
-        );
-    }
-
-    #[tokio::test]
-    async fn repo_root_outside_a_repo_is_absent() {
-        let dir = tempfile::tempdir().unwrap();
-        assert_eq!(
-            with_isolated_git_env_async(repo_root(dir.path())).await,
-            None
-        );
-    }
-
-    // ── stdout_line ──
-
-    #[test]
-    fn stdout_line_keeps_one_trimmed_line_and_drops_everything_else() {
-        assert_eq!(stdout_line(b"feat/login\n"), Some("feat/login".to_owned()));
-        // `branch --show-current` prints empty on detached HEAD.
-        assert_eq!(stdout_line(b""), None);
-        assert_eq!(stdout_line(b"   \n"), None);
-        assert_eq!(stdout_line(&[0xff, 0xfe, b'\n']), None);
-    }
-
-    // ── current_pull_request ──
-
-    #[tokio::test]
-    async fn current_pull_request_outside_a_repo_is_absent() {
-        let dir = tempfile::tempdir().unwrap();
-        for detail in [PullRequestDetail::Link, PullRequestDetail::Status] {
+            // macOS routes tempdirs through `/private`.
             assert_eq!(
-                with_isolated_git_env_async(current_pull_request(dir.path(), detail)).await,
-                None,
-                "{detail:?}",
+                root.canonicalize().unwrap(),
+                dir.path().canonicalize().unwrap()
+            );
+        }
+
+        #[tokio::test]
+        async fn outside_a_repo_is_absent() {
+            let dir = tempfile::tempdir().unwrap();
+            assert_eq!(
+                with_isolated_git_env_async(repo_root(dir.path())).await,
+                None
             );
         }
     }
 
-    #[tokio::test]
-    #[cfg(unix)]
-    async fn current_pull_request_with_non_utf8_cwd_is_absent() {
-        let cwd = PathBuf::from(OsStr::from_bytes(b"/tmp/\xff"));
-        assert_eq!(
-            current_pull_request(&cwd, PullRequestDetail::Link).await,
-            None
-        );
+    mod stdout_line {
+        use super::*;
+
+        #[test]
+        fn keeps_one_trimmed_line_and_drops_everything_else() {
+            assert_eq!(stdout_line(b"feat/login\n"), Some("feat/login".to_owned()));
+            // `branch --show-current` prints empty on detached HEAD.
+            assert_eq!(stdout_line(b""), None);
+            assert_eq!(stdout_line(b"   \n"), None);
+            assert_eq!(stdout_line(&[0xff, 0xfe, b'\n']), None);
+        }
     }
 
-    // ── parse_pull_request ──
+    mod current_pull_request {
+        use super::*;
 
-    /// `gh pr view` output for PR 86 with `rollup` and `review_decision`.
-    fn pull_request_json(rollup: &serde_json::Value, review_decision: &str) -> Vec<u8> {
-        serde_json::to_vec(&serde_json::json!({
-            "number": 86,
-            "url": "https://github.com/o/r/pull/86",
-            "statusCheckRollup": rollup,
-            "reviewDecision": review_decision,
-        }))
-        .unwrap()
+        #[tokio::test]
+        async fn outside_a_repo_is_absent() {
+            let dir = tempfile::tempdir().unwrap();
+            for detail in [PullRequestDetail::Link, PullRequestDetail::Status] {
+                assert_eq!(
+                    with_isolated_git_env_async(current_pull_request(dir.path(), detail)).await,
+                    None,
+                    "{detail:?}",
+                );
+            }
+        }
+
+        #[tokio::test]
+        #[cfg(unix)]
+        async fn with_non_utf8_cwd_is_absent() {
+            let cwd = PathBuf::from(OsStr::from_bytes(b"/tmp/\xff"));
+            assert_eq!(
+                current_pull_request(&cwd, PullRequestDetail::Link).await,
+                None
+            );
+        }
     }
 
-    fn run(name: &str, started_at: &str, status: &str, conclusion: &str) -> serde_json::Value {
-        serde_json::json!({
-            "__typename": "CheckRun",
-            "name": name,
-            "workflowName": "CI",
-            "startedAt": started_at,
-            "status": status,
-            "conclusion": conclusion,
-        })
-    }
+    mod parse_pull_request {
+        use super::*;
 
-    fn status_context(started_at: &str, state: &str) -> serde_json::Value {
-        serde_json::json!({
-            "__typename": "StatusContext",
-            "context": "ci/legacy",
-            "startedAt": started_at,
-            "state": state,
-        })
-    }
-
-    fn checks_of(rollup: &serde_json::Value) -> Option<Checks> {
-        parse_pull_request(&pull_request_json(rollup, ""))
+        /// `gh pr view` output for PR 86 with `rollup` and `review_decision`.
+        fn pull_request_json(rollup: &serde_json::Value, review_decision: &str) -> Vec<u8> {
+            serde_json::to_vec(&serde_json::json!({
+                "number": 86,
+                "url": "https://github.com/o/r/pull/86",
+                "statusCheckRollup": rollup,
+                "reviewDecision": review_decision,
+            }))
             .unwrap()
-            .checks
-    }
+        }
 
-    #[test]
-    fn parse_pull_request_extracts_number_and_url() {
-        assert_eq!(
-            parse_pull_request(br#"{"number":86,"url":"https://github.com/o/r/pull/86"}"#),
-            Some(PullRequest {
-                number: 86,
-                url: "https://github.com/o/r/pull/86".to_owned(),
-                checks: None,
-                review: None,
-            }),
-        );
-    }
+        fn run(name: &str, started_at: &str, status: &str, conclusion: &str) -> serde_json::Value {
+            serde_json::json!({
+                "__typename": "CheckRun",
+                "name": name,
+                "workflowName": "CI",
+                "startedAt": started_at,
+                "status": status,
+                "conclusion": conclusion,
+            })
+        }
 
-    #[test]
-    fn parse_pull_request_reads_the_review_decision() {
-        let review = |decision| {
-            parse_pull_request(&pull_request_json(&serde_json::json!([]), decision))
+        fn status_context(started_at: &str, state: &str) -> serde_json::Value {
+            serde_json::json!({
+                "__typename": "StatusContext",
+                "context": "ci/legacy",
+                "startedAt": started_at,
+                "state": state,
+            })
+        }
+
+        fn checks_of(rollup: &serde_json::Value) -> Option<Checks> {
+            parse_pull_request(&pull_request_json(rollup, ""))
                 .unwrap()
-                .review
-        };
-        assert_eq!(review("APPROVED"), Some(ReviewDecision::Approved));
-        assert_eq!(
-            review("CHANGES_REQUESTED"),
-            Some(ReviewDecision::ChangesRequested)
-        );
-        assert_eq!(
-            review("REVIEW_REQUIRED"),
-            Some(ReviewDecision::ReviewRequired)
-        );
-        assert_eq!(review(""), None, "branch protection requires no review");
+                .checks
+        }
+
+        #[test]
+        fn extracts_number_and_url() {
+            assert_eq!(
+                parse_pull_request(br#"{"number":86,"url":"https://github.com/o/r/pull/86"}"#),
+                Some(PullRequest {
+                    number: 86,
+                    url: "https://github.com/o/r/pull/86".to_owned(),
+                    checks: None,
+                    review: None,
+                }),
+            );
+        }
+
+        #[test]
+        fn reads_the_review_decision() {
+            let review = |decision| {
+                parse_pull_request(&pull_request_json(&serde_json::json!([]), decision))
+                    .unwrap()
+                    .review
+            };
+            assert_eq!(review("APPROVED"), Some(ReviewDecision::Approved));
+            assert_eq!(
+                review("CHANGES_REQUESTED"),
+                Some(ReviewDecision::ChangesRequested)
+            );
+            assert_eq!(
+                review("REVIEW_REQUIRED"),
+                Some(ReviewDecision::ReviewRequired)
+            );
+            assert_eq!(review(""), None, "branch protection requires no review");
+        }
+
+        #[test]
+        fn summarizes_checks_by_their_worst_state() {
+            let t = "2026-10-16T06:37:52Z";
+            let status = |state: &str| status_context(t, state);
+
+            assert_eq!(checks_of(&serde_json::json!([])), None);
+            assert_eq!(checks_of(&serde_json::Value::Null), None);
+            assert_eq!(
+                checks_of(&serde_json::json!([
+                    run("Build", t, "COMPLETED", "SUCCESS"),
+                    run("Docs", t, "COMPLETED", "SKIPPED"),
+                    status("SUCCESS"),
+                ])),
+                Some(Checks::Passing),
+            );
+            assert_eq!(
+                checks_of(&serde_json::json!([
+                    run("Build", t, "COMPLETED", "SUCCESS"),
+                    run("Test", t, "COMPLETED", "CANCELLED"),
+                    run("Lint", t, "COMPLETED", "CANCELLED"),
+                ])),
+                Some(Checks::Cancelled(2)),
+            );
+            assert_eq!(
+                checks_of(&serde_json::json!([
+                    run("Build", t, "COMPLETED", "SUCCESS"),
+                    run("Test", t, "IN_PROGRESS", ""),
+                    run("Lint", t, "COMPLETED", "CANCELLED"),
+                    status("PENDING"),
+                ])),
+                Some(Checks::Pending(2)),
+            );
+            assert_eq!(
+                checks_of(&serde_json::json!([
+                    run("Build", t, "COMPLETED", "TIMED_OUT"),
+                    run("Deploy", t, "COMPLETED", "STARTUP_FAILURE"),
+                    run("Test", t, "IN_PROGRESS", ""),
+                    run("Lint", t, "COMPLETED", "CANCELLED"),
+                    status("ERROR"),
+                ])),
+                Some(Checks::Failing(3)),
+            );
+        }
+
+        #[test]
+        fn counts_only_the_latest_run_of_a_rerun_check() {
+            let (earlier, later) = ("2026-10-16T06:00:00Z", "2026-10-16T07:00:00Z");
+            assert_eq!(
+                checks_of(&serde_json::json!([
+                    run("Test", earlier, "COMPLETED", "FAILURE"),
+                    run("Test", later, "COMPLETED", "SUCCESS"),
+                ])),
+                Some(Checks::Passing),
+            );
+            assert_eq!(
+                checks_of(&serde_json::json!([
+                    status_context(earlier, "FAILURE"),
+                    status_context(later, "SUCCESS"),
+                ])),
+                Some(Checks::Passing),
+            );
+
+            let mut nightly = run("Test", earlier, "COMPLETED", "FAILURE");
+            nightly["workflowName"] = "Nightly".into();
+            assert_eq!(
+                checks_of(&serde_json::json!([
+                    run("Test", later, "COMPLETED", "SUCCESS"),
+                    nightly
+                ])),
+                Some(Checks::Failing(1)),
+                "a same-named check in another workflow is a separate check",
+            );
+        }
+
+        #[test]
+        fn drops_invalid_payloads() {
+            assert_eq!(parse_pull_request(b""), None);
+            assert_eq!(parse_pull_request(b"not json"), None);
+            assert_eq!(parse_pull_request(br#"{"number":86}"#), None);
+            assert_eq!(parse_pull_request(br#"{"url":"https://x"}"#), None);
+            assert_eq!(parse_pull_request(br#"{"number":86,"url":""}"#), None);
+            assert_eq!(parse_pull_request(br#"{"number":-1,"url":"x"}"#), None);
+            assert_eq!(parse_pull_request(br#"{"number":86,"url":42}"#), None);
+        }
     }
 
-    #[test]
-    fn parse_pull_request_summarizes_checks_by_their_worst_state() {
-        let t = "2026-10-16T06:37:52Z";
-        let status = |state: &str| status_context(t, state);
+    mod cwd_to_str {
+        use super::*;
 
-        assert_eq!(checks_of(&serde_json::json!([])), None);
-        assert_eq!(checks_of(&serde_json::Value::Null), None);
-        assert_eq!(
-            checks_of(&serde_json::json!([
-                run("Build", t, "COMPLETED", "SUCCESS"),
-                run("Docs", t, "COMPLETED", "SKIPPED"),
-                status("SUCCESS"),
-            ])),
-            Some(Checks::Passing),
-        );
-        assert_eq!(
-            checks_of(&serde_json::json!([
-                run("Build", t, "COMPLETED", "SUCCESS"),
-                run("Test", t, "COMPLETED", "CANCELLED"),
-                run("Lint", t, "COMPLETED", "CANCELLED"),
-            ])),
-            Some(Checks::Cancelled(2)),
-        );
-        assert_eq!(
-            checks_of(&serde_json::json!([
-                run("Build", t, "COMPLETED", "SUCCESS"),
-                run("Test", t, "IN_PROGRESS", ""),
-                run("Lint", t, "COMPLETED", "CANCELLED"),
-                status("PENDING"),
-            ])),
-            Some(Checks::Pending(2)),
-        );
-        assert_eq!(
-            checks_of(&serde_json::json!([
-                run("Build", t, "COMPLETED", "TIMED_OUT"),
-                run("Deploy", t, "COMPLETED", "STARTUP_FAILURE"),
-                run("Test", t, "IN_PROGRESS", ""),
-                run("Lint", t, "COMPLETED", "CANCELLED"),
-                status("ERROR"),
-            ])),
-            Some(Checks::Failing(3)),
-        );
+        #[test]
+        fn utf8_path_is_preserved() {
+            assert_eq!(cwd_to_str(Path::new("/tmp/a"), "p"), Some("/tmp/a"));
+        }
+
+        #[test]
+        #[cfg(unix)]
+        fn is_absent_when_not_utf8() {
+            let cwd = PathBuf::from(OsStr::from_bytes(b"/tmp/\xff"));
+            assert_eq!(cwd_to_str(&cwd, "p"), None);
+        }
     }
 
-    #[test]
-    fn parse_pull_request_counts_only_the_latest_run_of_a_rerun_check() {
-        let (earlier, later) = ("2026-10-16T06:00:00Z", "2026-10-16T07:00:00Z");
-        assert_eq!(
-            checks_of(&serde_json::json!([
-                run("Test", earlier, "COMPLETED", "FAILURE"),
-                run("Test", later, "COMPLETED", "SUCCESS"),
-            ])),
-            Some(Checks::Passing),
-        );
-        assert_eq!(
-            checks_of(&serde_json::json!([
-                status_context(earlier, "FAILURE"),
-                status_context(later, "SUCCESS"),
-            ])),
-            Some(Checks::Passing),
-        );
+    mod check_output {
+        use super::*;
 
-        let mut nightly = run("Test", earlier, "COMPLETED", "FAILURE");
-        nightly["workflowName"] = "Nightly".into();
-        assert_eq!(
-            checks_of(&serde_json::json!([
-                run("Test", later, "COMPLETED", "SUCCESS"),
-                nightly
-            ])),
-            Some(Checks::Failing(1)),
-            "a same-named check in another workflow is a separate check",
-        );
+        fn status_with_code(code: i32) -> std::process::ExitStatus {
+            Command::new("sh")
+                .arg("-c")
+                .arg(format!("exit {code}"))
+                .status()
+                .unwrap()
+        }
+
+        #[test]
+        fn success_preserves_stdout() {
+            let output = check_output(
+                "test",
+                "/tmp/cwd",
+                Ok(Output {
+                    status: status_with_code(0),
+                    stdout: b"ok".to_vec(),
+                    stderr: Vec::new(),
+                }),
+            )
+            .expect("success path keeps the output");
+            assert_eq!(output.stdout, b"ok");
+        }
+
+        #[test]
+        fn drops_output_on_non_zero_exit() {
+            let result = check_output(
+                "test",
+                "/tmp/cwd",
+                Ok(Output {
+                    status: status_with_code(1),
+                    stdout: b"unused".to_vec(),
+                    stderr: b"fatal: not a git repository\n".to_vec(),
+                }),
+            );
+            assert!(result.is_none());
+        }
+
+        #[test]
+        fn drops_output_on_spawn_failure() {
+            let result = check_output(
+                "test",
+                "/tmp/cwd",
+                Err(io::Error::new(io::ErrorKind::NotFound, "binary missing")),
+            );
+            assert!(result.is_none());
+        }
     }
 
-    #[test]
-    fn parse_pull_request_drops_invalid_payloads() {
-        assert_eq!(parse_pull_request(b""), None);
-        assert_eq!(parse_pull_request(b"not json"), None);
-        assert_eq!(parse_pull_request(br#"{"number":86}"#), None);
-        assert_eq!(parse_pull_request(br#"{"url":"https://x"}"#), None);
-        assert_eq!(parse_pull_request(br#"{"number":86,"url":""}"#), None);
-        assert_eq!(parse_pull_request(br#"{"number":-1,"url":"x"}"#), None);
-        assert_eq!(parse_pull_request(br#"{"number":86,"url":42}"#), None);
-    }
+    mod stderr_summary {
+        use super::*;
 
-    // ── cwd_to_str ──
+        #[test]
+        fn picks_first_meaningful_line_and_caps_length() {
+            assert_eq!(stderr_summary(b""), "");
+            assert_eq!(
+                stderr_summary(b"\n  \nfatal: not a git repository\nmore detail\n"),
+                "fatal: not a git repository",
+            );
+            let huge = vec![b'x'; 500];
+            assert_eq!(stderr_summary(&huge), format!("{}...", "x".repeat(197)));
+        }
 
-    #[test]
-    fn cwd_to_str_utf8_path_is_preserved() {
-        assert_eq!(cwd_to_str(Path::new("/tmp/a"), "p"), Some("/tmp/a"));
-    }
+        #[test]
+        fn caps_multibyte_lines_on_char_boundaries() {
+            // 303 bytes of three-byte chars, so a byte-indexed cut at 200 would land mid-char.
+            let line = "中".repeat(101);
+            assert_eq!(
+                stderr_summary(line.as_bytes()),
+                format!("{}...", "中".repeat(98)),
+            );
+        }
 
-    #[test]
-    #[cfg(unix)]
-    fn cwd_to_str_is_absent_when_not_utf8() {
-        let cwd = PathBuf::from(OsStr::from_bytes(b"/tmp/\xff"));
-        assert_eq!(cwd_to_str(&cwd, "p"), None);
-    }
-
-    // ── check_output ──
-
-    #[test]
-    fn check_output_success_preserves_stdout() {
-        let output = check_output(
-            "test",
-            "/tmp/cwd",
-            Ok(Output {
-                status: status_with_code(0),
-                stdout: b"ok".to_vec(),
-                stderr: Vec::new(),
-            }),
-        )
-        .expect("success path keeps the output");
-        assert_eq!(output.stdout, b"ok");
-    }
-
-    #[test]
-    fn check_output_drops_output_on_non_zero_exit() {
-        let result = check_output(
-            "test",
-            "/tmp/cwd",
-            Ok(Output {
-                status: status_with_code(1),
-                stdout: b"unused".to_vec(),
-                stderr: b"fatal: not a git repository\n".to_vec(),
-            }),
-        );
-        assert!(result.is_none());
-    }
-
-    #[test]
-    fn check_output_drops_output_on_spawn_failure() {
-        let result = check_output(
-            "test",
-            "/tmp/cwd",
-            Err(io::Error::new(io::ErrorKind::NotFound, "binary missing")),
-        );
-        assert!(result.is_none());
-    }
-
-    fn status_with_code(code: i32) -> std::process::ExitStatus {
-        Command::new("sh")
-            .arg("-c")
-            .arg(format!("exit {code}"))
-            .status()
-            .unwrap()
-    }
-
-    // ── stderr_summary ──
-
-    #[test]
-    fn stderr_summary_picks_first_meaningful_line_and_caps_length() {
-        assert_eq!(stderr_summary(b""), "");
-        assert_eq!(
-            stderr_summary(b"\n  \nfatal: not a git repository\nmore detail\n"),
-            "fatal: not a git repository",
-        );
-        let huge = vec![b'x'; 500];
-        assert_eq!(stderr_summary(&huge), format!("{}...", "x".repeat(197)));
-    }
-
-    #[test]
-    fn stderr_summary_caps_multibyte_lines_on_char_boundaries() {
-        // 303 bytes of three-byte chars, so a byte-indexed cut at 200 would land mid-char.
-        let line = "中".repeat(101);
-        assert_eq!(
-            stderr_summary(line.as_bytes()),
-            format!("{}...", "中".repeat(98)),
-        );
-    }
-
-    #[test]
-    fn stderr_summary_blank_lines_have_no_summary() {
-        assert_eq!(stderr_summary(b"\n   \n\t\n"), "");
+        #[test]
+        fn blank_lines_have_no_summary() {
+            assert_eq!(stderr_summary(b"\n   \n\t\n"), "");
+        }
     }
 }
