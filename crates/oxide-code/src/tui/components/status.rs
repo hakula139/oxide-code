@@ -351,7 +351,7 @@ impl StatusBar {
         let style = if matches!(self.status, Status::ExitArmed { .. }) {
             self.theme.warning()
         } else {
-            self.theme.success()
+            self.theme.muted()
         };
         Span::styled(label, style)
     }
@@ -1061,6 +1061,33 @@ mod tests {
             assert!(
                 bar.take_pending_hyperlinks().is_empty(),
                 "second take leaves nothing behind",
+            );
+        }
+    }
+
+    mod status_span {
+        use super::*;
+
+        #[test]
+        fn ready_reads_in_the_muted_style() {
+            let bar = test_bar();
+
+            assert_eq!(
+                bar.status_span(),
+                Span::styled("Ready", Theme::default().muted())
+            );
+        }
+
+        #[test]
+        fn armed_exit_hint_reads_as_a_warning() {
+            let mut bar = test_bar();
+            bar.set_status(Status::ExitArmed {
+                until: Instant::now(),
+            });
+
+            assert_eq!(
+                bar.status_span(),
+                Span::styled("Press Ctrl+C again to exit", Theme::default().warning())
             );
         }
     }

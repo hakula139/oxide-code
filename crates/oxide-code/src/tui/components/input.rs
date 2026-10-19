@@ -140,9 +140,14 @@ impl InputArea {
     }
 
     pub(crate) fn render(&self, frame: &mut Frame<'_>, area: Rect) {
+        let rule_style = if self.enabled {
+            self.theme.border_focused()
+        } else {
+            self.theme.accent()
+        };
         let block = Block::default()
             .borders(Borders::TOP | Borders::BOTTOM)
-            .border_style(self.theme.border_focused())
+            .border_style(rule_style)
             .style(self.theme.surface());
         let inner = block.inner(area);
         frame.render_widget(block, area);
@@ -906,6 +911,27 @@ mod tests {
 
             assert_eq!(enabled_fg, theme.user().fg.unwrap());
             assert_eq!(disabled_fg, theme.user().fg.unwrap());
+        }
+
+        #[test]
+        fn rules_rest_in_border_focused_and_take_the_accent_while_busy() {
+            let theme = Theme::default();
+            let mut input = InputArea::new(&theme);
+            let rule_styles = |input: &InputArea| {
+                let backend = render_to_backend(input, 60, 3);
+                [0, 2].map(|row| {
+                    let cell = backend.buffer().cell(Position::new(30, row)).unwrap();
+                    (cell.fg, cell.modifier)
+                })
+            };
+
+            let idle = rule_styles(&input);
+            input.set_enabled(false);
+            let busy = rule_styles(&input);
+
+            let rule = |style: Style| (style.fg.unwrap(), style.add_modifier);
+            assert_eq!(idle, [rule(theme.border_focused()); 2]);
+            assert_eq!(busy, [rule(theme.accent()); 2]);
         }
 
         #[test]

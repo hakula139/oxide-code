@@ -57,7 +57,7 @@ macro_rules! for_each_slot {
             // Text hierarchy
             (text, "Primary text"),
             (muted, "Secondary text and labels, dimmer than text and brighter than dim"),
-            (dim, "Dimmed metadata, timestamps"),
+            (dim, "Low-emphasis text that stays readable, such as tool output and hints"),
 
             // Surfaces
             (surface, "Chat / input / status panel background (bg-only)"),
@@ -70,7 +70,7 @@ macro_rules! for_each_slot {
 
             // Status indicators (ascending severity)
             (info, "Informational highlight (in-progress / neutral signals)"),
-            (success, "Successful tool results, ready status"),
+            (success, "Successful tools, added diff lines, passing checks and approvals, notices"),
             (warning, "Warnings, caution status"),
             (error, "Errors, failed tools, critical status"),
 
@@ -91,7 +91,7 @@ macro_rules! for_each_slot {
             // Markdown body
             (thinking, "Thinking text"),
             (link, "Markdown links"),
-            (blockquote, "Markdown blockquote marker (`> `)"),
+            (blockquote, "Markdown blockquote bar (`│`)"),
             (list_marker, "List item bullet / number marker"),
 
             // Markdown chrome
@@ -102,7 +102,7 @@ macro_rules! for_each_slot {
             // UI chrome
             (tool_border, "Left border for tool call blocks"),
             (tool_icon, "Tool icon accent"),
-            (border_focused, "Focused component border"),
+            (border_focused, "Input rules while idle"),
             (border_unfocused, "Unfocused component border"),
             (separator, "Status-line segment separator"),
             (selection, "Chat text selected with the mouse (bg-only)"),
@@ -278,16 +278,6 @@ mod tests {
         }
 
         #[test]
-        fn chrome_slots_reuse_accent_and_dim_colors() {
-            let t = Theme::default();
-            assert_eq!(t.tool_icon.fg, t.accent.fg);
-            assert_eq!(t.border_focused.fg, t.accent.fg);
-            assert_eq!(t.border_unfocused.fg, t.dim.fg);
-            assert_eq!(t.list_marker.fg, t.accent.fg);
-            assert_eq!(t.blockquote.fg, t.success.fg);
-        }
-
-        #[test]
         fn headings_step_down_from_bold_underlined_to_italic() {
             let t = Theme::default();
             let text = t.text();
@@ -318,15 +308,6 @@ mod tests {
         fn thinking_is_italic() {
             let t = Theme::default();
             assert!(t.thinking.modifiers.contains(Modifier::ITALIC));
-        }
-
-        #[test]
-        fn dim_cluster_matches_dim() {
-            let t = Theme::default();
-            let dim = t.dim();
-            assert_eq!(t.border_unfocused(), dim);
-            assert_eq!(t.horizontal_rule(), dim);
-            assert_eq!(t.table_border(), dim);
         }
     }
 

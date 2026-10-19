@@ -4,7 +4,7 @@
 # Text hierarchy
 text = "#cad3f5"
 muted = "#a5adcb"
-dim = "#5b6078"
+dim = "#8087a2"
 
 # Surfaces
 surface = { bg = "reset" }
@@ -23,7 +23,7 @@ error = "#ed8796"
 
 # Code
 code = "#8bd5ca"
-inline_code = "#f5a97f"
+inline_code = "#f4dbd6"
 syntax_theme = "base16-ocean.dark"
 
 # Diff backgrounds
@@ -37,9 +37,9 @@ heading_h3 = { fg = "#cad3f5", bold = true, italic = true }
 heading_minor = { fg = "#cad3f5", italic = true }
 
 # Markdown body
-thinking = { fg = "#5b6078", italic = true }
+thinking = { fg = "#8087a2", italic = true }
 link = { fg = "#8aadf4", underlined = true }
-blockquote = "#a6da95"
+blockquote = "#6e738d"
 list_marker = "#8aadf4"
 
 # Markdown chrome
@@ -50,7 +50,7 @@ table_border = "#5b6078"
 # UI chrome
 tool_border = "#6e738d"
 tool_icon = "#8aadf4"
-border_focused = "#8aadf4"
+border_focused = "#6e738d"
 border_unfocused = "#5b6078"
 separator = "#5b6078"
-selection = { bg = "#363a4f" }
+selection = { bg = "#393d52" }

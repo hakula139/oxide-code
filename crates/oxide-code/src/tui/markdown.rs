@@ -15,7 +15,7 @@ const OPTIONS: Options = Options::ENABLE_STRIKETHROUGH.union(Options::ENABLE_TAB
 ///
 /// `width == 0` disables wrapping entirely (useful for tests and width-agnostic callers). Any
 /// non-zero value wraps each block to that column budget, preserving the enclosing block's
-/// continuation indent (blockquote `>`, list-item gutter, etc.) on wrapped sub-lines.
+/// continuation indent (blockquote `│`, list-item gutter, etc.) on wrapped sub-lines.
 pub(super) fn render_markdown(input: &str, theme: &Theme, width: usize) -> Text<'static> {
     render_markdown_chunk(input, theme, width, false).0
 }

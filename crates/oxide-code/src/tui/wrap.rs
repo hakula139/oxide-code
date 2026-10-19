@@ -9,7 +9,7 @@ use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 ///
 /// `continuation_indent` is the column count reserved on every wrapped sub-line after the first.
 /// `continuation_prefix`, when supplied, replaces the default whitespace fill with styled spans
-/// (blockquote `> ` markers, nested list indentation). The first line is never indented, since
+/// (blockquote `│ ` bars, nested list indentation). The first line is never indented, since
 /// callers prepend the original prefix themselves. Breaks fall between grapheme clusters, so ZWJ
 /// emoji and combining sequences stay whole. Every row keeps the line's style and alignment.
 ///

@@ -699,7 +699,12 @@ mod tests {
             let t = parse_theme(builtin::MOCHA).unwrap();
             assert_eq!(t.text.fg, Some(Color::Rgb(0xcd, 0xd6, 0xf4)), "Text");
             assert_eq!(t.muted.fg, Some(Color::Rgb(0xa6, 0xad, 0xc8)), "Subtext0");
-            assert_eq!(t.dim.fg, Some(Color::Rgb(0x58, 0x5b, 0x70)), "Surface2");
+            assert_eq!(t.dim.fg, Some(Color::Rgb(0x7f, 0x84, 0x9c)), "Overlay1");
+            assert_eq!(
+                t.border_unfocused.fg,
+                Some(Color::Rgb(0x58, 0x5b, 0x70)),
+                "Surface2",
+            );
             assert_eq!(t.accent.fg, Some(Color::Rgb(0x89, 0xb4, 0xfa)), "Blue");
             assert_eq!(t.user.fg, Some(Color::Rgb(0xfa, 0xb3, 0x87)), "Peach");
             assert_eq!(
@@ -753,7 +758,7 @@ mod tests {
 
         #[test]
         fn missing_required_slot_names_it_with_a_value_to_add() {
-            let body = builtin::MOCHA.replace(r##"selection = { bg = "#313244" }"##, "");
+            let body = builtin::MOCHA.replace(r##"selection = { bg = "#393a4c" }"##, "");
 
             let err = parse_theme(&body).expect_err("missing required slot");
 
@@ -761,7 +766,7 @@ mod tests {
                 format!("{err:#}"),
                 format!(
                     "the theme has no `selection` slot. \
-                     Add one, such as `selection = {{ bg = \"#313244\" }}`. \
+                     Add one, such as `selection = {{ bg = \"#393a4c\" }}`. \
                      {THEMING_GUIDE} lists every slot."
                 ),
             );
@@ -881,11 +886,11 @@ mod tests {
         #[test]
         fn inline_supports_every_modifier_flag() {
             let replacement = indoc! {r##"
-                thinking = { fg = "#585b70", bold = true, italic = true, underlined = true, dim = true, reversed = true }
+                thinking = { fg = "#7f849c", bold = true, italic = true, underlined = true, dim = true, reversed = true }
             "##}
             .trim();
             let body = mocha_with_slot_replacement(
-                r##"thinking = { fg = "#585b70", italic = true }"##,
+                r##"thinking = { fg = "#7f849c", italic = true }"##,
                 replacement,
             );
             let t = parse_theme(&body).unwrap();
