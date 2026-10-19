@@ -51,6 +51,7 @@ These rules apply to comments, docs, commit messages, PR and issue text, `#[expe
 
 - Keep `README.md` focused on users: explain the value, supported features, scope, and usage.
 - Use `docs/` to describe current behavior and its rationale. Track planned work, deferred follow-ups, and open design questions in GitHub issues, and link to the relevant issue from the docs.
+- Keep every command shown in the docs minimal. When a command would need extra flags or environment variables, move the setting into the tool's config, rely on its default, or add a project script, then document the short form.
 - Organize each page around the questions its readers bring. Keep each paragraph focused on one idea, and verify every claim against the code before citing it.
 - When you add or edit a claim in a research note, record when you verified it and which version you checked. Delete the claim if a newer test contradicts it or you can no longer verify it.
 - Cite Claude Code, [Codex](https://github.com/openai/codex), [pi](https://github.com/badlogic/pi-mono), and [oh-my-pi](https://github.com/can1357/oh-my-pi) as reference implementations in new research and design notes. Existing notes may retain their opencode citations.
