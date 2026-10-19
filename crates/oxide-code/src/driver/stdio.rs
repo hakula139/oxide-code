@@ -363,595 +363,618 @@ mod tests {
     use crate::tool::tasks::testing::{plan, task};
     use crate::tool::testing::bash_preview;
 
-    /// Answers every approval with its decision, recording what each request offered.
-    struct Fixed {
-        decision: Decision,
-        offered: Vec<(String, Option<String>)>,
-    }
+    mod render_op {
+        use super::*;
 
-    impl Approver for Fixed {
-        fn decide(
-            &mut self,
-            preview: &ApprovalPreview,
-            _: &Basis,
-            grant: Option<&SessionGrant>,
-        ) -> impl Future<Output = Decision> {
-            let rule = grant.map(|grant| grant.suggested().pattern().to_owned());
-            self.offered.push((preview.title.clone(), rule));
-            std::future::ready(self.decision.clone())
+        /// Answers every approval with its decision, recording what each request offered.
+        struct Fixed {
+            decision: Decision,
+            offered: Vec<(String, Option<String>)>,
         }
-    }
 
-    fn fixed(decision: Decision) -> Fixed {
-        Fixed {
-            decision,
-            offered: Vec::new(),
+        impl Approver for Fixed {
+            fn decide(
+                &mut self,
+                preview: &ApprovalPreview,
+                _: &Basis,
+                grant: Option<&SessionGrant>,
+            ) -> impl Future<Output = Decision> {
+                let rule = grant.map(|grant| grant.suggested().pattern().to_owned());
+                self.offered.push((preview.title.clone(), rule));
+                std::future::ready(self.decision.clone())
+            }
         }
-    }
 
-    fn prompt() -> Op {
-        Op::Prompt("hi".to_owned())
-    }
-
-    // ── render_op ──
-
-    #[tokio::test]
-    async fn render_op_answers_each_approval_on_ops() {
-        let (tx, mut events) = mpsc::unbounded_channel();
-        let approval = Event::ApprovalRequested {
-            id: "t1".to_owned(),
-            preview: bash_preview("ls"),
-            basis: Basis::Mode(Mode::Manual),
-            grant: Some(Box::new(exec_grant("ls"))),
-        };
-        for event in [approval, Event::TurnComplete] {
-            tx.send(event).unwrap();
+        fn fixed(decision: Decision) -> Fixed {
+            Fixed {
+                decision,
+                offered: Vec::new(),
+            }
         }
-        let (ops_tx, mut ops) = mpsc::channel(1);
-        let sink = CapturingSink::default();
-        let mut approver = fixed(Decision::Deny);
 
-        let end = render_op(&mut events, &sink, &ops_tx, &prompt(), &mut approver).await;
+        fn prompt() -> Op {
+            Op::Prompt("hi".to_owned())
+        }
 
-        assert_eq!(end, Some(TurnEnd::Completed));
-        assert_eq!(
-            approver.offered,
-            [("Bash".to_owned(), Some("ls".to_owned()))],
-        );
-        assert_eq!(
-            ops.try_recv().ok(),
-            Some(Op::Resolve {
+        #[tokio::test]
+        async fn answers_each_approval_on_ops() {
+            let (tx, mut events) = mpsc::unbounded_channel();
+            let approval = Event::ApprovalRequested {
                 id: "t1".to_owned(),
-                decision: Decision::Deny,
-            }),
-        );
-        assert_eq!(sink.events(), [Event::TurnComplete]);
-    }
-
-    #[tokio::test]
-    async fn render_op_stops_at_the_terminal_event_even_when_rendering_fails() {
-        let (tx, mut events) = mpsc::unbounded_channel();
-        for event in [
-            Event::StreamToken("reply".to_owned()),
-            Event::Cancelled,
-            Event::TurnComplete,
-        ] {
-            tx.send(event).unwrap();
-        }
-
-        let (ops, _) = mpsc::channel(1);
-        let mut approver = fixed(Decision::Deny);
-        let end = render_op(&mut events, &FailingSink, &ops, &prompt(), &mut approver).await;
-
-        assert_eq!(end, Some(TurnEnd::Cancelled));
-        assert_eq!(events.try_recv().ok(), Some(Event::TurnComplete));
-    }
-
-    #[tokio::test]
-    async fn render_op_waits_for_the_terminal_event_of_its_own_op() {
-        let (tx, mut events) = mpsc::unbounded_channel();
-        let cleared = [
-            Event::SessionRolled {
-                id: "next".to_owned(),
-                archived: false,
-            },
-            Event::Error("Previous session write failed: disk full".to_owned()),
-            Event::Notice("Skipped instruction file /repo/CLAUDE.md: permission denied".to_owned()),
-            Event::SessionReady,
-        ];
-        for event in cleared.iter().cloned().chain([Event::TurnComplete]) {
-            tx.send(event).unwrap();
-        }
-        drop(tx);
-        let sink = CapturingSink::default();
-
-        let (ops, _) = mpsc::channel(1);
-        let mut approver = fixed(Decision::Deny);
-        let end = render_op(&mut events, &sink, &ops, &Op::Clear, &mut approver).await;
-
-        assert_eq!(end, Some(TurnEnd::Completed));
-        assert_eq!(sink.events(), cleared);
-        assert_eq!(events.try_recv().ok(), Some(Event::TurnComplete));
-    }
-
-    #[tokio::test]
-    async fn render_op_renders_what_the_engine_reports_after_a_clear_before_returning() {
-        with_pinned_home(async {
-            let server = MockServer::start().await;
-            let dir = tempfile::tempdir().unwrap();
-            let engine = engine(server.uri(), &test_store(dir.path()), dir.path()).await;
-            let instructions = dir.path().join("CLAUDE.md");
-            std::fs::write(&instructions, b"\xff\xfe").unwrap();
-            let mut handle = engine.spawn(&[]);
-            handle.ops.send(Op::Clear).await.unwrap();
+                preview: bash_preview("ls"),
+                basis: Basis::Mode(Mode::Manual),
+                grant: Some(Box::new(exec_grant("ls"))),
+            };
+            for event in [approval, Event::TurnComplete] {
+                tx.send(event).unwrap();
+            }
+            let (ops_tx, mut ops) = mpsc::channel(1);
             let sink = CapturingSink::default();
             let mut approver = fixed(Decision::Deny);
 
-            let end = render_op(
-                &mut handle.events,
-                &sink,
-                &handle.ops,
-                &Op::Clear,
-                &mut approver,
-            )
-            .await;
+            let end = render_op(&mut events, &sink, &ops_tx, &prompt(), &mut approver).await;
 
             assert_eq!(end, Some(TurnEnd::Completed));
-            let warning = format!(
-                "Skipped instruction file {}: stream did not contain valid UTF-8",
-                instructions.display(),
-            );
-            assert!(
-                matches!(
-                    sink.events().as_slice(),
-                    [
-                        Event::SessionRolled { .. },
-                        Event::Notice(notice),
-                        Event::SessionReady,
-                    ] if *notice == warning
-                ),
-                "{:?}",
-                sink.events(),
-            );
-            handle.shutdown().await.unwrap();
-        })
-        .await;
-    }
-
-    #[tokio::test]
-    async fn render_op_reports_a_stopped_engine() {
-        let (tx, mut events) = mpsc::unbounded_channel();
-        tx.send(Event::StreamToken("partial".to_owned())).unwrap();
-        drop(tx);
-        let sink = CapturingSink::default();
-
-        let (ops, _) = mpsc::channel(1);
-        let mut approver = fixed(Decision::Deny);
-        let end = render_op(&mut events, &sink, &ops, &prompt(), &mut approver).await;
-
-        assert_eq!(end, None);
-        assert_eq!(sink.events(), [Event::StreamToken("partial".to_owned())]);
-    }
-
-    // ── Unattended::decide ──
-
-    #[tokio::test]
-    async fn unattended_denies_naming_the_allow_pattern_or_what_holds_the_call() {
-        let command = r#"echo "a\b""#;
-        let preview = bash_preview(command);
-        let manual = Basis::Mode(Mode::Manual);
-        let grant = exec_grant(command);
-        let ask = Basis::Rule {
-            tier: Tier::Ask,
-            rule: Rule::parse(PermissionClass::Exec, "git push *").unwrap(),
-        };
-        let cases = [
-            (
-                &manual,
-                Some(&grant),
-                "This run cannot ask for approval. \
-                 To allow this call, \
-                 add `'''echo 'a\\b''''` to `permission.allow.exec` in the user config.",
-            ),
-            (
-                &manual,
-                None,
-                "This run cannot ask for approval, and no allow pattern matches this call. \
-                 Under `permission.allow` in the user config, \
-                 a chained command needs a pattern per command, \
-                 and a word that expands needs a pattern ending in `*` at that word. \
-                 A command that hides what it runs, \
-                 such as `$(...)` or `sh -c`, needs approval in an interactive session.",
-            ),
-            (
-                &Basis::Builtin(Shipped::Git),
-                None,
-                "This run cannot ask for approval, and the built-in `git` rule holds this call. \
-                 Approve it in an interactive session, \
-                 or set `permission.defaults.git = false` in the user config.",
-            ),
-            (
-                &Basis::Builtin(Shipped::Ssh),
-                None,
-                "This run cannot ask for approval, and the built-in `ssh` rule holds this call. \
-                 Approve it in an interactive session.",
-            ),
-            (
-                &ask,
-                None,
-                "This run cannot ask for approval, \
-                 and the `ask.exec` pattern `git push *` holds this call. \
-                 Approve it in an interactive session.",
-            ),
-        ];
-
-        for (basis, grant, expected) in cases {
-            let decision = Unattended.decide(&preview, basis, grant).await;
-
             assert_eq!(
-                decision,
-                Decision::DenyWithFeedback {
-                    feedback: expected.to_owned()
-                },
-                "{basis:?}"
+                approver.offered,
+                [("Bash".to_owned(), Some("ls".to_owned()))],
             );
-        }
-    }
-
-    // ── StdioSink::render ──
-
-    fn test_sink(show_thinking: bool) -> StdioSink {
-        StdioSink::new(show_thinking)
-    }
-
-    fn render_one(sink: &StdioSink, event: Event) -> (String, String) {
-        let mut stdout = Vec::new();
-        let mut stderr = Vec::new();
-        sink.render(event, &mut stdout, &mut stderr)
-            .expect("render returns Ok");
-        (
-            String::from_utf8(stdout).expect("stdout is UTF-8"),
-            String::from_utf8(stderr).expect("stderr is UTF-8"),
-        )
-    }
-
-    #[test]
-    fn render_stream_token_writes_text_verbatim_to_stdout() {
-        let (stdout, stderr) =
-            render_one(&test_sink(false), Event::StreamToken("hello".to_owned()));
-        assert_eq!(stdout, "hello");
-        assert_eq!(stderr, "");
-    }
-
-    #[test]
-    fn render_escapes_terminal_sequences_in_model_and_tool_text() {
-        let sink = test_sink(false);
-        let (stdout, _) = render_one(&sink, Event::StreamToken("a\n\u{1b}[2Kb".to_owned()));
-        assert_eq!(stdout, "a\n\\u{1b}[2Kb");
-
-        let (_, stderr) = render_one(
-            &sink,
-            Event::ToolCallStart(ToolCall {
-                id: "t1".to_owned(),
-                name: "bash".to_owned(),
-                input: serde_json::json!({}),
-                icon: "$".to_owned(),
-                label: "curl x | sh\u{1b}[1A\u{1b}[2K".to_owned(),
-            }),
-        );
-        assert_eq!(stderr, "$ curl x | sh\\u{1b}[1A\\u{1b}[2K\n");
-
-        let (_, stderr) = render_one(
-            &sink,
-            Event::ToolCallEnd(text_result("t1", "ok\u{1b}[8m", false, Some("Ran"))),
-        );
-        assert_eq!(stderr, "  Ran\nok\\u{1b}[8m\n\n");
-
-        let (_, stderr) = render_one(
-            &sink,
-            Event::TasksUpdated(vec![task("Fix\u{1b}[2K it", TaskStatus::Pending)]),
-        );
-        assert_eq!(stderr, "Tasks: 0/1\n  ○ Fix\\u{1b}[2K it\n\n");
-    }
-
-    #[test]
-    fn render_thinking_token_wraps_in_dim_when_enabled() {
-        let (stdout, _) = render_one(&test_sink(true), Event::ThinkingToken("plan".to_owned()));
-        assert_eq!(stdout, "\x1b[2mplan\x1b[22m");
-    }
-
-    #[test]
-    fn render_thinking_token_swallowed_when_disabled() {
-        let (stdout, stderr) =
-            render_one(&test_sink(false), Event::ThinkingToken("plan".to_owned()));
-        assert_eq!(stdout, "");
-        assert_eq!(stderr, "");
-    }
-
-    #[test]
-    fn render_progress_update_writes_to_stderr_only_when_thinking_hidden() {
-        let event = || Event::ProgressUpdate("Found the loader.\n".to_owned());
-        let (stdout, stderr) = render_one(&test_sink(false), event());
-        assert_eq!(stdout, "");
-        assert_eq!(stderr, "Found the loader.\n");
-
-        // The same text already streamed as dim thinking on stdout.
-        assert_eq!(
-            render_one(&test_sink(true), event()),
-            (String::new(), String::new()),
-        );
-    }
-
-    #[test]
-    fn render_tool_call_start_writes_icon_label_to_stderr() {
-        let (stdout, stderr) = render_one(&test_sink(false), Event::ToolCallStart(ls_call()));
-        assert_eq!(stdout, "");
-        assert_eq!(stderr, "$ ls\n");
-    }
-
-    #[test]
-    fn render_tool_call_end_with_title_writes_title_then_content() {
-        let (_, stderr) = render_one(
-            &test_sink(false),
-            Event::ToolCallEnd(text_result("t1", "file1\nfile2\n", false, Some("Listed"))),
-        );
-        assert_eq!(
-            stderr,
-            indoc! {"
-                  Listed
-                file1
-                file2
-
-            "}
-        );
-    }
-
-    #[test]
-    fn render_tool_call_end_after_another_call_started_repeats_its_header() {
-        let sink = test_sink(false);
-        let start = |id: &str| {
-            Event::ToolCallStart(ToolCall {
-                id: id.to_owned(),
-                name: "grep".to_owned(),
-                input: serde_json::json!({}),
-                icon: "*".to_owned(),
-                label: format!("Grep({id})"),
-            })
-        };
-
-        let rendered = [
-            start("a"),
-            start("b"),
-            Event::ToolCallEnd(text_result("a", "a hits", false, None)),
-            Event::ToolCallEnd(text_result("b", "b hits", false, None)),
-            start("c"),
-            Event::ToolCallEnd(text_result("c", "c hits", false, None)),
-        ]
-        .map(|event| render_one(&sink, event).1);
-
-        assert_eq!(
-            rendered,
-            [
-                "* Grep(a)\n",
-                "* Grep(b)\n",
-                "* Grep(a)\na hits\n\n",
-                "* Grep(b)\nb hits\n\n",
-                "* Grep(c)\n",
-                "c hits\n\n",
-            ],
-        );
-    }
-
-    #[test]
-    fn render_tool_call_end_without_title_skips_header_and_whitespace_content() {
-        let (_, stderr) = render_one(
-            &test_sink(false),
-            Event::ToolCallEnd(text_result("t2", "   \n", true, None)),
-        );
-        assert_eq!(stderr, "\n");
-    }
-
-    #[test]
-    fn render_tasks_updated_marks_each_task_under_its_progress_and_skips_a_cleared_list() {
-        let sink = test_sink(false);
-
-        let (stdout, stderr) = render_one(&sink, Event::TasksUpdated(plan()));
-        assert_eq!(stdout, "");
-        assert_eq!(
-            stderr,
-            [
-                "Tasks: 1/3\n",
-                "  ✓ Read the config loader\n",
-                "  ● Add the entry type\n",
-                "  ○ Write the tests\n",
-                "\n",
-            ]
-            .concat(),
-        );
-
-        let (stdout, stderr) = render_one(&sink, Event::TasksUpdated(Vec::new()));
-        assert_eq!((stdout.as_str(), stderr.as_str()), ("", ""));
-    }
-
-    #[test]
-    fn render_tui_only_events_emit_nothing_on_either_stream() {
-        for event in [
-            Event::PromptDrained("queued".to_owned()),
-            Event::RateLimitsUpdated(RateLimits {
-                five_hour: None,
-                seven_day: Some(RateLimitWindow {
-                    utilization: 0.5,
-                    resets_at: 1_760_000_000,
+            assert_eq!(
+                ops.try_recv().ok(),
+                Some(Op::Resolve {
+                    id: "t1".to_owned(),
+                    decision: Decision::Deny,
                 }),
-            }),
-            Event::AutoCompactionStarted,
-            Event::AutoCompactionPaused { failures: 3 },
-            Event::AutoCompactionResumed,
-            Event::SummaryToken("Recap".to_owned()),
-            Event::SummaryDiscarded,
-            Event::BackgroundShellsUpdated(shells_in_each_state()),
-        ] {
-            let (stdout, stderr) = render_one(&test_sink(false), event);
-            assert!(stdout.is_empty(), "stdout must stay empty: {stdout:?}");
-            assert!(stderr.is_empty(), "stderr must stay empty: {stderr:?}");
+            );
+            assert_eq!(sink.events(), [Event::TurnComplete]);
         }
-    }
 
-    #[test]
-    fn render_session_confirmations_write_to_stderr() {
-        let cases = [
-            (
-                Event::SessionTitleUpdated {
-                    session_id: "sid".to_owned(),
-                    title: "Fix login\u{1b}[2J".to_owned(),
-                },
-                "Renamed the session to Fix login\\u{1b}[2J\n",
-            ),
-            (
+        #[tokio::test]
+        async fn stops_at_the_terminal_event_even_when_rendering_fails() {
+            let (tx, mut events) = mpsc::unbounded_channel();
+            for event in [
+                Event::StreamToken("reply".to_owned()),
+                Event::Cancelled,
+                Event::TurnComplete,
+            ] {
+                tx.send(event).unwrap();
+            }
+
+            let (ops, _) = mpsc::channel(1);
+            let mut approver = fixed(Decision::Deny);
+            let end = render_op(&mut events, &FailingSink, &ops, &prompt(), &mut approver).await;
+
+            assert_eq!(end, Some(TurnEnd::Cancelled));
+            assert_eq!(events.try_recv().ok(), Some(Event::TurnComplete));
+        }
+
+        #[tokio::test]
+        async fn waits_for_the_terminal_event_of_its_own_op() {
+            let (tx, mut events) = mpsc::unbounded_channel();
+            let cleared = [
                 Event::SessionRolled {
-                    id: "0123456789abcdef".to_owned(),
+                    id: "next".to_owned(),
                     archived: false,
                 },
-                "Started session 01234567\n",
-            ),
-            (
-                Event::SessionResumed {
-                    id: "89abcdef01234567".to_owned(),
-                    title: Some("Fix login".to_owned()),
-                    unarchived: false,
-                    history: Vec::new(),
-                },
-                "Resumed session 89abcdef: Fix login\n",
-            ),
-            (
-                Event::SessionResumed {
-                    id: "89abcdef01234567".to_owned(),
-                    title: None,
-                    unarchived: true,
-                    history: Vec::new(),
-                },
-                "Resumed session 89abcdef: (untitled)\nUnarchived session 89abcdef\n",
-            ),
-        ];
-
-        for (event, expected) in cases {
-            let (stdout, stderr) = render_one(&test_sink(false), event);
-
-            assert!(stdout.is_empty(), "stdout must stay empty: {stdout:?}");
-            assert_eq!(stderr, expected);
-        }
-    }
-
-    #[test]
-    fn render_config_changed_names_the_model_and_the_effort_in_use() {
-        let config_changed = |id: &str, effort, requested| Event::ConfigChanged {
-            model: ModelSpec::resolve(id.to_owned()),
-            effort,
-            requested,
-            auto_compaction: AutoCompactionConfig::disabled(),
-        };
-        let custom_model = || ConfigPick::Model {
-            id: ResolvedModelId::new("custom-model".to_owned()),
-            effort: None,
-        };
-        let cases = [
-            (
-                config_changed(
-                    "claude-opus-5-5",
-                    Some(Effort::Low),
-                    ConfigPick::Effort(Effort::Low),
+                Event::Error("Previous session write failed: disk full".to_owned()),
+                Event::Notice(
+                    "Skipped instruction file /repo/CLAUDE.md: permission denied".to_owned(),
                 ),
-                "Using Claude Opus 5.5 (claude-opus-5-5) at low effort\n",
-            ),
-            (
-                config_changed("custom-model", None, ConfigPick::Effort(Effort::High)),
-                "Using custom-model (custom-model). \
-                 Effort unchanged (model has no effort tier, asked for high).\n",
-            ),
-            (
-                config_changed("custom-model", None, custom_model()),
-                "Using custom-model (custom-model)\n",
-            ),
-        ];
+                Event::SessionReady,
+            ];
+            for event in cleared.iter().cloned().chain([Event::TurnComplete]) {
+                tx.send(event).unwrap();
+            }
+            drop(tx);
+            let sink = CapturingSink::default();
 
-        for (event, expected) in cases {
-            let (stdout, stderr) = render_one(&test_sink(false), event);
+            let (ops, _) = mpsc::channel(1);
+            let mut approver = fixed(Decision::Deny);
+            let end = render_op(&mut events, &sink, &ops, &Op::Clear, &mut approver).await;
 
-            assert!(stdout.is_empty(), "stdout must stay empty: {stdout:?}");
-            assert_eq!(stderr, expected);
+            assert_eq!(end, Some(TurnEnd::Completed));
+            assert_eq!(sink.events(), cleared);
+            assert_eq!(events.try_recv().ok(), Some(Event::TurnComplete));
+        }
+
+        #[tokio::test]
+        async fn renders_what_the_engine_reports_after_a_clear_before_returning() {
+            with_pinned_home(async {
+                let server = MockServer::start().await;
+                let dir = tempfile::tempdir().unwrap();
+                let engine = engine(server.uri(), &test_store(dir.path()), dir.path()).await;
+                let instructions = dir.path().join("CLAUDE.md");
+                std::fs::write(&instructions, b"\xff\xfe").unwrap();
+                let mut handle = engine.spawn(&[]);
+                handle.ops.send(Op::Clear).await.unwrap();
+                let sink = CapturingSink::default();
+                let mut approver = fixed(Decision::Deny);
+
+                let end = render_op(
+                    &mut handle.events,
+                    &sink,
+                    &handle.ops,
+                    &Op::Clear,
+                    &mut approver,
+                )
+                .await;
+
+                assert_eq!(end, Some(TurnEnd::Completed));
+                let warning = format!(
+                    "Skipped instruction file {}: stream did not contain valid UTF-8",
+                    instructions.display(),
+                );
+                assert!(
+                    matches!(
+                        sink.events().as_slice(),
+                        [
+                            Event::SessionRolled { .. },
+                            Event::Notice(notice),
+                            Event::SessionReady,
+                        ] if *notice == warning
+                    ),
+                    "{:?}",
+                    sink.events(),
+                );
+                handle.shutdown().await.unwrap();
+            })
+            .await;
+        }
+
+        #[tokio::test]
+        async fn reports_a_stopped_engine() {
+            let (tx, mut events) = mpsc::unbounded_channel();
+            tx.send(Event::StreamToken("partial".to_owned())).unwrap();
+            drop(tx);
+            let sink = CapturingSink::default();
+
+            let (ops, _) = mpsc::channel(1);
+            let mut approver = fixed(Decision::Deny);
+            let end = render_op(&mut events, &sink, &ops, &prompt(), &mut approver).await;
+
+            assert_eq!(end, None);
+            assert_eq!(sink.events(), [Event::StreamToken("partial".to_owned())]);
         }
     }
 
-    #[test]
-    fn render_mode_changed_names_the_mode_in_use() {
-        let (stdout, stderr) = render_one(&test_sink(false), Event::ModeChanged(Mode::Plan));
+    mod unattended {
+        use super::*;
 
-        assert!(stdout.is_empty(), "stdout must stay empty: {stdout:?}");
-        assert_eq!(stderr, "Using plan mode\n");
+        mod decide {
+            use super::*;
+
+            #[tokio::test]
+            async fn denies_naming_the_allow_pattern_or_what_holds_the_call() {
+                let command = r#"echo "a\b""#;
+                let preview = bash_preview(command);
+                let manual = Basis::Mode(Mode::Manual);
+                let grant = exec_grant(command);
+                let ask = Basis::Rule {
+                    tier: Tier::Ask,
+                    rule: Rule::parse(PermissionClass::Exec, "git push *").unwrap(),
+                };
+                let cases = [
+                    (
+                        &manual,
+                        Some(&grant),
+                        "This run cannot ask for approval. \
+                         To allow this call, \
+                         add `'''echo 'a\\b''''` to `permission.allow.exec` in the user config.",
+                    ),
+                    (
+                        &manual,
+                        None,
+                        "This run cannot ask for approval, and no allow pattern matches this call. \
+                         Under `permission.allow` in the user config, \
+                         a chained command needs a pattern per command, \
+                         and a word that expands needs a pattern ending in `*` at that word. \
+                         A command that hides what it runs, \
+                         such as `$(...)` or `sh -c`, needs approval in an interactive session.",
+                    ),
+                    (
+                        &Basis::Builtin(Shipped::Git),
+                        None,
+                        "This run cannot ask for approval, \
+                         and the built-in `git` rule holds this call. \
+                         Approve it in an interactive session, \
+                         or set `permission.defaults.git = false` in the user config.",
+                    ),
+                    (
+                        &Basis::Builtin(Shipped::Ssh),
+                        None,
+                        "This run cannot ask for approval, \
+                         and the built-in `ssh` rule holds this call. \
+                         Approve it in an interactive session.",
+                    ),
+                    (
+                        &ask,
+                        None,
+                        "This run cannot ask for approval, \
+                         and the `ask.exec` pattern `git push *` holds this call. \
+                         Approve it in an interactive session.",
+                    ),
+                ];
+
+                for (basis, grant, expected) in cases {
+                    let decision = Unattended.decide(&preview, basis, grant).await;
+
+                    assert_eq!(
+                        decision,
+                        Decision::DenyWithFeedback {
+                            feedback: expected.to_owned()
+                        },
+                        "{basis:?}"
+                    );
+                }
+            }
+        }
     }
 
-    #[test]
-    fn render_session_compacted_writes_stderr_boundary() {
-        let (_, stderr) = render_one(
-            &test_sink(false),
-            Event::SessionCompacted {
-                summary: "summary".to_owned(),
-                pre_count: 4,
-                instructions: None,
-                automatic: false,
-            },
-        );
-        assert_eq!(stderr, "Compacted 4 messages into summary\n");
+    mod stdio_sink {
+        use super::*;
 
-        let (_, stderr) = render_one(
-            &test_sink(false),
-            Event::SessionCompacted {
-                summary: "summary".to_owned(),
-                pre_count: 4,
-                instructions: None,
-                automatic: true,
-            },
-        );
-        assert_eq!(stderr, "Auto-compacted 4 messages into summary\n");
-    }
+        mod render {
+            use super::*;
 
-    #[test]
-    fn render_turn_complete_writes_trailing_newline_to_stdout() {
-        let (stdout, stderr) = render_one(&test_sink(false), Event::TurnComplete);
-        assert_eq!(stdout, "\n");
-        assert_eq!(stderr, "");
-    }
+            fn test_sink(show_thinking: bool) -> StdioSink {
+                StdioSink::new(show_thinking)
+            }
 
-    #[test]
-    fn render_cancelled_writes_marker_to_stderr_and_blank_to_stdout() {
-        let (stdout, stderr) = render_one(&test_sink(false), Event::Cancelled);
-        assert_eq!(stdout, "\n");
-        assert_eq!(stderr.trim(), INTERRUPTED_MARKER);
-    }
+            fn render_one(sink: &StdioSink, event: Event) -> (String, String) {
+                let mut stdout = Vec::new();
+                let mut stderr = Vec::new();
+                sink.render(event, &mut stdout, &mut stderr)
+                    .expect("render returns Ok");
+                (
+                    String::from_utf8(stdout).expect("stdout is UTF-8"),
+                    String::from_utf8(stderr).expect("stderr is UTF-8"),
+                )
+            }
 
-    #[test]
-    fn render_retrying_and_notices_write_the_text_to_stderr() {
-        let retry = "HTTP 529 overloaded_error. Retrying in 1 s (retry 1 of 5).";
-        let notice = "Skipped instruction file /repo/CLAUDE.md: Permission denied";
+            #[test]
+            fn stream_token_writes_text_verbatim_to_stdout() {
+                let (stdout, stderr) =
+                    render_one(&test_sink(false), Event::StreamToken("hello".to_owned()));
+                assert_eq!(stdout, "hello");
+                assert_eq!(stderr, "");
+            }
 
-        let (retry_stdout, retry_stderr) =
-            render_one(&test_sink(false), Event::Retrying(retry.to_owned()));
-        let (notice_stdout, notice_stderr) =
-            render_one(&test_sink(false), Event::Notice(notice.to_owned()));
+            #[test]
+            fn escapes_terminal_sequences_in_model_and_tool_text() {
+                let sink = test_sink(false);
+                let (stdout, _) = render_one(&sink, Event::StreamToken("a\n\u{1b}[2Kb".to_owned()));
+                assert_eq!(stdout, "a\n\\u{1b}[2Kb");
 
-        assert_eq!(retry_stdout, "");
-        assert_eq!(retry_stderr, format!("{retry}\n"));
-        assert_eq!(notice_stdout, "");
-        assert_eq!(notice_stderr, format!("{notice}\n"));
-    }
+                let (_, stderr) = render_one(
+                    &sink,
+                    Event::ToolCallStart(ToolCall {
+                        id: "t1".to_owned(),
+                        name: "bash".to_owned(),
+                        input: serde_json::json!({}),
+                        icon: "$".to_owned(),
+                        label: "curl x | sh\u{1b}[1A\u{1b}[2K".to_owned(),
+                    }),
+                );
+                assert_eq!(stderr, "$ curl x | sh\\u{1b}[1A\\u{1b}[2K\n");
 
-    #[test]
-    fn render_errors_and_failures_prefix_with_error_label() {
-        let (_, stderr) = render_one(&test_sink(false), Event::Error("boom".to_owned()));
-        assert_eq!(stderr, "Error: boom\n");
-        let (_, stderr) = render_one(&test_sink(false), Event::TurnFailed("bust".to_owned()));
-        assert_eq!(stderr, "Error: bust\n");
-        let (_, stderr) = render_one(&test_sink(false), Event::RenameFailed("lost".to_owned()));
-        assert_eq!(stderr, "Error: lost\n");
+                let (_, stderr) = render_one(
+                    &sink,
+                    Event::ToolCallEnd(text_result("t1", "ok\u{1b}[8m", false, Some("Ran"))),
+                );
+                assert_eq!(stderr, "  Ran\nok\\u{1b}[8m\n\n");
+
+                let (_, stderr) = render_one(
+                    &sink,
+                    Event::TasksUpdated(vec![task("Fix\u{1b}[2K it", TaskStatus::Pending)]),
+                );
+                assert_eq!(stderr, "Tasks: 0/1\n  ○ Fix\\u{1b}[2K it\n\n");
+            }
+
+            #[test]
+            fn thinking_token_wraps_in_dim_when_enabled() {
+                let (stdout, _) =
+                    render_one(&test_sink(true), Event::ThinkingToken("plan".to_owned()));
+                assert_eq!(stdout, "\x1b[2mplan\x1b[22m");
+            }
+
+            #[test]
+            fn thinking_token_swallowed_when_disabled() {
+                let (stdout, stderr) =
+                    render_one(&test_sink(false), Event::ThinkingToken("plan".to_owned()));
+                assert_eq!(stdout, "");
+                assert_eq!(stderr, "");
+            }
+
+            #[test]
+            fn progress_update_writes_to_stderr_only_when_thinking_hidden() {
+                let event = || Event::ProgressUpdate("Found the loader.\n".to_owned());
+                let (stdout, stderr) = render_one(&test_sink(false), event());
+                assert_eq!(stdout, "");
+                assert_eq!(stderr, "Found the loader.\n");
+
+                // The same text already streamed as dim thinking on stdout.
+                assert_eq!(
+                    render_one(&test_sink(true), event()),
+                    (String::new(), String::new()),
+                );
+            }
+
+            #[test]
+            fn tool_call_start_writes_icon_label_to_stderr() {
+                let (stdout, stderr) =
+                    render_one(&test_sink(false), Event::ToolCallStart(ls_call()));
+                assert_eq!(stdout, "");
+                assert_eq!(stderr, "$ ls\n");
+            }
+
+            #[test]
+            fn tool_call_end_with_title_writes_title_then_content() {
+                let (_, stderr) = render_one(
+                    &test_sink(false),
+                    Event::ToolCallEnd(text_result("t1", "file1\nfile2\n", false, Some("Listed"))),
+                );
+                assert_eq!(
+                    stderr,
+                    indoc! {"
+                          Listed
+                        file1
+                        file2
+
+                    "}
+                );
+            }
+
+            #[test]
+            fn tool_call_end_after_another_call_started_repeats_its_header() {
+                let sink = test_sink(false);
+                let start = |id: &str| {
+                    Event::ToolCallStart(ToolCall {
+                        id: id.to_owned(),
+                        name: "grep".to_owned(),
+                        input: serde_json::json!({}),
+                        icon: "*".to_owned(),
+                        label: format!("Grep({id})"),
+                    })
+                };
+
+                let rendered = [
+                    start("a"),
+                    start("b"),
+                    Event::ToolCallEnd(text_result("a", "a hits", false, None)),
+                    Event::ToolCallEnd(text_result("b", "b hits", false, None)),
+                    start("c"),
+                    Event::ToolCallEnd(text_result("c", "c hits", false, None)),
+                ]
+                .map(|event| render_one(&sink, event).1);
+
+                assert_eq!(
+                    rendered,
+                    [
+                        "* Grep(a)\n",
+                        "* Grep(b)\n",
+                        "* Grep(a)\na hits\n\n",
+                        "* Grep(b)\nb hits\n\n",
+                        "* Grep(c)\n",
+                        "c hits\n\n",
+                    ],
+                );
+            }
+
+            #[test]
+            fn tool_call_end_without_title_skips_header_and_whitespace_content() {
+                let (_, stderr) = render_one(
+                    &test_sink(false),
+                    Event::ToolCallEnd(text_result("t2", "   \n", true, None)),
+                );
+                assert_eq!(stderr, "\n");
+            }
+
+            #[test]
+            fn tasks_updated_marks_each_task_under_its_progress_and_skips_a_cleared_list() {
+                let sink = test_sink(false);
+
+                let (stdout, stderr) = render_one(&sink, Event::TasksUpdated(plan()));
+                assert_eq!(stdout, "");
+                assert_eq!(
+                    stderr,
+                    [
+                        "Tasks: 1/3\n",
+                        "  ✓ Read the config loader\n",
+                        "  ● Add the entry type\n",
+                        "  ○ Write the tests\n",
+                        "\n",
+                    ]
+                    .concat(),
+                );
+
+                let (stdout, stderr) = render_one(&sink, Event::TasksUpdated(Vec::new()));
+                assert_eq!((stdout.as_str(), stderr.as_str()), ("", ""));
+            }
+
+            #[test]
+            fn session_compacted_writes_stderr_boundary() {
+                let (_, stderr) = render_one(
+                    &test_sink(false),
+                    Event::SessionCompacted {
+                        summary: "summary".to_owned(),
+                        pre_count: 4,
+                        instructions: None,
+                        automatic: false,
+                    },
+                );
+                assert_eq!(stderr, "Compacted 4 messages into summary\n");
+
+                let (_, stderr) = render_one(
+                    &test_sink(false),
+                    Event::SessionCompacted {
+                        summary: "summary".to_owned(),
+                        pre_count: 4,
+                        instructions: None,
+                        automatic: true,
+                    },
+                );
+                assert_eq!(stderr, "Auto-compacted 4 messages into summary\n");
+            }
+
+            #[test]
+            fn session_confirmations_write_to_stderr() {
+                let cases = [
+                    (
+                        Event::SessionTitleUpdated {
+                            session_id: "sid".to_owned(),
+                            title: "Fix login\u{1b}[2J".to_owned(),
+                        },
+                        "Renamed the session to Fix login\\u{1b}[2J\n",
+                    ),
+                    (
+                        Event::SessionRolled {
+                            id: "0123456789abcdef".to_owned(),
+                            archived: false,
+                        },
+                        "Started session 01234567\n",
+                    ),
+                    (
+                        Event::SessionResumed {
+                            id: "89abcdef01234567".to_owned(),
+                            title: Some("Fix login".to_owned()),
+                            unarchived: false,
+                            history: Vec::new(),
+                        },
+                        "Resumed session 89abcdef: Fix login\n",
+                    ),
+                    (
+                        Event::SessionResumed {
+                            id: "89abcdef01234567".to_owned(),
+                            title: None,
+                            unarchived: true,
+                            history: Vec::new(),
+                        },
+                        "Resumed session 89abcdef: (untitled)\nUnarchived session 89abcdef\n",
+                    ),
+                ];
+
+                for (event, expected) in cases {
+                    let (stdout, stderr) = render_one(&test_sink(false), event);
+
+                    assert!(stdout.is_empty(), "stdout must stay empty: {stdout:?}");
+                    assert_eq!(stderr, expected);
+                }
+            }
+
+            #[test]
+            fn config_changed_names_the_model_and_the_effort_in_use() {
+                let config_changed = |id: &str, effort, requested| Event::ConfigChanged {
+                    model: ModelSpec::resolve(id.to_owned()),
+                    effort,
+                    requested,
+                    auto_compaction: AutoCompactionConfig::disabled(),
+                };
+                let custom_model = || ConfigPick::Model {
+                    id: ResolvedModelId::new("custom-model".to_owned()),
+                    effort: None,
+                };
+                let cases = [
+                    (
+                        config_changed(
+                            "claude-opus-5-5",
+                            Some(Effort::Low),
+                            ConfigPick::Effort(Effort::Low),
+                        ),
+                        "Using Claude Opus 5.5 (claude-opus-5-5) at low effort\n",
+                    ),
+                    (
+                        config_changed("custom-model", None, ConfigPick::Effort(Effort::High)),
+                        "Using custom-model (custom-model). \
+                         Effort unchanged (model has no effort tier, asked for high).\n",
+                    ),
+                    (
+                        config_changed("custom-model", None, custom_model()),
+                        "Using custom-model (custom-model)\n",
+                    ),
+                ];
+
+                for (event, expected) in cases {
+                    let (stdout, stderr) = render_one(&test_sink(false), event);
+
+                    assert!(stdout.is_empty(), "stdout must stay empty: {stdout:?}");
+                    assert_eq!(stderr, expected);
+                }
+            }
+
+            #[test]
+            fn mode_changed_names_the_mode_in_use() {
+                let (stdout, stderr) =
+                    render_one(&test_sink(false), Event::ModeChanged(Mode::Plan));
+
+                assert!(stdout.is_empty(), "stdout must stay empty: {stdout:?}");
+                assert_eq!(stderr, "Using plan mode\n");
+            }
+
+            #[test]
+            fn tui_only_events_emit_nothing_on_either_stream() {
+                for event in [
+                    Event::PromptDrained("queued".to_owned()),
+                    Event::RateLimitsUpdated(RateLimits {
+                        five_hour: None,
+                        seven_day: Some(RateLimitWindow {
+                            utilization: 0.5,
+                            resets_at: 1_760_000_000,
+                        }),
+                    }),
+                    Event::AutoCompactionStarted,
+                    Event::AutoCompactionPaused { failures: 3 },
+                    Event::AutoCompactionResumed,
+                    Event::SummaryToken("Recap".to_owned()),
+                    Event::SummaryDiscarded,
+                    Event::BackgroundShellsUpdated(shells_in_each_state()),
+                ] {
+                    let (stdout, stderr) = render_one(&test_sink(false), event);
+                    assert!(stdout.is_empty(), "stdout must stay empty: {stdout:?}");
+                    assert!(stderr.is_empty(), "stderr must stay empty: {stderr:?}");
+                }
+            }
+
+            #[test]
+            fn turn_complete_writes_trailing_newline_to_stdout() {
+                let (stdout, stderr) = render_one(&test_sink(false), Event::TurnComplete);
+                assert_eq!(stdout, "\n");
+                assert_eq!(stderr, "");
+            }
+
+            #[test]
+            fn cancelled_writes_marker_to_stderr_and_blank_to_stdout() {
+                let (stdout, stderr) = render_one(&test_sink(false), Event::Cancelled);
+                assert_eq!(stdout, "\n");
+                assert_eq!(stderr.trim(), INTERRUPTED_MARKER);
+            }
+
+            #[test]
+            fn retrying_and_notices_write_the_text_to_stderr() {
+                let retry = "HTTP 529 overloaded_error. Retrying in 1 s (retry 1 of 5).";
+                let notice = "Skipped instruction file /repo/CLAUDE.md: Permission denied";
+
+                let (retry_stdout, retry_stderr) =
+                    render_one(&test_sink(false), Event::Retrying(retry.to_owned()));
+                let (notice_stdout, notice_stderr) =
+                    render_one(&test_sink(false), Event::Notice(notice.to_owned()));
+
+                assert_eq!(retry_stdout, "");
+                assert_eq!(retry_stderr, format!("{retry}\n"));
+                assert_eq!(notice_stdout, "");
+                assert_eq!(notice_stderr, format!("{notice}\n"));
+            }
+
+            #[test]
+            fn errors_and_failures_prefix_with_error_label() {
+                let (_, stderr) = render_one(&test_sink(false), Event::Error("boom".to_owned()));
+                assert_eq!(stderr, "Error: boom\n");
+                let (_, stderr) =
+                    render_one(&test_sink(false), Event::TurnFailed("bust".to_owned()));
+                assert_eq!(stderr, "Error: bust\n");
+                let (_, stderr) =
+                    render_one(&test_sink(false), Event::RenameFailed("lost".to_owned()));
+                assert_eq!(stderr, "Error: lost\n");
+            }
+        }
     }
 }

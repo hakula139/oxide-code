@@ -32,54 +32,58 @@ mod tests {
     use super::*;
     use crate::slash::testing::test_session_info;
 
-    // ── open_store ──
+    mod open_store {
+        use super::*;
 
-    #[test]
-    fn open_store_reports_a_data_dir_it_cannot_create() {
-        let dir = tempfile::tempdir().unwrap();
-        let data_home = dir.path().join("data");
-        std::fs::write(&data_home, "").unwrap();
-        let sessions_dir = data_home.join("ox").join("sessions");
-        let cause = std::fs::create_dir_all(&sessions_dir).unwrap_err();
+        #[test]
+        fn reports_a_data_dir_it_cannot_create() {
+            let dir = tempfile::tempdir().unwrap();
+            let data_home = dir.path().join("data");
+            std::fs::write(&data_home, "").unwrap();
+            let sessions_dir = data_home.join("ox").join("sessions");
+            let cause = std::fs::create_dir_all(&sessions_dir).unwrap_err();
 
-        let err = temp_env::with_var("XDG_DATA_HOME", Some(data_home.as_os_str()), || {
-            open_store(&test_session_info()).err().unwrap()
-        });
-        assert_eq!(
-            err,
-            format!(
-                "Session store unavailable: failed to create {}: {cause}",
-                sessions_dir.display(),
-            ),
-        );
+            let err = temp_env::with_var("XDG_DATA_HOME", Some(data_home.as_os_str()), || {
+                open_store(&test_session_info()).err().unwrap()
+            });
+            assert_eq!(
+                err,
+                format!(
+                    "Session store unavailable: failed to create {}: {cause}",
+                    sessions_dir.display(),
+                ),
+            );
+        }
     }
 
-    // ── resolve_error_message ──
+    mod resolve_error_message {
+        use super::*;
 
-    #[test]
-    fn resolve_error_message_capitalizes_each_variant() {
-        let no_match = ResolveError::NoMatch {
-            prefix: "zz".to_owned(),
-        };
-        assert_eq!(resolve_error_message(no_match), "No session matching `zz`");
+        #[test]
+        fn capitalizes_each_variant() {
+            let no_match = ResolveError::NoMatch {
+                prefix: "zz".to_owned(),
+            };
+            assert_eq!(resolve_error_message(no_match), "No session matching `zz`");
 
-        let ambiguous = ResolveError::Ambiguous {
-            prefix: "ab".to_owned(),
-            count: 7,
-            preview: "ab1, ab2, ab3, ab4, ab5, and 2 more".to_owned(),
-        };
-        assert_eq!(
-            resolve_error_message(ambiguous),
-            "Ambiguous prefix `ab` matches 7 sessions: ab1, ab2, ab3, ab4, ab5, and 2 more",
-        );
+            let ambiguous = ResolveError::Ambiguous {
+                prefix: "ab".to_owned(),
+                count: 7,
+                preview: "ab1, ab2, ab3, ab4, ab5, and 2 more".to_owned(),
+            };
+            assert_eq!(
+                resolve_error_message(ambiguous),
+                "Ambiguous prefix `ab` matches 7 sessions: ab1, ab2, ab3, ab4, ab5, and 2 more",
+            );
 
-        let list = ResolveError::List {
-            scope: "all projects",
-            cause: anyhow::anyhow!("disk unavailable"),
-        };
-        assert_eq!(
-            resolve_error_message(list),
-            "Failed to list sessions (all projects): disk unavailable",
-        );
+            let list = ResolveError::List {
+                scope: "all projects",
+                cause: anyhow::anyhow!("disk unavailable"),
+            };
+            assert_eq!(
+                resolve_error_message(list),
+                "Failed to list sessions (all projects): disk unavailable",
+            );
+        }
     }
 }

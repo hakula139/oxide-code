@@ -86,14 +86,20 @@ async fn shutdown_signal() -> Shutdown {
 mod tests {
     use super::*;
 
-    // ── exit_status ──
+    mod shutdown {
+        use super::*;
 
-    #[test]
-    fn exit_status_is_128_plus_the_signal_number() {
-        #[cfg(unix)]
-        assert_eq!(Shutdown::Hangup.exit_status(), 129);
-        assert_eq!(Shutdown::Interrupt.exit_status(), 130);
-        #[cfg(unix)]
-        assert_eq!(Shutdown::Terminate.exit_status(), 143);
+        mod exit_status {
+            use super::*;
+
+            #[test]
+            fn is_128_plus_the_signal_number() {
+                #[cfg(unix)]
+                assert_eq!(Shutdown::Hangup.exit_status(), 129);
+                assert_eq!(Shutdown::Interrupt.exit_status(), 130);
+                #[cfg(unix)]
+                assert_eq!(Shutdown::Terminate.exit_status(), 143);
+            }
+        }
     }
 }

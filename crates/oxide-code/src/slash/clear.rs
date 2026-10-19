@@ -36,8 +36,6 @@ mod tests {
     use super::*;
     use crate::slash::testing::test_session_info;
 
-    // ── ClearCmd::name ──
-
     #[test]
     fn name_and_metadata_match_built_ins_contract() {
         assert_eq!(ClearCmd.name(), "clear");
@@ -45,21 +43,25 @@ mod tests {
         assert_ne!(ClearCmd.description(), "");
     }
 
-    // ── ClearCmd::classify ──
+    mod classify {
+        use super::*;
 
-    #[test]
-    fn classify_is_mutating() {
-        assert_eq!(ClearCmd.classify(""), SlashKind::Mutating);
+        #[test]
+        fn is_mutating() {
+            assert_eq!(ClearCmd.classify(""), SlashKind::Mutating);
+        }
     }
 
-    // ── ClearCmd::execute ──
+    mod execute {
+        use super::*;
 
-    #[test]
-    fn execute_forwards_the_clear_action() {
-        let info = test_session_info();
-        let outcome = ClearCmd
-            .execute("", &SlashContext::new(&info, None))
-            .expect("/clear must succeed");
-        assert_eq!(outcome.into_forward(), Action::Op(Op::Clear));
+        #[test]
+        fn forwards_the_clear_action() {
+            let info = test_session_info();
+            let outcome = ClearCmd
+                .execute("", &SlashContext::new(&info, None))
+                .expect("/clear must succeed");
+            assert_eq!(outcome.into_forward(), Action::Op(Op::Clear));
+        }
     }
 }
