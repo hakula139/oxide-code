@@ -136,144 +136,160 @@ mod tests {
 
     use super::*;
 
-    fn spec(id: &str) -> ModelSpec {
-        ModelSpec::resolve(id.to_owned())
+    mod detect {
+        use super::*;
+
+        #[test]
+        fn inside_repo_sets_is_git_true() {
+            let cwd = std::env::current_dir().expect("cwd should be available");
+            let env = Environment::detect(&cwd, Some(&cwd));
+            assert!(env.is_git);
+        }
+
+        #[test]
+        fn with_cwd_but_no_git_root_sets_is_git_false() {
+            let tmp = tempfile::tempdir().expect("failed to create tempdir");
+            let env = Environment::detect(tmp.path(), None);
+            assert!(!env.is_git);
+            assert!(
+                env.cwd
+                    .ends_with(tmp.path().file_name().unwrap().to_str().unwrap())
+            );
+        }
     }
 
-    // ── Environment::detect ──
+    mod render {
+        use super::*;
 
-    #[test]
-    fn detect_inside_repo_sets_is_git_true() {
-        let cwd = std::env::current_dir().expect("cwd should be available");
-        let env = Environment::detect(&cwd, Some(&cwd));
-        assert!(env.is_git);
+        #[test]
+        fn lists_every_field() {
+            let env = Environment {
+                cwd: "/home/user/project".to_owned(),
+                is_git: true,
+                platform: "linux".to_owned(),
+                shell: "bash".to_owned(),
+                os_version: "Linux 6.1.0".to_owned(),
+            };
+
+            assert_eq!(
+                env.render(),
+                indoc! {"
+                    # Environment
+
+                    You have been invoked in the following environment:
+
+                    - Primary working directory: /home/user/project
+                      - Is a git repository: true
+                    - Platform: linux
+                    - Shell: bash
+                    - OS Version: Linux 6.1.0"
+                },
+            );
+        }
     }
 
-    #[test]
-    fn detect_with_cwd_but_no_git_root_sets_is_git_false() {
-        let tmp = tempfile::tempdir().expect("failed to create tempdir");
-        let env = Environment::detect(tmp.path(), None);
-        assert!(!env.is_git);
-        assert!(
-            env.cwd
-                .ends_with(tmp.path().file_name().unwrap().to_str().unwrap())
-        );
+    mod normalize_node_platform {
+        use super::*;
+
+        #[test]
+        fn maps_rust_names_to_node_names() {
+            assert_eq!(normalize_node_platform("macos"), "darwin");
+            assert_eq!(normalize_node_platform("linux"), "linux");
+            assert_eq!(normalize_node_platform("windows"), "win32");
+        }
+
+        #[test]
+        fn unrecognized_name_is_unknown() {
+            assert_eq!(normalize_node_platform("haiku"), "unknown");
+        }
     }
 
-    // ── Environment::render ──
+    mod detect_shell {
+        use super::*;
 
-    #[test]
-    fn render_lists_every_field() {
-        let env = Environment {
-            cwd: "/home/user/project".to_owned(),
-            is_git: true,
-            platform: "linux".to_owned(),
-            shell: "bash".to_owned(),
-            os_version: "Linux 6.1.0".to_owned(),
-        };
-
-        assert_eq!(
-            env.render(),
-            indoc! {"
-                # Environment
-
-                You have been invoked in the following environment:
-
-                - Primary working directory: /home/user/project
-                  - Is a git repository: true
-                - Platform: linux
-                - Shell: bash
-                - OS Version: Linux 6.1.0"
-            },
-        );
+        #[test]
+        fn produces_basename() {
+            let shell = detect_shell();
+            assert_ne!(shell, "");
+            assert!(!shell.contains('/'), "should be a basename, got: {shell:?}");
+        }
     }
 
-    // ── normalize_node_platform ──
+    mod detect_os_version {
+        use super::*;
 
-    #[test]
-    fn normalize_node_platform_maps_rust_names_to_node_names() {
-        assert_eq!(normalize_node_platform("macos"), "darwin");
-        assert_eq!(normalize_node_platform("linux"), "linux");
-        assert_eq!(normalize_node_platform("windows"), "win32");
+        #[test]
+        fn joins_sysname_and_release() {
+            let version = detect_os_version();
+            let info = PlatformInfo::new().unwrap();
+            let sysname = info.sysname().to_string_lossy();
+            assert_eq!(
+                version,
+                format!("{sysname} {}", info.release().to_string_lossy())
+            );
+        }
     }
 
-    #[test]
-    fn normalize_node_platform_unrecognized_name_is_unknown() {
-        assert_eq!(normalize_node_platform("haiku"), "unknown");
+    mod current_date {
+        use super::*;
+
+        #[test]
+        fn matches_iso_format() {
+            let date = current_date();
+            assert_eq!(date.len(), 10, "expected YYYY-MM-DD, got: {date}");
+            assert_eq!(&date[4..5], "-");
+            assert_eq!(&date[7..8], "-");
+
+            let year: u32 = date[..4].parse().expect("year should be numeric");
+            let month: u32 = date[5..7].parse().expect("month should be numeric");
+            let day: u32 = date[8..10].parse().expect("day should be numeric");
+            assert!((2025..=2100).contains(&year), "unexpected year: {year}");
+            assert!((1..=12).contains(&month), "unexpected month: {month}");
+            assert!((1..=31).contains(&day), "unexpected day: {day}");
+        }
     }
 
-    // ── detect_shell ──
+    mod format_local_date {
+        use super::*;
 
-    #[test]
-    fn detect_shell_produces_basename() {
-        let shell = detect_shell();
-        assert_ne!(shell, "");
-        assert!(!shell.contains('/'), "should be a basename, got: {shell:?}");
+        #[test]
+        fn applies_offset_across_midnight() {
+            let now = time::macros::datetime!(2026-04-12 20:30:00 UTC);
+            assert_eq!(
+                format_local_date(now, time::macros::offset!(+8)),
+                "2026-04-13"
+            );
+            assert_eq!(
+                format_local_date(now, time::macros::offset!(-5)),
+                "2026-04-12"
+            );
+            assert_eq!(format_local_date(now, time::UtcOffset::UTC), "2026-04-12");
+        }
     }
 
-    // ── detect_os_version ──
+    mod model_identity {
+        use super::*;
 
-    #[test]
-    fn detect_os_version_joins_sysname_and_release() {
-        let version = detect_os_version();
-        let info = PlatformInfo::new().unwrap();
-        let sysname = info.sysname().to_string_lossy();
-        assert_eq!(
-            version,
-            format!("{sysname} {}", info.release().to_string_lossy())
-        );
-    }
+        fn spec(id: &str) -> ModelSpec {
+            ModelSpec::resolve(id.to_owned())
+        }
 
-    // ── current_date ──
+        #[test]
+        fn names_a_catalog_model_with_its_cutoff() {
+            assert_eq!(
+                model_identity(&spec("claude-opus-5-5")),
+                "You are powered by the model named Claude Opus 5.5. \
+                 The exact model ID is claude-opus-5-5. \
+                 Assistant knowledge cutoff is June 2026.",
+            );
+        }
 
-    #[test]
-    fn current_date_matches_iso_format() {
-        let date = current_date();
-        assert_eq!(date.len(), 10, "expected YYYY-MM-DD, got: {date}");
-        assert_eq!(&date[4..5], "-");
-        assert_eq!(&date[7..8], "-");
-
-        let year: u32 = date[..4].parse().expect("year should be numeric");
-        let month: u32 = date[5..7].parse().expect("month should be numeric");
-        let day: u32 = date[8..10].parse().expect("day should be numeric");
-        assert!((2025..=2100).contains(&year), "unexpected year: {year}");
-        assert!((1..=12).contains(&month), "unexpected month: {month}");
-        assert!((1..=31).contains(&day), "unexpected day: {day}");
-    }
-
-    // ── format_local_date ──
-
-    #[test]
-    fn format_local_date_applies_offset_across_midnight() {
-        let now = time::macros::datetime!(2026-04-12 20:30:00 UTC);
-        assert_eq!(
-            format_local_date(now, time::macros::offset!(+8)),
-            "2026-04-13"
-        );
-        assert_eq!(
-            format_local_date(now, time::macros::offset!(-5)),
-            "2026-04-12"
-        );
-        assert_eq!(format_local_date(now, time::UtcOffset::UTC), "2026-04-12");
-    }
-
-    // ── model_identity ──
-
-    #[test]
-    fn model_identity_names_a_catalog_model_with_its_cutoff() {
-        assert_eq!(
-            model_identity(&spec("claude-opus-5-5")),
-            "You are powered by the model named Claude Opus 5.5. \
-             The exact model ID is claude-opus-5-5. \
-             Assistant knowledge cutoff is June 2026.",
-        );
-    }
-
-    #[test]
-    fn model_identity_names_an_unknown_model_by_its_id() {
-        assert_eq!(
-            model_identity(&spec("custom-model-v1")),
-            "You are powered by the model custom-model-v1.",
-        );
+        #[test]
+        fn names_an_unknown_model_by_its_id() {
+            assert_eq!(
+                model_identity(&spec("custom-model-v1")),
+                "You are powered by the model custom-model-v1.",
+            );
+        }
     }
 }
