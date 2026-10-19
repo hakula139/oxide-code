@@ -1192,58 +1192,8 @@ mod tests {
             .as_ref()
     }
 
-    // ── Tool: trait contract ──
-
     #[test]
-    fn every_tool_exposes_non_empty_name_description_and_object_schema() {
-        for t in all_tools() {
-            let ToolSpec {
-                name,
-                description,
-                input_schema,
-                ..
-            } = t.spec();
-            assert!(!name.is_empty(), "tool with empty name in catalog");
-            assert!(!description.is_empty(), "{name}: empty description");
-            assert_eq!(input_schema["type"], "object", "{name}: schema type");
-            assert!(
-                input_schema["properties"].is_object(),
-                "{name}: schema.properties"
-            );
-            assert!(
-                input_schema["required"].is_array(),
-                "{name}: schema.required"
-            );
-        }
-    }
-
-    #[test]
-    fn tool_catalog_classes_and_parallel_safety_match_each_tool() {
-        let catalog: Vec<_> = all_tools()
-            .iter()
-            .map(|t| {
-                let spec = t.spec();
-                (spec.name, spec.class, spec.parallel_safe)
-            })
-            .collect();
-        assert_eq!(
-            catalog,
-            [
-                ("bash".to_owned(), PermissionClass::Exec, false),
-                ("bash_output".to_owned(), PermissionClass::Read, false),
-                ("bash_stop".to_owned(), PermissionClass::Read, false),
-                ("edit".to_owned(), PermissionClass::Edit, false),
-                ("glob".to_owned(), PermissionClass::Read, true),
-                ("grep".to_owned(), PermissionClass::Read, true),
-                ("read".to_owned(), PermissionClass::Read, true),
-                ("tasks".to_owned(), PermissionClass::Read, false),
-                ("write".to_owned(), PermissionClass::Edit, false),
-            ],
-        );
-    }
-
-    #[test]
-    fn tool_catalog_names_and_icons_are_unique() {
+    fn catalog_names_and_icons_are_unique() {
         let tools = all_tools();
         let names: HashSet<_> = tools.iter().map(|t| t.spec().name).collect();
         assert_eq!(names.len(), tools.len(), "duplicate name");
@@ -1251,214 +1201,226 @@ mod tests {
         assert_eq!(icons.len(), tools.len(), "duplicate icon");
     }
 
-    #[test]
-    fn tool_catalog_icons_match_the_published_prefix_set() {
-        let expected = [
-            ("bash", "$"),
-            ("bash_output", "»"),
-            ("bash_stop", "■"),
-            ("edit", "✎"),
-            ("glob", "✱"),
-            ("grep", "⌕"),
-            ("read", "→"),
-            ("tasks", "≡"),
-            ("write", "←"),
-        ];
-        let tools = all_tools();
-        for (name, icon) in expected {
-            assert_eq!(find(&tools, name).icon(), icon, "tool {name}");
-        }
-    }
+    mod spec {
+        use super::*;
 
-    #[test]
-    fn tool_summarize_input_plucks_the_primary_field() {
-        let cases = [
-            ("bash", serde_json::json!({"command": "ls"}), Some("ls")),
-            (
-                "edit",
-                serde_json::json!({
-                    "file_path": "/a/b.rs",
-                    "old_string": "x",
-                    "new_string": "y",
-                }),
-                Some("/a/b.rs"),
-            ),
-            (
-                "glob",
-                serde_json::json!({"pattern": "**/*.rs"}),
-                Some("**/*.rs"),
-            ),
-            ("grep", serde_json::json!({"pattern": "fn "}), Some("fn ")),
-            (
-                "read",
-                serde_json::json!({"file_path": "/a/b.rs"}),
-                Some("/a/b.rs"),
-            ),
-            (
-                "write",
-                serde_json::json!({"file_path": "/a/b.rs", "content": "x"}),
-                Some("/a/b.rs"),
-            ),
-        ];
-        let tools = all_tools();
-        for (name, input, expected) in &cases {
-            let t = find(&tools, name);
-            assert_eq!(t.summarize_input(input), *expected, "tool {name}");
+        #[test]
+        fn every_tool_exposes_non_empty_name_description_and_object_schema() {
+            for t in all_tools() {
+                let ToolSpec {
+                    name,
+                    description,
+                    input_schema,
+                    ..
+                } = t.spec();
+                assert!(!name.is_empty(), "tool with empty name in catalog");
+                assert!(!description.is_empty(), "{name}: empty description");
+                assert_eq!(input_schema["type"], "object", "{name}: schema type");
+                assert!(
+                    input_schema["properties"].is_object(),
+                    "{name}: schema.properties"
+                );
+                assert!(
+                    input_schema["required"].is_array(),
+                    "{name}: schema.required"
+                );
+            }
         }
-    }
 
-    #[test]
-    fn tool_summarize_input_is_none_when_primary_field_missing() {
-        for t in all_tools() {
-            assert!(
-                t.summarize_input(&serde_json::json!({})).is_none(),
-                "tool {} returned Some on empty input",
-                t.spec().name,
-            );
-        }
-    }
-
-    #[test]
-    fn tool_summarize_call_wraps_arg_in_the_tool_label() {
-        let cases = [
-            ("bash", serde_json::json!({"command": "ls"}), "ls"),
-            (
-                "bash_output",
-                serde_json::json!({"shell_id": "shell-2"}),
-                "BashOutput(shell-2)",
-            ),
-            (
-                "bash_stop",
-                serde_json::json!({"shell_id": "shell-2"}),
-                "BashStop(shell-2)",
-            ),
-            (
-                "edit",
-                serde_json::json!({"file_path": "/a/b.rs", "old_string": "x", "new_string": "y"}),
-                "Edit(/a/b.rs)",
-            ),
-            (
-                "glob",
-                serde_json::json!({"pattern": "**/*.rs"}),
-                "Glob(**/*.rs)",
-            ),
-            ("grep", serde_json::json!({"pattern": "fn "}), "Grep(fn )"),
-            (
-                "read",
-                serde_json::json!({"file_path": "/a/b.rs"}),
-                "Read(/a/b.rs)",
-            ),
-            (
-                "write",
-                serde_json::json!({"file_path": "/a/b.rs", "content": "x"}),
-                "Write(/a/b.rs)",
-            ),
-        ];
-        let tools = all_tools();
-        for (name, input, expected) in &cases {
-            let t = find(&tools, name);
+        #[test]
+        fn catalog_classes_and_parallel_safety_match_each_tool() {
+            let catalog: Vec<_> = all_tools()
+                .iter()
+                .map(|t| {
+                    let spec = t.spec();
+                    (spec.name, spec.class, spec.parallel_safe)
+                })
+                .collect();
             assert_eq!(
-                t.summarize_call(name, input, Path::new("/repo")),
-                *expected,
-                "tool {name}",
+                catalog,
+                [
+                    ("bash".to_owned(), PermissionClass::Exec, false),
+                    ("bash_output".to_owned(), PermissionClass::Read, false),
+                    ("bash_stop".to_owned(), PermissionClass::Read, false),
+                    ("edit".to_owned(), PermissionClass::Edit, false),
+                    ("glob".to_owned(), PermissionClass::Read, true),
+                    ("grep".to_owned(), PermissionClass::Read, true),
+                    ("read".to_owned(), PermissionClass::Read, true),
+                    ("tasks".to_owned(), PermissionClass::Read, false),
+                    ("write".to_owned(), PermissionClass::Edit, false),
+                ],
             );
         }
-    }
 
-    #[test]
-    fn tool_summarize_call_falls_back_to_bare_name_when_arg_missing() {
-        for t in all_tools() {
-            let name = t.spec().name;
-            let got = t.summarize_call(&name, &serde_json::json!({}), Path::new("/repo"));
-            assert_eq!(got, pascal_case(&name), "tool {name}");
+        #[test]
+        fn class_rules_cover_every_tool_in_the_class() {
+            let dir = canonical_tempdir();
+            std::fs::write(dir.path().join(".env"), "SECRET=1").unwrap();
+            let deny = [
+                (PermissionClass::Read, ".env"),
+                (PermissionClass::Edit, ".env"),
+                (PermissionClass::Exec, "cat .env"),
+            ]
+            .map(|(class, pattern)| Rule::parse(class, pattern).unwrap());
+            let policy = Policy::new(Mode::Manual, deny.to_vec(), Vec::new(), Vec::new());
+            let cases = [
+                ("read", serde_json::json!({"file_path": ".env"})),
+                ("grep", serde_json::json!({"pattern": ".", "path": ".env"})),
+                ("glob", serde_json::json!({"pattern": "*", "path": ".env"})),
+                (
+                    "edit",
+                    serde_json::json!({"file_path": ".env", "old_string": "a", "new_string": "b"}),
+                ),
+                (
+                    "write",
+                    serde_json::json!({"file_path": ".env", "content": "x"}),
+                ),
+                ("bash", serde_json::json!({"command": "cat .env"})),
+            ];
+            let tools = all_tools();
+            let ctx = ctx(dir.path());
+            for (name, input) in &cases {
+                let t = find(&tools, name);
+                let prepared = t.prepare(input.clone(), &ctx);
+                assert_eq!(
+                    policy.decide(t.spec().class, &prepared.access.as_target()),
+                    Decision::Deny,
+                    "tool {name}",
+                );
+            }
         }
     }
 
-    #[test]
-    fn tool_summarize_call_shortens_file_paths_inside_cwd() {
-        let path = "/repo/crates/oxide-code/src/tool/read.rs";
-        let cases = [
-            (
-                "edit",
-                serde_json::json!({"file_path": path, "old_string": "x", "new_string": "y"}),
-                "Edit(crates/oxide-code/src/tool/read.rs)",
-            ),
-            (
-                "read",
-                serde_json::json!({"file_path": path}),
-                "Read(crates/oxide-code/src/tool/read.rs)",
-            ),
-            (
-                "write",
-                serde_json::json!({"file_path": path, "content": "x"}),
-                "Write(crates/oxide-code/src/tool/read.rs)",
-            ),
-        ];
-        let tools = all_tools();
-        for (name, input, expected) in &cases {
-            let t = find(&tools, name);
-            assert_eq!(
-                t.summarize_call(name, input, Path::new("/repo")),
-                *expected,
-                "tool {name}",
-            );
+    mod prepare {
+        use super::*;
+
+        #[test]
+        fn resolves_and_pins_the_path_field_of_each_path_tool() {
+            let dir = canonical_tempdir();
+            let ctx = ctx(dir.path());
+            let resolved = dir.path().join("a.rs");
+            let tools = all_tools();
+            for name in ["read", "edit", "write"] {
+                let t = find(&tools, name);
+
+                let prepared = t.prepare(
+                    serde_json::json!({"file_path": "a.rs", "content": "a.rs"}),
+                    &ctx,
+                );
+
+                let Access::Path {
+                    canonical,
+                    relative,
+                    zone,
+                    ..
+                } = &prepared.access
+                else {
+                    panic!("tool {name}: expected a path target, got {prepared:?}");
+                };
+                assert_eq!(canonical, resolved.to_str().unwrap(), "tool {name}");
+                assert_eq!(relative.as_deref(), Some("a.rs"), "tool {name}");
+                assert_eq!(*zone, Zone::Workspace, "tool {name}");
+                assert_eq!(
+                    prepared.input,
+                    serde_json::json!({"file_path": resolved, "content": "a.rs"}),
+                    "tool {name}: only the path field is pinned",
+                );
+
+                let missing = t.prepare(serde_json::json!({}), &ctx);
+                assert_eq!(missing.access, Access::None, "tool {name}");
+                assert_eq!(missing.input, serde_json::json!({}), "tool {name}");
+            }
         }
-    }
 
-    // ── ToolSpec::class ──
+        #[tokio::test]
+        async fn matches_native_file_access_for_directory_suffixed_paths() {
+            for name in ["notes/", "notes/."] {
+                let dir = canonical_tempdir();
+                let ctx = ctx(dir.path());
+                let path = dir.path().join("notes");
+                std::fs::write(&path, "original").unwrap();
+                let native = std::fs::read_to_string(dir.path().join(name));
+                let succeeds = native.is_ok();
 
-    #[test]
-    fn spec_class_rules_cover_every_tool_in_the_class() {
-        let dir = canonical_tempdir();
-        std::fs::write(dir.path().join(".env"), "SECRET=1").unwrap();
-        let deny = [
-            (PermissionClass::Read, ".env"),
-            (PermissionClass::Edit, ".env"),
-            (PermissionClass::Exec, "cat .env"),
-        ]
-        .map(|(class, pattern)| Rule::parse(class, pattern).unwrap());
-        let policy = Policy::new(Mode::Manual, deny.to_vec(), Vec::new(), Vec::new());
-        let cases = [
-            ("read", serde_json::json!({"file_path": ".env"})),
-            ("grep", serde_json::json!({"pattern": ".", "path": ".env"})),
-            ("glob", serde_json::json!({"pattern": "*", "path": ".env"})),
-            (
-                "edit",
-                serde_json::json!({"file_path": ".env", "old_string": "a", "new_string": "b"}),
-            ),
-            (
-                "write",
-                serde_json::json!({"file_path": ".env", "content": "x"}),
-            ),
-            ("bash", serde_json::json!({"command": "cat .env"})),
-        ];
-        let tools = all_tools();
-        let ctx = ctx(dir.path());
-        for (name, input) in &cases {
-            let t = find(&tools, name);
-            let prepared = t.prepare(input.clone(), &ctx);
-            assert_eq!(
-                policy.decide(t.spec().class, &prepared.access.as_target()),
-                Decision::Deny,
-                "tool {name}",
-            );
+                let prepared = ReadTool.prepare(serde_json::json!({"file_path": name}), &ctx);
+                let Access::Path { zone, .. } = &prepared.access else {
+                    panic!("expected a path target, got {prepared:?}");
+                };
+                assert_eq!(*zone, Zone::Outside, "{name}");
+                let read = ReadTool.run(prepared, &ctx).await;
+                assert_eq!(read.is_error, !succeeds, "{name}: {}", read.content);
+                if let Ok(content) = native {
+                    assert_eq!(content, "original");
+                    assert_eq!(read.content, "1\toriginal");
+                }
+
+                let write = testing::run(
+                    &WriteTool,
+                    serde_json::json!({"file_path": name, "content": "replacement"}),
+                    &ctx,
+                )
+                .await;
+                assert_eq!(write.is_error, !succeeds, "{name}: {}", write.content);
+
+                assert_eq!(
+                    std::fs::read_to_string(&path).unwrap(),
+                    if succeeds { "replacement" } else { "original" },
+                    "{name}",
+                );
+            }
         }
-    }
 
-    // ── Tool::prepare ──
+        #[tokio::test]
+        async fn keeps_missing_directory_paths_from_becoming_files() {
+            for name in ["missing/", "missing/."] {
+                let dir = canonical_tempdir();
+                let ctx = ctx(dir.path());
 
-    #[test]
-    fn prepare_resolves_and_pins_the_path_field_of_each_path_tool() {
-        let dir = canonical_tempdir();
-        let ctx = ctx(dir.path());
-        let resolved = dir.path().join("a.rs");
-        let tools = all_tools();
-        for name in ["read", "edit", "write"] {
-            let t = find(&tools, name);
+                let read =
+                    testing::run(&ReadTool, serde_json::json!({"file_path": name}), &ctx).await;
+                assert!(read.is_error, "{name}: {}", read.content);
+                let write = testing::run(
+                    &WriteTool,
+                    serde_json::json!({"file_path": name, "content": "replacement"}),
+                    &ctx,
+                )
+                .await;
+                assert!(write.is_error, "{name}: {}", write.content);
 
-            let prepared = t.prepare(
-                serde_json::json!({"file_path": "a.rs", "content": "a.rs"}),
-                &ctx,
+                assert!(!dir.path().join("missing").is_file());
+            }
+        }
+
+        #[test]
+        fn resolves_a_search_root_but_leaves_its_spelling_in_the_input() {
+            // The read deny and ask rules a search's hits face match against the root as the call
+            // spells it.
+            let dir = canonical_tempdir();
+            let input = serde_json::json!({"pattern": "x", "path": "."});
+
+            let prepared = GrepTool::default().prepare(input.clone(), &ctx(dir.path()));
+
+            let Access::Path { canonical, .. } = &prepared.access else {
+                panic!("expected a path target, got {prepared:?}");
+            };
+            assert_eq!(canonical, dir.path().to_str().unwrap());
+            assert_eq!(prepared.input, input);
+        }
+
+        #[cfg(unix)]
+        #[test]
+        fn follows_a_symlink_out_of_the_workspace_to_its_target() {
+            // The edit gate must see the outside path that the tool then opens.
+            let dir = canonical_tempdir();
+            let (cwd, outside) = (dir.path().join("repo"), dir.path().join("outside"));
+            std::fs::create_dir(&cwd).unwrap();
+            std::fs::create_dir(&outside).unwrap();
+            std::os::unix::fs::symlink("../outside/notes.md", cwd.join("notes.md")).unwrap();
+            let target = outside.join("notes.md");
+
+            let prepared = WriteTool.prepare(
+                serde_json::json!({"file_path": "notes.md", "content": "x"}),
+                &ctx(&cwd),
             );
 
             let Access::Path {
@@ -1468,1169 +1430,1291 @@ mod tests {
                 ..
             } = &prepared.access
             else {
-                panic!("tool {name}: expected a path target, got {prepared:?}");
-            };
-            assert_eq!(canonical, resolved.to_str().unwrap(), "tool {name}");
-            assert_eq!(relative.as_deref(), Some("a.rs"), "tool {name}");
-            assert_eq!(*zone, Zone::Workspace, "tool {name}");
-            assert_eq!(
-                prepared.input,
-                serde_json::json!({"file_path": resolved, "content": "a.rs"}),
-                "tool {name}: only the path field is pinned",
-            );
-
-            let missing = t.prepare(serde_json::json!({}), &ctx);
-            assert_eq!(missing.access, Access::None, "tool {name}");
-            assert_eq!(missing.input, serde_json::json!({}), "tool {name}");
-        }
-    }
-
-    #[tokio::test]
-    async fn prepare_matches_native_file_access_for_directory_suffixed_paths() {
-        for name in ["notes/", "notes/."] {
-            let dir = canonical_tempdir();
-            let ctx = ctx(dir.path());
-            let path = dir.path().join("notes");
-            std::fs::write(&path, "original").unwrap();
-            let native = std::fs::read_to_string(dir.path().join(name));
-            let succeeds = native.is_ok();
-
-            let prepared = ReadTool.prepare(serde_json::json!({"file_path": name}), &ctx);
-            let Access::Path { zone, .. } = &prepared.access else {
                 panic!("expected a path target, got {prepared:?}");
             };
-            assert_eq!(*zone, Zone::Outside, "{name}");
-            let read = ReadTool.run(prepared, &ctx).await;
-            assert_eq!(read.is_error, !succeeds, "{name}: {}", read.content);
-            if let Ok(content) = native {
-                assert_eq!(content, "original");
-                assert_eq!(read.content, "1\toriginal");
+            assert_eq!(canonical, target.to_str().unwrap());
+            assert_eq!(*relative, None);
+            assert_eq!(*zone, Zone::Outside);
+            assert_eq!(prepared.input["file_path"], serde_json::json!(target));
+        }
+    }
+
+    mod icon {
+        use super::*;
+
+        #[test]
+        fn catalog_icons_match_the_published_prefix_set() {
+            let expected = [
+                ("bash", "$"),
+                ("bash_output", "»"),
+                ("bash_stop", "■"),
+                ("edit", "✎"),
+                ("glob", "✱"),
+                ("grep", "⌕"),
+                ("read", "→"),
+                ("tasks", "≡"),
+                ("write", "←"),
+            ];
+            let tools = all_tools();
+            for (name, icon) in expected {
+                assert_eq!(find(&tools, name).icon(), icon, "tool {name}");
+            }
+        }
+    }
+
+    mod summarize_input {
+        use super::*;
+
+        #[test]
+        fn plucks_the_primary_field() {
+            let cases = [
+                ("bash", serde_json::json!({"command": "ls"}), Some("ls")),
+                (
+                    "edit",
+                    serde_json::json!({
+                        "file_path": "/a/b.rs",
+                        "old_string": "x",
+                        "new_string": "y",
+                    }),
+                    Some("/a/b.rs"),
+                ),
+                (
+                    "glob",
+                    serde_json::json!({"pattern": "**/*.rs"}),
+                    Some("**/*.rs"),
+                ),
+                ("grep", serde_json::json!({"pattern": "fn "}), Some("fn ")),
+                (
+                    "read",
+                    serde_json::json!({"file_path": "/a/b.rs"}),
+                    Some("/a/b.rs"),
+                ),
+                (
+                    "write",
+                    serde_json::json!({"file_path": "/a/b.rs", "content": "x"}),
+                    Some("/a/b.rs"),
+                ),
+            ];
+            let tools = all_tools();
+            for (name, input, expected) in &cases {
+                let t = find(&tools, name);
+                assert_eq!(t.summarize_input(input), *expected, "tool {name}");
+            }
+        }
+
+        #[test]
+        fn is_absent_when_primary_field_missing() {
+            for t in all_tools() {
+                assert!(
+                    t.summarize_input(&serde_json::json!({})).is_none(),
+                    "tool {} returned Some on empty input",
+                    t.spec().name,
+                );
+            }
+        }
+    }
+
+    mod summarize_call {
+        use super::*;
+
+        #[test]
+        fn wraps_arg_in_the_tool_label() {
+            let cases = [
+                ("bash", serde_json::json!({"command": "ls"}), "ls"),
+                (
+                    "bash_output",
+                    serde_json::json!({"shell_id": "shell-2"}),
+                    "BashOutput(shell-2)",
+                ),
+                (
+                    "bash_stop",
+                    serde_json::json!({"shell_id": "shell-2"}),
+                    "BashStop(shell-2)",
+                ),
+                (
+                    "edit",
+                    serde_json::json!({
+                        "file_path": "/a/b.rs",
+                        "old_string": "x",
+                        "new_string": "y",
+                    }),
+                    "Edit(/a/b.rs)",
+                ),
+                (
+                    "glob",
+                    serde_json::json!({"pattern": "**/*.rs"}),
+                    "Glob(**/*.rs)",
+                ),
+                ("grep", serde_json::json!({"pattern": "fn "}), "Grep(fn )"),
+                (
+                    "read",
+                    serde_json::json!({"file_path": "/a/b.rs"}),
+                    "Read(/a/b.rs)",
+                ),
+                (
+                    "write",
+                    serde_json::json!({"file_path": "/a/b.rs", "content": "x"}),
+                    "Write(/a/b.rs)",
+                ),
+            ];
+            let tools = all_tools();
+            for (name, input, expected) in &cases {
+                let t = find(&tools, name);
+                assert_eq!(
+                    t.summarize_call(name, input, Path::new("/repo")),
+                    *expected,
+                    "tool {name}",
+                );
+            }
+        }
+
+        #[test]
+        fn falls_back_to_bare_name_when_arg_missing() {
+            for t in all_tools() {
+                let name = t.spec().name;
+                let got = t.summarize_call(&name, &serde_json::json!({}), Path::new("/repo"));
+                assert_eq!(got, pascal_case(&name), "tool {name}");
+            }
+        }
+
+        #[test]
+        fn shortens_file_paths_inside_cwd() {
+            let path = "/repo/crates/oxide-code/src/tool/read.rs";
+            let cases = [
+                (
+                    "edit",
+                    serde_json::json!({"file_path": path, "old_string": "x", "new_string": "y"}),
+                    "Edit(crates/oxide-code/src/tool/read.rs)",
+                ),
+                (
+                    "read",
+                    serde_json::json!({"file_path": path}),
+                    "Read(crates/oxide-code/src/tool/read.rs)",
+                ),
+                (
+                    "write",
+                    serde_json::json!({"file_path": path, "content": "x"}),
+                    "Write(crates/oxide-code/src/tool/read.rs)",
+                ),
+            ];
+            let tools = all_tools();
+            for (name, input, expected) in &cases {
+                let t = find(&tools, name);
+                assert_eq!(
+                    t.summarize_call(name, input, Path::new("/repo")),
+                    *expected,
+                    "tool {name}",
+                );
+            }
+        }
+    }
+
+    mod approval_preview {
+        use super::*;
+
+        #[tokio::test]
+        async fn default_titles_with_the_tool_name() {
+            let preview = GlobTool::default()
+                .approval_preview(
+                    "glob",
+                    &serde_json::json!({"pattern": "*.rs"}),
+                    Path::new("/repo"),
+                )
+                .await;
+            assert_eq!(preview.title, "Glob");
+            assert_eq!(preview.body, ApprovalBody::Command("Glob(*.rs)".to_owned()));
+        }
+    }
+
+    mod pascal_case {
+        use super::*;
+
+        #[test]
+        fn capitalizes_each_snake_case_word() {
+            assert_eq!(pascal_case("grep"), "Grep");
+            assert_eq!(pascal_case("bash_output"), "BashOutput");
+            assert_eq!(pascal_case("Foo"), "Foo");
+            assert_eq!(pascal_case(""), "");
+            assert_eq!(pascal_case("a"), "A");
+        }
+    }
+
+    mod tool_registry {
+        use super::*;
+
+        mod get {
+            use super::*;
+
+            #[test]
+            fn finds_registered_tool() {
+                let registry = ToolRegistry::new(vec![Box::new(BashTool::default())]);
+                assert_eq!(registry.get("bash").unwrap().0.name, "bash");
             }
 
-            let write = testing::run(
-                &WriteTool,
-                serde_json::json!({"file_path": name, "content": "replacement"}),
-                &ctx,
-            )
-            .await;
-            assert_eq!(write.is_error, !succeeds, "{name}: {}", write.content);
+            #[test]
+            fn unknown_tool_has_no_entry() {
+                let registry = ToolRegistry::new(vec![Box::new(BashTool::default())]);
+                assert!(registry.get("nonexistent").is_none());
+            }
+        }
+
+        mod definitions {
+            use super::*;
+
+            #[test]
+            fn produces_tool_with_valid_schema() {
+                let registry = ToolRegistry::new(vec![Box::new(BashTool::default())]);
+                let defs = registry.definitions();
+                assert_eq!(defs.len(), 1);
+                assert_eq!(defs[0].name, "bash");
+                let schema = &defs[0].input_schema;
+                assert_eq!(schema["type"], "object");
+                assert!(schema["properties"]["command"].is_object());
+                assert_eq!(schema["required"], serde_json::json!(["command"]));
+            }
+        }
+
+        mod icon {
+            use super::*;
+
+            #[test]
+            fn delegates_to_registered_tool() {
+                let registry = ToolRegistry::new(vec![Box::new(BashTool::default())]);
+                assert_eq!(registry.icon("bash"), "$");
+            }
+
+            #[test]
+            fn unknown_tool_falls_back_to_default() {
+                let registry = ToolRegistry::new(vec![Box::new(BashTool::default())]);
+                assert_eq!(registry.icon("nonexistent"), DEFAULT_TOOL_ICON);
+            }
+        }
+
+        mod label {
+            use super::*;
+
+            #[test]
+            fn delegates_to_registered_tool() {
+                let registry = ToolRegistry::new(vec![
+                    Box::new(BashTool::default()),
+                    Box::new(GrepTool::default()),
+                ]);
+                assert_eq!(
+                    registry.label(
+                        "bash",
+                        &serde_json::json!({"command": "echo hi"}),
+                        Path::new("/repo")
+                    ),
+                    "echo hi",
+                );
+                assert_eq!(
+                    registry.label(
+                        "grep",
+                        &serde_json::json!({"pattern": "fn "}),
+                        Path::new("/repo")
+                    ),
+                    "Grep(fn )",
+                );
+            }
+
+            #[test]
+            fn unknown_tool_falls_back_to_raw_name() {
+                let registry = ToolRegistry::new(vec![Box::new(BashTool::default())]);
+                let input = serde_json::json!({"command": "echo hi"});
+                assert_eq!(
+                    registry.label("nonexistent", &input, Path::new("/repo")),
+                    "nonexistent"
+                );
+            }
+        }
+
+        mod result_view {
+            use super::*;
+
+            #[test]
+            fn delegates_to_tool_for_structured_output() {
+                let registry = ToolRegistry::new(vec![Box::new(EditTool)]);
+                let input = serde_json::json!({
+                    "file_path": "/tmp/f.rs",
+                    "old_string": "a",
+                    "new_string": "b",
+                });
+                let metadata = ToolMetadata::default();
+                let view = registry.result_view(
+                    "edit",
+                    &input,
+                    "Successfully edited /tmp/f.rs.",
+                    &metadata,
+                    false,
+                    Path::new("/repo"),
+                );
+                assert_eq!(
+                    view,
+                    ToolResultView::Diff {
+                        chunks: vec![DiffChunk {
+                            old: vec![DiffLine {
+                                number: 1,
+                                text: "a".to_owned()
+                            }],
+                            new: vec![DiffLine {
+                                number: 1,
+                                text: "b".to_owned()
+                            }],
+                        }],
+                        replace_all: false,
+                        replacements: 1,
+                    },
+                );
+            }
+
+            #[test]
+            fn delegates_grep_matches() {
+                let registry = ToolRegistry::new(vec![Box::new(GrepTool::default())]);
+                let input = serde_json::json!({"pattern": "fn"});
+                let metadata = ToolMetadata::default();
+                let view = registry.result_view(
+                    "grep",
+                    &input,
+                    "src/main.rs:10:fn main()",
+                    &metadata,
+                    false,
+                    Path::new("/repo"),
+                );
+                assert_eq!(
+                    view,
+                    ToolResultView::GrepMatches {
+                        groups: vec![GrepFileGroup {
+                            path: "src/main.rs".to_owned(),
+                            lines: vec![GrepMatchLine {
+                                number: 10,
+                                text: "fn main()".to_owned(),
+                                is_match: true,
+                            }],
+                        }],
+                        truncated: false,
+                    },
+                );
+            }
+
+            #[test]
+            fn delegates_read_excerpt() {
+                let registry = ToolRegistry::new(vec![Box::new(ReadTool)]);
+                let input = serde_json::json!({"file_path": "/tmp/lib.rs"});
+                let metadata = ToolMetadata::default();
+                let view = registry.result_view(
+                    "read",
+                    &input,
+                    "1\tmod foo;",
+                    &metadata,
+                    false,
+                    Path::new("/repo"),
+                );
+                assert_eq!(
+                    view,
+                    ToolResultView::ReadExcerpt {
+                        path: "/tmp/lib.rs".to_owned(),
+                        lines: vec![ReadExcerptLine {
+                            number: 1,
+                            text: "mod foo;".to_owned(),
+                        }],
+                        total_lines: 1,
+                    },
+                );
+            }
+
+            #[test]
+            fn delegates_glob_files() {
+                let registry = ToolRegistry::new(vec![Box::new(GlobTool::default())]);
+                let input = serde_json::json!({"pattern": "*.rs"});
+                let metadata = ToolMetadata::default();
+                let view = registry.result_view(
+                    "glob",
+                    &input,
+                    "src/main.rs\nsrc/lib.rs",
+                    &metadata,
+                    false,
+                    Path::new("/repo"),
+                );
+                assert_eq!(
+                    view,
+                    ToolResultView::GlobFiles {
+                        pattern: "*.rs".to_owned(),
+                        files: vec!["src/main.rs".to_owned(), "src/lib.rs".to_owned()],
+                        total: 2,
+                    },
+                );
+            }
+
+            #[test]
+            fn short_circuits_errors_to_text() {
+                let registry = ToolRegistry::new(vec![Box::new(EditTool)]);
+                let input = serde_json::json!({
+                    "file_path": "/tmp/f.rs",
+                    "old_string": "a",
+                    "new_string": "b",
+                });
+                let metadata = ToolMetadata::default();
+                let view = registry.result_view(
+                    "edit",
+                    &input,
+                    "old_string not found",
+                    &metadata,
+                    true,
+                    Path::new("/repo"),
+                );
+                assert_eq!(
+                    view,
+                    ToolResultView::Text {
+                        content: "old_string not found".to_owned(),
+                    },
+                );
+            }
+
+            #[test]
+            fn falls_back_to_text_for_unknown_tool() {
+                let registry = ToolRegistry::new(vec![Box::new(BashTool::default())]);
+                let metadata = ToolMetadata::default();
+                let view = registry.result_view(
+                    "nonexistent",
+                    &serde_json::json!({}),
+                    "anything",
+                    &metadata,
+                    false,
+                    Path::new("/repo"),
+                );
+                assert_eq!(
+                    view,
+                    ToolResultView::Text {
+                        content: "anything".to_owned(),
+                    },
+                );
+            }
+
+            #[test]
+            fn falls_back_to_text_when_tool_has_no_structured_view() {
+                let registry = ToolRegistry::new(vec![Box::new(BashTool::default())]);
+                let metadata = ToolMetadata::default();
+                let view = registry.result_view(
+                    "bash",
+                    &serde_json::json!({"command": "ls"}),
+                    "file1\nfile2",
+                    &metadata,
+                    false,
+                    Path::new("/repo"),
+                );
+                assert_eq!(
+                    view,
+                    ToolResultView::Text {
+                        content: "file1\nfile2".to_owned(),
+                    },
+                );
+            }
+        }
+    }
+
+    mod run_capped {
+        use super::*;
+
+        fn oversize_grep_input() -> (tempfile::TempDir, serde_json::Value) {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("big.txt");
+            let line = "x".repeat(400);
+            std::fs::write(&path, format!("{line}\n").repeat(500)).unwrap();
+            let input = serde_json::json!({"pattern": "x", "path": path, "head_limit": 0});
+            (dir, input)
+        }
+
+        #[tokio::test]
+        async fn caps_byte_overflow() {
+            let (_dir, input) = oversize_grep_input();
+            let registry = ToolRegistry::new(vec![Box::new(GrepTool::default())]);
+            let output = registry.run_input("grep", input, &temp_ctx()).await;
+
+            assert!(!output.is_error);
+            assert!(output.content.len() <= MAX_OUTPUT_BYTES + TRUNCATION_OVERHEAD);
+            assert!(output.content.contains("bytes truncated, head + tail kept"));
+            assert!(output.metadata.truncated_bytes.is_some());
+            assert!(output.metadata.truncated_total.is_none());
+        }
+
+        #[tokio::test]
+        async fn within_cap_leaves_content_and_metadata_untouched() {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("small.txt");
+            std::fs::write(&path, "hello\nworld\n").unwrap();
+
+            let registry = ToolRegistry::new(vec![Box::new(ReadTool)]);
+            let output = registry
+                .run_input(
+                    "read",
+                    serde_json::json!({"file_path": path.to_str().unwrap()}),
+                    &temp_ctx(),
+                )
+                .await;
+
+            assert!(!output.is_error);
+            assert_eq!(output.content, "1\thello\n2\tworld");
+            assert!(output.metadata.truncated_bytes.is_none());
+        }
+
+        #[tokio::test]
+        async fn byte_cap_on_grep_falls_through_to_text_view() {
+            let (_dir, input) = oversize_grep_input();
+            let registry = ToolRegistry::new(vec![Box::new(GrepTool::default())]);
+            let output = registry.run_input("grep", input.clone(), &temp_ctx()).await;
+            assert!(output.metadata.truncated_bytes.is_some());
+
+            let view = registry.result_view(
+                "grep",
+                &input,
+                &output.content,
+                &output.metadata,
+                output.is_error,
+                Path::new("/repo"),
+            );
+            assert!(matches!(view, ToolResultView::Text { .. }));
+        }
+    }
+
+    mod cap_output {
+        use super::*;
+
+        #[test]
+        fn short_content_unchanged() {
+            let (out, original) = cap_output("hello".to_owned());
+            assert_eq!(out, "hello");
+            assert!(original.is_none());
+        }
+
+        #[test]
+        fn keeps_head_and_tail() {
+            let head = "HEAD_SENTINEL\n";
+            let tail = "TAIL_SENTINEL\n";
+            let filler_len = MAX_OUTPUT_BYTES * 2 - head.len() - tail.len();
+
+            let mut content = String::with_capacity(head.len() + filler_len + tail.len());
+            content.push_str(head);
+            content.extend(std::iter::repeat_n('x', filler_len));
+            content.push_str(tail);
+            let original_len = content.len();
+
+            let (out, original) = cap_output(content);
+
+            assert!(out.starts_with(head));
+            assert!(out.ends_with(tail));
+            assert!(out.contains("bytes truncated, head + tail kept"));
+            assert!(out.len() <= MAX_OUTPUT_BYTES + TRUNCATION_OVERHEAD);
+            let sep_pos = out.find("bytes truncated").unwrap();
+            assert!(sep_pos > head.len());
+            assert!(sep_pos < out.len() - tail.len());
+            assert_eq!(original, Some(original_len));
+        }
+
+        #[test]
+        fn multibyte_at_split_boundary() {
+            let half = MAX_OUTPUT_BYTES / 2;
+            let emoji = "🦀"; // 4 bytes
+            let prefix_len = half - 2;
+
+            let mut content = String::new();
+            content.push_str(&"a".repeat(prefix_len));
+            content.push_str(emoji);
+            content.push_str(&"b".repeat(MAX_OUTPUT_BYTES * 2));
+
+            let (out, original) = cap_output(content);
+
+            assert!(out.contains("bytes truncated"));
+            assert!(out.starts_with("aaaa"));
+            assert!(out.ends_with('b'));
+            assert!(!out.contains(emoji));
+            assert!(original.is_some());
+        }
+
+        #[test]
+        fn barely_over_limit_unchanged() {
+            let original = "a".repeat(MAX_OUTPUT_BYTES + 1);
+            let (out, original_len) = cap_output(original.clone());
+            assert_eq!(out, original);
+            assert!(original_len.is_none());
+        }
+    }
+
+    mod search_root {
+        use super::*;
+
+        mod new {
+            use super::*;
+
+            #[test]
+            fn resolves_relative_and_absolute_paths_and_keeps_their_spelling() {
+                let dir = canonical_tempdir();
+                std::fs::create_dir(dir.path().join("src")).unwrap();
+                std::fs::create_dir(dir.path().join("lib")).unwrap();
+                let lib = dir.path().join("lib");
+
+                let relative = search_root(dir.path(), Some("./src/../lib")).unwrap();
+                let absolute = search_root(Path::new("/"), Some(lib.to_str().unwrap())).unwrap();
+
+                assert_eq!(
+                    (relative.base, relative.spelled, relative.cwd),
+                    (
+                        lib.clone(),
+                        PathBuf::from("./src/../lib"),
+                        dir.path().to_owned()
+                    ),
+                );
+                assert_eq!(absolute.base, lib);
+            }
+
+            #[test]
+            fn none_uses_cwd() {
+                let dir = canonical_tempdir();
+
+                let root = search_root(dir.path(), None).unwrap();
+
+                assert_eq!(
+                    (root.base, root.spelled),
+                    (dir.path().to_owned(), PathBuf::from(".")),
+                );
+            }
+
+            #[test]
+            fn missing_path_is_named_relative_to_cwd() {
+                let dir = canonical_tempdir();
+
+                let err = search_root(dir.path(), Some("missing")).err().unwrap();
+
+                let cause = std::fs::metadata(dir.path().join("missing")).unwrap_err();
+                assert_eq!(err, format!("Failed to access missing: {cause}"));
+            }
+
+            #[test]
+            fn refuses_an_access_that_is_not_a_path() {
+                let workspace = Arc::new(Workspace::new(Path::new("/repo")));
+                let err = SearchRoot::new(&Access::None, Some("src"), workspace)
+                    .err()
+                    .unwrap();
+                assert_eq!(
+                    err,
+                    "Failed to access src: the search root was not resolved."
+                );
+            }
+
+            #[cfg(unix)]
+            #[test]
+            fn resolves_dot_dot_after_a_symlink_physically() {
+                let dir = canonical_tempdir();
+                std::fs::create_dir_all(dir.path().join("real/target")).unwrap();
+                let cwd = dir.path().join("cwd");
+                std::fs::create_dir(&cwd).unwrap();
+                std::os::unix::fs::symlink(dir.path().join("real/target"), cwd.join("link"))
+                    .unwrap();
+
+                let root = search_root(&cwd, Some("link/..")).unwrap();
+
+                assert_eq!(root.base, dir.path().join("real"));
+            }
+
+            #[cfg(target_os = "linux")]
+            #[test]
+            fn walks_from_a_root_whose_name_is_not_utf8() {
+                use std::os::unix::ffi::OsStrExt as _;
+                let dir = canonical_tempdir();
+                let cwd = dir.path().join(std::ffi::OsStr::from_bytes(b"caf\xe9"));
+                std::fs::create_dir(&cwd).unwrap();
+
+                let root = search_root(&cwd, None).unwrap();
+
+                assert_eq!(root.base, cwd);
+            }
+        }
+    }
+
+    mod tracker_key {
+        use super::*;
+
+        #[tokio::test]
+        async fn resolves_dotted_spellings_to_one_key() {
+            let dir = canonical_tempdir();
+            std::fs::create_dir(dir.path().join("src")).unwrap();
+            let file = dir.path().join("src/main.rs");
+            std::fs::write(&file, "").unwrap();
+
+            assert_eq!(tracker_key(&file).await, file);
+            assert_eq!(
+                tracker_key(&dir.path().join("./src/../src/main.rs")).await,
+                file
+            );
+        }
+
+        #[tokio::test]
+        async fn missing_path_falls_back_to_its_lexically_clean_form() {
+            let dir = canonical_tempdir();
+            assert_eq!(
+                tracker_key(&dir.path().join("missing/../a.rs")).await,
+                dir.path().join("a.rs")
+            );
+        }
+
+        #[cfg(unix)]
+        #[tokio::test]
+        async fn resolves_a_symlinked_spelling_to_the_target() {
+            let dir = canonical_tempdir();
+            std::fs::create_dir(dir.path().join("real")).unwrap();
+            std::fs::write(dir.path().join("real/a.rs"), "").unwrap();
+            std::os::unix::fs::symlink(dir.path().join("real"), dir.path().join("link")).unwrap();
 
             assert_eq!(
-                std::fs::read_to_string(&path).unwrap(),
-                if succeeds { "replacement" } else { "original" },
-                "{name}",
+                tracker_key(&dir.path().join("link/a.rs")).await,
+                dir.path().join("real/a.rs"),
             );
         }
     }
 
-    #[tokio::test]
-    async fn prepare_keeps_missing_directory_paths_from_becoming_files() {
-        for name in ["missing/", "missing/."] {
-            let dir = canonical_tempdir();
-            let ctx = ctx(dir.path());
+    mod display_path {
+        use super::*;
 
-            let read = testing::run(&ReadTool, serde_json::json!({"file_path": name}), &ctx).await;
-            assert!(read.is_error, "{name}: {}", read.content);
-            let write = testing::run(
-                &WriteTool,
-                serde_json::json!({"file_path": name, "content": "replacement"}),
-                &ctx,
-            )
-            .await;
-            assert!(write.is_error, "{name}: {}", write.content);
+        #[test]
+        fn relative_inside_base() {
+            let base = Path::new("/home/user/project");
+            let path = Path::new("/home/user/project/src/main.rs");
+            assert_eq!(display_path(path, base), "src/main.rs");
+        }
 
-            assert!(!dir.path().join("missing").is_file());
+        #[test]
+        fn outside_base_stays_absolute() {
+            let base = Path::new("/home/user/project");
+            let path = Path::new("/etc/config.toml");
+            assert_eq!(display_path(path, base), "/etc/config.toml");
+        }
+
+        #[test]
+        fn same_path_is_filename() {
+            let base = Path::new("/home/user/project/src/main.rs");
+            let path = Path::new("/home/user/project/src/main.rs");
+            assert_eq!(display_path(path, base), "main.rs");
         }
     }
 
-    #[cfg(unix)]
-    #[test]
-    fn prepare_follows_a_symlink_out_of_the_workspace_to_its_target() {
-        // The edit gate must see the outside path that the tool then opens.
-        let dir = canonical_tempdir();
-        let (cwd, outside) = (dir.path().join("repo"), dir.path().join("outside"));
-        std::fs::create_dir(&cwd).unwrap();
-        std::fs::create_dir(&outside).unwrap();
-        std::os::unix::fs::symlink("../outside/notes.md", cwd.join("notes.md")).unwrap();
-        let target = outside.join("notes.md");
+    mod file_name {
+        use super::*;
 
-        let prepared = WriteTool.prepare(
-            serde_json::json!({"file_path": "notes.md", "content": "x"}),
-            &ctx(&cwd),
-        );
+        #[test]
+        fn extracts_basename() {
+            assert_eq!(file_name("/home/user/project/src/main.rs"), "main.rs");
+        }
 
-        let Access::Path {
-            canonical,
-            relative,
-            zone,
-            ..
-        } = &prepared.access
-        else {
-            panic!("expected a path target, got {prepared:?}");
-        };
-        assert_eq!(canonical, target.to_str().unwrap());
-        assert_eq!(*relative, None);
-        assert_eq!(*zone, Zone::Outside);
-        assert_eq!(prepared.input["file_path"], serde_json::json!(target));
+        #[test]
+        fn bare_name_unchanged() {
+            assert_eq!(file_name("README.md"), "README.md");
+        }
     }
 
-    #[test]
-    fn prepare_resolves_a_search_root_but_leaves_its_spelling_in_the_input() {
-        // The read deny and ask rules a search's hits face match against the root as the call
-        // spells it.
-        let dir = canonical_tempdir();
-        let input = serde_json::json!({"pattern": "x", "path": "."});
+    mod read_validated {
+        use super::*;
+
+        #[tokio::test]
+        async fn reads_a_regular_file_but_refuses_a_symlink() {
+            let dir = tempfile::tempdir().unwrap();
+            let target = dir.path().join("target.txt");
+            std::fs::write(&target, "original").unwrap();
+            let link = dir.path().join("link.txt");
+            symlink_file(&target, &link);
+
+            let accept = |_: &std::fs::Metadata| Ok(());
+            let (metadata, bytes) = read_validated(&target, "target.txt", accept).await.unwrap();
+            assert_eq!(
+                (metadata.len(), bytes.as_slice()),
+                (8, b"original".as_slice())
+            );
+            let err = read_validated(&link, "link.txt", accept).await.unwrap_err();
+            #[cfg(unix)]
+            let cause = std::io::Error::from_raw_os_error(nix::errno::Errno::ELOOP as i32);
+            #[cfg(windows)]
+            let cause = "the final path component is a symlink";
+            assert_eq!(err, format!("Failed to read link.txt: {cause}"));
+        }
 
-        let prepared = GrepTool::default().prepare(input.clone(), &ctx(dir.path()));
-
-        let Access::Path { canonical, .. } = &prepared.access else {
-            panic!("expected a path target, got {prepared:?}");
-        };
-        assert_eq!(canonical, dir.path().to_str().unwrap());
-        assert_eq!(prepared.input, input);
-    }
-
-    // ── Tool::approval_preview ──
-
-    #[tokio::test]
-    async fn approval_preview_default_titles_with_the_tool_name() {
-        let preview = GlobTool::default()
-            .approval_preview(
-                "glob",
-                &serde_json::json!({"pattern": "*.rs"}),
-                Path::new("/repo"),
-            )
-            .await;
-        assert_eq!(preview.title, "Glob");
-        assert_eq!(preview.body, ApprovalBody::Command("Glob(*.rs)".to_owned()));
-    }
-
-    // ── pascal_case ──
-
-    #[test]
-    fn pascal_case_capitalizes_each_snake_case_word() {
-        assert_eq!(pascal_case("grep"), "Grep");
-        assert_eq!(pascal_case("bash_output"), "BashOutput");
-        assert_eq!(pascal_case("Foo"), "Foo");
-        assert_eq!(pascal_case(""), "");
-        assert_eq!(pascal_case("a"), "A");
-    }
-
-    // ── ToolRegistry::get ──
-
-    #[test]
-    fn get_finds_registered_tool() {
-        let registry = ToolRegistry::new(vec![Box::new(BashTool::default())]);
-        assert_eq!(registry.get("bash").unwrap().0.name, "bash");
-    }
-
-    #[test]
-    fn get_unknown_tool_has_no_entry() {
-        let registry = ToolRegistry::new(vec![Box::new(BashTool::default())]);
-        assert!(registry.get("nonexistent").is_none());
-    }
-
-    // ── ToolRegistry::definitions ──
-
-    #[test]
-    fn definitions_produces_tool_with_valid_schema() {
-        let registry = ToolRegistry::new(vec![Box::new(BashTool::default())]);
-        let defs = registry.definitions();
-        assert_eq!(defs.len(), 1);
-        assert_eq!(defs[0].name, "bash");
-        let schema = &defs[0].input_schema;
-        assert_eq!(schema["type"], "object");
-        assert!(schema["properties"]["command"].is_object());
-        assert_eq!(schema["required"], serde_json::json!(["command"]));
-    }
-
-    // ── ToolRegistry::icon ──
-
-    #[test]
-    fn icon_delegates_to_registered_tool() {
-        let registry = ToolRegistry::new(vec![Box::new(BashTool::default())]);
-        assert_eq!(registry.icon("bash"), "$");
-    }
-
-    #[test]
-    fn icon_unknown_tool_falls_back_to_default() {
-        let registry = ToolRegistry::new(vec![Box::new(BashTool::default())]);
-        assert_eq!(registry.icon("nonexistent"), DEFAULT_TOOL_ICON);
-    }
-
-    // ── ToolRegistry::label ──
-
-    #[test]
-    fn label_delegates_to_registered_tool() {
-        let registry = ToolRegistry::new(vec![
-            Box::new(BashTool::default()),
-            Box::new(GrepTool::default()),
-        ]);
-        assert_eq!(
-            registry.label(
-                "bash",
-                &serde_json::json!({"command": "echo hi"}),
-                Path::new("/repo")
-            ),
-            "echo hi",
-        );
-        assert_eq!(
-            registry.label(
-                "grep",
-                &serde_json::json!({"pattern": "fn "}),
-                Path::new("/repo")
-            ),
-            "Grep(fn )",
-        );
-    }
-
-    #[test]
-    fn label_unknown_tool_falls_back_to_raw_name() {
-        let registry = ToolRegistry::new(vec![Box::new(BashTool::default())]);
-        let input = serde_json::json!({"command": "echo hi"});
-        assert_eq!(
-            registry.label("nonexistent", &input, Path::new("/repo")),
-            "nonexistent"
-        );
-    }
-
-    // ── run_capped ──
-
-    fn oversize_grep_input() -> (tempfile::TempDir, serde_json::Value) {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("big.txt");
-        let line = "x".repeat(400);
-        std::fs::write(&path, format!("{line}\n").repeat(500)).unwrap();
-        let input = serde_json::json!({"pattern": "x", "path": path, "head_limit": 0});
-        (dir, input)
-    }
-
-    #[tokio::test]
-    async fn run_capped_caps_byte_overflow() {
-        let (_dir, input) = oversize_grep_input();
-        let registry = ToolRegistry::new(vec![Box::new(GrepTool::default())]);
-        let output = registry.run_input("grep", input, &temp_ctx()).await;
-
-        assert!(!output.is_error);
-        assert!(output.content.len() <= MAX_OUTPUT_BYTES + TRUNCATION_OVERHEAD);
-        assert!(output.content.contains("bytes truncated, head + tail kept"));
-        assert!(output.metadata.truncated_bytes.is_some());
-        assert!(output.metadata.truncated_total.is_none());
-    }
-
-    #[tokio::test]
-    async fn run_capped_within_cap_leaves_content_and_metadata_untouched() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("small.txt");
-        std::fs::write(&path, "hello\nworld\n").unwrap();
-
-        let registry = ToolRegistry::new(vec![Box::new(ReadTool)]);
-        let output = registry
-            .run_input(
-                "read",
-                serde_json::json!({"file_path": path.to_str().unwrap()}),
-                &temp_ctx(),
-            )
-            .await;
-
-        assert!(!output.is_error);
-        assert_eq!(output.content, "1\thello\n2\tworld");
-        assert!(output.metadata.truncated_bytes.is_none());
-    }
-
-    #[tokio::test]
-    async fn run_capped_byte_cap_on_grep_falls_through_to_text_view() {
-        let (_dir, input) = oversize_grep_input();
-        let registry = ToolRegistry::new(vec![Box::new(GrepTool::default())]);
-        let output = registry.run_input("grep", input.clone(), &temp_ctx()).await;
-        assert!(output.metadata.truncated_bytes.is_some());
-
-        let view = registry.result_view(
-            "grep",
-            &input,
-            &output.content,
-            &output.metadata,
-            output.is_error,
-            Path::new("/repo"),
-        );
-        assert!(matches!(view, ToolResultView::Text { .. }));
-    }
-
-    // ── ToolRegistry::result_view ──
-
-    #[test]
-    fn result_view_delegates_to_tool_for_structured_output() {
-        let registry = ToolRegistry::new(vec![Box::new(EditTool)]);
-        let input = serde_json::json!({
-            "file_path": "/tmp/f.rs",
-            "old_string": "a",
-            "new_string": "b",
-        });
-        let metadata = ToolMetadata::default();
-        let view = registry.result_view(
-            "edit",
-            &input,
-            "Successfully edited /tmp/f.rs.",
-            &metadata,
-            false,
-            Path::new("/repo"),
-        );
-        assert_eq!(
-            view,
-            ToolResultView::Diff {
-                chunks: vec![DiffChunk {
-                    old: vec![DiffLine {
-                        number: 1,
-                        text: "a".to_owned()
-                    }],
-                    new: vec![DiffLine {
-                        number: 1,
-                        text: "b".to_owned()
-                    }],
-                }],
-                replace_all: false,
-                replacements: 1,
-            },
-        );
-    }
-
-    #[test]
-    fn result_view_delegates_grep_matches() {
-        let registry = ToolRegistry::new(vec![Box::new(GrepTool::default())]);
-        let input = serde_json::json!({"pattern": "fn"});
-        let metadata = ToolMetadata::default();
-        let view = registry.result_view(
-            "grep",
-            &input,
-            "src/main.rs:10:fn main()",
-            &metadata,
-            false,
-            Path::new("/repo"),
-        );
-        assert_eq!(
-            view,
-            ToolResultView::GrepMatches {
-                groups: vec![GrepFileGroup {
-                    path: "src/main.rs".to_owned(),
-                    lines: vec![GrepMatchLine {
-                        number: 10,
-                        text: "fn main()".to_owned(),
-                        is_match: true,
-                    }],
-                }],
-                truncated: false,
-            },
-        );
-    }
-
-    #[test]
-    fn result_view_delegates_read_excerpt() {
-        let registry = ToolRegistry::new(vec![Box::new(ReadTool)]);
-        let input = serde_json::json!({"file_path": "/tmp/lib.rs"});
-        let metadata = ToolMetadata::default();
-        let view = registry.result_view(
-            "read",
-            &input,
-            "1\tmod foo;",
-            &metadata,
-            false,
-            Path::new("/repo"),
-        );
-        assert_eq!(
-            view,
-            ToolResultView::ReadExcerpt {
-                path: "/tmp/lib.rs".to_owned(),
-                lines: vec![ReadExcerptLine {
-                    number: 1,
-                    text: "mod foo;".to_owned(),
-                }],
-                total_lines: 1,
-            },
-        );
-    }
-
-    #[test]
-    fn result_view_delegates_glob_files() {
-        let registry = ToolRegistry::new(vec![Box::new(GlobTool::default())]);
-        let input = serde_json::json!({"pattern": "*.rs"});
-        let metadata = ToolMetadata::default();
-        let view = registry.result_view(
-            "glob",
-            &input,
-            "src/main.rs\nsrc/lib.rs",
-            &metadata,
-            false,
-            Path::new("/repo"),
-        );
-        assert_eq!(
-            view,
-            ToolResultView::GlobFiles {
-                pattern: "*.rs".to_owned(),
-                files: vec!["src/main.rs".to_owned(), "src/lib.rs".to_owned()],
-                total: 2,
-            },
-        );
-    }
-
-    #[test]
-    fn result_view_short_circuits_errors_to_text() {
-        let registry = ToolRegistry::new(vec![Box::new(EditTool)]);
-        let input = serde_json::json!({
-            "file_path": "/tmp/f.rs",
-            "old_string": "a",
-            "new_string": "b",
-        });
-        let metadata = ToolMetadata::default();
-        let view = registry.result_view(
-            "edit",
-            &input,
-            "old_string not found",
-            &metadata,
-            true,
-            Path::new("/repo"),
-        );
-        assert_eq!(
-            view,
-            ToolResultView::Text {
-                content: "old_string not found".to_owned(),
-            },
-        );
-    }
-
-    #[test]
-    fn result_view_falls_back_to_text_for_unknown_tool() {
-        let registry = ToolRegistry::new(vec![Box::new(BashTool::default())]);
-        let metadata = ToolMetadata::default();
-        let view = registry.result_view(
-            "nonexistent",
-            &serde_json::json!({}),
-            "anything",
-            &metadata,
-            false,
-            Path::new("/repo"),
-        );
-        assert_eq!(
-            view,
-            ToolResultView::Text {
-                content: "anything".to_owned(),
-            },
-        );
-    }
-
-    #[test]
-    fn result_view_falls_back_to_text_when_tool_has_no_structured_view() {
-        let registry = ToolRegistry::new(vec![Box::new(BashTool::default())]);
-        let metadata = ToolMetadata::default();
-        let view = registry.result_view(
-            "bash",
-            &serde_json::json!({"command": "ls"}),
-            "file1\nfile2",
-            &metadata,
-            false,
-            Path::new("/repo"),
-        );
-        assert_eq!(
-            view,
-            ToolResultView::Text {
-                content: "file1\nfile2".to_owned(),
-            },
-        );
-    }
-
-    // ── cap_output ──
-
-    #[test]
-    fn cap_output_short_content_unchanged() {
-        let (out, original) = cap_output("hello".to_owned());
-        assert_eq!(out, "hello");
-        assert!(original.is_none());
-    }
-
-    #[test]
-    fn cap_output_keeps_head_and_tail() {
-        let head = "HEAD_SENTINEL\n";
-        let tail = "TAIL_SENTINEL\n";
-        let filler_len = MAX_OUTPUT_BYTES * 2 - head.len() - tail.len();
-
-        let mut content = String::with_capacity(head.len() + filler_len + tail.len());
-        content.push_str(head);
-        content.extend(std::iter::repeat_n('x', filler_len));
-        content.push_str(tail);
-        let original_len = content.len();
-
-        let (out, original) = cap_output(content);
-
-        assert!(out.starts_with(head));
-        assert!(out.ends_with(tail));
-        assert!(out.contains("bytes truncated, head + tail kept"));
-        assert!(out.len() <= MAX_OUTPUT_BYTES + TRUNCATION_OVERHEAD);
-        let sep_pos = out.find("bytes truncated").unwrap();
-        assert!(sep_pos > head.len());
-        assert!(sep_pos < out.len() - tail.len());
-        assert_eq!(original, Some(original_len));
-    }
-
-    #[test]
-    fn cap_output_multibyte_at_split_boundary() {
-        let half = MAX_OUTPUT_BYTES / 2;
-        let emoji = "🦀"; // 4 bytes
-        let prefix_len = half - 2;
-
-        let mut content = String::new();
-        content.push_str(&"a".repeat(prefix_len));
-        content.push_str(emoji);
-        content.push_str(&"b".repeat(MAX_OUTPUT_BYTES * 2));
-
-        let (out, original) = cap_output(content);
-
-        assert!(out.contains("bytes truncated"));
-        assert!(out.starts_with("aaaa"));
-        assert!(out.ends_with('b'));
-        assert!(!out.contains(emoji));
-        assert!(original.is_some());
-    }
-
-    #[test]
-    fn cap_output_barely_over_limit_unchanged() {
-        let original = "a".repeat(MAX_OUTPUT_BYTES + 1);
-        let (out, original_len) = cap_output(original.clone());
-        assert_eq!(out, original);
-        assert!(original_len.is_none());
-    }
-
-    // ── SearchRoot::new ──
-
-    #[test]
-    fn search_root_resolves_relative_and_absolute_paths_and_keeps_their_spelling() {
-        let dir = canonical_tempdir();
-        std::fs::create_dir(dir.path().join("src")).unwrap();
-        std::fs::create_dir(dir.path().join("lib")).unwrap();
-        let lib = dir.path().join("lib");
-
-        let relative = search_root(dir.path(), Some("./src/../lib")).unwrap();
-        let absolute = search_root(Path::new("/"), Some(lib.to_str().unwrap())).unwrap();
-
-        assert_eq!(
-            (relative.base, relative.spelled, relative.cwd),
-            (
-                lib.clone(),
-                PathBuf::from("./src/../lib"),
-                dir.path().to_owned()
-            ),
-        );
-        assert_eq!(absolute.base, lib);
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn search_root_resolves_dot_dot_after_a_symlink_physically() {
-        let dir = canonical_tempdir();
-        std::fs::create_dir_all(dir.path().join("real/target")).unwrap();
-        let cwd = dir.path().join("cwd");
-        std::fs::create_dir(&cwd).unwrap();
-        std::os::unix::fs::symlink(dir.path().join("real/target"), cwd.join("link")).unwrap();
-
-        let root = search_root(&cwd, Some("link/..")).unwrap();
-
-        assert_eq!(root.base, dir.path().join("real"));
-    }
-
-    #[cfg(target_os = "linux")]
-    #[test]
-    fn search_root_walks_from_a_root_whose_name_is_not_utf8() {
-        use std::os::unix::ffi::OsStrExt as _;
-        let dir = canonical_tempdir();
-        let cwd = dir.path().join(std::ffi::OsStr::from_bytes(b"caf\xe9"));
-        std::fs::create_dir(&cwd).unwrap();
-
-        let root = search_root(&cwd, None).unwrap();
-
-        assert_eq!(root.base, cwd);
-    }
-
-    #[test]
-    fn search_root_none_uses_cwd() {
-        let dir = canonical_tempdir();
-
-        let root = search_root(dir.path(), None).unwrap();
-
-        assert_eq!(
-            (root.base, root.spelled),
-            (dir.path().to_owned(), PathBuf::from(".")),
-        );
-    }
-
-    #[test]
-    fn search_root_missing_path_is_named_relative_to_cwd() {
-        let dir = canonical_tempdir();
-
-        let err = search_root(dir.path(), Some("missing")).err().unwrap();
-
-        let cause = std::fs::metadata(dir.path().join("missing")).unwrap_err();
-        assert_eq!(err, format!("Failed to access missing: {cause}"));
-    }
-
-    #[test]
-    fn search_root_refuses_an_access_that_is_not_a_path() {
-        let workspace = Arc::new(Workspace::new(Path::new("/repo")));
-        let err = SearchRoot::new(&Access::None, Some("src"), workspace)
-            .err()
-            .unwrap();
-        assert_eq!(
-            err,
-            "Failed to access src: the search root was not resolved."
-        );
-    }
-
-    // ── tracker_key ──
-
-    #[tokio::test]
-    async fn tracker_key_resolves_dotted_spellings_to_one_key() {
-        let dir = canonical_tempdir();
-        std::fs::create_dir(dir.path().join("src")).unwrap();
-        let file = dir.path().join("src/main.rs");
-        std::fs::write(&file, "").unwrap();
-
-        assert_eq!(tracker_key(&file).await, file);
-        assert_eq!(
-            tracker_key(&dir.path().join("./src/../src/main.rs")).await,
-            file
-        );
-    }
-
-    #[cfg(unix)]
-    #[tokio::test]
-    async fn tracker_key_resolves_a_symlinked_spelling_to_the_target() {
-        let dir = canonical_tempdir();
-        std::fs::create_dir(dir.path().join("real")).unwrap();
-        std::fs::write(dir.path().join("real/a.rs"), "").unwrap();
-        std::os::unix::fs::symlink(dir.path().join("real"), dir.path().join("link")).unwrap();
-
-        assert_eq!(
-            tracker_key(&dir.path().join("link/a.rs")).await,
-            dir.path().join("real/a.rs"),
-        );
-    }
-
-    #[tokio::test]
-    async fn tracker_key_missing_path_falls_back_to_its_lexically_clean_form() {
-        let dir = canonical_tempdir();
-        assert_eq!(
-            tracker_key(&dir.path().join("missing/../a.rs")).await,
-            dir.path().join("a.rs")
-        );
-    }
-
-    // ── display_path ──
-
-    #[test]
-    fn display_path_relative_inside_base() {
-        let base = Path::new("/home/user/project");
-        let path = Path::new("/home/user/project/src/main.rs");
-        assert_eq!(display_path(path, base), "src/main.rs");
-    }
-
-    #[test]
-    fn display_path_outside_base_stays_absolute() {
-        let base = Path::new("/home/user/project");
-        let path = Path::new("/etc/config.toml");
-        assert_eq!(display_path(path, base), "/etc/config.toml");
-    }
-
-    #[test]
-    fn display_path_same_path_is_filename() {
-        let base = Path::new("/home/user/project/src/main.rs");
-        let path = Path::new("/home/user/project/src/main.rs");
-        assert_eq!(display_path(path, base), "main.rs");
-    }
-
-    // ── file_name ──
-
-    #[test]
-    fn file_name_extracts_basename() {
-        assert_eq!(file_name("/home/user/project/src/main.rs"), "main.rs");
-    }
-
-    #[test]
-    fn file_name_bare_name_unchanged() {
-        assert_eq!(file_name("README.md"), "README.md");
-    }
-
-    // ── read_validated ──
-
-    #[tokio::test]
-    async fn read_validated_reads_a_regular_file_but_refuses_a_symlink() {
-        let dir = tempfile::tempdir().unwrap();
-        let target = dir.path().join("target.txt");
-        std::fs::write(&target, "original").unwrap();
-        let link = dir.path().join("link.txt");
-        symlink_file(&target, &link);
-
-        let accept = |_: &std::fs::Metadata| Ok(());
-        let (metadata, bytes) = read_validated(&target, "target.txt", accept).await.unwrap();
-        assert_eq!(
-            (metadata.len(), bytes.as_slice()),
-            (8, b"original".as_slice())
-        );
-        let err = read_validated(&link, "link.txt", accept).await.unwrap_err();
         #[cfg(unix)]
-        let cause = std::io::Error::from_raw_os_error(nix::errno::Errno::ELOOP as i32);
-        #[cfg(windows)]
-        let cause = "the final path component is a symlink";
-        assert_eq!(err, format!("Failed to read link.txt: {cause}"));
+        #[tokio::test]
+        async fn rechecks_a_file_swapped_after_the_path_check() {
+            // Each swap runs once the path check passes, as a racing writer's would: a larger file
+            // the size limit must catch, then a fifo the open must not block on.
+            fn grow(path: &Path) {
+                let staged = path.with_extension("new");
+                std::fs::write(&staged, "SECRET=1").unwrap();
+                std::fs::rename(&staged, path).unwrap();
+            }
+            fn fifo(path: &Path) {
+                std::fs::remove_file(path).unwrap();
+                nix::unistd::mkfifo(path, nix::sys::stat::Mode::S_IRWXU).unwrap();
+            }
+
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("notes.md");
+            for swap in [grow as fn(&Path), fifo] {
+                std::fs::write(&path, "ok").unwrap();
+                let swapped = std::cell::Cell::new(false);
+                let validate = |meta: &std::fs::Metadata| {
+                    if !meta.is_file() || meta.len() > 4 {
+                        return Err("rejected".to_owned());
+                    }
+                    if !swapped.replace(true) {
+                        swap(&path);
+                    }
+                    Ok(())
+                };
+                let err = read_validated(&path, "notes.md", validate)
+                    .await
+                    .unwrap_err();
+                assert_eq!(err, "rejected");
+            }
+        }
     }
 
-    #[cfg(unix)]
-    #[tokio::test]
-    async fn read_validated_rechecks_a_file_swapped_after_the_path_check() {
-        // Each swap runs once the path check passes, as a racing writer's would: a larger file the
-        // size limit must catch, then a fifo the open must not block on.
-        fn grow(path: &Path) {
-            let staged = path.with_extension("new");
-            std::fs::write(&staged, "SECRET=1").unwrap();
-            std::fs::rename(&staged, path).unwrap();
-        }
-        fn fifo(path: &Path) {
-            std::fs::remove_file(path).unwrap();
-            nix::unistd::mkfifo(path, nix::sys::stat::Mode::S_IRWXU).unwrap();
+    mod write_no_follow {
+        use super::*;
+
+        #[tokio::test]
+        async fn overwrite_truncates_a_regular_file() {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("file.txt");
+            std::fs::write(&path, "a much longer original").unwrap();
+
+            write_no_follow(&path, b"short", WriteMode::Overwrite)
+                .await
+                .unwrap();
+            assert_eq!(std::fs::read_to_string(&path).unwrap(), "short");
         }
 
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("notes.md");
-        for swap in [grow as fn(&Path), fifo] {
-            std::fs::write(&path, "ok").unwrap();
-            let swapped = std::cell::Cell::new(false);
-            let validate = |meta: &std::fs::Metadata| {
-                if !meta.is_file() || meta.len() > 4 {
-                    return Err("rejected".to_owned());
-                }
-                if !swapped.replace(true) {
-                    swap(&path);
-                }
-                Ok(())
-            };
-            let err = read_validated(&path, "notes.md", validate)
+        #[tokio::test]
+        async fn create_new_refuses_existing_entries_and_dangling_links() {
+            let dir = tempfile::tempdir().unwrap();
+            let existing = dir.path().join("existing.txt");
+            std::fs::write(&existing, "original").unwrap();
+            let target = dir.path().join("target.txt");
+            let link = dir.path().join("link.txt");
+            symlink_file(&target, &link);
+
+            assert!(
+                write_no_follow(&existing, b"x", WriteMode::CreateNew)
+                    .await
+                    .is_err()
+            );
+            assert_eq!(std::fs::read_to_string(&existing).unwrap(), "original");
+            assert!(
+                write_no_follow(&link, b"x", WriteMode::CreateNew)
+                    .await
+                    .is_err()
+            );
+            assert!(!target.exists(), "the link target must not be created");
+        }
+
+        #[tokio::test]
+        async fn overwrite_refuses_a_symlink() {
+            let dir = tempfile::tempdir().unwrap();
+            let target = dir.path().join("target.txt");
+            std::fs::write(&target, "original").unwrap();
+            let link = dir.path().join("link.txt");
+            symlink_file(&target, &link);
+
+            let err = write_no_follow(&link, b"x", WriteMode::Overwrite)
                 .await
                 .unwrap_err();
-            assert_eq!(err, "rejected");
+            #[cfg(unix)]
+            assert_eq!(err.raw_os_error(), Some(nix::errno::Errno::ELOOP as i32));
+            #[cfg(windows)]
+            assert_eq!(err.to_string(), "the final path component is a symlink");
+            assert_eq!(std::fs::read_to_string(&target).unwrap(), "original");
+        }
+
+        #[cfg(unix)]
+        #[tokio::test]
+        async fn overwrite_refuses_a_fifo_without_blocking() {
+            let dir = tempfile::tempdir().unwrap();
+            let fifo = dir.path().join("pipe");
+            nix::unistd::mkfifo(&fifo, nix::sys::stat::Mode::S_IRWXU).unwrap();
+
+            let write = write_no_follow(&fifo, b"x", WriteMode::Overwrite);
+            let result = tokio::time::timeout(std::time::Duration::from_secs(5), write).await;
+            assert!(result.expect("the open must not block").is_err());
         }
     }
-
-    // ── write_no_follow ──
-
-    #[tokio::test]
-    async fn write_no_follow_overwrite_truncates_a_regular_file() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("file.txt");
-        std::fs::write(&path, "a much longer original").unwrap();
-
-        write_no_follow(&path, b"short", WriteMode::Overwrite)
-            .await
-            .unwrap();
-        assert_eq!(std::fs::read_to_string(&path).unwrap(), "short");
-    }
-
-    #[tokio::test]
-    async fn write_no_follow_create_new_refuses_existing_entries_and_dangling_links() {
-        let dir = tempfile::tempdir().unwrap();
-        let existing = dir.path().join("existing.txt");
-        std::fs::write(&existing, "original").unwrap();
-        let target = dir.path().join("target.txt");
-        let link = dir.path().join("link.txt");
-        symlink_file(&target, &link);
-
-        assert!(
-            write_no_follow(&existing, b"x", WriteMode::CreateNew)
-                .await
-                .is_err()
-        );
-        assert_eq!(std::fs::read_to_string(&existing).unwrap(), "original");
-        assert!(
-            write_no_follow(&link, b"x", WriteMode::CreateNew)
-                .await
-                .is_err()
-        );
-        assert!(!target.exists(), "the link target must not be created");
-    }
-
-    #[tokio::test]
-    async fn write_no_follow_overwrite_refuses_a_symlink() {
-        let dir = tempfile::tempdir().unwrap();
-        let target = dir.path().join("target.txt");
-        std::fs::write(&target, "original").unwrap();
-        let link = dir.path().join("link.txt");
-        symlink_file(&target, &link);
-
-        let err = write_no_follow(&link, b"x", WriteMode::Overwrite)
-            .await
-            .unwrap_err();
-        #[cfg(unix)]
-        assert_eq!(err.raw_os_error(), Some(nix::errno::Errno::ELOOP as i32));
-        #[cfg(windows)]
-        assert_eq!(err.to_string(), "the final path component is a symlink");
-        assert_eq!(std::fs::read_to_string(&target).unwrap(), "original");
-    }
-
-    #[cfg(unix)]
-    #[tokio::test]
-    async fn write_no_follow_overwrite_refuses_a_fifo_without_blocking() {
-        let dir = tempfile::tempdir().unwrap();
-        let fifo = dir.path().join("pipe");
-        nix::unistd::mkfifo(&fifo, nix::sys::stat::Mode::S_IRWXU).unwrap();
-
-        let write = write_no_follow(&fifo, b"x", WriteMode::Overwrite);
-        let result = tokio::time::timeout(std::time::Duration::from_secs(5), write).await;
-        assert!(result.expect("the open must not block").is_err());
-    }
-
-    // ── open_no_follow ──
 
     #[cfg(windows)]
-    #[tokio::test]
-    async fn open_no_follow_reads_and_rewrites_a_compressed_file() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("notes.txt");
-        let content = "a compressible line\n".repeat(4096);
-        std::fs::write(&path, &content).unwrap();
-        // `compact /EXE` stores the data compressed behind the WOF filter, which hides the file's
-        // reparse point from user mode, so the no-follow open keeps its first handle.
-        let compact = std::process::Command::new("compact.exe")
-            .args(["/C", "/EXE:XPRESS4K"])
-            .arg(&path)
-            .output()
-            .unwrap();
-        assert!(
-            compact.status.success(),
-            "{}",
-            String::from_utf8_lossy(&compact.stdout)
-        );
+    mod open_no_follow {
+        use super::*;
 
-        let accept = |_: &std::fs::Metadata| Ok(());
-        let (_, bytes) = read_validated(&path, "notes.txt", accept).await.unwrap();
-        assert_eq!(bytes, content.as_bytes());
-        write_no_follow(&path, b"rewritten", WriteMode::Overwrite)
-            .await
-            .unwrap();
-        assert_eq!(std::fs::read(&path).unwrap(), b"rewritten");
-    }
+        #[tokio::test]
+        async fn reads_and_rewrites_a_compressed_file() {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("notes.txt");
+            let content = "a compressible line\n".repeat(4096);
+            std::fs::write(&path, &content).unwrap();
+            // `compact /EXE` stores the data compressed behind the WOF filter, which hides the
+            // file's reparse point from user mode, so the no-follow open keeps its first handle.
+            let compact = std::process::Command::new("compact.exe")
+                .args(["/C", "/EXE:XPRESS4K"])
+                .arg(&path)
+                .output()
+                .unwrap();
+            assert!(
+                compact.status.success(),
+                "{}",
+                String::from_utf8_lossy(&compact.stdout)
+            );
 
-    // ── walk_files ──
-
-    #[test]
-    fn walk_files_stops_once_cancelled() {
-        let dir = canonical_tempdir();
-        for name in ["a.txt", "b.txt", "c.txt"] {
-            std::fs::write(dir.path().join(name), "").unwrap();
-        }
-        let cancel = CancellationToken::new();
-        let mut unreadable = Vec::new();
-        let mut walk = walk_files(dir.path(), &cancel, &mut unreadable);
-
-        let first = walk.next();
-        cancel.cancel();
-
-        assert!(first.is_some(), "an uncancelled walk yields files");
-        assert_eq!(walk.count(), 0, "the walk stops at the cancel");
-    }
-
-    #[test]
-    fn walk_files_records_a_directory_it_cannot_read_and_walks_on() {
-        let dir = canonical_tempdir();
-        let readable = dir.path().join("a.txt");
-        std::fs::write(&readable, "").unwrap();
-        let locked = dir.path().join("locked");
-        std::fs::create_dir(&locked).unwrap();
-        std::fs::write(locked.join("b.txt"), "").unwrap();
-        let _denied = deny_read_access(&locked);
-        let mut unreadable = Vec::new();
-
-        let files: Vec<_> = walk_files(dir.path(), &CancellationToken::new(), &mut unreadable)
-            .map(ignore::DirEntry::into_path)
-            .collect();
-
-        let cause = std::fs::read_dir(&locked).unwrap_err().to_string();
-        assert_eq!(files, [readable]);
-        assert_eq!(
-            unreadable,
-            [Unreadable {
-                path: Some(locked),
-                error: cause,
-            }]
-        );
-    }
-
-    // ── Unreadable::from_walk ──
-
-    #[test]
-    fn unreadable_from_walk_keeps_only_errors_that_hide_files() {
-        let denied = || ignore::Error::Io(std::io::Error::other("denied"));
-        let at_depth = |err| ignore::Error::WithDepth {
-            depth: 1,
-            err: Box::new(err),
-        };
-        let cases = [
-            (
-                ignore::Error::WithPath {
-                    path: "locked".into(),
-                    err: Box::new(at_depth(denied())),
-                },
-                Some((Some("locked"), "denied")),
-            ),
-            (at_depth(denied()), Some((None, "denied"))),
-            (
-                ignore::Error::WithPath {
-                    path: "gone".into(),
-                    err: Box::new(at_depth(ignore::Error::Io(
-                        std::io::ErrorKind::NotFound.into(),
-                    ))),
-                },
-                None,
-            ),
-            (
-                ignore::Error::WithPath {
-                    path: ".gitignore".into(),
-                    err: Box::new(denied()),
-                },
-                None,
-            ),
-            (ignore::Error::Partial(vec![denied(), denied()]), None),
-        ];
-
-        for (e, expected) in cases {
-            let expected = expected.map(|(path, error): (Option<&str>, &str)| Unreadable {
-                path: path.map(PathBuf::from),
-                error: error.to_owned(),
-            });
-            assert_eq!(Unreadable::from_walk(&e), expected, "{e}");
+            let accept = |_: &std::fs::Metadata| Ok(());
+            let (_, bytes) = read_validated(&path, "notes.txt", accept).await.unwrap();
+            assert_eq!(bytes, content.as_bytes());
+            write_no_follow(&path, b"rewritten", WriteMode::Overwrite)
+                .await
+                .unwrap();
+            assert_eq!(std::fs::read(&path).unwrap(), b"rewritten");
         }
     }
 
-    // ── withhold_unreadable ──
+    mod walk_files {
+        use super::*;
 
-    #[test]
-    fn withhold_unreadable_drops_and_counts_only_the_paths_the_filter_withholds() {
-        let dir = canonical_tempdir();
-        let root = search_root(dir.path(), None).unwrap();
-        let read_filter = deny_reads(&["secrets"]);
-        let read_filter = read_filter.walk(&root.base, &root.spelled, &root.workspace);
-        let at = |path: Option<&str>| Unreadable {
-            path: path.map(|path| dir.path().join(path)),
-            error: "denied".to_owned(),
-        };
-        let mut unreadable = vec![at(Some("secrets")), at(Some("src")), at(None)];
+        #[test]
+        fn stops_once_cancelled() {
+            let dir = canonical_tempdir();
+            for name in ["a.txt", "b.txt", "c.txt"] {
+                std::fs::write(dir.path().join(name), "").unwrap();
+            }
+            let cancel = CancellationToken::new();
+            let mut unreadable = Vec::new();
+            let mut walk = walk_files(dir.path(), &cancel, &mut unreadable);
 
-        let withheld = withhold_unreadable(&mut unreadable, &read_filter);
+            let first = walk.next();
+            cancel.cancel();
 
-        assert_eq!(withheld, 1);
-        assert_eq!(unreadable, [at(Some("src")), at(None)]);
-    }
-
-    // ── newest_first ──
-
-    #[test]
-    fn newest_first_orders_by_mtime_and_keeps_input_order_among_ties() {
-        let dir = canonical_tempdir();
-        for (name, secs) in [
-            ("a.txt", 1_000_000),
-            ("b.txt", 1_000_060),
-            ("c.txt", 1_000_000),
-        ] {
-            create_modified_at(&dir.path().join(name), secs);
+            assert!(first.is_some(), "an uncancelled walk yields files");
+            assert_eq!(walk.count(), 0, "the walk stops at the cancel");
         }
-        let mut unreadable = Vec::new();
-        let mut entries: Vec<_> =
-            walk_files(dir.path(), &CancellationToken::new(), &mut unreadable).collect();
-        entries.sort_by_key(|entry| Reverse(entry.file_name().to_owned()));
 
-        let sorted = newest_first(entries.into_iter());
+        #[test]
+        fn records_a_directory_it_cannot_read_and_walks_on() {
+            let dir = canonical_tempdir();
+            let readable = dir.path().join("a.txt");
+            std::fs::write(&readable, "").unwrap();
+            let locked = dir.path().join("locked");
+            std::fs::create_dir(&locked).unwrap();
+            std::fs::write(locked.join("b.txt"), "").unwrap();
+            let _denied = deny_read_access(&locked);
+            let mut unreadable = Vec::new();
 
-        let names: Vec<_> = sorted
-            .iter()
-            .map(|entry| entry.file_name().to_string_lossy().into_owned())
-            .collect();
-        assert_eq!(names, ["b.txt", "c.txt", "a.txt"]);
+            let files: Vec<_> = walk_files(dir.path(), &CancellationToken::new(), &mut unreadable)
+                .map(ignore::DirEntry::into_path)
+                .collect();
+
+            let cause = std::fs::read_dir(&locked).unwrap_err().to_string();
+            assert_eq!(files, [readable]);
+            assert_eq!(
+                unreadable,
+                [Unreadable {
+                    path: Some(locked),
+                    error: cause,
+                }]
+            );
+        }
     }
 
-    // ── run_blocking ──
+    mod unreadable {
+        use super::*;
 
-    #[tokio::test]
-    async fn run_blocking_reports_a_panic_as_an_internal_error() {
-        let err = run_blocking(|| -> Result<(), String> { panic!("boom") })
-            .await
-            .unwrap_err();
+        mod from_walk {
+            use super::*;
 
-        let (task, message) = err.split_once(" panicked ").unwrap();
-        assert!(task.starts_with("Internal error: task "), "{err}");
-        assert_eq!(message, "with message \"boom\"");
+            #[test]
+            fn keeps_only_errors_that_hide_files() {
+                let denied = || ignore::Error::Io(std::io::Error::other("denied"));
+                let at_depth = |err| ignore::Error::WithDepth {
+                    depth: 1,
+                    err: Box::new(err),
+                };
+                let cases = [
+                    (
+                        ignore::Error::WithPath {
+                            path: "locked".into(),
+                            err: Box::new(at_depth(denied())),
+                        },
+                        Some((Some("locked"), "denied")),
+                    ),
+                    (at_depth(denied()), Some((None, "denied"))),
+                    (
+                        ignore::Error::WithPath {
+                            path: "gone".into(),
+                            err: Box::new(at_depth(ignore::Error::Io(
+                                std::io::ErrorKind::NotFound.into(),
+                            ))),
+                        },
+                        None,
+                    ),
+                    (
+                        ignore::Error::WithPath {
+                            path: ".gitignore".into(),
+                            err: Box::new(denied()),
+                        },
+                        None,
+                    ),
+                    (ignore::Error::Partial(vec![denied(), denied()]), None),
+                ];
+
+                for (e, expected) in cases {
+                    let expected = expected.map(|(path, error): (Option<&str>, &str)| Unreadable {
+                        path: path.map(PathBuf::from),
+                        error: error.to_owned(),
+                    });
+                    assert_eq!(Unreadable::from_walk(&e), expected, "{e}");
+                }
+            }
+        }
     }
 
-    // ── truncate_line ──
+    mod withhold_unreadable {
+        use super::*;
 
-    const MAX_CHARS: usize = 500;
+        #[test]
+        fn drops_and_counts_only_the_paths_the_filter_withholds() {
+            let dir = canonical_tempdir();
+            let root = search_root(dir.path(), None).unwrap();
+            let read_filter = deny_reads(&["secrets"]);
+            let read_filter = read_filter.walk(&root.base, &root.spelled, &root.workspace);
+            let at = |path: Option<&str>| Unreadable {
+                path: path.map(|path| dir.path().join(path)),
+                error: "denied".to_owned(),
+            };
+            let mut unreadable = vec![at(Some("secrets")), at(Some("src")), at(None)];
 
-    #[test]
-    fn truncate_line_short_unchanged() {
-        assert_eq!(truncate_line("hello", MAX_CHARS).as_ref(), "hello");
+            let withheld = withhold_unreadable(&mut unreadable, &read_filter);
+
+            assert_eq!(withheld, 1);
+            assert_eq!(unreadable, [at(Some("src")), at(None)]);
+        }
     }
 
-    #[test]
-    fn truncate_line_long_text_ends_with_ellipsis() {
-        let long_line = "x".repeat(MAX_CHARS + 100);
-        let result = truncate_line(&long_line, MAX_CHARS);
-        let suffix = format!("... [{} chars]", MAX_CHARS + 100);
-        assert_eq!(result.len(), MAX_CHARS + suffix.len());
-        assert_eq!(&result[..MAX_CHARS], "x".repeat(MAX_CHARS));
-        assert_eq!(&result[MAX_CHARS..], suffix);
+    mod newest_first {
+        use super::*;
+
+        #[test]
+        fn orders_by_mtime_and_keeps_input_order_among_ties() {
+            let dir = canonical_tempdir();
+            for (name, secs) in [
+                ("a.txt", 1_000_000),
+                ("b.txt", 1_000_060),
+                ("c.txt", 1_000_000),
+            ] {
+                create_modified_at(&dir.path().join(name), secs);
+            }
+            let mut unreadable = Vec::new();
+            let mut entries: Vec<_> =
+                walk_files(dir.path(), &CancellationToken::new(), &mut unreadable).collect();
+            entries.sort_by_key(|entry| Reverse(entry.file_name().to_owned()));
+
+            let sorted = newest_first(entries.into_iter());
+
+            let names: Vec<_> = sorted
+                .iter()
+                .map(|entry| entry.file_name().to_string_lossy().into_owned())
+                .collect();
+            assert_eq!(names, ["b.txt", "c.txt", "a.txt"]);
+        }
     }
 
-    #[test]
-    fn truncate_line_multibyte_text_preserves_character_boundaries() {
-        let mut line = "a".repeat(MAX_CHARS - 2);
-        line.push('🦀');
-        line.push_str(&"b".repeat(100));
-        let result = truncate_line(&line, MAX_CHARS);
+    mod run_blocking {
+        use super::*;
 
-        let (prefix, suffix) = result.split_once("... [").unwrap();
-        let expected_prefix = "a".repeat(MAX_CHARS - 2) + "🦀" + "b";
-        assert_eq!(prefix, expected_prefix);
-        assert_eq!(prefix.chars().count(), MAX_CHARS);
-        assert_eq!(suffix, format!("{} chars]", MAX_CHARS + 99));
+        #[tokio::test]
+        async fn reports_a_panic_as_an_internal_error() {
+            let err = run_blocking(|| -> Result<(), String> { panic!("boom") })
+                .await
+                .unwrap_err();
+
+            let (task, message) = err.split_once(" panicked ").unwrap();
+            assert!(task.starts_with("Internal error: task "), "{err}");
+            assert_eq!(message, "with message \"boom\"");
+        }
     }
 
-    #[test]
-    fn truncate_line_multibyte_under_char_cap_unchanged() {
-        let line = "é".repeat(MAX_CHARS);
-        let result = truncate_line(&line, MAX_CHARS);
-        assert!(matches!(result, Cow::Borrowed(_)));
-        assert_eq!(result.as_ref(), line);
+    mod truncate_line {
+        use super::*;
+
+        const MAX_CHARS: usize = 500;
+
+        #[test]
+        fn short_unchanged() {
+            assert_eq!(truncate_line("hello", MAX_CHARS).as_ref(), "hello");
+        }
+
+        #[test]
+        fn long_text_ends_with_ellipsis() {
+            let long_line = "x".repeat(MAX_CHARS + 100);
+            let result = truncate_line(&long_line, MAX_CHARS);
+            let suffix = format!("... [{} chars]", MAX_CHARS + 100);
+            assert_eq!(result.len(), MAX_CHARS + suffix.len());
+            assert_eq!(&result[..MAX_CHARS], "x".repeat(MAX_CHARS));
+            assert_eq!(&result[MAX_CHARS..], suffix);
+        }
+
+        #[test]
+        fn multibyte_text_preserves_character_boundaries() {
+            let mut line = "a".repeat(MAX_CHARS - 2);
+            line.push('🦀');
+            line.push_str(&"b".repeat(100));
+            let result = truncate_line(&line, MAX_CHARS);
+
+            let (prefix, suffix) = result.split_once("... [").unwrap();
+            let expected_prefix = "a".repeat(MAX_CHARS - 2) + "🦀" + "b";
+            assert_eq!(prefix, expected_prefix);
+            assert_eq!(prefix.chars().count(), MAX_CHARS);
+            assert_eq!(suffix, format!("{} chars]", MAX_CHARS + 99));
+        }
+
+        #[test]
+        fn multibyte_under_char_cap_unchanged() {
+            let line = "é".repeat(MAX_CHARS);
+            let result = truncate_line(&line, MAX_CHARS);
+            assert!(matches!(result, Cow::Borrowed(_)));
+            assert_eq!(result.as_ref(), line);
+        }
     }
 
-    // ── push_withheld_note ──
+    mod push_path_note {
+        use super::*;
 
-    #[test]
-    fn push_withheld_note_counts_files_and_strips_back_off() {
-        for (count, note) in [
-            (1, "(1 file withheld by read deny or ask rules)"),
-            (3, "(3 files withheld by read deny or ask rules)"),
-        ] {
+        #[test]
+        fn names_up_to_the_cap_and_counts_the_rest() {
+            let lines: Vec<String> = (1..=13).map(|i| format!("{i}.rs")).collect();
+            let listed = indoc! {"
+                a.rs
+
+                Header:
+                  1.rs
+                  2.rs
+                  3.rs
+                  4.rs
+                  5.rs
+                  6.rs
+                  7.rs
+                  8.rs
+                  9.rs
+                  10.rs"
+            };
+            for (count, expected) in [
+                (10, listed.to_owned()),
+                (13, format!("{listed}\n  ... and 3 more")),
+            ] {
+                let mut content = "a.rs".to_owned();
+
+                push_path_note(&mut content, "Header:", &lines[..count]);
+
+                assert_eq!(content, expected);
+            }
+
             let mut content = "a.rs".to_owned();
-            push_withheld_note(&mut content, count);
+            push_path_note(&mut content, "Header:", &[]);
+            assert_eq!(content, "a.rs");
+        }
+    }
+
+    mod push_unreadable_note {
+        use super::*;
+
+        #[test]
+        fn names_each_path_relative_to_the_cwd() {
+            let cwd = Path::new("/repo");
+            let unreadable = [
+                Unreadable {
+                    path: Some(cwd.join("locked")),
+                    error: "Permission denied (os error 13)".to_owned(),
+                },
+                Unreadable {
+                    path: None,
+                    error: "Input/output error (os error 5)".to_owned(),
+                },
+            ];
+            let mut content = "a.rs".to_owned();
+
+            push_unreadable_note(&mut content, &unreadable, cwd);
+
             assert_eq!(
                 content,
-                formatdoc! {"
+                indoc! {"
                     a.rs
 
-                    {note}"
+                    Could not read:
+                      locked: Permission denied (os error 13)
+                      Input/output error (os error 5)"
                 }
             );
             assert_eq!(strip_search_notes(&content), "a.rs");
         }
-
-        let mut content = "a.rs".to_owned();
-        push_withheld_note(&mut content, 0);
-        assert_eq!(content, "a.rs");
     }
 
-    // ── push_path_note ──
+    mod push_withheld_note {
+        use super::*;
 
-    #[test]
-    fn push_path_note_names_up_to_the_cap_and_counts_the_rest() {
-        let lines: Vec<String> = (1..=13).map(|i| format!("{i}.rs")).collect();
-        let listed = indoc! {"
-            a.rs
+        #[test]
+        fn counts_files_and_strips_back_off() {
+            for (count, note) in [
+                (1, "(1 file withheld by read deny or ask rules)"),
+                (3, "(3 files withheld by read deny or ask rules)"),
+            ] {
+                let mut content = "a.rs".to_owned();
+                push_withheld_note(&mut content, count);
+                assert_eq!(
+                    content,
+                    formatdoc! {"
+                        a.rs
 
-            Header:
-              1.rs
-              2.rs
-              3.rs
-              4.rs
-              5.rs
-              6.rs
-              7.rs
-              8.rs
-              9.rs
-              10.rs"
-        };
-        for (count, expected) in [
-            (10, listed.to_owned()),
-            (13, format!("{listed}\n  ... and 3 more")),
-        ] {
+                        {note}"
+                    }
+                );
+                assert_eq!(strip_search_notes(&content), "a.rs");
+            }
+
             let mut content = "a.rs".to_owned();
-
-            push_path_note(&mut content, "Header:", &lines[..count]);
-
-            assert_eq!(content, expected);
+            push_withheld_note(&mut content, 0);
+            assert_eq!(content, "a.rs");
         }
-
-        let mut content = "a.rs".to_owned();
-        push_path_note(&mut content, "Header:", &[]);
-        assert_eq!(content, "a.rs");
     }
 
-    // ── push_unreadable_note ──
+    mod strip_search_notes {
+        use super::*;
 
-    #[test]
-    fn push_unreadable_note_names_each_path_relative_to_the_cwd() {
-        let cwd = Path::new("/repo");
-        let unreadable = [
-            Unreadable {
-                path: Some(cwd.join("locked")),
-                error: "Permission denied (os error 13)".to_owned(),
-            },
-            Unreadable {
-                path: None,
-                error: "Input/output error (os error 5)".to_owned(),
-            },
-        ];
-        let mut content = "a.rs".to_owned();
-
-        push_unreadable_note(&mut content, &unreadable, cwd);
-
-        assert_eq!(
-            content,
-            indoc! {"
+        #[test]
+        fn strips_both_notes_and_keeps_other_sections() {
+            let notes = indoc! {"
                 a.rs
+
+                (Showing 100 of 120 matches. Use a more specific pattern.)
 
                 Could not read:
                   locked: Permission denied (os error 13)
-                  Input/output error (os error 5)"
+
+                (1 file withheld by read deny or ask rules)"
+            };
+            assert_eq!(
+                strip_search_notes(notes),
+                indoc! {"
+                    a.rs
+
+                    (Showing 100 of 120 matches. Use a more specific pattern.)"
+                }
+            );
+
+            for content in [
+                "a.rs",
+                indoc! {"
+                    a.rs
+
+                    (Showing 100 of 120 matches. Use a more specific pattern.)"
+                },
+            ] {
+                assert_eq!(strip_search_notes(content), content);
             }
-        );
-        assert_eq!(strip_search_notes(&content), "a.rs");
-    }
-
-    // ── strip_search_notes ──
-
-    #[test]
-    fn strip_search_notes_strips_both_notes_and_keeps_other_sections() {
-        let notes = indoc! {"
-            a.rs
-
-            (Showing 100 of 120 matches. Use a more specific pattern.)
-
-            Could not read:
-              locked: Permission denied (os error 13)
-
-            (1 file withheld by read deny or ask rules)"
-        };
-        assert_eq!(
-            strip_search_notes(notes),
-            indoc! {"
-                a.rs
-
-                (Showing 100 of 120 matches. Use a more specific pattern.)"
-            }
-        );
-
-        for content in [
-            "a.rs",
-            indoc! {"
-                a.rs
-
-                (Showing 100 of 120 matches. Use a more specific pattern.)"
-            },
-        ] {
-            assert_eq!(strip_search_notes(content), content);
         }
     }
 }

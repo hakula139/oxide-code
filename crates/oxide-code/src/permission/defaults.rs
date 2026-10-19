@@ -342,222 +342,233 @@ mod tests {
     use crate::util::path::slash_separated;
     use crate::util::path::testing::{HOME_VAR, abs};
 
-    fn groups(raw: &str) -> Vec<Shipped> {
-        protected_by(&[Path::new(raw)], &[])
-    }
+    mod shipped {
+        use super::*;
 
-    // ── Shipped::as_str ──
+        mod as_str {
+            use super::*;
 
-    #[test]
-    fn as_str_names_each_group_by_its_defaults_key() {
-        for group in Shipped::ALL {
-            assert_eq!(
-                toml::Value::try_from(group).unwrap().as_str(),
-                Some(group.as_str())
-            );
+            #[test]
+            fn names_each_group_by_its_defaults_key() {
+                for group in Shipped::ALL {
+                    assert_eq!(
+                        toml::Value::try_from(group).unwrap().as_str(),
+                        Some(group.as_str())
+                    );
+                }
+            }
         }
-    }
 
-    // ── Shipped::rules ──
+        mod rules {
+            use super::*;
 
-    #[test]
-    fn rules_put_each_pattern_group_in_its_tier_and_class() {
-        temp_env::with_vars(
-            [
-                (HOME_VAR, Some(abs("/home/u"))),
-                ("XDG_DATA_HOME", Some(abs("/data"))),
-            ],
-            || {
-                let patterns = |group: Shipped| {
-                    let rules = group.rules().unwrap().unwrap();
-                    let classes: Vec<PermissionClass> = rules.iter().map(Rule::class).collect();
-                    let patterns: Vec<String> =
-                        rules.iter().map(|rule| rule.pattern().to_owned()).collect();
-                    (group.tier(), classes, patterns)
-                };
-                let home = slash_separated(Path::new(&abs("/home/u")));
-                let data = slash_separated(Path::new(&abs("/data")));
-                assert_eq!(
-                    patterns(Shipped::Devices),
-                    (
-                        ShippedTier::Ask,
-                        if cfg!(unix) {
-                            vec![PermissionClass::Edit]
-                        } else {
-                            Vec::new()
-                        },
-                        if cfg!(unix) {
-                            vec!["/dev/**".to_owned()]
-                        } else {
-                            Vec::new()
-                        },
-                    )
-                );
-                assert_eq!(
-                    patterns(Shipped::Ssh),
-                    (
-                        ShippedTier::Deny,
-                        vec![PermissionClass::Read],
-                        vec![format!("{home}/.ssh")]
-                    )
-                );
-                assert_eq!(
-                    patterns(Shipped::Credentials),
-                    (
-                        ShippedTier::Deny,
-                        vec![PermissionClass::Read; 2],
-                        vec![
-                            format!("{data}/ox/credentials.json"),
-                            format!("{home}/.claude/.credentials.json"),
-                        ]
-                    )
-                );
-                assert!(Shipped::Git.rules().unwrap().is_none());
-                assert!(Shipped::Rm.rules().unwrap().is_none());
-            },
-        );
-    }
-
-    #[test]
-    fn rules_name_the_home_directory_however_its_variable_spells_it() {
-        let home = abs("/home/u");
-        let expected = slash_separated(Path::new(&home));
-        for spelling in [
-            format!("{home}/"),
-            format!("{home}/."),
-            format!("{home}/x/.."),
-        ] {
-            let patterns = temp_env::with_vars(
-                [(HOME_VAR, Some(spelling.as_str())), ("XDG_DATA_HOME", None)],
-                || {
-                    [Shipped::Ssh, Shipped::Credentials].map(|group| {
-                        let rules = group.rules().unwrap().unwrap();
-                        rules
-                            .iter()
-                            .map(|rule| rule.pattern().to_owned())
-                            .collect::<Vec<_>>()
-                    })
-                },
-            );
-            assert_eq!(
-                patterns,
-                [
-                    vec![format!("{expected}/.ssh")],
-                    vec![
-                        format!("{expected}/.local/share/ox/credentials.json"),
-                        format!("{expected}/.claude/.credentials.json"),
+            #[test]
+            fn put_each_pattern_group_in_its_tier_and_class() {
+                temp_env::with_vars(
+                    [
+                        (HOME_VAR, Some(abs("/home/u"))),
+                        ("XDG_DATA_HOME", Some(abs("/data"))),
                     ],
-                ],
-                "{spelling}"
-            );
+                    || {
+                        let patterns = |group: Shipped| {
+                            let rules = group.rules().unwrap().unwrap();
+                            let classes: Vec<PermissionClass> =
+                                rules.iter().map(Rule::class).collect();
+                            let patterns: Vec<String> =
+                                rules.iter().map(|rule| rule.pattern().to_owned()).collect();
+                            (group.tier(), classes, patterns)
+                        };
+                        let home = slash_separated(Path::new(&abs("/home/u")));
+                        let data = slash_separated(Path::new(&abs("/data")));
+                        assert_eq!(
+                            patterns(Shipped::Devices),
+                            (
+                                ShippedTier::Ask,
+                                if cfg!(unix) {
+                                    vec![PermissionClass::Edit]
+                                } else {
+                                    Vec::new()
+                                },
+                                if cfg!(unix) {
+                                    vec!["/dev/**".to_owned()]
+                                } else {
+                                    Vec::new()
+                                },
+                            )
+                        );
+                        assert_eq!(
+                            patterns(Shipped::Ssh),
+                            (
+                                ShippedTier::Deny,
+                                vec![PermissionClass::Read],
+                                vec![format!("{home}/.ssh")]
+                            )
+                        );
+                        assert_eq!(
+                            patterns(Shipped::Credentials),
+                            (
+                                ShippedTier::Deny,
+                                vec![PermissionClass::Read; 2],
+                                vec![
+                                    format!("{data}/ox/credentials.json"),
+                                    format!("{home}/.claude/.credentials.json"),
+                                ]
+                            )
+                        );
+                        assert!(Shipped::Git.rules().unwrap().is_none());
+                        assert!(Shipped::Rm.rules().unwrap().is_none());
+                    },
+                );
+            }
+
+            #[test]
+            fn name_the_home_directory_however_its_variable_spells_it() {
+                let home = abs("/home/u");
+                let expected = slash_separated(Path::new(&home));
+                for spelling in [
+                    format!("{home}/"),
+                    format!("{home}/."),
+                    format!("{home}/x/.."),
+                ] {
+                    let patterns = temp_env::with_vars(
+                        [(HOME_VAR, Some(spelling.as_str())), ("XDG_DATA_HOME", None)],
+                        || {
+                            [Shipped::Ssh, Shipped::Credentials].map(|group| {
+                                let rules = group.rules().unwrap().unwrap();
+                                rules
+                                    .iter()
+                                    .map(|rule| rule.pattern().to_owned())
+                                    .collect::<Vec<_>>()
+                            })
+                        },
+                    );
+                    assert_eq!(
+                        patterns,
+                        [
+                            vec![format!("{expected}/.ssh")],
+                            vec![
+                                format!("{expected}/.local/share/ox/credentials.json"),
+                                format!("{expected}/.claude/.credentials.json"),
+                            ],
+                        ],
+                        "{spelling}"
+                    );
+                }
+            }
         }
     }
-
-    // ── protected_roots ──
 
     #[cfg(unix)]
-    #[test]
-    fn protected_roots_tags_where_each_symlinked_name_resolves_with_its_group() {
-        let dir = tempfile::tempdir().unwrap();
-        let cwd = dunce::canonicalize(dir.path()).unwrap();
-        std::fs::create_dir_all(cwd.join("tools/vscode")).unwrap();
-        std::os::unix::fs::symlink("tools/vscode", cwd.join(".vscode")).unwrap();
+    mod protected_roots {
+        use super::*;
 
-        let roots = protected_roots(&cwd, std::slice::from_ref(&cwd));
+        #[test]
+        fn tags_where_each_symlinked_name_resolves_with_its_group() {
+            let dir = tempfile::tempdir().unwrap();
+            let cwd = dunce::canonicalize(dir.path()).unwrap();
+            std::fs::create_dir_all(cwd.join("tools/vscode")).unwrap();
+            std::os::unix::fs::symlink("tools/vscode", cwd.join(".vscode")).unwrap();
 
-        assert!(roots.contains(&(Shipped::Editors, cwd.join("tools/vscode"))));
-        assert!(
-            !roots.iter().any(
+            let roots = protected_roots(&cwd, std::slice::from_ref(&cwd));
+
+            assert!(roots.contains(&(Shipped::Editors, cwd.join("tools/vscode"))));
+            assert!(!roots.iter().any(
                 |(group, path)| *group != Shipped::Editors && *path == cwd.join("tools/vscode")
-            )
-        );
-    }
-
-    // ── protected_by ──
-
-    #[test]
-    fn protected_by_names_the_group_of_each_protected_name_at_any_depth_and_spelling() {
-        for (raw, group) in [
-            ("/repo/.git/hooks/pre-commit", Shipped::Git),
-            ("/repo/vendor/sub/.GIT/config", Shipped::Git),
-            ("/repo/.git", Shipped::Git),
-            ("/repo/.gitmodules", Shipped::Git),
-            ("/repo/.gitconfig", Shipped::Git),
-            ("/repo/.husky/pre-commit", Shipped::Git),
-            ("/repo/.githooks/pre-push", Shipped::Git),
-            ("/repo/.envrc", Shipped::Direnv),
-            ("/repo/.vscode/tasks.json", Shipped::Editors),
-            ("/repo/.idea/workspace.xml", Shipped::Editors),
-            ("/repo/.devcontainer/devcontainer.json", Shipped::Editors),
-            ("/repo/.cargo/config", Shipped::Cargo),
-            ("/repo/crates/x/.Cargo/config.toml", Shipped::Cargo),
-            ("/repo/rust-toolchain", Shipped::Cargo),
-            ("/repo/rust-toolchain.toml", Shipped::Cargo),
-            ("/repo/.bashrc", Shipped::Shell),
-            ("/repo/.bash_profile", Shipped::Shell),
-            ("/repo/.bash_login", Shipped::Shell),
-            ("/repo/.profile", Shipped::Shell),
-            ("/repo/.zshrc", Shipped::Shell),
-            ("/repo/.zshenv", Shipped::Shell),
-            ("/repo/.zprofile", Shipped::Shell),
-            ("/repo/.zlogin", Shipped::Shell),
-            ("/repo/.codex/config.toml", Shipped::Agents),
-            ("/repo/.claude/settings.json", Shipped::Agents),
-            ("/repo/.claude/settings.local.json", Shipped::Agents),
-            ("/repo/.claude/hooks/format.sh", Shipped::Agents),
-            ("/home/u/.claude/settings.json", Shipped::Agents),
-            ("/repo/sub/.OX/config.toml", Shipped::Ox),
-            ("/repo/.cargo/con\u{fb01}g.toml", Shipped::Cargo),
-            ("/repo/.v\u{17f}code/tasks.json", Shipped::Editors),
-            ("/repo/.gitmodule\u{17f}", Shipped::Git),
-            ("/repo/.git./config", Shipped::Git),
-            ("/repo/.vscode /tasks.json", Shipped::Editors),
-            ("/repo/.g\u{200b}it/config", Shipped::Git),
-            ("/repo/.git\u{feff}/hooks/pre-commit", Shipped::Git),
-        ] {
-            assert_eq!(groups(raw), [group], "{raw}");
-        }
-        assert_eq!(
-            groups("/repo/.git/.vscode/.envrc"),
-            [Shipped::Git, Shipped::Direnv, Shipped::Editors]
-        );
-    }
-
-    #[test]
-    fn protected_by_leaves_lookalike_names_unprotected() {
-        for raw in [
-            "/repo/.github/workflows/ci.yml",
-            "/repo/src/git/mod.rs",
-            "/repo/cargo/config.toml",
-            "/repo/.cargo/registry/x.rs",
-            "/repo/docs/.zshrc.md",
-            "/repo/box/config.toml",
-            "/repo/.claude/worktrees/feat/src/main.rs",
-            "/repo/.claude/plans/next.md",
-            "/repo/.claude/settings.json/notes.md",
-            "/repo/hooks/format.sh",
-        ] {
-            assert_eq!(groups(raw), [], "{raw}");
+            ));
         }
     }
 
-    #[test]
-    fn protected_by_covers_paths_under_a_root_case_insensitively() {
-        let roots = [(Shipped::Ox, PathBuf::from("/home/u/.config/ox"))];
-        for raw in [
-            "/home/u/.config/ox/config.toml",
-            "/home/u/.CONFIG/Ox/config.toml",
-            "/home/u/.con\u{fb01}g/ox/config.toml",
-        ] {
+    mod protected_by {
+        use super::*;
+
+        fn groups(raw: &str) -> Vec<Shipped> {
+            protected_by(&[Path::new(raw)], &[])
+        }
+
+        #[test]
+        fn names_the_group_of_each_protected_name_at_any_depth_and_spelling() {
+            for (raw, group) in [
+                ("/repo/.git/hooks/pre-commit", Shipped::Git),
+                ("/repo/vendor/sub/.GIT/config", Shipped::Git),
+                ("/repo/.git", Shipped::Git),
+                ("/repo/.gitmodules", Shipped::Git),
+                ("/repo/.gitconfig", Shipped::Git),
+                ("/repo/.husky/pre-commit", Shipped::Git),
+                ("/repo/.githooks/pre-push", Shipped::Git),
+                ("/repo/.envrc", Shipped::Direnv),
+                ("/repo/.vscode/tasks.json", Shipped::Editors),
+                ("/repo/.idea/workspace.xml", Shipped::Editors),
+                ("/repo/.devcontainer/devcontainer.json", Shipped::Editors),
+                ("/repo/.cargo/config", Shipped::Cargo),
+                ("/repo/crates/x/.Cargo/config.toml", Shipped::Cargo),
+                ("/repo/rust-toolchain", Shipped::Cargo),
+                ("/repo/rust-toolchain.toml", Shipped::Cargo),
+                ("/repo/.bashrc", Shipped::Shell),
+                ("/repo/.bash_profile", Shipped::Shell),
+                ("/repo/.bash_login", Shipped::Shell),
+                ("/repo/.profile", Shipped::Shell),
+                ("/repo/.zshrc", Shipped::Shell),
+                ("/repo/.zshenv", Shipped::Shell),
+                ("/repo/.zprofile", Shipped::Shell),
+                ("/repo/.zlogin", Shipped::Shell),
+                ("/repo/.codex/config.toml", Shipped::Agents),
+                ("/repo/.claude/settings.json", Shipped::Agents),
+                ("/repo/.claude/settings.local.json", Shipped::Agents),
+                ("/repo/.claude/hooks/format.sh", Shipped::Agents),
+                ("/home/u/.claude/settings.json", Shipped::Agents),
+                ("/repo/sub/.OX/config.toml", Shipped::Ox),
+                ("/repo/.cargo/con\u{fb01}g.toml", Shipped::Cargo),
+                ("/repo/.v\u{17f}code/tasks.json", Shipped::Editors),
+                ("/repo/.gitmodule\u{17f}", Shipped::Git),
+                ("/repo/.git./config", Shipped::Git),
+                ("/repo/.vscode /tasks.json", Shipped::Editors),
+                ("/repo/.g\u{200b}it/config", Shipped::Git),
+                ("/repo/.git\u{feff}/hooks/pre-commit", Shipped::Git),
+            ] {
+                assert_eq!(groups(raw), [group], "{raw}");
+            }
             assert_eq!(
-                protected_by(&[Path::new(raw)], &roots),
-                [Shipped::Ox],
-                "{raw}"
+                groups("/repo/.git/.vscode/.envrc"),
+                [Shipped::Git, Shipped::Direnv, Shipped::Editors]
             );
         }
-        assert_eq!(
-            protected_by(&[Path::new("/home/u/.config/oxen/config.toml")], &roots),
-            []
-        );
+
+        #[test]
+        fn leaves_lookalike_names_unprotected() {
+            for raw in [
+                "/repo/.github/workflows/ci.yml",
+                "/repo/src/git/mod.rs",
+                "/repo/cargo/config.toml",
+                "/repo/.cargo/registry/x.rs",
+                "/repo/docs/.zshrc.md",
+                "/repo/box/config.toml",
+                "/repo/.claude/worktrees/feat/src/main.rs",
+                "/repo/.claude/plans/next.md",
+                "/repo/.claude/settings.json/notes.md",
+                "/repo/hooks/format.sh",
+            ] {
+                assert_eq!(groups(raw), [], "{raw}");
+            }
+        }
+
+        #[test]
+        fn covers_paths_under_a_root_case_insensitively() {
+            let roots = [(Shipped::Ox, PathBuf::from("/home/u/.config/ox"))];
+            for raw in [
+                "/home/u/.config/ox/config.toml",
+                "/home/u/.CONFIG/Ox/config.toml",
+                "/home/u/.con\u{fb01}g/ox/config.toml",
+            ] {
+                assert_eq!(
+                    protected_by(&[Path::new(raw)], &roots),
+                    [Shipped::Ox],
+                    "{raw}"
+                );
+            }
+            assert_eq!(
+                protected_by(&[Path::new("/home/u/.config/oxen/config.toml")], &roots),
+                []
+            );
+        }
     }
 }

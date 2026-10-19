@@ -637,426 +637,6 @@ mod tests {
     #[cfg(unix)]
     use crate::tool::testing::{canonical_tempdir, ctx};
 
-    // ── prepare ──
-
-    #[test]
-    fn prepare_extracts_the_command() {
-        let ctx = temp_ctx();
-        let prepared = BashTool::default().prepare(serde_json::json!({"command": "ls -la"}), &ctx);
-        assert_eq!(
-            prepared.access,
-            Access::for_command("ls -la", &ctx.workspace)
-        );
-    }
-
-    #[test]
-    fn prepare_missing_command_is_none() {
-        // Only a tool-wide rule matches `None`, so a malformed call cannot slip past a
-        // command-specific allow.
-        let prepared = BashTool::default().prepare(serde_json::json!({}), &temp_ctx());
-        assert!(matches!(prepared.access, Access::None));
-    }
-
-    // ── approval_preview ──
-
-    #[tokio::test]
-    async fn approval_preview_marks_a_background_command_in_the_title() {
-        let tool = BashTool::default();
-        let cwd = Path::new("/repo");
-
-        let foreground = tool
-            .approval_preview("bash", &serde_json::json!({"command": "cargo test"}), cwd)
-            .await;
-        let background = tool
-            .approval_preview(
-                "bash",
-                &serde_json::json!({"command": "cargo watch", "run_in_background": true}),
-                cwd,
-            )
-            .await;
-
-        assert_eq!(foreground, bash_preview("cargo test"));
-        assert_eq!(
-            background,
-            ApprovalPreview {
-                title: "Bash (background)".to_owned(),
-                body: ApprovalBody::Command("cargo watch".to_owned()),
-            }
-        );
-    }
-
-    // ── run ──
-
-    #[tokio::test]
-    async fn run_valid_command_executes_successfully() {
-        let output = run(
-            &Arc::default(),
-            serde_json::json!({"command": "echo hello"}),
-            &temp_ctx(),
-        )
-        .await;
-        assert!(!output.is_error);
-        assert_eq!(output.content, "hello");
-    }
-
-    #[tokio::test]
-    async fn run_missing_command_field_reports_input_error() {
-        let output = run(&Arc::default(), serde_json::json!({}), &temp_ctx()).await;
-        assert!(output.is_error);
-        assert!(output.content.contains("Invalid input"));
-    }
-
-    #[tokio::test]
-    async fn run_attaches_description_to_metadata_title() {
-        let input = serde_json::json!({
-            "command": "echo hello",
-            "description": "Print greeting",
-        });
-
-        let output = testing::run(&BashTool::default(), input, &temp_ctx()).await;
-
-        assert!(!output.is_error);
-        assert_eq!(output.content, "hello");
-        assert_eq!(output.metadata.title.as_deref(), Some("Print greeting"));
-    }
-
-    #[tokio::test]
-    async fn run_times_out_after_the_input_timeout() {
-        let output = run(
-            &Arc::default(),
-            serde_json::json!({"command": "sleep 30", "timeout": 1}),
-            &temp_ctx(),
-        )
-        .await;
-
-        assert!(output.is_error);
-        assert_eq!(output.content, "Command timed out after 1 ms");
-    }
-
-    // ── resolve_timeout ──
-
-    #[test]
-    fn resolve_timeout_defaults_zero_and_caps_the_ceiling() {
-        assert_eq!(resolve_timeout(None), DEFAULT_TIMEOUT);
-        assert_eq!(resolve_timeout(Some(0)), DEFAULT_TIMEOUT);
-        assert_eq!(resolve_timeout(Some(5_000)), Duration::from_secs(5));
-        assert_eq!(resolve_timeout(Some(u64::MAX)), MAX_TIMEOUT);
-    }
-
-    // ── execute ──
-
-    async fn run_default(cmd: &str) -> ToolOutput {
-        execute(cmd, DEFAULT_TIMEOUT, &temp_ctx()).await
-    }
-
-    #[cfg(unix)]
-    #[tokio::test]
-    async fn execute_runs_in_the_ctx_cwd_with_the_session_id_exported() {
-        let dir = canonical_tempdir();
-        assert_ne!(std::env::current_dir().unwrap(), dir.path());
-
-        let output = execute(
-            r#"pwd -P; printf %s "$OX_SESSION_ID""#,
-            DEFAULT_TIMEOUT,
-            &ctx(dir.path()),
-        )
-        .await;
-
-        assert!(!output.is_error, "{}", output.content);
-        assert_eq!(
-            output.content,
-            format!("{}\ntest-session", dir.path().display()),
-        );
-    }
-
-    #[cfg(unix)]
-    #[tokio::test]
-    async fn execute_in_a_removed_cwd_names_it_in_the_error() {
-        let dir = canonical_tempdir();
-        let gone = dir.path().join("gone");
-
-        let output = execute("true", DEFAULT_TIMEOUT, &ctx(&gone)).await;
-
-        assert!(output.is_error);
-        assert_eq!(
-            output.content,
-            format!(
-                "Failed to execute command in {}: No such file or directory (os error 2)",
-                gone.display()
-            ),
-        );
-    }
-
-    #[tokio::test]
-    async fn execute_stderr_output_preserves_content() {
-        let output = run_default("echo err >&2").await;
-        assert!(!output.is_error);
-        assert_eq!(output.content, "err");
-    }
-
-    #[tokio::test]
-    async fn execute_combined_stdout_and_stderr_renders_both_streams() {
-        let output = run_default("echo out && echo err >&2").await;
-        assert!(!output.is_error);
-        assert_eq!(output.content, "out\nerr");
-    }
-
-    #[tokio::test]
-    async fn execute_nonzero_exit_not_flagged_as_error() {
-        let output = run_default("false").await;
-        assert!(!output.is_error);
-        assert_eq!(output.content, "(exit code 1)");
-    }
-
-    #[tokio::test]
-    async fn execute_nonzero_exit_preserves_output() {
-        let output = run_default("echo partial; false").await;
-        assert!(!output.is_error);
-        assert_eq!(
-            output.content,
-            indoc! {"
-                partial
-
-                (exit code 1)"
-            }
-        );
-    }
-
-    #[tokio::test]
-    async fn execute_no_output_renders_the_no_output_marker() {
-        let output = run_default("true").await;
-        assert!(!output.is_error);
-        assert_eq!(output.content, "(no output)");
-    }
-
-    #[tokio::test]
-    async fn execute_large_output_keeps_head_and_tail() {
-        // `cargo build 2>&1` puts its error summary last, so the tail must survive the pipe cap.
-        let filler = PIPE_HEAD_BYTES + PIPE_TAIL_BYTES + 1024;
-        let output = run_default(&format!("echo HEAD; yes x | head -c {filler}; echo TAIL")).await;
-
-        assert!(!output.is_error);
-        assert!(output.content.starts_with("HEAD\nx\n"), "head kept");
-        assert!(output.content.ends_with("x\nTAIL"), "tail kept");
-        let omitted = "HEAD\n".len() + filler + "TAIL\n".len() - PIPE_HEAD_BYTES - PIPE_TAIL_BYTES;
-        assert!(
-            output
-                .content
-                .contains(&format!("\n... [{omitted} bytes omitted] ...\n")),
-            "middle marker counts the dropped bytes",
-        );
-        assert!(output.content.len() <= PIPE_HEAD_BYTES + PIPE_TAIL_BYTES + 64);
-    }
-
-    #[tokio::test]
-    async fn execute_timeout_kills_backgrounded_children() {
-        let dir = tempfile::tempdir().unwrap();
-        let pid_file = dir.path().join("pid");
-        let command = format!("sleep 30 & {}; sleep 30", record_pid("$!", &pid_file));
-        let started = async {
-            until_recorded(&pid_file).await;
-        };
-
-        let timed_out = execute_until(&command, started, &temp_ctx()).await.err();
-
-        assert_eq!(timed_out, Some(TimedOut(String::new())));
-        until_gone(&until_recorded(&pid_file).await).await;
-    }
-
-    #[tokio::test]
-    async fn execute_cancelled_mid_run_kills_backgrounded_children() {
-        // The shell either still runs or has exited while a descendant holds its pipes.
-        for tail in ["sleep 30", "echo done"] {
-            let dir = tempfile::tempdir().unwrap();
-            let pid_file = dir.path().join("pid");
-            let command = format!("sleep 30 & {}; {tail}", record_pid("$!", &pid_file));
-            let ctx = temp_ctx();
-            let mut call = Box::pin(execute(&command, DEFAULT_TIMEOUT, &ctx));
-
-            let pid = tokio::select! {
-                output = &mut call => panic!("{tail}: finished before the cancel: {}", output.content),
-                pid = until_recorded(&pid_file) => pid,
-            };
-            drop(call);
-
-            until_gone(&pid).await;
-        }
-    }
-
-    #[tokio::test]
-    async fn execute_finished_call_keeps_descendants_detached_from_its_pipes() {
-        let dir = tempfile::tempdir().unwrap();
-        let parent = dir.path().join("parent");
-        let ready = dir.path().join("ready");
-        let completed = dir.path().join("completed");
-        let release = dir.path().join("release");
-        let diagnostics = dir.path().join("diagnostics");
-        let parent_command = record_pid("$$", &parent);
-        let ready_command = record_pid("$$", &ready);
-        let completed_command = record_pid("$$", &completed);
-        let scratch_path = dir.path().display();
-        let ready_path = ready.display();
-        let release_path = release.display();
-        let diagnostics_path = diagnostics.display();
-        let script = dir.path().join("child.sh");
-        let script_path = script.display();
-        std::fs::write(
-            &script,
-            formatdoc! {"
-                {ready_command} || exit
-                while [ -d '{scratch_path}' ] && [ ! -f '{release_path}' ]; do sleep 0.02; done
-                [ -f '{release_path}' ] && {completed_command}
-            "},
-        )
-        .unwrap();
-        let command = formatdoc! {r#"
-            {parent_command} || exit
-            "$BASH" '{script_path}' > '{diagnostics_path}' 2>&1 &
-            child=$!
-            while [ ! -f '{ready_path}' ]; do
-                kill -0 $child || {{ wait $child; exit $?; }}
-                sleep 0.02
-            done
-            echo started
-        "#};
-
-        let output = run_default(&command).await;
-        std::fs::write(&release, "").unwrap();
-        assert_eq!(
-            output.content,
-            "started",
-            "child diagnostics: {:?}",
-            std::fs::read_to_string(&diagnostics),
-        );
-        let pid = until_recorded(&ready).await;
-        assert_ne!(pid, until_recorded(&parent).await);
-        until_gone(&pid).await;
-
-        let completed_pid = std::fs::read_to_string(&completed).unwrap_or_else(|error| {
-            let diagnostics = std::fs::read_to_string(&diagnostics).unwrap();
-            panic!("descendant {pid} exited without recording completion: {error}. {diagnostics}")
-        });
-        assert_eq!(completed_pid.trim(), pid);
-    }
-
-    #[tokio::test]
-    async fn execute_timeout_covers_background_pipe_holders() {
-        // The backgrounded `sleep` holds the pipes open past bash's exit, so only a deadline that
-        // covers the drain ends the call before the `sleep` does.
-        let dir = tempfile::tempdir().unwrap();
-        let pid_file = dir.path().join("pid");
-        let command = format!("sleep 30 & echo done; {}", record_pid("$$", &pid_file));
-        let exited = async {
-            until_gone(&until_recorded(&pid_file).await).await;
-        };
-
-        let timed_out = execute_until(&command, exited, &temp_ctx()).await.err();
-
-        assert_eq!(timed_out, Some(TimedOut("done".to_owned())));
-    }
-
-    #[cfg(unix)]
-    #[tokio::test]
-    async fn execute_signal_death_names_the_signal() {
-        let output = run_default("echo before; kill -9 $$").await;
-        assert!(!output.is_error);
-        assert_eq!(
-            output.content,
-            indoc! {"
-                before
-
-                (killed by signal 9)"
-            }
-        );
-    }
-
-    // ── git_bash_on ──
-
-    #[cfg(windows)]
-    #[test]
-    fn git_bash_on_finds_bash_under_the_git_root_of_any_git_on_path() {
-        let dir = tempfile::tempdir().unwrap();
-        // A shim outside any Git root, then the `mingw64\bin` and `cmd` copies a Git Bash session
-        // puts on `PATH`.
-        let [shims, mingw, cmd, bin] =
-            ["shims", r"Git\mingw64\bin", r"Git\cmd", r"Git\bin"].map(|d| dir.path().join(d));
-        for d in [&shims, &mingw, &cmd, &bin] {
-            std::fs::create_dir_all(d).unwrap();
-        }
-        for d in [&shims, &mingw, &cmd] {
-            std::fs::write(d.join("git.exe"), "").unwrap();
-        }
-        let path = |entries: &[&std::path::PathBuf]| std::env::join_paths(entries).unwrap();
-        assert_eq!(git_bash_on(&path(&[&shims, &cmd])), None, "no bash.exe yet");
-
-        let bash = bin.join("bash.exe");
-        std::fs::write(&bash, "").unwrap();
-        for git_dir in [&mingw, &cmd] {
-            assert_eq!(git_bash_on(&path(&[&shims, git_dir])).as_ref(), Some(&bash));
-        }
-        assert_eq!(git_bash_on(&path(&[&shims])), None);
-    }
-
-    // ── render_streams ──
-
-    /// Reads the byte count out of each `[N bytes omitted]` marker in `content`.
-    fn omitted_counts(content: &str) -> Vec<usize> {
-        content
-            .split("... [")
-            .skip(1)
-            .map(|rest| rest[..rest.find(' ').unwrap()].parse().unwrap())
-            .collect()
-    }
-
-    #[test]
-    fn render_streams_fits_overflowing_pipes_under_the_dispatcher_cap() {
-        // `a` and `z` appear nowhere in the marker text, so counting them counts kept bytes.
-        for (stdout_len, stderr_len) in [(10 << 20, 1024), (300 << 10, 300 << 10)] {
-            let mut stdout = PipeCapture::default();
-            stdout.push(&vec![b'a'; stdout_len]);
-            let mut stderr = PipeCapture::default();
-            stderr.push(&vec![b'z'; stderr_len]);
-
-            let content = render_streams(&stdout, &stderr);
-
-            assert!(
-                content.len() <= MAX_OUTPUT_BYTES,
-                "{stdout_len} / {stderr_len}"
-            );
-            let (stdout_text, stderr_text) = content.split_once("\nz").unwrap();
-            let stdout_omitted = omitted_counts(stdout_text);
-            assert_eq!(stdout_omitted.len(), 1);
-            assert_eq!(
-                stdout_text.matches('a').count() + stdout_omitted[0],
-                stdout_len
-            );
-            let stderr_omitted: usize = omitted_counts(stderr_text).iter().sum();
-            assert_eq!(
-                stderr_text.matches('z').count() + 1 + stderr_omitted,
-                stderr_len
-            );
-        }
-    }
-
-    #[test]
-    fn render_streams_trims_stdout_newlines_and_stderr_whitespace() {
-        let stdout = capture(b"\n  output\n", b"", 0);
-        let stderr = capture(b"\n  error\n", b"", 0);
-        assert_eq!(render_streams(&stdout, &stderr), "  output\nerror");
-    }
-
-    // ── split_budget ──
-
-    #[test]
-    fn split_budget_hands_an_unused_share_to_the_other_part() {
-        assert_eq!(split_budget(10, 20, 100), (10, 20));
-        assert_eq!(split_budget(10, 1_000, 100), (10, 90));
-        assert_eq!(split_budget(1_000, 10, 100), (90, 10));
-        assert_eq!(split_budget(1_000, 1_000, 100), (50, 50));
-    }
-
-    // ── render_pipe ──
-
     fn capture(head: &[u8], tail: &[u8], omitted: usize) -> PipeCapture {
         PipeCapture {
             head: head.to_vec(),
@@ -1065,192 +645,653 @@ mod tests {
         }
     }
 
-    #[test]
-    fn render_pipe_marks_the_omitted_middle_between_head_and_tail() {
-        let pipe = capture(b"hello\n", b"world\n", 7);
-        assert_eq!(
-            render_pipe(&pipe, OUTPUT_BUDGET),
-            indoc! {"
-                hello
+    mod prepare {
+        use super::*;
 
-                ... [7 bytes omitted] ...
-                world"
-            },
-        );
-    }
-
-    #[test]
-    fn render_pipe_folds_chars_split_by_the_omission_into_the_count() {
-        let crab = "🦀".as_bytes();
-        let pipe = capture(
-            &[b"ab", &crab[..2]].concat(),
-            &[&crab[1..], b"cd"].concat(),
-            5,
-        );
-        assert_eq!(
-            render_pipe(&pipe, OUTPUT_BUDGET),
-            indoc! {"
-                ab
-                ... [10 bytes omitted] ...
-                cd"
-            },
-        );
-    }
-
-    #[test]
-    fn render_pipe_over_budget_drops_the_middle_and_counts_it() {
-        let pipe = capture(b"0123456789", b"abcdef4321", 0);
-        assert_eq!(
-            render_pipe(&pipe, 8),
-            indoc! {"
-                0123
-                ... [12 bytes omitted] ...
-                4321"
-            },
-        );
-    }
-
-    #[test]
-    fn render_pipe_decodes_head_and_tail_together_when_nothing_was_omitted() {
-        // A multibyte char straddling the head / tail split must not decode as two replacements.
-        let crab = "🦀".as_bytes();
-        let pipe = capture(&crab[..2], &crab[2..], 0);
-        assert_eq!(render_pipe(&pipe, OUTPUT_BUDGET), "🦀");
-    }
-
-    #[test]
-    fn render_pipe_trims_the_end_and_keeps_leading_and_internal_newlines() {
-        let pipe = capture(b"\nerr\nmore\n\n", b"", 0);
-        assert_eq!(render_pipe(&pipe, OUTPUT_BUDGET), "\nerr\nmore");
-    }
-
-    // ── PipeCapture::drain ──
-
-    #[tokio::test]
-    async fn drain_cut_short_keeps_what_already_arrived() {
-        let (mut writer, mut reader) = tokio::io::duplex(64);
-        writer.write_all(b"partial").await.unwrap();
-
-        let mut pipe = PipeCapture::default();
-        let drained =
-            tokio::time::timeout(Duration::from_millis(50), pipe.drain(&mut reader)).await;
-
-        assert!(
-            drained.is_err(),
-            "writer is still open, so the drain must time out"
-        );
-        assert_eq!(pipe.head, b"partial");
-    }
-
-    // ── PipeCapture::push ──
-
-    #[test]
-    fn push_keeps_head_and_tail_across_chunks_and_counts_the_middle() {
-        let mut pipe = PipeCapture::default();
-        pipe.push(&vec![b'h'; PIPE_HEAD_BYTES - 1]);
-        pipe.push(b"hm");
-        pipe.push(&[b'm'; 99]);
-        pipe.push(&vec![b't'; PIPE_TAIL_BYTES]);
-
-        assert_eq!(pipe.head, vec![b'h'; PIPE_HEAD_BYTES]);
-        assert_eq!(pipe.tail, vec![b't'; PIPE_TAIL_BYTES]);
-        assert_eq!(pipe.omitted, 100);
-    }
-
-    // ── ShellTree::kill ──
-
-    /// A process tree whose first `live` signals reach a member and whose later ones find none,
-    /// with a count of the signals it has received.
-    fn fake_tree(live: usize) -> (ShellTree, Arc<AtomicUsize>) {
-        let signals = Arc::new(AtomicUsize::new(0));
-        let child = FakeChild {
-            live,
-            signals: Arc::clone(&signals),
-        };
-        let tree = ShellTree {
-            child: Box::new(child),
-            armed: true,
-        };
-        (tree, signals)
-    }
-
-    #[derive(Debug)]
-    struct FakeChild {
-        live: usize,
-        signals: Arc<AtomicUsize>,
-    }
-
-    impl ChildWrapper for FakeChild {
-        fn inner(&self) -> &dyn ChildWrapper {
-            unreachable!("a fake child wraps no process")
+        #[test]
+        fn extracts_the_command() {
+            let ctx = temp_ctx();
+            let prepared =
+                BashTool::default().prepare(serde_json::json!({"command": "ls -la"}), &ctx);
+            assert_eq!(
+                prepared.access,
+                Access::for_command("ls -la", &ctx.workspace)
+            );
         }
 
-        fn inner_mut(&mut self) -> &mut dyn ChildWrapper {
-            unreachable!("a fake child wraps no process")
+        #[test]
+        fn missing_command_is_none() {
+            // Only a tool-wide rule matches `None`, so a malformed call cannot slip past a
+            // command-specific allow.
+            let prepared = BashTool::default().prepare(serde_json::json!({}), &temp_ctx());
+            assert!(matches!(prepared.access, Access::None));
+        }
+    }
+
+    mod approval_preview {
+        use super::*;
+
+        #[tokio::test]
+        async fn marks_a_background_command_in_the_title() {
+            let tool = BashTool::default();
+            let cwd = Path::new("/repo");
+
+            let foreground = tool
+                .approval_preview("bash", &serde_json::json!({"command": "cargo test"}), cwd)
+                .await;
+            let background = tool
+                .approval_preview(
+                    "bash",
+                    &serde_json::json!({"command": "cargo watch", "run_in_background": true}),
+                    cwd,
+                )
+                .await;
+
+            assert_eq!(foreground, bash_preview("cargo test"));
+            assert_eq!(
+                background,
+                ApprovalPreview {
+                    title: "Bash (background)".to_owned(),
+                    body: ApprovalBody::Command("cargo watch".to_owned()),
+                }
+            );
+        }
+    }
+
+    mod run {
+        use super::*;
+
+        #[tokio::test]
+        async fn valid_command_executes_successfully() {
+            let output = run(
+                &Arc::default(),
+                serde_json::json!({"command": "echo hello"}),
+                &temp_ctx(),
+            )
+            .await;
+            assert!(!output.is_error);
+            assert_eq!(output.content, "hello");
         }
 
-        fn into_inner(self: Box<Self>) -> Box<dyn ChildWrapper> {
-            self
+        #[tokio::test]
+        async fn missing_command_field_reports_input_error() {
+            let output = run(&Arc::default(), serde_json::json!({}), &temp_ctx()).await;
+            assert!(output.is_error);
+            assert!(output.content.contains("Invalid input"));
         }
 
-        fn start_kill(&mut self) -> io::Result<()> {
-            if self.signals.fetch_add(1, Ordering::Relaxed) < self.live {
-                Ok(())
-            } else {
-                Err(io::ErrorKind::PermissionDenied.into())
+        #[tokio::test]
+        async fn attaches_description_to_metadata_title() {
+            let input = serde_json::json!({
+                "command": "echo hello",
+                "description": "Print greeting",
+            });
+
+            let output = testing::run(&BashTool::default(), input, &temp_ctx()).await;
+
+            assert!(!output.is_error);
+            assert_eq!(output.content, "hello");
+            assert_eq!(output.metadata.title.as_deref(), Some("Print greeting"));
+        }
+
+        #[tokio::test]
+        async fn times_out_after_the_input_timeout() {
+            let output = run(
+                &Arc::default(),
+                serde_json::json!({"command": "sleep 30", "timeout": 1}),
+                &temp_ctx(),
+            )
+            .await;
+
+            assert!(output.is_error);
+            assert_eq!(output.content, "Command timed out after 1 ms");
+        }
+    }
+
+    mod resolve_timeout {
+        use super::*;
+
+        #[test]
+        fn defaults_zero_and_caps_the_ceiling() {
+            assert_eq!(resolve_timeout(None), DEFAULT_TIMEOUT);
+            assert_eq!(resolve_timeout(Some(0)), DEFAULT_TIMEOUT);
+            assert_eq!(resolve_timeout(Some(5_000)), Duration::from_secs(5));
+            assert_eq!(resolve_timeout(Some(u64::MAX)), MAX_TIMEOUT);
+        }
+    }
+
+    mod execute {
+        use super::*;
+
+        async fn run_default(cmd: &str) -> ToolOutput {
+            execute(cmd, DEFAULT_TIMEOUT, &temp_ctx()).await
+        }
+
+        #[tokio::test]
+        async fn stderr_output_preserves_content() {
+            let output = run_default("echo err >&2").await;
+            assert!(!output.is_error);
+            assert_eq!(output.content, "err");
+        }
+
+        #[tokio::test]
+        async fn combined_stdout_and_stderr_renders_both_streams() {
+            let output = run_default("echo out && echo err >&2").await;
+            assert!(!output.is_error);
+            assert_eq!(output.content, "out\nerr");
+        }
+
+        #[tokio::test]
+        async fn nonzero_exit_not_flagged_as_error() {
+            let output = run_default("false").await;
+            assert!(!output.is_error);
+            assert_eq!(output.content, "(exit code 1)");
+        }
+
+        #[tokio::test]
+        async fn nonzero_exit_preserves_output() {
+            let output = run_default("echo partial; false").await;
+            assert!(!output.is_error);
+            assert_eq!(
+                output.content,
+                indoc! {"
+                    partial
+
+                    (exit code 1)"
+                }
+            );
+        }
+
+        #[tokio::test]
+        async fn no_output_renders_the_no_output_marker() {
+            let output = run_default("true").await;
+            assert!(!output.is_error);
+            assert_eq!(output.content, "(no output)");
+        }
+
+        #[tokio::test]
+        async fn large_output_keeps_head_and_tail() {
+            // `cargo build 2>&1` ends with its error summary, so the tail must survive the cap.
+            let filler = PIPE_HEAD_BYTES + PIPE_TAIL_BYTES + 1024;
+            let output =
+                run_default(&format!("echo HEAD; yes x | head -c {filler}; echo TAIL")).await;
+
+            assert!(!output.is_error);
+            assert!(output.content.starts_with("HEAD\nx\n"), "head kept");
+            assert!(output.content.ends_with("x\nTAIL"), "tail kept");
+            let omitted =
+                "HEAD\n".len() + filler + "TAIL\n".len() - PIPE_HEAD_BYTES - PIPE_TAIL_BYTES;
+            assert!(
+                output
+                    .content
+                    .contains(&format!("\n... [{omitted} bytes omitted] ...\n")),
+                "middle marker counts the dropped bytes",
+            );
+            assert!(output.content.len() <= PIPE_HEAD_BYTES + PIPE_TAIL_BYTES + 64);
+        }
+
+        #[tokio::test]
+        async fn cancelled_mid_run_kills_backgrounded_children() {
+            // The shell either still runs or has exited while a descendant holds its pipes.
+            for tail in ["sleep 30", "echo done"] {
+                let dir = tempfile::tempdir().unwrap();
+                let pid_file = dir.path().join("pid");
+                let command = format!("sleep 30 & {}; {tail}", record_pid("$!", &pid_file));
+                let ctx = temp_ctx();
+                let mut call = Box::pin(execute(&command, DEFAULT_TIMEOUT, &ctx));
+
+                let pid = tokio::select! {
+                    output = &mut call => panic!("{tail}: finished before the cancel: {}", output.content),
+                    pid = until_recorded(&pid_file) => pid,
+                };
+                drop(call);
+
+                until_gone(&pid).await;
+            }
+        }
+
+        #[tokio::test]
+        async fn finished_call_keeps_descendants_detached_from_its_pipes() {
+            let dir = tempfile::tempdir().unwrap();
+            let parent = dir.path().join("parent");
+            let ready = dir.path().join("ready");
+            let completed = dir.path().join("completed");
+            let release = dir.path().join("release");
+            let diagnostics = dir.path().join("diagnostics");
+            let parent_command = record_pid("$$", &parent);
+            let ready_command = record_pid("$$", &ready);
+            let completed_command = record_pid("$$", &completed);
+            let scratch_path = dir.path().display();
+            let ready_path = ready.display();
+            let release_path = release.display();
+            let diagnostics_path = diagnostics.display();
+            let script = dir.path().join("child.sh");
+            let script_path = script.display();
+            std::fs::write(
+                &script,
+                formatdoc! {"
+                    {ready_command} || exit
+                    while [ -d '{scratch_path}' ] && [ ! -f '{release_path}' ]; do sleep 0.02; done
+                    [ -f '{release_path}' ] && {completed_command}
+                "},
+            )
+            .unwrap();
+            let command = formatdoc! {r#"
+                {parent_command} || exit
+                "$BASH" '{script_path}' > '{diagnostics_path}' 2>&1 &
+                child=$!
+                while [ ! -f '{ready_path}' ]; do
+                    kill -0 $child || {{ wait $child; exit $?; }}
+                    sleep 0.02
+                done
+                echo started
+            "#};
+
+            let output = run_default(&command).await;
+            std::fs::write(&release, "").unwrap();
+            assert_eq!(
+                output.content,
+                "started",
+                "child diagnostics: {:?}",
+                std::fs::read_to_string(&diagnostics),
+            );
+            let pid = until_recorded(&ready).await;
+            assert_ne!(pid, until_recorded(&parent).await);
+            until_gone(&pid).await;
+
+            let completed_pid = std::fs::read_to_string(&completed).unwrap_or_else(|error| {
+                let diagnostics = std::fs::read_to_string(&diagnostics).unwrap();
+                panic!(
+                    "descendant {pid} exited without recording completion: {error}. {diagnostics}"
+                )
+            });
+            assert_eq!(completed_pid.trim(), pid);
+        }
+
+        #[cfg(unix)]
+        #[tokio::test]
+        async fn runs_in_the_ctx_cwd_with_the_session_id_exported() {
+            let dir = canonical_tempdir();
+            assert_ne!(std::env::current_dir().unwrap(), dir.path());
+
+            let output = execute(
+                r#"pwd -P; printf %s "$OX_SESSION_ID""#,
+                DEFAULT_TIMEOUT,
+                &ctx(dir.path()),
+            )
+            .await;
+
+            assert!(!output.is_error, "{}", output.content);
+            assert_eq!(
+                output.content,
+                format!("{}\ntest-session", dir.path().display()),
+            );
+        }
+
+        #[cfg(unix)]
+        #[tokio::test]
+        async fn in_a_removed_cwd_names_it_in_the_error() {
+            let dir = canonical_tempdir();
+            let gone = dir.path().join("gone");
+
+            let output = execute("true", DEFAULT_TIMEOUT, &ctx(&gone)).await;
+
+            assert!(output.is_error);
+            assert_eq!(
+                output.content,
+                format!(
+                    "Failed to execute command in {}: No such file or directory (os error 2)",
+                    gone.display()
+                ),
+            );
+        }
+
+        #[cfg(unix)]
+        #[tokio::test]
+        async fn signal_death_names_the_signal() {
+            let output = run_default("echo before; kill -9 $$").await;
+            assert!(!output.is_error);
+            assert_eq!(
+                output.content,
+                indoc! {"
+                    before
+
+                    (killed by signal 9)"
+                }
+            );
+        }
+    }
+
+    mod execute_until {
+        use super::*;
+
+        #[tokio::test]
+        async fn timeout_kills_backgrounded_children() {
+            let dir = tempfile::tempdir().unwrap();
+            let pid_file = dir.path().join("pid");
+            let command = format!("sleep 30 & {}; sleep 30", record_pid("$!", &pid_file));
+            let started = async {
+                until_recorded(&pid_file).await;
+            };
+
+            let timed_out = execute_until(&command, started, &temp_ctx()).await.err();
+
+            assert_eq!(timed_out, Some(TimedOut(String::new())));
+            until_gone(&until_recorded(&pid_file).await).await;
+        }
+
+        #[tokio::test]
+        async fn timeout_covers_background_pipe_holders() {
+            // The backgrounded `sleep` holds the pipes open past bash's exit, so only a deadline
+            // that covers the drain ends the call before the `sleep` does.
+            let dir = tempfile::tempdir().unwrap();
+            let pid_file = dir.path().join("pid");
+            let command = format!("sleep 30 & echo done; {}", record_pid("$$", &pid_file));
+            let exited = async {
+                until_gone(&until_recorded(&pid_file).await).await;
+            };
+
+            let timed_out = execute_until(&command, exited, &temp_ctx()).await.err();
+
+            assert_eq!(timed_out, Some(TimedOut("done".to_owned())));
+        }
+    }
+
+    #[cfg(windows)]
+    mod git_bash_on {
+        use super::*;
+
+        #[test]
+        fn finds_bash_under_the_git_root_of_any_git_on_path() {
+            let dir = tempfile::tempdir().unwrap();
+            // A shim outside any Git root, then the `mingw64\bin` and `cmd` copies a Git Bash
+            // session puts on `PATH`.
+            let [shims, mingw, cmd, bin] =
+                ["shims", r"Git\mingw64\bin", r"Git\cmd", r"Git\bin"].map(|d| dir.path().join(d));
+            for d in [&shims, &mingw, &cmd, &bin] {
+                std::fs::create_dir_all(d).unwrap();
+            }
+            for d in [&shims, &mingw, &cmd] {
+                std::fs::write(d.join("git.exe"), "").unwrap();
+            }
+            let path = |entries: &[&std::path::PathBuf]| std::env::join_paths(entries).unwrap();
+            assert_eq!(git_bash_on(&path(&[&shims, &cmd])), None, "no bash.exe yet");
+
+            let bash = bin.join("bash.exe");
+            std::fs::write(&bash, "").unwrap();
+            for git_dir in [&mingw, &cmd] {
+                assert_eq!(git_bash_on(&path(&[&shims, git_dir])).as_ref(), Some(&bash));
+            }
+            assert_eq!(git_bash_on(&path(&[&shims])), None);
+        }
+    }
+
+    mod render_streams {
+        use super::*;
+
+        /// Reads the byte count out of each `[N bytes omitted]` marker in `content`.
+        fn omitted_counts(content: &str) -> Vec<usize> {
+            content
+                .split("... [")
+                .skip(1)
+                .map(|rest| rest[..rest.find(' ').unwrap()].parse().unwrap())
+                .collect()
+        }
+
+        #[test]
+        fn fits_overflowing_pipes_under_the_dispatcher_cap() {
+            // `a` and `z` appear nowhere in the marker text, so counting them counts kept bytes.
+            for (stdout_len, stderr_len) in [(10 << 20, 1024), (300 << 10, 300 << 10)] {
+                let mut stdout = PipeCapture::default();
+                stdout.push(&vec![b'a'; stdout_len]);
+                let mut stderr = PipeCapture::default();
+                stderr.push(&vec![b'z'; stderr_len]);
+
+                let content = render_streams(&stdout, &stderr);
+
+                assert!(
+                    content.len() <= MAX_OUTPUT_BYTES,
+                    "{stdout_len} / {stderr_len}"
+                );
+                let (stdout_text, stderr_text) = content.split_once("\nz").unwrap();
+                let stdout_omitted = omitted_counts(stdout_text);
+                assert_eq!(stdout_omitted.len(), 1);
+                assert_eq!(
+                    stdout_text.matches('a').count() + stdout_omitted[0],
+                    stdout_len
+                );
+                let stderr_omitted: usize = omitted_counts(stderr_text).iter().sum();
+                assert_eq!(
+                    stderr_text.matches('z').count() + 1 + stderr_omitted,
+                    stderr_len
+                );
+            }
+        }
+
+        #[test]
+        fn trims_stdout_newlines_and_stderr_whitespace() {
+            let stdout = capture(b"\n  output\n", b"", 0);
+            let stderr = capture(b"\n  error\n", b"", 0);
+            assert_eq!(render_streams(&stdout, &stderr), "  output\nerror");
+        }
+    }
+
+    mod split_budget {
+        use super::*;
+
+        #[test]
+        fn hands_an_unused_share_to_the_other_part() {
+            assert_eq!(split_budget(10, 20, 100), (10, 20));
+            assert_eq!(split_budget(10, 1_000, 100), (10, 90));
+            assert_eq!(split_budget(1_000, 10, 100), (90, 10));
+            assert_eq!(split_budget(1_000, 1_000, 100), (50, 50));
+        }
+    }
+
+    mod render_pipe {
+        use super::*;
+
+        #[test]
+        fn marks_the_omitted_middle_between_head_and_tail() {
+            let pipe = capture(b"hello\n", b"world\n", 7);
+            assert_eq!(
+                render_pipe(&pipe, OUTPUT_BUDGET),
+                indoc! {"
+                    hello
+
+                    ... [7 bytes omitted] ...
+                    world"
+                },
+            );
+        }
+
+        #[test]
+        fn folds_chars_split_by_the_omission_into_the_count() {
+            let crab = "🦀".as_bytes();
+            let pipe = capture(
+                &[b"ab", &crab[..2]].concat(),
+                &[&crab[1..], b"cd"].concat(),
+                5,
+            );
+            assert_eq!(
+                render_pipe(&pipe, OUTPUT_BUDGET),
+                indoc! {"
+                    ab
+                    ... [10 bytes omitted] ...
+                    cd"
+                },
+            );
+        }
+
+        #[test]
+        fn over_budget_drops_the_middle_and_counts_it() {
+            let pipe = capture(b"0123456789", b"abcdef4321", 0);
+            assert_eq!(
+                render_pipe(&pipe, 8),
+                indoc! {"
+                    0123
+                    ... [12 bytes omitted] ...
+                    4321"
+                },
+            );
+        }
+
+        #[test]
+        fn decodes_head_and_tail_together_when_nothing_was_omitted() {
+            // A multibyte char across the head / tail split must not decode as two replacements.
+            let crab = "🦀".as_bytes();
+            let pipe = capture(&crab[..2], &crab[2..], 0);
+            assert_eq!(render_pipe(&pipe, OUTPUT_BUDGET), "🦀");
+        }
+
+        #[test]
+        fn trims_the_end_and_keeps_leading_and_internal_newlines() {
+            let pipe = capture(b"\nerr\nmore\n\n", b"", 0);
+            assert_eq!(render_pipe(&pipe, OUTPUT_BUDGET), "\nerr\nmore");
+        }
+    }
+
+    mod pipe_capture {
+        use super::*;
+
+        mod drain {
+            use super::*;
+
+            #[tokio::test]
+            async fn cut_short_keeps_what_already_arrived() {
+                let (mut writer, mut reader) = tokio::io::duplex(64);
+                writer.write_all(b"partial").await.unwrap();
+
+                let mut pipe = PipeCapture::default();
+                let drained =
+                    tokio::time::timeout(Duration::from_millis(50), pipe.drain(&mut reader)).await;
+
+                assert!(
+                    drained.is_err(),
+                    "writer is still open, so the drain must time out"
+                );
+                assert_eq!(pipe.head, b"partial");
+            }
+        }
+
+        mod push {
+            use super::*;
+
+            #[test]
+            fn keeps_head_and_tail_across_chunks_and_counts_the_middle() {
+                let mut pipe = PipeCapture::default();
+                pipe.push(&vec![b'h'; PIPE_HEAD_BYTES - 1]);
+                pipe.push(b"hm");
+                pipe.push(&[b'm'; 99]);
+                pipe.push(&vec![b't'; PIPE_TAIL_BYTES]);
+
+                assert_eq!(pipe.head, vec![b'h'; PIPE_HEAD_BYTES]);
+                assert_eq!(pipe.tail, vec![b't'; PIPE_TAIL_BYTES]);
+                assert_eq!(pipe.omitted, 100);
             }
         }
     }
 
-    #[cfg(any(target_os = "linux", windows))]
-    #[tokio::test]
-    async fn kill_signals_once_from_a_call_and_from_drop() {
-        let (mut killed, killed_signals) = fake_tree(usize::MAX);
-        let (dropped, dropped_signals) = fake_tree(usize::MAX);
+    mod shell_tree {
+        use super::*;
 
-        killed.kill().await;
-        drop(killed);
-        drop(dropped);
+        mod kill {
+            use super::*;
 
-        assert_eq!(killed_signals.load(Ordering::Relaxed), 1);
-        assert_eq!(dropped_signals.load(Ordering::Relaxed), 1);
-    }
+            /// A process tree whose first `live` signals reach a member and whose later ones find
+            /// none, with a count of the signals it has received.
+            fn fake_tree(live: usize) -> (ShellTree, Arc<AtomicUsize>) {
+                let signals = Arc::new(AtomicUsize::new(0));
+                let child = FakeChild {
+                    live,
+                    signals: Arc::clone(&signals),
+                };
+                let tree = ShellTree {
+                    child: Box::new(child),
+                    armed: true,
+                };
+                (tree, signals)
+            }
 
-    #[cfg(all(unix, not(target_os = "linux")))]
-    #[tokio::test]
-    async fn kill_signals_until_no_member_is_alive() {
-        let (mut tree, signals) = fake_tree(2);
+            #[derive(Debug)]
+            struct FakeChild {
+                live: usize,
+                signals: Arc<AtomicUsize>,
+            }
 
-        tree.kill().await;
-        drop(tree);
+            impl ChildWrapper for FakeChild {
+                fn inner(&self) -> &dyn ChildWrapper {
+                    unreachable!("a fake child wraps no process")
+                }
 
-        assert_eq!(signals.load(Ordering::Relaxed), 3);
-    }
+                fn inner_mut(&mut self) -> &mut dyn ChildWrapper {
+                    unreachable!("a fake child wraps no process")
+                }
 
-    // In real time, a late wakeup can fire the retry sleep before the zero timeout returns.
-    #[cfg(all(unix, not(target_os = "linux")))]
-    #[tokio::test(start_paused = true)]
-    async fn kill_cut_short_finishes_in_drop() {
-        let (mut tree, signals) = fake_tree(5);
+                fn into_inner(self: Box<Self>) -> Box<dyn ChildWrapper> {
+                    self
+                }
 
-        let cut = tokio::time::timeout(Duration::ZERO, tree.kill()).await;
-        let before_drop = signals.load(Ordering::Relaxed);
-        drop(tree);
+                fn start_kill(&mut self) -> io::Result<()> {
+                    if self.signals.fetch_add(1, Ordering::Relaxed) < self.live {
+                        Ok(())
+                    } else {
+                        Err(io::ErrorKind::PermissionDenied.into())
+                    }
+                }
+            }
 
-        assert!(cut.is_err(), "the kill waits between signals");
-        assert_eq!(before_drop, 1);
-        assert_eq!(signals.load(Ordering::Relaxed), 6);
-    }
+            #[cfg(any(target_os = "linux", windows))]
+            #[tokio::test]
+            async fn signals_once_from_a_call_and_from_drop() {
+                let (mut killed, killed_signals) = fake_tree(usize::MAX);
+                let (dropped, dropped_signals) = fake_tree(usize::MAX);
 
-    #[cfg(all(unix, not(target_os = "linux")))]
-    #[test]
-    fn kill_from_drop_gives_up_on_a_tree_that_outlives_the_limit() {
-        let (tree, signals) = fake_tree(usize::MAX);
+                killed.kill().await;
+                drop(killed);
+                drop(dropped);
 
-        let began = Instant::now();
-        drop(tree);
+                assert_eq!(killed_signals.load(Ordering::Relaxed), 1);
+                assert_eq!(dropped_signals.load(Ordering::Relaxed), 1);
+            }
 
-        assert!(began.elapsed() >= ShellTree::KILL_LIMIT);
-        assert!(signals.load(Ordering::Relaxed) > 1);
+            #[cfg(all(unix, not(target_os = "linux")))]
+            #[tokio::test]
+            async fn signals_until_no_member_is_alive() {
+                let (mut tree, signals) = fake_tree(2);
+
+                tree.kill().await;
+                drop(tree);
+
+                assert_eq!(signals.load(Ordering::Relaxed), 3);
+            }
+
+            // In real time, a late wakeup can fire the retry sleep before the zero timeout returns.
+            #[cfg(all(unix, not(target_os = "linux")))]
+            #[tokio::test(start_paused = true)]
+            async fn cut_short_finishes_in_drop() {
+                let (mut tree, signals) = fake_tree(5);
+
+                let cut = tokio::time::timeout(Duration::ZERO, tree.kill()).await;
+                let before_drop = signals.load(Ordering::Relaxed);
+                drop(tree);
+
+                assert!(cut.is_err(), "the kill waits between signals");
+                assert_eq!(before_drop, 1);
+                assert_eq!(signals.load(Ordering::Relaxed), 6);
+            }
+
+            #[cfg(all(unix, not(target_os = "linux")))]
+            #[test]
+            fn from_drop_gives_up_on_a_tree_that_outlives_the_limit() {
+                let (tree, signals) = fake_tree(usize::MAX);
+
+                let began = Instant::now();
+                drop(tree);
+
+                assert!(began.elapsed() >= ShellTree::KILL_LIMIT);
+                assert!(signals.load(Ordering::Relaxed) > 1);
+            }
+        }
     }
 }

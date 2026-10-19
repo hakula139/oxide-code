@@ -1258,762 +1258,791 @@ mod tests {
         CommandTarget::parse(command, &Workspace::new(Path::new("/repo")))
     }
 
-    fn joined(words: &[ShellWord]) -> String {
-        words
-            .iter()
-            .map(ShellWord::text)
-            .collect::<Vec<_>>()
-            .join(" ")
-    }
-
-    /// Each simple command's named words, joined on spaces.
-    fn texts(command: &str) -> Vec<String> {
-        parse(command)
-            .segments
-            .iter()
-            .map(|segment| joined(segment.named()))
-            .collect()
-    }
-
-    fn words(command: &str) -> Vec<String> {
-        parse(command).segments[0]
-            .program()
-            .iter()
-            .map(|word| word.text().to_owned())
-            .collect()
-    }
-
-    fn pattern(raw: &str) -> Vec<PatternWord> {
-        pattern_words(raw).unwrap()
-    }
-
-    fn literal(text: &str) -> PatternWord {
-        PatternWord::Literal(text.to_owned())
-    }
-
-    /// Each write's path relative to `cwd`, or as requested outside it.
-    fn writes(command: &str, cwd: &Path) -> Vec<String> {
-        spelled(CommandTarget::parse(command, &Workspace::new(cwd)).writes)
-    }
-
-    /// Each input redirection's path relative to `cwd`, or as requested outside it.
-    fn reads(command: &str, cwd: &Path) -> Vec<String> {
-        spelled(CommandTarget::parse(command, &Workspace::new(cwd)).reads)
-    }
-
-    fn spelled(targets: Vec<Access>) -> Vec<String> {
-        targets
-            .into_iter()
-            .map(|target| match target {
-                Access::Path {
-                    relative,
-                    requested,
-                    ..
-                } => relative.unwrap_or(requested),
-                other => panic!("a redirection target is a path, got {other:?}"),
-            })
-            .collect()
-    }
-
     fn is_safe(command: &str) -> bool {
         parse(command).segments[0].safe_reads().is_some()
     }
 
-    // ── CommandTarget::parse: segments ──
+    mod command_target {
+        use super::*;
 
-    #[test]
-    fn parse_splits_simple_commands_across_every_separator() {
-        for (command, expected) in [
-            ("a; b", &["a", "b"][..]),
-            ("a && b || c", &["a", "b", "c"]),
-            ("a | b |& c", &["a", "b", "c"]),
-            ("a & b", &["a", "b"]),
-            ("a\nb", &["a", "b"]),
-            ("(cd x && ls) ; { echo a; }", &["cd x", "ls", "echo a"]),
-            ("! git diff --quiet", &["git diff --quiet"]),
-            ("if true; then ls -la; fi", &["true", "ls -la"]),
-        ] {
-            assert_eq!(texts(command), expected, "{command:?}");
+        mod parse {
+            use super::*;
+
+            fn joined(words: &[ShellWord]) -> String {
+                words
+                    .iter()
+                    .map(ShellWord::text)
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            }
+
+            /// Each simple command's named words, joined on spaces.
+            fn texts(command: &str) -> Vec<String> {
+                parse(command)
+                    .segments
+                    .iter()
+                    .map(|segment| joined(segment.named()))
+                    .collect()
+            }
+
+            fn words(command: &str) -> Vec<String> {
+                parse(command).segments[0]
+                    .program()
+                    .iter()
+                    .map(|word| word.text().to_owned())
+                    .collect()
+            }
+
+            #[test]
+            fn splits_simple_commands_across_every_separator() {
+                for (command, expected) in [
+                    ("a; b", &["a", "b"][..]),
+                    ("a && b || c", &["a", "b", "c"]),
+                    ("a | b |& c", &["a", "b", "c"]),
+                    ("a & b", &["a", "b"]),
+                    ("a\nb", &["a", "b"]),
+                    ("(cd x && ls) ; { echo a; }", &["cd x", "ls", "echo a"]),
+                    ("! git diff --quiet", &["git diff --quiet"]),
+                    ("if true; then ls -la; fi", &["true", "ls -la"]),
+                ] {
+                    assert_eq!(texts(command), expected, "{command:?}");
+                }
+                assert!(!parse("cargo test --all").is_opaque());
+            }
+
+            #[test]
+            fn strips_leading_assignments_and_keeps_words_unquoted() {
+                assert_eq!(texts(r#"LANG=C TZ="x y" cargo test"#), ["cargo test"]);
+                assert_eq!(
+                    words(indoc! {r#"
+                        "rm" -rf 'a b' c\ d "e\"f\
+                        g\h" "$HOME"
+                    "#}),
+                    ["rm", "-rf", "a b", "c d", "e\"fg\\h", "\"$HOME\""]
+                );
+                assert!(texts("FOO=1").is_empty(), "an assignment runs no command");
+            }
+
+            #[test]
+            fn keeps_an_assignment_that_may_change_the_program_in_the_text_a_rule_names() {
+                for (command, text, name) in [
+                    (
+                        "RUST_LOG=debug LD_PRELOAD=./x.so cat a",
+                        "LD_PRELOAD=./x.so cat a",
+                        "cat",
+                    ),
+                    ("GIT_PAGER=sh git log", "GIT_PAGER=sh git log", "git"),
+                    (
+                        "nice env PATH=. nohup cat a",
+                        "env PATH=. nohup cat a",
+                        "cat",
+                    ),
+                ] {
+                    let command = parse(command);
+                    let segment = &command.segments[0];
+                    assert_eq!(joined(segment.named()), text, "{command:?}");
+                    assert_eq!(segment.program()[0].text(), name, "{command:?}");
+                    assert!(segment.safe_reads().is_none(), "{command:?}");
+                    assert!(!command.is_opaque(), "{command:?}");
+                }
+                assert!(is_safe("LANG=C TZ=UTC env NO_COLOR=1 cat a"));
+            }
+
+            #[test]
+            fn turns_a_variable_the_shell_or_a_later_program_reads_opaque() {
+                for command in [
+                    "PATH=.; ls",
+                    "HOME=/; cat ~/x",
+                    "export GIT_PAGER=sh; git log",
+                    "declare -x PATH",
+                    "for PATH in .; do ls; done",
+                ] {
+                    assert!(parse(command).is_opaque(), "{command:?}");
+                }
+                for command in [
+                    "X=1; echo hi",
+                    "export RUST_LOG=debug; cargo test",
+                    "for f in a b; do cat \"$f\"; done",
+                ] {
+                    assert!(!parse(command).is_opaque(), "{command:?}");
+                }
+            }
+
+            #[test]
+            fn expands_a_leading_tilde_only() {
+                temp_env::with_var(HOME_VAR, Some(abs("/home/u")), || {
+                    let expanded = PathBuf::from(abs("/home/u")).join("x");
+                    assert_eq!(
+                        words(r#"cat ~/x "~/y" a~b"#),
+                        [
+                            "cat".to_owned(),
+                            expanded.to_string_lossy().into_owned(),
+                            "~/y".to_owned(),
+                            "a~b".to_owned()
+                        ]
+                    );
+                    assert_eq!(words("cat ~u/x"), ["cat", "~u/x"], "kept as written");
+                });
+            }
+
+            #[test]
+            fn marks_each_word_that_expands_or_globs_as_not_literal() {
+                let command = temp_env::with_var(HOME_VAR, Some(abs("/home/u")), || {
+                    parse(r#"FOO="a b" BAR=$X EMPTY= a[$i]=1 cat 'x*' *.rs "$HOME" ~/n"#)
+                });
+                let segment = &command.segments[0];
+                let named: Vec<(&str, bool)> = segment
+                    .named()
+                    .iter()
+                    .map(|word| (word.text(), word.is_literal()))
+                    .collect();
+                let home = Path::new(&abs("/home/u"))
+                    .join("n")
+                    .to_string_lossy()
+                    .into_owned();
+                assert_eq!(
+                    named,
+                    [
+                        ("FOO=a b", true),
+                        ("BAR=$X", false),
+                        ("EMPTY=", true),
+                        ("a[$i]=1", false),
+                        ("cat", true),
+                        ("x*", true),
+                        ("*.rs", false),
+                        ("\"$HOME\"", false),
+                        (home.as_str(), true),
+                    ]
+                );
+                assert_eq!(
+                    joined(segment.program()),
+                    format!("cat x* *.rs \"$HOME\" {home}")
+                );
+            }
+
+            #[test]
+            fn reads_an_ansi_c_string_as_the_literal_word_it_decodes_to() {
+                let command = parse(r"$'rm' pu$'sh' $'\055rf' $'\x80'");
+
+                let program: Vec<(&str, bool)> = command.segments[0]
+                    .program()
+                    .iter()
+                    .map(|word| (word.text(), word.is_literal()))
+                    .collect();
+
+                assert_eq!(
+                    program,
+                    [
+                        ("rm", true),
+                        ("push", true),
+                        ("-rf", true),
+                        (r"$'\x80'", false)
+                    ]
+                );
+            }
+
+            #[test]
+            fn drops_the_program_directory_for_the_bare_program_only() {
+                let command = parse("FOO=1 /usr/bin/rm -rf x");
+                let segment = &command.segments[0];
+                assert_eq!(joined(&segment.bare_program().unwrap()), "rm -rf x");
+                assert_eq!(joined(segment.named()), "FOO=1 /usr/bin/rm -rf x");
+                assert!(parse("rm -rf x").segments[0].bare_program().is_none());
+            }
+
+            #[test]
+            fn strips_transparent_wrappers_and_their_options() {
+                for command in [
+                    "env -i -u HOME TZ=UTC rm -rf x",
+                    "env --chdir=/tmp rm -rf x",
+                    "nice -n 5 rm -rf x",
+                    "nice -10 rm -rf x",
+                    "nice -n5 rm -rf x",
+                    "nohup rm -rf x",
+                    "time -p rm -rf x",
+                    "timeout -s KILL --preserve-status 5m rm -rf x",
+                    "nice nohup -- timeout 5 rm -rf x",
+                    "builtin rm -rf x",
+                    "command -p rm -rf x",
+                    "exec -a name rm -rf x",
+                ] {
+                    let command = parse(command);
+                    assert_eq!(
+                        joined(command.segments[0].program()),
+                        "rm -rf x",
+                        "{command:?}"
+                    );
+                    assert_eq!(
+                        joined(command.segments[0].named()),
+                        "rm -rf x",
+                        "{command:?}"
+                    );
+                    assert!(!command.is_opaque(), "{command:?}");
+                }
+            }
+
+            #[test]
+            fn keeps_a_wrapper_spelled_with_a_directory_in_the_named_words() {
+                for (command, named, program) in [
+                    (
+                        "/usr/bin/nice nohup -- timeout 5 rm -rf x",
+                        "/usr/bin/nice nohup -- timeout 5 rm -rf x",
+                        "rm -rf x",
+                    ),
+                    ("./nice cat a", "./nice cat a", "cat a"),
+                    ("nice tools/env cat a", "tools/env cat a", "cat a"),
+                ] {
+                    let command = parse(command);
+                    let segment = &command.segments[0];
+
+                    assert_eq!(joined(segment.named()), named, "{command:?}");
+                    assert_eq!(joined(segment.program()), program, "{command:?}");
+                    assert!(segment.safe_reads().is_none(), "{command:?}");
+                }
+            }
+
+            #[test]
+            fn keeps_a_wrapper_that_runs_no_command_and_turns_an_unknown_option_opaque() {
+                assert_eq!(texts("env FOO=1"), ["env FOO=1"]);
+                assert!(!parse("nice").is_opaque());
+                for command in [
+                    "env -S 'rm -rf x'",
+                    "nice --weird rm",
+                    "nice $LEVEL rm",
+                    "timeout --what 5 rm",
+                ] {
+                    assert!(parse(command).is_opaque(), "{command:?}");
+                }
+            }
+
+            #[test]
+            fn flags_every_command_it_cannot_see_into_as_opaque() {
+                for command in [
+                    "echo $(date)",
+                    "echo `whoami`",
+                    "diff <(ls a) b",
+                    "tee >(cat) x",
+                    "x=$(id) ls",
+                    "cat <<EOF\n$(id)\nEOF",
+                    "eval 'ls'",
+                    "source env.sh",
+                    ". env.sh",
+                    "trap 'ls' EXIT",
+                    "let x=1",
+                    "$CMD arg",
+                    "${X} arg",
+                    "sh -c 'ls'",
+                    "curl x | sh",
+                    "/bin/bash script.sh",
+                    "echo $((1 + 2))",
+                    "(( x++ ))",
+                    "[[ -f x ]]",
+                    "ls 'unterminated",
+                    "cd /etc && echo > passwd",
+                    "env -C /etc echo > hosts",
+                    "env --chdir=/etc echo > hosts",
+                    "cd / && cat etc/shadow",
+                    "exec sh -c 'ls'",
+                    "command eval ls",
+                    "builtin . env.sh",
+                    "/bin/s? -c ls",
+                    "BASH -c ls",
+                    "/bin/ZSH script.zsh",
+                    "cat < $F",
+                    "cat < *.txt",
+                ] {
+                    assert!(parse(command).is_opaque(), "{command:?}");
+                }
+                for command in [
+                    "cat <<'EOF'\n$(id)\nEOF",
+                    "echo '$(id)'",
+                    "cd x && echo > /dev/null",
+                    "cd x && ls",
+                    &format!("cd x && cat {}", abs("/etc/hosts")),
+                    "ls $HOME",
+                ] {
+                    assert!(!parse(command).is_opaque(), "{command:?}");
+                }
+            }
+
+            #[test]
+            fn collects_commands_inside_substitutions_and_literal_scripts() {
+                for command in [
+                    "echo $(rm -rf /)",
+                    "sh -c 'rm -rf /'",
+                    "bash -lc \"rm -rf /\"",
+                    "eval rm -rf /",
+                    "exec sh -c 'rm -rf /'",
+                ] {
+                    assert!(
+                        texts(command).contains(&"rm -rf /".to_owned()),
+                        "{command:?}: {:?}",
+                        texts(command)
+                    );
+                }
+            }
         }
-        assert!(!parse("cargo test --all").is_opaque());
     }
 
-    #[test]
-    fn parse_strips_leading_assignments_and_keeps_words_unquoted() {
-        assert_eq!(texts(r#"LANG=C TZ="x y" cargo test"#), ["cargo test"]);
-        assert_eq!(
-            words(indoc! {r#"
-                "rm" -rf 'a b' c\ d "e\"f\
-                g\h" "$HOME"
-            "#}),
-            ["rm", "-rf", "a b", "c d", "e\"fg\\h", "\"$HOME\""]
-        );
-        assert!(texts("FOO=1").is_empty(), "an assignment runs no command");
-    }
+    mod segment {
+        use super::*;
 
-    #[test]
-    fn parse_keeps_an_assignment_that_may_change_the_program_in_the_text_a_rule_names() {
-        for (command, text, name) in [
-            (
-                "RUST_LOG=debug LD_PRELOAD=./x.so cat a",
-                "LD_PRELOAD=./x.so cat a",
-                "cat",
-            ),
-            ("GIT_PAGER=sh git log", "GIT_PAGER=sh git log", "git"),
-            (
-                "nice env PATH=. nohup cat a",
-                "env PATH=. nohup cat a",
-                "cat",
-            ),
-        ] {
-            let command = parse(command);
-            let segment = &command.segments[0];
-            assert_eq!(joined(segment.named()), text, "{command:?}");
-            assert_eq!(segment.program()[0].text(), name, "{command:?}");
-            assert!(segment.safe_reads().is_none(), "{command:?}");
-            assert!(!command.is_opaque(), "{command:?}");
-        }
-        assert!(is_safe("LANG=C TZ=UTC env NO_COLOR=1 cat a"));
-    }
+        mod removes_recursively_by_force {
+            use super::*;
 
-    #[test]
-    fn parse_turns_a_variable_the_shell_or_a_later_program_reads_opaque() {
-        for command in [
-            "PATH=.; ls",
-            "HOME=/; cat ~/x",
-            "export GIT_PAGER=sh; git log",
-            "declare -x PATH",
-            "for PATH in .; do ls; done",
-        ] {
-            assert!(parse(command).is_opaque(), "{command:?}");
-        }
-        for command in [
-            "X=1; echo hi",
-            "export RUST_LOG=debug; cargo test",
-            "for f in a b; do cat \"$f\"; done",
-        ] {
-            assert!(!parse(command).is_opaque(), "{command:?}");
+            #[test]
+            fn reads_both_options_in_every_spelling_before_a_double_dash() {
+                for command in [
+                    "rm -rf /",
+                    "rm -fr x",
+                    "rm -rfv /",
+                    "rm -Rf x",
+                    "rm -f -R x",
+                    "rm -r --force /",
+                    "rm --recursive --force x",
+                    "rm --rec --f x",
+                    "rm / -rf",
+                    "RM -Rf x",
+                    "/bin/rm -rf x",
+                    "nice -n 5 rm -rf x",
+                    "rm $FLAGS x",
+                    "$RM -rf x",
+                ] {
+                    assert!(
+                        parse(command).segments[0].removes_recursively_by_force(),
+                        "{command:?}"
+                    );
+                }
+                for command in [
+                    "rm -r x",
+                    "rm -f x",
+                    "rm --recursive x",
+                    "rm -- -rf",
+                    "rm -f -- -r",
+                    "rm --forced -r x",
+                    "rmdir -rf x",
+                    "$RM x",
+                ] {
+                    assert!(
+                        !parse(command).segments[0].removes_recursively_by_force(),
+                        "{command:?}"
+                    );
+                }
+            }
         }
     }
 
-    #[test]
-    fn parse_expands_a_leading_tilde_only() {
-        temp_env::with_var(HOME_VAR, Some(abs("/home/u")), || {
-            let expanded = PathBuf::from(abs("/home/u")).join("x");
+    mod walk {
+        use super::*;
+
+        mod redirect {
+            use super::*;
+
+            /// Each write's path relative to `cwd`, or as requested outside it.
+            fn writes(command: &str, cwd: &Path) -> Vec<String> {
+                spelled(CommandTarget::parse(command, &Workspace::new(cwd)).writes)
+            }
+
+            /// Each input redirection's path relative to `cwd`, or as requested outside it.
+            fn reads(command: &str, cwd: &Path) -> Vec<String> {
+                spelled(CommandTarget::parse(command, &Workspace::new(cwd)).reads)
+            }
+
+            fn spelled(targets: Vec<Access>) -> Vec<String> {
+                targets
+                    .into_iter()
+                    .map(|target| match target {
+                        Access::Path {
+                            relative,
+                            requested,
+                            ..
+                        } => relative.unwrap_or(requested),
+                        other => panic!("a redirection target is a path, got {other:?}"),
+                    })
+                    .collect()
+            }
+
+            #[test]
+            fn counts_each_file_an_output_redirection_writes() {
+                let (_dir, cwd) = temp_cwd();
+                assert_eq!(
+                    writes("echo a > out.txt 2>> log &> all >| clobber >& both", &cwd),
+                    ["out.txt", "log", "all", "clobber", "both"]
+                );
+                let outside = abs("/etc/hosts");
+                assert_eq!(
+                    CommandTarget::parse(&format!("echo a > {outside}"), &Workspace::new(&cwd))
+                        .writes,
+                    [Access::for_path(&outside, &Workspace::new(&cwd))]
+                );
+            }
+
+            #[test]
+            fn counts_each_file_an_input_redirection_reads() {
+                let (_dir, cwd) = temp_cwd();
+
+                let target = CommandTarget::parse(
+                    "sort < in.txt 3< more.txt > out.txt",
+                    &Workspace::new(&cwd),
+                );
+
+                assert_eq!(spelled(target.reads.clone()), ["in.txt", "more.txt"]);
+                assert_eq!(spelled(target.writes.clone()), ["out.txt"]);
+                assert!(!target.is_opaque());
+                assert!(
+                    parse("cd x && cat < in.txt").is_opaque(),
+                    "a relative input after a cd may name another file"
+                );
+            }
+
+            #[test]
+            fn skips_heredocs_descriptors_and_devices() {
+                let (_dir, cwd) = temp_cwd();
+                for command in [
+                    "cat <<< x",
+                    "cat <<EOF\nx\nEOF",
+                    "make 2>&1",
+                    "make 3>&-",
+                    "make <&3",
+                    "make > /dev/null 2> /dev/stderr < /dev/null",
+                ] {
+                    assert!(writes(command, &cwd).is_empty(), "{command:?}");
+                    assert!(reads(command, &cwd).is_empty(), "{command:?}");
+                    assert!(
+                        !CommandTarget::parse(command, &Workspace::new(&cwd)).is_opaque(),
+                        "{command:?}"
+                    );
+                }
+            }
+
+            #[test]
+            fn to_a_target_it_cannot_place_is_opaque() {
+                for command in ["echo > \"$OUT\"", "echo > *.txt", "echo >&2 hi"] {
+                    assert!(parse(command).is_opaque(), "{command:?}");
+                }
+            }
+        }
+    }
+
+    mod unquote_ansi_c {
+        use super::*;
+
+        #[test]
+        fn decodes_each_escape_bash_does() {
+            for (inner, value) in [
+                ("push", "push"),
+                (r"pu\x73h", "push"),
+                (r"\162m", "rm"),
+                (r"\55rf", "-rf"),
+                (r"\0101", "\u{8}1"),
+                (r"\u002drf", "-rf"),
+                (r"\U0000002drf", "-rf"),
+                (r"\u00e9", "\u{e9}"),
+                (r"a\tb\n\r\v\f\a\b", "a\tb\n\r\u{b}\u{c}\u{7}\u{8}"),
+                (r"\e[0m\E", "\u{1b}[0m\u{1b}"),
+                (r#"\'\"\\\?"#, r#"'"\?"#),
+                (r"\cA", "\u{1}"),
+                (r"\q", r"\q"),
+            ] {
+                assert_eq!(unquote_ansi_c(inner).as_deref(), Some(value), "{inner:?}");
+            }
+        }
+
+        #[test]
+        fn declines_an_escape_that_names_no_ascii_character_or_nul() {
+            for inner in [
+                r"\x80", r"\200", r"\xZ", r"\0", r"\400", r"a\x00b", r"\c", "a\\",
+            ] {
+                assert_eq!(unquote_ansi_c(inner), None, "{inner:?}");
+            }
+        }
+    }
+
+    mod pattern_words {
+        use super::*;
+
+        fn pattern(raw: &str) -> Vec<PatternWord> {
+            pattern_words(raw).unwrap()
+        }
+
+        fn literal(text: &str) -> PatternWord {
+            PatternWord::Literal(text.to_owned())
+        }
+
+        #[test]
+        fn unquotes_each_word_and_reads_a_lone_star_as_a_wildcard() {
+            temp_env::with_var(HOME_VAR, Some(abs("/home/u")), || {
+                let home = PathBuf::from(abs("/home/u")).join("x");
+                assert_eq!(
+                    pattern(r#"GIT_PAGER=cat git  commit -m "a b" '*' \* ~/x *"#),
+                    [
+                        literal("GIT_PAGER=cat"),
+                        literal("git"),
+                        literal("commit"),
+                        literal("-m"),
+                        literal("a b"),
+                        literal("*"),
+                        literal("*"),
+                        literal(&home.to_string_lossy()),
+                        PatternWord::Any,
+                    ]
+                );
+            });
+            assert_eq!(pattern("*"), [PatternWord::Any]);
             assert_eq!(
-                words(r#"cat ~/x "~/y" a~b"#),
+                pattern("git * --force"),
+                [literal("git"), PatternWord::Any, literal("--force")]
+            );
+        }
+    }
+
+    mod safe_operands {
+        use super::*;
+
+        #[test]
+        fn names_every_word_that_may_be_a_file() {
+            let command = CommandTarget::parse(
+                "grep -fpats --file=more -e x -- -y src",
+                &Workspace::new(Path::new("/repo")),
+            );
+            let at = |name: &str| Access::for_path(name, &Workspace::new(Path::new("/repo")));
+            assert_eq!(
+                command.segments[0].safe_reads(),
+                Some(&[at("pats"), at("more"), at("x"), at("-y"), at("src")][..])
+            );
+            assert_eq!(
+                parse("echo $HOME *").segments[0].safe_reads(),
+                Some(&[][..])
+            );
+        }
+
+        #[test]
+        fn admits_only_shipped_commands_with_literal_arguments() {
+            for command in [
+                "cat a.rs",
+                "head -n 5 a",
+                "ls -la src",
+                "wc -l a",
+                "pwd",
+                "true",
+            ] {
+                assert!(is_safe(command), "{command:?}");
+            }
+            for command in [
+                "cat *.rs",
+                "cat $F",
+                "cat {a,b}",
+                "rm a",
+                "./cat a",
+                "git status",
+            ] {
+                assert!(!is_safe(command), "{command:?}");
+            }
+        }
+
+        #[test]
+        fn guards_find_and_grep() {
+            assert!(is_safe("find . -name '*.rs' -type f"));
+            for action in FIND_ACTIONS {
+                assert!(!is_safe(&format!("find . {action} x")), "{action}");
+            }
+            assert!(is_safe("grep -n TODO src/main.rs"));
+            for command in [
+                "grep -r TODO .",
+                "grep -Rn TODO .",
+                "grep --recursive TODO .",
+                "grep -d recurse TODO .",
+                "grep --directories=recurse TODO .",
+                "grep --rec TODO .",
+                "grep --dir=rec TODO .",
+                "grep -d rec TODO .",
+            ] {
+                assert!(!is_safe(command), "{command:?}");
+            }
+        }
+    }
+
+    mod sed_files {
+        use super::*;
+
+        #[test]
+        fn admits_scripts_that_only_print_or_rewrite_text() {
+            for command in [
+                "sed -n '1,20p' a.rs",
+                "sed 's/foo/bar/g' a.rs",
+                "sed -e '/^$/d' -e 's/a\\/b/c/2' a.rs",
+                "sed --expression='$p' a.rs",
+                "sed --expression '$p' a.rs",
+                "sed --quiet 1p a.rs",
+                "sed -es/a/b/ a.rs",
+                "sed --exp=1p a.rs",
+                "sed -ne '3p;5q' a.rs",
+                "sed -n -- '1!G;h;$p' a.rs",
+            ] {
+                assert!(is_safe(command), "{command:?}");
+            }
+        }
+
+        #[test]
+        fn refuses_in_place_edits_script_files_and_writing_or_running_commands() {
+            for command in [
+                "sed -i 's/a/b/' a.rs",
+                "sed -I '' 's/a/b/' a.rs",
+                "sed --in 's/a/b/' a.rs",
+                "sed --fi=script.sed a.rs",
+                "sed --exp='w out' p a.rs",
+                "sed -ni 'p' a.rs",
+                "sed --in-place=.bak 's/a/b/' a.rs",
+                "sed -f script.sed a.rs",
+                "sed --file=script.sed a.rs",
+                "sed 's/a/b/w out' a.rs",
+                "sed 's/a/b/e' a.rs",
+                "sed -n 'w out' a.rs",
+                "sed '1r /etc/passwd' a.rs",
+                "sed 'e date' a.rs",
+                "sed -e",
+                "sed --expression",
+                "sed",
+            ] {
+                assert!(!is_safe(command), "{command:?}");
+            }
+        }
+
+        #[test]
+        fn reads_the_files_past_the_script() {
+            for command in ["sed -n 1p a.rs", "sed -e 1p -- a.rs"] {
+                let reads = parse(command).segments[0].safe_reads().unwrap().to_vec();
+                assert_eq!(
+                    reads,
+                    [Access::for_path(
+                        "a.rs",
+                        &Workspace::new(Path::new("/repo"))
+                    )],
+                    "{command:?}"
+                );
+            }
+        }
+    }
+
+    mod reader_operands {
+        use super::*;
+
+        #[test]
+        fn flag_a_reader_word_whose_files_are_unknown() {
+            for command in [
+                "cat $F",
+                r#"cat "$HOME/.ssh/id_rsa""#,
+                "/bin/cat $F",
+                "grep -r x $DIR",
+                "head -n $N a",
+                "cat x[",
+            ] {
+                assert!(parse(command).segments[0].reads_anything(), "{command:?}");
+            }
+            for command in ["cat a", "cat *.rs", "echo $F", "cp $F b"] {
+                assert!(!parse(command).segments[0].reads_anything(), "{command:?}");
+            }
+        }
+
+        #[test]
+        fn read_each_literal_operand_and_each_file_a_glob_matches() {
+            let (_dir, cwd) = temp_cwd();
+            std::fs::create_dir(cwd.join("src")).unwrap();
+            std::fs::write(cwd.join("src/main.rs"), "").unwrap();
+            let workspace = Workspace::new(&cwd);
+
+            let command = CommandTarget::parse("grep -r x src/*.rs docs", &workspace);
+
+            let segment = &command.segments[0];
+            assert_eq!(segment.safe_reads(), None);
+            let at = |name: &str| Access::for_path(name, &workspace);
+            let main = Path::new("src").join("main.rs");
+            assert_eq!(
+                segment.reads(),
                 [
-                    "cat".to_owned(),
-                    expanded.to_string_lossy().into_owned(),
-                    "~/y".to_owned(),
-                    "a~b".to_owned()
+                    at("x"),
+                    at(&main.to_string_lossy()),
+                    at("src/*.rs"),
+                    at("docs")
                 ]
             );
-            assert_eq!(words("cat ~u/x"), ["cat", "~u/x"], "kept as written");
-        });
+        }
     }
 
-    #[test]
-    fn parse_marks_each_word_that_expands_or_globs_as_not_literal() {
-        let command = temp_env::with_var(HOME_VAR, Some(abs("/home/u")), || {
-            parse(r#"FOO="a b" BAR=$X EMPTY= a[$i]=1 cat 'x*' *.rs "$HOME" ~/n"#)
-        });
-        let segment = &command.segments[0];
-        let named: Vec<(&str, bool)> = segment
-            .named()
-            .iter()
-            .map(|word| (word.text(), word.is_literal()))
-            .collect();
-        let home = Path::new(&abs("/home/u"))
-            .join("n")
-            .to_string_lossy()
-            .into_owned();
-        assert_eq!(
-            named,
-            [
-                ("FOO=a b", true),
-                ("BAR=$X", false),
-                ("EMPTY=", true),
-                ("a[$i]=1", false),
-                ("cat", true),
-                ("x*", true),
-                ("*.rs", false),
-                ("\"$HOME\"", false),
-                (home.as_str(), true),
-            ]
-        );
-        assert_eq!(
-            joined(segment.program()),
-            format!("cat x* *.rs \"$HOME\" {home}")
-        );
-    }
+    mod expand_glob {
+        use super::*;
 
-    #[test]
-    fn parse_reads_an_ansi_c_string_as_the_literal_word_it_decodes_to() {
-        let command = parse(r"$'rm' pu$'sh' $'\055rf' $'\x80'");
+        #[test]
+        fn lists_what_bash_would_and_skips_dot_names_unless_a_name_asks_for_them() {
+            let (_dir, cwd) = temp_cwd();
+            for dir in ["src/sub", ".ssh", "docs"] {
+                std::fs::create_dir_all(cwd.join(dir)).unwrap();
+            }
+            for file in [
+                "src/a.rs",
+                "src/b.rs",
+                "src/c.md",
+                "src/sub/d.rs",
+                ".ssh/id_rsa",
+                ".ssh/id_ed25519",
+                "docs/id_x",
+                ".env",
+            ] {
+                std::fs::write(cwd.join(file), "").unwrap();
+            }
+            let expand = |pattern: &str| {
+                let mut paths: Vec<String> = expand_glob(pattern, &cwd)
+                    .unwrap()
+                    .iter()
+                    .map(|path| slash_separated(Path::new(path)))
+                    .collect();
+                paths.sort();
+                paths
+            };
+            let root = slash_separated(&cwd);
 
-        let program: Vec<(&str, bool)> = command.segments[0]
-            .program()
-            .iter()
-            .map(|word| (word.text(), word.is_literal()))
-            .collect();
-
-        assert_eq!(
-            program,
-            [
-                ("rm", true),
-                ("push", true),
-                ("-rf", true),
-                (r"$'\x80'", false)
-            ]
-        );
-    }
-
-    #[test]
-    fn parse_drops_the_program_directory_for_the_bare_program_only() {
-        let command = parse("FOO=1 /usr/bin/rm -rf x");
-        let segment = &command.segments[0];
-        assert_eq!(joined(&segment.bare_program().unwrap()), "rm -rf x");
-        assert_eq!(joined(segment.named()), "FOO=1 /usr/bin/rm -rf x");
-        assert!(parse("rm -rf x").segments[0].bare_program().is_none());
-    }
-
-    // ── CommandTarget::parse: wrappers ──
-
-    #[test]
-    fn parse_strips_transparent_wrappers_and_their_options() {
-        for command in [
-            "env -i -u HOME TZ=UTC rm -rf x",
-            "env --chdir=/tmp rm -rf x",
-            "nice -n 5 rm -rf x",
-            "nice -10 rm -rf x",
-            "nice -n5 rm -rf x",
-            "nohup rm -rf x",
-            "time -p rm -rf x",
-            "timeout -s KILL --preserve-status 5m rm -rf x",
-            "nice nohup -- timeout 5 rm -rf x",
-            "builtin rm -rf x",
-            "command -p rm -rf x",
-            "exec -a name rm -rf x",
-        ] {
-            let command = parse(command);
+            assert_eq!(expand("src/*.rs"), ["src/a.rs", "src/b.rs"]);
+            assert_eq!(expand("./src/*/*.rs"), ["./src/sub/d.rs"]);
+            assert_eq!(expand("*/id_*"), ["docs/id_x"]);
+            assert_eq!(expand(".*/id_*"), [".ssh/id_ed25519", ".ssh/id_rsa"]);
             assert_eq!(
-                joined(command.segments[0].program()),
-                "rm -rf x",
-                "{command:?}"
+                expand("{.ssh,docs}/id_[er]*"),
+                [".ssh/id_ed25519", ".ssh/id_rsa"]
             );
+            assert_eq!(expand("?env"), [""; 0]);
+            assert_eq!(expand("missing/*"), [""; 0]);
             assert_eq!(
-                joined(command.segments[0].named()),
-                "rm -rf x",
-                "{command:?}"
-            );
-            assert!(!command.is_opaque(), "{command:?}");
-        }
-    }
-
-    #[test]
-    fn parse_keeps_a_wrapper_spelled_with_a_directory_in_the_named_words() {
-        for (command, named, program) in [
-            (
-                "/usr/bin/nice nohup -- timeout 5 rm -rf x",
-                "/usr/bin/nice nohup -- timeout 5 rm -rf x",
-                "rm -rf x",
-            ),
-            ("./nice cat a", "./nice cat a", "cat a"),
-            ("nice tools/env cat a", "tools/env cat a", "cat a"),
-        ] {
-            let command = parse(command);
-            let segment = &command.segments[0];
-
-            assert_eq!(joined(segment.named()), named, "{command:?}");
-            assert_eq!(joined(segment.program()), program, "{command:?}");
-            assert!(segment.safe_reads().is_none(), "{command:?}");
-        }
-    }
-
-    #[test]
-    fn parse_keeps_a_wrapper_that_runs_no_command_and_turns_an_unknown_option_opaque() {
-        assert_eq!(texts("env FOO=1"), ["env FOO=1"]);
-        assert!(!parse("nice").is_opaque());
-        for command in [
-            "env -S 'rm -rf x'",
-            "nice --weird rm",
-            "nice $LEVEL rm",
-            "timeout --what 5 rm",
-        ] {
-            assert!(parse(command).is_opaque(), "{command:?}");
-        }
-    }
-
-    // ── CommandTarget::parse: opaque ──
-
-    #[test]
-    fn parse_flags_every_command_it_cannot_see_into_as_opaque() {
-        for command in [
-            "echo $(date)",
-            "echo `whoami`",
-            "diff <(ls a) b",
-            "tee >(cat) x",
-            "x=$(id) ls",
-            "cat <<EOF\n$(id)\nEOF",
-            "eval 'ls'",
-            "source env.sh",
-            ". env.sh",
-            "trap 'ls' EXIT",
-            "let x=1",
-            "$CMD arg",
-            "${X} arg",
-            "sh -c 'ls'",
-            "curl x | sh",
-            "/bin/bash script.sh",
-            "echo $((1 + 2))",
-            "(( x++ ))",
-            "[[ -f x ]]",
-            "ls 'unterminated",
-            "cd /etc && echo > passwd",
-            "env -C /etc echo > hosts",
-            "env --chdir=/etc echo > hosts",
-            "cd / && cat etc/shadow",
-            "exec sh -c 'ls'",
-            "command eval ls",
-            "builtin . env.sh",
-            "/bin/s? -c ls",
-            "BASH -c ls",
-            "/bin/ZSH script.zsh",
-            "cat < $F",
-            "cat < *.txt",
-        ] {
-            assert!(parse(command).is_opaque(), "{command:?}");
-        }
-        for command in [
-            "cat <<'EOF'\n$(id)\nEOF",
-            "echo '$(id)'",
-            "cd x && echo > /dev/null",
-            "cd x && ls",
-            &format!("cd x && cat {}", abs("/etc/hosts")),
-            "ls $HOME",
-        ] {
-            assert!(!parse(command).is_opaque(), "{command:?}");
-        }
-    }
-
-    #[test]
-    fn parse_collects_commands_inside_substitutions_and_literal_scripts() {
-        for command in [
-            "echo $(rm -rf /)",
-            "sh -c 'rm -rf /'",
-            "bash -lc \"rm -rf /\"",
-            "eval rm -rf /",
-            "exec sh -c 'rm -rf /'",
-        ] {
-            assert!(
-                texts(command).contains(&"rm -rf /".to_owned()),
-                "{command:?}: {:?}",
-                texts(command)
+                expand(&format!("{root}/.ss?/id_rsa")),
+                [format!("{root}/.ssh/id_rsa")]
             );
         }
-    }
 
-    // ── Segment::removes_recursively_by_force ──
-
-    #[test]
-    fn removes_recursively_by_force_reads_both_options_in_every_spelling_before_a_double_dash() {
-        for command in [
-            "rm -rf /",
-            "rm -fr x",
-            "rm -rfv /",
-            "rm -Rf x",
-            "rm -f -R x",
-            "rm -r --force /",
-            "rm --recursive --force x",
-            "rm --rec --f x",
-            "rm / -rf",
-            "RM -Rf x",
-            "/bin/rm -rf x",
-            "nice -n 5 rm -rf x",
-            "rm $FLAGS x",
-            "$RM -rf x",
-        ] {
-            assert!(
-                parse(command).segments[0].removes_recursively_by_force(),
-                "{command:?}"
-            );
-        }
-        for command in [
-            "rm -r x",
-            "rm -f x",
-            "rm --recursive x",
-            "rm -- -rf",
-            "rm -f -- -r",
-            "rm --forced -r x",
-            "rmdir -rf x",
-            "$RM x",
-        ] {
-            assert!(
-                !parse(command).segments[0].removes_recursively_by_force(),
-                "{command:?}"
-            );
-        }
-    }
-
-    // ── Walk::redirect ──
-
-    #[test]
-    fn redirect_counts_each_file_an_output_redirection_writes() {
-        let (_dir, cwd) = temp_cwd();
-        assert_eq!(
-            writes("echo a > out.txt 2>> log &> all >| clobber >& both", &cwd),
-            ["out.txt", "log", "all", "clobber", "both"]
-        );
-        let outside = abs("/etc/hosts");
-        assert_eq!(
-            CommandTarget::parse(&format!("echo a > {outside}"), &Workspace::new(&cwd)).writes,
-            [Access::for_path(&outside, &Workspace::new(&cwd))]
-        );
-    }
-
-    #[test]
-    fn redirect_counts_each_file_an_input_redirection_reads() {
-        let (_dir, cwd) = temp_cwd();
-
-        let target =
-            CommandTarget::parse("sort < in.txt 3< more.txt > out.txt", &Workspace::new(&cwd));
-
-        assert_eq!(spelled(target.reads.clone()), ["in.txt", "more.txt"]);
-        assert_eq!(spelled(target.writes.clone()), ["out.txt"]);
-        assert!(!target.is_opaque());
-        assert!(
-            parse("cd x && cat < in.txt").is_opaque(),
-            "a relative input after a cd may name another file"
-        );
-    }
-
-    #[test]
-    fn redirect_skips_heredocs_descriptors_and_devices() {
-        let (_dir, cwd) = temp_cwd();
-        for command in [
-            "cat <<< x",
-            "cat <<EOF\nx\nEOF",
-            "make 2>&1",
-            "make 3>&-",
-            "make <&3",
-            "make > /dev/null 2> /dev/stderr < /dev/null",
-        ] {
-            assert!(writes(command, &cwd).is_empty(), "{command:?}");
-            assert!(reads(command, &cwd).is_empty(), "{command:?}");
-            assert!(
-                !CommandTarget::parse(command, &Workspace::new(&cwd)).is_opaque(),
-                "{command:?}"
-            );
-        }
-    }
-
-    #[test]
-    fn redirect_to_a_target_it_cannot_place_is_opaque() {
-        for command in ["echo > \"$OUT\"", "echo > *.txt", "echo >&2 hi"] {
-            assert!(parse(command).is_opaque(), "{command:?}");
-        }
-    }
-
-    // ── unquote_ansi_c ──
-
-    #[test]
-    fn unquote_ansi_c_decodes_each_escape_bash_does() {
-        for (inner, value) in [
-            ("push", "push"),
-            (r"pu\x73h", "push"),
-            (r"\162m", "rm"),
-            (r"\55rf", "-rf"),
-            (r"\0101", "\u{8}1"),
-            (r"\u002drf", "-rf"),
-            (r"\U0000002drf", "-rf"),
-            (r"\u00e9", "\u{e9}"),
-            (r"a\tb\n\r\v\f\a\b", "a\tb\n\r\u{b}\u{c}\u{7}\u{8}"),
-            (r"\e[0m\E", "\u{1b}[0m\u{1b}"),
-            (r#"\'\"\\\?"#, r#"'"\?"#),
-            (r"\cA", "\u{1}"),
-            (r"\q", r"\q"),
-        ] {
-            assert_eq!(unquote_ansi_c(inner).as_deref(), Some(value), "{inner:?}");
-        }
-    }
-
-    #[test]
-    fn unquote_ansi_c_declines_an_escape_that_names_no_ascii_character_or_nul() {
-        for inner in [
-            r"\x80", r"\200", r"\xZ", r"\0", r"\400", r"a\x00b", r"\c", "a\\",
-        ] {
-            assert_eq!(unquote_ansi_c(inner), None, "{inner:?}");
-        }
-    }
-
-    // ── pattern_words ──
-
-    #[test]
-    fn pattern_words_unquotes_each_word_and_reads_a_lone_star_as_a_wildcard() {
-        temp_env::with_var(HOME_VAR, Some(abs("/home/u")), || {
-            let home = PathBuf::from(abs("/home/u")).join("x");
+        #[test]
+        fn gives_up_past_the_match_cap_or_on_a_pattern_globset_rejects() {
+            let (_dir, cwd) = temp_cwd();
+            for i in 0..MAX_GLOB_MATCHES {
+                std::fs::write(cwd.join(format!("{i}.txt")), "").unwrap();
+            }
             assert_eq!(
-                pattern(r#"GIT_PAGER=cat git  commit -m "a b" '*' \* ~/x *"#),
-                [
-                    literal("GIT_PAGER=cat"),
-                    literal("git"),
-                    literal("commit"),
-                    literal("-m"),
-                    literal("a b"),
-                    literal("*"),
-                    literal("*"),
-                    literal(&home.to_string_lossy()),
-                    PatternWord::Any,
-                ]
+                expand_glob("*.txt", &cwd).map(|paths| paths.len()),
+                Some(MAX_GLOB_MATCHES)
             );
-        });
-        assert_eq!(pattern("*"), [PatternWord::Any]);
-        assert_eq!(
-            pattern("git * --force"),
-            [literal("git"), PatternWord::Any, literal("--force")]
-        );
-    }
 
-    // ── safe_operands ──
+            std::fs::write(cwd.join("last.txt"), "").unwrap();
 
-    #[test]
-    fn safe_operands_names_every_word_that_may_be_a_file() {
-        let command = CommandTarget::parse(
-            "grep -fpats --file=more -e x -- -y src",
-            &Workspace::new(Path::new("/repo")),
-        );
-        let at = |name: &str| Access::for_path(name, &Workspace::new(Path::new("/repo")));
-        assert_eq!(
-            command.segments[0].safe_reads(),
-            Some(&[at("pats"), at("more"), at("x"), at("-y"), at("src")][..])
-        );
-        assert_eq!(
-            parse("echo $HOME *").segments[0].safe_reads(),
-            Some(&[][..])
-        );
-    }
-
-    #[test]
-    fn safe_operands_admits_only_shipped_commands_with_literal_arguments() {
-        for command in [
-            "cat a.rs",
-            "head -n 5 a",
-            "ls -la src",
-            "wc -l a",
-            "pwd",
-            "true",
-        ] {
-            assert!(is_safe(command), "{command:?}");
+            assert_eq!(expand_glob("*.txt", &cwd), None);
+            assert_eq!(expand_glob("[", &cwd), None);
         }
-        for command in [
-            "cat *.rs",
-            "cat $F",
-            "cat {a,b}",
-            "rm a",
-            "./cat a",
-            "git status",
-        ] {
-            assert!(!is_safe(command), "{command:?}");
+
+        #[cfg(target_os = "linux")]
+        #[test]
+        fn gives_up_on_a_file_name_that_is_not_utf8() {
+            use std::os::unix::ffi::OsStrExt as _;
+
+            let (_dir, cwd) = temp_cwd();
+            std::fs::write(cwd.join(std::ffi::OsStr::from_bytes(b"a\xff")), "").unwrap();
+
+            assert_eq!(expand_glob("*", &cwd), None);
         }
-    }
-
-    #[test]
-    fn safe_operands_guards_find_and_grep() {
-        assert!(is_safe("find . -name '*.rs' -type f"));
-        for action in FIND_ACTIONS {
-            assert!(!is_safe(&format!("find . {action} x")), "{action}");
-        }
-        assert!(is_safe("grep -n TODO src/main.rs"));
-        for command in [
-            "grep -r TODO .",
-            "grep -Rn TODO .",
-            "grep --recursive TODO .",
-            "grep -d recurse TODO .",
-            "grep --directories=recurse TODO .",
-            "grep --rec TODO .",
-            "grep --dir=rec TODO .",
-            "grep -d rec TODO .",
-        ] {
-            assert!(!is_safe(command), "{command:?}");
-        }
-    }
-
-    // ── sed_files ──
-
-    #[test]
-    fn sed_files_admits_scripts_that_only_print_or_rewrite_text() {
-        for command in [
-            "sed -n '1,20p' a.rs",
-            "sed 's/foo/bar/g' a.rs",
-            "sed -e '/^$/d' -e 's/a\\/b/c/2' a.rs",
-            "sed --expression='$p' a.rs",
-            "sed --expression '$p' a.rs",
-            "sed --quiet 1p a.rs",
-            "sed -es/a/b/ a.rs",
-            "sed --exp=1p a.rs",
-            "sed -ne '3p;5q' a.rs",
-            "sed -n -- '1!G;h;$p' a.rs",
-        ] {
-            assert!(is_safe(command), "{command:?}");
-        }
-    }
-
-    #[test]
-    fn sed_files_refuses_in_place_edits_script_files_and_writing_or_running_commands() {
-        for command in [
-            "sed -i 's/a/b/' a.rs",
-            "sed -I '' 's/a/b/' a.rs",
-            "sed --in 's/a/b/' a.rs",
-            "sed --fi=script.sed a.rs",
-            "sed --exp='w out' p a.rs",
-            "sed -ni 'p' a.rs",
-            "sed --in-place=.bak 's/a/b/' a.rs",
-            "sed -f script.sed a.rs",
-            "sed --file=script.sed a.rs",
-            "sed 's/a/b/w out' a.rs",
-            "sed 's/a/b/e' a.rs",
-            "sed -n 'w out' a.rs",
-            "sed '1r /etc/passwd' a.rs",
-            "sed 'e date' a.rs",
-            "sed -e",
-            "sed --expression",
-            "sed",
-        ] {
-            assert!(!is_safe(command), "{command:?}");
-        }
-    }
-
-    #[test]
-    fn sed_files_reads_the_files_past_the_script() {
-        for command in ["sed -n 1p a.rs", "sed -e 1p -- a.rs"] {
-            let reads = parse(command).segments[0].safe_reads().unwrap().to_vec();
-            assert_eq!(
-                reads,
-                [Access::for_path(
-                    "a.rs",
-                    &Workspace::new(Path::new("/repo"))
-                )],
-                "{command:?}"
-            );
-        }
-    }
-
-    // ── reader_operands ──
-
-    #[test]
-    fn reader_operands_flag_a_reader_word_whose_files_are_unknown() {
-        for command in [
-            "cat $F",
-            r#"cat "$HOME/.ssh/id_rsa""#,
-            "/bin/cat $F",
-            "grep -r x $DIR",
-            "head -n $N a",
-            "cat x[",
-        ] {
-            assert!(parse(command).segments[0].reads_anything(), "{command:?}");
-        }
-        for command in ["cat a", "cat *.rs", "echo $F", "cp $F b"] {
-            assert!(!parse(command).segments[0].reads_anything(), "{command:?}");
-        }
-    }
-
-    #[test]
-    fn reader_operands_read_each_literal_operand_and_each_file_a_glob_matches() {
-        let (_dir, cwd) = temp_cwd();
-        std::fs::create_dir(cwd.join("src")).unwrap();
-        std::fs::write(cwd.join("src/main.rs"), "").unwrap();
-        let workspace = Workspace::new(&cwd);
-
-        let command = CommandTarget::parse("grep -r x src/*.rs docs", &workspace);
-
-        let segment = &command.segments[0];
-        assert_eq!(segment.safe_reads(), None);
-        let at = |name: &str| Access::for_path(name, &workspace);
-        let main = Path::new("src").join("main.rs");
-        assert_eq!(
-            segment.reads(),
-            [
-                at("x"),
-                at(&main.to_string_lossy()),
-                at("src/*.rs"),
-                at("docs")
-            ]
-        );
-    }
-
-    // ── expand_glob ──
-
-    #[test]
-    fn expand_glob_lists_what_bash_would_and_skips_dot_names_unless_a_name_asks_for_them() {
-        let (_dir, cwd) = temp_cwd();
-        for dir in ["src/sub", ".ssh", "docs"] {
-            std::fs::create_dir_all(cwd.join(dir)).unwrap();
-        }
-        for file in [
-            "src/a.rs",
-            "src/b.rs",
-            "src/c.md",
-            "src/sub/d.rs",
-            ".ssh/id_rsa",
-            ".ssh/id_ed25519",
-            "docs/id_x",
-            ".env",
-        ] {
-            std::fs::write(cwd.join(file), "").unwrap();
-        }
-        let expand = |pattern: &str| {
-            let mut paths: Vec<String> = expand_glob(pattern, &cwd)
-                .unwrap()
-                .iter()
-                .map(|path| slash_separated(Path::new(path)))
-                .collect();
-            paths.sort();
-            paths
-        };
-        let root = slash_separated(&cwd);
-
-        assert_eq!(expand("src/*.rs"), ["src/a.rs", "src/b.rs"]);
-        assert_eq!(expand("./src/*/*.rs"), ["./src/sub/d.rs"]);
-        assert_eq!(expand("*/id_*"), ["docs/id_x"]);
-        assert_eq!(expand(".*/id_*"), [".ssh/id_ed25519", ".ssh/id_rsa"]);
-        assert_eq!(
-            expand("{.ssh,docs}/id_[er]*"),
-            [".ssh/id_ed25519", ".ssh/id_rsa"]
-        );
-        assert_eq!(expand("?env"), [""; 0]);
-        assert_eq!(expand("missing/*"), [""; 0]);
-        assert_eq!(
-            expand(&format!("{root}/.ss?/id_rsa")),
-            [format!("{root}/.ssh/id_rsa")]
-        );
-    }
-
-    #[test]
-    fn expand_glob_gives_up_past_the_match_cap_or_on_a_pattern_globset_rejects() {
-        let (_dir, cwd) = temp_cwd();
-        for i in 0..MAX_GLOB_MATCHES {
-            std::fs::write(cwd.join(format!("{i}.txt")), "").unwrap();
-        }
-        assert_eq!(
-            expand_glob("*.txt", &cwd).map(|paths| paths.len()),
-            Some(MAX_GLOB_MATCHES)
-        );
-
-        std::fs::write(cwd.join("last.txt"), "").unwrap();
-
-        assert_eq!(expand_glob("*.txt", &cwd), None);
-        assert_eq!(expand_glob("[", &cwd), None);
-    }
-
-    #[cfg(target_os = "linux")]
-    #[test]
-    fn expand_glob_gives_up_on_a_file_name_that_is_not_utf8() {
-        use std::os::unix::ffi::OsStrExt as _;
-
-        let (_dir, cwd) = temp_cwd();
-        std::fs::write(cwd.join(std::ffi::OsStr::from_bytes(b"a\xff")), "").unwrap();
-
-        assert_eq!(expand_glob("*", &cwd), None);
     }
 }
