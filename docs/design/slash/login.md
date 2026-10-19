@@ -10,6 +10,8 @@
 
 Credentials resolve in this order: `ANTHROPIC_AUTH_TOKEN`, `ANTHROPIC_API_KEY`, `client.api_key`, `CLAUDE_CODE_OAUTH_TOKEN`, the oxide-code login, then the Claude Code login. Both stored logins use the same refresh path, with a separate file and lock for each.
 
+A session loads its stored login at startup or sign-in, keeping the access token and its expiry in memory. A request made within 5 minutes of that expiry first reloads the login from its store, which refreshes the token and writes it back unless another process already has. When the API rejects a stored login with HTTP 401, the session reloads it once, picking up a token another process refreshed, and resends the request once. A second 401 reports the login's sign-in step. Because every copy of the client shares the token, concurrent requests, such as the title request during a turn, wait for a single refresh. Env vars and `client.api_key` are never reloaded, and their 401 fails at once.
+
 ## Design Decisions
 
 1. **oxide-code keeps its own credential store.** Claude Code stores its login in the macOS Keychain item `Claude Code-credentials` or in `~/.claude/.credentials.json`, and its `/logout` deletes that store. oxide-code stores its login only in its own file, which `/logout` deletes, so signing out of one tool leaves the other signed in. Refreshing a Claude Code login still writes the rotated tokens back to Claude Code's store because the refresh invalidates the old refresh token.
@@ -26,6 +28,8 @@ Credentials resolve in this order: `ANTHROPIC_AUTH_TOKEN`, `ANTHROPIC_API_KEY`, 
 
 7. **TUI only.** `-p` runs no slash commands, and the `--no-tui` REPL runs only the typed session and model commands. To sign in for those modes, run `ox` once and use `/login`, or set `CLAUDE_CODE_OAUTH_TOKEN`.
 
+8. **Requests read the store only near expiry.** Claude Code refreshes its login whenever a request falls within 5 minutes of expiry, so a long session never sees the token expire. oxide-code does the same using the expiry it holds in memory, because reading the macOS Keychain on every request is slow and can prompt.
+
 ## Out of Scope
 
 - **Signing in from another machine.** The redirect returns to the loopback listener, so a browser on another device, as over SSH, cannot finish the sign-in. Claude Code and pi let the user paste the code back into the terminal for this case, which [#239](https://github.com/hakula139/oxide-code/issues/239) tracks.
@@ -33,11 +37,11 @@ Credentials resolve in this order: `ANTHROPIC_AUTH_TOKEN`, `ANTHROPIC_API_KEY`, 
 ## Sources
 
 - `crates/oxide-code/src/client/anthropic.rs`: `Client::set_auth`, which swaps the credential that each request sends.
-- `crates/oxide-code/src/client/anthropic/transport.rs`: `MessagesRequest`, which carries the credential header into every attempt.
-- `crates/oxide-code/src/config.rs`: `Config::load` starts an interactive session signed out.
-- `crates/oxide-code/src/config/auth.rs`: `AuthSource`, resolution order, and the stored-login search.
-- `crates/oxide-code/src/config/login.rs`: PKCE, loopback listener, and code exchange.
-- `crates/oxide-code/src/config/oauth.rs`: credential stores, refresh, and write-back.
+- `crates/oxide-code/src/client/anthropic/transport.rs`: `MessagesRequest`, which carries the credential into every attempt, and `post_messages`, which resends a request after a 401.
+- `crates/oxide-code/src/config.rs`: `Config::load`, which starts an interactive session signed out.
+- `crates/oxide-code/src/config/auth.rs`: `AuthSource`, resolution order, the stored-login search, and `Auth::credential`, which refreshes a stored login before a request.
+- `crates/oxide-code/src/config/login.rs`: PKCE, the loopback listener, and code exchange.
+- `crates/oxide-code/src/config/oauth.rs`: credential stores, refresh, write-back, and `SessionLogin`, the token a session holds.
 - `crates/oxide-code/src/engine.rs`: `Engine::login` and `Engine::logout`, which swap the client's credential.
 - `crates/oxide-code/src/protocol.rs`: `Op::Login`, `Op::Logout`, `Event::LoginStarted`, `Event::SignedIn`, and `Event::SignedOut`.
 - `crates/oxide-code/src/slash/login.rs`: `LoginCmd` and `LogoutCmd`.

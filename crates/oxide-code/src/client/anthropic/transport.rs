@@ -3,22 +3,23 @@
 
 use std::fmt;
 use std::future::Future;
-use std::sync::LazyLock;
+use std::sync::{Arc, LazyLock};
 use std::time::Duration;
 
 use anyhow::{Result, anyhow};
 use bytes::Bytes;
 use regex::Regex;
 use reqwest::StatusCode;
-use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
+use reqwest::header::HeaderMap;
 use tracing::{debug, warn};
 
 use super::Client;
 use super::wire::{ApiError, ErrorResponse};
 use crate::client::PromptTooLong;
 use crate::client::{RateLimitWindow, RateLimits};
-use crate::config::auth::{Auth, AuthSource};
+use crate::config::auth::{Auth, AuthSource, Credential};
 use crate::util::text::{join_sentences, truncate_to_width};
+use crate::util::tls::Trust;
 
 // ── Retry Policy ──
 
@@ -40,26 +41,26 @@ pub(super) struct MessagesRequest {
     pub(super) betas: String,
     pub(super) session_id: String,
     pub(super) body: Bytes,
-    pub(super) auth: AuthSource,
-    pub(super) credential: (HeaderName, HeaderValue),
+    pub(super) auth: Auth,
+    /// Verifies the token endpoint when a stored login refreshes.
+    pub(super) trust: Arc<dyn Trust>,
 }
 
 impl Client {
-    /// Fails when the credential cannot travel in a header.
     pub(super) fn messages_request(
         &self,
         betas: String,
         body: String,
         auth: &Auth,
-    ) -> Result<MessagesRequest> {
-        Ok(MessagesRequest {
+    ) -> MessagesRequest {
+        MessagesRequest {
             url: format!("{}/v1/messages?beta=true", self.base_url),
             betas,
             session_id: self.session_id.clone(),
             body: body.into(),
-            auth: auth.source(),
-            credential: auth.header()?,
-        })
+            auth: auth.clone(),
+            trust: Arc::clone(&self.trust),
+        }
     }
 }
 
@@ -160,18 +161,37 @@ fn retry_delay(retry: u32, retry_after: Option<Duration>) -> Option<Duration> {
     Some(backoff.mul_f64(1.0 + MAX_JITTER * fastrand::f64()))
 }
 
-/// Sends one attempt and classifies a transport failure or a non-2xx status.
+/// Sends one attempt and classifies a transport failure or a non-2xx status. A stored login is
+/// refreshed first when near expiry, and reloaded and sent once more when the API rejects it with
+/// HTTP 401.
 pub(super) async fn post_messages(
     http: &reqwest::Client,
     request: &MessagesRequest,
     retry: u32,
 ) -> Result<reqwest::Response, AttemptError> {
-    let response = http
-        .post(&request.url)
+    let trust = request.trust.as_ref();
+    let credential = request.auth.credential(trust).await?;
+    let mut response = send(http, request, &credential, retry).await?;
+    if response.status() == StatusCode::UNAUTHORIZED
+        && let Some(reloaded) = request.auth.reload(&credential, trust).await?
+    {
+        response = send(http, request, &reloaded, retry).await?;
+    }
+    error_for_status(response, request.auth.source()).await
+}
+
+async fn send(
+    http: &reqwest::Client,
+    request: &MessagesRequest,
+    credential: &Credential,
+    retry: u32,
+) -> Result<reqwest::Response, AttemptError> {
+    let (name, value) = credential.header();
+    http.post(&request.url)
         .header("anthropic-beta", &request.betas)
         .header("x-claude-code-session-id", &request.session_id)
         .header("x-stainless-retry-count", retry)
-        .header(&request.credential.0, &request.credential.1)
+        .header(name, value)
         .body(request.body.clone())
         .send()
         .await
@@ -184,8 +204,7 @@ pub(super) async fn post_messages(
                     anyhow::Error::new(e).context("API connection failed"),
                 )
             }
-        })?;
-    error_for_status(response, request.auth).await
+        })
 }
 
 /// Passes a 2xx response through. Otherwise reads the body into a user-facing error. As in the
@@ -438,11 +457,13 @@ mod tests {
     use std::sync::atomic::{AtomicU32, Ordering};
 
     use indoc::indoc;
-    use wiremock::matchers::{method, path};
+    use reqwest::header::{HeaderName, HeaderValue};
+    use wiremock::matchers::{header, method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
     use super::*;
     use crate::client::anthropic::testing::{messages_request, plain_http};
+    use crate::config::oauth::testing::{ox_login_in, write_creds};
 
     fn request(server: &MockServer) -> MessagesRequest {
         messages_request(format!("{}/v1/messages", server.uri()))
@@ -681,6 +702,61 @@ mod tests {
                 "status {status}",
             );
         }
+    }
+
+    #[tokio::test]
+    async fn post_messages_resends_a_rejected_stored_login_with_the_token_another_process_stored() {
+        let server = MockServer::start().await;
+        for (token, status) in [("old", 401), ("new", 200)] {
+            Mock::given(method("POST"))
+                .and(path("/v1/messages"))
+                .and(header("authorization", format!("Bearer {token}")))
+                .respond_with(ResponseTemplate::new(status))
+                .expect(1)
+                .mount(&server)
+                .await;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("credentials.json");
+        write_creds(&file, "new", Some("ref"), 9_999_999_999_999);
+        let mut req = request(&server);
+        req.auth = ox_login_in(&file, "http://unused", "old", 9_999_999_999_999);
+
+        post_messages(&plain_http(), &req, 0)
+            .await
+            .expect("the resend succeeds");
+
+        server.verify().await;
+    }
+
+    #[tokio::test]
+    async fn post_messages_reports_a_401_the_reload_cannot_fix_with_the_sign_in_step() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/messages"))
+            .respond_with(ResponseTemplate::new(401).set_body_string("token revoked"))
+            .expect(2)
+            .mount(&server)
+            .await;
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("credentials.json");
+        write_creds(&file, "revoked", Some("ref"), 9_999_999_999_999);
+        let mut req = request(&server);
+        req.auth = ox_login_in(&file, "http://unused", "revoked", 9_999_999_999_999);
+
+        let err = post_messages(&plain_http(), &req, 0)
+            .await
+            .expect_err("the second 401 fails the attempt");
+
+        let AttemptError::Fatal(error) = &err else {
+            panic!("expected a fatal error, got {err:?}");
+        };
+        assert_eq!(
+            format!("{error:#}"),
+            "Anthropic API rejected credentials (HTTP 401): token revoked. \
+             Run `/login` to sign in again.",
+        );
+        server.verify().await;
     }
 
     #[tokio::test]

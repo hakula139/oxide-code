@@ -14,7 +14,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tracing::debug;
 
-use super::auth::{Auth, AuthSource};
+use super::auth::Auth;
 use super::oauth::{self, CodeGrant, OAUTH_CLIENT_ID, OAUTH_SCOPES};
 use crate::util::tls::Trust;
 
@@ -80,8 +80,7 @@ impl PendingLogin {
         };
         let result = async {
             let tokens = oauth::exchange_code(token_url, &grant, trust).await?;
-            oauth::save_login(&tokens).await?;
-            Ok(Auth::new(AuthSource::OxLogin, tokens.access_token))
+            Ok(Auth::stored(oauth::save_login(&tokens, token_url).await?))
         }
         .await;
         let reply = match &result {
@@ -278,7 +277,8 @@ mod tests {
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
     use super::*;
-    use crate::config::oauth::{ClaudeCodeKeychain, Login};
+    use crate::config::auth::{self, AuthSource};
+    use crate::config::oauth::ClaudeCodeKeychain;
     use crate::util::tls::testing::NoRoots;
 
     /// A token endpoint nothing listens on, for flows that end before the exchange.
@@ -378,7 +378,7 @@ mod tests {
                 (
                     auth,
                     reply,
-                    oauth::load_token(Login::Ox, ClaudeCodeKeychain::NONE, &NoRoots).await,
+                    auth::stored_login(ClaudeCodeKeychain::NONE, &NoRoots).await,
                 )
             })
             .await;
@@ -392,7 +392,7 @@ mod tests {
             )),
             "{reply}"
         );
-        assert_eq!(reloaded.unwrap(), "fresh-access");
+        assert_eq!(reloaded.unwrap().secret(), "fresh-access");
         let stored: serde_json::Value = serde_json::from_str(
             &std::fs::read_to_string(data.path().join("ox").join("credentials.json")).unwrap(),
         )

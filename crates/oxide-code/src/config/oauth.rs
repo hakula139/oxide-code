@@ -7,6 +7,7 @@ use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
+use tokio::sync::Mutex;
 use tracing::{debug, warn};
 
 #[cfg(target_os = "macos")]
@@ -35,7 +36,7 @@ const LOCK_RETRY_INTERVAL: Duration = Duration::from_secs(1);
 #[cfg(target_os = "macos")]
 const KEYCHAIN_SERVICE: &str = "Claude Code-credentials";
 
-/// Where [`load_token`] looks for the Claude Code login, as error messages name it.
+/// Where [`SessionLogin::load`] looks for the Claude Code login, as error messages name it.
 #[cfg(target_os = "macos")]
 pub(super) const LOGIN_STORES: &str = "the macOS Keychain or ~/.claude/.credentials.json";
 #[cfg(not(target_os = "macos"))]
@@ -132,6 +133,20 @@ impl OAuthCredential {
     fn expires_at_ms(&self) -> u64 {
         u64::try_from(self.expires_at).unwrap_or(0)
     }
+
+    fn into_token(self) -> Token {
+        Token {
+            expires_at_ms: self.expires_at_ms(),
+            access_token: self.access_token,
+        }
+    }
+}
+
+/// An access token and when it expires, in Unix milliseconds.
+#[cfg_attr(test, derive(Debug))]
+struct Token {
+    access_token: String,
+    expires_at_ms: u64,
 }
 
 /// Credentials parsed from one store, keeping the raw JSON so write-back preserves unknown fields.
@@ -211,14 +226,16 @@ impl<'a> Store<'a> {
 
 impl Store<'_> {
     /// Replaces the stored login with newly issued tokens.
-    async fn save(&self, tokens: &TokenResponse) -> Result<()> {
+    async fn save(&self, tokens: &TokenResponse) -> Result<Token> {
         if let Some(dir) = self.file.parent() {
             create_private_dir_all(dir)?;
         }
         let _lock = acquire_lock(&self.lock).await?;
+        let token = tokens.token();
         let mut json = serde_json::json!({ "claudeAiOauth": {} });
-        apply_tokens(&mut json["claudeAiOauth"], tokens)?;
-        atomic_write_private(&self.file, serde_json::to_string_pretty(&json)?.as_bytes())
+        apply_tokens(&mut json["claudeAiOauth"], tokens, token.expires_at_ms);
+        atomic_write_private(&self.file, serde_json::to_string_pretty(&json)?.as_bytes())?;
+        Ok(token)
     }
 
     /// Removes the login file, returning whether one existed.
@@ -235,9 +252,14 @@ impl Store<'_> {
     }
 }
 
-/// Stores tokens from `/login` as the oxide-code login.
-pub(super) async fn save_login(tokens: &TokenResponse) -> Result<()> {
-    Store::locate(Login::Ox, None)?.save(tokens).await
+/// Stores tokens from `/login` as the oxide-code login, which refreshes at `token_url`.
+pub(super) async fn save_login(
+    tokens: &TokenResponse,
+    token_url: &str,
+) -> Result<SessionLogin<'static>> {
+    let store = Store::locate(Login::Ox, None)?;
+    let token = store.save(tokens).await?;
+    Ok(SessionLogin::new(store, token_url, token))
 }
 
 /// Removes the oxide-code login, returning whether one was stored. Claude Code's store stays.
@@ -245,29 +267,90 @@ pub(crate) async fn delete_login() -> Result<bool> {
     Store::locate(Login::Ox, None)?.delete().await
 }
 
-// ── Token Loading ──
+// ── SessionLogin ──
 
-/// Loads the login's access token, refreshing it near expiry. The Claude Code login reads
-/// `keychain` first, then `~/.claude/.credentials.json`. The oxide-code login reads
-/// `$XDG_DATA_HOME/ox/credentials.json`.
-pub(super) async fn load_token(
-    login: Login,
-    keychain: ClaudeCodeKeychain,
-    trust: &dyn Trust,
-) -> Result<String, LoginError> {
-    let store = Store::locate(login, keychain.0).map_err(|e| LoginError::Unreadable(login, e))?;
-    load_token_from(&store, OAUTH_TOKEN_URL, trust).await
+/// A stored login as a session sends it: the store it lives in, the endpoint that refreshes it,
+/// and its current access token. The store is read again only near expiry or after a 401.
+pub(super) struct SessionLogin<'a> {
+    store: Store<'a>,
+    refresh_url: String,
+    /// Held across each reload, so concurrent requests wait for a single refresh.
+    token: Mutex<Token>,
 }
+
+impl SessionLogin<'static> {
+    /// Loads the login, refreshing it near expiry. The Claude Code login reads `keychain` first,
+    /// then `~/.claude/.credentials.json`. The oxide-code login reads
+    /// `$XDG_DATA_HOME/ox/credentials.json`.
+    pub(super) async fn load(
+        login: Login,
+        keychain: ClaudeCodeKeychain,
+        trust: &dyn Trust,
+    ) -> Result<Self, LoginError> {
+        let store =
+            Store::locate(login, keychain.0).map_err(|e| LoginError::Unreadable(login, e))?;
+        let token = load_token_from(&store, OAUTH_TOKEN_URL, trust).await?;
+        Ok(Self::new(store, OAUTH_TOKEN_URL, token))
+    }
+}
+
+impl<'a> SessionLogin<'a> {
+    fn new(store: Store<'a>, refresh_url: &str, token: Token) -> Self {
+        Self {
+            store,
+            refresh_url: refresh_url.to_owned(),
+            token: Mutex::new(token),
+        }
+    }
+
+    pub(super) const fn login(&self) -> Login {
+        self.store.login
+    }
+
+    #[cfg(test)]
+    pub(super) fn cached_token(&self) -> String {
+        self.token
+            .try_lock()
+            .expect("no reload is in flight")
+            .access_token
+            .clone()
+    }
+
+    /// The access token for the next request, reloaded from the store first when it nears expiry.
+    pub(super) async fn access_token(&self, trust: &dyn Trust) -> Result<String, LoginError> {
+        let mut token = self.token.lock().await;
+        if is_near_expiry(token.expires_at_ms) {
+            *token = load_token_from(&self.store, &self.refresh_url, trust).await?;
+        }
+        Ok(token.access_token.clone())
+    }
+
+    /// Reloads the token after the API rejected `rejected`, picking up one another process
+    /// refreshed. Once another request has replaced `rejected`, returns its token unread.
+    pub(super) async fn reload(
+        &self,
+        rejected: &str,
+        trust: &dyn Trust,
+    ) -> Result<String, LoginError> {
+        let mut token = self.token.lock().await;
+        if token.access_token == rejected {
+            *token = load_token_from(&self.store, &self.refresh_url, trust).await?;
+        }
+        Ok(token.access_token.clone())
+    }
+}
+
+// ── Token Loading ──
 
 async fn load_token_from(
     store: &Store<'_>,
     refresh_url: &str,
     trust: &dyn Trust,
-) -> Result<String, LoginError> {
+) -> Result<Token, LoginError> {
     let login = store.login;
     let oauth = load_credentials(store)?.oauth;
     if !is_near_expiry(oauth.expires_at_ms()) {
-        return Ok(oauth.access_token);
+        return Ok(oauth.into_token());
     }
     if oauth.refresh_token.is_none() {
         return usable_until_expiry(login, oauth);
@@ -282,7 +365,7 @@ async fn load_token_from(
                 return Err(LoginError::RefreshFailed(login, e));
             }
             warn!("skipping OAuth token refresh, using existing: {e:#}");
-            return Ok(oauth.access_token);
+            return Ok(oauth.into_token());
         }
     };
 
@@ -290,7 +373,7 @@ async fn load_token_from(
     let creds = load_credentials(store)?;
     let expires_at_ms = creds.oauth.expires_at_ms();
     if !is_near_expiry(expires_at_ms) {
-        return Ok(creds.oauth.access_token);
+        return Ok(creds.oauth.into_token());
     }
 
     let Some(refresh_token) = creds.oauth.refresh_token.as_deref() else {
@@ -299,26 +382,27 @@ async fn load_token_from(
 
     match refresh_oauth_token(refresh_url, refresh_token, trust).await {
         Ok(response) => {
-            if let Err(e) = write_refreshed_credentials(&creds, &response) {
+            let token = response.token();
+            if let Err(e) = write_refreshed_credentials(&creds, &response, token.expires_at_ms) {
                 warn!("failed to save refreshed OAuth credentials: {e:#}");
             }
-            Ok(response.access_token)
+            Ok(token)
         }
         Err(e) if is_expired(expires_at_ms) => Err(LoginError::RefreshFailed(login, e)),
         Err(e) => {
             warn!("failed to refresh OAuth token, using existing: {e:#}");
-            Ok(creds.oauth.access_token)
+            Ok(creds.oauth.into_token())
         }
     }
 }
 
 /// A near-expiry token with no refresh token stays usable until it expires.
-fn usable_until_expiry(login: Login, oauth: OAuthCredential) -> Result<String, LoginError> {
+fn usable_until_expiry(login: Login, oauth: OAuthCredential) -> Result<Token, LoginError> {
     if is_expired(oauth.expires_at_ms()) {
         return Err(LoginError::Expired(login));
     }
     warn!("OAuth token expires soon but no refresh token available");
-    Ok(oauth.access_token)
+    Ok(oauth.into_token())
 }
 
 /// Reads the Keychain first, then the file. When the file is missing, a denied or unparsable
@@ -399,7 +483,8 @@ const SYSTEM_KEYCHAIN: Option<&dyn Keychain> = Some(&SystemKeychain);
 #[cfg(not(target_os = "macos"))]
 const SYSTEM_KEYCHAIN: Option<&dyn Keychain> = None;
 
-/// Where [`load_token`] looks for the Claude Code login before `~/.claude/.credentials.json`.
+/// Where [`SessionLogin::load`] looks for the Claude Code login before
+/// `~/.claude/.credentials.json`.
 #[derive(Clone, Copy)]
 pub(crate) struct ClaudeCodeKeychain(Option<&'static dyn Keychain>);
 
@@ -464,11 +549,24 @@ fn keychain_account() -> Result<String> {
 #[cfg_attr(test, derive(Debug))]
 #[derive(Deserialize)]
 pub(super) struct TokenResponse {
-    pub(super) access_token: String,
+    access_token: String,
     refresh_token: String,
     expires_in: u64,
     #[serde(default)]
     scope: Option<String>,
+}
+
+impl TokenResponse {
+    /// The issued access token, expiring `expires_in` seconds from now. A clock set before 1970
+    /// records it as expired, as [`is_near_expiry`] reads such a clock.
+    fn token(&self) -> Token {
+        Token {
+            access_token: self.access_token.clone(),
+            expires_at_ms: now_millis().map_or(0, |now| {
+                now.saturating_add(self.expires_in.saturating_mul(1000))
+            }),
+        }
+    }
 }
 
 /// The authorization-code grant `/login` sends once the browser redirect returns.
@@ -562,6 +660,7 @@ async fn request_tokens(
 fn write_refreshed_credentials(
     creds: &StoredCredentials<'_>,
     response: &TokenResponse,
+    expires_at_ms: u64,
 ) -> Result<()> {
     let mut json: serde_json::Value =
         serde_json::from_str(&creds.json).context("failed to parse credentials for update")?;
@@ -569,7 +668,7 @@ fn write_refreshed_credentials(
     let oauth = json
         .get_mut("claudeAiOauth")
         .context("missing claudeAiOauth in credentials")?;
-    apply_tokens(oauth, response)?;
+    apply_tokens(oauth, response, expires_at_ms);
 
     let serialized = serde_json::to_string_pretty(&json)?;
     match creds.backend {
@@ -578,20 +677,17 @@ fn write_refreshed_credentials(
     }
 }
 
-/// Writes `tokens` into a `claudeAiOauth` object, keeping its other fields.
-fn apply_tokens(oauth: &mut serde_json::Value, tokens: &TokenResponse) -> Result<()> {
+/// Writes `tokens`, which expire at `expires_at_ms`, into a `claudeAiOauth` object, keeping its
+/// other fields.
+fn apply_tokens(oauth: &mut serde_json::Value, tokens: &TokenResponse, expires_at_ms: u64) {
     oauth["accessToken"] = serde_json::Value::String(tokens.access_token.clone());
     oauth["refreshToken"] = serde_json::Value::String(tokens.refresh_token.clone());
-    let now =
-        now_millis().context("cannot record the token expiry: system clock is before 1970")?;
-    oauth["expiresAt"] =
-        serde_json::json!(now.saturating_add(tokens.expires_in.saturating_mul(1000)));
+    oauth["expiresAt"] = serde_json::json!(expires_at_ms);
 
     if let Some(scope) = &tokens.scope {
         let scopes: Vec<&str> = scope.split_whitespace().collect();
         oauth["scopes"] = serde_json::json!(scopes);
     }
-    Ok(())
 }
 
 fn now_millis() -> Option<u64> {
@@ -657,6 +753,71 @@ fn is_stale_lock(path: &Path) -> bool {
         .is_ok_and(|t| t.elapsed().unwrap_or_default() > LOCK_STALE_THRESHOLD)
 }
 
+// ── Testing ──
+
+#[cfg(test)]
+pub(crate) mod testing {
+    use std::path::Path;
+
+    use super::{Login, SessionLogin, Store, Token};
+    use crate::config::auth::Auth;
+
+    /// A stored `claudeAiOauth` document, with no refresh token when `refresh` is `None`.
+    pub(super) fn creds_json(
+        access: &str,
+        refresh: Option<&str>,
+        expires_at: u64,
+    ) -> serde_json::Value {
+        let mut oauth = serde_json::json!({
+            "accessToken": access,
+            "expiresAt": expires_at,
+        });
+        if let Some(r) = refresh {
+            oauth["refreshToken"] = r.into();
+        }
+        serde_json::json!({ "claudeAiOauth": oauth })
+    }
+
+    pub(crate) fn write_creds(path: &Path, access: &str, refresh: Option<&str>, expires_at: u64) {
+        std::fs::write(path, creds_json(access, refresh, expires_at).to_string()).unwrap();
+    }
+
+    /// The token endpoint's reply to a successful refresh.
+    pub(crate) fn ok_refresh_body(
+        access: &str,
+        refresh: &str,
+        expires_in: u64,
+    ) -> serde_json::Value {
+        serde_json::json!({
+            "access_token": access,
+            "refresh_token": refresh,
+            "expires_in": expires_in,
+            "scope": "user:profile user:inference",
+        })
+    }
+
+    /// The oxide-code login stored in `file`, as a session holds it: sending `access_token` until
+    /// `expires_at_ms`, then refreshing at `refresh_url`.
+    pub(crate) fn ox_login_in(
+        file: &Path,
+        refresh_url: &str,
+        access_token: &str,
+        expires_at_ms: u64,
+    ) -> Auth {
+        let store = Store {
+            login: Login::Ox,
+            keychain: None,
+            file: file.to_owned(),
+            lock: file.with_extension("lock"),
+        };
+        let token = Token {
+            access_token: access_token.to_owned(),
+            expires_at_ms,
+        };
+        Auth::stored(SessionLogin::new(store, refresh_url, token))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::{Arc, Mutex};
@@ -665,6 +826,7 @@ mod tests {
     use wiremock::matchers::{method, path as wm_path};
     use wiremock::{Mock, MockServer, Request, ResponseTemplate};
 
+    use super::testing::{creds_json, ok_refresh_body, write_creds};
     use super::*;
     use crate::util::path::testing::{HOME_VAR, abs};
     use crate::util::tls::PlatformTrust;
@@ -761,10 +923,10 @@ mod tests {
         assert_eq!(std::fs::read_to_string(&claude_code_file).unwrap(), "{}");
     }
 
-    // ── load_token ──
+    // ── SessionLogin::load ──
 
     #[tokio::test]
-    async fn load_token_resolves_credentials_relative_to_home() {
+    async fn load_resolves_credentials_relative_to_home() {
         let home = tempfile::tempdir().unwrap();
         let claude_dir = home.path().join(".claude");
         std::fs::create_dir_all(&claude_dir).unwrap();
@@ -775,34 +937,114 @@ mod tests {
             9_999_999_999_999,
         );
 
-        let token = temp_env::async_with_vars(
+        let login = temp_env::async_with_vars(
             [(HOME_VAR, Some(home.path().to_string_lossy().into_owned()))],
             async {
-                load_token(Login::ClaudeCode, ClaudeCodeKeychain::NONE, &NoRoots)
+                SessionLogin::load(Login::ClaudeCode, ClaudeCodeKeychain::NONE, &NoRoots)
                     .await
                     .unwrap()
             },
         )
         .await;
-        assert_eq!(token, "token-from-home");
+        assert_eq!(login.cached_token(), "token-from-home");
+    }
+
+    // ── SessionLogin::access_token ──
+
+    fn session_login<'a>(
+        store: Store<'a>,
+        refresh_url: &str,
+        access_token: &str,
+        expires_at_ms: u64,
+    ) -> SessionLogin<'a> {
+        let token = Token {
+            access_token: access_token.to_owned(),
+            expires_at_ms,
+        };
+        SessionLogin::new(store, refresh_url, token)
+    }
+
+    #[tokio::test]
+    async fn access_token_far_from_expiry_leaves_the_store_unread() {
+        let dir = tempfile::tempdir().unwrap();
+        let missing = dir.path().join("creds.json");
+        let login = session_login(
+            store(None, &missing, &dir.path().join("lock")),
+            "http://should-not-be-called",
+            "held",
+            9_999_999_999_999,
+        );
+
+        let token = login.access_token(&NoRoots).await.unwrap();
+
+        assert_eq!(token, "held");
+    }
+
+    #[tokio::test]
+    async fn access_token_near_expiry_refreshes_once_for_concurrent_requests() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(wm_path("/"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(ok_refresh_body(
+                "fresh-access",
+                "fresh-refresh",
+                3600,
+            )))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let dir = tempfile::tempdir().unwrap();
+        let near_expiry = now_millis().unwrap() + 60_000;
+        // The refused write-back leaves the store stale, so only the shared token stops a second
+        // refresh.
+        let keychain = FakeKeychain {
+            writable: false,
+            ..FakeKeychain::holding(
+                creds_json("stale", Some("old-refresh"), near_expiry).to_string(),
+            )
+        };
+        let login = session_login(
+            store(
+                Some(&keychain),
+                &dir.path().join("creds.json"),
+                &dir.path().join("lock"),
+            ),
+            &server.uri(),
+            "stale",
+            near_expiry,
+        );
+
+        let (first, second) =
+            tokio::join!(login.access_token(&NoRoots), login.access_token(&NoRoots),);
+
+        assert_eq!(first.unwrap(), "fresh-access");
+        assert_eq!(second.unwrap(), "fresh-access");
+        server.verify().await;
+    }
+
+    // ── SessionLogin::reload ──
+
+    #[tokio::test]
+    async fn reload_adopts_the_stored_token_once_per_rejected_token() {
+        let dir = tempfile::tempdir().unwrap();
+        let creds = dir.path().join("creds.json");
+        write_creds(&creds, "rotated", Some("ref"), 9_999_999_999_999);
+        let login = session_login(
+            store(None, &creds, &dir.path().join("lock")),
+            "http://should-not-be-called",
+            "rejected",
+            9_999_999_999_999,
+        );
+
+        let reloaded = login.reload("rejected", &NoRoots).await.unwrap();
+        write_creds(&creds, "rotated-again", Some("ref"), 9_999_999_999_999);
+        let late = login.reload("rejected", &NoRoots).await.unwrap();
+
+        assert_eq!(reloaded, "rotated");
+        assert_eq!(late, "rotated", "a replaced token is not reloaded again");
     }
 
     // ── load_token_from ──
-
-    fn creds_json(access: &str, refresh: Option<&str>, expires_at: u64) -> serde_json::Value {
-        let mut oauth = serde_json::json!({
-            "accessToken": access,
-            "expiresAt": expires_at,
-        });
-        if let Some(r) = refresh {
-            oauth["refreshToken"] = r.into();
-        }
-        serde_json::json!({ "claudeAiOauth": oauth })
-    }
-
-    fn write_creds(path: &Path, access: &str, refresh: Option<&str>, expires_at: u64) {
-        std::fs::write(path, creds_json(access, refresh, expires_at).to_string()).unwrap();
-    }
 
     fn read_json(path: &Path) -> serde_json::Value {
         serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap()
@@ -900,7 +1142,7 @@ mod tests {
         )
         .await
         .unwrap();
-        assert_eq!(token, "tok");
+        assert_eq!(token.access_token, "tok");
     }
 
     #[tokio::test]
@@ -920,7 +1162,7 @@ mod tests {
         let token = load_token_from(&store(None, &creds, &lock), &server.uri(), &NoRoots)
             .await
             .unwrap();
-        assert_eq!(token, "fresh-access");
+        assert_eq!(token.access_token, "fresh-access");
 
         let json = read_json(&creds);
         assert_eq!(json["claudeAiOauth"]["accessToken"], "fresh-access");
@@ -931,6 +1173,7 @@ mod tests {
             expires_at >= now + 3_500_000 && expires_at <= now + 3_700_000,
             "expiresAt out of band: {expires_at}",
         );
+        assert_eq!(token.expires_at_ms, expires_at);
     }
 
     #[tokio::test]
@@ -951,7 +1194,7 @@ mod tests {
         )
         .await
         .unwrap();
-        assert_eq!(token, "fresh-access");
+        assert_eq!(token.access_token, "fresh-access");
 
         let json = keychain.json();
         assert_eq!(json["claudeAiOauth"]["accessToken"], "fresh-access");
@@ -981,7 +1224,7 @@ mod tests {
         )
         .await
         .unwrap();
-        assert_eq!(token, "fresh-access");
+        assert_eq!(token.access_token, "fresh-access");
 
         let json = keychain.json();
         assert_eq!(json["claudeAiOauth"]["accessToken"], "fresh-access");
@@ -1011,7 +1254,7 @@ mod tests {
         )
         .await
         .unwrap();
-        assert_eq!(token, "fresh-access");
+        assert_eq!(token.access_token, "fresh-access");
 
         assert_eq!(
             read_json(&creds)["claudeAiOauth"]["accessToken"],
@@ -1035,7 +1278,7 @@ mod tests {
         )
         .await
         .unwrap();
-        assert_eq!(token, "from-file");
+        assert_eq!(token.access_token, "from-file");
     }
 
     #[tokio::test]
@@ -1059,7 +1302,7 @@ mod tests {
         )
         .await
         .unwrap();
-        assert_eq!(token, "fresh-access");
+        assert_eq!(token.access_token, "fresh-access");
     }
 
     #[tokio::test]
@@ -1076,7 +1319,7 @@ mod tests {
         )
         .await
         .unwrap();
-        assert_eq!(token, "tok");
+        assert_eq!(token.access_token, "tok");
     }
 
     #[tokio::test]
@@ -1101,7 +1344,7 @@ mod tests {
         let token = load_token_from(&store(None, &creds, &lock), &server.uri(), &NoRoots)
             .await
             .unwrap();
-        assert_eq!(token, "stale");
+        assert_eq!(token.access_token, "stale");
     }
 
     #[tokio::test(start_paused = true)]
@@ -1119,7 +1362,7 @@ mod tests {
         )
         .await
         .unwrap();
-        assert_eq!(token, "tok");
+        assert_eq!(token.access_token, "tok");
     }
 
     #[tokio::test]
@@ -1247,7 +1490,7 @@ mod tests {
         .await
         .unwrap();
         sibling.await.unwrap();
-        assert_eq!(token, "sibling");
+        assert_eq!(token.access_token, "sibling");
     }
 
     #[tokio::test(start_paused = true)]
@@ -1278,7 +1521,7 @@ mod tests {
         .await
         .unwrap();
         sibling.await.unwrap();
-        assert_eq!(token, "sibling");
+        assert_eq!(token.access_token, "sibling");
     }
 
     #[tokio::test]
@@ -1438,15 +1681,6 @@ mod tests {
 
     // ── refresh_oauth_token ──
 
-    fn ok_refresh_body(access: &str, refresh: &str, expires_in: u64) -> serde_json::Value {
-        serde_json::json!({
-            "access_token": access,
-            "refresh_token": refresh,
-            "expires_in": expires_in,
-            "scope": "user:profile user:inference",
-        })
-    }
-
     #[tokio::test]
     async fn refresh_oauth_token_sends_grant_and_client_id_and_produces_parsed_response() {
         let server = MockServer::start().await;
@@ -1589,7 +1823,8 @@ mod tests {
             scope: Some("user:profile user:inference".to_owned()),
         };
 
-        write_refreshed_credentials(&read_credentials(&path).unwrap().unwrap(), &response).unwrap();
+        write_refreshed_credentials(&read_credentials(&path).unwrap().unwrap(), &response, 9_000)
+            .unwrap();
 
         let content = std::fs::read_to_string(&path).unwrap();
         let json: serde_json::Value = serde_json::from_str(&content).unwrap();
@@ -1597,16 +1832,7 @@ mod tests {
 
         assert_eq!(oauth["accessToken"], "new-access");
         assert_eq!(oauth["refreshToken"], "new-refresh");
-        let expires_at = oauth["expiresAt"].as_u64().unwrap();
-        let now = now_millis().unwrap();
-        assert!(
-            expires_at >= now + 3_500_000,
-            "expiresAt too early: {expires_at}"
-        );
-        assert!(
-            expires_at <= now + 3_700_000,
-            "expiresAt too late: {expires_at}"
-        );
+        assert_eq!(oauth["expiresAt"], 9_000);
         assert_eq!(
             oauth["scopes"],
             serde_json::json!(["user:profile", "user:inference"])
@@ -1642,7 +1868,8 @@ mod tests {
             scope: Some("  user:profile   user:inference  ".to_owned()),
         };
 
-        write_refreshed_credentials(&read_credentials(&path).unwrap().unwrap(), &response).unwrap();
+        write_refreshed_credentials(&read_credentials(&path).unwrap().unwrap(), &response, 9_000)
+            .unwrap();
 
         let content = std::fs::read_to_string(&path).unwrap();
         let json: serde_json::Value = serde_json::from_str(&content).unwrap();
@@ -1679,7 +1906,8 @@ mod tests {
             scope: None,
         };
 
-        write_refreshed_credentials(&read_credentials(&path).unwrap().unwrap(), &response).unwrap();
+        write_refreshed_credentials(&read_credentials(&path).unwrap().unwrap(), &response, 9_000)
+            .unwrap();
 
         let content = std::fs::read_to_string(&path).unwrap();
         let json: serde_json::Value = serde_json::from_str(&content).unwrap();
