@@ -900,238 +900,6 @@ mod tests {
     use crate::util::tls::PlatformTrust;
     use crate::util::tls::testing::{NoRoots, TEST_CA_PEM};
 
-    // ── OAuthCredential::expires_at_ms ──
-
-    #[test]
-    fn expires_at_ms_keeps_a_positive_value() {
-        let cred = OAuthCredential {
-            access_token: String::new(),
-            refresh_token: None,
-            expires_at: 1_700_000_000_000,
-        };
-        assert_eq!(cred.expires_at_ms(), 1_700_000_000_000);
-    }
-
-    #[test]
-    fn expires_at_ms_negative_clamps_to_zero() {
-        let cred = OAuthCredential {
-            access_token: String::new(),
-            refresh_token: None,
-            expires_at: -1,
-        };
-        assert_eq!(cred.expires_at_ms(), 0);
-    }
-
-    // ── Store::locate ──
-
-    #[test]
-    fn locate_keeps_each_login_in_its_own_tool_s_directory() {
-        let (home, data) = (abs("/home/user"), abs("/data"));
-        let keychain = FakeKeychain::empty();
-        let (ox, default_ox, claude_code) = temp_env::with_vars(
-            [
-                (HOME_VAR, Some(home.as_str())),
-                ("XDG_DATA_HOME", Some(data.as_str())),
-            ],
-            || {
-                let ox = Store::locate(Login::Ox, Some(&keychain)).unwrap();
-                let default_ox = temp_env::with_var_unset("XDG_DATA_HOME", || {
-                    Store::locate(Login::Ox, None).unwrap()
-                });
-                let claude_code = Store::locate(Login::ClaudeCode, Some(&keychain)).unwrap();
-                (ox, default_ox, claude_code)
-            },
-        );
-
-        let data_dir = Path::new(&data).join("ox");
-        assert_eq!(ox.file, data_dir.join("credentials.json"));
-        assert_eq!(ox.lock, data_dir.join("credentials.lock"));
-        assert!(ox.keychain.is_none());
-        assert_eq!(
-            default_ox.file,
-            Path::new(&home).join(".local/share/ox/credentials.json")
-        );
-        assert_eq!(
-            claude_code.file,
-            Path::new(&home).join(".claude").join(".credentials.json")
-        );
-        assert_eq!(claude_code.lock, Path::new(&home).join(".claude.lock"));
-        assert!(claude_code.keychain.is_some());
-    }
-
-    // ── delete_login ──
-
-    #[tokio::test]
-    async fn delete_login_removes_only_the_oxide_code_login() {
-        let data = tempfile::tempdir().unwrap();
-        let home = tempfile::tempdir().unwrap();
-        let ox_file = data.path().join("ox").join("credentials.json");
-        let claude_code_file = home.path().join(".claude").join(".credentials.json");
-        for file in [&ox_file, &claude_code_file] {
-            std::fs::create_dir_all(file.parent().unwrap()).unwrap();
-            std::fs::write(file, "{}").unwrap();
-        }
-        let delete_in = |data: &Path| {
-            temp_env::async_with_vars(
-                [
-                    ("XDG_DATA_HOME", Some(data.to_owned())),
-                    (HOME_VAR, Some(home.path().to_owned())),
-                ],
-                async { delete_login().await.unwrap() },
-            )
-        };
-
-        let removed = (delete_in(data.path()).await, delete_in(data.path()).await);
-        let without_data_dir = delete_in(&data.path().join("missing")).await;
-
-        assert_eq!(removed, (true, false));
-        assert!(!without_data_dir);
-        assert!(!ox_file.exists());
-        assert!(!data.path().join("ox").join("credentials.lock").exists());
-        assert_eq!(std::fs::read_to_string(&claude_code_file).unwrap(), "{}");
-    }
-
-    // ── SessionLogin::load ──
-
-    #[tokio::test]
-    async fn load_resolves_credentials_relative_to_home() {
-        let home = tempfile::tempdir().unwrap();
-        let claude_dir = home.path().join(".claude");
-        std::fs::create_dir_all(&claude_dir).unwrap();
-        write_creds(
-            &claude_dir.join(".credentials.json"),
-            "token-from-home",
-            None,
-            9_999_999_999_999,
-        );
-
-        let login = temp_env::async_with_vars(
-            [(HOME_VAR, Some(home.path().to_string_lossy().into_owned()))],
-            async {
-                SessionLogin::load(Login::ClaudeCode, ClaudeCodeKeychain::NONE, &NoRoots)
-                    .await
-                    .unwrap()
-            },
-        )
-        .await;
-        assert_eq!(login.cached_token(), "token-from-home");
-    }
-
-    // ── SessionLogin::access_token ──
-
-    fn session_login<'a>(
-        store: Store<'a>,
-        refresh_url: &str,
-        access_token: &str,
-        expires_at_ms: u64,
-    ) -> SessionLogin<'a> {
-        let token = Token {
-            access_token: access_token.to_owned(),
-            expires_at_ms,
-        };
-        SessionLogin::new(store, refresh_url, token)
-    }
-
-    #[tokio::test]
-    async fn access_token_far_from_expiry_leaves_the_store_unread() {
-        let dir = tempfile::tempdir().unwrap();
-        let missing = dir.path().join("creds.json");
-        let login = session_login(
-            store(None, &missing, &dir.path().join("lock")),
-            "http://should-not-be-called",
-            "held",
-            9_999_999_999_999,
-        );
-
-        let token = login.access_token(&NoRoots).await.unwrap();
-
-        assert_eq!(token, "held");
-    }
-
-    #[tokio::test]
-    async fn access_token_near_expiry_refreshes_once_for_concurrent_requests() {
-        let server = MockServer::start().await;
-        Mock::given(method("POST"))
-            .and(wm_path("/"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(ok_refresh_body(
-                "fresh-access",
-                "fresh-refresh",
-                3600,
-            )))
-            .expect(1)
-            .mount(&server)
-            .await;
-        let dir = tempfile::tempdir().unwrap();
-        let near_expiry = now_millis().unwrap() + 60_000;
-        // The refused write-back leaves the store stale, so only the shared token stops a second
-        // refresh.
-        let keychain = FakeKeychain {
-            writable: false,
-            ..FakeKeychain::holding(
-                creds_json("stale", Some("old-refresh"), near_expiry).to_string(),
-            )
-        };
-        let login = session_login(
-            store(
-                Some(&keychain),
-                &dir.path().join("creds.json"),
-                &dir.path().join("lock"),
-            ),
-            &server.uri(),
-            "stale",
-            near_expiry,
-        );
-
-        let (first, second) =
-            tokio::join!(login.access_token(&NoRoots), login.access_token(&NoRoots),);
-
-        assert_eq!(first.unwrap(), "fresh-access");
-        assert_eq!(second.unwrap(), "fresh-access");
-        server.verify().await;
-    }
-
-    // ── SessionLogin::reload ──
-
-    #[tokio::test]
-    async fn reload_adopts_the_stored_token_once_per_rejected_token() {
-        let dir = tempfile::tempdir().unwrap();
-        let creds = dir.path().join("creds.json");
-        write_creds(&creds, "rotated", Some("ref"), 9_999_999_999_999);
-        let login = session_login(
-            store(None, &creds, &dir.path().join("lock")),
-            "http://should-not-be-called",
-            "rejected",
-            9_999_999_999_999,
-        );
-
-        let reloaded = login.reload("rejected", &NoRoots).await.unwrap();
-        write_creds(&creds, "rotated-again", Some("ref"), 9_999_999_999_999);
-        let late = login.reload("rejected", &NoRoots).await.unwrap();
-
-        assert_eq!(reloaded, "rotated");
-        assert_eq!(late, "rotated", "a replaced token is not reloaded again");
-    }
-
-    // ── load_token_from ──
-
-    fn read_json(path: &Path) -> serde_json::Value {
-        serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap()
-    }
-
-    async fn mock_refresh_server() -> MockServer {
-        let server = MockServer::start().await;
-        Mock::given(method("POST"))
-            .and(wm_path("/"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(ok_refresh_body(
-                "fresh-access",
-                "fresh-refresh",
-                3600,
-            )))
-            .mount(&server)
-            .await;
-        server
-    }
-
     fn store<'a>(keychain: Option<&'a dyn Keychain>, file: &Path, lock: &Path) -> Store<'a> {
         Store {
             login: Login::ClaudeCode,
@@ -1196,885 +964,1169 @@ mod tests {
         }
     }
 
-    #[tokio::test]
-    async fn load_token_from_keeps_existing_when_far_from_expiry() {
-        let dir = tempfile::tempdir().unwrap();
-        let creds = dir.path().join("creds.json");
-        let lock = dir.path().join("lock");
-        write_creds(&creds, "tok", Some("ref"), 9_999_999_999_999);
+    mod oauth_credential {
+        use super::*;
 
-        let token = load_token_from(
-            &store(None, &creds, &lock),
-            "http://should-not-be-called",
-            &NoRoots,
-            None,
-        )
-        .await
-        .unwrap();
-        assert_eq!(token.access_token, "tok");
+        mod expires_at_ms {
+            use super::*;
+
+            #[test]
+            fn keeps_a_positive_value() {
+                let cred = OAuthCredential {
+                    access_token: String::new(),
+                    refresh_token: None,
+                    expires_at: 1_700_000_000_000,
+                };
+                assert_eq!(cred.expires_at_ms(), 1_700_000_000_000);
+            }
+
+            #[test]
+            fn negative_clamps_to_zero() {
+                let cred = OAuthCredential {
+                    access_token: String::new(),
+                    refresh_token: None,
+                    expires_at: -1,
+                };
+                assert_eq!(cred.expires_at_ms(), 0);
+            }
+        }
     }
 
-    #[tokio::test]
-    async fn load_token_from_near_expiry_refreshes_and_persists_new_credentials() {
-        let server = mock_refresh_server().await;
+    mod store {
+        use super::*;
 
-        let dir = tempfile::tempdir().unwrap();
-        let creds = dir.path().join("creds.json");
-        let lock = dir.path().join("lock");
-        write_creds(
-            &creds,
-            "old",
-            Some("old-refresh"),
-            now_millis().unwrap() + 1_000,
-        );
+        mod locate {
+            use super::*;
 
-        let token = load_token_from(&store(None, &creds, &lock), &server.uri(), &NoRoots, None)
-            .await
-            .unwrap();
-        assert_eq!(token.access_token, "fresh-access");
+            #[test]
+            fn keeps_each_login_in_its_own_tool_s_directory() {
+                let (home, data) = (abs("/home/user"), abs("/data"));
+                let keychain = FakeKeychain::empty();
+                let (ox, default_ox, claude_code) = temp_env::with_vars(
+                    [
+                        (HOME_VAR, Some(home.as_str())),
+                        ("XDG_DATA_HOME", Some(data.as_str())),
+                    ],
+                    || {
+                        let ox = Store::locate(Login::Ox, Some(&keychain)).unwrap();
+                        let default_ox = temp_env::with_var_unset("XDG_DATA_HOME", || {
+                            Store::locate(Login::Ox, None).unwrap()
+                        });
+                        let claude_code =
+                            Store::locate(Login::ClaudeCode, Some(&keychain)).unwrap();
+                        (ox, default_ox, claude_code)
+                    },
+                );
 
-        let json = read_json(&creds);
-        assert_eq!(json["claudeAiOauth"]["accessToken"], "fresh-access");
-        assert_eq!(json["claudeAiOauth"]["refreshToken"], "fresh-refresh");
-        let expires_at = json["claudeAiOauth"]["expiresAt"].as_u64().unwrap();
-        let now = now_millis().unwrap();
-        assert!(
-            expires_at >= now + 3_500_000 && expires_at <= now + 3_700_000,
-            "expiresAt out of band: {expires_at}",
-        );
-        assert_eq!(token.expires_at_ms, expires_at);
+                let data_dir = Path::new(&data).join("ox");
+                assert_eq!(ox.file, data_dir.join("credentials.json"));
+                assert_eq!(ox.lock, data_dir.join("credentials.lock"));
+                assert!(ox.keychain.is_none());
+                assert_eq!(
+                    default_ox.file,
+                    Path::new(&home).join(".local/share/ox/credentials.json")
+                );
+                assert_eq!(
+                    claude_code.file,
+                    Path::new(&home).join(".claude").join(".credentials.json")
+                );
+                assert_eq!(claude_code.lock, Path::new(&home).join(".claude.lock"));
+                assert!(claude_code.keychain.is_some());
+            }
+        }
     }
 
-    #[tokio::test]
-    async fn load_token_from_keychain_refresh_writes_back_to_keychain_without_creating_file() {
-        let server = mock_refresh_server().await;
+    mod delete_login {
+        use super::*;
 
-        let dir = tempfile::tempdir().unwrap();
-        let creds = dir.path().join("creds.json");
-        let lock = dir.path().join("lock");
-        let keychain = FakeKeychain::holding(
-            creds_json("old", Some("old-refresh"), now_millis().unwrap() + 1_000).to_string(),
-        );
+        #[tokio::test]
+        async fn removes_only_the_oxide_code_login() {
+            let data = tempfile::tempdir().unwrap();
+            let home = tempfile::tempdir().unwrap();
+            let ox_file = data.path().join("ox").join("credentials.json");
+            let claude_code_file = home.path().join(".claude").join(".credentials.json");
+            for file in [&ox_file, &claude_code_file] {
+                std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+                std::fs::write(file, "{}").unwrap();
+            }
+            let delete_in = |data: &Path| {
+                temp_env::async_with_vars(
+                    [
+                        ("XDG_DATA_HOME", Some(data.to_owned())),
+                        (HOME_VAR, Some(home.path().to_owned())),
+                    ],
+                    async { delete_login().await.unwrap() },
+                )
+            };
 
-        let token = load_token_from(
-            &store(Some(&keychain), &creds, &lock),
-            &server.uri(),
-            &NoRoots,
-            None,
-        )
-        .await
-        .unwrap();
-        assert_eq!(token.access_token, "fresh-access");
+            let removed = (delete_in(data.path()).await, delete_in(data.path()).await);
+            let without_data_dir = delete_in(&data.path().join("missing")).await;
 
-        let json = keychain.json();
-        assert_eq!(json["claudeAiOauth"]["accessToken"], "fresh-access");
-        assert_eq!(json["claudeAiOauth"]["refreshToken"], "fresh-refresh");
-        assert!(!creds.exists(), "file must not be created");
+            assert_eq!(removed, (true, false));
+            assert!(!without_data_dir);
+            assert!(!ox_file.exists());
+            assert!(!data.path().join("ox").join("credentials.lock").exists());
+            assert_eq!(std::fs::read_to_string(&claude_code_file).unwrap(), "{}");
+        }
     }
 
-    #[tokio::test]
-    async fn load_token_from_keychain_refresh_leaves_existing_file_untouched() {
-        let server = mock_refresh_server().await;
+    mod session_login {
+        use super::*;
 
-        let dir = tempfile::tempdir().unwrap();
-        let creds = dir.path().join("creds.json");
-        let lock = dir.path().join("lock");
-        let mut file_json = creds_json("file-access", Some("file-refresh"), 0);
-        file_json["claudeAiOauth"]["subscriptionType"] = "pro".into();
-        std::fs::write(&creds, file_json.to_string()).unwrap();
-        let mut keychain_json =
-            creds_json("old", Some("old-refresh"), now_millis().unwrap() + 1_000);
-        keychain_json["claudeAiOauth"]["subscriptionType"] = "max".into();
-        let keychain = FakeKeychain::holding(keychain_json.to_string());
+        fn session_login<'a>(
+            store: Store<'a>,
+            refresh_url: &str,
+            access_token: &str,
+            expires_at_ms: u64,
+        ) -> SessionLogin<'a> {
+            let token = Token {
+                access_token: access_token.to_owned(),
+                expires_at_ms,
+            };
+            SessionLogin::new(store, refresh_url, token)
+        }
 
-        let token = load_token_from(
-            &store(Some(&keychain), &creds, &lock),
-            &server.uri(),
-            &NoRoots,
-            None,
-        )
-        .await
-        .unwrap();
-        assert_eq!(token.access_token, "fresh-access");
+        mod load {
+            use super::*;
 
-        let json = keychain.json();
-        assert_eq!(json["claudeAiOauth"]["accessToken"], "fresh-access");
-        assert_eq!(json["claudeAiOauth"]["subscriptionType"], "max");
-        assert_eq!(read_json(&creds), file_json);
+            #[tokio::test]
+            async fn resolves_credentials_relative_to_home() {
+                let home = tempfile::tempdir().unwrap();
+                let claude_dir = home.path().join(".claude");
+                std::fs::create_dir_all(&claude_dir).unwrap();
+                write_creds(
+                    &claude_dir.join(".credentials.json"),
+                    "token-from-home",
+                    None,
+                    9_999_999_999_999,
+                );
+
+                let login = temp_env::async_with_vars(
+                    [(HOME_VAR, Some(home.path().to_string_lossy().into_owned()))],
+                    async {
+                        SessionLogin::load(Login::ClaudeCode, ClaudeCodeKeychain::NONE, &NoRoots)
+                            .await
+                            .unwrap()
+                    },
+                )
+                .await;
+                assert_eq!(login.cached_token(), "token-from-home");
+            }
+        }
+
+        mod access_token {
+            use super::*;
+
+            #[tokio::test]
+            async fn far_from_expiry_leaves_the_store_unread() {
+                let dir = tempfile::tempdir().unwrap();
+                let missing = dir.path().join("creds.json");
+                let login = session_login(
+                    store(None, &missing, &dir.path().join("lock")),
+                    "http://should-not-be-called",
+                    "held",
+                    9_999_999_999_999,
+                );
+
+                let token = login.access_token(&NoRoots).await.unwrap();
+
+                assert_eq!(token, "held");
+            }
+
+            #[tokio::test]
+            async fn near_expiry_refreshes_once_for_concurrent_requests() {
+                let server = MockServer::start().await;
+                Mock::given(method("POST"))
+                    .and(wm_path("/"))
+                    .respond_with(ResponseTemplate::new(200).set_body_json(ok_refresh_body(
+                        "fresh-access",
+                        "fresh-refresh",
+                        3600,
+                    )))
+                    .expect(1)
+                    .mount(&server)
+                    .await;
+                let dir = tempfile::tempdir().unwrap();
+                let near_expiry = now_millis().unwrap() + 60_000;
+                // The refused write-back leaves the store stale, so only the shared token
+                // stops a second refresh.
+                let keychain = FakeKeychain {
+                    writable: false,
+                    ..FakeKeychain::holding(
+                        creds_json("stale", Some("old-refresh"), near_expiry).to_string(),
+                    )
+                };
+                let login = session_login(
+                    store(
+                        Some(&keychain),
+                        &dir.path().join("creds.json"),
+                        &dir.path().join("lock"),
+                    ),
+                    &server.uri(),
+                    "stale",
+                    near_expiry,
+                );
+
+                let (first, second) =
+                    tokio::join!(login.access_token(&NoRoots), login.access_token(&NoRoots),);
+
+                assert_eq!(first.unwrap(), "fresh-access");
+                assert_eq!(second.unwrap(), "fresh-access");
+                server.verify().await;
+            }
+        }
+
+        mod reload {
+            use super::*;
+
+            #[tokio::test]
+            async fn adopts_the_stored_token_once_per_rejected_token() {
+                let dir = tempfile::tempdir().unwrap();
+                let creds = dir.path().join("creds.json");
+                write_creds(&creds, "rotated", Some("ref"), 9_999_999_999_999);
+                let login = session_login(
+                    store(None, &creds, &dir.path().join("lock")),
+                    "http://should-not-be-called",
+                    "rejected",
+                    9_999_999_999_999,
+                );
+
+                let reloaded = login.reload("rejected", &NoRoots).await.unwrap();
+                write_creds(&creds, "rotated-again", Some("ref"), 9_999_999_999_999);
+                let late = login.reload("rejected", &NoRoots).await.unwrap();
+
+                assert_eq!(reloaded, "rotated");
+                assert_eq!(late, "rotated", "a replaced token is not reloaded again");
+            }
+        }
     }
 
-    #[tokio::test]
-    async fn load_token_from_unparsable_keychain_falls_back_to_file_and_refreshes_only_the_file() {
-        let server = mock_refresh_server().await;
+    mod load_token_from {
+        use super::*;
 
-        let dir = tempfile::tempdir().unwrap();
-        let creds = dir.path().join("creds.json");
-        let lock = dir.path().join("lock");
-        write_creds(
-            &creds,
-            "old",
-            Some("old-refresh"),
-            now_millis().unwrap() + 1_000,
-        );
-        let keychain = FakeKeychain::holding("not json");
+        fn read_json(path: &Path) -> serde_json::Value {
+            serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap()
+        }
 
-        let token = load_token_from(
-            &store(Some(&keychain), &creds, &lock),
-            &server.uri(),
-            &NoRoots,
-            None,
-        )
-        .await
-        .unwrap();
-        assert_eq!(token.access_token, "fresh-access");
+        async fn mock_refresh_server() -> MockServer {
+            let server = MockServer::start().await;
+            Mock::given(method("POST"))
+                .and(wm_path("/"))
+                .respond_with(ResponseTemplate::new(200).set_body_json(ok_refresh_body(
+                    "fresh-access",
+                    "fresh-refresh",
+                    3600,
+                )))
+                .mount(&server)
+                .await;
+            server
+        }
 
-        assert_eq!(
-            read_json(&creds)["claudeAiOauth"]["accessToken"],
-            "fresh-access"
-        );
-        assert_eq!(keychain.entry().as_deref(), Some("not json"));
-    }
+        #[tokio::test]
+        async fn keeps_existing_when_far_from_expiry() {
+            let dir = tempfile::tempdir().unwrap();
+            let creds = dir.path().join("creds.json");
+            let lock = dir.path().join("lock");
+            write_creds(&creds, "tok", Some("ref"), 9_999_999_999_999);
 
-    #[tokio::test]
-    async fn load_token_from_denied_keychain_falls_back_to_the_file() {
-        let dir = tempfile::tempdir().unwrap();
-        let creds = dir.path().join("creds.json");
-        let lock = dir.path().join("lock");
-        write_creds(&creds, "from-file", None, 9_999_999_999_999);
-
-        let keychain = FakeKeychain::denying();
-        let token = load_token_from(
-            &store(Some(&keychain), &creds, &lock),
-            "http://unused",
-            &NoRoots,
-            None,
-        )
-        .await
-        .unwrap();
-        assert_eq!(token.access_token, "from-file");
-    }
-
-    #[tokio::test]
-    async fn load_token_from_write_back_failure_still_uses_refreshed_token() {
-        let server = mock_refresh_server().await;
-
-        let dir = tempfile::tempdir().unwrap();
-        let creds = dir.path().join("creds.json");
-        let lock = dir.path().join("lock");
-        let keychain = FakeKeychain {
-            writable: false,
-            ..FakeKeychain::holding(
-                creds_json("old", Some("old-refresh"), now_millis().unwrap() + 1_000).to_string(),
-            )
-        };
-
-        let token = load_token_from(
-            &store(Some(&keychain), &creds, &lock),
-            &server.uri(),
-            &NoRoots,
-            None,
-        )
-        .await
-        .unwrap();
-        assert_eq!(token.access_token, "fresh-access");
-    }
-
-    #[tokio::test]
-    async fn load_token_from_without_refresh_token_keeps_nonexpired_as_is() {
-        let dir = tempfile::tempdir().unwrap();
-        let creds = dir.path().join("creds.json");
-        let lock = dir.path().join("lock");
-        write_creds(&creds, "tok", None, now_millis().unwrap() + 60_000);
-
-        let token = load_token_from(
-            &store(None, &creds, &lock),
-            "http://should-not-be-called",
-            &NoRoots,
-            None,
-        )
-        .await
-        .unwrap();
-        assert_eq!(token.access_token, "tok");
-    }
-
-    #[tokio::test]
-    async fn load_token_from_refresh_endpoint_down_keeps_existing_token_if_unexpired() {
-        let server = MockServer::start().await;
-        Mock::given(method("POST"))
-            .and(wm_path("/"))
-            .respond_with(ResponseTemplate::new(503))
-            .mount(&server)
-            .await;
-
-        let dir = tempfile::tempdir().unwrap();
-        let creds = dir.path().join("creds.json");
-        let lock = dir.path().join("lock");
-        write_creds(
-            &creds,
-            "stale",
-            Some("old-refresh"),
-            now_millis().unwrap() + 60_000,
-        );
-
-        let token = load_token_from(&store(None, &creds, &lock), &server.uri(), &NoRoots, None)
-            .await
-            .unwrap();
-        assert_eq!(token.access_token, "stale");
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn load_token_from_lock_held_keeps_existing_token_if_unexpired() {
-        let dir = tempfile::tempdir().unwrap();
-        let creds = dir.path().join("creds.json");
-        let lock = dir.path().join("lock");
-        write_creds(&creds, "tok", Some("ref"), now_millis().unwrap() + 60_000);
-        std::fs::create_dir(&lock).unwrap();
-
-        let token = load_token_from(
-            &store(None, &creds, &lock),
-            "http://should-not-be-called",
-            &NoRoots,
-            None,
-        )
-        .await
-        .unwrap();
-        assert_eq!(token.access_token, "tok");
-    }
-
-    #[tokio::test]
-    async fn load_token_from_without_refresh_token_bails_when_expired() {
-        let dir = tempfile::tempdir().unwrap();
-        let creds = dir.path().join("creds.json");
-        let lock = dir.path().join("lock");
-        write_creds(&creds, "tok", None, 0);
-
-        let err = load_token_from(&store(None, &creds, &lock), "http://unused", &NoRoots, None)
-            .await
-            .expect_err("expired without refresh must bail");
-        assert!(
-            matches!(err, LoginError::Expired(Login::ClaudeCode)),
-            "{err:?}"
-        );
-    }
-
-    #[tokio::test]
-    async fn load_token_from_refresh_endpoint_down_bails_if_expired() {
-        let server = MockServer::start().await;
-        Mock::given(method("POST"))
-            .and(wm_path("/"))
-            .respond_with(ResponseTemplate::new(503))
-            .mount(&server)
-            .await;
-
-        let dir = tempfile::tempdir().unwrap();
-        let creds = dir.path().join("creds.json");
-        let lock = dir.path().join("lock");
-        write_creds(&creds, "dead", Some("old"), 0);
-
-        let err = load_token_from(&store(None, &creds, &lock), &server.uri(), &NoRoots, None)
-            .await
-            .expect_err("expired + refresh down must bail");
-        assert!(
-            matches!(
-                err,
-                LoginError::RefreshFailed {
-                    login: Login::ClaudeCode,
-                    transient: true,
-                    ..
-                }
-            ),
-            "{err:?}"
-        );
-        assert_eq!(
-            format!("{err:#}"),
-            "failed to refresh the expired Claude Code login: \
-             token refresh failed with 503 Service Unavailable. \
-             Run `claude` to sign in again.",
-        );
-    }
-
-    #[tokio::test]
-    async fn load_token_from_refresh_rejection_keeps_a_body_that_ends_a_sentence_verbatim() {
-        let server = MockServer::start().await;
-        Mock::given(method("POST"))
-            .and(wm_path("/"))
-            .respond_with(ResponseTemplate::new(400).set_body_string("Refresh token revoked."))
-            .mount(&server)
-            .await;
-        let dir = tempfile::tempdir().unwrap();
-        let creds = dir.path().join("creds.json");
-        let lock = dir.path().join("lock");
-        write_creds(&creds, "dead", Some("old"), 0);
-
-        let err = load_token_from(&store(None, &creds, &lock), &server.uri(), &NoRoots, None)
-            .await
-            .expect_err("expired + refresh rejected must bail");
-
-        assert!(!err.is_transient(), "{err:?}");
-        assert_eq!(
-            format!("{err:#}"),
-            "failed to refresh the expired Claude Code login: \
-             token refresh failed with 400 Bad Request: Refresh token revoked. \
-             Run `claude` to sign in again.",
-        );
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn load_token_from_lock_held_bails_if_expired() {
-        let dir = tempfile::tempdir().unwrap();
-        let creds = dir.path().join("creds.json");
-        let lock = dir.path().join("lock");
-        write_creds(&creds, "dead", Some("ref"), 0);
-        std::fs::create_dir(&lock).unwrap();
-
-        let err = load_token_from(
-            &store(None, &creds, &lock),
-            "http://should-not-be-called",
-            &NoRoots,
-            None,
-        )
-        .await
-        .expect_err("expired + lock held must bail");
-        assert!(
-            matches!(
-                err,
-                LoginError::RefreshFailed {
-                    login: Login::ClaudeCode,
-                    transient: false,
-                    ..
-                }
-            ),
-            "{err:?}"
-        );
-        assert_eq!(
-            format!("{err:#}"),
-            "failed to refresh the expired Claude Code login: \
-             failed to acquire credentials lock after 5 retries \
-             (another process may be refreshing). \
-             Run `claude` to sign in again.",
-        );
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn load_token_from_lock_held_picks_up_sibling_refresh() {
-        let dir = tempfile::tempdir().unwrap();
-        let creds = dir.path().join("creds.json");
-        let lock = dir.path().join("lock");
-        write_creds(&creds, "dead", Some("ref"), 0);
-        std::fs::create_dir(&lock).unwrap();
-
-        let sibling_creds = creds.clone();
-        let sibling = tokio::spawn(async move {
-            tokio::time::sleep(LOCK_RETRY_INTERVAL * 2).await;
-            write_creds(
-                &sibling_creds,
-                "sibling",
-                Some("ref"),
-                now_millis().unwrap() + 60 * 60 * 1000,
-            );
-        });
-
-        let token = load_token_from(
-            &store(None, &creds, &lock),
-            "http://should-not-be-called",
-            &NoRoots,
-            None,
-        )
-        .await
-        .unwrap();
-        sibling.await.unwrap();
-        assert_eq!(token.access_token, "sibling");
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn load_token_from_lock_released_without_a_refresh_token_keeps_the_sibling_login() {
-        let dir = tempfile::tempdir().unwrap();
-        let creds = dir.path().join("creds.json");
-        let lock = dir.path().join("lock");
-        write_creds(&creds, "dead", Some("ref"), 0);
-        std::fs::create_dir(&lock).unwrap();
-
-        let (sibling_creds, sibling_lock) = (creds.clone(), lock.clone());
-        let sibling = tokio::spawn(async move {
-            tokio::time::sleep(LOCK_RETRY_INTERVAL * 2).await;
-            write_creds(
-                &sibling_creds,
-                "sibling",
+            let token = load_token_from(
+                &store(None, &creds, &lock),
+                "http://should-not-be-called",
+                &NoRoots,
                 None,
-                now_millis().unwrap() + 60 * 1000,
+            )
+            .await
+            .unwrap();
+            assert_eq!(token.access_token, "tok");
+        }
+
+        #[tokio::test]
+        async fn near_expiry_refreshes_and_persists_new_credentials() {
+            let server = mock_refresh_server().await;
+
+            let dir = tempfile::tempdir().unwrap();
+            let creds = dir.path().join("creds.json");
+            let lock = dir.path().join("lock");
+            write_creds(
+                &creds,
+                "old",
+                Some("old-refresh"),
+                now_millis().unwrap() + 1_000,
             );
-            std::fs::remove_dir(&sibling_lock).unwrap();
-        });
 
-        let token = load_token_from(
-            &store(None, &creds, &lock),
-            "http://should-not-be-called",
-            &NoRoots,
-            None,
-        )
-        .await
-        .unwrap();
-        sibling.await.unwrap();
-        assert_eq!(token.access_token, "sibling");
-    }
+            let token = load_token_from(&store(None, &creds, &lock), &server.uri(), &NoRoots, None)
+                .await
+                .unwrap();
+            assert_eq!(token.access_token, "fresh-access");
 
-    #[tokio::test]
-    async fn load_token_from_reports_why_no_login_was_found() {
-        let dir = tempfile::tempdir().unwrap();
-        let missing = dir.path().join("creds.json");
-        let lock = dir.path().join("lock");
-        let (empty, denying, garbled) = (
-            FakeKeychain::empty(),
-            FakeKeychain::denying(),
-            FakeKeychain::holding("not json"),
-        );
+            let json = read_json(&creds);
+            assert_eq!(json["claudeAiOauth"]["accessToken"], "fresh-access");
+            assert_eq!(json["claudeAiOauth"]["refreshToken"], "fresh-refresh");
+            let expires_at = json["claudeAiOauth"]["expiresAt"].as_u64().unwrap();
+            let now = now_millis().unwrap();
+            assert!(
+                expires_at >= now + 3_500_000 && expires_at <= now + 3_700_000,
+                "expiresAt out of band: {expires_at}",
+            );
+            assert_eq!(token.expires_at_ms, expires_at);
+        }
 
-        for keychain in [None, Some(&empty as &dyn Keychain)] {
-            let err = load_token_from(
-                &store(keychain, &missing, &lock),
+        #[tokio::test]
+        async fn keychain_refresh_writes_back_to_keychain_without_creating_file() {
+            let server = mock_refresh_server().await;
+
+            let dir = tempfile::tempdir().unwrap();
+            let creds = dir.path().join("creds.json");
+            let lock = dir.path().join("lock");
+            let keychain = FakeKeychain::holding(
+                creds_json("old", Some("old-refresh"), now_millis().unwrap() + 1_000).to_string(),
+            );
+
+            let token = load_token_from(
+                &store(Some(&keychain), &creds, &lock),
+                &server.uri(),
+                &NoRoots,
+                None,
+            )
+            .await
+            .unwrap();
+            assert_eq!(token.access_token, "fresh-access");
+
+            let json = keychain.json();
+            assert_eq!(json["claudeAiOauth"]["accessToken"], "fresh-access");
+            assert_eq!(json["claudeAiOauth"]["refreshToken"], "fresh-refresh");
+            assert!(!creds.exists(), "file must not be created");
+        }
+
+        #[tokio::test]
+        async fn keychain_refresh_leaves_existing_file_untouched() {
+            let server = mock_refresh_server().await;
+
+            let dir = tempfile::tempdir().unwrap();
+            let creds = dir.path().join("creds.json");
+            let lock = dir.path().join("lock");
+            let mut file_json = creds_json("file-access", Some("file-refresh"), 0);
+            file_json["claudeAiOauth"]["subscriptionType"] = "pro".into();
+            std::fs::write(&creds, file_json.to_string()).unwrap();
+            let mut keychain_json =
+                creds_json("old", Some("old-refresh"), now_millis().unwrap() + 1_000);
+            keychain_json["claudeAiOauth"]["subscriptionType"] = "max".into();
+            let keychain = FakeKeychain::holding(keychain_json.to_string());
+
+            let token = load_token_from(
+                &store(Some(&keychain), &creds, &lock),
+                &server.uri(),
+                &NoRoots,
+                None,
+            )
+            .await
+            .unwrap();
+            assert_eq!(token.access_token, "fresh-access");
+
+            let json = keychain.json();
+            assert_eq!(json["claudeAiOauth"]["accessToken"], "fresh-access");
+            assert_eq!(json["claudeAiOauth"]["subscriptionType"], "max");
+            assert_eq!(read_json(&creds), file_json);
+        }
+
+        #[tokio::test]
+        async fn unparsable_keychain_falls_back_to_file_and_refreshes_only_the_file() {
+            let server = mock_refresh_server().await;
+
+            let dir = tempfile::tempdir().unwrap();
+            let creds = dir.path().join("creds.json");
+            let lock = dir.path().join("lock");
+            write_creds(
+                &creds,
+                "old",
+                Some("old-refresh"),
+                now_millis().unwrap() + 1_000,
+            );
+            let keychain = FakeKeychain::holding("not json");
+
+            let token = load_token_from(
+                &store(Some(&keychain), &creds, &lock),
+                &server.uri(),
+                &NoRoots,
+                None,
+            )
+            .await
+            .unwrap();
+            assert_eq!(token.access_token, "fresh-access");
+
+            assert_eq!(
+                read_json(&creds)["claudeAiOauth"]["accessToken"],
+                "fresh-access"
+            );
+            assert_eq!(keychain.entry().as_deref(), Some("not json"));
+        }
+
+        #[tokio::test]
+        async fn denied_keychain_falls_back_to_the_file() {
+            let dir = tempfile::tempdir().unwrap();
+            let creds = dir.path().join("creds.json");
+            let lock = dir.path().join("lock");
+            write_creds(&creds, "from-file", None, 9_999_999_999_999);
+
+            let keychain = FakeKeychain::denying();
+            let token = load_token_from(
+                &store(Some(&keychain), &creds, &lock),
                 "http://unused",
                 &NoRoots,
                 None,
             )
             .await
-            .expect_err("no login anywhere");
-            assert!(matches!(err, LoginError::Missing), "{err:?}");
+            .unwrap();
+            assert_eq!(token.access_token, "from-file");
         }
 
-        let err = load_token_from(
-            &store(Some(&denying), &missing, &lock),
-            "http://unused",
-            &NoRoots,
-            None,
-        )
-        .await
-        .expect_err("a denied Keychain and no file");
-        assert!(matches!(err, LoginError::KeychainDenied), "{err:?}");
+        #[tokio::test]
+        async fn write_back_failure_still_uses_refreshed_token() {
+            let server = mock_refresh_server().await;
 
-        let err = load_token_from(
-            &store(Some(&garbled), &missing, &lock),
-            "http://unused",
-            &NoRoots,
-            None,
-        )
-        .await
-        .expect_err("an unparsable Keychain entry and no file");
-        assert_eq!(
-            format!("{err:#}"),
-            "failed to load the Claude Code login: \
-             failed to parse the credentials in the macOS Keychain: \
-             expected ident at line 1 column 2. \
-             Run `claude` to sign in again.",
-        );
+            let dir = tempfile::tempdir().unwrap();
+            let creds = dir.path().join("creds.json");
+            let lock = dir.path().join("lock");
+            let keychain = FakeKeychain {
+                writable: false,
+                ..FakeKeychain::holding(
+                    creds_json("old", Some("old-refresh"), now_millis().unwrap() + 1_000)
+                        .to_string(),
+                )
+            };
 
-        let unreadable = dir.path().join("directory.json");
-        std::fs::create_dir(&unreadable).unwrap();
-        let err = load_token_from(
-            &store(Some(&empty), &unreadable, &lock),
-            "http://unused",
-            &NoRoots,
-            None,
-        )
-        .await
-        .expect_err("an unreadable credentials file");
-        let msg = format!("{err:#}");
-        assert!(
-            msg.starts_with(&format!(
-                "failed to load the Claude Code login: failed to read {}: ",
-                unreadable.display()
-            )),
-            "{msg}"
-        );
-        assert!(msg.ends_with(". Run `claude` to sign in again."), "{msg}");
+            let token = load_token_from(
+                &store(Some(&keychain), &creds, &lock),
+                &server.uri(),
+                &NoRoots,
+                None,
+            )
+            .await
+            .unwrap();
+            assert_eq!(token.access_token, "fresh-access");
+        }
+
+        #[tokio::test]
+        async fn without_refresh_token_keeps_nonexpired_as_is() {
+            let dir = tempfile::tempdir().unwrap();
+            let creds = dir.path().join("creds.json");
+            let lock = dir.path().join("lock");
+            write_creds(&creds, "tok", None, now_millis().unwrap() + 60_000);
+
+            let token = load_token_from(
+                &store(None, &creds, &lock),
+                "http://should-not-be-called",
+                &NoRoots,
+                None,
+            )
+            .await
+            .unwrap();
+            assert_eq!(token.access_token, "tok");
+        }
+
+        #[tokio::test]
+        async fn refresh_endpoint_down_keeps_existing_token_if_unexpired() {
+            let server = MockServer::start().await;
+            Mock::given(method("POST"))
+                .and(wm_path("/"))
+                .respond_with(ResponseTemplate::new(503))
+                .mount(&server)
+                .await;
+
+            let dir = tempfile::tempdir().unwrap();
+            let creds = dir.path().join("creds.json");
+            let lock = dir.path().join("lock");
+            write_creds(
+                &creds,
+                "stale",
+                Some("old-refresh"),
+                now_millis().unwrap() + 60_000,
+            );
+
+            let token = load_token_from(&store(None, &creds, &lock), &server.uri(), &NoRoots, None)
+                .await
+                .unwrap();
+            assert_eq!(token.access_token, "stale");
+        }
+
+        #[tokio::test(start_paused = true)]
+        async fn lock_held_keeps_existing_token_if_unexpired() {
+            let dir = tempfile::tempdir().unwrap();
+            let creds = dir.path().join("creds.json");
+            let lock = dir.path().join("lock");
+            write_creds(&creds, "tok", Some("ref"), now_millis().unwrap() + 60_000);
+            std::fs::create_dir(&lock).unwrap();
+
+            let token = load_token_from(
+                &store(None, &creds, &lock),
+                "http://should-not-be-called",
+                &NoRoots,
+                None,
+            )
+            .await
+            .unwrap();
+            assert_eq!(token.access_token, "tok");
+        }
+
+        #[tokio::test]
+        async fn without_refresh_token_bails_when_expired() {
+            let dir = tempfile::tempdir().unwrap();
+            let creds = dir.path().join("creds.json");
+            let lock = dir.path().join("lock");
+            write_creds(&creds, "tok", None, 0);
+
+            let err = load_token_from(&store(None, &creds, &lock), "http://unused", &NoRoots, None)
+                .await
+                .expect_err("expired without refresh must bail");
+            assert!(
+                matches!(err, LoginError::Expired(Login::ClaudeCode)),
+                "{err:?}"
+            );
+        }
+
+        #[tokio::test]
+        async fn refresh_endpoint_down_bails_if_expired() {
+            let server = MockServer::start().await;
+            Mock::given(method("POST"))
+                .and(wm_path("/"))
+                .respond_with(ResponseTemplate::new(503))
+                .mount(&server)
+                .await;
+
+            let dir = tempfile::tempdir().unwrap();
+            let creds = dir.path().join("creds.json");
+            let lock = dir.path().join("lock");
+            write_creds(&creds, "dead", Some("old"), 0);
+
+            let err = load_token_from(&store(None, &creds, &lock), &server.uri(), &NoRoots, None)
+                .await
+                .expect_err("expired + refresh down must bail");
+            assert!(
+                matches!(
+                    err,
+                    LoginError::RefreshFailed {
+                        login: Login::ClaudeCode,
+                        transient: true,
+                        ..
+                    }
+                ),
+                "{err:?}"
+            );
+            assert_eq!(
+                format!("{err:#}"),
+                "failed to refresh the expired Claude Code login: \
+                 token refresh failed with 503 Service Unavailable. \
+                 Run `claude` to sign in again.",
+            );
+        }
+
+        #[tokio::test]
+        async fn refresh_rejection_keeps_a_body_that_ends_a_sentence_verbatim() {
+            let server = MockServer::start().await;
+            Mock::given(method("POST"))
+                .and(wm_path("/"))
+                .respond_with(ResponseTemplate::new(400).set_body_string("Refresh token revoked."))
+                .mount(&server)
+                .await;
+            let dir = tempfile::tempdir().unwrap();
+            let creds = dir.path().join("creds.json");
+            let lock = dir.path().join("lock");
+            write_creds(&creds, "dead", Some("old"), 0);
+
+            let err = load_token_from(&store(None, &creds, &lock), &server.uri(), &NoRoots, None)
+                .await
+                .expect_err("expired + refresh rejected must bail");
+
+            assert!(!err.is_transient(), "{err:?}");
+            assert_eq!(
+                format!("{err:#}"),
+                "failed to refresh the expired Claude Code login: \
+                 token refresh failed with 400 Bad Request: Refresh token revoked. \
+                 Run `claude` to sign in again.",
+            );
+        }
+
+        #[tokio::test(start_paused = true)]
+        async fn lock_held_bails_if_expired() {
+            let dir = tempfile::tempdir().unwrap();
+            let creds = dir.path().join("creds.json");
+            let lock = dir.path().join("lock");
+            write_creds(&creds, "dead", Some("ref"), 0);
+            std::fs::create_dir(&lock).unwrap();
+
+            let err = load_token_from(
+                &store(None, &creds, &lock),
+                "http://should-not-be-called",
+                &NoRoots,
+                None,
+            )
+            .await
+            .expect_err("expired + lock held must bail");
+            assert!(
+                matches!(
+                    err,
+                    LoginError::RefreshFailed {
+                        login: Login::ClaudeCode,
+                        transient: false,
+                        ..
+                    }
+                ),
+                "{err:?}"
+            );
+            assert_eq!(
+                format!("{err:#}"),
+                "failed to refresh the expired Claude Code login: \
+                 failed to acquire credentials lock after 5 retries \
+                 (another process may be refreshing). \
+                 Run `claude` to sign in again.",
+            );
+        }
+
+        #[tokio::test(start_paused = true)]
+        async fn lock_held_picks_up_sibling_refresh() {
+            let dir = tempfile::tempdir().unwrap();
+            let creds = dir.path().join("creds.json");
+            let lock = dir.path().join("lock");
+            write_creds(&creds, "dead", Some("ref"), 0);
+            std::fs::create_dir(&lock).unwrap();
+
+            let sibling_creds = creds.clone();
+            let sibling = tokio::spawn(async move {
+                tokio::time::sleep(LOCK_RETRY_INTERVAL * 2).await;
+                write_creds(
+                    &sibling_creds,
+                    "sibling",
+                    Some("ref"),
+                    now_millis().unwrap() + 60 * 60 * 1000,
+                );
+            });
+
+            let token = load_token_from(
+                &store(None, &creds, &lock),
+                "http://should-not-be-called",
+                &NoRoots,
+                None,
+            )
+            .await
+            .unwrap();
+            sibling.await.unwrap();
+            assert_eq!(token.access_token, "sibling");
+        }
+
+        #[tokio::test(start_paused = true)]
+        async fn lock_released_without_a_refresh_token_keeps_the_sibling_login() {
+            let dir = tempfile::tempdir().unwrap();
+            let creds = dir.path().join("creds.json");
+            let lock = dir.path().join("lock");
+            write_creds(&creds, "dead", Some("ref"), 0);
+            std::fs::create_dir(&lock).unwrap();
+
+            let (sibling_creds, sibling_lock) = (creds.clone(), lock.clone());
+            let sibling = tokio::spawn(async move {
+                tokio::time::sleep(LOCK_RETRY_INTERVAL * 2).await;
+                write_creds(
+                    &sibling_creds,
+                    "sibling",
+                    None,
+                    now_millis().unwrap() + 60 * 1000,
+                );
+                std::fs::remove_dir(&sibling_lock).unwrap();
+            });
+
+            let token = load_token_from(
+                &store(None, &creds, &lock),
+                "http://should-not-be-called",
+                &NoRoots,
+                None,
+            )
+            .await
+            .unwrap();
+            sibling.await.unwrap();
+            assert_eq!(token.access_token, "sibling");
+        }
+
+        #[tokio::test]
+        async fn reports_why_no_login_was_found() {
+            let dir = tempfile::tempdir().unwrap();
+            let missing = dir.path().join("creds.json");
+            let lock = dir.path().join("lock");
+            let (empty, denying, garbled) = (
+                FakeKeychain::empty(),
+                FakeKeychain::denying(),
+                FakeKeychain::holding("not json"),
+            );
+
+            for keychain in [None, Some(&empty as &dyn Keychain)] {
+                let err = load_token_from(
+                    &store(keychain, &missing, &lock),
+                    "http://unused",
+                    &NoRoots,
+                    None,
+                )
+                .await
+                .expect_err("no login anywhere");
+                assert!(matches!(err, LoginError::Missing), "{err:?}");
+            }
+
+            let err = load_token_from(
+                &store(Some(&denying), &missing, &lock),
+                "http://unused",
+                &NoRoots,
+                None,
+            )
+            .await
+            .expect_err("a denied Keychain and no file");
+            assert!(matches!(err, LoginError::KeychainDenied), "{err:?}");
+
+            let err = load_token_from(
+                &store(Some(&garbled), &missing, &lock),
+                "http://unused",
+                &NoRoots,
+                None,
+            )
+            .await
+            .expect_err("an unparsable Keychain entry and no file");
+            assert_eq!(
+                format!("{err:#}"),
+                "failed to load the Claude Code login: \
+                 failed to parse the credentials in the macOS Keychain: \
+                 expected ident at line 1 column 2. \
+                 Run `claude` to sign in again.",
+            );
+
+            let unreadable = dir.path().join("directory.json");
+            std::fs::create_dir(&unreadable).unwrap();
+            let err = load_token_from(
+                &store(Some(&empty), &unreadable, &lock),
+                "http://unused",
+                &NoRoots,
+                None,
+            )
+            .await
+            .expect_err("an unreadable credentials file");
+            let msg = format!("{err:#}");
+            assert!(
+                msg.starts_with(&format!(
+                    "failed to load the Claude Code login: failed to read {}: ",
+                    unreadable.display()
+                )),
+                "{msg}"
+            );
+            assert!(msg.ends_with(". Run `claude` to sign in again."), "{msg}");
+        }
     }
 
-    // ── read_credentials ──
+    mod read_credentials {
+        use super::*;
 
-    #[test]
-    fn read_credentials_parses_tokens_and_expiry() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("creds.json");
-        write_creds(&path, "tok", Some("ref"), 9_999_999_999_999);
+        #[test]
+        fn parses_tokens_and_expiry() {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("creds.json");
+            write_creds(&path, "tok", Some("ref"), 9_999_999_999_999);
 
-        let creds = read_credentials(&path).unwrap().unwrap();
-        assert_eq!(creds.oauth.access_token, "tok");
-        assert_eq!(creds.oauth.refresh_token.as_deref(), Some("ref"));
-        assert_eq!(creds.oauth.expires_at, 9_999_999_999_999);
+            let creds = read_credentials(&path).unwrap().unwrap();
+            assert_eq!(creds.oauth.access_token, "tok");
+            assert_eq!(creds.oauth.refresh_token.as_deref(), Some("ref"));
+            assert_eq!(creds.oauth.expires_at, 9_999_999_999_999);
+        }
+
+        #[test]
+        fn without_refresh_token_keeps_access_token() {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("creds.json");
+            write_creds(&path, "tok", None, 9_999_999_999_999);
+
+            let creds = read_credentials(&path).unwrap().unwrap();
+            assert_eq!(creds.oauth.access_token, "tok");
+            assert!(creds.oauth.refresh_token.is_none());
+        }
+
+        #[test]
+        fn missing_file_is_absent() {
+            assert!(
+                read_credentials(Path::new("/nonexistent/creds.json"))
+                    .unwrap()
+                    .is_none()
+            );
+        }
+
+        #[test]
+        fn invalid_json_fails_naming_the_path() {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("creds.json");
+            std::fs::write(&path, "not json").unwrap();
+            let err = read_credentials(&path)
+                .err()
+                .expect("invalid JSON must fail");
+            assert_eq!(
+                format!("{err:#}"),
+                format!(
+                    "failed to parse the credentials in {}: expected ident at line 1 column 2",
+                    path.display()
+                ),
+            );
+        }
+
+        #[test]
+        fn without_oauth_key_fails_naming_the_missing_field() {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("creds.json");
+            std::fs::write(&path, r#"{"other": "data"}"#).unwrap();
+            let err = read_credentials(&path)
+                .err()
+                .expect("credentials without claudeAiOauth must fail");
+            assert_eq!(
+                format!("{err:#}"),
+                format!(
+                    "failed to parse the credentials in {}: \
+                     missing field `claudeAiOauth` at line 1 column 17",
+                    path.display()
+                ),
+            );
+        }
     }
 
-    #[test]
-    fn read_credentials_without_refresh_token_keeps_access_token() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("creds.json");
-        write_creds(&path, "tok", None, 9_999_999_999_999);
+    mod is_near_expiry {
+        use super::*;
 
-        let creds = read_credentials(&path).unwrap().unwrap();
-        assert_eq!(creds.oauth.access_token, "tok");
-        assert!(creds.oauth.refresh_token.is_none());
+        #[test]
+        fn far_future_is_not_near() {
+            assert!(!is_near_expiry(u64::MAX));
+        }
+
+        #[test]
+        fn zero_is_expired() {
+            assert!(is_near_expiry(0));
+        }
     }
 
-    #[test]
-    fn read_credentials_missing_file_is_absent() {
-        assert!(
-            read_credentials(Path::new("/nonexistent/creds.json"))
-                .unwrap()
-                .is_none()
-        );
+    mod is_expired {
+        use super::*;
+
+        #[test]
+        fn far_future_is_not_expired() {
+            assert!(!is_expired(u64::MAX));
+        }
+
+        #[test]
+        fn zero_is_expired() {
+            assert!(is_expired(0));
+        }
     }
 
-    #[test]
-    fn read_credentials_invalid_json_fails_naming_the_path() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("creds.json");
-        std::fs::write(&path, "not json").unwrap();
-        let err = read_credentials(&path)
-            .err()
-            .expect("invalid JSON must fail");
-        assert_eq!(
-            format!("{err:#}"),
-            format!(
-                "failed to parse the credentials in {}: expected ident at line 1 column 2",
-                path.display()
-            ),
-        );
-    }
+    mod refresh_oauth_token {
+        use super::*;
 
-    #[test]
-    fn read_credentials_without_oauth_key_fails_naming_the_missing_field() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("creds.json");
-        std::fs::write(&path, r#"{"other": "data"}"#).unwrap();
-        let err = read_credentials(&path)
-            .err()
-            .expect("credentials without claudeAiOauth must fail");
-        assert_eq!(
-            format!("{err:#}"),
-            format!(
-                "failed to parse the credentials in {}: \
-                 missing field `claudeAiOauth` at line 1 column 17",
-                path.display()
-            ),
-        );
-    }
+        #[tokio::test]
+        async fn sends_grant_and_client_id_and_produces_parsed_response() {
+            let server = MockServer::start().await;
+            let captured: Arc<Mutex<Option<serde_json::Value>>> = Arc::new(Mutex::new(None));
+            let captured_clone = Arc::clone(&captured);
+            Mock::given(method("POST"))
+                .and(wm_path("/"))
+                .respond_with(move |req: &Request| {
+                    *captured_clone.lock().unwrap() = serde_json::from_slice(&req.body).ok();
+                    ResponseTemplate::new(200).set_body_json(ok_refresh_body(
+                        "new-access",
+                        "new-refresh",
+                        3600,
+                    ))
+                })
+                .mount(&server)
+                .await;
 
-    // ── is_near_expiry ──
+            let response = refresh_oauth_token(&server.uri(), "old-refresh", &NoRoots)
+                .await
+                .unwrap();
+            assert_eq!(response.access_token, "new-access");
+            assert_eq!(response.refresh_token, "new-refresh");
+            assert_eq!(response.expires_in, 3600);
+            assert_eq!(
+                response.scope.as_deref(),
+                Some("user:profile user:inference")
+            );
 
-    #[test]
-    fn is_near_expiry_far_future_is_not_near() {
-        assert!(!is_near_expiry(u64::MAX));
-    }
+            let body = captured.lock().unwrap().take().expect("body captured");
+            assert_eq!(body["grant_type"], "refresh_token");
+            assert_eq!(body["refresh_token"], "old-refresh");
+            assert_eq!(body["client_id"], OAUTH_CLIENT_ID);
+            assert_eq!(body["scope"], OAUTH_SCOPES.join(" "));
+        }
 
-    #[test]
-    fn is_near_expiry_zero_is_expired() {
-        assert!(is_near_expiry(0));
-    }
+        #[tokio::test]
+        async fn propagates_http_error_with_status_and_body() {
+            let server = MockServer::start().await;
+            Mock::given(method("POST"))
+                .and(wm_path("/"))
+                .respond_with(
+                    ResponseTemplate::new(401).set_body_string(r#"{"error":"invalid_grant"}"#),
+                )
+                .mount(&server)
+                .await;
 
-    // ── is_expired ──
+            let err = refresh_oauth_token(&server.uri(), "bad", &NoRoots)
+                .await
+                .expect_err("expected HTTP error");
+            let msg = format!("{:#}", err.error);
+            assert!(msg.contains("401"), "status: {msg}");
+            assert!(msg.contains("invalid_grant"), "body: {msg}");
+            assert!(!err.transient, "a 4xx needs a new sign-in");
+        }
 
-    #[test]
-    fn is_expired_far_future_is_not_expired() {
-        assert!(!is_expired(u64::MAX));
-    }
+        #[tokio::test]
+        async fn malformed_json_errors_with_context() {
+            let server = MockServer::start().await;
+            Mock::given(method("POST"))
+                .and(wm_path("/"))
+                .respond_with(ResponseTemplate::new(200).set_body_string("<not json>"))
+                .mount(&server)
+                .await;
 
-    #[test]
-    fn is_expired_zero_is_expired() {
-        assert!(is_expired(0));
-    }
+            let err = refresh_oauth_token(&server.uri(), "tok", &NoRoots)
+                .await
+                .expect_err("expected parse error");
+            assert!(format!("{:#}", err.error).contains("parse"));
+            assert!(!err.transient, "a malformed reply is not retried");
+        }
 
-    // ── refresh_oauth_token ──
-
-    #[tokio::test]
-    async fn refresh_oauth_token_sends_grant_and_client_id_and_produces_parsed_response() {
-        let server = MockServer::start().await;
-        let captured: Arc<Mutex<Option<serde_json::Value>>> = Arc::new(Mutex::new(None));
-        let captured_clone = Arc::clone(&captured);
-        Mock::given(method("POST"))
-            .and(wm_path("/"))
-            .respond_with(move |req: &Request| {
-                *captured_clone.lock().unwrap() = serde_json::from_slice(&req.body).ok();
-                ResponseTemplate::new(200).set_body_json(ok_refresh_body(
+        #[tokio::test]
+        async fn honors_extra_ca_certs() {
+            let server = MockServer::start().await;
+            Mock::given(method("POST"))
+                .and(wm_path("/"))
+                .respond_with(ResponseTemplate::new(200).set_body_json(ok_refresh_body(
                     "new-access",
                     "new-refresh",
                     3600,
-                ))
-            })
-            .mount(&server)
-            .await;
+                )))
+                .mount(&server)
+                .await;
 
-        let response = refresh_oauth_token(&server.uri(), "old-refresh", &NoRoots)
-            .await
-            .unwrap();
-        assert_eq!(response.access_token, "new-access");
-        assert_eq!(response.refresh_token, "new-refresh");
-        assert_eq!(response.expires_in, 3600);
-        assert_eq!(
-            response.scope.as_deref(),
-            Some("user:profile user:inference")
-        );
+            let pem = tempfile::NamedTempFile::new().unwrap();
+            std::io::Write::write_all(&mut pem.as_file(), TEST_CA_PEM.as_bytes()).unwrap();
 
-        let body = captured.lock().unwrap().take().expect("body captured");
-        assert_eq!(body["grant_type"], "refresh_token");
-        assert_eq!(body["refresh_token"], "old-refresh");
-        assert_eq!(body["client_id"], OAUTH_CLIENT_ID);
-        assert_eq!(body["scope"], OAUTH_SCOPES.join(" "));
-    }
-
-    #[tokio::test]
-    async fn refresh_oauth_token_propagates_http_error_with_status_and_body() {
-        let server = MockServer::start().await;
-        Mock::given(method("POST"))
-            .and(wm_path("/"))
-            .respond_with(
-                ResponseTemplate::new(401).set_body_string(r#"{"error":"invalid_grant"}"#),
+            let response = refresh_oauth_token(
+                &server.uri(),
+                "refresh",
+                &PlatformTrust(Some(pem.path().to_path_buf())),
             )
-            .mount(&server)
-            .await;
-
-        let err = refresh_oauth_token(&server.uri(), "bad", &NoRoots)
             .await
-            .expect_err("expected HTTP error");
-        let msg = format!("{:#}", err.error);
-        assert!(msg.contains("401"), "status: {msg}");
-        assert!(msg.contains("invalid_grant"), "body: {msg}");
-        assert!(!err.transient, "a 4xx needs a new sign-in");
-    }
-
-    #[tokio::test]
-    async fn refresh_oauth_token_malformed_json_errors_with_context() {
-        let server = MockServer::start().await;
-        Mock::given(method("POST"))
-            .and(wm_path("/"))
-            .respond_with(ResponseTemplate::new(200).set_body_string("<not json>"))
-            .mount(&server)
-            .await;
-
-        let err = refresh_oauth_token(&server.uri(), "tok", &NoRoots)
-            .await
-            .expect_err("expected parse error");
-        assert!(format!("{:#}", err.error).contains("parse"));
-        assert!(!err.transient, "a malformed reply is not retried");
-    }
-
-    #[tokio::test]
-    async fn refresh_oauth_token_honors_extra_ca_certs() {
-        let server = MockServer::start().await;
-        Mock::given(method("POST"))
-            .and(wm_path("/"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(ok_refresh_body(
-                "new-access",
-                "new-refresh",
-                3600,
-            )))
-            .mount(&server)
-            .await;
-
-        let pem = tempfile::NamedTempFile::new().unwrap();
-        std::io::Write::write_all(&mut pem.as_file(), TEST_CA_PEM.as_bytes()).unwrap();
-
-        let response = refresh_oauth_token(
-            &server.uri(),
-            "refresh",
-            &PlatformTrust(Some(pem.path().to_path_buf())),
-        )
-        .await
-        .expect("valid PEM must build a client and produce a response");
-        assert_eq!(response.access_token, "new-access");
-    }
-
-    #[tokio::test]
-    async fn refresh_oauth_token_surfaces_extra_ca_certs_error_with_path() {
-        let missing = Path::new("/definitely/does/not/exist.pem");
-        let err = refresh_oauth_token(
-            "http://unused.invalid/",
-            "refresh",
-            &PlatformTrust(Some(missing.to_path_buf())),
-        )
-        .await
-        .expect_err("missing CA bundle must error");
-        let msg = format!("{:#}", err.error);
-        assert!(msg.contains("failed to read extra CA bundle"), "{msg}");
-        assert!(msg.contains("/definitely/does/not/exist.pem"), "{msg}");
-    }
-
-    // ── write_refreshed_credentials ──
-
-    #[test]
-    fn write_refreshed_credentials_preserves_unknown_fields() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("credentials.json");
-
-        std::fs::write(
-            &path,
-            indoc! {r#"
-                {
-                    "claudeAiOauth": {
-                        "accessToken": "old-access",
-                        "refreshToken": "old-refresh",
-                        "expiresAt": 1000,
-                        "scopes": ["user:profile"],
-                        "subscriptionType": "pro",
-                        "rateLimitTier": "default"
-                    }
-                }
-            "#},
-        )
-        .unwrap();
-
-        let response = TokenResponse {
-            access_token: "new-access".to_owned(),
-            refresh_token: "new-refresh".to_owned(),
-            expires_in: 3600,
-            scope: Some("user:profile user:inference".to_owned()),
-        };
-
-        write_refreshed_credentials(&read_credentials(&path).unwrap().unwrap(), &response, 9_000)
-            .unwrap();
-
-        let content = std::fs::read_to_string(&path).unwrap();
-        let json: serde_json::Value = serde_json::from_str(&content).unwrap();
-        let oauth = &json["claudeAiOauth"];
-
-        assert_eq!(oauth["accessToken"], "new-access");
-        assert_eq!(oauth["refreshToken"], "new-refresh");
-        assert_eq!(oauth["expiresAt"], 9_000);
-        assert_eq!(
-            oauth["scopes"],
-            serde_json::json!(["user:profile", "user:inference"])
-        );
-        assert_eq!(oauth["subscriptionType"], "pro");
-        assert_eq!(oauth["rateLimitTier"], "default");
-    }
-
-    #[test]
-    fn write_refreshed_credentials_tolerates_whitespace_in_scope_field() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("credentials.json");
-
-        std::fs::write(
-            &path,
-            indoc! {r#"
-                {
-                    "claudeAiOauth": {
-                        "accessToken": "t",
-                        "refreshToken": "r",
-                        "expiresAt": 1000,
-                        "scopes": []
-                    }
-                }
-            "#},
-        )
-        .unwrap();
-
-        let response = TokenResponse {
-            access_token: "t2".to_owned(),
-            refresh_token: "r2".to_owned(),
-            expires_in: 3600,
-            scope: Some("  user:profile   user:inference  ".to_owned()),
-        };
-
-        write_refreshed_credentials(&read_credentials(&path).unwrap().unwrap(), &response, 9_000)
-            .unwrap();
-
-        let content = std::fs::read_to_string(&path).unwrap();
-        let json: serde_json::Value = serde_json::from_str(&content).unwrap();
-        assert_eq!(
-            json["claudeAiOauth"]["scopes"],
-            serde_json::json!(["user:profile", "user:inference"]),
-        );
-    }
-
-    #[test]
-    fn write_refreshed_credentials_skips_scopes_when_absent() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("credentials.json");
-
-        std::fs::write(
-            &path,
-            indoc! {r#"
-                {
-                    "claudeAiOauth": {
-                        "accessToken": "old",
-                        "refreshToken": "old",
-                        "expiresAt": 1000,
-                        "scopes": ["user:profile"]
-                    }
-                }
-            "#},
-        )
-        .unwrap();
-
-        let response = TokenResponse {
-            access_token: "new".to_owned(),
-            refresh_token: "new".to_owned(),
-            expires_in: 3600,
-            scope: None,
-        };
-
-        write_refreshed_credentials(&read_credentials(&path).unwrap().unwrap(), &response, 9_000)
-            .unwrap();
-
-        let content = std::fs::read_to_string(&path).unwrap();
-        let json: serde_json::Value = serde_json::from_str(&content).unwrap();
-        let oauth = &json["claudeAiOauth"];
-
-        assert_eq!(oauth["scopes"], serde_json::json!(["user:profile"]));
-    }
-
-    // ── acquire_lock ──
-
-    #[tokio::test]
-    async fn acquire_lock_creates_and_drop_removes() {
-        let dir = tempfile::tempdir().unwrap();
-        let lock_path = dir.path().join("test.lock");
-
-        let guard = acquire_lock(&lock_path).await.unwrap();
-        assert!(lock_path.exists());
-
-        drop(guard);
-        assert!(!lock_path.exists());
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn acquire_lock_clears_stale_lock() {
-        let dir = tempfile::tempdir().unwrap();
-        let lock_path = dir.path().join("test.lock");
-        std::fs::create_dir(&lock_path).unwrap();
-        let abandoned_at =
-            std::time::SystemTime::now() - LOCK_STALE_THRESHOLD - Duration::from_secs(1);
-        open_dir(&lock_path).set_modified(abandoned_at).unwrap();
-
-        let _guard = acquire_lock(&lock_path).await.unwrap();
-        assert!(!is_stale_lock(&lock_path));
-    }
-
-    /// Opens a directory with enough access to set its mtime.
-    fn open_dir(path: &Path) -> std::fs::File {
-        #[cfg(windows)]
-        {
-            use std::os::windows::fs::OpenOptionsExt as _;
-
-            // `FILE_WRITE_ATTRIBUTES` access, and `FILE_FLAG_BACKUP_SEMANTICS`, without which
-            // Windows refuses to open a directory.
-            std::fs::OpenOptions::new()
-                .access_mode(0x0100)
-                .custom_flags(0x0200_0000)
-                .open(path)
-                .unwrap()
+            .expect("valid PEM must build a client and produce a response");
+            assert_eq!(response.access_token, "new-access");
         }
-        #[cfg(not(windows))]
-        std::fs::File::open(path).unwrap()
+
+        #[tokio::test]
+        async fn surfaces_extra_ca_certs_error_with_path() {
+            let missing = Path::new("/definitely/does/not/exist.pem");
+            let err = refresh_oauth_token(
+                "http://unused.invalid/",
+                "refresh",
+                &PlatformTrust(Some(missing.to_path_buf())),
+            )
+            .await
+            .expect_err("missing CA bundle must error");
+            let msg = format!("{:#}", err.error);
+            assert!(msg.contains("failed to read extra CA bundle"), "{msg}");
+            assert!(msg.contains("/definitely/does/not/exist.pem"), "{msg}");
+        }
     }
 
-    #[tokio::test]
-    async fn acquire_lock_surfaces_io_error() {
-        let dir = tempfile::tempdir().unwrap();
-        let lock_path = dir.path().join("missing").join("test.lock");
+    mod write_refreshed_credentials {
+        use super::*;
 
-        let err = acquire_lock(&lock_path)
-            .await
-            .err()
-            .expect("missing parent must fail");
-        let msg = format!("{err:#}");
-        assert!(msg.contains("failed to create lock"), "{msg}");
+        #[test]
+        fn preserves_unknown_fields() {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("credentials.json");
+
+            std::fs::write(
+                &path,
+                indoc! {r#"
+                    {
+                        "claudeAiOauth": {
+                            "accessToken": "old-access",
+                            "refreshToken": "old-refresh",
+                            "expiresAt": 1000,
+                            "scopes": ["user:profile"],
+                            "subscriptionType": "pro",
+                            "rateLimitTier": "default"
+                        }
+                    }
+                "#},
+            )
+            .unwrap();
+
+            let response = TokenResponse {
+                access_token: "new-access".to_owned(),
+                refresh_token: "new-refresh".to_owned(),
+                expires_in: 3600,
+                scope: Some("user:profile user:inference".to_owned()),
+            };
+
+            write_refreshed_credentials(
+                &read_credentials(&path).unwrap().unwrap(),
+                &response,
+                9_000,
+            )
+            .unwrap();
+
+            let content = std::fs::read_to_string(&path).unwrap();
+            let json: serde_json::Value = serde_json::from_str(&content).unwrap();
+            let oauth = &json["claudeAiOauth"];
+
+            assert_eq!(oauth["accessToken"], "new-access");
+            assert_eq!(oauth["refreshToken"], "new-refresh");
+            assert_eq!(oauth["expiresAt"], 9_000);
+            assert_eq!(
+                oauth["scopes"],
+                serde_json::json!(["user:profile", "user:inference"])
+            );
+            assert_eq!(oauth["subscriptionType"], "pro");
+            assert_eq!(oauth["rateLimitTier"], "default");
+        }
+
+        #[test]
+        fn tolerates_whitespace_in_scope_field() {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("credentials.json");
+
+            std::fs::write(
+                &path,
+                indoc! {r#"
+                    {
+                        "claudeAiOauth": {
+                            "accessToken": "t",
+                            "refreshToken": "r",
+                            "expiresAt": 1000,
+                            "scopes": []
+                        }
+                    }
+                "#},
+            )
+            .unwrap();
+
+            let response = TokenResponse {
+                access_token: "t2".to_owned(),
+                refresh_token: "r2".to_owned(),
+                expires_in: 3600,
+                scope: Some("  user:profile   user:inference  ".to_owned()),
+            };
+
+            write_refreshed_credentials(
+                &read_credentials(&path).unwrap().unwrap(),
+                &response,
+                9_000,
+            )
+            .unwrap();
+
+            let content = std::fs::read_to_string(&path).unwrap();
+            let json: serde_json::Value = serde_json::from_str(&content).unwrap();
+            assert_eq!(
+                json["claudeAiOauth"]["scopes"],
+                serde_json::json!(["user:profile", "user:inference"]),
+            );
+        }
+
+        #[test]
+        fn skips_scopes_when_absent() {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("credentials.json");
+
+            std::fs::write(
+                &path,
+                indoc! {r#"
+                    {
+                        "claudeAiOauth": {
+                            "accessToken": "old",
+                            "refreshToken": "old",
+                            "expiresAt": 1000,
+                            "scopes": ["user:profile"]
+                        }
+                    }
+                "#},
+            )
+            .unwrap();
+
+            let response = TokenResponse {
+                access_token: "new".to_owned(),
+                refresh_token: "new".to_owned(),
+                expires_in: 3600,
+                scope: None,
+            };
+
+            write_refreshed_credentials(
+                &read_credentials(&path).unwrap().unwrap(),
+                &response,
+                9_000,
+            )
+            .unwrap();
+
+            let content = std::fs::read_to_string(&path).unwrap();
+            let json: serde_json::Value = serde_json::from_str(&content).unwrap();
+            let oauth = &json["claudeAiOauth"];
+
+            assert_eq!(oauth["scopes"], serde_json::json!(["user:profile"]));
+        }
+    }
+
+    mod acquire_lock {
+        use super::*;
+
+        /// Opens a directory with enough access to set its mtime.
+        fn open_dir(path: &Path) -> std::fs::File {
+            #[cfg(windows)]
+            {
+                use std::os::windows::fs::OpenOptionsExt as _;
+
+                // `FILE_WRITE_ATTRIBUTES` access, and `FILE_FLAG_BACKUP_SEMANTICS`, without which
+                // Windows refuses to open a directory.
+                std::fs::OpenOptions::new()
+                    .access_mode(0x0100)
+                    .custom_flags(0x0200_0000)
+                    .open(path)
+                    .unwrap()
+            }
+            #[cfg(not(windows))]
+            std::fs::File::open(path).unwrap()
+        }
+
+        #[tokio::test]
+        async fn creates_and_drop_removes() {
+            let dir = tempfile::tempdir().unwrap();
+            let lock_path = dir.path().join("test.lock");
+
+            let guard = acquire_lock(&lock_path).await.unwrap();
+            assert!(lock_path.exists());
+
+            drop(guard);
+            assert!(!lock_path.exists());
+        }
+
+        #[tokio::test(start_paused = true)]
+        async fn clears_stale_lock() {
+            let dir = tempfile::tempdir().unwrap();
+            let lock_path = dir.path().join("test.lock");
+            std::fs::create_dir(&lock_path).unwrap();
+            let abandoned_at =
+                std::time::SystemTime::now() - LOCK_STALE_THRESHOLD - Duration::from_secs(1);
+            open_dir(&lock_path).set_modified(abandoned_at).unwrap();
+
+            let _guard = acquire_lock(&lock_path).await.unwrap();
+            assert!(!is_stale_lock(&lock_path));
+        }
+
+        #[tokio::test]
+        async fn surfaces_io_error() {
+            let dir = tempfile::tempdir().unwrap();
+            let lock_path = dir.path().join("missing").join("test.lock");
+
+            let err = acquire_lock(&lock_path)
+                .await
+                .err()
+                .expect("missing parent must fail");
+            let msg = format!("{err:#}");
+            assert!(msg.contains("failed to create lock"), "{msg}");
+        }
     }
 }

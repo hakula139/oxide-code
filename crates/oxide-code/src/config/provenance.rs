@@ -136,46 +136,58 @@ pub(crate) struct Provenance {
 mod tests {
     use super::*;
 
-    // ── Layer::label ──
+    mod layer {
+        use super::*;
 
-    #[test]
-    fn label_names_each_layer_kind() {
-        assert_eq!(
-            Layer::User(PathBuf::from("/x/ox/config.toml")).label(),
-            "user"
-        );
-        assert_eq!(
-            Layer::DropIn(PathBuf::from("/x/ox/config.d/10-nix.toml")).label(),
-            "config.d/10-nix.toml",
-        );
-        assert_eq!(
-            Layer::Project(PathBuf::from("/repo/.ox/config.toml")).label(),
-            "project"
-        );
+        mod label {
+            use super::*;
+
+            #[test]
+            fn names_each_layer_kind() {
+                assert_eq!(
+                    Layer::User(PathBuf::from("/x/ox/config.toml")).label(),
+                    "user"
+                );
+                assert_eq!(
+                    Layer::DropIn(PathBuf::from("/x/ox/config.d/10-nix.toml")).label(),
+                    "config.d/10-nix.toml",
+                );
+                assert_eq!(
+                    Layer::Project(PathBuf::from("/repo/.ox/config.toml")).label(),
+                    "project"
+                );
+            }
+        }
     }
 
-    // ── Source ──
+    mod source {
+        use super::*;
 
-    #[test]
-    fn source_display_names_the_layer_variable_or_flag() {
-        assert_eq!(Source::Default.to_string(), "default");
-        assert_eq!(Source::Env("OX_EFFORT").to_string(), "$OX_EFFORT");
-        assert_eq!(Source::Flag("--mode").to_string(), "--mode");
-        assert_eq!(Source::Session.to_string(), "session");
-        assert_eq!(
-            Source::File(Layer::DropIn(PathBuf::from("/x/config.d/a.toml"))).to_string(),
-            "config.d/a.toml",
-        );
-    }
+        #[test]
+        fn display_names_the_layer_variable_or_flag() {
+            assert_eq!(Source::Default.to_string(), "default");
+            assert_eq!(Source::Env("OX_EFFORT").to_string(), "$OX_EFFORT");
+            assert_eq!(Source::Flag("--mode").to_string(), "--mode");
+            assert_eq!(Source::Session.to_string(), "session");
+            assert_eq!(
+                Source::File(Layer::DropIn(PathBuf::from("/x/config.d/a.toml"))).to_string(),
+                "config.d/a.toml",
+            );
+        }
 
-    #[test]
-    fn env_if_set_treats_an_empty_variable_as_unset() {
-        const VAR: &str = "OX_TEST_PROVENANCE_VAR";
-        temp_env::with_var(VAR, Some("1"), || {
-            assert_eq!(Source::env_if_set(VAR), Source::Env(VAR));
-        });
-        temp_env::with_var(VAR, Some(""), || {
-            assert_eq!(Source::env_if_set(VAR), Source::Default);
-        });
+        mod env_if_set {
+            use super::*;
+
+            #[test]
+            fn treats_an_empty_variable_as_unset() {
+                const VAR: &str = "OX_TEST_PROVENANCE_VAR";
+                temp_env::with_var(VAR, Some("1"), || {
+                    assert_eq!(Source::env_if_set(VAR), Source::Env(VAR));
+                });
+                temp_env::with_var(VAR, Some(""), || {
+                    assert_eq!(Source::env_if_set(VAR), Source::Default);
+                });
+            }
+        }
     }
 }

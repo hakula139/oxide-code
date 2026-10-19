@@ -247,104 +247,116 @@ mod tests {
     use super::*;
     use crate::model::MODELS;
 
-    // ── CompactionConfig::for_model ──
+    mod for_model {
+        use super::*;
 
-    #[test]
-    fn for_model_re_resolves_a_percent_threshold_against_the_new_window() {
-        let policy = AutoCompactionPolicy::Percent(ThresholdPercent(40));
-        let unknown = ModelSpec::resolve("custom-model".to_owned());
-        let compaction = resolve_policy(policy, &unknown, 16_000);
-        assert!(!compaction.auto.enabled, "precondition: no window");
+        #[test]
+        fn re_resolves_a_percent_threshold_against_the_new_window() {
+            let policy = AutoCompactionPolicy::Percent(ThresholdPercent(40));
+            let unknown = ModelSpec::resolve("custom-model".to_owned());
+            let compaction = resolve_policy(policy, &unknown, 16_000);
+            assert!(!compaction.auto.enabled, "precondition: no window");
 
-        let known = ModelSpec::resolve("claude-opus-5-5".to_owned());
-        let swapped = compaction.for_model(&known, 64_000);
+            let known = ModelSpec::resolve("claude-opus-5-5".to_owned());
+            let swapped = compaction.for_model(&known, 64_000);
 
-        assert_eq!(
-            swapped.auto,
-            AutoCompactionConfig {
-                enabled: true,
-                threshold_tokens: Some(400_000),
-            }
-        );
-        assert_eq!(swapped.policy, policy);
-    }
-
-    // ── AutoCompactionConfig::should_trigger ──
-
-    #[test]
-    fn should_trigger_requires_enabled_threshold_and_enough_tokens() {
-        let enabled = AutoCompactionConfig {
-            enabled: true,
-            threshold_tokens: Some(10),
-        };
-        assert!(enabled.should_trigger(10));
-        assert!(!enabled.should_trigger(9));
-        assert!(!AutoCompactionConfig::disabled().should_trigger(100));
-        assert!(
-            !AutoCompactionConfig {
-                enabled: true,
-                threshold_tokens: None,
-            }
-            .should_trigger(100)
-        );
-    }
-
-    // ── resolve_policy ──
-
-    #[test]
-    fn resolve_policy_bounds_the_threshold_by_the_floor_and_the_model_window() {
-        let (opus, unknown) = ("claude-opus-5-5", "custom-model");
-        for (id, policy, threshold) in [
-            (opus, AutoCompactionPolicy::Tokens(400_000), Some(400_000)),
-            (opus, AutoCompactionPolicy::Tokens(0), Some(50_000)),
-            (opus, AutoCompactionPolicy::Tokens(49_999), Some(50_000)),
-            (
-                opus,
-                AutoCompactionPolicy::Tokens(990_000),
-                Some(test_thresholds::WINDOW_1M),
-            ),
-            (
-                opus,
-                AutoCompactionPolicy::Percent(ThresholdPercent(40)),
-                Some(400_000),
-            ),
-            (
-                opus,
-                AutoCompactionPolicy::Percent(ThresholdPercent(4)),
-                Some(50_000),
-            ),
-            (
-                unknown,
-                AutoCompactionPolicy::Percent(ThresholdPercent(40)),
-                None,
-            ),
-        ] {
-            let model = ModelSpec::resolve(id.to_owned());
             assert_eq!(
-                resolve_policy(policy, &model, 64_000).auto,
+                swapped.auto,
                 AutoCompactionConfig {
-                    enabled: threshold.is_some(),
-                    threshold_tokens: threshold,
-                },
-                "{id} {policy:?}",
+                    enabled: true,
+                    threshold_tokens: Some(400_000),
+                }
             );
+            assert_eq!(swapped.policy, policy);
         }
     }
 
-    // ── test_thresholds ──
+    mod auto_compaction_config {
+        use super::*;
 
-    #[test]
-    fn test_thresholds_pin_default_auto_threshold_per_window() {
-        for info in MODELS {
-            let model = ModelSpec::resolve(info.id.to_owned());
-            assert_eq!(
-                default_auto_threshold(&model, 64_000),
-                Some(test_thresholds::WINDOW_1M),
-                "{}",
-                info.id,
-            );
+        mod should_trigger {
+            use super::*;
+
+            #[test]
+            fn requires_enabled_threshold_and_enough_tokens() {
+                let enabled = AutoCompactionConfig {
+                    enabled: true,
+                    threshold_tokens: Some(10),
+                };
+                assert!(enabled.should_trigger(10));
+                assert!(!enabled.should_trigger(9));
+                assert!(!AutoCompactionConfig::disabled().should_trigger(100));
+                assert!(
+                    !AutoCompactionConfig {
+                        enabled: true,
+                        threshold_tokens: None,
+                    }
+                    .should_trigger(100)
+                );
+            }
         }
-        let unknown = ModelSpec::resolve("custom-model".to_owned());
-        assert_eq!(default_auto_threshold(&unknown, 64_000), None);
+    }
+
+    mod resolve_policy {
+        use super::*;
+
+        #[test]
+        fn bounds_the_threshold_by_the_floor_and_the_model_window() {
+            let (opus, unknown) = ("claude-opus-5-5", "custom-model");
+            for (id, policy, threshold) in [
+                (opus, AutoCompactionPolicy::Tokens(400_000), Some(400_000)),
+                (opus, AutoCompactionPolicy::Tokens(0), Some(50_000)),
+                (opus, AutoCompactionPolicy::Tokens(49_999), Some(50_000)),
+                (
+                    opus,
+                    AutoCompactionPolicy::Tokens(990_000),
+                    Some(test_thresholds::WINDOW_1M),
+                ),
+                (
+                    opus,
+                    AutoCompactionPolicy::Percent(ThresholdPercent(40)),
+                    Some(400_000),
+                ),
+                (
+                    opus,
+                    AutoCompactionPolicy::Percent(ThresholdPercent(4)),
+                    Some(50_000),
+                ),
+                (
+                    unknown,
+                    AutoCompactionPolicy::Percent(ThresholdPercent(40)),
+                    None,
+                ),
+            ] {
+                let model = ModelSpec::resolve(id.to_owned());
+                assert_eq!(
+                    resolve_policy(policy, &model, 64_000).auto,
+                    AutoCompactionConfig {
+                        enabled: threshold.is_some(),
+                        threshold_tokens: threshold,
+                    },
+                    "{id} {policy:?}",
+                );
+            }
+        }
+    }
+
+    mod window_1m {
+        use super::*;
+
+        #[test]
+        fn pins_default_auto_threshold_per_window() {
+            for info in MODELS {
+                let model = ModelSpec::resolve(info.id.to_owned());
+                assert_eq!(
+                    default_auto_threshold(&model, 64_000),
+                    Some(test_thresholds::WINDOW_1M),
+                    "{}",
+                    info.id,
+                );
+            }
+            let unknown = ModelSpec::resolve("custom-model".to_owned());
+            assert_eq!(default_auto_threshold(&unknown, 64_000), None);
+        }
     }
 }
