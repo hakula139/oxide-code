@@ -904,15 +904,6 @@ mod tests {
         }
 
         #[test]
-        fn rejects_unknown_tokens_listing_the_accepted_ones() {
-            let err = "extra-high".parse::<Effort>().expect_err("unknown token");
-            assert_eq!(
-                format!("{err:#}"),
-                "expected one of low, medium, high, xhigh, max"
-            );
-        }
-
-        #[test]
         fn round_trips_through_toml_deserialize() {
             #[derive(Deserialize)]
             struct Wrap {
@@ -920,6 +911,19 @@ mod tests {
             }
             let wrap: Wrap = toml::from_str(r#"effort = "xhigh""#).unwrap();
             assert_eq!(wrap.effort, Effort::Xhigh);
+        }
+
+        mod from_str {
+            use super::*;
+
+            #[test]
+            fn rejects_unknown_tokens_listing_the_accepted_ones() {
+                let err = "extra-high".parse::<Effort>().expect_err("unknown token");
+                assert_eq!(
+                    format!("{err:#}"),
+                    "expected one of low, medium, high, xhigh, max"
+                );
+            }
         }
     }
 
@@ -938,12 +942,6 @@ mod tests {
             }
         }
 
-        #[test]
-        fn rejects_unknown_tokens_listing_the_accepted_ones() {
-            let err = "30m".parse::<PromptCacheTtl>().expect_err("unknown token");
-            assert_eq!(format!("{err:#}"), "expected one of 5m, 1h");
-        }
-
         mod wire {
             use super::*;
 
@@ -951,6 +949,16 @@ mod tests {
             fn omits_the_five_minute_server_default() {
                 assert_eq!(PromptCacheTtl::FiveMin.wire(), None);
                 assert_eq!(PromptCacheTtl::OneHour.wire(), Some("1h"));
+            }
+        }
+
+        mod from_str {
+            use super::*;
+
+            #[test]
+            fn rejects_unknown_tokens_listing_the_accepted_ones() {
+                let err = "30m".parse::<PromptCacheTtl>().expect_err("unknown token");
+                assert_eq!(format!("{err:#}"), "expected one of 5m, 1h");
             }
         }
     }
@@ -1366,7 +1374,7 @@ mod tests {
         }
 
         #[tokio::test]
-        async fn extra_ca_certs_default_is_none() {
+        async fn extra_ca_certs_default_to_no_bundle() {
             let dir = tempfile::tempdir().unwrap();
             let config = load_with(&dir, &[]).await.unwrap();
             assert!(config.extra_ca_certs.is_none());

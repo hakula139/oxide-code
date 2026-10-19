@@ -162,7 +162,7 @@ mod tests {
         use super::*;
 
         #[tokio::test]
-        async fn uses_cwd_as_fallback_root_when_git_root_is_none() {
+        async fn uses_cwd_as_the_project_root_outside_a_git_repo() {
             let dir = tempfile::tempdir().expect("failed to create tempdir");
             fs::write(dir.path().join("CLAUDE.md"), "Fallback rules.")
                 .await
