@@ -510,59 +510,6 @@ mod tests {
         }
 
         #[test]
-        fn current_time_uses_clock_label() {
-            let text = render_text(vec![StatusLineSegment::CurrentTime], 20);
-            assert!(is_hh_mm(text.trim()), "expected HH:MM label: {text:?}");
-        }
-
-        #[test]
-        fn truncates_single_oversized_segment_to_width() {
-            let rendered = StatusLine::new(vec![StatusLineSegment::RunState]).render(
-                &Theme::default(),
-                &StatusLineState {
-                    cwd: "",
-                    status_span: Span::raw("Running a very long command name"),
-                    ..bare_state()
-                },
-                12,
-            );
-
-            assert_eq!(text_of(&rendered), "  Running...");
-        }
-
-        #[test]
-        fn drops_low_utility_segments_before_usage_model_and_state() {
-            let segments = vec![
-                StatusLineSegment::CurrentTime,
-                StatusLineSegment::SessionCost,
-                StatusLineSegment::ContextUsed,
-                StatusLineSegment::Model,
-                StatusLineSegment::RunState,
-            ];
-
-            assert_eq!(
-                render_text(segments.clone(), 34),
-                "  Ctx: 50% (100k/200k) │ m │ Ready",
-            );
-            assert_eq!(render_text(segments.clone(), 11), "  m │ Ready");
-            assert_eq!(render_text(segments, 10), "  Ready");
-        }
-
-        #[test]
-        fn drops_plain_model_before_model_with_effort() {
-            // The compact `model-with-effort` label carries strictly more information than `model`,
-            // so a user who configures both keeps the more useful variant under width pressure.
-            let segments = vec![
-                StatusLineSegment::Model,
-                StatusLineSegment::ModelWithEffort,
-                StatusLineSegment::RunState,
-            ];
-
-            assert_eq!(render_text(segments.clone(), 80), "  m │ m (high) │ Ready");
-            assert_eq!(render_text(segments, 18), "  m (high) │ Ready");
-        }
-
-        #[test]
         fn pull_request_renders_hash_prefix_and_drops_before_git_branch() {
             let segments = vec![
                 StatusLineSegment::CurrentTime,
@@ -950,6 +897,59 @@ mod tests {
             assert_eq!(text("latte"), "  Theme: latte │ Ready");
             assert_eq!(text("/home/me/themes/dusk.toml"), "  Theme: dusk │ Ready");
             assert_eq!(text(""), "  Ready");
+        }
+
+        #[test]
+        fn current_time_uses_clock_label() {
+            let text = render_text(vec![StatusLineSegment::CurrentTime], 20);
+            assert!(is_hh_mm(text.trim()), "expected HH:MM label: {text:?}");
+        }
+
+        #[test]
+        fn truncates_single_oversized_segment_to_width() {
+            let rendered = StatusLine::new(vec![StatusLineSegment::RunState]).render(
+                &Theme::default(),
+                &StatusLineState {
+                    cwd: "",
+                    status_span: Span::raw("Running a very long command name"),
+                    ..bare_state()
+                },
+                12,
+            );
+
+            assert_eq!(text_of(&rendered), "  Running...");
+        }
+
+        #[test]
+        fn drops_low_utility_segments_before_usage_model_and_state() {
+            let segments = vec![
+                StatusLineSegment::CurrentTime,
+                StatusLineSegment::SessionCost,
+                StatusLineSegment::ContextUsed,
+                StatusLineSegment::Model,
+                StatusLineSegment::RunState,
+            ];
+
+            assert_eq!(
+                render_text(segments.clone(), 34),
+                "  Ctx: 50% (100k/200k) │ m │ Ready",
+            );
+            assert_eq!(render_text(segments.clone(), 11), "  m │ Ready");
+            assert_eq!(render_text(segments, 10), "  Ready");
+        }
+
+        #[test]
+        fn drops_plain_model_before_model_with_effort() {
+            // The compact `model-with-effort` label carries strictly more information than `model`,
+            // so a user who configures both keeps the more useful variant under width pressure.
+            let segments = vec![
+                StatusLineSegment::Model,
+                StatusLineSegment::ModelWithEffort,
+                StatusLineSegment::RunState,
+            ];
+
+            assert_eq!(render_text(segments.clone(), 80), "  m │ m (high) │ Ready");
+            assert_eq!(render_text(segments, 18), "  m (high) │ Ready");
         }
     }
 

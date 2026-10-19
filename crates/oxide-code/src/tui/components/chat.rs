@@ -1633,7 +1633,7 @@ mod tests {
         }
 
         #[test]
-        fn is_none_for_other_blocks() {
+        fn finds_no_error_after_other_blocks() {
             let mut chat = test_chat();
             chat.push_user_message("hello".to_owned());
             assert_eq!(chat.last_error_text(), None);
@@ -1650,7 +1650,7 @@ mod tests {
         }
 
         #[test]
-        fn is_none_without_blocks() {
+        fn finds_no_error_in_an_empty_chat() {
             let chat = test_chat();
 
             assert_eq!(chat.last_error_text(), None);
@@ -1668,7 +1668,7 @@ mod tests {
         }
 
         #[test]
-        fn default_is_none_for_non_system_blocks() {
+        fn finds_no_system_message_after_other_blocks() {
             let mut chat = test_chat();
             chat.push_user_message("a user prompt".to_owned());
             assert_eq!(chat.last_system_text(), None);
@@ -1681,7 +1681,7 @@ mod tests {
         }
 
         #[test]
-        fn none_when_no_blocks() {
+        fn finds_no_system_message_in_an_empty_chat() {
             let chat = test_chat();
             assert_eq!(chat.last_system_text(), None);
         }

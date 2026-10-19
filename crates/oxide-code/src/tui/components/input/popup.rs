@@ -295,10 +295,11 @@ mod tests {
     }
 
     mod set_state {
+
         use super::*;
 
         #[test]
-        fn none_hides_popup() {
+        fn hides_the_popup_without_a_slash_command() {
             let popup = popup_with_state(None);
             assert!(!popup.is_visible());
             assert_eq!(popup.height(), 0);
@@ -334,6 +335,31 @@ mod tests {
                     "unarchive",
                 ]
             );
+        }
+
+        #[test]
+        fn arg_with_curated_roster_populates_arg_mode() {
+            let popup = arg_popup("model", "");
+
+            assert_eq!(
+                list(&popup).mode,
+                PopupMode::Arg {
+                    name: "model".to_owned()
+                }
+            );
+        }
+
+        #[test]
+        fn arg_with_empty_roster_stays_hidden() {
+            // `/init` has no curated roster, so the popup hides, leaving Tab and Enter to the arg.
+            let popup = arg_popup("init", "");
+            assert!(!popup.is_visible());
+        }
+
+        #[test]
+        fn arg_unknown_command_stays_hidden() {
+            let popup = arg_popup("nope", "");
+            assert!(!popup.is_visible());
         }
 
         #[test]
@@ -396,31 +422,6 @@ mod tests {
                 parked,
                 "same mode preserves selection"
             );
-        }
-
-        #[test]
-        fn arg_with_curated_roster_populates_arg_mode() {
-            let popup = arg_popup("model", "");
-
-            assert_eq!(
-                list(&popup).mode,
-                PopupMode::Arg {
-                    name: "model".to_owned()
-                }
-            );
-        }
-
-        #[test]
-        fn arg_with_empty_roster_stays_hidden() {
-            // `/init` has no curated roster, so the popup hides, leaving Tab and Enter to the arg.
-            let popup = arg_popup("init", "");
-            assert!(!popup.is_visible());
-        }
-
-        #[test]
-        fn arg_unknown_command_stays_hidden() {
-            let popup = arg_popup("nope", "");
-            assert!(!popup.is_visible());
         }
     }
 

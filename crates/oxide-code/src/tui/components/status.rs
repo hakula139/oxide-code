@@ -477,7 +477,7 @@ mod tests {
         }
 
         #[test]
-        fn none_clears_title() {
+        fn clears_a_stored_title() {
             let mut bar = test_bar();
             bar.set_title(Some("something".to_owned()));
             bar.set_title(None);
@@ -594,7 +594,7 @@ mod tests {
         use super::*;
 
         #[test]
-        fn idle_is_false() {
+        fn idle_needs_no_repaint() {
             let mut bar = test_bar();
             assert!(!bar.tick());
             assert_eq!(bar.spinner_frame, 0);
@@ -769,23 +769,6 @@ mod tests {
         }
 
         #[test]
-        fn usage_shows_context_and_session_cost() {
-            let mut bar = bar_idle(None, "~/projects/demo");
-            bar.set_usage(Some(UsageSnapshot {
-                context_tokens: Some(124_000),
-                context_window: Some(1_000_000),
-                estimated_cost_usd: Some(0.4321),
-            }));
-            let output = render_top_row(&mut bar, 120);
-            assert!(
-                output.contains("Ctx: 12% (124k/1M)"),
-                "usage slot should render before status: {output:?}",
-            );
-            assert!(output.contains("Sess: $0.4321"));
-            assert!(output.contains("Ready"));
-        }
-
-        #[test]
         fn tool_running_status() {
             let mut bar = bar_idle(None, "~/projects/demo");
             bar.set_status(Status::ToolRunning {
@@ -829,6 +812,88 @@ mod tests {
                 until: Instant::now() + std::time::Duration::from_secs(1),
             });
             insta::assert_snapshot!(render_status(&mut bar, 80));
+        }
+
+        #[test]
+        fn pull_request_checks_at_wide_and_narrow_widths() {
+            let mut bar = segment_bar(StatusLineSegment::PullRequestChecks);
+            bar.set_pull_request(Some(git::PullRequest {
+                checks: Some(git::Checks::Failing(2)),
+                ..pr_state(86)
+            }));
+            insta::assert_snapshot!(render_wide_and_narrow(&mut bar));
+        }
+
+        #[test]
+        fn pull_request_review_at_wide_and_narrow_widths() {
+            let mut bar = segment_bar(StatusLineSegment::PullRequestReview);
+            bar.set_pull_request(Some(git::PullRequest {
+                review: Some(git::ReviewDecision::ChangesRequested),
+                ..pr_state(86)
+            }));
+            insta::assert_snapshot!(render_wide_and_narrow(&mut bar));
+        }
+
+        #[test]
+        fn usage_shows_context_and_session_cost() {
+            let mut bar = bar_idle(None, "~/projects/demo");
+            bar.set_usage(Some(UsageSnapshot {
+                context_tokens: Some(124_000),
+                context_window: Some(1_000_000),
+                estimated_cost_usd: Some(0.4321),
+            }));
+            let output = render_top_row(&mut bar, 120);
+            assert!(
+                output.contains("Ctx: 12% (124k/1M)"),
+                "usage slot should render before status: {output:?}",
+            );
+            assert!(output.contains("Sess: $0.4321"));
+            assert!(output.contains("Ready"));
+        }
+
+        #[test]
+        fn five_hour_limit_at_wide_and_narrow_widths() {
+            let mut bar = segment_bar(StatusLineSegment::FiveHourLimit);
+            bar.set_rate_limits(Some(rate_limits()));
+            insta::assert_snapshot!(render_wide_and_narrow(&mut bar));
+        }
+
+        #[test]
+        fn weekly_limit_at_wide_and_narrow_widths() {
+            let mut bar = segment_bar(StatusLineSegment::WeeklyLimit);
+            bar.set_rate_limits(Some(rate_limits()));
+            insta::assert_snapshot!(render_wide_and_narrow(&mut bar));
+        }
+
+        #[test]
+        fn queued_prompts_at_wide_and_narrow_widths() {
+            let mut bar = segment_bar(StatusLineSegment::QueuedPrompts);
+            bar.set_queued_prompts(2);
+            insta::assert_snapshot!(render_wide_and_narrow(&mut bar));
+        }
+
+        #[test]
+        fn task_progress_at_wide_and_narrow_widths() {
+            let mut bar = segment_bar(StatusLineSegment::TaskProgress);
+            bar.set_task_progress(Some(Progress {
+                completed: 2,
+                total: 5,
+            }));
+            insta::assert_snapshot!(render_wide_and_narrow(&mut bar));
+        }
+
+        #[test]
+        fn session_id_at_wide_and_narrow_widths() {
+            let mut bar = segment_bar(StatusLineSegment::SessionId);
+            bar.set_session_id("3f2a9c1e-5b7d-4e8f-9a0b-1c2d3e4f5a6b");
+            insta::assert_snapshot!(render_wide_and_narrow(&mut bar));
+        }
+
+        #[test]
+        fn theme_at_wide_and_narrow_widths() {
+            let mut bar = segment_bar(StatusLineSegment::Theme);
+            bar.set_theme_name("mocha");
+            insta::assert_snapshot!(render_wide_and_narrow(&mut bar));
         }
 
         #[test]
@@ -947,71 +1012,6 @@ mod tests {
                 !output.contains('~'),
                 "no tildified path should appear: {output:?}",
             );
-        }
-
-        #[test]
-        fn queued_prompts_at_wide_and_narrow_widths() {
-            let mut bar = segment_bar(StatusLineSegment::QueuedPrompts);
-            bar.set_queued_prompts(2);
-            insta::assert_snapshot!(render_wide_and_narrow(&mut bar));
-        }
-
-        #[test]
-        fn session_id_at_wide_and_narrow_widths() {
-            let mut bar = segment_bar(StatusLineSegment::SessionId);
-            bar.set_session_id("3f2a9c1e-5b7d-4e8f-9a0b-1c2d3e4f5a6b");
-            insta::assert_snapshot!(render_wide_and_narrow(&mut bar));
-        }
-
-        #[test]
-        fn theme_at_wide_and_narrow_widths() {
-            let mut bar = segment_bar(StatusLineSegment::Theme);
-            bar.set_theme_name("mocha");
-            insta::assert_snapshot!(render_wide_and_narrow(&mut bar));
-        }
-
-        #[test]
-        fn five_hour_limit_at_wide_and_narrow_widths() {
-            let mut bar = segment_bar(StatusLineSegment::FiveHourLimit);
-            bar.set_rate_limits(Some(rate_limits()));
-            insta::assert_snapshot!(render_wide_and_narrow(&mut bar));
-        }
-
-        #[test]
-        fn weekly_limit_at_wide_and_narrow_widths() {
-            let mut bar = segment_bar(StatusLineSegment::WeeklyLimit);
-            bar.set_rate_limits(Some(rate_limits()));
-            insta::assert_snapshot!(render_wide_and_narrow(&mut bar));
-        }
-
-        #[test]
-        fn pull_request_checks_at_wide_and_narrow_widths() {
-            let mut bar = segment_bar(StatusLineSegment::PullRequestChecks);
-            bar.set_pull_request(Some(git::PullRequest {
-                checks: Some(git::Checks::Failing(2)),
-                ..pr_state(86)
-            }));
-            insta::assert_snapshot!(render_wide_and_narrow(&mut bar));
-        }
-
-        #[test]
-        fn pull_request_review_at_wide_and_narrow_widths() {
-            let mut bar = segment_bar(StatusLineSegment::PullRequestReview);
-            bar.set_pull_request(Some(git::PullRequest {
-                review: Some(git::ReviewDecision::ChangesRequested),
-                ..pr_state(86)
-            }));
-            insta::assert_snapshot!(render_wide_and_narrow(&mut bar));
-        }
-
-        #[test]
-        fn task_progress_at_wide_and_narrow_widths() {
-            let mut bar = segment_bar(StatusLineSegment::TaskProgress);
-            bar.set_task_progress(Some(Progress {
-                completed: 2,
-                total: 5,
-            }));
-            insta::assert_snapshot!(render_wide_and_narrow(&mut bar));
         }
 
         #[test]

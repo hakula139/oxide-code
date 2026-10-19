@@ -364,7 +364,7 @@ mod tests {
         use super::*;
 
         #[test]
-        fn counts_hidden_tasks_by_status_and_is_none_when_all_show() {
+        fn counts_hidden_tasks_by_status_and_gives_no_summary_when_all_show() {
             assert_eq!(
                 hidden_summary(&plan(), &(0..0)).as_deref(),
                 Some("+1 in progress, 1 pending, 1 completed"),

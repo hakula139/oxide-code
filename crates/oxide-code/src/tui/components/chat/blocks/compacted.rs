@@ -88,7 +88,7 @@ mod tests {
         }
     }
 
-    mod render {
+    mod render_boundary {
         use super::*;
 
         fn ctx_at(width: u16, theme: &Theme) -> RenderCtx<'_> {

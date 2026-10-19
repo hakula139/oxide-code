@@ -530,6 +530,46 @@ mod tests {
             buf[(x, y)].bg == Theme::default().selection().bg.unwrap()
         }
 
+        #[test]
+        fn edge_scroll_stops_at_the_bottom_and_the_release_follows_the_tail_again() {
+            let mut chat = chat_of(vec![
+                "r0", "r1", "r2", "r3", "r4", "r5", "r6", "r7", "r8", "r9",
+            ]);
+            let now = Instant::now();
+            mouse(
+                &mut chat,
+                MouseEventKind::Down(MouseButton::Left),
+                (0, 2),
+                now,
+            );
+            mouse(
+                &mut chat,
+                MouseEventKind::Drag(MouseButton::Left),
+                (0, 5),
+                now,
+            );
+
+            assert!(!chat.tick_selection(now), "already at the bottom");
+            chat.handle_event(&crossterm::event::Event::Mouse(MouseEvent {
+                kind: MouseEventKind::ScrollDown,
+                column: 0,
+                row: 2,
+                modifiers: KeyModifiers::NONE,
+            }));
+            chat.push_block(Rows(vec!["streamed"]));
+            paint(&mut chat);
+            assert!(chat.is_scrolled_up(), "a held drag keeps the paint paused");
+            let copied = mouse(
+                &mut chat,
+                MouseEventKind::Up(MouseButton::Left),
+                (0, 5),
+                now,
+            );
+
+            assert_eq!(copied.as_deref(), Some("r7\nr8\nr9\nstreamed"));
+            assert!(!chat.is_scrolled_up(), "the release follows the tail again");
+        }
+
         mod handle_mouse {
             use super::*;
 
@@ -969,46 +1009,6 @@ mod tests {
                 );
 
                 assert_eq!(copied.as_deref(), Some("r0\nr1\nr2\nr3\nr4"));
-            }
-
-            #[test]
-            fn stops_at_the_bottom_and_the_release_follows_the_tail_again() {
-                let mut chat = chat_of(vec![
-                    "r0", "r1", "r2", "r3", "r4", "r5", "r6", "r7", "r8", "r9",
-                ]);
-                let now = Instant::now();
-                mouse(
-                    &mut chat,
-                    MouseEventKind::Down(MouseButton::Left),
-                    (0, 2),
-                    now,
-                );
-                mouse(
-                    &mut chat,
-                    MouseEventKind::Drag(MouseButton::Left),
-                    (0, 5),
-                    now,
-                );
-
-                assert!(!chat.tick_selection(now), "already at the bottom");
-                chat.handle_event(&crossterm::event::Event::Mouse(MouseEvent {
-                    kind: MouseEventKind::ScrollDown,
-                    column: 0,
-                    row: 2,
-                    modifiers: KeyModifiers::NONE,
-                }));
-                chat.push_block(Rows(vec!["streamed"]));
-                paint(&mut chat);
-                assert!(chat.is_scrolled_up(), "a held drag keeps the paint paused");
-                let copied = mouse(
-                    &mut chat,
-                    MouseEventKind::Up(MouseButton::Left),
-                    (0, 5),
-                    now,
-                );
-
-                assert_eq!(copied.as_deref(), Some("r7\nr8\nr9\nstreamed"));
-                assert!(!chat.is_scrolled_up(), "the release follows the tail again");
             }
 
             #[test]

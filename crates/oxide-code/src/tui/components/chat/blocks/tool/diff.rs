@@ -395,7 +395,7 @@ mod tests {
         }
 
         #[test]
-        fn is_none_when_both_sides_empty() {
+        fn leaves_an_empty_chunk_unanchored() {
             let chunk = chunk_of(&[], &[]);
             assert_eq!(chunk_anchor_line(&chunk), None);
         }

@@ -499,13 +499,6 @@ mod tests {
         }
 
         #[test]
-        fn ctrl_c_idle_arms_exit() {
-            let mut input = test_input();
-            let outcome = input.handle_event(&key(KeyCode::Char('c'), KeyModifiers::CONTROL));
-            assert_eq!(outcome, InputOutcome::Action(Action::ConfirmExit));
-        }
-
-        #[test]
         fn ctrl_d_empty_buffer_quits_only_when_idle() {
             // POSIX EOF idiom: idle Ctrl+D on an empty buffer exits.
             let mut input = test_input();
@@ -539,43 +532,18 @@ mod tests {
         }
 
         #[test]
+        fn ctrl_c_idle_arms_exit() {
+            let mut input = test_input();
+            let outcome = input.handle_event(&key(KeyCode::Char('c'), KeyModifiers::CONTROL));
+            assert_eq!(outcome, InputOutcome::Action(Action::ConfirmExit));
+        }
+
+        #[test]
         fn ctrl_c_busy_triggers_interrupt() {
             let mut input = test_input();
             input.set_enabled(false);
             let outcome = input.handle_event(&key(KeyCode::Char('c'), KeyModifiers::CONTROL));
             assert_eq!(outcome, InputOutcome::Action(Action::Op(Op::Interrupt)));
-        }
-
-        #[test]
-        fn disabled_empty_enter_is_silent() {
-            // Submit's empty-buffer guard short-circuits, so a stray Enter mid-turn produces no
-            // action even though the textarea accepts typing while busy.
-            let mut input = test_input();
-            input.set_enabled(false);
-            let outcome = input.handle_event(&key(KeyCode::Enter, KeyModifiers::NONE));
-            assert_eq!(outcome, InputOutcome::Consumed);
-        }
-
-        #[test]
-        fn disabled_typing_lands_in_textarea() {
-            // Enables the queue UX: the user composes a follow-up while the spinner still spins.
-            let mut input = test_input();
-            input.set_enabled(false);
-            input.handle_event(&key(KeyCode::Char('h'), KeyModifiers::NONE));
-            input.handle_event(&key(KeyCode::Char('i'), KeyModifiers::NONE));
-            assert_eq!(input.textarea.lines(), vec!["hi"]);
-        }
-
-        #[test]
-        fn disabled_enter_with_content_submits() {
-            let mut input = test_input();
-            input.set_enabled(false);
-            input.handle_event(&key(KeyCode::Char('q'), KeyModifiers::NONE));
-            let outcome = input.handle_event(&key(KeyCode::Enter, KeyModifiers::NONE));
-            assert_eq!(
-                outcome,
-                InputOutcome::Action(Action::Submit("q".to_owned())),
-            );
         }
 
         #[test]
@@ -600,107 +568,6 @@ mod tests {
                 assert_eq!(input.textarea.lines(), vec!["draft"]);
                 assert_eq!(input.textarea.cursor(), (0, 5));
             }
-        }
-
-        #[test]
-        fn up_down_on_empty_buffer_is_ignored() {
-            let mut input = test_input();
-            for code in [KeyCode::Up, KeyCode::Down] {
-                assert_eq!(
-                    input.handle_event(&key(code, KeyModifiers::NONE)),
-                    InputOutcome::Ignored,
-                );
-            }
-        }
-
-        #[test]
-        fn up_down_move_the_cursor_until_the_buffer_edge() {
-            let mut input = test_input();
-            input.set_text("one\ntwo");
-
-            let up = key(KeyCode::Up, KeyModifiers::NONE);
-            let down = key(KeyCode::Down, KeyModifiers::NONE);
-            assert_eq!(input.handle_event(&up), InputOutcome::Consumed);
-            assert_eq!(input.textarea.cursor().0, 0);
-            assert_eq!(input.handle_event(&up), InputOutcome::Ignored, "top row");
-            assert_eq!(input.handle_event(&down), InputOutcome::Consumed);
-            assert_eq!(input.textarea.cursor().0, 1);
-            assert_eq!(
-                input.handle_event(&down),
-                InputOutcome::Ignored,
-                "bottom row"
-            );
-        }
-
-        #[test]
-        fn plain_home_moves_the_cursor_while_busy() {
-            let mut input = test_input();
-            input.set_enabled(false);
-            type_text(&mut input, "draft");
-            let outcome = input.handle_event(&key(KeyCode::Home, KeyModifiers::NONE));
-            assert_eq!(outcome, InputOutcome::Consumed);
-            assert_eq!(input.textarea.cursor(), (0, 0));
-        }
-
-        #[test]
-        fn paste_normalizes_line_breaks_without_submitting() {
-            let mut input = test_input();
-            let outcome = input.handle_event(&Event::Paste("one\r\ntwo\rthree\nfour".to_owned()));
-            assert_eq!(outcome, InputOutcome::Consumed);
-            assert_eq!(input.textarea.lines(), vec!["one", "two", "three", "four"]);
-        }
-
-        #[test]
-        fn paste_of_a_slash_command_opens_the_popup() {
-            let mut input = test_input();
-            input.handle_event(&Event::Paste("/he".to_owned()));
-            assert!(input.popup_visible());
-        }
-
-        #[test]
-        fn shift_enter_inserts_newline() {
-            let mut input = test_input();
-            input.textarea.input(Event::Key(KeyEvent::new(
-                KeyCode::Char('a'),
-                KeyModifiers::NONE,
-            )));
-
-            let outcome = input.handle_event(&key(KeyCode::Enter, KeyModifiers::SHIFT));
-            assert_eq!(outcome, InputOutcome::Consumed);
-            assert_eq!(input.textarea.lines().len(), 2);
-        }
-
-        #[test]
-        fn alt_enter_inserts_newline() {
-            // VS Code and Cursor send Shift+Enter as `\x1b\r`, which crossterm parses as Alt+Enter.
-            let mut input = test_input();
-            input.textarea.input(Event::Key(KeyEvent::new(
-                KeyCode::Char('a'),
-                KeyModifiers::NONE,
-            )));
-
-            let outcome = input.handle_event(&key(KeyCode::Enter, KeyModifiers::ALT));
-            assert_eq!(outcome, InputOutcome::Consumed);
-            assert_eq!(input.textarea.lines().len(), 2);
-        }
-
-        #[test]
-        fn enter_submits_nonempty() {
-            let mut input = test_input();
-            input.textarea.input(Event::Key(KeyEvent::new(
-                KeyCode::Char('h'),
-                KeyModifiers::NONE,
-            )));
-            input.textarea.input(Event::Key(KeyEvent::new(
-                KeyCode::Char('i'),
-                KeyModifiers::NONE,
-            )));
-
-            let outcome = input.handle_event(&key(KeyCode::Enter, KeyModifiers::NONE));
-            assert_eq!(
-                outcome,
-                InputOutcome::Action(Action::Submit("hi".to_owned())),
-            );
         }
 
         #[test]
@@ -844,6 +711,139 @@ mod tests {
                 outcome,
                 InputOutcome::Action(Action::Submit("/model claude-opus".to_owned())),
             );
+        }
+
+        #[test]
+        fn shift_enter_inserts_newline() {
+            let mut input = test_input();
+            input.textarea.input(Event::Key(KeyEvent::new(
+                KeyCode::Char('a'),
+                KeyModifiers::NONE,
+            )));
+
+            let outcome = input.handle_event(&key(KeyCode::Enter, KeyModifiers::SHIFT));
+            assert_eq!(outcome, InputOutcome::Consumed);
+            assert_eq!(input.textarea.lines().len(), 2);
+        }
+
+        #[test]
+        fn alt_enter_inserts_newline() {
+            // VS Code and Cursor send Shift+Enter as `\x1b\r`, which crossterm parses as Alt+Enter.
+            let mut input = test_input();
+            input.textarea.input(Event::Key(KeyEvent::new(
+                KeyCode::Char('a'),
+                KeyModifiers::NONE,
+            )));
+
+            let outcome = input.handle_event(&key(KeyCode::Enter, KeyModifiers::ALT));
+            assert_eq!(outcome, InputOutcome::Consumed);
+            assert_eq!(input.textarea.lines().len(), 2);
+        }
+
+        #[test]
+        fn enter_submits_nonempty() {
+            let mut input = test_input();
+            input.textarea.input(Event::Key(KeyEvent::new(
+                KeyCode::Char('h'),
+                KeyModifiers::NONE,
+            )));
+            input.textarea.input(Event::Key(KeyEvent::new(
+                KeyCode::Char('i'),
+                KeyModifiers::NONE,
+            )));
+
+            let outcome = input.handle_event(&key(KeyCode::Enter, KeyModifiers::NONE));
+            assert_eq!(
+                outcome,
+                InputOutcome::Action(Action::Submit("hi".to_owned())),
+            );
+        }
+
+        #[test]
+        fn disabled_empty_enter_is_silent() {
+            // Submit's empty-buffer guard short-circuits, so a stray Enter mid-turn produces no
+            // action even though the textarea accepts typing while busy.
+            let mut input = test_input();
+            input.set_enabled(false);
+            let outcome = input.handle_event(&key(KeyCode::Enter, KeyModifiers::NONE));
+            assert_eq!(outcome, InputOutcome::Consumed);
+        }
+
+        #[test]
+        fn disabled_enter_with_content_submits() {
+            let mut input = test_input();
+            input.set_enabled(false);
+            input.handle_event(&key(KeyCode::Char('q'), KeyModifiers::NONE));
+            let outcome = input.handle_event(&key(KeyCode::Enter, KeyModifiers::NONE));
+            assert_eq!(
+                outcome,
+                InputOutcome::Action(Action::Submit("q".to_owned())),
+            );
+        }
+
+        #[test]
+        fn up_down_on_empty_buffer_is_ignored() {
+            let mut input = test_input();
+            for code in [KeyCode::Up, KeyCode::Down] {
+                assert_eq!(
+                    input.handle_event(&key(code, KeyModifiers::NONE)),
+                    InputOutcome::Ignored,
+                );
+            }
+        }
+
+        #[test]
+        fn up_down_move_the_cursor_until_the_buffer_edge() {
+            let mut input = test_input();
+            input.set_text("one\ntwo");
+
+            let up = key(KeyCode::Up, KeyModifiers::NONE);
+            let down = key(KeyCode::Down, KeyModifiers::NONE);
+            assert_eq!(input.handle_event(&up), InputOutcome::Consumed);
+            assert_eq!(input.textarea.cursor().0, 0);
+            assert_eq!(input.handle_event(&up), InputOutcome::Ignored, "top row");
+            assert_eq!(input.handle_event(&down), InputOutcome::Consumed);
+            assert_eq!(input.textarea.cursor().0, 1);
+            assert_eq!(
+                input.handle_event(&down),
+                InputOutcome::Ignored,
+                "bottom row"
+            );
+        }
+
+        #[test]
+        fn disabled_typing_lands_in_textarea() {
+            // Enables the queue UX: the user composes a follow-up while the spinner still spins.
+            let mut input = test_input();
+            input.set_enabled(false);
+            input.handle_event(&key(KeyCode::Char('h'), KeyModifiers::NONE));
+            input.handle_event(&key(KeyCode::Char('i'), KeyModifiers::NONE));
+            assert_eq!(input.textarea.lines(), vec!["hi"]);
+        }
+
+        #[test]
+        fn plain_home_moves_the_cursor_while_busy() {
+            let mut input = test_input();
+            input.set_enabled(false);
+            type_text(&mut input, "draft");
+            let outcome = input.handle_event(&key(KeyCode::Home, KeyModifiers::NONE));
+            assert_eq!(outcome, InputOutcome::Consumed);
+            assert_eq!(input.textarea.cursor(), (0, 0));
+        }
+
+        #[test]
+        fn paste_normalizes_line_breaks_without_submitting() {
+            let mut input = test_input();
+            let outcome = input.handle_event(&Event::Paste("one\r\ntwo\rthree\nfour".to_owned()));
+            assert_eq!(outcome, InputOutcome::Consumed);
+            assert_eq!(input.textarea.lines(), vec!["one", "two", "three", "four"]);
+        }
+
+        #[test]
+        fn paste_of_a_slash_command_opens_the_popup() {
+            let mut input = test_input();
+            input.handle_event(&Event::Paste("/he".to_owned()));
+            assert!(input.popup_visible());
         }
     }
 

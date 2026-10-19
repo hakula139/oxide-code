@@ -231,26 +231,22 @@ mod tests {
     mod progress_update {
         use super::*;
 
-        mod visible {
-            use super::*;
+        #[test]
+        fn shows_as_assistant_text_only_while_thinking_hidden() {
+            let theme = Theme::default();
+            let block = ProgressUpdate::new("Found the loader.");
+            let mut ctx = ctx_at(60, &theme);
+            assert!(
+                !block.visible(&ctx),
+                "the thinking block already shows the text"
+            );
 
-            #[test]
-            fn only_while_thinking_hidden() {
-                let theme = Theme::default();
-                let block = ProgressUpdate::new("Found the loader.");
-                let mut ctx = ctx_at(60, &theme);
-                assert!(
-                    !block.visible(&ctx),
-                    "the thinking block already shows the text"
-                );
-
-                ctx.show_thinking = false;
-                assert!(block.visible(&ctx));
-                assert_eq!(
-                    block.render(&ctx),
-                    AssistantText::new("Found the loader.").render(&ctx),
-                );
-            }
+            ctx.show_thinking = false;
+            assert!(block.visible(&ctx));
+            assert_eq!(
+                block.render(&ctx),
+                AssistantText::new("Found the loader.").render(&ctx),
+            );
         }
     }
 }
