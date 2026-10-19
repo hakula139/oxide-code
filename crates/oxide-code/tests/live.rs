@@ -359,9 +359,9 @@ fn has_block(message: &Value, kind: &str) -> bool {
 fn has_signed_thinking(message: &Value) -> bool {
     blocks(message).any(|block| {
         block["type"] == "thinking"
-            && block["signature"]
+            && block["payload"]
                 .as_str()
-                .is_some_and(|signature| !signature.is_empty())
+                .is_some_and(|payload| !payload.is_empty())
     })
 }
 
