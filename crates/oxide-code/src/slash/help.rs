@@ -58,8 +58,6 @@ mod tests {
     use crate::slash::resume::ResumeCmd;
     use crate::tui::modal::Modal;
 
-    // ── HelpCmd::name ──
-
     #[test]
     fn name_and_metadata_match_built_ins_contract() {
         assert_eq!(HelpCmd.name(), "help");
@@ -67,35 +65,41 @@ mod tests {
         assert_ne!(HelpCmd.description(), "");
     }
 
-    // ── HelpCmd::execute ──
+    mod execute {
+        use super::*;
 
-    #[test]
-    fn execute_opens_the_overview_modal() {
-        let info = crate::slash::testing::test_session_info();
-        let outcome = HelpCmd.execute("", &SlashContext::new(&info, None));
-        outcome.unwrap().into_modal();
+        #[test]
+        fn opens_the_overview_modal() {
+            let info = crate::slash::testing::test_session_info();
+            let outcome = HelpCmd.execute("", &SlashContext::new(&info, None));
+            outcome.unwrap().into_modal();
+        }
     }
 
-    // ── build_modal ──
+    mod build_modal {
+        use super::*;
 
-    #[test]
-    fn build_modal_renders_one_row_per_built_in() {
-        let m = build_modal();
-        // title + blank + N rows + blank + footer.
-        let expected = u16::try_from(BUILT_INS.len() + 4).unwrap();
-        assert_eq!(m.height(80, u16::MAX), expected);
+        #[test]
+        fn renders_one_row_per_built_in() {
+            let m = build_modal();
+            // title + blank + N rows + blank + footer.
+            let expected = u16::try_from(BUILT_INS.len() + 4).unwrap();
+            assert_eq!(m.height(80, u16::MAX), expected);
+        }
     }
 
-    // ── display_label ──
+    mod display_label {
+        use super::*;
 
-    #[test]
-    fn display_label_combines_name_aliases_and_usage() {
-        assert_eq!(display_label(&HelpCmd), "/help");
-        assert_eq!(display_label(&ClearCmd), "/clear (new, reset)");
-        assert_eq!(display_label(&ModelCmd), "/model [<id>]");
-        assert_eq!(
-            display_label(&ResumeCmd),
-            "/resume (continue) [<id-prefix>]"
-        );
+        #[test]
+        fn combines_name_aliases_and_usage() {
+            assert_eq!(display_label(&HelpCmd), "/help");
+            assert_eq!(display_label(&ClearCmd), "/clear (new, reset)");
+            assert_eq!(display_label(&ModelCmd), "/model [<id>]");
+            assert_eq!(
+                display_label(&ResumeCmd),
+                "/resume (continue) [<id-prefix>]"
+            );
+        }
     }
 }

@@ -80,8 +80,6 @@ mod tests {
     use crate::slash::registry::testing::run_execute;
     use crate::slash::testing::test_session_info;
 
-    // ── EffortCmd::name ──
-
     #[test]
     fn name_and_metadata_match_built_ins_contract() {
         assert_eq!(EffortCmd.name(), "effort");
@@ -90,94 +88,100 @@ mod tests {
         assert_eq!(EffortCmd.usage(), Some("[<level>]"));
     }
 
-    // ── EffortCmd::classify ──
+    mod classify {
+        use super::*;
 
-    #[test]
-    fn classify_is_mutating_for_modal_and_direct_forms() {
-        assert_eq!(EffortCmd.classify(""), SlashKind::Mutating);
-        assert_eq!(EffortCmd.classify("   "), SlashKind::Mutating);
-        assert_eq!(EffortCmd.classify("xhigh"), SlashKind::Mutating);
+        #[test]
+        fn is_mutating_for_modal_and_direct_forms() {
+            assert_eq!(EffortCmd.classify(""), SlashKind::Mutating);
+            assert_eq!(EffortCmd.classify("   "), SlashKind::Mutating);
+            assert_eq!(EffortCmd.classify("xhigh"), SlashKind::Mutating);
+        }
     }
 
-    // ── EffortCmd::complete_arg ──
+    mod complete_arg {
+        use super::*;
 
-    fn arg_values(prefix: &str) -> Vec<String> {
-        EffortCmd
-            .complete_arg(prefix)
-            .into_iter()
-            .map(|c| c.value.into_owned())
-            .collect()
+        fn arg_values(prefix: &str) -> Vec<String> {
+            EffortCmd
+                .complete_arg(prefix)
+                .into_iter()
+                .map(|c| c.value.into_owned())
+                .collect()
+        }
+
+        #[test]
+        fn empty_prefix_lists_full_ladder_in_intensity_order() {
+            assert_eq!(
+                arg_values(""),
+                vec!["low", "medium", "high", "xhigh", "max"]
+            );
+        }
+
+        #[test]
+        fn prefix_match_pulls_xhigh_above_max_substring() {
+            assert_eq!(arg_values("x"), vec!["xhigh", "max"]);
+        }
+
+        #[test]
+        fn substring_match_lands_after_prefix_tier() {
+            assert_eq!(arg_values("high"), vec!["high", "xhigh"]);
+        }
+
+        #[test]
+        fn is_case_insensitive() {
+            assert_eq!(arg_values("MAX"), vec!["max"]);
+        }
     }
 
-    #[test]
-    fn complete_arg_empty_prefix_lists_full_ladder_in_intensity_order() {
-        assert_eq!(
-            arg_values(""),
-            vec!["low", "medium", "high", "xhigh", "max"]
-        );
-    }
+    mod execute {
+        use super::*;
 
-    #[test]
-    fn complete_arg_prefix_match_pulls_xhigh_above_max_substring() {
-        assert_eq!(arg_values("x"), vec!["xhigh", "max"]);
-    }
+        const NO_TIER_ERROR: &str = "custom-model has no effort tier. \
+                                     Switch to a supported model first with `/model`, \
+                                     for example `/model opus`.";
 
-    #[test]
-    fn complete_arg_substring_match_lands_after_prefix_tier() {
-        assert_eq!(arg_values("high"), vec!["high", "xhigh"]);
-    }
+        fn run_execute_with_model(model_id: &str, args: &str) -> Result<SlashOutcome, String> {
+            let mut info = test_session_info();
+            info.config.model = ModelSpec::resolve(model_id.to_owned());
+            EffortCmd.execute(args, &SlashContext::new(&info, None))
+        }
 
-    #[test]
-    fn complete_arg_is_case_insensitive() {
-        assert_eq!(arg_values("MAX"), vec!["max"]);
-    }
+        #[test]
+        fn no_args_opens_the_slider() {
+            run_execute(&EffortCmd, "").unwrap().into_modal();
+        }
 
-    // ── EffortCmd::execute ──
+        #[test]
+        fn no_args_on_no_tier_model_errors_with_recovery_hint() {
+            let err = run_execute_with_model("custom-model", "").unwrap_err();
 
-    const NO_TIER_ERROR: &str = "custom-model has no effort tier. \
-                                 Switch to a supported model first with `/model`, \
-                                 for example `/model opus`.";
+            assert_eq!(err, NO_TIER_ERROR);
+        }
 
-    fn run_execute_with_model(model_id: &str, args: &str) -> Result<SlashOutcome, String> {
-        let mut info = test_session_info();
-        info.config.model = ModelSpec::resolve(model_id.to_owned());
-        EffortCmd.execute(args, &SlashContext::new(&info, None))
-    }
+        #[test]
+        fn with_level_forwards_set_model_with_effort_only() {
+            assert_eq!(
+                run_execute(&EffortCmd, "xhigh").unwrap().into_forward(),
+                Action::Op(Op::SetModel(ConfigPick::Effort(Effort::Xhigh))),
+            );
+        }
 
-    #[test]
-    fn execute_no_args_opens_the_slider() {
-        run_execute(&EffortCmd, "").unwrap().into_modal();
-    }
+        #[test]
+        fn unknown_level_errors_before_the_tier_check() {
+            let err = run_execute_with_model("custom-model", "turbo").unwrap_err();
 
-    #[test]
-    fn execute_no_args_on_no_tier_model_errors_with_recovery_hint() {
-        let err = run_execute_with_model("custom-model", "").unwrap_err();
+            assert_eq!(
+                err,
+                "Unknown effort: `turbo`. Valid: low, medium, high, xhigh, max."
+            );
+        }
 
-        assert_eq!(err, NO_TIER_ERROR);
-    }
+        #[test]
+        fn explicit_level_on_no_tier_model_errors_with_recovery_hint() {
+            let err = run_execute_with_model("custom-model", "xhigh").unwrap_err();
 
-    #[test]
-    fn execute_with_level_forwards_set_model_with_effort_only() {
-        assert_eq!(
-            run_execute(&EffortCmd, "xhigh").unwrap().into_forward(),
-            Action::Op(Op::SetModel(ConfigPick::Effort(Effort::Xhigh))),
-        );
-    }
-
-    #[test]
-    fn execute_unknown_level_errors_before_the_tier_check() {
-        let err = run_execute_with_model("custom-model", "turbo").unwrap_err();
-
-        assert_eq!(
-            err,
-            "Unknown effort: `turbo`. Valid: low, medium, high, xhigh, max."
-        );
-    }
-
-    #[test]
-    fn execute_explicit_level_on_no_tier_model_errors_with_recovery_hint() {
-        let err = run_execute_with_model("custom-model", "xhigh").unwrap_err();
-
-        assert_eq!(err, NO_TIER_ERROR);
+            assert_eq!(err, NO_TIER_ERROR);
+        }
     }
 }
