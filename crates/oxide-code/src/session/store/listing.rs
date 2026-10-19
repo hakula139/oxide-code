@@ -3,6 +3,7 @@
 use std::fs::{self, File};
 use std::io::BufReader;
 use std::path::{Path, PathBuf};
+use std::vec;
 
 use anyhow::{Context, Result};
 use time::OffsetDateTime;
@@ -40,6 +41,7 @@ impl ListPage {
         &self.sessions
     }
 
+    #[cfg(test)]
     pub(crate) fn into_sessions(self) -> Vec<SessionInfo> {
         self.sessions
     }
@@ -49,24 +51,68 @@ impl ListPage {
     }
 }
 
+// ── SessionWalk ──
+
+/// The readable sessions in one archive state, most recently active first, each parsed as it is
+/// drawn. The walk lists and sorts the files when it starts, so it never draws a session created
+/// after that.
+pub(crate) struct SessionWalk {
+    paths: vec::IntoIter<(PathBuf, OffsetDateTime)>,
+    archived: bool,
+}
+
+impl SessionWalk {
+    /// Whether the walk has drawn every file it listed.
+    pub(crate) fn is_exhausted(&self) -> bool {
+        self.paths.as_slice().is_empty()
+    }
+
+    /// The next session, like [`Iterator::next`], or `None` early once `stop` returns true. `stop`
+    /// runs before each file is parsed, so a caller can end a long scan between files.
+    pub(crate) fn next_unless(&mut self, stop: impl Fn() -> bool) -> Option<SessionInfo> {
+        while !stop() {
+            let (path, modified) = self.paths.next()?;
+            if let Some(info) = read_readable(&path, modified)
+                && info.archived == self.archived
+            {
+                return Some(info);
+            }
+        }
+        None
+    }
+}
+
+impl Iterator for SessionWalk {
+    type Item = SessionInfo;
+
+    fn next(&mut self) -> Option<SessionInfo> {
+        self.next_unless(|| false)
+    }
+}
+
 // ── Listing ──
 
 impl SessionStore {
     /// Every readable unarchived session in the home project, most recently active first.
     #[cfg(test)]
     pub(crate) fn list(&self) -> Result<Vec<SessionInfo>> {
-        Ok(self.list_paged(None, ListScope::default())?.into_sessions())
+        Ok(self.walk(ListScope::default())?.collect())
     }
 
-    /// Up to `limit` most recently active readable sessions matching `scope`, unbounded for `None`.
-    /// `scope.all` widens the walk from the home project to every project. Archive state lives in
-    /// each file, so the walk parses sessions until it finds one past the page.
+    /// Walks the sessions matching `scope`. `scope.all` widens the walk from the home project to
+    /// every project.
+    pub(crate) fn walk(&self, scope: ListScope) -> Result<SessionWalk> {
+        Ok(SessionWalk {
+            paths: self.session_paths(scope.all)?.into_iter(),
+            archived: scope.archived,
+        })
+    }
+
+    /// Up to `limit` sessions from the [`walk`](Self::walk) of `scope`, unbounded for `None`.
+    /// Archive state lives in each file, so the walk reads on to the next match past the page.
     pub(crate) fn list_paged(&self, limit: Option<usize>, scope: ListScope) -> Result<ListPage> {
         let limit = limit.unwrap_or(usize::MAX);
-        let mut sessions: Vec<_> = read_session_infos(self.session_paths(scope.all)?.into_iter())
-            .filter(|info| info.archived == scope.archived)
-            .take(limit.saturating_add(1))
-            .collect();
+        let mut sessions: Vec<_> = self.walk(scope)?.take(limit.saturating_add(1)).collect();
         let more = sessions.len() > limit;
         sessions.truncate(limit);
         Ok(ListPage::new(sessions, more))
@@ -74,7 +120,11 @@ impl SessionStore {
 
     /// The most recently active readable unarchived session.
     pub(crate) fn latest(&self, all: bool) -> Result<Option<SessionInfo>> {
-        Ok(read_session_infos(self.session_paths(all)?.into_iter()).find(|info| !info.archived))
+        let scope = ListScope {
+            all,
+            archived: false,
+        };
+        Ok(self.walk(scope)?.next())
     }
 
     /// Readable sessions whose ID starts with `prefix`, most recently active first. IDs are
@@ -147,15 +197,14 @@ fn sort_paths_recent_first(paths: &mut [(PathBuf, OffsetDateTime)]) {
 fn read_session_infos(
     paths: impl Iterator<Item = (PathBuf, OffsetDateTime)>,
 ) -> impl Iterator<Item = SessionInfo> {
-    paths.filter_map(
-        |(path, modified)| match read_session_info(&path, modified) {
-            Ok(info) => Some(info),
-            Err(e) => {
-                warn!("skipping unreadable session file {}: {e}", path.display());
-                None
-            }
-        },
-    )
+    paths.filter_map(|(path, modified)| read_readable(&path, modified))
+}
+
+/// [`read_session_info`], warn-skipping an unreadable file.
+fn read_readable(path: &Path, modified: OffsetDateTime) -> Option<SessionInfo> {
+    read_session_info(path, modified)
+        .inspect_err(|e| warn!("skipping unreadable session file {}: {e}", path.display()))
+        .ok()
 }
 
 // ── Session Info Extraction ──
@@ -237,6 +286,32 @@ mod tests {
         seed_test_session, test_project_dir, test_session_file, test_store,
         write_newest_corrupt_session,
     };
+
+    // ── next_unless ──
+
+    #[test]
+    fn next_unless_stops_before_parsing_once_asked() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = test_store(dir.path());
+        seed_n_sessions(&store, 3);
+        set_archived_at(&test_session_file(dir.path(), "session-0002"), true).unwrap();
+        let mut walk = store.walk(ListScope::default()).unwrap();
+        let checks = std::cell::Cell::new(0);
+        let stop_at_second_file = || {
+            checks.set(checks.get() + 1);
+            checks.get() > 1
+        };
+
+        assert!(
+            walk.next_unless(stop_at_second_file).is_none(),
+            "the archived file came first",
+        );
+        assert_eq!(
+            walk.next().map(|info| info.session_id).as_deref(),
+            Some("session-0001"),
+            "the walk resumes at the file it stopped before",
+        );
+    }
 
     // ── list ──
 

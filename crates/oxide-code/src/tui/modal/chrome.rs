@@ -24,7 +24,7 @@ pub(crate) const CONFIRM_HINTS: [&str; 2] = ["Enter to confirm", "Esc to cancel"
 pub(crate) const FOOTER_HEIGHT: u16 = 2;
 
 /// Blank columns between two text columns of a modal row.
-pub(super) const COLUMN_GAP: usize = 2;
+pub(crate) const COLUMN_GAP: usize = 2;
 
 // ── Header ──
 

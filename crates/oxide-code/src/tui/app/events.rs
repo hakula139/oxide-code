@@ -6,7 +6,7 @@ use std::time::Instant;
 use indoc::formatdoc;
 use tracing::{debug, warn};
 
-use super::{App, COPY_NOTICE_DURATION, CopyNotice};
+use super::{App, CopyNotice};
 use crate::config::auth::AuthSource;
 use crate::config::compaction::AutoCompactionConfig;
 use crate::config::{Effort, display_auto_compaction};
@@ -20,7 +20,7 @@ use crate::tui::clipboard::{CopyReport, Delivery};
 use crate::tui::components::status::Status;
 use crate::tui::git_probes::GitUpdate;
 use crate::tui::modal::approval::ApprovalModal;
-use crate::tui::now;
+use crate::tui::{NOTICE_DURATION, now};
 use crate::util::text::plural;
 
 impl App {
@@ -417,7 +417,7 @@ impl App {
         self.copy_notice = Some(CopyNotice {
             text,
             failed,
-            until: now() + COPY_NOTICE_DURATION,
+            until: now() + NOTICE_DURATION,
         });
         self.dirty = true;
     }
@@ -1995,7 +1995,7 @@ mod tests {
                 outcome: Ok(Delivery::Copied),
             });
 
-            let just_before = COPY_NOTICE_DURATION
+            let just_before = NOTICE_DURATION
                 .checked_sub(Duration::from_millis(1))
                 .unwrap();
             tokio::time::advance(just_before).await;
