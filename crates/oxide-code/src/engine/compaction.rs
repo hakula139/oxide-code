@@ -57,7 +57,8 @@ const SUMMARIZATION_USER_RUBRIC: &str = indoc! {"
     1. The engineer's overall intent and any constraints they stated.
     2. Key technical decisions made and why.
     3. Files, functions, and code paths touched (full paths when known).
-    4. Current state: what is done, what is in progress, what is blocked.
+    4. Current state: what is done, what is in progress, what is blocked, and which checks passed,
+       failed, or have not run.
     5. The next concrete step, if one is obvious.
 
     Be concise. Terse bullets beat paragraphs. Preserve exact identifiers, file paths, error strings,
@@ -1863,6 +1864,17 @@ mod tests {
 
             assert_eq!(message, SUMMARIZATION_USER_RUBRIC, "{instructions:?}");
         }
+    }
+
+    #[test]
+    fn build_user_message_asks_which_checks_ran() {
+        let message = build_user_message(None);
+
+        let prose = message.split_whitespace().collect::<Vec<_>>().join(" ");
+        assert!(
+            prose.contains("which checks passed, failed, or have not run"),
+            "{message}"
+        );
     }
 
     #[test]
