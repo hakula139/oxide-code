@@ -34,6 +34,8 @@ use crate::tui::wrap::{
 pub(super) struct MarkdownRenderer<I> {
     iter: I,
     theme: Theme,
+    /// Style of the body, which fills the spans still without a color once the walk ends.
+    base: Style,
     width: usize,
     pub(super) lines: Vec<Line<'static>>,
 
@@ -119,10 +121,17 @@ impl<'a, I> MarkdownRenderer<I>
 where
     I: Iterator<Item = Event<'a>>,
 {
-    pub(super) fn new(iter: I, theme: &Theme, width: usize, after_block: bool) -> Self {
+    pub(super) fn new(
+        iter: I,
+        theme: &Theme,
+        base: Style,
+        width: usize,
+        after_block: bool,
+    ) -> Self {
         Self {
             iter,
             theme: theme.clone(),
+            base,
             width,
             lines: Vec::new(),
             needs_newline: after_block,
@@ -141,6 +150,9 @@ where
     pub(super) fn run(&mut self) {
         while let Some(event) = self.iter.next() {
             self.handle_event(event);
+        }
+        for line in &mut self.lines {
+            fill_uncolored_spans(line, self.base);
         }
     }
 
@@ -718,9 +730,10 @@ where
     }
 }
 
-// ── Blockquote Helpers ──
+// ── Style Helpers ──
 
-/// Patches `base` onto spans without a foreground, unless the line's style supplies one.
+/// Patches `base` onto spans without a foreground. A line colored as a whole, such as a plain code
+/// fence, keeps its color, since any span color would paint over it.
 fn fill_uncolored_spans(line: &mut Line<'_>, base: Style) {
     if line.style.fg.is_some() {
         return;
@@ -937,7 +950,7 @@ mod tests {
     use ratatui::style::{Color, Stylize};
 
     use super::*;
-    use crate::tui::markdown::render_markdown;
+    use crate::tui::markdown::{render_markdown, render_markdown_on};
 
     mod render_markdown {
         use super::*;
@@ -2184,6 +2197,25 @@ mod tests {
                     "│   four five six ",
                     "│   seven eight"
                 ],
+            );
+        }
+    }
+
+    mod render_markdown_on {
+        use super::*;
+
+        #[test]
+        fn fills_only_text_without_a_color_with_the_base() {
+            let t = Theme::default();
+
+            let text = render_markdown_on("plain `code`", &t, t.thinking(), 0);
+
+            assert_eq!(
+                text.lines,
+                [Line::from(vec![
+                    Span::styled("plain ", t.thinking()),
+                    Span::styled("code", t.inline_code()),
+                ])]
             );
         }
     }

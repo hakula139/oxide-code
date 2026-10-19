@@ -31,7 +31,7 @@ use unicode_width::UnicodeWidthStr;
 
 use self::rows::{MAX_ROW_BYTES, prefixed_row, truncate_to_bytes};
 use crate::tui::glyphs::INLINE_SEPARATOR;
-use crate::tui::markdown::render_markdown;
+use crate::tui::markdown::render_markdown_on;
 use crate::tui::theme::Theme;
 
 // ── Trait ──
@@ -182,25 +182,10 @@ fn bar_section(
 
     out.push(Line::from(Span::styled(prefix.to_owned(), styles.bar)));
     let width = usize::from(ctx.width).saturating_sub(prefix.width());
-    for line in render_markdown(body, ctx.theme, width).lines {
-        let line = fill_plain_spans(line, styles.body);
+    for line in render_markdown_on(body, ctx.theme, styles.body, width).lines {
         out.push(prepend_markdown_prefix(line, prefix, styles.bar));
     }
     out
-}
-
-/// Patches `base` onto spans without a color. A line colored as a whole, such as a plain code
-/// fence, keeps its color, since any span color would paint over it.
-fn fill_plain_spans(mut line: Line<'static>, base: Style) -> Line<'static> {
-    if line.style.fg.is_some() {
-        return line;
-    }
-    for span in &mut line.spans {
-        if span.style.fg.is_none() {
-            span.style = span.style.patch(base);
-        }
-    }
-    line
 }
 
 /// Prepends a styled prefix span, keeping the line's style and alignment.
@@ -242,39 +227,6 @@ mod tests {
 
                 assert_eq!(rows.expander_rows(), [1, 2]);
             }
-        }
-    }
-
-    mod fill_plain_spans {
-        use super::*;
-
-        #[test]
-        fn patches_only_spans_without_a_color() {
-            let theme = Theme::default();
-            let line = Line::from(vec![
-                Span::raw("plain "),
-                Span::styled("code", theme.code()),
-            ]);
-
-            let out = fill_plain_spans(line, theme.thinking());
-
-            assert_eq!(
-                out,
-                Line::from(vec![
-                    Span::styled("plain ", theme.thinking()),
-                    Span::styled("code", theme.code()),
-                ])
-            );
-        }
-
-        #[test]
-        fn keeps_a_line_colored_as_a_whole() {
-            let theme = Theme::default();
-            let line = Line::styled("cargo test", theme.code());
-
-            let out = fill_plain_spans(line.clone(), theme.text());
-
-            assert_eq!(out, line);
         }
     }
 
