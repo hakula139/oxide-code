@@ -286,238 +286,249 @@ mod tests {
     use crate::message::Role;
     use crate::tool::testing::{self as tool_testing, temp_ctx};
 
-    // ── Fixtures ──
-
     fn input(tasks: &[Task]) -> serde_json::Value {
         json!({ "tasks": tasks })
     }
 
-    fn tasks_call(id: &str, input: serde_json::Value) -> Message {
-        Message {
-            role: Role::Assistant,
-            content: vec![ContentBlock::ToolUse {
-                id: id.to_owned(),
-                name: NAME.to_owned(),
-                input,
-            }],
+    mod progress {
+        use super::*;
+
+        mod of {
+            use super::*;
+
+            #[test]
+            fn counts_completed_tasks_out_of_all() {
+                assert_eq!(
+                    Progress::of(&plan()),
+                    Some(Progress {
+                        completed: 1,
+                        total: 3,
+                    }),
+                );
+                assert_eq!(Progress::of(&[]), None);
+            }
         }
     }
 
-    fn result(id: &str, is_error: bool) -> Message {
-        Message {
-            role: Role::User,
-            content: vec![ContentBlock::ToolResult {
-                tool_use_id: id.to_owned(),
-                content: "ok".to_owned(),
-                is_error,
-            }],
+    mod result_view {
+        use super::*;
+
+        #[test]
+        fn shows_the_list_as_sent_even_when_it_cleared() {
+            let done = [task("Fix the parser", TaskStatus::Completed)];
+
+            let view = TasksTool.result_view(
+                &input(&done),
+                "",
+                &ToolMetadata::default(),
+                Path::new("/repo"),
+            );
+
+            assert_eq!(
+                view,
+                Some(ToolResultView::Tasks {
+                    tasks: done.to_vec(),
+                }),
+            );
         }
     }
 
-    // ── Progress::of ──
+    mod run {
+        use super::*;
 
-    #[test]
-    fn progress_of_counts_completed_tasks_out_of_all() {
-        assert_eq!(
-            Progress::of(&plan()),
-            Some(Progress {
-                completed: 1,
-                total: 3,
-            }),
-        );
-        assert_eq!(Progress::of(&[]), None);
+        #[tokio::test]
+        async fn keeps_the_sent_list_and_reports_its_progress() {
+            let output = tool_testing::run(&TasksTool, input(&plan()), &temp_ctx()).await;
+
+            assert!(!output.is_error, "{}", output.content);
+            assert_eq!(
+                output.content,
+                "Updated the task list: 1 of 3 completed. Carry on with the remaining tasks."
+            );
+            assert_eq!(
+                output.metadata.title.as_deref(),
+                Some("Updated 3 tasks, 1 completed")
+            );
+            assert_eq!(output.tasks, Some(plan()));
+        }
+
+        #[tokio::test]
+        async fn collapses_each_task_onto_one_line() {
+            let sent = [task(
+                "  Fix the parser\nthen   rerun\tthe tests ",
+                TaskStatus::Pending,
+            )];
+
+            let output = tool_testing::run(&TasksTool, input(&sent), &temp_ctx()).await;
+
+            assert_eq!(
+                output.tasks,
+                Some(vec![task(
+                    "Fix the parser then rerun the tests",
+                    TaskStatus::Pending
+                )]),
+            );
+        }
+
+        #[tokio::test]
+        async fn clears_a_list_once_every_task_is_completed() {
+            let done = [
+                task("Fix the parser", TaskStatus::Completed),
+                task("Run the tests", TaskStatus::Completed),
+            ];
+
+            let output = tool_testing::run(&TasksTool, input(&done), &temp_ctx()).await;
+
+            assert_eq!(
+                output.content,
+                "Every task is completed, so the task list was cleared."
+            );
+            assert_eq!(output.metadata.title.as_deref(), Some("Completed 2 tasks"));
+            assert_eq!(output.tasks, Some(Vec::new()));
+        }
+
+        #[tokio::test]
+        async fn clears_the_list_for_an_empty_one() {
+            let output = tool_testing::run(&TasksTool, input(&[]), &temp_ctx()).await;
+
+            assert_eq!(output.content, "Cleared the task list.");
+            assert_eq!(output.tasks, Some(Vec::new()));
+        }
+
+        #[tokio::test]
+        async fn rejects_more_than_one_task_in_progress() {
+            let tasks = [
+                task("Fix the parser", TaskStatus::InProgress),
+                task("Run the tests", TaskStatus::InProgress),
+            ];
+
+            let output = tool_testing::run(&TasksTool, input(&tasks), &temp_ctx()).await;
+
+            assert!(output.is_error);
+            assert_eq!(
+                output.content,
+                "2 tasks are in_progress, but at most one can be at a time. \
+                 Mark the others pending or completed."
+            );
+            assert_eq!(output.tasks, None);
+        }
+
+        #[tokio::test]
+        async fn rejects_a_task_without_content() {
+            let tasks = [
+                task("Fix the parser", TaskStatus::Pending),
+                task(" \n ", TaskStatus::Pending),
+            ];
+
+            let output = tool_testing::run(&TasksTool, input(&tasks), &temp_ctx()).await;
+
+            assert!(output.is_error);
+            assert_eq!(
+                output.content,
+                "Task 2 has no content. Describe each task in a few words."
+            );
+            assert_eq!(output.tasks, None);
+        }
+
+        #[tokio::test]
+        async fn rejects_an_unknown_status() {
+            let raw = json!({"tasks": [{"content": "Fix the parser", "status": "blocked"}]});
+
+            let output = tool_testing::run(&TasksTool, raw, &temp_ctx()).await;
+
+            assert!(output.is_error);
+            assert_eq!(
+                output.content,
+                "Invalid input: unknown variant `blocked`, \
+                 expected one of `pending`, `in_progress`, `completed`",
+            );
+            assert_eq!(output.tasks, None);
+        }
     }
 
-    // ── result_view ──
+    mod latest {
+        use super::*;
 
-    #[test]
-    fn result_view_shows_the_list_as_sent_even_when_it_cleared() {
-        let done = [task("Fix the parser", TaskStatus::Completed)];
+        fn tasks_call(id: &str, input: serde_json::Value) -> Message {
+            Message {
+                role: Role::Assistant,
+                content: vec![ContentBlock::ToolUse {
+                    id: id.to_owned(),
+                    name: NAME.to_owned(),
+                    input,
+                }],
+            }
+        }
 
-        let view = TasksTool.result_view(
-            &input(&done),
-            "",
-            &ToolMetadata::default(),
-            Path::new("/repo"),
-        );
+        fn result(id: &str, is_error: bool) -> Message {
+            Message {
+                role: Role::User,
+                content: vec![ContentBlock::ToolResult {
+                    tool_use_id: id.to_owned(),
+                    content: "ok".to_owned(),
+                    is_error,
+                }],
+            }
+        }
 
-        assert_eq!(
-            view,
-            Some(ToolResultView::Tasks {
-                tasks: done.to_vec(),
-            }),
-        );
-    }
+        #[test]
+        fn takes_the_last_successful_call() {
+            let earlier = [task("Fix the parser", TaskStatus::Pending)];
+            let messages = [
+                tasks_call("t1", input(&earlier)),
+                result("t1", false),
+                tasks_call("t2", input(&plan())),
+                result("t2", false),
+                tasks_call("t3", input(&[task("Rejected", TaskStatus::Pending)])),
+                result("t3", true),
+            ];
 
-    // ── run ──
+            assert_eq!(latest(&messages), Some(plan()));
+        }
 
-    #[tokio::test]
-    async fn run_keeps_the_sent_list_and_reports_its_progress() {
-        let output = tool_testing::run(&TasksTool, input(&plan()), &temp_ctx()).await;
+        #[test]
+        fn skips_a_call_without_a_result() {
+            let messages = [
+                tasks_call("t1", input(&plan())),
+                result("t1", false),
+                tasks_call("t2", input(&[task("Unanswered", TaskStatus::Pending)])),
+            ];
 
-        assert!(!output.is_error, "{}", output.content);
-        assert_eq!(
-            output.content,
-            "Updated the task list: 1 of 3 completed. Carry on with the remaining tasks."
-        );
-        assert_eq!(
-            output.metadata.title.as_deref(),
-            Some("Updated 3 tasks, 1 completed")
-        );
-        assert_eq!(output.tasks, Some(plan()));
-    }
+            assert_eq!(latest(&messages), Some(plan()));
+        }
 
-    #[tokio::test]
-    async fn run_collapses_each_task_onto_one_line() {
-        let sent = [task(
-            "  Fix the parser\nthen   rerun\tthe tests ",
-            TaskStatus::Pending,
-        )];
+        #[test]
+        fn skips_a_successful_call_whose_input_does_not_parse() {
+            let unknown_status =
+                json!({"tasks": [{"content": "Fix the parser", "status": "blocked"}]});
+            let messages = [
+                tasks_call("t1", input(&plan())),
+                result("t1", false),
+                tasks_call("t2", unknown_status),
+                result("t2", false),
+            ];
 
-        let output = tool_testing::run(&TasksTool, input(&sent), &temp_ctx()).await;
+            assert_eq!(latest(&messages), Some(plan()));
+        }
 
-        assert_eq!(
-            output.tasks,
-            Some(vec![task(
-                "Fix the parser then rerun the tests",
-                TaskStatus::Pending
-            )]),
-        );
-    }
+        #[test]
+        fn reports_a_cleared_list_as_empty() {
+            let done = [task("Fix the parser", TaskStatus::Completed)];
+            let messages = [
+                tasks_call("t1", input(&plan())),
+                result("t1", false),
+                tasks_call("t2", input(&done)),
+                result("t2", false),
+            ];
 
-    #[tokio::test]
-    async fn run_clears_a_list_once_every_task_is_completed() {
-        let done = [
-            task("Fix the parser", TaskStatus::Completed),
-            task("Run the tests", TaskStatus::Completed),
-        ];
+            assert_eq!(latest(&messages), Some(Vec::new()));
+        }
 
-        let output = tool_testing::run(&TasksTool, input(&done), &temp_ctx()).await;
+        #[test]
+        fn finds_no_list_without_a_call() {
+            let messages = [Message::user("hi"), Message::assistant("hello")];
 
-        assert_eq!(
-            output.content,
-            "Every task is completed, so the task list was cleared."
-        );
-        assert_eq!(output.metadata.title.as_deref(), Some("Completed 2 tasks"));
-        assert_eq!(output.tasks, Some(Vec::new()));
-    }
-
-    #[tokio::test]
-    async fn run_clears_the_list_for_an_empty_one() {
-        let output = tool_testing::run(&TasksTool, input(&[]), &temp_ctx()).await;
-
-        assert_eq!(output.content, "Cleared the task list.");
-        assert_eq!(output.tasks, Some(Vec::new()));
-    }
-
-    #[tokio::test]
-    async fn run_rejects_more_than_one_task_in_progress() {
-        let tasks = [
-            task("Fix the parser", TaskStatus::InProgress),
-            task("Run the tests", TaskStatus::InProgress),
-        ];
-
-        let output = tool_testing::run(&TasksTool, input(&tasks), &temp_ctx()).await;
-
-        assert!(output.is_error);
-        assert_eq!(
-            output.content,
-            "2 tasks are in_progress, but at most one can be at a time. \
-             Mark the others pending or completed."
-        );
-        assert_eq!(output.tasks, None);
-    }
-
-    #[tokio::test]
-    async fn run_rejects_a_task_without_content() {
-        let tasks = [
-            task("Fix the parser", TaskStatus::Pending),
-            task(" \n ", TaskStatus::Pending),
-        ];
-
-        let output = tool_testing::run(&TasksTool, input(&tasks), &temp_ctx()).await;
-
-        assert!(output.is_error);
-        assert_eq!(
-            output.content,
-            "Task 2 has no content. Describe each task in a few words."
-        );
-        assert_eq!(output.tasks, None);
-    }
-
-    #[tokio::test]
-    async fn run_rejects_an_unknown_status() {
-        let raw = json!({"tasks": [{"content": "Fix the parser", "status": "blocked"}]});
-
-        let output = tool_testing::run(&TasksTool, raw, &temp_ctx()).await;
-
-        assert!(output.is_error);
-        assert_eq!(
-            output.content,
-            "Invalid input: unknown variant `blocked`, \
-             expected one of `pending`, `in_progress`, `completed`",
-        );
-        assert_eq!(output.tasks, None);
-    }
-
-    // ── latest ──
-
-    #[test]
-    fn latest_takes_the_last_successful_call() {
-        let earlier = [task("Fix the parser", TaskStatus::Pending)];
-        let messages = [
-            tasks_call("t1", input(&earlier)),
-            result("t1", false),
-            tasks_call("t2", input(&plan())),
-            result("t2", false),
-            tasks_call("t3", input(&[task("Rejected", TaskStatus::Pending)])),
-            result("t3", true),
-        ];
-
-        assert_eq!(latest(&messages), Some(plan()));
-    }
-
-    #[test]
-    fn latest_skips_a_call_without_a_result() {
-        let messages = [
-            tasks_call("t1", input(&plan())),
-            result("t1", false),
-            tasks_call("t2", input(&[task("Unanswered", TaskStatus::Pending)])),
-        ];
-
-        assert_eq!(latest(&messages), Some(plan()));
-    }
-
-    #[test]
-    fn latest_skips_a_successful_call_whose_input_does_not_parse() {
-        let unknown_status = json!({"tasks": [{"content": "Fix the parser", "status": "blocked"}]});
-        let messages = [
-            tasks_call("t1", input(&plan())),
-            result("t1", false),
-            tasks_call("t2", unknown_status),
-            result("t2", false),
-        ];
-
-        assert_eq!(latest(&messages), Some(plan()));
-    }
-
-    #[test]
-    fn latest_reports_a_cleared_list_as_empty() {
-        let done = [task("Fix the parser", TaskStatus::Completed)];
-        let messages = [
-            tasks_call("t1", input(&plan())),
-            result("t1", false),
-            tasks_call("t2", input(&done)),
-            result("t2", false),
-        ];
-
-        assert_eq!(latest(&messages), Some(Vec::new()));
-    }
-
-    #[test]
-    fn latest_is_none_without_a_call() {
-        let messages = [Message::user("hi"), Message::assistant("hello")];
-
-        assert_eq!(latest(&messages), None);
+            assert_eq!(latest(&messages), None);
+        }
     }
 }
