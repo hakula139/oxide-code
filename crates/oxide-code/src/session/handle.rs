@@ -959,6 +959,76 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn set_manual_title_aborting_the_title_usage_write_still_delivers_its_cost() {
+        use wiremock::matchers::{method, path as wm_path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        use crate::client::anthropic::testing::{completion_body, test_client};
+        use crate::config::auth::{Auth, AuthSource};
+        use crate::protocol::testing::CapturingSink;
+        use crate::session::title_generator;
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(wm_path("/v1/messages"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_string(completion_body(r#"{"title":"AI title"}"#)),
+            )
+            .mount(&server)
+            .await;
+        let dir = tempfile::tempdir().unwrap();
+        let mut session = start(&test_store(dir.path()), "claude-haiku-5-5", None);
+        session.record_message(Message::user("first prompt")).await;
+        let session_id = session.session_id().to_owned();
+        let actor = session.cmd_tx.clone();
+        let (cmd_tx, mut commands) = mpsc::channel(8);
+        session.cmd_tx = cmd_tx;
+        let usage = title_generator::spawn(
+            test_client(
+                server.uri(),
+                Auth::new(AuthSource::ApiKeyEnv, "sk"),
+                "claude-haiku-5-5",
+            ),
+            session.clone(),
+            CapturingSink::default(),
+            "prompt".to_owned(),
+        );
+        let SessionCmd::Usage {
+            records,
+            ack: _unanswered,
+        } = commands.recv().await.unwrap()
+        else {
+            panic!("title generator must record its usage first");
+        };
+        let (written, written_rx) = oneshot::channel();
+        actor
+            .send(SessionCmd::Usage {
+                records,
+                ack: written,
+            })
+            .await
+            .unwrap();
+        assert!(written_rx.await.unwrap().failure.is_none());
+
+        let renamed = session.clone();
+        let rename =
+            tokio::spawn(async move { renamed.set_manual_title("Manual title".to_owned()).await });
+        actor.send(commands.recv().await.unwrap()).await.unwrap();
+        assert!(rename.await.unwrap().failure.is_none());
+
+        let data = test_store(dir.path())
+            .load_session_data(&session_id)
+            .unwrap();
+        assert_eq!(
+            data.usage,
+            [usage
+                .await
+                .expect("a cost the file keeps must also reach the engine")]
+        );
+    }
+
+    #[tokio::test]
     async fn set_manual_title_actor_gone_surfaces_failure_but_still_latches_flag() {
         let handle = testing::dead("dead");
 

@@ -15,6 +15,7 @@ use std::sync::Arc;
 
 use anyhow::{Result, anyhow};
 use serde::Serialize;
+use tokio::sync::oneshot::error::TryRecvError;
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::{JoinError, JoinHandle};
 
@@ -830,10 +831,7 @@ impl Engine {
     /// Shows the context usage and session cost, first adding the title request's cost once its
     /// usage lands.
     fn emit_usage_update(&mut self, sink: &dyn EventSink) {
-        if let Some(Ok(record)) = self.title_usage.as_mut().map(oneshot::Receiver::try_recv) {
-            self.total_estimated_cost_usd += estimate_cost_usd(&[record]);
-        }
-
+        self.absorb_title_usage();
         let estimated_cost_usd =
             (self.total_estimated_cost_usd > 0.0).then_some(self.total_estimated_cost_usd);
         if self.displayed_usage.is_none() && estimated_cost_usd.is_none() {
@@ -847,6 +845,20 @@ impl Engine {
             }),
             "usage-updated",
         );
+    }
+
+    /// Adds the title request's cost to the session total once its usage lands, and stops waiting
+    /// once the request has ended, with or without usage.
+    fn absorb_title_usage(&mut self) {
+        let Some(pending) = &mut self.title_usage else {
+            return;
+        };
+        match pending.try_recv() {
+            Ok(record) => self.total_estimated_cost_usd += estimate_cost_usd(&[record]),
+            Err(TryRecvError::Empty) => return,
+            Err(TryRecvError::Closed) => {}
+        }
+        self.title_usage = None;
     }
 
     /// Ends the background shells, then flushes and closes the live session, returning the write
@@ -2321,10 +2333,11 @@ mod tests {
 
             engine.submit_prompt("hello", &sink, &mut inert_ops()).await;
             let title = engine.title_usage.as_mut().expect("a fresh session titles");
-            assert!(title.await.is_err(), "the failed request delivers no usage");
+            let delivered = title.await;
             engine.emit_usage_update(&sink);
             engine.finalize().await;
 
+            assert!(delivered.is_err(), "the failed request delivers no usage");
             let shown = sink
                 .events()
                 .into_iter()
@@ -3045,7 +3058,6 @@ mod tests {
             );
 
             engine.clear(&sink).await;
-            engine.emit_usage_update(&sink);
 
             assert!(
                 engine.total_estimated_cost_usd.abs() < f64::EPSILON,

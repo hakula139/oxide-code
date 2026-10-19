@@ -48,9 +48,9 @@ const SYSTEM_PROMPT: &str = indoc! {r#"
 // ── Public API ──
 
 /// Spawns a task that asks Haiku for a title, appends it to `session`, and emits
-/// `SessionTitleUpdated` through `sink`. The returned receiver gets the request's usage once the API
-/// answers, even with a reply that holds no title. Finalizing `session` aborts the task. A
-/// generation failure only warns, while a write failure shows as a session write error.
+/// `SessionTitleUpdated` through `sink`. The returned receiver gets the usage the response reports,
+/// even for a reply that holds no title. Finalizing `session` aborts the task. A generation failure
+/// only warns, while a write failure shows as a session write error.
 pub(crate) fn spawn<S>(
     client: Client,
     session: SessionHandle,
@@ -74,8 +74,9 @@ where
 // ── Generation ──
 
 /// Asks Haiku for a title, then appends it and notifies `sink` unless a `/rename` won the race.
-/// Records the request's usage in `session` and sends it on `billed` before parsing the reply,
-/// since the API bills a reply that holds no title.
+/// Sends the request's usage on `billed` and records it in `session` before parsing the reply,
+/// since the API bills a reply that holds no title. The send goes first, so a `/rename` that
+/// aborts the task during the write still leaves the cost counted.
 async fn generate_and_record(
     client: &Client,
     session: &SessionHandle,
@@ -103,9 +104,9 @@ async fn generate_and_record(
             cache_ttl: client.prompt_cache_ttl(),
             tokens,
         };
-        let outcome = session.record_usage(vec![record.clone()]).await;
+        _ = billed.send(record.clone());
+        let outcome = session.record_usage(vec![record]).await;
         sink.session_write_error(outcome.failure.as_deref());
-        _ = billed.send(record);
     }
 
     let title = parse_title(&raw).context("Haiku returned a malformed title")?;
@@ -340,7 +341,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn generate_and_record_skips_emit_when_manual_title_was_set_during_haiku_call() {
+    async fn generate_and_record_bills_but_skips_emit_when_renamed_during_haiku_call() {
         let server = MockServer::start().await;
         Mock::given(method("POST"))
             .and(wm_path("/v1/messages"))
@@ -357,16 +358,11 @@ mod tests {
 
         let client = title_client(server.uri());
         let sink = CapturingSink::default();
+        let (billed, usage) = oneshot::channel();
 
-        generate_and_record(
-            &client,
-            &session,
-            &sink,
-            "first prompt",
-            oneshot::channel().0,
-        )
-        .await
-        .unwrap();
+        generate_and_record(&client, &session, &sink, "first prompt", billed)
+            .await
+            .unwrap();
 
         let events = sink.events();
         assert!(
@@ -375,6 +371,11 @@ mod tests {
                 .any(|e| matches!(e, Event::SessionTitleUpdated { .. })),
             "AI title must not emit when manual title is already set: {events:?}",
         );
+        assert_eq!(usage.await.unwrap(), title_record(&client));
+        let data = test_store(dir.path())
+            .load_session_data(session.session_id())
+            .unwrap();
+        assert_eq!(data.usage, [title_record(&client)]);
     }
 
     #[tokio::test]
