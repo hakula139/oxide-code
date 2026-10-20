@@ -39,7 +39,7 @@ invalid_rust_codeblocks = "deny"
 redundant_explicit_links = "deny"
 unused_footnote_definition = "deny"
 
-# Docs include private items (`--document-private-items`), so links to them resolve.
+# `.cargo/config.toml` makes rustdoc document private items, so links to them resolve.
 private_intra_doc_links = "allow"
 
 [workspace.dependencies]

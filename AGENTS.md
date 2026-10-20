@@ -15,7 +15,7 @@ ox -p "<prompt>"                            # Headless: run one turn and print t
 ```text
 .
 ├── .agents/                                # Agent skills for the release procedure
-├── .cargo/                                 # Mutation testing settings for cargo-mutants
+├── .cargo/                                 # Cargo rustdoc flags and cargo-mutants settings
 ├── .claude/                                # Link to the agent skills for Claude Code
 ├── .cspell/                                # Project spelling dictionary
 ├── .envrc                                  # Loads the dev shell through direnv
@@ -78,7 +78,8 @@ Run after implementation and before review:
 cargo fmt --all --check                               # Check formatting
 cargo build                                           # Build
 cargo clippy --all-targets -- -D warnings             # Lint (pedantic, zero warnings)
-cargo doc --no-deps --document-private-items          # Check rustdoc lints
+cargo clippy -- -D warnings                           # Lint without test targets or their fixtures
+cargo doc --no-deps                                   # Check rustdoc lints
 cargo llvm-cov                                        # Run tests and check coverage
 cargo deny check licenses advisories sources bans     # Check dependencies when they change
 pnpm format                                           # Check JSON, Markdown, and YAML formatting

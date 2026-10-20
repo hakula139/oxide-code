@@ -77,8 +77,11 @@ jobs:
       - name: Clippy
         run: nix develop -c cargo clippy --locked --all-targets -- -D warnings
 
+      - name: Clippy without test targets
+        run: nix develop -c cargo clippy --locked -- -D warnings
+
       - name: Rustdoc
-        run: nix develop -c cargo doc --locked --no-deps --document-private-items
+        run: nix develop -c cargo doc --locked --no-deps
 
   dependency-check:
     name: Dependency Check
@@ -130,8 +133,11 @@ jobs:
       - name: Clippy
         run: cargo clippy --locked --all-targets -- -D warnings
 
+      - name: Clippy without test targets
+        run: cargo clippy --locked -- -D warnings
+
       - name: Rustdoc
-        run: cargo doc --locked --no-deps --document-private-items
+        run: cargo doc --locked --no-deps
 
       - name: Test
         run: cargo test --locked
@@ -152,8 +158,11 @@ jobs:
       - name: Clippy
         run: cargo clippy --locked --all-targets -- -D warnings
 
+      - name: Clippy without test targets
+        run: cargo clippy --locked -- -D warnings
+
       - name: Rustdoc
-        run: cargo doc --locked --no-deps --document-private-items
+        run: cargo doc --locked --no-deps
 
       - name: Test
         run: cargo test --locked
@@ -174,7 +183,7 @@ jobs:
         uses: Swatinem/rust-cache@v2
 
       - name: Generate coverage
-        run: nix develop -c cargo llvm-cov --locked --workspace --lcov --output-path lcov.info
+        run: nix develop -c cargo llvm-cov --locked --lcov --output-path lcov.info
 
       - name: Upload to Codecov
         uses: codecov/codecov-action@v7
