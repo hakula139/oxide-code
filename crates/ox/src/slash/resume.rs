@@ -29,6 +29,7 @@ use ox_core::session::store::SessionStore;
 use ox_core::session::store::listing::{ListScope, SessionWalk};
 use ox_core::util::path::tildify;
 use ox_core::util::text::{center_truncate_to_width, compact_count, plural, truncate_to_width};
+use ox_core::util::time::local_offset;
 
 use super::confirm::ConfirmDeleteSessionModal;
 use super::context::SlashContext;
@@ -529,7 +530,7 @@ impl ResumePicker {
             all,
             archived: false,
             dismissal,
-            local_offset: ox_core::util::time::local_offset(),
+            local_offset: local_offset(),
             live_session_id,
             pages: Pages::Done,
             load_error: None,
@@ -801,9 +802,9 @@ mod tests {
     use time::macros::datetime;
 
     use ox_core::session::display::UNTITLED_MARKER;
-    use ox_core::session::entry::TitleInfo;
+    use ox_core::session::entry::{ExitInfo, TitleInfo};
     use ox_core::session::store::testing::{
-        archive_test_session, listed_ids, seed_test_session, test_store,
+        archive_test_session, listed_ids, seed_test_session, test_project_dir, test_store,
     };
 
     use super::Column::{Branch, Id, Msgs, Project, Title, When};
@@ -978,7 +979,7 @@ mod tests {
                     title: t.to_owned(),
                     updated_at: last_active_at,
                 }),
-                exit: message_count.map(|message_count| ox_core::session::entry::ExitInfo {
+                exit: message_count.map(|message_count| ExitInfo {
                     message_count,
                     updated_at: last_active_at,
                 }),
@@ -1350,7 +1351,7 @@ mod tests {
         #[test]
         fn sets_load_error_and_clears_rows_when_the_walk_fails() {
             let (dir, store) = isolated_store();
-            let project_dir = ox_core::session::store::testing::test_project_dir(dir.path());
+            let project_dir = test_project_dir(dir.path());
             std::fs::remove_dir_all(&project_dir).unwrap();
             let Err(cause) = store.walk(ListScope::default()) else {
                 panic!("the walk must fail without the project directory");

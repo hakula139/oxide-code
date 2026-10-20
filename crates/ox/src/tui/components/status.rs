@@ -17,6 +17,7 @@ use ox_core::permission::Mode;
 use ox_core::protocol::UsageSnapshot;
 use ox_core::tool::tasks::Progress;
 use ox_core::util::git;
+use ox_core::util::time::local_offset;
 
 use self::line::{RenderedStatusLine, StatusLine, StatusLineState};
 use crate::tui::glyphs::SPINNER_FRAMES;
@@ -387,7 +388,7 @@ impl StatusBar {
 }
 
 fn current_time_minute() -> u16 {
-    let now = time::OffsetDateTime::now_utc().to_offset(ox_core::util::time::local_offset());
+    let now = time::OffsetDateTime::now_utc().to_offset(local_offset());
     u16::from(now.hour()) * 60 + u16::from(now.minute())
 }
 

@@ -340,6 +340,7 @@ mod tests {
     use ratatui::backend::TestBackend;
 
     use ox_core::config::Effort;
+    use ox_core::config::auth::AuthSource;
 
     use super::*;
     use crate::slash::testing::test_session_info;
@@ -350,7 +351,7 @@ mod tests {
         let mut info = test_session_info();
         info.cwd = "~/github/oxide-code".to_owned();
         info.version = "0.1.0";
-        info.config.auth = Some(ox_core::config::auth::AuthSource::ClaudeCodeLogin);
+        info.config.auth = Some(AuthSource::ClaudeCodeLogin);
         info.config.effort = Some(Effort::Xhigh);
         info
     }

@@ -153,6 +153,7 @@ fn layer_kind(layer: &Layer) -> &'static str {
 mod tests {
     use std::path::PathBuf;
 
+    use ox_core::model::ModelSpec;
     use ox_core::util::path::testing::HOME_VAR;
 
     use super::*;
@@ -272,7 +273,7 @@ mod tests {
             };
             assert_max_tokens(&info, "64000");
 
-            info.config.model = ox_core::model::ModelSpec::resolve("custom-model".to_owned());
+            info.config.model = ModelSpec::resolve("custom-model".to_owned());
             assert_max_tokens(&info, "16000");
 
             info.config.max_tokens = Some(1_000);

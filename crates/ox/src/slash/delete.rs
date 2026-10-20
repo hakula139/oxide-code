@@ -9,6 +9,7 @@ use ox_core::session::display::{display_title, format_metadata_line};
 use ox_core::session::entry::SessionInfo;
 use ox_core::session::resolver::resolve_saved_prefix;
 use ox_core::util::path::tildify;
+use ox_core::util::time::local_offset;
 
 use super::confirm::ConfirmDeleteSessionModal;
 use super::context::SlashContext;
@@ -81,7 +82,7 @@ fn metadata_line(info: &SessionInfo) -> String {
     format_metadata_line(
         &info.session_id,
         info.last_active_at,
-        ox_core::util::time::local_offset(),
+        local_offset(),
         info.exit.as_ref().map_or(0, |e| e.message_count),
         info.git_branch.as_deref(),
         (!project.is_empty()).then_some(project.as_str()),
