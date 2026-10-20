@@ -20,7 +20,6 @@ mod login;
 mod matcher;
 mod mode;
 mod model;
-mod parser;
 mod picker;
 mod registry;
 mod rename;
@@ -34,7 +33,6 @@ pub(crate) use context::{LiveSessionInfo, SlashContext};
 pub(crate) use diff::truncate_for_display;
 pub(crate) use diff::{TRUNCATION_FOOTER, UNTRACKED_HEADING};
 pub(crate) use matcher::MatchedCommand;
-pub(crate) use parser::{PopupState, popup_state};
 pub(crate) use registry::{ArgCompletion, SlashKind, SlashOutcome};
 pub(crate) use resume::ResumePicker;
 

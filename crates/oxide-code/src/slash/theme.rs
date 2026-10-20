@@ -220,7 +220,6 @@ mod tests {
     #[test]
     fn name_and_metadata_match_built_ins_contract() {
         assert_eq!(ThemeCmd.name(), "theme");
-        assert_eq!(ThemeCmd.aliases(), [] as [&str; 0]);
         assert_ne!(ThemeCmd.description(), "");
         assert_eq!(ThemeCmd.usage(), Some("[<name>]"));
     }

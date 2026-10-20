@@ -61,7 +61,6 @@ mod tests {
     #[test]
     fn name_and_metadata_match_built_ins_contract() {
         assert_eq!(HelpCmd.name(), "help");
-        assert_eq!(HelpCmd.aliases(), [] as [&str; 0]);
         assert_ne!(HelpCmd.description(), "");
     }
 

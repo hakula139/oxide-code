@@ -65,7 +65,6 @@ mod tests {
     #[test]
     fn name_and_metadata_match_built_ins_contract() {
         assert_eq!(LoginCmd.name(), "login");
-        assert_eq!(LoginCmd.aliases(), [] as [&str; 0]);
         assert_ne!(LoginCmd.description(), "");
     }
 
@@ -93,7 +92,6 @@ mod tests {
         #[test]
         fn name_and_metadata_match_built_ins_contract() {
             assert_eq!(LogoutCmd.name(), "logout");
-            assert_eq!(LogoutCmd.aliases(), [] as [&str; 0]);
             assert_ne!(LogoutCmd.description(), "");
         }
 

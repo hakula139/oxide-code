@@ -124,7 +124,6 @@ mod tests {
     #[test]
     fn name_and_metadata_match_built_ins_contract() {
         assert_eq!(RenameCmd.name(), "rename");
-        assert_eq!(RenameCmd.aliases(), [] as [&str; 0]);
         assert_ne!(RenameCmd.description(), "");
         assert_eq!(RenameCmd.usage(), Some("[<title>]"));
     }

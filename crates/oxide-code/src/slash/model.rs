@@ -64,7 +64,6 @@ mod tests {
     #[test]
     fn name_and_metadata_match_built_ins_contract() {
         assert_eq!(ModelCmd.name(), "model");
-        assert_eq!(ModelCmd.aliases(), [] as [&str; 0]);
         assert_ne!(ModelCmd.description(), "");
         assert_eq!(ModelCmd.usage(), Some("[<id>]"));
     }

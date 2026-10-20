@@ -171,7 +171,6 @@ mod tests {
     #[test]
     fn name_and_metadata_match_built_ins_contract() {
         assert_eq!(ModeCmd.name(), "mode");
-        assert_eq!(ModeCmd.aliases(), [] as [&str; 0]);
         assert_ne!(ModeCmd.description(), "");
         assert_eq!(ModeCmd.usage(), Some("[<mode>]"));
     }

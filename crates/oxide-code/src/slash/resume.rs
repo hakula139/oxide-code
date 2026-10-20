@@ -899,7 +899,6 @@ mod tests {
         #[test]
         fn name_and_metadata_match_built_ins_contract() {
             assert_eq!(ResumeCmd.name(), "resume");
-            assert_eq!(ResumeCmd.aliases(), &["continue"]);
             assert_ne!(ResumeCmd.description(), "");
             assert_eq!(ResumeCmd.usage(), Some("[<id-prefix>]"));
         }

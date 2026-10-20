@@ -83,7 +83,6 @@ mod tests {
     #[test]
     fn name_and_metadata_match_built_ins_contract() {
         assert_eq!(EffortCmd.name(), "effort");
-        assert_eq!(EffortCmd.aliases(), [] as [&str; 0]);
         assert_ne!(EffortCmd.description(), "");
         assert_eq!(EffortCmd.usage(), Some("[<level>]"));
     }

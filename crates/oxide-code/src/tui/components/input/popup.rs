@@ -17,7 +17,8 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph};
 use unicode_width::UnicodeWidthStr;
 
-use crate::slash::{PopupState, complete_arg_for, filter_built_ins};
+use crate::command::is_name_char;
+use crate::slash::{complete_arg_for, filter_built_ins};
 use crate::tui::saturating_u16;
 use crate::tui::theme::Theme;
 use crate::tui::viewport::{wrap_next, wrap_prev};
@@ -30,6 +31,14 @@ const COLUMN_GAP: usize = 2;
 /// Rows of chrome above the row list. One dim horizontal rule frames the popup as a separate
 /// overlay so it doesn't bleed into whatever sits above (welcome, chat, preview).
 const CHROME_ROWS: u16 = 1;
+
+/// In-progress popup context: `Name` while the user types the command name, and `Arg` once a
+/// space follows it. `None` for plain prompts and the `//` escape.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) enum PopupState<'a> {
+    Name(&'a str),
+    Arg { name: &'a str, prefix: &'a str },
+}
 
 /// What the rows complete: a command name, or an argument of the named command.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -236,6 +245,29 @@ impl PopupList {
         let max_offset = total - MAX_VISIBLE_ROWS;
         self.selected.saturating_sub(pad).min(max_offset)
     }
+}
+
+/// Classifies the cursor's position within a single-line input, by the name rules of
+/// [`parse_slash`](crate::command::parse_slash). An empty `prefix` in `Arg` means the user typed
+/// `/cmd ` and has not started the argument yet.
+pub(super) fn popup_state(buffer: &str) -> Option<PopupState<'_>> {
+    let rest = buffer.trim_start().strip_prefix('/')?;
+    if rest.starts_with('/') {
+        return None;
+    }
+    let Some((name, after)) = rest.split_once(char::is_whitespace) else {
+        return rest
+            .chars()
+            .all(is_name_char)
+            .then_some(PopupState::Name(rest));
+    };
+    if name.is_empty() || !name.chars().all(is_name_char) {
+        return None;
+    }
+    Some(PopupState::Arg {
+        name,
+        prefix: after.trim_start(),
+    })
 }
 
 #[cfg(test)]
@@ -734,6 +766,80 @@ mod tests {
                 assert_eq!(list(&p).selected, total - 1, "wrap to last row");
                 assert_eq!(list(&p).scroll_offset(), total - MAX_VISIBLE_ROWS);
             }
+        }
+    }
+
+    mod popup_state {
+        use super::*;
+
+        fn name(s: &str) -> PopupState<'_> {
+            PopupState::Name(s)
+        }
+
+        fn arg<'a>(name: &'a str, prefix: &'a str) -> PopupState<'a> {
+            PopupState::Arg { name, prefix }
+        }
+
+        #[test]
+        fn bare_slash_is_empty_name() {
+            assert_eq!(popup_state("/"), Some(name("")));
+        }
+
+        #[test]
+        fn partial_name_carries_typed_chars() {
+            assert_eq!(popup_state("/cl"), Some(name("cl")));
+            assert_eq!(popup_state("/clear"), Some(name("clear")));
+        }
+
+        #[test]
+        fn tolerates_leading_whitespace_before_slash() {
+            assert_eq!(popup_state("   /he"), Some(name("he")));
+        }
+
+        #[test]
+        fn trailing_space_after_name_switches_to_empty_arg() {
+            assert_eq!(popup_state("/clear "), Some(arg("clear", "")));
+        }
+
+        #[test]
+        fn typed_arg_carries_prefix_trimmed_of_leading_whitespace() {
+            assert_eq!(popup_state("/model claude-"), Some(arg("model", "claude-")));
+            assert_eq!(popup_state("/model    opus"), Some(arg("model", "opus")));
+        }
+
+        #[test]
+        fn inner_whitespace_in_args_is_kept_for_free_form_commands() {
+            assert_eq!(
+                popup_state("/init please write CLAUDE.md"),
+                Some(arg("init", "please write CLAUDE.md")),
+            );
+        }
+
+        #[test]
+        fn double_slash_escape_is_not_a_command() {
+            assert!(popup_state("//etc/hosts").is_none());
+            assert!(popup_state("//").is_none());
+        }
+
+        #[test]
+        fn plain_prompts_are_not_a_command() {
+            assert!(popup_state("hello").is_none());
+            assert!(popup_state("explain /etc/hosts").is_none());
+            assert!(popup_state("").is_none());
+        }
+
+        #[test]
+        fn invalid_name_chars_reject_the_buffer() {
+            assert!(popup_state("/foo🦀").is_none());
+            assert!(popup_state("/foo!").is_none());
+            assert!(popup_state("/foo! arg").is_none());
+        }
+
+        #[test]
+        fn empty_name_rejects_buffer() {
+            assert!(popup_state("/ ").is_none());
+            assert!(popup_state("/    ").is_none());
+            assert!(popup_state("/  arg").is_none());
         }
     }
 }

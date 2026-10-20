@@ -161,7 +161,6 @@ mod tests {
     #[test]
     fn name_and_metadata_match_built_ins_contract() {
         assert_eq!(ConfigCmd.name(), "config");
-        assert_eq!(ConfigCmd.aliases(), [] as [&str; 0]);
         assert_ne!(ConfigCmd.description(), "");
     }
 

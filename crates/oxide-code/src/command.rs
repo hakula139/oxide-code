@@ -35,7 +35,7 @@ pub(crate) fn typed_op(parsed: &Parsed, project_root: &Path) -> Option<Result<Op
 }
 
 /// The canonical name `name` stands for: the command it is an alias of, or `name` itself.
-pub(crate) fn canonical(name: &str) -> &str {
+fn canonical(name: &str) -> &str {
     ALIASES
         .iter()
         .find(|(_, aliases)| aliases.contains(&name))
@@ -182,6 +182,18 @@ fn format_models<'a>(models: impl IntoIterator<Item = &'a ModelInfo>) -> String 
         .join("\n")
 }
 
+// ── Testing ──
+
+#[cfg(test)]
+pub(crate) mod testing {
+    use super::ALIASES;
+
+    /// The canonical names of the commands that have aliases.
+    pub(crate) fn aliased_names() -> impl Iterator<Item = &'static str> {
+        ALIASES.iter().map(|&(name, _)| name)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use indoc::indoc;
@@ -203,21 +215,16 @@ mod tests {
     mod typed_op {
         use super::*;
 
-        fn parsed(name: &str, args: &str) -> Parsed {
-            Parsed {
-                name: name.to_owned(),
-                args: args.to_owned(),
-            }
+        /// The op the typed `line` runs at `/repo`.
+        fn typed(line: &str) -> Option<Result<Op, String>> {
+            typed_op(&parse_slash(line).unwrap(), Path::new("/repo"))
         }
 
         #[test]
         fn routes_an_alias_to_its_command() {
+            assert_eq!(typed("/new"), Some(Ok(Op::Clear)));
             assert_eq!(
-                typed_op(&parsed("new", ""), Path::new("/repo")),
-                Some(Ok(Op::Clear))
-            );
-            assert_eq!(
-                typed_op(&parsed("continue", " ab12 "), Path::new("/repo")),
+                typed("/continue ab12"),
                 Some(Ok(Op::Resume {
                     target: ResumeTarget::Prefix("ab12".to_owned()),
                 })),
@@ -227,7 +234,7 @@ mod tests {
         #[test]
         fn error_names_the_command_as_typed() {
             assert_eq!(
-                typed_op(&parsed("continue", ""), Path::new("/repo")),
+                typed("/continue"),
                 Some(Err(
                     "/continue: Missing session ID. Usage: `/resume <id-prefix>`.".to_owned()
                 )),
@@ -236,11 +243,8 @@ mod tests {
 
         #[test]
         fn command_without_a_typed_form_or_an_unknown_one_has_no_op() {
-            assert_eq!(typed_op(&parsed("help", ""), Path::new("/repo")), None);
-            assert_eq!(
-                typed_op(&parsed("no-such-thing", "x"), Path::new("/repo")),
-                None
-            );
+            assert_eq!(typed("/help"), None);
+            assert_eq!(typed("/no-such-thing x"), None);
         }
     }
 

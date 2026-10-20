@@ -100,7 +100,6 @@ mod tests {
     #[test]
     fn name_and_metadata_match_built_ins_contract() {
         assert_eq!(DeleteCmd.name(), "delete");
-        assert_eq!(DeleteCmd.aliases(), [] as [&str; 0]);
         assert_ne!(DeleteCmd.description(), "");
         assert_eq!(DeleteCmd.usage(), Some("<id-prefix>"));
     }

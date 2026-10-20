@@ -170,7 +170,6 @@ mod tests {
     #[test]
     fn metadata_matches_built_ins_contract() {
         assert_eq!(InitCmd.name(), "init");
-        assert_eq!(InitCmd.aliases(), [] as [&str; 0]);
         assert_eq!(InitCmd.usage(), Some("[<file>]"));
     }
 

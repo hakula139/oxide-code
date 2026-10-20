@@ -17,23 +17,24 @@ mod tool;
 mod tui;
 mod util;
 
+use std::ffi::OsStr;
 use std::io::IsTerminal;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::sync::Arc;
 
 use anyhow::{Context, Result, bail};
 use clap::builder::{PossibleValue, PossibleValuesParser, TypedValueParser};
-use clap::{ArgGroup, Parser};
+use clap::{Arg, ArgGroup, Command, Parser};
 use time::error::IndeterminateOffset;
 use tracing::warn;
 
 use client::anthropic::identity;
-use config::Config;
+use config::{Config, ConfigSnapshot};
 use driver::Exit;
 use driver::headless::OutputFormat;
 use driver::tui::Startup;
-use engine::{Engine, EnginePanic, SessionParts, Toolbox};
+use engine::{Engine, EnginePanic, SessionParts};
 use file_tracker::FileTracker;
 use permission::Mode;
 use session::display::archive_notice;
@@ -43,6 +44,7 @@ use session::resolver::resolve_session;
 use session::store::SessionStore;
 use session::store::listing::{DEFAULT_SESSION_LIST_LIMIT, ListScope};
 use slash::ResumePicker;
+use tui::theme::Theme;
 use util::tls::PlatformTrust;
 
 #[derive(Parser)]
@@ -88,7 +90,7 @@ struct Cli {
     list: bool,
 
     /// Start in this permission mode, overriding `permission.mode` and `OX_PERMISSION_MODE`.
-    #[arg(long, value_name = "MODE", value_parser = mode_parser())]
+    #[arg(long, value_name = "MODE", value_parser = ModeParser::new())]
     mode: Option<Mode>,
 
     /// Disable the TUI and use a bare REPL instead.
@@ -115,11 +117,36 @@ struct Cli {
 }
 
 /// Parses `--mode`, listing each mode in `--help` with the description the `/mode` picker shows.
-fn mode_parser() -> impl TypedValueParser<Value = Mode> {
-    PossibleValuesParser::new(
-        Mode::ALL.map(|mode| PossibleValue::new(mode.as_str()).help(mode.description())),
-    )
-    .map(|name| name.parse::<Mode>().expect("each value names a mode"))
+#[derive(Clone)]
+struct ModeParser(PossibleValuesParser);
+
+impl ModeParser {
+    fn new() -> Self {
+        Self(PossibleValuesParser::new(Mode::ALL.map(|mode| {
+            PossibleValue::new(mode.as_str()).help(mode.description())
+        })))
+    }
+}
+
+impl TypedValueParser for ModeParser {
+    type Value = Mode;
+
+    fn parse_ref(
+        &self,
+        cmd: &Command,
+        arg: Option<&Arg>,
+        value: &OsStr,
+    ) -> Result<Mode, clap::Error> {
+        // Replaces invalid UTF-8 as the `ValueEnum` parser behind `--output` does, so the error for
+        // such a value lists the modes.
+        let value = value.to_string_lossy();
+        let name = self.0.parse_ref(cmd, arg, OsStr::new(&*value))?;
+        Ok(name.parse().expect("each value names a mode"))
+    }
+
+    fn possible_values(&self) -> Option<Box<dyn Iterator<Item = PossibleValue> + '_>> {
+        self.0.possible_values()
+    }
 }
 
 fn main() -> Result<ExitCode> {
@@ -204,12 +231,10 @@ async fn async_main(offset_error: Option<IndeterminateOffset>) -> Result<Exit> {
         .resume
         .then(|| ResumePicker::at_startup(store.clone(), handle.session_id().to_owned(), cli.all));
 
-    let toolbox = Toolbox::built_in(&config.permission.read_filter());
     let engine = Engine::new(
         &config,
         PlatformTrust(config.extra_ca_certs.clone()),
         identity::load_or_create_device_id(),
-        toolbox,
         SessionParts {
             store,
             handle,
@@ -228,19 +253,40 @@ async fn async_main(offset_error: Option<IndeterminateOffset>) -> Result<Exit> {
         return driver::repl::run(engine, show_thinking, &drifted).await;
     };
 
-    let signal = driver::tui::run(
+    let startup = Startup {
+        git_branch,
+        picker,
+        theme_notices: theme.notices,
+        title,
+        unarchived,
+    };
+    run_tui(
         engine,
         &theme.theme,
         snapshot,
         show_thinking,
-        Startup {
-            git_branch,
-            picker,
-            theme_notices: theme.notices,
-            title,
-            unarchived,
-        },
+        startup,
         &drifted,
+    )
+    .await
+}
+
+/// Runs the TUI until the user quits or a shutdown signal arrives, which then sets the exit status.
+async fn run_tui(
+    engine: Engine,
+    theme: &Theme,
+    snapshot: ConfigSnapshot,
+    show_thinking: bool,
+    startup: Startup,
+    drifted: &[PathBuf],
+) -> Result<Exit> {
+    let signal = driver::tui::run(
+        engine,
+        theme,
+        snapshot,
+        show_thinking,
+        startup,
+        drifted,
         driver::shutdown_signal(),
     )
     .await?;
@@ -273,8 +319,11 @@ fn detect_terminal_width() -> Option<usize> {
 
 #[cfg(test)]
 mod tests {
+    use std::ffi::OsString;
+
     use clap::CommandFactory;
     use clap::error::ErrorKind;
+    use indoc::formatdoc;
     use time::macros::datetime;
 
     use super::*;
@@ -311,6 +360,31 @@ mod tests {
             ] {
                 assert!(help.contains(line), "{help}");
             }
+        }
+
+        #[test]
+        fn mode_lists_the_modes_for_a_value_that_is_not_utf8() {
+            #[cfg(unix)]
+            let value = <OsString as std::os::unix::ffi::OsStringExt>::from_vec(vec![0xff]);
+            #[cfg(windows)]
+            let value = <OsString as std::os::windows::ffi::OsStringExt>::from_wide(&[0xd800]);
+
+            let invalid = Cli::try_parse_from([OsString::from("ox"), "--mode".into(), value])
+                .err()
+                .expect("the value names no mode");
+
+            assert_eq!(invalid.kind(), ErrorKind::InvalidValue);
+            assert_eq!(
+                invalid.to_string(),
+                formatdoc! {"
+                    error: invalid value '{}' for '--mode <MODE>'
+                      [possible values: manual, plan, yolo]
+
+                    For more information, try '--help'.
+                    ",
+                    char::REPLACEMENT_CHARACTER,
+                },
+            );
         }
 
         #[test]

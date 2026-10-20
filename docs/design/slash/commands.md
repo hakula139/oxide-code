@@ -113,7 +113,7 @@ Client-side command surface: `/help`, `/clear`, `/model`, `/status`, and friends
 - `crates/oxide-code/src/slash/mode.rs`: `ModeCmd` plus `ModePicker`.
 - `crates/oxide-code/src/slash/model.rs`: `ModelCmd`.
 - `crates/oxide-code/src/slash/picker.rs`: combined model and effort picker modal.
-- `crates/oxide-code/src/slash/registry.rs`: `SlashCommand` trait, whose aliases default to `command::aliases`, `BUILT_INS`, `SlashKind`, `SlashOutcome`.
+- `crates/oxide-code/src/slash/registry.rs`: `BUILT_INS`, `SlashKind`, `SlashOutcome`, and the `SlashCommand` trait, whose aliases default to `command::aliases`.
 - `crates/oxide-code/src/slash/rename.rs`: `RenameCmd` plus `RenameModal` editor.
 - `crates/oxide-code/src/slash/resume.rs`: `ResumeCmd` plus `ResumePicker` (see `resume.md`).
 - `crates/oxide-code/src/slash/sessions.rs`: `open_store` and `resolve_error_message`, shared by the session commands.
@@ -121,7 +121,7 @@ Client-side command surface: `/help`, `/clear`, `/model`, `/status`, and friends
 - `crates/oxide-code/src/slash/theme.rs`: `ThemeCmd`, picker open plus typed-arg validator.
 - `crates/oxide-code/src/tui/action.rs`: `Action`, which slash commands forward.
 - `crates/oxide-code/src/tui/app/dispatch.rs`: `dispatch_action`, `dispatch_op`, `run_slash`, `apply_slash_outcome`, modal gate, echo gate.
-- `crates/oxide-code/src/tui/components/input/popup.rs`: `SlashPopup`, which lists the matching commands or the typed command's arg completions for Tab and Enter to complete.
+- `crates/oxide-code/src/tui/components/input/popup.rs`: `popup_state`, which reads the typed line as a command name or an argument, and `SlashPopup`, which lists the matching commands or the typed command's arg completions for Tab and Enter to complete.
 - `crates/oxide-code/src/tui/modal.rs`: `Modal` trait, `ModalStack`, key routing.
 - `crates/oxide-code/src/tui/modal/kv_overview.rs`: generic `KvOverview` / `KvSection` primitive.
 - `crates/oxide-code/src/tui/modal/list_picker.rs`: generic `ListPicker` primitive.

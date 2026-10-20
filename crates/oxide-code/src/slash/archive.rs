@@ -230,12 +230,13 @@ mod tests {
                 let path = store.find_session_path(&target_id).unwrap();
                 std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o444)).unwrap();
                 let info = test_session_info();
+                let failure =
+                    saved::set_archived(&path, &target_id, true, &info.session_id).unwrap_err();
 
                 let err = ArchiveCmd
                     .execute(&target_id[..4], &SlashContext::new(&info, None))
                     .unwrap_err();
-                let failure =
-                    saved::set_archived(&path, &target_id, true, &info.session_id).unwrap_err();
+
                 assert_eq!(err, failure);
             });
         }

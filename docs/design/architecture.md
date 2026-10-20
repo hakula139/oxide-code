@@ -25,8 +25,8 @@ Layers run from the foundation to the frontends.
 | Services   | `session`      | JSONL session persistence behind an actor task, plus listing, archiving, resume, transcript repair, and AI titles                               |
 | Services   | `tool`         | The `Tool` trait, the registry, and the built-in `bash`, `bash_output`, `bash_stop`, `edit`, `glob`, `grep`, `read`, `tasks`, and `write` tools |
 | Engine     | `engine`       | The live conversation as a task that every frontend drives through `EngineHandle`, with its turn loop, tool dispatch, and compaction            |
-| Frontend   | `driver`       | The TUI, bare REPL, and headless drivers over `EngineHandle`, plus exit status and shutdown signals, which the TUI driver takes as a future     |
-| Frontend   | `slash`        | Slash-command registry, built-in commands, and input popup state                                                                                |
+| Frontend   | `driver`       | The TUI, bare REPL, and headless drivers, which drive the `Engine` through `EngineHandle`, plus exit status and shutdown signals                |
+| Frontend   | `slash`        | Slash-command registry and built-in commands                                                                                                    |
 | Frontend   | `tui`          | Terminal UI: the `App` event loop, chat, input, status, and task panel components, modals, markdown rendering, and themes                       |
 | Frontend   | `main.rs`      | CLI parsing, config and session resolution, and handing a new `Engine` to a driver                                                              |
 
