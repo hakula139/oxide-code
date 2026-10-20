@@ -2198,6 +2198,37 @@ mod tests {
             );
             assert!(matches!(view, ToolResultView::Text { .. }));
         }
+
+        #[tokio::test]
+        async fn binary_bash_output_fits_the_cap_with_only_its_pipe_spill() {
+            // Each byte renders as the three bytes of U+FFFD.
+            let dir = tempfile::tempdir().unwrap();
+            let bytes = vec![0xFF; 300 << 10];
+            std::fs::write(dir.path().join("image.bin"), &bytes).unwrap();
+            let registry = ToolRegistry::new(vec![Box::new(BashTool::default())]);
+
+            let output = registry
+                .run_input(
+                    "bash",
+                    serde_json::json!({"command": "cat image.bin"}),
+                    &ctx(dir.path()),
+                )
+                .await;
+
+            assert!(!output.is_error, "{}", output.content);
+            assert!(output.content.len() <= MAX_OUTPUT_BYTES);
+            assert!(output.metadata.truncated_bytes.is_none());
+            let stdout = spill_path(dir.path(), ".stdout.txt");
+            assert!(
+                std::fs::read(&stdout).unwrap() == bytes,
+                "the spill holds the raw bytes"
+            );
+            let spills: Vec<_> = std::fs::read_dir(stdout.parent().unwrap())
+                .unwrap()
+                .map(|entry| entry.unwrap().path())
+                .collect();
+            assert_eq!(spills, [stdout]);
+        }
     }
 
     mod cap_output {
