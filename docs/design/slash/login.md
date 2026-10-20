@@ -16,6 +16,8 @@ When the API rejects a stored login with HTTP 401, the session reloads it and re
 
 Either reload runs on a task of its own, which keeps the token locked until the reload finishes. A request cancelled mid-refresh, such as a turn interrupted with Esc or a title request that `/rename` stops, therefore still leaves the rotated tokens in the store and in the session. Since the refresh invalidates the old refresh token, losing them would force a new sign-in. Shutting down would still cancel the task, so exiting waits for every reload in flight, including one for a login that `/login` replaced. A reload spends at most the lock's 5 one-second retries and the 15-second token request, plus any Keychain prompt it raises.
 
+Writing the rotated tokens back can fail, as when the Keychain refuses the write or the credentials file cannot be replaced. The session then logs a warning and keeps the rotated refresh token with the access token. While the store still holds the refresh token the session replaced, each reload uses the session's tokens in place of the stored ones and writes the next refresh's tokens back, warning again if that write fails, so the store catches up once writing succeeds. Any other refresh token in the store was written by another process, such as `claude` or a second `ox`, so the session adopts the stored login. Until the store catches up, another process that refreshes the login sends the invalidated refresh token, so its refresh fails.
+
 A refresh required by a request, whether for an expired token or after a 401, retries the request with backoff when the token endpoint sends no response or a server error, as a transient API failure does. Any other refresh failure ends the request with the sign-in step.
 
 ## Design Decisions
@@ -37,6 +39,8 @@ A refresh required by a request, whether for an expired token or after a 401, re
 8. **Requests read the store only near expiry or after a 401.** Claude Code refreshes its login whenever a request falls within 5 minutes of expiry, so a long session never sees the token expire. Because reading the macOS Keychain on every request is slow and can prompt, oxide-code does the same using the expiry it holds in memory.
 
 9. **A 401 refreshes the login whatever its expiry.** Because the API can reject a token that the local clock still counts as valid, for example when the two clocks disagree, counting a rejected token as expired lets the session recover without a new sign-in while the refresh token still works.
+
+10. **The stored refresh token shows whether another process wrote the store.** A refresh invalidates the refresh token it sends, so a store still holding the one the session replaced has seen no sign-in or refresh since, and any other refresh token came from a newer one. Claude Code also rewrites the document to save MCP server logins under `mcpOAuth`, so comparing the whole document would drop the session's tokens after a write that left the login untouched.
 
 ## Out of Scope
 

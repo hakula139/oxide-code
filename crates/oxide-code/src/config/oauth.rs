@@ -159,22 +159,44 @@ impl OAuthCredential {
         Token {
             expires_at_ms: self.expires_at_ms(),
             access_token: self.access_token,
+            unsaved: None,
         }
     }
 }
 
 /// An access token and when it expires, in Unix milliseconds.
+#[expect(
+    clippy::struct_field_names,
+    reason = "`access_token` matches the field in `OAuthCredential` and `TokenResponse`, \
+              which this token is built from"
+)]
 #[cfg_attr(test, derive(Debug))]
 struct Token {
     access_token: String,
     expires_at_ms: u64,
+    /// The refresh token issued with `access_token`, held only when the store failed to save it.
+    unsaved: Option<UnsavedRefresh>,
+}
+
+/// A rotated refresh token that the store failed to save, which reloads send in place of the
+/// stored one it replaced.
+#[cfg_attr(test, derive(Debug))]
+#[derive(Clone)]
+struct UnsavedRefresh {
+    refresh_token: String,
+    /// The stored refresh token this one superseded. A store holding any other was written by
+    /// another process, and its login wins.
+    replaced: String,
 }
 
 /// Credentials parsed from one store, keeping the raw JSON so write-back preserves unknown fields.
+/// `oauth` may hold the session's tokens in place of the stored ones while the store lacks them.
 struct StoredCredentials<'a> {
     backend: Backend<'a>,
     json: String,
     oauth: OAuthCredential,
+    /// Set when `oauth` holds the session's unsaved tokens.
+    unsaved: Option<UnsavedRefresh>,
 }
 
 impl<'a> StoredCredentials<'a> {
@@ -185,7 +207,31 @@ impl<'a> StoredCredentials<'a> {
             backend,
             json,
             oauth: file.claude_ai_oauth,
+            unsaved: None,
         })
+    }
+
+    /// Puts the session's `held` tokens in place of the stored ones while the store still holds
+    /// the refresh token they replaced.
+    fn prefer_unsaved(&mut self, held: Option<&Token>) {
+        if let Some(held) = held
+            && let Some(unsaved) = &held.unsaved
+            && self.oauth.refresh_token.as_deref() == Some(unsaved.replaced.as_str())
+        {
+            self.oauth = OAuthCredential {
+                access_token: held.access_token.clone(),
+                refresh_token: Some(unsaved.refresh_token.clone()),
+                expires_at: i64::try_from(held.expires_at_ms).unwrap_or(i64::MAX),
+            };
+            self.unsaved = Some(unsaved.clone());
+        }
+    }
+
+    fn into_token(self) -> Token {
+        Token {
+            unsaved: self.unsaved,
+            ..self.oauth.into_token()
+        }
     }
 }
 
@@ -308,7 +354,7 @@ impl SessionLogin {
     ) -> Result<Self, LoginError> {
         let store =
             Store::locate(login, keychain.0).map_err(|e| LoginError::Unreadable(login, e))?;
-        let token = load_token_from(&store, OAUTH_TOKEN_URL, trust, None).await?;
+        let token = load_token_from(&store, OAUTH_TOKEN_URL, trust, None, None).await?;
         Ok(Self::new(store, OAUTH_TOKEN_URL, token))
     }
 
@@ -381,8 +427,14 @@ impl SessionLogin {
         let rejected = rejected.map(str::to_owned);
         reloads
             .spawn(async move {
-                *token = load_token_from(&store, &refresh_url, trust.as_ref(), rejected.as_deref())
-                    .await?;
+                *token = load_token_from(
+                    &store,
+                    &refresh_url,
+                    trust.as_ref(),
+                    Some(&token),
+                    rejected.as_deref(),
+                )
+                .await?;
                 Ok(token.access_token.clone())
             })
             .await
@@ -392,37 +444,40 @@ impl SessionLogin {
 
 // ── Token Loading ──
 
-/// Loads the stored token, refreshing it near expiry. A token the API rejected, `rejected`,
-/// counts as expired, so it is refreshed whatever its expiry and never returned.
+/// Loads the stored token, refreshing it near expiry. The session's `held` token stands in for the
+/// stored one while the store still holds the refresh token it replaced. A token the API rejected,
+/// `rejected`, counts as expired, so it is refreshed whatever its expiry and never returned.
 async fn load_token_from(
     store: &Store<'_>,
     refresh_url: &str,
     trust: &dyn Trust,
+    held: Option<&Token>,
     rejected: Option<&str>,
 ) -> Result<Token, LoginError> {
     let login = store.login;
     let load = || {
         load_credentials(store).map(|mut creds| {
+            creds.prefer_unsaved(held);
             if rejected == Some(creds.oauth.access_token.as_str()) {
                 creds.oauth.expires_at = 0;
             }
             creds
         })
     };
-    let oauth = load()?.oauth;
-    if !is_near_expiry(oauth.expires_at_ms()) {
-        return Ok(oauth.into_token());
+    let creds = load()?;
+    if !is_near_expiry(creds.oauth.expires_at_ms()) {
+        return Ok(creds.into_token());
     }
-    if oauth.refresh_token.is_none() {
-        return usable_until_expiry(login, oauth);
+    if creds.oauth.refresh_token.is_none() {
+        return usable_until_expiry(login, creds.oauth);
     }
 
     let _lock = match acquire_lock(&store.lock).await {
         Ok(lock) => lock,
         Err(error) => {
             // The lock holder may have written a fresh token before releasing.
-            let oauth = load()?.oauth;
-            if is_expired(oauth.expires_at_ms()) {
+            let creds = load()?;
+            if is_expired(creds.oauth.expires_at_ms()) {
                 return Err(LoginError::RefreshFailed {
                     login,
                     error,
@@ -430,7 +485,7 @@ async fn load_token_from(
                 });
             }
             warn!("skipping OAuth token refresh, using existing: {error:#}");
-            return Ok(oauth.into_token());
+            return Ok(creds.into_token());
         }
     };
 
@@ -438,7 +493,7 @@ async fn load_token_from(
     let creds = load()?;
     let expires_at_ms = creds.oauth.expires_at_ms();
     if !is_near_expiry(expires_at_ms) {
-        return Ok(creds.oauth.into_token());
+        return Ok(creds.into_token());
     }
 
     let Some(refresh_token) = creds.oauth.refresh_token.as_deref() else {
@@ -447,9 +502,16 @@ async fn load_token_from(
 
     match refresh_oauth_token(refresh_url, refresh_token, trust).await {
         Ok(response) => {
-            let token = response.token();
+            let mut token = response.token();
             if let Err(e) = write_refreshed_credentials(&creds, &response, token.expires_at_ms) {
-                warn!("failed to save refreshed OAuth credentials: {e:#}");
+                warn!("failed to save refreshed OAuth credentials, keeping them in memory: {e:#}");
+                token.unsaved = Some(UnsavedRefresh {
+                    refresh_token: response.refresh_token,
+                    // A refresh sending an unsaved token leaves the store with the one it replaced.
+                    replaced: creds
+                        .unsaved
+                        .map_or_else(|| refresh_token.to_owned(), |unsaved| unsaved.replaced),
+                });
             }
             Ok(token)
         }
@@ -462,7 +524,7 @@ async fn load_token_from(
         }
         Err(TokenRequestError { error, .. }) => {
             warn!("failed to refresh OAuth token, using existing: {error:#}");
-            Ok(creds.oauth.into_token())
+            Ok(creds.into_token())
         }
     }
 }
@@ -636,6 +698,7 @@ impl TokenResponse {
             expires_at_ms: now_millis().map_or(0, |now| {
                 now.saturating_add(self.expires_in.saturating_mul(1000))
             }),
+            unsaved: None,
         }
     }
 }
@@ -965,6 +1028,7 @@ pub(crate) mod testing {
         let token = Token {
             access_token: access_token.to_owned(),
             expires_at_ms,
+            unsaved: None,
         };
         Auth::stored(SessionLogin::new(store, refresh_url, token))
     }
@@ -972,10 +1036,11 @@ pub(crate) mod testing {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::{Arc, Mutex};
 
     use indoc::indoc;
-    use wiremock::matchers::{method, path as wm_path};
+    use wiremock::matchers::{body_partial_json, method, path as wm_path};
     use wiremock::{Mock, MockServer, Request, ResponseTemplate};
 
     use super::testing::{HeldRefresh, creds_json, ok_refresh_body, write_creds};
@@ -1001,7 +1066,7 @@ mod tests {
         entry: Mutex<Option<String>>,
         denies: bool,
         panics: bool,
-        writable: bool,
+        writable: AtomicBool,
     }
 
     impl FakeKeychain {
@@ -1017,7 +1082,15 @@ mod tests {
                 entry: Mutex::new(None),
                 denies: false,
                 panics: false,
-                writable: true,
+                writable: AtomicBool::new(true),
+            }
+        }
+
+        /// Holds `entry` and refuses writes until `writable` is set.
+        fn unwritable(entry: impl Into<String>) -> Self {
+            Self {
+                writable: AtomicBool::new(false),
+                ..Self::holding(entry)
             }
         }
 
@@ -1054,7 +1127,7 @@ mod tests {
         }
 
         fn write(&self, json: &str) -> Result<()> {
-            if !self.writable {
+            if !self.writable.load(Ordering::Relaxed) {
                 bail!("Keychain write denied");
             }
             *self.entry.lock().unwrap() = Some(json.to_owned());
@@ -1180,8 +1253,50 @@ mod tests {
             let token = Token {
                 access_token: access_token.to_owned(),
                 expires_at_ms,
+                unsaved: None,
             };
             SessionLogin::new(store, refresh_url, token)
+        }
+
+        /// A session holding a login that sends `access` until `expires_at_ms`, then refreshes with
+        /// `refresh` at `refresh_url`. A Keychain that refuses writes holds the login, leaked so the
+        /// session's store can borrow it, and the store locks within `dir`.
+        fn unwritable_login(
+            dir: &Path,
+            refresh_url: &str,
+            access: &str,
+            refresh: &str,
+            expires_at_ms: u64,
+        ) -> (SessionLogin, &'static FakeKeychain) {
+            let json = creds_json(access, Some(refresh), expires_at_ms).to_string();
+            let keychain: &'static FakeKeychain =
+                Box::leak(Box::new(FakeKeychain::unwritable(json)));
+            let store = store(Some(keychain), &dir.join("creds.json"), &dir.join("lock"));
+            let login = session_login(store, refresh_url, access, expires_at_ms);
+            (login, keychain)
+        }
+
+        /// Answers the one refresh that sends `sent` with `access` and `refresh`, which expire in
+        /// `expires_in` seconds.
+        async fn mount_refresh(
+            server: &MockServer,
+            sent: &str,
+            access: &str,
+            refresh: &str,
+            expires_in: u64,
+        ) {
+            Mock::given(method("POST"))
+                .and(wm_path("/"))
+                .and(body_partial_json(
+                    serde_json::json!({ "refresh_token": sent }),
+                ))
+                .respond_with(
+                    ResponseTemplate::new(200)
+                        .set_body_json(ok_refresh_body(access, refresh, expires_in)),
+                )
+                .expect(1)
+                .mount(server)
+                .await;
         }
 
         mod load {
@@ -1251,20 +1366,11 @@ mod tests {
                 let near_expiry = now_millis().unwrap() + 60_000;
                 // The refused write-back leaves the store stale, so only the shared token
                 // stops a second refresh.
-                let keychain: &'static FakeKeychain = Box::leak(Box::new(FakeKeychain {
-                    writable: false,
-                    ..FakeKeychain::holding(
-                        creds_json("stale", Some("old-refresh"), near_expiry).to_string(),
-                    )
-                }));
-                let login = session_login(
-                    store(
-                        Some(keychain),
-                        &dir.path().join("creds.json"),
-                        &dir.path().join("lock"),
-                    ),
+                let (login, _) = unwritable_login(
+                    dir.path(),
                     &server.uri(),
                     "stale",
+                    "old-refresh",
                     near_expiry,
                 );
                 let (trust, reloads) = (no_roots(), TaskTracker::new());
@@ -1276,6 +1382,86 @@ mod tests {
 
                 assert_eq!(first.unwrap(), "fresh-access");
                 assert_eq!(second.unwrap(), "fresh-access");
+                server.verify().await;
+            }
+
+            #[tokio::test]
+            async fn keeps_sending_the_rotated_refresh_token_until_a_write_back_succeeds() {
+                let server = MockServer::start().await;
+                // Tokens that expire within the 5-minute buffer make each request refresh.
+                mount_refresh(&server, "old-refresh", "first-access", "first-refresh", 60).await;
+                mount_refresh(
+                    &server,
+                    "first-refresh",
+                    "second-access",
+                    "second-refresh",
+                    60,
+                )
+                .await;
+                mount_refresh(
+                    &server,
+                    "second-refresh",
+                    "third-access",
+                    "third-refresh",
+                    3600,
+                )
+                .await;
+                let dir = tempfile::tempdir().unwrap();
+                let near_expiry = now_millis().unwrap() + 60_000;
+                let (login, keychain) = unwritable_login(
+                    dir.path(),
+                    &server.uri(),
+                    "old-access",
+                    "old-refresh",
+                    near_expiry,
+                );
+                let (trust, reloads) = (no_roots(), TaskTracker::new());
+
+                let first = login.access_token(&trust, &reloads).await.unwrap();
+                let second = login.access_token(&trust, &reloads).await.unwrap();
+                keychain.writable.store(true, Ordering::Relaxed);
+                let third = login.access_token(&trust, &reloads).await.unwrap();
+
+                assert_eq!(
+                    [first, second, third],
+                    ["first-access", "second-access", "third-access"]
+                );
+                let stored = &keychain.json()["claudeAiOauth"];
+                assert_eq!(stored["accessToken"], "third-access");
+                assert_eq!(stored["refreshToken"], "third-refresh");
+                server.verify().await;
+            }
+
+            #[tokio::test]
+            async fn a_refresh_token_another_process_stored_wins_over_the_unsaved_one() {
+                let server = MockServer::start().await;
+                mount_refresh(&server, "old-refresh", "first-access", "first-refresh", 60).await;
+                mount_refresh(
+                    &server,
+                    "sibling-refresh",
+                    "second-access",
+                    "second-refresh",
+                    60,
+                )
+                .await;
+                let dir = tempfile::tempdir().unwrap();
+                let near_expiry = now_millis().unwrap() + 60_000;
+                let (login, keychain) = unwritable_login(
+                    dir.path(),
+                    &server.uri(),
+                    "old-access",
+                    "old-refresh",
+                    near_expiry,
+                );
+                let (trust, reloads) = (no_roots(), TaskTracker::new());
+
+                let first = login.access_token(&trust, &reloads).await.unwrap();
+                *keychain.entry.lock().unwrap() = Some(
+                    creds_json("sibling-access", Some("sibling-refresh"), near_expiry).to_string(),
+                );
+                let second = login.access_token(&trust, &reloads).await.unwrap();
+
+                assert_eq!([first, second], ["first-access", "second-access"]);
                 server.verify().await;
             }
 
@@ -1366,6 +1552,45 @@ mod tests {
             }
 
             #[tokio::test]
+            async fn refreshes_with_the_rotated_refresh_token_after_a_failed_write_back() {
+                let server = MockServer::start().await;
+                mount_refresh(
+                    &server,
+                    "old-refresh",
+                    "first-access",
+                    "first-refresh",
+                    3600,
+                )
+                .await;
+                mount_refresh(
+                    &server,
+                    "first-refresh",
+                    "second-access",
+                    "second-refresh",
+                    3600,
+                )
+                .await;
+                let dir = tempfile::tempdir().unwrap();
+                let (login, _) = unwritable_login(
+                    dir.path(),
+                    &server.uri(),
+                    "rejected",
+                    "old-refresh",
+                    9_999_999_999_999,
+                );
+                let (trust, reloads) = (no_roots(), TaskTracker::new());
+
+                let first = login.reload("rejected", &trust, &reloads).await.unwrap();
+                let second = login
+                    .reload("first-access", &trust, &reloads)
+                    .await
+                    .unwrap();
+
+                assert_eq!([first, second], ["first-access", "second-access"]);
+                server.verify().await;
+            }
+
+            #[tokio::test]
             async fn dropped_mid_refresh_still_stores_and_holds_the_rotated_tokens() {
                 let server = MockServer::start().await;
                 let refresh = HeldRefresh::mount(&server).await;
@@ -1402,6 +1627,11 @@ mod tests {
     mod load_token_from {
         use super::*;
 
+        /// Loads the token in `store` as a session does at startup, with no token held.
+        async fn load(store: &Store<'_>, refresh_url: &str) -> Result<Token, LoginError> {
+            load_token_from(store, refresh_url, &NoRoots, None, None).await
+        }
+
         async fn mock_refresh_server() -> MockServer {
             let server = MockServer::start().await;
             Mock::given(method("POST"))
@@ -1423,14 +1653,9 @@ mod tests {
             let lock = dir.path().join("lock");
             write_creds(&creds, "tok", Some("ref"), 9_999_999_999_999);
 
-            let token = load_token_from(
-                &store(None, &creds, &lock),
-                "http://should-not-be-called",
-                &NoRoots,
-                None,
-            )
-            .await
-            .unwrap();
+            let token = load(&store(None, &creds, &lock), "http://should-not-be-called")
+                .await
+                .unwrap();
             assert_eq!(token.access_token, "tok");
         }
 
@@ -1448,7 +1673,7 @@ mod tests {
                 now_millis().unwrap() + 1_000,
             );
 
-            let token = load_token_from(&store(None, &creds, &lock), &server.uri(), &NoRoots, None)
+            let token = load(&store(None, &creds, &lock), &server.uri())
                 .await
                 .unwrap();
             assert_eq!(token.access_token, "fresh-access");
@@ -1476,14 +1701,9 @@ mod tests {
                 creds_json("old", Some("old-refresh"), now_millis().unwrap() + 1_000).to_string(),
             );
 
-            let token = load_token_from(
-                &store(Some(&keychain), &creds, &lock),
-                &server.uri(),
-                &NoRoots,
-                None,
-            )
-            .await
-            .unwrap();
+            let token = load(&store(Some(&keychain), &creds, &lock), &server.uri())
+                .await
+                .unwrap();
             assert_eq!(token.access_token, "fresh-access");
 
             let json = keychain.json();
@@ -1507,14 +1727,9 @@ mod tests {
             keychain_json["claudeAiOauth"]["subscriptionType"] = "max".into();
             let keychain = FakeKeychain::holding(keychain_json.to_string());
 
-            let token = load_token_from(
-                &store(Some(&keychain), &creds, &lock),
-                &server.uri(),
-                &NoRoots,
-                None,
-            )
-            .await
-            .unwrap();
+            let token = load(&store(Some(&keychain), &creds, &lock), &server.uri())
+                .await
+                .unwrap();
             assert_eq!(token.access_token, "fresh-access");
 
             let json = keychain.json();
@@ -1538,14 +1753,9 @@ mod tests {
             );
             let keychain = FakeKeychain::holding("not json");
 
-            let token = load_token_from(
-                &store(Some(&keychain), &creds, &lock),
-                &server.uri(),
-                &NoRoots,
-                None,
-            )
-            .await
-            .unwrap();
+            let token = load(&store(Some(&keychain), &creds, &lock), &server.uri())
+                .await
+                .unwrap();
             assert_eq!(token.access_token, "fresh-access");
 
             assert_eq!(
@@ -1563,41 +1773,31 @@ mod tests {
             write_creds(&creds, "from-file", None, 9_999_999_999_999);
 
             let keychain = FakeKeychain::denying();
-            let token = load_token_from(
-                &store(Some(&keychain), &creds, &lock),
-                "http://unused",
-                &NoRoots,
-                None,
-            )
-            .await
-            .unwrap();
+            let token = load(&store(Some(&keychain), &creds, &lock), "http://unused")
+                .await
+                .unwrap();
             assert_eq!(token.access_token, "from-file");
         }
 
         #[tokio::test]
-        async fn write_back_failure_still_uses_refreshed_token() {
+        async fn write_back_failure_holds_the_refreshed_tokens() {
             let server = mock_refresh_server().await;
 
             let dir = tempfile::tempdir().unwrap();
             let creds = dir.path().join("creds.json");
             let lock = dir.path().join("lock");
-            let keychain = FakeKeychain {
-                writable: false,
-                ..FakeKeychain::holding(
-                    creds_json("old", Some("old-refresh"), now_millis().unwrap() + 1_000)
-                        .to_string(),
-                )
-            };
+            let keychain = FakeKeychain::unwritable(
+                creds_json("old", Some("old-refresh"), now_millis().unwrap() + 1_000).to_string(),
+            );
 
-            let token = load_token_from(
-                &store(Some(&keychain), &creds, &lock),
-                &server.uri(),
-                &NoRoots,
-                None,
-            )
-            .await
-            .unwrap();
+            let token = load(&store(Some(&keychain), &creds, &lock), &server.uri())
+                .await
+                .unwrap();
+
             assert_eq!(token.access_token, "fresh-access");
+            let unsaved = token.unsaved.expect("the rotated refresh token is held");
+            assert_eq!(unsaved.refresh_token, "fresh-refresh");
+            assert_eq!(unsaved.replaced, "old-refresh");
         }
 
         #[tokio::test]
@@ -1607,14 +1807,9 @@ mod tests {
             let lock = dir.path().join("lock");
             write_creds(&creds, "tok", None, now_millis().unwrap() + 60_000);
 
-            let token = load_token_from(
-                &store(None, &creds, &lock),
-                "http://should-not-be-called",
-                &NoRoots,
-                None,
-            )
-            .await
-            .unwrap();
+            let token = load(&store(None, &creds, &lock), "http://should-not-be-called")
+                .await
+                .unwrap();
             assert_eq!(token.access_token, "tok");
         }
 
@@ -1637,10 +1832,52 @@ mod tests {
                 now_millis().unwrap() + 60_000,
             );
 
-            let token = load_token_from(&store(None, &creds, &lock), &server.uri(), &NoRoots, None)
+            let token = load(&store(None, &creds, &lock), &server.uri())
                 .await
                 .unwrap();
             assert_eq!(token.access_token, "stale");
+        }
+
+        #[tokio::test]
+        async fn refresh_endpoint_down_keeps_the_unsaved_refresh_token() {
+            let server = MockServer::start().await;
+            Mock::given(method("POST"))
+                .and(wm_path("/"))
+                .and(body_partial_json(
+                    serde_json::json!({ "refresh_token": "held-refresh" }),
+                ))
+                .respond_with(ResponseTemplate::new(503))
+                .expect(1)
+                .mount(&server)
+                .await;
+            let dir = tempfile::tempdir().unwrap();
+            let creds = dir.path().join("creds.json");
+            let lock = dir.path().join("lock");
+            write_creds(&creds, "old-access", Some("old-refresh"), 0);
+            let held = Token {
+                access_token: "held-access".to_owned(),
+                expires_at_ms: now_millis().unwrap() + 60_000,
+                unsaved: Some(UnsavedRefresh {
+                    refresh_token: "held-refresh".to_owned(),
+                    replaced: "old-refresh".to_owned(),
+                }),
+            };
+
+            let token = load_token_from(
+                &store(None, &creds, &lock),
+                &server.uri(),
+                &NoRoots,
+                Some(&held),
+                None,
+            )
+            .await
+            .unwrap();
+
+            assert_eq!(token.access_token, "held-access");
+            let unsaved = token.unsaved.expect("the unsaved refresh token is kept");
+            assert_eq!(unsaved.refresh_token, "held-refresh");
+            assert_eq!(unsaved.replaced, "old-refresh");
+            server.verify().await;
         }
 
         #[tokio::test(start_paused = true)]
@@ -1651,14 +1888,9 @@ mod tests {
             write_creds(&creds, "tok", Some("ref"), now_millis().unwrap() + 60_000);
             std::fs::create_dir(&lock).unwrap();
 
-            let token = load_token_from(
-                &store(None, &creds, &lock),
-                "http://should-not-be-called",
-                &NoRoots,
-                None,
-            )
-            .await
-            .unwrap();
+            let token = load(&store(None, &creds, &lock), "http://should-not-be-called")
+                .await
+                .unwrap();
             assert_eq!(token.access_token, "tok");
         }
 
@@ -1669,7 +1901,7 @@ mod tests {
             let lock = dir.path().join("lock");
             write_creds(&creds, "tok", None, 0);
 
-            let err = load_token_from(&store(None, &creds, &lock), "http://unused", &NoRoots, None)
+            let err = load(&store(None, &creds, &lock), "http://unused")
                 .await
                 .expect_err("expired without refresh must bail");
             assert!(
@@ -1692,7 +1924,7 @@ mod tests {
             let lock = dir.path().join("lock");
             write_creds(&creds, "dead", Some("old"), 0);
 
-            let err = load_token_from(&store(None, &creds, &lock), &server.uri(), &NoRoots, None)
+            let err = load(&store(None, &creds, &lock), &server.uri())
                 .await
                 .expect_err("expired + refresh down must bail");
             assert!(
@@ -1727,7 +1959,7 @@ mod tests {
             let lock = dir.path().join("lock");
             write_creds(&creds, "dead", Some("old"), 0);
 
-            let err = load_token_from(&store(None, &creds, &lock), &server.uri(), &NoRoots, None)
+            let err = load(&store(None, &creds, &lock), &server.uri())
                 .await
                 .expect_err("expired + refresh rejected must bail");
 
@@ -1748,14 +1980,9 @@ mod tests {
             write_creds(&creds, "dead", Some("ref"), 0);
             std::fs::create_dir(&lock).unwrap();
 
-            let err = load_token_from(
-                &store(None, &creds, &lock),
-                "http://should-not-be-called",
-                &NoRoots,
-                None,
-            )
-            .await
-            .expect_err("expired + lock held must bail");
+            let err = load(&store(None, &creds, &lock), "http://should-not-be-called")
+                .await
+                .expect_err("expired + lock held must bail");
             assert!(
                 matches!(
                     err,
@@ -1795,15 +2022,37 @@ mod tests {
                 );
             });
 
-            let token = load_token_from(
-                &store(None, &creds, &lock),
-                "http://should-not-be-called",
-                &NoRoots,
-                None,
-            )
-            .await
-            .unwrap();
+            let token = load(&store(None, &creds, &lock), "http://should-not-be-called")
+                .await
+                .unwrap();
             sibling.await.unwrap();
+            assert_eq!(token.access_token, "sibling");
+        }
+
+        #[tokio::test(start_paused = true)]
+        async fn lock_released_after_a_sibling_refresh_keeps_the_sibling_token() {
+            let dir = tempfile::tempdir().unwrap();
+            let creds = dir.path().join("creds.json");
+            let lock = dir.path().join("lock");
+            write_creds(&creds, "dead", Some("ref"), 0);
+            std::fs::create_dir(&lock).unwrap();
+            let (sibling_creds, sibling_lock) = (creds.clone(), lock.clone());
+            let sibling = tokio::spawn(async move {
+                tokio::time::sleep(LOCK_RETRY_INTERVAL * 2).await;
+                write_creds(
+                    &sibling_creds,
+                    "sibling",
+                    Some("sibling-refresh"),
+                    now_millis().unwrap() + 60 * 60 * 1000,
+                );
+                std::fs::remove_dir(&sibling_lock).unwrap();
+            });
+
+            let token = load(&store(None, &creds, &lock), "http://should-not-be-called")
+                .await
+                .unwrap();
+            sibling.await.unwrap();
+
             assert_eq!(token.access_token, "sibling");
         }
 
@@ -1827,14 +2076,9 @@ mod tests {
                 std::fs::remove_dir(&sibling_lock).unwrap();
             });
 
-            let token = load_token_from(
-                &store(None, &creds, &lock),
-                "http://should-not-be-called",
-                &NoRoots,
-                None,
-            )
-            .await
-            .unwrap();
+            let token = load(&store(None, &creds, &lock), "http://should-not-be-called")
+                .await
+                .unwrap();
             sibling.await.unwrap();
             assert_eq!(token.access_token, "sibling");
         }
@@ -1851,35 +2095,20 @@ mod tests {
             );
 
             for keychain in [None, Some(&empty as &dyn Keychain)] {
-                let err = load_token_from(
-                    &store(keychain, &missing, &lock),
-                    "http://unused",
-                    &NoRoots,
-                    None,
-                )
-                .await
-                .expect_err("no login anywhere");
+                let err = load(&store(keychain, &missing, &lock), "http://unused")
+                    .await
+                    .expect_err("no login anywhere");
                 assert!(matches!(err, LoginError::Missing), "{err:?}");
             }
 
-            let err = load_token_from(
-                &store(Some(&denying), &missing, &lock),
-                "http://unused",
-                &NoRoots,
-                None,
-            )
-            .await
-            .expect_err("a denied Keychain and no file");
+            let err = load(&store(Some(&denying), &missing, &lock), "http://unused")
+                .await
+                .expect_err("a denied Keychain and no file");
             assert!(matches!(err, LoginError::KeychainDenied), "{err:?}");
 
-            let err = load_token_from(
-                &store(Some(&garbled), &missing, &lock),
-                "http://unused",
-                &NoRoots,
-                None,
-            )
-            .await
-            .expect_err("an unparsable Keychain entry and no file");
+            let err = load(&store(Some(&garbled), &missing, &lock), "http://unused")
+                .await
+                .expect_err("an unparsable Keychain entry and no file");
             assert_eq!(
                 format!("{err:#}"),
                 "failed to load the Claude Code login: \
@@ -1890,14 +2119,9 @@ mod tests {
 
             let unreadable = dir.path().join("directory.json");
             std::fs::create_dir(&unreadable).unwrap();
-            let err = load_token_from(
-                &store(Some(&empty), &unreadable, &lock),
-                "http://unused",
-                &NoRoots,
-                None,
-            )
-            .await
-            .expect_err("an unreadable credentials file");
+            let err = load(&store(Some(&empty), &unreadable, &lock), "http://unused")
+                .await
+                .expect_err("an unreadable credentials file");
             let msg = format!("{err:#}");
             assert!(
                 msg.starts_with(&format!(
