@@ -42,7 +42,6 @@ Manual and automatic compaction both pass the engine's list to `replace_session_
 
 ## Sources
 
-- `crates/ox/src/driver/stdio.rs`: `task_lines`, the REPL's task list.
 - `crates/ox-core/src/engine.rs`: `Engine::tasks`, adopted after each turn, and `emit_restored_tasks`.
 - `crates/ox-core/src/engine/compact_boundary.rs`: `Boundary`, which carries the list into compaction.
 - `crates/ox-core/src/engine/compaction.rs`: `AutoCompact::tasks`, the list passed through automatic compaction.
@@ -54,6 +53,7 @@ Manual and automatic compaction both pass the engine's list to `replace_session_
 - `crates/ox-core/src/session/post_compact.rs`: `synthesize_post_compact_message` and `task_reminder`, the block listing tasks after the summary.
 - `crates/ox-core/src/tool.rs`: `ToolOutput::tasks` and `ToolResultView::Tasks`.
 - `crates/ox-core/src/tool/tasks.rs`: `TasksTool`, validation, and `latest`.
+- `crates/ox/src/driver/stdio.rs`: `task_lines`, the REPL's task list.
 - `crates/ox/src/tui/app/events.rs`: the panel's updates on `TasksUpdated`, `SessionRolled`, and `SessionResumed`.
 - `crates/ox/src/tui/app/render.rs`: `draw_frame`, which sizes the panel after the higher-priority bands.
 - `crates/ox/src/tui/components/chat/blocks/tool/tasks.rs`: the chat block for a `tasks` call.

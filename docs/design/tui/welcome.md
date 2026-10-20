@@ -82,8 +82,8 @@ Below 25 cols nothing paints, since the terminal is too narrow to read the welco
 
 - `crates/ox-core/src/config.rs`: `show_welcome` field.
 - `crates/ox-core/src/config/schema.rs`: `[tui] show_welcome` TOML option.
+- `crates/ox-core/src/util/path.rs`: `tildify` (cwd display).
 - `crates/ox/src/slash/context.rs`: `LiveSessionInfo` (snapshot input).
 - `crates/ox/src/tui/app/render.rs`: `draw_frame` empty-chat branch, `show_welcome` gate.
 - `crates/ox/src/tui/components/chat.rs`: `is_empty()` predicate.
 - `crates/ox/src/tui/components/welcome.rs`: `paint`, `WelcomeSnapshot`, starter rows.
-- `crates/ox-core/src/util/path.rs`: `tildify` (cwd display).

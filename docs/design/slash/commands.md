@@ -90,13 +90,13 @@ Client-side command surface: `/help`, `/clear`, `/model`, `/status`, and friends
 - `crates/ox-core/src/command.rs`: the alias table, `typed_op`, `parse`, and the typed forms of `/clear`, `/compact`, `/effort`, `/mode`, `/model`, `/rename`, and `/resume`, plus the model resolver.
 - `crates/ox-core/src/command/init.rs`: the typed form of `/init`, the instruction-file discovery, and the create and update prompts.
 - `crates/ox-core/src/command/parser.rs`: `parse_slash`, which splits a typed line into a command name and its arguments, and `unescape_literal` for the `//` escape.
-- `crates/ox/src/driver/repl.rs`: `command_op`, which runs typed slash commands in the bare REPL.
-- `crates/ox/src/driver/stdio.rs`: `render_op`, plus the `StdioSink` confirmations for the session and config events.
 - `crates/ox-core/src/engine.rs`: `Engine::run` arms for `Op::Clear`, `Op::SetModel`, and `Op::SetMode`, `Engine::set_model`, which re-resolves the compaction threshold for the new model, `Engine::archive`, which waits for the archive entry to reach disk before rolling the session, and `TurnEnd::of`.
 - `crates/ox-core/src/session/display.rs`: shared `id_prefix`, `display_title`, and `format_metadata_line` for the picker row and delete confirm modal, `archive_notice`, and the `MAX_TITLE_WIDTH` cap that `fit_title` applies to first-prompt and `/rename` titles.
 - `crates/ox-core/src/session/resolver.rs`: `resolve_prefix_to_info` checks the current project first, widens the search on a miss, and returns a typed `ResolveError` that the CLI prints as is and slash commands rephrase. `resolve_saved_prefix` distinguishes live-only matches for `/archive`, `/unarchive`, and `/delete`.
 - `crates/ox-core/src/session/saved.rs`: `set_archived` and `delete`, shared by the typed commands and the `/resume` picker, which refuse the live session and word each failure for the user.
 - `crates/ox-core/src/session/store.rs`: `delete_at`, which refuses to delete the live session at the filesystem boundary, and `set_archived_at`.
+- `crates/ox/src/driver/repl.rs`: `command_op`, which runs typed slash commands in the bare REPL.
+- `crates/ox/src/driver/stdio.rs`: `render_op`, plus the `StdioSink` confirmations for the session and config events.
 - `crates/ox/src/slash.rs`: dispatch and the shared test fixtures in `slash::testing`.
 - `crates/ox/src/slash/archive.rs`: `ArchiveCmd` and `UnarchiveCmd`.
 - `crates/ox/src/slash/clear.rs`: `ClearCmd` sends first.

@@ -1,6 +1,6 @@
 # Architecture
 
-The `ox` binary consists of two crates organized into layers of top-level modules: the library `ox-core` in `crates/ox-core`, which holds every layer up to the engine, and the binary crate `ox` in `crates/ox`, which holds the frontends. This map lists those modules and shows the direction of their imports. The first `//!` line in each file describes that file, so the map covers only the top level. To list the first doc line from every file:
+The `ox` binary consists of two crates organized into layers of top-level modules: the library `ox-core` in `crates/ox-core`, which holds the layers from the foundation through the engine, and the binary crate `ox` in `crates/ox`, which holds the frontends. This map lists those modules and shows the direction of their imports. The first `//!` line in each file describes that file, so the map covers only the top level. To list the first doc line from every file:
 
 ```bash
 grep -rm1 '^//!' crates/*/src

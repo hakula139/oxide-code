@@ -32,9 +32,9 @@ Both prompts share one rubric: include only information an agent would otherwise
 
 - `crates/ox-core/src/command.rs`: `parse`, which routes `/init` to `command::init`.
 - `crates/ox-core/src/command/init.rs`: `FILE_CHOICES`, `resolve`, the instruction-file discovery, and the create and update prompts.
+- `crates/ox-core/src/prompt/instructions.rs`: `INSTRUCTION_FILENAMES` and `INSTRUCTION_DIRS`, the files and directories checked by `/init`.
+- `crates/ox-core/src/util/git.rs`: `project_root` and `repo_root`, the async lookups for the project and repository roots.
 - `crates/ox/src/driver/repl.rs`: resolves the project root and runs `/init` in the bare REPL.
 - `crates/ox/src/driver/tui.rs`: resolves the project root and stores it in `LiveSessionInfo`.
-- `crates/ox-core/src/prompt/instructions.rs`: `INSTRUCTION_FILENAMES` and `INSTRUCTION_DIRS`, the files and directories checked by `/init`.
 - `crates/ox/src/slash/context.rs`: `LiveSessionInfo::project_root`.
 - `crates/ox/src/slash/init.rs`: `InitCmd` and the file picker.
-- `crates/ox-core/src/util/git.rs`: `project_root` and `repo_root`, the async lookups for the project and repository roots.

@@ -98,10 +98,7 @@ The picker wraps [`SearchableList`](modals.md) and adds these controls and displ
 ## Sources
 
 - `crates/ox-core/src/command.rs`: `resume`, the typed form shared with the bare REPL.
-- `crates/ox/src/driver/stdio.rs`: `StdioSink`, which confirms a resume on stderr.
-- `crates/ox/src/driver/tui.rs`: `Startup::picker`, pushed over the first frame.
 - `crates/ox-core/src/engine.rs`: `Engine::resume`, `Engine::roll_into`, `Engine::take_history`, `format_drift_warning`.
-- `crates/ox/src/main.rs`: `Cli::archived`, `Cli::limit`, `Cli::resume`.
 - `crates/ox-core/src/protocol.rs`: `Op::Resume`, `ResumeTarget`, `Event::SessionResumed`, `Interaction`.
 - `crates/ox-core/src/session/display.rs`: `format_short_relative_time` for the picker row's time column, and `format_metadata_line` for the delete confirmation.
 - `crates/ox-core/src/session/handle.rs`: `roll_into`, `RollIntoOutcome`, `LoadedTranscript`.
@@ -110,6 +107,10 @@ The picker wraps [`SearchableList`](modals.md) and adds these controls and displ
 - `crates/ox-core/src/session/resolver.rs`: `resolve_saved_prefix`, shared by `Engine::roll_into`, `/archive`, `/unarchive`, and `/delete`, and the `resolve_prefix_to_info` lookup it wraps.
 - `crates/ox-core/src/session/saved.rs`: `set_archived` behind Ctrl+X, and `delete` behind the confirm-delete modal.
 - `crates/ox-core/src/session/store/listing.rs`: `walk`, `SessionWalk`, `list_paged`, `latest`, `list_matching`, `ListPage`, `ListScope`.
+- `crates/ox-core/src/util/text.rs`: `compact_count`, which abbreviates the message count, shared with the status line's token counts.
+- `crates/ox/src/driver/stdio.rs`: `StdioSink`, which confirms a resume on stderr.
+- `crates/ox/src/driver/tui.rs`: `Startup::picker`, pushed over the first frame.
+- `crates/ox/src/main.rs`: `Cli::archived`, `Cli::limit`, `Cli::resume`.
 - `crates/ox/src/slash/confirm.rs`: `ConfirmDeleteSessionModal` pushed by Ctrl+D.
 - `crates/ox/src/slash/registry.rs`: `BUILT_INS` entry `&ResumeCmd`.
 - `crates/ox/src/slash/resume.rs`: `ResumeCmd`, `ResumePicker` and its `at_startup` variant, `PickerAction` and its `ACTIONS` keymap, `Pages`, and `SessionRow` with its `Column` layout.
@@ -119,4 +120,3 @@ The picker wraps [`SearchableList`](modals.md) and adds these controls and displ
 - `crates/ox/src/tui/components/chat.rs`: `ChatView::load_history`.
 - `crates/ox/src/tui/keymap.rs`: `Keymap`, `KeyAction`, and `KeyChord`, behind the picker's keys and footer hints.
 - `crates/ox/src/tui/modal/searchable_list.rs`: `SearchableList<T>`, `SearchableItem`, `append_items` and `set_has_more` for paged loading, and `retain_items` and `cursor_to`, which keep the cursor when rows drop.
-- `crates/ox-core/src/util/text.rs`: `compact_count`, which abbreviates the message count, shared with the status line's token counts.

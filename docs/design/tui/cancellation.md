@@ -36,7 +36,6 @@ The picks lean toward the Codex precedent on most surfaces, since it is the one 
 
 ## Sources
 
-- `crates/ox/src/driver/stdio.rs`: `StdioSink::render`, and `render_op`, which renders until the op it sent ends.
 - `crates/ox-core/src/engine.rs`: `Engine::run`, which ignores an `Op::Queue` that arrives between turns, plus `Engine::submit_prompt`, `report_abort`, and `TurnEnd::of`, shared by the TUI, REPL, and headless drivers.
 - `crates/ox-core/src/engine/abort.rs`: `TurnAbort` enum, `await_unless_aborted`.
 - `crates/ox-core/src/engine/dispatch.rs`: `run_tool_round` / `ToolRound`, `Dispatcher::run_ready`, which cancels the running calls on an abort.
@@ -47,6 +46,7 @@ The picks lean toward the Codex precedent on most surfaces, since it is the one 
 - `crates/ox-core/src/session/history.rs`: `walk_transcript`, which shows a resumed interruption marker as `Interaction::Interrupted`.
 - `crates/ox-core/src/tool.rs`: `Tool::run` drop contract, `ToolCtx::cancel`, `walk_files`, `write_tracked`.
 - `crates/ox-core/src/tool/bash.rs`: `ShellTree`, which kills the shell's process group (Unix) or Job Object (Windows) when a call times out or drops before finishing.
+- `crates/ox/src/driver/stdio.rs`: `StdioSink::render`, and `render_op`, which renders until the op it sent ends.
 - `crates/ox/src/tui/action.rs`: `Action::ConfirmExit`.
 - `crates/ox/src/tui/app.rs`: `App::pending_prompts` / `forwarded_prompts`, and `App::active_prompt` / `auto_compacting`.
 - `crates/ox/src/tui/app/dispatch.rs`: `dispatch_op` / `start_turn` / `forward_queued_prompts`, `handle_esc`, `expire_armed_exit`.

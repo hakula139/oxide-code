@@ -122,8 +122,8 @@ A user-command segment is [#166](https://github.com/hakula139/oxide-code/issues/
 - `crates/ox-core/src/model/usage.rs`: `TokenUsage`, the token counts one request reports.
 - `crates/ox-core/src/session/entry.rs`: `Entry::Usage` and `UsageRecord`, the per-request record a resume prices.
 - `crates/ox-core/src/session/title_generator.rs`: `spawn`, which records the title request's usage and hands it to the engine.
+- `crates/ox-core/src/util/git.rs`: `current_branch` and `current_pull_request` probes, and the checks summary.
 - `crates/ox/src/tui/app/render.rs`: `App::draw_frame`, which copies App-owned state, the permission mode included, into the status bar.
 - `crates/ox/src/tui/components/status.rs`: `StatusBar` state and the run-state `Status`.
 - `crates/ox/src/tui/components/status/line.rs`: `StatusLine` segment rendering and width fitting.
 - `crates/ox/src/tui/git_probes.rs`: `GitProbes` background branch and pull-request polling, at the detail the roster needs.
-- `crates/ox-core/src/util/git.rs`: `current_branch` and `current_pull_request` probes, and the checks summary.

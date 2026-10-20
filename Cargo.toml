@@ -23,8 +23,8 @@ mod_module_files = "warn"
 todo = "warn"
 unwrap_used = "warn"
 
-# Pedantic lints that document exported items for outside callers, which these unpublished crates
-# do not have.
+# Pedantic lints whose docs and `#[must_use]` serve callers outside the workspace, which these
+# unpublished crates do not have.
 missing_errors_doc = "allow"
 missing_panics_doc = "allow"
 must_use_candidate = "allow"
