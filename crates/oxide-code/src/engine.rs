@@ -1461,16 +1461,13 @@ mod tests {
         #[tokio::test]
         async fn takes_the_agent_settings_from_config_and_binds_the_client_to_the_session() {
             with_pinned_home(async {
-                let dir = canonical_tempdir();
-                std::fs::write(dir.path().join("notes.txt"), "").unwrap();
-                std::fs::write(dir.path().join("secret.txt"), "").unwrap();
+                let dir = tempfile::tempdir().unwrap();
                 let store = test_store(dir.path());
                 let session = handle::start(&store, MODEL, None);
                 let mut config = test_config("http://127.0.0.1:9", api_key(), MODEL);
                 config.max_tool_rounds = Some(3);
                 config.compaction = CompactionConfig::with_threshold_for_test(50_000);
-                let deny = vec![Rule::parse(PermissionClass::Read, "secret.txt").unwrap()];
-                config.permission = Policy::new(Mode::Plan, deny, Vec::new(), Vec::new());
+                config.permission.set_mode(Mode::Plan);
                 config.workspace = Workspace::new(dir.path());
 
                 let engine = Engine::new(
@@ -1488,23 +1485,65 @@ mod tests {
                 .await
                 .unwrap();
 
-                let globbed = engine
-                    .tools
-                    .run_input(
-                        "glob",
-                        serde_json::json!({"pattern": "*.txt"}),
-                        &ctx(dir.path()),
-                    )
-                    .await;
                 assert_eq!(*engine.workspace, config.workspace);
                 assert_eq!(engine.max_tool_rounds, Some(3));
                 assert_eq!(engine.compaction, config.compaction);
                 assert_eq!(engine.policy.mode(), Mode::Plan);
+                assert_eq!(engine.client.session_id(), session.session_id());
+            })
+            .await;
+        }
+
+        #[tokio::test]
+        async fn hands_its_background_shells_and_the_read_rules_to_the_built_in_tools() {
+            with_pinned_home(async {
+                let dir = canonical_tempdir();
+                std::fs::write(dir.path().join("notes.txt"), "").unwrap();
+                std::fs::write(dir.path().join("secret.txt"), "").unwrap();
+                let store = test_store(dir.path());
+                let mut config = test_config("http://127.0.0.1:9", api_key(), MODEL);
+                let deny = vec![Rule::parse(PermissionClass::Read, "secret.txt").unwrap()];
+                config.permission = Policy::new(Mode::Manual, deny, Vec::new(), Vec::new());
+                config.workspace = Workspace::new(dir.path());
+                let ctx = ctx(dir.path());
+
+                let engine = Engine::new(
+                    &config,
+                    NoRoots,
+                    DEVICE_ID.to_owned(),
+                    SessionParts {
+                        store: store.clone(),
+                        handle: handle::start(&store, MODEL, None),
+                        transcript: LoadedTranscript::default(),
+                        file_tracker: Arc::new(FileTracker::default()),
+                    },
+                    false,
+                )
+                .await
+                .unwrap();
+
+                let globbed = engine
+                    .tools
+                    .run_input("glob", serde_json::json!({"pattern": "*.txt"}), &ctx)
+                    .await;
+                let started = engine
+                    .tools
+                    .run_input(
+                        "bash",
+                        serde_json::json!({"command": "sleep 30", "run_in_background": true}),
+                        &ctx,
+                    )
+                    .await;
                 assert_eq!(
                     globbed.content,
                     "notes.txt\n\n(1 file withheld by read deny or ask rules)"
                 );
-                assert_eq!(engine.client.session_id(), session.session_id());
+                assert!(!started.is_error, "{}", started.content);
+                assert_eq!(
+                    engine.shells.list(),
+                    [shell("shell-1", "sleep 30", ShellState::Running)]
+                );
+                engine.shells.stop_all().await;
             })
             .await;
         }
