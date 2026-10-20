@@ -65,9 +65,13 @@ jobs:
       - name: Generate third-party notices
         shell: bash
         run: |
-          # Scanning from the shipped package leaves out the test-only dependencies of ox-core's
-          # `testing` feature, which a workspace-wide scan counts.
-          cargo about generate --locked --manifest-path crates/ox/Cargo.toml --config about.toml about.hbs -o THIRD-PARTY-NOTICES
+          # A workspace scan would also count the dependencies of ox-core's `testing` feature.
+          cargo about generate \
+            --locked \
+            --manifest-path crates/ox/Cargo.toml \
+            --config about.toml \
+            about.hbs \
+            -o THIRD-PARTY-NOTICES
           cat licenses/syntect-assets.txt >> THIRD-PARTY-NOTICES
 
       - name: Build archive
@@ -103,7 +107,8 @@ jobs:
           if [[ "$GITHUB_REF_TYPE" == 'tag' ]]; then
             expected=${GITHUB_REF_NAME#v}
           else
-            expected=$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[] | select(.name == "ox") | .version')
+            expected=$(cargo metadata --no-deps --format-version 1 |
+              jq -r '.packages[] | select(.name == "ox") | .version')
           fi
           test "$(smoke/ox --version)" = "ox $expected"
 
@@ -112,13 +117,16 @@ jobs:
         shell: bash
         run: |
           floor=$(grep -oP 'Linux with glibc \K[0-9.]+(?= or later)' docs/guide/install.md)
-          # The loader skips a weak version need that the system glibc lacks, so only `Flags: none`
-          # entries raise the floor.
-          required=$(readelf -V --wide smoke/ox | grep -oP 'Name: GLIBC_\K[0-9.]+(?=\s+Flags: none)' | sort -uV | tail -1)
+          # The loader tolerates a missing weak version, so only `Flags: none` versions are needed.
+          required=$(readelf -V --wide smoke/ox |
+            grep -oP 'Name: GLIBC_\K[0-9.]+(?=\s+Flags: none)' |
+            sort -uV |
+            tail -1)
           test -n "$required"
           echo "ox requires glibc $required, and docs/guide/install.md promises $floor"
           if [[ "$(printf '%s\n' "$required" "$floor" | sort -V | tail -1)" != "$floor" ]]; then
-            echo "::error::ox needs glibc $required. Raise the floor in docs/guide/install.md, or pin the previous runner image."
+            echo "::error::ox needs glibc $required." \
+              "Raise the floor in docs/guide/install.md, or pin the previous runner image."
             exit 1
           fi
 
@@ -203,7 +211,10 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           # Follow the latest release, or the newest prerelease before the first stable one.
-          latest=$(gh release list --exclude-drafts --json tagName,isLatest --jq '.[] | select(.isLatest) | .tagName')
+          latest=$(gh release list \
+            --exclude-drafts \
+            --json tagName,isLatest \
+            --jq '.[] | select(.isLatest) | .tagName')
           if [[ -n "$latest" && "$latest" != "$GITHUB_REF_NAME" ]]; then
             echo "Skipping $GITHUB_REF_NAME, since the formula follows $latest."
             exit 0
@@ -224,9 +235,13 @@ jobs:
           # A rerun rebuilds this commit on the current main and replaces the earlier push.
           git push --force origin "$branch"
 
-          setting='Enable "Allow GitHub Actions to create and approve pull requests" in Settings > Actions > General, then rerun this job.'
           if [[ -z "$(gh pr list --head "$branch" --state open --json number --jq '.[].number')" ]] &&
-            ! gh pr create --base main --head "$branch" --title "$title" --assignee hakula139 --label chore \
+            ! gh pr create \
+              --base main \
+              --head "$branch" \
+              --title "$title" \
+              --assignee hakula139 \
+              --label chore \
               --body-file - <<EOF
           ## Summary
 
@@ -237,7 +252,9 @@ jobs:
           - [x] The Release workflow rendered the formula from the checksums its build jobs produced.
           EOF
           then
-            echo "::error::Could not open the formula PR. $setting"
+            echo "::error::Could not open the formula PR." \
+              'Enable "Allow GitHub Actions to create and approve pull requests"' \
+              'in Settings > Actions > General, then rerun this job.'
             exit 1
           fi
 

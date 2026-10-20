@@ -1,6 +1,6 @@
 # Development
 
-Learn how to set up the development environment, what the pre-commit hooks check, how the toolchain is pinned, how Nix files are styled, what debug info dev builds keep, what CI runs, and how to treat a failing check. For other ways to build `ox`, see [Installation](../guide/install.md).
+Learn how to set up the development environment, what the pre-commit hooks check, how the toolchain is pinned, how Nix and config files are styled, what debug info dev builds keep, what CI runs, and how to treat a failing check. For other ways to build `ox`, see [Installation](../guide/install.md).
 
 ## Dev Shell
 
@@ -52,6 +52,13 @@ The Node-based hooks run tools pinned in `node_modules` and fail when that direc
 - Group related bindings and attributes, and order a `let` block so that each binding follows what it depends on. Within a group, use alphabetical order unless a stronger order applies.
 - Follow a multiline binding or attribute with a blank line before its next sibling. Keep single-line siblings together and separate their groups with a blank line. A single-line binding may lead directly into a related multiline one.
 - Write multiline text, such as a shell hook, as an indented string with literal line breaks.
+
+## Config Style
+
+Prettier and Taplo do not wrap long strings or shell commands, so wrap YAML, TOML, and shell files by hand:
+
+- Keep lines within about 100 columns, counting the indent. Wrap a long string only where its value stays the same, and leave a line long when wrapping would break a URL, a heredoc body, or a literal block whose line breaks are content.
+- Split a long shell command at its pipeline stages. If a stage is still too long, put each flag with its value, and each positional argument, on its own line. Indent continuation lines one level past the first line, and end each line but the last with `\`, unless it ends with `|` or `&&`, which already continue the command. In a workflow, write the command in a `run: |` block.
 
 ## Debug Info
 

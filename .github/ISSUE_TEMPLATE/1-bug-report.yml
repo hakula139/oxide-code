@@ -72,7 +72,9 @@ body:
     id: permission-mode
     attributes:
       label: Permission mode
-      description: 'The mode when the problem occurred. The status line shows `Mode: plan` or `Mode: yolo`, and nothing in `manual`.'
+      description: >-
+        The mode when the problem occurred. The status line shows `Mode: plan` or `Mode: yolo`, and
+        nothing in `manual`.
       options:
         - manual
         - plan
@@ -111,5 +113,8 @@ body:
     id: logs
     attributes:
       label: Logs
-      description: The relevant lines from `$XDG_STATE_HOME/ox/log/oxide-code.log` (default `~/.local/state/ox/log/oxide-code.log`). The TUI writes its log there, and the other modes log to stderr.
+      description: >-
+        The relevant lines from `$XDG_STATE_HOME/ox/log/oxide-code.log` (default
+        `~/.local/state/ox/log/oxide-code.log`). The TUI writes its log there, and the other modes
+        log to stderr.
       render: text

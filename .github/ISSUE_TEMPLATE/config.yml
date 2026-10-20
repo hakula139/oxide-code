@@ -5,4 +5,6 @@ contact_links:
     about: Guides for installing, configuring, and using ox.
   - name: Planned work
     url: https://github.com/hakula139/oxide-code/issues?q=is%3Aissue%20is%3Aopen
-    about: Open issues track what is planned, with epics grouping multi-issue themes. The README lists what works today and what is out of scope.
+    about: >-
+      Open issues track what is planned, with epics grouping multi-issue themes. The README lists
+      what works today and what is out of scope.

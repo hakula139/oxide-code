@@ -66,7 +66,9 @@ The draft lists PR titles, which are short and written for reviewers at merge ti
    ```bash
    session=crates/ox-core/src/session
    mkdir -p "$session/fixtures"
-   sed '1,/^---$/d' "$session/snapshots/ox_core__session__handle__tests__session_format__writes_every_entry_type_as_byte_compatible_jsonl.snap" >"$session/fixtures/vX.Y.Z.jsonl"
+   sed '1,/^---$/d' \
+     "$session/snapshots/ox_core__session__handle__tests__session_format__writes_every_entry_type_as_byte_compatible_jsonl.snap" \
+     >"$session/fixtures/vX.Y.Z.jsonl"
    INSTA_UPDATE=unseen cargo test -p ox-core --lib session_format::resumes_from_every_release_fixture
    ```
 
@@ -109,7 +111,8 @@ Tag the release PR's squash commit by its SHA, since a later PR may already sit 
 ```bash
 git fetch origin
 sha=$(gh pr view <release-pr> --json mergeCommit --jq .mergeCommit.oid)
-git show "$sha:CHANGELOG.md" | awk '/^## / { n++ } /^#/ { h = n == 1 && $0 == "### Highlights"; next } h' >highlights.md
+git show "$sha:CHANGELOG.md" |
+  awk '/^## / { n++ } /^#/ { h = n == 1 && $0 == "### Highlights"; next } h' >highlights.md
 git tag vX.Y.Z "$sha"                                               # Without highlights
 git tag -a --cleanup=whitespace -F highlights.md vX.Y.Z "$sha"      # With highlights
 git push origin vX.Y.Z
