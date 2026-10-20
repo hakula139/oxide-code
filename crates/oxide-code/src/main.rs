@@ -260,14 +260,14 @@ async fn async_main(offset_error: Option<IndeterminateOffset>) -> Result<Exit> {
         title,
         unarchived,
     };
-    run_tui(
+    Box::pin(run_tui(
         engine,
         &theme.theme,
         snapshot,
         show_thinking,
         startup,
         &drifted,
-    )
+    ))
     .await
 }
 
