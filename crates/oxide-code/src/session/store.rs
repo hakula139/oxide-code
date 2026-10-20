@@ -1965,19 +1965,23 @@ mod tests {
     mod appender {
         use super::*;
 
-        #[test]
-        fn writes_after_lines_another_handle_appended() {
-            let dir = tempfile::tempdir().unwrap();
-            let path = dir.path().join("shared.jsonl");
-            let first = create_written(&path, |file| Appender(file).write_all(b"1\n")).unwrap();
-            let second = open_append_file(&path).unwrap();
+        mod write {
+            use super::*;
 
-            Appender(&second).write_all(b"2\n").unwrap();
-            let mut appender = Appender(&first);
-            appender.write_all(b"3\n").unwrap();
-            appender.flush().unwrap();
+            #[test]
+            fn lands_after_lines_another_handle_appended() {
+                let dir = tempfile::tempdir().unwrap();
+                let path = dir.path().join("shared.jsonl");
+                let first = create_written(&path, |file| Appender(file).write_all(b"1\n")).unwrap();
+                let second = open_append_file(&path).unwrap();
 
-            assert_eq!(fs::read_to_string(&path).unwrap(), "1\n2\n3\n");
+                Appender(&second).write_all(b"2\n").unwrap();
+                let mut appender = Appender(&first);
+                appender.write_all(b"3\n").unwrap();
+                appender.flush().unwrap();
+
+                assert_eq!(fs::read_to_string(&path).unwrap(), "1\n2\n3\n");
+            }
         }
     }
 

@@ -2589,7 +2589,7 @@ mod tests {
         }
 
         #[tokio::test]
-        async fn keeps_the_list_through_a_later_round_that_sets_none() {
+        async fn keeps_the_list_through_a_later_rejected_tasks_call() {
             with_pinned_home(async {
                 let server = MockServer::start().await;
                 let planned = serde_json::json!({ "tasks": plan() }).to_string();

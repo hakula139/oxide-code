@@ -436,7 +436,7 @@ mod tests {
             assert_eq!(sessions.len(), 2);
             assert_eq!(
                 sessions[0].session_id, "aaa-old-header",
-                "freshly-touched file with older header should come first"
+                "the file with the later mtime comes first despite its older header"
             );
             assert!(
                 sessions[0].last_active_at > sessions[1].last_active_at,

@@ -97,7 +97,7 @@ pub(crate) fn test_session_file(dir: &Path, session_id: &str) -> PathBuf {
         .unwrap_or_else(|| panic!("no session file for id {session_id} in {project_dir:?}"))
 }
 
-/// Sets the mtime of the session file at `path`, which orders listings, to `at`.
+/// Sets the mtime, which orders listings, of the session file at `path` to `at`.
 pub(super) fn set_modified(path: &Path, at: OffsetDateTime) {
     open_append_file(path)
         .unwrap()

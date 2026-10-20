@@ -1526,7 +1526,7 @@ mod tests {
 
             #[tokio::test]
             async fn rejects_a_credential_no_header_can_carry() {
-                // `HeaderValue::from_str` rejects \n and \r. Both auth arms must propagate it.
+                // `HeaderValue::from_str` rejects control chars, which both auth arms must report.
                 for auth in [
                     Auth::new(AuthSource::ApiKeyEnv, "bad\nkey"),
                     Auth::new(AuthSource::OAuthTokenEnv, "bad\rtoken"),

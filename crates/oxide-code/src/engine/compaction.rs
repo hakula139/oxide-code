@@ -1289,7 +1289,7 @@ mod tests {
             let [parent, fork] = bodies.as_slice() else {
                 panic!("expected two requests, got {}", bodies.len());
             };
-            // Skips the billing block, whose `cch` hashes the whole body and differs per request.
+            // Skips the billing block, whose `cch` hashes the body and so differs per request.
             let system =
                 |body: &serde_json::Value| body["system"].as_array().unwrap()[1..].to_vec();
             assert_eq!(system(fork), system(parent));

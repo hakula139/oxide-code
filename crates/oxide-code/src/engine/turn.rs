@@ -767,7 +767,7 @@ mod tests {
 
         #[tokio::test]
         async fn metadata_batch_failure_after_healthy_messages_surfaces_error() {
-            // Only the assistant and tool-result writes ack, not the third, the metadata batch.
+            // Acks the assistant and tool-result writes, then drops the third, the metadata batch.
             let session =
                 crate::session::handle::testing::acks_then_drops("metadata-batch-fails", 2);
             let client = FakeClient::new(vec![

@@ -803,6 +803,7 @@ mod tests {
     use time::OffsetDateTime;
     use time::macros::datetime;
 
+    use super::Column::{Branch, Id, Msgs, Project, Title, When};
     use super::*;
     use crate::session::display::UNTITLED_MARKER;
     use crate::session::entry::TitleInfo;
@@ -1040,7 +1041,6 @@ mod tests {
 
         mod layout {
             use super::*;
-            use Column::{Branch, Id, Msgs, Project, Title, When};
 
             #[test]
             fn drops_the_id_then_the_branch_project_and_msgs_as_the_width_shrinks() {

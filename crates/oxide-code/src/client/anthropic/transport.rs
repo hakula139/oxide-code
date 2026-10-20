@@ -1021,7 +1021,7 @@ mod tests {
         }
 
         #[tokio::test(start_paused = true)]
-        async fn with_retry_recovers_from_a_transient_status() {
+        async fn numbers_each_attempt_in_the_retry_count_header() {
             let server = MockServer::start().await;
             Mock::given(method("POST"))
                 .and(path("/v1/messages"))
