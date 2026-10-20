@@ -25,17 +25,17 @@ use ox_core::permission::Mode;
 use ox_core::protocol::{Event, Interaction, Op};
 use ox_core::session::display::archive_notice;
 
-use super::clipboard::{Clipboard, Environment};
-use super::components::chat::ChatView;
-use super::components::input::InputArea;
-use super::components::status::{StatusBar, StatusBarInit, StatusHyperlink};
-use super::components::tasks::TaskPanel;
-use super::git_probes::GitProbes;
-use super::modal::{Modal, ModalStack};
-use super::now;
-use super::terminal::{Tui, TuiBackend};
-use super::theme::Theme;
+use crate::clipboard::{Clipboard, Environment};
+use crate::components::chat::ChatView;
+use crate::components::input::InputArea;
+use crate::components::status::{StatusBar, StatusBarInit, StatusHyperlink};
+use crate::components::tasks::TaskPanel;
+use crate::git_probes::GitProbes;
+use crate::modal::{Modal, ModalStack};
+use crate::now;
 use crate::slash::LiveSessionInfo;
+use crate::terminal::{Tui, TuiBackend};
+use crate::theme::Theme;
 
 /// Tick interval for animation frames and render coalescing (~60 FPS).
 const TICK_INTERVAL: Duration = Duration::from_millis(16);

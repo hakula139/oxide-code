@@ -32,7 +32,7 @@ use tracing::error;
 
 use ox_core::util::sync::lock_or_recover;
 
-use super::components::status::{HyperlinkCell, StatusHyperlink};
+use crate::components::status::{HyperlinkCell, StatusHyperlink};
 
 pub(crate) type Tui = Terminal<CrosstermBackend<Stdout>>;
 

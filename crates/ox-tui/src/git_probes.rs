@@ -10,7 +10,7 @@ use tokio::sync::mpsc;
 use ox_core::config::StatusLineSegment;
 use ox_core::util::git::{self, PullRequest, PullRequestDetail};
 
-use super::now;
+use crate::now;
 
 /// Gap between a branch probe finishing and the next one starting. Branch changes outside the
 /// session (manual `git checkout`) only become visible after one interval.

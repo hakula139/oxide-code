@@ -7,7 +7,7 @@ use pulldown_cmark::{Event, Options, Parser};
 use ratatui::style::Style;
 use ratatui::text::Text;
 
-use super::theme::Theme;
+use crate::theme::Theme;
 use render::MarkdownRenderer;
 
 const OPTIONS: Options = Options::ENABLE_STRIKETHROUGH.union(Options::ENABLE_TABLES);

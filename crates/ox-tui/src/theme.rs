@@ -14,7 +14,7 @@ use syntect::highlighting::Theme as SyntaxTheme;
 
 use ox_core::tool::tasks::TaskStatus;
 
-use super::glyphs::SEGMENT_SEPARATOR;
+use crate::glyphs::SEGMENT_SEPARATOR;
 
 /// Parses the built-in theme `name`, such as `mocha` or `latte`. `None` for an unknown name.
 /// Panics if the vendored TOML fails to parse, which `parse_theme_all_builtins` rules out.

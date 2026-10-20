@@ -18,9 +18,9 @@ use ratatui::layout::Rect;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 
-use super::action::Action;
-use super::glyphs::HORIZONTAL_RULE;
-use super::theme::Theme;
+use crate::action::Action;
+use crate::glyphs::HORIZONTAL_RULE;
+use crate::theme::Theme;
 
 const TOP_BORDER_HEIGHT: u16 = 1;
 

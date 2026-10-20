@@ -1,5 +1,5 @@
 //! What the input box, slash commands, modals, and the app's named keys ask the
-//! [`App`](super::app::App) to do.
+//! [`App`](crate::app::App) to do.
 
 use ox_core::protocol::Op;
 
