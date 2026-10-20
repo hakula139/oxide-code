@@ -283,7 +283,7 @@ mod tests {
     use crate::session::store::set_archived_at;
     use crate::session::store::testing::{
         sample_header, sample_message_entry, sample_summary_entry, sample_title_entry,
-        seed_test_session, test_project_dir, test_session_file, test_store,
+        seed_test_session, set_modified, test_project_dir, test_session_file, test_store,
         write_newest_corrupt_session,
     };
 
@@ -292,14 +292,14 @@ mod tests {
         for i in 0..count {
             let id = format!("session-{i:04}");
             let offset = i64::try_from(i).expect("test count fits i64");
+            let created_at = datetime!(2026-04-15 10:00:00 UTC) + time::Duration::seconds(offset);
             let mut writer = store
                 .create(
                     &Entry::Header {
                         session_id: id.clone(),
                         cwd: "/work/project".to_owned(),
                         model: "m".to_owned(),
-                        created_at: datetime!(2026-04-15 10:00:00 UTC)
-                            + time::Duration::seconds(offset),
+                        created_at,
                         version: CURRENT_VERSION,
                         git_branch: None,
                     },
@@ -309,6 +309,7 @@ mod tests {
             writer
                 .append(&[sample_title_entry(&format!("Title {i}"))])
                 .unwrap();
+            set_modified(writer.path(), created_at);
         }
     }
 
@@ -367,6 +368,7 @@ mod tests {
                 .unwrap();
             wa.append(&[sample_title_entry("Older")]).unwrap();
             wa.append(&[sample_summary_entry(3)]).unwrap();
+            set_modified(wa.path(), datetime!(2026-04-15 10:00:00 UTC));
 
             let mut wb = store
                 .create(
@@ -383,6 +385,7 @@ mod tests {
                 .unwrap();
             wb.append(&[sample_title_entry("Newer")]).unwrap();
             wb.append(&[sample_summary_entry(5)]).unwrap();
+            set_modified(wb.path(), datetime!(2026-04-16 12:00:00 UTC));
 
             let sessions = store.list().unwrap();
             assert_eq!(sessions.len(), 2);
@@ -411,7 +414,7 @@ mod tests {
                 )
                 .unwrap();
             w_old.append(&[sample_title_entry("Old")]).unwrap();
-            drop(w_old);
+            set_modified(w_old.path(), datetime!(2026-04-18 10:00:00 UTC));
 
             let mut w_new = store
                 .create(
@@ -427,17 +430,7 @@ mod tests {
                 )
                 .unwrap();
             w_new.append(&[sample_title_entry("New")]).unwrap();
-            drop(w_new);
-
-            let new_path = test_session_file(dir.path(), "zzz-new-header");
-            let far_past = std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_700_000_000);
-            let times = std::fs::FileTimes::new().set_modified(far_past);
-            File::options()
-                .write(true)
-                .open(&new_path)
-                .unwrap()
-                .set_times(times)
-                .unwrap();
+            set_modified(w_new.path(), datetime!(2026-04-17 10:00:00 UTC));
 
             let sessions = store.list().unwrap();
             assert_eq!(sessions.len(), 2);

@@ -11,7 +11,7 @@ use uuid::Uuid;
 use super::listing::ListScope;
 use super::{
     SessionData, SessionStore, SessionWriter, encode_lines, file_session_id,
-    load_session_data_from_path, open_append_at,
+    load_session_data_from_path, open_append_at, open_append_file,
 };
 use crate::message::Message;
 use crate::session::entry::{CURRENT_VERSION, Entry, TitleSource};
@@ -97,8 +97,17 @@ pub(crate) fn test_session_file(dir: &Path, session_id: &str) -> PathBuf {
         .unwrap_or_else(|| panic!("no session file for id {session_id} in {project_dir:?}"))
 }
 
-/// Seeds a session holding a header and, when given, a `UserProvided` title and a summary of
-/// `message_count`, so a `None` `message_count` leaves the session unfinished.
+/// Sets the mtime of the session file at `path`, which orders listings, to `at`.
+pub(super) fn set_modified(path: &Path, at: OffsetDateTime) {
+    open_append_file(path)
+        .unwrap()
+        .set_modified(at.into())
+        .unwrap();
+}
+
+/// Seeds a session created and last active at `created_at`, holding a header and, when given, a
+/// `UserProvided` title and a summary of `message_count`, so a `None` `message_count` leaves the
+/// session unfinished.
 pub(crate) fn seed_test_session(
     store: &SessionStore,
     session_id: &str,
@@ -136,6 +145,7 @@ pub(crate) fn seed_test_session(
             }])
             .unwrap();
     }
+    set_modified(writer.path(), created_at);
 }
 
 /// IDs of the home project's sessions in the given archive state, most recently active first.
@@ -151,14 +161,13 @@ pub(crate) fn listed_ids(store: &SessionStore, archived: bool) -> Vec<String> {
         .collect()
 }
 
-/// Writes an unparsable session file with ID `corrupt`. Call it last: it then has the newest
-/// mtime, and its name wins any mtime tie, so it always sorts first.
+/// Writes an unparsable session file with ID `corrupt`, whose name and mtime both carry a time
+/// past every seeded session, so it sorts first.
 pub(crate) fn write_newest_corrupt_session(dir: &Path) {
-    fs::write(
-        test_project_dir(dir).join("9999999999-corrupt.jsonl"),
-        "not a session\n",
-    )
-    .unwrap();
+    const NEWEST: i64 = 9_999_999_999;
+    let path = test_project_dir(dir).join(format!("{NEWEST}-corrupt.jsonl"));
+    fs::write(&path, "not a session\n").unwrap();
+    set_modified(&path, OffsetDateTime::from_unix_timestamp(NEWEST).unwrap());
 }
 
 pub(crate) fn sample_header(session_id: &str) -> Entry {
