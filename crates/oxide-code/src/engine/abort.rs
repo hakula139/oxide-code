@@ -102,10 +102,8 @@ mod tests {
     use super::*;
     use crate::protocol::testing::CapturingSink;
 
-    // ── TurnAbort ──
-
     #[test]
-    fn turn_abort_display_alternate_propagates_anyhow_cause_chain() {
+    fn display_alternate_propagates_anyhow_cause_chain() {
         let abort = TurnAbort::Failed(anyhow!("HTTP 503 from upstream").context("request failed"));
 
         let plain = format!("{abort}");
@@ -116,73 +114,82 @@ mod tests {
     }
 
     #[test]
-    fn turn_abort_display_cancelled_and_shutdown_use_static_labels() {
+    fn display_cancelled_and_shutdown_use_static_labels() {
         assert_eq!(format!("{}", TurnAbort::Cancelled), "turn cancelled");
         assert_eq!(format!("{}", TurnAbort::Shutdown), "engine shut down");
     }
 
-    // ── Inbox::absorb ──
+    mod inbox {
+        use super::*;
 
-    #[test]
-    fn absorb_aborts_on_interrupt_shutdown_or_a_closed_channel() {
-        let mut inbox = Inbox::default();
-        let sink = CapturingSink::default();
+        mod absorb {
+            use super::*;
 
-        let interrupted = inbox.absorb(Some(Op::Interrupt), &sink);
-        let shut_down = inbox.absorb(Some(Op::Shutdown), &sink);
-        let closed = inbox.absorb(None, &sink);
+            #[test]
+            fn aborts_on_interrupt_shutdown_or_a_closed_channel() {
+                let mut inbox = Inbox::default();
+                let sink = CapturingSink::default();
 
-        assert!(
-            matches!(interrupted, Err(TurnAbort::Cancelled)),
-            "{interrupted:?}"
-        );
-        assert!(
-            matches!(shut_down, Err(TurnAbort::Shutdown)),
-            "{shut_down:?}"
-        );
-        assert!(matches!(closed, Err(TurnAbort::Shutdown)), "{closed:?}");
+                let interrupted = inbox.absorb(Some(Op::Interrupt), &sink);
+                let shut_down = inbox.absorb(Some(Op::Shutdown), &sink);
+                let closed = inbox.absorb(None, &sink);
+
+                assert!(
+                    matches!(interrupted, Err(TurnAbort::Cancelled)),
+                    "{interrupted:?}"
+                );
+                assert!(
+                    matches!(shut_down, Err(TurnAbort::Shutdown)),
+                    "{shut_down:?}"
+                );
+                assert!(matches!(closed, Err(TurnAbort::Shutdown)), "{closed:?}");
+            }
+
+            #[test]
+            fn hands_back_an_op_it_does_not_keep() {
+                let mut inbox = Inbox::default();
+                let sink = CapturingSink::default();
+
+                let op = inbox.absorb(Some(Op::Clear), &sink);
+
+                assert!(matches!(op, Ok(Some(Op::Clear))), "{op:?}");
+                assert_eq!(inbox.prompts, [] as [String; 0]);
+                assert_eq!(inbox.mode, None);
+                assert_eq!(sink.events(), []);
+            }
+        }
     }
 
-    #[test]
-    fn absorb_hands_back_an_op_it_does_not_keep() {
-        let mut inbox = Inbox::default();
-        let sink = CapturingSink::default();
+    mod await_unless_aborted {
+        use super::*;
 
-        let op = inbox.absorb(Some(Op::Clear), &sink);
+        #[tokio::test]
+        async fn keeps_queued_prompts_and_the_latest_mode_switch() {
+            let (tx, mut rx) = mpsc::channel(3);
+            tx.try_send(Op::Queue("next".to_owned())).unwrap();
+            tx.try_send(Op::SetMode(Mode::Plan)).unwrap();
+            tx.try_send(Op::SetMode(Mode::Yolo)).unwrap();
+            let mut inbox = Inbox::default();
+            let sink = CapturingSink::default();
 
-        assert!(matches!(op, Ok(Some(Op::Clear))), "{op:?}");
-        assert_eq!(inbox.prompts, [] as [String; 0]);
-        assert_eq!(inbox.mode, None);
-        assert_eq!(sink.events(), []);
-    }
+            let output =
+                await_unless_aborted(std::future::ready(7), &mut rx, &mut inbox, &sink).await;
 
-    // ── await_unless_aborted ──
-
-    #[tokio::test]
-    async fn await_unless_aborted_keeps_queued_prompts_and_the_latest_mode_switch() {
-        let (tx, mut rx) = mpsc::channel(3);
-        tx.try_send(Op::Queue("next".to_owned())).unwrap();
-        tx.try_send(Op::SetMode(Mode::Plan)).unwrap();
-        tx.try_send(Op::SetMode(Mode::Yolo)).unwrap();
-        let mut inbox = Inbox::default();
-        let sink = CapturingSink::default();
-
-        let output = await_unless_aborted(std::future::ready(7), &mut rx, &mut inbox, &sink).await;
-
-        assert!(matches!(output, Ok(7)), "{output:?}");
-        assert_eq!(inbox.prompts, ["next"]);
-        assert_eq!(inbox.mode, Some(Mode::Yolo));
-        assert!(
-            matches!(
-                sink.events().as_slice(),
-                [
-                    Event::ModeChanged(Mode::Plan),
-                    Event::ModeChanged(Mode::Yolo)
-                ]
-            ),
-            "{:?}",
-            sink.events(),
-        );
-        drop(tx);
+            assert!(matches!(output, Ok(7)), "{output:?}");
+            assert_eq!(inbox.prompts, ["next"]);
+            assert_eq!(inbox.mode, Some(Mode::Yolo));
+            assert!(
+                matches!(
+                    sink.events().as_slice(),
+                    [
+                        Event::ModeChanged(Mode::Plan),
+                        Event::ModeChanged(Mode::Yolo)
+                    ]
+                ),
+                "{:?}",
+                sink.events(),
+            );
+            drop(tx);
+        }
     }
 }

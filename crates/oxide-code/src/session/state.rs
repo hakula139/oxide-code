@@ -331,516 +331,535 @@ mod tests {
     use crate::session::store::testing::{test_project_dir, test_session_file, test_store};
     use crate::tool::tasks::testing::plan;
 
-    // ── try_defer_title ──
+    mod try_defer_title {
+        use super::*;
 
-    #[test]
-    fn try_defer_title_pending_accepts_and_overwrites_previous_value() {
-        let dir = tempfile::tempdir().unwrap();
-        let store = test_store(dir.path());
-        let mut state = SessionState::fresh(store, "m", None);
+        #[test]
+        fn pending_accepts_and_overwrites_previous_value() {
+            let dir = tempfile::tempdir().unwrap();
+            let store = test_store(dir.path());
+            let mut state = SessionState::fresh(store, "m", None);
 
-        assert!(state.try_defer_title("first".to_owned()).is_none());
-        assert!(state.try_defer_title("second".to_owned()).is_none());
+            assert!(state.try_defer_title("first".to_owned()).is_none());
+            assert!(state.try_defer_title("second".to_owned()).is_none());
 
-        let WriterStatus::Pending {
-            deferred_title: Some(slot),
-            ..
-        } = &state.writer_status
-        else {
-            panic!("expected Pending with last-wins deferred title");
-        };
-        assert_eq!(slot, "second", "later defer overwrites the earlier one");
-    }
-
-    #[test]
-    fn try_defer_title_active_rejects_with_title() {
-        let dir = tempfile::tempdir().unwrap();
-        let store = test_store(dir.path());
-        let mut state = SessionState::fresh(store, "m", None);
-        let now = OffsetDateTime::now_utc();
-        let (entries, _) = state.queue_message_entries(&Message::user("first"), now, false);
-        state.flush_entries(entries).unwrap();
-        assert!(matches!(state.writer_status, WriterStatus::Active(_)));
-
-        let rejected = state.try_defer_title("Manual title".to_owned());
-        assert_eq!(rejected.as_deref(), Some("Manual title"));
-    }
-
-    // ── queue_message_entries ──
-
-    #[test]
-    fn queue_message_entries_seeds_ai_title_on_first_user_text() {
-        let dir = tempfile::tempdir().unwrap();
-        let store = test_store(dir.path());
-        let mut state = SessionState::fresh(store, "m", None);
-        let now = OffsetDateTime::now_utc();
-
-        let (entries, seed) =
-            state.queue_message_entries(&Message::user("Fix the auth bug"), now, false);
-
-        assert_eq!(entries.len(), 2, "title + message");
-        assert!(matches!(
-            &entries[0],
-            Entry::Title { title, .. } if title == "Fix the auth bug",
-        ));
-        assert!(matches!(&entries[1], Entry::Message { .. }));
-        assert_eq!(seed.as_deref(), Some("Fix the auth bug"));
-        assert!(state.first_user_prompt_seen);
-        assert_eq!(state.message_count, 1);
-        assert!(state.last_message_uuid.is_some());
-    }
-
-    #[test]
-    fn queue_message_entries_subsequent_user_message_skips_title_and_chains_uuid() {
-        let dir = tempfile::tempdir().unwrap();
-        let store = test_store(dir.path());
-        let mut state = SessionState::fresh(store, "m", None);
-        let now = OffsetDateTime::now_utc();
-        _ = state.queue_message_entries(&Message::user("first"), now, false);
-        let first_tip = state.last_message_uuid.unwrap();
-
-        let (entries, seed) = state.queue_message_entries(&Message::user("second"), now, false);
-
-        assert_eq!(entries.len(), 1, "no second title");
-        let Entry::Message {
-            parent_uuid, uuid, ..
-        } = &entries[0]
-        else {
-            panic!("expected Message, got {:?}", entries[0]);
-        };
-        assert_eq!(*parent_uuid, Some(first_tip), "chains to previous tip");
-        assert_eq!(state.last_message_uuid, Some(*uuid));
-        assert!(seed.is_none(), "seed only fires once per session");
-        assert_eq!(state.message_count, 2);
-    }
-
-    #[test]
-    fn queue_message_entries_tool_result_only_user_does_not_seed_title() {
-        let dir = tempfile::tempdir().unwrap();
-        let store = test_store(dir.path());
-        let mut state = SessionState::fresh(store, "m", None);
-        let now = OffsetDateTime::now_utc();
-        let msg = Message {
-            role: Role::User,
-            content: vec![ContentBlock::ToolResult {
-                tool_use_id: "t".to_owned(),
-                content: "out".to_owned(),
-                is_error: false,
-            }],
-        };
-
-        let (entries, seed) = state.queue_message_entries(&msg, now, false);
-
-        assert_eq!(entries.len(), 1, "message only");
-        assert!(matches!(&entries[0], Entry::Message { .. }));
-        assert!(seed.is_none());
-        assert!(
-            !state.first_user_prompt_seen,
-            "tool-result-only does not consume the first-prompt slot",
-        );
-    }
-
-    #[test]
-    fn queue_message_entries_assistant_message_skips_title() {
-        let dir = tempfile::tempdir().unwrap();
-        let store = test_store(dir.path());
-        let mut state = SessionState::fresh(store, "m", None);
-        let now = OffsetDateTime::now_utc();
-
-        let (entries, seed) = state.queue_message_entries(&Message::assistant("hi"), now, false);
-
-        assert_eq!(entries.len(), 1);
-        assert!(seed.is_none());
-        assert!(!state.first_user_prompt_seen);
-    }
-
-    // ── compact_entries ──
-
-    #[test]
-    fn compact_entries_writes_boundary_and_synthetic_message_without_committing() {
-        let dir = tempfile::tempdir().unwrap();
-        let store = test_store(dir.path());
-        let mut state = SessionState::fresh(store, "m", None);
-        let now = OffsetDateTime::now_utc();
-        let (rec, _) = state.queue_message_entries(&Message::user("first"), now, false);
-        state.flush_entries(rec).unwrap();
-        let (rec, _) = state.queue_message_entries(&Message::assistant("reply"), now, false);
-        state.flush_entries(rec).unwrap();
-        assert_eq!(state.message_count(), 2);
-
-        let (entries, synthetic_uuid) = state.compact_entries(
-            "summary body",
-            Some("focus on auth".to_owned()),
-            plan(),
-            Message::user("post-compact"),
-            now,
-        );
-
-        assert_eq!(entries.len(), 2);
-        assert!(
-            matches!(
-                &entries[0],
-                Entry::Compact {
-                    summary,
-                    pre_message_count: 2,
-                    instructions: Some(i),
-                    tasks,
-                    ..
-                } if summary == "summary body" && i == "focus on auth" && *tasks == plan()
-            ),
-            "boundary entry must carry summary, pre-count, instructions, and tasks verbatim: {:?}",
-            entries[0],
-        );
-        assert!(
-            matches!(
-                &entries[1],
-                Entry::Message {
-                    uuid,
-                    parent_uuid: None,
-                    ..
-                } if *uuid == synthetic_uuid
-            ),
-            "synthetic post-compact message must reset the parent chain: {:?}",
-            entries[1],
-        );
-        assert_eq!(
-            state.message_count(),
-            2,
-            "pre-flush count must remain until commit"
-        );
-        assert_ne!(state.last_message_uuid, Some(synthetic_uuid));
-    }
-
-    #[test]
-    fn compact_entries_omits_instructions_when_none() {
-        let dir = tempfile::tempdir().unwrap();
-        let store = test_store(dir.path());
-        let state = SessionState::fresh(store, "m", None);
-        let now = OffsetDateTime::now_utc();
-
-        let (entries, _) =
-            state.compact_entries("s", None, Vec::new(), Message::user("synth"), now);
-
-        assert!(matches!(
-            &entries[0],
-            Entry::Compact {
-                instructions: None,
+            let WriterStatus::Pending {
+                deferred_title: Some(slot),
                 ..
-            }
-        ));
+            } = &state.writer_status
+            else {
+                panic!("expected Pending with last-wins deferred title");
+            };
+            assert_eq!(slot, "second", "later defer overwrites the earlier one");
+        }
+
+        #[test]
+        fn active_rejects_with_title() {
+            let dir = tempfile::tempdir().unwrap();
+            let store = test_store(dir.path());
+            let mut state = SessionState::fresh(store, "m", None);
+            let now = OffsetDateTime::now_utc();
+            let (entries, _) = state.queue_message_entries(&Message::user("first"), now, false);
+            state.flush_entries(entries).unwrap();
+            assert!(matches!(state.writer_status, WriterStatus::Active(_)));
+
+            let rejected = state.try_defer_title("Manual title".to_owned());
+            assert_eq!(rejected.as_deref(), Some("Manual title"));
+        }
     }
 
-    // ── commit_compact ──
+    mod queue_message_entries {
+        use super::*;
 
-    #[test]
-    fn commit_compact_resets_chain_and_message_count() {
-        let dir = tempfile::tempdir().unwrap();
-        let store = test_store(dir.path());
-        let mut state = SessionState::fresh(store, "m", None);
-        let now = OffsetDateTime::now_utc();
-        let (rec, _) = state.queue_message_entries(&Message::user("first"), now, false);
-        state.flush_entries(rec).unwrap();
-        let (rec, _) = state.queue_message_entries(&Message::assistant("reply"), now, false);
-        state.flush_entries(rec).unwrap();
+        #[test]
+        fn seeds_ai_title_on_first_user_text() {
+            let dir = tempfile::tempdir().unwrap();
+            let store = test_store(dir.path());
+            let mut state = SessionState::fresh(store, "m", None);
+            let now = OffsetDateTime::now_utc();
 
-        let (_, synthetic_uuid) =
-            state.compact_entries("s", None, Vec::new(), Message::user("synth"), now);
-        state.commit_compact(synthetic_uuid);
+            let (entries, seed) =
+                state.queue_message_entries(&Message::user("Fix the auth bug"), now, false);
 
-        assert_eq!(state.last_message_uuid, Some(synthetic_uuid));
-        assert_eq!(state.message_count(), 1);
-    }
+            assert_eq!(entries.len(), 2, "title + message");
+            assert!(matches!(
+                &entries[0],
+                Entry::Title { title, .. } if title == "Fix the auth bug",
+            ));
+            assert!(matches!(&entries[1], Entry::Message { .. }));
+            assert_eq!(seed.as_deref(), Some("Fix the auth bug"));
+            assert!(state.first_user_prompt_seen);
+            assert_eq!(state.message_count, 1);
+            assert!(state.last_message_uuid.is_some());
+        }
 
-    #[test]
-    fn commit_compact_marks_first_user_prompt_seen_so_post_compact_record_skips_title() {
-        let dir = tempfile::tempdir().unwrap();
-        let store = test_store(dir.path());
-        let mut state = SessionState::fresh(store, "m", None);
-        let now = OffsetDateTime::now_utc();
+        #[test]
+        fn subsequent_user_message_skips_title_and_chains_uuid() {
+            let dir = tempfile::tempdir().unwrap();
+            let store = test_store(dir.path());
+            let mut state = SessionState::fresh(store, "m", None);
+            let now = OffsetDateTime::now_utc();
+            _ = state.queue_message_entries(&Message::user("first"), now, false);
+            let first_tip = state.last_message_uuid.unwrap();
 
-        let (_, synthetic_uuid) =
-            state.compact_entries("s", None, Vec::new(), Message::user("synth"), now);
-        state.commit_compact(synthetic_uuid);
+            let (entries, seed) = state.queue_message_entries(&Message::user("second"), now, false);
 
-        assert!(state.first_user_prompt_seen);
-        let (_, seed) = state.queue_message_entries(&Message::user("after"), now, false);
-        assert!(seed.is_none());
-    }
+            assert_eq!(entries.len(), 1, "no second title");
+            let Entry::Message {
+                parent_uuid, uuid, ..
+            } = &entries[0]
+            else {
+                panic!("expected Message, got {:?}", entries[0]);
+            };
+            assert_eq!(*parent_uuid, Some(first_tip), "chains to previous tip");
+            assert_eq!(state.last_message_uuid, Some(*uuid));
+            assert!(seed.is_none(), "seed only fires once per session");
+            assert_eq!(state.message_count, 2);
+        }
 
-    #[test]
-    fn commit_compact_clears_resume_anchor_so_finish_writes_summary() {
-        let dir = tempfile::tempdir().unwrap();
-        let store = test_store(dir.path());
-        let mut state = SessionState::fresh(store, "m", None);
-        state.initial_message_count = 5;
-        state.message_count = 5;
-        let now = OffsetDateTime::now_utc();
+        #[test]
+        fn tool_result_only_user_does_not_seed_title() {
+            let dir = tempfile::tempdir().unwrap();
+            let store = test_store(dir.path());
+            let mut state = SessionState::fresh(store, "m", None);
+            let now = OffsetDateTime::now_utc();
+            let msg = Message {
+                role: Role::User,
+                content: vec![ContentBlock::ToolResult {
+                    tool_use_id: "t".to_owned(),
+                    content: "out".to_owned(),
+                    is_error: false,
+                }],
+            };
 
-        let (_, synthetic_uuid) =
-            state.compact_entries("s", None, Vec::new(), Message::user("synth"), now);
-        state.commit_compact(synthetic_uuid);
+            let (entries, seed) = state.queue_message_entries(&msg, now, false);
 
-        assert_eq!(state.initial_message_count, 0);
-        assert_eq!(state.message_count, 1);
-    }
-
-    // ── finish_entries ──
-
-    #[test]
-    fn finish_entries_after_record_produces_summary_with_count() {
-        let dir = tempfile::tempdir().unwrap();
-        let store = test_store(dir.path());
-        let mut state = SessionState::fresh(store, "m", None);
-        let now = OffsetDateTime::now_utc();
-        let (entries, _) = state.queue_message_entries(&Message::user("hello"), now, false);
-        state.flush_entries(entries).unwrap();
-
-        let entries = state.finish_entries(Vec::new(), now);
-        let Some(Entry::Summary { message_count, .. }) = entries.last() else {
-            panic!("expected trailing Summary, got {entries:?}");
-        };
-        assert_eq!(*message_count, 1);
-    }
-
-    #[test]
-    fn finish_entries_pending_writer_is_empty_and_marks_finished() {
-        let dir = tempfile::tempdir().unwrap();
-        let store = test_store(dir.path());
-        let mut state = SessionState::fresh(store, "m", None);
-
-        let entries = state.finish_entries(Vec::new(), OffsetDateTime::now_utc());
-
-        assert!(entries.is_empty());
-        assert!(state.finished);
-    }
-
-    #[test]
-    fn finish_entries_emits_one_file_snapshot_per_tracked_file() {
-        let dir = tempfile::tempdir().unwrap();
-        let store = test_store(dir.path());
-        let tracker = FileTracker::default();
-        let mut state = SessionState::fresh(store, "m", None);
-        let now = OffsetDateTime::now_utc();
-        let (msgs, _) = state.queue_message_entries(&Message::user("hi"), now, false);
-        state.flush_entries(msgs).unwrap();
-
-        for name in ["/tmp/a", "/tmp/b", "/tmp/c"] {
-            _ = tracker.record_read(
-                std::path::Path::new(name),
-                name.as_bytes(),
-                LastView::Full,
-                "toolu_test",
+            assert_eq!(entries.len(), 1, "message only");
+            assert!(matches!(&entries[0], Entry::Message { .. }));
+            assert!(seed.is_none());
+            assert!(
+                !state.first_user_prompt_seen,
+                "tool-result-only does not consume the first-prompt slot",
             );
         }
 
-        let entries = state.finish_entries(tracker.snapshot_all(), now);
-        let snapshot_count = entries
-            .iter()
-            .filter(|e| matches!(e, Entry::FileSnapshot { .. }))
-            .count();
-        assert_eq!(snapshot_count, 3);
-        assert!(
-            matches!(entries.last(), Some(Entry::Summary { .. })),
-            "summary must come after every snapshot",
-        );
+        #[test]
+        fn assistant_message_skips_title() {
+            let dir = tempfile::tempdir().unwrap();
+            let store = test_store(dir.path());
+            let mut state = SessionState::fresh(store, "m", None);
+            let now = OffsetDateTime::now_utc();
+
+            let (entries, seed) =
+                state.queue_message_entries(&Message::assistant("hi"), now, false);
+
+            assert_eq!(entries.len(), 1);
+            assert!(seed.is_none());
+            assert!(!state.first_user_prompt_seen);
+        }
     }
 
-    #[test]
-    fn finish_entries_is_idempotent() {
-        let dir = tempfile::tempdir().unwrap();
-        let store = test_store(dir.path());
-        let mut state = SessionState::fresh(store, "m", None);
-        let now = OffsetDateTime::now_utc();
-        let (entries, _) = state.queue_message_entries(&Message::user("hi"), now, false);
-        state.flush_entries(entries).unwrap();
-        let _first = state.finish_entries(Vec::new(), now);
+    mod compact_entries {
+        use super::*;
 
-        let second = state.finish_entries(Vec::new(), now);
+        #[test]
+        fn writes_boundary_and_synthetic_message_without_committing() {
+            let dir = tempfile::tempdir().unwrap();
+            let store = test_store(dir.path());
+            let mut state = SessionState::fresh(store, "m", None);
+            let now = OffsetDateTime::now_utc();
+            let (rec, _) = state.queue_message_entries(&Message::user("first"), now, false);
+            state.flush_entries(rec).unwrap();
+            let (rec, _) = state.queue_message_entries(&Message::assistant("reply"), now, false);
+            state.flush_entries(rec).unwrap();
+            assert_eq!(state.message_count(), 2);
 
-        assert!(second.is_empty(), "second call short-circuits");
-        assert!(state.finished);
+            let (entries, synthetic_uuid) = state.compact_entries(
+                "summary body",
+                Some("focus on auth".to_owned()),
+                plan(),
+                Message::user("post-compact"),
+                now,
+            );
+
+            assert_eq!(entries.len(), 2);
+            assert!(
+                matches!(
+                    &entries[0],
+                    Entry::Compact {
+                        summary,
+                        pre_message_count: 2,
+                        instructions: Some(i),
+                        tasks,
+                        ..
+                    } if summary == "summary body" && i == "focus on auth" && *tasks == plan()
+                ),
+                "boundary entry must carry summary, pre-count, instructions, and tasks verbatim: \
+                 {:?}",
+                entries[0],
+            );
+            assert!(
+                matches!(
+                    &entries[1],
+                    Entry::Message {
+                        uuid,
+                        parent_uuid: None,
+                        ..
+                    } if *uuid == synthetic_uuid
+                ),
+                "synthetic post-compact message must reset the parent chain: {:?}",
+                entries[1],
+            );
+            assert_eq!(
+                state.message_count(),
+                2,
+                "pre-flush count must remain until commit"
+            );
+            assert_ne!(state.last_message_uuid, Some(synthetic_uuid));
+        }
+
+        #[test]
+        fn omits_absent_instructions() {
+            let dir = tempfile::tempdir().unwrap();
+            let store = test_store(dir.path());
+            let state = SessionState::fresh(store, "m", None);
+            let now = OffsetDateTime::now_utc();
+
+            let (entries, _) =
+                state.compact_entries("s", None, Vec::new(), Message::user("synth"), now);
+
+            assert!(matches!(
+                &entries[0],
+                Entry::Compact {
+                    instructions: None,
+                    ..
+                }
+            ));
+        }
     }
 
-    #[test]
-    fn finish_entries_skips_summary_on_empty_resume() {
-        let dir = tempfile::tempdir().unwrap();
-        let store = test_store(dir.path());
-        let mut original = SessionState::fresh(store.clone(), "m", None);
-        let now = OffsetDateTime::now_utc();
-        let (entries, _) = original.queue_message_entries(&Message::user("hi"), now, false);
-        original.flush_entries(entries).unwrap();
-        let parent = original.last_message_uuid;
-        let session_id = original.session_id.to_string();
-        drop(original);
+    mod commit_compact {
+        use super::*;
 
-        let writer = store.open_append(&session_id).unwrap();
-        let mut resumed = SessionState::resumed(store, session_id, writer, parent, 1, true);
+        #[test]
+        fn resets_chain_and_message_count() {
+            let dir = tempfile::tempdir().unwrap();
+            let store = test_store(dir.path());
+            let mut state = SessionState::fresh(store, "m", None);
+            let now = OffsetDateTime::now_utc();
+            let (rec, _) = state.queue_message_entries(&Message::user("first"), now, false);
+            state.flush_entries(rec).unwrap();
+            let (rec, _) = state.queue_message_entries(&Message::assistant("reply"), now, false);
+            state.flush_entries(rec).unwrap();
 
-        let entries = resumed.finish_entries(Vec::new(), now);
+            let (_, synthetic_uuid) =
+                state.compact_entries("s", None, Vec::new(), Message::user("synth"), now);
+            state.commit_compact(synthetic_uuid);
 
-        assert!(entries.is_empty(), "no new messages → no summary");
+            assert_eq!(state.last_message_uuid, Some(synthetic_uuid));
+            assert_eq!(state.message_count(), 1);
+        }
+
+        #[test]
+        fn marks_first_user_prompt_seen_so_post_compact_record_skips_title() {
+            let dir = tempfile::tempdir().unwrap();
+            let store = test_store(dir.path());
+            let mut state = SessionState::fresh(store, "m", None);
+            let now = OffsetDateTime::now_utc();
+
+            let (_, synthetic_uuid) =
+                state.compact_entries("s", None, Vec::new(), Message::user("synth"), now);
+            state.commit_compact(synthetic_uuid);
+
+            assert!(state.first_user_prompt_seen);
+            let (_, seed) = state.queue_message_entries(&Message::user("after"), now, false);
+            assert!(seed.is_none());
+        }
+
+        #[test]
+        fn clears_resume_anchor_so_finish_writes_summary() {
+            let dir = tempfile::tempdir().unwrap();
+            let store = test_store(dir.path());
+            let mut state = SessionState::fresh(store, "m", None);
+            state.initial_message_count = 5;
+            state.message_count = 5;
+            let now = OffsetDateTime::now_utc();
+
+            let (_, synthetic_uuid) =
+                state.compact_entries("s", None, Vec::new(), Message::user("synth"), now);
+            state.commit_compact(synthetic_uuid);
+
+            assert_eq!(state.initial_message_count, 0);
+            assert_eq!(state.message_count, 1);
+        }
     }
 
-    // ── flush_entries ──
+    mod finish_entries {
+        use super::*;
 
-    #[test]
-    fn flush_entries_failed_write_retries_queued_entries_at_the_writer_path() {
-        let source = tempfile::tempdir().unwrap();
-        let elsewhere = tempfile::tempdir().unwrap();
-        let now = OffsetDateTime::now_utc();
-        let mut original = SessionState::fresh(test_store(source.path()), "m", None);
-        let (entries, _) = original.queue_message_entries(&Message::user("first"), now, false);
-        original.flush_entries(entries).unwrap();
-        let session_id = original.session_id.to_string();
-        let copied = elsewhere.path().join("copied.jsonl");
-        std::fs::copy(test_session_file(source.path(), &session_id), &copied).unwrap();
+        #[test]
+        fn after_record_produces_summary_with_count() {
+            let dir = tempfile::tempdir().unwrap();
+            let store = test_store(dir.path());
+            let mut state = SessionState::fresh(store, "m", None);
+            let now = OffsetDateTime::now_utc();
+            let (entries, _) = state.queue_message_entries(&Message::user("hello"), now, false);
+            state.flush_entries(entries).unwrap();
 
-        let empty_store = tempfile::tempdir().unwrap();
-        let mut state = SessionState::resumed(
-            test_store(empty_store.path()),
-            session_id,
-            SessionWriter::failing_once(&copied),
-            original.last_message_uuid,
-            1,
-            true,
-        );
-        let (entries, _) = state.queue_message_entries(&Message::user("second"), now, false);
-        assert!(state.flush_entries(entries).is_err());
-        let (entries, _) = state.queue_message_entries(&Message::assistant("third"), now, false);
-        state.flush_entries(entries).unwrap();
+            let entries = state.finish_entries(Vec::new(), now);
+            let Some(Entry::Summary { message_count, .. }) = entries.last() else {
+                panic!("expected trailing Summary, got {entries:?}");
+            };
+            assert_eq!(*message_count, 1);
+        }
 
-        let data = load_session_data_from_path(&copied).unwrap();
-        assert_eq!(
-            data.messages,
-            [
-                Message::user("first"),
-                Message::user("second"),
-                Message::assistant("third"),
-            ]
-        );
-        assert_eq!(data.last_uuid, state.last_message_uuid);
+        #[test]
+        fn pending_writer_is_empty_and_marks_finished() {
+            let dir = tempfile::tempdir().unwrap();
+            let store = test_store(dir.path());
+            let mut state = SessionState::fresh(store, "m", None);
+
+            let entries = state.finish_entries(Vec::new(), OffsetDateTime::now_utc());
+
+            assert!(entries.is_empty());
+            assert!(state.finished);
+        }
+
+        #[test]
+        fn emits_one_file_snapshot_per_tracked_file() {
+            let dir = tempfile::tempdir().unwrap();
+            let store = test_store(dir.path());
+            let tracker = FileTracker::default();
+            let mut state = SessionState::fresh(store, "m", None);
+            let now = OffsetDateTime::now_utc();
+            let (msgs, _) = state.queue_message_entries(&Message::user("hi"), now, false);
+            state.flush_entries(msgs).unwrap();
+
+            for name in ["/tmp/a", "/tmp/b", "/tmp/c"] {
+                _ = tracker.record_read(
+                    std::path::Path::new(name),
+                    name.as_bytes(),
+                    LastView::Full,
+                    "toolu_test",
+                );
+            }
+
+            let entries = state.finish_entries(tracker.snapshot_all(), now);
+            let snapshot_count = entries
+                .iter()
+                .filter(|e| matches!(e, Entry::FileSnapshot { .. }))
+                .count();
+            assert_eq!(snapshot_count, 3);
+            assert!(
+                matches!(entries.last(), Some(Entry::Summary { .. })),
+                "summary must come after every snapshot",
+            );
+        }
+
+        #[test]
+        fn is_idempotent() {
+            let dir = tempfile::tempdir().unwrap();
+            let store = test_store(dir.path());
+            let mut state = SessionState::fresh(store, "m", None);
+            let now = OffsetDateTime::now_utc();
+            let (entries, _) = state.queue_message_entries(&Message::user("hi"), now, false);
+            state.flush_entries(entries).unwrap();
+            let _first = state.finish_entries(Vec::new(), now);
+
+            let second = state.finish_entries(Vec::new(), now);
+
+            assert!(second.is_empty(), "second call short-circuits");
+            assert!(state.finished);
+        }
+
+        #[test]
+        fn skips_summary_on_empty_resume() {
+            let dir = tempfile::tempdir().unwrap();
+            let store = test_store(dir.path());
+            let mut original = SessionState::fresh(store.clone(), "m", None);
+            let now = OffsetDateTime::now_utc();
+            let (entries, _) = original.queue_message_entries(&Message::user("hi"), now, false);
+            original.flush_entries(entries).unwrap();
+            let parent = original.last_message_uuid;
+            let session_id = original.session_id.to_string();
+            drop(original);
+
+            let writer = store.open_append(&session_id).unwrap();
+            let mut resumed = SessionState::resumed(store, session_id, writer, parent, 1, true);
+
+            let entries = resumed.finish_entries(Vec::new(), now);
+
+            assert!(entries.is_empty(), "no new messages → no summary");
+        }
     }
 
-    #[test]
-    fn flush_entries_pending_create_failure_keeps_entries_and_deferred_title() {
-        let dir = tempfile::tempdir().unwrap();
-        let store = test_store(dir.path());
-        let mut state = SessionState::fresh(store, "m", None);
-        let now = OffsetDateTime::now_utc();
-        let session_id = state.session_id.to_string();
-        assert!(
-            state
-                .try_defer_title("Survives rollback".to_owned())
-                .is_none(),
-            "fresh state must accept defer",
-        );
+    mod flush_entries {
+        use super::*;
 
-        let project_dir = test_project_dir(dir.path());
-        std::fs::remove_dir_all(&project_dir).unwrap();
-        let (entries, _) = state.queue_message_entries(&Message::user("first"), now, false);
-        assert!(
-            state.flush_entries(entries).is_err(),
-            "create must fail with project dir gone",
-        );
-        let WriterStatus::Pending {
-            deferred_title: Some(restored),
-            ..
-        } = &state.writer_status
-        else {
-            panic!("create failure must leave Pending with deferred title intact");
-        };
-        assert_eq!(restored, "Survives rollback");
+        #[test]
+        fn failed_write_retries_queued_entries_at_the_writer_path() {
+            let source = tempfile::tempdir().unwrap();
+            let elsewhere = tempfile::tempdir().unwrap();
+            let now = OffsetDateTime::now_utc();
+            let mut original = SessionState::fresh(test_store(source.path()), "m", None);
+            let (entries, _) = original.queue_message_entries(&Message::user("first"), now, false);
+            original.flush_entries(entries).unwrap();
+            let session_id = original.session_id.to_string();
+            let copied = elsewhere.path().join("copied.jsonl");
+            std::fs::copy(test_session_file(source.path(), &session_id), &copied).unwrap();
 
-        std::fs::create_dir_all(&project_dir).unwrap();
-        let (entries, _) = state.queue_message_entries(&Message::assistant("second"), now, false);
-        state.flush_entries(entries).unwrap();
+            let empty_store = tempfile::tempdir().unwrap();
+            let mut state = SessionState::resumed(
+                test_store(empty_store.path()),
+                session_id,
+                SessionWriter::failing_once(&copied),
+                original.last_message_uuid,
+                1,
+                true,
+            );
+            let (entries, _) = state.queue_message_entries(&Message::user("second"), now, false);
+            assert!(state.flush_entries(entries).is_err());
+            let (entries, _) =
+                state.queue_message_entries(&Message::assistant("third"), now, false);
+            state.flush_entries(entries).unwrap();
 
-        let data =
-            load_session_data_from_path(&test_session_file(dir.path(), &session_id)).unwrap();
-        assert_eq!(
-            data.messages,
-            [Message::user("first"), Message::assistant("second")]
-        );
-        assert_eq!(
-            data.title.map(|t| t.title).as_deref(),
-            Some("Survives rollback"),
-        );
+            let data = load_session_data_from_path(&copied).unwrap();
+            assert_eq!(
+                data.messages,
+                [
+                    Message::user("first"),
+                    Message::user("second"),
+                    Message::assistant("third"),
+                ]
+            );
+            assert_eq!(data.last_uuid, state.last_message_uuid);
+        }
+
+        #[test]
+        fn pending_create_failure_keeps_entries_and_deferred_title() {
+            let dir = tempfile::tempdir().unwrap();
+            let store = test_store(dir.path());
+            let mut state = SessionState::fresh(store, "m", None);
+            let now = OffsetDateTime::now_utc();
+            let session_id = state.session_id.to_string();
+            assert!(
+                state
+                    .try_defer_title("Survives rollback".to_owned())
+                    .is_none(),
+                "fresh state must accept defer",
+            );
+
+            let project_dir = test_project_dir(dir.path());
+            std::fs::remove_dir_all(&project_dir).unwrap();
+            let (entries, _) = state.queue_message_entries(&Message::user("first"), now, false);
+            assert!(
+                state.flush_entries(entries).is_err(),
+                "create must fail with project dir gone",
+            );
+            let WriterStatus::Pending {
+                deferred_title: Some(restored),
+                ..
+            } = &state.writer_status
+            else {
+                panic!("create failure must leave Pending with deferred title intact");
+            };
+            assert_eq!(restored, "Survives rollback");
+
+            std::fs::create_dir_all(&project_dir).unwrap();
+            let (entries, _) =
+                state.queue_message_entries(&Message::assistant("second"), now, false);
+            state.flush_entries(entries).unwrap();
+
+            let data =
+                load_session_data_from_path(&test_session_file(dir.path(), &session_id)).unwrap();
+            assert_eq!(
+                data.messages,
+                [Message::user("first"), Message::assistant("second")]
+            );
+            assert_eq!(
+                data.title.map(|t| t.title).as_deref(),
+                Some("Survives rollback"),
+            );
+        }
+
+        #[test]
+        fn failure_over_the_cap_stops_persistence_for_good() {
+            let dir = tempfile::tempdir().unwrap();
+            let now = OffsetDateTime::now_utc();
+            let mut original = SessionState::fresh(test_store(dir.path()), "m", None);
+            let (entries, _) = original.queue_message_entries(&Message::user("first"), now, false);
+            original.flush_entries(entries).unwrap();
+            let session_id = original.session_id.to_string();
+            let path = test_session_file(dir.path(), &session_id);
+            let before = std::fs::read(&path).unwrap();
+
+            let mut state = SessionState::resumed(
+                test_store(dir.path()),
+                session_id,
+                SessionWriter::failing_once(&path),
+                original.last_message_uuid,
+                1,
+                true,
+            );
+            let huge = Message::user("x".repeat(MAX_UNWRITTEN_BYTES));
+            let (entries, _) = state.queue_message_entries(&huge, now, false);
+            let err = state.flush_entries(entries).unwrap_err();
+            assert!(
+                format!("{err:#}").contains(&persistence_stopped()),
+                "got: {err:#}"
+            );
+            let (entries, _) =
+                state.queue_message_entries(&Message::assistant("after"), now, false);
+            let err = state.flush_entries(entries).unwrap_err();
+
+            assert_eq!(err.to_string(), persistence_stopped());
+            assert!(state.persistence_stopped());
+            assert_eq!(
+                std::fs::read(&path).unwrap(),
+                before,
+                "a stopped session writes nothing"
+            );
+        }
     }
 
-    #[test]
-    fn flush_entries_failure_over_the_cap_stops_persistence_for_good() {
-        let dir = tempfile::tempdir().unwrap();
-        let now = OffsetDateTime::now_utc();
-        let mut original = SessionState::fresh(test_store(dir.path()), "m", None);
-        let (entries, _) = original.queue_message_entries(&Message::user("first"), now, false);
-        original.flush_entries(entries).unwrap();
-        let session_id = original.session_id.to_string();
-        let path = test_session_file(dir.path(), &session_id);
-        let before = std::fs::read(&path).unwrap();
+    mod extract_user_text {
+        use super::*;
 
-        let mut state = SessionState::resumed(
-            test_store(dir.path()),
-            session_id,
-            SessionWriter::failing_once(&path),
-            original.last_message_uuid,
-            1,
-            true,
-        );
-        let huge = Message::user("x".repeat(MAX_UNWRITTEN_BYTES));
-        let (entries, _) = state.queue_message_entries(&huge, now, false);
-        let err = state.flush_entries(entries).unwrap_err();
-        assert!(
-            format!("{err:#}").contains(&persistence_stopped()),
-            "got: {err:#}"
-        );
-        let (entries, _) = state.queue_message_entries(&Message::assistant("after"), now, false);
-        let err = state.flush_entries(entries).unwrap_err();
+        #[test]
+        fn selects_first_nonempty_user_text() {
+            let tool_result = ContentBlock::ToolResult {
+                tool_use_id: "t1".to_owned(),
+                content: "output".to_owned(),
+                is_error: false,
+            };
+            let user_with_only_blank = Message {
+                role: Role::User,
+                content: vec![ContentBlock::Text {
+                    text: "  ".to_owned(),
+                }],
+            };
+            let user_with_only_tool_result = Message {
+                role: Role::User,
+                content: vec![tool_result.clone()],
+            };
+            let user_with_text_after_tool_result = Message {
+                role: Role::User,
+                content: vec![
+                    tool_result,
+                    ContentBlock::Text {
+                        text: "follow-up".to_owned(),
+                    },
+                ],
+            };
 
-        assert_eq!(err.to_string(), persistence_stopped());
-        assert!(state.persistence_stopped());
-        assert_eq!(
-            std::fs::read(&path).unwrap(),
-            before,
-            "a stopped session writes nothing"
-        );
-    }
-
-    // ── extract_user_text ──
-
-    #[test]
-    fn extract_user_text_selects_first_nonempty_user_text() {
-        let tool_result = ContentBlock::ToolResult {
-            tool_use_id: "t1".to_owned(),
-            content: "output".to_owned(),
-            is_error: false,
-        };
-        let user_with_only_blank = Message {
-            role: Role::User,
-            content: vec![ContentBlock::Text {
-                text: "  ".to_owned(),
-            }],
-        };
-        let user_with_only_tool_result = Message {
-            role: Role::User,
-            content: vec![tool_result.clone()],
-        };
-        let user_with_text_after_tool_result = Message {
-            role: Role::User,
-            content: vec![
-                tool_result,
-                ContentBlock::Text {
-                    text: "follow-up".to_owned(),
-                },
-            ],
-        };
-
-        assert_eq!(extract_user_text(&Message::user("hello")), Some("hello"));
-        assert_eq!(extract_user_text(&Message::assistant("hello")), None);
-        assert_eq!(extract_user_text(&user_with_only_blank), None);
-        assert_eq!(extract_user_text(&user_with_only_tool_result), None);
-        assert_eq!(
-            extract_user_text(&user_with_text_after_tool_result),
-            Some("follow-up"),
-        );
+            assert_eq!(extract_user_text(&Message::user("hello")), Some("hello"));
+            assert_eq!(extract_user_text(&Message::assistant("hello")), None);
+            assert_eq!(extract_user_text(&user_with_only_blank), None);
+            assert_eq!(extract_user_text(&user_with_only_tool_result), None);
+            assert_eq!(
+                extract_user_text(&user_with_text_after_tool_result),
+                Some("follow-up"),
+            );
+        }
     }
 }

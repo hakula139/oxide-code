@@ -516,1301 +516,1342 @@ mod tests {
     use crate::util::tls::PlatformTrust;
     use crate::util::tls::testing::{NoRoots, TEST_CA_PEM};
 
-    // ── Fixtures ──
+    mod client {
+        use super::*;
 
-    const OFFLINE_URL: &str = "https://example.invalid";
-    const TEST_MODEL: &str = "claude-sonnet-5-5";
+        const OFFLINE_URL: &str = "https://example.invalid";
 
-    fn sse_body(frames: &[(&str, &str)]) -> String {
-        let mut body = String::new();
-        for (event, data) in frames {
-            _ = writedoc!(
-                body,
-                "
-                event: {event}
-                data: {data}
+        const TEST_MODEL: &str = "claude-sonnet-5-5";
 
-                ",
-            );
-        }
-        body
-    }
-
-    async fn collect_events(
-        mut rx: mpsc::Receiver<Result<ResponseEvent>>,
-    ) -> Result<Vec<ResponseEvent>> {
-        let mut out = Vec::new();
-        while let Some(event) = rx.recv().await {
-            out.push(event?);
-        }
-        Ok(out)
-    }
-
-    /// Streams one `hi` turn against a mock server and returns the request it received.
-    async fn capture_stream_request(mut client: Client) -> Request {
-        let server = MockServer::start().await;
-        Mock::given(method("POST"))
-            .and(path("/v1/messages"))
-            .respond_with(
-                ResponseTemplate::new(200)
-                    .insert_header("content-type", "text/event-stream")
-                    .set_body_string(text_stream_body("", "Hi")),
-            )
-            .mount(&server)
-            .await;
-
-        client.base_url = server.uri();
-        collect_events(
-            client
-                .stream_message(&[Message::user("hi")], &[], None, &[])
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-
-        let mut received = server.received_requests().await.expect("recorded requests");
-        assert_eq!(received.len(), 1, "exactly one streamed call");
-        received.remove(0)
-    }
-
-    fn request_header<'a>(request: &'a Request, name: &str) -> Option<&'a str> {
-        request.headers.get(name).map(|v| v.to_str().unwrap())
-    }
-
-    // ── Client::new / Client::model ──
-
-    #[test]
-    fn new_with_api_key_exposes_model() {
-        let client = Client::new(
-            &test_config(
-                OFFLINE_URL,
-                Auth::new(AuthSource::ApiKeyEnv, "sk-test"),
-                TEST_MODEL,
-            ),
-            NoRoots,
-            None,
-            DEVICE_ID.to_owned(),
-        )
-        .unwrap();
-        assert_eq!(client.model().id(), TEST_MODEL);
-    }
-
-    #[test]
-    fn new_with_oauth_token_exposes_model() {
-        let client = Client::new(
-            &test_config(
-                OFFLINE_URL,
-                Auth::new(AuthSource::ClaudeCodeLogin, "oauth-token"),
-                TEST_MODEL,
-            ),
-            NoRoots,
-            None,
-            DEVICE_ID.to_owned(),
-        )
-        .unwrap();
-        assert_eq!(client.model().id(), TEST_MODEL);
-    }
-
-    #[test]
-    fn new_exposes_the_prompt_cache_ttl() {
-        let mut config = test_config(
-            OFFLINE_URL,
-            Auth::new(AuthSource::ApiKeyEnv, "sk-test"),
-            TEST_MODEL,
-        );
-        config.prompt_cache_ttl = PromptCacheTtl::FiveMin;
-        let client = Client::new(&config, NoRoots, None, DEVICE_ID.to_owned()).unwrap();
-
-        assert_eq!(client.prompt_cache_ttl(), PromptCacheTtl::FiveMin);
-    }
-
-    #[test]
-    fn new_none_session_id_generates_uuid_v4() {
-        let client = Client::new(
-            &test_config(
-                OFFLINE_URL,
-                Auth::new(AuthSource::ApiKeyEnv, "k"),
-                TEST_MODEL,
-            ),
-            NoRoots,
-            None,
-            DEVICE_ID.to_owned(),
-        )
-        .unwrap();
-        let sid = client.session_id();
-        let parsed = Uuid::parse_str(sid)
-            .unwrap_or_else(|_| panic!("auto-generated session_id is not a UUID: {sid:?}"));
-        assert_eq!(parsed.get_version_num(), 4);
-    }
-
-    #[test]
-    fn new_preserves_explicit_session_id() {
-        let sid = "11111111-2222-4333-8444-555555555555".to_owned();
-        let client = Client::new(
-            &test_config(
-                OFFLINE_URL,
-                Auth::new(AuthSource::ApiKeyEnv, "k"),
-                TEST_MODEL,
-            ),
-            NoRoots,
-            Some(sid.clone()),
-            DEVICE_ID.to_owned(),
-        )
-        .unwrap();
-        assert_eq!(client.session_id(), sid);
-    }
-
-    #[test]
-    fn new_with_extra_ca_certs_accepts_valid_bundle() {
-        // `util::tls` covers the handshake through a bundle, so this checks only that a valid one
-        // builds a client with the platform's real trust services.
-        let pem = tempfile::NamedTempFile::new().unwrap();
-        std::io::Write::write_all(&mut pem.as_file(), TEST_CA_PEM.as_bytes()).unwrap();
-        let cfg = test_config(OFFLINE_URL, api_key(), TEST_MODEL);
-        let trust = PlatformTrust(Some(pem.path().to_path_buf()));
-        Client::new(&cfg, trust, None, DEVICE_ID.to_owned())
-            .expect("valid CA bundle must build a client");
-    }
-
-    #[test]
-    fn new_surfaces_extra_ca_certs_error_with_path() {
-        // An unreadable trust anchor must fail the client build and cite the configured path so
-        // the user can debug it without inspecting TLS internals.
-        let cfg = test_config(OFFLINE_URL, api_key(), TEST_MODEL);
-        let trust = PlatformTrust(Some(std::path::PathBuf::from("/no/such/bundle.pem")));
-        let err = Client::new(&cfg, trust, None, DEVICE_ID.to_owned())
-            .err()
-            .expect("missing CA must error");
-        let msg = format!("{err:#}");
-        assert!(msg.contains("failed to read extra CA bundle"), "{msg}");
-        assert!(msg.contains("/no/such/bundle.pem"), "{msg}");
-    }
-
-    // ── Client::max_tokens ──
-
-    #[tokio::test]
-    async fn max_tokens_sends_the_user_cap_over_the_model_default() {
-        let mut cfg = test_config(OFFLINE_URL, api_key(), "claude-opus-5-5");
-        cfg.max_tokens = Some(4_096);
-        let client = client_for(&cfg);
-
-        let (body, _) = capture_stream_turn(client.clone()).await;
-
-        assert_eq!(client.max_tokens(), 4_096);
-        assert_eq!(body["max_tokens"], 4_096);
-    }
-
-    // ── Client::set_session_id ──
-
-    #[tokio::test]
-    async fn set_session_id_propagates_to_header_and_metadata_user_id() {
-        // Pin both wire surfaces: the mock matches the rolled id in the header, and the assertion
-        // below pins the embedded JSON in `metadata.user_id`.
-        let server = MockServer::start().await;
-        Mock::given(method("POST"))
-            .and(path("/v1/messages"))
-            .and(header("x-claude-code-session-id", "sid-rolled"))
-            .respond_with(
-                ResponseTemplate::new(200)
-                    .insert_header("content-type", "text/event-stream")
-                    .set_body_string(text_stream_body("", "Hi")),
-            )
-            .mount(&server)
-            .await;
-
-        let mut client = Client::new(
-            &test_config(
-                server.uri(),
-                Auth::new(AuthSource::ApiKeyEnv, "k"),
-                TEST_MODEL,
-            ),
-            NoRoots,
-            Some("sid-original".to_owned()),
-            DEVICE_ID.to_owned(),
-        )
-        .unwrap();
-        client.set_session_id("sid-rolled".to_owned());
-        collect_events(
-            client
-                .stream_message(&[Message::user("hi")], &[], None, &[])
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-
-        let received = server.received_requests().await.expect("recorded requests");
-        assert_eq!(received.len(), 1, "exactly one streamed call");
-        let body: serde_json::Value =
-            serde_json::from_slice(&received[0].body).expect("request body is JSON");
-        let user_id = body["metadata"]["user_id"]
-            .as_str()
-            .expect("metadata.user_id is a string");
-        assert!(
-            user_id.contains("sid-rolled"),
-            "metadata.user_id carries the new session id: {user_id}",
-        );
-        assert!(
-            !user_id.contains("sid-original"),
-            "old session id must not leak into the body: {user_id}",
-        );
-    }
-
-    // ── Client::set_model ──
-
-    fn client_with(model: &str, effort: Option<Effort>) -> Client {
-        let mut cfg = test_config(OFFLINE_URL, api_key(), model);
-        cfg.effort = effort;
-        client_for(&cfg)
-    }
-
-    #[test]
-    fn set_model_resolves_effort_and_persists_full_state() {
-        for (from_model, from_effort, swap_to, expect) in [
-            (
-                "claude-opus-5-5",
-                Some(Effort::Xhigh),
-                "claude-sonnet-5-5",
-                Some(Effort::Xhigh),
-            ),
-            (
-                "custom-model",
-                None,
-                "claude-sonnet-5-5",
-                Some(Effort::High),
-            ),
-            ("claude-opus-5-5", Some(Effort::High), "custom-model", None),
-        ] {
-            let mut client = client_with(from_model, from_effort);
-            client.set_model(swap_to.to_owned());
-            assert_eq!(
-                client.effort, expect,
-                "{from_model} → {swap_to}: stored effort",
-            );
-            assert_eq!(client.model().id(), swap_to, "{swap_to}: stored id");
-        }
-    }
-
-    #[tokio::test]
-    async fn set_model_rederives_every_model_gated_request_field() {
-        let mut cfg = test_config(OFFLINE_URL, api_key(), "custom-model");
-        cfg.max_tokens = None;
-        cfg.show_thinking = true;
-        let mut client = client_for(&cfg);
-
-        let (unknown, unknown_betas) = capture_stream_turn(client.clone()).await;
-        for field in ["thinking", "output_config", "context_management"] {
-            assert!(unknown.get(field).is_none(), "{field} absent: {unknown}");
-        }
-        assert_eq!(unknown["max_tokens"], 16_000);
-        for beta in ["context-management", "thinking-binding-controls"] {
-            assert!(!unknown_betas.contains(beta), "{beta}: {unknown_betas}");
+        async fn collect_events(
+            mut rx: mpsc::Receiver<Result<ResponseEvent>>,
+        ) -> Result<Vec<ResponseEvent>> {
+            let mut out = Vec::new();
+            while let Some(event) = rx.recv().await {
+                out.push(event?);
+            }
+            Ok(out)
         }
 
-        client.set_model("claude-opus-5-5".to_owned());
-        let (known, known_betas) = capture_stream_turn(client).await;
-        assert_eq!(known["model"], "claude-opus-5-5");
-        assert_eq!(known["max_tokens"], 64_000);
-        assert_eq!(
-            known["thinking"],
-            serde_json::json!({
-                "type": "adaptive",
-                "display": "summarized",
-                "block_binding": {"prefix_mismatch_behavior": "drop_block"},
-            }),
-        );
-        assert_eq!(known["output_config"]["effort"], "medium");
-        assert_eq!(
-            known["context_management"]["edits"][0]["type"],
-            "clear_thinking_20251015",
-        );
-        assert!(
-            known_betas.contains("context-management-2025-06-27"),
-            "{known_betas}"
-        );
-    }
-
-    // ── Client::set_effort ──
-
-    #[test]
-    fn set_effort_resolves_pick_against_active_model() {
-        for (model, initial, pick, expect) in [
-            (
-                "claude-sonnet-5-5",
-                Some(Effort::High),
-                Effort::Max,
-                Some(Effort::Max),
-            ),
-            ("custom-model", None, Effort::High, None),
-        ] {
-            let mut client = client_with(model, initial);
-            assert_eq!(client.set_effort(pick), expect, "{model} pick={pick:?}");
-            assert_eq!(
-                client.effort, expect,
-                "{model} pick={pick:?}: stored effort",
-            );
-        }
-    }
-
-    // ── Client::set_auth ──
-
-    #[tokio::test]
-    async fn set_auth_sends_the_new_credential_and_signing_out_stops_requests() {
-        let mut client = Client::new(
-            &test_config(OFFLINE_URL, api_key(), TEST_MODEL),
-            NoRoots,
-            None,
-            DEVICE_ID.to_owned(),
-        )
-        .unwrap();
-
-        client.set_auth(Some(Auth::new(AuthSource::OxLogin, "ox-token")));
-        let request = capture_stream_request(client.clone()).await;
-        client.set_auth(None);
-        let signed_out = client
-            .stream_message(&[Message::user("hi")], &[], None, &[])
-            .expect_err("a signed-out client must not send");
-
-        assert_eq!(
-            request_header(&request, "authorization"),
-            Some("Bearer ox-token")
-        );
-        assert_eq!(request_header(&request, "x-api-key"), None);
-        assert_eq!(client.auth_source(), None);
-        assert_eq!(signed_out.to_string(), "not signed in");
-    }
-
-    // ── Client::finish_reloads ──
-
-    #[tokio::test]
-    async fn finish_reloads_waits_for_a_refresh_that_a_replaced_login_left_in_flight() {
-        for (token, expires_at) in [("expired", 0), ("rejected", 9_999_999_999_999)] {
-            let server = MockServer::start().await;
-            Mock::given(method("POST"))
-                .and(path("/v1/messages"))
-                .respond_with(ResponseTemplate::new(401))
-                .mount(&server)
-                .await;
-            let refresh = HeldRefresh::mount(&server).await;
-            let dir = tempfile::tempdir().unwrap();
-            let creds = dir.path().join("credentials.json");
-            write_creds(&creds, token, Some("old-refresh"), expires_at);
-            let replaced = ox_login_in(&creds, &server.uri(), token, expires_at);
-            let mut client = Client::new(
-                &test_config(server.uri(), replaced.clone(), TEST_MODEL),
-                NoRoots,
-                None,
-                DEVICE_ID.to_owned(),
-            )
-            .unwrap();
-
-            refresh
-                .abort_mid_refresh({
-                    let http = client.http.clone();
-                    let request =
-                        client.messages_request(String::new(), "{}".to_owned(), &replaced);
-                    async move { transport::post_messages(&http, &request, 0).await }
-                })
-                .await;
-            client.set_auth(Some(Auth::new(AuthSource::OxLogin, "ox-token")));
-            refresh.release();
-            client.finish_reloads().await;
-
-            assert_eq!(replaced.secret(), "fresh-access", "{token}");
-            server.verify().await;
-        }
-    }
-
-    // ── Client::stream_message ──
-
-    #[tokio::test]
-    async fn stream_message_streams_usage_and_text_then_completes_the_reply() {
-        let server = MockServer::start().await;
-        Mock::given(method("POST"))
-            .and(path("/v1/messages"))
-            .and(query_param("beta", "true"))
-            .respond_with(
-                ResponseTemplate::new(200)
-                    .insert_header("content-type", "text/event-stream")
-                    .set_body_string(text_stream_body("", "Hi")),
-            )
-            .mount(&server)
-            .await;
-
-        let client = test_client(server.uri(), api_key(), TEST_MODEL);
-        let rx = client
-            .stream_message(&[Message::user("hello")], &[], None, &[])
-            .unwrap();
-        let events = collect_events(rx).await.unwrap();
-
-        assert_eq!(
-            events,
-            [
-                ResponseEvent::Usage(TokenUsage::new(1_000, 0)),
-                ResponseEvent::Text("Hi".to_owned()),
-                ResponseEvent::Usage(TokenUsage::new(1_000, 100)),
-                ResponseEvent::Completed(Response {
-                    content: vec![ContentBlock::Text {
-                        text: "Hi".to_owned(),
-                    }],
-                    stop_reason: Some(StopReason::EndTurn),
-                    ..Response::default()
-                }),
-            ],
-        );
-    }
-
-    #[tokio::test]
-    async fn stream_message_preserves_multibyte_codepoints_in_deltas() {
-        // Pins the byte-level SSE buffer: lossy UTF-8 would mangle a 4-byte emoji split across
-        // TCP chunk boundaries.
-        let server = MockServer::start().await;
-        let body = sse_body(&[
-            (
-                "content_block_start",
-                r#"{"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}"#,
-            ),
-            (
-                "content_block_delta",
-                r#"{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"🦀rust"}}"#,
-            ),
-            ("message_stop", r#"{"type":"message_stop"}"#),
-        ]);
-        Mock::given(method("POST"))
-            .and(path("/v1/messages"))
-            .respond_with(
-                ResponseTemplate::new(200)
-                    .insert_header("content-type", "text/event-stream")
-                    .set_body_string(body),
-            )
-            .mount(&server)
-            .await;
-
-        let client = test_client(server.uri(), api_key(), TEST_MODEL);
-        let events = collect_events(
-            client
-                .stream_message(&[Message::user("hi")], &[], None, &[])
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-        let got = events.iter().find_map(|e| match e {
-            ResponseEvent::Text(text) => Some(text.as_str()),
-            _ => None,
-        });
-        assert_eq!(got, Some("🦀rust"));
-    }
-
-    #[tokio::test]
-    async fn stream_message_sends_one_credential_header_and_betas_per_auth_kind() {
-        let mut betas = Vec::new();
-        for (auth, api_key, bearer) in [
-            (
-                Auth::new(AuthSource::ApiKeyEnv, "sk-env"),
-                Some("sk-env"),
-                None,
-            ),
-            (
-                Auth::new(AuthSource::AuthTokenEnv, "gw-token"),
-                None,
-                Some("Bearer gw-token"),
-            ),
-            (
-                Auth::new(AuthSource::OAuthTokenEnv, "oat-env"),
-                None,
-                Some("Bearer oat-env"),
-            ),
-        ] {
-            let source = auth.source();
-            let client = test_client(OFFLINE_URL, auth, TEST_MODEL);
-            let request = capture_stream_request(client).await;
-            assert_eq!(request_header(&request, "x-api-key"), api_key, "{source:?}");
-            assert_eq!(
-                request_header(&request, "authorization"),
-                bearer,
-                "{source:?}"
-            );
-            assert_eq!(
-                request_header(&request, "x-claude-code-session-id"),
-                Some("sid")
-            );
-            betas.push(
-                request_header(&request, "anthropic-beta")
-                    .unwrap()
-                    .to_owned(),
-            );
-        }
-
-        // The auth token keeps the API-key betas. OAuth adds its beta after the claude-code tag.
-        let [api_key, auth_token, oauth]: [String; 3] = betas.try_into().unwrap();
-        let tail = api_key.strip_prefix("claude-code-20250219,").unwrap();
-        assert!(!tail.contains("oauth"), "{api_key}");
-        assert_eq!(auth_token, api_key);
-        assert_eq!(
-            oauth,
-            format!("claude-code-20250219,oauth-2025-04-20,{tail}")
-        );
-    }
-
-    #[tokio::test]
-    async fn stream_message_custom_headers_ride_along_and_override_built_ins() {
-        // An API key travels in `x-api-key`, so a gateway may take its own `Authorization`.
-        let mut config = test_config(OFFLINE_URL, api_key(), TEST_MODEL);
-        for (name, value) in [
-            ("x-team", "platform"),
-            ("user-agent", "custom/1.0"),
-            ("authorization", "Bearer gateway-jwt"),
-        ] {
-            config
-                .gateway
-                .custom_headers
-                .insert(name, HeaderValue::from_static(value));
-        }
-        let request = capture_stream_request(client_for(&config)).await;
-        assert_eq!(request_header(&request, "x-team"), Some("platform"));
-        assert_eq!(
-            request
-                .headers
-                .get_all("user-agent")
-                .iter()
-                .collect::<Vec<_>>(),
-            ["custom/1.0"],
-        );
-        assert_eq!(
-            request_header(&request, "authorization"),
-            Some("Bearer gateway-jwt")
-        );
-        assert_eq!(request_header(&request, "x-api-key"), Some("k"));
-    }
-
-    #[tokio::test]
-    async fn stream_message_billing_block_hashes_only_first_party_requests() {
-        for is_first_party in [true, false] {
-            let mut client = test_client(OFFLINE_URL, api_key(), TEST_MODEL);
-            client.is_first_party = is_first_party;
-            let (body, _) = capture_stream_turn(client).await;
-            let block = body["system"][0]["text"].as_str().unwrap();
-            let (prefix, cch) = block.split_once(" cch=").unwrap_or((block, ""));
-            assert!(prefix.ends_with("; cc_entrypoint=cli;"), "{block}");
-            let hash = cch.strip_suffix(';').unwrap_or(cch);
-            let hashed =
-                hash.len() == 5 && hash != "00000" && u32::from_str_radix(hash, 16).is_ok();
-            assert_eq!(hashed, is_first_party, "{block}");
-            assert_eq!(cch.is_empty(), !is_first_party, "{block}");
-        }
-    }
-
-    #[tokio::test]
-    async fn stream_message_attribution_off_drops_billing_block() {
-        let mut config = test_config(OFFLINE_URL, oauth(), TEST_MODEL);
-        config.gateway.attribution = false;
-        let body = capture_stream_body(config).await;
-        assert_eq!(body["system"][0]["text"], SYSTEM_PROMPT_PREFIX);
-        assert!(
-            !body.to_string().contains("x-anthropic-billing-header"),
-            "{body}"
-        );
-    }
-
-    #[tokio::test]
-    async fn stream_message_with_user_context_prepends_it_and_fingerprints_the_prompt() {
-        let prompt = "Say 'hello' and nothing else.";
-        let context = "<system-reminder>CLAUDE.md content here</system-reminder>";
-        let server = MockServer::start().await;
-        let body_sink: Captured<String> = captured();
-        let sink_clone = std::sync::Arc::clone(&body_sink);
-        Mock::given(method("POST"))
-            .and(path("/v1/messages"))
-            .respond_with(move |req: &Request| {
-                *sink_clone.lock().unwrap() = Some(String::from_utf8_lossy(&req.body).into_owned());
-                ResponseTemplate::new(200)
-                    .insert_header("content-type", "text/event-stream")
-                    .set_body_string(text_stream_body("", "Hi"))
-            })
-            .mount(&server)
-            .await;
-
-        let client = test_client(server.uri(), api_key(), TEST_MODEL);
-        collect_events(
-            client
-                .stream_message(&[Message::user(prompt)], &[], Some(context), &[])
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-
-        let body = body_sink.lock().unwrap().clone().expect("body captured");
-        let v: serde_json::Value = serde_json::from_str(&body).unwrap();
-        assert_eq!(
-            v["system"][0]["text"],
-            format!(
-                "x-anthropic-billing-header: \
-                 cc_version={CLAUDE_CLI_VERSION}.{}; cc_entrypoint=cli;",
-                billing::compute_fingerprint(prompt, CLAUDE_CLI_VERSION),
-            ),
-        );
-        let messages = v["messages"].as_array().expect("messages array");
-        assert_eq!(messages.len(), 2, "user_context prepends: {body}");
-        assert_eq!(
-            messages[0],
-            serde_json::json!({"role": "user", "content": [{"type": "text", "text": context}]}),
-        );
-        assert_eq!(messages[1]["content"][0]["text"], prompt);
-    }
-
-    #[tokio::test]
-    async fn stream_message_third_party_base_url_drops_global_scope_keeps_its_beta() {
-        // As in Claude Code, the beta ships on every base URL, while the body-side
-        // `scope: "global"` goes only to the Anthropic API.
-        let server = MockServer::start().await;
-        let sink: Captured<(String, String)> = captured();
-        let sink_clone = std::sync::Arc::clone(&sink);
-        Mock::given(method("POST"))
-            .and(path("/v1/messages"))
-            .respond_with(move |req: &Request| {
-                let body = String::from_utf8_lossy(&req.body).into_owned();
-                let beta = req
-                    .headers
-                    .get("anthropic-beta")
-                    .map(|v| v.to_str().unwrap().to_owned())
-                    .unwrap_or_default();
-                *sink_clone.lock().unwrap() = Some((body, beta));
-                ResponseTemplate::new(200)
-                    .insert_header("content-type", "text/event-stream")
-                    .set_body_string(text_stream_body("", "Hi"))
-            })
-            .mount(&server)
-            .await;
-
-        let client = test_client(server.uri(), api_key(), TEST_MODEL);
-        collect_events(
-            client
-                .stream_message(&[Message::user("hi")], &["static-a", "static-b"], None, &[])
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-
-        let (body, beta) = sink.lock().unwrap().clone().expect("request captured");
-        assert!(
-            beta.contains("prompt-caching-scope-2026-01-05"),
-            "prompt-caching-scope beta ships on 3P: {beta}",
-        );
-        let v: serde_json::Value = serde_json::from_str(&body).unwrap();
-        let system = v["system"].as_array().expect("system array");
-        // [0] billing, [1] identity prefix, [2] static joined.
-        assert!(
-            system[0]["text"]
-                .as_str()
-                .unwrap()
-                .starts_with("x-anthropic-billing-header:"),
-            "billing header occupies system[0]: {body}",
-        );
-        assert_eq!(system[1]["text"], SYSTEM_PROMPT_PREFIX);
-        let cc = &system[2]["cache_control"];
-        assert_eq!(cc["type"], "ephemeral");
-        assert!(
-            cc.get("scope").is_none(),
-            "scope field omitted entirely on 3P (not null): {body}",
-        );
-        // TTL rides through on 3P. Only `scope` is gated on 1P.
-        assert_eq!(cc["ttl"], "1h", "default 1h ttl survives on 3P: {body}");
-    }
-
-    #[tokio::test]
-    async fn stream_message_breakpoints_cover_static_prefix_and_conversation_tail() {
-        let server = MockServer::start().await;
-        let sink: Captured<String> = captured();
-        let sink_clone = std::sync::Arc::clone(&sink);
-        Mock::given(method("POST"))
-            .and(path("/v1/messages"))
-            .respond_with(move |req: &Request| {
-                *sink_clone.lock().unwrap() = Some(String::from_utf8_lossy(&req.body).into_owned());
-                ResponseTemplate::new(200)
-                    .insert_header("content-type", "text/event-stream")
-                    .set_body_string(text_stream_body("", "Hi"))
-            })
-            .mount(&server)
-            .await;
-
-        let mut client = test_client(server.uri(), api_key(), "claude-sonnet-5-5");
-        // The conversation breakpoint omits `scope` even where the system prefix is global.
-        client.is_first_party = true;
-        let messages = [
-            Message::user("question"),
-            Message::assistant("answer"),
-            Message {
-                role: Role::User,
-                content: vec![ContentBlock::ToolResult {
-                    tool_use_id: "toolu_1".to_owned(),
-                    content: "ok".to_owned(),
-                    is_error: false,
-                }],
-            },
-        ];
-        collect_events(
-            client
-                .stream_message(
-                    &messages,
-                    &["static", SYSTEM_PROMPT_DYNAMIC_BOUNDARY, "dynamic"],
-                    Some("<system-reminder>context</system-reminder>"),
-                    &[],
-                )
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-
-        let body = sink.lock().unwrap().clone().expect("request captured");
-        let v: serde_json::Value = serde_json::from_str(&body).unwrap();
-        assert_eq!(
-            v["system"][2]["cache_control"],
-            serde_json::json!({"type": "ephemeral", "scope": "global", "ttl": "1h"}),
-        );
-        let sent = v["messages"].as_array().expect("messages array");
-        assert_eq!(sent.len(), 4, "user context leads the transcript: {body}");
-        assert_eq!(
-            sent[3]["content"][0]["cache_control"],
-            serde_json::json!({"type": "ephemeral", "ttl": "1h"}),
-        );
-        assert_eq!(
-            body.matches(r#""cache_control""#).count(),
-            2,
-            "only the static prefix and the final block carry breakpoints: {body}",
-        );
-    }
-
-    #[tokio::test]
-    async fn stream_message_malformed_frame_is_skipped_without_poisoning_stream() {
-        let server = MockServer::start().await;
-        let body = sse_body(&[
-            (
-                "content_block_start",
-                r#"{"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}"#,
-            ),
-            ("content_block_delta", "{not valid json"),
-            (
-                "content_block_delta",
-                r#"{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Hi"}}"#,
-            ),
-            ("message_stop", r#"{"type":"message_stop"}"#),
-        ]);
-        Mock::given(method("POST"))
-            .and(path("/v1/messages"))
-            .respond_with(
-                ResponseTemplate::new(200)
-                    .insert_header("content-type", "text/event-stream")
-                    .set_body_string(body),
-            )
-            .mount(&server)
-            .await;
-
-        let client = test_client(server.uri(), api_key(), TEST_MODEL);
-        let events = collect_events(
-            client
-                .stream_message(&[Message::user("hi")], &[], None, &[])
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-        let delta = events.iter().find_map(|e| match e {
-            ResponseEvent::Text(text) => Some(text.as_str()),
-            _ => None,
-        });
-        assert_eq!(delta, Some("Hi"));
-    }
-
-    #[tokio::test]
-    async fn stream_message_in_band_error_fails_the_stream_with_its_payload() {
-        let server = MockServer::start().await;
-        let body = sse_body(&[(
-            "error",
-            r#"{"type":"error","error":{"type":"invalid_request_error","message":"Bad block"}}"#,
-        )]);
-        Mock::given(method("POST"))
-            .and(path("/v1/messages"))
-            .respond_with(
-                ResponseTemplate::new(200)
-                    .insert_header("content-type", "text/event-stream")
-                    .set_body_string(body),
-            )
-            .mount(&server)
-            .await;
-
-        let client = test_client(server.uri(), api_key(), TEST_MODEL);
-        let err = collect_events(
-            client
-                .stream_message(&[Message::user("hi")], &[], None, &[])
-                .unwrap(),
-        )
-        .await
-        .expect_err("an in-band error fails the stream");
-
-        assert_eq!(
-            format!("{err:#}"),
-            "API error (invalid_request_error): Bad block"
-        );
-        assert_eq!(
-            server.received_requests().await.unwrap().len(),
-            1,
-            "a non-transient error is not retried",
-        );
-    }
-
-    #[tokio::test]
-    async fn stream_message_redirect_is_not_followed() {
-        let elsewhere = MockServer::start().await;
-        Mock::given(method("POST"))
-            .respond_with(ResponseTemplate::new(200))
-            .expect(0)
-            .mount(&elsewhere)
-            .await;
-        let server = MockServer::start().await;
-        Mock::given(method("POST"))
-            .and(path("/v1/messages"))
-            .respond_with(
-                ResponseTemplate::new(307)
-                    .insert_header("location", format!("{}/v1/messages", elsewhere.uri())),
-            )
-            .mount(&server)
-            .await;
-
-        let client = test_client(server.uri(), api_key(), TEST_MODEL);
-        let rx = client
-            .stream_message(&[Message::user("hi")], &[], None, &[])
-            .unwrap();
-        let err = collect_events(rx).await.expect_err("redirect must fail");
-
-        assert_eq!(
-            format!("{err:#}"),
-            "Anthropic API endpoint redirected (HTTP 307 Temporary Redirect) to 127.0.0.1. \
-             Redirects are not followed, so point the base URL at the final endpoint.",
-        );
-        elsewhere.verify().await;
-    }
-
-    #[tokio::test]
-    async fn stream_message_http_error_propagates_status_and_body() {
-        let rate_limited = r#"{"error":{"type":"rate_limit_error"}}"#;
-        for (status, body, expected) in [
-            (
-                429_u16,
-                rate_limited,
-                format!(
-                    "Anthropic API rate limited (HTTP 429): {rate_limited}. \
-                     Retry after a short delay."
-                ),
-            ),
-            (
-                529,
-                "overloaded",
-                "Anthropic API overloaded (HTTP 529): overloaded. Retry in a few seconds."
-                    .to_owned(),
-            ),
-        ] {
+        /// Streams one `hi` turn against a mock server and returns the request it received.
+        async fn capture_stream_request(mut client: Client) -> Request {
             let server = MockServer::start().await;
             Mock::given(method("POST"))
                 .and(path("/v1/messages"))
                 .respond_with(
-                    ResponseTemplate::new(status)
-                        .insert_header("x-should-retry", "false")
-                        .set_body_string(body),
+                    ResponseTemplate::new(200)
+                        .insert_header("content-type", "text/event-stream")
+                        .set_body_string(text_stream_body("", "Hi")),
                 )
                 .mount(&server)
                 .await;
 
-            let client = test_client(server.uri(), api_key(), TEST_MODEL);
-            let rx = client
-                .stream_message(&[Message::user("hi")], &[], None, &[])
-                .unwrap();
-            let err = collect_events(rx).await.expect_err("expected HTTP error");
-
-            assert_eq!(format!("{err:#}"), expected);
-        }
-    }
-
-    #[tokio::test]
-    async fn stream_message_401_names_the_oauth_token_variable_without_resending() {
-        let server = MockServer::start().await;
-        Mock::given(method("POST"))
-            .and(path("/v1/messages"))
-            .respond_with(ResponseTemplate::new(401).set_body_string("token revoked"))
-            .expect(1)
-            .mount(&server)
-            .await;
-
-        let client = test_client(
-            server.uri(),
-            Auth::new(AuthSource::OAuthTokenEnv, "oat-env"),
-            TEST_MODEL,
-        );
-        let rx = client
-            .stream_message(&[Message::user("hi")], &[], None, &[])
-            .unwrap();
-        let err = collect_events(rx).await.expect_err("expected 401");
-
-        assert_eq!(
-            format!("{err:#}"),
-            "Anthropic API rejected credentials (HTTP 401): token revoked. \
-             CLAUDE_CODE_OAUTH_TOKEN may be expired or revoked. \
-             Generate a new one with `claude setup-token`.",
-        );
-        server.verify().await;
-    }
-
-    #[tokio::test]
-    async fn stream_message_429_threads_retry_after_header_into_error() {
-        // A hint past the retry cap fails fast with the hint in the message.
-        let server = MockServer::start().await;
-        Mock::given(method("POST"))
-            .and(path("/v1/messages"))
-            .respond_with(
-                ResponseTemplate::new(429)
-                    .insert_header("retry-after", "120")
-                    .set_body_string("Too many requests"),
+            client.base_url = server.uri();
+            collect_events(
+                client
+                    .stream_message(&[Message::user("hi")], &[], None, &[])
+                    .unwrap(),
             )
-            .mount(&server)
-            .await;
-
-        let client = test_client(server.uri(), api_key(), TEST_MODEL);
-        let rx = client
-            .stream_message(&[Message::user("hi")], &[], None, &[])
-            .unwrap();
-        let err = collect_events(rx).await.expect_err("expected 429");
-
-        assert_eq!(
-            format!("{err:#}"),
-            "Anthropic API rate limited (HTTP 429): Too many requests. Retry after 120 s.",
-        );
-        assert_eq!(server.received_requests().await.unwrap().len(), 1);
-    }
-
-    #[tokio::test]
-    async fn stream_message_rejects_a_credential_no_header_can_carry() {
-        // `HeaderValue::from_str` rejects control chars (\n, \r). Both auth arms must propagate.
-        for auth in [
-            Auth::new(AuthSource::ApiKeyEnv, "bad\nkey"),
-            Auth::new(AuthSource::OAuthTokenEnv, "bad\rtoken"),
-        ] {
-            let source = auth.source();
-            let client = test_client(OFFLINE_URL, auth, TEST_MODEL);
-
-            let rx = client
-                .stream_message(&[Message::user("hi")], &[], None, &[])
-                .unwrap();
-            let err = collect_events(rx).await.unwrap_err();
-
-            let msg = format!("{err:#}");
-            assert!(
-                msg.starts_with(&format!("{source} is not a valid HTTP header value")),
-                "error names the credential source: {msg}",
-            );
-            assert!(
-                !msg.contains("bad"),
-                "error must not echo the secret: {msg}"
-            );
-        }
-    }
-
-    #[tokio::test]
-    async fn stream_message_refreshes_an_expired_stored_login_once_for_every_clone() {
-        let server = MockServer::start().await;
-        Mock::given(method("POST"))
-            .and(path("/token"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(ok_refresh_body(
-                "fresh-access",
-                "fresh-refresh",
-                3600,
-            )))
-            .expect(1)
-            .mount(&server)
-            .await;
-        for (streamed, reply) in [
-            (true, sse_response(text_stream_body("", "Hi"))),
-            (
-                false,
-                ResponseTemplate::new(200).set_body_string(completion_body("Title")),
-            ),
-        ] {
-            Mock::given(method("POST"))
-                .and(path("/v1/messages"))
-                .and(header("authorization", "Bearer fresh-access"))
-                .and(body_partial_json(serde_json::json!({ "stream": streamed })))
-                .respond_with(reply)
-                .expect(1)
-                .mount(&server)
-                .await;
-        }
-        let dir = tempfile::tempdir().unwrap();
-        let file = dir.path().join("credentials.json");
-        write_creds(&file, "expired", Some("old-refresh"), 0);
-        let token_url = format!("{}/token", server.uri());
-        let client = test_client(
-            server.uri(),
-            ox_login_in(&file, &token_url, "expired", 0),
-            TEST_MODEL,
-        );
-
-        let rx = client
-            .stream_message(&[Message::user("hi")], &[], None, &[])
-            .unwrap();
-        collect_events(rx).await.unwrap();
-        let stored: serde_json::Value =
-            serde_json::from_str(&std::fs::read_to_string(&file).unwrap()).unwrap();
-        std::fs::remove_file(&file).unwrap();
-        let haiku = ModelSpec::resolve("claude-haiku-5-5".to_owned());
-        let (title, _) = client
-            .clone()
-            .complete(&haiku, "", "u", 40, None, None)
             .await
             .unwrap();
 
-        assert_eq!(stored["claudeAiOauth"]["accessToken"], "fresh-access");
-        assert_eq!(stored["claudeAiOauth"]["refreshToken"], "fresh-refresh");
-        assert_eq!(
-            title, "Title",
-            "the clone reuses the refreshed token unread"
-        );
-        server.verify().await;
-    }
+            let mut received = server.received_requests().await.expect("recorded requests");
+            assert_eq!(received.len(), 1, "exactly one streamed call");
+            received.remove(0)
+        }
 
-    // ── Client::stream_message / agentic body fields ──
+        fn request_header<'a>(request: &'a Request, name: &str) -> Option<&'a str> {
+            request.headers.get(name).map(|v| v.to_str().unwrap())
+        }
 
-    /// Body and `anthropic-beta` header of one streamed turn sent through `client`.
-    async fn capture_stream_turn(client: Client) -> (serde_json::Value, String) {
-        let request = capture_stream_request(client).await;
-        let betas = request_header(&request, "anthropic-beta")
-            .unwrap_or_default()
-            .to_owned();
-        (serde_json::from_slice(&request.body).unwrap(), betas)
-    }
+        fn client_with(model: &str, effort: Option<Effort>) -> Client {
+            let mut cfg = test_config(OFFLINE_URL, api_key(), model);
+            cfg.effort = effort;
+            client_for(&cfg)
+        }
 
-    async fn capture_stream_body(config: Config) -> serde_json::Value {
-        capture_stream_turn(client_for(&config)).await.0
-    }
+        /// Body and `anthropic-beta` header of one streamed turn sent through `client`.
+        async fn capture_stream_turn(client: Client) -> (serde_json::Value, String) {
+            let request = capture_stream_request(client).await;
+            let betas = request_header(&request, "anthropic-beta")
+                .unwrap_or_default()
+                .to_owned();
+            (serde_json::from_slice(&request.body).unwrap(), betas)
+        }
 
-    #[tokio::test]
-    async fn stream_message_emits_output_config_effort() {
-        let mut cfg = test_config(OFFLINE_URL, api_key(), "claude-opus-5-5");
-        cfg.effort = Some(Effort::Xhigh);
-        let body = capture_stream_body(cfg).await;
-        assert_eq!(body["output_config"]["effort"], "xhigh");
-    }
+        mod new {
+            use super::*;
 
-    #[tokio::test]
-    async fn stream_message_omits_output_config_when_effort_is_none() {
-        let cfg = test_config(OFFLINE_URL, api_key(), "custom-model");
-        assert!(cfg.effort.is_none(), "precondition: effort unset");
-        let body = capture_stream_body(cfg).await;
-        assert!(
-            body.get("output_config").is_none(),
-            "output_config absent: {body}",
-        );
-    }
+            #[test]
+            fn with_api_key_exposes_model() {
+                let client = Client::new(
+                    &test_config(
+                        OFFLINE_URL,
+                        Auth::new(AuthSource::ApiKeyEnv, "sk-test"),
+                        TEST_MODEL,
+                    ),
+                    NoRoots,
+                    None,
+                    DEVICE_ID.to_owned(),
+                )
+                .unwrap();
+                assert_eq!(client.model().id(), TEST_MODEL);
+            }
 
-    #[tokio::test]
-    async fn stream_message_context_management_body_present_on_every_known_model() {
-        // The body directive must accompany the beta header `compute_betas` sends for these.
-        for info in crate::model::MODELS {
-            let cfg = test_config(OFFLINE_URL, api_key(), info.id);
-            let body = capture_stream_body(cfg).await;
-            let edits = body["context_management"]["edits"]
-                .as_array()
-                .unwrap_or_else(|| panic!("context_management.edits missing for {}", info.id));
-            assert_eq!(edits.len(), 1, "{}", info.id);
-            assert_eq!(edits[0]["type"], "clear_thinking_20251015", "{}", info.id);
-            assert_eq!(edits[0]["keep"], "all", "{}", info.id);
+            #[test]
+            fn with_oauth_token_exposes_model() {
+                let client = Client::new(
+                    &test_config(
+                        OFFLINE_URL,
+                        Auth::new(AuthSource::ClaudeCodeLogin, "oauth-token"),
+                        TEST_MODEL,
+                    ),
+                    NoRoots,
+                    None,
+                    DEVICE_ID.to_owned(),
+                )
+                .unwrap();
+                assert_eq!(client.model().id(), TEST_MODEL);
+            }
+
+            #[test]
+            fn exposes_the_prompt_cache_ttl() {
+                let mut config = test_config(
+                    OFFLINE_URL,
+                    Auth::new(AuthSource::ApiKeyEnv, "sk-test"),
+                    TEST_MODEL,
+                );
+                config.prompt_cache_ttl = PromptCacheTtl::FiveMin;
+                let client = Client::new(&config, NoRoots, None, DEVICE_ID.to_owned()).unwrap();
+
+                assert_eq!(client.prompt_cache_ttl(), PromptCacheTtl::FiveMin);
+            }
+
+            #[test]
+            fn without_a_session_id_generates_uuid_v4() {
+                let client = Client::new(
+                    &test_config(
+                        OFFLINE_URL,
+                        Auth::new(AuthSource::ApiKeyEnv, "k"),
+                        TEST_MODEL,
+                    ),
+                    NoRoots,
+                    None,
+                    DEVICE_ID.to_owned(),
+                )
+                .unwrap();
+                let sid = client.session_id();
+                let parsed = Uuid::parse_str(sid)
+                    .unwrap_or_else(|_| panic!("auto-generated session_id is not a UUID: {sid:?}"));
+                assert_eq!(parsed.get_version_num(), 4);
+            }
+
+            #[test]
+            fn preserves_explicit_session_id() {
+                let sid = "11111111-2222-4333-8444-555555555555".to_owned();
+                let client = Client::new(
+                    &test_config(
+                        OFFLINE_URL,
+                        Auth::new(AuthSource::ApiKeyEnv, "k"),
+                        TEST_MODEL,
+                    ),
+                    NoRoots,
+                    Some(sid.clone()),
+                    DEVICE_ID.to_owned(),
+                )
+                .unwrap();
+                assert_eq!(client.session_id(), sid);
+            }
+
+            #[test]
+            fn with_extra_ca_certs_accepts_valid_bundle() {
+                // `util::tls` covers the handshake through a bundle, so this checks only that a
+                // valid one builds a client with the platform's real trust services.
+                let pem = tempfile::NamedTempFile::new().unwrap();
+                std::io::Write::write_all(&mut pem.as_file(), TEST_CA_PEM.as_bytes()).unwrap();
+                let cfg = test_config(OFFLINE_URL, api_key(), TEST_MODEL);
+                let trust = PlatformTrust(Some(pem.path().to_path_buf()));
+                Client::new(&cfg, trust, None, DEVICE_ID.to_owned())
+                    .expect("valid CA bundle must build a client");
+            }
+
+            #[test]
+            fn surfaces_extra_ca_certs_error_with_path() {
+                // An unreadable trust anchor must fail the client build and cite the configured
+                // path so the user can debug it without inspecting TLS internals.
+                let cfg = test_config(OFFLINE_URL, api_key(), TEST_MODEL);
+                let trust = PlatformTrust(Some(std::path::PathBuf::from("/no/such/bundle.pem")));
+                let err = Client::new(&cfg, trust, None, DEVICE_ID.to_owned())
+                    .err()
+                    .expect("missing CA must error");
+                let msg = format!("{err:#}");
+                assert!(msg.contains("failed to read extra CA bundle"), "{msg}");
+                assert!(msg.contains("/no/such/bundle.pem"), "{msg}");
+            }
+        }
+
+        mod max_tokens {
+            use super::*;
+
+            #[tokio::test]
+            async fn sends_the_user_cap_over_the_model_default() {
+                let mut cfg = test_config(OFFLINE_URL, api_key(), "claude-opus-5-5");
+                cfg.max_tokens = Some(4_096);
+                let client = client_for(&cfg);
+
+                let (body, _) = capture_stream_turn(client.clone()).await;
+
+                assert_eq!(client.max_tokens(), 4_096);
+                assert_eq!(body["max_tokens"], 4_096);
+            }
+        }
+
+        mod set_session_id {
+            use super::*;
+
+            #[tokio::test]
+            async fn propagates_to_header_and_metadata_user_id() {
+                // Pin both wire surfaces: the mock matches the rolled id in the header, and the
+                // assertion below pins the embedded JSON in `metadata.user_id`.
+                let server = MockServer::start().await;
+                Mock::given(method("POST"))
+                    .and(path("/v1/messages"))
+                    .and(header("x-claude-code-session-id", "sid-rolled"))
+                    .respond_with(
+                        ResponseTemplate::new(200)
+                            .insert_header("content-type", "text/event-stream")
+                            .set_body_string(text_stream_body("", "Hi")),
+                    )
+                    .mount(&server)
+                    .await;
+
+                let mut client = Client::new(
+                    &test_config(
+                        server.uri(),
+                        Auth::new(AuthSource::ApiKeyEnv, "k"),
+                        TEST_MODEL,
+                    ),
+                    NoRoots,
+                    Some("sid-original".to_owned()),
+                    DEVICE_ID.to_owned(),
+                )
+                .unwrap();
+                client.set_session_id("sid-rolled".to_owned());
+                collect_events(
+                    client
+                        .stream_message(&[Message::user("hi")], &[], None, &[])
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+
+                let received = server.received_requests().await.expect("recorded requests");
+                assert_eq!(received.len(), 1, "exactly one streamed call");
+                let body: serde_json::Value =
+                    serde_json::from_slice(&received[0].body).expect("request body is JSON");
+                let user_id = body["metadata"]["user_id"]
+                    .as_str()
+                    .expect("metadata.user_id is a string");
+                assert!(
+                    user_id.contains("sid-rolled"),
+                    "metadata.user_id carries the new session id: {user_id}",
+                );
+                assert!(
+                    !user_id.contains("sid-original"),
+                    "old session id must not leak into the body: {user_id}",
+                );
+            }
+        }
+
+        mod set_model {
+            use super::*;
+
+            #[test]
+            fn resolves_effort_and_persists_full_state() {
+                for (from_model, from_effort, swap_to, expect) in [
+                    (
+                        "claude-opus-5-5",
+                        Some(Effort::Xhigh),
+                        "claude-sonnet-5-5",
+                        Some(Effort::Xhigh),
+                    ),
+                    (
+                        "custom-model",
+                        None,
+                        "claude-sonnet-5-5",
+                        Some(Effort::High),
+                    ),
+                    ("claude-opus-5-5", Some(Effort::High), "custom-model", None),
+                ] {
+                    let mut client = client_with(from_model, from_effort);
+                    client.set_model(swap_to.to_owned());
+                    assert_eq!(
+                        client.effort, expect,
+                        "{from_model} → {swap_to}: stored effort",
+                    );
+                    assert_eq!(client.model().id(), swap_to, "{swap_to}: stored id");
+                }
+            }
+
+            #[tokio::test]
+            async fn rederives_every_model_gated_request_field() {
+                let mut cfg = test_config(OFFLINE_URL, api_key(), "custom-model");
+                cfg.max_tokens = None;
+                cfg.show_thinking = true;
+                let mut client = client_for(&cfg);
+
+                let (unknown, unknown_betas) = capture_stream_turn(client.clone()).await;
+                for field in ["thinking", "output_config", "context_management"] {
+                    assert!(unknown.get(field).is_none(), "{field} absent: {unknown}");
+                }
+                assert_eq!(unknown["max_tokens"], 16_000);
+                for beta in ["context-management", "thinking-binding-controls"] {
+                    assert!(!unknown_betas.contains(beta), "{beta}: {unknown_betas}");
+                }
+
+                client.set_model("claude-opus-5-5".to_owned());
+                let (known, known_betas) = capture_stream_turn(client).await;
+                assert_eq!(known["model"], "claude-opus-5-5");
+                assert_eq!(known["max_tokens"], 64_000);
+                assert_eq!(
+                    known["thinking"],
+                    serde_json::json!({
+                        "type": "adaptive",
+                        "display": "summarized",
+                        "block_binding": {"prefix_mismatch_behavior": "drop_block"},
+                    }),
+                );
+                assert_eq!(known["output_config"]["effort"], "medium");
+                assert_eq!(
+                    known["context_management"]["edits"][0]["type"],
+                    "clear_thinking_20251015",
+                );
+                assert!(
+                    known_betas.contains("context-management-2025-06-27"),
+                    "{known_betas}"
+                );
+            }
+        }
+
+        mod set_effort {
+            use super::*;
+
+            #[test]
+            fn resolves_pick_against_active_model() {
+                for (model, initial, pick, expect) in [
+                    (
+                        "claude-sonnet-5-5",
+                        Some(Effort::High),
+                        Effort::Max,
+                        Some(Effort::Max),
+                    ),
+                    ("custom-model", None, Effort::High, None),
+                ] {
+                    let mut client = client_with(model, initial);
+                    assert_eq!(client.set_effort(pick), expect, "{model} pick={pick:?}");
+                    assert_eq!(
+                        client.effort, expect,
+                        "{model} pick={pick:?}: stored effort",
+                    );
+                }
+            }
+        }
+
+        mod set_auth {
+            use super::*;
+
+            #[tokio::test]
+            async fn sends_the_new_credential_and_signing_out_stops_requests() {
+                let mut client = Client::new(
+                    &test_config(OFFLINE_URL, api_key(), TEST_MODEL),
+                    NoRoots,
+                    None,
+                    DEVICE_ID.to_owned(),
+                )
+                .unwrap();
+
+                client.set_auth(Some(Auth::new(AuthSource::OxLogin, "ox-token")));
+                let request = capture_stream_request(client.clone()).await;
+                client.set_auth(None);
+                let signed_out = client
+                    .stream_message(&[Message::user("hi")], &[], None, &[])
+                    .expect_err("a signed-out client must not send");
+
+                assert_eq!(
+                    request_header(&request, "authorization"),
+                    Some("Bearer ox-token")
+                );
+                assert_eq!(request_header(&request, "x-api-key"), None);
+                assert_eq!(client.auth_source(), None);
+                assert_eq!(signed_out.to_string(), "not signed in");
+            }
+        }
+
+        mod finish_reloads {
+            use super::*;
+
+            #[tokio::test]
+            async fn waits_for_a_refresh_that_a_replaced_login_left_in_flight() {
+                for (token, expires_at) in [("expired", 0), ("rejected", 9_999_999_999_999)] {
+                    let server = MockServer::start().await;
+                    Mock::given(method("POST"))
+                        .and(path("/v1/messages"))
+                        .respond_with(ResponseTemplate::new(401))
+                        .mount(&server)
+                        .await;
+                    let refresh = HeldRefresh::mount(&server).await;
+                    let dir = tempfile::tempdir().unwrap();
+                    let creds = dir.path().join("credentials.json");
+                    write_creds(&creds, token, Some("old-refresh"), expires_at);
+                    let replaced = ox_login_in(&creds, &server.uri(), token, expires_at);
+                    let mut client = Client::new(
+                        &test_config(server.uri(), replaced.clone(), TEST_MODEL),
+                        NoRoots,
+                        None,
+                        DEVICE_ID.to_owned(),
+                    )
+                    .unwrap();
+
+                    refresh
+                        .abort_mid_refresh({
+                            let http = client.http.clone();
+                            let request =
+                                client.messages_request(String::new(), "{}".to_owned(), &replaced);
+                            async move { transport::post_messages(&http, &request, 0).await }
+                        })
+                        .await;
+                    client.set_auth(Some(Auth::new(AuthSource::OxLogin, "ox-token")));
+                    refresh.release();
+                    client.finish_reloads().await;
+
+                    assert_eq!(replaced.secret(), "fresh-access", "{token}");
+                    server.verify().await;
+                }
+            }
+        }
+
+        mod stream_message {
+            use super::*;
+
+            fn sse_body(frames: &[(&str, &str)]) -> String {
+                let mut body = String::new();
+                for (event, data) in frames {
+                    _ = writedoc!(
+                        body,
+                        "
+                        event: {event}
+                        data: {data}
+
+                        ",
+                    );
+                }
+                body
+            }
+
+            async fn capture_stream_body(config: Config) -> serde_json::Value {
+                capture_stream_turn(client_for(&config)).await.0
+            }
+
+            #[tokio::test]
+            async fn streams_usage_and_text_then_completes_the_reply() {
+                let server = MockServer::start().await;
+                Mock::given(method("POST"))
+                    .and(path("/v1/messages"))
+                    .and(query_param("beta", "true"))
+                    .respond_with(
+                        ResponseTemplate::new(200)
+                            .insert_header("content-type", "text/event-stream")
+                            .set_body_string(text_stream_body("", "Hi")),
+                    )
+                    .mount(&server)
+                    .await;
+
+                let client = test_client(server.uri(), api_key(), TEST_MODEL);
+                let rx = client
+                    .stream_message(&[Message::user("hello")], &[], None, &[])
+                    .unwrap();
+                let events = collect_events(rx).await.unwrap();
+
+                assert_eq!(
+                    events,
+                    [
+                        ResponseEvent::Usage(TokenUsage::new(1_000, 0)),
+                        ResponseEvent::Text("Hi".to_owned()),
+                        ResponseEvent::Usage(TokenUsage::new(1_000, 100)),
+                        ResponseEvent::Completed(Response {
+                            content: vec![ContentBlock::Text {
+                                text: "Hi".to_owned(),
+                            }],
+                            stop_reason: Some(StopReason::EndTurn),
+                            ..Response::default()
+                        }),
+                    ],
+                );
+            }
+
+            #[tokio::test]
+            async fn preserves_multibyte_codepoints_in_deltas() {
+                // Pins the byte-level SSE buffer: lossy UTF-8 would mangle a 4-byte emoji split
+                // across TCP chunk boundaries.
+                let server = MockServer::start().await;
+                let body = sse_body(&[
+                    (
+                        "content_block_start",
+                        r#"{"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}"#,
+                    ),
+                    (
+                        "content_block_delta",
+                        r#"{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"🦀rust"}}"#,
+                    ),
+                    ("message_stop", r#"{"type":"message_stop"}"#),
+                ]);
+                Mock::given(method("POST"))
+                    .and(path("/v1/messages"))
+                    .respond_with(
+                        ResponseTemplate::new(200)
+                            .insert_header("content-type", "text/event-stream")
+                            .set_body_string(body),
+                    )
+                    .mount(&server)
+                    .await;
+
+                let client = test_client(server.uri(), api_key(), TEST_MODEL);
+                let events = collect_events(
+                    client
+                        .stream_message(&[Message::user("hi")], &[], None, &[])
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+                let got = events.iter().find_map(|e| match e {
+                    ResponseEvent::Text(text) => Some(text.as_str()),
+                    _ => None,
+                });
+                assert_eq!(got, Some("🦀rust"));
+            }
+
+            #[tokio::test]
+            async fn sends_one_credential_header_and_betas_per_auth_kind() {
+                let mut betas = Vec::new();
+                for (auth, api_key, bearer) in [
+                    (
+                        Auth::new(AuthSource::ApiKeyEnv, "sk-env"),
+                        Some("sk-env"),
+                        None,
+                    ),
+                    (
+                        Auth::new(AuthSource::AuthTokenEnv, "gw-token"),
+                        None,
+                        Some("Bearer gw-token"),
+                    ),
+                    (
+                        Auth::new(AuthSource::OAuthTokenEnv, "oat-env"),
+                        None,
+                        Some("Bearer oat-env"),
+                    ),
+                ] {
+                    let source = auth.source();
+                    let client = test_client(OFFLINE_URL, auth, TEST_MODEL);
+                    let request = capture_stream_request(client).await;
+                    assert_eq!(request_header(&request, "x-api-key"), api_key, "{source:?}");
+                    assert_eq!(
+                        request_header(&request, "authorization"),
+                        bearer,
+                        "{source:?}"
+                    );
+                    assert_eq!(
+                        request_header(&request, "x-claude-code-session-id"),
+                        Some("sid")
+                    );
+                    betas.push(
+                        request_header(&request, "anthropic-beta")
+                            .unwrap()
+                            .to_owned(),
+                    );
+                }
+
+                // Auth tokens keep API-key betas. OAuth adds its beta after the claude-code tag.
+                let [api_key, auth_token, oauth]: [String; 3] = betas.try_into().unwrap();
+                let tail = api_key.strip_prefix("claude-code-20250219,").unwrap();
+                assert!(!tail.contains("oauth"), "{api_key}");
+                assert_eq!(auth_token, api_key);
+                assert_eq!(
+                    oauth,
+                    format!("claude-code-20250219,oauth-2025-04-20,{tail}")
+                );
+            }
+
+            #[tokio::test]
+            async fn custom_headers_ride_along_and_override_built_ins() {
+                // An API key travels in `x-api-key`, so a gateway may take its own `Authorization`.
+                let mut config = test_config(OFFLINE_URL, api_key(), TEST_MODEL);
+                for (name, value) in [
+                    ("x-team", "platform"),
+                    ("user-agent", "custom/1.0"),
+                    ("authorization", "Bearer gateway-jwt"),
+                ] {
+                    config
+                        .gateway
+                        .custom_headers
+                        .insert(name, HeaderValue::from_static(value));
+                }
+                let request = capture_stream_request(client_for(&config)).await;
+                assert_eq!(request_header(&request, "x-team"), Some("platform"));
+                assert_eq!(
+                    request
+                        .headers
+                        .get_all("user-agent")
+                        .iter()
+                        .collect::<Vec<_>>(),
+                    ["custom/1.0"],
+                );
+                assert_eq!(
+                    request_header(&request, "authorization"),
+                    Some("Bearer gateway-jwt")
+                );
+                assert_eq!(request_header(&request, "x-api-key"), Some("k"));
+            }
+
+            #[tokio::test]
+            async fn billing_block_hashes_only_first_party_requests() {
+                for is_first_party in [true, false] {
+                    let mut client = test_client(OFFLINE_URL, api_key(), TEST_MODEL);
+                    client.is_first_party = is_first_party;
+                    let (body, _) = capture_stream_turn(client).await;
+                    let block = body["system"][0]["text"].as_str().unwrap();
+                    let (prefix, cch) = block.split_once(" cch=").unwrap_or((block, ""));
+                    assert!(prefix.ends_with("; cc_entrypoint=cli;"), "{block}");
+                    let hash = cch.strip_suffix(';').unwrap_or(cch);
+                    let hashed =
+                        hash.len() == 5 && hash != "00000" && u32::from_str_radix(hash, 16).is_ok();
+                    assert_eq!(hashed, is_first_party, "{block}");
+                    assert_eq!(cch.is_empty(), !is_first_party, "{block}");
+                }
+            }
+
+            #[tokio::test]
+            async fn attribution_off_drops_billing_block() {
+                let mut config = test_config(OFFLINE_URL, oauth(), TEST_MODEL);
+                config.gateway.attribution = false;
+                let body = capture_stream_body(config).await;
+                assert_eq!(body["system"][0]["text"], SYSTEM_PROMPT_PREFIX);
+                assert!(
+                    !body.to_string().contains("x-anthropic-billing-header"),
+                    "{body}"
+                );
+            }
+
+            #[tokio::test]
+            async fn with_user_context_prepends_it_and_fingerprints_the_prompt() {
+                let prompt = "Say 'hello' and nothing else.";
+                let context = "<system-reminder>CLAUDE.md content here</system-reminder>";
+                let server = MockServer::start().await;
+                let body_sink: Captured<String> = captured();
+                let sink_clone = std::sync::Arc::clone(&body_sink);
+                Mock::given(method("POST"))
+                    .and(path("/v1/messages"))
+                    .respond_with(move |req: &Request| {
+                        *sink_clone.lock().unwrap() =
+                            Some(String::from_utf8_lossy(&req.body).into_owned());
+                        ResponseTemplate::new(200)
+                            .insert_header("content-type", "text/event-stream")
+                            .set_body_string(text_stream_body("", "Hi"))
+                    })
+                    .mount(&server)
+                    .await;
+
+                let client = test_client(server.uri(), api_key(), TEST_MODEL);
+                collect_events(
+                    client
+                        .stream_message(&[Message::user(prompt)], &[], Some(context), &[])
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+
+                let body = body_sink.lock().unwrap().clone().expect("body captured");
+                let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+                assert_eq!(
+                    v["system"][0]["text"],
+                    format!(
+                        "x-anthropic-billing-header: \
+                         cc_version={CLAUDE_CLI_VERSION}.{}; cc_entrypoint=cli;",
+                        billing::compute_fingerprint(prompt, CLAUDE_CLI_VERSION),
+                    ),
+                );
+                let messages = v["messages"].as_array().expect("messages array");
+                assert_eq!(messages.len(), 2, "user_context prepends: {body}");
+                assert_eq!(
+                    messages[0],
+                    serde_json::json!({
+                        "role": "user",
+                        "content": [{"type": "text", "text": context}],
+                    }),
+                );
+                assert_eq!(messages[1]["content"][0]["text"], prompt);
+            }
+
+            #[tokio::test]
+            async fn third_party_base_url_drops_global_scope_keeps_its_beta() {
+                // As in Claude Code, the beta ships on every base URL, while the body-side
+                // `scope: "global"` goes only to the Anthropic API.
+                let server = MockServer::start().await;
+                let sink: Captured<(String, String)> = captured();
+                let sink_clone = std::sync::Arc::clone(&sink);
+                Mock::given(method("POST"))
+                    .and(path("/v1/messages"))
+                    .respond_with(move |req: &Request| {
+                        let body = String::from_utf8_lossy(&req.body).into_owned();
+                        let beta = req
+                            .headers
+                            .get("anthropic-beta")
+                            .map(|v| v.to_str().unwrap().to_owned())
+                            .unwrap_or_default();
+                        *sink_clone.lock().unwrap() = Some((body, beta));
+                        ResponseTemplate::new(200)
+                            .insert_header("content-type", "text/event-stream")
+                            .set_body_string(text_stream_body("", "Hi"))
+                    })
+                    .mount(&server)
+                    .await;
+
+                let client = test_client(server.uri(), api_key(), TEST_MODEL);
+                collect_events(
+                    client
+                        .stream_message(
+                            &[Message::user("hi")],
+                            &["static-a", "static-b"],
+                            None,
+                            &[],
+                        )
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+
+                let (body, beta) = sink.lock().unwrap().clone().expect("request captured");
+                assert!(
+                    beta.contains("prompt-caching-scope-2026-01-05"),
+                    "prompt-caching-scope beta ships on 3P: {beta}",
+                );
+                let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+                let system = v["system"].as_array().expect("system array");
+                // [0] billing, [1] identity prefix, [2] static joined.
+                assert!(
+                    system[0]["text"]
+                        .as_str()
+                        .unwrap()
+                        .starts_with("x-anthropic-billing-header:"),
+                    "billing header occupies system[0]: {body}",
+                );
+                assert_eq!(system[1]["text"], SYSTEM_PROMPT_PREFIX);
+                let cc = &system[2]["cache_control"];
+                assert_eq!(cc["type"], "ephemeral");
+                assert!(
+                    cc.get("scope").is_none(),
+                    "scope field omitted entirely on 3P (not null): {body}",
+                );
+                // TTL rides through on 3P. Only `scope` is gated on 1P.
+                assert_eq!(cc["ttl"], "1h", "default 1h ttl survives on 3P: {body}");
+            }
+
+            #[tokio::test]
+            async fn breakpoints_cover_static_prefix_and_conversation_tail() {
+                let server = MockServer::start().await;
+                let sink: Captured<String> = captured();
+                let sink_clone = std::sync::Arc::clone(&sink);
+                Mock::given(method("POST"))
+                    .and(path("/v1/messages"))
+                    .respond_with(move |req: &Request| {
+                        *sink_clone.lock().unwrap() =
+                            Some(String::from_utf8_lossy(&req.body).into_owned());
+                        ResponseTemplate::new(200)
+                            .insert_header("content-type", "text/event-stream")
+                            .set_body_string(text_stream_body("", "Hi"))
+                    })
+                    .mount(&server)
+                    .await;
+
+                let mut client = test_client(server.uri(), api_key(), "claude-sonnet-5-5");
+                // The conversation breakpoint omits `scope` even where the system prefix is global.
+                client.is_first_party = true;
+                let messages = [
+                    Message::user("question"),
+                    Message::assistant("answer"),
+                    Message {
+                        role: Role::User,
+                        content: vec![ContentBlock::ToolResult {
+                            tool_use_id: "toolu_1".to_owned(),
+                            content: "ok".to_owned(),
+                            is_error: false,
+                        }],
+                    },
+                ];
+                collect_events(
+                    client
+                        .stream_message(
+                            &messages,
+                            &["static", SYSTEM_PROMPT_DYNAMIC_BOUNDARY, "dynamic"],
+                            Some("<system-reminder>context</system-reminder>"),
+                            &[],
+                        )
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+
+                let body = sink.lock().unwrap().clone().expect("request captured");
+                let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+                assert_eq!(
+                    v["system"][2]["cache_control"],
+                    serde_json::json!({"type": "ephemeral", "scope": "global", "ttl": "1h"}),
+                );
+                let sent = v["messages"].as_array().expect("messages array");
+                assert_eq!(sent.len(), 4, "user context leads the transcript: {body}");
+                assert_eq!(
+                    sent[3]["content"][0]["cache_control"],
+                    serde_json::json!({"type": "ephemeral", "ttl": "1h"}),
+                );
+                assert_eq!(
+                    body.matches(r#""cache_control""#).count(),
+                    2,
+                    "only the static prefix and the final block carry breakpoints: {body}",
+                );
+            }
+
+            #[tokio::test]
+            async fn malformed_frame_is_skipped_without_poisoning_stream() {
+                let server = MockServer::start().await;
+                let body = sse_body(&[
+                    (
+                        "content_block_start",
+                        r#"{"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}"#,
+                    ),
+                    ("content_block_delta", "{not valid json"),
+                    (
+                        "content_block_delta",
+                        r#"{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Hi"}}"#,
+                    ),
+                    ("message_stop", r#"{"type":"message_stop"}"#),
+                ]);
+                Mock::given(method("POST"))
+                    .and(path("/v1/messages"))
+                    .respond_with(
+                        ResponseTemplate::new(200)
+                            .insert_header("content-type", "text/event-stream")
+                            .set_body_string(body),
+                    )
+                    .mount(&server)
+                    .await;
+
+                let client = test_client(server.uri(), api_key(), TEST_MODEL);
+                let events = collect_events(
+                    client
+                        .stream_message(&[Message::user("hi")], &[], None, &[])
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+                let delta = events.iter().find_map(|e| match e {
+                    ResponseEvent::Text(text) => Some(text.as_str()),
+                    _ => None,
+                });
+                assert_eq!(delta, Some("Hi"));
+            }
+
+            #[tokio::test]
+            async fn in_band_error_fails_the_stream_with_its_payload() {
+                let server = MockServer::start().await;
+                let body = sse_body(&[(
+                    "error",
+                    r#"{"type":"error","error":{"type":"invalid_request_error","message":"Bad block"}}"#,
+                )]);
+                Mock::given(method("POST"))
+                    .and(path("/v1/messages"))
+                    .respond_with(
+                        ResponseTemplate::new(200)
+                            .insert_header("content-type", "text/event-stream")
+                            .set_body_string(body),
+                    )
+                    .mount(&server)
+                    .await;
+
+                let client = test_client(server.uri(), api_key(), TEST_MODEL);
+                let err = collect_events(
+                    client
+                        .stream_message(&[Message::user("hi")], &[], None, &[])
+                        .unwrap(),
+                )
+                .await
+                .expect_err("an in-band error fails the stream");
+
+                assert_eq!(
+                    format!("{err:#}"),
+                    "API error (invalid_request_error): Bad block"
+                );
+                assert_eq!(
+                    server.received_requests().await.unwrap().len(),
+                    1,
+                    "a non-transient error is not retried",
+                );
+            }
+
+            #[tokio::test]
+            async fn redirect_is_not_followed() {
+                let elsewhere = MockServer::start().await;
+                Mock::given(method("POST"))
+                    .respond_with(ResponseTemplate::new(200))
+                    .expect(0)
+                    .mount(&elsewhere)
+                    .await;
+                let server = MockServer::start().await;
+                Mock::given(method("POST"))
+                    .and(path("/v1/messages"))
+                    .respond_with(
+                        ResponseTemplate::new(307)
+                            .insert_header("location", format!("{}/v1/messages", elsewhere.uri())),
+                    )
+                    .mount(&server)
+                    .await;
+
+                let client = test_client(server.uri(), api_key(), TEST_MODEL);
+                let rx = client
+                    .stream_message(&[Message::user("hi")], &[], None, &[])
+                    .unwrap();
+                let err = collect_events(rx).await.expect_err("redirect must fail");
+
+                assert_eq!(
+                    format!("{err:#}"),
+                    "Anthropic API endpoint redirected (HTTP 307 Temporary Redirect) to 127.0.0.1. \
+                     Redirects are not followed, so point the base URL at the final endpoint.",
+                );
+                elsewhere.verify().await;
+            }
+
+            #[tokio::test]
+            async fn http_error_propagates_status_and_body() {
+                let rate_limited = r#"{"error":{"type":"rate_limit_error"}}"#;
+                for (status, body, expected) in [
+                    (
+                        429_u16,
+                        rate_limited,
+                        format!(
+                            "Anthropic API rate limited (HTTP 429): {rate_limited}. \
+                             Retry after a short delay."
+                        ),
+                    ),
+                    (
+                        529,
+                        "overloaded",
+                        "Anthropic API overloaded (HTTP 529): overloaded. Retry in a few seconds."
+                            .to_owned(),
+                    ),
+                ] {
+                    let server = MockServer::start().await;
+                    Mock::given(method("POST"))
+                        .and(path("/v1/messages"))
+                        .respond_with(
+                            ResponseTemplate::new(status)
+                                .insert_header("x-should-retry", "false")
+                                .set_body_string(body),
+                        )
+                        .mount(&server)
+                        .await;
+
+                    let client = test_client(server.uri(), api_key(), TEST_MODEL);
+                    let rx = client
+                        .stream_message(&[Message::user("hi")], &[], None, &[])
+                        .unwrap();
+                    let err = collect_events(rx).await.expect_err("expected HTTP error");
+
+                    assert_eq!(format!("{err:#}"), expected);
+                }
+            }
+
+            #[tokio::test]
+            async fn on_401_names_the_oauth_token_variable_without_resending() {
+                let server = MockServer::start().await;
+                Mock::given(method("POST"))
+                    .and(path("/v1/messages"))
+                    .respond_with(ResponseTemplate::new(401).set_body_string("token revoked"))
+                    .expect(1)
+                    .mount(&server)
+                    .await;
+
+                let client = test_client(
+                    server.uri(),
+                    Auth::new(AuthSource::OAuthTokenEnv, "oat-env"),
+                    TEST_MODEL,
+                );
+                let rx = client
+                    .stream_message(&[Message::user("hi")], &[], None, &[])
+                    .unwrap();
+                let err = collect_events(rx).await.expect_err("expected 401");
+
+                assert_eq!(
+                    format!("{err:#}"),
+                    "Anthropic API rejected credentials (HTTP 401): token revoked. \
+                     CLAUDE_CODE_OAUTH_TOKEN may be expired or revoked. \
+                     Generate a new one with `claude setup-token`.",
+                );
+                server.verify().await;
+            }
+
+            #[tokio::test]
+            async fn on_429_threads_retry_after_header_into_error() {
+                // A hint past the retry cap fails fast with the hint in the message.
+                let server = MockServer::start().await;
+                Mock::given(method("POST"))
+                    .and(path("/v1/messages"))
+                    .respond_with(
+                        ResponseTemplate::new(429)
+                            .insert_header("retry-after", "120")
+                            .set_body_string("Too many requests"),
+                    )
+                    .mount(&server)
+                    .await;
+
+                let client = test_client(server.uri(), api_key(), TEST_MODEL);
+                let rx = client
+                    .stream_message(&[Message::user("hi")], &[], None, &[])
+                    .unwrap();
+                let err = collect_events(rx).await.expect_err("expected 429");
+
+                assert_eq!(
+                    format!("{err:#}"),
+                    "Anthropic API rate limited (HTTP 429): Too many requests. Retry after 120 s.",
+                );
+                assert_eq!(server.received_requests().await.unwrap().len(), 1);
+            }
+
+            #[tokio::test]
+            async fn rejects_a_credential_no_header_can_carry() {
+                // `HeaderValue::from_str` rejects \n and \r. Both auth arms must propagate it.
+                for auth in [
+                    Auth::new(AuthSource::ApiKeyEnv, "bad\nkey"),
+                    Auth::new(AuthSource::OAuthTokenEnv, "bad\rtoken"),
+                ] {
+                    let source = auth.source();
+                    let client = test_client(OFFLINE_URL, auth, TEST_MODEL);
+
+                    let rx = client
+                        .stream_message(&[Message::user("hi")], &[], None, &[])
+                        .unwrap();
+                    let err = collect_events(rx).await.unwrap_err();
+
+                    let msg = format!("{err:#}");
+                    assert!(
+                        msg.starts_with(&format!("{source} is not a valid HTTP header value")),
+                        "error names the credential source: {msg}",
+                    );
+                    assert!(
+                        !msg.contains("bad"),
+                        "error must not echo the secret: {msg}"
+                    );
+                }
+            }
+
+            #[tokio::test]
+            async fn refreshes_an_expired_stored_login_once_for_every_clone() {
+                let server = MockServer::start().await;
+                Mock::given(method("POST"))
+                    .and(path("/token"))
+                    .respond_with(ResponseTemplate::new(200).set_body_json(ok_refresh_body(
+                        "fresh-access",
+                        "fresh-refresh",
+                        3600,
+                    )))
+                    .expect(1)
+                    .mount(&server)
+                    .await;
+                for (streamed, reply) in [
+                    (true, sse_response(text_stream_body("", "Hi"))),
+                    (
+                        false,
+                        ResponseTemplate::new(200).set_body_string(completion_body("Title")),
+                    ),
+                ] {
+                    Mock::given(method("POST"))
+                        .and(path("/v1/messages"))
+                        .and(header("authorization", "Bearer fresh-access"))
+                        .and(body_partial_json(serde_json::json!({ "stream": streamed })))
+                        .respond_with(reply)
+                        .expect(1)
+                        .mount(&server)
+                        .await;
+                }
+                let dir = tempfile::tempdir().unwrap();
+                let file = dir.path().join("credentials.json");
+                write_creds(&file, "expired", Some("old-refresh"), 0);
+                let token_url = format!("{}/token", server.uri());
+                let client = test_client(
+                    server.uri(),
+                    ox_login_in(&file, &token_url, "expired", 0),
+                    TEST_MODEL,
+                );
+
+                let rx = client
+                    .stream_message(&[Message::user("hi")], &[], None, &[])
+                    .unwrap();
+                collect_events(rx).await.unwrap();
+                let stored: serde_json::Value =
+                    serde_json::from_str(&std::fs::read_to_string(&file).unwrap()).unwrap();
+                std::fs::remove_file(&file).unwrap();
+                let haiku = ModelSpec::resolve("claude-haiku-5-5".to_owned());
+                let (title, _) = client
+                    .clone()
+                    .complete(&haiku, "", "u", 40, None, None)
+                    .await
+                    .unwrap();
+
+                assert_eq!(stored["claudeAiOauth"]["accessToken"], "fresh-access");
+                assert_eq!(stored["claudeAiOauth"]["refreshToken"], "fresh-refresh");
+                assert_eq!(
+                    title, "Title",
+                    "the clone reuses the refreshed token unread"
+                );
+                server.verify().await;
+            }
+
+            #[tokio::test]
+            async fn emits_output_config_effort() {
+                let mut cfg = test_config(OFFLINE_URL, api_key(), "claude-opus-5-5");
+                cfg.effort = Some(Effort::Xhigh);
+                let body = capture_stream_body(cfg).await;
+                assert_eq!(body["output_config"]["effort"], "xhigh");
+            }
+
+            #[tokio::test]
+            async fn omits_output_config_without_an_effort() {
+                let cfg = test_config(OFFLINE_URL, api_key(), "custom-model");
+                assert!(cfg.effort.is_none(), "precondition: effort unset");
+                let body = capture_stream_body(cfg).await;
+                assert!(
+                    body.get("output_config").is_none(),
+                    "output_config absent: {body}",
+                );
+            }
+
+            #[tokio::test]
+            async fn context_management_body_present_on_every_known_model() {
+                // The body directive must accompany the beta `compute_betas` sends for these.
+                for info in crate::model::MODELS {
+                    let cfg = test_config(OFFLINE_URL, api_key(), info.id);
+                    let body = capture_stream_body(cfg).await;
+                    let edits = body["context_management"]["edits"]
+                        .as_array()
+                        .unwrap_or_else(|| {
+                            panic!("context_management.edits missing for {}", info.id)
+                        });
+                    assert_eq!(edits.len(), 1, "{}", info.id);
+                    assert_eq!(edits[0]["type"], "clear_thinking_20251015", "{}", info.id);
+                    assert_eq!(edits[0]["keep"], "all", "{}", info.id);
+                }
+            }
+
+            #[tokio::test]
+            async fn hidden_thinking_requests_updates_where_supported() {
+                for (id, display, sends_beta) in [
+                    ("claude-opus-5-5", Some("updates"), true),
+                    ("claude-haiku-5-5", None, false),
+                ] {
+                    let client = test_client(OFFLINE_URL, api_key(), id);
+                    let (body, betas) = capture_stream_turn(client).await;
+                    assert_eq!(
+                        body["thinking"].get("display"),
+                        display.map(Into::into).as_ref(),
+                        "{id}"
+                    );
+                    assert_eq!(
+                        betas.contains("thinking-display-updates-2026-08-18"),
+                        sends_beta,
+                        "{id}: {betas}",
+                    );
+                }
+            }
+
+            #[tokio::test]
+            async fn known_model_drops_stale_thinking_blocks_under_binding_beta() {
+                for info in crate::model::MODELS {
+                    let client = test_client(OFFLINE_URL, api_key(), info.id);
+                    let (body, betas) = capture_stream_turn(client).await;
+                    assert_eq!(
+                        body["thinking"]["block_binding"],
+                        serde_json::json!({"prefix_mismatch_behavior": "drop_block"}),
+                        "{}",
+                        info.id,
+                    );
+                    assert!(
+                        betas
+                            .split(',')
+                            .any(|beta| beta == "thinking-binding-controls-2026-08-01"),
+                        "{}: {betas}",
+                        info.id,
+                    );
+                }
+            }
         }
     }
 
-    #[tokio::test]
-    async fn stream_message_hidden_thinking_requests_updates_where_supported() {
-        for (id, display, sends_beta) in [
-            ("claude-opus-5-5", Some("updates"), true),
-            ("claude-haiku-5-5", None, false),
-        ] {
-            let client = test_client(OFFLINE_URL, api_key(), id);
-            let (body, betas) = capture_stream_turn(client).await;
+    mod build_metadata {
+        use super::*;
+
+        #[test]
+        fn wraps_ids_in_stringified_json_with_canonical_field_order() {
+            // Claude Code's field order is `device_id, account_uuid, session_id`, which
+            // `serde_json::json!` would alphabetize.
+            let meta = build_metadata("dev-1", "abc-123");
             assert_eq!(
-                body["thinking"].get("display"),
-                display.map(Into::into).as_ref(),
-                "{id}"
+                meta.user_id,
+                r#"{"device_id":"dev-1","account_uuid":"","session_id":"abc-123"}"#,
             );
+        }
+    }
+
+    mod build_system_blocks {
+        use super::*;
+
+        #[test]
+        fn orders_billing_then_identity_then_extras() {
+            let cache = CacheControl {
+                r#type: "ephemeral",
+                scope: Some("global"),
+                ttl: Some("1h"),
+            };
+
+            let blocks = build_system_blocks(
+                Some("billing"),
+                &[("static body", Some(cache)), ("dynamic body", None)],
+            );
+
             assert_eq!(
-                betas.contains("thinking-display-updates-2026-08-18"),
-                sends_beta,
-                "{id}: {betas}",
+                serde_json::to_value(blocks).unwrap(),
+                serde_json::json!([
+                    {"type": "text", "text": "billing"},
+                    {"type": "text", "text": SYSTEM_PROMPT_PREFIX},
+                    {
+                        "type": "text",
+                        "text": "static body",
+                        "cache_control": {"type": "ephemeral", "scope": "global", "ttl": "1h"},
+                    },
+                    {"type": "text", "text": "dynamic body"},
+                ]),
             );
         }
-    }
 
-    #[tokio::test]
-    async fn stream_message_known_model_drops_stale_thinking_blocks_under_binding_beta() {
-        for info in crate::model::MODELS {
-            let client = test_client(OFFLINE_URL, api_key(), info.id);
-            let (body, betas) = capture_stream_turn(client).await;
+        #[test]
+        fn drops_empty_extras_and_omits_billing_when_absent() {
+            let blocks = build_system_blocks(None, &[("", None), ("only-content", None)]);
+
             assert_eq!(
-                body["thinking"]["block_binding"],
-                serde_json::json!({"prefix_mismatch_behavior": "drop_block"}),
-                "{}",
-                info.id,
-            );
-            assert!(
-                betas
-                    .split(',')
-                    .any(|beta| beta == "thinking-binding-controls-2026-08-01"),
-                "{}: {betas}",
-                info.id,
+                serde_json::to_value(blocks).unwrap(),
+                serde_json::json!([
+                    {"type": "text", "text": SYSTEM_PROMPT_PREFIX},
+                    {"type": "text", "text": "only-content"},
+                ]),
             );
         }
     }
 
-    // ── build_metadata ──
+    mod normalize_platform {
+        use super::*;
 
-    #[test]
-    fn build_metadata_wraps_ids_in_stringified_json_with_canonical_field_order() {
-        // Claude Code's field order is `device_id, account_uuid, session_id`, which
-        // `serde_json::json!` would alphabetize.
-        let meta = build_metadata("dev-1", "abc-123");
-        assert_eq!(
-            meta.user_id,
-            r#"{"device_id":"dev-1","account_uuid":"","session_id":"abc-123"}"#,
-        );
-    }
-
-    // ── build_system_blocks ──
-
-    #[test]
-    fn build_system_blocks_orders_billing_then_identity_then_extras() {
-        let cache = CacheControl {
-            r#type: "ephemeral",
-            scope: Some("global"),
-            ttl: Some("1h"),
-        };
-
-        let blocks = build_system_blocks(
-            Some("billing"),
-            &[("static body", Some(cache)), ("dynamic body", None)],
-        );
-
-        assert_eq!(
-            serde_json::to_value(blocks).unwrap(),
-            serde_json::json!([
-                {"type": "text", "text": "billing"},
-                {"type": "text", "text": SYSTEM_PROMPT_PREFIX},
-                {
-                    "type": "text",
-                    "text": "static body",
-                    "cache_control": {"type": "ephemeral", "scope": "global", "ttl": "1h"},
-                },
-                {"type": "text", "text": "dynamic body"},
-            ]),
-        );
-    }
-
-    #[test]
-    fn build_system_blocks_drops_empty_extras_and_omits_billing_when_absent() {
-        let blocks = build_system_blocks(None, &[("", None), ("only-content", None)]);
-
-        assert_eq!(
-            serde_json::to_value(blocks).unwrap(),
-            serde_json::json!([
-                {"type": "text", "text": SYSTEM_PROMPT_PREFIX},
-                {"type": "text", "text": "only-content"},
-            ]),
-        );
-    }
-
-    // ── normalize_platform ──
-
-    #[test]
-    fn normalize_platform_maps_known_and_falls_back_to_unknown() {
-        for (input, expected) in [
-            ("macos", "MacOS"),
-            ("linux", "Linux"),
-            ("windows", "Windows"),
-            ("freebsd", "FreeBSD"),
-            ("openbsd", "OpenBSD"),
-            ("ios", "iOS"),
-            ("android", "Android"),
-            ("haiku", "Unknown"),
-        ] {
-            assert_eq!(normalize_platform(input), expected, "input={input}");
+        #[test]
+        fn maps_known_and_falls_back_to_unknown() {
+            for (input, expected) in [
+                ("macos", "MacOS"),
+                ("linux", "Linux"),
+                ("windows", "Windows"),
+                ("freebsd", "FreeBSD"),
+                ("openbsd", "OpenBSD"),
+                ("ios", "iOS"),
+                ("android", "Android"),
+                ("haiku", "Unknown"),
+            ] {
+                assert_eq!(normalize_platform(input), expected, "input={input}");
+            }
         }
     }
 
-    // ── normalize_arch ──
+    mod normalize_arch {
+        use super::*;
 
-    #[test]
-    fn normalize_arch_maps_known_and_falls_back_to_unknown() {
-        for (input, expected) in [
-            ("x86", "x32"),
-            ("x86_64", "x64"),
-            ("arm", "arm"),
-            ("aarch64", "arm64"),
-            ("riscv64gc", "unknown"),
-        ] {
-            assert_eq!(normalize_arch(input), expected, "input={input}");
+        #[test]
+        fn maps_known_and_falls_back_to_unknown() {
+            for (input, expected) in [
+                ("x86", "x32"),
+                ("x86_64", "x64"),
+                ("arm", "arm"),
+                ("aarch64", "arm64"),
+                ("riscv64gc", "unknown"),
+            ] {
+                assert_eq!(normalize_arch(input), expected, "input={input}");
+            }
         }
     }
 
-    // ── split_at_boundary ──
+    mod split_at_boundary {
+        use super::*;
 
-    #[test]
-    fn split_at_boundary_separates_static_and_dynamic() {
-        let sections = &["intro", "tasks", SYSTEM_PROMPT_DYNAMIC_BOUNDARY, "env"];
-        let (statics, dynamic) = split_at_boundary(sections);
-        assert_eq!(statics, vec!["intro", "tasks"]);
-        assert_eq!(dynamic, vec!["env"]);
+        #[test]
+        fn separates_static_and_dynamic() {
+            let sections = &["intro", "tasks", SYSTEM_PROMPT_DYNAMIC_BOUNDARY, "env"];
+            let (statics, dynamic) = split_at_boundary(sections);
+            assert_eq!(statics, vec!["intro", "tasks"]);
+            assert_eq!(dynamic, vec!["env"]);
+        }
+
+        #[test]
+        fn without_marker_treats_all_as_static() {
+            let (statics, dynamic) = split_at_boundary(&["intro", "tasks", "env"]);
+            assert_eq!(statics, vec!["intro", "tasks", "env"]);
+            assert_eq!(dynamic, [] as [&str; 0]);
+        }
+
+        #[test]
+        fn filters_empty_sections() {
+            let sections = &["intro", "", SYSTEM_PROMPT_DYNAMIC_BOUNDARY, "", "env"];
+            let (statics, dynamic) = split_at_boundary(sections);
+            assert_eq!(statics, vec!["intro"]);
+            assert_eq!(dynamic, vec!["env"]);
+        }
+
+        #[test]
+        fn at_extremes_yields_empty_side() {
+            let (statics, dynamic) =
+                split_at_boundary(&[SYSTEM_PROMPT_DYNAMIC_BOUNDARY, "env", "lang"]);
+            assert_eq!(statics, [] as [&str; 0]);
+            assert_eq!(dynamic, vec!["env", "lang"]);
+
+            let (statics, dynamic) =
+                split_at_boundary(&["intro", "tasks", SYSTEM_PROMPT_DYNAMIC_BOUNDARY]);
+            assert_eq!(statics, vec!["intro", "tasks"]);
+            assert_eq!(dynamic, [] as [&str; 0]);
+        }
     }
 
-    #[test]
-    fn split_at_boundary_without_marker_treats_all_as_static() {
-        let (statics, dynamic) = split_at_boundary(&["intro", "tasks", "env"]);
-        assert_eq!(statics, vec!["intro", "tasks", "env"]);
-        assert_eq!(dynamic, [] as [&str; 0]);
-    }
+    mod first_user_text {
+        use super::*;
 
-    #[test]
-    fn split_at_boundary_filters_empty_sections() {
-        let sections = &["intro", "", SYSTEM_PROMPT_DYNAMIC_BOUNDARY, "", "env"];
-        let (statics, dynamic) = split_at_boundary(sections);
-        assert_eq!(statics, vec!["intro"]);
-        assert_eq!(dynamic, vec!["env"]);
-    }
+        #[test]
+        fn extracts_from_first_user_message() {
+            let messages = vec![Message::user("hello world"), Message::assistant("hi")];
+            assert_eq!(first_user_text(&messages), "hello world");
+        }
 
-    #[test]
-    fn split_at_boundary_at_extremes_yields_empty_side() {
-        let (statics, dynamic) =
-            split_at_boundary(&[SYSTEM_PROMPT_DYNAMIC_BOUNDARY, "env", "lang"]);
-        assert_eq!(statics, [] as [&str; 0]);
-        assert_eq!(dynamic, vec!["env", "lang"]);
-
-        let (statics, dynamic) =
-            split_at_boundary(&["intro", "tasks", SYSTEM_PROMPT_DYNAMIC_BOUNDARY]);
-        assert_eq!(statics, vec!["intro", "tasks"]);
-        assert_eq!(dynamic, [] as [&str; 0]);
-    }
-
-    // ── first_user_text ──
-
-    #[test]
-    fn first_user_text_extracts_from_first_user_message() {
-        let messages = vec![Message::user("hello world"), Message::assistant("hi")];
-        assert_eq!(first_user_text(&messages), "hello world");
-    }
-
-    #[test]
-    fn first_user_text_is_empty_when_absent() {
-        assert_eq!(first_user_text(&[]), "");
-        assert_eq!(first_user_text(&[Message::assistant("hi")]), "");
-        let tool_only = vec![Message {
-            role: Role::User,
-            content: vec![ContentBlock::ToolResult {
-                tool_use_id: "id".to_owned(),
-                content: "result".to_owned(),
-                is_error: false,
-            }],
-        }];
-        assert_eq!(first_user_text(&tool_only), "");
+        #[test]
+        fn is_empty_when_absent() {
+            assert_eq!(first_user_text(&[]), "");
+            assert_eq!(first_user_text(&[Message::assistant("hi")]), "");
+            let tool_only = vec![Message {
+                role: Role::User,
+                content: vec![ContentBlock::ToolResult {
+                    tool_use_id: "id".to_owned(),
+                    content: "result".to_owned(),
+                    is_error: false,
+                }],
+            }];
+            assert_eq!(first_user_text(&tool_only), "");
+        }
     }
 }

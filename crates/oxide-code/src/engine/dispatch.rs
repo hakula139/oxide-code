@@ -498,30 +498,6 @@ mod tests {
     #[cfg(unix)]
     use crate::tool::write::WriteTool;
 
-    fn call(id: &str, name: &str, input: serde_json::Value) -> PendingToolUse {
-        PendingToolUse {
-            id: id.to_owned(),
-            name: name.to_owned(),
-            input,
-        }
-    }
-
-    /// Each result of `round` as `(id, content, is_error)`, in order.
-    fn results(round: &ToolRound) -> Vec<(&str, &str, bool)> {
-        round
-            .results
-            .iter()
-            .map(|block| match block {
-                ContentBlock::ToolResult {
-                    tool_use_id,
-                    content,
-                    is_error,
-                } => (tool_use_id.as_str(), content.as_str(), *is_error),
-                other => panic!("expected a tool result, got {other:?}"),
-            })
-            .collect()
-    }
-
     fn approval_ids(sink: &CapturingSink) -> Vec<String> {
         sink.events()
             .into_iter()
@@ -532,822 +508,864 @@ mod tests {
             .collect()
     }
 
-    /// How [`gate_call`] settled a call, without the tool a ready call borrows.
-    enum Gated {
-        Ready(Prepared),
-        Settled(ToolOutput),
-    }
+    mod run_tool_round {
+        use super::*;
 
-    impl Gated {
-        fn prepared(self) -> Prepared {
-            match self {
-                Self::Ready(prepared) => prepared,
-                Self::Settled(output) => panic!("the call was settled: {}", output.content),
+        fn call(id: &str, name: &str, input: serde_json::Value) -> PendingToolUse {
+            PendingToolUse {
+                id: id.to_owned(),
+                name: name.to_owned(),
+                input,
             }
         }
 
-        fn output(self) -> ToolOutput {
-            match self {
-                Self::Settled(output) => output,
-                Self::Ready(prepared) => panic!("the call is ready to run: {prepared:?}"),
+        /// Each result of `round` as `(id, content, is_error)`, in order.
+        fn results(round: &ToolRound) -> Vec<(&str, &str, bool)> {
+            round
+                .results
+                .iter()
+                .map(|block| match block {
+                    ContentBlock::ToolResult {
+                        tool_use_id,
+                        content,
+                        is_error,
+                    } => (tool_use_id.as_str(), content.as_str(), *is_error),
+                    other => panic!("expected a tool result, got {other:?}"),
+                })
+                .collect()
+        }
+
+        fn parallel_spec(name: &str, class: PermissionClass) -> ToolSpec {
+            ToolSpec {
+                name: name.to_owned(),
+                description: format!("the {name} fixture"),
+                input_schema: json!({"type": "object"}),
+                class,
+                parallel_safe: true,
             }
         }
-    }
 
-    /// Gates the call `id` to `name` the way a round does.
-    async fn gate_call(
-        tools: &ToolRegistry,
-        id: &str,
-        name: &str,
-        input: serde_json::Value,
-        sink: &dyn EventSink,
-        ops: &mut mpsc::Receiver<Op>,
-        dispatch_ctx: &mut DispatchContext<'_>,
-    ) -> AbortResult<Gated> {
-        let parse_errors = HashMap::new();
-        let mut inbox = Inbox::default();
-        let mut dispatcher = Dispatcher {
-            tools,
-            parse_errors: &parse_errors,
-            sink,
-            ops,
-            inbox: &mut inbox,
-            dispatch_ctx,
-        };
-        Ok(match dispatcher.gate(id, name, input).await? {
-            Gate::Ready { prepared, .. } => Gated::Ready(prepared),
-            Gate::Settled(output) => Gated::Settled(output),
-        })
-    }
+        /// Parallel-safe tool in the `exec` class, so `manual` asks before each of its calls.
+        struct AskingTool;
 
-    fn parallel_spec(name: &str, class: PermissionClass) -> ToolSpec {
-        ToolSpec {
-            name: name.to_owned(),
-            description: format!("the {name} fixture"),
-            input_schema: json!({"type": "object"}),
-            class,
-            parallel_safe: true,
-        }
-    }
+        impl Tool for AskingTool {
+            fn spec(&self) -> ToolSpec {
+                parallel_spec("probe", PermissionClass::Exec)
+            }
 
-    /// Parallel-safe tool in the `exec` class, so `manual` asks before each of its calls.
-    struct AskingTool;
-
-    impl Tool for AskingTool {
-        fn spec(&self) -> ToolSpec {
-            parallel_spec("probe", PermissionClass::Exec)
+            fn run<'a>(
+                &'a self,
+                _prepared: Prepared,
+                _ctx: &'a ToolCtx,
+            ) -> Pin<Box<dyn Future<Output = ToolOutput> + Send + 'a>> {
+                Box::pin(async { ToolOutput::success("probed") })
+            }
         }
 
-        fn run<'a>(
-            &'a self,
-            _prepared: Prepared,
-            _ctx: &'a ToolCtx,
-        ) -> Pin<Box<dyn Future<Output = ToolOutput> + Send + 'a>> {
-            Box::pin(async { ToolOutput::success("probed") })
-        }
-    }
+        /// Parallel-safe tool whose call echoes `v` once every call sharing its barrier is running,
+        /// so a round that runs them one at a time never finishes.
+        struct RendezvousTool(Arc<Barrier>);
 
-    /// Parallel-safe tool whose call echoes `v` once every call sharing its barrier is running,
-    /// so a round that runs them one at a time never finishes.
-    struct RendezvousTool(Arc<Barrier>);
+        impl Tool for RendezvousTool {
+            fn spec(&self) -> ToolSpec {
+                parallel_spec("meet", PermissionClass::Read)
+            }
 
-    impl Tool for RendezvousTool {
-        fn spec(&self) -> ToolSpec {
-            parallel_spec("meet", PermissionClass::Read)
-        }
-
-        fn run<'a>(
-            &'a self,
-            prepared: Prepared,
-            _ctx: &'a ToolCtx,
-        ) -> Pin<Box<dyn Future<Output = ToolOutput> + Send + 'a>> {
-            Box::pin(async move {
-                self.0.wait().await;
-                ToolOutput::success(prepared.input["v"].to_string())
-            })
-        }
-    }
-
-    /// Parallel-safe tool whose call hands its cancel token to the test, then never finishes.
-    struct HangTool(mpsc::UnboundedSender<CancellationToken>);
-
-    impl Tool for HangTool {
-        fn spec(&self) -> ToolSpec {
-            parallel_spec("hang", PermissionClass::Read)
+            fn run<'a>(
+                &'a self,
+                prepared: Prepared,
+                _ctx: &'a ToolCtx,
+            ) -> Pin<Box<dyn Future<Output = ToolOutput> + Send + 'a>> {
+                Box::pin(async move {
+                    self.0.wait().await;
+                    ToolOutput::success(prepared.input["v"].to_string())
+                })
+            }
         }
 
-        fn run<'a>(
-            &'a self,
-            _prepared: Prepared,
-            ctx: &'a ToolCtx,
-        ) -> Pin<Box<dyn Future<Output = ToolOutput> + Send + 'a>> {
-            Box::pin(async move {
-                self.0.send(ctx.cancel.clone()).unwrap();
-                std::future::pending().await
-            })
+        /// Parallel-safe tool whose call hands its cancel token to the test, then never finishes.
+        struct HangTool(mpsc::UnboundedSender<CancellationToken>);
+
+        impl Tool for HangTool {
+            fn spec(&self) -> ToolSpec {
+                parallel_spec("hang", PermissionClass::Read)
+            }
+
+            fn run<'a>(
+                &'a self,
+                _prepared: Prepared,
+                ctx: &'a ToolCtx,
+            ) -> Pin<Box<dyn Future<Output = ToolOutput> + Send + 'a>> {
+                Box::pin(async move {
+                    self.0.send(ctx.cancel.clone()).unwrap();
+                    std::future::pending().await
+                })
+            }
         }
-    }
 
-    // ── run_tool_round ──
+        #[tokio::test]
+        async fn interrupt_during_approval_reports_every_call_not_run() {
+            // The first call passes the gate but never runs, since the interrupt lands while the
+            // second awaits approval. The rest of the round never starts.
+            let tools = ToolRegistry::new(vec![
+                Box::new(RendezvousTool(Arc::new(Barrier::new(1)))),
+                Box::new(AskingTool),
+                Box::new(EchoTool),
+            ]);
+            let sink = CapturingSink::default();
+            let mut dispatch_ctx = dispatch_with(Mode::Manual, &[], &[], Path::new("/repo"));
+            let (tx, mut rx) = mpsc::channel::<Op>(1);
+            tx.try_send(Op::Interrupt).unwrap();
+            let calls = vec![
+                call("tool_1", "meet", json!({"v": 1})),
+                call("tool_2", "probe", json!({})),
+                call("tool_3", "probe", json!({})),
+                call("tool_4", "echo", json!({})),
+            ];
 
-    #[tokio::test]
-    async fn run_tool_round_interrupt_during_approval_reports_every_call_not_run() {
-        // The first call passes the gate but never runs, since the interrupt lands while the
-        // second awaits approval. The rest of the round never starts.
-        let tools = ToolRegistry::new(vec![
-            Box::new(RendezvousTool(Arc::new(Barrier::new(1)))),
-            Box::new(AskingTool),
-            Box::new(EchoTool),
-        ]);
-        let sink = CapturingSink::default();
-        let mut dispatch_ctx = dispatch_with(Mode::Manual, &[], &[], Path::new("/repo"));
-        let (tx, mut rx) = mpsc::channel::<Op>(1);
-        tx.try_send(Op::Interrupt).unwrap();
-        let calls = vec![
-            call("tool_1", "meet", json!({"v": 1})),
-            call("tool_2", "probe", json!({})),
-            call("tool_3", "probe", json!({})),
-            call("tool_4", "echo", json!({})),
-        ];
-
-        let round = run_tool_round(
-            &tools,
-            calls,
-            &HashMap::new(),
-            &sink,
-            &mut rx,
-            &mut Inbox::default(),
-            &mut dispatch_ctx,
-        )
-        .await;
-
-        assert!(
-            matches!(round.abort, Some(TurnAbort::Cancelled)),
-            "got {:?}",
-            round.abort,
-        );
-        assert_eq!(approval_ids(&sink), ["tool_2"]);
-        let started: Vec<String> = sink
-            .events()
-            .into_iter()
-            .filter_map(|e| match e {
-                Event::ToolCallStart(call) => Some(call.id),
-                _ => None,
-            })
-            .collect();
-        assert_eq!(started, ["tool_1", "tool_2"]);
-        assert_eq!(
-            results(&round),
-            [
-                ("tool_1", NOT_RUN, true),
-                ("tool_2", NOT_RUN, true),
-                ("tool_3", NOT_RUN, true),
-                ("tool_4", NOT_RUN, true),
-            ],
-        );
-    }
-
-    #[tokio::test]
-    async fn run_tool_round_runs_consecutive_parallel_safe_calls_together() {
-        // A parse failure in the middle of the batch must not shift the results after it.
-        let tools = ToolRegistry::new(vec![
-            Box::new(RendezvousTool(Arc::new(Barrier::new(2)))),
-            Box::new(EchoTool),
-        ]);
-        let sink = CapturingSink::default();
-        let mut dispatch_ctx = dispatch_with(Mode::Manual, &[], &["*"], Path::new("/repo"));
-        let calls = vec![
-            call("tool_1", "meet", json!({"v": 1})),
-            call("tool_2", "meet", json!({})),
-            call("tool_3", "meet", json!({"v": 3})),
-            call("tool_4", "echo", json!({"v": 4})),
-        ];
-        let parse_errors = HashMap::from([("tool_2".to_owned(), "EOF".to_owned())]);
-
-        let round = tokio::time::timeout(
-            Duration::from_secs(10),
-            run_tool_round(
+            let round = run_tool_round(
                 &tools,
                 calls,
-                &parse_errors,
+                &HashMap::new(),
+                &sink,
+                &mut rx,
+                &mut Inbox::default(),
+                &mut dispatch_ctx,
+            )
+            .await;
+
+            assert!(
+                matches!(round.abort, Some(TurnAbort::Cancelled)),
+                "got {:?}",
+                round.abort,
+            );
+            assert_eq!(approval_ids(&sink), ["tool_2"]);
+            let started: Vec<String> = sink
+                .events()
+                .into_iter()
+                .filter_map(|e| match e {
+                    Event::ToolCallStart(call) => Some(call.id),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(started, ["tool_1", "tool_2"]);
+            assert_eq!(
+                results(&round),
+                [
+                    ("tool_1", NOT_RUN, true),
+                    ("tool_2", NOT_RUN, true),
+                    ("tool_3", NOT_RUN, true),
+                    ("tool_4", NOT_RUN, true),
+                ],
+            );
+        }
+
+        #[tokio::test]
+        async fn runs_consecutive_parallel_safe_calls_together() {
+            // A parse failure in the middle of the batch must not shift the results after it.
+            let tools = ToolRegistry::new(vec![
+                Box::new(RendezvousTool(Arc::new(Barrier::new(2)))),
+                Box::new(EchoTool),
+            ]);
+            let sink = CapturingSink::default();
+            let mut dispatch_ctx = dispatch_with(Mode::Manual, &[], &["*"], Path::new("/repo"));
+            let calls = vec![
+                call("tool_1", "meet", json!({"v": 1})),
+                call("tool_2", "meet", json!({})),
+                call("tool_3", "meet", json!({"v": 3})),
+                call("tool_4", "echo", json!({"v": 4})),
+            ];
+            let parse_errors = HashMap::from([("tool_2".to_owned(), "EOF".to_owned())]);
+
+            let round = tokio::time::timeout(
+                Duration::from_secs(10),
+                run_tool_round(
+                    &tools,
+                    calls,
+                    &parse_errors,
+                    &sink,
+                    &mut inert_ops(),
+                    &mut Inbox::default(),
+                    &mut dispatch_ctx,
+                ),
+            )
+            .await
+            .expect("the meet calls must run together");
+
+            assert!(round.abort.is_none(), "{:?}", round.abort);
+            assert_eq!(
+                results(&round),
+                [
+                    ("tool_1", "1", false),
+                    (
+                        "tool_2",
+                        "Tool input JSON failed to parse: EOF. Retry with a valid JSON object.",
+                        true,
+                    ),
+                    ("tool_3", "3", false),
+                    ("tool_4", r#"{"v":4}"#, false),
+                ],
+            );
+            let order: Vec<String> = sink
+                .events()
+                .into_iter()
+                .filter_map(|e| match e {
+                    Event::ToolCallStart(call) => Some(format!("start {}", call.id)),
+                    Event::ToolCallEnd(result) => Some(format!("end {}", result.id)),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(
+                order,
+                [
+                    "start tool_1",
+                    "start tool_2",
+                    "start tool_3",
+                    "end tool_1",
+                    "end tool_2",
+                    "end tool_3",
+                    "start tool_4",
+                    "end tool_4",
+                ],
+                "the echo call waits for the batch before it",
+            );
+        }
+
+        #[tokio::test]
+        async fn interrupt_while_calls_run_keeps_finished_results_and_cancels_the_rest() {
+            let (started_tx, mut started) = mpsc::unbounded_channel();
+            let tools = ToolRegistry::new(vec![
+                Box::new(RendezvousTool(Arc::new(Barrier::new(1)))),
+                Box::new(HangTool(started_tx)),
+            ]);
+            let sink = CapturingSink::default();
+            let mut dispatch_ctx = dispatch_with(Mode::Manual, &[], &[], Path::new("/repo"));
+            let (tx, mut rx) = mpsc::channel::<Op>(1);
+            let calls = vec![
+                call("tool_1", "meet", json!({"v": 1})),
+                call("tool_2", "hang", json!({})),
+                call("tool_3", "hang", json!({})),
+            ];
+            let (parse_errors, mut inbox) = (HashMap::new(), Inbox::default());
+            let interrupt = async {
+                let tokens = [started.recv().await.unwrap(), started.recv().await.unwrap()];
+                assert!(tokens.iter().all(|token| !token.is_cancelled()));
+                tx.send(Op::Interrupt).await.unwrap();
+                tokens
+            };
+
+            let (round, tokens) = tokio::join!(
+                run_tool_round(
+                    &tools,
+                    calls,
+                    &parse_errors,
+                    &sink,
+                    &mut rx,
+                    &mut inbox,
+                    &mut dispatch_ctx,
+                ),
+                interrupt,
+            );
+
+            assert!(
+                matches!(round.abort, Some(TurnAbort::Cancelled)),
+                "got {:?}",
+                round.abort,
+            );
+            assert_eq!(
+                results(&round),
+                [
+                    ("tool_1", "1", false),
+                    ("tool_2", INTERRUPTED, true),
+                    ("tool_3", INTERRUPTED, true),
+                ],
+            );
+            assert!(tokens.iter().all(CancellationToken::is_cancelled));
+        }
+
+        #[tokio::test]
+        async fn reports_the_list_only_a_successful_tasks_call_sets() {
+            let tools = ToolRegistry::new(vec![Box::new(TasksTool)]);
+            let sink = CapturingSink::default();
+            let mut dispatch_ctx = dispatch_with(Mode::Manual, &[], &[], Path::new("/repo"));
+            let both_in_progress = json!({"tasks": [
+                {"content": "Fix the parser", "status": "in_progress"},
+                {"content": "Fix the lexer", "status": "in_progress"},
+            ]});
+            let calls = vec![
+                call("call-1", "tasks", json!({"tasks": plan()})),
+                call("call-2", "tasks", both_in_progress),
+            ];
+
+            let round = run_tool_round(
+                &tools,
+                calls,
+                &HashMap::new(),
                 &sink,
                 &mut inert_ops(),
                 &mut Inbox::default(),
                 &mut dispatch_ctx,
-            ),
-        )
-        .await
-        .expect("the meet calls must run together");
-
-        assert!(round.abort.is_none(), "{:?}", round.abort);
-        assert_eq!(
-            results(&round),
-            [
-                ("tool_1", "1", false),
-                (
-                    "tool_2",
-                    "Tool input JSON failed to parse: EOF. Retry with a valid JSON object.",
-                    true,
-                ),
-                ("tool_3", "3", false),
-                ("tool_4", r#"{"v":4}"#, false),
-            ],
-        );
-        let order: Vec<String> = sink
-            .events()
-            .into_iter()
-            .filter_map(|e| match e {
-                Event::ToolCallStart(call) => Some(format!("start {}", call.id)),
-                Event::ToolCallEnd(result) => Some(format!("end {}", result.id)),
-                _ => None,
-            })
-            .collect();
-        assert_eq!(
-            order,
-            [
-                "start tool_1",
-                "start tool_2",
-                "start tool_3",
-                "end tool_1",
-                "end tool_2",
-                "end tool_3",
-                "start tool_4",
-                "end tool_4",
-            ],
-            "the echo call waits for the batch before it",
-        );
-    }
-
-    #[tokio::test]
-    async fn run_tool_round_interrupt_while_calls_run_keeps_finished_results_and_cancels_the_rest()
-    {
-        let (started_tx, mut started) = mpsc::unbounded_channel();
-        let tools = ToolRegistry::new(vec![
-            Box::new(RendezvousTool(Arc::new(Barrier::new(1)))),
-            Box::new(HangTool(started_tx)),
-        ]);
-        let sink = CapturingSink::default();
-        let mut dispatch_ctx = dispatch_with(Mode::Manual, &[], &[], Path::new("/repo"));
-        let (tx, mut rx) = mpsc::channel::<Op>(1);
-        let calls = vec![
-            call("tool_1", "meet", json!({"v": 1})),
-            call("tool_2", "hang", json!({})),
-            call("tool_3", "hang", json!({})),
-        ];
-        let (parse_errors, mut inbox) = (HashMap::new(), Inbox::default());
-        let interrupt = async {
-            let tokens = [started.recv().await.unwrap(), started.recv().await.unwrap()];
-            assert!(tokens.iter().all(|token| !token.is_cancelled()));
-            tx.send(Op::Interrupt).await.unwrap();
-            tokens
-        };
-
-        let (round, tokens) = tokio::join!(
-            run_tool_round(
-                &tools,
-                calls,
-                &parse_errors,
-                &sink,
-                &mut rx,
-                &mut inbox,
-                &mut dispatch_ctx,
-            ),
-            interrupt,
-        );
-
-        assert!(
-            matches!(round.abort, Some(TurnAbort::Cancelled)),
-            "got {:?}",
-            round.abort,
-        );
-        assert_eq!(
-            results(&round),
-            [
-                ("tool_1", "1", false),
-                ("tool_2", INTERRUPTED, true),
-                ("tool_3", INTERRUPTED, true),
-            ],
-        );
-        assert!(tokens.iter().all(CancellationToken::is_cancelled));
-    }
-
-    #[tokio::test]
-    async fn run_tool_round_reports_the_list_only_a_successful_tasks_call_sets() {
-        let tools = ToolRegistry::new(vec![Box::new(TasksTool)]);
-        let sink = CapturingSink::default();
-        let mut dispatch_ctx = dispatch_with(Mode::Manual, &[], &[], Path::new("/repo"));
-        let both_in_progress = json!({"tasks": [
-            {"content": "Fix the parser", "status": "in_progress"},
-            {"content": "Fix the lexer", "status": "in_progress"},
-        ]});
-        let calls = vec![
-            call("call-1", "tasks", json!({"tasks": plan()})),
-            call("call-2", "tasks", both_in_progress),
-        ];
-
-        let round = run_tool_round(
-            &tools,
-            calls,
-            &HashMap::new(),
-            &sink,
-            &mut inert_ops(),
-            &mut Inbox::default(),
-            &mut dispatch_ctx,
-        )
-        .await;
-
-        assert_eq!(round.tasks, Some(plan()));
-        assert!(
-            matches!(
-                &round.results[1],
-                ContentBlock::ToolResult { is_error: true, .. }
-            ),
-            "{:?}",
-            round.results,
-        );
-        let events = sink.events();
-        let updates: Vec<usize> = events
-            .iter()
-            .enumerate()
-            .filter(|(_, event)| matches!(event, Event::TasksUpdated(_)))
-            .map(|(i, _)| i)
-            .collect();
-        assert_eq!(updates, [2], "{events:?}");
-        assert!(
-            matches!(&events[1], Event::ToolCallEnd(result) if result.id == "call-1"),
-            "{events:?}",
-        );
-        assert_eq!(events[2], Event::TasksUpdated(plan()));
-    }
-
-    // ── Dispatcher::gate ──
-
-    #[tokio::test]
-    async fn gate_allow_proceeds_without_an_approval_event() {
-        // `echo` is an exec-class tool, so `manual` asks unless a class-wide allow clears it.
-        let tools = ToolRegistry::new(vec![Box::new(EchoTool)]);
-        let sink = CapturingSink::default();
-        let mut dispatch_ctx = dispatch_with(Mode::Manual, &[], &["*"], Path::new("/repo"));
-
-        let gate = gate_call(
-            &tools,
-            "tool_1",
-            "echo",
-            json!({"v": 1}),
-            &sink,
-            &mut inert_ops(),
-            &mut dispatch_ctx,
-        )
-        .await
-        .expect("allow must not abort");
-
-        assert_eq!(gate.prepared().input, json!({"v": 1}));
-        assert_eq!(approval_ids(&sink), [] as [&str; 0]);
-    }
-
-    #[tokio::test]
-    async fn gate_deny_rule_short_circuits_to_a_synthetic_denial() {
-        let tools = ToolRegistry::new(vec![Box::new(EchoTool)]);
-        let sink = CapturingSink::default();
-        let mut dispatch_ctx = dispatch_with(Mode::Manual, &["*"], &[], Path::new("/repo"));
-
-        let denial = gate_call(
-            &tools,
-            "tool_1",
-            "echo",
-            json!({}),
-            &sink,
-            &mut inert_ops(),
-            &mut dispatch_ctx,
-        )
-        .await
-        .expect("deny resolves without abort")
-        .output();
-
-        assert!(denial.is_error);
-        assert_eq!(
-            denial.content,
-            "The echo call was denied by the `deny.exec` pattern `*`. \
-             Do not retry it. \
-             Choose a different approach or ask the user to adjust permissions."
-        );
-        assert_eq!(
-            approval_ids(&sink),
-            [] as [&str; 0],
-            "a deny rule never prompts"
-        );
-    }
-
-    #[tokio::test]
-    async fn gate_ask_emits_event_and_approve_proceeds() {
-        let tools = ToolRegistry::new(vec![Box::new(EchoTool)]);
-        let sink = CapturingSink::default();
-        let mut dispatch_ctx = dispatch_with(Mode::Manual, &[], &[], Path::new("/repo"));
-        let (tx, mut rx) = mpsc::channel::<Op>(1);
-        tx.try_send(Op::Resolve {
-            id: "tool_1".to_owned(),
-            decision: Decision::Approve,
-        })
-        .unwrap();
-
-        let gate = gate_call(
-            &tools,
-            "tool_1",
-            "echo",
-            json!({}),
-            &sink,
-            &mut rx,
-            &mut dispatch_ctx,
-        )
-        .await
-        .expect("approve resolves without abort");
-
-        assert_eq!(gate.prepared().input, json!({}));
-        assert!(
-            matches!(
-                sink.events().as_slice(),
-                [Event::ApprovalRequested {
-                    id,
-                    basis: Basis::Mode(Mode::Manual),
-                    ..
-                }] if id == "tool_1",
-            ),
-            "ask must surface one approval event carrying the call id and its basis: {:?}",
-            sink.events(),
-        );
-    }
-
-    #[tokio::test]
-    async fn gate_allow_for_session_runs_later_calls_the_rule_covers_unasked() {
-        let tools = ToolRegistry::new(vec![Box::new(BashTool::default())]);
-        let sink = CapturingSink::default();
-        let mut dispatch_ctx = dispatch_with(Mode::Manual, &[], &[], Path::new("/repo"));
-        let rule = Rule::parse(PermissionClass::Exec, "cargo test *").unwrap();
-        let (tx, mut rx) = mpsc::channel::<Op>(1);
-        tx.try_send(Op::Resolve {
-            id: "tool_1".to_owned(),
-            decision: Decision::AllowForSession {
-                rule: Box::new(rule.clone()),
-            },
-        })
-        .unwrap();
-        drop(tx);
-
-        for (id, command) in [("tool_1", "cargo test"), ("tool_2", "cargo test --release")] {
-            let gate = gate_call(
-                &tools,
-                id,
-                "bash",
-                json!({ "command": command }),
-                &sink,
-                &mut rx,
-                &mut dispatch_ctx,
             )
-            .await
-            .expect("the granted rule settles the second call without waiting");
-            assert_eq!(gate.prepared().input, json!({ "command": command }));
+            .await;
+
+            assert_eq!(round.tasks, Some(plan()));
+            assert!(
+                matches!(
+                    &round.results[1],
+                    ContentBlock::ToolResult { is_error: true, .. }
+                ),
+                "{:?}",
+                round.results,
+            );
+            let events = sink.events();
+            let updates: Vec<usize> = events
+                .iter()
+                .enumerate()
+                .filter(|(_, event)| matches!(event, Event::TasksUpdated(_)))
+                .map(|(i, _)| i)
+                .collect();
+            assert_eq!(updates, [2], "{events:?}");
+            assert!(
+                matches!(&events[1], Event::ToolCallEnd(result) if result.id == "call-1"),
+                "{events:?}",
+            );
+            assert_eq!(events[2], Event::TasksUpdated(plan()));
         }
-
-        let events = sink.events();
-        let suggested: Vec<String> = events
-            .iter()
-            .filter_map(|e| match e {
-                Event::ApprovalRequested { grant, .. } => Some(
-                    grant
-                        .as_ref()
-                        .expect("a command offers a grant")
-                        .suggested()
-                        .pattern()
-                        .to_owned(),
-                ),
-                _ => None,
-            })
-            .collect();
-        assert_eq!(suggested, ["cargo test"], "only the first call asks");
-        assert!(
-            events.iter().any(
-                |e| matches!(e, Event::SessionRulesUpdated(rules) if *rules == [rule.clone()])
-            ),
-            "{events:?}",
-        );
-        assert_eq!(dispatch_ctx.policy.session_allow(), [rule]);
     }
 
-    #[tokio::test]
-    async fn gate_allow_for_session_denies_a_rule_the_call_grant_does_not_admit() {
-        // The engine re-checks the frontend's rule against its own grant: a rule that misses the
-        // call, one in another class, and any rule for a call that offered no grant all deny.
-        let tools = ToolRegistry::new(vec![Box::new(BashTool::default()), Box::new(EchoTool)]);
-        for (name, input, (class, pattern)) in [
-            (
-                "bash",
-                json!({ "command": "cargo test" }),
-                (PermissionClass::Exec, "cargo build *"),
-            ),
-            (
-                "bash",
-                json!({ "command": "cargo test" }),
-                (PermissionClass::Edit, "*"),
-            ),
-            ("echo", json!({}), (PermissionClass::Exec, "*")),
-        ] {
-            let rule = Rule::parse(class, pattern).unwrap();
-            let sink = CapturingSink::default();
-            let mut dispatch_ctx = dispatch_with(Mode::Manual, &[], &[], Path::new("/repo"));
-            let (tx, mut rx) = mpsc::channel::<Op>(1);
-            tx.try_send(Op::Resolve {
-                id: "tool_1".to_owned(),
-                decision: Decision::AllowForSession {
-                    rule: Box::new(rule),
-                },
-            })
-            .unwrap();
+    mod dispatcher {
+        use super::*;
 
-            let denial = gate_call(
-                &tools,
-                "tool_1",
-                name,
-                input,
-                &sink,
-                &mut rx,
-                &mut dispatch_ctx,
-            )
-            .await
-            .expect("a refused rule resolves without abort")
-            .output();
+        mod gate {
+            use super::*;
 
-            assert_eq!(
-                denial.content,
-                format!(
-                    "The {name} call was denied \
-                     because the session rule chosen in its approval does not cover it. \
+            /// How [`gate_call`] settled a call, without the tool a ready call borrows.
+            enum Gated {
+                Ready(Prepared),
+                Settled(ToolOutput),
+            }
+
+            impl Gated {
+                fn prepared(self) -> Prepared {
+                    match self {
+                        Self::Ready(prepared) => prepared,
+                        Self::Settled(output) => panic!("the call was settled: {}", output.content),
+                    }
+                }
+
+                fn output(self) -> ToolOutput {
+                    match self {
+                        Self::Settled(output) => output,
+                        Self::Ready(prepared) => panic!("the call is ready to run: {prepared:?}"),
+                    }
+                }
+            }
+
+            /// Gates the call `id` to `name` the way a round does.
+            async fn gate_call(
+                tools: &ToolRegistry,
+                id: &str,
+                name: &str,
+                input: serde_json::Value,
+                sink: &dyn EventSink,
+                ops: &mut mpsc::Receiver<Op>,
+                dispatch_ctx: &mut DispatchContext<'_>,
+            ) -> AbortResult<Gated> {
+                let parse_errors = HashMap::new();
+                let mut inbox = Inbox::default();
+                let mut dispatcher = Dispatcher {
+                    tools,
+                    parse_errors: &parse_errors,
+                    sink,
+                    ops,
+                    inbox: &mut inbox,
+                    dispatch_ctx,
+                };
+                Ok(match dispatcher.gate(id, name, input).await? {
+                    Gate::Ready { prepared, .. } => Gated::Ready(prepared),
+                    Gate::Settled(output) => Gated::Settled(output),
+                })
+            }
+
+            #[tokio::test]
+            async fn allow_proceeds_without_an_approval_event() {
+                // `echo` is exec-class, so `manual` asks unless a class-wide allow clears it.
+                let tools = ToolRegistry::new(vec![Box::new(EchoTool)]);
+                let sink = CapturingSink::default();
+                let mut dispatch_ctx = dispatch_with(Mode::Manual, &[], &["*"], Path::new("/repo"));
+
+                let gate = gate_call(
+                    &tools,
+                    "tool_1",
+                    "echo",
+                    json!({"v": 1}),
+                    &sink,
+                    &mut inert_ops(),
+                    &mut dispatch_ctx,
+                )
+                .await
+                .expect("allow must not abort");
+
+                assert_eq!(gate.prepared().input, json!({"v": 1}));
+                assert_eq!(approval_ids(&sink), [] as [&str; 0]);
+            }
+
+            #[tokio::test]
+            async fn deny_rule_short_circuits_to_a_synthetic_denial() {
+                let tools = ToolRegistry::new(vec![Box::new(EchoTool)]);
+                let sink = CapturingSink::default();
+                let mut dispatch_ctx = dispatch_with(Mode::Manual, &["*"], &[], Path::new("/repo"));
+
+                let denial = gate_call(
+                    &tools,
+                    "tool_1",
+                    "echo",
+                    json!({}),
+                    &sink,
+                    &mut inert_ops(),
+                    &mut dispatch_ctx,
+                )
+                .await
+                .expect("deny resolves without abort")
+                .output();
+
+                assert!(denial.is_error);
+                assert_eq!(
+                    denial.content,
+                    "The echo call was denied by the `deny.exec` pattern `*`. \
                      Do not retry it. \
                      Choose a different approach or ask the user to adjust permissions."
-                ),
-                "{class} {pattern}"
-            );
-            assert_eq!(dispatch_ctx.policy.session_allow(), [], "{class} {pattern}");
-            let events = sink.events();
-            assert!(
-                events.iter().any(|e| matches!(
-                    e,
-                    Event::Error(msg) if msg.starts_with(&format!("Session rule refused, so the {name} call was denied: "))
-                )),
-                "{class} {pattern}: {events:?}",
-            );
-            assert!(
-                !events
+                );
+                assert_eq!(
+                    approval_ids(&sink),
+                    [] as [&str; 0],
+                    "a deny rule never prompts"
+                );
+            }
+
+            #[tokio::test]
+            async fn ask_emits_event_and_approve_proceeds() {
+                let tools = ToolRegistry::new(vec![Box::new(EchoTool)]);
+                let sink = CapturingSink::default();
+                let mut dispatch_ctx = dispatch_with(Mode::Manual, &[], &[], Path::new("/repo"));
+                let (tx, mut rx) = mpsc::channel::<Op>(1);
+                tx.try_send(Op::Resolve {
+                    id: "tool_1".to_owned(),
+                    decision: Decision::Approve,
+                })
+                .unwrap();
+
+                let gate = gate_call(
+                    &tools,
+                    "tool_1",
+                    "echo",
+                    json!({}),
+                    &sink,
+                    &mut rx,
+                    &mut dispatch_ctx,
+                )
+                .await
+                .expect("approve resolves without abort");
+
+                assert_eq!(gate.prepared().input, json!({}));
+                assert!(
+                    matches!(
+                        sink.events().as_slice(),
+                        [Event::ApprovalRequested {
+                            id,
+                            basis: Basis::Mode(Mode::Manual),
+                            ..
+                        }] if id == "tool_1",
+                    ),
+                    "ask must surface one approval event carrying the call id and its basis: {:?}",
+                    sink.events(),
+                );
+            }
+
+            #[tokio::test]
+            async fn allow_for_session_runs_later_calls_the_rule_covers_unasked() {
+                let tools = ToolRegistry::new(vec![Box::new(BashTool::default())]);
+                let sink = CapturingSink::default();
+                let mut dispatch_ctx = dispatch_with(Mode::Manual, &[], &[], Path::new("/repo"));
+                let rule = Rule::parse(PermissionClass::Exec, "cargo test *").unwrap();
+                let (tx, mut rx) = mpsc::channel::<Op>(1);
+                tx.try_send(Op::Resolve {
+                    id: "tool_1".to_owned(),
+                    decision: Decision::AllowForSession {
+                        rule: Box::new(rule.clone()),
+                    },
+                })
+                .unwrap();
+                drop(tx);
+
+                for (id, command) in [("tool_1", "cargo test"), ("tool_2", "cargo test --release")]
+                {
+                    let gate = gate_call(
+                        &tools,
+                        id,
+                        "bash",
+                        json!({ "command": command }),
+                        &sink,
+                        &mut rx,
+                        &mut dispatch_ctx,
+                    )
+                    .await
+                    .expect("the granted rule settles the second call without waiting");
+                    assert_eq!(gate.prepared().input, json!({ "command": command }));
+                }
+
+                let events = sink.events();
+                let suggested: Vec<String> = events
                     .iter()
-                    .any(|e| matches!(e, Event::SessionRulesUpdated(_))),
-                "{class} {pattern}: {events:?}",
-            );
+                    .filter_map(|e| match e {
+                        Event::ApprovalRequested { grant, .. } => Some(
+                            grant
+                                .as_ref()
+                                .expect("a command offers a grant")
+                                .suggested()
+                                .pattern()
+                                .to_owned(),
+                        ),
+                        _ => None,
+                    })
+                    .collect();
+                assert_eq!(suggested, ["cargo test"], "only the first call asks");
+                assert!(
+                    events.iter().any(|e| matches!(
+                        e,
+                        Event::SessionRulesUpdated(rules) if *rules == [rule.clone()]
+                    )),
+                    "{events:?}",
+                );
+                assert_eq!(dispatch_ctx.policy.session_allow(), [rule]);
+            }
+
+            #[tokio::test]
+            async fn allow_for_session_denies_a_rule_the_call_grant_does_not_admit() {
+                // The engine re-checks the frontend's rule against its own grant: a rule that
+                // misses the call, one in another class, and any rule for a call that offered no
+                // grant all deny.
+                let tools =
+                    ToolRegistry::new(vec![Box::new(BashTool::default()), Box::new(EchoTool)]);
+                for (name, input, (class, pattern)) in [
+                    (
+                        "bash",
+                        json!({ "command": "cargo test" }),
+                        (PermissionClass::Exec, "cargo build *"),
+                    ),
+                    (
+                        "bash",
+                        json!({ "command": "cargo test" }),
+                        (PermissionClass::Edit, "*"),
+                    ),
+                    ("echo", json!({}), (PermissionClass::Exec, "*")),
+                ] {
+                    let rule = Rule::parse(class, pattern).unwrap();
+                    let sink = CapturingSink::default();
+                    let mut dispatch_ctx =
+                        dispatch_with(Mode::Manual, &[], &[], Path::new("/repo"));
+                    let (tx, mut rx) = mpsc::channel::<Op>(1);
+                    tx.try_send(Op::Resolve {
+                        id: "tool_1".to_owned(),
+                        decision: Decision::AllowForSession {
+                            rule: Box::new(rule),
+                        },
+                    })
+                    .unwrap();
+
+                    let denial = gate_call(
+                        &tools,
+                        "tool_1",
+                        name,
+                        input,
+                        &sink,
+                        &mut rx,
+                        &mut dispatch_ctx,
+                    )
+                    .await
+                    .expect("a refused rule resolves without abort")
+                    .output();
+
+                    assert_eq!(
+                        denial.content,
+                        format!(
+                            "The {name} call was denied \
+                             because the session rule chosen in its approval does not cover it. \
+                             Do not retry it. \
+                             Choose a different approach or ask the user to adjust permissions."
+                        ),
+                        "{class} {pattern}"
+                    );
+                    assert_eq!(dispatch_ctx.policy.session_allow(), [], "{class} {pattern}");
+                    let events = sink.events();
+                    assert!(
+                        events.iter().any(|e| matches!(
+                            e,
+                            Event::Error(msg) if msg.starts_with(&format!("Session rule refused, so the {name} call was denied: "))
+                        )),
+                        "{class} {pattern}: {events:?}",
+                    );
+                    assert!(
+                        !events
+                            .iter()
+                            .any(|e| matches!(e, Event::SessionRulesUpdated(_))),
+                        "{class} {pattern}: {events:?}",
+                    );
+                }
+            }
+
+            #[tokio::test]
+            async fn ask_undeliverable_event_fails_closed() {
+                let tools = ToolRegistry::new(vec![Box::new(EchoTool)]);
+                let mut dispatch_ctx = dispatch_with(Mode::Manual, &[], &[], Path::new("/repo"));
+                let (_tx, mut rx) = mpsc::channel::<Op>(1);
+
+                let denial = gate_call(
+                    &tools,
+                    "tool_1",
+                    "echo",
+                    json!({}),
+                    &FailingSink,
+                    &mut rx,
+                    &mut dispatch_ctx,
+                )
+                .await
+                .expect("an undeliverable approval resolves without abort")
+                .output();
+
+                assert_eq!(
+                    denial.content,
+                    "The echo call was denied \
+                     because its approval request could not reach the user. \
+                     Do not retry it. \
+                     Choose a different approach or ask the user to adjust permissions."
+                );
+            }
+
+            #[tokio::test]
+            async fn ask_deny_decision_yields_a_synthetic_denial() {
+                let tools = ToolRegistry::new(vec![Box::new(EchoTool)]);
+                let sink = CapturingSink::default();
+                let mut dispatch_ctx = dispatch_with(Mode::Manual, &[], &[], Path::new("/repo"));
+                let (tx, mut rx) = mpsc::channel::<Op>(1);
+                tx.try_send(Op::Resolve {
+                    id: "tool_1".to_owned(),
+                    decision: Decision::Deny,
+                })
+                .unwrap();
+
+                let denial = gate_call(
+                    &tools,
+                    "tool_1",
+                    "echo",
+                    json!({}),
+                    &sink,
+                    &mut rx,
+                    &mut dispatch_ctx,
+                )
+                .await
+                .expect("deny decision resolves without abort")
+                .output();
+
+                assert!(denial.is_error);
+                assert_eq!(
+                    denial.content,
+                    "The echo call was denied by the user. \
+                     Do not retry it. \
+                     Choose a different approach or ask the user to adjust permissions."
+                );
+            }
+
+            #[tokio::test]
+            async fn unknown_tool_settles_without_consulting_the_policy() {
+                // An unknown tool has no permission class, so a class-wide deny must not catch it,
+                // and the model reads why the call failed.
+                let tools = ToolRegistry::new(vec![]);
+                let sink = CapturingSink::default();
+                let mut dispatch_ctx = dispatch_with(Mode::Manual, &["*"], &[], Path::new("/repo"));
+
+                let output = gate_call(
+                    &tools,
+                    "tool_1",
+                    "mystery",
+                    json!({}),
+                    &sink,
+                    &mut inert_ops(),
+                    &mut dispatch_ctx,
+                )
+                .await
+                .expect("unknown tool resolves without abort")
+                .output();
+
+                assert_eq!(
+                    (output.content.as_str(), output.is_error),
+                    ("Unknown tool: mystery", true),
+                );
+                assert_eq!(approval_ids(&sink), [] as [&str; 0]);
+            }
+
+            #[cfg(unix)]
+            #[tokio::test]
+            async fn pins_a_path_input_to_the_resolved_target() {
+                let dir = tempfile::tempdir().unwrap();
+                let cwd = dunce::canonicalize(dir.path()).unwrap();
+                std::fs::write(cwd.join("real.txt"), "x").unwrap();
+                std::os::unix::fs::symlink("real.txt", cwd.join("link.txt")).unwrap();
+                let tools = ToolRegistry::new(vec![Box::new(ReadTool)]);
+                let mut dispatch_ctx = dispatch_with(Mode::Manual, &[], &[], &cwd);
+
+                let gate = gate_call(
+                    &tools,
+                    "tool_1",
+                    "read",
+                    json!({"file_path": "link.txt"}),
+                    &CapturingSink::default(),
+                    &mut inert_ops(),
+                    &mut dispatch_ctx,
+                )
+                .await
+                .expect("a read resolves without abort");
+
+                assert_eq!(
+                    gate.prepared().input,
+                    json!({"file_path": cwd.join("real.txt")}),
+                );
+            }
+
+            #[cfg(unix)]
+            #[tokio::test]
+            async fn allows_edits_inside_every_root_and_asks_past_a_symlink_out_of_them() {
+                // The cwd and the extra root form one set of roots: a link from one into the other
+                // stays inside, and a link from either to anywhere else asks.
+                let dir = tempfile::tempdir().unwrap();
+                let base = dunce::canonicalize(dir.path()).unwrap();
+                let (repo, extra, outside) =
+                    (base.join("repo"), base.join("extra"), base.join("outside"));
+                for root in [&repo, &extra, &outside] {
+                    std::fs::create_dir(root).unwrap();
+                }
+                std::os::unix::fs::symlink("../extra/notes.md", repo.join("to-extra.md")).unwrap();
+                std::os::unix::fs::symlink("../outside/notes.md", extra.join("to-outside.md"))
+                    .unwrap();
+                let workspace =
+                    Workspace::resolve(&repo, &[extra.to_str().unwrap().to_owned()]).unwrap();
+                let tools = ToolRegistry::new(vec![Box::new(WriteTool)]);
+                let mut dispatch_ctx = DispatchContext {
+                    workspace: Arc::new(workspace),
+                    ..dispatch_with(Mode::Manual, &[], &[], &repo)
+                };
+
+                for (id, path, asks) in [
+                    ("in_cwd", repo.join("plain.md"), false),
+                    ("in_extra", extra.join("new.md"), false),
+                    ("into_extra", repo.join("to-extra.md"), false),
+                    ("out_of_extra", extra.join("to-outside.md"), true),
+                    ("outside", outside.join("new.md"), true),
+                ] {
+                    let sink = CapturingSink::default();
+                    let (tx, mut rx) = mpsc::channel::<Op>(1);
+                    tx.try_send(Op::Resolve {
+                        id: id.to_owned(),
+                        decision: Decision::Deny,
+                    })
+                    .unwrap();
+
+                    let gate = gate_call(
+                        &tools,
+                        id,
+                        "write",
+                        json!({"file_path": path, "content": "x"}),
+                        &sink,
+                        &mut rx,
+                        &mut dispatch_ctx,
+                    )
+                    .await
+                    .expect("a write resolves without abort");
+
+                    assert_eq!(
+                        approval_ids(&sink),
+                        if asks { vec![id] } else { vec![] },
+                        "{id}"
+                    );
+                    assert_eq!(matches!(gate, Gated::Ready(_)), !asks, "{id}");
+                }
+            }
         }
     }
 
-    #[tokio::test]
-    async fn gate_ask_undeliverable_event_fails_closed() {
-        let tools = ToolRegistry::new(vec![Box::new(EchoTool)]);
-        let mut dispatch_ctx = dispatch_with(Mode::Manual, &[], &[], Path::new("/repo"));
-        let (_tx, mut rx) = mpsc::channel::<Op>(1);
+    mod await_approval {
+        use super::*;
 
-        let denial = gate_call(
-            &tools,
-            "tool_1",
-            "echo",
-            json!({}),
-            &FailingSink,
-            &mut rx,
-            &mut dispatch_ctx,
-        )
-        .await
-        .expect("an undeliverable approval resolves without abort")
-        .output();
-
-        assert_eq!(
-            denial.content,
-            "The echo call was denied because its approval request could not reach the user. \
-             Do not retry it. \
-             Choose a different approach or ask the user to adjust permissions."
-        );
-    }
-
-    #[tokio::test]
-    async fn gate_ask_deny_decision_yields_a_synthetic_denial() {
-        let tools = ToolRegistry::new(vec![Box::new(EchoTool)]);
-        let sink = CapturingSink::default();
-        let mut dispatch_ctx = dispatch_with(Mode::Manual, &[], &[], Path::new("/repo"));
-        let (tx, mut rx) = mpsc::channel::<Op>(1);
-        tx.try_send(Op::Resolve {
-            id: "tool_1".to_owned(),
-            decision: Decision::Deny,
-        })
-        .unwrap();
-
-        let denial = gate_call(
-            &tools,
-            "tool_1",
-            "echo",
-            json!({}),
-            &sink,
-            &mut rx,
-            &mut dispatch_ctx,
-        )
-        .await
-        .expect("deny decision resolves without abort")
-        .output();
-
-        assert!(denial.is_error);
-        assert_eq!(
-            denial.content,
-            "The echo call was denied by the user. \
-             Do not retry it. \
-             Choose a different approach or ask the user to adjust permissions."
-        );
-    }
-
-    #[tokio::test]
-    async fn gate_unknown_tool_settles_without_consulting_the_policy() {
-        // An unknown tool has no permission class, so a class-wide deny must not catch it, and
-        // the model reads why the call failed.
-        let tools = ToolRegistry::new(vec![]);
-        let sink = CapturingSink::default();
-        let mut dispatch_ctx = dispatch_with(Mode::Manual, &["*"], &[], Path::new("/repo"));
-
-        let output = gate_call(
-            &tools,
-            "tool_1",
-            "mystery",
-            json!({}),
-            &sink,
-            &mut inert_ops(),
-            &mut dispatch_ctx,
-        )
-        .await
-        .expect("unknown tool resolves without abort")
-        .output();
-
-        assert_eq!(
-            (output.content.as_str(), output.is_error),
-            ("Unknown tool: mystery", true),
-        );
-        assert_eq!(approval_ids(&sink), [] as [&str; 0]);
-    }
-
-    #[cfg(unix)]
-    #[tokio::test]
-    async fn gate_pins_a_path_input_to_the_resolved_target() {
-        let dir = tempfile::tempdir().unwrap();
-        let cwd = dunce::canonicalize(dir.path()).unwrap();
-        std::fs::write(cwd.join("real.txt"), "x").unwrap();
-        std::os::unix::fs::symlink("real.txt", cwd.join("link.txt")).unwrap();
-        let tools = ToolRegistry::new(vec![Box::new(ReadTool)]);
-        let mut dispatch_ctx = dispatch_with(Mode::Manual, &[], &[], &cwd);
-
-        let gate = gate_call(
-            &tools,
-            "tool_1",
-            "read",
-            json!({"file_path": "link.txt"}),
-            &CapturingSink::default(),
-            &mut inert_ops(),
-            &mut dispatch_ctx,
-        )
-        .await
-        .expect("a read resolves without abort");
-
-        assert_eq!(
-            gate.prepared().input,
-            json!({"file_path": cwd.join("real.txt")}),
-        );
-    }
-
-    #[cfg(unix)]
-    #[tokio::test]
-    async fn gate_allows_edits_inside_every_root_and_asks_past_a_symlink_out_of_them() {
-        // The cwd and the extra root form one set of roots: a link from one into the other stays
-        // inside, and a link from either to anywhere else asks.
-        let dir = tempfile::tempdir().unwrap();
-        let base = dunce::canonicalize(dir.path()).unwrap();
-        let (repo, extra, outside) = (base.join("repo"), base.join("extra"), base.join("outside"));
-        for root in [&repo, &extra, &outside] {
-            std::fs::create_dir(root).unwrap();
-        }
-        std::os::unix::fs::symlink("../extra/notes.md", repo.join("to-extra.md")).unwrap();
-        std::os::unix::fs::symlink("../outside/notes.md", extra.join("to-outside.md")).unwrap();
-        let workspace = Workspace::resolve(&repo, &[extra.to_str().unwrap().to_owned()]).unwrap();
-        let tools = ToolRegistry::new(vec![Box::new(WriteTool)]);
-        let mut dispatch_ctx = DispatchContext {
-            workspace: Arc::new(workspace),
-            ..dispatch_with(Mode::Manual, &[], &[], &repo)
-        };
-
-        for (id, path, asks) in [
-            ("in_cwd", repo.join("plain.md"), false),
-            ("in_extra", extra.join("new.md"), false),
-            ("into_extra", repo.join("to-extra.md"), false),
-            ("out_of_extra", extra.join("to-outside.md"), true),
-            ("outside", outside.join("new.md"), true),
-        ] {
-            let sink = CapturingSink::default();
-            let (tx, mut rx) = mpsc::channel::<Op>(1);
+        #[tokio::test]
+        async fn ignores_a_stale_decision_for_another_call() {
+            let (tx, mut rx) = mpsc::channel::<Op>(2);
             tx.try_send(Op::Resolve {
-                id: id.to_owned(),
+                id: "other".to_owned(),
+                decision: Decision::Approve,
+            })
+            .unwrap();
+            tx.try_send(Op::Resolve {
+                id: "tool_1".to_owned(),
                 decision: Decision::Deny,
             })
             .unwrap();
 
-            let gate = gate_call(
-                &tools,
-                id,
-                "write",
-                json!({"file_path": path, "content": "x"}),
-                &sink,
-                &mut rx,
-                &mut dispatch_ctx,
-            )
-            .await
-            .expect("a write resolves without abort");
-
-            assert_eq!(
-                approval_ids(&sink),
-                if asks { vec![id] } else { vec![] },
-                "{id}"
-            );
-            assert_eq!(matches!(gate, Gated::Ready(_)), !asks, "{id}");
-        }
-    }
-
-    // ── await_approval ──
-
-    #[tokio::test]
-    async fn await_approval_ignores_a_stale_decision_for_another_call() {
-        let (tx, mut rx) = mpsc::channel::<Op>(2);
-        tx.try_send(Op::Resolve {
-            id: "other".to_owned(),
-            decision: Decision::Approve,
-        })
-        .unwrap();
-        tx.try_send(Op::Resolve {
-            id: "tool_1".to_owned(),
-            decision: Decision::Deny,
-        })
-        .unwrap();
-
-        let decision = await_approval(
-            "tool_1",
-            &mut rx,
-            &mut Inbox::default(),
-            &CapturingSink::default(),
-        )
-        .await
-        .expect("matching decision resolves");
-        assert_eq!(decision, Decision::Deny);
-    }
-
-    #[tokio::test]
-    async fn await_approval_holds_a_mid_approval_submit_and_mode_switch_in_the_inbox() {
-        let (tx, mut rx) = mpsc::channel::<Op>(3);
-        tx.try_send(Op::Queue("queued".to_owned())).unwrap();
-        tx.try_send(Op::SetMode(Mode::Plan)).unwrap();
-        tx.try_send(Op::Resolve {
-            id: "tool_1".to_owned(),
-            decision: Decision::Approve,
-        })
-        .unwrap();
-        let mut inbox = Inbox::default();
-        let sink = CapturingSink::default();
-
-        let decision = await_approval("tool_1", &mut rx, &mut inbox, &sink)
-            .await
-            .expect("approval resolves");
-
-        assert_eq!(decision, Decision::Approve);
-        assert_eq!(inbox.prompts, vec!["queued".to_owned()]);
-        assert_eq!(inbox.mode, Some(Mode::Plan));
-        assert!(
-            matches!(sink.events().as_slice(), [Event::ModeChanged(Mode::Plan)]),
-            "{:?}",
-            sink.events(),
-        );
-    }
-
-    #[tokio::test]
-    async fn await_approval_interrupt_and_shutdown_abort_the_turn() {
-        for (op, want_shutdown) in [(Op::Interrupt, false), (Op::Shutdown, true)] {
-            let (tx, mut rx) = mpsc::channel::<Op>(1);
-            tx.try_send(op.clone()).unwrap();
-            let abort = await_approval(
+            let decision = await_approval(
                 "tool_1",
                 &mut rx,
                 &mut Inbox::default(),
                 &CapturingSink::default(),
             )
             .await
-            .expect_err("interrupt / shutdown abort the wait");
-            if want_shutdown {
-                assert!(matches!(abort, TurnAbort::Shutdown), "{op:?}");
-            } else {
-                assert!(matches!(abort, TurnAbort::Cancelled), "{op:?}");
+            .expect("matching decision resolves");
+            assert_eq!(decision, Decision::Deny);
+        }
+
+        #[tokio::test]
+        async fn holds_a_mid_approval_submit_and_mode_switch_in_the_inbox() {
+            let (tx, mut rx) = mpsc::channel::<Op>(3);
+            tx.try_send(Op::Queue("queued".to_owned())).unwrap();
+            tx.try_send(Op::SetMode(Mode::Plan)).unwrap();
+            tx.try_send(Op::Resolve {
+                id: "tool_1".to_owned(),
+                decision: Decision::Approve,
+            })
+            .unwrap();
+            let mut inbox = Inbox::default();
+            let sink = CapturingSink::default();
+
+            let decision = await_approval("tool_1", &mut rx, &mut inbox, &sink)
+                .await
+                .expect("approval resolves");
+
+            assert_eq!(decision, Decision::Approve);
+            assert_eq!(inbox.prompts, vec!["queued".to_owned()]);
+            assert_eq!(inbox.mode, Some(Mode::Plan));
+            assert!(
+                matches!(sink.events().as_slice(), [Event::ModeChanged(Mode::Plan)]),
+                "{:?}",
+                sink.events(),
+            );
+        }
+
+        #[tokio::test]
+        async fn interrupt_and_shutdown_abort_the_turn() {
+            for (op, want_shutdown) in [(Op::Interrupt, false), (Op::Shutdown, true)] {
+                let (tx, mut rx) = mpsc::channel::<Op>(1);
+                tx.try_send(op.clone()).unwrap();
+                let abort = await_approval(
+                    "tool_1",
+                    &mut rx,
+                    &mut Inbox::default(),
+                    &CapturingSink::default(),
+                )
+                .await
+                .expect_err("interrupt / shutdown abort the wait");
+                if want_shutdown {
+                    assert!(matches!(abort, TurnAbort::Shutdown), "{op:?}");
+                } else {
+                    assert!(matches!(abort, TurnAbort::Cancelled), "{op:?}");
+                }
             }
         }
     }

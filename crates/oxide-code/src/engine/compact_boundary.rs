@@ -76,133 +76,138 @@ mod tests {
     use crate::session::store::testing::test_store;
     use crate::tool::tasks::testing::plan;
 
-    fn boundary(tasks: Vec<Task>) -> Boundary {
-        Boundary {
-            summary: "fixed login bug".to_owned(),
-            instructions: None,
-            tasks,
-            shells: Vec::new(),
-            automatic: true,
+    mod replace_session_with_summary {
+        use super::*;
+
+        fn boundary(tasks: Vec<Task>) -> Boundary {
+            Boundary {
+                summary: "fixed login bug".to_owned(),
+                instructions: None,
+                tasks,
+                shells: Vec::new(),
+                automatic: true,
+            }
         }
-    }
 
-    fn fake_transcript() -> Vec<Message> {
-        vec![
-            Message::user("fix the bug"),
-            Message::assistant("looking now"),
-            Message::user("any progress?"),
-            Message::assistant("found it"),
-        ]
-    }
+        fn fake_transcript() -> Vec<Message> {
+            vec![
+                Message::user("fix the bug"),
+                Message::assistant("looking now"),
+                Message::user("any progress?"),
+                Message::assistant("found it"),
+            ]
+        }
 
-    #[tokio::test]
-    async fn replace_session_with_summary_clears_tracker_and_carries_the_task_list_over() {
-        let dir = tempfile::tempdir().unwrap();
-        let store = test_store(dir.path());
-        let session = handle::start(&store, "claude-sonnet-5-5", None);
-        let session_id = session.session_id().to_owned();
-        let tracker = FileTracker::default();
-        tracker.record_read(
-            std::path::Path::new("/tmp/example.rs"),
-            b"old",
-            LastView::Full,
-            "toolu_test",
-        );
-        let mut messages = fake_transcript();
-        let sink = CapturingSink::default();
+        #[tokio::test]
+        async fn clears_tracker_and_carries_the_task_list_over() {
+            let dir = tempfile::tempdir().unwrap();
+            let store = test_store(dir.path());
+            let session = handle::start(&store, "claude-sonnet-5-5", None);
+            let session_id = session.session_id().to_owned();
+            let tracker = FileTracker::default();
+            tracker.record_read(
+                std::path::Path::new("/tmp/example.rs"),
+                b"old",
+                LastView::Full,
+                "toolu_test",
+            );
+            let mut messages = fake_transcript();
+            let sink = CapturingSink::default();
 
-        let compacted = replace_session_with_summary(
-            &session,
-            &tracker,
-            &mut messages,
-            &sink,
-            boundary(plan()),
-        )
-        .await;
+            let compacted = replace_session_with_summary(
+                &session,
+                &tracker,
+                &mut messages,
+                &sink,
+                boundary(plan()),
+            )
+            .await;
 
-        assert!(compacted);
-        assert_eq!(tracker.snapshot_all(), []);
-        assert_eq!(
-            messages,
-            [synthesize_post_compact_message(
-                "fixed login bug",
-                &plan(),
-                &[]
-            )]
-        );
-        session.shutdown().await;
-        let saved = store.load_session_data(&session_id).unwrap();
-        assert_eq!(saved.compact.map(|compact| compact.tasks), Some(plan()));
-        assert_eq!(saved.messages, messages);
-    }
+            assert!(compacted);
+            assert_eq!(tracker.snapshot_all(), []);
+            assert_eq!(
+                messages,
+                [synthesize_post_compact_message(
+                    "fixed login bug",
+                    &plan(),
+                    &[]
+                )]
+            );
+            session.shutdown().await;
+            let saved = store.load_session_data(&session_id).unwrap();
+            assert_eq!(saved.compact.map(|compact| compact.tasks), Some(plan()));
+            assert_eq!(saved.messages, messages);
+        }
 
-    #[tokio::test]
-    async fn replace_session_with_summary_preserves_state_when_persist_fails() {
-        let session = handle::testing::dead("dead-compact-session");
-        let tracker = FileTracker::default();
-        let path = std::path::PathBuf::from("/tmp/example.rs");
-        tracker.record_read(&path, b"old", LastView::Full, "toolu_test");
-        let original = fake_transcript();
-        let mut messages = original.clone();
-        let sink = CapturingSink::default();
+        #[tokio::test]
+        async fn preserves_state_when_persist_fails() {
+            let session = handle::testing::dead("dead-compact-session");
+            let tracker = FileTracker::default();
+            let path = std::path::PathBuf::from("/tmp/example.rs");
+            tracker.record_read(&path, b"old", LastView::Full, "toolu_test");
+            let original = fake_transcript();
+            let mut messages = original.clone();
+            let sink = CapturingSink::default();
 
-        let compacted = replace_session_with_summary(
-            &session,
-            &tracker,
-            &mut messages,
-            &sink,
-            boundary(Vec::new()),
-        )
-        .await;
+            let compacted = replace_session_with_summary(
+                &session,
+                &tracker,
+                &mut messages,
+                &sink,
+                boundary(Vec::new()),
+            )
+            .await;
 
-        assert!(!compacted);
-        assert_eq!(messages.len(), original.len());
-        assert!(
-            matches!(&messages[0].content[0], ContentBlock::Text { text } if text == "fix the bug")
-        );
-        assert!(
-            matches!(&messages[3].content[0], ContentBlock::Text { text } if text == "found it")
-        );
-        assert_eq!(tracker.snapshot_all().len(), 1);
-        let events = sink.events();
-        assert!(
-            matches!(
-                events.as_slice(),
-                [Event::SummaryDiscarded, Event::Error(message)]
-                    if message.contains("Session write failed")
-            ),
-            "the unsaved summary is discarded before the write error: {events:?}",
-        );
-    }
+            assert!(!compacted);
+            assert_eq!(messages.len(), original.len());
+            assert!(matches!(
+                &messages[0].content[0],
+                ContentBlock::Text { text } if text == "fix the bug"
+            ));
+            assert!(
+                matches!(&messages[3].content[0], ContentBlock::Text { text } if text == "found it")
+            );
+            assert_eq!(tracker.snapshot_all().len(), 1);
+            let events = sink.events();
+            assert!(
+                matches!(
+                    events.as_slice(),
+                    [Event::SummaryDiscarded, Event::Error(message)]
+                        if message.contains("Session write failed")
+                ),
+                "the unsaved summary is discarded before the write error: {events:?}",
+            );
+        }
 
-    #[tokio::test]
-    async fn replace_session_with_summary_still_replaces_messages_when_event_send_fails() {
-        let dir = tempfile::tempdir().unwrap();
-        let store = test_store(dir.path());
-        let session = handle::start(&store, "claude-sonnet-5-5", None);
-        let tracker = FileTracker::default();
-        tracker.record_read(
-            std::path::Path::new("/tmp/example.rs"),
-            b"old",
-            LastView::Full,
-            "toolu_test",
-        );
-        let mut messages = fake_transcript();
+        #[tokio::test]
+        async fn still_replaces_messages_when_event_send_fails() {
+            let dir = tempfile::tempdir().unwrap();
+            let store = test_store(dir.path());
+            let session = handle::start(&store, "claude-sonnet-5-5", None);
+            let tracker = FileTracker::default();
+            tracker.record_read(
+                std::path::Path::new("/tmp/example.rs"),
+                b"old",
+                LastView::Full,
+                "toolu_test",
+            );
+            let mut messages = fake_transcript();
 
-        let compacted = replace_session_with_summary(
-            &session,
-            &tracker,
-            &mut messages,
-            &FailingSink,
-            boundary(Vec::new()),
-        )
-        .await;
+            let compacted = replace_session_with_summary(
+                &session,
+                &tracker,
+                &mut messages,
+                &FailingSink,
+                boundary(Vec::new()),
+            )
+            .await;
 
-        assert!(compacted);
-        assert_eq!(tracker.snapshot_all(), []);
-        assert_eq!(messages.len(), 1);
-        assert!(
-            matches!(&messages[0].content[0], ContentBlock::Text { text } if text.contains("fixed login bug"))
-        );
+            assert!(compacted);
+            assert_eq!(tracker.snapshot_all(), []);
+            assert_eq!(messages.len(), 1);
+            assert!(
+                matches!(&messages[0].content[0], ContentBlock::Text { text } if text.contains("fixed login bug"))
+            );
+        }
     }
 }

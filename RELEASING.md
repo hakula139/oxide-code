@@ -66,8 +66,8 @@ The draft lists PR titles, which are short and written for reviewers at merge ti
    ```bash
    session=crates/oxide-code/src/session
    mkdir -p "$session/fixtures"
-   sed '1,/^---$/d' "$session/snapshots/ox__session__handle__tests__session_writes_every_entry_type_as_byte_compatible_jsonl.snap" >"$session/fixtures/vX.Y.Z.jsonl"
-   INSTA_UPDATE=unseen cargo test --bin ox session_resumes_from_every_release_fixture
+   sed '1,/^---$/d' "$session/snapshots/ox__session__handle__tests__session_format__writes_every_entry_type_as_byte_compatible_jsonl.snap" >"$session/fixtures/vX.Y.Z.jsonl"
+   INSTA_UPDATE=unseen cargo test --bin ox session_format::resumes_from_every_release_fixture
    ```
 
 5. Inside the Nix dev shell, which provides git-cliff, prepend the changelog section. Because `cliff.toml` bounds sections at stable tags only, a prerelease adds a `--tag-pattern` that bounds its section at every tag:

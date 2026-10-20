@@ -338,8 +338,6 @@ mod tests {
 
     use super::*;
 
-    // ── Fixtures ──
-
     const MODEL: &str = "claude-sonnet-5-5";
 
     fn event(value: serde_json::Value) -> StreamEvent {
@@ -362,652 +360,673 @@ mod tests {
         json!({"type": "content_block_delta", "index": index, "delta": delta})
     }
 
-    // ── ResponseAccumulator::content_started ──
+    mod content_started {
+        use super::*;
 
-    #[test]
-    fn content_started_once_a_block_starts() {
-        let mut reply = ResponseAccumulator::new(MODEL);
+        #[test]
+        fn once_a_block_starts() {
+            let mut reply = ResponseAccumulator::new(MODEL);
 
-        fold(
-            &mut reply,
-            vec![
-                json!({
-                    "type": "message_start",
-                    "message": {"id": "m", "model": "claude-sonnet-5-5"}
-                }),
-                block_delta(0, &json!({"type": "text_delta", "text": "orphan"})),
-            ],
-        );
-        assert!(!reply.content_started());
-
-        fold(
-            &mut reply,
-            vec![block_start(0, &json!({"type": "text", "text": ""}))],
-        );
-        assert!(reply.content_started());
-    }
-
-    // ── ResponseAccumulator::apply ──
-
-    #[test]
-    fn apply_layers_usage_from_message_start_and_message_delta() {
-        let mut reply = ResponseAccumulator::new(MODEL);
-
-        let forwarded = fold(
-            &mut reply,
-            vec![
-                json!({
-                    "type": "message_start",
-                    "message": {
-                        "id": "m",
-                        "model": "claude-sonnet-5-5",
-                        "usage": {
-                            "input_tokens": 10,
-                            "cache_creation_input_tokens": 20,
-                            "cache_read_input_tokens": 30,
-                            "output_tokens": 0
-                        }
-                    }
-                }),
-                json!({
-                    "type": "message_delta",
-                    "delta": {"stop_reason": "end_turn"},
-                    "usage": {"output_tokens": 5}
-                }),
-                json!({"type": "message_delta", "delta": {"stop_reason": "end_turn"}}),
-            ],
-        );
-
-        let start = TokenUsage {
-            input_tokens: 10,
-            cache_creation_input_tokens: 20,
-            cache_read_input_tokens: 30,
-            output_tokens: 0,
-        };
-        assert_eq!(
-            forwarded,
-            [
-                ResponseEvent::Usage(start),
-                ResponseEvent::Usage(TokenUsage {
-                    output_tokens: 5,
-                    ..start
-                }),
-            ],
-        );
-    }
-
-    #[test]
-    fn apply_streams_text_from_block_starts_and_deltas() {
-        let mut reply = ResponseAccumulator::new(MODEL);
-
-        let forwarded = fold(
-            &mut reply,
-            vec![
-                block_start(0, &json!({"type": "text", "text": "Hello "})),
-                block_delta(0, &json!({"type": "text_delta", "text": "there"})),
-                block_start(1, &json!({"type": "text", "text": ""})),
-                block_delta(1, &json!({"type": "text_delta", "text": "!"})),
-                json!({"type": "message_stop"}),
-            ],
-        );
-
-        assert_eq!(
-            forwarded,
-            [
-                ResponseEvent::Text("Hello ".to_owned()),
-                ResponseEvent::Text("there".to_owned()),
-                ResponseEvent::Text("!".to_owned()),
-                ResponseEvent::Completed(Response {
-                    content: vec![
-                        ContentBlock::Text {
-                            text: "Hello there".to_owned(),
-                        },
-                        ContentBlock::Text {
-                            text: "!".to_owned(),
-                        },
-                    ],
-                    ..Response::default()
-                }),
-            ],
-        );
-    }
-
-    #[test]
-    fn apply_sends_each_progress_note_as_its_tool_use_starts() {
-        let thinking = |text: &str| {
-            (
-                json!({"type": "thinking", "thinking": "", "signature": "sig"}),
-                Some(json!({"type": "thinking_delta", "thinking": text})),
-            )
-        };
-        let text = |text: &str| {
-            (
-                json!({"type": "text", "text": ""}),
-                Some(json!({"type": "text_delta", "text": text})),
-            )
-        };
-        let tool = |kind: &str, id: &str| {
-            (
-                json!({"type": kind, "id": id, "name": "echo"}),
-                Some(json!({"type": "input_json_delta", "partial_json": "{}"})),
-            )
-        };
-        let blocks = [
-            thinking(""),
-            thinking("Searching."),
-            tool("server_tool_use", "s1"),
-            text("Found it."),
-            tool("tool_use", "t1"),
-            thinking("Now b."),
-            (json!({"type": "redacted_thinking", "data": "opaque"}), None),
-            tool("tool_use", "t2"),
-            thinking("Summing up."),
-            text("Checked."),
-        ];
-        let mut reply = ResponseAccumulator::new(MODEL);
-
-        let forwarded = fold(
-            &mut reply,
-            blocks
-                .into_iter()
-                .enumerate()
-                .flat_map(|(index, (start, delta))| {
-                    iter::once(block_start(index, &start))
-                        .chain(delta.map(|delta| block_delta(index, &delta)))
-                })
-                .chain([json!({"type": "message_stop"})])
-                .collect(),
-        );
-
-        let notes: Vec<String> = forwarded
-            .iter()
-            .filter_map(|event| match event {
-                ResponseEvent::Text(text) => Some(format!("text {text}")),
-                ResponseEvent::Progress(note) => Some(format!("progress {note}")),
-                _ => None,
-            })
-            .collect();
-        // Text cuts `t1` off from any note, and a note before text introduces no tool call.
-        assert_eq!(
-            notes,
-            [
-                "progress Searching.",
-                "text Found it.",
-                "progress Now b.",
-                "text Checked.",
-            ],
-        );
-        let thinking_block = |text: &str| ContentBlock::Thinking {
-            thinking: text.to_owned(),
-            replay: Replay::with_model(MODEL, "sig"),
-        };
-        let text_block = |text: &str| ContentBlock::Text {
-            text: text.to_owned(),
-        };
-        let tool_block = |id: &str| ContentBlock::ToolUse {
-            id: id.to_owned(),
-            name: "echo".to_owned(),
-            input: json!({}),
-        };
-        // Every block, the empty reasoning one included, stays in the reply.
-        assert_eq!(
-            forwarded.last(),
-            Some(&ResponseEvent::Completed(Response {
-                content: vec![
-                    thinking_block(""),
-                    thinking_block("Searching."),
-                    ContentBlock::ServerToolUse {
-                        id: "s1".to_owned(),
-                        name: "echo".to_owned(),
-                        input: json!({}),
-                    },
-                    text_block("Found it."),
-                    tool_block("t1"),
-                    thinking_block("Now b."),
-                    ContentBlock::RedactedThinking {
-                        replay: Replay::with_model(MODEL, "opaque"),
-                    },
-                    tool_block("t2"),
-                    thinking_block("Summing up."),
-                    text_block("Checked."),
-                ],
-                ..Response::default()
-            })),
-        );
-    }
-
-    #[test]
-    fn apply_keeps_a_server_tool_result_whole_beside_its_call() {
-        let results = json!([{"type": "web_search_result", "encrypted_content": "opaque"}]);
-        let mut reply = ResponseAccumulator::new(MODEL);
-
-        let forwarded = fold(
-            &mut reply,
-            vec![
-                block_start(
-                    0,
-                    &json!({"type": "server_tool_use", "id": "s1", "name": "web_search"}),
-                ),
-                block_delta(
-                    0,
-                    &json!({"type": "input_json_delta", "partial_json": r#"{"query":"rust"}"#}),
-                ),
-                block_start(
-                    1,
-                    &json!({
-                        "type": "web_search_tool_result",
-                        "tool_use_id": "s1",
-                        "content": results,
+            fold(
+                &mut reply,
+                vec![
+                    json!({
+                        "type": "message_start",
+                        "message": {"id": "m", "model": "claude-sonnet-5-5"}
                     }),
-                ),
-                block_delta(1, &json!({"type": "text_delta", "text": "stray"})),
-                block_start(2, &json!({"type": "text", "text": "Found it."})),
-                json!({"type": "message_stop"}),
-            ],
-        );
+                    block_delta(0, &json!({"type": "text_delta", "text": "orphan"})),
+                ],
+            );
+            assert!(!reply.content_started());
 
-        assert_eq!(
-            forwarded,
-            [
-                ResponseEvent::Text("Found it.".to_owned()),
-                ResponseEvent::Completed(Response {
+            fold(
+                &mut reply,
+                vec![block_start(0, &json!({"type": "text", "text": ""}))],
+            );
+            assert!(reply.content_started());
+        }
+    }
+
+    mod apply {
+        use super::*;
+
+        #[test]
+        fn layers_usage_from_message_start_and_message_delta() {
+            let mut reply = ResponseAccumulator::new(MODEL);
+
+            let forwarded = fold(
+                &mut reply,
+                vec![
+                    json!({
+                        "type": "message_start",
+                        "message": {
+                            "id": "m",
+                            "model": "claude-sonnet-5-5",
+                            "usage": {
+                                "input_tokens": 10,
+                                "cache_creation_input_tokens": 20,
+                                "cache_read_input_tokens": 30,
+                                "output_tokens": 0
+                            }
+                        }
+                    }),
+                    json!({
+                        "type": "message_delta",
+                        "delta": {"stop_reason": "end_turn"},
+                        "usage": {"output_tokens": 5}
+                    }),
+                    json!({"type": "message_delta", "delta": {"stop_reason": "end_turn"}}),
+                ],
+            );
+
+            let start = TokenUsage {
+                input_tokens: 10,
+                cache_creation_input_tokens: 20,
+                cache_read_input_tokens: 30,
+                output_tokens: 0,
+            };
+            assert_eq!(
+                forwarded,
+                [
+                    ResponseEvent::Usage(start),
+                    ResponseEvent::Usage(TokenUsage {
+                        output_tokens: 5,
+                        ..start
+                    }),
+                ],
+            );
+        }
+
+        #[test]
+        fn streams_text_from_block_starts_and_deltas() {
+            let mut reply = ResponseAccumulator::new(MODEL);
+
+            let forwarded = fold(
+                &mut reply,
+                vec![
+                    block_start(0, &json!({"type": "text", "text": "Hello "})),
+                    block_delta(0, &json!({"type": "text_delta", "text": "there"})),
+                    block_start(1, &json!({"type": "text", "text": ""})),
+                    block_delta(1, &json!({"type": "text_delta", "text": "!"})),
+                    json!({"type": "message_stop"}),
+                ],
+            );
+
+            assert_eq!(
+                forwarded,
+                [
+                    ResponseEvent::Text("Hello ".to_owned()),
+                    ResponseEvent::Text("there".to_owned()),
+                    ResponseEvent::Text("!".to_owned()),
+                    ResponseEvent::Completed(Response {
+                        content: vec![
+                            ContentBlock::Text {
+                                text: "Hello there".to_owned(),
+                            },
+                            ContentBlock::Text {
+                                text: "!".to_owned(),
+                            },
+                        ],
+                        ..Response::default()
+                    }),
+                ],
+            );
+        }
+
+        #[test]
+        fn sends_each_progress_note_as_its_tool_use_starts() {
+            let thinking = |text: &str| {
+                (
+                    json!({"type": "thinking", "thinking": "", "signature": "sig"}),
+                    Some(json!({"type": "thinking_delta", "thinking": text})),
+                )
+            };
+            let text = |text: &str| {
+                (
+                    json!({"type": "text", "text": ""}),
+                    Some(json!({"type": "text_delta", "text": text})),
+                )
+            };
+            let tool = |kind: &str, id: &str| {
+                (
+                    json!({"type": kind, "id": id, "name": "echo"}),
+                    Some(json!({"type": "input_json_delta", "partial_json": "{}"})),
+                )
+            };
+            let blocks = [
+                thinking(""),
+                thinking("Searching."),
+                tool("server_tool_use", "s1"),
+                text("Found it."),
+                tool("tool_use", "t1"),
+                thinking("Now b."),
+                (json!({"type": "redacted_thinking", "data": "opaque"}), None),
+                tool("tool_use", "t2"),
+                thinking("Summing up."),
+                text("Checked."),
+            ];
+            let mut reply = ResponseAccumulator::new(MODEL);
+
+            let forwarded = fold(
+                &mut reply,
+                blocks
+                    .into_iter()
+                    .enumerate()
+                    .flat_map(|(index, (start, delta))| {
+                        iter::once(block_start(index, &start))
+                            .chain(delta.map(|delta| block_delta(index, &delta)))
+                    })
+                    .chain([json!({"type": "message_stop"})])
+                    .collect(),
+            );
+
+            let notes: Vec<String> = forwarded
+                .iter()
+                .filter_map(|event| match event {
+                    ResponseEvent::Text(text) => Some(format!("text {text}")),
+                    ResponseEvent::Progress(note) => Some(format!("progress {note}")),
+                    _ => None,
+                })
+                .collect();
+            // Text cuts `t1` off from any note, and a note before text introduces no tool call.
+            assert_eq!(
+                notes,
+                [
+                    "progress Searching.",
+                    "text Found it.",
+                    "progress Now b.",
+                    "text Checked.",
+                ],
+            );
+            let thinking_block = |text: &str| ContentBlock::Thinking {
+                thinking: text.to_owned(),
+                replay: Replay::with_model(MODEL, "sig"),
+            };
+            let text_block = |text: &str| ContentBlock::Text {
+                text: text.to_owned(),
+            };
+            let tool_block = |id: &str| ContentBlock::ToolUse {
+                id: id.to_owned(),
+                name: "echo".to_owned(),
+                input: json!({}),
+            };
+            // Every block, the empty reasoning one included, stays in the reply.
+            assert_eq!(
+                forwarded.last(),
+                Some(&ResponseEvent::Completed(Response {
                     content: vec![
+                        thinking_block(""),
+                        thinking_block("Searching."),
                         ContentBlock::ServerToolUse {
                             id: "s1".to_owned(),
-                            name: "web_search".to_owned(),
-                            input: json!({"query": "rust"}),
-                        },
-                        ContentBlock::ServerToolResult {
-                            tool_use_id: "s1".to_owned(),
-                            kind: "web_search_tool_result".to_owned(),
-                            fields: serde_json::Map::from_iter([("content".to_owned(), results)]),
-                        },
-                        ContentBlock::Text {
-                            text: "Found it.".to_owned(),
-                        },
-                    ],
-                    ..Response::default()
-                }),
-            ],
-        );
-    }
-
-    #[test]
-    fn apply_completes_the_reply_with_parse_errors_and_the_stop() {
-        let mut reply = ResponseAccumulator::new(MODEL);
-
-        let forwarded = fold(
-            &mut reply,
-            vec![
-                block_start(0, &json!({"type": "text", "text": "Writing it now."})),
-                block_start(1, &json!({"type": "tool_use", "id": "t1", "name": "write"})),
-                block_delta(
-                    1,
-                    &json!({"type": "input_json_delta", "partial_json": r#"{"content": "#}),
-                ),
-                block_delta(5, &json!({"type": "text_delta", "text": "lost"})),
-                json!({
-                    "type": "message_delta",
-                    "delta": {"stop_reason": "refusal", "stop_details": {"category": "cyber"}}
-                }),
-                json!({"type": "message_stop"}),
-            ],
-        );
-
-        let parse_error = serde_json::from_str::<serde_json::Value>(r#"{"content": "#).unwrap_err();
-        assert_eq!(
-            forwarded,
-            [
-                ResponseEvent::Text("Writing it now.".to_owned()),
-                ResponseEvent::Completed(Response {
-                    content: vec![
-                        ContentBlock::Text {
-                            text: "Writing it now.".to_owned(),
-                        },
-                        ContentBlock::ToolUse {
-                            id: "t1".to_owned(),
-                            name: "write".to_owned(),
+                            name: "echo".to_owned(),
                             input: json!({}),
                         },
+                        text_block("Found it."),
+                        tool_block("t1"),
+                        thinking_block("Now b."),
+                        ContentBlock::RedactedThinking {
+                            replay: Replay::with_model(MODEL, "opaque"),
+                        },
+                        tool_block("t2"),
+                        thinking_block("Summing up."),
+                        text_block("Checked."),
                     ],
-                    parse_errors: HashMap::from([("t1".to_owned(), parse_error.to_string())]),
-                    stop_reason: Some(StopReason::Refusal),
-                    stop_details: Some(StopDetails {
-                        category: Some("cyber".to_owned()),
-                        explanation: None,
-                    }),
-                }),
-            ],
-        );
-    }
-
-    #[test]
-    fn apply_skips_a_block_that_starts_out_of_order() {
-        let mut reply = ResponseAccumulator::new(MODEL);
-
-        let forwarded = fold(
-            &mut reply,
-            vec![
-                block_start(usize::MAX, &json!({"type": "text", "text": "far"})),
-                block_delta(usize::MAX, &json!({"type": "text_delta", "text": "lost"})),
-                block_start(1, &json!({"type": "text", "text": "early"})),
-            ],
-        );
-        assert_eq!(forwarded, []);
-        assert!(!reply.content_started());
-
-        let forwarded = fold(
-            &mut reply,
-            vec![
-                block_start(0, &json!({"type": "text", "text": "Hi"})),
-                json!({"type": "message_stop"}),
-            ],
-        );
-        assert_eq!(
-            forwarded,
-            [
-                ResponseEvent::Text("Hi".to_owned()),
-                ResponseEvent::Completed(Response {
-                    content: vec![ContentBlock::Text {
-                        text: "Hi".to_owned(),
-                    }],
                     ..Response::default()
-                }),
-            ],
-        );
-    }
+                })),
+            );
+        }
 
-    #[test]
-    fn apply_in_band_error_fails_the_reply() {
-        let mut reply = ResponseAccumulator::new(MODEL);
+        #[test]
+        fn keeps_a_server_tool_result_whole_beside_its_call() {
+            let results = json!([{"type": "web_search_result", "encrypted_content": "opaque"}]);
+            let mut reply = ResponseAccumulator::new(MODEL);
 
-        let error = reply
-            .apply(event(json!({
-                "type": "error",
-                "error": {"type": "overloaded_error", "message": "Overloaded"}
-            })))
-            .expect_err("an error event fails the reply");
+            let forwarded = fold(
+                &mut reply,
+                vec![
+                    block_start(
+                        0,
+                        &json!({"type": "server_tool_use", "id": "s1", "name": "web_search"}),
+                    ),
+                    block_delta(
+                        0,
+                        &json!({"type": "input_json_delta", "partial_json": r#"{"query":"rust"}"#}),
+                    ),
+                    block_start(
+                        1,
+                        &json!({
+                            "type": "web_search_tool_result",
+                            "tool_use_id": "s1",
+                            "content": results,
+                        }),
+                    ),
+                    block_delta(1, &json!({"type": "text_delta", "text": "stray"})),
+                    block_start(2, &json!({"type": "text", "text": "Found it."})),
+                    json!({"type": "message_stop"}),
+                ],
+            );
 
-        assert_eq!(
-            (error.error_type.as_str(), error.message.as_str()),
-            ("overloaded_error", "Overloaded"),
-        );
-        assert!(!reply.content_started());
-    }
+            assert_eq!(
+                forwarded,
+                [
+                    ResponseEvent::Text("Found it.".to_owned()),
+                    ResponseEvent::Completed(Response {
+                        content: vec![
+                            ContentBlock::ServerToolUse {
+                                id: "s1".to_owned(),
+                                name: "web_search".to_owned(),
+                                input: json!({"query": "rust"}),
+                            },
+                            ContentBlock::ServerToolResult {
+                                tool_use_id: "s1".to_owned(),
+                                kind: "web_search_tool_result".to_owned(),
+                                fields: serde_json::Map::from_iter([(
+                                    "content".to_owned(),
+                                    results
+                                )]),
+                            },
+                            ContentBlock::Text {
+                                text: "Found it.".to_owned(),
+                            },
+                        ],
+                        ..Response::default()
+                    }),
+                ],
+            );
+        }
 
-    // ── BlockAccumulator::start ──
+        #[test]
+        fn completes_the_reply_with_parse_errors_and_the_stop() {
+            let mut reply = ResponseAccumulator::new(MODEL);
 
-    #[test]
-    fn start_keeps_initial_text_thinking_and_redacted_data() {
-        let text = BlockAccumulator::start(
-            ContentBlockInfo::Text {
-                text: "hi".to_owned(),
-            },
-            0,
-        );
+            let forwarded = fold(
+                &mut reply,
+                vec![
+                    block_start(0, &json!({"type": "text", "text": "Writing it now."})),
+                    block_start(1, &json!({"type": "tool_use", "id": "t1", "name": "write"})),
+                    block_delta(
+                        1,
+                        &json!({"type": "input_json_delta", "partial_json": r#"{"content": "#}),
+                    ),
+                    block_delta(5, &json!({"type": "text_delta", "text": "lost"})),
+                    json!({
+                        "type": "message_delta",
+                        "delta": {"stop_reason": "refusal", "stop_details": {"category": "cyber"}}
+                    }),
+                    json!({"type": "message_stop"}),
+                ],
+            );
 
-        assert_eq!(text, BlockAccumulator::Text("hi".to_owned()));
+            let parse_error =
+                serde_json::from_str::<serde_json::Value>(r#"{"content": "#).unwrap_err();
+            assert_eq!(
+                forwarded,
+                [
+                    ResponseEvent::Text("Writing it now.".to_owned()),
+                    ResponseEvent::Completed(Response {
+                        content: vec![
+                            ContentBlock::Text {
+                                text: "Writing it now.".to_owned(),
+                            },
+                            ContentBlock::ToolUse {
+                                id: "t1".to_owned(),
+                                name: "write".to_owned(),
+                                input: json!({}),
+                            },
+                        ],
+                        parse_errors: HashMap::from([("t1".to_owned(), parse_error.to_string())]),
+                        stop_reason: Some(StopReason::Refusal),
+                        stop_details: Some(StopDetails {
+                            category: Some("cyber".to_owned()),
+                            explanation: None,
+                        }),
+                    }),
+                ],
+            );
+        }
 
-        let thinking = BlockAccumulator::start(
-            ContentBlockInfo::Thinking {
-                thinking: "step 1".to_owned(),
-                signature: "sig_abc".to_owned(),
-            },
-            0,
-        );
+        #[test]
+        fn skips_a_block_that_starts_out_of_order() {
+            let mut reply = ResponseAccumulator::new(MODEL);
 
-        assert_eq!(
-            thinking,
-            BlockAccumulator::Thinking {
-                thinking: "step 1".to_owned(),
-                signature: "sig_abc".to_owned(),
-            },
-        );
+            let forwarded = fold(
+                &mut reply,
+                vec![
+                    block_start(usize::MAX, &json!({"type": "text", "text": "far"})),
+                    block_delta(usize::MAX, &json!({"type": "text_delta", "text": "lost"})),
+                    block_start(1, &json!({"type": "text", "text": "early"})),
+                ],
+            );
+            assert_eq!(forwarded, []);
+            assert!(!reply.content_started());
 
-        let redacted = BlockAccumulator::start(
-            ContentBlockInfo::RedactedThinking {
-                data: "opaque-blob".to_owned(),
-            },
-            0,
-        );
+            let forwarded = fold(
+                &mut reply,
+                vec![
+                    block_start(0, &json!({"type": "text", "text": "Hi"})),
+                    json!({"type": "message_stop"}),
+                ],
+            );
+            assert_eq!(
+                forwarded,
+                [
+                    ResponseEvent::Text("Hi".to_owned()),
+                    ResponseEvent::Completed(Response {
+                        content: vec![ContentBlock::Text {
+                            text: "Hi".to_owned(),
+                        }],
+                        ..Response::default()
+                    }),
+                ],
+            );
+        }
 
-        assert_eq!(
-            redacted,
-            BlockAccumulator::RedactedThinking {
-                data: "opaque-blob".to_owned()
-            },
-        );
-    }
+        #[test]
+        fn in_band_error_fails_the_reply() {
+            let mut reply = ResponseAccumulator::new(MODEL);
 
-    #[test]
-    fn start_opens_tool_uses_with_an_empty_input_buffer() {
-        let tool = BlockAccumulator::start(
-            ContentBlockInfo::ToolUse {
-                id: "tool_1".to_owned(),
-                name: "bash".to_owned(),
-            },
-            0,
-        );
+            let error = reply
+                .apply(event(json!({
+                    "type": "error",
+                    "error": {"type": "overloaded_error", "message": "Overloaded"}
+                })))
+                .expect_err("an error event fails the reply");
 
-        assert_eq!(
-            tool,
-            BlockAccumulator::ToolUse {
-                id: "tool_1".to_owned(),
-                name: "bash".to_owned(),
-                json_buf: String::new(),
-                server: false,
-            },
-        );
-
-        let server = BlockAccumulator::start(
-            ContentBlockInfo::ServerToolUse {
-                id: "srv_1".to_owned(),
-                name: "web_search".to_owned(),
-            },
-            0,
-        );
-
-        assert_eq!(
-            server,
-            BlockAccumulator::ToolUse {
-                id: "srv_1".to_owned(),
-                name: "web_search".to_owned(),
-                json_buf: String::new(),
-                server: true,
-            },
-        );
-    }
-
-    #[test]
-    fn start_skips_unknown_blocks_and_mcp_connector_results() {
-        for info in [
-            ContentBlockInfo::Unknown {
-                r#type: json!("some_future_block"),
-            },
-            ContentBlockInfo::McpToolResult {},
-        ] {
-            let block = BlockAccumulator::start(info, 0);
-
-            assert_eq!(block, BlockAccumulator::Skipped);
+            assert_eq!(
+                (error.error_type.as_str(), error.message.as_str()),
+                ("overloaded_error", "Overloaded"),
+            );
+            assert!(!reply.content_started());
         }
     }
 
-    // ── BlockAccumulator::apply ──
+    mod block_accumulator {
+        use super::*;
 
-    #[test]
-    fn apply_appends_tool_input_without_streaming_it() {
-        let mut block = BlockAccumulator::ToolUse {
-            id: "tool_1".to_owned(),
-            name: "bash".to_owned(),
-            json_buf: r#"{"x"#.to_owned(),
-            server: false,
-        };
+        mod start {
+            use super::*;
 
-        let forwarded = block.apply(Delta::InputJsonDelta {
-            partial_json: ":1}".to_owned(),
-        });
+            #[test]
+            fn keeps_initial_text_thinking_and_redacted_data() {
+                let text = BlockAccumulator::start(
+                    ContentBlockInfo::Text {
+                        text: "hi".to_owned(),
+                    },
+                    0,
+                );
 
-        assert_eq!(forwarded, None);
-        assert_eq!(
-            block,
-            BlockAccumulator::ToolUse {
-                id: "tool_1".to_owned(),
-                name: "bash".to_owned(),
-                json_buf: r#"{"x:1}"#.to_owned(),
-                server: false,
-            },
-        );
-    }
+                assert_eq!(text, BlockAccumulator::Text("hi".to_owned()));
 
-    #[test]
-    fn apply_appends_thinking_and_replaces_the_signature() {
-        let mut block = BlockAccumulator::Thinking {
-            thinking: "step 1".to_owned(),
-            signature: "stale".to_owned(),
-        };
+                let thinking = BlockAccumulator::start(
+                    ContentBlockInfo::Thinking {
+                        thinking: "step 1".to_owned(),
+                        signature: "sig_abc".to_owned(),
+                    },
+                    0,
+                );
 
-        let thinking = block.apply(Delta::ThinkingDelta {
-            thinking: ", step 2".to_owned(),
-        });
-        let signature = block.apply(Delta::SignatureDelta {
-            signature: "sig_abc".to_owned(),
-        });
+                assert_eq!(
+                    thinking,
+                    BlockAccumulator::Thinking {
+                        thinking: "step 1".to_owned(),
+                        signature: "sig_abc".to_owned(),
+                    },
+                );
 
-        assert_eq!(
-            thinking,
-            Some(ResponseEvent::Thinking(", step 2".to_owned()))
-        );
-        assert_eq!(signature, None);
-        assert_eq!(
-            block,
-            BlockAccumulator::Thinking {
-                thinking: "step 1, step 2".to_owned(),
-                signature: "sig_abc".to_owned(),
-            },
-        );
-    }
+                let redacted = BlockAccumulator::start(
+                    ContentBlockInfo::RedactedThinking {
+                        data: "opaque-blob".to_owned(),
+                    },
+                    0,
+                );
 
-    #[test]
-    fn apply_ignores_a_delta_of_another_block_kind() {
-        let mut block = BlockAccumulator::Text("hi".to_owned());
-
-        let forwarded = block.apply(Delta::InputJsonDelta {
-            partial_json: "ignored".to_owned(),
-        });
-
-        assert_eq!(forwarded, None);
-        assert_eq!(block, BlockAccumulator::Text("hi".to_owned()));
-    }
-
-    // ── BlockAccumulator::into_content_block ──
-
-    #[test]
-    fn into_content_block_yields_text_verbatim_and_reasoning_for_its_model() {
-        assert_eq!(
-            BlockAccumulator::Text("hi".to_owned()).into_content_block(MODEL),
-            (
-                Some(ContentBlock::Text {
-                    text: "hi".to_owned()
-                }),
-                None
-            ),
-        );
-        assert_eq!(
-            BlockAccumulator::Thinking {
-                thinking: "step 1".to_owned(),
-                signature: "sig_abc".to_owned(),
+                assert_eq!(
+                    redacted,
+                    BlockAccumulator::RedactedThinking {
+                        data: "opaque-blob".to_owned()
+                    },
+                );
             }
-            .into_content_block(MODEL),
-            (
-                Some(ContentBlock::Thinking {
+
+            #[test]
+            fn opens_tool_uses_with_an_empty_input_buffer() {
+                let tool = BlockAccumulator::start(
+                    ContentBlockInfo::ToolUse {
+                        id: "tool_1".to_owned(),
+                        name: "bash".to_owned(),
+                    },
+                    0,
+                );
+
+                assert_eq!(
+                    tool,
+                    BlockAccumulator::ToolUse {
+                        id: "tool_1".to_owned(),
+                        name: "bash".to_owned(),
+                        json_buf: String::new(),
+                        server: false,
+                    },
+                );
+
+                let server = BlockAccumulator::start(
+                    ContentBlockInfo::ServerToolUse {
+                        id: "srv_1".to_owned(),
+                        name: "web_search".to_owned(),
+                    },
+                    0,
+                );
+
+                assert_eq!(
+                    server,
+                    BlockAccumulator::ToolUse {
+                        id: "srv_1".to_owned(),
+                        name: "web_search".to_owned(),
+                        json_buf: String::new(),
+                        server: true,
+                    },
+                );
+            }
+
+            #[test]
+            fn skips_unknown_blocks_and_mcp_connector_results() {
+                for info in [
+                    ContentBlockInfo::Unknown {
+                        r#type: json!("some_future_block"),
+                    },
+                    ContentBlockInfo::McpToolResult {},
+                ] {
+                    let block = BlockAccumulator::start(info, 0);
+
+                    assert_eq!(block, BlockAccumulator::Skipped);
+                }
+            }
+        }
+
+        mod apply {
+            use super::*;
+
+            #[test]
+            fn appends_tool_input_without_streaming_it() {
+                let mut block = BlockAccumulator::ToolUse {
+                    id: "tool_1".to_owned(),
+                    name: "bash".to_owned(),
+                    json_buf: r#"{"x"#.to_owned(),
+                    server: false,
+                };
+
+                let forwarded = block.apply(Delta::InputJsonDelta {
+                    partial_json: ":1}".to_owned(),
+                });
+
+                assert_eq!(forwarded, None);
+                assert_eq!(
+                    block,
+                    BlockAccumulator::ToolUse {
+                        id: "tool_1".to_owned(),
+                        name: "bash".to_owned(),
+                        json_buf: r#"{"x:1}"#.to_owned(),
+                        server: false,
+                    },
+                );
+            }
+
+            #[test]
+            fn appends_thinking_and_replaces_the_signature() {
+                let mut block = BlockAccumulator::Thinking {
                     thinking: "step 1".to_owned(),
-                    replay: Replay::with_model(MODEL, "sig_abc"),
-                }),
-                None,
-            ),
-        );
-        assert_eq!(
-            BlockAccumulator::RedactedThinking {
-                data: "opaque-blob".to_owned(),
+                    signature: "stale".to_owned(),
+                };
+
+                let thinking = block.apply(Delta::ThinkingDelta {
+                    thinking: ", step 2".to_owned(),
+                });
+                let signature = block.apply(Delta::SignatureDelta {
+                    signature: "sig_abc".to_owned(),
+                });
+
+                assert_eq!(
+                    thinking,
+                    Some(ResponseEvent::Thinking(", step 2".to_owned()))
+                );
+                assert_eq!(signature, None);
+                assert_eq!(
+                    block,
+                    BlockAccumulator::Thinking {
+                        thinking: "step 1, step 2".to_owned(),
+                        signature: "sig_abc".to_owned(),
+                    },
+                );
             }
-            .into_content_block(MODEL),
-            (
-                Some(ContentBlock::RedactedThinking {
-                    replay: Replay::with_model(MODEL, "opaque-blob"),
-                }),
-                None,
-            ),
-        );
-        assert_eq!(
-            BlockAccumulator::Skipped.into_content_block(MODEL),
-            (None, None)
-        );
-    }
 
-    #[test]
-    fn into_content_block_parses_tool_input() {
-        let (tool, err) = BlockAccumulator::ToolUse {
-            id: "tool_1".to_owned(),
-            name: "bash".to_owned(),
-            json_buf: r#"{"command": "ls"}"#.to_owned(),
-            server: false,
+            #[test]
+            fn ignores_a_delta_of_another_block_kind() {
+                let mut block = BlockAccumulator::Text("hi".to_owned());
+
+                let forwarded = block.apply(Delta::InputJsonDelta {
+                    partial_json: "ignored".to_owned(),
+                });
+
+                assert_eq!(forwarded, None);
+                assert_eq!(block, BlockAccumulator::Text("hi".to_owned()));
+            }
         }
-        .into_content_block(MODEL);
-        assert_eq!(
-            tool,
-            Some(ContentBlock::ToolUse {
-                id: "tool_1".to_owned(),
-                name: "bash".to_owned(),
-                input: json!({"command": "ls"}),
-            }),
-        );
-        assert_eq!(err, None);
 
-        let (server, err) = BlockAccumulator::ToolUse {
-            id: "srv_1".to_owned(),
-            name: "web_search".to_owned(),
-            json_buf: r#"{"query": "rust"}"#.to_owned(),
-            server: true,
+        mod into_content_block {
+            use super::*;
+
+            #[test]
+            fn yields_text_verbatim_and_reasoning_for_its_model() {
+                assert_eq!(
+                    BlockAccumulator::Text("hi".to_owned()).into_content_block(MODEL),
+                    (
+                        Some(ContentBlock::Text {
+                            text: "hi".to_owned()
+                        }),
+                        None
+                    ),
+                );
+                assert_eq!(
+                    BlockAccumulator::Thinking {
+                        thinking: "step 1".to_owned(),
+                        signature: "sig_abc".to_owned(),
+                    }
+                    .into_content_block(MODEL),
+                    (
+                        Some(ContentBlock::Thinking {
+                            thinking: "step 1".to_owned(),
+                            replay: Replay::with_model(MODEL, "sig_abc"),
+                        }),
+                        None,
+                    ),
+                );
+                assert_eq!(
+                    BlockAccumulator::RedactedThinking {
+                        data: "opaque-blob".to_owned(),
+                    }
+                    .into_content_block(MODEL),
+                    (
+                        Some(ContentBlock::RedactedThinking {
+                            replay: Replay::with_model(MODEL, "opaque-blob"),
+                        }),
+                        None,
+                    ),
+                );
+                assert_eq!(
+                    BlockAccumulator::Skipped.into_content_block(MODEL),
+                    (None, None)
+                );
+            }
+
+            #[test]
+            fn parses_tool_input() {
+                let (tool, err) = BlockAccumulator::ToolUse {
+                    id: "tool_1".to_owned(),
+                    name: "bash".to_owned(),
+                    json_buf: r#"{"command": "ls"}"#.to_owned(),
+                    server: false,
+                }
+                .into_content_block(MODEL);
+                assert_eq!(
+                    tool,
+                    Some(ContentBlock::ToolUse {
+                        id: "tool_1".to_owned(),
+                        name: "bash".to_owned(),
+                        input: json!({"command": "ls"}),
+                    }),
+                );
+                assert_eq!(err, None);
+
+                let (server, err) = BlockAccumulator::ToolUse {
+                    id: "srv_1".to_owned(),
+                    name: "web_search".to_owned(),
+                    json_buf: r#"{"query": "rust"}"#.to_owned(),
+                    server: true,
+                }
+                .into_content_block(MODEL);
+                assert_eq!(
+                    server,
+                    Some(ContentBlock::ServerToolUse {
+                        id: "srv_1".to_owned(),
+                        name: "web_search".to_owned(),
+                        input: json!({"query": "rust"}),
+                    }),
+                );
+                assert_eq!(err, None);
+            }
+
+            #[test]
+            fn malformed_tool_input_surfaces_a_parse_error() {
+                let block = BlockAccumulator::ToolUse {
+                    id: "srv_1".to_owned(),
+                    name: "web_search".to_owned(),
+                    json_buf: "{unclosed".to_owned(),
+                    server: true,
+                };
+
+                let (block, err) = block.into_content_block(MODEL);
+
+                assert_eq!(
+                    block,
+                    Some(ContentBlock::ServerToolUse {
+                        id: "srv_1".to_owned(),
+                        name: "web_search".to_owned(),
+                        input: json!({}),
+                    }),
+                );
+                let serde_error =
+                    serde_json::from_str::<serde_json::Value>("{unclosed").unwrap_err();
+                assert_eq!(err, Some(("srv_1".to_owned(), serde_error.to_string())));
+            }
         }
-        .into_content_block(MODEL);
-        assert_eq!(
-            server,
-            Some(ContentBlock::ServerToolUse {
-                id: "srv_1".to_owned(),
-                name: "web_search".to_owned(),
-                input: json!({"query": "rust"}),
-            }),
-        );
-        assert_eq!(err, None);
     }
 
-    #[test]
-    fn into_content_block_malformed_tool_input_surfaces_a_parse_error() {
-        let block = BlockAccumulator::ToolUse {
-            id: "srv_1".to_owned(),
-            name: "web_search".to_owned(),
-            json_buf: "{unclosed".to_owned(),
-            server: true,
-        };
+    mod parse_tool_json {
+        use super::*;
 
-        let (block, err) = block.into_content_block(MODEL);
-
-        assert_eq!(
-            block,
-            Some(ContentBlock::ServerToolUse {
-                id: "srv_1".to_owned(),
-                name: "web_search".to_owned(),
-                input: json!({}),
-            }),
-        );
-        let serde_error = serde_json::from_str::<serde_json::Value>("{unclosed").unwrap_err();
-        assert_eq!(err, Some(("srv_1".to_owned(), serde_error.to_string())));
-    }
-
-    // ── parse_tool_json ──
-
-    #[test]
-    fn parse_tool_json_empty_buffer_is_an_empty_object() {
-        assert_eq!(parse_tool_json(""), (json!({}), None));
+        #[test]
+        fn empty_buffer_is_an_empty_object() {
+            assert_eq!(parse_tool_json(""), (json!({}), None));
+        }
     }
 }

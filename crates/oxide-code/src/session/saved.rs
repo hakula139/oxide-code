@@ -49,30 +49,32 @@ mod tests {
         listed_ids, seed_test_session, test_session_file, test_store,
     };
 
-    // ── set_archived ──
+    mod set_archived {
+        use super::*;
 
-    #[test]
-    fn set_archived_refuses_only_to_archive_the_live_session() {
-        let dir = tempfile::tempdir().unwrap();
-        let store = test_store(dir.path());
-        seed_test_session(
-            &store,
-            "live-session",
-            Some("Live"),
-            Some(1),
-            datetime!(2026-04-18 09:00:00 UTC),
-        );
-        let path = test_session_file(dir.path(), "live-session");
+        #[test]
+        fn refuses_only_to_archive_the_live_session() {
+            let dir = tempfile::tempdir().unwrap();
+            let store = test_store(dir.path());
+            seed_test_session(
+                &store,
+                "live-session",
+                Some("Live"),
+                Some(1),
+                datetime!(2026-04-18 09:00:00 UTC),
+            );
+            let path = test_session_file(dir.path(), "live-session");
 
-        let err = set_archived(&path, "live-session", true, "live-session").unwrap_err();
+            let err = set_archived(&path, "live-session", true, "live-session").unwrap_err();
 
-        assert_eq!(
-            err,
-            "Session live-ses is the live session. \
-             Use bare `/archive` to archive it and start a new one.",
-        );
-        assert_eq!(listed_ids(&store, false), ["live-session"]);
+            assert_eq!(
+                err,
+                "Session live-ses is the live session. \
+                 Use bare `/archive` to archive it and start a new one.",
+            );
+            assert_eq!(listed_ids(&store, false), ["live-session"]);
 
-        set_archived(&path, "live-session", false, "live-session").unwrap();
+            set_archived(&path, "live-session", false, "live-session").unwrap();
+        }
     }
 }

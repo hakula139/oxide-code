@@ -51,89 +51,91 @@ pub(crate) fn sanitize_cwd(path: &Path) -> String {
 mod tests {
     use super::*;
 
-    // ── sanitize_cwd ──
+    mod sanitize_cwd {
+        use super::*;
 
-    #[test]
-    fn sanitize_cwd_replaces_slashes_and_trims_leading() {
-        let out = sanitize_cwd(Path::new("/Users/alice/project"));
-        assert_eq!(out, "Users-alice-project");
-    }
+        #[test]
+        fn replaces_slashes_and_trims_leading() {
+            let out = sanitize_cwd(Path::new("/Users/alice/project"));
+            assert_eq!(out, "Users-alice-project");
+        }
 
-    #[test]
-    fn sanitize_cwd_replaces_backslash_and_drive_letter() {
-        let out = sanitize_cwd(Path::new(r"C:\Users\alice\project"));
-        assert_eq!(out, "C--Users-alice-project");
-    }
+        #[test]
+        fn replaces_backslash_and_drive_letter() {
+            let out = sanitize_cwd(Path::new(r"C:\Users\alice\project"));
+            assert_eq!(out, "C--Users-alice-project");
+        }
 
-    #[test]
-    fn sanitize_cwd_preserves_dots_underscores_and_dashes() {
-        let out = sanitize_cwd(Path::new("/home/user/my-proj_v1.0"));
-        assert_eq!(out, "home-user-my-proj_v1.0");
-    }
+        #[test]
+        fn preserves_dots_underscores_and_dashes() {
+            let out = sanitize_cwd(Path::new("/home/user/my-proj_v1.0"));
+            assert_eq!(out, "home-user-my-proj_v1.0");
+        }
 
-    #[test]
-    fn sanitize_cwd_replaces_other_reserved_chars_with_dash() {
-        let out = sanitize_cwd(Path::new("/sub dir/with spaces&symbols!"));
-        assert_eq!(out, "sub-dir-with-spaces-symbols");
-    }
+        #[test]
+        fn replaces_other_reserved_chars_with_dash() {
+            let out = sanitize_cwd(Path::new("/sub dir/with spaces&symbols!"));
+            assert_eq!(out, "sub-dir-with-spaces-symbols");
+        }
 
-    #[test]
-    fn sanitize_cwd_is_unknown_for_empty_result() {
-        assert_eq!(sanitize_cwd(Path::new("/")), UNKNOWN_PROJECT_DIR);
-        assert_eq!(sanitize_cwd(Path::new("")), UNKNOWN_PROJECT_DIR);
-        assert_eq!(sanitize_cwd(Path::new("///")), UNKNOWN_PROJECT_DIR);
-    }
+        #[test]
+        fn is_unknown_for_empty_result() {
+            assert_eq!(sanitize_cwd(Path::new("/")), UNKNOWN_PROJECT_DIR);
+            assert_eq!(sanitize_cwd(Path::new("")), UNKNOWN_PROJECT_DIR);
+            assert_eq!(sanitize_cwd(Path::new("///")), UNKNOWN_PROJECT_DIR);
+        }
 
-    #[test]
-    fn sanitize_cwd_truncates_long_paths_with_stable_hash_suffix() {
-        let long = "/".to_owned() + &"a".repeat(200);
-        let out = sanitize_cwd(Path::new(&long));
-        assert_eq!(out.chars().count(), MAX_PROJECT_DIR_LEN);
-        let suffix = &out[out.len() - (HASH_SUFFIX_HEX_LEN + 1)..];
-        assert!(suffix.starts_with('-'));
-        assert!(suffix[1..].chars().all(|c| c.is_ascii_hexdigit()));
-    }
+        #[test]
+        fn truncates_long_paths_with_stable_hash_suffix() {
+            let long = "/".to_owned() + &"a".repeat(200);
+            let out = sanitize_cwd(Path::new(&long));
+            assert_eq!(out.chars().count(), MAX_PROJECT_DIR_LEN);
+            let suffix = &out[out.len() - (HASH_SUFFIX_HEX_LEN + 1)..];
+            assert!(suffix.starts_with('-'));
+            assert!(suffix[1..].chars().all(|c| c.is_ascii_hexdigit()));
+        }
 
-    #[test]
-    fn sanitize_cwd_truncation_distinguishes_similar_long_paths() {
-        let base = "/".to_owned() + &"a".repeat(200);
-        let a = sanitize_cwd(Path::new(&(base.clone() + "/alpha")));
-        let b = sanitize_cwd(Path::new(&(base + "/beta")));
-        assert_ne!(a, b, "hash suffix must disambiguate");
-    }
+        #[test]
+        fn truncation_distinguishes_similar_long_paths() {
+            let base = "/".to_owned() + &"a".repeat(200);
+            let a = sanitize_cwd(Path::new(&(base.clone() + "/alpha")));
+            let b = sanitize_cwd(Path::new(&(base + "/beta")));
+            assert_ne!(a, b, "hash suffix must disambiguate");
+        }
 
-    #[test]
-    fn sanitize_cwd_is_deterministic() {
-        let p = Path::new("/some/deterministic/path");
-        assert_eq!(sanitize_cwd(p), sanitize_cwd(p));
-    }
+        #[test]
+        fn is_deterministic() {
+            let p = Path::new("/some/deterministic/path");
+            assert_eq!(sanitize_cwd(p), sanitize_cwd(p));
+        }
 
-    #[cfg(unix)]
-    #[test]
-    fn sanitize_cwd_distinguishes_non_utf8_paths_with_same_lossy_form() {
-        // Both invalid bytes lossy-render as U+FFFD, so the raw-byte hash must disambiguate.
-        use std::ffi::OsStr;
-        use std::os::unix::ffi::OsStrExt;
-        use std::path::PathBuf;
+        #[cfg(unix)]
+        #[test]
+        fn distinguishes_non_utf8_paths_with_same_lossy_form() {
+            // Both invalid bytes lossy-render as U+FFFD, so the raw-byte hash must disambiguate.
+            use std::ffi::OsStr;
+            use std::os::unix::ffi::OsStrExt;
+            use std::path::PathBuf;
 
-        let base = "/".to_owned() + &"a".repeat(200) + "/";
-        let mut bytes_a = base.as_bytes().to_vec();
-        bytes_a.push(0xFF);
-        let mut bytes_b = base.as_bytes().to_vec();
-        bytes_b.push(0xFE);
+            let base = "/".to_owned() + &"a".repeat(200) + "/";
+            let mut bytes_a = base.as_bytes().to_vec();
+            bytes_a.push(0xFF);
+            let mut bytes_b = base.as_bytes().to_vec();
+            bytes_b.push(0xFE);
 
-        let path_a = PathBuf::from(OsStr::from_bytes(&bytes_a));
-        let path_b = PathBuf::from(OsStr::from_bytes(&bytes_b));
+            let path_a = PathBuf::from(OsStr::from_bytes(&bytes_a));
+            let path_b = PathBuf::from(OsStr::from_bytes(&bytes_b));
 
-        assert_eq!(
-            path_a.to_string_lossy(),
-            path_b.to_string_lossy(),
-            "precondition: lossy forms collide"
-        );
-        assert_ne!(
-            sanitize_cwd(&path_a),
-            sanitize_cwd(&path_b),
-            "raw-byte hash must disambiguate"
-        );
+            assert_eq!(
+                path_a.to_string_lossy(),
+                path_b.to_string_lossy(),
+                "precondition: lossy forms collide"
+            );
+            assert_ne!(
+                sanitize_cwd(&path_a),
+                sanitize_cwd(&path_b),
+                "raw-byte hash must disambiguate"
+            );
+        }
     }
 }
