@@ -4,7 +4,7 @@ Learn how to set up the development environment, what the pre-commit hooks check
 
 ## Dev Shell
 
-The Nix flake provides the pinned Rust toolchain, `cargo-deny`, `cargo-llvm-cov`, `cargo-mutants`, `git-cliff`, Node.js, and pnpm:
+The Nix flake provides the pinned Rust toolchain, `cargo-deny`, `cargo-insta`, `cargo-llvm-cov`, `cargo-mutants`, `git-cliff`, Node.js, and pnpm:
 
 ```bash
 nix develop                                        # Dev shell with the Rust toolchain and pre-commit hooks
