@@ -68,6 +68,8 @@ ox -p "<prompt>"                            # Headless: run one turn and print t
 - Run the [verification](#verification) block before review.
 - Add new words to `.cspell/words.txt` in alphabetical order. `cspell` scans Rust sources too, so a new word in a doc comment fails the same way as one in `README.md`.
 - Update whatever the change makes stale: the `README.md` Features and Scope sections, the user guides, design docs and the module map, research notes whose follow-ups it resolves, and open issues it resolves or invalidates.
+- Design each change to hold up long term. Survey the reference implementations that [Writing](docs/conventions/writing.md#documentation) lists, reason from first principles toward a design better than any of them, and land any refactor the design needs first. Fix a problem in the layer that owns it, so when `ox` misbehaves in some environment, fix `ox` and leave the environment alone. Never ship a stopgap labeled temporary.
+- When a change or review exposes a gap or inconsistency in the conventions, settle the standard from first principles, record it in the convention doc that owns the area, and bring existing code and docs up to it in a scoped refactor PR.
 - Issues, PRs, and their comments link only public material. Never reference gitignored or local material, such as working notes, local paths, or private repositories.
 
 ## Verification
