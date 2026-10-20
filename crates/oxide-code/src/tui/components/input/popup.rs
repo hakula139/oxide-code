@@ -247,9 +247,9 @@ impl PopupList {
     }
 }
 
-/// Classifies the cursor's position within a single-line input, by the name rules of
-/// [`parse_slash`](crate::command::parse_slash). An empty `prefix` in `Arg` means the user typed
-/// `/cmd ` and has not started the argument yet.
+/// Classifies a single-line input as a command name being typed or an argument of the named
+/// command, by the name rules of [`parse_slash`](crate::command::parse_slash). An empty `prefix` in
+/// `Arg` means the user typed `/cmd ` and has not started the argument yet.
 pub(super) fn popup_state(buffer: &str) -> Option<PopupState<'_>> {
     let rest = buffer.trim_start().strip_prefix('/')?;
     if rest.starts_with('/') {

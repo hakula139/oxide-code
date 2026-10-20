@@ -260,6 +260,7 @@ async fn async_main(offset_error: Option<IndeterminateOffset>) -> Result<Exit> {
         title,
         unarchived,
     };
+    // Boxed, since on Windows this future passes clippy's 16 KiB `large_futures` threshold.
     Box::pin(run_tui(
         engine,
         &theme.theme,
@@ -368,6 +369,7 @@ mod tests {
             let value = <OsString as std::os::unix::ffi::OsStringExt>::from_vec(vec![0xff]);
             #[cfg(windows)]
             let value = <OsString as std::os::windows::ffi::OsStringExt>::from_wide(&[0xd800]);
+            let replacement = char::REPLACEMENT_CHARACTER;
 
             let invalid = Cli::try_parse_from([OsString::from("ox"), "--mode".into(), value])
                 .err()
@@ -377,13 +379,11 @@ mod tests {
             assert_eq!(
                 invalid.to_string(),
                 formatdoc! {"
-                    error: invalid value '{}' for '--mode <MODE>'
+                    error: invalid value '{replacement}' for '--mode <MODE>'
                       [possible values: manual, plan, yolo]
 
                     For more information, try '--help'.
-                    ",
-                    char::REPLACEMENT_CHARACTER,
-                },
+                "},
             );
         }
 
