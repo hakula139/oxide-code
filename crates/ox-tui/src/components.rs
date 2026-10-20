@@ -12,6 +12,6 @@ use ox_core::util::text::plural;
 const LEFT_MARGIN: &str = "  ";
 
 /// Counts the items an overflow leaves out, as in `... +3 lines`.
-pub(super) fn overflow_count(hidden: usize, singular: &str, plural_form: &str) -> String {
+pub(crate) fn overflow_count(hidden: usize, singular: &str, plural_form: &str) -> String {
     format!("... +{hidden} {}", plural(hidden, singular, plural_form))
 }

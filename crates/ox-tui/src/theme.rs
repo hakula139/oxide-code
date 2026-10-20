@@ -18,7 +18,7 @@ use super::glyphs::SEGMENT_SEPARATOR;
 
 /// Parses the built-in theme `name`, such as `mocha` or `latte`. `None` for an unknown name.
 /// Panics if the vendored TOML fails to parse, which `parse_theme_all_builtins` rules out.
-pub(super) fn load_builtin(name: &str) -> Option<Theme> {
+pub(crate) fn load_builtin(name: &str) -> Option<Theme> {
     let body = builtin::lookup(name)?;
     Some(loader::parse_theme(body).expect("vendored builtin theme TOML must parse"))
 }
@@ -111,7 +111,7 @@ macro_rules! for_each_slot {
     };
 }
 
-pub(super) use for_each_slot;
+pub(crate) use for_each_slot;
 
 /// Theme palette, with one slot per semantic role.
 macro_rules! define_theme_struct {
@@ -127,7 +127,7 @@ macro_rules! define_theme_struct {
         }
 
         #[cfg(test)]
-        pub(super) const SLOT_NAMES: &[&str] = &[ $(stringify!($name),)* ];
+        pub(crate) const SLOT_NAMES: &[&str] = &[ $(stringify!($name),)* ];
     };
 }
 
@@ -148,12 +148,12 @@ impl Default for Theme {
 
 macro_rules! define_slot_accessor {
     (diff_add) => {
-        pub(super) fn diff_add_row(&self) -> Style {
+        pub(crate) fn diff_add_row(&self) -> Style {
             Style::default().bg(self.diff_add.bg.unwrap_or(Color::Reset))
         }
     };
     (diff_del) => {
-        pub(super) fn diff_del_row(&self) -> Style {
+        pub(crate) fn diff_del_row(&self) -> Style {
             Style::default().bg(self.diff_del.bg.unwrap_or(Color::Reset))
         }
     };
@@ -175,7 +175,7 @@ macro_rules! define_slot_accessors {
 for_each_slot!(define_slot_accessors);
 
 impl Theme {
-    pub(super) fn row_style(&self, selected: bool) -> Style {
+    pub(crate) fn row_style(&self, selected: bool) -> Style {
         if selected {
             self.text().add_modifier(Modifier::BOLD)
         } else {
@@ -183,12 +183,12 @@ impl Theme {
         }
     }
 
-    pub(super) fn separator_span(&self) -> Span<'static> {
+    pub(crate) fn separator_span(&self) -> Span<'static> {
         Span::styled(SEGMENT_SEPARATOR, self.separator())
     }
 
     /// Style of a task row, which highlights the task in progress and dims the finished ones.
-    pub(super) fn task_style(&self, status: TaskStatus) -> Style {
+    pub(crate) fn task_style(&self, status: TaskStatus) -> Style {
         match status {
             TaskStatus::Pending => self.text(),
             TaskStatus::InProgress => self.info(),

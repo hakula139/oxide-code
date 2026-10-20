@@ -12,41 +12,41 @@ use ox_core::tool::tasks::TaskStatus;
 // ── User Prompt ──
 
 /// First-line prefix for user-typed prompts.
-pub(super) const USER_PROMPT_PREFIX: &str = "❯ ";
+pub(crate) const USER_PROMPT_PREFIX: &str = "❯ ";
 
 /// Display width of [`USER_PROMPT_PREFIX`] in terminal columns.
-pub(super) const USER_PROMPT_PREFIX_WIDTH: u16 = 2;
+pub(crate) const USER_PROMPT_PREFIX_WIDTH: u16 = 2;
 
 /// Continuation indent for multi-line user-typed content.
-pub(super) const USER_PROMPT_CONT: &str = "  ";
+pub(crate) const USER_PROMPT_CONT: &str = "  ";
 
 // ── Assistant ──
 
 /// First-line prefix for assistant text.
-pub(super) const ASSISTANT_PREFIX: &str = "◉ ";
+pub(crate) const ASSISTANT_PREFIX: &str = "◉ ";
 
 /// Continuation indent for multi-line assistant content.
-pub(super) const ASSISTANT_CONT: &str = "  ";
+pub(crate) const ASSISTANT_CONT: &str = "  ";
 
 // ── Tool / Thinking ──
 
 /// Left-bar glyph for tool and thinking blocks.
-pub(super) const BAR: &str = "▎";
+pub(crate) const BAR: &str = "▎";
 
 /// Per-line prefix for thinking blocks.
-pub(super) const THINKING_PREFIX: &str = "▎ ";
+pub(crate) const THINKING_PREFIX: &str = "▎ ";
 
 /// First-line prefix for tool-call and tool-result status lines.
-pub(super) const TOOL_BORDER_PREFIX: &str = "▎ ";
+pub(crate) const TOOL_BORDER_PREFIX: &str = "▎ ";
 
 /// Continuation prefix for tool-block body lines (content at col 4).
-pub(super) const TOOL_BORDER_CONT: &str = "▎   ";
+pub(crate) const TOOL_BORDER_CONT: &str = "▎   ";
 
 /// Tool-result success indicator.
-pub(super) const TOOL_SUCCESS: &str = "✓";
+pub(crate) const TOOL_SUCCESS: &str = "✓";
 
 /// Tool-result failure indicator.
-pub(super) const TOOL_ERROR: &str = "✗";
+pub(crate) const TOOL_ERROR: &str = "✗";
 
 // ── Tasks ──
 
@@ -62,10 +62,10 @@ pub const fn task_marker(status: TaskStatus) -> &'static str {
 // ── Error ──
 
 /// First-line prefix for error blocks.
-pub(super) const ERROR_PREFIX: &str = "✗ ";
+pub(crate) const ERROR_PREFIX: &str = "✗ ";
 
 /// Continuation indent for multi-line error messages.
-pub(super) const ERROR_CONT: &str = "  ";
+pub(crate) const ERROR_CONT: &str = "  ";
 
 /// Prefix for an error shown inside a modal, such as a failed delete or session load.
 pub(crate) const MODAL_ERROR_PREFIX: &str = "! ";
@@ -76,16 +76,16 @@ pub(crate) const MODAL_ERROR_PREFIX: &str = "! ";
 const CURSOR_MARKER: &str = "> ";
 
 /// Display width of [`CURSOR_MARKER`] in terminal columns.
-pub(super) const CURSOR_MARKER_WIDTH: u16 = 2;
+pub(crate) const CURSOR_MARKER_WIDTH: u16 = 2;
 
 /// A picker row's gutter: [`CURSOR_MARKER`] on the cursor row, and blank columns of the same width
 /// on the others.
-pub(super) const fn cursor_gutter(is_cursor: bool) -> &'static str {
+pub(crate) const fn cursor_gutter(is_cursor: bool) -> &'static str {
     if is_cursor { CURSOR_MARKER } else { "  " }
 }
 
 /// Marker after the label of a list picker's active row.
-pub(super) const ACTIVE_MARKER: &str = "✓";
+pub(crate) const ACTIVE_MARKER: &str = "✓";
 
 /// Dot for the chosen effort level.
 pub(crate) const RADIO_SELECTED: char = '●';
@@ -99,35 +99,35 @@ pub(crate) const RADIO_UNSELECTED: char = '○';
 pub(crate) const HORIZONTAL_RULE: &str = "─";
 
 /// Border between markdown table cells.
-pub(super) const VERTICAL_RULE: &str = "│";
+pub(crate) const VERTICAL_RULE: &str = "│";
 
 /// Per-line prefix for markdown blockquotes.
-pub(super) const BLOCKQUOTE_PREFIX: &str = "│ ";
+pub(crate) const BLOCKQUOTE_PREFIX: &str = "│ ";
 
 /// Corner and junction glyphs of one horizontal rule in a markdown table.
 #[derive(Debug, Clone, Copy)]
-pub(super) struct TableRule {
-    pub(super) left: char,
-    pub(super) join: char,
-    pub(super) right: char,
+pub(crate) struct TableRule {
+    pub(crate) left: char,
+    pub(crate) join: char,
+    pub(crate) right: char,
 }
 
 /// Rule above a table's first row.
-pub(super) const TABLE_TOP: TableRule = TableRule {
+pub(crate) const TABLE_TOP: TableRule = TableRule {
     left: '┌',
     join: '┬',
     right: '┐',
 };
 
 /// Rule between two rows of a table.
-pub(super) const TABLE_MIDDLE: TableRule = TableRule {
+pub(crate) const TABLE_MIDDLE: TableRule = TableRule {
     left: '├',
     join: '┼',
     right: '┤',
 };
 
 /// Rule below a table's last row.
-pub(super) const TABLE_BOTTOM: TableRule = TableRule {
+pub(crate) const TABLE_BOTTOM: TableRule = TableRule {
     left: '└',
     join: '┴',
     right: '┘',
@@ -136,15 +136,15 @@ pub(super) const TABLE_BOTTOM: TableRule = TableRule {
 // ── Separators ──
 
 /// Separator between status bar segments.
-pub(super) const SEGMENT_SEPARATOR: &str = " │ ";
+pub(crate) const SEGMENT_SEPARATOR: &str = " │ ";
 
 /// Separator between items on one line of the welcome screen.
-pub(super) const INLINE_SEPARATOR: &str = " · ";
+pub(crate) const INLINE_SEPARATOR: &str = " · ";
 
 // ── Inline Markers ──
 
 /// Inline newline replacement for collapsed multi-line previews.
-pub(super) const NEWLINE_GLYPH: &str = " ⏎ ";
+pub(crate) const NEWLINE_GLYPH: &str = " ⏎ ";
 
 /// Line marking where a cancelled turn's reply stopped, in the chat and on stderr under `--no-tui`.
 pub const INTERRUPTED_MARKER: &str = "(interrupted)";
@@ -152,7 +152,7 @@ pub const INTERRUPTED_MARKER: &str = "(interrupted)";
 // ── Status Spinner ──
 
 /// 8-dot Braille spinner frames whose one empty dot moves clockwise, indexed modulo their count.
-pub(super) const SPINNER_FRAMES: &[char] = &['⣷', '⣯', '⣟', '⡿', '⢿', '⣻', '⣽', '⣾'];
+pub(crate) const SPINNER_FRAMES: &[char] = &['⣷', '⣯', '⣟', '⡿', '⢿', '⣻', '⣽', '⣾'];
 
 #[cfg(test)]
 mod tests {

@@ -4,7 +4,7 @@ use ratatui::Frame;
 use ratatui::layout::Rect;
 
 /// Places the terminal cursor at `(raw_x, y)`, clamped inside the right edge of `area`.
-pub(super) fn place_clamped(frame: &mut Frame<'_>, raw_x: u16, y: u16, area: Rect) {
+pub(crate) fn place_clamped(frame: &mut Frame<'_>, raw_x: u16, y: u16, area: Rect) {
     let cursor_x = raw_x.min(area.right().saturating_sub(1));
     frame.set_cursor_position((cursor_x, y));
 }

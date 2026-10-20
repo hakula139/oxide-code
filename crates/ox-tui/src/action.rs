@@ -32,13 +32,13 @@ pub(crate) enum Action {
 
 /// A named action whose key works while no modal holds the keyboard.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) enum AppAction {
+pub(crate) enum AppAction {
     /// Switches the chat between its compact and expanded views.
     ToggleExpanded,
 }
 
 /// The app's key actions, which take their keys before the input box sees them.
-pub(super) const APP_KEYMAP: Keymap<AppAction, ()> = Keymap::new(&[KeyAction {
+pub(crate) const APP_KEYMAP: Keymap<AppAction, ()> = Keymap::new(&[KeyAction {
     action: AppAction::ToggleExpanded,
     key: KeyChord::ctrl('o'),
     label: |()| Some("to expand"),

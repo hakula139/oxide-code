@@ -8,7 +8,7 @@ const FALLBACK_RESULT_HEADER: &str = "(result)";
 
 /// Picks the display header for a tool result, preferring the tool's own post-execution title,
 /// then the label its call showed, then the generic fallback.
-pub(super) fn result_header(title: Option<String>, call_label: Option<String>) -> String {
+pub(crate) fn result_header(title: Option<String>, call_label: Option<String>) -> String {
     title
         .or(call_label)
         .unwrap_or_else(|| FALLBACK_RESULT_HEADER.to_owned())
@@ -18,29 +18,29 @@ pub(super) fn result_header(title: Option<String>, call_label: Option<String>) -
 /// header and sit right under the call. Cleared at turn boundaries so orphan starts from a
 /// cancelled or errored turn don't leak across turns.
 #[derive(Debug, Default)]
-pub(super) struct PendingCalls {
+pub(crate) struct PendingCalls {
     calls: HashMap<String, PendingCall>,
 }
 
 #[derive(Debug, PartialEq, Eq)]
-pub(super) struct PendingCall {
-    pub(super) label: String,
+pub(crate) struct PendingCall {
+    pub(crate) label: String,
     /// Index of the call's chat block.
-    pub(super) block: usize,
+    pub(crate) block: usize,
 }
 
 impl PendingCalls {
-    pub(super) fn insert(&mut self, id: String, label: String, block: usize) {
+    pub(crate) fn insert(&mut self, id: String, label: String, block: usize) {
         self.calls.insert(id, PendingCall { label, block });
     }
 
-    pub(super) fn remove(&mut self, id: &str) -> Option<PendingCall> {
+    pub(crate) fn remove(&mut self, id: &str) -> Option<PendingCall> {
         self.calls.remove(id)
     }
 
     /// Moves each call whose block sits at or after `at` one block down, after a block is inserted
     /// at `at`.
-    pub(super) fn shift_from(&mut self, at: usize) {
+    pub(crate) fn shift_from(&mut self, at: usize) {
         for call in self.calls.values_mut() {
             if call.block >= at {
                 call.block += 1;
@@ -48,12 +48,12 @@ impl PendingCalls {
         }
     }
 
-    pub(super) fn clear(&mut self) {
+    pub(crate) fn clear(&mut self) {
         self.calls.clear();
     }
 
     #[cfg(test)]
-    pub(super) fn len(&self) -> usize {
+    pub(crate) fn len(&self) -> usize {
         self.calls.len()
     }
 }

@@ -31,7 +31,7 @@ const COPY_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// The terminal running the session, as far as its OSC 52 support goes.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) enum Terminal {
+pub(crate) enum Terminal {
     /// Terminal.app, which ignores OSC 52.
     Apple,
     /// iTerm2, which ignores OSC 52 unless "Applications in terminal may access clipboard" is on.
@@ -59,18 +59,18 @@ impl Terminal {
 
 /// Session facts that pick the clipboard routes.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) struct Environment {
+pub(crate) struct Environment {
     /// Whether the session runs on the machine whose clipboard the user pastes from.
-    pub(super) local: bool,
-    pub(super) tmux: bool,
+    pub(crate) local: bool,
+    pub(crate) tmux: bool,
     /// Whether GNU screen, outside tmux, hosts the session. Screen passes OSC 52 to the outer
     /// terminal only inside its DCS passthrough.
-    pub(super) screen: bool,
-    pub(super) terminal: Terminal,
+    pub(crate) screen: bool,
+    pub(crate) terminal: Terminal,
 }
 
 impl Environment {
-    pub(super) fn detect() -> Self {
+    pub(crate) fn detect() -> Self {
         let tmux = env::string("TMUX").is_some();
         Self {
             local: env::string("SSH_CONNECTION").is_none() && env::string("SSH_TTY").is_none(),
@@ -87,7 +87,7 @@ impl Environment {
 
 /// How a copy reached the clipboard.
 #[derive(Debug, PartialEq, Eq)]
-pub(super) enum Delivery {
+pub(crate) enum Delivery {
     /// The system clipboard holds the text, written directly or forwarded by tmux.
     Copied,
     /// Only a tmux paste buffer holds the text, since tmux before 3.2 cannot forward it.
@@ -101,7 +101,7 @@ pub(super) enum Delivery {
 
 /// Why a copy did not reach the clipboard.
 #[derive(Debug, PartialEq, Eq)]
-pub(super) enum CopyError {
+pub(crate) enum CopyError {
     /// The selection is over [`MAX_TERMINAL_COPY_BYTES`], with its size in bytes, and only a
     /// terminal route was left.
     TooLarge(usize),
@@ -141,14 +141,14 @@ impl fmt::Display for CopyError {
 
 /// The outcome of one copy, for the notice over the chat.
 #[derive(Debug, PartialEq, Eq)]
-pub(super) struct CopyReport {
-    pub(super) chars: usize,
-    pub(super) outcome: Result<Delivery, CopyError>,
+pub(crate) struct CopyReport {
+    pub(crate) chars: usize,
+    pub(crate) outcome: Result<Delivery, CopyError>,
 }
 
 impl CopyReport {
     /// The notice text, and whether it warns that the copy may not have landed.
-    pub(super) fn notice(&self) -> (String, bool) {
+    pub(crate) fn notice(&self) -> (String, bool) {
         let copied = match self.chars {
             1 => "Copied 1 character".to_owned(),
             count => format!("Copied {count} characters"),
@@ -177,7 +177,7 @@ impl CopyReport {
 
 /// Copies text off the event loop. The native clipboard handle lives as long as this value, since
 /// X11 and some Wayland compositors drop the contents once the process that wrote them lets go.
-pub(super) struct Clipboard {
+pub(crate) struct Clipboard {
     environment: Environment,
     native: Arc<Mutex<Option<arboard::Clipboard>>>,
     /// Runs tmux for the tmux routes. Tests replace it with a fake.
@@ -187,7 +187,7 @@ pub(super) struct Clipboard {
 }
 
 impl Clipboard {
-    pub(super) fn new(environment: Environment) -> Self {
+    pub(crate) fn new(environment: Environment) -> Self {
         let (tx, rx) = mpsc::unbounded_channel();
         Self {
             environment,
@@ -199,7 +199,7 @@ impl Clipboard {
     }
 
     /// Starts copying `text` and reports through [`Self::recv`]. Must run inside a tokio runtime.
-    pub(super) fn copy(&self, text: String) {
+    pub(crate) fn copy(&self, text: String) {
         let route = Route {
             environment: self.environment,
             native: Arc::clone(&self.native),
@@ -216,7 +216,7 @@ impl Clipboard {
     }
 
     /// Waits for the next finished copy. Cancel-safe, so it can sit in a `tokio::select!` arm.
-    pub(super) async fn recv(&mut self) -> Option<CopyReport> {
+    pub(crate) async fn recv(&mut self) -> Option<CopyReport> {
         self.rx.recv().await
     }
 }

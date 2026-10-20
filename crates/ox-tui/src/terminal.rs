@@ -38,7 +38,7 @@ pub(crate) type Tui = Terminal<CrosstermBackend<Stdout>>;
 
 /// A backend the TUI draws frames to and then writes escape sequences to, such as the OSC 8 status
 /// links and OSC 52 copies.
-pub(super) trait TuiBackend: Backend<Error: Send + Sync + 'static> + Write {}
+pub(crate) trait TuiBackend: Backend<Error: Send + Sync + 'static> + Write {}
 
 impl<B: Backend<Error: Send + Sync + 'static> + Write> TuiBackend for B {}
 
@@ -143,7 +143,7 @@ fn write_deferred_panics(deferred: &Mutex<DeferredPanics>, out: &mut impl Write)
 
 /// Runs `f` inside a DEC synchronized update (mode 2026), so the terminal presents everything it
 /// writes as one tear-free frame.
-pub(super) fn synchronized_update<B: TuiBackend>(
+pub(crate) fn synchronized_update<B: TuiBackend>(
     terminal: &mut Terminal<B>,
     f: impl FnOnce(&mut Terminal<B>) -> Result<()>,
 ) -> Result<()> {
@@ -314,7 +314,7 @@ pub fn stdout_width() -> Option<usize> {
 // ── Testing ──
 
 #[cfg(test)]
-pub(super) mod testing {
+pub(crate) mod testing {
     //! A terminal stand-in for render tests that records the escape sequences written to it.
 
     use std::convert::Infallible;
