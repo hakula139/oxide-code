@@ -1,6 +1,6 @@
-//! Slash commands: [`parse_slash`](ox_core::command::parse_slash) detects them, and [`dispatch`] runs
-//! them through the registry of [`registry::SlashCommand`] impls. No command writes the config
-//! files, so a setting one changes reverts on restart.
+//! Slash commands: [`parse_slash`](ox_core::command::parse_slash) detects them, and [`dispatch`]
+//! runs them through the registry of [`registry::SlashCommand`] impls. No command writes the
+//! config files, so a setting one changes reverts on restart.
 //!
 //! Design: `docs/design/slash/commands.md`.
 

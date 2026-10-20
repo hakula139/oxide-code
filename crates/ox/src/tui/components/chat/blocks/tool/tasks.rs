@@ -42,7 +42,7 @@ mod tests {
     mod render {
         use super::*;
 
-        /// Each row's text in the compact or expanded view, plus the style of the span after the bar.
+        /// Each row's text and the style of the span after its bar, compact or `expanded`.
         fn rows(tasks: &[Task], expanded: bool) -> Vec<(String, Style)> {
             let theme = Theme::default();
             let ctx = RenderCtx {

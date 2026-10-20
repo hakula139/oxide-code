@@ -1261,8 +1261,8 @@ mod tests {
         }
 
         /// A session holding a login that sends `access` until `expires_at_ms`, then refreshes with
-        /// `refresh` at `refresh_url`. A Keychain that refuses writes holds the login, leaked so the
-        /// session's store can borrow it, and the store locks within `dir`.
+        /// `refresh` at `refresh_url`. A Keychain that refuses writes holds the login, leaked so
+        /// the session's store can borrow it, and the store locks within `dir`.
         fn unwritable_login(
             dir: &Path,
             refresh_url: &str,

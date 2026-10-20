@@ -623,8 +623,8 @@ mod tests {
                 }
             }
 
-            /// Results of eight lines for the calls `ids`, which the compact view caps at five with a
-            /// footer, painted at the tail of a 10-row chat.
+            /// Results of eight lines for the calls `ids`, which the compact view caps at five with
+            /// a footer, painted at the tail of a 10-row chat.
             fn long_results(ids: &[&str]) -> (ChatView, Vec<String>) {
                 let output = (0..8)
                     .map(|i| format!("line {i}"))

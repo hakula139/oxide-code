@@ -1101,7 +1101,7 @@ mod tests {
 
         #[test]
         fn single_file_over_the_walk_limit_searches_like_read() {
-            // A spill file runs to 10 MiB, so a search rooted at one must not stop at the walk's 1 MiB.
+            // A spill file runs to 10 MiB, so searching one directly ignores the walk's 1 MiB cap.
             let dir = canonical_tempdir();
             let spill = "session/tool-results/toolu_1.txt";
             let lines = 21_000;
