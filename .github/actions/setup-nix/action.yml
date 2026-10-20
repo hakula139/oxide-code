@@ -1,5 +1,7 @@
 name: Set up Nix
-description: Install Nix and configure the Cachix substituter named by the caller's CACHIX_NAME environment variable
+description: >-
+  Install Nix and configure the Cachix substituter
+  named by the caller's CACHIX_NAME environment variable
 
 inputs:
   cachix_auth_token:
@@ -22,4 +24,6 @@ runs:
       with:
         name: ${{ env.CACHIX_NAME }}
         authToken: ${{ inputs.cachix_auth_token }}
-        skipPush: ${{ !inputs.cachix_auth_token || !(github.ref == 'refs/heads/main' || github.actor == 'hakula139') }}
+        skipPush: >-
+          ${{ !inputs.cachix_auth_token ||
+          !(github.ref == 'refs/heads/main' || github.actor == 'hakula139') }}

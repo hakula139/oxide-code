@@ -1,6 +1,6 @@
 # Development
 
-Learn how to set up the development environment, what the pre-commit hooks check, how the toolchain is pinned, how Nix files are styled, what debug info dev builds keep, what CI runs, and how to treat a failing check. For other ways to build `ox`, see [Installation](../guide/install.md).
+Learn how to set up the development environment, what the pre-commit hooks check, how the toolchain is pinned, how Nix and config files are styled, what debug info dev builds keep, what CI runs, and how to treat a failing check. For other ways to build `ox`, see [Installation](../guide/install.md).
 
 ## Dev Shell
 
@@ -52,6 +52,14 @@ The Node-based hooks run tools pinned in `node_modules` and fail when that direc
 - Group related bindings and attributes, and order a `let` block so that each binding follows what it depends on. Within a group, use alphabetical order unless a stronger order applies.
 - Follow a multiline binding or attribute with a blank line before its next sibling. Keep single-line siblings together and separate their groups with a blank line. A single-line binding may lead directly into a related multiline one.
 - Write multiline text, such as a shell hook, as an indented string with literal line breaks.
+
+## Config Style
+
+Prettier and Taplo leave long strings alone, and no formatter covers shell code, so wrap YAML, TOML, and shell files by hand:
+
+- Wrap comments at 100 columns, as [Writing](writing.md#comments) requires, and keep other lines within about 100, counting the indent. Leave a line long when it holds an unbreakable token, such as a URL or path, or sits in a heredoc body or literal block whose line breaks are content.
+- Wrap a long string only where its value stays the same, and break it where [Rust](rust.md#strings) breaks a continued literal.
+- Split a shell command that runs past the limit at its pipelines and `&&` or `||` lists, and split one in a Markdown code block the same way where that helps readability. If a part is still too long, keep at most what names the operation on its first line, such as the command, its subcommands, and a leading script, pattern, or message, and put each further flag with its value, or each group of related arguments, on a line of its own. Indent continuation lines one level past the first line, and end each line but the last with `\`, unless it ends with `|`, `&&`, or `||`, which already continue the command. In a workflow, write the command in a `run: |` block.
 
 ## Debug Info
 

@@ -103,6 +103,8 @@ The tests drive headless and REPL runs. Check the TUI-only paths by hand in a sc
 4. **Leak check**: Search the logs and session files for each credential. Pass the value straight to `grep` so it never prints, and check the exit status: `1` means no match, `0` a match, and `2` an error such as a missing directory.
 
    ```bash
-   grep -rqF -- "$ANTHROPIC_AUTH_TOKEN" "${XDG_STATE_HOME:-$HOME/.local/state}/ox" "${XDG_DATA_HOME:-$HOME/.local/share}/ox/sessions"
+   grep -rqF -- "$ANTHROPIC_AUTH_TOKEN" \
+     "${XDG_STATE_HOME:-$HOME/.local/state}/ox" \
+     "${XDG_DATA_HOME:-$HOME/.local/share}/ox/sessions"
    echo $?
    ```

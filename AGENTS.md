@@ -59,7 +59,7 @@ ox -p "<prompt>"                            # Headless: run one turn and print t
 | Tests                                                | [Testing](docs/conventions/testing.md)                                             |
 | Comments, docs, or text that users or the model read | [Writing](docs/conventions/writing.md)                                             |
 | Commits, branches, PRs, or issues                    | [GitHub](docs/conventions/github.md)                                               |
-| The dev shell, hooks, toolchain, or CI               | [Development](docs/conventions/development.md)                                     |
+| The dev shell, hooks, toolchain, CI, or config files | [Development](docs/conventions/development.md)                                     |
 | A release                                            | [RELEASING.md](RELEASING.md)                                                       |
 
 ## Rules for Every Change
