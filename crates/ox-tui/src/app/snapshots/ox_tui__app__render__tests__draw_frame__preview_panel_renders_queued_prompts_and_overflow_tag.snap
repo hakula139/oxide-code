@@ -1,0 +1,18 @@
+---
+source: crates/ox-tui/src/app/render.rs
+expression: "render_app(&mut app, 60, 14)"
+---
+"  test-model (high) │ ⣷ Streaming · Esc to interrupt        "
+"────────────────────────────────────────────────────────────"
+"❯ active                                                    "
+"                                                            "
+"                                                            "
+"                                                            "
+"                                                            "
+"❯ queued 0                                                  "
+"❯ queued 1                                                  "
+"❯ queued 2                                                  "
+"  ... +2 prompts                                            "
+"────────────────────────────────────────────────────────────"
+"❯                                                           "
+"────────────────────────────────────────────────────────────"

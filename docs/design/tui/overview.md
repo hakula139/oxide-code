@@ -21,7 +21,7 @@ Components are concrete structs (`ChatView`, `InputArea`, `StatusBar`, modals) t
 
 ### Named Keys
 
-The app's own keys live in `APP_KEYMAP` in `tui/action.rs`, a table of named `AppAction`s built from the `KeyAction`, `KeyChord`, and `Keymap` types in `tui/keymap.rs`. Each entry carries its key and hint, so the hint a footer shows comes from the entry the key dispatches through. A key in the table works while no modal holds the keyboard and reaches the app before the input box. The `/resume` picker builds its keys and footer from the same types.
+The app's own keys live in `APP_KEYMAP` in `ox_tui::action`, a table of named `AppAction`s built from the `KeyAction`, `KeyChord`, and `Keymap` types in `ox_tui::keymap`. Each entry carries its key and hint, so the hint a footer shows comes from the entry the key dispatches through. A key in the table works while no modal holds the keyboard and reaches the app before the input box. The `/resume` picker builds its keys and footer from the same types.
 
 ### Async Event Loop
 

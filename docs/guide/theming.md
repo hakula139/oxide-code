@@ -31,7 +31,7 @@ Both `[tui.theme]` keys are optional. Without them the default is `mocha` (Catpp
 
 Each ships as a vendored TOML file [in the source tree][themes-src] and doubles as a copy-paste starting point for custom themes.
 
-[themes-src]: https://github.com/hakula139/oxide-code/tree/main/crates/ox/themes
+[themes-src]: https://github.com/hakula139/oxide-code/tree/main/crates/ox-tui/themes
 
 ## Custom Theme Files
 

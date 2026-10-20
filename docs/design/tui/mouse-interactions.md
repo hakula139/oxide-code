@@ -45,7 +45,7 @@ In the compact view, a plain click on a block's overflow footer, such as `... +3
 
 ## Copying
 
-`tui::clipboard::Clipboard` runs each copy in a tokio task, off the event loop, and reports the outcome back to `App` through a channel the loop selects on. A copy that takes over 2 s reports a timeout, and dropping the timed-out task kills any tmux child, which tokio reaps. The routes depend on where `ox` runs:
+`ox_tui::clipboard::Clipboard` runs each copy in a tokio task, off the event loop, and reports the outcome back to `App` through a channel the loop selects on. A copy that takes over 2 s reports a timeout, and dropping the timed-out task kills any tmux child, which tokio reaps. The routes depend on where `ox` runs:
 
 | Session                                         | Routes                                                                       |
 | ----------------------------------------------- | ---------------------------------------------------------------------------- |

@@ -63,7 +63,7 @@ Conventions for Rust code under `crates/`. Tooling enforces some style rules, so
 - Leave one blank line before and after each banner.
 - In function bodies, use blank lines to separate logical phases such as setup, validation, execution, and result.
 - Put a single-line computation directly above its early-return guard, with no blank line between them. For a multi-line `let` binding, such as an async chain or builder, leave a blank line before the guard.
-- Order `use` groups as std, external crates, workspace crates (`ox_core::`), then internal paths (`crate::`, `super::`, `self::`, and the file's child modules), with a blank line between groups. rustfmt sorts imports within each group, putting `self` before `super` before `crate`, but does not move imports between groups. Authors and reviewers must maintain the grouping.
+- Order `use` groups as std, external crates, workspace crates (`ox_core::`, `ox_tui::`), then internal paths (`crate::`, `super::`, `self::`, and the file's child modules), with a blank line between groups. rustfmt sorts imports within each group, putting `self` before `super` before `crate`, but does not move imports between groups. Authors and reviewers must maintain the grouping.
 
 ## Strings
 

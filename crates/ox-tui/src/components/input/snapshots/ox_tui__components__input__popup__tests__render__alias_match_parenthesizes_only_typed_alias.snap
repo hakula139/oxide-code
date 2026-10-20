@@ -1,0 +1,6 @@
+---
+source: crates/ox-tui/src/components/input/popup.rs
+expression: "render_to_backend(&popup, 60)"
+---
+"────────────────────────────────────────────────────────────"
+"/clear (new)  Reset the conversation context                "

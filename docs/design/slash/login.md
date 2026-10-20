@@ -56,6 +56,6 @@ A refresh required by a request, whether for an expired token or after a 401, re
 - `crates/ox-core/src/config/oauth.rs`: credential stores, refresh, write-back, and `SessionLogin`, the token a session holds.
 - `crates/ox-core/src/engine.rs`: `Engine::login` and `Engine::logout`, which swap the client's credential, and `Engine::finalize`, which waits at exit for the reloads in flight.
 - `crates/ox-core/src/protocol.rs`: `Op::Login`, `Op::Logout`, `Event::LoginStarted`, `Event::SignedIn`, and `Event::SignedOut`.
-- `crates/ox/src/slash/login.rs`: `LoginCmd` and `LogoutCmd`.
-- `crates/ox/src/tui/app/events.rs`: browser launch and sign-in messages.
-- `crates/ox/src/tui/components/status.rs`: `Status::SigningIn`, the status line while the browser is out.
+- `crates/ox-tui/src/app/events.rs`: browser launch and sign-in messages.
+- `crates/ox-tui/src/components/status.rs`: `Status::SigningIn`, the status line while the browser is out.
+- `crates/ox-tui/src/slash/login.rs`: `LoginCmd` and `LogoutCmd`.
