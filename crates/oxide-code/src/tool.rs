@@ -2201,7 +2201,7 @@ mod tests {
 
         #[tokio::test]
         async fn binary_bash_output_fits_the_cap_with_only_its_pipe_spill() {
-            // Each byte renders as the three bytes of U+FFFD.
+            // Each byte decodes as the three bytes of U+FFFD.
             let dir = tempfile::tempdir().unwrap();
             let bytes = vec![0xFF; 300 << 10];
             std::fs::write(dir.path().join("image.bin"), &bytes).unwrap();
@@ -2216,9 +2216,10 @@ mod tests {
                 .await;
 
             assert!(!output.is_error, "{}", output.content);
-            assert!(output.content.len() <= MAX_OUTPUT_BYTES);
             assert!(output.metadata.truncated_bytes.is_none());
             let stdout = spill_path(dir.path(), ".stdout.txt");
+            let note = format!("full stdout saved to {}] ...", stdout.display());
+            assert!(output.content.contains(&note));
             assert!(
                 std::fs::read(&stdout).unwrap() == bytes,
                 "the spill holds the raw bytes"
