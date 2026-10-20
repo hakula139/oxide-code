@@ -260,6 +260,7 @@ async fn async_main(offset_error: Option<IndeterminateOffset>) -> Result<Exit> {
         title,
         unarchived,
     };
+    // Boxed, since on Windows this future passes clippy's 16 KiB `large_futures` threshold.
     Box::pin(run_tui(
         engine,
         &theme.theme,
