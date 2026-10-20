@@ -136,6 +136,28 @@ fn continue_in_the_repl_unarchives_the_session_with_a_note() {
 }
 
 #[test]
+fn continue_with_an_unmatched_prefix_fails_with_a_scope_hint() {
+    let dir = tempfile::tempdir().unwrap();
+    let output = ox(dir.path())
+        .args(["--no-tui", "--continue", "deadbeef"])
+        .current_dir(dir.path())
+        .env("ANTHROPIC_AUTH_TOKEN", "test-token")
+        .env("ANTHROPIC_BASE_URL", "http://127.0.0.1:9")
+        .stdin(Stdio::null())
+        .output()
+        .unwrap();
+
+    assert!(!output.status.success(), "{output:?}");
+    assert!(output.stdout.is_empty(), "{:?}", output.stdout);
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert_eq!(
+        stderr.lines().next().unwrap(),
+        "Error: no session matching prefix `deadbeef` in this project \
+         (use --all to search every project)",
+    );
+}
+
+#[test]
 fn resume_without_a_terminal_fails_before_writing_anything() {
     let dir = tempfile::tempdir().unwrap();
     let output = ox(dir.path())
