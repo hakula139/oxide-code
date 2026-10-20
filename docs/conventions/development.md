@@ -59,7 +59,7 @@ Prettier and Taplo leave long strings alone, and no formatter covers shell code,
 
 - Wrap comments at 100 columns, as [Writing](writing.md#comments) requires, and keep other lines within about 100, counting the indent. Leave a line long when it holds an unbreakable token, such as a URL or path, or sits in a heredoc body or literal block whose line breaks are content.
 - Wrap a long string only where its value stays the same, and break it where [Rust](rust.md#strings) breaks a continued literal.
-- Split a long shell command, including one in a Markdown code block, at its pipelines and `&&` or `||` lists. If a part is still too long, keep at most the command, its subcommands, and a leading script or message on its first line, and put each flag with its value, or each group of related arguments, on a line of its own. Indent continuation lines one level past the first line, and end each line but the last with `\`, unless it ends with `|`, `&&`, or `||`, which already continue the command. In a workflow, write the command in a `run: |` block.
+- Split a shell command that runs past the limit at its pipelines and `&&` or `||` lists, and split one in a Markdown code block the same way where that helps readability. If a part is still too long, keep only what names the operation on its first line, such as the command and its subcommands or a leading script, pattern, or message, and put each further flag with its value, or each group of related arguments, on a line of its own. Indent continuation lines one level past the first line, and end each line but the last with `\`, unless it ends with `|`, `&&`, or `||`, which already continue the command. In a workflow, write the command in a `run: |` block.
 
 ## Debug Info
 
