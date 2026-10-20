@@ -55,23 +55,23 @@ The Node-based hooks run tools pinned in `node_modules` and fail when that direc
 
 ## Debug Info
 
-Dev and test builds include line tables for `ox` and no debug info for dependencies, which limits the size of each checkout's `target/`. Panic messages keep their file and line, and so do backtrace frames in `ox` code, while frames in dependency code may show only function names. To inspect variables in a debugger, set `CARGO_PROFILE_DEV_DEBUG=true` to rebuild `ox` with full debug info.
+Dev and test builds include line tables for the workspace crates and no debug info for dependencies, which limits the size of each checkout's `target/`. Panic messages keep their file and line, and so do backtrace frames in workspace code, while frames in dependency code may show only function names. To inspect variables in a debugger, set `CARGO_PROFILE_DEV_DEBUG=true` to rebuild the workspace crates with full debug info.
 
 ## CI
 
 CI runs on pushes to `main`, pull requests, and manual dispatch, and the release workflow calls it again for each tag before publishing:
 
-| Job              | Checks                                                                                            |
-| ---------------- | ------------------------------------------------------------------------------------------------- |
-| Nix Flake Check  | `nix flake check`, which runs the pre-commit hooks without the Node ones                          |
-| Node Check       | `pnpm format`, `pnpm lint`, and `pnpm spellcheck`                                                 |
-| Rust Check       | `cargo fmt --all --check`, `cargo clippy --all-targets -- -D warnings`, and `cargo doc --no-deps` |
-| Dependency Check | `cargo deny check licenses advisories sources bans`                                               |
-| MSRV Check       | `cargo hack check --rust-version` against `rust-version`                                          |
-| macOS Check      | Clippy, rustdoc, and the test suite on macOS                                                      |
-| Windows Check    | Clippy, rustdoc, and the test suite on Windows                                                    |
-| Coverage         | The test suite under `cargo llvm-cov`, uploaded to Codecov                                        |
-| Nix Build        | The package build on Linux and macOS, which runs the tests and `ox --version`                     |
+| Job              | Checks                                                                                                                     |
+| ---------------- | -------------------------------------------------------------------------------------------------------------------------- |
+| Nix Flake Check  | `nix flake check`, which runs the pre-commit hooks without the Node ones                                                   |
+| Node Check       | `pnpm format`, `pnpm lint`, and `pnpm spellcheck`                                                                          |
+| Rust Check       | `cargo fmt --all --check`, `cargo clippy --all-targets -- -D warnings`, and `cargo doc --no-deps --document-private-items` |
+| Dependency Check | `cargo deny check licenses advisories sources bans`                                                                        |
+| MSRV Check       | `cargo hack check --rust-version` against `rust-version`                                                                   |
+| macOS Check      | Clippy, rustdoc, and the test suite on macOS                                                                               |
+| Windows Check    | Clippy, rustdoc, and the test suite on Windows                                                                             |
+| Coverage         | The test suite under `cargo llvm-cov`, uploaded to Codecov                                                                 |
+| Nix Build        | The package build on Linux and macOS, which runs the tests and `ox --version`                                              |
 
 Branch protection requires only the CI Result job and Codecov's `codecov/patch` status. CI Result fails when any job in its `needs` fails or is cancelled, so list each new job there.
 

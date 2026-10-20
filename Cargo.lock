@@ -1898,17 +1898,47 @@ dependencies = [
 ]
 
 [[package]]
-name = "oxide-code"
+name = "ox"
 version = "0.1.0-alpha.5"
 dependencies = [
  "anyhow",
  "arboard",
  "base64 0.23.1",
+ "clap",
+ "crossterm",
+ "fastrand",
+ "futures",
+ "indoc",
+ "insta",
+ "open",
+ "ox-core",
+ "pulldown-cmark",
+ "ratatui",
+ "ratatui-textarea",
+ "serde",
+ "serde_json",
+ "syntect",
+ "temp-env",
+ "tempfile",
+ "time",
+ "tokio",
+ "toml",
+ "tracing",
+ "unicode-segmentation",
+ "unicode-width",
+ "uuid",
+ "wiremock",
+]
+
+[[package]]
+name = "ox-core"
+version = "0.1.0-alpha.5"
+dependencies = [
+ "anyhow",
+ "base64 0.23.1",
  "bytes",
  "caseless",
- "clap",
  "core-foundation",
- "crossterm",
  "dunce",
  "fastrand",
  "futures",
@@ -1918,12 +1948,8 @@ dependencies = [
  "indoc",
  "insta",
  "nix 0.31.3",
- "open",
  "platform-info",
  "process-wrap",
- "pulldown-cmark",
- "ratatui",
- "ratatui-textarea",
  "regex",
  "reqwest",
  "rustls",
@@ -1934,7 +1960,6 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2 0.11.1",
- "syntect",
  "temp-env",
  "tempfile",
  "thiserror 2.0.21",

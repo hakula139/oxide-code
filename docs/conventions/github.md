@@ -6,7 +6,7 @@ Conventions for commits, branches, pull requests, and issues.
 
 - Keep each commit to one logical change. Use the imperative mood for its title, formatted as `type(scope): description`. For substantial changes, add a body explaining the problem, rationale, and tradeoffs.
 - Choose one of these types: `feat`, `fix`, `perf`, `refactor`, `docs`, `test`, `ci`, `build`, `chore`, `style`, or `revert`.
-- Use the most specific scope the change touches, such as a module (`client`, `config`, `oauth`) or a documentation target (`AGENTS`, `research`). Use the crate name only for changes that span modules.
+- Use the most specific scope the change touches, such as a module (`client`, `config`, `oauth`) or a documentation target (`AGENTS`, `research`). Use a crate name, such as `ox-core`, only for changes that span its modules, and omit the scope for changes that span crates.
 - If a change breaks the [stability surface](../../RELEASING.md#stability-surface), add `!` after the scope, as in `feat(config)!: ...`.
 - Name branches `<type>/<short-name>`, using the same types.
 

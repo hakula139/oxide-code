@@ -1,0 +1,14 @@
+---
+source: crates/ox/src/tui/components/chat.rs
+expression: "render_chat(&mut chat, 60, 10)"
+---
+"❯ hello                                                     "
+"                                                            "
+"▎ Thought · Ctrl+O to expand                                "
+"                                                            "
+"◉ Hi!                                                       "
+"                                                            "
+"                                                            "
+"                                                            "
+"                                                            "
+"                                                            "

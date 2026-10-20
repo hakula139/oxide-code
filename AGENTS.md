@@ -15,6 +15,7 @@ ox -p "<prompt>"                            # Headless: run one turn and print t
 ```text
 .
 ├── .agents/                                # Agent skills for the release procedure
+├── .cargo/                                 # Mutation testing settings for cargo-mutants
 ├── .claude/                                # Link to the agent skills for Claude Code
 ├── .cspell/                                # Project spelling dictionary
 ├── .envrc                                  # Loads the dev shell through direnv
@@ -33,7 +34,8 @@ ox -p "<prompt>"                            # Headless: run one turn and print t
 ├── cliff.toml                              # Changelog configuration for git-cliff
 ├── clippy.toml                             # Clippy settings
 ├── codecov.yml                             # Codecov coverage targets
-├── crates/oxide-code/                      # The `ox` crate, mapped in docs/design/architecture.md
+├── crates/ox/                              # The `ox` binary crate with the frontends, mapped in docs/design/architecture.md
+├── crates/ox-core/                         # The `ox-core` library crate with the agent core, mapped in docs/design/architecture.md
 ├── cspell.json                             # Spell checker settings
 ├── deny.toml                               # Dependency license, advisory, source, and ban policy
 ├── docs/                                   # User guides, conventions, design specs, and research notes
@@ -76,7 +78,7 @@ Run after implementation and before review:
 cargo fmt --all --check                               # Check formatting
 cargo build                                           # Build
 cargo clippy --all-targets -- -D warnings             # Lint (pedantic, zero warnings)
-cargo doc --no-deps                                   # Check rustdoc lints
+cargo doc --no-deps --document-private-items          # Check rustdoc lints
 cargo llvm-cov                                        # Run tests and check coverage
 cargo deny check licenses advisories sources bans     # Check dependencies when they change
 pnpm format                                           # Check JSON, Markdown, and YAML formatting

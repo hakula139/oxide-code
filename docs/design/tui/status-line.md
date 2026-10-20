@@ -112,18 +112,18 @@ A user-command segment is [#166](https://github.com/hakula139/oxide-code/issues/
 
 - [Status line research](../../research/tui/status-line.md)
 - [Auto-compaction design](../agent/auto-compaction.md)
-- `crates/oxide-code/src/client.rs`: `ResponseEvent::RateLimits` and the `RateLimits` windows.
-- `crates/oxide-code/src/client/anthropic/sse.rs`: `pump_events`, which forwards each response's limits.
-- `crates/oxide-code/src/client/anthropic/transport.rs`: `rate_limits`, the unified rate-limit header parser.
-- `crates/oxide-code/src/config.rs`: `StatusLineSegment`, the segment roster and its default order.
-- `crates/oxide-code/src/engine.rs`: `Engine` usage accounting, `UsageUpdated` emission, and restored-cost pricing.
-- `crates/oxide-code/src/engine/turn.rs`: `collect_response`, which emits `RateLimitsUpdated`.
-- `crates/oxide-code/src/model/pricing.rs`: `TokenCostRates`, the per-model rate cards and the request estimate.
-- `crates/oxide-code/src/model/usage.rs`: `TokenUsage`, the token counts one request reports.
-- `crates/oxide-code/src/session/entry.rs`: `Entry::Usage` and `UsageRecord`, the per-request record a resume prices.
-- `crates/oxide-code/src/session/title_generator.rs`: `spawn`, which records the title request's usage and hands it to the engine.
-- `crates/oxide-code/src/tui/app/render.rs`: `App::draw_frame`, which copies App-owned state, the permission mode included, into the status bar.
-- `crates/oxide-code/src/tui/components/status.rs`: `StatusBar` state and the run-state `Status`.
-- `crates/oxide-code/src/tui/components/status/line.rs`: `StatusLine` segment rendering and width fitting.
-- `crates/oxide-code/src/tui/git_probes.rs`: `GitProbes` background branch and pull-request polling, at the detail the roster needs.
-- `crates/oxide-code/src/util/git.rs`: `current_branch` and `current_pull_request` probes, and the checks summary.
+- `crates/ox-core/src/client.rs`: `ResponseEvent::RateLimits` and the `RateLimits` windows.
+- `crates/ox-core/src/client/anthropic/sse.rs`: `pump_events`, which forwards each response's limits.
+- `crates/ox-core/src/client/anthropic/transport.rs`: `rate_limits`, the unified rate-limit header parser.
+- `crates/ox-core/src/config.rs`: `StatusLineSegment`, the segment roster and its default order.
+- `crates/ox-core/src/engine.rs`: `Engine` usage accounting, `UsageUpdated` emission, and restored-cost pricing.
+- `crates/ox-core/src/engine/turn.rs`: `collect_response`, which emits `RateLimitsUpdated`.
+- `crates/ox-core/src/model/pricing.rs`: `TokenCostRates`, the per-model rate cards and the request estimate.
+- `crates/ox-core/src/model/usage.rs`: `TokenUsage`, the token counts one request reports.
+- `crates/ox-core/src/session/entry.rs`: `Entry::Usage` and `UsageRecord`, the per-request record a resume prices.
+- `crates/ox-core/src/session/title_generator.rs`: `spawn`, which records the title request's usage and hands it to the engine.
+- `crates/ox/src/tui/app/render.rs`: `App::draw_frame`, which copies App-owned state, the permission mode included, into the status bar.
+- `crates/ox/src/tui/components/status.rs`: `StatusBar` state and the run-state `Status`.
+- `crates/ox/src/tui/components/status/line.rs`: `StatusLine` segment rendering and width fitting.
+- `crates/ox/src/tui/git_probes.rs`: `GitProbes` background branch and pull-request polling, at the detail the roster needs.
+- `crates/ox-core/src/util/git.rs`: `current_branch` and `current_pull_request` probes, and the checks summary.

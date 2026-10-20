@@ -109,12 +109,12 @@ This prints the version string. If you see `command not found`, the binary is no
 
 ## Uninstall `ox`
 
-| Install method  | Uninstall command                                              |
-| --------------- | -------------------------------------------------------------- |
-| Prebuilt binary | `sudo rm /usr/local/bin/ox` (or wherever you moved it)         |
-| Homebrew        | `brew uninstall oxide-code && brew untap hakula139/oxide-code` |
-| Cargo           | `cargo uninstall oxide-code`                                   |
-| Nix profile     | `nix profile remove oxide-code`                                |
+| Install method  | Uninstall command                                                                          |
+| --------------- | ------------------------------------------------------------------------------------------ |
+| Prebuilt binary | `sudo rm /usr/local/bin/ox` (or wherever you moved it)                                     |
+| Homebrew        | `brew uninstall oxide-code && brew untap hakula139/oxide-code`                             |
+| Cargo           | `cargo uninstall ox`, or `cargo uninstall oxide-code` for a release up to `v0.1.0-alpha.5` |
+| Nix profile     | `nix profile remove oxide-code`                                                            |
 
 To also remove session data and config:
 

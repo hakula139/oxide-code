@@ -30,11 +30,11 @@ Both prompts share one rubric: include only information an agent would otherwise
 
 ## Sources
 
-- `crates/oxide-code/src/command.rs`: `parse`, which routes `/init` to `command::init`.
-- `crates/oxide-code/src/command/init.rs`: `FILE_CHOICES`, `resolve`, the instruction-file discovery, and the create and update prompts.
-- `crates/oxide-code/src/driver/repl.rs`: resolves the project root and runs `/init` in the bare REPL.
-- `crates/oxide-code/src/driver/tui.rs`: resolves the project root and stores it in `LiveSessionInfo`.
-- `crates/oxide-code/src/prompt/instructions.rs`: `INSTRUCTION_FILENAMES` and `INSTRUCTION_DIRS`, the files and directories checked by `/init`.
-- `crates/oxide-code/src/slash/context.rs`: `LiveSessionInfo::project_root`.
-- `crates/oxide-code/src/slash/init.rs`: `InitCmd` and the file picker.
-- `crates/oxide-code/src/util/git.rs`: `project_root` and `repo_root`, the async lookups for the project and repository roots.
+- `crates/ox-core/src/command.rs`: `parse`, which routes `/init` to `command::init`.
+- `crates/ox-core/src/command/init.rs`: `FILE_CHOICES`, `resolve`, the instruction-file discovery, and the create and update prompts.
+- `crates/ox/src/driver/repl.rs`: resolves the project root and runs `/init` in the bare REPL.
+- `crates/ox/src/driver/tui.rs`: resolves the project root and stores it in `LiveSessionInfo`.
+- `crates/ox-core/src/prompt/instructions.rs`: `INSTRUCTION_FILENAMES` and `INSTRUCTION_DIRS`, the files and directories checked by `/init`.
+- `crates/ox/src/slash/context.rs`: `LiveSessionInfo::project_root`.
+- `crates/ox/src/slash/init.rs`: `InitCmd` and the file picker.
+- `crates/ox-core/src/util/git.rs`: `project_root` and `repo_root`, the async lookups for the project and repository roots.

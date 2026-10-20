@@ -262,32 +262,32 @@ The stdio sink escapes control characters other than tabs and line breaks in mod
 
 ## Sources
 
-- `crates/oxide-code/src/config.rs`: `Config::load`, `resolve_permission`, `OX_PERMISSION_MODE`, `Effort` enum template.
-- `crates/oxide-code/src/config/load.rs`: `reject_project_secrets`, `reject_project_permissions`.
-- `crates/oxide-code/src/config/merge.rs`: `APPENDED_TABLES` and `APPENDED` lists, `merge`.
-- `crates/oxide-code/src/config/schema.rs`: `PermissionTable`, `TierTable`, the `defaults` map.
-- `crates/oxide-code/src/driver/repl.rs`: `Prompter`, the stdin approval prompt.
-- `crates/oxide-code/src/driver/stdio.rs`: `render_op`, the `Approver` trait, `Unattended`, the escaped `StdioSink` output and its repeated call headers.
-- `crates/oxide-code/src/engine.rs`: the live policy, whose session grants reset when the session changes, `Engine::set_mode`, and `Engine::adopt_mode`.
-- `crates/oxide-code/src/engine/abort.rs`: `await_unless_aborted`, which races an allowed call against cancel and quit, and the `Inbox` whose `absorb` keeps queued prompts and mode switches.
-- `crates/oxide-code/src/engine/dispatch.rs`: `run_tool_round` (parallel-safe batches), `Dispatcher::gate` (prepare, then decide), `check_permission` (take a waiting mode switch, then log the verdict), `allow_for_session` (admit against the call's grant), `await_approval`, `denied_output`.
-- `crates/oxide-code/src/main.rs`: the `--mode` flag.
-- `crates/oxide-code/src/permission.rs`: `Mode`, `PermissionClass`, `Workspace`, `Access::for_path`, `Access::for_command`, `Verdict`, `Basis`, `Policy::verdict`, `Policy::session_grant`, `SessionGrant`, `ReadFilter`.
-- `crates/oxide-code/src/permission/defaults.rs`: the shipped defaults, `ShippedTier`, protected names and home locations, and `[permission.defaults]` names.
-- `crates/oxide-code/src/permission/rule.rs`: `Rule`, the exec, path, net, and MCP patterns, `MatchDiscipline`, and `Rule::for_call`.
-- `crates/oxide-code/src/permission/shell.rs`: `CommandTarget::parse`, wrapper stripping, named and program words, opaque forms, redirection reads and writes, known-safe commands, reader glob expansion, and the forced recursive `rm` check.
-- `crates/oxide-code/src/protocol.rs`: `Event::ApprovalRequested`, `Event::SessionRulesUpdated`, `Event::ModeChanged`, `Op::Resolve`, `Op::SetMode`, `Decision`.
-- `crates/oxide-code/src/slash/confirm.rs`: `ConfirmDeleteSessionModal`, the approval-modal template.
-- `crates/oxide-code/src/slash/mode.rs`: `ModeCmd` and the `/mode` picker.
-- `crates/oxide-code/src/slash/status.rs`: the Session Rules listing.
-- `crates/oxide-code/src/tool.rs`: `Tool` trait (`spec`, `path_field`, `prepare`, `approval_preview`, `run`), `ToolSpec`, `ToolCtx`, `Prepared`, `SearchRoot`, `ApprovalPreview`, `read_validated`, `write_no_follow`, `open_no_follow`, `push_withheld_note`.
-- `crates/oxide-code/src/tool/bash.rs`: unbounded execution surface.
-- `crates/oxide-code/src/tool/edit.rs`: read-before-edit gate, `synthesize_chunk` preview.
-- `crates/oxide-code/src/tool/glob.rs`: read filter on each match.
-- `crates/oxide-code/src/tool/grep.rs`: read filter in `collect_files`.
-- `crates/oxide-code/src/tool/write.rs`: new-file creation, symlink refusal, current-content preview.
-- `crates/oxide-code/src/tui/app/dispatch.rs`: `App::cycle_mode`, the Shift+Tab cycle.
-- `crates/oxide-code/src/tui/components/chat.rs`: `ChatView::push_tool_result`, which places a result under its call.
-- `crates/oxide-code/src/tui/modal.rs`: `ModalStack`, the cancel hook, `captures_esc`.
-- `crates/oxide-code/src/tui/modal/approval.rs`: `ApprovalModal` wrapping, scrolling, character reveal, and the rule and feedback editors.
-- `crates/oxide-code/src/util/text.rs`: `is_hidden`, shared by both frontends, plus the stdio sink's `escape_controls` and the REPL preview's `escape_hidden`.
+- `crates/ox-core/src/config.rs`: `Config::load`, `resolve_permission`, `OX_PERMISSION_MODE`, `Effort` enum template.
+- `crates/ox-core/src/config/load.rs`: `reject_project_secrets`, `reject_project_permissions`.
+- `crates/ox-core/src/config/merge.rs`: `APPENDED_TABLES` and `APPENDED` lists, `merge`.
+- `crates/ox-core/src/config/schema.rs`: `PermissionTable`, `TierTable`, the `defaults` map.
+- `crates/ox/src/driver/repl.rs`: `Prompter`, the stdin approval prompt.
+- `crates/ox/src/driver/stdio.rs`: `render_op`, the `Approver` trait, `Unattended`, the escaped `StdioSink` output and its repeated call headers.
+- `crates/ox-core/src/engine.rs`: the live policy, whose session grants reset when the session changes, `Engine::set_mode`, and `Engine::adopt_mode`.
+- `crates/ox-core/src/engine/abort.rs`: `await_unless_aborted`, which races an allowed call against cancel and quit, and the `Inbox` whose `absorb` keeps queued prompts and mode switches.
+- `crates/ox-core/src/engine/dispatch.rs`: `run_tool_round` (parallel-safe batches), `Dispatcher::gate` (prepare, then decide), `check_permission` (take a waiting mode switch, then log the verdict), `allow_for_session` (admit against the call's grant), `await_approval`, `denied_output`.
+- `crates/ox/src/main.rs`: the `--mode` flag.
+- `crates/ox-core/src/permission.rs`: `Mode`, `PermissionClass`, `Workspace`, `Access::for_path`, `Access::for_command`, `Verdict`, `Basis`, `Policy::verdict`, `Policy::session_grant`, `SessionGrant`, `ReadFilter`.
+- `crates/ox-core/src/permission/defaults.rs`: the shipped defaults, `ShippedTier`, protected names and home locations, and `[permission.defaults]` names.
+- `crates/ox-core/src/permission/rule.rs`: `Rule`, the exec, path, net, and MCP patterns, `MatchDiscipline`, and `Rule::for_call`.
+- `crates/ox-core/src/permission/shell.rs`: `CommandTarget::parse`, wrapper stripping, named and program words, opaque forms, redirection reads and writes, known-safe commands, reader glob expansion, and the forced recursive `rm` check.
+- `crates/ox-core/src/protocol.rs`: `Event::ApprovalRequested`, `Event::SessionRulesUpdated`, `Event::ModeChanged`, `Op::Resolve`, `Op::SetMode`, `Decision`.
+- `crates/ox/src/slash/confirm.rs`: `ConfirmDeleteSessionModal`, the approval-modal template.
+- `crates/ox/src/slash/mode.rs`: `ModeCmd` and the `/mode` picker.
+- `crates/ox/src/slash/status.rs`: the Session Rules listing.
+- `crates/ox-core/src/tool.rs`: `Tool` trait (`spec`, `path_field`, `prepare`, `approval_preview`, `run`), `ToolSpec`, `ToolCtx`, `Prepared`, `SearchRoot`, `ApprovalPreview`, `read_validated`, `write_no_follow`, `open_no_follow`, `push_withheld_note`.
+- `crates/ox-core/src/tool/bash.rs`: unbounded execution surface.
+- `crates/ox-core/src/tool/edit.rs`: read-before-edit gate, `synthesize_chunk` preview.
+- `crates/ox-core/src/tool/glob.rs`: read filter on each match.
+- `crates/ox-core/src/tool/grep.rs`: read filter in `collect_files`.
+- `crates/ox-core/src/tool/write.rs`: new-file creation, symlink refusal, current-content preview.
+- `crates/ox/src/tui/app/dispatch.rs`: `App::cycle_mode`, the Shift+Tab cycle.
+- `crates/ox/src/tui/components/chat.rs`: `ChatView::push_tool_result`, which places a result under its call.
+- `crates/ox/src/tui/modal.rs`: `ModalStack`, the cancel hook, `captures_esc`.
+- `crates/ox/src/tui/modal/approval.rs`: `ApprovalModal` wrapping, scrolling, character reveal, and the rule and feedback editors.
+- `crates/ox-core/src/util/text.rs`: `is_hidden`, shared by both frontends, plus the stdio sink's `escape_controls` and the REPL preview's `escape_hidden`.

@@ -4,7 +4,7 @@ Conventions for Rust code under `crates/`. Tooling enforces some style rules, so
 
 ## Enforced by Tooling
 
-- The root `Cargo.toml` configures `[workspace.lints]` to forbid `unsafe_code` and enable Clippy's `pedantic` group and the `allow_attributes`, `allow_attributes_without_reason`, `dbg_macro`, `let_underscore_untyped`, `mod_module_files`, `todo`, and `unwrap_used` lints. `clippy.toml` allows `unwrap()` in tests, and CI denies all warnings. The root manifest also denies the rustdoc lints that warn by default, so `cargo doc` fails on broken, private, or redundant links, bare URLs, invalid HTML tags, malformed code blocks, and broken or unused footnotes.
+- The root `Cargo.toml` configures `[workspace.lints]` to forbid `unsafe_code` and enable Clippy's `pedantic` group and the `allow_attributes`, `allow_attributes_without_reason`, `dbg_macro`, `let_underscore_untyped`, `mod_module_files`, `todo`, and `unwrap_used` lints. It allows the pedantic `missing_errors_doc`, `missing_panics_doc`, and `must_use_candidate` lints, which document exported items for callers outside the unpublished workspace. `clippy.toml` allows `unwrap()` in tests, and CI denies all warnings. The root manifest also denies the rustdoc lints that warn by default, so `cargo doc` fails on broken or redundant links, bare URLs, invalid HTML tags, malformed code blocks, and broken or unused footnotes. Docs include private items, so links to them are allowed.
 - These lints require every suppression to use `#[expect(lint, reason = "...")]`, every module with children to use a `foo.rs` file beside its `foo/` directory rather than a `mod.rs`, and every raw string to use as few `#` delimiters as possible (`pedantic`'s `needless_raw_string_hashes`). They also reject `unwrap()` outside tests and untyped `let _ =` statements, so discard a value with `_ = expr`.
 - `cargo fmt` uses stable rustfmt, which does not wrap comments or group imports.
 - [Development](development.md#pre-commit-hooks) lists the pre-commit hooks.
@@ -45,7 +45,7 @@ Conventions for Rust code under `crates/`. Tooling enforces some style rules, so
 
 ## Visibility
 
-- Use the narrowest visibility that works: private first, then `pub(super)` within the parent module, then `pub(crate)`. Because the crate is a binary, it has no `pub` items.
+- Use the narrowest visibility that works: private first, then `pub(super)` within the parent module, then `pub(crate)`, then `pub`. Make an item `pub` only when another workspace crate uses it, along with every module on the path to it, so `pub(crate)` means the item serves its own crate alone. The binary crate `ox` has no `pub` items.
 - Skip scoped forms such as `pub(in super::super)`. When modules outside an item's parent use it, move it into their nearest common module, or into a child of it with `pub(super)`.
 
 ## Modules
@@ -63,7 +63,7 @@ Conventions for Rust code under `crates/`. Tooling enforces some style rules, so
 - Leave one blank line before and after each banner.
 - In function bodies, use blank lines to separate logical phases such as setup, validation, execution, and result.
 - Put a single-line computation directly above its early-return guard, with no blank line between them. For a multi-line `let` binding, such as an async chain or builder, leave a blank line before the guard.
-- Order `use` groups as std, external crates, then internal paths (`crate::`, `super::`, `self::`, and the file's child modules), with a blank line between groups. rustfmt sorts imports within each group, putting `self` before `super` before `crate`, but does not move imports between groups. Authors and reviewers must maintain the grouping.
+- Order `use` groups as std, external crates, workspace crates (`ox_core::`), then internal paths (`crate::`, `super::`, `self::`, and the file's child modules), with a blank line between groups. rustfmt sorts imports within each group, putting `self` before `super` before `crate`, but does not move imports between groups. Authors and reviewers must maintain the grouping.
 
 ## Strings
 

@@ -5,8 +5,9 @@ Conventions for tests, their environment, timing, coverage, mutation testing, an
 ## Placement
 
 - Unit tests live in a `#[cfg(test)] mod tests` in the file they test.
-- The crate is binary-only, so tests in `tests/` cannot import its modules. That directory is for end-to-end tests that run the `ox` binary through `CARGO_BIN_EXE_ox`, as `tests/cli.rs` does. Test cross-module behavior in the module that composes those modules, such as `engine` tests that run a full turn against a mock server.
+- `crates/ox/tests/` holds end-to-end tests that run the `ox` binary through `CARGO_BIN_EXE_ox`, as `tests/cli.rs` does. Test cross-module behavior in the module that composes those modules, such as `engine` tests that run a full turn against a mock server.
 - Share fixtures across test modules from a `#[cfg(test)] mod testing` child of the module that owns what they build, so they can construct private fields. Give the child its own `use` imports and the narrowest [visibility](rust.md#visibility) its callers allow. Put an inline child under a `// ── Testing ──` banner, and declare a file-backed one with the other child modules. A test-only constructor on the type itself, such as `TokenUsage::new`, stays an `#[cfg(test)]` method in the type's `impl`.
+- A fixture that another crate's tests use lives in a `pub mod testing` gated on `#[cfg(any(test, feature = "testing"))]`, which those crates enable through `ox-core`'s `testing` feature in their dev-dependencies. A test-only method they call, such as `SessionStore::list`, takes the same gate, and `.cargo/mutants.toml` excludes it from mutation alongside the gated modules. Make only the items other crates use `pub`. Gated code compiles without `cfg(test)`, so it states each invariant with `expect`, since Clippy allows `unwrap()` only under `cfg(test)`. A fixture that only its own crate's tests use would be dead code there, so it goes in a sibling `#[cfg(test)] mod local_testing`.
 
 ## Grouping and Naming
 
@@ -36,7 +37,7 @@ These rules apply to unit-test modules (`mod tests`), while the integration test
 
 Every test must run and pass wherever the suite runs: on each supported OS, in CI, and in the Nix build sandbox, which has no network access or system services such as macOS trustd. Never skip, `#[ignore]`, retry, or `cfg`-gate a test to get it past its environment. Restructure tests that depend on their environment until they pass everywhere. For example, move the dependency behind a trait fake, as `util::tls` does for the Security framework, or pin what the test reads. Use a platform `cfg` gate only for a test of code that exists only on that platform.
 
-Run the suite as a non-root user, an environment requirement like having `git` installed. Root ignores the read denials that `tool::testing::deny_read_access` sets up, so the tests built on them fail.
+Run the suite as a non-root user, an environment requirement like having `git` installed. Root ignores the read denials that `tool::local_testing::deny_read_access` sets up, so the tests built on them fail.
 
 The [live tests](#live-tests) are the sole exception because they send paid requests to a real endpoint.
 
@@ -56,9 +57,9 @@ The [live tests](#live-tests) are the sole exception because they send paid requ
 
 `insta` snapshot tests compare TUI renders, session JSONL, and headless output against baselines in the module's `snapshots/` directory. When output changes, the test fails and writes a `.snap.new` file beside the baseline. Review the difference, accept it with `INSTA_UPDATE=always cargo test <filter>` or `cargo insta review`, and commit the updated `.snap`.
 
-A baseline's file name consists of the test's `module_path!()`, which starts with the crate name `ox`, followed by the snapshot name, with `__` replacing each `::`, as in `ox__driver__headless__tests__drive__stderr.snap`. An unnamed assertion takes the test's name, where insta strips a leading `test_` and appends `-2`, `-3`, and so on to each further unnamed snapshot in the same test. A `snapshot_suffix` setting appends `@<suffix>`. An explicit name drops the function prefix just as a test name does, so `drive_stderr` becomes `stderr` inside `mod drive`. Moving a test to another module renames every baseline it writes, while renaming a test renames only its unnamed ones. Rename each `.snap` file to match, and delete baselines left behind by removed tests. `cargo insta test --unreferenced=reject` fails whenever any baseline is left without a test.
+A baseline's file name consists of the test's `module_path!()`, which starts with the crate name, such as `ox_core` or `ox`, followed by the snapshot name, with `__` replacing each `::`, as in `ox__driver__headless__tests__drive__stderr.snap`. An unnamed assertion takes the test's name, where insta strips a leading `test_` and appends `-2`, `-3`, and so on to each further unnamed snapshot in the same test. A `snapshot_suffix` setting appends `@<suffix>`. An explicit name drops the function prefix just as a test name does, so `drive_stderr` becomes `stderr` inside `mod drive`. Moving a test to another module renames every baseline it writes, while renaming a test renames only its unnamed ones. Rename each `.snap` file to match, and delete baselines left behind by removed tests. `cargo insta test --unreferenced=reject` fails whenever any baseline is left without a test.
 
-The session fixtures in `crates/oxide-code/src/session/fixtures/` are frozen release output, with one fixture per stable release starting at `v0.1.0`. Never edit them. A changed `session_format::resumes_from_every_release_fixture@<tag>` snapshot means an older release's sessions now resume differently, so accept it only as [Compatibility](../design/session/persistence.md#compatibility) allows.
+The session fixtures in `crates/ox-core/src/session/fixtures/` are frozen release output, with one fixture per stable release starting at `v0.1.0`. Never edit them. A changed `session_format::resumes_from_every_release_fixture@<tag>` snapshot means an older release's sessions now resume differently, so accept it only as [Compatibility](../design/session/persistence.md#compatibility) allows.
 
 ## Coverage
 
@@ -73,10 +74,10 @@ CI uploads `cargo llvm-cov` results to Codecov. Its PR comment reports patch cov
 Coverage shows whether a line ran. Mutation testing shows whether a mutation of that line would be caught. A full run is slow, so run it out of band before large-scope changes ship:
 
 ```bash
-cargo mutants --package oxide-code
+cargo mutants --workspace
 ```
 
-A surviving mutant usually means an assertion is too loose, so tighten it. If a mutant is genuinely equivalent, exclude it with an `exclude_re` pattern in `.cargo/mutants.toml`. Create the file for the first exclusion and add a comment explaining the equivalence.
+A surviving mutant usually means an assertion is too loose, so tighten it. `.cargo/mutants.toml` runs every crate's tests against each mutant. If a mutant is genuinely equivalent, exclude it there with an `exclude_re` pattern and a comment explaining the equivalence.
 
 ## Live Tests
 

@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/oxide-code"]
+members = ["crates/ox-core", "crates/ox"]
 resolver = "3"
 
 [workspace.package]
@@ -8,6 +8,7 @@ edition = "2024"
 rust-version = "1.91"
 authors = ["Hakula <i@hakula.xyz>"]
 license = "MIT"
+publish = false
 
 [workspace.lints.rust]
 unsafe_code = "forbid"
@@ -22,6 +23,12 @@ mod_module_files = "warn"
 todo = "warn"
 unwrap_used = "warn"
 
+# Pedantic lints that document exported items for outside callers, which these unpublished crates
+# do not have.
+missing_errors_doc = "allow"
+missing_panics_doc = "allow"
+must_use_candidate = "allow"
+
 [workspace.lints.rustdoc]
 bare_urls = "deny"
 broken_footnote = "deny"
@@ -29,9 +36,11 @@ broken_intra_doc_links = "deny"
 invalid_codeblock_attributes = "deny"
 invalid_html_tags = "deny"
 invalid_rust_codeblocks = "deny"
-private_intra_doc_links = "deny"
 redundant_explicit_links = "deny"
 unused_footnote_definition = "deny"
+
+# Docs include private items (`--document-private-items`), so links to them resolve.
+private_intra_doc_links = "allow"
 
 [workspace.dependencies]
 anyhow = "1"
@@ -52,6 +61,7 @@ indoc = "2"
 insta = { version = "1", features = ["glob"] }
 nix = { version = "0.31", default-features = false, features = ["fs"] }
 open = "5"
+ox-core = { path = "crates/ox-core" }
 platform-info = "2"
 process-wrap = { version = "10", default-features = false, features = [
   "job-object",

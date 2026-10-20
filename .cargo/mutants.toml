@@ -1,0 +1,11 @@
+# Frontend tests also exercise core code, so each mutant faces every crate's tests.
+test_workspace = true
+
+# Fixtures that the `testing` feature compiles outside `cfg(test)`, which is the only test gate
+# cargo-mutants recognizes.
+exclude_globs = ["**/testing.rs"]
+exclude_re = [
+  "\\btesting::",
+  "replace CompactionConfig::(disabled|with_threshold_for_test) ",
+  "replace SessionStore::list ",
+]
