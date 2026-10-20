@@ -64,10 +64,10 @@ The draft lists PR titles, which are short and written for reviewers at merge ti
 4. For a stable tag, add the release's [session resume fixture](docs/design/session/persistence.md#compatibility), which is the byte-compatibility snapshot with its insta header deleted by `sed` from the first line through the second `---` line. `INSTA_UPDATE=unseen` then records how the new fixture resumes, while still failing if an earlier release's fixture now resumes differently:
 
    ```bash
-   session=crates/oxide-code/src/session
+   session=crates/ox-core/src/session
    mkdir -p "$session/fixtures"
-   sed '1,/^---$/d' "$session/snapshots/ox__session__handle__tests__session_format__writes_every_entry_type_as_byte_compatible_jsonl.snap" >"$session/fixtures/vX.Y.Z.jsonl"
-   INSTA_UPDATE=unseen cargo test --bin ox session_format::resumes_from_every_release_fixture
+   sed '1,/^---$/d' "$session/snapshots/ox_core__session__handle__tests__session_format__writes_every_entry_type_as_byte_compatible_jsonl.snap" >"$session/fixtures/vX.Y.Z.jsonl"
+   INSTA_UPDATE=unseen cargo test -p ox-core --lib session_format::resumes_from_every_release_fixture
    ```
 
 5. Inside the Nix dev shell, which provides git-cliff, prepend the changelog section. Because `cliff.toml` bounds sections at stable tags only, a prerelease adds a `--tag-pattern` that bounds its section at every tag:
@@ -96,7 +96,7 @@ The draft lists PR titles, which are short and written for reviewers at merge ti
 
 8. Run the [verification block](AGENTS.md#verification). Because `cspell` scans `CHANGELOG.md`, add any unknown words from the section to `.cspell/words.txt`.
 
-9. Commit, then open a PR titled `chore(release): vX.Y.Z`, whose title becomes the squash commit title on `main`. Record the checks in the PR's Test plan. The diff should touch only `Cargo.toml`, `Cargo.lock`, `CHANGELOG.md`, `README.md`, `docs/guide/install.md`, and possibly `.cspell/words.txt`, plus, for a stable tag, the new fixture under `crates/oxide-code/src/session/fixtures/` and its snapshot.
+9. Commit, then open a PR titled `chore(release): vX.Y.Z`, whose title becomes the squash commit title on `main`. Record the checks in the PR's Test plan. The diff should touch only `Cargo.toml`, `Cargo.lock`, `CHANGELOG.md`, `README.md`, `docs/guide/install.md`, and possibly `.cspell/words.txt`, plus, for a stable tag, the new fixture under `crates/ox-core/src/session/fixtures/` and its snapshot.
 
 10. Merge after CI passes and the review is approved. If another PR merges first, recreate the branch from `main` and repeat the steps before curation, because updating the branch leaves a section that misses the new commit. Carry the curated entries over from the old branch, then curate the new ones.
 
@@ -154,7 +154,7 @@ Before tagging `v0.1.0`:
 - A whole-repo review at the rc commit has no open findings. Fix each finding or file it into the milestone.
 - The rc serves as the daily driver for the full soak without a new bug.
 
-The `v0.1.0` release PR also switches the install snippets to `releases/latest/download/`, then removes the `VERSION=` lines and the [Prepare a Release](#prepare-a-release) step that pins them. Because it adds the first session resume fixture, it also drops `allow_empty_glob` from the fixture test in `crates/oxide-code/src/session/handle.rs`, so the test fails again when no fixture matches.
+The `v0.1.0` release PR also switches the install snippets to `releases/latest/download/`, then removes the `VERSION=` lines and the [Prepare a Release](#prepare-a-release) step that pins them. Because it adds the first session resume fixture, it also drops `allow_empty_glob` from the fixture test in `crates/ox-core/src/session/handle.rs`, so the test fails again when no fixture matches.
 
 ## Targets
 

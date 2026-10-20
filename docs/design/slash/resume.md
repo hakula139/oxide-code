@@ -97,26 +97,26 @@ The picker wraps [`SearchableList`](modals.md) and adds these controls and displ
 
 ## Sources
 
-- `crates/oxide-code/src/command.rs`: `resume`, the typed form shared with the bare REPL.
-- `crates/oxide-code/src/driver/stdio.rs`: `StdioSink`, which confirms a resume on stderr.
-- `crates/oxide-code/src/driver/tui.rs`: `Startup::picker`, pushed over the first frame.
-- `crates/oxide-code/src/engine.rs`: `Engine::resume`, `Engine::roll_into`, `Engine::take_history`, `format_drift_warning`.
-- `crates/oxide-code/src/main.rs`: `Cli::archived`, `Cli::limit`, `Cli::resume`.
-- `crates/oxide-code/src/protocol.rs`: `Op::Resume`, `ResumeTarget`, `Event::SessionResumed`, `Interaction`.
-- `crates/oxide-code/src/session/display.rs`: `format_short_relative_time` for the picker row's time column, and `format_metadata_line` for the delete confirmation.
-- `crates/oxide-code/src/session/handle.rs`: `roll_into`, `RollIntoOutcome`, `LoadedTranscript`.
-- `crates/oxide-code/src/session/history.rs`: `interactions`, the display projection `SessionResumed` carries.
-- `crates/oxide-code/src/session/list_view.rs`: `render_list` over `list_paged`.
-- `crates/oxide-code/src/session/resolver.rs`: `resolve_saved_prefix`, shared by `Engine::roll_into`, `/archive`, `/unarchive`, and `/delete`, and the `resolve_prefix_to_info` lookup it wraps.
-- `crates/oxide-code/src/session/saved.rs`: `set_archived` behind Ctrl+X, and `delete` behind the confirm-delete modal.
-- `crates/oxide-code/src/session/store/listing.rs`: `walk`, `SessionWalk`, `list_paged`, `latest`, `list_matching`, `ListPage`, `ListScope`.
-- `crates/oxide-code/src/slash/confirm.rs`: `ConfirmDeleteSessionModal` pushed by Ctrl+D.
-- `crates/oxide-code/src/slash/registry.rs`: `BUILT_INS` entry `&ResumeCmd`.
-- `crates/oxide-code/src/slash/resume.rs`: `ResumeCmd`, `ResumePicker` and its `at_startup` variant, `PickerAction` and its `ACTIONS` keymap, `Pages`, and `SessionRow` with its `Column` layout.
-- `crates/oxide-code/src/tui.rs`: `NOTICE_DURATION`, shared by the copy notice and the picker's notice.
-- `crates/oxide-code/src/tui/app.rs`: `push_modal`.
-- `crates/oxide-code/src/tui/app/events.rs`: `apply_session_resumed`.
-- `crates/oxide-code/src/tui/components/chat.rs`: `ChatView::load_history`.
-- `crates/oxide-code/src/tui/keymap.rs`: `Keymap`, `KeyAction`, and `KeyChord`, behind the picker's keys and footer hints.
-- `crates/oxide-code/src/tui/modal/searchable_list.rs`: `SearchableList<T>`, `SearchableItem`, `append_items` and `set_has_more` for paged loading, and `retain_items` and `cursor_to`, which keep the cursor when rows drop.
-- `crates/oxide-code/src/util/text.rs`: `compact_count`, which abbreviates the message count, shared with the status line's token counts.
+- `crates/ox-core/src/command.rs`: `resume`, the typed form shared with the bare REPL.
+- `crates/ox-core/src/engine.rs`: `Engine::resume`, `Engine::roll_into`, `Engine::take_history`, `format_drift_warning`.
+- `crates/ox-core/src/protocol.rs`: `Op::Resume`, `ResumeTarget`, `Event::SessionResumed`, `Interaction`.
+- `crates/ox-core/src/session/display.rs`: `format_short_relative_time` for the picker row's time column, and `format_metadata_line` for the delete confirmation.
+- `crates/ox-core/src/session/handle.rs`: `roll_into`, `RollIntoOutcome`, `LoadedTranscript`.
+- `crates/ox-core/src/session/history.rs`: `interactions`, the display projection `SessionResumed` carries.
+- `crates/ox-core/src/session/list_view.rs`: `render_list` over `list_paged`.
+- `crates/ox-core/src/session/resolver.rs`: `resolve_saved_prefix`, shared by `Engine::roll_into`, `/archive`, `/unarchive`, and `/delete`, and the `resolve_prefix_to_info` lookup it wraps.
+- `crates/ox-core/src/session/saved.rs`: `set_archived` behind Ctrl+X, and `delete` behind the confirm-delete modal.
+- `crates/ox-core/src/session/store/listing.rs`: `walk`, `SessionWalk`, `list_paged`, `latest`, `list_matching`, `ListPage`, `ListScope`.
+- `crates/ox-core/src/util/text.rs`: `compact_count`, which abbreviates the message count, shared with the status line's token counts.
+- `crates/ox/src/driver/stdio.rs`: `StdioSink`, which confirms a resume on stderr.
+- `crates/ox/src/driver/tui.rs`: `Startup::picker`, pushed over the first frame.
+- `crates/ox/src/main.rs`: `Cli::archived`, `Cli::limit`, `Cli::resume`.
+- `crates/ox/src/slash/confirm.rs`: `ConfirmDeleteSessionModal` pushed by Ctrl+D.
+- `crates/ox/src/slash/registry.rs`: `BUILT_INS` entry `&ResumeCmd`.
+- `crates/ox/src/slash/resume.rs`: `ResumeCmd`, `ResumePicker` and its `at_startup` variant, `PickerAction` and its `ACTIONS` keymap, `Pages`, and `SessionRow` with its `Column` layout.
+- `crates/ox/src/tui.rs`: `NOTICE_DURATION`, shared by the copy notice and the picker's notice.
+- `crates/ox/src/tui/app.rs`: `push_modal`.
+- `crates/ox/src/tui/app/events.rs`: `apply_session_resumed`.
+- `crates/ox/src/tui/components/chat.rs`: `ChatView::load_history`.
+- `crates/ox/src/tui/keymap.rs`: `Keymap`, `KeyAction`, and `KeyChord`, behind the picker's keys and footer hints.
+- `crates/ox/src/tui/modal/searchable_list.rs`: `SearchableList<T>`, `SearchableItem`, `append_items` and `set_has_more` for paged loading, and `retain_items` and `cursor_to`, which keep the cursor when rows drop.

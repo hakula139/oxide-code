@@ -65,7 +65,9 @@ jobs:
       - name: Generate third-party notices
         shell: bash
         run: |
-          cargo about generate --locked about.hbs -o THIRD-PARTY-NOTICES
+          # Scanning from the shipped package leaves out the test-only dependencies of ox-core's
+          # `testing` feature, which a workspace-wide scan counts.
+          cargo about generate --locked --manifest-path crates/ox/Cargo.toml --config about.toml about.hbs -o THIRD-PARTY-NOTICES
           cat licenses/syntect-assets.txt >> THIRD-PARTY-NOTICES
 
       - name: Build archive
@@ -101,7 +103,7 @@ jobs:
           if [[ "$GITHUB_REF_TYPE" == 'tag' ]]; then
             expected=${GITHUB_REF_NAME#v}
           else
-            expected=$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[] | select(.name == "oxide-code") | .version')
+            expected=$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[] | select(.name == "ox") | .version')
           fi
           test "$(smoke/ox --version)" = "ox $expected"
 

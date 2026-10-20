@@ -36,13 +36,13 @@ Two-layer truncation combines per-tool view-shape caps with a centralized byte-b
 
 ## Sources
 
-- `crates/oxide-code/src/engine.rs` and `crates/oxide-code/src/engine/dispatch.rs`: `DispatchContext::artifact_dir`, the live session's artifact directory that each dispatch hands to `ToolCtx`.
-- `crates/oxide-code/src/file_tracker.rs`: `MAX_TRACKED_FILE_SIZE`.
-- `crates/oxide-code/src/session/handle.rs`: `SessionHandle::artifact_dir`.
-- `crates/oxide-code/src/session/store.rs`: `artifact_dir`, `SessionStore::session_file`, `delete_at`.
-- `crates/oxide-code/src/tool.rs`: `run_capped`, `cap_output()`, `MAX_OUTPUT_BYTES`, `Spill`, `MAX_SPILL_BYTES`, `SPILL_DIR`, `truncate_line()`, `MAX_NOTE_PATHS`, `push_path_note()`.
-- `crates/oxide-code/src/tool/bash.rs`: `OUTPUT_BUDGET`, `PipeCapture`, `render_pipe()`.
-- `crates/oxide-code/src/tool/bash/background.rs`: `ShellOutput::take`, the per-read capture of a background shell.
-- `crates/oxide-code/src/tool/glob.rs`: `MAX_RESULTS`, `truncated_total` setter.
-- `crates/oxide-code/src/tool/grep.rs`: `DEFAULT_HEAD_LIMIT`, `MAX_LINE_CHARS`, `MAX_WALK_FILE_SIZE`.
-- `crates/oxide-code/src/tool/read.rs`: `DEFAULT_LINE_LIMIT`, `MAX_LINE_CHARS`, `OUTPUT_BUDGET`.
+- `crates/ox-core/src/engine.rs` and `crates/ox-core/src/engine/dispatch.rs`: `DispatchContext::artifact_dir`, the live session's artifact directory that each dispatch hands to `ToolCtx`.
+- `crates/ox-core/src/file_tracker.rs`: `MAX_TRACKED_FILE_SIZE`.
+- `crates/ox-core/src/session/handle.rs`: `SessionHandle::artifact_dir`.
+- `crates/ox-core/src/session/store.rs`: `artifact_dir`, `SessionStore::session_file`, `delete_at`.
+- `crates/ox-core/src/tool.rs`: `run_capped`, `cap_output()`, `MAX_OUTPUT_BYTES`, `Spill`, `MAX_SPILL_BYTES`, `SPILL_DIR`, `truncate_line()`, `MAX_NOTE_PATHS`, `push_path_note()`.
+- `crates/ox-core/src/tool/bash.rs`: `OUTPUT_BUDGET`, `PipeCapture`, `render_pipe()`.
+- `crates/ox-core/src/tool/bash/background.rs`: `ShellOutput::take`, the per-read capture of a background shell.
+- `crates/ox-core/src/tool/glob.rs`: `MAX_RESULTS`, `truncated_total` setter.
+- `crates/ox-core/src/tool/grep.rs`: `DEFAULT_HEAD_LIMIT`, `MAX_LINE_CHARS`, `MAX_WALK_FILE_SIZE`.
+- `crates/ox-core/src/tool/read.rs`: `DEFAULT_LINE_LIMIT`, `MAX_LINE_CHARS`, `OUTPUT_BUDGET`.

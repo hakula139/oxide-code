@@ -123,30 +123,30 @@ App owns `ModalStack` and runs the key gate first inside `handle_crossterm_event
 
 ## Sources
 
-- `crates/oxide-code/src/session/display.rs`: shared metadata-line formatter used by the picker row and the confirm-delete modal.
-- `crates/oxide-code/src/slash/config.rs`: `/config` row builder plus sectioned `KvOverview`.
-- `crates/oxide-code/src/slash/confirm.rs`: `ConfirmDeleteSessionModal`.
-- `crates/oxide-code/src/slash/context.rs`: `SlashContext`, the read-only state each `execute` call receives.
-- `crates/oxide-code/src/slash/delete.rs`: `DeleteCmd` plus prefix resolver.
-- `crates/oxide-code/src/slash/effort_slider.rs`: `/effort` slider.
-- `crates/oxide-code/src/slash/help.rs`: `/help` row builder plus `KvOverview`.
-- `crates/oxide-code/src/slash/init.rs`: `/init` instruction-file picker (`InitPicker`).
-- `crates/oxide-code/src/slash/mode.rs`: `/mode` picker (`ModeCmd` plus `ModePicker`).
-- `crates/oxide-code/src/slash/picker.rs`: combined `/model + /effort` picker.
-- `crates/oxide-code/src/slash/registry.rs`: `SlashOutcome`, including the `Modal` variant.
-- `crates/oxide-code/src/slash/rename.rs`: `RenameCmd` plus `RenameModal` editor.
-- `crates/oxide-code/src/slash/resume.rs`: `ResumeCmd` plus `ResumePicker`.
-- `crates/oxide-code/src/slash/status.rs`: `/status` row builder plus `KvOverview`.
-- `crates/oxide-code/src/slash/theme.rs`: `/theme` live-preview picker (`ThemeCmd` plus `ThemePicker`).
-- `crates/oxide-code/src/tui/app/dispatch.rs`: `App::handle_crossterm_event` modal gate, `run_slash`, `apply_slash_outcome`, `apply_modal_action`, `dispatch_action`, `clear_modals`.
-- `crates/oxide-code/src/tui/app/events.rs`: `push_approval_modal`.
-- `crates/oxide-code/src/tui/app/render.rs`: `draw_frame` modal layout band.
-- `crates/oxide-code/src/tui/keymap.rs`: `Keymap`, `KeyAction`, and `KeyChord`.
-- `crates/oxide-code/src/tui/modal.rs`: `Modal` (including the `on_cancel`, `captures_esc`, and `tick` hooks), `ModalKey`, `ModalAction`, `ModalStack`.
-- `crates/oxide-code/src/tui/modal/approval.rs`: `ApprovalModal` approve-or-deny gate for agent tool calls, plus the rule and feedback editors.
-- `crates/oxide-code/src/tui/modal/chrome.rs`: shared `Header`, `render_footer`, and the hint fragments.
-- `crates/oxide-code/src/tui/modal/kv_overview.rs`: generic `KvOverview` plus `KvSection`.
-- `crates/oxide-code/src/tui/modal/line_editor.rs`: single-line `LineEditor` over `ratatui-textarea`.
-- `crates/oxide-code/src/tui/modal/list_picker.rs`: generic `ListPicker<T: PickerItem>`.
-- `crates/oxide-code/src/tui/modal/searchable_list.rs`: generic `SearchableList<T: SearchableItem>`.
-- `crates/oxide-code/src/tui/viewport.rs`: `Viewport` scroll window plus `wrap_next` / `wrap_prev` cursor steps.
+- `crates/ox-core/src/session/display.rs`: shared metadata-line formatter used by the picker row and the confirm-delete modal.
+- `crates/ox/src/slash/config.rs`: `/config` row builder plus sectioned `KvOverview`.
+- `crates/ox/src/slash/confirm.rs`: `ConfirmDeleteSessionModal`.
+- `crates/ox/src/slash/context.rs`: `SlashContext`, the read-only state each `execute` call receives.
+- `crates/ox/src/slash/delete.rs`: `DeleteCmd` plus prefix resolver.
+- `crates/ox/src/slash/effort_slider.rs`: `/effort` slider.
+- `crates/ox/src/slash/help.rs`: `/help` row builder plus `KvOverview`.
+- `crates/ox/src/slash/init.rs`: `/init` instruction-file picker (`InitPicker`).
+- `crates/ox/src/slash/mode.rs`: `/mode` picker (`ModeCmd` plus `ModePicker`).
+- `crates/ox/src/slash/picker.rs`: combined `/model + /effort` picker.
+- `crates/ox/src/slash/registry.rs`: `SlashOutcome`, including the `Modal` variant.
+- `crates/ox/src/slash/rename.rs`: `RenameCmd` plus `RenameModal` editor.
+- `crates/ox/src/slash/resume.rs`: `ResumeCmd` plus `ResumePicker`.
+- `crates/ox/src/slash/status.rs`: `/status` row builder plus `KvOverview`.
+- `crates/ox/src/slash/theme.rs`: `/theme` live-preview picker (`ThemeCmd` plus `ThemePicker`).
+- `crates/ox/src/tui/app/dispatch.rs`: `App::handle_crossterm_event` modal gate, `run_slash`, `apply_slash_outcome`, `apply_modal_action`, `dispatch_action`, `clear_modals`.
+- `crates/ox/src/tui/app/events.rs`: `push_approval_modal`.
+- `crates/ox/src/tui/app/render.rs`: `draw_frame` modal layout band.
+- `crates/ox/src/tui/keymap.rs`: `Keymap`, `KeyAction`, and `KeyChord`.
+- `crates/ox/src/tui/modal.rs`: `Modal` (including the `on_cancel`, `captures_esc`, and `tick` hooks), `ModalKey`, `ModalAction`, `ModalStack`.
+- `crates/ox/src/tui/modal/approval.rs`: `ApprovalModal` approve-or-deny gate for agent tool calls, plus the rule and feedback editors.
+- `crates/ox/src/tui/modal/chrome.rs`: shared `Header`, `render_footer`, and the hint fragments.
+- `crates/ox/src/tui/modal/kv_overview.rs`: generic `KvOverview` plus `KvSection`.
+- `crates/ox/src/tui/modal/line_editor.rs`: single-line `LineEditor` over `ratatui-textarea`.
+- `crates/ox/src/tui/modal/list_picker.rs`: generic `ListPicker<T: PickerItem>`.
+- `crates/ox/src/tui/modal/searchable_list.rs`: generic `SearchableList<T: SearchableItem>`.
+- `crates/ox/src/tui/viewport.rs`: `Viewport` scroll window plus `wrap_next` / `wrap_prev` cursor steps.

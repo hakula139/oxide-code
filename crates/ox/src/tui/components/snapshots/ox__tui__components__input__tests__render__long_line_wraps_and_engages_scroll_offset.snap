@@ -1,0 +1,9 @@
+---
+source: crates/ox/src/tui/components/input.rs
+expression: "render_to_backend(&input, 30, 5)"
+---
+"──────────────────────────────"
+"❯ a long input that overflows "
+"  a narrow terminal and forces"
+"   the textarea to wrap       "
+"──────────────────────────────"

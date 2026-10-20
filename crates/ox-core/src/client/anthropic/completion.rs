@@ -1,0 +1,635 @@
+//! Non-streaming `/v1/messages` one-shot path. Returns flattened assistant text and the response's
+//! usage.
+
+use anyhow::{Context, Result};
+use serde::Deserialize;
+use tracing::debug;
+
+use super::betas::compute_betas;
+use super::transport::{post_messages, with_retry};
+use super::wire::{
+    ContentBlockInfo, CreateMessageRequest, OutputConfig, OutputFormat, RequestMessages,
+    RequestMetadata,
+};
+use super::{Client, attribution_text, billing, build_metadata, build_system_blocks};
+use crate::config::Effort;
+use crate::message::Message;
+use crate::model::{ModelSpec, TokenUsage};
+
+// ── Client::complete ──
+
+impl Client {
+    /// Sends a non-streaming request and returns the concatenated assistant text, dropping tool-use
+    /// and thinking blocks, with the usage the response reported. The request carries no agentic
+    /// betas or `context_management` directive. `output_format` is dropped when the config turns
+    /// structured outputs off, so callers can pass it unconditionally.
+    pub(crate) async fn complete(
+        &self,
+        model: &ModelSpec,
+        system: &str,
+        user: &str,
+        max_tokens: u32,
+        effort: Option<Effort>,
+        output_format: Option<&OutputFormat>,
+    ) -> Result<(String, Option<TokenUsage>)> {
+        let auth = self.auth()?;
+        let attribution = self
+            .gateway
+            .attribution
+            .then(|| attribution_text(user, self.is_first_party));
+        let body = build_completion_body(
+            model.id(),
+            system,
+            user,
+            max_tokens,
+            attribution.as_deref(),
+            build_metadata(&self.device_id, &self.session_id),
+            OutputConfig::new(
+                output_format.filter(|_| self.gateway.structured_outputs),
+                effort,
+            ),
+        )?;
+
+        debug!(
+            model = model.id(),
+            body_len = body.len(),
+            "sending completion request"
+        );
+
+        let betas = compute_betas(model, None, auth.kind(), false).join(",");
+        let request = &self.messages_request(betas, body, auth);
+        let CompletionResponse { content, usage } = with_retry(
+            |retry| async move {
+                let response = post_messages(&self.http, request, retry).await?;
+                Ok(response
+                    .json()
+                    .await
+                    .context("failed to parse completion response")?)
+            },
+            |_| {},
+        )
+        .await?;
+        Ok((join_text_blocks(content), usage))
+    }
+}
+
+// ── Body Builder ──
+
+/// System block order: `attribution` (when set) → identity prefix → caller system.
+fn build_completion_body(
+    model: &str,
+    system: &str,
+    user: &str,
+    max_tokens: u32,
+    attribution: Option<&str>,
+    metadata: RequestMetadata,
+    output_config: Option<OutputConfig<'_>>,
+) -> Result<String> {
+    let messages = [Message::user(user)];
+
+    let system_blocks = build_system_blocks(attribution, &[(system, None)]);
+
+    let mut body = serde_json::to_string(&CreateMessageRequest {
+        model,
+        max_tokens,
+        stream: false,
+        metadata,
+        system: system_blocks,
+        tools: None,
+        thinking: None,
+        output_config,
+        context_management: None,
+        messages: RequestMessages {
+            user_context: None,
+            messages: &messages,
+            breakpoint: None,
+        },
+    })
+    .context("failed to serialize request")?;
+
+    if attribution.is_some_and(billing::is_hashed) {
+        body = billing::inject_cch(&body)?;
+    }
+    Ok(body)
+}
+
+// ── Response Handling ──
+
+fn join_text_blocks(content: Vec<ContentBlockInfo>) -> String {
+    content
+        .into_iter()
+        .filter_map(|b| match b {
+            ContentBlockInfo::Text { text } => Some(text),
+            _ => None,
+        })
+        .collect()
+}
+
+#[derive(Deserialize)]
+struct CompletionResponse {
+    content: Vec<ContentBlockInfo>,
+    usage: Option<TokenUsage>,
+}
+
+#[cfg(test)]
+mod tests {
+    use wiremock::matchers::{header, method, path};
+    use wiremock::{Mock, MockServer, Request, ResponseTemplate};
+
+    use super::super::betas::OAUTH_BETA_HEADER;
+    use super::super::local_testing::{
+        Captured, auth_token, captured, client_for, oauth, test_client,
+    };
+    use super::super::testing::{DEVICE_ID, api_key, test_config};
+    use super::*;
+    use crate::client::anthropic::local_testing::{COMPLETION_USAGE, completion_body};
+    use crate::client::anthropic::{CLAUDE_CLI_VERSION, SYSTEM_PROMPT_PREFIX};
+    use crate::util::tls::testing::NoRoots;
+
+    mod client {
+        use super::*;
+
+        mod complete {
+            use super::*;
+
+            fn haiku() -> ModelSpec {
+                ModelSpec::resolve("claude-haiku-5-5".to_owned())
+            }
+
+            #[tokio::test]
+            async fn sends_x_claude_code_session_id_header() {
+                // `/clear` rolls the id in place, so `complete` must send the current one.
+                let server = MockServer::start().await;
+                Mock::given(method("POST"))
+                    .and(path("/v1/messages"))
+                    .and(header("x-claude-code-session-id", "sid-complete"))
+                    .respond_with(ResponseTemplate::new(200).set_body_string(completion_body("ok")))
+                    .mount(&server)
+                    .await;
+
+                let client = Client::new(
+                    &test_config(server.uri(), api_key(), "claude-haiku-5-5"),
+                    NoRoots,
+                    Some("sid-complete".to_owned()),
+                    DEVICE_ID.to_owned(),
+                )
+                .unwrap();
+                client
+                    .complete(&haiku(), "", "u", 40, None, None)
+                    .await
+                    .unwrap();
+            }
+
+            #[tokio::test]
+            async fn happy_path_produces_assistant_text_and_usage() {
+                let server = MockServer::start().await;
+                Mock::given(method("POST"))
+                    .and(path("/v1/messages"))
+                    .respond_with(
+                        ResponseTemplate::new(200)
+                            .set_body_string(completion_body("Fix login bug")),
+                    )
+                    .mount(&server)
+                    .await;
+
+                let client = test_client(server.uri(), api_key(), "claude-haiku-5-5");
+                let (text, usage) = client
+                    .complete(&haiku(), "sys", "user input", 40, None, None)
+                    .await
+                    .unwrap();
+                assert_eq!(text, "Fix login bug");
+                assert_eq!(usage, Some(COMPLETION_USAGE));
+            }
+
+            #[tokio::test]
+            async fn retries_a_transient_status_before_the_reply() {
+                let server = MockServer::start().await;
+                Mock::given(method("POST"))
+                    .and(path("/v1/messages"))
+                    .respond_with(ResponseTemplate::new(529).insert_header("retry-after", "0"))
+                    .up_to_n_times(1)
+                    .mount(&server)
+                    .await;
+                Mock::given(method("POST"))
+                    .and(path("/v1/messages"))
+                    .respond_with(
+                        ResponseTemplate::new(200)
+                            .set_body_string(completion_body("Fix login bug")),
+                    )
+                    .mount(&server)
+                    .await;
+
+                let client = test_client(server.uri(), api_key(), "claude-haiku-5-5");
+                let (text, _) = client
+                    .complete(&haiku(), "sys", "user input", 40, None, None)
+                    .await
+                    .unwrap();
+
+                assert_eq!(text, "Fix login bug");
+                assert_eq!(server.received_requests().await.unwrap().len(), 2);
+            }
+
+            #[tokio::test]
+            async fn while_signed_out_fails_without_a_request() {
+                let mut config =
+                    test_config("https://example.invalid", api_key(), "claude-haiku-5-5");
+                config.auth = None;
+                let client = Client::new(&config, NoRoots, None, DEVICE_ID.to_owned()).unwrap();
+
+                let err = client
+                    .complete(&haiku(), "", "u", 40, None, None)
+                    .await
+                    .expect_err("a signed-out client must not send");
+
+                assert_eq!(err.to_string(), "not signed in");
+            }
+
+            #[tokio::test]
+            async fn http_error_propagates_status_and_body() {
+                let server = MockServer::start().await;
+                Mock::given(method("POST"))
+                    .and(path("/v1/messages"))
+                    .respond_with(
+                        ResponseTemplate::new(400)
+                            .set_body_string(r#"{"error":{"type":"invalid_request"}}"#),
+                    )
+                    .mount(&server)
+                    .await;
+
+                let client = test_client(server.uri(), api_key(), "claude-haiku-5-5");
+                let err = client
+                    .complete(&haiku(), "", "u", 40, None, None)
+                    .await
+                    .expect_err("expected error");
+                let msg = format!("{err:#}");
+                assert!(msg.contains("400"), "status surfaced: {msg}");
+                assert!(msg.contains("invalid_request"), "body surfaced: {msg}");
+            }
+
+            #[tokio::test]
+            async fn on_429_surfaces_retry_after_header_in_error() {
+                let server = MockServer::start().await;
+                Mock::given(method("POST"))
+                    .and(path("/v1/messages"))
+                    .respond_with(
+                        ResponseTemplate::new(429)
+                            .insert_header("retry-after", "120")
+                            .set_body_string(r#"{"error":{"type":"rate_limit_error"}}"#),
+                    )
+                    .mount(&server)
+                    .await;
+
+                let client = test_client(server.uri(), api_key(), "claude-haiku-5-5");
+                let err = client
+                    .complete(&haiku(), "", "u", 40, None, None)
+                    .await
+                    .expect_err("expected 429 error");
+                let msg = format!("{err:#}");
+                assert!(
+                    msg.contains("Retry after 120 s."),
+                    "retry-after threaded: {msg}"
+                );
+            }
+
+            #[tokio::test]
+            async fn on_401_names_the_gateway_token_variable() {
+                let server = MockServer::start().await;
+                Mock::given(method("POST"))
+                    .and(path("/v1/messages"))
+                    .respond_with(ResponseTemplate::new(401).set_body_string("unauthorized"))
+                    .mount(&server)
+                    .await;
+
+                let client = test_client(server.uri(), auth_token(), "claude-haiku-5-5");
+                let err = client
+                    .complete(&haiku(), "", "u", 40, None, None)
+                    .await
+                    .expect_err("expected 401");
+                assert!(
+                    format!("{err:#}").contains("Check ANTHROPIC_AUTH_TOKEN."),
+                    "{err:#}"
+                );
+            }
+
+            #[tokio::test]
+            async fn malformed_response_body_errors_with_parse_context() {
+                // A 200 with non-JSON must surface a parse error so the title path falls back.
+                let server = MockServer::start().await;
+                Mock::given(method("POST"))
+                    .and(path("/v1/messages"))
+                    .respond_with(ResponseTemplate::new(200).set_body_string("<not json>"))
+                    .mount(&server)
+                    .await;
+
+                let client = test_client(server.uri(), api_key(), "claude-haiku-5-5");
+                let err = client
+                    .complete(&haiku(), "", "u", 40, None, None)
+                    .await
+                    .expect_err("expected parse error");
+                assert!(
+                    format!("{err:#}").contains("failed to parse completion response"),
+                    "parse context: {err:#}",
+                );
+            }
+
+            #[tokio::test]
+            async fn ships_effort_and_format_without_beta_tags_unless_structured_outputs_off() {
+                // Both fields are GA, so neither may drag a beta tag along.
+                let schema = serde_json::json!({
+                    "type": "object",
+                    "properties": {"title": {"type": "string"}},
+                    "required": ["title"],
+                    "additionalProperties": false,
+                });
+                let fmt = OutputFormat::json_schema(schema.clone());
+                for structured_outputs in [true, false] {
+                    let server = MockServer::start().await;
+                    let sink: Captured<(String, String)> = captured();
+                    let sink_clone = std::sync::Arc::clone(&sink);
+                    Mock::given(method("POST"))
+                        .and(path("/v1/messages"))
+                        .respond_with(move |req: &Request| {
+                            let body = String::from_utf8_lossy(&req.body).into_owned();
+                            let beta = req
+                                .headers
+                                .get("anthropic-beta")
+                                .map(|v| v.to_str().unwrap().to_owned())
+                                .unwrap_or_default();
+                            *sink_clone.lock().unwrap() = Some((body, beta));
+                            ResponseTemplate::new(200).set_body_string(completion_body("ok"))
+                        })
+                        .mount(&server)
+                        .await;
+
+                    let mut config = test_config(server.uri(), oauth(), "claude-haiku-5-5");
+                    config.gateway.structured_outputs = structured_outputs;
+                    let client = client_for(&config);
+                    _ = client
+                        .complete(&haiku(), "sys", "prompt", 40, Some(Effort::Low), Some(&fmt))
+                        .await
+                        .unwrap();
+
+                    let (body, beta) = sink.lock().unwrap().clone().expect("request captured");
+                    let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+                    assert_eq!(v["output_config"]["effort"], "low", "{body}");
+                    let expected_format = if structured_outputs {
+                        serde_json::json!({"type": "json_schema", "schema": schema})
+                    } else {
+                        serde_json::Value::Null
+                    };
+                    assert_eq!(v["output_config"]["format"], expected_format, "{body}");
+                    assert_eq!(beta, OAUTH_BETA_HEADER, "only the auth tag ships: {beta}");
+                }
+            }
+
+            #[tokio::test]
+            async fn carries_the_billing_block_under_every_credential_unless_turned_off() {
+                for (auth, attribution) in [
+                    (api_key(), true),
+                    (auth_token(), true),
+                    (oauth(), true),
+                    (api_key(), false),
+                ] {
+                    let server = MockServer::start().await;
+                    Mock::given(method("POST"))
+                        .and(path("/v1/messages"))
+                        .respond_with(
+                            ResponseTemplate::new(200).set_body_string(completion_body("ok")),
+                        )
+                        .mount(&server)
+                        .await;
+                    let kind = auth.kind();
+                    let mut config = test_config(server.uri(), auth, "claude-haiku-5-5");
+                    config.gateway.attribution = attribution;
+
+                    client_for(&config)
+                        .complete(&haiku(), "sys", "Fix login", 40, None, None)
+                        .await
+                        .unwrap();
+
+                    let received = server.received_requests().await.expect("recorded requests");
+                    let body: serde_json::Value =
+                        serde_json::from_slice(&received[0].body).unwrap();
+                    let expected = if attribution {
+                        attribution_text("Fix login", false)
+                    } else {
+                        SYSTEM_PROMPT_PREFIX.to_owned()
+                    };
+                    assert_eq!(
+                        body["system"][0]["text"], expected,
+                        "{kind:?} {attribution}"
+                    );
+                }
+            }
+
+            #[tokio::test]
+            async fn does_not_emit_context_management_edits() {
+                // `complete` omits agentic-only `context_management.edits`, even on known models.
+                let server = MockServer::start().await;
+                let sink: Captured<String> = captured();
+                let sink_clone = std::sync::Arc::clone(&sink);
+                Mock::given(method("POST"))
+                    .and(path("/v1/messages"))
+                    .respond_with(move |req: &Request| {
+                        *sink_clone.lock().unwrap() =
+                            Some(String::from_utf8_lossy(&req.body).into_owned());
+                        ResponseTemplate::new(200).set_body_string(completion_body("ok"))
+                    })
+                    .mount(&server)
+                    .await;
+
+                let client = test_client(server.uri(), api_key(), "claude-haiku-5-5");
+                _ = client
+                    .complete(&haiku(), "sys", "hi", 40, None, None)
+                    .await
+                    .unwrap();
+
+                let body = sink.lock().unwrap().clone().expect("body captured");
+                let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+                assert!(
+                    v.get("context_management").is_none(),
+                    "context_management absent on one-shot path: {body}",
+                );
+            }
+        }
+    }
+
+    mod build_completion_body {
+        use super::*;
+
+        fn parse_body(body: &str) -> serde_json::Value {
+            serde_json::from_str(body).expect("serialized body must be valid JSON")
+        }
+
+        #[test]
+        fn omits_tools_thinking_and_output_config_by_default() {
+            let body = build_completion_body(
+                "claude-haiku-5-5",
+                "sys",
+                "hi",
+                40,
+                None,
+                build_metadata("did", "sid"),
+                OutputConfig::new(None, None),
+            )
+            .unwrap();
+            let v = parse_body(&body);
+            assert_eq!(v["model"], "claude-haiku-5-5");
+            assert_eq!(v["max_tokens"], 40);
+            assert_eq!(v["stream"], false);
+            assert!(v.get("tools").is_none(), "tools omitted: {v}");
+            assert!(v.get("thinking").is_none(), "thinking omitted: {v}");
+            assert!(
+                v.get("output_config").is_none(),
+                "output_config omitted: {v}"
+            );
+            assert_eq!(v["messages"][0]["role"], "user");
+            assert_eq!(v["messages"][0]["content"][0]["text"], "hi");
+        }
+
+        #[test]
+        fn attribution_prepends_attested_billing_block() {
+            let plain_body = build_completion_body(
+                "claude-haiku-5-5",
+                "sys-prompt",
+                "hi",
+                40,
+                None,
+                build_metadata("did", "sid"),
+                OutputConfig::new(None, None),
+            )
+            .unwrap();
+            let plain = parse_body(&plain_body);
+            let plain_system = plain["system"].as_array().unwrap();
+            assert_eq!(plain_system.len(), 2);
+            assert_eq!(plain_system[0]["text"], SYSTEM_PROMPT_PREFIX);
+            assert_eq!(plain_system[1]["text"], "sys-prompt");
+            assert!(!plain_body.contains("x-anthropic-billing-header:"));
+
+            let attributed_body = build_completion_body(
+                "claude-haiku-5-5",
+                "sys-prompt",
+                "Fix login",
+                40,
+                Some(&attribution_text("Fix login", true)),
+                build_metadata("did", "sid"),
+                OutputConfig::new(None, None),
+            )
+            .unwrap();
+            let attributed = parse_body(&attributed_body);
+            let attributed_system = attributed["system"].as_array().unwrap();
+            assert_eq!(attributed_system.len(), 3);
+            let first = attributed_system[0]["text"].as_str().unwrap();
+            assert!(first.starts_with("x-anthropic-billing-header:"));
+            assert!(first.contains(&format!("cc_version={CLAUDE_CLI_VERSION}")));
+            assert_eq!(attributed_system[1]["text"], SYSTEM_PROMPT_PREFIX);
+            assert_eq!(attributed_system[2]["text"], "sys-prompt");
+            assert!(!attributed_body.contains("cch=00000"));
+        }
+
+        #[test]
+        fn empty_system_keeps_identity_prefix_alone() {
+            // Non-Haiku OAuth requires the identity prefix in block 0 even with no caller system.
+            let body = build_completion_body(
+                "claude-haiku-5-5",
+                "",
+                "hi",
+                40,
+                None,
+                build_metadata("did", "sid"),
+                OutputConfig::new(None, None),
+            )
+            .unwrap();
+            let v = parse_body(&body);
+            let system = v["system"].as_array().unwrap();
+            assert_eq!(system.len(), 1);
+            assert_eq!(system[0]["text"], SYSTEM_PROMPT_PREFIX);
+        }
+
+        #[test]
+        fn with_effort_or_format_emits_output_config() {
+            let fmt = OutputFormat::json_schema(serde_json::json!({"type": "object"}));
+            for (effort, format, expected) in [
+                (
+                    Some(Effort::Low),
+                    None,
+                    serde_json::json!({"effort": "low"}),
+                ),
+                (
+                    None,
+                    Some(&fmt),
+                    serde_json::json!({"format": {"type": "json_schema", "schema": {"type": "object"}}}),
+                ),
+            ] {
+                let body = build_completion_body(
+                    "claude-haiku-5-5",
+                    "sys",
+                    "hi",
+                    40,
+                    None,
+                    build_metadata("did", "sid"),
+                    OutputConfig::new(format, effort),
+                )
+                .unwrap();
+                assert_eq!(parse_body(&body)["output_config"], expected);
+            }
+        }
+
+        #[test]
+        fn routes_device_and_session_ids_into_metadata() {
+            let body = build_completion_body(
+                "claude-haiku-5-5",
+                "",
+                "hi",
+                40,
+                None,
+                build_metadata("did-456", "sid-789"),
+                OutputConfig::new(None, None),
+            )
+            .unwrap();
+            assert!(
+                body.contains("sid-789"),
+                "session_id threads into metadata.user_id: {body}",
+            );
+            assert!(
+                body.contains("did-456"),
+                "device_id threads into metadata.user_id: {body}",
+            );
+        }
+    }
+
+    mod join_text_blocks {
+        use super::*;
+
+        #[test]
+        fn concatenates_text_and_drops_non_text_blocks() {
+            // Round-trips through `CompletionResponse` to pin the live wire shape.
+            let body = r#"{
+            "id": "msg_1",
+            "type": "message",
+            "role": "assistant",
+            "model": "claude-haiku-5-5",
+            "stop_reason": "end_turn",
+            "content": [
+                {"type":"thinking","thinking":"pondering","signature":"sig"},
+                {"type":"text","text":"Fix auth bug"},
+                {"type":"tool_use","id":"t1","name":"noop","input":{}},
+                {"type":"text","text":" and friends"}
+            ],
+            "usage": {"input_tokens":10,"output_tokens":5}
+        }"#;
+            let parsed: CompletionResponse = serde_json::from_str(body).unwrap();
+            assert_eq!(join_text_blocks(parsed.content), "Fix auth bug and friends");
+        }
+
+        #[test]
+        fn gives_empty_text_for_a_tool_only_response() {
+            // Empty signals "parse failure, keep fallback" to the title caller.
+            let blocks = vec![ContentBlockInfo::ToolUse {
+                id: "t1".to_owned(),
+                name: "noop".to_owned(),
+            }];
+            assert_eq!(join_text_blocks(blocks), "");
+        }
+    }
+}

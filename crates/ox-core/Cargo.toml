@@ -1,0 +1,74 @@
+[package]
+name = "ox-core"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[features]
+# Fixtures for the other workspace crates' tests, which enable it only from their dev-dependencies.
+testing = ["dep:temp-env", "dep:wiremock"]
+
+[dependencies]
+anyhow.workspace = true
+base64.workspace = true
+bytes.workspace = true
+caseless.workspace = true
+dunce.workspace = true
+fastrand.workspace = true
+futures.workspace = true
+getrandom.workspace = true
+globset.workspace = true
+ignore.workspace = true
+indoc.workspace = true
+platform-info.workspace = true
+process-wrap.workspace = true
+regex.workspace = true
+reqwest.workspace = true
+rustls.workspace = true
+rustls-webpki.workspace = true
+same-file.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+temp-env = { workspace = true, optional = true }
+tempfile.workspace = true
+thiserror.workspace = true
+time.workspace = true
+tokio.workspace = true
+tokio-util.workspace = true
+toml.workspace = true
+tracing.workspace = true
+tracing-appender.workspace = true
+tracing-subscriber.workspace = true
+tree-sitter.workspace = true
+tree-sitter-bash.workspace = true
+unicode-normalization.workspace = true
+unicode-segmentation.workspace = true
+unicode-width.workspace = true
+uuid.workspace = true
+wiremock = { workspace = true, optional = true }
+xxhash-rust.workspace = true
+
+[target.'cfg(unix)'.dependencies]
+nix.workspace = true
+
+[target.'cfg(target_os = "macos")'.dependencies]
+core-foundation.workspace = true
+rustls-platform-verifier.workspace = true
+security-framework.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+winapi-util.workspace = true
+windows-sys.workspace = true
+
+[dev-dependencies]
+insta.workspace = true
+temp-env.workspace = true
+tokio = { workspace = true, features = ["test-util"] }
+wiremock.workspace = true

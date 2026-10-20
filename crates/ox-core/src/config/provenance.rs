@@ -1,0 +1,193 @@
+//! Where resolved settings came from: the config file layers and the per-setting source `/config`
+//! shows beside each value.
+
+use std::fmt;
+use std::path::{Path, PathBuf};
+
+use crate::util::env;
+
+// ── Layer ──
+
+/// One config file that loaded. Layers apply lowest precedence first.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Layer {
+    /// `$XDG_CONFIG_HOME/ox/config.toml`.
+    User(PathBuf),
+    /// A `$XDG_CONFIG_HOME/ox/config.d/*.toml` drop-in, applied in name order after the user file.
+    DropIn(PathBuf),
+    /// `.ox/config.toml` in the nearest directory at or above the working directory that has one.
+    Project(PathBuf),
+}
+
+impl Layer {
+    pub fn path(&self) -> &Path {
+        match self {
+            Self::User(path) | Self::DropIn(path) | Self::Project(path) => path,
+        }
+    }
+
+    /// Returns whether this is the project layer, which comes from the checkout and so may not set
+    /// credentials, endpoints, or permission grants.
+    pub(super) const fn is_project(&self) -> bool {
+        matches!(self, Self::Project(_))
+    }
+
+    /// Short name for the layer, as `/config` shows it.
+    pub(crate) fn label(&self) -> String {
+        match self {
+            Self::User(_) => "user".to_owned(),
+            Self::DropIn(path) => format!(
+                "config.d/{}",
+                path.file_name().unwrap_or_default().to_string_lossy()
+            ),
+            Self::Project(_) => "project".to_owned(),
+        }
+    }
+}
+
+// ── Source ──
+
+/// Where one resolved setting came from.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub enum Source {
+    /// The built-in default, including a model-derived value when nothing sets one.
+    #[default]
+    Default,
+    File(Layer),
+    Env(&'static str),
+    Flag(&'static str),
+    /// Changed during the session by `/model`, `/effort`, `/mode`, or Shift+Tab.
+    Session,
+}
+
+impl Source {
+    /// [`Source::Env`] when `var` is set and non-empty, matching how env vars override.
+    pub(super) fn env_if_set(var: &'static str) -> Self {
+        env::string(var).map_or(Self::Default, |_| Self::Env(var))
+    }
+}
+
+impl fmt::Display for Source {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Default => f.write_str("default"),
+            Self::File(layer) => f.write_str(&layer.label()),
+            Self::Env(var) => write!(f, "${var}"),
+            Self::Flag(flag) => f.write_str(flag),
+            Self::Session => f.write_str("session"),
+        }
+    }
+}
+
+// ── Sourced ──
+
+/// A resolved value paired with the source that set it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct Sourced<T> {
+    pub(super) value: T,
+    pub(super) source: Source,
+}
+
+impl<T> Sourced<T> {
+    pub(super) const fn new(value: T, source: Source) -> Self {
+        Self { value, source }
+    }
+
+    pub(super) const fn fallback(value: T) -> Self {
+        Self::new(value, Source::Default)
+    }
+
+    pub(super) fn map<U>(self, f: impl FnOnce(T) -> U) -> Sourced<U> {
+        Sourced::new(f(self.value), self.source)
+    }
+}
+
+impl<T> Sourced<Option<T>> {
+    /// An optional setting that nothing sets is `None` from the default source.
+    pub(super) fn from_option(value: Option<Sourced<T>>) -> Self {
+        value.map_or_else(|| Self::fallback(None), |set| set.map(Some))
+    }
+}
+
+// ── Provenance ──
+
+/// The config files that loaded and the source of each setting `/config` lists.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Provenance {
+    /// Lowest precedence first.
+    pub layers: Vec<Layer>,
+    pub model: Source,
+    pub effort: Source,
+    pub auth: Source,
+    pub base_url: Source,
+    pub extra_ca_certs: Source,
+    pub custom_headers: Source,
+    pub attribution: Source,
+    pub structured_outputs: Source,
+    pub max_tokens: Source,
+    pub max_tool_rounds: Source,
+    pub prompt_cache_ttl: Source,
+    pub compaction: Source,
+    pub permission_mode: Source,
+    pub show_thinking: Source,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    mod layer {
+        use super::*;
+
+        mod label {
+            use super::*;
+
+            #[test]
+            fn names_each_layer_kind() {
+                assert_eq!(
+                    Layer::User(PathBuf::from("/x/ox/config.toml")).label(),
+                    "user"
+                );
+                assert_eq!(
+                    Layer::DropIn(PathBuf::from("/x/ox/config.d/10-nix.toml")).label(),
+                    "config.d/10-nix.toml",
+                );
+                assert_eq!(
+                    Layer::Project(PathBuf::from("/repo/.ox/config.toml")).label(),
+                    "project"
+                );
+            }
+        }
+    }
+
+    mod source {
+        use super::*;
+
+        #[test]
+        fn display_names_the_layer_variable_or_flag() {
+            assert_eq!(Source::Default.to_string(), "default");
+            assert_eq!(Source::Env("OX_EFFORT").to_string(), "$OX_EFFORT");
+            assert_eq!(Source::Flag("--mode").to_string(), "--mode");
+            assert_eq!(Source::Session.to_string(), "session");
+            assert_eq!(
+                Source::File(Layer::DropIn(PathBuf::from("/x/config.d/a.toml"))).to_string(),
+                "config.d/a.toml",
+            );
+        }
+
+        mod env_if_set {
+            use super::*;
+
+            #[test]
+            fn treats_an_empty_variable_as_unset() {
+                const VAR: &str = "OX_TEST_PROVENANCE_VAR";
+                temp_env::with_var(VAR, Some("1"), || {
+                    assert_eq!(Source::env_if_set(VAR), Source::Env(VAR));
+                });
+                temp_env::with_var(VAR, Some(""), || {
+                    assert_eq!(Source::env_if_set(VAR), Source::Default);
+                });
+            }
+        }
+    }
+}

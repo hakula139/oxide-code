@@ -1,0 +1,95 @@
+//! Session fixtures and ID-keyed lookups that only this crate's tests use.
+
+use std::fs::{self, File};
+use std::path::{Path, PathBuf};
+
+use anyhow::Result;
+use time::OffsetDateTime;
+use time::macros::datetime;
+use uuid::Uuid;
+
+use super::testing::{find_session_in, set_modified, test_project_dir};
+use super::{SessionStore, SessionWriter, open_append_at};
+use crate::message::Message;
+use crate::session::entry::{CURRENT_VERSION, Entry, TitleSource};
+
+// ── SessionStore ──
+
+impl SessionStore {
+    pub(crate) fn open_append(&self, session_id: &str) -> Result<SessionWriter> {
+        open_append_at(&self.find_session_path(session_id)?)
+    }
+}
+
+// ── SessionWriter ──
+
+impl SessionWriter {
+    /// Writer whose first append fails on a read-only handle and whose next one reopens `path`.
+    pub(crate) fn failing_once(path: &Path) -> Self {
+        Self {
+            path: path.to_owned(),
+            file: Some(File::open(path).unwrap()),
+        }
+    }
+}
+
+// ── Fixtures ──
+
+pub(crate) fn test_session_file(dir: &Path, session_id: &str) -> PathBuf {
+    let project_dir = test_project_dir(dir);
+    find_session_in(&project_dir, session_id)
+        .unwrap_or_else(|| panic!("no session file for id {session_id} in {project_dir:?}"))
+}
+
+/// Writes an unparsable session file with ID `corrupt`, whose name and mtime both carry a time
+/// past every seeded session, so it sorts first.
+pub(crate) fn write_newest_corrupt_session(dir: &Path) {
+    const NEWEST: i64 = 9_999_999_999;
+    let path = test_project_dir(dir).join(format!("{NEWEST}-corrupt.jsonl"));
+    fs::write(&path, "not a session\n").unwrap();
+    set_modified(&path, OffsetDateTime::from_unix_timestamp(NEWEST).unwrap());
+}
+
+pub(crate) fn sample_header(session_id: &str) -> Entry {
+    Entry::Header {
+        session_id: session_id.to_owned(),
+        cwd: "/tmp/project".to_owned(),
+        model: "claude-opus-5-5".to_owned(),
+        created_at: datetime!(2026-04-16 12:00:00 UTC),
+        version: CURRENT_VERSION,
+        git_branch: None,
+    }
+}
+
+pub(super) fn sample_message_entry(uuid: Uuid, text: &str) -> Entry {
+    sample_message_at(uuid, None, datetime!(2026-04-16 12:00:01 UTC), text)
+}
+
+pub(super) fn sample_message_at(
+    uuid: Uuid,
+    parent_uuid: Option<Uuid>,
+    timestamp: OffsetDateTime,
+    text: &str,
+) -> Entry {
+    Entry::Message {
+        uuid,
+        parent_uuid,
+        message: Message::user(text),
+        timestamp,
+    }
+}
+
+pub(super) fn sample_title_entry(title: &str) -> Entry {
+    Entry::Title {
+        title: title.to_owned(),
+        source: TitleSource::FirstPrompt,
+        updated_at: datetime!(2026-04-16 12:00:01 UTC),
+    }
+}
+
+pub(super) fn sample_summary_entry(message_count: u32) -> Entry {
+    Entry::Summary {
+        message_count,
+        updated_at: datetime!(2026-04-16 12:05:00 UTC),
+    }
+}

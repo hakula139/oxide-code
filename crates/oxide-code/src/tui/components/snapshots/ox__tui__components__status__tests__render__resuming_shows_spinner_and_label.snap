@@ -1,6 +1,0 @@
----
-source: crates/oxide-code/src/tui/components/status.rs
-expression: "render_status(&mut bar, 80)"
----
-"  ~/projects/demo │ main │ Opus 5.5 (xhigh) │ ⣷ Resuming                        "
-"────────────────────────────────────────────────────────────────────────────────"

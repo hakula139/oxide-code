@@ -36,23 +36,23 @@ The picks lean toward the Codex precedent on most surfaces, since it is the one 
 
 ## Sources
 
-- `crates/oxide-code/src/driver/stdio.rs`: `StdioSink::render`, and `render_op`, which renders until the op it sent ends.
-- `crates/oxide-code/src/engine.rs`: `Engine::run`, which ignores an `Op::Queue` that arrives between turns, plus `Engine::submit_prompt`, `report_abort`, and `TurnEnd::of`, shared by the TUI, REPL, and headless drivers.
-- `crates/oxide-code/src/engine/abort.rs`: `TurnAbort` enum, `await_unless_aborted`.
-- `crates/oxide-code/src/engine/dispatch.rs`: `run_tool_round` / `ToolRound`, `Dispatcher::run_ready`, which cancels the running calls on an abort.
-- `crates/oxide-code/src/engine/turn.rs`: `agent_turn` round loop, `interrupt_turn`, `record_drained_prompts`.
-- `crates/oxide-code/src/file_tracker.rs`: `FileTracker::write_and_record`.
-- `crates/oxide-code/src/message.rs`: `Message::interruption`, the marker a user abort records.
-- `crates/oxide-code/src/protocol.rs`: `Event::{Cancelled, PromptDrained, TurnFailed}`, `Interaction::Interrupted`, `Op::{Interrupt, Queue, Shutdown}`.
-- `crates/oxide-code/src/session/history.rs`: `walk_transcript`, which shows a resumed interruption marker as `Interaction::Interrupted`.
-- `crates/oxide-code/src/tool.rs`: `Tool::run` drop contract, `ToolCtx::cancel`, `walk_files`, `write_tracked`.
-- `crates/oxide-code/src/tool/bash.rs`: `ShellTree`, which kills the shell's process group (Unix) or Job Object (Windows) when a call times out or drops before finishing.
-- `crates/oxide-code/src/tui/action.rs`: `Action::ConfirmExit`.
-- `crates/oxide-code/src/tui/app.rs`: `App::pending_prompts` / `forwarded_prompts`, and `App::active_prompt` / `auto_compacting`.
-- `crates/oxide-code/src/tui/app/dispatch.rs`: `dispatch_op` / `start_turn` / `forward_queued_prompts`, `handle_esc`, `expire_armed_exit`.
-- `crates/oxide-code/src/tui/app/events.rs`: `finish_turn`, `return_unsent_prompt`, `finalize_idle` / `enter_idle` / `drain_pending_prompt`, `set_active_status`.
-- `crates/oxide-code/src/tui/components/chat.rs`: `ChatView::clear_pending_calls`, which evicts orphan tool calls at turn boundaries, and `ChatView::load_history`, which shows a resumed interruption as the `(interrupted)` line.
-- `crates/oxide-code/src/tui/components/chat/blocks/interrupted.rs`: `InterruptedMarker` block.
-- `crates/oxide-code/src/tui/components/input.rs`: Ctrl+D POSIX gate, plus `set_text` and `is_empty`, which the idle Esc recall uses.
-- `crates/oxide-code/src/tui/components/status.rs`: `Status` variants, busy hints, spinner.
-- `crates/oxide-code/src/tui/glyphs.rs`: `INTERRUPTED_MARKER`.
+- `crates/ox-core/src/engine.rs`: `Engine::run`, which ignores an `Op::Queue` that arrives between turns, plus `Engine::submit_prompt`, `report_abort`, and `TurnEnd::of`, shared by the TUI, REPL, and headless drivers.
+- `crates/ox-core/src/engine/abort.rs`: `TurnAbort` enum, `await_unless_aborted`.
+- `crates/ox-core/src/engine/dispatch.rs`: `run_tool_round` / `ToolRound`, `Dispatcher::run_ready`, which cancels the running calls on an abort.
+- `crates/ox-core/src/engine/turn.rs`: `agent_turn` round loop, `interrupt_turn`, `record_drained_prompts`.
+- `crates/ox-core/src/file_tracker.rs`: `FileTracker::write_and_record`.
+- `crates/ox-core/src/message.rs`: `Message::interruption`, the marker a user abort records.
+- `crates/ox-core/src/protocol.rs`: `Event::{Cancelled, PromptDrained, TurnFailed}`, `Interaction::Interrupted`, `Op::{Interrupt, Queue, Shutdown}`.
+- `crates/ox-core/src/session/history.rs`: `walk_transcript`, which shows a resumed interruption marker as `Interaction::Interrupted`.
+- `crates/ox-core/src/tool.rs`: `Tool::run` drop contract, `ToolCtx::cancel`, `walk_files`, `write_tracked`.
+- `crates/ox-core/src/tool/bash.rs`: `ShellTree`, which kills the shell's process group (Unix) or Job Object (Windows) when a call times out or drops before finishing.
+- `crates/ox/src/driver/stdio.rs`: `StdioSink::render`, and `render_op`, which renders until the op it sent ends.
+- `crates/ox/src/tui/action.rs`: `Action::ConfirmExit`.
+- `crates/ox/src/tui/app.rs`: `App::pending_prompts` / `forwarded_prompts`, and `App::active_prompt` / `auto_compacting`.
+- `crates/ox/src/tui/app/dispatch.rs`: `dispatch_op` / `start_turn` / `forward_queued_prompts`, `handle_esc`, `expire_armed_exit`.
+- `crates/ox/src/tui/app/events.rs`: `finish_turn`, `return_unsent_prompt`, `finalize_idle` / `enter_idle` / `drain_pending_prompt`, `set_active_status`.
+- `crates/ox/src/tui/components/chat.rs`: `ChatView::clear_pending_calls`, which evicts orphan tool calls at turn boundaries, and `ChatView::load_history`, which shows a resumed interruption as the `(interrupted)` line.
+- `crates/ox/src/tui/components/chat/blocks/interrupted.rs`: `InterruptedMarker` block.
+- `crates/ox/src/tui/components/input.rs`: Ctrl+D POSIX gate, plus `set_text` and `is_empty`, which the idle Esc recall uses.
+- `crates/ox/src/tui/components/status.rs`: `Status` variants, busy hints, spinner.
+- `crates/ox/src/tui/glyphs.rs`: `INTERRUPTED_MARKER`.

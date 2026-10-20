@@ -48,14 +48,14 @@ A refresh required by a request, whether for an expired token or after a 401, re
 
 ## Sources
 
-- `crates/oxide-code/src/client/anthropic.rs`: `Client::set_auth`, which swaps the credential that each request sends, and `Client::finish_reloads`, which waits for the reloads in flight.
-- `crates/oxide-code/src/client/anthropic/transport.rs`: `MessagesRequest`, which carries the credential into every attempt, and `post_messages`, which resends a request after a 401.
-- `crates/oxide-code/src/config.rs`: `Config::load`, which starts an interactive session signed out.
-- `crates/oxide-code/src/config/auth.rs`: `AuthSource`, resolution order, the stored-login search, and `Auth::credential`, which refreshes a stored login before a request.
-- `crates/oxide-code/src/config/login.rs`: PKCE, the loopback listener, and code exchange.
-- `crates/oxide-code/src/config/oauth.rs`: credential stores, refresh, write-back, and `SessionLogin`, the token a session holds.
-- `crates/oxide-code/src/engine.rs`: `Engine::login` and `Engine::logout`, which swap the client's credential, and `Engine::finalize`, which waits at exit for the reloads in flight.
-- `crates/oxide-code/src/protocol.rs`: `Op::Login`, `Op::Logout`, `Event::LoginStarted`, `Event::SignedIn`, and `Event::SignedOut`.
-- `crates/oxide-code/src/slash/login.rs`: `LoginCmd` and `LogoutCmd`.
-- `crates/oxide-code/src/tui/app/events.rs`: browser launch and sign-in messages.
-- `crates/oxide-code/src/tui/components/status.rs`: `Status::SigningIn`, the status line while the browser is out.
+- `crates/ox-core/src/client/anthropic.rs`: `Client::set_auth`, which swaps the credential that each request sends, and `Client::finish_reloads`, which waits for the reloads in flight.
+- `crates/ox-core/src/client/anthropic/transport.rs`: `MessagesRequest`, which carries the credential into every attempt, and `post_messages`, which resends a request after a 401.
+- `crates/ox-core/src/config.rs`: `Config::load`, which starts an interactive session signed out.
+- `crates/ox-core/src/config/auth.rs`: `AuthSource`, resolution order, the stored-login search, and `Auth::credential`, which refreshes a stored login before a request.
+- `crates/ox-core/src/config/login.rs`: PKCE, the loopback listener, and code exchange.
+- `crates/ox-core/src/config/oauth.rs`: credential stores, refresh, write-back, and `SessionLogin`, the token a session holds.
+- `crates/ox-core/src/engine.rs`: `Engine::login` and `Engine::logout`, which swap the client's credential, and `Engine::finalize`, which waits at exit for the reloads in flight.
+- `crates/ox-core/src/protocol.rs`: `Op::Login`, `Op::Logout`, `Event::LoginStarted`, `Event::SignedIn`, and `Event::SignedOut`.
+- `crates/ox/src/slash/login.rs`: `LoginCmd` and `LogoutCmd`.
+- `crates/ox/src/tui/app/events.rs`: browser launch and sign-in messages.
+- `crates/ox/src/tui/components/status.rs`: `Status::SigningIn`, the status line while the browser is out.

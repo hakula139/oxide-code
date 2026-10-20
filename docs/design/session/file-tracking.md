@@ -30,10 +30,10 @@ The `FileTracker` is a per-session `Arc<Mutex<HashMap>>` shared across tool call
 
 ## Sources
 
-- `crates/oxide-code/src/file_tracker.rs`: `FileTracker`, `FileState`, `LastView`, `FileSnapshot`, `record_read` and `write_and_record`, which attribute each record to the call ID they take, content verification, persist / restore.
-- `crates/oxide-code/src/session/entry.rs`: `Entry::FileSnapshot`.
-- `crates/oxide-code/src/session/sanitize.rs`: `retain_visible_file_snapshots`, the resume-time provenance filter.
-- `crates/oxide-code/src/tool.rs`: `tracker_key`, `write_tracked`.
-- `crates/oxide-code/src/tool/edit.rs`: Read-before-Edit gate, current-content verification.
-- `crates/oxide-code/src/tool/read.rs`: `FileTracker::record_read`, cache-hit stub.
-- `crates/oxide-code/src/tool/write.rs`: Read-before-Write gate.
+- `crates/ox-core/src/file_tracker.rs`: `FileTracker`, `FileState`, `LastView`, `FileSnapshot`, `record_read` and `write_and_record`, which attribute each record to the call ID they take, content verification, persist / restore.
+- `crates/ox-core/src/session/entry.rs`: `Entry::FileSnapshot`.
+- `crates/ox-core/src/session/sanitize.rs`: `retain_visible_file_snapshots`, the resume-time provenance filter.
+- `crates/ox-core/src/tool.rs`: `tracker_key`, `write_tracked`.
+- `crates/ox-core/src/tool/edit.rs`: Read-before-Edit gate, current-content verification.
+- `crates/ox-core/src/tool/read.rs`: `FileTracker::record_read`, cache-hit stub.
+- `crates/ox-core/src/tool/write.rs`: Read-before-Write gate.

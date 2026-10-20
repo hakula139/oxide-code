@@ -77,6 +77,9 @@ jobs:
       - name: Clippy
         run: nix develop -c cargo clippy --locked --all-targets -- -D warnings
 
+      - name: Clippy without test targets
+        run: nix develop -c cargo clippy --locked -- -D warnings
+
       - name: Rustdoc
         run: nix develop -c cargo doc --locked --no-deps
 
@@ -130,6 +133,9 @@ jobs:
       - name: Clippy
         run: cargo clippy --locked --all-targets -- -D warnings
 
+      - name: Clippy without test targets
+        run: cargo clippy --locked -- -D warnings
+
       - name: Rustdoc
         run: cargo doc --locked --no-deps
 
@@ -151,6 +157,9 @@ jobs:
 
       - name: Clippy
         run: cargo clippy --locked --all-targets -- -D warnings
+
+      - name: Clippy without test targets
+        run: cargo clippy --locked -- -D warnings
 
       - name: Rustdoc
         run: cargo doc --locked --no-deps

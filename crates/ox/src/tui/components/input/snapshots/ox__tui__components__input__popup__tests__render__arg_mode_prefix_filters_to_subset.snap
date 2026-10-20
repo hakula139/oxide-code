@@ -1,0 +1,8 @@
+---
+source: crates/ox/src/tui/components/input/popup.rs
+expression: "render_to_backend(&popup, 60)"
+---
+"────────────────────────────────────────────────────────────"
+"mocha      Catppuccin dark (default)                        "
+"macchiato  Catppuccin dark (medium)                         "
+"material   Material dark                                    "
