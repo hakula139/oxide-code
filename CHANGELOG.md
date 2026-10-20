@@ -4,7 +4,14 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [0.1.0-alpha.5] - 2026-10-19
+## [0.1.0-alpha.5] - 2026-10-20
+
+### Highlights
+
+- Press Ctrl+O to expand truncated tool output and finished thinking, or click a footer to expand one block.
+- Oversized tool output is saved beside the session, so the model can read the part that was cut.
+- The `/resume` picker loads older sessions as you scroll and searches all of them.
+- An expiring OAuth login now refreshes during the session instead of failing until restart.
 
 ### Added
 
