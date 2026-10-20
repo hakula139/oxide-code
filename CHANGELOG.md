@@ -4,6 +4,32 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.0-alpha.5] - 2026-10-20
+
+### Highlights
+
+- Press Ctrl+O to expand truncated tool output and finished thinking, or click a footer to expand one block.
+- Oversized tool output is saved beside the session, so the model can read the part that was cut.
+- The `/resume` picker loads older sessions as you scroll and searches all of them.
+- An expiring OAuth login now refreshes during the session instead of failing until restart.
+
+### Added
+
+- _(tui)_ Press Ctrl+O to switch the chat between a compact view and an expanded view that shows every tool output and thinking block in full, or click an overflow footer or a `Thought` header to expand only that block. In the compact view, truncated tool output ends in a `... +N lines · Ctrl+O to expand` footer, and finished thinking collapses to its `Thought` header, including in resumed sessions. The task panel and the queued-prompt preview count their hidden rows as `... +N tasks` and `... +N prompts` ([#428](https://github.com/hakula139/oxide-code/pull/428))
+- _(tool)_ When a tool result is cut to fit, save the full output to a directory beside the session file and name the file in the omission marker, so the model can `read` or `grep` the omitted part. This covers results over the 128 KiB cap and each `bash` or `bash_output` stream cut to its head and tail. Each file keeps up to 10 MiB, `/delete` removes a session's files, and `grep` now searches a single file of up to 10 MiB ([#426](https://github.com/hakula139/oxide-code/pull/426))
+- _(slash)_ Load older sessions in the `/resume` picker as you scroll, and search every session in the selected scope and view. Each session takes one row, which drops its ID, branch, project, and message count in that order as the terminal narrows, and the archive notice clears after 3 seconds ([#423](https://github.com/hakula139/oxide-code/pull/423))
+- _(slash)_ Run `/init` in the `--no-tui` REPL. When the project has no `AGENTS.md` or `CLAUDE.md`, name the file to create as `/init AGENTS.md` or `/init CLAUDE.md`, which the TUI also accepts ([#424](https://github.com/hakula139/oxide-code/pull/424))
+
+### Fixed
+
+- _(oauth)_ Refresh a stored oxide-code or Claude Code login that expires during a session, so requests no longer fail with HTTP 401 until you restart. After a 401, the login is reloaded or refreshed and the request is sent once more. A refresh that gets no response or a server error from the token endpoint retries with backoff, and a refresh still saves its rotated tokens when the request that started it is cancelled, with exit waiting for it to finish ([#411](https://github.com/hakula139/oxide-code/pull/411), [#430](https://github.com/hakula139/oxide-code/pull/430))
+- _(session)_ Include the AI title request in the session cost shown in the status line and `/status`, and save it so a resumed session restores it ([#418](https://github.com/hakula139/oxide-code/pull/418))
+
+### Changed
+
+- _(theme)_ Make tool output, thinking, hints, and unselected popup and picker rows readable in every built-in theme, and give inline code, blockquotes, the input box, and the idle `Ready` state distinct colors. Blockquotes show a `│` bar and muted text, keeping the thinking style inside thinking blocks, and the input box's rules take the accent color while Enter queues the prompt, such as during a turn. Each dark theme's selection highlight now keeps dim text legible on it ([#425](https://github.com/hakula139/oxide-code/pull/425), [#429](https://github.com/hakula139/oxide-code/pull/429))
+- _(prompt)_ Have the model run the checks that prove a task before reporting it done, then say what it verified and what it did not. It reports findings without editing files on review-only requests, inspects the actual output after a failure before trying again, never prints credentials, writes comments that describe the code without narrating the change, writes tests that fail for a plausible bug, and commits only when asked. Compaction summaries record which checks passed, failed, or have not run ([#409](https://github.com/hakula139/oxide-code/pull/409))
+
 ## [0.1.0-alpha.4] - 2026-10-18
 
 ### Highlights
@@ -198,6 +224,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - _(deps)_ Bump rustls-webpki and rand for Dependabot alerts (#17)
 - _(deps)_ Bump rustls-webpki from 0.103.12 to 0.103.13 (#34)
 
+[0.1.0-alpha.5]: https://github.com/hakula139/oxide-code/compare/v0.1.0-alpha.4..v0.1.0-alpha.5
 [0.1.0-alpha.4]: https://github.com/hakula139/oxide-code/compare/v0.1.0-alpha.3..v0.1.0-alpha.4
 [0.1.0-alpha.3]: https://github.com/hakula139/oxide-code/compare/v0.1.0-alpha.2..v0.1.0-alpha.3
 [0.1.0-alpha.2]: https://github.com/hakula139/oxide-code/compare/v0.1.0-alpha.1..v0.1.0-alpha.2
