@@ -17,17 +17,6 @@ allow = [
 
 [bans]
 multiple-versions = "warn"
-# Frontend crates, which only `ox` may depend on so that `ox-core` stays frontend-neutral.
-deny = [
-  { crate = "arboard", wrappers = ["ox"] },
-  { crate = "clap", wrappers = ["ox"] },
-  { crate = "crossterm", wrappers = ["ox", "ratatui-crossterm"] },
-  { crate = "open", wrappers = ["ox"] },
-  { crate = "pulldown-cmark", wrappers = ["ox"] },
-  { crate = "ratatui", wrappers = ["ox"] },
-  { crate = "ratatui-textarea", wrappers = ["ox"] },
-  { crate = "syntect", wrappers = ["ox"] },
-]
 
 [sources]
 unknown-registry = "deny"

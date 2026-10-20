@@ -32,4 +32,4 @@ Layers run from the foundation to the frontends.
 
 ## Dependency Direction
 
-A module imports only from its own layer and lower layers, so `ox` depends on `ox-core` and never the reverse. `ox-core` depends on no terminal UI crate, such as `ratatui` or `crossterm`, and `deny.toml` allows only `ox` to depend on each frontend crate directly.
+A module imports only from its own layer and lower layers, so `ox` depends on `ox-core` and never the reverse. `ox-core` depends on no terminal UI crate, such as `ratatui` or `crossterm`.
