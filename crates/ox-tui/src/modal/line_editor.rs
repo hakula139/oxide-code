@@ -50,7 +50,7 @@ impl LineEditor {
     }
 
     /// Dim hint shown in place of the empty text.
-    pub(crate) fn with_placeholder(mut self, placeholder: &'static str) -> Self {
+    pub(super) fn with_placeholder(mut self, placeholder: &'static str) -> Self {
         self.placeholder = Some(placeholder);
         self
     }

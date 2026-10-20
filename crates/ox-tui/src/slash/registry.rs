@@ -50,21 +50,21 @@ impl std::fmt::Debug for SlashOutcome {
 
 #[cfg(test)]
 impl SlashOutcome {
-    pub(crate) fn into_forward(self) -> Action {
+    pub(super) fn into_forward(self) -> Action {
         match self {
             Self::Forward(action) => action,
             other => panic!("expected Forward, got {other:?}"),
         }
     }
 
-    pub(crate) fn into_modal(self) -> Box<dyn Modal> {
+    pub(super) fn into_modal(self) -> Box<dyn Modal> {
         match self {
             Self::Modal(modal) => modal,
             other => panic!("expected Modal, got {other:?}"),
         }
     }
 
-    pub(crate) fn into_system_message(self) -> String {
+    pub(super) fn into_system_message(self) -> String {
         match self {
             Self::SystemMessage(text) => text,
             other => panic!("expected SystemMessage, got {other:?}"),

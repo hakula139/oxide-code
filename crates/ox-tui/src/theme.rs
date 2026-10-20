@@ -111,7 +111,7 @@ macro_rules! for_each_slot {
     };
 }
 
-pub(crate) use for_each_slot;
+use for_each_slot;
 
 /// Theme palette, with one slot per semantic role.
 macro_rules! define_theme_struct {
@@ -127,7 +127,7 @@ macro_rules! define_theme_struct {
         }
 
         #[cfg(test)]
-        pub(crate) const SLOT_NAMES: &[&str] = &[ $(stringify!($name),)* ];
+        const SLOT_NAMES: &[&str] = &[ $(stringify!($name),)* ];
     };
 }
 
