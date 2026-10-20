@@ -1141,9 +1141,11 @@ pub(crate) mod testing {
     use tempfile::TempDir;
     use tokio_util::sync::CancellationToken;
 
+    use super::bash::BashTool;
+    use super::edit::synthesize_chunk;
     use super::{
-        ApprovalBody, ApprovalPreview, SearchRoot, Tool, ToolCtx, ToolOutput, ToolRegistry,
-        run_capped,
+        ApprovalBody, ApprovalPreview, DiffChunk, SearchRoot, Tool, ToolCtx, ToolOutput,
+        ToolRegistry, run_capped,
     };
     use crate::file_tracker::FileTracker;
     use crate::permission::rule::Rule;
@@ -1195,6 +1197,17 @@ pub(crate) mod testing {
             title: "Bash".to_owned(),
             body: ApprovalBody::Command(command.to_owned()),
         }
+    }
+
+    /// A registry of `tools` followed by a `bash` tool with background shells of its own.
+    pub(crate) fn bash_registry(mut tools: Vec<Box<dyn Tool>>) -> ToolRegistry {
+        tools.push(Box::new(BashTool::default()));
+        ToolRegistry::new(tools)
+    }
+
+    /// The diff chunk the `edit` tool shows for replacing `old` with `new`, numbered from line 1.
+    pub(crate) fn diff_chunk(old: &str, new: &str) -> DiffChunk {
+        synthesize_chunk(old, new)
     }
 
     /// The read filter of a policy that denies reading whatever one of `patterns` matches.

@@ -8,12 +8,11 @@ use tokio::io::{AsyncBufRead, AsyncBufReadExt, BufReader, Lines};
 
 use super::stdio::{Approver, StdioSink, Unattended, render_op, render_queued};
 use super::{Exit, shutdown_signal};
-use crate::command;
+use crate::command::{self, Parsed};
 use crate::engine::{Engine, EngineHandle, TurnEnd};
 use crate::permission::rule::Rule;
 use crate::permission::{Basis, SessionGrant};
 use crate::protocol::{Decision, Event, EventSink, Op};
-use crate::slash::{self, Parsed};
 use crate::tool::{ApprovalBody, ApprovalPreview};
 use crate::util::git;
 use crate::util::text::escape_hidden;
@@ -65,7 +64,7 @@ where
             if input.is_empty() {
                 continue;
             }
-            let op = match slash::parse_slash(input) {
+            let op = match command::parse_slash(input) {
                 Some(parsed) => match command_op(&parsed, project_root) {
                     Ok(op) => op,
                     Err(message) => {
@@ -74,7 +73,7 @@ where
                         continue;
                     }
                 },
-                None => Op::Prompt(slash::unescape_literal(input).to_owned()),
+                None => Op::Prompt(command::unescape_literal(input).to_owned()),
             };
 
             // A send fails only once the engine has stopped, which `render_op` then reports.
@@ -120,7 +119,7 @@ where
 /// The op a slash command runs in the REPL at `project_root`, or the message saying why it cannot
 /// run here.
 fn command_op(parsed: &Parsed, project_root: &Path) -> Result<Op, String> {
-    slash::typed_op(parsed, project_root).unwrap_or_else(|| {
+    command::typed_op(parsed, project_root).unwrap_or_else(|| {
         let names: Vec<String> = command::NAMES
             .iter()
             .map(|name| format!("/{name}"))
@@ -274,9 +273,8 @@ mod tests {
     use crate::permission::{Mode, PermissionClass, Tier};
     use crate::protocol::testing::CapturingSink;
     use crate::session::store::testing::test_store;
-    use crate::tool::bash::BashTool;
-    use crate::tool::testing::bash_preview;
-    use crate::tool::{DiffChunk, DiffLine, ToolRegistry};
+    use crate::tool::testing::{bash_preview, bash_registry};
+    use crate::tool::{DiffChunk, DiffLine};
 
     mod drive {
         use super::*;
@@ -584,7 +582,7 @@ mod tests {
                 let dir = tempfile::tempdir().unwrap();
                 let engine = engine(server.uri(), &test_store(dir.path()), dir.path())
                     .await
-                    .with_tools(ToolRegistry::new(vec![Box::new(BashTool::default())]));
+                    .with_tools(bash_registry(Vec::new()));
                 let input = indoc! {"
                     list files
                     f
@@ -623,7 +621,7 @@ mod tests {
                 let dir = tempfile::tempdir().unwrap();
                 let engine = engine(server.uri(), &test_store(dir.path()), dir.path())
                     .await
-                    .with_tools(ToolRegistry::new(vec![Box::new(BashTool::default())]));
+                    .with_tools(bash_registry(Vec::new()));
                 let input = indoc! {"
                     list files
                     y

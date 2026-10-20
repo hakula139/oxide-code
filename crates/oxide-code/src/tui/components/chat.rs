@@ -690,6 +690,7 @@ mod tests {
     use unicode_width::UnicodeWidthStr;
 
     use super::*;
+    use crate::tool::testing::diff_chunk;
     use crate::tool::{ReadExcerptLine, ToolResultView};
     use crate::tui::glyphs::{
         ASSISTANT_PREFIX, BAR, INTERRUPTED_MARKER, TOOL_BORDER_CONT, TOOL_BORDER_PREFIX,
@@ -2461,11 +2462,8 @@ mod tests {
         fn tool_call_with_edit_diff_result() {
             let mut chat = test_chat();
             chat.push_tool_call(call("✎", "Edit(/tmp/f.rs)"));
-            let view = crate::tool::ToolResultView::Diff {
-                chunks: vec![crate::tool::edit::synthesize_chunk(
-                    "fn foo() {}",
-                    "fn foo() -> i32 { 42 }",
-                )],
+            let view = ToolResultView::Diff {
+                chunks: vec![diff_chunk("fn foo() {}", "fn foo() -> i32 { 42 }")],
                 replace_all: false,
                 replacements: 1,
             };
@@ -2485,8 +2483,8 @@ mod tests {
                 .map(|i| format!("new{i}"))
                 .collect::<Vec<_>>()
                 .join("\n");
-            let view = crate::tool::ToolResultView::Diff {
-                chunks: vec![crate::tool::edit::synthesize_chunk(&old, &new)],
+            let view = ToolResultView::Diff {
+                chunks: vec![diff_chunk(&old, &new)],
                 replace_all: false,
                 replacements: 1,
             };
@@ -2498,11 +2496,8 @@ mod tests {
         fn tool_call_with_edit_diff_error_uses_error_border_color() {
             let mut chat = test_chat();
             chat.push_tool_call(call("✎", "Edit(/tmp/f.rs)"));
-            let view = crate::tool::ToolResultView::Diff {
-                chunks: vec![crate::tool::edit::synthesize_chunk(
-                    "fn foo() {}",
-                    "fn foo() -> i32 { 42 }",
-                )],
+            let view = ToolResultView::Diff {
+                chunks: vec![diff_chunk("fn foo() {}", "fn foo() -> i32 { 42 }")],
                 replace_all: false,
                 replacements: 1,
             };
@@ -2527,11 +2522,8 @@ mod tests {
         fn tool_call_with_edit_diff_identical_sides_emits_no_change_marker() {
             let mut chat = test_chat();
             chat.push_tool_call(call("✎", "Edit(/tmp/f.rs)"));
-            let view = crate::tool::ToolResultView::Diff {
-                chunks: vec![crate::tool::edit::synthesize_chunk(
-                    "unchanged",
-                    "unchanged",
-                )],
+            let view = ToolResultView::Diff {
+                chunks: vec![diff_chunk("unchanged", "unchanged")],
                 replace_all: false,
                 replacements: 1,
             };
@@ -2543,11 +2535,8 @@ mod tests {
         fn tool_call_with_edit_diff_trims_identical_boundary_lines() {
             let mut chat = test_chat();
             chat.push_tool_call(call("✎", "Edit(/tmp/f.rs)"));
-            let view = crate::tool::ToolResultView::Diff {
-                chunks: vec![crate::tool::edit::synthesize_chunk(
-                    "fn foo()",
-                    "fn foo()\n    return 42;",
-                )],
+            let view = ToolResultView::Diff {
+                chunks: vec![diff_chunk("fn foo()", "fn foo()\n    return 42;")],
                 replace_all: false,
                 replacements: 1,
             };
@@ -2559,8 +2548,8 @@ mod tests {
         fn tool_call_with_edit_diff_wraps_long_lines_under_bar() {
             let mut chat = test_chat();
             chat.push_tool_call(call("✎", "Edit(/tmp/f.rs)"));
-            let view = crate::tool::ToolResultView::Diff {
-                chunks: vec![crate::tool::edit::synthesize_chunk(
+            let view = ToolResultView::Diff {
+                chunks: vec![diff_chunk(
                     "short",
                     "an intentionally quite long replacement line that forces wrapping",
                 )],

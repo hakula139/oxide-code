@@ -11,7 +11,7 @@ use uuid::Uuid;
 use super::listing::ListScope;
 use super::{
     SessionData, SessionStore, SessionWriter, encode_lines, file_session_id,
-    load_session_data_from_path, open_append_at, open_append_file,
+    load_session_data_from_path, open_append_at, open_append_file, set_archived_at,
 };
 use crate::message::Message;
 use crate::session::entry::{CURRENT_VERSION, Entry, TitleSource};
@@ -146,6 +146,11 @@ pub(crate) fn seed_test_session(
             .unwrap();
     }
     set_modified(writer.path(), created_at);
+}
+
+/// Archives the seeded session `session_id`, keeping the last-active time that orders listings.
+pub(crate) fn archive_test_session(store: &SessionStore, session_id: &str) {
+    set_archived_at(&store.find_session_path(session_id).unwrap(), true).unwrap();
 }
 
 /// IDs of the home project's sessions in the given archive state, most recently active first.

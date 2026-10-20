@@ -12,8 +12,9 @@ use tokio::sync::mpsc::error::TrySendError;
 use tracing::{debug, warn};
 
 use super::{App, EXIT_WINDOW};
+use crate::command::{self, Parsed};
 use crate::protocol::Op;
-use crate::slash::{self, Parsed, SlashContext, SlashKind, SlashOutcome};
+use crate::slash::{self, SlashContext, SlashKind, SlashOutcome};
 use crate::tui::action::{APP_KEYMAP, Action, AppAction};
 use crate::tui::components::input::InputOutcome;
 use crate::tui::components::status::Status;
@@ -344,7 +345,7 @@ impl App {
     /// their own synthesized actions.
     fn handle_submit_prompt(&mut self, text: &str) {
         let idle = self.input.is_enabled();
-        let Some(parsed) = slash::parse_slash(text) else {
+        let Some(parsed) = command::parse_slash(text) else {
             self.pending_prompts.push_back(text.to_owned());
             if idle {
                 // Prompts a cancel left queued run before this one.
@@ -403,7 +404,7 @@ impl App {
             return;
         }
         while let Some(queued) = self.pending_prompts.get(self.forwarded_prompts) {
-            let prompt = slash::unescape_literal(queued).to_owned();
+            let prompt = command::unescape_literal(queued).to_owned();
             match self.ops.try_send(Op::Queue(prompt)) {
                 Ok(()) => self.forwarded_prompts += 1,
                 Err(TrySendError::Full(_)) => break,

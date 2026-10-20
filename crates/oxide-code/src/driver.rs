@@ -51,7 +51,7 @@ impl Shutdown {
 }
 
 /// Resolves on the first SIGINT / SIGTERM / SIGHUP.
-async fn shutdown_signal() -> Shutdown {
+pub(crate) async fn shutdown_signal() -> Shutdown {
     #[cfg(unix)]
     {
         use tokio::signal::unix::{SignalKind, signal};

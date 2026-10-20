@@ -14,10 +14,6 @@ impl SlashCommand for ClearCmd {
         "clear"
     }
 
-    fn aliases(&self) -> &'static [&'static str] {
-        &["new", "reset"]
-    }
-
     fn description(&self) -> &'static str {
         "Reset the conversation context"
     }

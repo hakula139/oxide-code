@@ -1,7 +1,13 @@
-//! Typed slash-command forms parsed into the [`Op`] each one runs, shared by the TUI's slash
-//! commands and the bare REPL. The TUI adds the pickers and modals behind the bare forms.
+//! Slash-command input shared by the TUI's slash commands and the bare REPL: the line parser, the
+//! command aliases, and the typed forms parsed into the [`Op`] each one runs. The TUI adds the
+//! pickers and modals behind the bare forms.
+//!
+//! Design: `docs/design/slash/commands.md`.
 
 pub(crate) mod init;
+mod parser;
+
+pub(crate) use parser::{Parsed, is_name_char, parse_slash, unescape_literal};
 
 use std::path::Path;
 
@@ -17,6 +23,32 @@ use crate::session::display::fit_title;
 pub(crate) const NAMES: [&str; 8] = [
     "clear", "compact", "effort", "init", "mode", "model", "rename", "resume",
 ];
+
+/// Each command's aliases, keyed by its canonical name.
+const ALIASES: [(&str, &[&str]); 2] = [("clear", &["new", "reset"]), ("resume", &["continue"])];
+
+/// The op the typed form of `parsed` runs at `project_root`, with an alias resolved to its command
+/// and an error prefixed by the name the user typed. `None` when the command has no typed form.
+pub(crate) fn typed_op(parsed: &Parsed, project_root: &Path) -> Option<Result<Op, String>> {
+    let op = parse(canonical(&parsed.name), &parsed.args, project_root)?;
+    Some(op.map_err(|msg| parsed.named_error(&msg)))
+}
+
+/// The canonical name `name` stands for: the command it is an alias of, or `name` itself.
+pub(crate) fn canonical(name: &str) -> &str {
+    ALIASES
+        .iter()
+        .find(|(_, aliases)| aliases.contains(&name))
+        .map_or(name, |&(canonical, _)| canonical)
+}
+
+/// The aliases of the command whose canonical name is `name`.
+pub(crate) fn aliases(name: &str) -> &'static [&'static str] {
+    ALIASES
+        .iter()
+        .find(|(canonical, _)| *canonical == name)
+        .map_or(&[], |&(_, aliases)| aliases)
+}
 
 /// Parses the typed form of the command `name`, canonical and without its `/`, into the op it
 /// runs, where `/init` reads the instruction files at `project_root`. `None` when `name` is not
@@ -166,6 +198,81 @@ mod tests {
 
     fn set_effort(level: Effort) -> Op {
         Op::SetModel(ConfigPick::Effort(level))
+    }
+
+    mod typed_op {
+        use super::*;
+
+        fn parsed(name: &str, args: &str) -> Parsed {
+            Parsed {
+                name: name.to_owned(),
+                args: args.to_owned(),
+            }
+        }
+
+        #[test]
+        fn routes_an_alias_to_its_command() {
+            assert_eq!(
+                typed_op(&parsed("new", ""), Path::new("/repo")),
+                Some(Ok(Op::Clear))
+            );
+            assert_eq!(
+                typed_op(&parsed("continue", " ab12 "), Path::new("/repo")),
+                Some(Ok(Op::Resume {
+                    target: ResumeTarget::Prefix("ab12".to_owned()),
+                })),
+            );
+        }
+
+        #[test]
+        fn error_names_the_command_as_typed() {
+            assert_eq!(
+                typed_op(&parsed("continue", ""), Path::new("/repo")),
+                Some(Err(
+                    "/continue: Missing session ID. Usage: `/resume <id-prefix>`.".to_owned()
+                )),
+            );
+        }
+
+        #[test]
+        fn command_without_a_typed_form_or_an_unknown_one_has_no_op() {
+            assert_eq!(typed_op(&parsed("help", ""), Path::new("/repo")), None);
+            assert_eq!(
+                typed_op(&parsed("no-such-thing", "x"), Path::new("/repo")),
+                None
+            );
+        }
+    }
+
+    mod canonical {
+        use super::*;
+
+        #[test]
+        fn resolves_each_alias_to_its_command() {
+            for (alias, name) in [("new", "clear"), ("reset", "clear"), ("continue", "resume")] {
+                assert_eq!(canonical(alias), name, "{alias}");
+            }
+        }
+
+        #[test]
+        fn keeps_a_canonical_or_unknown_name() {
+            for name in ["clear", "resume", "help", "no-such-thing"] {
+                assert_eq!(canonical(name), name);
+            }
+        }
+    }
+
+    mod aliases {
+        use super::*;
+
+        #[test]
+        fn lists_the_aliases_of_a_canonical_name_only() {
+            assert_eq!(aliases("clear"), ["new", "reset"]);
+            assert_eq!(aliases("resume"), ["continue"]);
+            for name in ["help", "new", "no-such-thing"] {
+                assert_eq!(aliases(name), [] as [&str; 0], "{name}");
+            }
+        }
     }
 
     mod parse {

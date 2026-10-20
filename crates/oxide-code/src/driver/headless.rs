@@ -9,9 +9,9 @@ use serde::Serialize;
 
 use super::stdio::{StdioSink, Unattended, render_op};
 use super::{Exit, shutdown_signal};
+use crate::command;
 use crate::engine::{Engine, EngineHandle, EnginePanic, TurnEnd};
 use crate::protocol::{Event, EventSink, Op, UsageSnapshot};
-use crate::slash;
 use crate::util::sync::lock_or_recover;
 
 /// Runs `prompt` as a single turn, printed in `format`. A turn that does not complete exits with
@@ -43,7 +43,7 @@ where
     O: Write + Send,
     E: Write + Send,
 {
-    let prompt = Op::Prompt(slash::unescape_literal(prompt).to_owned());
+    let prompt = Op::Prompt(command::unescape_literal(prompt).to_owned());
     // A send fails only once the engine has stopped, which `render_op` then reports.
     _ = handle.ops.send(prompt.clone()).await;
     let mut approver = Unattended;
@@ -244,8 +244,8 @@ mod tests {
     use crate::permission::PermissionClass;
     use crate::protocol::testing::ls_call;
     use crate::session::store::testing::test_store;
-    use crate::tool::bash::BashTool;
-    use crate::tool::{Prepared, Tool, ToolCtx, ToolOutput, ToolRegistry, ToolSpec};
+    use crate::tool::testing::bash_registry;
+    use crate::tool::{Prepared, Tool, ToolCtx, ToolOutput, ToolSpec};
 
     const SESSION_ID: &str = "session-1";
 
@@ -318,8 +318,7 @@ mod tests {
                         .await;
                     mount_reply(&server, "Done.").await;
                     let dir = tempfile::tempdir().unwrap();
-                    let tools =
-                        ToolRegistry::new(vec![Box::new(LookTool), Box::new(BashTool::default())]);
+                    let tools = bash_registry(vec![Box::new(LookTool)]);
                     let engine = engine(server.uri(), &test_store(dir.path()), dir.path())
                         .await
                         .with_tools(tools);

@@ -23,6 +23,7 @@ use std::process::ExitCode;
 use std::sync::Arc;
 
 use anyhow::{Context, Result, bail};
+use clap::builder::{PossibleValue, PossibleValuesParser, TypedValueParser};
 use clap::{ArgGroup, Parser};
 use time::error::IndeterminateOffset;
 use tracing::warn;
@@ -34,7 +35,7 @@ use driver::headless::OutputFormat;
 use driver::tui::Startup;
 use engine::{Engine, EnginePanic, SessionParts, Toolbox};
 use file_tracker::FileTracker;
-use permission::{Mode, ReadFilter};
+use permission::Mode;
 use session::display::archive_notice;
 use session::handle::ResumedSession;
 use session::list_view::render_list;
@@ -42,11 +43,6 @@ use session::resolver::resolve_session;
 use session::store::SessionStore;
 use session::store::listing::{DEFAULT_SESSION_LIST_LIMIT, ListScope};
 use slash::ResumePicker;
-use tool::bash::background::{BackgroundShells, BashOutputTool, BashStopTool};
-use tool::{
-    ToolRegistry, bash::BashTool, edit::EditTool, glob::GlobTool, grep::GrepTool, read::ReadTool,
-    tasks::TasksTool, write::WriteTool,
-};
 use util::tls::PlatformTrust;
 
 #[derive(Parser)]
@@ -92,7 +88,7 @@ struct Cli {
     list: bool,
 
     /// Start in this permission mode, overriding `permission.mode` and `OX_PERMISSION_MODE`.
-    #[arg(long, value_enum, value_name = "MODE")]
+    #[arg(long, value_name = "MODE", value_parser = mode_parser())]
     mode: Option<Mode>,
 
     /// Disable the TUI and use a bare REPL instead.
@@ -116,6 +112,14 @@ struct Cli {
     /// Open the TUI on the session picker, and exit without a session if the picker is quit.
     #[arg(short, long, conflicts_with_all = ["continue", "list", "no_tui", "prompt"])]
     resume: bool,
+}
+
+/// Parses `--mode`, listing each mode in `--help` with the description the `/mode` picker shows.
+fn mode_parser() -> impl TypedValueParser<Value = Mode> {
+    PossibleValuesParser::new(
+        Mode::ALL.map(|mode| PossibleValue::new(mode.as_str()).help(mode.description())),
+    )
+    .map(|name| name.parse::<Mode>().expect("each value names a mode"))
 }
 
 fn main() -> Result<ExitCode> {
@@ -200,7 +204,7 @@ async fn async_main(offset_error: Option<IndeterminateOffset>) -> Result<Exit> {
         .resume
         .then(|| ResumePicker::at_startup(store.clone(), handle.session_id().to_owned(), cli.all));
 
-    let toolbox = create_toolbox(&config.permission.read_filter());
+    let toolbox = Toolbox::built_in(&config.permission.read_filter());
     let engine = Engine::new(
         &config,
         PlatformTrust(config.extra_ca_certs.clone()),
@@ -224,22 +228,23 @@ async fn async_main(offset_error: Option<IndeterminateOffset>) -> Result<Exit> {
         return driver::repl::run(engine, show_thinking, &drifted).await;
     };
 
-    let startup = Startup {
-        git_branch,
-        picker,
-        theme_notices: theme.notices,
-        title,
-        unarchived,
-    };
-    driver::tui::run(
+    let signal = driver::tui::run(
         engine,
         &theme.theme,
         snapshot,
         show_thinking,
-        startup,
+        Startup {
+            git_branch,
+            picker,
+            theme_notices: theme.notices,
+            title,
+            unarchived,
+        },
         &drifted,
+        driver::shutdown_signal(),
     )
-    .await
+    .await?;
+    Ok(signal.map_or(Exit::Success, Exit::Signal))
 }
 
 // ── Session Helpers ──
@@ -266,26 +271,6 @@ fn detect_terminal_width() -> Option<usize> {
         .map(|(cols, _)| usize::from(cols))
 }
 
-/// The built-in tools, with the background shells the `bash` tools share with the engine.
-fn create_toolbox(read_filter: &ReadFilter) -> Toolbox {
-    let shells = Arc::new(BackgroundShells::default());
-    let tools = ToolRegistry::new(vec![
-        Box::new(BashTool::new(Arc::clone(&shells))),
-        Box::new(BashOutputTool::new(Arc::clone(&shells))),
-        Box::new(BashStopTool::new(Arc::clone(&shells))),
-        Box::new(ReadTool),
-        Box::new(WriteTool),
-        Box::new(EditTool),
-        Box::new(GlobTool::new(read_filter.clone())),
-        Box::new(GrepTool::new(read_filter.clone())),
-        Box::new(TasksTool),
-    ]);
-    Toolbox {
-        tools: Arc::new(tools),
-        shells,
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use clap::CommandFactory;
@@ -293,9 +278,7 @@ mod tests {
     use time::macros::datetime;
 
     use super::*;
-    use crate::session::store::set_archived_at;
-    use crate::session::store::testing::seed_test_session;
-    use crate::tool::testing::{canonical_tempdir, ctx, deny_reads, temp_ctx};
+    use crate::session::store::testing::{archive_test_session, seed_test_session};
 
     mod cli {
         use super::*;
@@ -429,7 +412,7 @@ mod tests {
                 assert!(!capped.contains("Local session"));
                 assert!(capped.contains("... more"));
 
-                set_archived_at(&other.find_session_path("other-session").unwrap(), true).unwrap();
+                archive_test_session(&other, "other-session");
                 let mut output = Vec::new();
                 list_sessions(
                     &mut output,
@@ -456,106 +439,6 @@ mod tests {
                         .is_err()
                 );
             });
-        }
-    }
-
-    mod create_toolbox {
-        use super::*;
-
-        #[test]
-        fn registers_the_built_in_tools() {
-            let tools = create_toolbox(&ReadFilter::default()).tools;
-            let names: Vec<_> = tools
-                .definitions()
-                .into_iter()
-                .map(|tool| tool.name)
-                .collect();
-            assert_eq!(
-                names,
-                [
-                    "bash",
-                    "bash_output",
-                    "bash_stop",
-                    "read",
-                    "write",
-                    "edit",
-                    "glob",
-                    "grep",
-                    "tasks",
-                ],
-            );
-        }
-
-        #[tokio::test]
-        async fn shares_its_background_shells_with_the_bash_tools() {
-            let toolbox = create_toolbox(&ReadFilter::default());
-            let tools = &toolbox.tools;
-            let ctx = temp_ctx();
-
-            let started = tools
-                .run_input(
-                    "bash",
-                    serde_json::json!({"command": "echo hi", "run_in_background": true}),
-                    &ctx,
-                )
-                .await;
-            assert!(!started.is_error, "{}", started.content);
-            let listed: Vec<_> = toolbox.shells.list().into_iter().map(|s| s.id).collect();
-            let read = tools
-                .run_input(
-                    "bash_output",
-                    serde_json::json!({"shell_id": "shell-1", "timeout": 5_000}),
-                    &ctx,
-                )
-                .await;
-            let stopped = tools
-                .run_input(
-                    "bash_stop",
-                    serde_json::json!({"shell_id": "shell-1"}),
-                    &ctx,
-                )
-                .await;
-
-            assert_eq!(listed, ["shell-1"]);
-            assert_eq!(read.content, "hi\n\n(exit code 0)");
-            assert_eq!(
-                stopped.content,
-                "(no new output)\n\n(stopped after it exited with code 0)"
-            );
-            assert_eq!(toolbox.shells.list(), []);
-        }
-
-        #[tokio::test]
-        async fn hands_the_read_filter_to_the_search_tools() {
-            let dir = canonical_tempdir();
-            std::fs::write(dir.path().join("notes.txt"), "token").unwrap();
-            std::fs::write(dir.path().join("secret.txt"), "token").unwrap();
-            let read_filter = deny_reads(&["secret.txt"]);
-            let tools = create_toolbox(&read_filter).tools;
-            let ctx = ctx(dir.path());
-
-            for (tool, pattern) in [("glob", "*.txt"), ("grep", "token")] {
-                let input = serde_json::json!({"pattern": pattern});
-                let output = tools.run_input(tool, input, &ctx).await;
-                assert!(!output.is_error, "{tool}: {}", output.content);
-                assert!(
-                    output.content.contains("notes.txt"),
-                    "{tool}: {}",
-                    output.content
-                );
-                assert!(
-                    !output.content.contains("secret"),
-                    "{tool}: {}",
-                    output.content
-                );
-                assert!(
-                    output
-                        .content
-                        .ends_with("(1 file withheld by read deny or ask rules)"),
-                    "{tool}: {}",
-                    output.content
-                );
-            }
         }
     }
 }

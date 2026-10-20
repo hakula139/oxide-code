@@ -7,6 +7,7 @@ use indoc::formatdoc;
 use tracing::{debug, warn};
 
 use super::{App, CopyNotice};
+use crate::command;
 use crate::config::auth::AuthSource;
 use crate::config::compaction::AutoCompactionConfig;
 use crate::config::{Effort, display_auto_compaction};
@@ -14,7 +15,6 @@ use crate::model::ModelSpec;
 use crate::permission::{Basis, Mode, SessionGrant};
 use crate::protocol::{ConfigPick, Event, Interaction, Op};
 use crate::session::display::archive_notice;
-use crate::slash;
 use crate::tool::ApprovalPreview;
 use crate::tui::clipboard::{CopyReport, Delivery};
 use crate::tui::components::status::Status;
@@ -123,7 +123,7 @@ impl App {
             && self
                 .pending_prompts
                 .front()
-                .is_some_and(|queued| slash::unescape_literal(queued) == text)
+                .is_some_and(|queued| command::unescape_literal(queued) == text)
         {
             self.pending_prompts.pop_front();
             self.forwarded_prompts -= 1;
@@ -254,7 +254,7 @@ impl App {
         self.auto_compacting = false;
         if automatic && let Some(prompt) = &self.active_prompt {
             self.chat
-                .push_user_message(slash::unescape_literal(prompt).to_owned());
+                .push_user_message(command::unescape_literal(prompt).to_owned());
         }
         self.clear_modals();
     }
@@ -380,7 +380,7 @@ impl App {
     /// Starts a turn with the oldest queued prompt.
     pub(super) fn drain_pending_prompt(&mut self) {
         if let Some(queued) = self.pending_prompts.pop_front() {
-            let prompt = slash::unescape_literal(&queued).to_owned();
+            let prompt = command::unescape_literal(&queued).to_owned();
             self.chat.push_user_message(prompt.clone());
             self.active_prompt = Some(queued);
             self.start_turn(Op::Prompt(prompt));

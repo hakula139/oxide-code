@@ -19,6 +19,7 @@ use super::rename::RenameCmd;
 use super::resume::ResumeCmd;
 use super::status::StatusCmd;
 use super::theme::ThemeCmd;
+use crate::command;
 use crate::tui::action::Action;
 use crate::tui::modal::Modal;
 
@@ -95,8 +96,9 @@ pub(crate) struct ArgCompletion {
 pub(super) trait SlashCommand: Sync {
     fn name(&self) -> &'static str;
 
+    /// Other names the command answers to, from the [`command::aliases`] table the REPL shares.
     fn aliases(&self) -> &'static [&'static str] {
-        &[]
+        command::aliases(self.name())
     }
 
     fn description(&self) -> &'static str;
