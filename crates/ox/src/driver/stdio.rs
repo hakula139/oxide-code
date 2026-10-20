@@ -20,8 +20,7 @@ use ox_core::tool::ApprovalPreview;
 use ox_core::tool::tasks::{Progress, Task};
 use ox_core::util::sync::lock_or_recover;
 use ox_core::util::text::escape_controls;
-
-use crate::tui::glyphs::{INTERRUPTED_MARKER, task_marker};
+use ox_tui::glyphs::{INTERRUPTED_MARKER, task_marker};
 
 // ── Turn Rendering ──
 

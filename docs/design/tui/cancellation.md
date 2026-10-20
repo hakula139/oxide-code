@@ -46,13 +46,13 @@ The picks lean toward the Codex precedent on most surfaces, since it is the one 
 - `crates/ox-core/src/session/history.rs`: `walk_transcript`, which shows a resumed interruption marker as `Interaction::Interrupted`.
 - `crates/ox-core/src/tool.rs`: `Tool::run` drop contract, `ToolCtx::cancel`, `walk_files`, `write_tracked`.
 - `crates/ox-core/src/tool/bash.rs`: `ShellTree`, which kills the shell's process group (Unix) or Job Object (Windows) when a call times out or drops before finishing.
+- `crates/ox-tui/src/action.rs`: `Action::ConfirmExit`.
+- `crates/ox-tui/src/app.rs`: `App::pending_prompts` / `forwarded_prompts`, and `App::active_prompt` / `auto_compacting`.
+- `crates/ox-tui/src/app/dispatch.rs`: `dispatch_op` / `start_turn` / `forward_queued_prompts`, `handle_esc`, `expire_armed_exit`.
+- `crates/ox-tui/src/app/events.rs`: `finish_turn`, `return_unsent_prompt`, `finalize_idle` / `enter_idle` / `drain_pending_prompt`, `set_active_status`.
+- `crates/ox-tui/src/components/chat.rs`: `ChatView::clear_pending_calls`, which evicts orphan tool calls at turn boundaries, and `ChatView::load_history`, which shows a resumed interruption as the `(interrupted)` line.
+- `crates/ox-tui/src/components/chat/blocks/interrupted.rs`: `InterruptedMarker` block.
+- `crates/ox-tui/src/components/input.rs`: Ctrl+D POSIX gate, plus `set_text` and `is_empty`, which the idle Esc recall uses.
+- `crates/ox-tui/src/components/status.rs`: `Status` variants, busy hints, spinner.
+- `crates/ox-tui/src/glyphs.rs`: `INTERRUPTED_MARKER`.
 - `crates/ox/src/driver/stdio.rs`: `StdioSink::render`, and `render_op`, which renders until the op it sent ends.
-- `crates/ox/src/tui/action.rs`: `Action::ConfirmExit`.
-- `crates/ox/src/tui/app.rs`: `App::pending_prompts` / `forwarded_prompts`, and `App::active_prompt` / `auto_compacting`.
-- `crates/ox/src/tui/app/dispatch.rs`: `dispatch_op` / `start_turn` / `forward_queued_prompts`, `handle_esc`, `expire_armed_exit`.
-- `crates/ox/src/tui/app/events.rs`: `finish_turn`, `return_unsent_prompt`, `finalize_idle` / `enter_idle` / `drain_pending_prompt`, `set_active_status`.
-- `crates/ox/src/tui/components/chat.rs`: `ChatView::clear_pending_calls`, which evicts orphan tool calls at turn boundaries, and `ChatView::load_history`, which shows a resumed interruption as the `(interrupted)` line.
-- `crates/ox/src/tui/components/chat/blocks/interrupted.rs`: `InterruptedMarker` block.
-- `crates/ox/src/tui/components/input.rs`: Ctrl+D POSIX gate, plus `set_text` and `is_empty`, which the idle Esc recall uses.
-- `crates/ox/src/tui/components/status.rs`: `Status` variants, busy hints, spinner.
-- `crates/ox/src/tui/glyphs.rs`: `INTERRUPTED_MARKER`.

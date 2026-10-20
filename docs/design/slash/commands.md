@@ -95,34 +95,34 @@ Client-side command surface: `/help`, `/clear`, `/model`, `/status`, and friends
 - `crates/ox-core/src/session/resolver.rs`: `resolve_prefix_to_info` checks the current project first, widens the search on a miss, and returns a typed `ResolveError` that the CLI prints as is and slash commands rephrase. `resolve_saved_prefix` distinguishes live-only matches for `/archive`, `/unarchive`, and `/delete`.
 - `crates/ox-core/src/session/saved.rs`: `set_archived` and `delete`, shared by the typed commands and the `/resume` picker, which refuse the live session and word each failure for the user.
 - `crates/ox-core/src/session/store.rs`: `delete_at`, which refuses to delete the live session at the filesystem boundary, and `set_archived_at`.
+- `crates/ox-tui/src/action.rs`: `Action`, which slash commands forward.
+- `crates/ox-tui/src/app/dispatch.rs`: `dispatch_action`, `dispatch_op`, `run_slash`, `apply_slash_outcome`, modal gate, echo gate.
+- `crates/ox-tui/src/components/input/popup.rs`: `popup_state`, which reads the typed line as a command name or an argument, and `SlashPopup`, which lists the matching commands or the typed command's arg completions for Tab and Enter to complete.
+- `crates/ox-tui/src/modal.rs`: `Modal` trait, `ModalStack`, key routing.
+- `crates/ox-tui/src/modal/kv_overview.rs`: generic `KvOverview` / `KvSection` primitive.
+- `crates/ox-tui/src/modal/list_picker.rs`: generic `ListPicker` primitive.
+- `crates/ox-tui/src/modal/searchable_list.rs`: generic `SearchableList` primitive.
+- `crates/ox-tui/src/slash.rs`: dispatch and the shared test fixtures in `slash::testing`.
+- `crates/ox-tui/src/slash/archive.rs`: `ArchiveCmd` and `UnarchiveCmd`.
+- `crates/ox-tui/src/slash/clear.rs`: `ClearCmd` sends first.
+- `crates/ox-tui/src/slash/config.rs`: `/config` row builder plus sectioned `KvOverview` constructor.
+- `crates/ox-tui/src/slash/confirm.rs`: `ConfirmDeleteSessionModal` (destructive-action gate, sticky inline error cleared only on deliberate Y / N).
+- `crates/ox-tui/src/slash/context.rs`: `SlashContext` (`LiveSessionInfo` plus the live title).
+- `crates/ox-tui/src/slash/delete.rs`: `DeleteCmd` refuses prefixes that match only the live session.
+- `crates/ox-tui/src/slash/diff.rs`: `/diff` printer with 64 KB UTF-8-boundary cap.
+- `crates/ox-tui/src/slash/effort.rs`: `EffortCmd`.
+- `crates/ox-tui/src/slash/effort_slider.rs`: bare `/effort` Speed ↔ Intelligence slider modal.
+- `crates/ox-tui/src/slash/help.rs`: `/help` row builder plus `KvOverview` constructor.
+- `crates/ox-tui/src/slash/init.rs`: `InitCmd` and the file picker.
+- `crates/ox-tui/src/slash/login.rs`: `LoginCmd` and `LogoutCmd`.
+- `crates/ox-tui/src/slash/mode.rs`: `ModeCmd` plus `ModePicker`.
+- `crates/ox-tui/src/slash/model.rs`: `ModelCmd`.
+- `crates/ox-tui/src/slash/picker.rs`: combined model and effort picker modal.
+- `crates/ox-tui/src/slash/registry.rs`: `BUILT_INS`, `SlashKind`, `SlashOutcome`, and the `SlashCommand` trait, whose aliases default to `command::aliases`.
+- `crates/ox-tui/src/slash/rename.rs`: `RenameCmd` plus `RenameModal` editor.
+- `crates/ox-tui/src/slash/resume.rs`: `ResumeCmd` plus `ResumePicker` (see `resume.md`).
+- `crates/ox-tui/src/slash/sessions.rs`: `open_store` and `resolve_error_message`, shared by the session commands.
+- `crates/ox-tui/src/slash/status.rs`: `/status` row builder plus `KvOverview` constructor.
+- `crates/ox-tui/src/slash/theme.rs`: `ThemeCmd`, picker open plus typed-arg validator.
 - `crates/ox/src/driver/repl.rs`: `command_op`, which runs typed slash commands in the bare REPL.
 - `crates/ox/src/driver/stdio.rs`: `render_op`, plus the `StdioSink` confirmations for the session and config events.
-- `crates/ox/src/slash.rs`: dispatch and the shared test fixtures in `slash::testing`.
-- `crates/ox/src/slash/archive.rs`: `ArchiveCmd` and `UnarchiveCmd`.
-- `crates/ox/src/slash/clear.rs`: `ClearCmd` sends first.
-- `crates/ox/src/slash/config.rs`: `/config` row builder plus sectioned `KvOverview` constructor.
-- `crates/ox/src/slash/confirm.rs`: `ConfirmDeleteSessionModal` (destructive-action gate, sticky inline error cleared only on deliberate Y / N).
-- `crates/ox/src/slash/context.rs`: `SlashContext` (`LiveSessionInfo` plus the live title).
-- `crates/ox/src/slash/delete.rs`: `DeleteCmd` refuses prefixes that match only the live session.
-- `crates/ox/src/slash/diff.rs`: `/diff` printer with 64 KB UTF-8-boundary cap.
-- `crates/ox/src/slash/effort.rs`: `EffortCmd`.
-- `crates/ox/src/slash/effort_slider.rs`: bare `/effort` Speed ↔ Intelligence slider modal.
-- `crates/ox/src/slash/help.rs`: `/help` row builder plus `KvOverview` constructor.
-- `crates/ox/src/slash/init.rs`: `InitCmd` and the file picker.
-- `crates/ox/src/slash/login.rs`: `LoginCmd` and `LogoutCmd`.
-- `crates/ox/src/slash/mode.rs`: `ModeCmd` plus `ModePicker`.
-- `crates/ox/src/slash/model.rs`: `ModelCmd`.
-- `crates/ox/src/slash/picker.rs`: combined model and effort picker modal.
-- `crates/ox/src/slash/registry.rs`: `BUILT_INS`, `SlashKind`, `SlashOutcome`, and the `SlashCommand` trait, whose aliases default to `command::aliases`.
-- `crates/ox/src/slash/rename.rs`: `RenameCmd` plus `RenameModal` editor.
-- `crates/ox/src/slash/resume.rs`: `ResumeCmd` plus `ResumePicker` (see `resume.md`).
-- `crates/ox/src/slash/sessions.rs`: `open_store` and `resolve_error_message`, shared by the session commands.
-- `crates/ox/src/slash/status.rs`: `/status` row builder plus `KvOverview` constructor.
-- `crates/ox/src/slash/theme.rs`: `ThemeCmd`, picker open plus typed-arg validator.
-- `crates/ox/src/tui/action.rs`: `Action`, which slash commands forward.
-- `crates/ox/src/tui/app/dispatch.rs`: `dispatch_action`, `dispatch_op`, `run_slash`, `apply_slash_outcome`, modal gate, echo gate.
-- `crates/ox/src/tui/components/input/popup.rs`: `popup_state`, which reads the typed line as a command name or an argument, and `SlashPopup`, which lists the matching commands or the typed command's arg completions for Tab and Enter to complete.
-- `crates/ox/src/tui/modal.rs`: `Modal` trait, `ModalStack`, key routing.
-- `crates/ox/src/tui/modal/kv_overview.rs`: generic `KvOverview` / `KvSection` primitive.
-- `crates/ox/src/tui/modal/list_picker.rs`: generic `ListPicker` primitive.
-- `crates/ox/src/tui/modal/searchable_list.rs`: generic `SearchableList` primitive.

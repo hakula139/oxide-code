@@ -34,8 +34,9 @@ ox -p "<prompt>"                            # Headless: run one turn and print t
 ├── cliff.toml                              # Changelog configuration for git-cliff
 ├── clippy.toml                             # Clippy settings
 ├── codecov.yml                             # Codecov coverage targets
-├── crates/ox/                              # The `ox` binary crate with the frontends, mapped in docs/design/architecture.md
+├── crates/ox/                              # The `ox` binary crate with the CLI and the stdio frontends, mapped in docs/design/architecture.md
 ├── crates/ox-core/                         # The `ox-core` library crate with the agent core, mapped in docs/design/architecture.md
+├── crates/ox-tui/                          # The `ox-tui` library crate with the terminal UI, mapped in docs/design/architecture.md
 ├── cspell.json                             # Spell checker settings
 ├── deny.toml                               # Dependency license, advisory, source, and ban policy
 ├── docs/                                   # User guides, conventions, design specs, and research notes

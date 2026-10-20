@@ -1,10 +1,9 @@
-//! Frontends that drive the [`Engine`](ox_core::engine::Engine) through its handle: the TUI, the
-//! bare REPL, and headless mode.
+//! The bare REPL and headless drivers, which run the [`Engine`](ox_core::engine::Engine) over
+//! stdio, plus the exit status and shutdown signals the TUI shares.
 
 pub(crate) mod headless;
 pub(crate) mod repl;
 mod stdio;
-pub(crate) mod tui;
 
 use std::process::ExitCode;
 

@@ -281,13 +281,13 @@ The stdio sink escapes control characters other than tabs and line breaks in mod
 - `crates/ox-core/src/tool/grep.rs`: read filter in `collect_files`.
 - `crates/ox-core/src/tool/write.rs`: new-file creation, symlink refusal, current-content preview.
 - `crates/ox-core/src/util/text.rs`: `is_hidden`, shared by both frontends, plus the stdio sink's `escape_controls` and the REPL preview's `escape_hidden`.
+- `crates/ox-tui/src/app/dispatch.rs`: `App::cycle_mode`, the Shift+Tab cycle.
+- `crates/ox-tui/src/components/chat.rs`: `ChatView::push_tool_result`, which places a result under its call.
+- `crates/ox-tui/src/modal.rs`: `ModalStack`, the cancel hook, `captures_esc`.
+- `crates/ox-tui/src/modal/approval.rs`: `ApprovalModal` wrapping, scrolling, character reveal, and the rule and feedback editors.
+- `crates/ox-tui/src/slash/confirm.rs`: `ConfirmDeleteSessionModal`, the approval-modal template.
+- `crates/ox-tui/src/slash/mode.rs`: `ModeCmd` and the `/mode` picker.
+- `crates/ox-tui/src/slash/status.rs`: the Session Rules listing.
 - `crates/ox/src/driver/repl.rs`: `Prompter`, the stdin approval prompt.
 - `crates/ox/src/driver/stdio.rs`: `render_op`, the `Approver` trait, `Unattended`, the escaped `StdioSink` output and its repeated call headers.
 - `crates/ox/src/main.rs`: the `--mode` flag.
-- `crates/ox/src/slash/confirm.rs`: `ConfirmDeleteSessionModal`, the approval-modal template.
-- `crates/ox/src/slash/mode.rs`: `ModeCmd` and the `/mode` picker.
-- `crates/ox/src/slash/status.rs`: the Session Rules listing.
-- `crates/ox/src/tui/app/dispatch.rs`: `App::cycle_mode`, the Shift+Tab cycle.
-- `crates/ox/src/tui/components/chat.rs`: `ChatView::push_tool_result`, which places a result under its call.
-- `crates/ox/src/tui/modal.rs`: `ModalStack`, the cancel hook, `captures_esc`.
-- `crates/ox/src/tui/modal/approval.rs`: `ApprovalModal` wrapping, scrolling, character reveal, and the rule and feedback editors.

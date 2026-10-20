@@ -1,0 +1,8 @@
+---
+source: crates/ox-tui/src/components/input.rs
+assertion_line: 647
+expression: "render_to_backend(&input, 60, 3)"
+---
+"────────────────────────────────────────────────────────────"
+"❯                                                           "
+"────────────────────────────────────────────────────────────"

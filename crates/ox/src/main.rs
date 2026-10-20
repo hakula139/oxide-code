@@ -1,8 +1,6 @@
 //! CLI entry point: config loading, session resolution, mode dispatch.
 
 mod driver;
-mod slash;
-mod tui;
 
 use std::ffi::OsStr;
 use std::io::IsTerminal;
@@ -29,12 +27,13 @@ use ox_core::session::store::SessionStore;
 use ox_core::session::store::listing::{DEFAULT_SESSION_LIST_LIMIT, ListScope};
 use ox_core::util;
 use ox_core::util::tls::PlatformTrust;
+use ox_tui::Startup;
+use ox_tui::slash::ResumePicker;
+use ox_tui::terminal;
+use ox_tui::theme::{Theme, resolve_theme};
 
 use driver::Exit;
 use driver::headless::OutputFormat;
-use driver::tui::Startup;
-use slash::ResumePicker;
-use tui::theme::Theme;
 
 #[derive(Parser)]
 #[command(name = "ox", version, about = "A terminal-based AI coding assistant")]
@@ -186,9 +185,7 @@ async fn async_main(offset_error: Option<IndeterminateOffset>) -> Result<Exit> {
         config.apply_mode_flag(mode);
     }
     let show_thinking = config.show_thinking;
-    let theme = tui_mode
-        .then(|| tui::theme::resolve_theme(&config.theme))
-        .transpose()?;
+    let theme = tui_mode.then(|| resolve_theme(&config.theme)).transpose()?;
     let snapshot = config.snapshot();
     let theme_notices = theme.iter().flat_map(|resolved| &resolved.notices);
     for notice in snapshot.notices().iter().chain(theme_notices) {
@@ -269,7 +266,7 @@ async fn run_tui(
     startup: Startup,
     drifted: &[PathBuf],
 ) -> Result<Exit> {
-    let signal = driver::tui::run(
+    let signal = ox_tui::run(
         engine,
         theme,
         snapshot,
@@ -292,18 +289,9 @@ fn list_sessions(
 ) -> Result<()> {
     let store = SessionStore::open(cwd)?;
     let local_offset = util::time::local_offset();
-    let term_width = detect_terminal_width();
+    let term_width = terminal::stdout_width();
     let cap = (limit > 0).then_some(limit);
     render_list(out, &store, scope, local_offset, term_width, cap)
-}
-
-fn detect_terminal_width() -> Option<usize> {
-    if !std::io::stdout().is_terminal() {
-        return None;
-    }
-    crossterm::terminal::size()
-        .ok()
-        .map(|(cols, _)| usize::from(cols))
 }
 
 #[cfg(test)]

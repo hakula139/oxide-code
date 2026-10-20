@@ -122,8 +122,8 @@ A `pre_compact` hook is tracked in [#168](https://github.com/hakula139/oxide-cod
 - `crates/ox-core/src/session/post_compact.rs`: `SUMMARY_PREFIX`, `synthesize_post_compact_message` and its `task_reminder` and `shell_reminder` blocks, plus `strip_synthetic_post_compact_prefix`, which hides the prefix when a resumed session displays it.
 - `crates/ox-core/src/session/state.rs`: `compact_entries` and `commit_compact` (chain reset).
 - `crates/ox-core/src/session/store.rs`: resume loader compact boundary reset, tail filtering, and `CompactInfo`.
-- `crates/ox/src/slash/compact.rs`: `CompactCmd`.
-- `crates/ox/src/slash/registry.rs`: `BUILT_INS` entry `&CompactCmd`.
-- `crates/ox/src/tui/app/events.rs`: `apply_session_compacted` and `apply_session_ready`.
-- `crates/ox/src/tui/components/chat.rs`: `ChatView::append_summary_token` and `ChatView::discard_summary`.
-- `crates/ox/src/tui/components/chat/blocks/compacted.rs`: `CompactedBlock`.
+- `crates/ox-tui/src/app/events.rs`: `apply_session_compacted` and `apply_session_ready`.
+- `crates/ox-tui/src/components/chat.rs`: `ChatView::append_summary_token` and `ChatView::discard_summary`.
+- `crates/ox-tui/src/components/chat/blocks/compacted.rs`: `CompactedBlock`.
+- `crates/ox-tui/src/slash/compact.rs`: `CompactCmd`.
+- `crates/ox-tui/src/slash/registry.rs`: `BUILT_INS` entry `&CompactCmd`.

@@ -1,0 +1,12 @@
+---
+source: crates/ox-tui/src/components/welcome.rs
+expression: "render(30, 8, &snap)"
+---
+"                              "
+"       oxide-code v0.1.0      "
+"                              "
+"Claude Opus 5.5 · xhigh       "
+"~/very/long/w...ath/oxide-code"
+"                              "
+"                              "
+"                              "

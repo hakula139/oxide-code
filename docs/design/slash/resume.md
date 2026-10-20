@@ -20,7 +20,7 @@ The picker wraps [`SearchableList`](modals.md) and adds these controls and displ
 - Ctrl+D on the cursor row pushes [`ConfirmDeleteSessionModal`](modals.md). On focus regain the picker drops the rows whose files are gone and re-seeks the cursor to the previously selected row, so cancel-delete keeps the user in place. After a delete, the row that followed takes the highlight.
 - Ctrl+X archives the cursor row, or unarchives it in the archived view, through `session::saved::set_archived`, the operation the typed `/archive` and `/unarchive` forms also run. The picker then drops the row with the cursor index and scroll position kept, so the cursor lands on the row that followed while the visible rows hold still, and the footer names the moved session until the next key or for 3 seconds, the same `NOTICE_DURATION` as the copy notice. A refusal or failed write shows in the footer as an error and leaves the row in place.
 
-`ox --resume` starts the TUI in a fresh session with no file yet, then opens the picker on the first frame. `main.rs` builds it with `ResumePicker::at_startup`, and `driver::tui::run` pushes `Startup::picker` onto the modal stack before the event loop starts. The startup picker carries `Dismissal::Quit`, so Esc / Ctrl+C call `on_cancel`, which resolves to `Op::Shutdown`, and the footer reads `Esc to quit`. Pressing Enter resumes through the same `roll_into` path as `/resume`. A session file is created only with the first message, so neither path leaves an empty session on disk.
+`ox --resume` starts the TUI in a fresh session with no file yet, then opens the picker on the first frame. `main.rs` builds it with `ResumePicker::at_startup`, and `ox_tui::run` pushes `Startup::picker` onto the modal stack before the event loop starts. The startup picker carries `Dismissal::Quit`, so Esc / Ctrl+C call `on_cancel`, which resolves to `Op::Shutdown`, and the footer reads `Esc to quit`. Pressing Enter resumes through the same `roll_into` path as `/resume`. A session file is created only with the first message, so neither path leaves an empty session on disk.
 
 `session/handle` provides `roll_into(...)`, which mirrors `roll(...)`. It loads and sanitizes the target first, so a load failure leaves the live session untouched. Loading an archived target appends an entry unarchiving it, which `RollIntoOutcome::unarchived` reports. It then snapshots and clears the file tracker, restores the target's tracker state through `restore_verified`, swaps the handle in place, and finalizes the old session. `RollIntoOutcome` carries the target's `LoadedTranscript` (messages, recorded prompt context, compact boundary, tool-result metadata, and recorded usage) and title, plus a diagnostic pair (finalize failure of the prior session, drift list from the file tracker).
 
@@ -108,15 +108,14 @@ The picker wraps [`SearchableList`](modals.md) and adds these controls and displ
 - `crates/ox-core/src/session/saved.rs`: `set_archived` behind Ctrl+X, and `delete` behind the confirm-delete modal.
 - `crates/ox-core/src/session/store/listing.rs`: `walk`, `SessionWalk`, `list_paged`, `latest`, `list_matching`, `ListPage`, `ListScope`.
 - `crates/ox-core/src/util/text.rs`: `compact_count`, which abbreviates the message count, shared with the status line's token counts.
+- `crates/ox-tui/src/app.rs`: `push_modal`.
+- `crates/ox-tui/src/app/events.rs`: `apply_session_resumed`.
+- `crates/ox-tui/src/components/chat.rs`: `ChatView::load_history`.
+- `crates/ox-tui/src/keymap.rs`: `Keymap`, `KeyAction`, and `KeyChord`, behind the picker's keys and footer hints.
+- `crates/ox-tui/src/lib.rs`: `Startup::picker`, pushed over the first frame, and `NOTICE_DURATION`, shared by the copy notice and the picker's notice.
+- `crates/ox-tui/src/modal/searchable_list.rs`: `SearchableList<T>`, `SearchableItem`, `append_items` and `set_has_more` for paged loading, and `retain_items` and `cursor_to`, which keep the cursor when rows drop.
+- `crates/ox-tui/src/slash/confirm.rs`: `ConfirmDeleteSessionModal` pushed by Ctrl+D.
+- `crates/ox-tui/src/slash/registry.rs`: `BUILT_INS` entry `&ResumeCmd`.
+- `crates/ox-tui/src/slash/resume.rs`: `ResumeCmd`, `ResumePicker` and its `at_startup` variant, `PickerAction` and its `ACTIONS` keymap, `Pages`, and `SessionRow` with its `Column` layout.
 - `crates/ox/src/driver/stdio.rs`: `StdioSink`, which confirms a resume on stderr.
-- `crates/ox/src/driver/tui.rs`: `Startup::picker`, pushed over the first frame.
 - `crates/ox/src/main.rs`: `Cli::archived`, `Cli::limit`, `Cli::resume`.
-- `crates/ox/src/slash/confirm.rs`: `ConfirmDeleteSessionModal` pushed by Ctrl+D.
-- `crates/ox/src/slash/registry.rs`: `BUILT_INS` entry `&ResumeCmd`.
-- `crates/ox/src/slash/resume.rs`: `ResumeCmd`, `ResumePicker` and its `at_startup` variant, `PickerAction` and its `ACTIONS` keymap, `Pages`, and `SessionRow` with its `Column` layout.
-- `crates/ox/src/tui.rs`: `NOTICE_DURATION`, shared by the copy notice and the picker's notice.
-- `crates/ox/src/tui/app.rs`: `push_modal`.
-- `crates/ox/src/tui/app/events.rs`: `apply_session_resumed`.
-- `crates/ox/src/tui/components/chat.rs`: `ChatView::load_history`.
-- `crates/ox/src/tui/keymap.rs`: `Keymap`, `KeyAction`, and `KeyChord`, behind the picker's keys and footer hints.
-- `crates/ox/src/tui/modal/searchable_list.rs`: `SearchableList<T>`, `SearchableItem`, `append_items` and `set_has_more` for paged loading, and `retain_items` and `cursor_to`, which keep the cursor when rows drop.

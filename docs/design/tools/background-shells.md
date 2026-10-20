@@ -48,6 +48,6 @@ Whenever a shell starts, exits, or stops, the engine emits `Event::BackgroundShe
 - `crates/ox-core/src/tool.rs`: `ToolRegistry::built_in`, which hands one `BackgroundShells` to the three tools.
 - `crates/ox-core/src/tool/bash.rs`: `run_in_background`, `ShellTree`, `PipeCapture`, and `render_streams`.
 - `crates/ox-core/src/tool/bash/background.rs`: `BackgroundShells`, `supervise`, `BashOutputTool`, and `BashStopTool`.
+- `crates/ox-tui/src/app/events.rs`: the list shown by `/status`, replaced on each `BackgroundShellsUpdated` and cleared on `SessionRolled` and `SessionResumed`.
+- `crates/ox-tui/src/slash/status.rs`: the Background Shells section.
 - `crates/ox/src/driver/stdio.rs`: `render`, which ignores `BackgroundShellsUpdated`.
-- `crates/ox/src/slash/status.rs`: the Background Shells section.
-- `crates/ox/src/tui/app/events.rs`: the list shown by `/status`, replaced on each `BackgroundShellsUpdated` and cleared on `SessionRolled` and `SessionResumed`.

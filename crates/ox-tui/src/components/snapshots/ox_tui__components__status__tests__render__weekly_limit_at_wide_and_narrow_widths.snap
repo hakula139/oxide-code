@@ -1,0 +1,9 @@
+---
+source: crates/ox-tui/src/components/status.rs
+expression: render_wide_and_narrow(&mut bar)
+---
+"  ~/projects/demo │ 7d: 13% │ Opus 5.5 (xhigh) │ Ready                                              "
+"────────────────────────────────────────────────────────────────────────────────────────────────────"
+
+"  7d: 13% │ Opus 5.5 (xhigh) │ Ready    "
+"────────────────────────────────────────"

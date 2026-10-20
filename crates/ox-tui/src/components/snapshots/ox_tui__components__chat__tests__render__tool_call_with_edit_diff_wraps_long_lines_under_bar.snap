@@ -1,0 +1,15 @@
+---
+source: crates/ox-tui/src/components/chat.rs
+assertion_line: 2341
+expression: "render_chat(&mut chat, 40, 10)"
+---
+"▎ ✎ Edit(/tmp/f.rs)                     "
+"▎ ✓ Edited f.rs                         "
+"▎   1 - short                           "
+"▎   1 + an intentionally quite long     "
+"▎       replacement line that forces    "
+"▎       wrapping                        "
+"                                        "
+"                                        "
+"                                        "
+"                                        "

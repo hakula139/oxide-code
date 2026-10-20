@@ -53,10 +53,10 @@ Manual and automatic compaction both pass the engine's list to `replace_session_
 - `crates/ox-core/src/session/post_compact.rs`: `synthesize_post_compact_message` and `task_reminder`, the block listing tasks after the summary.
 - `crates/ox-core/src/tool.rs`: `ToolOutput::tasks` and `ToolResultView::Tasks`.
 - `crates/ox-core/src/tool/tasks.rs`: `TasksTool`, validation, and `latest`.
+- `crates/ox-tui/src/app/events.rs`: the panel's updates on `TasksUpdated`, `SessionRolled`, and `SessionResumed`.
+- `crates/ox-tui/src/app/render.rs`: `draw_frame`, which sizes the panel after the higher-priority bands.
+- `crates/ox-tui/src/components/chat/blocks/tool/tasks.rs`: the chat block for a `tasks` call.
+- `crates/ox-tui/src/components/status/line.rs`: the `task-progress` segment.
+- `crates/ox-tui/src/components/tasks.rs`: `TaskPanel` and `window`.
+- `crates/ox-tui/src/glyphs.rs`: `task_marker`.
 - `crates/ox/src/driver/stdio.rs`: `task_lines`, the REPL's task list.
-- `crates/ox/src/tui/app/events.rs`: the panel's updates on `TasksUpdated`, `SessionRolled`, and `SessionResumed`.
-- `crates/ox/src/tui/app/render.rs`: `draw_frame`, which sizes the panel after the higher-priority bands.
-- `crates/ox/src/tui/components/chat/blocks/tool/tasks.rs`: the chat block for a `tasks` call.
-- `crates/ox/src/tui/components/status/line.rs`: the `task-progress` segment.
-- `crates/ox/src/tui/components/tasks.rs`: `TaskPanel` and `window`.
-- `crates/ox/src/tui/glyphs.rs`: `task_marker`.
