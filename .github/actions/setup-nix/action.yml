@@ -1,7 +1,7 @@
 name: Set up Nix
 description: >-
-  Install Nix and configure the Cachix substituter named by the caller's CACHIX_NAME
-  environment variable
+  Install Nix and configure the Cachix substituter
+  named by the caller's CACHIX_NAME environment variable
 
 inputs:
   cachix_auth_token:

@@ -55,10 +55,11 @@ The Node-based hooks run tools pinned in `node_modules` and fail when that direc
 
 ## Config Style
 
-Prettier and Taplo do not wrap long strings or shell commands, so wrap YAML, TOML, and shell files by hand:
+Prettier and Taplo leave long strings alone, and no formatter covers shell code, so wrap YAML, TOML, and shell files by hand:
 
-- Keep lines within about 100 columns, counting the indent. Wrap a long string only where its value stays the same, and leave a line long when wrapping would break a URL, a heredoc body, or a literal block whose line breaks are content.
-- Split a long shell command at its pipeline stages. If a stage is still too long, put each flag with its value, and each positional argument, on its own line. Indent continuation lines one level past the first line, and end each line but the last with `\`, unless it ends with `|` or `&&`, which already continue the command. In a workflow, write the command in a `run: |` block.
+- Wrap comments at 100 columns, as [Writing](writing.md#comments) requires, and keep other lines within about 100, counting the indent. Leave a line long when it holds an unbreakable token, such as a URL or path, or sits in a heredoc body or literal block whose line breaks are content.
+- Wrap a long string only where its value stays the same, and break it where [Rust](rust.md#strings) breaks a continued literal.
+- Split a long shell command, including one in a Markdown code block, at its pipelines and `&&` or `||` lists. If a part is still too long, keep at most the command, its subcommands, and a leading script or message on its first line, and put each flag with its value, or each group of related arguments, on a line of its own. Indent continuation lines one level past the first line, and end each line but the last with `\`, unless it ends with `|`, `&&`, or `||`, which already continue the command. In a workflow, write the command in a `run: |` block.
 
 ## Debug Info
 

@@ -65,7 +65,7 @@ jobs:
       - name: Generate third-party notices
         shell: bash
         run: |
-          # A workspace scan would also count the dependencies of ox-core's `testing` feature.
+          # A workspace scan would also count ox-core's test-only `testing` dependencies.
           cargo about generate \
             --locked \
             --manifest-path crates/ox/Cargo.toml \
@@ -229,7 +229,8 @@ jobs:
             exit 0
           fi
 
-          git -c user.name='github-actions[bot]' \
+          git \
+            -c user.name='github-actions[bot]' \
             -c user.email='41898282+github-actions[bot]@users.noreply.github.com' \
             commit -am "$title"
           # A rerun rebuilds this commit on the current main and replaces the earlier push.

@@ -1,7 +1,7 @@
 # Renovate opens version updates, so `open-pull-requests-limit: 0` leaves Dependabot only security
-# updates. Each entry sets its label and commit type, which Dependabot would otherwise infer from
-# recent commits. The cargo entry's `fix` type lists Rust advisory bumps, which ship in `ox`, under
-# Fixed in the changelog, while the other types keep npm and Actions bumps out of it.
+# updates. Each entry sets its commit type, which Dependabot would otherwise infer from recent
+# commits, and its label, which drops the ecosystem label Dependabot adds by default. Only the cargo
+# entry uses `fix`, since Rust advisory bumps ship in `ox` and belong under Fixed in the changelog.
 version: 2
 updates:
   - package-ecosystem: cargo

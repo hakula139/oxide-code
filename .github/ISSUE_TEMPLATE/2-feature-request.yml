@@ -20,8 +20,8 @@ body:
     attributes:
       label: Proposed behavior
       description: >-
-        What ox should do, including the command, flag, config key, or UI surface if you have one
-        in mind.
+        What ox should do,
+        including the command, flag, config key, or UI surface if you have one in mind.
     validations:
       required: true
 
