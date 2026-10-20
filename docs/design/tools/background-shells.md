@@ -42,12 +42,12 @@ Whenever a shell starts, exits, or stops, the engine emits `Event::BackgroundShe
 ## Sources
 
 - `crates/oxide-code/src/driver/stdio.rs`: `render`, which ignores `BackgroundShellsUpdated`.
-- `crates/oxide-code/src/engine.rs`: `Toolbox` and `Engine::shells`, attached to the event channel in `spawn` and ended in `adopt_session` and `finalize`.
+- `crates/oxide-code/src/engine.rs`: `Engine::shells`, which `Engine::new` shares with the three tools, attached to the event channel in `spawn` and ended in `adopt_session` and `finalize`.
 - `crates/oxide-code/src/engine/compact_boundary.rs`: `Boundary::shells`, the open shells listed in the summary message.
-- `crates/oxide-code/src/main.rs`: `create_toolbox`, which shares one `BackgroundShells` among the three tools and the engine.
 - `crates/oxide-code/src/protocol.rs`: `Event::BackgroundShellsUpdated`.
 - `crates/oxide-code/src/session/post_compact.rs`: `shell_reminder`, the block listing open shells after the summary.
 - `crates/oxide-code/src/slash/status.rs`: the Background Shells section.
+- `crates/oxide-code/src/tool.rs`: `ToolRegistry::built_in`, which hands one `BackgroundShells` to the three tools.
 - `crates/oxide-code/src/tool/bash.rs`: `run_in_background`, `ShellTree`, `PipeCapture`, and `render_streams`.
 - `crates/oxide-code/src/tool/bash/background.rs`: `BackgroundShells`, `supervise`, `BashOutputTool`, and `BashStopTool`.
 - `crates/oxide-code/src/tui/app/events.rs`: the list shown by `/status`, replaced on each `BackgroundShellsUpdated` and cleared on `SessionRolled` and `SessionResumed`.

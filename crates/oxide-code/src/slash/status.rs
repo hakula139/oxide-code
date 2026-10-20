@@ -96,7 +96,6 @@ mod tests {
     #[test]
     fn name_and_metadata_match_built_ins_contract() {
         assert_eq!(StatusCmd.name(), "status");
-        assert_eq!(StatusCmd.aliases(), [] as [&str; 0]);
         assert_ne!(StatusCmd.description(), "");
     }
 

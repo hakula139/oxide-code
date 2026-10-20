@@ -76,5 +76,16 @@ mod tests {
 
             set_archived(&path, "live-session", false, "live-session").unwrap();
         }
+
+        #[test]
+        fn names_the_session_and_the_cause_of_a_failed_write() {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("missing.jsonl");
+
+            let err = set_archived(&path, "missing-session", true, "live-session").unwrap_err();
+
+            let cause = set_archived_at(&path, true).unwrap_err();
+            assert_eq!(err, format!("Failed to update session missing-: {cause:#}"));
+        }
     }
 }

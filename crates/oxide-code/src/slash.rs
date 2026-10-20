@@ -1,6 +1,6 @@
-//! Slash commands: [`parse_slash`] detects them, and [`dispatch`] runs them through the registry of
-//! [`registry::SlashCommand`] impls. No command writes the config files, so a setting one changes
-//! reverts on restart.
+//! Slash commands: [`parse_slash`](crate::command::parse_slash) detects them, and [`dispatch`] runs
+//! them through the registry of [`registry::SlashCommand`] impls. No command writes the config
+//! files, so a setting one changes reverts on restart.
 //!
 //! Design: `docs/design/slash/commands.md`.
 
@@ -20,7 +20,6 @@ mod login;
 mod matcher;
 mod mode;
 mod model;
-mod parser;
 mod picker;
 mod registry;
 mod rename;
@@ -34,14 +33,10 @@ pub(crate) use context::{LiveSessionInfo, SlashContext};
 pub(crate) use diff::truncate_for_display;
 pub(crate) use diff::{TRUNCATION_FOOTER, UNTRACKED_HEADING};
 pub(crate) use matcher::MatchedCommand;
-pub(crate) use parser::{Parsed, PopupState, parse_slash, popup_state, unescape_literal};
 pub(crate) use registry::{ArgCompletion, SlashKind, SlashOutcome};
 pub(crate) use resume::ResumePicker;
 
-use std::path::Path;
-
-use crate::command;
-use crate::protocol::Op;
+use crate::command::Parsed;
 
 /// Filters the built-in registry against a popup query (leading `/` stripped).
 pub(crate) fn filter_built_ins(query: &str) -> Vec<MatchedCommand> {
@@ -89,12 +84,7 @@ fn dispatch_with(
         ));
     };
     cmd.execute(&parsed.args, ctx)
-        .map_err(|msg| named_error(parsed, &msg))
-}
-
-/// `msg` prefixed with the command name as the user typed it.
-fn named_error(parsed: &Parsed, msg: &str) -> String {
-    format!("/{}: {msg}", parsed.name)
+        .map_err(|msg| parsed.named_error(&msg))
 }
 
 fn format_available(commands: &[&dyn registry::SlashCommand]) -> String {
@@ -103,14 +93,6 @@ fn format_available(commands: &[&dyn registry::SlashCommand]) -> String {
         .map(|cmd| format!("/{}", cmd.name()))
         .collect::<Vec<_>>()
         .join(", ")
-}
-
-/// The op the typed form of `parsed` runs at `project_root` without the TUI's pickers and modals,
-/// with an error prefixed by the name the user typed. `None` when the command has no such form.
-pub(crate) fn typed_op(parsed: &Parsed, project_root: &Path) -> Option<Result<Op, String>> {
-    let cmd = registry::lookup_in(registry::BUILT_INS, &parsed.name)?;
-    let op = command::parse(cmd.name(), &parsed.args, project_root)?;
-    Some(op.map_err(|msg| named_error(parsed, &msg)))
 }
 
 /// Returns the [`SlashKind`] that decides whether `parsed` may dispatch mid-turn.
@@ -152,7 +134,6 @@ pub(crate) mod testing {
 mod tests {
     use super::testing::test_session_info;
     use super::*;
-    use crate::protocol::ResumeTarget;
     use crate::slash::registry::testing::FakeCmd;
 
     fn parsed(name: &str, args: &str) -> Parsed {
@@ -248,43 +229,6 @@ mod tests {
             assert_eq!(
                 dispatch_fake("etc"),
                 "Unknown command: /etc. Available: /failing. Use //etc to send the literal text.",
-            );
-        }
-    }
-
-    mod typed_op {
-        use super::*;
-
-        #[test]
-        fn routes_an_alias_to_its_command() {
-            assert_eq!(
-                typed_op(&parsed("new", ""), Path::new("/repo")),
-                Some(Ok(Op::Clear))
-            );
-            assert_eq!(
-                typed_op(&parsed("continue", " ab12 "), Path::new("/repo")),
-                Some(Ok(Op::Resume {
-                    target: ResumeTarget::Prefix("ab12".to_owned()),
-                })),
-            );
-        }
-
-        #[test]
-        fn error_names_the_command_as_typed() {
-            assert_eq!(
-                typed_op(&parsed("continue", ""), Path::new("/repo")),
-                Some(Err(
-                    "/continue: Missing session ID. Usage: `/resume <id-prefix>`.".to_owned()
-                )),
-            );
-        }
-
-        #[test]
-        fn command_without_a_typed_form_or_an_unknown_one_has_no_op() {
-            assert_eq!(typed_op(&parsed("help", ""), Path::new("/repo")), None);
-            assert_eq!(
-                typed_op(&parsed("no-such-thing", "x"), Path::new("/repo")),
-                None
             );
         }
     }

@@ -20,8 +20,6 @@ use std::sync::{Arc, LazyLock};
 
 use anyhow::{Result, bail, ensure};
 use caseless::Caseless;
-use clap::ValueEnum;
-use clap::builder::PossibleValue;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use unicode_normalization::UnicodeNormalization;
@@ -83,17 +81,6 @@ impl FromStr for Mode {
             "yolo" => Ok(Self::Yolo),
             _ => bail!("expected one of {}", Self::VALID_VALUES),
         }
-    }
-}
-
-/// Lists each mode in `--help` with the description the `/mode` picker shows.
-impl ValueEnum for Mode {
-    fn value_variants<'a>() -> &'a [Self] {
-        &Self::ALL
-    }
-
-    fn to_possible_value(&self) -> Option<PossibleValue> {
-        Some(PossibleValue::new(self.as_str()).help(self.description()))
     }
 }
 

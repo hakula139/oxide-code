@@ -74,10 +74,6 @@ impl SlashCommand for ResumeCmd {
         "resume"
     }
 
-    fn aliases(&self) -> &'static [&'static str] {
-        &["continue"]
-    }
-
     fn description(&self) -> &'static str {
         "Resume a previous session"
     }
@@ -807,8 +803,9 @@ mod tests {
     use super::*;
     use crate::session::display::UNTITLED_MARKER;
     use crate::session::entry::TitleInfo;
-    use crate::session::store::set_archived_at;
-    use crate::session::store::testing::{listed_ids, seed_test_session, test_store};
+    use crate::session::store::testing::{
+        archive_test_session, listed_ids, seed_test_session, test_store,
+    };
     use crate::slash::testing::{stamped_id, test_session_info, with_isolated_xdg};
     use crate::tui::modal::chrome::HINT_SEPARATOR;
     use crate::tui::modal::testing::{render_rows, rendered_text};
@@ -844,7 +841,7 @@ mod tests {
                 datetime!(2026-04-18 09:00:00 UTC) - time::Duration::days(days_ago);
             seed_session(store, &id, Some(title), msg_count, last_active_at);
             if archived {
-                set_archived_at(&store.find_session_path(&id).unwrap(), true).unwrap();
+                archive_test_session(store, &id);
             }
         }
     }
@@ -902,7 +899,6 @@ mod tests {
         #[test]
         fn name_and_metadata_match_built_ins_contract() {
             assert_eq!(ResumeCmd.name(), "resume");
-            assert_eq!(ResumeCmd.aliases(), &["continue"]);
             assert_ne!(ResumeCmd.description(), "");
             assert_eq!(ResumeCmd.usage(), Some("[<id-prefix>]"));
         }
@@ -2037,7 +2033,7 @@ mod tests {
                     1,
                     datetime!(2026-04-18 09:00:00 UTC) + time::Duration::seconds(i64::from(byte)),
                 );
-                set_archived_at(&store.find_session_path(&id).unwrap(), true).unwrap();
+                archive_test_session(&store, &id);
             }
             let mut picker = opened(ResumePicker::new(
                 store.clone(),
@@ -2121,15 +2117,12 @@ mod tests {
             );
             let path = store.find_session_path(&id).unwrap();
             std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o444)).unwrap();
-            let cause = set_archived_at(&path, true).unwrap_err();
+            let failure = saved::set_archived(&path, &id, true, "live-session-id").unwrap_err();
             let mut picker = opened(ResumePicker::new(store, "live-session-id".to_owned()));
 
             picker.handle_key(&KeyEvent::new(KeyCode::Char('x'), KeyModifiers::CONTROL));
 
-            assert_eq!(
-                footer_row(&picker, 400),
-                format!("! Failed to update session 11111111: {cause:#}"),
-            );
+            assert_eq!(footer_row(&picker, 400), format!("! {failure}"));
             assert_eq!(picker.list.selected().unwrap().session_id, id);
         }
     }

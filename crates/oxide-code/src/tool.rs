@@ -25,11 +25,18 @@ use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 use tokio_util::sync::CancellationToken;
 use tracing::warn;
 
-use self::tasks::Task;
+use self::bash::BashTool;
+use self::bash::background::{BackgroundShells, BashOutputTool, BashStopTool};
+use self::edit::EditTool;
+use self::glob::GlobTool;
+use self::grep::GrepTool;
+use self::read::ReadTool;
+use self::tasks::{Task, TasksTool};
+use self::write::WriteTool;
 use crate::file_tracker::{
     FileTracker, MAX_TRACKED_FILE_SIZE, TrackableFileError, validate_trackable_file,
 };
-use crate::permission::{Access, PermissionClass, WalkFilter, Workspace};
+use crate::permission::{Access, PermissionClass, ReadFilter, WalkFilter, Workspace};
 use crate::util::fs::create_private_dir_all;
 use crate::util::path::{lexical_normalize, slash_separated};
 use crate::util::text::{ELLIPSIS, plural};
@@ -388,6 +395,22 @@ impl ToolRegistry {
         Self {
             tools: tools.into_iter().map(|tool| (tool.spec(), tool)).collect(),
         }
+    }
+
+    /// The built-in tools, with `read_filter` handed to the search tools and `shells` shared by the
+    /// `bash` tools.
+    pub(crate) fn built_in(read_filter: &ReadFilter, shells: &Arc<BackgroundShells>) -> Self {
+        Self::new(vec![
+            Box::new(BashTool::new(Arc::clone(shells))),
+            Box::new(BashOutputTool::new(Arc::clone(shells))),
+            Box::new(BashStopTool::new(Arc::clone(shells))),
+            Box::new(ReadTool),
+            Box::new(WriteTool),
+            Box::new(EditTool),
+            Box::new(GlobTool::new(read_filter.clone())),
+            Box::new(GrepTool::new(read_filter.clone())),
+            Box::new(TasksTool),
+        ])
     }
 
     pub(crate) fn get(&self, name: &str) -> Option<(&ToolSpec, &dyn Tool)> {
@@ -1141,9 +1164,11 @@ pub(crate) mod testing {
     use tempfile::TempDir;
     use tokio_util::sync::CancellationToken;
 
+    use super::bash::BashTool;
+    use super::edit::synthesize_chunk;
     use super::{
-        ApprovalBody, ApprovalPreview, SearchRoot, Tool, ToolCtx, ToolOutput, ToolRegistry,
-        run_capped,
+        ApprovalBody, ApprovalPreview, DiffChunk, SearchRoot, Tool, ToolCtx, ToolOutput,
+        ToolRegistry, run_capped,
     };
     use crate::file_tracker::FileTracker;
     use crate::permission::rule::Rule;
@@ -1195,6 +1220,17 @@ pub(crate) mod testing {
             title: "Bash".to_owned(),
             body: ApprovalBody::Command(command.to_owned()),
         }
+    }
+
+    /// A registry of `tools` followed by a `bash` tool with background shells of its own.
+    pub(crate) fn bash_registry(mut tools: Vec<Box<dyn Tool>>) -> ToolRegistry {
+        tools.push(Box::new(BashTool::default()));
+        ToolRegistry::new(tools)
+    }
+
+    /// The diff chunk the `edit` tool shows for replacing `old` with `new`, numbered from line 1.
+    pub(crate) fn diff_chunk(old: &str, new: &str) -> DiffChunk {
+        synthesize_chunk(old, new)
     }
 
     /// The read filter of a policy that denies reading whatever one of `patterns` matches.
@@ -1327,18 +1363,10 @@ mod tests {
 
     use indoc::{formatdoc, indoc};
 
-    use super::bash::BashTool;
-    use super::bash::background::{BashOutputTool, BashStopTool};
-    use super::edit::EditTool;
-    use super::glob::GlobTool;
-    use super::grep::GrepTool;
-    use super::read::ReadTool;
-    use super::tasks::TasksTool;
     use super::testing::{
         canonical_tempdir, create_modified_at, ctx, deny_read_access, deny_reads, search_root,
-        spill_path,
+        spill_path, temp_ctx,
     };
-    use super::write::WriteTool;
     use super::*;
     use crate::permission::rule::Rule;
     use crate::permission::{Decision, Mode, PermissionClass, Policy, Zone};
@@ -1823,6 +1851,108 @@ mod tests {
 
     mod tool_registry {
         use super::*;
+
+        mod built_in {
+            use super::*;
+
+            #[test]
+            fn registers_each_tool_in_order() {
+                let tools = ToolRegistry::built_in(&ReadFilter::default(), &Arc::default());
+
+                let names: Vec<_> = tools
+                    .definitions()
+                    .into_iter()
+                    .map(|tool| tool.name)
+                    .collect();
+
+                assert_eq!(
+                    names,
+                    [
+                        "bash",
+                        "bash_output",
+                        "bash_stop",
+                        "read",
+                        "write",
+                        "edit",
+                        "glob",
+                        "grep",
+                        "tasks",
+                    ],
+                );
+            }
+
+            #[tokio::test]
+            async fn shares_the_background_shells_among_the_bash_tools() {
+                let shells = Arc::new(BackgroundShells::default());
+                let tools = ToolRegistry::built_in(&ReadFilter::default(), &shells);
+                let ctx = temp_ctx();
+
+                let started = tools
+                    .run_input(
+                        "bash",
+                        serde_json::json!({"command": "echo hi", "run_in_background": true}),
+                        &ctx,
+                    )
+                    .await;
+                assert!(!started.is_error, "{}", started.content);
+                let listed: Vec<_> = shells.list().into_iter().map(|s| s.id).collect();
+                let read = tools
+                    .run_input(
+                        "bash_output",
+                        serde_json::json!({"shell_id": "shell-1", "timeout": 5_000}),
+                        &ctx,
+                    )
+                    .await;
+                let stopped = tools
+                    .run_input(
+                        "bash_stop",
+                        serde_json::json!({"shell_id": "shell-1"}),
+                        &ctx,
+                    )
+                    .await;
+
+                assert_eq!(listed, ["shell-1"]);
+                assert_eq!(read.content, "hi\n\n(exit code 0)");
+                assert_eq!(
+                    stopped.content,
+                    "(no new output)\n\n(stopped after it exited with code 0)"
+                );
+                assert_eq!(shells.list(), []);
+            }
+
+            #[tokio::test]
+            async fn hands_the_read_filter_to_the_search_tools() {
+                let dir = canonical_tempdir();
+                std::fs::write(dir.path().join("notes.txt"), "token").unwrap();
+                std::fs::write(dir.path().join("secret.txt"), "token").unwrap();
+                let tools = ToolRegistry::built_in(&deny_reads(&["secret.txt"]), &Arc::default());
+                let ctx = ctx(dir.path());
+
+                for (tool, pattern) in [("glob", "*.txt"), ("grep", "token")] {
+                    let input = serde_json::json!({"pattern": pattern});
+                    let output = tools.run_input(tool, input, &ctx).await;
+
+                    assert!(!output.is_error, "{tool}: {}", output.content);
+                    assert!(
+                        output.content.contains("notes.txt"),
+                        "{tool}: {}",
+                        output.content
+                    );
+                    assert!(
+                        !output.content.contains("secret"),
+                        "{tool}: {}",
+                        output.content
+                    );
+                    assert!(
+                        output
+                            .content
+                            .ends_with("(1 file withheld by read deny or ask rules)"),
+                        "{tool}: {}",
+                        output.content
+                    );
+                }
+            }
+        }
 
         mod get {
             use super::*;

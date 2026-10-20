@@ -17,24 +17,26 @@ mod tool;
 mod tui;
 mod util;
 
+use std::ffi::OsStr;
 use std::io::IsTerminal;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::sync::Arc;
 
 use anyhow::{Context, Result, bail};
-use clap::{ArgGroup, Parser};
+use clap::builder::{PossibleValue, PossibleValuesParser, TypedValueParser};
+use clap::{Arg, ArgGroup, Command, Parser};
 use time::error::IndeterminateOffset;
 use tracing::warn;
 
 use client::anthropic::identity;
-use config::Config;
+use config::{Config, ConfigSnapshot};
 use driver::Exit;
 use driver::headless::OutputFormat;
 use driver::tui::Startup;
-use engine::{Engine, EnginePanic, SessionParts, Toolbox};
+use engine::{Engine, EnginePanic, SessionParts};
 use file_tracker::FileTracker;
-use permission::{Mode, ReadFilter};
+use permission::Mode;
 use session::display::archive_notice;
 use session::handle::ResumedSession;
 use session::list_view::render_list;
@@ -42,11 +44,7 @@ use session::resolver::resolve_session;
 use session::store::SessionStore;
 use session::store::listing::{DEFAULT_SESSION_LIST_LIMIT, ListScope};
 use slash::ResumePicker;
-use tool::bash::background::{BackgroundShells, BashOutputTool, BashStopTool};
-use tool::{
-    ToolRegistry, bash::BashTool, edit::EditTool, glob::GlobTool, grep::GrepTool, read::ReadTool,
-    tasks::TasksTool, write::WriteTool,
-};
+use tui::theme::Theme;
 use util::tls::PlatformTrust;
 
 #[derive(Parser)]
@@ -92,7 +90,7 @@ struct Cli {
     list: bool,
 
     /// Start in this permission mode, overriding `permission.mode` and `OX_PERMISSION_MODE`.
-    #[arg(long, value_enum, value_name = "MODE")]
+    #[arg(long, value_name = "MODE", value_parser = ModeParser::new())]
     mode: Option<Mode>,
 
     /// Disable the TUI and use a bare REPL instead.
@@ -116,6 +114,39 @@ struct Cli {
     /// Open the TUI on the session picker, and exit without a session if the picker is quit.
     #[arg(short, long, conflicts_with_all = ["continue", "list", "no_tui", "prompt"])]
     resume: bool,
+}
+
+/// Parses `--mode`, listing each mode in `--help` with the description the `/mode` picker shows.
+#[derive(Clone)]
+struct ModeParser(PossibleValuesParser);
+
+impl ModeParser {
+    fn new() -> Self {
+        Self(PossibleValuesParser::new(Mode::ALL.map(|mode| {
+            PossibleValue::new(mode.as_str()).help(mode.description())
+        })))
+    }
+}
+
+impl TypedValueParser for ModeParser {
+    type Value = Mode;
+
+    fn parse_ref(
+        &self,
+        cmd: &Command,
+        arg: Option<&Arg>,
+        value: &OsStr,
+    ) -> Result<Mode, clap::Error> {
+        // Replaces invalid UTF-8 as the `ValueEnum` parser behind `--output` does, so the error for
+        // such a value lists the modes.
+        let value = value.to_string_lossy();
+        let name = self.0.parse_ref(cmd, arg, OsStr::new(&*value))?;
+        Ok(name.parse().expect("each value names a mode"))
+    }
+
+    fn possible_values(&self) -> Option<Box<dyn Iterator<Item = PossibleValue> + '_>> {
+        self.0.possible_values()
+    }
 }
 
 fn main() -> Result<ExitCode> {
@@ -200,12 +231,10 @@ async fn async_main(offset_error: Option<IndeterminateOffset>) -> Result<Exit> {
         .resume
         .then(|| ResumePicker::at_startup(store.clone(), handle.session_id().to_owned(), cli.all));
 
-    let toolbox = create_toolbox(&config.permission.read_filter());
     let engine = Engine::new(
         &config,
         PlatformTrust(config.extra_ca_certs.clone()),
         identity::load_or_create_device_id(),
-        toolbox,
         SessionParts {
             store,
             handle,
@@ -231,15 +260,37 @@ async fn async_main(offset_error: Option<IndeterminateOffset>) -> Result<Exit> {
         title,
         unarchived,
     };
-    driver::tui::run(
+    Box::pin(run_tui(
         engine,
         &theme.theme,
         snapshot,
         show_thinking,
         startup,
         &drifted,
-    )
+    ))
     .await
+}
+
+/// Runs the TUI until the user quits or a shutdown signal arrives, which then sets the exit status.
+async fn run_tui(
+    engine: Engine,
+    theme: &Theme,
+    snapshot: ConfigSnapshot,
+    show_thinking: bool,
+    startup: Startup,
+    drifted: &[PathBuf],
+) -> Result<Exit> {
+    let signal = driver::tui::run(
+        engine,
+        theme,
+        snapshot,
+        show_thinking,
+        startup,
+        drifted,
+        driver::shutdown_signal(),
+    )
+    .await?;
+    Ok(signal.map_or(Exit::Success, Exit::Signal))
 }
 
 // ── Session Helpers ──
@@ -266,36 +317,17 @@ fn detect_terminal_width() -> Option<usize> {
         .map(|(cols, _)| usize::from(cols))
 }
 
-/// The built-in tools, with the background shells the `bash` tools share with the engine.
-fn create_toolbox(read_filter: &ReadFilter) -> Toolbox {
-    let shells = Arc::new(BackgroundShells::default());
-    let tools = ToolRegistry::new(vec![
-        Box::new(BashTool::new(Arc::clone(&shells))),
-        Box::new(BashOutputTool::new(Arc::clone(&shells))),
-        Box::new(BashStopTool::new(Arc::clone(&shells))),
-        Box::new(ReadTool),
-        Box::new(WriteTool),
-        Box::new(EditTool),
-        Box::new(GlobTool::new(read_filter.clone())),
-        Box::new(GrepTool::new(read_filter.clone())),
-        Box::new(TasksTool),
-    ]);
-    Toolbox {
-        tools: Arc::new(tools),
-        shells,
-    }
-}
-
 #[cfg(test)]
 mod tests {
+    use std::ffi::OsString;
+
     use clap::CommandFactory;
     use clap::error::ErrorKind;
+    use indoc::formatdoc;
     use time::macros::datetime;
 
     use super::*;
-    use crate::session::store::set_archived_at;
-    use crate::session::store::testing::seed_test_session;
-    use crate::tool::testing::{canonical_tempdir, ctx, deny_reads, temp_ctx};
+    use crate::session::store::testing::{archive_test_session, seed_test_session};
 
     mod cli {
         use super::*;
@@ -328,6 +360,31 @@ mod tests {
             ] {
                 assert!(help.contains(line), "{help}");
             }
+        }
+
+        #[test]
+        fn mode_lists_the_modes_for_a_value_that_is_not_utf8() {
+            #[cfg(unix)]
+            let value = <OsString as std::os::unix::ffi::OsStringExt>::from_vec(vec![0xff]);
+            #[cfg(windows)]
+            let value = <OsString as std::os::windows::ffi::OsStringExt>::from_wide(&[0xd800]);
+
+            let invalid = Cli::try_parse_from([OsString::from("ox"), "--mode".into(), value])
+                .err()
+                .expect("the value names no mode");
+
+            assert_eq!(invalid.kind(), ErrorKind::InvalidValue);
+            assert_eq!(
+                invalid.to_string(),
+                formatdoc! {"
+                    error: invalid value '{}' for '--mode <MODE>'
+                      [possible values: manual, plan, yolo]
+
+                    For more information, try '--help'.
+                    ",
+                    char::REPLACEMENT_CHARACTER,
+                },
+            );
         }
 
         #[test]
@@ -429,7 +486,7 @@ mod tests {
                 assert!(!capped.contains("Local session"));
                 assert!(capped.contains("... more"));
 
-                set_archived_at(&other.find_session_path("other-session").unwrap(), true).unwrap();
+                archive_test_session(&other, "other-session");
                 let mut output = Vec::new();
                 list_sessions(
                     &mut output,
@@ -456,106 +513,6 @@ mod tests {
                         .is_err()
                 );
             });
-        }
-    }
-
-    mod create_toolbox {
-        use super::*;
-
-        #[test]
-        fn registers_the_built_in_tools() {
-            let tools = create_toolbox(&ReadFilter::default()).tools;
-            let names: Vec<_> = tools
-                .definitions()
-                .into_iter()
-                .map(|tool| tool.name)
-                .collect();
-            assert_eq!(
-                names,
-                [
-                    "bash",
-                    "bash_output",
-                    "bash_stop",
-                    "read",
-                    "write",
-                    "edit",
-                    "glob",
-                    "grep",
-                    "tasks",
-                ],
-            );
-        }
-
-        #[tokio::test]
-        async fn shares_its_background_shells_with_the_bash_tools() {
-            let toolbox = create_toolbox(&ReadFilter::default());
-            let tools = &toolbox.tools;
-            let ctx = temp_ctx();
-
-            let started = tools
-                .run_input(
-                    "bash",
-                    serde_json::json!({"command": "echo hi", "run_in_background": true}),
-                    &ctx,
-                )
-                .await;
-            assert!(!started.is_error, "{}", started.content);
-            let listed: Vec<_> = toolbox.shells.list().into_iter().map(|s| s.id).collect();
-            let read = tools
-                .run_input(
-                    "bash_output",
-                    serde_json::json!({"shell_id": "shell-1", "timeout": 5_000}),
-                    &ctx,
-                )
-                .await;
-            let stopped = tools
-                .run_input(
-                    "bash_stop",
-                    serde_json::json!({"shell_id": "shell-1"}),
-                    &ctx,
-                )
-                .await;
-
-            assert_eq!(listed, ["shell-1"]);
-            assert_eq!(read.content, "hi\n\n(exit code 0)");
-            assert_eq!(
-                stopped.content,
-                "(no new output)\n\n(stopped after it exited with code 0)"
-            );
-            assert_eq!(toolbox.shells.list(), []);
-        }
-
-        #[tokio::test]
-        async fn hands_the_read_filter_to_the_search_tools() {
-            let dir = canonical_tempdir();
-            std::fs::write(dir.path().join("notes.txt"), "token").unwrap();
-            std::fs::write(dir.path().join("secret.txt"), "token").unwrap();
-            let read_filter = deny_reads(&["secret.txt"]);
-            let tools = create_toolbox(&read_filter).tools;
-            let ctx = ctx(dir.path());
-
-            for (tool, pattern) in [("glob", "*.txt"), ("grep", "token")] {
-                let input = serde_json::json!({"pattern": pattern});
-                let output = tools.run_input(tool, input, &ctx).await;
-                assert!(!output.is_error, "{tool}: {}", output.content);
-                assert!(
-                    output.content.contains("notes.txt"),
-                    "{tool}: {}",
-                    output.content
-                );
-                assert!(
-                    !output.content.contains("secret"),
-                    "{tool}: {}",
-                    output.content
-                );
-                assert!(
-                    output
-                        .content
-                        .ends_with("(1 file withheld by read deny or ask rules)"),
-                    "{tool}: {}",
-                    output.content
-                );
-            }
         }
     }
 }

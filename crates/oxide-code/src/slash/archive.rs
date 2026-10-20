@@ -125,8 +125,8 @@ mod tests {
     use time::macros::datetime;
 
     use super::*;
-    use crate::session::store::testing::{listed_ids, seed_test_session};
-    use crate::session::store::{SessionStore, set_archived_at};
+    use crate::session::store::SessionStore;
+    use crate::session::store::testing::{archive_test_session, listed_ids, seed_test_session};
     use crate::slash::testing::{stamped_id, test_session_info, with_isolated_xdg};
 
     fn seed_saved(store: &SessionStore, session_id: &str) {
@@ -230,12 +230,14 @@ mod tests {
                 let path = store.find_session_path(&target_id).unwrap();
                 std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o444)).unwrap();
                 let info = test_session_info();
+                let failure =
+                    saved::set_archived(&path, &target_id, true, &info.session_id).unwrap_err();
 
                 let err = ArchiveCmd
                     .execute(&target_id[..4], &SlashContext::new(&info, None))
                     .unwrap_err();
-                let cause = set_archived_at(&path, true).unwrap_err();
-                assert_eq!(err, format!("Failed to update session abababab: {cause:#}"));
+
+                assert_eq!(err, failure);
             });
         }
     }
@@ -292,7 +294,7 @@ mod tests {
                     let store = open_store(&test_session_info()).unwrap();
                     let target_id = stamped_id(0xab);
                     seed_saved(&store, &target_id);
-                    set_archived_at(&store.find_session_path(&target_id).unwrap(), true).unwrap();
+                    archive_test_session(&store, &target_id);
                     let info = test_session_info();
                     let ctx = SlashContext::new(&info, None);
 

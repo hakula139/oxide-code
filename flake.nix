@@ -163,6 +163,7 @@
           ++ [ preCommit.config.package ]
           ++ (with pkgs; [
             cargo-deny
+            cargo-insta
             cargo-llvm-cov
             cargo-mutants
             git-cliff

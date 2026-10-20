@@ -1,11 +1,11 @@
 //! TUI driver: the [`App`] event loop over the engine's handle.
 
+use std::fmt::Debug;
 use std::path::PathBuf;
 
 use anyhow::Result;
 use tracing::{debug, warn};
 
-use super::{Exit, shutdown_signal};
 use crate::config::ConfigSnapshot;
 use crate::engine::{Engine, EngineHandle};
 use crate::slash::{LiveSessionInfo, ResumePicker};
@@ -28,17 +28,18 @@ pub(crate) struct Startup {
     pub(crate) unarchived: bool,
 }
 
-/// Runs the TUI until the user quits or a signal arrives, then waits for the engine to finalize the
-/// live session. An engine panic is returned after the terminal is restored, which prints the
-/// deferred panic report.
-pub(crate) async fn run(
+/// Runs the TUI until the user quits or `shutdown` resolves, then waits for the engine to finalize
+/// the live session. Returns what `shutdown` resolved to, or `None` when the user quit. An engine
+/// panic is returned after the terminal is restored, which prints the deferred panic report.
+pub(crate) async fn run<S: Debug>(
     mut engine: Engine,
     theme: &Theme,
     config: ConfigSnapshot,
     show_thinking: bool,
     startup: Startup,
     drifted: &[PathBuf],
-) -> Result<Exit> {
+    shutdown: impl Future<Output = S>,
+) -> Result<Option<S>> {
     terminal::install_panic_hook();
 
     let cwd = engine.cwd();
@@ -79,10 +80,10 @@ pub(crate) async fn run(
     }
 
     let result = tokio::select! {
-        result = app.run(&mut tui) => result.map(|()| Exit::Success),
-        signal = shutdown_signal() => {
+        result = app.run(&mut tui) => result.map(|()| None),
+        signal = shutdown => {
             debug!("TUI received {signal:?}, tearing down");
-            Ok(Exit::Signal(signal))
+            Ok(Some(signal))
         }
     };
 

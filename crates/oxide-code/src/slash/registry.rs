@@ -19,6 +19,7 @@ use super::rename::RenameCmd;
 use super::resume::ResumeCmd;
 use super::status::StatusCmd;
 use super::theme::ThemeCmd;
+use crate::command;
 use crate::tui::action::Action;
 use crate::tui::modal::Modal;
 
@@ -95,8 +96,9 @@ pub(crate) struct ArgCompletion {
 pub(super) trait SlashCommand: Sync {
     fn name(&self) -> &'static str;
 
+    /// Other names the command answers to, from the [`command::aliases`] table the REPL shares.
     fn aliases(&self) -> &'static [&'static str] {
-        &[]
+        command::aliases(self.name())
     }
 
     fn description(&self) -> &'static str;
@@ -148,7 +150,7 @@ pub(super) const BUILT_INS: &[&dyn SlashCommand] = &[
     &UnarchiveCmd,
 ];
 
-/// Resolves `name` against canonical names first, then aliases.
+/// Resolves `name` to the command it names, canonically or as an alias.
 pub(super) fn lookup_in<'a>(
     commands: &'a [&'a dyn SlashCommand],
     name: &str,
@@ -208,6 +210,7 @@ mod tests {
     use std::collections::HashSet;
 
     use super::*;
+    use crate::command::testing::aliased_names;
     use crate::protocol::Op;
     use crate::slash::registry::testing::FakeCmd;
     use crate::slash::testing::test_session_info;
@@ -267,6 +270,36 @@ mod tests {
         }
     }
 
+    mod lookup_in {
+        use super::*;
+
+        const ALIASED: FakeCmd = FakeCmd {
+            name: "primary",
+            aliases: &["alt", "shortcut"],
+            ..FakeCmd::DEFAULT
+        };
+
+        #[test]
+        fn resolves_canonical_name() {
+            let cmd = lookup_in(BUILT_INS, "help").expect("/help is registered");
+            assert_eq!(cmd.name(), "help");
+        }
+
+        #[test]
+        fn resolves_each_alias_to_canonical_impl() {
+            let registry: &[&dyn SlashCommand] = &[&ALIASED];
+            for alias in ["alt", "shortcut"] {
+                let cmd = lookup_in(registry, alias).expect("alias must resolve");
+                assert_eq!(cmd.name(), "primary");
+            }
+        }
+
+        #[test]
+        fn unknown_name_resolves_to_no_command() {
+            assert!(lookup_in(BUILT_INS, "nonexistent").is_none());
+        }
+    }
+
     mod built_ins {
         use super::*;
 
@@ -320,6 +353,26 @@ mod tests {
         }
 
         #[test]
+        fn take_their_aliases_from_the_shared_table() {
+            for cmd in BUILT_INS {
+                assert_eq!(
+                    cmd.aliases(),
+                    command::aliases(cmd.name()),
+                    "/{}",
+                    cmd.name()
+                );
+            }
+        }
+
+        #[test]
+        fn include_every_command_the_shared_table_aliases() {
+            for name in aliased_names() {
+                let found = lookup_in(BUILT_INS, name).map(SlashCommand::name);
+                assert_eq!(found, Some(name));
+            }
+        }
+
+        #[test]
         fn have_non_empty_name_and_description() {
             let offenders = empty_metadata_offenders(BUILT_INS);
             assert!(
@@ -363,36 +416,6 @@ mod tests {
             }
 
             assert!(steering > 0, "no built-in form steers");
-        }
-    }
-
-    mod lookup_in {
-        use super::*;
-
-        const ALIASED: FakeCmd = FakeCmd {
-            name: "primary",
-            aliases: &["alt", "shortcut"],
-            ..FakeCmd::DEFAULT
-        };
-
-        #[test]
-        fn resolves_canonical_name() {
-            let cmd = lookup_in(BUILT_INS, "help").expect("/help is registered");
-            assert_eq!(cmd.name(), "help");
-        }
-
-        #[test]
-        fn resolves_each_alias_to_canonical_impl() {
-            let registry: &[&dyn SlashCommand] = &[&ALIASED];
-            for alias in ["alt", "shortcut"] {
-                let cmd = lookup_in(registry, alias).expect("alias must resolve");
-                assert_eq!(cmd.name(), "primary");
-            }
-        }
-
-        #[test]
-        fn unknown_name_resolves_to_no_command() {
-            assert!(lookup_in(BUILT_INS, "nonexistent").is_none());
         }
     }
 }

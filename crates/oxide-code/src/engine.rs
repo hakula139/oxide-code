@@ -103,12 +103,6 @@ impl EnginePanic {
 
 // ── Engine ──
 
-/// The tool registry and the background shells its `bash` tools share with the engine.
-pub(crate) struct Toolbox {
-    pub(crate) tools: Arc<ToolRegistry>,
-    pub(crate) shells: Arc<BackgroundShells>,
-}
-
 /// The session an [`Engine`] continues: the store it rolls new sessions into, the live handle and
 /// the transcript it loaded, and the tracker holding the file state it restored.
 pub(crate) struct SessionParts {
@@ -167,13 +161,12 @@ pub(crate) struct Engine {
 }
 
 impl Engine {
-    /// Continues `session` with a client built from `config` and `trust`, and the agent settings
-    /// from `config`. Fails when the client cannot be built.
+    /// Continues `session` with a client built from `config` and `trust`, and the built-in tools
+    /// and agent settings from `config`. Fails when the client cannot be built.
     pub(crate) async fn new(
         config: &Config,
         trust: impl Trust + 'static,
         device_id: String,
-        toolbox: Toolbox,
         session: SessionParts,
         interactive: bool,
     ) -> Result<Self> {
@@ -189,7 +182,9 @@ impl Engine {
             Some(session.session_id().to_owned()),
             device_id,
         )?;
-        let Toolbox { tools, shells } = toolbox;
+        let shells = Arc::new(BackgroundShells::default());
+        let read_filter = config.permission.read_filter();
+        let tools = Arc::new(ToolRegistry::built_in(&read_filter, &shells));
         let LoadedTranscript {
             messages,
             context,
@@ -1040,6 +1035,7 @@ mod tests {
     use crate::tool::bash::background::testing::{shell, start_shell};
     use crate::tool::tasks::TasksTool;
     use crate::tool::tasks::testing::plan;
+    use crate::tool::testing::{canonical_tempdir, ctx};
     use crate::util::git::testing::{init_fixture_repo, with_isolated_git_env_async};
     use crate::util::tls::testing::NoRoots;
 
@@ -1396,14 +1392,6 @@ mod tests {
     mod new {
         use super::*;
 
-        /// A toolbox without tools, for an engine that [`Engine::new`] builds.
-        fn toolbox() -> Toolbox {
-            Toolbox {
-                tools: Arc::new(ToolRegistry::new(Vec::new())),
-                shells: Arc::default(),
-            }
-        }
-
         #[tokio::test]
         async fn prices_recorded_usage_and_replays_a_recorded_context_or_builds_one() {
             with_pinned_home(async {
@@ -1428,7 +1416,6 @@ mod tests {
                         &config,
                         NoRoots,
                         DEVICE_ID.to_owned(),
-                        toolbox(),
                         SessionParts {
                             store: store.clone(),
                             handle: handle::start(&store, "claude-sonnet-5-5", None),
@@ -1474,20 +1461,22 @@ mod tests {
         #[tokio::test]
         async fn takes_the_agent_settings_from_config_and_binds_the_client_to_the_session() {
             with_pinned_home(async {
-                let dir = tempfile::tempdir().unwrap();
+                let dir = canonical_tempdir();
+                std::fs::write(dir.path().join("notes.txt"), "").unwrap();
+                std::fs::write(dir.path().join("secret.txt"), "").unwrap();
                 let store = test_store(dir.path());
                 let session = handle::start(&store, MODEL, None);
                 let mut config = test_config("http://127.0.0.1:9", api_key(), MODEL);
                 config.max_tool_rounds = Some(3);
                 config.compaction = CompactionConfig::with_threshold_for_test(50_000);
-                config.permission = Policy::new(Mode::Plan, Vec::new(), Vec::new(), Vec::new());
+                let deny = vec![Rule::parse(PermissionClass::Read, "secret.txt").unwrap()];
+                config.permission = Policy::new(Mode::Plan, deny, Vec::new(), Vec::new());
                 config.workspace = Workspace::new(dir.path());
 
                 let engine = Engine::new(
                     &config,
                     NoRoots,
                     DEVICE_ID.to_owned(),
-                    toolbox(),
                     SessionParts {
                         store: store.clone(),
                         handle: session.clone(),
@@ -1499,10 +1488,22 @@ mod tests {
                 .await
                 .unwrap();
 
+                let globbed = engine
+                    .tools
+                    .run_input(
+                        "glob",
+                        serde_json::json!({"pattern": "*.txt"}),
+                        &ctx(dir.path()),
+                    )
+                    .await;
                 assert_eq!(*engine.workspace, config.workspace);
                 assert_eq!(engine.max_tool_rounds, Some(3));
                 assert_eq!(engine.compaction, config.compaction);
                 assert_eq!(engine.policy.mode(), Mode::Plan);
+                assert_eq!(
+                    globbed.content,
+                    "notes.txt\n\n(1 file withheld by read deny or ask rules)"
+                );
                 assert_eq!(engine.client.session_id(), session.session_id());
             })
             .await;

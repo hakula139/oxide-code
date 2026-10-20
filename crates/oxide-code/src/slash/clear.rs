@@ -14,10 +14,6 @@ impl SlashCommand for ClearCmd {
         "clear"
     }
 
-    fn aliases(&self) -> &'static [&'static str] {
-        &["new", "reset"]
-    }
-
     fn description(&self) -> &'static str {
         "Reset the conversation context"
     }
@@ -39,7 +35,6 @@ mod tests {
     #[test]
     fn name_and_metadata_match_built_ins_contract() {
         assert_eq!(ClearCmd.name(), "clear");
-        assert_eq!(ClearCmd.aliases(), &["new", "reset"]);
         assert_ne!(ClearCmd.description(), "");
     }
 

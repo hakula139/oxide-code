@@ -12,9 +12,9 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph};
 use ratatui_textarea::{CursorMove, TextArea, WrapMode};
 
-use self::popup::SlashPopup;
+use self::popup::{PopupState, SlashPopup, popup_state};
 use crate::protocol::Op;
-use crate::slash::{PopupState, arg_placeholder_for, popup_state};
+use crate::slash::arg_placeholder_for;
 use crate::tui::action::Action;
 use crate::tui::glyphs::{USER_PROMPT_PREFIX, USER_PROMPT_PREFIX_WIDTH};
 use crate::tui::saturating_u16;
