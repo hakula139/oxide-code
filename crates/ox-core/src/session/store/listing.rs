@@ -93,12 +93,6 @@ impl Iterator for SessionWalk {
 // ── Listing ──
 
 impl SessionStore {
-    /// Every readable unarchived session in the home project, most recently active first.
-    #[cfg(any(test, feature = "testing"))]
-    pub fn list(&self) -> Result<Vec<SessionInfo>> {
-        Ok(self.walk(ListScope::default())?.collect())
-    }
-
     /// Walks the sessions matching `scope`. `scope.all` widens the walk from the home project to
     /// every project.
     pub fn walk(&self, scope: ListScope) -> Result<SessionWalk> {

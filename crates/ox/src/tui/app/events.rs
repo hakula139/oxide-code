@@ -492,7 +492,7 @@ mod tests {
     use indoc::indoc;
     use tokio::sync::mpsc::error::TryRecvError;
 
-    use ox_core::config::compaction::test_thresholds;
+    use ox_core::config::compaction::testing::WINDOW_1M_THRESHOLD;
     use ox_core::config::provenance::Source;
     use ox_core::model::ResolvedModelId;
     use ox_core::permission::PermissionClass;
@@ -1612,7 +1612,7 @@ mod tests {
                 requested: model_pick(&spec("claude-sonnet-5-5"), None),
                 auto_compaction: AutoCompactionConfig {
                     enabled: true,
-                    threshold_tokens: Some(test_thresholds::WINDOW_1M),
+                    threshold_tokens: Some(WINDOW_1M_THRESHOLD),
                 },
             });
 
@@ -1621,15 +1621,14 @@ mod tests {
             assert_eq!(app.status_bar.model(), "Sonnet 5.5");
             assert_eq!(
                 app.session_info.config.compaction.auto.threshold_tokens,
-                Some(test_thresholds::WINDOW_1M),
+                Some(WINDOW_1M_THRESHOLD),
             );
             let body = app.chat.last_system_text().expect("confirmation block");
             assert_eq!(
                 body,
                 format!(
                     "Switched to Claude Sonnet 5.5 (claude-sonnet-5-5) · effort high. \
-                     Auto compaction at {} tokens.",
-                    test_thresholds::WINDOW_1M,
+                     Auto compaction at {WINDOW_1M_THRESHOLD} tokens.",
                 ),
             );
             assert!(app.dirty);
@@ -2159,7 +2158,7 @@ mod tests {
             let after = ConfigSettings {
                 auto_compaction: AutoCompactionConfig {
                     enabled: true,
-                    threshold_tokens: Some(test_thresholds::WINDOW_1M),
+                    threshold_tokens: Some(WINDOW_1M_THRESHOLD),
                 },
                 ..settings(&sonnet, Some(Effort::High))
             };
@@ -2174,8 +2173,7 @@ mod tests {
                 s,
                 format!(
                     "Switched to Claude Sonnet 5.5 (claude-sonnet-5-5) · effort high. \
-                     Auto compaction at {} tokens.",
-                    test_thresholds::WINDOW_1M,
+                     Auto compaction at {WINDOW_1M_THRESHOLD} tokens.",
                 ),
             );
         }
@@ -2186,7 +2184,7 @@ mod tests {
             let after = ConfigSettings {
                 auto_compaction: AutoCompactionConfig {
                     enabled: true,
-                    threshold_tokens: Some(test_thresholds::WINDOW_1M),
+                    threshold_tokens: Some(WINDOW_1M_THRESHOLD),
                 },
                 ..settings(&custom, None)
             };
@@ -2202,8 +2200,7 @@ mod tests {
                 format!(
                     "Switched to custom-model (custom-model). \
                      Effort unchanged (model has no effort tier, asked for max). \
-                     Auto compaction at {} tokens.",
-                    test_thresholds::WINDOW_1M,
+                     Auto compaction at {WINDOW_1M_THRESHOLD} tokens.",
                 ),
             );
         }

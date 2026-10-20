@@ -502,7 +502,7 @@ pub(crate) mod local_testing {
     use super::Trust;
     use super::testing::NoRoots;
 
-    /// A self-signed P-256 CA, valid for 100 years. The CLI tests pin it as the trust store.
+    /// The CA at [`TEST_CA_PATH`](super::testing::TEST_CA_PATH).
     pub(crate) const TEST_CA_PEM: &str = include_str!("../../tests/fixtures/test-ca.pem");
 
     /// [`NoRoots`] as a shared `Arc<dyn Trust>`.
@@ -512,11 +512,15 @@ pub(crate) mod local_testing {
 }
 
 #[cfg(any(test, feature = "testing"))]
-pub(crate) mod testing {
+pub mod testing {
     use anyhow::Result;
     use reqwest::ClientBuilder;
 
     use super::Trust;
+
+    /// A self-signed P-256 CA, valid for 100 years, that the CLI tests pin as the trust store.
+    pub const TEST_CA_PATH: &str =
+        concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/test-ca.pem");
 
     /// No roots, so building a client reads no system store. The client reaches only plain-HTTP
     /// servers, such as the mock servers.

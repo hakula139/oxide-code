@@ -26,27 +26,8 @@ pub struct CompactionConfig {
 }
 
 impl CompactionConfig {
-    #[cfg(any(test, feature = "testing"))]
-    pub(crate) const fn disabled() -> Self {
-        Self {
-            auto: AutoCompactionConfig::disabled(),
-            policy: AutoCompactionPolicy::Disabled,
-        }
-    }
-
     pub(crate) fn for_model(self, model: &ModelSpec, max_tokens: u32) -> Self {
         resolve_policy(self.policy, model, max_tokens)
-    }
-
-    #[cfg(any(test, feature = "testing"))]
-    pub const fn with_threshold_for_test(tokens: u32) -> Self {
-        Self {
-            auto: AutoCompactionConfig {
-                enabled: true,
-                threshold_tokens: Some(tokens),
-            },
-            policy: AutoCompactionPolicy::Tokens(tokens),
-        }
     }
 
     #[cfg(test)]
@@ -236,14 +217,39 @@ fn default_auto_threshold_for_window(context_window: u32, max_tokens: u32) -> Op
         .checked_sub(AUTO_COMPACTION_BUFFER_TOKENS)
 }
 
-/// Output of [`default_auto_threshold`] when `max_tokens` saturates the reserve cap.
+// ── Testing ──
+
 #[cfg(any(test, feature = "testing"))]
-pub mod test_thresholds {
-    pub const WINDOW_1M: u32 = 967_000;
+pub mod testing {
+    use super::{AutoCompactionConfig, AutoCompactionPolicy, CompactionConfig};
+
+    /// Output of [`default_auto_threshold`](super::default_auto_threshold) for a 1M-token window
+    /// when `max_tokens` saturates the reserve cap.
+    pub const WINDOW_1M_THRESHOLD: u32 = 967_000;
+
+    impl CompactionConfig {
+        pub(crate) const fn disabled() -> Self {
+            Self {
+                auto: AutoCompactionConfig::disabled(),
+                policy: AutoCompactionPolicy::Disabled,
+            }
+        }
+
+        pub const fn with_threshold_for_test(tokens: u32) -> Self {
+            Self {
+                auto: AutoCompactionConfig {
+                    enabled: true,
+                    threshold_tokens: Some(tokens),
+                },
+                policy: AutoCompactionPolicy::Tokens(tokens),
+            }
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
+    use super::testing::WINDOW_1M_THRESHOLD;
     use super::*;
     use crate::model::MODELS;
 
@@ -310,7 +316,7 @@ mod tests {
                 (
                     opus,
                     AutoCompactionPolicy::Tokens(990_000),
-                    Some(test_thresholds::WINDOW_1M),
+                    Some(WINDOW_1M_THRESHOLD),
                 ),
                 (
                     opus,
@@ -350,7 +356,7 @@ mod tests {
                 let model = ModelSpec::resolve(info.id.to_owned());
                 assert_eq!(
                     default_auto_threshold(&model, 64_000),
-                    Some(test_thresholds::WINDOW_1M),
+                    Some(WINDOW_1M_THRESHOLD),
                     "{}",
                     info.id,
                 );

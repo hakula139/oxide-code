@@ -11,9 +11,9 @@ use super::{
     SessionData, SessionStore, SessionWriter, encode_lines, file_session_id,
     load_session_data_from_path, open_append_file, set_archived_at,
 };
-use crate::session::entry::{CURRENT_VERSION, Entry, TitleSource};
+use crate::session::entry::{CURRENT_VERSION, Entry, SessionInfo, TitleSource};
 
-pub(crate) const TEST_PROJECT: &str = "test-project";
+pub(super) const TEST_PROJECT: &str = "test-project";
 
 // ── SessionStore ──
 
@@ -28,6 +28,11 @@ impl SessionStore {
             project_dir,
             cwd: Path::new("/work").join(project_name),
         })
+    }
+
+    /// Every readable unarchived session in the home project, most recently active first.
+    pub fn list(&self) -> Result<Vec<SessionInfo>> {
+        Ok(self.walk(ListScope::default())?.collect())
     }
 
     pub(crate) fn load_session_data(&self, session_id: &str) -> Result<SessionData> {
@@ -61,7 +66,7 @@ pub(super) fn find_session_in(dir: &Path, session_id: &str) -> Option<PathBuf> {
 // ── SessionWriter ──
 
 impl SessionWriter {
-    pub(crate) fn append(&mut self, entries: &[Entry]) -> Result<()> {
+    pub(super) fn append(&mut self, entries: &[Entry]) -> Result<()> {
         self.append_lines(&encode_lines(entries)?)
     }
 }
@@ -152,7 +157,7 @@ pub fn listed_ids(store: &SessionStore, archived: bool) -> Vec<String> {
     };
     store
         .walk(scope)
-        .expect("the project's sessions list")
+        .expect("the home project's sessions can be listed")
         .map(|info| info.session_id)
         .collect()
 }

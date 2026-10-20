@@ -61,11 +61,11 @@ pub(crate) fn sample_header(session_id: &str) -> Entry {
     }
 }
 
-pub(crate) fn sample_message_entry(uuid: Uuid, text: &str) -> Entry {
+pub(super) fn sample_message_entry(uuid: Uuid, text: &str) -> Entry {
     sample_message_at(uuid, None, datetime!(2026-04-16 12:00:01 UTC), text)
 }
 
-pub(crate) fn sample_message_at(
+pub(super) fn sample_message_at(
     uuid: Uuid,
     parent_uuid: Option<Uuid>,
     timestamp: OffsetDateTime,
@@ -79,7 +79,7 @@ pub(crate) fn sample_message_at(
     }
 }
 
-pub(crate) fn sample_title_entry(title: &str) -> Entry {
+pub(super) fn sample_title_entry(title: &str) -> Entry {
     Entry::Title {
         title: title.to_owned(),
         source: TitleSource::FirstPrompt,
@@ -87,7 +87,7 @@ pub(crate) fn sample_title_entry(title: &str) -> Entry {
     }
 }
 
-pub(crate) fn sample_summary_entry(message_count: u32) -> Entry {
+pub(super) fn sample_summary_entry(message_count: u32) -> Entry {
     Entry::Summary {
         message_count,
         updated_at: datetime!(2026-04-16 12:05:00 UTC),

@@ -753,7 +753,7 @@ mod tests {
     use indoc::indoc;
     use tempfile::TempDir;
 
-    use super::compaction::test_thresholds;
+    use super::compaction::testing::WINDOW_1M_THRESHOLD;
     use super::provenance::Layer;
     use super::*;
     use crate::permission::{Access, Decision, PermissionClass};
@@ -1108,7 +1108,7 @@ mod tests {
             assert!(config.compaction.auto.enabled);
             assert_eq!(
                 config.compaction.auto.threshold_tokens,
-                Some(test_thresholds::WINDOW_1M),
+                Some(WINDOW_1M_THRESHOLD),
             );
             assert!(!config.show_thinking);
             assert!(

@@ -1,6 +1,9 @@
 //! Public session API. Every write method sends a [`super::actor::SessionCmd`] and awaits the
 //! actor's ack without holding a lock across `await`.
 
+#[cfg(test)]
+pub(crate) mod testing;
+
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -24,9 +27,6 @@ use crate::prompt::SessionContext;
 use crate::tool::ToolMetadata;
 use crate::tool::tasks::{self, Task};
 use crate::util::sync::lock_or_recover;
-
-#[cfg(test)]
-pub(crate) mod testing;
 
 /// Headroom for burst tool-round writes and the concurrent title generator.
 const CHANNEL_CAPACITY: usize = 1024;

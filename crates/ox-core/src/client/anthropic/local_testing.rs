@@ -71,18 +71,18 @@ pub(crate) fn completion_body(text: &str) -> String {
     .to_string()
 }
 
-pub(crate) fn auth_token() -> Auth {
+pub(super) fn auth_token() -> Auth {
     Auth::new(AuthSource::AuthTokenEnv, "g")
 }
 
-pub(crate) fn oauth() -> Auth {
+pub(super) fn oauth() -> Auth {
     Auth::new(AuthSource::ClaudeCodeLogin, "t")
 }
 
 /// Slot for data captured by a wiremock responder. Capturing it in an `Fn` and inspecting it
 /// across awaits takes the full `Arc<Mutex<Option<T>>>`.
-pub(crate) type Captured<T> = Arc<Mutex<Option<T>>>;
+pub(super) type Captured<T> = Arc<Mutex<Option<T>>>;
 
-pub(crate) fn captured<T>() -> Captured<T> {
+pub(super) fn captured<T>() -> Captured<T> {
     Arc::new(Mutex::new(None))
 }

@@ -8,6 +8,8 @@ use indoc::{indoc, writedoc};
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
+use ox_core::util::tls::testing::TEST_CA_PATH;
+
 #[path = "support/env.rs"]
 mod env;
 
@@ -23,13 +25,7 @@ fn ox(root: &Path) -> Command {
         .env("XDG_STATE_HOME", root.join("state"));
     // On Linux, building the HTTP client reads the system trust store and fails when it holds no
     // certificates, so the tests pin it to a test CA.
-    ox.env(
-        "SSL_CERT_FILE",
-        concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/../ox-core/tests/fixtures/test-ca.pem"
-        ),
-    );
+    ox.env("SSL_CERT_FILE", TEST_CA_PATH);
     ox
 }
 

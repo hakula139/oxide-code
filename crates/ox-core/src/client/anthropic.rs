@@ -11,14 +11,13 @@ mod betas;
 mod billing;
 mod completion;
 pub mod identity;
-mod sse;
-mod transport;
-pub(crate) mod wire;
-
 #[cfg(test)]
 pub(crate) mod local_testing;
+mod sse;
 #[cfg(any(test, feature = "testing"))]
 pub(crate) mod testing;
+mod transport;
+pub(crate) mod wire;
 
 use std::sync::Arc;
 use std::time::Duration;

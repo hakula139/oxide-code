@@ -1177,12 +1177,12 @@ pub(crate) mod local_testing {
 
     /// [`ctx`] in the system temp dir, for calls that name absolute paths. Its artifact directory
     /// is shared, so a call that spills output needs [`ctx`] in a temp dir of its own.
-    pub(crate) fn temp_ctx() -> ToolCtx {
+    pub(super) fn temp_ctx() -> ToolCtx {
         ctx(&std::env::temp_dir())
     }
 
     /// [`ctx`] with `tracker` as the session's tracker.
-    pub(crate) fn ctx_with(cwd: &Path, tracker: Arc<FileTracker>) -> ToolCtx {
+    pub(super) fn ctx_with(cwd: &Path, tracker: Arc<FileTracker>) -> ToolCtx {
         ToolCtx {
             workspace: Arc::new(Workspace::new(cwd)),
             session_id: "test-session".to_owned(),
@@ -1194,14 +1194,14 @@ pub(crate) mod local_testing {
     }
 
     /// Where a spill of call `toolu_test` in [`ctx`] in `cwd` with `suffix`, such as `.txt`, goes.
-    pub(crate) fn spill_path(cwd: &Path, suffix: &str) -> PathBuf {
+    pub(super) fn spill_path(cwd: &Path, suffix: &str) -> PathBuf {
         cwd.join("session")
             .join("tool-results")
             .join(format!("toolu_test{suffix}"))
     }
 
     /// Prepares `input` for `tool` and runs it in `ctx`, the way dispatch does past the gate.
-    pub(crate) async fn run(
+    pub(super) async fn run(
         tool: &dyn Tool,
         input: serde_json::Value,
         ctx: &ToolCtx,
@@ -1210,7 +1210,7 @@ pub(crate) mod local_testing {
     }
 
     /// The read filter of a policy that denies reading whatever one of `patterns` matches.
-    pub(crate) fn deny_reads(patterns: &[&str]) -> ReadFilter {
+    pub(super) fn deny_reads(patterns: &[&str]) -> ReadFilter {
         let deny = patterns
             .iter()
             .map(|pattern| Rule::parse(PermissionClass::Read, pattern).unwrap())
@@ -1258,7 +1258,7 @@ pub(crate) mod local_testing {
     }
 
     /// Creates an empty file at `path`, last modified `secs` seconds after the Unix epoch.
-    pub(crate) fn create_modified_at(path: &Path, secs: u64) {
+    pub(super) fn create_modified_at(path: &Path, secs: u64) {
         let file = std::fs::File::create(path).unwrap();
         file.set_modified(SystemTime::UNIX_EPOCH + Duration::from_secs(secs))
             .unwrap();
@@ -1266,7 +1266,7 @@ pub(crate) mod local_testing {
 
     /// Denies reading the file or directory at `path` until the returned guard drops, which
     /// restores access so the temp dir can be removed.
-    pub(crate) fn deny_read_access(path: &Path) -> ReadDenied {
+    pub(super) fn deny_read_access(path: &Path) -> ReadDenied {
         #[cfg(unix)]
         let mode = {
             use std::os::unix::fs::PermissionsExt as _;
@@ -1294,7 +1294,7 @@ pub(crate) mod local_testing {
     }
 
     /// Read access denied by [`deny_read_access`], restored on drop.
-    pub(crate) struct ReadDenied {
+    pub(super) struct ReadDenied {
         path: PathBuf,
         #[cfg(unix)]
         mode: u32,

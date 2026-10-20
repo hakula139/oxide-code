@@ -11,6 +11,7 @@ publish.workspace = true
 workspace = true
 
 [features]
+# Fixtures for the other workspace crates' tests, which enable it only from their dev-dependencies.
 testing = ["dep:temp-env", "dep:wiremock"]
 
 [dependencies]

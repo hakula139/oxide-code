@@ -1025,7 +1025,8 @@ mod tests {
     use crate::client::anthropic::testing::{
         DEVICE_ID, api_key, sse_body, sse_response, test_config, text_stream_body,
     };
-    use crate::config::compaction::{CompactionConfig, test_thresholds};
+    use crate::config::compaction::CompactionConfig;
+    use crate::config::compaction::testing::WINDOW_1M_THRESHOLD;
     use crate::config::{Effort, PromptCacheTtl};
     use crate::file_tracker::testing::seed_full_read;
     use crate::message::{Replay, Role};
@@ -3722,11 +3723,11 @@ mod tests {
                 let mut resolved = Vec::new();
 
                 for (max_tokens, configured, threshold) in [
-                    (None, unwindowed, test_thresholds::WINDOW_1M),
+                    (None, unwindowed, WINDOW_1M_THRESHOLD),
                     (
                         None,
                         CompactionConfig::with_threshold_for_test(1_500_000),
-                        test_thresholds::WINDOW_1M,
+                        WINDOW_1M_THRESHOLD,
                     ),
                     (Some(8_000), unwindowed, 979_000),
                 ] {

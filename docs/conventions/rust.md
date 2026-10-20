@@ -45,7 +45,7 @@ Conventions for Rust code under `crates/`. Tooling enforces some style rules, so
 
 ## Visibility
 
-- Use the narrowest visibility that works: private first, then `pub(super)` within the parent module, then `pub(crate)`, then `pub`. Make an item `pub` only when another workspace crate uses it, along with every module on the path to it, so `pub(crate)` means the item serves its own crate alone. The binary crate `ox` has no `pub` items.
+- Use the narrowest visibility that works: private first, then `pub(super)` within the parent module, then `pub(crate)`, then `pub`. Make an item `pub` only when another workspace crate uses it or a `pub` signature names it, and make every module on its path `pub` too, so `pub(crate)` means the item serves its own crate alone. The compiler never reports an unused `pub` item in a library, so a change that removes the last use from another crate also narrows or deletes the item. The binary crate `ox` has no `pub` items.
 - Skip scoped forms such as `pub(in super::super)`. When modules outside an item's parent use it, move it into their nearest common module, or into a child of it with `pub(super)`.
 
 ## Modules
