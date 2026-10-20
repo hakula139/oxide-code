@@ -426,7 +426,7 @@ where
 
 /// Appends `note` to `capture` on a line of its own.
 fn push_note(capture: &mut PipeCapture, note: &str) {
-    if capture.kept() > 0 {
+    if capture.kept_len() > 0 {
         capture.push(b"\n");
     }
     capture.push(note.as_bytes());

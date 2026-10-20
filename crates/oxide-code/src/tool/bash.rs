@@ -343,11 +343,15 @@ fn git_bash_on(path: &std::ffi::OsStr) -> Option<std::path::PathBuf> {
 /// Renders stdout and stderr within [`OUTPUT_BUDGET`], spilling each pipe it cuts.
 fn render_streams(stdout: &mut PipeCapture, stderr: &mut PipeCapture) -> String {
     let paths = stdout.spill.path().as_os_str().len() + stderr.spill.path().as_os_str().len();
-    let (stdout_budget, stderr_budget) =
-        split_budget(stdout.kept(), stderr.kept(), OUTPUT_BUDGET - paths);
-    let stdout = render_pipe(stdout, stdout_budget, "stdout");
+    let (stdout_kept, stderr_kept) = (stdout.kept_bytes(), stderr.kept_bytes());
+    let (stdout_budget, stderr_budget) = split_budget(
+        decoded_len(&stdout_kept),
+        decoded_len(&stderr_kept),
+        OUTPUT_BUDGET - paths,
+    );
+    let stdout = render_pipe(stdout, &stdout_kept, stdout_budget, "stdout");
     let stdout = stdout.trim_start_matches('\n');
-    let stderr = render_pipe(stderr, stderr_budget, "stderr");
+    let stderr = render_pipe(stderr, &stderr_kept, stderr_budget, "stderr");
     let stderr = stderr.trim_start();
     match (stdout.is_empty(), stderr.is_empty()) {
         (_, true) => stdout.to_owned(),
@@ -370,32 +374,21 @@ fn split_budget(first: usize, second: usize, budget: usize) -> (usize, usize) {
     (first.min(budget - second), second)
 }
 
-/// Renders at most `budget` bytes of the pipe called `name`, folding everything it drops into the
-/// omission count. A cut spills the pipe's kept bytes if it has not spilled yet, so its marker can
+/// Renders the pipe called `name`, whose [`PipeCapture::kept_bytes`] are `kept`, within `budget`
+/// bytes, decoding each invalid UTF-8 sequence as U+FFFD, and counts every raw byte it drops in the
+/// omission marker. A cut spills the pipe's kept bytes if it has not spilled yet, so its marker can
 /// always name a file with the full output.
-fn render_pipe(pipe: &mut PipeCapture, budget: usize, name: &str) -> String {
-    let (head_len, tail_len) = split_budget(pipe.head.len(), pipe.tail.len(), budget);
-    let mut omitted = pipe.omitted + (pipe.head.len() - head_len) + (pipe.tail.len() - tail_len);
-    if omitted > 0 && !pipe.spill.started() {
-        pipe.spill_kept();
-    }
-    let tail: Vec<u8> = pipe.tail.iter().copied().collect();
-    let mut head = &pipe.head[..head_len];
-    let mut tail = &tail[tail.len() - tail_len..];
-
-    let text = if omitted == 0 {
-        String::from_utf8_lossy(&[head, tail].concat()).into_owned()
+fn render_pipe(pipe: &mut PipeCapture, kept: &[u8], budget: usize, name: &str) -> String {
+    let text = if pipe.omitted == 0 && decoded_len(kept) <= budget {
+        String::from_utf8_lossy(kept).into_owned()
     } else {
-        // Either cut can split a multibyte char, and its stray bytes would decode as U+FFFD.
-        let split_char = head.utf8_chunks().last().map_or(0, |c| c.invalid().len());
-        let continuations = tail
-            .iter()
-            .take(3)
-            .take_while(|&&b| b & 0xC0 == 0x80)
-            .count();
-        head = &head[..head.len() - split_char];
-        tail = &tail[continuations..];
-        omitted += split_char + continuations;
+        let (head, tail) = kept.split_at(pipe.head.len());
+        let (head, tail) = ends_within(head, tail, budget);
+        if !pipe.spill.started() {
+            pipe.spill_kept();
+        }
+
+        let omitted = pipe.omitted + kept.len() - head.len() - tail.len();
         let head = String::from_utf8_lossy(head);
         let marker = omission_marker(omitted, &pipe.spill.note(name));
         let tail = String::from_utf8_lossy(tail);
@@ -407,6 +400,68 @@ fn render_pipe(pipe: &mut PipeCapture, budget: usize, name: &str) -> String {
     };
 
     text.trim_end().to_owned()
+}
+
+/// The start of `head` and the end of `tail` to keep around a cut between them, decoding within
+/// `budget` bytes.
+fn ends_within<'a>(head: &'a [u8], tail: &'a [u8], budget: usize) -> (&'a [u8], &'a [u8]) {
+    // The capture can split a multibyte char between head and tail, and the stray bytes on either
+    // side would decode as U+FFFD.
+    let split_char = head.utf8_chunks().last().map_or(0, |c| c.invalid().len());
+    let continuations = tail
+        .iter()
+        .take(3)
+        .take_while(|&&b| b & 0xC0 == 0x80)
+        .count();
+    let head = &head[..head.len() - split_char];
+    let tail = &tail[continuations..];
+
+    let (head_budget, tail_budget) = split_budget(decoded_len(head), decoded_len(tail), budget);
+    (
+        prefix_within(head, head_budget),
+        suffix_within(tail, tail_budget),
+    )
+}
+
+/// The length of `bytes` once [`String::from_utf8_lossy`] decodes them.
+fn decoded_len(bytes: &[u8]) -> usize {
+    char_lens(bytes).map(|(_, decoded)| decoded).sum()
+}
+
+/// The longest prefix of `bytes` that decodes within `budget` bytes, cut between chars.
+fn prefix_within(bytes: &[u8], budget: usize) -> &[u8] {
+    let len = char_lens(bytes)
+        .scan(budget, |room, (raw, decoded)| {
+            *room = room.checked_sub(decoded)?;
+            Some(raw)
+        })
+        .sum();
+    &bytes[..len]
+}
+
+/// The longest suffix of `bytes` that decodes within `budget` bytes, cut between chars.
+fn suffix_within(bytes: &[u8], budget: usize) -> &[u8] {
+    let excess = decoded_len(bytes).saturating_sub(budget);
+    let cut = char_lens(bytes)
+        .scan(excess, |excess, (raw, decoded)| {
+            (*excess > 0).then(|| {
+                *excess = excess.saturating_sub(decoded);
+                raw
+            })
+        })
+        .sum();
+    &bytes[cut..]
+}
+
+/// The raw and decoded length of each char in `bytes`, where each invalid UTF-8 sequence counts as
+/// one char that decodes as U+FFFD.
+fn char_lens(bytes: &[u8]) -> impl Iterator<Item = (usize, usize)> {
+    bytes.utf8_chunks().flat_map(|chunk| {
+        let chars = chunk.valid().chars().map(|c| (c.len_utf8(), c.len_utf8()));
+        let invalid = chunk.invalid().len();
+        let replacement = char::REPLACEMENT_CHARACTER.len_utf8();
+        chars.chain((invalid > 0).then_some((invalid, replacement)))
+    })
 }
 
 // ── Pipe Capture ──
@@ -440,14 +495,20 @@ impl PipeCapture {
         read_chunks(reader, |chunk| self.push(chunk)).await
     }
 
-    fn kept(&self) -> usize {
+    fn kept_len(&self) -> usize {
         self.head.len() + self.tail.len()
+    }
+
+    /// The head followed by the tail, in one buffer.
+    fn kept_bytes(&self) -> Vec<u8> {
+        let (front, back) = self.tail.as_slices();
+        [self.head.as_slice(), front, back].concat()
     }
 
     fn push(&mut self, chunk: &[u8]) {
         if self.spill.started() {
             self.spill.write(chunk);
-        } else if self.kept() + chunk.len() > PIPE_HEAD_BYTES + PIPE_TAIL_BYTES {
+        } else if self.kept_len() + chunk.len() > PIPE_HEAD_BYTES + PIPE_TAIL_BYTES {
             self.spill_kept();
             self.spill.write(chunk);
         }
@@ -1115,8 +1176,8 @@ mod tests {
     mod render_streams {
         use super::*;
 
-        /// Counts the bytes a pipe's rendering kept, and reads the byte count out of each of its
-        /// `... [N bytes omitted, ...] ...` marker lines.
+        /// Counts the chars a pipe's rendering kept, each standing for one raw byte, and reads the
+        /// byte count out of each of its `... [N bytes omitted, ...] ...` marker lines.
         fn kept_and_omitted(text: &str) -> (usize, Vec<usize>) {
             let (mut kept, mut omitted) = (0, Vec::new());
             for line in text.lines() {
@@ -1124,7 +1185,7 @@ mod tests {
                     Some(marker) => {
                         omitted.push(marker.split(' ').next().unwrap().parse().unwrap());
                     }
-                    None => kept += line.len(),
+                    None => kept += line.chars().count(),
                 }
             }
             (kept, omitted)
@@ -1132,37 +1193,54 @@ mod tests {
 
         #[test]
         fn fits_overflowing_pipes_under_the_dispatcher_cap() {
+            // Each invalid byte, such as `0xFF`, decodes as the three bytes of U+FFFD.
             let cases = [
-                (10 << 20, 1024, 0),
-                (300 << 10, 300 << 10, 0),
-                (300 << 10, 300 << 10, 3),
+                (b'a', 10 << 20, 1024, 0),
+                (b'a', 300 << 10, 300 << 10, 0),
+                (b'a', 300 << 10, 300 << 10, 3),
+                (0xFF, 300 << 10, 300 << 10, 0),
             ];
-            for (stdout_len, stderr_len, depth) in cases {
+            for (stdout_byte, stdout_len, stderr_len, depth) in cases {
                 let dir = tempfile::tempdir().unwrap();
                 let cwd =
                     (0..depth).fold(dir.path().to_owned(), |cwd, _| cwd.join("d".repeat(100)));
                 let spills = ctx(&cwd).spills();
                 let mut stdout = PipeCapture::new(spills.file(".stdout.txt"));
-                stdout.push(&vec![b'a'; stdout_len]);
+                stdout.push(&vec![stdout_byte; stdout_len]);
                 let mut stderr = PipeCapture::new(spills.file(".stderr.txt"));
                 stderr.push(&vec![b'z'; stderr_len]);
 
                 let content = render_streams(&mut stdout, &mut stderr);
 
-                assert!(
-                    content.len() <= MAX_OUTPUT_BYTES,
-                    "{stdout_len} / {stderr_len} at depth {depth}"
-                );
+                let case =
+                    format!("{stdout_byte:#04x}: {stdout_len} / {stderr_len} at depth {depth}");
+                assert!(content.len() <= MAX_OUTPUT_BYTES, "{case}");
                 let (stdout_text, stderr_text) = content.split_once("\nz").unwrap();
                 let (stdout_kept, stdout_omitted) = kept_and_omitted(stdout_text);
-                assert_eq!(stdout_omitted.len(), 1);
-                assert_eq!(stdout_kept + stdout_omitted[0], stdout_len);
+                assert_eq!(stdout_omitted.len(), 1, "{case}");
+                assert_eq!(stdout_kept + stdout_omitted[0], stdout_len, "{case}");
                 let (stderr_kept, stderr_omitted) = kept_and_omitted(stderr_text);
                 assert_eq!(
                     stderr_kept + 1 + stderr_omitted.iter().sum::<usize>(),
-                    stderr_len
+                    stderr_len,
+                    "{case}"
                 );
             }
+        }
+
+        #[test]
+        fn splits_the_budget_by_decoded_length() {
+            // 32 KiB of `0xFF` decode to 96 KiB, so they fit only in a split by decoded length.
+            let dir = tempfile::tempdir().unwrap();
+            let mut stdout = capture(dir.path(), &vec![0xFF; 32 << 10], b"", 0);
+            let mut stderr = capture(dir.path(), &vec![b'z'; 16 << 10], b"", 0);
+
+            let content = render_streams(&mut stdout, &mut stderr);
+
+            let stdout = char::REPLACEMENT_CHARACTER.to_string().repeat(32 << 10);
+            let stderr = "z".repeat(16 << 10);
+            assert!(content == format!("{stdout}\n{stderr}"), "a pipe was cut");
+            assert!(!dir.path().join("session").exists());
         }
 
         #[test]
@@ -1198,12 +1276,18 @@ mod tests {
             )
         }
 
+        /// Renders `pipe` as stdout within `budget` bytes.
+        fn render(pipe: &mut PipeCapture, budget: usize) -> String {
+            let kept = pipe.kept_bytes();
+            render_pipe(pipe, &kept, budget, "stdout")
+        }
+
         #[test]
         fn marks_the_omitted_middle_between_head_and_tail() {
             let dir = tempfile::tempdir().unwrap();
             let mut pipe = capture(dir.path(), b"hello\n", b"world\n", 7);
 
-            let rendered = render_pipe(&mut pipe, OUTPUT_BUDGET, "stdout");
+            let rendered = render(&mut pipe, OUTPUT_BUDGET);
 
             assert_eq!(
                 rendered,
@@ -1222,21 +1306,26 @@ mod tests {
                 5,
             );
 
-            let rendered = render_pipe(&mut pipe, OUTPUT_BUDGET, "stdout");
+            let rendered = render(&mut pipe, OUTPUT_BUDGET);
 
             assert_eq!(rendered, format!("ab\n{}\ncd", marker(dir.path(), 10)));
         }
 
         #[test]
-        fn over_budget_spills_the_whole_pipe_and_counts_the_cut() {
+        fn over_budget_fits_the_decoded_text_and_spills_the_raw_pipe() {
+            // Each invalid sequence, even the 2-byte `\xE2\x82`, decodes as one 3-byte U+FFFD.
             let dir = tempfile::tempdir().unwrap();
-            let mut pipe = capture(dir.path(), b"0123456789", b"abcdef4321", 0);
+            let mut pipe = capture(dir.path(), b"a\xFF\xFFcd", b"\xFF\xFFw\xE2\x82yz", 0);
 
-            let rendered = render_pipe(&mut pipe, 8, "stdout");
+            let rendered = render(&mut pipe, 14);
 
-            assert_eq!(rendered, format!("0123\n{}\n4321", marker(dir.path(), 12)));
-            let spilled = std::fs::read_to_string(spill_path(dir.path(), ".stdout.txt")).unwrap();
-            assert_eq!(spilled, "0123456789abcdef4321");
+            let r = char::REPLACEMENT_CHARACTER;
+            assert_eq!(
+                rendered,
+                format!("a{r}{r}\n{}\nw{r}yz", marker(dir.path(), 4))
+            );
+            let spilled = std::fs::read(spill_path(dir.path(), ".stdout.txt")).unwrap();
+            assert_eq!(spilled, b"a\xFF\xFFcd\xFF\xFFw\xE2\x82yz");
         }
 
         #[test]
@@ -1246,7 +1335,7 @@ mod tests {
             let crab = "🦀".as_bytes();
             let mut pipe = capture(dir.path(), &crab[..2], &crab[2..], 0);
 
-            let rendered = render_pipe(&mut pipe, OUTPUT_BUDGET, "stdout");
+            let rendered = render(&mut pipe, OUTPUT_BUDGET);
 
             assert_eq!(rendered, "🦀");
             assert!(!dir.path().join("session").exists());
@@ -1256,10 +1345,7 @@ mod tests {
         fn trims_the_end_and_keeps_leading_and_internal_newlines() {
             let dir = tempfile::tempdir().unwrap();
             let mut pipe = capture(dir.path(), b"\nerr\nmore\n\n", b"", 0);
-            assert_eq!(
-                render_pipe(&mut pipe, OUTPUT_BUDGET, "stdout"),
-                "\nerr\nmore"
-            );
+            assert_eq!(render(&mut pipe, OUTPUT_BUDGET), "\nerr\nmore");
         }
     }
 
