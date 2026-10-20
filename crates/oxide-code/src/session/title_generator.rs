@@ -214,8 +214,6 @@ mod tests {
     use crate::session::handle::testing::dead;
     use crate::session::store::testing::test_store;
 
-    // ── Fixtures ──
-
     fn title_client(base_url: String) -> Client {
         test_client(
             base_url,
@@ -241,446 +239,461 @@ mod tests {
         handle
     }
 
-    // ── spawn ──
+    mod spawn {
+        use super::*;
 
-    #[tokio::test]
-    async fn spawn_success_notifies_sink_and_delivers_the_request_usage() {
-        let server = MockServer::start().await;
-        Mock::given(method("POST"))
-            .and(wm_path("/v1/messages"))
-            .respond_with(
-                ResponseTemplate::new(200)
-                    .set_body_string(completion_body(r#"{"title":"Fix auth"}"#)),
-            )
-            .mount(&server)
-            .await;
+        #[tokio::test]
+        async fn success_notifies_sink_and_delivers_the_request_usage() {
+            let server = MockServer::start().await;
+            Mock::given(method("POST"))
+                .and(wm_path("/v1/messages"))
+                .respond_with(
+                    ResponseTemplate::new(200)
+                        .set_body_string(completion_body(r#"{"title":"Fix auth"}"#)),
+                )
+                .mount(&server)
+                .await;
 
-        let dir = tempfile::tempdir().unwrap();
-        let session = prepared_session(dir.path()).await;
-        let session_id = session.session_id().to_owned();
-        let client = title_client(server.uri());
-        let billed = title_record(&client);
-        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+            let dir = tempfile::tempdir().unwrap();
+            let session = prepared_session(dir.path()).await;
+            let session_id = session.session_id().to_owned();
+            let client = title_client(server.uri());
+            let billed = title_record(&client);
+            let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
 
-        let usage = spawn(client, session, tx, "first prompt".to_owned());
+            let usage = spawn(client, session, tx, "first prompt".to_owned());
 
-        assert_eq!(
-            rx.recv().await,
-            Some(Event::SessionTitleUpdated {
-                session_id,
-                title: "Fix auth".to_owned(),
-            }),
-        );
-        assert_eq!(rx.recv().await, None);
-        assert_eq!(usage.await.unwrap(), billed);
-    }
-
-    #[tokio::test]
-    async fn spawn_error_emits_no_title_event_and_bills_nothing() {
-        // A 400 is fatal, so the task fails without waiting out the retry backoff.
-        let server = MockServer::start().await;
-        Mock::given(method("POST"))
-            .and(wm_path("/v1/messages"))
-            .respond_with(ResponseTemplate::new(400).set_body_string("bad request"))
-            .expect(1)
-            .mount(&server)
-            .await;
-
-        let dir = tempfile::tempdir().unwrap();
-        let session = prepared_session(dir.path()).await;
-        let client = title_client(server.uri());
-        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
-
-        let usage = spawn(client, session, tx, "first prompt".to_owned());
-
-        assert_eq!(rx.recv().await, None);
-        assert!(usage.await.is_err(), "a failed request bills nothing");
-    }
-
-    // ── generate_and_record ──
-
-    #[tokio::test]
-    async fn generate_and_record_happy_path_appends_title_and_notifies_sink() {
-        let server = MockServer::start().await;
-        Mock::given(method("POST"))
-            .and(wm_path("/v1/messages"))
-            .and(body_partial_json(serde_json::json!({
-                "model": "claude-haiku-5-5",
-                "max_tokens": 1_024,
-                "output_config": {"effort": "low"},
-            })))
-            .respond_with(
-                ResponseTemplate::new(200)
-                    .set_body_string(completion_body(r#"{"title":"Fix login"}"#)),
-            )
-            .mount(&server)
-            .await;
-
-        let dir = tempfile::tempdir().unwrap();
-        let session = prepared_session(dir.path()).await;
-        let client = title_client(server.uri());
-        let sink = CapturingSink::default();
-
-        generate_and_record(
-            &client,
-            &session,
-            &sink,
-            "first prompt",
-            oneshot::channel().0,
-        )
-        .await
-        .unwrap();
-
-        let events = sink.events();
-        assert!(
-            events.iter().any(
-                |e| matches!(e, Event::SessionTitleUpdated { title, .. } if title == "Fix login")
-            ),
-            "sink got SessionTitleUpdated: {events:?}",
-        );
-    }
-
-    #[tokio::test]
-    async fn generate_and_record_bills_but_skips_emit_when_renamed_during_haiku_call() {
-        let server = MockServer::start().await;
-        Mock::given(method("POST"))
-            .and(wm_path("/v1/messages"))
-            .respond_with(
-                ResponseTemplate::new(200)
-                    .set_body_string(completion_body(r#"{"title":"AI loses race"}"#)),
-            )
-            .mount(&server)
-            .await;
-
-        let dir = tempfile::tempdir().unwrap();
-        let session = prepared_session(dir.path()).await;
-        session.set_manual_title("User wins".to_owned()).await;
-
-        let client = title_client(server.uri());
-        let sink = CapturingSink::default();
-        let (billed, usage) = oneshot::channel();
-
-        generate_and_record(&client, &session, &sink, "first prompt", billed)
-            .await
-            .unwrap();
-
-        let events = sink.events();
-        assert!(
-            !events
-                .iter()
-                .any(|e| matches!(e, Event::SessionTitleUpdated { .. })),
-            "AI title must not emit when manual title is already set: {events:?}",
-        );
-        assert_eq!(usage.await.unwrap(), title_record(&client));
-        let data = test_store(dir.path())
-            .load_session_data(session.session_id())
-            .unwrap();
-        assert_eq!(data.usage, [title_record(&client)]);
-    }
-
-    #[tokio::test]
-    async fn generate_and_record_unwraps_code_fenced_json_envelope() {
-        let server = MockServer::start().await;
-        let raw = indoc! {r#"
-            ```json
-            {"title":"Add OAuth auth"}
-            ```
-        "#};
-        Mock::given(method("POST"))
-            .and(wm_path("/v1/messages"))
-            .respond_with(ResponseTemplate::new(200).set_body_string(completion_body(raw)))
-            .mount(&server)
-            .await;
-
-        let dir = tempfile::tempdir().unwrap();
-        let session = prepared_session(dir.path()).await;
-        let client = title_client(server.uri());
-        let sink = CapturingSink::default();
-
-        generate_and_record(&client, &session, &sink, "prompt", oneshot::channel().0)
-            .await
-            .unwrap();
-
-        let events = sink.events();
-        assert!(
-            events
-                .iter()
-                .any(|e| matches!(e, Event::SessionTitleUpdated { title, .. } if title == "Add OAuth auth")),
-            "sink got SessionTitleUpdated: {events:?}",
-        );
-    }
-
-    #[tokio::test]
-    async fn generate_and_record_titles_a_reply_without_usage_and_bills_nothing() {
-        let server = MockServer::start().await;
-        let body = serde_json::json!({
-            "content": [{"type": "text", "text": r#"{"title":"Fix auth"}"#}],
-        });
-        Mock::given(method("POST"))
-            .and(wm_path("/v1/messages"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(body))
-            .mount(&server)
-            .await;
-
-        let dir = tempfile::tempdir().unwrap();
-        let session = prepared_session(dir.path()).await;
-        let client = title_client(server.uri());
-        let sink = CapturingSink::default();
-        let (billed, usage) = oneshot::channel();
-
-        generate_and_record(&client, &session, &sink, "first prompt", billed)
-            .await
-            .unwrap();
-
-        assert_eq!(
-            sink.events(),
-            [Event::SessionTitleUpdated {
-                session_id: session.session_id().to_owned(),
-                title: "Fix auth".to_owned(),
-            }],
-        );
-        assert!(usage.await.is_err(), "no usage, no record");
-        let data = test_store(dir.path())
-            .load_session_data(session.session_id())
-            .unwrap();
-        assert_eq!(data.usage, []);
-    }
-
-    #[tokio::test]
-    async fn generate_and_record_conversational_reply_bails_without_a_title_but_bills_it() {
-        let server = MockServer::start().await;
-        Mock::given(method("POST"))
-            .and(wm_path("/v1/messages"))
-            .respond_with(ResponseTemplate::new(200).set_body_string(completion_body(
-                "I'd be happy to help! However, I need more details.",
-            )))
-            .mount(&server)
-            .await;
-
-        let dir = tempfile::tempdir().unwrap();
-        let session = prepared_session(dir.path()).await;
-        let client = title_client(server.uri());
-        let sink = CapturingSink::default();
-        let (billed, usage) = oneshot::channel();
-
-        let err = generate_and_record(&client, &session, &sink, "hi", billed)
-            .await
-            .expect_err("plain prose must fail parsing");
-
-        assert!(format!("{err:#}").contains("title envelope"));
-        assert!(
-            !sink
-                .events()
-                .iter()
-                .any(|e| matches!(e, Event::SessionTitleUpdated { .. })),
-            "no title event on parse failure",
-        );
-        assert_eq!(usage.await.unwrap(), title_record(&client));
-        let data = test_store(dir.path())
-            .load_session_data(session.session_id())
-            .unwrap();
-        assert_eq!(data.usage, [title_record(&client)]);
-    }
-
-    #[tokio::test]
-    async fn generate_and_record_surfaces_a_write_failure_before_the_title_event() {
-        let server = MockServer::start().await;
-        Mock::given(method("POST"))
-            .and(wm_path("/v1/messages"))
-            .respond_with(
-                ResponseTemplate::new(200)
-                    .set_body_string(completion_body(r#"{"title":"Fix auth"}"#)),
-            )
-            .mount(&server)
-            .await;
-
-        let session = dead("dead-session");
-        let client = title_client(server.uri());
-        let sink = CapturingSink::default();
-
-        generate_and_record(
-            &client,
-            &session,
-            &sink,
-            "first prompt",
-            oneshot::channel().0,
-        )
-        .await
-        .unwrap();
-
-        assert_eq!(
-            sink.events(),
-            [
-                Event::Error(
-                    "Session write failed: session writer task has stopped. \
-                     Conversation history may be incomplete."
-                        .to_owned(),
-                ),
-                Event::SessionTitleUpdated {
-                    session_id: "dead-session".to_owned(),
+            assert_eq!(
+                rx.recv().await,
+                Some(Event::SessionTitleUpdated {
+                    session_id,
                     title: "Fix auth".to_owned(),
-                },
-            ],
-        );
+                }),
+            );
+            assert_eq!(rx.recv().await, None);
+            assert_eq!(usage.await.unwrap(), billed);
+        }
+
+        #[tokio::test]
+        async fn error_emits_no_title_event_and_bills_nothing() {
+            // A 400 is fatal, so the task fails without waiting out the retry backoff.
+            let server = MockServer::start().await;
+            Mock::given(method("POST"))
+                .and(wm_path("/v1/messages"))
+                .respond_with(ResponseTemplate::new(400).set_body_string("bad request"))
+                .expect(1)
+                .mount(&server)
+                .await;
+
+            let dir = tempfile::tempdir().unwrap();
+            let session = prepared_session(dir.path()).await;
+            let client = title_client(server.uri());
+            let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+
+            let usage = spawn(client, session, tx, "first prompt".to_owned());
+
+            assert_eq!(rx.recv().await, None);
+            assert!(usage.await.is_err(), "a failed request bills nothing");
+        }
     }
 
-    #[tokio::test]
-    async fn generate_and_record_http_error_bails_with_context() {
-        let server = MockServer::start().await;
-        Mock::given(method("POST"))
-            .and(wm_path("/v1/messages"))
-            .respond_with(ResponseTemplate::new(400).set_body_string("bad request"))
-            .mount(&server)
-            .await;
+    mod generate_and_record {
+        use super::*;
 
-        let dir = tempfile::tempdir().unwrap();
-        let session = prepared_session(dir.path()).await;
-        let client = title_client(server.uri());
-        let sink = CapturingSink::default();
+        #[tokio::test]
+        async fn happy_path_appends_title_and_notifies_sink() {
+            let server = MockServer::start().await;
+            Mock::given(method("POST"))
+                .and(wm_path("/v1/messages"))
+                .and(body_partial_json(serde_json::json!({
+                    "model": "claude-haiku-5-5",
+                    "max_tokens": 1_024,
+                    "output_config": {"effort": "low"},
+                })))
+                .respond_with(
+                    ResponseTemplate::new(200)
+                        .set_body_string(completion_body(r#"{"title":"Fix login"}"#)),
+                )
+                .mount(&server)
+                .await;
 
-        let err = generate_and_record(&client, &session, &sink, "hi", oneshot::channel().0)
+            let dir = tempfile::tempdir().unwrap();
+            let session = prepared_session(dir.path()).await;
+            let client = title_client(server.uri());
+            let sink = CapturingSink::default();
+
+            generate_and_record(
+                &client,
+                &session,
+                &sink,
+                "first prompt",
+                oneshot::channel().0,
+            )
             .await
-            .expect_err("HTTP error must propagate");
-        assert_eq!(
-            format!("{err:#}"),
-            "Haiku completion failed: API error (HTTP 400 Bad Request): bad request"
-        );
+            .unwrap();
+
+            let events = sink.events();
+            assert!(
+                events.iter().any(|e| matches!(
+                    e,
+                    Event::SessionTitleUpdated { title, .. } if title == "Fix login"
+                )),
+                "sink got SessionTitleUpdated: {events:?}",
+            );
+        }
+
+        #[tokio::test]
+        async fn bills_but_skips_emit_when_renamed_during_haiku_call() {
+            let server = MockServer::start().await;
+            Mock::given(method("POST"))
+                .and(wm_path("/v1/messages"))
+                .respond_with(
+                    ResponseTemplate::new(200)
+                        .set_body_string(completion_body(r#"{"title":"AI loses race"}"#)),
+                )
+                .mount(&server)
+                .await;
+
+            let dir = tempfile::tempdir().unwrap();
+            let session = prepared_session(dir.path()).await;
+            session.set_manual_title("User wins".to_owned()).await;
+
+            let client = title_client(server.uri());
+            let sink = CapturingSink::default();
+            let (billed, usage) = oneshot::channel();
+
+            generate_and_record(&client, &session, &sink, "first prompt", billed)
+                .await
+                .unwrap();
+
+            let events = sink.events();
+            assert!(
+                !events
+                    .iter()
+                    .any(|e| matches!(e, Event::SessionTitleUpdated { .. })),
+                "AI title must not emit when manual title is already set: {events:?}",
+            );
+            assert_eq!(usage.await.unwrap(), title_record(&client));
+            let data = test_store(dir.path())
+                .load_session_data(session.session_id())
+                .unwrap();
+            assert_eq!(data.usage, [title_record(&client)]);
+        }
+
+        #[tokio::test]
+        async fn unwraps_code_fenced_json_envelope() {
+            let server = MockServer::start().await;
+            let raw = indoc! {r#"
+                ```json
+                {"title":"Add OAuth auth"}
+                ```
+            "#};
+            Mock::given(method("POST"))
+                .and(wm_path("/v1/messages"))
+                .respond_with(ResponseTemplate::new(200).set_body_string(completion_body(raw)))
+                .mount(&server)
+                .await;
+
+            let dir = tempfile::tempdir().unwrap();
+            let session = prepared_session(dir.path()).await;
+            let client = title_client(server.uri());
+            let sink = CapturingSink::default();
+
+            generate_and_record(&client, &session, &sink, "prompt", oneshot::channel().0)
+                .await
+                .unwrap();
+
+            let events = sink.events();
+            assert!(
+                events
+                    .iter()
+                    .any(|e| matches!(e, Event::SessionTitleUpdated { title, .. } if title == "Add OAuth auth")),
+                "sink got SessionTitleUpdated: {events:?}",
+            );
+        }
+
+        #[tokio::test]
+        async fn titles_a_reply_without_usage_and_bills_nothing() {
+            let server = MockServer::start().await;
+            let body = serde_json::json!({
+                "content": [{"type": "text", "text": r#"{"title":"Fix auth"}"#}],
+            });
+            Mock::given(method("POST"))
+                .and(wm_path("/v1/messages"))
+                .respond_with(ResponseTemplate::new(200).set_body_json(body))
+                .mount(&server)
+                .await;
+
+            let dir = tempfile::tempdir().unwrap();
+            let session = prepared_session(dir.path()).await;
+            let client = title_client(server.uri());
+            let sink = CapturingSink::default();
+            let (billed, usage) = oneshot::channel();
+
+            generate_and_record(&client, &session, &sink, "first prompt", billed)
+                .await
+                .unwrap();
+
+            assert_eq!(
+                sink.events(),
+                [Event::SessionTitleUpdated {
+                    session_id: session.session_id().to_owned(),
+                    title: "Fix auth".to_owned(),
+                }],
+            );
+            assert!(usage.await.is_err(), "no usage, no record");
+            let data = test_store(dir.path())
+                .load_session_data(session.session_id())
+                .unwrap();
+            assert_eq!(data.usage, []);
+        }
+
+        #[tokio::test]
+        async fn conversational_reply_bails_without_a_title_but_bills_it() {
+            let server = MockServer::start().await;
+            Mock::given(method("POST"))
+                .and(wm_path("/v1/messages"))
+                .respond_with(ResponseTemplate::new(200).set_body_string(completion_body(
+                    "I'd be happy to help! However, I need more details.",
+                )))
+                .mount(&server)
+                .await;
+
+            let dir = tempfile::tempdir().unwrap();
+            let session = prepared_session(dir.path()).await;
+            let client = title_client(server.uri());
+            let sink = CapturingSink::default();
+            let (billed, usage) = oneshot::channel();
+
+            let err = generate_and_record(&client, &session, &sink, "hi", billed)
+                .await
+                .expect_err("plain prose must fail parsing");
+
+            assert!(format!("{err:#}").contains("title envelope"));
+            assert!(
+                !sink
+                    .events()
+                    .iter()
+                    .any(|e| matches!(e, Event::SessionTitleUpdated { .. })),
+                "no title event on parse failure",
+            );
+            assert_eq!(usage.await.unwrap(), title_record(&client));
+            let data = test_store(dir.path())
+                .load_session_data(session.session_id())
+                .unwrap();
+            assert_eq!(data.usage, [title_record(&client)]);
+        }
+
+        #[tokio::test]
+        async fn surfaces_a_write_failure_before_the_title_event() {
+            let server = MockServer::start().await;
+            Mock::given(method("POST"))
+                .and(wm_path("/v1/messages"))
+                .respond_with(
+                    ResponseTemplate::new(200)
+                        .set_body_string(completion_body(r#"{"title":"Fix auth"}"#)),
+                )
+                .mount(&server)
+                .await;
+
+            let session = dead("dead-session");
+            let client = title_client(server.uri());
+            let sink = CapturingSink::default();
+
+            generate_and_record(
+                &client,
+                &session,
+                &sink,
+                "first prompt",
+                oneshot::channel().0,
+            )
+            .await
+            .unwrap();
+
+            assert_eq!(
+                sink.events(),
+                [
+                    Event::Error(
+                        "Session write failed: session writer task has stopped. \
+                         Conversation history may be incomplete."
+                            .to_owned(),
+                    ),
+                    Event::SessionTitleUpdated {
+                        session_id: "dead-session".to_owned(),
+                        title: "Fix auth".to_owned(),
+                    },
+                ],
+            );
+        }
+
+        #[tokio::test]
+        async fn http_error_bails_with_context() {
+            let server = MockServer::start().await;
+            Mock::given(method("POST"))
+                .and(wm_path("/v1/messages"))
+                .respond_with(ResponseTemplate::new(400).set_body_string("bad request"))
+                .mount(&server)
+                .await;
+
+            let dir = tempfile::tempdir().unwrap();
+            let session = prepared_session(dir.path()).await;
+            let client = title_client(server.uri());
+            let sink = CapturingSink::default();
+
+            let err = generate_and_record(&client, &session, &sink, "hi", oneshot::channel().0)
+                .await
+                .expect_err("HTTP error must propagate");
+            assert_eq!(
+                format!("{err:#}"),
+                "Haiku completion failed: API error (HTTP 400 Bad Request): bad request"
+            );
+        }
     }
 
-    // ── title_output_format ──
+    mod title_output_format {
+        use super::*;
 
-    #[test]
-    fn title_output_format_matches_title_envelope_shape() {
-        let fmt = title_output_format();
-        let v = serde_json::to_value(&fmt).unwrap();
-        assert_eq!(v["type"], "json_schema");
-        assert_eq!(v["schema"]["properties"]["title"]["type"], "string");
-        assert_eq!(v["schema"]["required"], serde_json::json!(["title"]));
-        assert_eq!(v["schema"]["additionalProperties"], false);
+        #[test]
+        fn matches_title_envelope_shape() {
+            let fmt = title_output_format();
+            let v = serde_json::to_value(&fmt).unwrap();
+            assert_eq!(v["type"], "json_schema");
+            assert_eq!(v["schema"]["properties"]["title"]["type"], "string");
+            assert_eq!(v["schema"]["required"], serde_json::json!(["title"]));
+            assert_eq!(v["schema"]["additionalProperties"], false);
+        }
     }
 
-    // ── parse_title ──
+    mod parse_title {
+        use super::*;
 
-    #[test]
-    fn parse_title_extracts_json_title_field() {
-        let out = parse_title(r#"{"title": "Fix auth bug"}"#).unwrap();
-        assert_eq!(out, "Fix auth bug");
+        #[test]
+        fn extracts_json_title_field() {
+            let out = parse_title(r#"{"title": "Fix auth bug"}"#).unwrap();
+            assert_eq!(out, "Fix auth bug");
+        }
+
+        #[test]
+        fn trims_whitespace_inside_json_envelope() {
+            let out = parse_title(r#"{"title": "  padded  "}"#).unwrap();
+            assert_eq!(out, "padded");
+        }
+
+        #[test]
+        fn errors_on_empty_title_field() {
+            let err = parse_title(r#"{"title": ""}"#).unwrap_err().to_string();
+            assert!(err.contains("empty title"), "got: {err}");
+        }
+
+        #[test]
+        fn errors_on_plain_text_response() {
+            let err = parse_title("I'd be happy to help! However, I need more details.")
+                .unwrap_err()
+                .to_string();
+            assert!(err.contains("not a title envelope"), "got: {err}");
+        }
+
+        #[test]
+        fn errors_on_empty_response() {
+            assert!(parse_title("   ").is_err());
+        }
+
+        #[test]
+        fn unwraps_json_code_fence() {
+            // Haiku on some gateways wraps the JSON envelope in a fenced block.
+            let raw = indoc! {r#"
+                ```json
+                {
+                  "title": "Fix the login flow"
+                }
+                ```
+            "#};
+            assert_eq!(parse_title(raw).unwrap(), "Fix the login flow");
+        }
+
+        #[test]
+        fn unwraps_bare_code_fence() {
+            let raw = indoc! {r#"
+                ```
+                {"title":"Add OAuth auth"}
+                ```
+            "#};
+            assert_eq!(parse_title(raw).unwrap(), "Add OAuth auth");
+        }
     }
 
-    #[test]
-    fn parse_title_trims_whitespace_inside_json_envelope() {
-        let out = parse_title(r#"{"title": "  padded  "}"#).unwrap();
-        assert_eq!(out, "padded");
-    }
+    mod truncate_for_log {
+        use super::*;
 
-    #[test]
-    fn parse_title_errors_on_empty_title_field() {
-        let err = parse_title(r#"{"title": ""}"#).unwrap_err().to_string();
-        assert!(err.contains("empty title"), "got: {err}");
-    }
+        #[test]
+        fn passes_short_strings_through() {
+            assert_eq!(truncate_for_log("short"), "short");
+        }
 
-    #[test]
-    fn parse_title_errors_on_plain_text_response() {
-        let err = parse_title("I'd be happy to help! However, I need more details.")
-            .unwrap_err()
-            .to_string();
-        assert!(err.contains("not a title envelope"), "got: {err}");
-    }
-
-    #[test]
-    fn parse_title_errors_on_empty_response() {
-        assert!(parse_title("   ").is_err());
-    }
-
-    #[test]
-    fn parse_title_unwraps_json_code_fence() {
-        // Haiku on some gateways wraps the JSON envelope in a fenced block.
-        let raw = indoc! {r#"
-            ```json
-            {
-              "title": "Fix the login flow"
+        #[test]
+        fn caps_long_strings_with_ellipsis() {
+            let cap = "a".repeat(120);
+            assert_eq!(truncate_for_log(&cap), cap);
+            for len in [121, 123, 500] {
+                assert_eq!(truncate_for_log(&"a".repeat(len)), format!("{cap}..."));
             }
-            ```
-        "#};
-        assert_eq!(parse_title(raw).unwrap(), "Fix the login flow");
-    }
+        }
 
-    #[test]
-    fn parse_title_unwraps_bare_code_fence() {
-        let raw = indoc! {r#"
-            ```
-            {"title":"Add OAuth auth"}
-            ```
-        "#};
-        assert_eq!(parse_title(raw).unwrap(), "Add OAuth auth");
-    }
-
-    // ── truncate_for_log ──
-
-    #[test]
-    fn truncate_for_log_passes_short_strings_through() {
-        assert_eq!(truncate_for_log("short"), "short");
-    }
-
-    #[test]
-    fn truncate_for_log_caps_long_strings_with_ellipsis() {
-        let cap = "a".repeat(120);
-        assert_eq!(truncate_for_log(&cap), cap);
-        for len in [121, 123, 500] {
-            assert_eq!(truncate_for_log(&"a".repeat(len)), format!("{cap}..."));
+        #[test]
+        fn caps_multiline_and_zero_width_responses() {
+            for text in [format!("x{}y", "\n".repeat(500)), "\u{200b}".repeat(500)] {
+                let expected = format!("{}{ELLIPSIS}", text.chars().take(120).collect::<String>());
+                assert_eq!(truncate_for_log(&text), expected);
+            }
         }
     }
 
-    #[test]
-    fn truncate_for_log_caps_multiline_and_zero_width_responses() {
-        for text in [format!("x{}y", "\n".repeat(500)), "\u{200b}".repeat(500)] {
-            let expected = format!("{}{ELLIPSIS}", text.chars().take(120).collect::<String>());
-            assert_eq!(truncate_for_log(&text), expected);
+    mod strip_code_fence {
+        use super::*;
+
+        #[test]
+        fn leaves_unwrapped_text_alone() {
+            assert_eq!(strip_code_fence("hello"), "hello");
+            assert_eq!(strip_code_fence(r#"{"title":"x"}"#), r#"{"title":"x"}"#);
+        }
+
+        #[test]
+        fn handles_language_tag() {
+            let raw = indoc! {"
+                ```json
+                body
+                ```
+            "};
+            assert_eq!(strip_code_fence(raw), "body");
+        }
+
+        #[test]
+        fn handles_no_opening_newline() {
+            assert_eq!(strip_code_fence("```body```"), "body");
         }
     }
 
-    // ── strip_code_fence ──
+    mod truncate_prompt {
+        use super::*;
 
-    #[test]
-    fn strip_code_fence_leaves_unwrapped_text_alone() {
-        assert_eq!(strip_code_fence("hello"), "hello");
-        assert_eq!(strip_code_fence(r#"{"title":"x"}"#), r#"{"title":"x"}"#);
-    }
+        #[test]
+        fn passes_short_text_through() {
+            assert_eq!(truncate_prompt("short", 100), "short");
+        }
 
-    #[test]
-    fn strip_code_fence_handles_language_tag() {
-        let raw = indoc! {"
-            ```json
-            body
-            ```
-        "};
-        assert_eq!(strip_code_fence(raw), "body");
-    }
+        #[test]
+        fn keeps_the_tail_of_long_text() {
+            let long = "a".repeat(50) + "TAIL";
+            let out = truncate_prompt(&long, 10);
+            assert_eq!(out.chars().count(), 10);
+            assert!(out.ends_with("TAIL"), "should retain tail: {out:?}");
+        }
 
-    #[test]
-    fn strip_code_fence_handles_no_opening_newline() {
-        assert_eq!(strip_code_fence("```body```"), "body");
-    }
-
-    // ── truncate_prompt ──
-
-    #[test]
-    fn truncate_prompt_passes_short_text_through() {
-        assert_eq!(truncate_prompt("short", 100), "short");
-    }
-
-    #[test]
-    fn truncate_prompt_keeps_the_tail_of_long_text() {
-        let long = "a".repeat(50) + "TAIL";
-        let out = truncate_prompt(&long, 10);
-        assert_eq!(out.chars().count(), 10);
-        assert!(out.ends_with("TAIL"), "should retain tail: {out:?}");
-    }
-
-    #[test]
-    fn truncate_prompt_respects_char_boundaries_for_multibyte() {
-        let s: String = "\u{00e9}".repeat(1_000) + "tail";
-        let out = truncate_prompt(&s, 4);
-        assert_eq!(out, "tail");
+        #[test]
+        fn respects_char_boundaries_for_multibyte() {
+            let s: String = "\u{00e9}".repeat(1_000) + "tail";
+            let out = truncate_prompt(&s, 4);
+            assert_eq!(out, "tail");
+        }
     }
 }

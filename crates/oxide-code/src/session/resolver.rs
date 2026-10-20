@@ -199,476 +199,487 @@ mod tests {
         write_newest_corrupt_session,
     };
 
-    // ── resolve_session ──
+    mod resolve_session {
+        use super::*;
 
-    #[tokio::test]
-    async fn resolve_session_starts_fresh_when_no_continue_flag() {
-        let dir = tempfile::tempdir().unwrap();
-        let store = test_store(dir.path());
-        let resumed = resolve_session(&store, "m", None, None, false)
-            .await
-            .unwrap();
-        assert_eq!(resumed.transcript.messages, []);
-        assert!(resumed.title.is_none());
-        assert!(resumed.transcript.tool_metadata.is_empty());
-        assert!(
-            std::fs::read_dir(test_project_dir(dir.path()))
+        #[tokio::test]
+        async fn starts_fresh_when_no_continue_flag() {
+            let dir = tempfile::tempdir().unwrap();
+            let store = test_store(dir.path());
+            let resumed = resolve_session(&store, "m", None, None, false)
+                .await
+                .unwrap();
+            assert_eq!(resumed.transcript.messages, []);
+            assert!(resumed.title.is_none());
+            assert!(resumed.transcript.tool_metadata.is_empty());
+            assert!(
+                std::fs::read_dir(test_project_dir(dir.path()))
+                    .unwrap()
+                    .next()
+                    .is_none(),
+                "fresh session file should be deferred until the first record_message",
+            );
+        }
+
+        #[tokio::test]
+        async fn resumes_from_external_path() {
+            let dir = tempfile::tempdir().unwrap();
+            let store = test_store(dir.path());
+            let original = handle::start(&store, "m", None);
+            let full_id = original.session_id().to_owned();
+            original
+                .record_message(Message::user("external path test"))
+                .await;
+            original.finish(Vec::new()).await;
+            let path = test_session_file(dir.path(), &full_id);
+            drop(original);
+
+            let external_dir = tempfile::tempdir().unwrap();
+            let external_path = external_dir.path().join("copied.jsonl");
+            std::fs::copy(&path, &external_path).unwrap();
+
+            let arg = Some(external_path.to_string_lossy().into_owned());
+            let resumed = resolve_session(&store, "m", None, Some(&arg), false)
+                .await
+                .unwrap();
+            assert_eq!(resumed.handle.session_id(), full_id);
+            assert_eq!(resumed.transcript.messages.len(), 1);
+            assert_eq!(resumed.title.as_deref(), Some("external path test"));
+        }
+
+        #[tokio::test]
+        async fn prefix_resumes_single_match() {
+            let dir = tempfile::tempdir().unwrap();
+            let store = test_store(dir.path());
+            let original = handle::start(&store, "m", None);
+            let full_id = original.session_id().to_owned();
+            original.record_message(Message::user("hello")).await;
+            original.finish(Vec::new()).await;
+            drop(original);
+
+            let prefix = full_id[..10].to_owned();
+            let arg = Some(prefix);
+            let resumed = resolve_session(&store, "m", None, Some(&arg), false)
+                .await
+                .unwrap();
+            assert_eq!(resumed.handle.session_id(), full_id);
+            assert_eq!(resumed.transcript.messages.len(), 1);
+            assert_eq!(resumed.title.as_deref(), Some("hello"));
+        }
+
+        #[tokio::test]
+        async fn all_widens_scope_to_every_project() {
+            let dir = tempfile::tempdir().unwrap();
+            let store = test_store(dir.path());
+            let other = SessionStore::open_at(dir.path().to_path_buf(), "other-project").unwrap();
+            let original = handle::start(&other, "m", None);
+            let full_id = original.session_id().to_owned();
+            original.record_message(Message::user("all scope")).await;
+            original.finish(Vec::new()).await;
+            drop(original);
+            let arg = Some(full_id[..10].to_owned());
+
+            let err = resolve_session(&store, "m", None, Some(&arg), false)
+                .await
+                .err()
                 .unwrap()
-                .next()
-                .is_none(),
-            "fresh session file should be deferred until the first record_message",
-        );
-    }
+                .to_string();
+            assert_eq!(
+                err,
+                format!(
+                    "no session matching prefix `{}` in this project \
+                     (use --all to search every project)",
+                    &full_id[..10],
+                ),
+            );
 
-    #[tokio::test]
-    async fn resolve_session_resumes_from_external_path() {
-        let dir = tempfile::tempdir().unwrap();
-        let store = test_store(dir.path());
-        let original = handle::start(&store, "m", None);
-        let full_id = original.session_id().to_owned();
-        original
-            .record_message(Message::user("external path test"))
-            .await;
-        original.finish(Vec::new()).await;
-        let path = test_session_file(dir.path(), &full_id);
-        drop(original);
+            let resumed = resolve_session(&store, "m", None, Some(&arg), true)
+                .await
+                .unwrap();
+            assert_eq!(resumed.handle.session_id(), full_id);
+            assert_eq!(resumed.transcript.messages.len(), 1);
+            assert_eq!(resumed.title.as_deref(), Some("all scope"));
 
-        let external_dir = tempfile::tempdir().unwrap();
-        let external_path = external_dir.path().join("copied.jsonl");
-        std::fs::copy(&path, &external_path).unwrap();
-
-        let arg = Some(external_path.to_string_lossy().into_owned());
-        let resumed = resolve_session(&store, "m", None, Some(&arg), false)
-            .await
-            .unwrap();
-        assert_eq!(resumed.handle.session_id(), full_id);
-        assert_eq!(resumed.transcript.messages.len(), 1);
-        assert_eq!(resumed.title.as_deref(), Some("external path test"));
-    }
-
-    #[tokio::test]
-    async fn resolve_session_prefix_resumes_single_match() {
-        let dir = tempfile::tempdir().unwrap();
-        let store = test_store(dir.path());
-        let original = handle::start(&store, "m", None);
-        let full_id = original.session_id().to_owned();
-        original.record_message(Message::user("hello")).await;
-        original.finish(Vec::new()).await;
-        drop(original);
-
-        let prefix = full_id[..10].to_owned();
-        let arg = Some(prefix);
-        let resumed = resolve_session(&store, "m", None, Some(&arg), false)
-            .await
-            .unwrap();
-        assert_eq!(resumed.handle.session_id(), full_id);
-        assert_eq!(resumed.transcript.messages.len(), 1);
-        assert_eq!(resumed.title.as_deref(), Some("hello"));
-    }
-
-    #[tokio::test]
-    async fn resolve_session_all_widens_scope_to_every_project() {
-        let dir = tempfile::tempdir().unwrap();
-        let store = test_store(dir.path());
-        let other = SessionStore::open_at(dir.path().to_path_buf(), "other-project").unwrap();
-        let original = handle::start(&other, "m", None);
-        let full_id = original.session_id().to_owned();
-        original.record_message(Message::user("all scope")).await;
-        original.finish(Vec::new()).await;
-        drop(original);
-        let arg = Some(full_id[..10].to_owned());
-
-        let err = resolve_session(&store, "m", None, Some(&arg), false)
-            .await
-            .err()
-            .unwrap()
-            .to_string();
-        assert_eq!(
-            err,
-            format!(
-                "no session matching prefix `{}` in this project \
-                 (use --all to search every project)",
-                &full_id[..10],
-            ),
-        );
-
-        let resumed = resolve_session(&store, "m", None, Some(&arg), true)
-            .await
-            .unwrap();
-        assert_eq!(resumed.handle.session_id(), full_id);
-        assert_eq!(resumed.transcript.messages.len(), 1);
-        assert_eq!(resumed.title.as_deref(), Some("all scope"));
-
-        let missing = Some("zzzz".to_owned());
-        let err = resolve_session(&store, "m", None, Some(&missing), true)
-            .await
-            .err()
-            .unwrap()
-            .to_string();
-        assert_eq!(
-            err, "no session matching prefix `zzzz`",
-            "the hint drops --all once it is set",
-        );
-    }
-
-    #[tokio::test]
-    async fn resolve_session_bare_continue_resumes_the_newest_readable_unarchived_session() {
-        let dir = tempfile::tempdir().unwrap();
-        let store = test_store(dir.path());
-        seed_test_session(
-            &store,
-            "older",
-            Some("Older"),
-            Some(1),
-            time::macros::datetime!(2026-04-18 09:00:00 UTC),
-        );
-        seed_test_session(
-            &store,
-            "newer",
-            Some("Newer"),
-            Some(1),
-            time::macros::datetime!(2026-04-18 10:00:00 UTC),
-        );
-        seed_test_session(
-            &store,
-            "archived",
-            Some("Archived"),
-            Some(1),
-            time::macros::datetime!(2026-04-18 11:00:00 UTC),
-        );
-        set_archived_at(&test_session_file(dir.path(), "archived"), true).unwrap();
-        write_newest_corrupt_session(dir.path());
-
-        let resumed = resolve_session(&store, "m", None, Some(&None), false)
-            .await
-            .unwrap();
-        assert_eq!(resumed.handle.session_id(), "newer");
-        assert_eq!(resumed.title.as_deref(), Some("Newer"));
-        assert!(!resumed.unarchived);
-    }
-
-    #[tokio::test]
-    async fn resolve_session_prefix_resumes_and_unarchives_an_archived_session() {
-        let dir = tempfile::tempdir().unwrap();
-        let store = test_store(dir.path());
-        seed_test_session(
-            &store,
-            "archived",
-            Some("Archived"),
-            Some(1),
-            time::macros::datetime!(2026-04-18 09:00:00 UTC),
-        );
-        let path = test_session_file(dir.path(), "archived");
-        set_archived_at(&path, true).unwrap();
-
-        let arg = Some("arch".to_owned());
-        let resumed = resolve_session(&store, "m", None, Some(&arg), false)
-            .await
-            .unwrap();
-        assert_eq!(resumed.handle.session_id(), "archived");
-        assert!(resumed.unarchived);
-        assert_eq!(
-            store
-                .latest(false)
+            let missing = Some("zzzz".to_owned());
+            let err = resolve_session(&store, "m", None, Some(&missing), true)
+                .await
+                .err()
                 .unwrap()
-                .map(|s| s.session_id)
-                .as_deref(),
-            Some("archived"),
-            "bare --continue finds the session again",
-        );
-    }
+                .to_string();
+            assert_eq!(
+                err, "no session matching prefix `zzzz`",
+                "the hint drops --all once it is set",
+            );
+        }
 
-    #[tokio::test]
-    async fn resolve_session_bare_continue_errors_without_sessions() {
-        let dir = tempfile::tempdir().unwrap();
-        let store = test_store(dir.path());
-        let err = resolve_session(&store, "m", None, Some(&None), false)
-            .await
-            .err()
-            .unwrap()
-            .to_string();
-        assert_eq!(
-            err,
-            "no sessions to resume in this project (use --all to search every project)",
-        );
-    }
-
-    #[tokio::test]
-    async fn resolve_session_prefix_errors_on_no_match() {
-        let dir = tempfile::tempdir().unwrap();
-        let store = test_store(dir.path());
-        let s = handle::start(&store, "m", None);
-        s.record_message(Message::user("noop")).await;
-        s.finish(Vec::new()).await;
-        let prefix_arg = Some("zzzz".to_owned());
-        drop(s);
-
-        let err = resolve_session(&store, "m", None, Some(&prefix_arg), false)
-            .await
-            .err()
-            .unwrap()
-            .to_string();
-        assert_eq!(
-            err,
-            "no session matching prefix `zzzz` in this project (use --all to search every project)",
-        );
-    }
-
-    #[tokio::test]
-    async fn resolve_session_prefix_reports_ambiguous_matches_newest_first() {
-        let dir = tempfile::tempdir().unwrap();
-        let store = test_store(dir.path());
-        for i in 0..7 {
+        #[tokio::test]
+        async fn bare_continue_resumes_the_newest_readable_unarchived_session() {
+            let dir = tempfile::tempdir().unwrap();
+            let store = test_store(dir.path());
             seed_test_session(
                 &store,
-                &format!("ab{i}-session"),
-                None,
+                "older",
+                Some("Older"),
                 Some(1),
-                time::macros::datetime!(2026-04-18 09:00:00 UTC) + time::Duration::seconds(i),
-            );
-        }
-
-        let prefix_arg = Some("ab".to_owned());
-        let err = resolve_session(&store, "m", None, Some(&prefix_arg), false)
-            .await
-            .err()
-            .unwrap()
-            .to_string();
-        assert_eq!(
-            err,
-            "ambiguous prefix `ab` matches 7 sessions: \
-             ab6-sess, ab5-sess, ab4-sess, ab3-sess, ab2-sess, and 2 more",
-        );
-    }
-
-    #[tokio::test]
-    async fn resolve_session_prefix_reports_a_listing_failure() {
-        let dir = tempfile::tempdir().unwrap();
-        let store = test_store(dir.path());
-        std::fs::remove_dir_all(test_project_dir(dir.path())).unwrap();
-        let cause = store.list_matching("ab", false).unwrap_err();
-
-        let prefix_arg = Some("ab".to_owned());
-        let err = resolve_session(&store, "m", None, Some(&prefix_arg), false)
-            .await
-            .err()
-            .unwrap()
-            .to_string();
-        assert_eq!(err, format!("list sessions (current project): {cause:#}"));
-    }
-
-    #[tokio::test]
-    async fn resolve_session_path_errors_on_missing_file() {
-        let dir = tempfile::tempdir().unwrap();
-        let store = test_store(dir.path());
-        let arg = Some("/does/not/exist.jsonl".to_owned());
-        let err = resolve_session(&store, "m", None, Some(&arg), false)
-            .await
-            .err()
-            .unwrap()
-            .to_string();
-        assert_eq!(err, "session not found: /does/not/exist.jsonl");
-    }
-
-    // ── normalize_resume_arg ──
-
-    #[test]
-    fn normalize_resume_arg_maps_none_to_fresh() {
-        assert!(matches!(
-            normalize_resume_arg(None).unwrap(),
-            ResumeMode::Fresh
-        ));
-    }
-
-    #[test]
-    fn normalize_resume_arg_maps_bare_flag_to_latest() {
-        assert!(matches!(
-            normalize_resume_arg(Some(&None)).unwrap(),
-            ResumeMode::Latest
-        ));
-    }
-
-    #[test]
-    fn normalize_resume_arg_trims_valid_prefix() {
-        let arg = Some("  abc123 ".to_owned());
-        let mode = normalize_resume_arg(Some(&arg)).unwrap();
-        assert!(matches!(mode, ResumeMode::Prefix("abc123")));
-    }
-
-    #[test]
-    fn normalize_resume_arg_classifies_path_arguments() {
-        for raw in [
-            "/abs/path.jsonl",
-            "./relative.jsonl",
-            "sub/dir/session.jsonl",
-            "name.jsonl",           // no separator but has .jsonl suffix
-            r"C:\Users\me\s.jsonl", // windows-shaped
-        ] {
-            let arg = Some(raw.to_owned());
-            let mode = normalize_resume_arg(Some(&arg)).unwrap();
-            assert!(
-                matches!(mode, ResumeMode::Path(p) if p == Path::new(raw)),
-                "{raw:?} should classify as Path",
-            );
-        }
-    }
-
-    #[test]
-    fn normalize_resume_arg_keeps_uuid_shaped_prefix_as_prefix() {
-        let arg = Some("a1b2c3d4-e5f6-7890".to_owned());
-        let mode = normalize_resume_arg(Some(&arg)).unwrap();
-        assert!(matches!(mode, ResumeMode::Prefix("a1b2c3d4-e5f6-7890")));
-    }
-
-    #[test]
-    fn normalize_resume_arg_rejects_empty_and_whitespace_prefix() {
-        for raw in ["", "   ", "\t\n"] {
-            let arg = Some(raw.to_owned());
-            let err = normalize_resume_arg(Some(&arg)).err().unwrap().to_string();
-            assert_eq!(
-                err, "empty session ID prefix (run bare `ox -c` to resume the latest session)",
-                "{raw:?}",
-            );
-        }
-    }
-
-    // ── resolve_prefix_to_info ──
-
-    #[test]
-    fn resolve_prefix_to_info_widens_to_other_projects_when_current_misses() {
-        let dir = tempfile::tempdir().unwrap();
-        let other = SessionStore::open_at(dir.path().to_path_buf(), "other-project").unwrap();
-        let target = "abcd1234-eeff-1122-3344-556677889900";
-        seed_test_session(
-            &other,
-            target,
-            Some("Foreign"),
-            Some(1),
-            time::macros::datetime!(2026-04-18 09:00:00 UTC),
-        );
-
-        let current = test_store(dir.path());
-        let info = resolve_prefix_to_info(&current, &target[..6], "live")
-            .unwrap()
-            .expect("widening pass must surface the foreign session");
-        assert_eq!(info.session_id, target);
-    }
-
-    #[test]
-    fn resolve_prefix_to_info_no_match_is_ok_absent() {
-        let dir = tempfile::tempdir().unwrap();
-        let store = test_store(dir.path());
-        assert!(
-            resolve_prefix_to_info(&store, "zzz", "live")
-                .unwrap()
-                .is_none(),
-            "missing prefix is Ok(None) so callers can layer their own error",
-        );
-    }
-
-    #[test]
-    fn resolve_prefix_to_info_filters_live_id_so_caller_layers_its_own_message() {
-        let dir = tempfile::tempdir().unwrap();
-        let store = test_store(dir.path());
-        let live_id = "abcd1234-eeff-1122-3344-556677889900";
-        seed_test_session(
-            &store,
-            live_id,
-            Some("Live"),
-            Some(1),
-            time::macros::datetime!(2026-04-18 09:00:00 UTC),
-        );
-
-        assert!(
-            resolve_prefix_to_info(&store, &live_id[..6], live_id)
-                .unwrap()
-                .is_none(),
-            "live-id-only matches don't surface to the caller",
-        );
-    }
-
-    #[test]
-    fn resolve_prefix_to_info_ambiguous_lists_short_ids() {
-        let dir = tempfile::tempdir().unwrap();
-        let store = test_store(dir.path());
-        for (id, created_at) in [
-            (
-                "abcd1111-eeff-1122-3344-556677889900",
                 time::macros::datetime!(2026-04-18 09:00:00 UTC),
-            ),
-            (
-                "abcd2222-eeff-1122-3344-556677889900",
-                time::macros::datetime!(2026-04-18 09:00:01 UTC),
-            ),
-        ] {
-            seed_test_session(&store, id, Some("dup"), Some(1), created_at);
+            );
+            seed_test_session(
+                &store,
+                "newer",
+                Some("Newer"),
+                Some(1),
+                time::macros::datetime!(2026-04-18 10:00:00 UTC),
+            );
+            seed_test_session(
+                &store,
+                "archived",
+                Some("Archived"),
+                Some(1),
+                time::macros::datetime!(2026-04-18 11:00:00 UTC),
+            );
+            set_archived_at(&test_session_file(dir.path(), "archived"), true).unwrap();
+            write_newest_corrupt_session(dir.path());
+
+            let resumed = resolve_session(&store, "m", None, Some(&None), false)
+                .await
+                .unwrap();
+            assert_eq!(resumed.handle.session_id(), "newer");
+            assert_eq!(resumed.title.as_deref(), Some("Newer"));
+            assert!(!resumed.unarchived);
         }
 
-        let err = resolve_prefix_to_info(&store, "abcd", "live").unwrap_err();
+        #[tokio::test]
+        async fn prefix_resumes_and_unarchives_an_archived_session() {
+            let dir = tempfile::tempdir().unwrap();
+            let store = test_store(dir.path());
+            seed_test_session(
+                &store,
+                "archived",
+                Some("Archived"),
+                Some(1),
+                time::macros::datetime!(2026-04-18 09:00:00 UTC),
+            );
+            let path = test_session_file(dir.path(), "archived");
+            set_archived_at(&path, true).unwrap();
 
-        assert!(
-            matches!(
-                &err,
-                ResolveError::Ambiguous { prefix, count: 2, preview }
-                    if prefix == "abcd" && preview == "abcd2222, abcd1111"
-            ),
-            "{err:?}",
-        );
-    }
+            let arg = Some("arch".to_owned());
+            let resumed = resolve_session(&store, "m", None, Some(&arg), false)
+                .await
+                .unwrap();
+            assert_eq!(resumed.handle.session_id(), "archived");
+            assert!(resumed.unarchived);
+            assert_eq!(
+                store
+                    .latest(false)
+                    .unwrap()
+                    .map(|s| s.session_id)
+                    .as_deref(),
+                Some("archived"),
+                "bare --continue finds the session again",
+            );
+        }
 
-    // ── resolve_saved_prefix ──
-
-    #[test]
-    fn resolve_saved_prefix_tells_a_live_only_match_from_no_match() {
-        let dir = tempfile::tempdir().unwrap();
-        let store = test_store(dir.path());
-        let live_id = "abcd1234-eeff-1122-3344-556677889900";
-        let saved_id = "abcd5678-eeff-1122-3344-556677889900";
-        seed_test_session(
-            &store,
-            saved_id,
-            Some("Saved"),
-            Some(1),
-            time::macros::datetime!(2026-04-18 09:00:00 UTC),
-        );
-
-        let saved = resolve_saved_prefix(&store, "abcd", live_id).unwrap();
-        assert_eq!(saved.map(|info| info.session_id).as_deref(), Some(saved_id));
-        assert!(
-            resolve_saved_prefix(&store, "abcd1", live_id)
+        #[tokio::test]
+        async fn bare_continue_errors_without_sessions() {
+            let dir = tempfile::tempdir().unwrap();
+            let store = test_store(dir.path());
+            let err = resolve_session(&store, "m", None, Some(&None), false)
+                .await
+                .err()
                 .unwrap()
-                .is_none()
-        );
-        assert!(matches!(
-            resolve_saved_prefix(&store, "zzz", live_id),
-            Err(ResolveError::NoMatch { prefix }) if prefix == "zzz",
-        ));
+                .to_string();
+            assert_eq!(
+                err,
+                "no sessions to resume in this project (use --all to search every project)",
+            );
+        }
+
+        #[tokio::test]
+        async fn prefix_errors_on_no_match() {
+            let dir = tempfile::tempdir().unwrap();
+            let store = test_store(dir.path());
+            let s = handle::start(&store, "m", None);
+            s.record_message(Message::user("noop")).await;
+            s.finish(Vec::new()).await;
+            let prefix_arg = Some("zzzz".to_owned());
+            drop(s);
+
+            let err = resolve_session(&store, "m", None, Some(&prefix_arg), false)
+                .await
+                .err()
+                .unwrap()
+                .to_string();
+            assert_eq!(
+                err,
+                "no session matching prefix `zzzz` in this project \
+                 (use --all to search every project)",
+            );
+        }
+
+        #[tokio::test]
+        async fn prefix_reports_ambiguous_matches_newest_first() {
+            let dir = tempfile::tempdir().unwrap();
+            let store = test_store(dir.path());
+            for i in 0..7 {
+                seed_test_session(
+                    &store,
+                    &format!("ab{i}-session"),
+                    None,
+                    Some(1),
+                    time::macros::datetime!(2026-04-18 09:00:00 UTC) + time::Duration::seconds(i),
+                );
+            }
+
+            let prefix_arg = Some("ab".to_owned());
+            let err = resolve_session(&store, "m", None, Some(&prefix_arg), false)
+                .await
+                .err()
+                .unwrap()
+                .to_string();
+            assert_eq!(
+                err,
+                "ambiguous prefix `ab` matches 7 sessions: \
+                 ab6-sess, ab5-sess, ab4-sess, ab3-sess, ab2-sess, and 2 more",
+            );
+        }
+
+        #[tokio::test]
+        async fn prefix_reports_a_listing_failure() {
+            let dir = tempfile::tempdir().unwrap();
+            let store = test_store(dir.path());
+            std::fs::remove_dir_all(test_project_dir(dir.path())).unwrap();
+            let cause = store.list_matching("ab", false).unwrap_err();
+
+            let prefix_arg = Some("ab".to_owned());
+            let err = resolve_session(&store, "m", None, Some(&prefix_arg), false)
+                .await
+                .err()
+                .unwrap()
+                .to_string();
+            assert_eq!(err, format!("list sessions (current project): {cause:#}"));
+        }
+
+        #[tokio::test]
+        async fn path_errors_on_missing_file() {
+            let dir = tempfile::tempdir().unwrap();
+            let store = test_store(dir.path());
+            let arg = Some("/does/not/exist.jsonl".to_owned());
+            let err = resolve_session(&store, "m", None, Some(&arg), false)
+                .await
+                .err()
+                .unwrap()
+                .to_string();
+            assert_eq!(err, "session not found: /does/not/exist.jsonl");
+        }
     }
 
-    // ── format_session_id_preview ──
+    mod normalize_resume_arg {
+        use super::*;
 
-    #[test]
-    fn format_session_id_preview_truncates_ids_to_eight_chars() {
-        let ids = [
-            "aaaaaaaaaaa".to_owned(),
-            "bbbbbbbbbbb".to_owned(),
-            "c".to_owned(),
-        ];
-        assert_eq!(format_session_id_preview(ids), "aaaaaaaa, bbbbbbbb, c");
+        #[test]
+        fn maps_no_flag_to_fresh() {
+            assert!(matches!(
+                normalize_resume_arg(None).unwrap(),
+                ResumeMode::Fresh
+            ));
+        }
+
+        #[test]
+        fn maps_bare_flag_to_latest() {
+            assert!(matches!(
+                normalize_resume_arg(Some(&None)).unwrap(),
+                ResumeMode::Latest
+            ));
+        }
+
+        #[test]
+        fn trims_valid_prefix() {
+            let arg = Some("  abc123 ".to_owned());
+            let mode = normalize_resume_arg(Some(&arg)).unwrap();
+            assert!(matches!(mode, ResumeMode::Prefix("abc123")));
+        }
+
+        #[test]
+        fn classifies_path_arguments() {
+            for raw in [
+                "/abs/path.jsonl",
+                "./relative.jsonl",
+                "sub/dir/session.jsonl",
+                "name.jsonl",           // no separator but has .jsonl suffix
+                r"C:\Users\me\s.jsonl", // windows-shaped
+            ] {
+                let arg = Some(raw.to_owned());
+                let mode = normalize_resume_arg(Some(&arg)).unwrap();
+                assert!(
+                    matches!(mode, ResumeMode::Path(p) if p == Path::new(raw)),
+                    "{raw:?} should classify as Path",
+                );
+            }
+        }
+
+        #[test]
+        fn keeps_uuid_shaped_prefix_as_prefix() {
+            let arg = Some("a1b2c3d4-e5f6-7890".to_owned());
+            let mode = normalize_resume_arg(Some(&arg)).unwrap();
+            assert!(matches!(mode, ResumeMode::Prefix("a1b2c3d4-e5f6-7890")));
+        }
+
+        #[test]
+        fn rejects_empty_and_whitespace_prefix() {
+            for raw in ["", "   ", "\t\n"] {
+                let arg = Some(raw.to_owned());
+                let err = normalize_resume_arg(Some(&arg)).err().unwrap().to_string();
+                assert_eq!(
+                    err, "empty session ID prefix (run bare `ox -c` to resume the latest session)",
+                    "{raw:?}",
+                );
+            }
+        }
     }
 
-    #[test]
-    fn format_session_id_preview_caps_at_five_and_counts_the_rest() {
-        let ids = (0..6).map(|i| format!("id{i}"));
-        assert_eq!(
-            format_session_id_preview(ids),
-            "id0, id1, id2, id3, id4, and 1 more",
-        );
+    mod resolve_prefix_to_info {
+        use super::*;
+
+        #[test]
+        fn widens_to_other_projects_when_current_misses() {
+            let dir = tempfile::tempdir().unwrap();
+            let other = SessionStore::open_at(dir.path().to_path_buf(), "other-project").unwrap();
+            let target = "abcd1234-eeff-1122-3344-556677889900";
+            seed_test_session(
+                &other,
+                target,
+                Some("Foreign"),
+                Some(1),
+                time::macros::datetime!(2026-04-18 09:00:00 UTC),
+            );
+
+            let current = test_store(dir.path());
+            let info = resolve_prefix_to_info(&current, &target[..6], "live")
+                .unwrap()
+                .expect("widening pass must surface the foreign session");
+            assert_eq!(info.session_id, target);
+        }
+
+        #[test]
+        fn no_match_resolves_to_no_session() {
+            let dir = tempfile::tempdir().unwrap();
+            let store = test_store(dir.path());
+            assert!(
+                resolve_prefix_to_info(&store, "zzz", "live")
+                    .unwrap()
+                    .is_none(),
+                "missing prefix is Ok(None) so callers can layer their own error",
+            );
+        }
+
+        #[test]
+        fn filters_live_id_so_caller_layers_its_own_message() {
+            let dir = tempfile::tempdir().unwrap();
+            let store = test_store(dir.path());
+            let live_id = "abcd1234-eeff-1122-3344-556677889900";
+            seed_test_session(
+                &store,
+                live_id,
+                Some("Live"),
+                Some(1),
+                time::macros::datetime!(2026-04-18 09:00:00 UTC),
+            );
+
+            assert!(
+                resolve_prefix_to_info(&store, &live_id[..6], live_id)
+                    .unwrap()
+                    .is_none(),
+                "live-id-only matches don't surface to the caller",
+            );
+        }
+
+        #[test]
+        fn ambiguous_lists_short_ids() {
+            let dir = tempfile::tempdir().unwrap();
+            let store = test_store(dir.path());
+            for (id, created_at) in [
+                (
+                    "abcd1111-eeff-1122-3344-556677889900",
+                    time::macros::datetime!(2026-04-18 09:00:00 UTC),
+                ),
+                (
+                    "abcd2222-eeff-1122-3344-556677889900",
+                    time::macros::datetime!(2026-04-18 09:00:01 UTC),
+                ),
+            ] {
+                seed_test_session(&store, id, Some("dup"), Some(1), created_at);
+            }
+
+            let err = resolve_prefix_to_info(&store, "abcd", "live").unwrap_err();
+
+            assert!(
+                matches!(
+                    &err,
+                    ResolveError::Ambiguous { prefix, count: 2, preview }
+                        if prefix == "abcd" && preview == "abcd2222, abcd1111"
+                ),
+                "{err:?}",
+            );
+        }
     }
 
-    #[test]
-    fn format_session_id_preview_lists_every_id_at_the_limit() {
-        let ids = (0..5).map(|i| format!("id{i}"));
-        assert_eq!(format_session_id_preview(ids), "id0, id1, id2, id3, id4");
+    mod resolve_saved_prefix {
+        use super::*;
+
+        #[test]
+        fn tells_a_live_only_match_from_no_match() {
+            let dir = tempfile::tempdir().unwrap();
+            let store = test_store(dir.path());
+            let live_id = "abcd1234-eeff-1122-3344-556677889900";
+            let saved_id = "abcd5678-eeff-1122-3344-556677889900";
+            seed_test_session(
+                &store,
+                saved_id,
+                Some("Saved"),
+                Some(1),
+                time::macros::datetime!(2026-04-18 09:00:00 UTC),
+            );
+
+            let saved = resolve_saved_prefix(&store, "abcd", live_id).unwrap();
+            assert_eq!(saved.map(|info| info.session_id).as_deref(), Some(saved_id));
+            assert!(
+                resolve_saved_prefix(&store, "abcd1", live_id)
+                    .unwrap()
+                    .is_none()
+            );
+            assert!(matches!(
+                resolve_saved_prefix(&store, "zzz", live_id),
+                Err(ResolveError::NoMatch { prefix }) if prefix == "zzz",
+            ));
+        }
+    }
+
+    mod format_session_id_preview {
+        use super::*;
+
+        #[test]
+        fn truncates_ids_to_eight_chars() {
+            let ids = [
+                "aaaaaaaaaaa".to_owned(),
+                "bbbbbbbbbbb".to_owned(),
+                "c".to_owned(),
+            ];
+            assert_eq!(format_session_id_preview(ids), "aaaaaaaa, bbbbbbbb, c");
+        }
+
+        #[test]
+        fn caps_at_five_and_counts_the_rest() {
+            let ids = (0..6).map(|i| format!("id{i}"));
+            assert_eq!(
+                format_session_id_preview(ids),
+                "id0, id1, id2, id3, id4, and 1 more",
+            );
+        }
+
+        #[test]
+        fn lists_every_id_at_the_limit() {
+            let ids = (0..5).map(|i| format!("id{i}"));
+            assert_eq!(format_session_id_preview(ids), "id0, id1, id2, id3, id4");
+        }
     }
 }

@@ -792,9 +792,9 @@ impl Modal for ResumePicker {
         true
     }
 }
+
 #[cfg(test)]
 mod tests {
-    use std::fs::File;
     use std::time::Duration;
 
     use crossterm::event::KeyModifiers;
@@ -803,6 +803,7 @@ mod tests {
     use time::OffsetDateTime;
     use time::macros::datetime;
 
+    use super::Column::{Branch, Id, Msgs, Project, Title, When};
     use super::*;
     use crate::session::display::UNTITLED_MARKER;
     use crate::session::entry::TitleInfo;
@@ -842,15 +843,8 @@ mod tests {
             let last_active_at =
                 datetime!(2026-04-18 09:00:00 UTC) - time::Duration::days(days_ago);
             seed_session(store, &id, Some(title), msg_count, last_active_at);
-            let path = store.find_session_path(&id).unwrap();
-            File::options()
-                .append(true)
-                .open(&path)
-                .unwrap()
-                .set_modified(last_active_at.into())
-                .unwrap();
             if archived {
-                set_archived_at(&path, true).unwrap();
+                set_archived_at(&store.find_session_path(&id).unwrap(), true).unwrap();
             }
         }
     }
@@ -1047,7 +1041,6 @@ mod tests {
 
         mod layout {
             use super::*;
-            use Column::{Branch, Id, Msgs, Project, Title, When};
 
             #[test]
             fn drops_the_id_then_the_branch_project_and_msgs_as_the_width_shrinks() {

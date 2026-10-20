@@ -165,8 +165,6 @@ mod tests {
     use crate::message::{ContentBlock, Role};
     use crate::tool::tasks::testing::plan;
 
-    // ── Entry::Header ──
-
     #[test]
     fn header_round_trips_with_correct_discriminator_and_version() {
         let entry = Entry::Header {
@@ -200,8 +198,6 @@ mod tests {
         assert_eq!(version, CURRENT_VERSION);
         assert!(git_branch.is_none());
     }
-
-    // ── Entry::Message ──
 
     #[test]
     fn message_round_trips_with_uuid_and_parent_uuid() {
@@ -241,7 +237,7 @@ mod tests {
     }
 
     #[test]
-    fn message_omits_parent_uuid_when_none() {
+    fn message_omits_an_absent_parent_uuid() {
         let entry = Entry::Message {
             uuid: Uuid::new_v4(),
             parent_uuid: None,
@@ -256,7 +252,7 @@ mod tests {
     }
 
     #[test]
-    fn message_missing_parent_uuid_defaults_to_none() {
+    fn message_missing_parent_uuid_parses_as_a_root_message() {
         let uuid = Uuid::new_v4();
         let json = format!(
             r#"{{"type":"message","uuid":"{uuid}","message":{{"role":"user","content":[{{"type":"text","text":"x"}}]}},"timestamp":"2026-04-16T12:00:00Z"}}"#
@@ -267,8 +263,6 @@ mod tests {
         };
         assert!(parent_uuid.is_none());
     }
-
-    // ── Entry::Title ──
 
     #[test]
     fn title_round_trips_with_source() {
@@ -295,8 +289,6 @@ mod tests {
         assert_eq!(updated_at, datetime!(2026-04-16 12:05:00 UTC));
     }
 
-    // ── Entry::Summary ──
-
     #[test]
     fn summary_round_trips_without_title_field() {
         let entry = Entry::Summary {
@@ -321,8 +313,6 @@ mod tests {
         assert_eq!(message_count, 8);
         assert_eq!(updated_at, datetime!(2026-04-16 12:05:00 UTC));
     }
-
-    // ── Entry::ToolResultMetadata ──
 
     #[test]
     fn tool_result_metadata_round_trips_with_title_and_truncated_total() {
@@ -356,8 +346,6 @@ mod tests {
         assert_eq!(reserialized["metadata"]["title"], "t");
         assert!(reserialized["metadata"].get("future_field").is_none());
     }
-
-    // ── Entry::Usage ──
 
     #[test]
     fn usage_round_trips_with_flat_token_fields() {
@@ -393,8 +381,6 @@ mod tests {
         );
         assert_eq!(serde_json::to_value(&parsed).unwrap(), json);
     }
-
-    // ── Entry::FileSnapshot ──
 
     #[test]
     fn file_snapshot_round_trips_with_inlined_payload_fields() {
@@ -462,8 +448,6 @@ mod tests {
         );
     }
 
-    // ── Entry::Compact ──
-
     #[test]
     fn compact_round_trips_with_instructions_and_tasks() {
         let entry = Entry::Compact {
@@ -524,8 +508,6 @@ mod tests {
         assert_eq!(instructions, None);
         assert_eq!(tasks, []);
     }
-
-    // ── JSONL Format ──
 
     #[test]
     fn entries_parse_from_jsonl_lines() {

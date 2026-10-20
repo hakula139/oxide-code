@@ -64,133 +64,139 @@ pub(super) fn inject_cch(body: &str) -> Result<String> {
 mod tests {
     use super::*;
 
-    // ── compute_fingerprint ──
+    mod compute_fingerprint {
+        use super::*;
 
-    // Verified via `echo -n "59cf53e54c78'li2.1.37" | shasum -a 256` → "9e71...".
-    // Chars at indices [4, 7, 20] of "Say 'hello'..." are `'`, `l`, `i`.
-    #[test]
-    fn compute_fingerprint_known_vector() {
-        let fp = compute_fingerprint("Say 'hello' and nothing else.", "2.1.37");
-        assert_eq!(fp, "9e7");
+        // Verified via `echo -n "59cf53e54c78'li2.1.37" | shasum -a 256` → "9e71...".
+        // Chars at indices [4, 7, 20] of "Say 'hello'..." are `'`, `l`, `i`.
+        #[test]
+        fn matches_a_known_vector() {
+            let fp = compute_fingerprint("Say 'hello' and nothing else.", "2.1.37");
+            assert_eq!(fp, "9e7");
+        }
+
+        #[test]
+        fn varies_with_version() {
+            let fp1 = compute_fingerprint("hello world", "2.1.37");
+            let fp2 = compute_fingerprint("hello world", "2.1.87");
+            assert_ne!(
+                fp1, fp2,
+                "different versions should produce different fingerprints"
+            );
+        }
+
+        #[test]
+        fn short_message_pads_with_zero() {
+            // "Hi" (len 2) has no char at any fingerprint index, so every position defaults to '0'.
+            let short = compute_fingerprint("Hi", "2.1.87");
+            let empty = compute_fingerprint("", "2.1.87");
+            assert_eq!(short, empty, "both should pad all positions with '0'");
+        }
+
+        #[test]
+        fn pads_only_out_of_bounds_indices() {
+            // Index 4 of "Hello" is `o`, and 7 and 20 are out of bounds.
+            assert_eq!(compute_fingerprint("Hello", "2.1.37"), "a74");
+        }
+
+        // Expected values in the UTF-16 tests come from Claude Code's fingerprint function run
+        // under both Bun and Node.
+        #[test]
+        fn counts_utf16_code_units() {
+            // 📦 takes two code units, which puts the `t` of "to" at index 20.
+            let fp = compute_fingerprint("Rename the 📦 crate to 🦀", "2.1.296");
+            assert_eq!(fp, "0bf");
+        }
+
+        #[test]
+        fn hashes_a_split_surrogate_pair_as_replacement_character() {
+            // Index 4 holds the high surrogate of 🦀.
+            let fp = compute_fingerprint("Fix 🦀 the parser, then test it", "2.1.296");
+            assert_eq!(fp, "070");
+        }
     }
 
-    #[test]
-    fn compute_fingerprint_varies_with_version() {
-        let fp1 = compute_fingerprint("hello world", "2.1.37");
-        let fp2 = compute_fingerprint("hello world", "2.1.87");
-        assert_ne!(
-            fp1, fp2,
-            "different versions should produce different fingerprints"
-        );
+    mod build_billing_header {
+        use super::*;
+
+        #[test]
+        fn formats_hashed_and_stable_headers() {
+            let hashed = build_billing_header("2.1.87", "abc", true);
+            assert_eq!(
+                hashed,
+                "x-anthropic-billing-header: cc_version=2.1.87.abc; cc_entrypoint=cli; cch=00000;"
+            );
+            assert!(is_hashed(&hashed));
+
+            let stable = build_billing_header("2.1.87", "abc", false);
+            assert_eq!(
+                stable,
+                "x-anthropic-billing-header: cc_version=2.1.87.abc; cc_entrypoint=cli;"
+            );
+            assert!(!is_hashed(&stable));
+        }
     }
 
-    #[test]
-    fn compute_fingerprint_short_message_pads_with_zero() {
-        // "Hi" (len 2) has no char at any fingerprint index, so every position defaults to '0'.
-        let short = compute_fingerprint("Hi", "2.1.87");
-        let empty = compute_fingerprint("", "2.1.87");
-        assert_eq!(short, empty, "both should pad all positions with '0'");
-    }
+    mod inject_cch {
+        use super::*;
 
-    #[test]
-    fn compute_fingerprint_partial_bounds() {
-        // Index 4 of "Hello" is `o`, and 7 and 20 are out of bounds.
-        assert_eq!(compute_fingerprint("Hello", "2.1.37"), "a74");
-    }
+        #[test]
+        fn replaces_placeholder() {
+            let body = r#"{"system":[{"type":"text","text":"cch=00000;"}],"messages":[]}"#;
+            let result = inject_cch(body).unwrap();
 
-    // Expected values in the UTF-16 tests come from Claude Code's fingerprint function run under
-    // both Bun and Node.
-    #[test]
-    fn compute_fingerprint_counts_utf16_code_units() {
-        // 📦 takes two code units, which puts the `t` of "to" at index 20.
-        let fp = compute_fingerprint("Rename the 📦 crate to 🦀", "2.1.296");
-        assert_eq!(fp, "0bf");
-    }
+            assert!(
+                !result.contains(CCH_PLACEHOLDER),
+                "placeholder should be replaced"
+            );
 
-    #[test]
-    fn compute_fingerprint_hashes_a_split_surrogate_pair_as_replacement_character() {
-        // Index 4 holds the high surrogate of 🦀.
-        let fp = compute_fingerprint("Fix 🦀 the parser, then test it", "2.1.296");
-        assert_eq!(fp, "070");
-    }
+            let hash = xxh64::xxh64(body.as_bytes(), CCH_SEED);
+            let expected = format!("{:05x}", hash & 0xFFFFF);
+            assert!(
+                result.contains(&format!("cch={expected}")),
+                "result should contain cch={expected}, got: {result}"
+            );
+        }
 
-    // ── build_billing_header ──
+        #[test]
+        fn is_deterministic() {
+            let body = r#"{"system":[{"type":"text","text":"cch=00000;"}],"messages":[]}"#;
+            assert_eq!(inject_cch(body).unwrap(), inject_cch(body).unwrap());
+        }
 
-    #[test]
-    fn build_billing_header_format() {
-        let hashed = build_billing_header("2.1.87", "abc", true);
-        assert_eq!(
-            hashed,
-            "x-anthropic-billing-header: cc_version=2.1.87.abc; cc_entrypoint=cli; cch=00000;"
-        );
-        assert!(is_hashed(&hashed));
+        #[test]
+        fn produces_five_hex_chars() {
+            let body = r#"{"system":[{"type":"text","text":"cch=00000;"}]}"#;
+            let result = inject_cch(body).unwrap();
 
-        let stable = build_billing_header("2.1.87", "abc", false);
-        assert_eq!(
-            stable,
-            "x-anthropic-billing-header: cc_version=2.1.87.abc; cc_entrypoint=cli;"
-        );
-        assert!(!is_hashed(&stable));
-    }
+            let cch_start = result.find("cch=").expect("cch= not found") + 4;
+            let cch_value = &result[cch_start..cch_start + 5];
+            assert!(
+                cch_value.chars().all(|c| c.is_ascii_hexdigit()),
+                "cch should be 5 hex chars, got: {cch_value}"
+            );
+        }
 
-    // ── inject_cch ──
+        #[test]
+        fn replaces_only_first_occurrence() {
+            // `system` precedes `messages`, as in the request struct's field order.
+            let body = r#"{"system":[{"type":"text","text":"cch=00000;"}],"messages":[{"role":"user","content":[{"type":"text","text":"cch=00000"}]}]}"#;
+            let result = inject_cch(body).unwrap();
 
-    #[test]
-    fn inject_cch_replaces_placeholder() {
-        let body = r#"{"system":[{"type":"text","text":"cch=00000;"}],"messages":[]}"#;
-        let result = inject_cch(body).unwrap();
+            assert_eq!(
+                result.matches("cch=00000").count(),
+                1,
+                "only the second occurrence (in messages) should remain"
+            );
+        }
 
-        assert!(
-            !result.contains(CCH_PLACEHOLDER),
-            "placeholder should be replaced"
-        );
-
-        let hash = xxh64::xxh64(body.as_bytes(), CCH_SEED);
-        let expected = format!("{:05x}", hash & 0xFFFFF);
-        assert!(
-            result.contains(&format!("cch={expected}")),
-            "result should contain cch={expected}, got: {result}"
-        );
-    }
-
-    #[test]
-    fn inject_cch_deterministic() {
-        let body = r#"{"system":[{"type":"text","text":"cch=00000;"}],"messages":[]}"#;
-        assert_eq!(inject_cch(body).unwrap(), inject_cch(body).unwrap());
-    }
-
-    #[test]
-    fn inject_cch_produces_five_hex_chars() {
-        let body = r#"{"system":[{"type":"text","text":"cch=00000;"}]}"#;
-        let result = inject_cch(body).unwrap();
-
-        let cch_start = result.find("cch=").expect("cch= not found") + 4;
-        let cch_value = &result[cch_start..cch_start + 5];
-        assert!(
-            cch_value.chars().all(|c| c.is_ascii_hexdigit()),
-            "cch should be 5 hex chars, got: {cch_value}"
-        );
-    }
-
-    #[test]
-    fn inject_cch_replaces_only_first_occurrence() {
-        // `system` precedes `messages`, as in the request struct's field order.
-        let body = r#"{"system":[{"type":"text","text":"cch=00000;"}],"messages":[{"role":"user","content":[{"type":"text","text":"cch=00000"}]}]}"#;
-        let result = inject_cch(body).unwrap();
-
-        assert_eq!(
-            result.matches("cch=00000").count(),
-            1,
-            "only the second occurrence (in messages) should remain"
-        );
-    }
-
-    #[test]
-    fn inject_cch_errors_when_placeholder_missing() {
-        let err = inject_cch(r#"{"system":[],"messages":[]}"#).expect_err("must error");
-        assert!(
-            format!("{err:#}").contains(CCH_PLACEHOLDER),
-            "error names placeholder: {err:#}",
-        );
+        #[test]
+        fn errors_when_placeholder_missing() {
+            let err = inject_cch(r#"{"system":[],"messages":[]}"#).expect_err("must error");
+            assert!(
+                format!("{err:#}").contains(CCH_PLACEHOLDER),
+                "error names placeholder: {err:#}",
+            );
+        }
     }
 }

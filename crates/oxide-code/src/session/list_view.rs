@@ -134,148 +134,13 @@ mod tests {
     use crate::session::store::set_archived_at;
     use crate::session::store::testing::{seed_test_session, test_store};
 
-    fn session(session_id: &str, last_active_at: time::OffsetDateTime) -> SessionInfo {
-        SessionInfo {
-            session_id: session_id.to_owned(),
-            path: std::path::PathBuf::new(),
-            cwd: "/work/project".to_owned(),
-            last_active_at,
-            title: None,
-            exit: None,
-            git_branch: None,
-            archived: false,
-        }
-    }
+    mod render_list {
+        use super::*;
 
-    fn render_to_string(sessions: &[SessionInfo], all: bool) -> String {
-        render_with_width(sessions, all, None)
-    }
-
-    fn render_with_width(sessions: &[SessionInfo], all: bool, term_width: Option<usize>) -> String {
-        let mut buf = Vec::new();
-        render_sessions(
-            &mut buf,
-            &ListPage::new(sessions.to_vec(), false),
-            ListScope {
-                all,
-                ..ListScope::default()
-            },
-            UtcOffset::UTC,
-            term_width,
-        )
-        .unwrap();
-        String::from_utf8(buf).unwrap()
-    }
-
-    // ── render_list ──
-
-    #[test]
-    fn render_list_empty_store_shows_no_sessions_notice() {
-        let dir = tempfile::tempdir().unwrap();
-        let store = test_store(dir.path());
-        let mut buf = Vec::new();
-        render_list(
-            &mut buf,
-            &store,
-            ListScope::default(),
-            UtcOffset::UTC,
-            None,
-            None,
-        )
-        .unwrap();
-        assert_eq!(
-            String::from_utf8(buf).unwrap(),
-            "No sessions found in this project\n",
-        );
-
-        let mut buf = Vec::new();
-        render_list(
-            &mut buf,
-            &store,
-            ListScope {
-                all: true,
-                ..ListScope::default()
-            },
-            UtcOffset::UTC,
-            None,
-            None,
-        )
-        .unwrap();
-        assert_eq!(String::from_utf8(buf).unwrap(), "No sessions found\n",);
-
-        let mut buf = Vec::new();
-        render_list(
-            &mut buf,
-            &store,
-            ListScope {
-                archived: true,
-                ..ListScope::default()
-            },
-            UtcOffset::UTC,
-            None,
-            None,
-        )
-        .unwrap();
-        assert_eq!(
-            String::from_utf8(buf).unwrap(),
-            "No archived sessions found in this project\n",
-        );
-    }
-
-    #[test]
-    fn render_list_archived_lists_only_archived_sessions() {
-        let dir = tempfile::tempdir().unwrap();
-        let store = test_store(dir.path());
-        for id in ["aaaa1111", "bbbb2222"] {
-            seed_test_session(
-                &store,
-                id,
-                Some(id),
-                Some(1),
-                datetime!(2026-04-18 09:00:00 UTC),
-            );
-        }
-        let archived = store.find_session_path("bbbb2222").unwrap();
-        set_archived_at(&archived, true).unwrap();
-        let render = |archived: bool| {
-            let mut buf = Vec::new();
-            render_list(
-                &mut buf,
-                &store,
-                ListScope {
-                    archived,
-                    ..ListScope::default()
-                },
-                UtcOffset::UTC,
-                None,
-                None,
-            )
-            .unwrap();
-            String::from_utf8(buf).unwrap()
-        };
-
-        let active = render(false);
-        assert!(active.contains("aaaa1111"), "{active}");
-        assert!(!active.contains("bbbb2222"), "{active}");
-        let archived = render(true);
-        assert!(archived.contains("bbbb2222"), "{archived}");
-        assert!(!archived.contains("aaaa1111"), "{archived}");
-    }
-
-    #[test]
-    fn render_list_appends_more_footer_only_when_capped() {
-        let dir = tempfile::tempdir().unwrap();
-        let store = test_store(dir.path());
-        for id in ["aaaa1111", "bbbb2222"] {
-            seed_test_session(
-                &store,
-                id,
-                Some(id),
-                Some(1),
-                datetime!(2026-04-18 09:00:00 UTC),
-            );
-        }
-        let render = |limit: usize| {
+        #[test]
+        fn empty_store_shows_no_sessions_notice() {
+            let dir = tempfile::tempdir().unwrap();
+            let store = test_store(dir.path());
             let mut buf = Vec::new();
             render_list(
                 &mut buf,
@@ -283,177 +148,320 @@ mod tests {
                 ListScope::default(),
                 UtcOffset::UTC,
                 None,
-                Some(limit),
+                None,
+            )
+            .unwrap();
+            assert_eq!(
+                String::from_utf8(buf).unwrap(),
+                "No sessions found in this project\n",
+            );
+
+            let mut buf = Vec::new();
+            render_list(
+                &mut buf,
+                &store,
+                ListScope {
+                    all: true,
+                    ..ListScope::default()
+                },
+                UtcOffset::UTC,
+                None,
+                None,
+            )
+            .unwrap();
+            assert_eq!(String::from_utf8(buf).unwrap(), "No sessions found\n",);
+
+            let mut buf = Vec::new();
+            render_list(
+                &mut buf,
+                &store,
+                ListScope {
+                    archived: true,
+                    ..ListScope::default()
+                },
+                UtcOffset::UTC,
+                None,
+                None,
+            )
+            .unwrap();
+            assert_eq!(
+                String::from_utf8(buf).unwrap(),
+                "No archived sessions found in this project\n",
+            );
+        }
+
+        #[test]
+        fn archived_lists_only_archived_sessions() {
+            let dir = tempfile::tempdir().unwrap();
+            let store = test_store(dir.path());
+            for id in ["aaaa1111", "bbbb2222"] {
+                seed_test_session(
+                    &store,
+                    id,
+                    Some(id),
+                    Some(1),
+                    datetime!(2026-04-18 09:00:00 UTC),
+                );
+            }
+            let archived = store.find_session_path("bbbb2222").unwrap();
+            set_archived_at(&archived, true).unwrap();
+            let render = |archived: bool| {
+                let mut buf = Vec::new();
+                render_list(
+                    &mut buf,
+                    &store,
+                    ListScope {
+                        archived,
+                        ..ListScope::default()
+                    },
+                    UtcOffset::UTC,
+                    None,
+                    None,
+                )
+                .unwrap();
+                String::from_utf8(buf).unwrap()
+            };
+
+            let active = render(false);
+            assert!(active.contains("aaaa1111"), "{active}");
+            assert!(!active.contains("bbbb2222"), "{active}");
+            let archived = render(true);
+            assert!(archived.contains("bbbb2222"), "{archived}");
+            assert!(!archived.contains("aaaa1111"), "{archived}");
+        }
+
+        #[test]
+        fn appends_more_footer_only_when_capped() {
+            let dir = tempfile::tempdir().unwrap();
+            let store = test_store(dir.path());
+            for id in ["aaaa1111", "bbbb2222"] {
+                seed_test_session(
+                    &store,
+                    id,
+                    Some(id),
+                    Some(1),
+                    datetime!(2026-04-18 09:00:00 UTC),
+                );
+            }
+            let render = |limit: usize| {
+                let mut buf = Vec::new();
+                render_list(
+                    &mut buf,
+                    &store,
+                    ListScope::default(),
+                    UtcOffset::UTC,
+                    None,
+                    Some(limit),
+                )
+                .unwrap();
+                String::from_utf8(buf).unwrap()
+            };
+
+            let capped = render(1);
+            assert_eq!(
+                capped.lines().last(),
+                Some("... more (use `--limit N` to raise the cap or `--limit 0` to list all)"),
+                "{capped}",
+            );
+            let full = render(2);
+            assert!(!full.contains("... more"), "{full}");
+        }
+    }
+
+    mod render_sessions {
+        use super::*;
+
+        fn session(session_id: &str, last_active_at: time::OffsetDateTime) -> SessionInfo {
+            SessionInfo {
+                session_id: session_id.to_owned(),
+                path: std::path::PathBuf::new(),
+                cwd: "/work/project".to_owned(),
+                last_active_at,
+                title: None,
+                exit: None,
+                git_branch: None,
+                archived: false,
+            }
+        }
+
+        fn render_to_string(sessions: &[SessionInfo], all: bool) -> String {
+            render_with_width(sessions, all, None)
+        }
+
+        fn render_with_width(
+            sessions: &[SessionInfo],
+            all: bool,
+            term_width: Option<usize>,
+        ) -> String {
+            let mut buf = Vec::new();
+            render_sessions(
+                &mut buf,
+                &ListPage::new(sessions.to_vec(), false),
+                ListScope {
+                    all,
+                    ..ListScope::default()
+                },
+                UtcOffset::UTC,
+                term_width,
             )
             .unwrap();
             String::from_utf8(buf).unwrap()
-        };
+        }
 
-        let capped = render(1);
-        assert_eq!(
-            capped.lines().last(),
-            Some("... more (use `--limit N` to raise the cap or `--limit 0` to list all)"),
-            "{capped}",
-        );
-        let full = render(2);
-        assert!(!full.contains("... more"), "{full}");
-    }
+        #[test]
+        fn populated_row_has_header_prefix_and_title_defaults() {
+            let s = session("0123456789abcdef", datetime!(2026-04-18 13:45:00 UTC));
+            let out = render_to_string(&[s], false);
+            let mut lines = out.lines();
+            assert_eq!(
+                lines.next().unwrap(),
+                "ID         Last Active         Msgs   Title"
+            );
+            let row = lines.next().unwrap();
+            assert!(row.starts_with("01234567   "), "got: {row:?}");
+            assert!(row.contains("2026-04-18 13:45"), "got: {row:?}");
+            assert!(row.ends_with(" -      (untitled)"), "got: {row:?}");
+            assert!(lines.next().is_none(), "unexpected trailing line");
+        }
 
-    // ── render_sessions ──
+        #[test]
+        fn shows_message_count_and_title_when_available() {
+            let mut s = session("feeddeadbeef0000", datetime!(2026-04-18 09:00:00 UTC));
+            s.title = Some(TitleInfo {
+                title: "Fix auth bug".to_owned(),
+                updated_at: datetime!(2026-04-18 09:05:00 UTC),
+            });
+            s.exit = Some(ExitInfo {
+                message_count: 42,
+                updated_at: datetime!(2026-04-18 09:30:00 UTC),
+            });
+            let out = render_to_string(&[s], false);
+            let row = out.lines().nth(1).unwrap();
+            assert!(row.contains(" 42     "), "got: {row:?}");
+            assert!(row.ends_with("Fix auth bug"), "got: {row:?}");
+        }
 
-    #[test]
-    fn render_sessions_populated_row_has_header_prefix_and_title_defaults() {
-        let s = session("0123456789abcdef", datetime!(2026-04-18 13:45:00 UTC));
-        let out = render_to_string(&[s], false);
-        let mut lines = out.lines();
-        assert_eq!(
-            lines.next().unwrap(),
-            "ID         Last Active         Msgs   Title"
-        );
-        let row = lines.next().unwrap();
-        assert!(row.starts_with("01234567   "), "got: {row:?}");
-        assert!(row.contains("2026-04-18 13:45"), "got: {row:?}");
-        assert!(row.ends_with(" -      (untitled)"), "got: {row:?}");
-        assert!(lines.next().is_none(), "unexpected trailing line");
-    }
+        #[test]
+        fn all_mode_inserts_project_column_aligned_to_widest_cwd() {
+            let mut short = session("aaaaaaaaaaaa", datetime!(2026-04-18 09:00:00 UTC));
+            short.cwd = "/a".to_owned();
+            let mut longer = session("bbbbbbbbbbbb", datetime!(2026-04-18 09:05:00 UTC));
+            longer.cwd = "/work/oxide-code".to_owned();
+            let out = render_to_string(&[short, longer], true);
 
-    #[test]
-    fn render_sessions_shows_message_count_and_title_when_available() {
-        let mut s = session("feeddeadbeef0000", datetime!(2026-04-18 09:00:00 UTC));
-        s.title = Some(TitleInfo {
-            title: "Fix auth bug".to_owned(),
-            updated_at: datetime!(2026-04-18 09:05:00 UTC),
-        });
-        s.exit = Some(ExitInfo {
-            message_count: 42,
-            updated_at: datetime!(2026-04-18 09:30:00 UTC),
-        });
-        let out = render_to_string(&[s], false);
-        let row = out.lines().nth(1).unwrap();
-        assert!(row.contains(" 42     "), "got: {row:?}");
-        assert!(row.ends_with("Fix auth bug"), "got: {row:?}");
-    }
+            let mut lines = out.lines();
+            let header = lines.next().unwrap();
+            assert!(
+                header.contains("Project"),
+                "header should mention Project: {header:?}"
+            );
+            let rows: Vec<&str> = lines.collect();
+            assert_eq!(rows.len(), 2);
+            assert!(rows[0].contains("/a"), "row 0 missing cwd: {:?}", rows[0]);
+            assert!(
+                rows[1].contains("/work/oxide-code"),
+                "row 1 missing cwd: {:?}",
+                rows[1],
+            );
 
-    #[test]
-    fn render_sessions_all_mode_inserts_project_column_aligned_to_widest_cwd() {
-        let mut short = session("aaaaaaaaaaaa", datetime!(2026-04-18 09:00:00 UTC));
-        short.cwd = "/a".to_owned();
-        let mut longer = session("bbbbbbbbbbbb", datetime!(2026-04-18 09:05:00 UTC));
-        longer.cwd = "/work/oxide-code".to_owned();
-        let out = render_to_string(&[short, longer], true);
+            let header_title_col = header.find("Title").expect("header must contain Title");
+            let row_title_cols: Vec<usize> = rows
+                .iter()
+                .map(|r| {
+                    r.rfind("(untitled)")
+                        .expect("row must render default title")
+                })
+                .collect();
+            assert_eq!(row_title_cols[0], row_title_cols[1], "titles misaligned");
+            assert_eq!(
+                row_title_cols[0], header_title_col,
+                "title column misaligned with header",
+            );
+        }
 
-        let mut lines = out.lines();
-        let header = lines.next().unwrap();
-        assert!(
-            header.contains("Project"),
-            "header should mention Project: {header:?}"
-        );
-        let rows: Vec<&str> = lines.collect();
-        assert_eq!(rows.len(), 2);
-        assert!(rows[0].contains("/a"), "row 0 missing cwd: {:?}", rows[0]);
-        assert!(
-            rows[1].contains("/work/oxide-code"),
-            "row 1 missing cwd: {:?}",
-            rows[1],
-        );
+        #[test]
+        fn project_col_width_respects_maximum() {
+            let long_cwd: String = "/deep/"
+                .chars()
+                .chain(std::iter::repeat_n('x', 80))
+                .collect();
+            let mut s = session("cccccccccccc", datetime!(2026-04-18 09:00:00 UTC));
+            s.cwd = long_cwd.clone();
+            let out = render_to_string(&[s], true);
 
-        let header_title_col = header.find("Title").expect("header must contain Title");
-        let row_title_cols: Vec<usize> = rows
-            .iter()
-            .map(|r| {
-                r.rfind("(untitled)")
-                    .expect("row must render default title")
-            })
-            .collect();
-        assert_eq!(row_title_cols[0], row_title_cols[1], "titles misaligned");
-        assert_eq!(
-            row_title_cols[0], header_title_col,
-            "title column misaligned with header",
-        );
-    }
+            let row = out.lines().nth(1).unwrap();
+            let title_pos = row
+                .rfind("(untitled)")
+                .expect("row must render the default title");
+            // The cwd exceeds the 40-col cap, so the title slips past the header column, but the
+            // row must still render the full cwd.
+            assert!(row.contains(&long_cwd), "cwd missing from row: {row:?}");
+            assert!(title_pos > 0);
+        }
 
-    #[test]
-    fn render_sessions_project_col_width_respects_maximum() {
-        let long_cwd: String = "/deep/"
-            .chars()
-            .chain(std::iter::repeat_n('x', 80))
-            .collect();
-        let mut s = session("cccccccccccc", datetime!(2026-04-18 09:00:00 UTC));
-        s.cwd = long_cwd.clone();
-        let out = render_to_string(&[s], true);
+        #[test]
+        fn truncates_title_when_term_width_too_narrow() {
+            let mut s = session("0123456789ab", datetime!(2026-04-18 09:00:00 UTC));
+            s.title = Some(TitleInfo {
+                title: "A very long session title that will not fit".to_owned(),
+                updated_at: datetime!(2026-04-18 09:05:00 UTC),
+            });
+            // Prefix = 38, term_width = 60 → title budget = 22 (fits ~19 chars + `...`).
+            let out = render_with_width(&[s], false, Some(60));
+            let row = out.lines().nth(1).unwrap();
+            let title = row
+                .split_once("-      ")
+                .map(|(_, t)| t)
+                .expect("row must have the Msgs cell");
+            assert!(title.ends_with("..."), "expected ellipsis, got: {title:?}");
+            assert!(
+                title.width() <= 22,
+                "title width {} exceeds budget for {title:?}",
+                title.width(),
+            );
+        }
 
-        let row = out.lines().nth(1).unwrap();
-        let title_pos = row
-            .rfind("(untitled)")
-            .expect("row must render the default title");
-        // The cwd exceeds the 40-col cap, so the title slips past the header column, but the row
-        // must still render the full cwd.
-        assert!(row.contains(&long_cwd), "cwd missing from row: {row:?}");
-        assert!(title_pos > 0);
-    }
+        #[test]
+        fn leaves_title_untruncated_without_term_width() {
+            let mut s = session("0123456789ab", datetime!(2026-04-18 09:00:00 UTC));
+            let full_title = "A very long session title that will not fit";
+            s.title = Some(TitleInfo {
+                title: full_title.to_owned(),
+                updated_at: datetime!(2026-04-18 09:05:00 UTC),
+            });
+            let out = render_with_width(&[s], false, None);
+            assert!(
+                out.contains(full_title),
+                "full title should render when term_width is None: {out}",
+            );
+        }
 
-    #[test]
-    fn render_sessions_truncates_title_when_term_width_too_narrow() {
-        let mut s = session("0123456789ab", datetime!(2026-04-18 09:00:00 UTC));
-        s.title = Some(TitleInfo {
-            title: "A very long session title that will not fit".to_owned(),
-            updated_at: datetime!(2026-04-18 09:05:00 UTC),
-        });
-        // Prefix = 38, term_width = 60 → title budget = 22 (fits ~19 chars + `...`).
-        let out = render_with_width(&[s], false, Some(60));
-        let row = out.lines().nth(1).unwrap();
-        let title = row
-            .split_once("-      ")
-            .map(|(_, t)| t)
-            .expect("row must have the Msgs cell");
-        assert!(title.ends_with("..."), "expected ellipsis, got: {title:?}");
-        assert!(
-            title.width() <= 22,
-            "title width {} exceeds budget for {title:?}",
-            title.width(),
-        );
-    }
+        #[test]
+        fn skips_truncation_when_title_budget_below_minimum() {
+            let mut s = session("0123456789ab", datetime!(2026-04-18 09:00:00 UTC));
+            let full_title = "A very long session title that will not fit";
+            s.title = Some(TitleInfo {
+                title: full_title.to_owned(),
+                updated_at: datetime!(2026-04-18 09:05:00 UTC),
+            });
+            // term_width 45 < prefix 38 + MIN_TITLE_BUDGET 12 → untruncated, so the terminal wraps.
+            let out = render_with_width(&[s], false, Some(45));
+            assert!(
+                out.contains(full_title),
+                "full title should render when budget too small: {out}",
+            );
+        }
 
-    #[test]
-    fn render_sessions_leaves_title_untruncated_without_term_width() {
-        let mut s = session("0123456789ab", datetime!(2026-04-18 09:00:00 UTC));
-        let full_title = "A very long session title that will not fit";
-        s.title = Some(TitleInfo {
-            title: full_title.to_owned(),
-            updated_at: datetime!(2026-04-18 09:05:00 UTC),
-        });
-        let out = render_with_width(&[s], false, None);
-        assert!(
-            out.contains(full_title),
-            "full title should render when term_width is None: {out}",
-        );
-    }
+        #[test]
+        fn empty_project_scope_mentions_project() {
+            let out = render_to_string(&[], false);
+            assert_eq!(out, "No sessions found in this project\n");
+        }
 
-    #[test]
-    fn render_sessions_skips_truncation_when_title_budget_below_minimum() {
-        let mut s = session("0123456789ab", datetime!(2026-04-18 09:00:00 UTC));
-        let full_title = "A very long session title that will not fit";
-        s.title = Some(TitleInfo {
-            title: full_title.to_owned(),
-            updated_at: datetime!(2026-04-18 09:05:00 UTC),
-        });
-        // term_width 45 < prefix 38 + MIN_TITLE_BUDGET 12 → no truncation, so the terminal wraps.
-        let out = render_with_width(&[s], false, Some(45));
-        assert!(
-            out.contains(full_title),
-            "full title should render when budget too small: {out}",
-        );
-    }
-
-    #[test]
-    fn render_sessions_empty_project_scope_mentions_project() {
-        let out = render_to_string(&[], false);
-        assert_eq!(out, "No sessions found in this project\n");
-    }
-
-    #[test]
-    fn render_sessions_empty_all_scope_omits_project_qualifier() {
-        let out = render_to_string(&[], true);
-        assert_eq!(out, "No sessions found\n");
+        #[test]
+        fn empty_all_scope_omits_project_qualifier() {
+            let out = render_to_string(&[], true);
+            assert_eq!(out, "No sessions found\n");
+        }
     }
 }

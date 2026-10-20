@@ -1048,14 +1048,6 @@ mod tests {
     /// What each reply from [`mount_reply`] bills, as [`text_stream_body`] reports it.
     const REPLY_USAGE: TokenUsage = TokenUsage::new(1_000, 100);
 
-    /// A toolbox without tools, for an engine that [`Engine::new`] builds.
-    fn toolbox() -> Toolbox {
-        Toolbox {
-            tools: Arc::new(ToolRegistry::new(Vec::new())),
-            shells: Arc::default(),
-        }
-    }
-
     /// Next event the engine emits that `pick` accepts, skipping the rest.
     async fn next_matching<T>(
         events: &mut mpsc::UnboundedReceiver<Event>,
@@ -1083,21 +1075,6 @@ mod tests {
         }
     }
 
-    /// Events of the prompt in flight until both its terminal event and its session's AI title
-    /// have arrived, in either order.
-    async fn titled_turn_events(events: &mut mpsc::UnboundedReceiver<Event>) -> Vec<Event> {
-        let prompt = Op::Prompt(String::new());
-        let (mut ended, mut titled) = (false, false);
-        let mut seen = Vec::new();
-        while !(ended && titled) {
-            let event = events.recv().await.expect("the engine stopped early");
-            ended |= TurnEnd::of(&prompt, &event).is_some();
-            titled |= matches!(event, Event::SessionTitleUpdated { .. });
-            seen.push(event);
-        }
-        seen
-    }
-
     /// Answers each title request with `response`. Mount it before the reply that answers turns.
     async fn mount_title(server: &MockServer, response: ResponseTemplate) {
         Mock::given(method("POST"))
@@ -1122,15 +1099,6 @@ mod tests {
             .estimate_usd(tokens, PromptCacheTtl::OneHour)
     }
 
-    /// A prompt that pastes two service logs, long enough that its exchange can compact.
-    fn pasted_logs() -> String {
-        format!(
-            "Why do these logs stop?\n{}{}",
-            service_log("alpha"),
-            service_log("beta")
-        )
-    }
-
     async fn submit(handle: &mut EngineHandle, text: &str) -> Vec<Event> {
         handle.ops.send(Op::Prompt(text.to_owned())).await.unwrap();
         turn_events(&mut handle.events).await
@@ -1147,21 +1115,6 @@ mod tests {
             .collect()
     }
 
-    /// Stores an oxide-code login under `data`, standing in for `$XDG_DATA_HOME`.
-    fn store_ox_login(data: &Path) -> PathBuf {
-        let file = data.join("ox").join("credentials.json");
-        std::fs::create_dir_all(file.parent().unwrap()).unwrap();
-        std::fs::write(&file, credentials_json("ox-token")).unwrap();
-        file
-    }
-
-    fn credentials_json(access_token: &str) -> String {
-        serde_json::json!({
-            "claudeAiOauth": { "accessToken": access_token, "expiresAt": 9_999_999_999_999_u64 },
-        })
-        .to_string()
-    }
-
     /// The URL `/login` announced, once the engine emits it.
     async fn login_url(events: &mut mpsc::UnboundedReceiver<Event>) -> String {
         next_matching(events, |event| match event {
@@ -1169,32 +1122,6 @@ mod tests {
             _ => None,
         })
         .await
-    }
-
-    /// Returns to the sign-in listener behind `url` with `query` and its `state`, as the browser
-    /// does, and reads the reply.
-    async fn return_from_browser(url: &str, query: &str) -> String {
-        let url = reqwest::Url::parse(url).unwrap();
-        let param = |name: &str| {
-            url.query_pairs()
-                .find(|(key, _)| key == name)
-                .map(|(_, value)| value.into_owned())
-                .unwrap()
-        };
-        let redirect = reqwest::Url::parse(&param("redirect_uri")).unwrap();
-        let mut stream = tokio::net::TcpStream::connect(("127.0.0.1", redirect.port().unwrap()))
-            .await
-            .unwrap();
-        let state = param("state");
-        let request = formatdoc! {"
-            GET /callback?{query}&state={state} HTTP/1.1\r
-            Host: localhost\r
-            \r
-        "};
-        stream.write_all(request.as_bytes()).await.unwrap();
-        let mut reply = String::new();
-        stream.read_to_string(&mut reply).await.unwrap();
-        reply
     }
 
     /// Writes a `CLAUDE.md` that is not UTF-8 into `dir`, returning the warning its load raises.
@@ -1219,1780 +1146,37 @@ mod tests {
         id
     }
 
-    // ── EngineHandle::shutdown ──
-
-    #[tokio::test]
-    async fn shutdown_reports_a_session_that_cannot_finish() {
-        with_pinned_home(async {
-            let server = MockServer::start().await;
-            let dir = tempfile::tempdir().unwrap();
-            let mut engine = engine(server.uri(), &test_store(dir.path()), dir.path()).await;
-            engine.session = handle::testing::dead("dead");
-
-            let failure = engine.spawn(&[]).shutdown().await.unwrap();
-
-            assert!(
-                failure.is_some_and(|f| f.starts_with("session writer task has stopped")),
-                "a session that cannot finish reports why"
-            );
-        })
-        .await;
+    /// The branch in the live session's header, after one recorded message writes the file.
+    async fn header_branch(engine: &Engine, dir: &Path) -> Option<String> {
+        engine.session.record_message(Message::user("first")).await;
+        let jsonl =
+            std::fs::read_to_string(test_session_file(dir, engine.session.session_id())).unwrap();
+        let header: serde_json::Value =
+            serde_json::from_str(jsonl.lines().next().unwrap()).unwrap();
+        header["git_branch"].as_str().map(ToOwned::to_owned)
     }
 
-    // ── EngineTask::join ──
-
-    #[tokio::test]
-    async fn join_hands_back_the_panic_of_a_panicked_engine() {
-        let task = EngineTask(tokio::spawn(async { panic!("engine bug") }));
-
-        let panic = task.join().await.unwrap_err();
-
-        assert_eq!(panic_message(panic), "engine bug");
-    }
-
-    // ── new ──
-
-    #[tokio::test]
-    async fn new_prices_recorded_usage_and_replays_a_recorded_context_or_builds_one() {
-        with_pinned_home(async {
-            let server = MockServer::start().await;
-            let dir = tempfile::tempdir().unwrap();
-            let store = test_store(dir.path());
-            let recorded = engine(server.uri(), &store, dir.path())
-                .await
-                .prompt
-                .session_context();
-            let warning = write_unreadable_instructions(dir.path());
-            let usage = [UsageRecord {
-                model: MODEL.to_owned(),
-                cache_ttl: PromptCacheTtl::FiveMin,
-                tokens: TokenUsage::new(1_000, 100),
-            }];
-
-            let mut config = test_config(server.uri(), api_key(), "claude-sonnet-5-5");
-            config.workspace = Workspace::new(dir.path());
-            for (context, replayed) in [(Some(recorded), true), (None, false)] {
-                let engine = Engine::new(
-                    &config,
-                    NoRoots,
-                    DEVICE_ID.to_owned(),
-                    toolbox(),
-                    SessionParts {
-                        store: store.clone(),
-                        handle: handle::start(&store, "claude-sonnet-5-5", None),
-                        transcript: LoadedTranscript {
-                            context,
-                            usage: usage.to_vec(),
-                            ..LoadedTranscript::default()
-                        },
-                        file_tracker: Arc::new(FileTracker::default()),
-                    },
-                    false,
-                )
-                .await
-                .unwrap();
-
-                assert!(
-                    (engine.total_estimated_cost_usd - 0.006).abs() < 1e-12,
-                    "priced at the recorded model's rates: {}",
-                    engine.total_estimated_cost_usd,
-                );
-                assert_eq!(engine.prompt.user_context == SESSION_CONTEXT, replayed);
-                assert_eq!(engine.prompt_unrecorded, !replayed);
-                let built_warnings = if replayed {
-                    Vec::new()
-                } else {
-                    vec![warning.clone()]
-                };
-                assert_eq!(engine.instruction_warnings, built_warnings);
-                let model = if replayed { MODEL } else { "claude-sonnet-5-5" };
-                assert!(
-                    engine
-                        .prompt
-                        .seen
-                        .model
-                        .contains(&format!("The exact model ID is {model}.")),
-                    "replayed: {replayed}",
-                );
-            }
-        })
-        .await;
-    }
-
-    #[tokio::test]
-    async fn new_takes_the_agent_settings_from_config_and_binds_the_client_to_the_session() {
-        with_pinned_home(async {
-            let dir = tempfile::tempdir().unwrap();
-            let store = test_store(dir.path());
-            let session = handle::start(&store, MODEL, None);
-            let mut config = test_config("http://127.0.0.1:9", api_key(), MODEL);
-            config.max_tool_rounds = Some(3);
-            config.compaction = CompactionConfig::with_threshold_for_test(50_000);
-            config.permission = Policy::new(Mode::Plan, Vec::new(), Vec::new(), Vec::new());
-            config.workspace = Workspace::new(dir.path());
-
-            let engine = Engine::new(
-                &config,
-                NoRoots,
-                DEVICE_ID.to_owned(),
-                toolbox(),
-                SessionParts {
-                    store: store.clone(),
-                    handle: session.clone(),
-                    transcript: LoadedTranscript::default(),
-                    file_tracker: Arc::new(FileTracker::default()),
-                },
-                false,
-            )
-            .await
-            .unwrap();
-
-            assert_eq!(*engine.workspace, config.workspace);
-            assert_eq!(engine.max_tool_rounds, Some(3));
-            assert_eq!(engine.compaction, config.compaction);
-            assert_eq!(engine.policy.mode(), Mode::Plan);
-            assert_eq!(engine.client.session_id(), session.session_id());
-        })
-        .await;
-    }
-
-    // ── spawn ──
-
-    #[tokio::test]
-    async fn spawn_reports_the_resumed_cost_tasks_warnings_drift_and_an_interrupted_transcript() {
-        with_pinned_home(async {
-            let server = MockServer::start().await;
-            let dir = tempfile::tempdir().unwrap();
-            let warning = write_unreadable_instructions(dir.path());
-            let mut engine = engine(server.uri(), &test_store(dir.path()), dir.path()).await;
-            engine.messages = vec![
-                Message::user("hi"),
-                Message {
-                    role: Role::Assistant,
-                    content: vec![ContentBlock::Thinking {
-                        thinking: turn::INTERRUPTED_WORK_SENTINEL.to_owned(),
-                        replay: Replay::with_model(MODEL, ""),
-                    }],
-                },
-            ];
-            engine.total_estimated_cost_usd = 1.23;
-            engine.tasks = plan();
-
-            let mut handle = engine.spawn(&[PathBuf::from("a.rs")]);
-            let cost = handle.events.recv().await.unwrap();
-            let tasks = handle.events.recv().await.unwrap();
-            let instructions = handle.events.recv().await.unwrap();
-            let drift = handle.events.recv().await.unwrap();
-            let interrupted = handle.events.recv().await.unwrap();
-            let failure = handle.shutdown().await.unwrap();
-
-            assert!(
-                matches!(
-                    &cost,
-                    Event::UsageUpdated(UsageSnapshot {
-                        context_tokens: None,
-                        estimated_cost_usd: Some(cost),
-                        ..
-                    }) if (cost - 1.23).abs() < f64::EPSILON
-                ),
-                "{cost:?}"
-            );
-            assert_eq!(tasks, Event::TasksUpdated(plan()));
-            assert_eq!(instructions, Event::Notice(warning));
-            assert_eq!(
-                drift,
-                Event::Notice(format_drift_warning(&[PathBuf::from("a.rs")]))
-            );
-            assert!(
-                matches!(
-                    &interrupted,
-                    Event::Error(msg) if msg.ends_with("Send a message to continue.")
-                ),
-                "{interrupted:?}"
-            );
-            assert_eq!(failure, None);
-        })
-        .await;
-    }
-
-    // ── run ──
-
-    #[tokio::test]
-    async fn run_serves_a_turn_and_saves_it_on_shutdown() {
-        with_pinned_home(async {
-            let server = MockServer::start().await;
-            mount_reply(&server, "reply").await;
-            let dir = tempfile::tempdir().unwrap();
-            let store = test_store(dir.path());
-            let engine = engine(server.uri(), &store, dir.path()).await;
-            let session_id = engine.session_id().to_owned();
-            let mut handle = engine.spawn(&[]);
-
-            let events = submit(&mut handle, "hello").await;
-            let failure = handle.shutdown().await.unwrap();
-
-            assert!(
-                matches!(
-                    events.as_slice(),
-                    [
-                        Event::StreamToken(token),
-                        Event::UsageUpdated(_),
-                        Event::TurnComplete,
-                    ] if token == "reply"
-                ),
-                "{events:?}"
-            );
-            assert_eq!(failure, None);
-            let data = store.load_session_data(&session_id).unwrap();
-            assert_eq!(
-                data.messages,
-                [Message::user("hello"), Message::assistant("reply")]
-            );
-        })
-        .await;
-    }
-
-    #[tokio::test]
-    async fn run_titles_a_fresh_session_when_interactive_and_counts_the_title_cost() {
-        with_pinned_home(async {
-            let server = MockServer::start().await;
-            mount_title(&server, greeting_title()).await;
-            mount_reply(&server, "reply").await;
-            let dir = tempfile::tempdir().unwrap();
-            let mut engine = engine(server.uri(), &test_store(dir.path()), dir.path()).await;
-            engine.interactive = true;
-            let live_id = engine.session_id().to_owned();
-            let mut handle = engine.spawn(&[]);
-
-            handle
-                .ops
-                .send(Op::Prompt("hello".to_owned()))
-                .await
-                .unwrap();
-            let first = titled_turn_events(&mut handle.events).await;
-            let second = submit(&mut handle, "again").await;
-            handle.shutdown().await.unwrap();
-
-            let titled = first.iter().find_map(|event| match event {
-                Event::SessionTitleUpdated { session_id, title } => {
-                    Some((session_id.as_str(), title.as_str()))
-                }
-                _ => None,
-            });
-            assert_eq!(titled, Some((live_id.as_str(), "Greeting")));
-            let expected = 2.0 * request_cost(MODEL, REPLY_USAGE)
-                + request_cost(TITLE_MODEL, COMPLETION_USAGE);
-            assert!(
-                matches!(
-                    second.as_slice(),
-                    [
-                        Event::StreamToken(_),
-                        Event::UsageUpdated(UsageSnapshot {
-                            estimated_cost_usd: Some(cost),
-                            ..
-                        }),
-                        Event::TurnComplete,
-                    ] if (cost - expected).abs() < 1e-12
-                ),
-                "two turns and the title: {second:?}"
-            );
-        })
-        .await;
-    }
-
-    #[tokio::test]
-    async fn run_saves_the_title_usage_so_a_resume_restores_its_cost() {
-        with_pinned_home(async {
-            let server = MockServer::start().await;
-            mount_title(&server, greeting_title()).await;
-            mount_reply(&server, "reply").await;
-            let dir = tempfile::tempdir().unwrap();
-            let store = test_store(dir.path());
-            let mut engine = engine(server.uri(), &store, dir.path()).await;
-            engine.interactive = true;
-            let session_id = engine.session_id().to_owned();
-            let cache_ttl = engine.client.prompt_cache_ttl();
-            let mut handle = engine.spawn(&[]);
-
-            handle
-                .ops
-                .send(Op::Prompt("hello".to_owned()))
-                .await
-                .unwrap();
-            titled_turn_events(&mut handle.events).await;
-            handle.ops.send(Op::Clear).await.unwrap();
-            next_matching(&mut handle.events, |event| {
-                matches!(event, Event::SessionReady).then_some(())
-            })
+    /// Runs a turn whose echo call `id` spills its output, and returns the session it ran in.
+    async fn spill_echo_output(server: &MockServer, engine: &mut Engine, id: &str) -> String {
+        let input = serde_json::json!({ "text": "x".repeat(300 << 10) });
+        server.reset().await;
+        mount_tool_call_once(server, id, "echo", &input.to_string()).await;
+        mount_reply(server, "done").await;
+        engine
+            .submit_prompt("echo it", &CapturingSink::default(), &mut inert_ops())
             .await;
-            let target = ResumeTarget::Path(store.find_session_path(&session_id).unwrap());
-            handle.ops.send(Op::Resume { target }).await.unwrap();
-            next_matching(&mut handle.events, |event| {
-                matches!(event, Event::SessionResumed { .. }).then_some(())
-            })
-            .await;
-            let restored = handle.events.recv().await.unwrap();
-            handle.shutdown().await.unwrap();
-
-            let expected =
-                request_cost(MODEL, REPLY_USAGE) + request_cost(TITLE_MODEL, COMPLETION_USAGE);
-            assert!(
-                matches!(
-                    &restored,
-                    Event::UsageUpdated(UsageSnapshot {
-                        context_tokens: None,
-                        estimated_cost_usd: Some(cost),
-                        ..
-                    }) if (cost - expected).abs() < 1e-12
-                ),
-                "the turn and the title: {restored:?}"
-            );
-            let usage = store.load_session_data(&session_id).unwrap().usage;
-            let title_usage: Vec<_> = usage
-                .iter()
-                .filter(|record| record.model == TITLE_MODEL)
-                .collect();
-            assert_eq!(
-                title_usage,
-                [&UsageRecord {
-                    model: TITLE_MODEL.to_owned(),
-                    cache_ttl,
-                    tokens: COMPLETION_USAGE,
-                }]
-            );
-        })
-        .await;
+        engine.session_id().to_owned()
     }
 
-    #[tokio::test]
-    async fn run_splices_a_queued_prompt_in_at_the_next_round_boundary() {
-        with_pinned_home(async {
-            let server = MockServer::start().await;
-            mount_tool_call_once(&server, "call-1", "missing", "{}").await;
-            mount_reply(&server, "done").await;
-            let dir = tempfile::tempdir().unwrap();
-            let engine = engine(server.uri(), &test_store(dir.path()), dir.path()).await;
-            let mut handle = engine.spawn(&[]);
-
-            for op in [
-                Op::Queue("early".to_owned()),
-                Op::Prompt("first".to_owned()),
-                Op::Queue("queued".to_owned()),
-            ] {
-                handle.ops.send(op).await.unwrap();
-            }
-            let events = turn_events(&mut handle.events).await;
-            handle.shutdown().await.unwrap();
-
-            let drained: Vec<_> = events
-                .iter()
-                .filter_map(|event| match event {
-                    Event::PromptDrained(text) => Some(text.as_str()),
-                    _ => None,
-                })
-                .collect();
-            assert_eq!(
-                drained,
-                ["queued"],
-                "a prompt queued between turns is dropped"
-            );
-            let tool_end = events
-                .iter()
-                .position(|event| matches!(event, Event::ToolCallEnd { .. }))
-                .unwrap();
-            assert!(
-                matches!(&events[tool_end + 1], Event::PromptDrained(_)),
-                "{events:?}"
-            );
-            let requests = request_bodies(&server).await;
-            assert_eq!(requests.len(), 2);
-            let messages = requests[1]["messages"].as_array().unwrap();
-            assert_eq!(
-                messages[messages.len() - 2]["content"][0]["type"],
-                "tool_result"
-            );
-            assert_eq!(texts(&requests[1]).last(), Some(&"queued"));
-        })
-        .await;
+    /// The names of the spill files in `artifact_dir`, sorted.
+    fn spill_names(artifact_dir: &Path) -> Vec<String> {
+        let mut names: Vec<_> = std::fs::read_dir(artifact_dir.join("tool-results"))
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+            .collect();
+        names.sort();
+        names
     }
-
-    #[tokio::test]
-    async fn run_compact_replaces_the_transcript_with_the_summary() {
-        with_pinned_home(async {
-            let server = MockServer::start().await;
-            mount_reply(&server, "reply").await;
-            let dir = tempfile::tempdir().unwrap();
-            let store = test_store(dir.path());
-            let engine = engine(server.uri(), &store, dir.path()).await;
-            let session_id = engine.session_id().to_owned();
-            let mut handle = engine.spawn(&[]);
-
-            submit(&mut handle, &pasted_logs()).await;
-            submit(&mut handle, "two").await;
-            handle
-                .ops
-                .send(Op::Compact {
-                    instructions: Some("focus".to_owned()),
-                })
-                .await
-                .unwrap();
-            let compacted = next_matching(&mut handle.events, |event| match event {
-                Event::SessionCompacted {
-                    pre_count,
-                    instructions,
-                    automatic,
-                    ..
-                } => Some((pre_count, instructions, automatic)),
-                _ => None,
-            })
-            .await;
-            submit(&mut handle, "after").await;
-            handle.shutdown().await.unwrap();
-
-            assert_eq!(compacted, (4, Some("focus".to_owned()), false));
-            let requests = request_bodies(&server).await;
-            let after = texts(&requests[3]);
-            assert_eq!(after.len(), 3, "{after:?}");
-            assert!(after[1].contains("reply"), "{after:?}");
-            assert_eq!(after[2], "after");
-            let data = store.load_session_data(&session_id).unwrap();
-            assert_eq!(
-                data.messages[1..],
-                [Message::user("after"), Message::assistant("reply")]
-            );
-        })
-        .await;
-    }
-
-    #[tokio::test]
-    async fn run_resume_continues_the_session_an_id_prefix_names() {
-        with_pinned_home(async {
-            let server = MockServer::start().await;
-            mount_reply(&server, "reply").await;
-            let dir = tempfile::tempdir().unwrap();
-            let store = test_store(dir.path());
-            let target_id = finished_session(&store).await;
-            let engine = engine(server.uri(), &store, dir.path()).await;
-            let mut handle = engine.spawn(&[]);
-
-            let target = ResumeTarget::Prefix(target_id[..8].to_owned());
-            handle.ops.send(Op::Resume { target }).await.unwrap();
-            let resumed = next_matching(&mut handle.events, |event| match event {
-                Event::SessionResumed { id, history, .. } => Some((id, history)),
-                _ => None,
-            })
-            .await;
-            submit(&mut handle, "again").await;
-            handle.shutdown().await.unwrap();
-
-            assert_eq!(
-                resumed,
-                (
-                    target_id.clone(),
-                    vec![
-                        Interaction::UserText("earlier prompt".to_owned()),
-                        Interaction::AssistantText("earlier reply".to_owned()),
-                    ],
-                )
-            );
-            let requests = request_bodies(&server).await;
-            assert_eq!(
-                texts(&requests[0])[1..],
-                ["earlier prompt", "earlier reply", "again"]
-            );
-            let data = store.load_session_data(&target_id).unwrap();
-            assert_eq!(
-                data.messages,
-                [
-                    Message::user("earlier prompt"),
-                    Message::assistant("earlier reply"),
-                    Message::user("again"),
-                    Message::assistant("reply"),
-                ]
-            );
-        })
-        .await;
-    }
-
-    #[tokio::test]
-    async fn run_resume_by_a_prefix_only_the_live_session_matches_fails_and_stays_live() {
-        with_pinned_home(async {
-            let server = MockServer::start().await;
-            mount_reply(&server, "reply").await;
-            let dir = tempfile::tempdir().unwrap();
-            let store = test_store(dir.path());
-            let engine = engine(server.uri(), &store, dir.path()).await;
-            let live_id = engine.session_id().to_owned();
-            let mut handle = engine.spawn(&[]);
-
-            submit(&mut handle, "first").await;
-            let target = ResumeTarget::Prefix(live_id[..8].to_owned());
-            handle.ops.send(Op::Resume { target }).await.unwrap();
-            let failure = next_matching(&mut handle.events, |event| match event {
-                Event::TurnFailed(message) => Some(message),
-                _ => None,
-            })
-            .await;
-            submit(&mut handle, "second").await;
-            handle.shutdown().await.unwrap();
-
-            assert_eq!(
-                failure,
-                format!(
-                    "Resume failed (still on session {prefix}): \
-                     session prefix `{prefix}` matches the live session",
-                    prefix = &live_id[..8],
-                ),
-            );
-            let data = store.load_session_data(&live_id).unwrap();
-            assert_eq!(data.messages.len(), 4, "the live session keeps recording");
-        })
-        .await;
-    }
-
-    #[tokio::test]
-    async fn run_records_every_request_so_a_resume_restores_the_session_cost() {
-        with_pinned_home(async {
-            let server = MockServer::start().await;
-            mount_reply(&server, "reply").await;
-            let dir = tempfile::tempdir().unwrap();
-            let store = test_store(dir.path());
-            let engine = engine(server.uri(), &store, dir.path()).await;
-            let session_id = engine.session_id().to_owned();
-            let mut handle = engine.spawn(&[]);
-
-            submit(&mut handle, &pasted_logs()).await;
-            submit(&mut handle, "two").await;
-            handle
-                .ops
-                .send(Op::Compact { instructions: None })
-                .await
-                .unwrap();
-            next_matching(&mut handle.events, |event| {
-                matches!(event, Event::SessionReady).then_some(())
-            })
-            .await;
-            submit(&mut handle, "after").await;
-            handle.ops.send(Op::Clear).await.unwrap();
-            next_matching(&mut handle.events, |event| {
-                matches!(event, Event::SessionReady).then_some(())
-            })
-            .await;
-            let fresh = submit(&mut handle, "fresh").await;
-            let target = ResumeTarget::Path(store.find_session_path(&session_id).unwrap());
-            handle.ops.send(Op::Resume { target }).await.unwrap();
-            next_matching(&mut handle.events, |event| {
-                matches!(event, Event::SessionResumed { .. }).then_some(())
-            })
-            .await;
-            let restored = handle.events.recv().await.unwrap();
-            handle.shutdown().await.unwrap();
-
-            assert!(
-                matches!(
-                    fresh.as_slice(),
-                    [
-                        Event::StreamToken(_),
-                        Event::UsageUpdated(UsageSnapshot {
-                            estimated_cost_usd: Some(cost),
-                            ..
-                        }),
-                        Event::TurnComplete,
-                    ] if (cost - 0.006).abs() < 1e-12
-                ),
-                "a cleared session starts its own cost: {fresh:?}"
-            );
-            assert!(
-                matches!(
-                    &restored,
-                    Event::UsageUpdated(UsageSnapshot {
-                        context_tokens: None,
-                        estimated_cost_usd: Some(cost),
-                        ..
-                    }) if (cost - 4.0 * 0.006).abs() < 1e-12
-                ),
-                "three turns and the summary: {restored:?}"
-            );
-        })
-        .await;
-    }
-
-    #[tokio::test]
-    async fn run_archive_rolls_away_and_a_resume_unarchives_the_session() {
-        with_pinned_home(async {
-            let server = MockServer::start().await;
-            mount_reply(&server, "reply").await;
-            let dir = tempfile::tempdir().unwrap();
-            let store = test_store(dir.path());
-            let engine = engine(server.uri(), &store, dir.path()).await;
-            let archived_id = engine.session.session_id().to_owned();
-            let mut handle = engine.spawn(&[]);
-
-            submit(&mut handle, "first").await;
-            handle.ops.send(Op::Archive).await.unwrap();
-            let (fresh_id, archived) = next_matching(&mut handle.events, |event| match event {
-                Event::SessionRolled { id, archived } => Some((id, archived)),
-                _ => None,
-            })
-            .await;
-            assert_ne!(fresh_id, archived_id);
-            assert!(archived);
-            assert!(store.load_session_data(&archived_id).unwrap().archived);
-
-            let target = ResumeTarget::Path(store.find_session_path(&archived_id).unwrap());
-            handle.ops.send(Op::Resume { target }).await.unwrap();
-            let resumed = next_matching(&mut handle.events, |event| match event {
-                Event::SessionResumed { id, unarchived, .. } => Some((id, unarchived)),
-                _ => None,
-            })
-            .await;
-            handle.shutdown().await.unwrap();
-
-            assert_eq!(resumed, (archived_id.clone(), true));
-            assert!(!store.load_session_data(&archived_id).unwrap().archived);
-        })
-        .await;
-    }
-
-    #[tokio::test]
-    async fn run_applies_rename_and_config_ops_until_shutdown() {
-        with_pinned_home(async {
-            let server = MockServer::start().await;
-            let dir = tempfile::tempdir().unwrap();
-            let engine = engine(server.uri(), &test_store(dir.path()), dir.path()).await;
-            let live_id = engine.session_id().to_owned();
-            let EngineHandle {
-                ops,
-                mut events,
-                task,
-            } = engine.spawn(&[]);
-
-            for op in [
-                Op::Rename {
-                    title: "Fix login".to_owned(),
-                },
-                Op::SetModel(ConfigPick::Effort(Effort::Low)),
-                Op::SetMode(Mode::Plan),
-                Op::Shutdown,
-            ] {
-                ops.send(op).await.unwrap();
-            }
-            let failure = tokio::time::timeout(Duration::from_secs(5), task.join())
-                .await
-                .expect("Shutdown stops the engine while its op channel is still open")
-                .unwrap();
-            let mut seen = Vec::new();
-            while let Ok(event) = events.try_recv() {
-                seen.push(event);
-            }
-
-            assert_eq!(failure, None);
-            assert!(
-                matches!(
-                    seen.as_slice(),
-                    [
-                        Event::SessionTitleUpdated { session_id, title },
-                        Event::ConfigChanged {
-                            requested: ConfigPick::Effort(Effort::Low),
-                            ..
-                        },
-                        Event::ModeChanged(Mode::Plan),
-                    ] if *session_id == live_id && title == "Fix login"
-                ),
-                "{seen:?}"
-            );
-        })
-        .await;
-    }
-
-    #[tokio::test]
-    async fn run_shutdown_before_any_prompt_leaves_no_session_file() {
-        with_pinned_home(async {
-            let server = MockServer::start().await;
-            let dir = tempfile::tempdir().unwrap();
-            let store = test_store(dir.path());
-            let handle = engine(server.uri(), &store, dir.path()).await.spawn(&[]);
-
-            handle.ops.send(Op::Shutdown).await.unwrap();
-            assert_eq!(handle.task.join().await.unwrap(), None);
-
-            assert!(store.list().unwrap().is_empty());
-        })
-        .await;
-    }
-
-    #[tokio::test]
-    async fn run_finalizes_the_live_session_after_a_clear() {
-        with_pinned_home(async {
-            let server = MockServer::start().await;
-            mount_reply(&server, "reply").await;
-            let dir = tempfile::tempdir().unwrap();
-            let store = test_store(dir.path());
-            let engine = engine(server.uri(), &store, dir.path()).await;
-            let tracker = Arc::clone(&engine.file_tracker);
-            let read_path = dir.path().join("read.txt");
-            std::fs::write(&read_path, "contents").unwrap();
-            let mut handle = engine.spawn(&[]);
-
-            handle.ops.send(Op::Clear).await.unwrap();
-            let live_id = next_matching(&mut handle.events, |event| match event {
-                Event::SessionRolled {
-                    id,
-                    archived: false,
-                } => Some(id),
-                _ => None,
-            })
-            .await;
-            seed_full_read(&tracker, &read_path);
-            submit(&mut handle, "after clear").await;
-            handle.shutdown().await.unwrap();
-
-            let snapshots = store.load_session_data(&live_id).unwrap().file_snapshots;
-            let paths: Vec<_> = snapshots.iter().map(|snapshot| &snapshot.path).collect();
-            assert_eq!(paths, [&read_path]);
-        })
-        .await;
-    }
-
-    #[tokio::test]
-    async fn run_reports_the_background_shells_and_ends_them_on_shutdown() {
-        with_pinned_home(async {
-            let server = MockServer::start().await;
-            let dir = tempfile::tempdir().unwrap();
-            let store = test_store(dir.path());
-            let engine = engine(server.uri(), &store, dir.path()).await;
-            let shells = Arc::clone(&engine.shells);
-            let mut handle = engine.spawn(&[]);
-
-            start_shell(&shells, "sleep 30");
-            let listed = next_matching(&mut handle.events, |event| match event {
-                Event::BackgroundShellsUpdated(list) => Some(list),
-                _ => None,
-            })
-            .await;
-            handle.shutdown().await.unwrap();
-
-            assert_eq!(listed, [shell("shell-1", "sleep 30", ShellState::Running)]);
-            assert_eq!(shells.list(), []);
-        })
-        .await;
-    }
-
-    #[tokio::test]
-    async fn run_interrupts_mark_each_abandoned_prompt_before_the_next_one() {
-        with_pinned_home(async {
-            let server = MockServer::start().await;
-            mount_stalled_reply_once(&server).await;
-            mount_stalled_reply_once(&server).await;
-            mount_reply(&server, "42").await;
-            let dir = tempfile::tempdir().unwrap();
-            let store = test_store(dir.path());
-            let engine = engine(server.uri(), &store, dir.path()).await;
-            let live_id = engine.session_id().to_owned();
-            let mut handle = engine.spawn(&[]);
-
-            let mut cancelled = Vec::new();
-            for (count, prompt) in [(1, "write a story"), (2, "write a poem")] {
-                handle
-                    .ops
-                    .send(Op::Prompt(prompt.to_owned()))
-                    .await
-                    .unwrap();
-                until_requested(&server, count).await;
-                handle.ops.send(Op::Interrupt).await.unwrap();
-                cancelled.extend(turn_events(&mut handle.events).await);
-            }
-            let next = submit(&mut handle, "what is 7 times 6?").await;
-            handle.shutdown().await.unwrap();
-
-            assert_eq!(cancelled, [Event::Cancelled, Event::Cancelled]);
-            assert!(matches!(next.last(), Some(Event::TurnComplete)));
-            let requests = request_bodies(&server).await;
-            assert_eq!(
-                texts(&requests[2])[1..],
-                [
-                    "write a story",
-                    "[Request interrupted by user]",
-                    "write a poem",
-                    "[Request interrupted by user]",
-                    "what is 7 times 6?",
-                ]
-            );
-            let data = store.load_session_data(&live_id).unwrap();
-            assert_eq!(
-                data.messages,
-                [
-                    Message::user("write a story"),
-                    Message::interruption(),
-                    Message::user("write a poem"),
-                    Message::interruption(),
-                    Message::user("what is 7 times 6?"),
-                    Message::assistant("42"),
-                ]
-            );
-        })
-        .await;
-    }
-
-    #[tokio::test]
-    async fn run_interrupt_during_auto_compaction_ends_the_prompt_before_the_model_sees_it() {
-        with_pinned_home(async {
-            let server = MockServer::start().await;
-            mount_stalled_reply_once(&server).await;
-            let dir = tempfile::tempdir().unwrap();
-            let store = test_store(dir.path());
-            let mut engine = engine(server.uri(), &store, dir.path()).await;
-            engine.compaction = CompactionConfig::with_threshold_for_test(50_000);
-            engine.messages = tool_heavy_transcript();
-            engine.last_usage = Some(TokenUsage::new(50_000, 1));
-            let mut handle = engine.spawn(&[]);
-
-            handle
-                .ops
-                .send(Op::Prompt("five".to_owned()))
-                .await
-                .unwrap();
-            until_requested(&server, 1).await;
-            handle.ops.send(Op::Interrupt).await.unwrap();
-            let events = turn_events(&mut handle.events).await;
-            handle.shutdown().await.unwrap();
-
-            assert!(
-                matches!(
-                    events.as_slice(),
-                    [Event::AutoCompactionStarted, Event::Cancelled]
-                ),
-                "{events:?}"
-            );
-            assert_eq!(
-                request_bodies(&server).await.len(),
-                1,
-                "the prompt never reaches the model"
-            );
-            assert!(
-                store.list().unwrap().is_empty(),
-                "neither the prompt nor an interruption marker is recorded",
-            );
-        })
-        .await;
-    }
-
-    #[tokio::test]
-    async fn run_shutdown_mid_request_stops_without_a_terminal_event() {
-        with_pinned_home(async {
-            for (label, op) in [
-                ("prompt", Op::Prompt("mid stream".to_owned())),
-                ("compaction", Op::Compact { instructions: None }),
-            ] {
-                let server = MockServer::start().await;
-                mount_stalled_reply_once(&server).await;
-                let dir = tempfile::tempdir().unwrap();
-                let mut engine = engine(server.uri(), &test_store(dir.path()), dir.path()).await;
-                engine.messages = tool_heavy_transcript();
-                let EngineHandle {
-                    ops,
-                    mut events,
-                    task,
-                } = engine.spawn(&[]);
-
-                ops.send(op).await.unwrap();
-                until_requested(&server, 1).await;
-                ops.send(Op::Shutdown).await.unwrap();
-                let failure = tokio::time::timeout(Duration::from_secs(5), task.join())
-                    .await
-                    .unwrap_or_else(|_| {
-                        panic!("Shutdown stops a {label} while the op channel is open")
-                    })
-                    .unwrap();
-
-                assert_eq!(failure, None, "{label}");
-                assert!(events.try_recv().is_err(), "{label}");
-            }
-        })
-        .await;
-    }
-
-    #[tokio::test]
-    async fn run_finalizes_when_the_op_channel_closes_mid_stream() {
-        with_pinned_home(async {
-            let server = MockServer::start().await;
-            mount_stalled_reply_once(&server).await;
-            let dir = tempfile::tempdir().unwrap();
-            let store = test_store(dir.path());
-            let engine = engine(server.uri(), &store, dir.path()).await;
-            let live_id = engine.session_id().to_owned();
-            let read_path = dir.path().join("read.txt");
-            std::fs::write(&read_path, "contents").unwrap();
-            seed_full_read(&engine.file_tracker, &read_path);
-            let handle = engine.spawn(&[]);
-
-            handle
-                .ops
-                .send(Op::Prompt("mid stream".to_owned()))
-                .await
-                .unwrap();
-            until_requested(&server, 1).await;
-            tokio::time::timeout(Duration::from_secs(5), handle.shutdown())
-                .await
-                .expect("the engine must stop waiting on the stream")
-                .unwrap();
-
-            let data = store.load_session_data(&live_id).unwrap();
-            assert_eq!(
-                data.messages,
-                [Message::user("mid stream"), Message::interruption()]
-            );
-            let paths: Vec<_> = data
-                .file_snapshots
-                .iter()
-                .map(|snapshot| &snapshot.path)
-                .collect();
-            assert_eq!(paths, [&read_path]);
-        })
-        .await;
-    }
-
-    #[tokio::test]
-    async fn run_serves_login_and_logout_and_ends_a_sign_in_on_interrupt_or_shutdown() {
-        with_pinned_home(async {
-            let server = MockServer::start().await;
-            let dir = tempfile::tempdir().unwrap();
-            let data = tempfile::tempdir().unwrap();
-            temp_env::async_with_vars([("XDG_DATA_HOME", Some(data.path()))], async {
-                let engine = engine(server.uri(), &test_store(dir.path()), dir.path()).await;
-                let EngineHandle {
-                    ops,
-                    mut events,
-                    task,
-                } = engine.spawn(&[]);
-
-                ops.send(Op::Login).await.unwrap();
-                let url = login_url(&mut events).await;
-                ops.send(Op::Interrupt).await.unwrap();
-                let cancelled = events.recv().await;
-                ops.send(Op::Logout).await.unwrap();
-                let signed_out = events.recv().await;
-                ops.send(Op::Login).await.unwrap();
-                login_url(&mut events).await;
-                ops.send(Op::Shutdown).await.unwrap();
-                let failure = tokio::time::timeout(Duration::from_secs(5), task.join())
-                    .await
-                    .expect("Shutdown stops the engine mid sign-in")
-                    .unwrap();
-
-                assert!(
-                    url.starts_with("https://claude.ai/oauth/authorize?"),
-                    "{url}"
-                );
-                assert!(matches!(cancelled, Some(Event::Cancelled)), "{cancelled:?}");
-                assert!(
-                    matches!(
-                        signed_out,
-                        Some(Event::SignedOut {
-                            removed: false,
-                            auth: Some(AuthSource::ApiKeyEnv),
-                            fallback_error: None,
-                        })
-                    ),
-                    "{signed_out:?}"
-                );
-                assert_eq!(failure, None);
-            })
-            .await;
-        })
-        .await;
-    }
-
-    // ── submit_prompt ──
-
-    #[tokio::test]
-    async fn submit_prompt_keeps_the_prefix_and_sends_a_date_change_as_a_reminder() {
-        with_pinned_home(async {
-            let server = MockServer::start().await;
-            mount_reply(&server, "reply").await;
-            let dir = tempfile::tempdir().unwrap();
-            let store = test_store(dir.path());
-            let mut engine = engine(server.uri(), &store, dir.path()).await;
-            let today = engine.prompt.seen.date.clone();
-            let sink = CapturingSink::default();
-            let mut ops = inert_ops();
-
-            let end = engine.submit_prompt("first", &sink, &mut ops).await;
-            assert_eq!(end, TurnEnd::Completed);
-            "2000-01-01".clone_into(&mut engine.prompt.seen.date);
-            let end = engine.submit_prompt("second", &sink, &mut ops).await;
-            assert_eq!(end, TurnEnd::Completed);
-
-            let turns = request_bodies(&server).await;
-            assert_eq!(
-                turns.len(),
-                2,
-                "non-interactive turns must not request a title"
-            );
-            assert_eq!(system_prompt(&turns[1]), system_prompt(&turns[0]));
-            let (first, second) = (&turns[0]["messages"], &turns[1]["messages"]);
-            assert_eq!(first[0]["content"][0]["text"], SESSION_CONTEXT);
-            assert_eq!(second[0], first[0], "the first message must not change");
-            assert_eq!(second[1]["content"][0]["text"], "first");
-            assert_eq!(second[2]["content"][0]["text"], "reply");
-            let prompt = second[3]["content"].as_array().unwrap();
-            assert_eq!(prompt[0]["text"], "second");
-            let reminder = prompt[1]["text"].as_str().unwrap();
-            assert!(
-                reminder.contains(&format!("Today's date is {today}.")),
-                "{reminder}"
-            );
-            assert!(!reminder.contains("# CLAUDE.md"), "{reminder}");
-
-            let id = engine.session.session_id().to_owned();
-            let expected = engine.prompt.session_context();
-            engine.finalize().await;
-            let data = store.load_session_data(&id).unwrap();
-            assert_eq!(data.context, Some(expected));
-            assert!(matches!(
-                &data.messages[2].content[..],
-                [_, ContentBlock::Text { text }] if text == reminder
-            ));
-        })
-        .await;
-    }
-
-    #[tokio::test]
-    async fn submit_prompt_shows_an_instruction_warning_each_time_it_appears() {
-        with_pinned_home(async {
-            let server = MockServer::start().await;
-            mount_reply(&server, "reply").await;
-            let dir = tempfile::tempdir().unwrap();
-            let mut engine = engine(server.uri(), &test_store(dir.path()), dir.path()).await;
-            let sink = CapturingSink::default();
-            let mut ops = inert_ops();
-            let warning = write_unreadable_instructions(dir.path());
-
-            engine.submit_prompt("broken", &sink, &mut ops).await;
-            engine.submit_prompt("still broken", &sink, &mut ops).await;
-            std::fs::write(dir.path().join("CLAUDE.md"), "Fixed rules.").unwrap();
-            engine.submit_prompt("fixed", &sink, &mut ops).await;
-            write_unreadable_instructions(dir.path());
-            engine.submit_prompt("broken again", &sink, &mut ops).await;
-
-            let notices: Vec<String> = sink
-                .events()
-                .into_iter()
-                .filter_map(|event| match event {
-                    Event::Notice(notice) => Some(notice),
-                    _ => None,
-                })
-                .collect();
-            assert_eq!(notices, [warning.clone(), warning]);
-        })
-        .await;
-    }
-
-    #[tokio::test]
-    async fn submit_prompt_reports_usage_and_accumulates_cost_across_turns() {
-        with_pinned_home(async {
-            let server = MockServer::start().await;
-            mount_reply(&server, "reply").await;
-            let dir = tempfile::tempdir().unwrap();
-            let mut engine = engine(server.uri(), &test_store(dir.path()), dir.path()).await;
-            let sink = CapturingSink::default();
-            let mut ops = inert_ops();
-
-            for text in ["first", "second"] {
-                engine.submit_prompt(text, &sink, &mut ops).await;
-            }
-
-            let usage = sink
-                .events()
-                .into_iter()
-                .rev()
-                .find_map(|event| match event {
-                    Event::UsageUpdated(usage) => Some(usage),
-                    _ => None,
-                });
-            let usage = usage.expect("each turn reports usage");
-            assert_eq!(usage.context_tokens, Some(1_000));
-            assert_eq!(usage.context_window, Some(1_000_000));
-            let cost = usage.estimated_cost_usd.unwrap();
-            assert!(
-                (cost - 0.012).abs() < 1e-12,
-                "two turns at $0.006 each: {cost}"
-            );
-        })
-        .await;
-    }
-
-    #[tokio::test]
-    async fn submit_prompt_bills_nothing_for_a_title_request_that_fails() {
-        with_pinned_home(async {
-            let server = MockServer::start().await;
-            let failure = ResponseTemplate::new(500).insert_header("retry-after", "0");
-            mount_title(&server, failure).await;
-            mount_reply(&server, "reply").await;
-            let dir = tempfile::tempdir().unwrap();
-            let store = test_store(dir.path());
-            let mut engine = engine(server.uri(), &store, dir.path()).await;
-            engine.interactive = true;
-            let session_id = engine.session_id().to_owned();
-            let cache_ttl = engine.client.prompt_cache_ttl();
-            let sink = CapturingSink::default();
-
-            engine.submit_prompt("hello", &sink, &mut inert_ops()).await;
-            let title = engine.title_usage.as_mut().expect("a fresh session titles");
-            let delivered = title.await;
-            engine.emit_usage_update(&sink);
-            engine.finalize().await;
-
-            assert!(delivered.is_err(), "the failed request delivers no usage");
-            let shown = sink
-                .events()
-                .into_iter()
-                .rev()
-                .find_map(|event| match event {
-                    Event::UsageUpdated(usage) => usage.estimated_cost_usd,
-                    _ => None,
-                });
-            let expected = request_cost(MODEL, REPLY_USAGE);
-            assert!(
-                shown.is_some_and(|cost| (cost - expected).abs() < 1e-12),
-                "only the turn counts: {shown:?}"
-            );
-            let data = store.load_session_data(&session_id).unwrap();
-            assert_eq!(
-                data.usage,
-                [UsageRecord {
-                    model: MODEL.to_owned(),
-                    cache_ttl,
-                    tokens: REPLY_USAGE,
-                }]
-            );
-        })
-        .await;
-    }
-
-    #[tokio::test]
-    async fn submit_prompt_adopts_the_task_list_a_tasks_call_sets() {
-        with_pinned_home(async {
-            let server = MockServer::start().await;
-            let input = serde_json::json!({ "tasks": plan() }).to_string();
-            mount_tool_call_once(&server, "call-1", "tasks", &input).await;
-            mount_reply(&server, "done").await;
-            let dir = tempfile::tempdir().unwrap();
-            let mut engine = engine(server.uri(), &test_store(dir.path()), dir.path())
-                .await
-                .with_tools(ToolRegistry::new(vec![Box::new(TasksTool)]));
-            let sink = CapturingSink::default();
-            let mut ops = inert_ops();
-
-            let end = engine.submit_prompt("plan it", &sink, &mut ops).await;
-
-            assert_eq!(end, TurnEnd::Completed);
-            assert_eq!(engine.tasks, plan());
-            let events = sink.events();
-            let updated = events
-                .iter()
-                .position(|event| matches!(event, Event::TasksUpdated(_)))
-                .expect("the tasks call reports the new list");
-            assert!(
-                matches!(&events[updated - 1], Event::ToolCallEnd(result) if result.id == "call-1"),
-                "{events:?}"
-            );
-            assert_eq!(events[updated], Event::TasksUpdated(plan()));
-        })
-        .await;
-    }
-
-    #[tokio::test]
-    async fn submit_prompt_keeps_the_list_through_a_later_round_that_sets_none() {
-        with_pinned_home(async {
-            let server = MockServer::start().await;
-            let planned = serde_json::json!({ "tasks": plan() }).to_string();
-            let rejected = serde_json::json!({ "tasks": [
-                {"content": "Fix the parser", "status": "in_progress"},
-                {"content": "Fix the lexer", "status": "in_progress"},
-            ]})
-            .to_string();
-            mount_tool_call_once(&server, "call-1", "tasks", &planned).await;
-            mount_tool_call_once(&server, "call-2", "tasks", &rejected).await;
-            mount_reply(&server, "done").await;
-            let dir = tempfile::tempdir().unwrap();
-            let mut engine = engine(server.uri(), &test_store(dir.path()), dir.path())
-                .await
-                .with_tools(ToolRegistry::new(vec![Box::new(TasksTool)]));
-            let mut ops = inert_ops();
-
-            let end = engine
-                .submit_prompt("plan it", &CapturingSink::default(), &mut ops)
-                .await;
-
-            assert_eq!(end, TurnEnd::Completed);
-            assert_eq!(server.received_requests().await.unwrap().len(), 3);
-            assert_eq!(engine.tasks, plan());
-        })
-        .await;
-    }
-
-    #[tokio::test]
-    async fn submit_prompt_adopts_the_list_of_a_turn_that_fails_after_the_call() {
-        with_pinned_home(async {
-            let server = MockServer::start().await;
-            let input = serde_json::json!({ "tasks": plan() }).to_string();
-            mount_tool_call_once(&server, "call-1", "tasks", &input).await;
-            let dir = tempfile::tempdir().unwrap();
-            let mut engine = engine(server.uri(), &test_store(dir.path()), dir.path())
-                .await
-                .with_tools(ToolRegistry::new(vec![Box::new(TasksTool)]));
-            engine.max_tool_rounds = Some(1);
-            let mut ops = inert_ops();
-
-            let end = engine
-                .submit_prompt("plan it", &CapturingSink::default(), &mut ops)
-                .await;
-
-            assert_eq!(end, TurnEnd::Failed);
-            assert_eq!(engine.tasks, plan());
-        })
-        .await;
-    }
-
-    #[tokio::test]
-    async fn submit_prompt_auto_compacts_before_recording_the_new_prompt() {
-        with_pinned_home(async {
-            let server = MockServer::start().await;
-            mount_reply(&server, "auto summary").await;
-            let dir = tempfile::tempdir().unwrap();
-            let mut engine = engine(server.uri(), &test_store(dir.path()), dir.path()).await;
-            engine.compaction = CompactionConfig::with_threshold_for_test(50_000);
-            engine.messages = tool_heavy_transcript();
-            engine.last_usage = Some(TokenUsage::new(50_000, 1));
-            engine.displayed_usage = engine.last_usage;
-            engine.total_estimated_cost_usd = 1.23;
-            engine.auto_compaction_failures = AutoCompactFailures::new(2);
-            let sink = CapturingSink::default();
-            let mut ops = inert_ops();
-
-            let end = engine.submit_prompt("five", &sink, &mut ops).await;
-
-            assert_eq!(end, TurnEnd::Completed);
-            assert_eq!(
-                engine.auto_compaction_failures,
-                AutoCompactFailures::default(),
-                "a success resets the failure count"
-            );
-            let requests = request_bodies(&server).await;
-            assert_eq!(requests.len(), 2);
-            assert_eq!(
-                requests[0]["messages"][0]["content"][0]["text"], SESSION_CONTEXT,
-                "the summary forks the engine's own prompt",
-            );
-            let turn = requests[1]["messages"].as_array().unwrap();
-            assert!(
-                turn[1]["content"][0]["text"]
-                    .as_str()
-                    .unwrap()
-                    .contains("auto summary"),
-                "the turn must start from the summary: {turn:?}",
-            );
-            assert_eq!(turn.last().unwrap()["content"][0]["text"], "five");
-            assert!(matches!(
-                &engine.messages[0].content[0],
-                ContentBlock::Text { text } if text.contains("auto summary")
-            ));
-            assert_eq!(engine.messages.len(), 3);
-            assert_eq!(engine.last_usage, Some(TokenUsage::new(1_000, 100)));
-            assert!(
-                (engine.total_estimated_cost_usd - (1.23 + 0.006 + 0.006)).abs() < 1e-12,
-                "the session cost keeps earlier turns and adds the summary and the turn: {}",
-                engine.total_estimated_cost_usd,
-            );
-            let events = sink.events();
-            let compacted = events
-                .iter()
-                .position(|event| {
-                    matches!(
-                        event,
-                        Event::SessionCompacted {
-                            automatic: true,
-                            ..
-                        }
-                    )
-                })
-                .unwrap();
-            let Event::UsageUpdated(usage) = &events[compacted + 1] else {
-                panic!("the summary's cost shows right after the compaction: {events:?}");
-            };
-            assert_eq!(usage.context_tokens, None);
-            assert!((usage.estimated_cost_usd.unwrap() - (1.23 + 0.006)).abs() < 1e-12);
-            let completed = events
-                .iter()
-                .position(|event| matches!(event, Event::TurnComplete));
-            assert!(compacted < completed.unwrap());
-        })
-        .await;
-    }
-
-    #[tokio::test]
-    async fn submit_prompt_fails_without_sending_the_prompt_when_auto_compaction_fails() {
-        with_pinned_home(async {
-            let server = MockServer::start().await;
-            mount_reply(&server, "   ").await;
-            let dir = tempfile::tempdir().unwrap();
-            let store = test_store(dir.path());
-            let mut engine = engine(server.uri(), &store, dir.path()).await;
-            engine.compaction = CompactionConfig::with_threshold_for_test(50_000);
-            engine.messages = tool_heavy_transcript();
-            engine.last_usage = Some(TokenUsage::new(50_000, 1));
-            let sink = CapturingSink::default();
-            let mut ops = inert_ops();
-
-            let end = engine.submit_prompt("five", &sink, &mut ops).await;
-
-            assert_eq!(end, TurnEnd::Failed);
-            assert_eq!(engine.messages, tool_heavy_transcript());
-            assert_eq!(engine.auto_compaction_failures, AutoCompactFailures::new(1));
-            assert_eq!(
-                request_bodies(&server).await.len(),
-                1,
-                "only the summary request goes out"
-            );
-            let data = store.load_session_data(engine.session_id()).unwrap();
-            assert_eq!(data.messages, [] as [Message; 0]);
-            let events = sink.events();
-            assert!(
-                matches!(
-                    events.as_slice(),
-                    [
-                        Event::AutoCompactionStarted,
-                        Event::SummaryToken(token),
-                        Event::SummaryDiscarded,
-                        Event::UsageUpdated(_),
-                        Event::TurnFailed(error),
-                    ] if token == "   "
-                        && error == "Auto-compaction failed: the model returned an empty summary. \
-                                     The prompt was not sent, so send it again to retry."
-                ),
-                "{events:?}"
-            );
-        })
-        .await;
-    }
-
-    #[tokio::test]
-    async fn submit_prompt_keeps_a_mode_switch_sent_during_a_failed_auto_compaction() {
-        with_pinned_home(async {
-            let server = MockServer::start().await;
-            mount_reply(&server, "   ").await;
-            let dir = tempfile::tempdir().unwrap();
-            let mut engine = engine(server.uri(), &test_store(dir.path()), dir.path()).await;
-            engine.compaction = CompactionConfig::with_threshold_for_test(50_000);
-            engine.messages = tool_heavy_transcript();
-            engine.last_usage = Some(TokenUsage::new(50_000, 1));
-            let sink = CapturingSink::default();
-            let (ops_tx, mut ops) = mpsc::channel(1);
-            ops_tx.try_send(Op::SetMode(Mode::Plan)).unwrap();
-
-            let end = engine.submit_prompt("five", &sink, &mut ops).await;
-
-            assert_eq!(end, TurnEnd::Failed);
-            assert_eq!(engine.policy.mode(), Mode::Plan);
-        })
-        .await;
-    }
-
-    #[tokio::test]
-    async fn submit_prompt_fails_while_signed_out_without_sending_a_request() {
-        with_pinned_home(async {
-            let server = MockServer::start().await;
-            mount_reply(&server, "reply").await;
-            let dir = tempfile::tempdir().unwrap();
-            let mut engine = engine(server.uri(), &test_store(dir.path()), dir.path()).await;
-            engine.client.set_auth(None);
-            let sink = CapturingSink::default();
-            let mut ops = inert_ops();
-
-            let end = engine.submit_prompt("hello", &sink, &mut ops).await;
-
-            assert_eq!(end, TurnEnd::Failed);
-            assert_eq!(engine.messages, [] as [Message; 0]);
-            assert_eq!(request_bodies(&server).await, [] as [serde_json::Value; 0]);
-            let events = sink.events();
-            assert!(
-                matches!(
-                    events.as_slice(),
-                    [Event::TurnFailed(msg)] if msg == "Not signed in. Run `/login` to sign in."
-                ),
-                "{events:?}"
-            );
-        })
-        .await;
-    }
-
-    // ── compact ──
-
-    #[tokio::test]
-    async fn compact_replaces_the_transcript_bills_the_summary_and_resumes_auto_compaction() {
-        with_pinned_home(async {
-            let server = MockServer::start().await;
-            mount_reply(&server, "manual summary").await;
-            let dir = tempfile::tempdir().unwrap();
-            let mut engine = engine(server.uri(), &test_store(dir.path()), dir.path()).await;
-            engine.messages = tool_heavy_transcript();
-            engine.displayed_usage = Some(TokenUsage::new(90_000, 9));
-            engine.total_estimated_cost_usd = 1.23;
-            engine.auto_compaction_failures = AutoCompactFailures::new(3);
-            let sink = CapturingSink::default();
-            let mut ops = inert_ops();
-
-            let end = engine
-                .compact(&sink, &mut ops, Some("focus".to_owned()))
-                .await;
-
-            assert_eq!(end, TurnEnd::Completed);
-            assert!(matches!(
-                engine.messages.as_slice(),
-                [Message { content, .. }] if matches!(
-                    &content[0],
-                    ContentBlock::Text { text } if text.contains("manual summary")
-                )
-            ));
-            assert_eq!(engine.displayed_usage, None);
-            assert!(
-                (engine.total_estimated_cost_usd - (1.23 + 0.006)).abs() < 1e-12,
-                "the session cost keeps earlier turns and adds the summary: {}",
-                engine.total_estimated_cost_usd,
-            );
-            assert_ne!(
-                engine.prompt.user_context, SESSION_CONTEXT,
-                "the compacted transcript starts from a fresh user context"
-            );
-            assert!(engine.prompt_unrecorded);
-            assert_eq!(
-                engine.auto_compaction_failures,
-                AutoCompactFailures::default()
-            );
-            let events = sink.events();
-            let [
-                Event::SummaryToken(streamed),
-                Event::SessionCompacted {
-                    automatic: false,
-                    instructions: Some(focus),
-                    ..
-                },
-                Event::AutoCompactionResumed,
-                Event::UsageUpdated(usage),
-                Event::SessionReady,
-            ] = events.as_slice()
-            else {
-                panic!("expected the summary, compaction, resume, cost, then the end: {events:?}");
-            };
-            assert_eq!(streamed, "manual summary");
-            assert_eq!(focus, "focus");
-            assert_eq!(usage.context_tokens, None);
-            assert!((usage.estimated_cost_usd.unwrap() - (1.23 + 0.006)).abs() < 1e-12);
-        })
-        .await;
-    }
-
-    #[tokio::test]
-    async fn compact_carries_the_task_list_into_the_summary_and_through_a_resume() {
-        with_pinned_home(async {
-            let server = MockServer::start().await;
-            mount_reply(&server, "manual summary").await;
-            let dir = tempfile::tempdir().unwrap();
-            let store = test_store(dir.path());
-            let mut engine = engine(server.uri(), &store, dir.path()).await;
-            let session_id = engine.session_id().to_owned();
-            engine.messages = tool_heavy_transcript();
-            engine.tasks = plan();
-            let mut ops = inert_ops();
-
-            let end = engine
-                .compact(&CapturingSink::default(), &mut ops, None)
-                .await;
-
-            assert_eq!(end, TurnEnd::Completed);
-            assert_eq!(
-                engine.messages,
-                [synthesize_post_compact_message(
-                    "manual summary",
-                    &plan(),
-                    &[]
-                )]
-            );
-            assert_eq!(engine.tasks, plan());
-
-            engine.clear(&CapturingSink::default()).await;
-            let compacted = store.find_session_path(&session_id).unwrap();
-            engine
-                .resume(&CapturingSink::default(), ResumeTarget::Path(compacted))
-                .await;
-
-            assert_eq!(engine.session_id(), session_id);
-            assert_eq!(engine.tasks, plan());
-        })
-        .await;
-    }
-
-    #[tokio::test]
-    async fn compact_lists_the_open_background_shells_in_the_summary_message() {
-        with_pinned_home(async {
-            let server = MockServer::start().await;
-            mount_reply(&server, "manual summary").await;
-            let dir = tempfile::tempdir().unwrap();
-            let store = test_store(dir.path());
-            let mut engine = engine(server.uri(), &store, dir.path()).await;
-            engine.messages = tool_heavy_transcript();
-            start_shell(&engine.shells, "sleep 30");
-            let mut ops = inert_ops();
-
-            let end = engine
-                .compact(&CapturingSink::default(), &mut ops, None)
-                .await;
-
-            assert_eq!(end, TurnEnd::Completed);
-            assert_eq!(
-                engine.messages,
-                [synthesize_post_compact_message(
-                    "manual summary",
-                    &[],
-                    &[shell("shell-1", "sleep 30", ShellState::Running)],
-                )]
-            );
-            engine.shells.stop_all().await;
-        })
-        .await;
-    }
-
-    #[tokio::test]
-    async fn compact_failure_or_cancel_keeps_the_transcript() {
-        with_pinned_home(async {
-            let server = MockServer::start().await;
-            mount_reply(&server, "summary").await;
-            let dir = tempfile::tempdir().unwrap();
-            let mut engine = engine(server.uri(), &test_store(dir.path()), dir.path()).await;
-            let sink = CapturingSink::default();
-            let (ops_tx, mut ops) = mpsc::channel(1);
-
-            engine.messages = vec![Message::user("too short")];
-            let end = engine.compact(&sink, &mut ops, None).await;
-            assert_eq!(end, TurnEnd::Failed);
-            assert_eq!(engine.messages, [Message::user("too short")]);
-
-            engine.messages = tool_heavy_transcript();
-            ops_tx.send(Op::Interrupt).await.unwrap();
-            let end = engine.compact(&sink, &mut ops, None).await;
-            assert_eq!(end, TurnEnd::Cancelled);
-            assert_eq!(engine.messages, tool_heavy_transcript());
-
-            engine.session = handle::testing::dead("dead");
-            let end = engine.compact(&sink, &mut ops, None).await;
-            assert_eq!(
-                end,
-                TurnEnd::Failed,
-                "an unwritten boundary is a failed compaction"
-            );
-            assert_eq!(engine.messages, tool_heavy_transcript());
-
-            let events = sink.events();
-            assert!(
-                matches!(
-                    events.as_slice(),
-                    [
-                        Event::TurnFailed(short),
-                        Event::Cancelled,
-                        Event::SummaryToken(_),
-                        Event::Error(usage_write),
-                        Event::SummaryDiscarded,
-                        Event::Error(boundary_write),
-                        Event::UsageUpdated(UsageSnapshot {
-                            context_tokens: None,
-                            estimated_cost_usd: Some(cost),
-                            ..
-                        }),
-                        Event::TurnFailed(unsaved),
-                    ] if short == "Compaction failed: the conversation has about 15 tokens, \
-                                   below the 1000-token minimum"
-                        && usage_write.starts_with("Session write failed")
-                        && boundary_write == "Session write failed: session writer task has stopped"
-                        && (cost - 0.006).abs() < 1e-12
-                        && unsaved == "Compaction was not saved, so the transcript is unchanged"
-                ),
-                "{events:?}",
-            );
-        })
-        .await;
-    }
-
-    #[tokio::test]
-    async fn compact_fails_while_signed_out_without_sending_a_request() {
-        with_pinned_home(async {
-            let server = MockServer::start().await;
-            mount_reply(&server, "summary").await;
-            let dir = tempfile::tempdir().unwrap();
-            let mut engine = engine(server.uri(), &test_store(dir.path()), dir.path()).await;
-            engine.client.set_auth(None);
-            engine.messages = tool_heavy_transcript();
-            let sink = CapturingSink::default();
-            let mut ops = inert_ops();
-
-            let end = engine.compact(&sink, &mut ops, None).await;
-
-            assert_eq!(end, TurnEnd::Failed);
-            assert_eq!(engine.messages, tool_heavy_transcript());
-            assert_eq!(request_bodies(&server).await, [] as [serde_json::Value; 0]);
-            let events = sink.events();
-            assert!(
-                matches!(
-                    events.as_slice(),
-                    [Event::TurnFailed(msg)] if msg == "Not signed in. Run `/login` to sign in."
-                ),
-                "{events:?}"
-            );
-        })
-        .await;
-    }
-
-    #[tokio::test]
-    async fn compact_keeps_a_mode_switch_sent_before_a_cancel() {
-        with_pinned_home(async {
-            let server = MockServer::start().await;
-            let dir = tempfile::tempdir().unwrap();
-            let mut engine = engine(server.uri(), &test_store(dir.path()), dir.path()).await;
-            engine.messages = tool_heavy_transcript();
-            let sink = CapturingSink::default();
-            let (ops_tx, mut ops) = mpsc::channel(2);
-            ops_tx.try_send(Op::SetMode(Mode::Plan)).unwrap();
-            ops_tx.try_send(Op::Interrupt).unwrap();
-
-            let end = engine.compact(&sink, &mut ops, None).await;
-
-            assert_eq!(end, TurnEnd::Cancelled);
-            assert_eq!(engine.policy.mode(), Mode::Plan);
-        })
-        .await;
-    }
-
-    #[tokio::test]
-    async fn compact_cancelled_mid_summary_discards_it_before_the_cancel() {
-        with_pinned_home(async {
-            let base_url = serve_stalled_summary("partial").await;
-            let dir = tempfile::tempdir().unwrap();
-            let mut engine = engine(base_url, &test_store(dir.path()), dir.path()).await;
-            engine.messages = tool_heavy_transcript();
-            let sink = CapturingSink::default();
-            let (ops_tx, mut ops) = mpsc::channel(1);
-            let interrupt_once_streaming = async {
-                while sink.events().is_empty() {
-                    tokio::task::yield_now().await;
-                }
-                ops_tx.send(Op::Interrupt).await.unwrap();
-            };
-
-            let (end, ()) = tokio::join!(
-                engine.compact(&sink, &mut ops, None),
-                interrupt_once_streaming,
-            );
-
-            assert_eq!(end, TurnEnd::Cancelled);
-            assert_eq!(engine.messages, tool_heavy_transcript());
-            let events = sink.events();
-            assert!(
-                matches!(
-                    events.as_slice(),
-                    [
-                        Event::SummaryToken(partial),
-                        Event::SummaryDiscarded,
-                        Event::UsageUpdated(_),
-                        Event::Cancelled,
-                    ] if partial == "partial"
-                ),
-                "{events:?}",
-            );
-        })
-        .await;
-    }
-
-    /// Serves one summary that streams `text` and then stalls with the connection open. Returns
-    /// the base URL.
-    async fn serve_stalled_summary(text: &str) -> String {
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let base_url = format!("http://{}", listener.local_addr().unwrap());
-        let body = sse_body(&[
-            serde_json::json!({"type": "message_start", "message": {"id": "msg_1", "model": MODEL, "usage": {"input_tokens": 1_000, "output_tokens": 0}}}),
-            serde_json::json!({"type": "content_block_start", "index": 0, "content_block": {"type": "text", "text": ""}}),
-            serde_json::json!({"type": "content_block_delta", "index": 0, "delta": {"type": "text_delta", "text": text}}),
-        ]);
-        let declared = body.len() + 1;
-        let response = formatdoc! {"
-            HTTP/1.1 200 OK\r
-            content-type: text/event-stream\r
-            content-length: {declared}\r
-            \r
-            {body}"
-        };
-        tokio::spawn(async move {
-            let (mut socket, _) = listener.accept().await.unwrap();
-            _ = socket.read(&mut [0; 1024]).await.unwrap();
-            socket.write_all(response.as_bytes()).await.unwrap();
-            std::future::pending::<()>().await;
-        });
-        base_url
-    }
-
-    #[tokio::test]
-    async fn compact_failure_bills_and_shows_the_summary_cost() {
-        with_pinned_home(async {
-            let server = MockServer::start().await;
-            Mock::given(method("POST"))
-                .and(path("/v1/messages"))
-                .respond_with(sse_response(
-                    text_stream_body("", "partial").replace("end_turn", "max_tokens"),
-                ))
-                .mount(&server)
-                .await;
-            let dir = tempfile::tempdir().unwrap();
-            let mut engine = engine(server.uri(), &test_store(dir.path()), dir.path()).await;
-            engine.messages = tool_heavy_transcript();
-            engine.displayed_usage = Some(TokenUsage::new(50_000, 1));
-            engine.total_estimated_cost_usd = 1.23;
-            let sink = CapturingSink::default();
-            let mut ops = inert_ops();
-
-            let end = engine.compact(&sink, &mut ops, None).await;
-
-            assert_eq!(end, TurnEnd::Failed);
-            assert_eq!(engine.messages, tool_heavy_transcript());
-            assert_eq!(engine.displayed_usage, Some(TokenUsage::new(50_000, 1)));
-            let expected = 1.23 + 0.006;
-            assert!(
-                (engine.total_estimated_cost_usd - expected).abs() < 1e-12,
-                "a rejected summary is still billed: {}",
-                engine.total_estimated_cost_usd,
-            );
-            let events = sink.events();
-            let [
-                Event::SummaryToken(partial),
-                Event::SummaryDiscarded,
-                Event::UsageUpdated(usage),
-                Event::TurnFailed(msg),
-            ] = events.as_slice()
-            else {
-                panic!(
-                    "expected the discarded summary and its cost before the failure: {events:?}"
-                );
-            };
-            assert_eq!(partial, "partial");
-            assert_eq!(usage.context_tokens, Some(50_000));
-            assert!((usage.estimated_cost_usd.unwrap() - expected).abs() < 1e-12);
-            assert!(
-                msg.starts_with("Compaction failed") && msg.contains("max_tokens"),
-                "{msg}"
-            );
-        })
-        .await;
-    }
-
-    // ── clear ──
 
     #[tokio::test]
     async fn clear_and_resume_rebuild_session_prompt_and_drop_session_rules() {
@@ -3033,83 +1217,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn clear_keeps_a_pending_title_cost_out_of_the_new_session() {
-        with_pinned_home(async {
-            let server = MockServer::start().await;
-            mount_title(&server, greeting_title()).await;
-            let reply_without_usage = sse_body(&[
-                serde_json::json!({"type": "message_start", "message": {"id": "msg_1", "model": MODEL}}),
-                serde_json::json!({"type": "content_block_start", "index": 0, "content_block": {"type": "text", "text": "reply"}}),
-                serde_json::json!({"type": "content_block_stop", "index": 0}),
-                serde_json::json!({"type": "message_delta", "delta": {"stop_reason": "end_turn"}}),
-                serde_json::json!({"type": "message_stop"}),
-            ]);
-            Mock::given(method("POST"))
-                .and(path("/v1/messages"))
-                .respond_with(sse_response(reply_without_usage))
-                .mount(&server)
-                .await;
-            let dir = tempfile::tempdir().unwrap();
-            let mut engine = engine(server.uri(), &test_store(dir.path()), dir.path()).await;
-            engine.interactive = true;
-            let (sink, mut events) = mpsc::unbounded_channel();
-            engine.submit_prompt("hello", &sink, &mut inert_ops()).await;
-            next_matching(&mut events, |event| {
-                matches!(event, Event::SessionTitleUpdated { .. }).then_some(())
-            })
-            .await;
-            assert!(
-                engine.total_estimated_cost_usd.abs() < f64::EPSILON,
-                "a turn without usage emits nothing, so the title cost is still pending"
-            );
-
-            engine.clear(&sink).await;
-
-            assert!(
-                engine.total_estimated_cost_usd.abs() < f64::EPSILON,
-                "the new session starts at zero: {}",
-                engine.total_estimated_cost_usd,
-            );
-        })
-        .await;
-    }
-
-    #[tokio::test]
-    async fn clear_reports_the_finalize_failure_and_instruction_warnings_before_it_ends() {
-        with_pinned_home(async {
-            let server = MockServer::start().await;
-            let dir = tempfile::tempdir().unwrap();
-            let mut engine = engine(server.uri(), &test_store(dir.path()), dir.path()).await;
-            engine.session = handle::testing::dead("dead");
-            let warning = write_unreadable_instructions(dir.path());
-            let sink = CapturingSink::default();
-
-            engine.clear(&sink).await;
-
-            let events = sink.events();
-            assert!(
-                matches!(
-                    events.as_slice(),
-                    [
-                        Event::SessionRolled {
-                            archived: false,
-                            ..
-                        },
-                        Event::Error(failure),
-                        Event::Notice(notice),
-                        Event::SessionReady,
-                    ] if failure == "Previous session write failed: \
-                                     session writer task has stopped. \
-                                     Conversation history may be incomplete."
-                        && *notice == warning
-                ),
-                "{events:?}",
-            );
-        })
-        .await;
-    }
-
-    #[tokio::test]
     async fn clear_and_archive_record_the_branch_on_the_new_session() {
         with_pinned_home(with_isolated_git_env_async(async {
             let server = MockServer::start().await;
@@ -3128,16 +1235,6 @@ mod tests {
             assert_eq!(archived.as_deref(), Some("fixture-branch"));
         }))
         .await;
-    }
-
-    /// The branch in the live session's header, after one recorded message writes the file.
-    async fn header_branch(engine: &Engine, dir: &Path) -> Option<String> {
-        engine.session.record_message(Message::user("first")).await;
-        let jsonl =
-            std::fs::read_to_string(test_session_file(dir, engine.session.session_id())).unwrap();
-        let header: serde_json::Value =
-            serde_json::from_str(jsonl.lines().next().unwrap()).unwrap();
-        header["git_branch"].as_str().map(ToOwned::to_owned)
     }
 
     #[tokio::test]
@@ -3197,67 +1294,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn clear_drops_the_task_list_and_resume_restores_it_after_the_session() {
-        with_pinned_home(async {
-            let server = MockServer::start().await;
-            let input = serde_json::json!({ "tasks": plan() }).to_string();
-            mount_tool_call_once(&server, "call-1", "tasks", &input).await;
-            mount_reply(&server, "done").await;
-            let dir = tempfile::tempdir().unwrap();
-            let store = test_store(dir.path());
-            let mut engine = engine(server.uri(), &store, dir.path())
-                .await
-                .with_tools(ToolRegistry::new(vec![Box::new(TasksTool)]));
-            let planned_id = engine.session_id().to_owned();
-            let mut ops = inert_ops();
-            engine
-                .submit_prompt("plan it", &CapturingSink::default(), &mut ops)
-                .await;
-
-            engine.clear(&CapturingSink::default()).await;
-            assert_eq!(engine.tasks, []);
-
-            let sink = CapturingSink::default();
-            let planned_path = store.find_session_path(&planned_id).unwrap();
-            engine.resume(&sink, ResumeTarget::Path(planned_path)).await;
-            assert_eq!(engine.tasks, plan());
-            let events = sink.events();
-            let resumed = events
-                .iter()
-                .position(|event| matches!(event, Event::SessionResumed { .. }))
-                .expect("the resume succeeds");
-            let restored = events
-                .iter()
-                .position(|event| *event == Event::TasksUpdated(plan()))
-                .expect("the resume shows the restored list");
-            assert!(resumed < restored, "{events:?}");
-        })
-        .await;
-    }
-
-    /// Runs a turn whose echo call `id` spills its output, and returns the session it ran in.
-    async fn spill_echo_output(server: &MockServer, engine: &mut Engine, id: &str) -> String {
-        let input = serde_json::json!({ "text": "x".repeat(300 << 10) });
-        server.reset().await;
-        mount_tool_call_once(server, id, "echo", &input.to_string()).await;
-        mount_reply(server, "done").await;
-        engine
-            .submit_prompt("echo it", &CapturingSink::default(), &mut inert_ops())
-            .await;
-        engine.session_id().to_owned()
-    }
-
-    /// The names of the spill files in `artifact_dir`, sorted.
-    fn spill_names(artifact_dir: &Path) -> Vec<String> {
-        let mut names: Vec<_> = std::fs::read_dir(artifact_dir.join("tool-results"))
-            .unwrap()
-            .map(|entry| entry.unwrap().file_name().into_string().unwrap())
-            .collect();
-        names.sort();
-        names
-    }
-
-    #[tokio::test]
     async fn clear_and_resume_spill_tool_output_into_the_live_session() {
         with_pinned_home(async {
             let server = MockServer::start().await;
@@ -3313,957 +1349,2997 @@ mod tests {
         .await;
     }
 
-    // ── archive ──
+    mod engine_handle {
+        use super::*;
 
-    #[tokio::test]
-    async fn archive_keeps_the_session_without_messages_or_after_each_failed_write() {
-        with_pinned_home(async {
-            let server = MockServer::start().await;
-            let dir = tempfile::tempdir().unwrap();
-            let store = test_store(dir.path());
-            let mut engine = engine(server.uri(), &store, dir.path()).await;
-            let live_id = engine.session.session_id().to_owned();
-            let sink = CapturingSink::default();
+        mod shutdown {
+            use super::*;
 
-            engine.archive(&sink).await;
-            assert_eq!(engine.session.session_id(), live_id);
-            engine.messages = vec![Message::user("unsaved")];
-            engine.session = handle::testing::dead("dead");
-            engine.archive(&sink).await;
-            engine.archive(&sink).await;
-            assert_eq!(engine.session.session_id(), "dead");
+            #[tokio::test]
+            async fn reports_a_session_that_cannot_finish() {
+                with_pinned_home(async {
+                    let server = MockServer::start().await;
+                    let dir = tempfile::tempdir().unwrap();
+                    let mut engine =
+                        engine(server.uri(), &test_store(dir.path()), dir.path()).await;
+                    engine.session = handle::testing::dead("dead");
 
-            let events = sink.events();
-            assert!(
-                matches!(
-                    events.as_slice(),
-                    [Event::Error(empty), Event::Error(first), Event::Error(again)]
-                        if empty.starts_with("Nothing to archive")
-                            && first.starts_with("Archive failed: ")
-                            && again.starts_with("Archive failed: ")
-                ),
-                "{events:?}",
-            );
-        })
-        .await;
-    }
+                    let failure = engine.spawn(&[]).shutdown().await.unwrap();
 
-    // ── resume ──
-
-    #[tokio::test]
-    async fn resume_replays_the_recorded_prompt() {
-        with_pinned_home(async {
-            let server = MockServer::start().await;
-            mount_reply(&server, "reply").await;
-            let dir = tempfile::tempdir().unwrap();
-            let store = test_store(dir.path());
-            let mut engine = engine(server.uri(), &store, dir.path()).await;
-            let recorded_id = engine.session.session_id().to_owned();
-            let sink = CapturingSink::default();
-            let mut ops = inert_ops();
-            engine.submit_prompt("first", &sink, &mut ops).await;
-            engine.clear(&sink).await;
-
-            let recorded_path = store.find_session_path(&recorded_id).unwrap();
-            engine
-                .resume(&sink, ResumeTarget::Path(recorded_path))
+                    assert!(
+                        failure.is_some_and(|f| f.starts_with("session writer task has stopped")),
+                        "a session that cannot finish reports why"
+                    );
+                })
                 .await;
-            assert_eq!(engine.prompt.user_context, SESSION_CONTEXT);
-            assert!(!engine.prompt_unrecorded);
-            engine.submit_prompt("second", &sink, &mut ops).await;
-
-            let turns = request_bodies(&server).await;
-            assert_eq!(system_prompt(&turns[1]), system_prompt(&turns[0]));
-            assert_eq!(turns[1]["messages"][0], turns[0]["messages"][0]);
-            assert_eq!(turns[1]["messages"][1]["content"][0]["text"], "first");
-        })
-        .await;
-    }
-
-    #[tokio::test]
-    async fn resume_shows_and_replays_an_interruption() {
-        with_pinned_home(async {
-            let server = MockServer::start().await;
-            mount_reply(&server, "42").await;
-            let dir = tempfile::tempdir().unwrap();
-            let store = test_store(dir.path());
-            let mut engine = engine(server.uri(), &store, dir.path()).await;
-            let interrupted_id = engine.session_id().to_owned();
-            let sink = CapturingSink::default();
-            let (ops_tx, mut ops) = mpsc::channel(1);
-            ops_tx.send(Op::Interrupt).await.unwrap();
-            engine.submit_prompt("write a story", &sink, &mut ops).await;
-            engine.clear(&sink).await;
-            let path = store.find_session_path(&interrupted_id).unwrap();
-
-            engine.resume(&sink, ResumeTarget::Path(path)).await;
-            engine
-                .submit_prompt("what is 7 times 6?", &sink, &mut ops)
-                .await;
-
-            let history = sink.events().into_iter().find_map(|event| match event {
-                Event::SessionResumed { history, .. } => Some(history),
-                _ => None,
-            });
-            assert_eq!(
-                history,
-                Some(vec![
-                    Interaction::UserText("write a story".to_owned()),
-                    Interaction::Interrupted,
-                ])
-            );
-            let request = &request_bodies(&server).await[0];
-            let replayed: Vec<&str> = request["messages"][1]["content"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .map(|block| block["text"].as_str().unwrap())
-                .collect();
-            assert_eq!(replayed, ["write a story", "[Request interrupted by user]"]);
-            assert_eq!(texts(request)[2..], ["what is 7 times 6?"]);
-        })
-        .await;
-    }
-
-    #[tokio::test]
-    async fn resume_from_another_project_spills_beside_the_file_that_delete_removes() {
-        with_pinned_home(async {
-            let server = MockServer::start().await;
-            let dir = tempfile::tempdir().unwrap();
-            let store = test_store(dir.path());
-            let other = SessionStore::open_at(dir.path().to_path_buf(), "other-project").unwrap();
-            let other_id = finished_session(&other).await;
-            let other_path = store.find_session_path(&other_id).unwrap();
-            let mut engine = engine(server.uri(), &store, dir.path())
-                .await
-                .with_tools(ToolRegistry::new(vec![Box::new(EchoTool)]));
-            engine.set_mode(&CapturingSink::default(), Mode::Yolo);
-            engine
-                .resume(
-                    &CapturingSink::default(),
-                    ResumeTarget::Path(other_path.clone()),
-                )
-                .await;
-
-            spill_echo_output(&server, &mut engine, "call-1").await;
-            let beside_file = other_path.with_file_name(&other_id);
-            assert_eq!(spill_names(&beside_file), ["call-1.txt"]);
-            engine.clear(&CapturingSink::default()).await;
-            delete_at(&other_path, engine.session_id()).unwrap();
-
-            assert!(!beside_file.exists(), "delete removes the spills");
-            assert!(!test_project_dir(dir.path()).join(&other_id).exists());
-        })
-        .await;
-    }
-
-    #[tokio::test]
-    async fn resume_reports_the_old_session_finalize_failure_before_it_ends() {
-        with_pinned_home(async {
-            let server = MockServer::start().await;
-            let dir = tempfile::tempdir().unwrap();
-            let store = test_store(dir.path());
-            let target_id = finished_session(&store).await;
-            let mut engine = engine(server.uri(), &store, dir.path()).await;
-            engine.session = handle::testing::dead("dead");
-            let sink = CapturingSink::default();
-
-            let target_path = store.find_session_path(&target_id).unwrap();
-            engine.resume(&sink, ResumeTarget::Path(target_path)).await;
-
-            let events = sink.events();
-            assert!(
-                matches!(
-                    events.as_slice(),
-                    [
-                        Event::SessionResumed { id, .. },
-                        Event::Error(msg),
-                        Event::SessionReady,
-                    ] if *id == target_id
-                            && msg == "Previous session write failed: \
-                                       session writer task has stopped. \
-                                       Conversation history may be incomplete."
-                ),
-                "{events:?}"
-            );
-        })
-        .await;
-    }
-
-    #[tokio::test]
-    async fn resume_failure_preserves_current_session_state() {
-        with_pinned_home(async {
-            let server = MockServer::start().await;
-            let dir = tempfile::tempdir().unwrap();
-            let store = test_store(dir.path());
-            let mut engine = engine(server.uri(), &store, dir.path()).await;
-            let original_id = engine.session.session_id().to_owned();
-            let last_usage = TokenUsage::new(100_000, 10);
-            let displayed_usage = TokenUsage::new(90_000, 9);
-            engine.messages = vec![Message::user("still here")];
-            engine.auto_compaction_failures = AutoCompactFailures::new(2);
-            engine.last_usage = Some(last_usage);
-            engine.displayed_usage = Some(displayed_usage);
-            engine.total_estimated_cost_usd = 1.23;
-            let rule = Rule::parse(PermissionClass::Exec, "cargo test *").unwrap();
-            engine.policy.allow_for_session(rule.clone());
-            start_shell(&engine.shells, "sleep 30");
-            let sink = CapturingSink::default();
-
-            engine
-                .resume(&sink, ResumeTarget::Path("missing-target.jsonl".into()))
-                .await;
-
-            assert_eq!(engine.session.session_id(), original_id);
-            assert_eq!(engine.messages.len(), 1);
-            assert_eq!(engine.auto_compaction_failures, AutoCompactFailures::new(2));
-            assert_eq!(engine.last_usage, Some(last_usage));
-            assert_eq!(engine.displayed_usage, Some(displayed_usage));
-            assert!((engine.total_estimated_cost_usd - 1.23).abs() < f64::EPSILON);
-            assert_eq!(engine.policy.session_allow(), [rule]);
-            assert_eq!(
-                engine.shells.list(),
-                [shell("shell-1", "sleep 30", ShellState::Running)]
-            );
-            assert_eq!(
-                sink.events(),
-                [Event::TurnFailed(format!(
-                    "Resume failed (still on session {}): \
-                     session not found: missing-target.jsonl: {}",
-                    id_prefix(&original_id),
-                    std::fs::metadata("missing-target.jsonl").unwrap_err(),
-                ))]
-            );
-            engine.shells.stop_all().await;
-        })
-        .await;
-    }
-
-    // ── rename ──
-
-    #[tokio::test]
-    async fn rename_announces_only_a_persisted_title() {
-        with_pinned_home(async {
-            let server = MockServer::start().await;
-            let dir = tempfile::tempdir().unwrap();
-            let mut engine = engine(server.uri(), &test_store(dir.path()), dir.path()).await;
-            let live_id = engine.session.session_id().to_owned();
-            let sink = CapturingSink::default();
-
-            engine.rename(&sink, "Fix login".to_owned()).await;
-            assert!(engine.session.manual_title_set());
-            engine.session = handle::testing::dead("dead");
-            engine.rename(&sink, "Lost".to_owned()).await;
-
-            let events = sink.events();
-            assert!(
-                matches!(
-                    events.as_slice(),
-                    [
-                        Event::SessionTitleUpdated { session_id, title },
-                        Event::RenameFailed(write),
-                    ] if *session_id == live_id && title == "Fix login"
-                        && write.starts_with("Session write failed")
-                ),
-                "{events:?}",
-            );
-        })
-        .await;
-    }
-
-    // ── set_model ──
-
-    fn sonnet_pick() -> ConfigPick {
-        ConfigPick::Model {
-            id: ResolvedModelId::new("claude-sonnet-5-5".to_owned()),
-            effort: None,
+            }
         }
     }
 
-    #[tokio::test]
-    async fn set_model_swap_keeps_the_system_prompt_and_names_the_model_next_turn() {
-        with_pinned_home(async {
-            let server = MockServer::start().await;
-            mount_reply(&server, "reply").await;
-            let dir = tempfile::tempdir().unwrap();
-            let mut engine = engine(server.uri(), &test_store(dir.path()), dir.path()).await;
-            let sink = CapturingSink::default();
-            let mut ops = inert_ops();
+    mod engine_task {
+        use super::*;
 
-            engine.submit_prompt("first", &sink, &mut ops).await;
-            engine.set_model(&sink, sonnet_pick());
-            engine.submit_prompt("second", &sink, &mut ops).await;
+        mod join {
+            use super::*;
 
-            let turns = request_bodies(&server).await;
-            assert_eq!(turns[1]["model"], "claude-sonnet-5-5");
-            assert_eq!(system_prompt(&turns[1]), system_prompt(&turns[0]));
-            let (first, second) = (&turns[0]["messages"], &turns[1]["messages"]);
-            assert_eq!(second[0], first[0], "the first message must not change");
-            let prompt = second[3]["content"].as_array().unwrap();
-            assert_eq!(prompt[0]["text"], "second");
-            let reminder = prompt[1]["text"].as_str().unwrap();
-            assert!(
-                reminder.contains(indoc! {"
-                    # Model
+            #[tokio::test]
+            async fn hands_back_the_panic_of_a_panicked_engine() {
+                let task = EngineTask(tokio::spawn(async { panic!("engine bug") }));
 
-                    You are powered by the model named Claude Sonnet 5.5. The exact model ID is claude-sonnet-5-5."
-                }),
-                "{reminder}"
-            );
-            assert!(!reminder.contains("# CLAUDE.md"), "{reminder}");
-        })
-        .await;
-    }
+                let panic = task.join().await.unwrap_err();
 
-    #[tokio::test]
-    async fn set_model_swap_keeps_sending_back_the_reasoning_of_the_previous_model() {
-        with_pinned_home(async {
-            let server = MockServer::start().await;
-            let reply = sse_body(&[
-                serde_json::json!({"type": "message_start", "message": {"id": "msg_1", "model": MODEL}}),
-                serde_json::json!({"type": "content_block_start", "index": 0, "content_block": {"type": "thinking", "thinking": "", "signature": ""}}),
-                serde_json::json!({"type": "content_block_delta", "index": 0, "delta": {"type": "thinking_delta", "thinking": "plan"}}),
-                serde_json::json!({"type": "content_block_delta", "index": 0, "delta": {"type": "signature_delta", "signature": "sig"}}),
-                serde_json::json!({"type": "content_block_start", "index": 1, "content_block": {"type": "text", "text": "reply"}}),
-                serde_json::json!({"type": "message_delta", "delta": {"stop_reason": "end_turn"}}),
-                serde_json::json!({"type": "message_stop"}),
-            ]);
-            Mock::given(method("POST"))
-                .and(path("/v1/messages"))
-                .respond_with(sse_response(reply))
-                .mount(&server)
-                .await;
-            let dir = tempfile::tempdir().unwrap();
-            let mut engine = engine(server.uri(), &test_store(dir.path()), dir.path()).await;
-            let sink = CapturingSink::default();
-            let mut ops = inert_ops();
-
-            engine.submit_prompt("first", &sink, &mut ops).await;
-            engine.set_model(&sink, sonnet_pick());
-            engine.submit_prompt("second", &sink, &mut ops).await;
-
-            let turns = request_bodies(&server).await;
-            let assistant_turns: Vec<&serde_json::Value> = turns[1]["messages"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .filter(|message| message["role"] == "assistant")
-                .collect();
-            assert_eq!(turns[1]["model"], "claude-sonnet-5-5");
-            assert_eq!(
-                assistant_turns,
-                [&serde_json::json!({"role": "assistant", "content": [
-                    {"type": "thinking", "thinking": "plan", "signature": "sig"},
-                    {"type": "text", "text": "reply"},
-                ]})],
-            );
-        })
-        .await;
-    }
-
-    #[tokio::test]
-    async fn set_model_resolves_the_compaction_threshold_for_the_new_model() {
-        with_pinned_home(async {
-            let server = MockServer::start().await;
-            let dir = tempfile::tempdir().unwrap();
-            let mut engine = engine(server.uri(), &test_store(dir.path()), dir.path()).await;
-            let mut config = test_config(server.uri(), api_key(), "custom-model");
-            let sink = CapturingSink::default();
-            let unwindowed = CompactionConfig::default_for_test(&config.model, 16_000);
-            assert!(!unwindowed.auto.enabled, "precondition: no window");
-            let mut resolved = Vec::new();
-
-            for (max_tokens, configured, threshold) in [
-                (None, unwindowed, test_thresholds::WINDOW_1M),
-                (
-                    None,
-                    CompactionConfig::with_threshold_for_test(1_500_000),
-                    test_thresholds::WINDOW_1M,
-                ),
-                (Some(8_000), unwindowed, 979_000),
-            ] {
-                config.max_tokens = max_tokens;
-                engine.client = client_for(&config);
-                engine.compaction = configured;
-
-                engine.set_model(&sink, sonnet_pick());
-
-                assert_eq!(
-                    engine.compaction.auto.threshold_tokens,
-                    Some(threshold),
-                    "{max_tokens:?}, {configured:?}",
-                );
-                resolved.push(engine.compaction.auto);
+                assert_eq!(panic_message(panic), "engine bug");
             }
-            let announced: Vec<_> = sink
-                .events()
-                .into_iter()
-                .filter_map(|event| match event {
-                    Event::ConfigChanged {
-                        auto_compaction, ..
-                    } => Some(auto_compaction),
-                    _ => None,
-                })
-                .collect();
-            assert_eq!(announced, resolved);
-        })
-        .await;
+        }
     }
 
-    #[tokio::test]
-    async fn set_model_resumes_paused_auto_compaction() {
-        with_pinned_home(async {
-            let server = MockServer::start().await;
-            let dir = tempfile::tempdir().unwrap();
-            let mut engine = engine(server.uri(), &test_store(dir.path()), dir.path()).await;
-            engine.auto_compaction_failures = AutoCompactFailures::new(3);
-            engine.last_usage = Some(TokenUsage::new(100_000, 1));
-            engine.total_estimated_cost_usd = 1.23;
-            let sink = CapturingSink::default();
+    mod new {
+        use super::*;
 
-            engine.set_model(&sink, ConfigPick::Effort(Effort::Xhigh));
+        /// A toolbox without tools, for an engine that [`Engine::new`] builds.
+        fn toolbox() -> Toolbox {
+            Toolbox {
+                tools: Arc::new(ToolRegistry::new(Vec::new())),
+                shells: Arc::default(),
+            }
+        }
 
-            assert_eq!(
-                engine.auto_compaction_failures,
-                AutoCompactFailures::default()
-            );
-            assert_eq!(engine.last_usage, Some(TokenUsage::new(100_000, 1)));
-            assert!(
-                (engine.total_estimated_cost_usd - 1.23).abs() < f64::EPSILON,
-                "session cost must accumulate across swaps: {}",
-                engine.total_estimated_cost_usd,
-            );
-            let events = sink.events();
-            assert!(
-                matches!(
-                    events.as_slice(),
-                    [
-                        Event::AutoCompactionResumed,
-                        Event::UsageUpdated(_),
-                        Event::ConfigChanged { .. },
-                    ]
-                ),
-                "{events:?}",
-            );
-        })
-        .await;
-    }
+        #[tokio::test]
+        async fn prices_recorded_usage_and_replays_a_recorded_context_or_builds_one() {
+            with_pinned_home(async {
+                let server = MockServer::start().await;
+                let dir = tempfile::tempdir().unwrap();
+                let store = test_store(dir.path());
+                let recorded = engine(server.uri(), &store, dir.path())
+                    .await
+                    .prompt
+                    .session_context();
+                let warning = write_unreadable_instructions(dir.path());
+                let usage = [UsageRecord {
+                    model: MODEL.to_owned(),
+                    cache_ttl: PromptCacheTtl::FiveMin,
+                    tokens: TokenUsage::new(1_000, 100),
+                }];
 
-    // ── set_mode ──
+                let mut config = test_config(server.uri(), api_key(), "claude-sonnet-5-5");
+                config.workspace = Workspace::new(dir.path());
+                for (context, replayed) in [(Some(recorded), true), (None, false)] {
+                    let engine = Engine::new(
+                        &config,
+                        NoRoots,
+                        DEVICE_ID.to_owned(),
+                        toolbox(),
+                        SessionParts {
+                            store: store.clone(),
+                            handle: handle::start(&store, "claude-sonnet-5-5", None),
+                            transcript: LoadedTranscript {
+                                context,
+                                usage: usage.to_vec(),
+                                ..LoadedTranscript::default()
+                            },
+                            file_tracker: Arc::new(FileTracker::default()),
+                        },
+                        false,
+                    )
+                    .await
+                    .unwrap();
 
-    #[tokio::test]
-    async fn set_mode_switches_the_gate_and_confirms() {
-        with_pinned_home(async {
-            let server = MockServer::start().await;
-            let dir = tempfile::tempdir().unwrap();
-            let mut engine = engine(server.uri(), &test_store(dir.path()), dir.path()).await;
-            let sink = CapturingSink::default();
-
-            engine.set_mode(&sink, Mode::Yolo);
-
-            assert_eq!(engine.policy.mode(), Mode::Yolo);
-            assert!(
-                matches!(sink.events().as_slice(), [Event::ModeChanged(Mode::Yolo)]),
-                "{:?}",
-                sink.events()
-            );
-        })
-        .await;
-    }
-
-    // ── adopt_mode ──
-
-    #[tokio::test]
-    async fn adopt_mode_keeps_a_switch_that_arrives_mid_turn() {
-        with_pinned_home(async {
-            let server = MockServer::start().await;
-            mount_reply(&server, "reply").await;
-            let dir = tempfile::tempdir().unwrap();
-            let mut engine = engine(server.uri(), &test_store(dir.path()), dir.path()).await;
-            let sink = CapturingSink::default();
-            let (tx, mut ops) = mpsc::channel(1);
-            tx.try_send(Op::SetMode(Mode::Plan)).unwrap();
-
-            engine.submit_prompt("hello", &sink, &mut ops).await;
-
-            assert_eq!(engine.policy.mode(), Mode::Plan);
-            assert!(
-                matches!(sink.events().first(), Some(Event::ModeChanged(Mode::Plan))),
-                "{:?}",
-                sink.events()
-            );
-            drop(tx);
-        })
-        .await;
-    }
-
-    // ── login ──
-
-    #[tokio::test]
-    async fn login_stores_the_browser_s_login_and_sends_it_with_the_next_prompt() {
-        with_pinned_home(async {
-            let server = MockServer::start().await;
-            Mock::given(method("POST"))
-                .and(path("/token"))
-                .and(body_partial_json(
-                    serde_json::json!({ "code": "auth-code" }),
-                ))
-                .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                    "access_token": "fresh-access",
-                    "refresh_token": "fresh-refresh",
-                    "expires_in": 3600,
-                    "scope": "user:inference",
-                })))
-                .expect(1)
-                .mount(&server)
-                .await;
-            mount_reply(&server, "reply").await;
-            let dir = tempfile::tempdir().unwrap();
-            let data = tempfile::tempdir().unwrap();
-            temp_env::async_with_vars([("XDG_DATA_HOME", Some(data.path()))], async {
-                let mut engine = engine(server.uri(), &test_store(dir.path()), dir.path()).await;
-                engine.client.set_auth(None);
-                engine.oauth_token_url = format!("{}/token", server.uri());
-                let mut handle = engine.spawn(&[]);
-
-                handle.ops.send(Op::Login).await.unwrap();
-                let url = login_url(&mut handle.events).await;
-                let reply = return_from_browser(&url, "code=auth-code").await;
-                let signed_in = handle.events.recv().await;
-                let turn = submit(&mut handle, "hi").await;
-                handle.shutdown().await.unwrap();
-
-                assert!(reply.starts_with("HTTP/1.1 302 Found\r\n"), "{reply}");
-                assert!(
-                    matches!(
-                        signed_in,
-                        Some(Event::SignedIn {
-                            auth: AuthSource::OxLogin
-                        })
-                    ),
-                    "{signed_in:?}"
-                );
-                assert!(matches!(turn.last(), Some(Event::TurnComplete)), "{turn:?}");
-                let requests = server.received_requests().await.unwrap();
-                let prompt = requests
-                    .iter()
-                    .find(|request| request.url.path() == "/v1/messages")
-                    .expect("the prompt reaches the API");
-                assert_eq!(prompt.headers["authorization"], "Bearer fresh-access");
-                assert!(data.path().join("ox").join("credentials.json").exists());
+                    assert!(
+                        (engine.total_estimated_cost_usd - 0.006).abs() < 1e-12,
+                        "priced at the recorded model's rates: {}",
+                        engine.total_estimated_cost_usd,
+                    );
+                    assert_eq!(engine.prompt.user_context == SESSION_CONTEXT, replayed);
+                    assert_eq!(engine.prompt_unrecorded, !replayed);
+                    let built_warnings = if replayed {
+                        Vec::new()
+                    } else {
+                        vec![warning.clone()]
+                    };
+                    assert_eq!(engine.instruction_warnings, built_warnings);
+                    let model = if replayed { MODEL } else { "claude-sonnet-5-5" };
+                    assert!(
+                        engine
+                            .prompt
+                            .seen
+                            .model
+                            .contains(&format!("The exact model ID is {model}.")),
+                        "replayed: {replayed}",
+                    );
+                }
             })
             .await;
-        })
-        .await;
+        }
+
+        #[tokio::test]
+        async fn takes_the_agent_settings_from_config_and_binds_the_client_to_the_session() {
+            with_pinned_home(async {
+                let dir = tempfile::tempdir().unwrap();
+                let store = test_store(dir.path());
+                let session = handle::start(&store, MODEL, None);
+                let mut config = test_config("http://127.0.0.1:9", api_key(), MODEL);
+                config.max_tool_rounds = Some(3);
+                config.compaction = CompactionConfig::with_threshold_for_test(50_000);
+                config.permission = Policy::new(Mode::Plan, Vec::new(), Vec::new(), Vec::new());
+                config.workspace = Workspace::new(dir.path());
+
+                let engine = Engine::new(
+                    &config,
+                    NoRoots,
+                    DEVICE_ID.to_owned(),
+                    toolbox(),
+                    SessionParts {
+                        store: store.clone(),
+                        handle: session.clone(),
+                        transcript: LoadedTranscript::default(),
+                        file_tracker: Arc::new(FileTracker::default()),
+                    },
+                    false,
+                )
+                .await
+                .unwrap();
+
+                assert_eq!(*engine.workspace, config.workspace);
+                assert_eq!(engine.max_tool_rounds, Some(3));
+                assert_eq!(engine.compaction, config.compaction);
+                assert_eq!(engine.policy.mode(), Mode::Plan);
+                assert_eq!(engine.client.session_id(), session.session_id());
+            })
+            .await;
+        }
     }
 
-    #[tokio::test]
-    async fn login_fails_the_sign_in_when_the_browser_returns_a_refusal() {
-        with_pinned_home(async {
-            let server = MockServer::start().await;
-            let dir = tempfile::tempdir().unwrap();
-            let engine = engine(server.uri(), &test_store(dir.path()), dir.path()).await;
-            let mut handle = engine.spawn(&[]);
+    mod spawn {
+        use super::*;
 
-            handle.ops.send(Op::Login).await.unwrap();
-            let url = login_url(&mut handle.events).await;
-            let reply = return_from_browser(&url, "error=access_denied").await;
-            let failed = handle.events.recv().await;
-            handle.shutdown().await.unwrap();
-
-            assert!(reply.starts_with("HTTP/1.1 400 Bad Request\r\n"), "{reply}");
-            assert!(
-                matches!(
-                    &failed,
-                    Some(Event::TurnFailed(msg))
-                        if msg == "Sign-in failed: authorization was refused (access_denied). \
-                                   Run `/login` to try again."
-                ),
-                "{failed:?}"
-            );
-        })
-        .await;
-    }
-
-    #[tokio::test]
-    async fn login_keeps_a_mode_switch_sent_before_a_cancel() {
-        with_pinned_home(async {
-            let server = MockServer::start().await;
-            let dir = tempfile::tempdir().unwrap();
-            let mut engine = engine(server.uri(), &test_store(dir.path()), dir.path()).await;
-            let sink = CapturingSink::default();
-            let (ops_tx, mut ops) = mpsc::channel(2);
-            ops_tx.try_send(Op::SetMode(Mode::Plan)).unwrap();
-            ops_tx.try_send(Op::Interrupt).unwrap();
-
-            let end = engine.login(&sink, &mut ops).await;
-
-            assert_eq!(end, TurnEnd::Cancelled);
-            assert_eq!(engine.policy.mode(), Mode::Plan);
-        })
-        .await;
-    }
-
-    // ── adopt_login ──
-
-    #[tokio::test]
-    async fn adopt_login_replaces_a_stored_login_or_none_but_not_an_explicit_credential() {
-        with_pinned_home(async {
-            let server = MockServer::start().await;
-            let dir = tempfile::tempdir().unwrap();
-            let mut engine = engine(server.uri(), &test_store(dir.path()), dir.path()).await;
-            let sink = CapturingSink::default();
-            let ox_login = || Auth::new(AuthSource::OxLogin, "ox-token");
-
-            engine.adopt_login(&sink, ox_login());
-            assert_eq!(engine.client.auth_source(), Some(AuthSource::ApiKeyEnv));
-            for before in [
-                None,
-                Some(Auth::new(AuthSource::ClaudeCodeLogin, "claude-code-token")),
-            ] {
-                engine.client.set_auth(before);
-                engine.adopt_login(&sink, ox_login());
-                assert_eq!(engine.client.auth().unwrap().secret(), "ox-token");
-            }
-
-            let events = sink.events();
-            assert!(
-                matches!(
-                    events.as_slice(),
-                    [
-                        Event::SignedIn {
-                            auth: AuthSource::ApiKeyEnv
-                        },
-                        Event::SignedIn {
-                            auth: AuthSource::OxLogin
-                        },
-                        Event::SignedIn {
-                            auth: AuthSource::OxLogin
-                        },
-                    ]
-                ),
-                "{events:?}"
-            );
-        })
-        .await;
-    }
-
-    // ── logout ──
-
-    #[tokio::test]
-    async fn logout_removes_the_oxide_code_login_and_keeps_an_explicit_credential() {
-        with_pinned_home(async {
-            let server = MockServer::start().await;
-            let dir = tempfile::tempdir().unwrap();
-            let data = tempfile::tempdir().unwrap();
-            let file = store_ox_login(data.path());
-            temp_env::async_with_vars([("XDG_DATA_HOME", Some(data.path()))], async {
+        #[tokio::test]
+        async fn reports_the_resumed_cost_tasks_warnings_drift_and_an_interrupted_transcript() {
+            with_pinned_home(async {
+                let server = MockServer::start().await;
+                let dir = tempfile::tempdir().unwrap();
+                let warning = write_unreadable_instructions(dir.path());
                 let mut engine = engine(server.uri(), &test_store(dir.path()), dir.path()).await;
-                let sink = CapturingSink::default();
+                engine.messages = vec![
+                    Message::user("hi"),
+                    Message {
+                        role: Role::Assistant,
+                        content: vec![ContentBlock::Thinking {
+                            thinking: turn::INTERRUPTED_WORK_SENTINEL.to_owned(),
+                            replay: Replay::with_model(MODEL, ""),
+                        }],
+                    },
+                ];
+                engine.total_estimated_cost_usd = 1.23;
+                engine.tasks = plan();
 
-                engine.logout(&sink).await;
+                let mut handle = engine.spawn(&[PathBuf::from("a.rs")]);
+                let cost = handle.events.recv().await.unwrap();
+                let tasks = handle.events.recv().await.unwrap();
+                let instructions = handle.events.recv().await.unwrap();
+                let drift = handle.events.recv().await.unwrap();
+                let interrupted = handle.events.recv().await.unwrap();
+                let failure = handle.shutdown().await.unwrap();
 
-                assert!(!file.exists());
-                assert_eq!(engine.client.auth_source(), Some(AuthSource::ApiKeyEnv));
-                let events = sink.events();
+                assert!(
+                    matches!(
+                        &cost,
+                        Event::UsageUpdated(UsageSnapshot {
+                            context_tokens: None,
+                            estimated_cost_usd: Some(cost),
+                            ..
+                        }) if (cost - 1.23).abs() < f64::EPSILON
+                    ),
+                    "{cost:?}"
+                );
+                assert_eq!(tasks, Event::TasksUpdated(plan()));
+                assert_eq!(instructions, Event::Notice(warning));
+                assert_eq!(
+                    drift,
+                    Event::Notice(format_drift_warning(&[PathBuf::from("a.rs")]))
+                );
+                assert!(
+                    matches!(
+                        &interrupted,
+                        Event::Error(msg) if msg.ends_with("Send a message to continue.")
+                    ),
+                    "{interrupted:?}"
+                );
+                assert_eq!(failure, None);
+            })
+            .await;
+        }
+    }
+
+    mod run {
+        use super::*;
+
+        /// Events of the prompt in flight until both its terminal event and its session's AI title
+        /// have arrived, in either order.
+        async fn titled_turn_events(events: &mut mpsc::UnboundedReceiver<Event>) -> Vec<Event> {
+            let prompt = Op::Prompt(String::new());
+            let (mut ended, mut titled) = (false, false);
+            let mut seen = Vec::new();
+            while !(ended && titled) {
+                let event = events.recv().await.expect("the engine stopped early");
+                ended |= TurnEnd::of(&prompt, &event).is_some();
+                titled |= matches!(event, Event::SessionTitleUpdated { .. });
+                seen.push(event);
+            }
+            seen
+        }
+
+        /// A prompt that pastes two service logs, long enough that its exchange can compact.
+        fn pasted_logs() -> String {
+            format!(
+                "Why do these logs stop?\n{}{}",
+                service_log("alpha"),
+                service_log("beta")
+            )
+        }
+
+        #[tokio::test]
+        async fn serves_a_turn_and_saves_it_on_shutdown() {
+            with_pinned_home(async {
+                let server = MockServer::start().await;
+                mount_reply(&server, "reply").await;
+                let dir = tempfile::tempdir().unwrap();
+                let store = test_store(dir.path());
+                let engine = engine(server.uri(), &store, dir.path()).await;
+                let session_id = engine.session_id().to_owned();
+                let mut handle = engine.spawn(&[]);
+
+                let events = submit(&mut handle, "hello").await;
+                let failure = handle.shutdown().await.unwrap();
+
                 assert!(
                     matches!(
                         events.as_slice(),
-                        [Event::SignedOut {
-                            removed: true,
-                            auth: Some(AuthSource::ApiKeyEnv),
-                            fallback_error: None,
-                        }]
+                        [
+                            Event::StreamToken(token),
+                            Event::UsageUpdated(_),
+                            Event::TurnComplete,
+                        ] if token == "reply"
                     ),
                     "{events:?}"
                 );
+                assert_eq!(failure, None);
+                let data = store.load_session_data(&session_id).unwrap();
+                assert_eq!(
+                    data.messages,
+                    [Message::user("hello"), Message::assistant("reply")]
+                );
             })
             .await;
-        })
-        .await;
+        }
+
+        #[tokio::test]
+        async fn titles_a_fresh_session_when_interactive_and_counts_the_title_cost() {
+            with_pinned_home(async {
+                let server = MockServer::start().await;
+                mount_title(&server, greeting_title()).await;
+                mount_reply(&server, "reply").await;
+                let dir = tempfile::tempdir().unwrap();
+                let mut engine = engine(server.uri(), &test_store(dir.path()), dir.path()).await;
+                engine.interactive = true;
+                let live_id = engine.session_id().to_owned();
+                let mut handle = engine.spawn(&[]);
+
+                handle
+                    .ops
+                    .send(Op::Prompt("hello".to_owned()))
+                    .await
+                    .unwrap();
+                let first = titled_turn_events(&mut handle.events).await;
+                let second = submit(&mut handle, "again").await;
+                handle.shutdown().await.unwrap();
+
+                let titled = first.iter().find_map(|event| match event {
+                    Event::SessionTitleUpdated { session_id, title } => {
+                        Some((session_id.as_str(), title.as_str()))
+                    }
+                    _ => None,
+                });
+                assert_eq!(titled, Some((live_id.as_str(), "Greeting")));
+                let expected = 2.0 * request_cost(MODEL, REPLY_USAGE)
+                    + request_cost(TITLE_MODEL, COMPLETION_USAGE);
+                assert!(
+                    matches!(
+                        second.as_slice(),
+                        [
+                            Event::StreamToken(_),
+                            Event::UsageUpdated(UsageSnapshot {
+                                estimated_cost_usd: Some(cost),
+                                ..
+                            }),
+                            Event::TurnComplete,
+                        ] if (cost - expected).abs() < 1e-12
+                    ),
+                    "two turns and the title: {second:?}"
+                );
+            })
+            .await;
+        }
+
+        #[tokio::test]
+        async fn saves_the_title_usage_so_a_resume_restores_its_cost() {
+            with_pinned_home(async {
+                let server = MockServer::start().await;
+                mount_title(&server, greeting_title()).await;
+                mount_reply(&server, "reply").await;
+                let dir = tempfile::tempdir().unwrap();
+                let store = test_store(dir.path());
+                let mut engine = engine(server.uri(), &store, dir.path()).await;
+                engine.interactive = true;
+                let session_id = engine.session_id().to_owned();
+                let cache_ttl = engine.client.prompt_cache_ttl();
+                let mut handle = engine.spawn(&[]);
+
+                handle
+                    .ops
+                    .send(Op::Prompt("hello".to_owned()))
+                    .await
+                    .unwrap();
+                titled_turn_events(&mut handle.events).await;
+                handle.ops.send(Op::Clear).await.unwrap();
+                next_matching(&mut handle.events, |event| {
+                    matches!(event, Event::SessionReady).then_some(())
+                })
+                .await;
+                let target = ResumeTarget::Path(store.find_session_path(&session_id).unwrap());
+                handle.ops.send(Op::Resume { target }).await.unwrap();
+                next_matching(&mut handle.events, |event| {
+                    matches!(event, Event::SessionResumed { .. }).then_some(())
+                })
+                .await;
+                let restored = handle.events.recv().await.unwrap();
+                handle.shutdown().await.unwrap();
+
+                let expected =
+                    request_cost(MODEL, REPLY_USAGE) + request_cost(TITLE_MODEL, COMPLETION_USAGE);
+                assert!(
+                    matches!(
+                        &restored,
+                        Event::UsageUpdated(UsageSnapshot {
+                            context_tokens: None,
+                            estimated_cost_usd: Some(cost),
+                            ..
+                        }) if (cost - expected).abs() < 1e-12
+                    ),
+                    "the turn and the title: {restored:?}"
+                );
+                let usage = store.load_session_data(&session_id).unwrap().usage;
+                let title_usage: Vec<_> = usage
+                    .iter()
+                    .filter(|record| record.model == TITLE_MODEL)
+                    .collect();
+                assert_eq!(
+                    title_usage,
+                    [&UsageRecord {
+                        model: TITLE_MODEL.to_owned(),
+                        cache_ttl,
+                        tokens: COMPLETION_USAGE,
+                    }]
+                );
+            })
+            .await;
+        }
+
+        #[tokio::test]
+        async fn splices_a_queued_prompt_in_at_the_next_round_boundary() {
+            with_pinned_home(async {
+                let server = MockServer::start().await;
+                mount_tool_call_once(&server, "call-1", "missing", "{}").await;
+                mount_reply(&server, "done").await;
+                let dir = tempfile::tempdir().unwrap();
+                let engine = engine(server.uri(), &test_store(dir.path()), dir.path()).await;
+                let mut handle = engine.spawn(&[]);
+
+                for op in [
+                    Op::Queue("early".to_owned()),
+                    Op::Prompt("first".to_owned()),
+                    Op::Queue("queued".to_owned()),
+                ] {
+                    handle.ops.send(op).await.unwrap();
+                }
+                let events = turn_events(&mut handle.events).await;
+                handle.shutdown().await.unwrap();
+
+                let drained: Vec<_> = events
+                    .iter()
+                    .filter_map(|event| match event {
+                        Event::PromptDrained(text) => Some(text.as_str()),
+                        _ => None,
+                    })
+                    .collect();
+                assert_eq!(
+                    drained,
+                    ["queued"],
+                    "a prompt queued between turns is dropped"
+                );
+                let tool_end = events
+                    .iter()
+                    .position(|event| matches!(event, Event::ToolCallEnd { .. }))
+                    .unwrap();
+                assert!(
+                    matches!(&events[tool_end + 1], Event::PromptDrained(_)),
+                    "{events:?}"
+                );
+                let requests = request_bodies(&server).await;
+                assert_eq!(requests.len(), 2);
+                let messages = requests[1]["messages"].as_array().unwrap();
+                assert_eq!(
+                    messages[messages.len() - 2]["content"][0]["type"],
+                    "tool_result"
+                );
+                assert_eq!(texts(&requests[1]).last(), Some(&"queued"));
+            })
+            .await;
+        }
+
+        #[tokio::test]
+        async fn compact_replaces_the_transcript_with_the_summary() {
+            with_pinned_home(async {
+                let server = MockServer::start().await;
+                mount_reply(&server, "reply").await;
+                let dir = tempfile::tempdir().unwrap();
+                let store = test_store(dir.path());
+                let engine = engine(server.uri(), &store, dir.path()).await;
+                let session_id = engine.session_id().to_owned();
+                let mut handle = engine.spawn(&[]);
+
+                submit(&mut handle, &pasted_logs()).await;
+                submit(&mut handle, "two").await;
+                handle
+                    .ops
+                    .send(Op::Compact {
+                        instructions: Some("focus".to_owned()),
+                    })
+                    .await
+                    .unwrap();
+                let compacted = next_matching(&mut handle.events, |event| match event {
+                    Event::SessionCompacted {
+                        pre_count,
+                        instructions,
+                        automatic,
+                        ..
+                    } => Some((pre_count, instructions, automatic)),
+                    _ => None,
+                })
+                .await;
+                submit(&mut handle, "after").await;
+                handle.shutdown().await.unwrap();
+
+                assert_eq!(compacted, (4, Some("focus".to_owned()), false));
+                let requests = request_bodies(&server).await;
+                let after = texts(&requests[3]);
+                assert_eq!(after.len(), 3, "{after:?}");
+                assert!(after[1].contains("reply"), "{after:?}");
+                assert_eq!(after[2], "after");
+                let data = store.load_session_data(&session_id).unwrap();
+                assert_eq!(
+                    data.messages[1..],
+                    [Message::user("after"), Message::assistant("reply")]
+                );
+            })
+            .await;
+        }
+
+        #[tokio::test]
+        async fn resume_continues_the_session_an_id_prefix_names() {
+            with_pinned_home(async {
+                let server = MockServer::start().await;
+                mount_reply(&server, "reply").await;
+                let dir = tempfile::tempdir().unwrap();
+                let store = test_store(dir.path());
+                let target_id = finished_session(&store).await;
+                let engine = engine(server.uri(), &store, dir.path()).await;
+                let mut handle = engine.spawn(&[]);
+
+                let target = ResumeTarget::Prefix(target_id[..8].to_owned());
+                handle.ops.send(Op::Resume { target }).await.unwrap();
+                let resumed = next_matching(&mut handle.events, |event| match event {
+                    Event::SessionResumed { id, history, .. } => Some((id, history)),
+                    _ => None,
+                })
+                .await;
+                submit(&mut handle, "again").await;
+                handle.shutdown().await.unwrap();
+
+                assert_eq!(
+                    resumed,
+                    (
+                        target_id.clone(),
+                        vec![
+                            Interaction::UserText("earlier prompt".to_owned()),
+                            Interaction::AssistantText("earlier reply".to_owned()),
+                        ],
+                    )
+                );
+                let requests = request_bodies(&server).await;
+                assert_eq!(
+                    texts(&requests[0])[1..],
+                    ["earlier prompt", "earlier reply", "again"]
+                );
+                let data = store.load_session_data(&target_id).unwrap();
+                assert_eq!(
+                    data.messages,
+                    [
+                        Message::user("earlier prompt"),
+                        Message::assistant("earlier reply"),
+                        Message::user("again"),
+                        Message::assistant("reply"),
+                    ]
+                );
+            })
+            .await;
+        }
+
+        #[tokio::test]
+        async fn resume_by_a_prefix_only_the_live_session_matches_fails_and_stays_live() {
+            with_pinned_home(async {
+                let server = MockServer::start().await;
+                mount_reply(&server, "reply").await;
+                let dir = tempfile::tempdir().unwrap();
+                let store = test_store(dir.path());
+                let engine = engine(server.uri(), &store, dir.path()).await;
+                let live_id = engine.session_id().to_owned();
+                let mut handle = engine.spawn(&[]);
+
+                submit(&mut handle, "first").await;
+                let target = ResumeTarget::Prefix(live_id[..8].to_owned());
+                handle.ops.send(Op::Resume { target }).await.unwrap();
+                let failure = next_matching(&mut handle.events, |event| match event {
+                    Event::TurnFailed(message) => Some(message),
+                    _ => None,
+                })
+                .await;
+                submit(&mut handle, "second").await;
+                handle.shutdown().await.unwrap();
+
+                assert_eq!(
+                    failure,
+                    format!(
+                        "Resume failed (still on session {prefix}): \
+                         session prefix `{prefix}` matches the live session",
+                        prefix = &live_id[..8],
+                    ),
+                );
+                let data = store.load_session_data(&live_id).unwrap();
+                assert_eq!(data.messages.len(), 4, "the live session keeps recording");
+            })
+            .await;
+        }
+
+        #[tokio::test]
+        async fn records_every_request_so_a_resume_restores_the_session_cost() {
+            with_pinned_home(async {
+                let server = MockServer::start().await;
+                mount_reply(&server, "reply").await;
+                let dir = tempfile::tempdir().unwrap();
+                let store = test_store(dir.path());
+                let engine = engine(server.uri(), &store, dir.path()).await;
+                let session_id = engine.session_id().to_owned();
+                let mut handle = engine.spawn(&[]);
+
+                submit(&mut handle, &pasted_logs()).await;
+                submit(&mut handle, "two").await;
+                handle
+                    .ops
+                    .send(Op::Compact { instructions: None })
+                    .await
+                    .unwrap();
+                next_matching(&mut handle.events, |event| {
+                    matches!(event, Event::SessionReady).then_some(())
+                })
+                .await;
+                submit(&mut handle, "after").await;
+                handle.ops.send(Op::Clear).await.unwrap();
+                next_matching(&mut handle.events, |event| {
+                    matches!(event, Event::SessionReady).then_some(())
+                })
+                .await;
+                let fresh = submit(&mut handle, "fresh").await;
+                let target = ResumeTarget::Path(store.find_session_path(&session_id).unwrap());
+                handle.ops.send(Op::Resume { target }).await.unwrap();
+                next_matching(&mut handle.events, |event| {
+                    matches!(event, Event::SessionResumed { .. }).then_some(())
+                })
+                .await;
+                let restored = handle.events.recv().await.unwrap();
+                handle.shutdown().await.unwrap();
+
+                assert!(
+                    matches!(
+                        fresh.as_slice(),
+                        [
+                            Event::StreamToken(_),
+                            Event::UsageUpdated(UsageSnapshot {
+                                estimated_cost_usd: Some(cost),
+                                ..
+                            }),
+                            Event::TurnComplete,
+                        ] if (cost - 0.006).abs() < 1e-12
+                    ),
+                    "a cleared session starts its own cost: {fresh:?}"
+                );
+                assert!(
+                    matches!(
+                        &restored,
+                        Event::UsageUpdated(UsageSnapshot {
+                            context_tokens: None,
+                            estimated_cost_usd: Some(cost),
+                            ..
+                        }) if (cost - 4.0 * 0.006).abs() < 1e-12
+                    ),
+                    "three turns and the summary: {restored:?}"
+                );
+            })
+            .await;
+        }
+
+        #[tokio::test]
+        async fn archive_rolls_away_and_a_resume_unarchives_the_session() {
+            with_pinned_home(async {
+                let server = MockServer::start().await;
+                mount_reply(&server, "reply").await;
+                let dir = tempfile::tempdir().unwrap();
+                let store = test_store(dir.path());
+                let engine = engine(server.uri(), &store, dir.path()).await;
+                let archived_id = engine.session.session_id().to_owned();
+                let mut handle = engine.spawn(&[]);
+
+                submit(&mut handle, "first").await;
+                handle.ops.send(Op::Archive).await.unwrap();
+                let (fresh_id, archived) = next_matching(&mut handle.events, |event| match event {
+                    Event::SessionRolled { id, archived } => Some((id, archived)),
+                    _ => None,
+                })
+                .await;
+                assert_ne!(fresh_id, archived_id);
+                assert!(archived);
+                assert!(store.load_session_data(&archived_id).unwrap().archived);
+
+                let target = ResumeTarget::Path(store.find_session_path(&archived_id).unwrap());
+                handle.ops.send(Op::Resume { target }).await.unwrap();
+                let resumed = next_matching(&mut handle.events, |event| match event {
+                    Event::SessionResumed { id, unarchived, .. } => Some((id, unarchived)),
+                    _ => None,
+                })
+                .await;
+                handle.shutdown().await.unwrap();
+
+                assert_eq!(resumed, (archived_id.clone(), true));
+                assert!(!store.load_session_data(&archived_id).unwrap().archived);
+            })
+            .await;
+        }
+
+        #[tokio::test]
+        async fn applies_rename_and_config_ops_until_shutdown() {
+            with_pinned_home(async {
+                let server = MockServer::start().await;
+                let dir = tempfile::tempdir().unwrap();
+                let engine = engine(server.uri(), &test_store(dir.path()), dir.path()).await;
+                let live_id = engine.session_id().to_owned();
+                let EngineHandle {
+                    ops,
+                    mut events,
+                    task,
+                } = engine.spawn(&[]);
+
+                for op in [
+                    Op::Rename {
+                        title: "Fix login".to_owned(),
+                    },
+                    Op::SetModel(ConfigPick::Effort(Effort::Low)),
+                    Op::SetMode(Mode::Plan),
+                    Op::Shutdown,
+                ] {
+                    ops.send(op).await.unwrap();
+                }
+                let failure = tokio::time::timeout(Duration::from_secs(5), task.join())
+                    .await
+                    .expect("Shutdown stops the engine while its op channel is still open")
+                    .unwrap();
+                let mut seen = Vec::new();
+                while let Ok(event) = events.try_recv() {
+                    seen.push(event);
+                }
+
+                assert_eq!(failure, None);
+                assert!(
+                    matches!(
+                        seen.as_slice(),
+                        [
+                            Event::SessionTitleUpdated { session_id, title },
+                            Event::ConfigChanged {
+                                requested: ConfigPick::Effort(Effort::Low),
+                                ..
+                            },
+                            Event::ModeChanged(Mode::Plan),
+                        ] if *session_id == live_id && title == "Fix login"
+                    ),
+                    "{seen:?}"
+                );
+            })
+            .await;
+        }
+
+        #[tokio::test]
+        async fn shutdown_before_any_prompt_leaves_no_session_file() {
+            with_pinned_home(async {
+                let server = MockServer::start().await;
+                let dir = tempfile::tempdir().unwrap();
+                let store = test_store(dir.path());
+                let handle = engine(server.uri(), &store, dir.path()).await.spawn(&[]);
+
+                handle.ops.send(Op::Shutdown).await.unwrap();
+                assert_eq!(handle.task.join().await.unwrap(), None);
+
+                assert!(store.list().unwrap().is_empty());
+            })
+            .await;
+        }
+
+        #[tokio::test]
+        async fn finalizes_the_live_session_after_a_clear() {
+            with_pinned_home(async {
+                let server = MockServer::start().await;
+                mount_reply(&server, "reply").await;
+                let dir = tempfile::tempdir().unwrap();
+                let store = test_store(dir.path());
+                let engine = engine(server.uri(), &store, dir.path()).await;
+                let tracker = Arc::clone(&engine.file_tracker);
+                let read_path = dir.path().join("read.txt");
+                std::fs::write(&read_path, "contents").unwrap();
+                let mut handle = engine.spawn(&[]);
+
+                handle.ops.send(Op::Clear).await.unwrap();
+                let live_id = next_matching(&mut handle.events, |event| match event {
+                    Event::SessionRolled {
+                        id,
+                        archived: false,
+                    } => Some(id),
+                    _ => None,
+                })
+                .await;
+                seed_full_read(&tracker, &read_path);
+                submit(&mut handle, "after clear").await;
+                handle.shutdown().await.unwrap();
+
+                let snapshots = store.load_session_data(&live_id).unwrap().file_snapshots;
+                let paths: Vec<_> = snapshots.iter().map(|snapshot| &snapshot.path).collect();
+                assert_eq!(paths, [&read_path]);
+            })
+            .await;
+        }
+
+        #[tokio::test]
+        async fn reports_the_background_shells_and_ends_them_on_shutdown() {
+            with_pinned_home(async {
+                let server = MockServer::start().await;
+                let dir = tempfile::tempdir().unwrap();
+                let store = test_store(dir.path());
+                let engine = engine(server.uri(), &store, dir.path()).await;
+                let shells = Arc::clone(&engine.shells);
+                let mut handle = engine.spawn(&[]);
+
+                start_shell(&shells, "sleep 30");
+                let listed = next_matching(&mut handle.events, |event| match event {
+                    Event::BackgroundShellsUpdated(list) => Some(list),
+                    _ => None,
+                })
+                .await;
+                handle.shutdown().await.unwrap();
+
+                assert_eq!(listed, [shell("shell-1", "sleep 30", ShellState::Running)]);
+                assert_eq!(shells.list(), []);
+            })
+            .await;
+        }
+
+        #[tokio::test]
+        async fn interrupts_mark_each_abandoned_prompt_before_the_next_one() {
+            with_pinned_home(async {
+                let server = MockServer::start().await;
+                mount_stalled_reply_once(&server).await;
+                mount_stalled_reply_once(&server).await;
+                mount_reply(&server, "42").await;
+                let dir = tempfile::tempdir().unwrap();
+                let store = test_store(dir.path());
+                let engine = engine(server.uri(), &store, dir.path()).await;
+                let live_id = engine.session_id().to_owned();
+                let mut handle = engine.spawn(&[]);
+
+                let mut cancelled = Vec::new();
+                for (count, prompt) in [(1, "write a story"), (2, "write a poem")] {
+                    handle
+                        .ops
+                        .send(Op::Prompt(prompt.to_owned()))
+                        .await
+                        .unwrap();
+                    until_requested(&server, count).await;
+                    handle.ops.send(Op::Interrupt).await.unwrap();
+                    cancelled.extend(turn_events(&mut handle.events).await);
+                }
+                let next = submit(&mut handle, "what is 7 times 6?").await;
+                handle.shutdown().await.unwrap();
+
+                assert_eq!(cancelled, [Event::Cancelled, Event::Cancelled]);
+                assert!(matches!(next.last(), Some(Event::TurnComplete)));
+                let requests = request_bodies(&server).await;
+                assert_eq!(
+                    texts(&requests[2])[1..],
+                    [
+                        "write a story",
+                        "[Request interrupted by user]",
+                        "write a poem",
+                        "[Request interrupted by user]",
+                        "what is 7 times 6?",
+                    ]
+                );
+                let data = store.load_session_data(&live_id).unwrap();
+                assert_eq!(
+                    data.messages,
+                    [
+                        Message::user("write a story"),
+                        Message::interruption(),
+                        Message::user("write a poem"),
+                        Message::interruption(),
+                        Message::user("what is 7 times 6?"),
+                        Message::assistant("42"),
+                    ]
+                );
+            })
+            .await;
+        }
+
+        #[tokio::test]
+        async fn interrupt_during_auto_compaction_ends_the_prompt_before_the_model_sees_it() {
+            with_pinned_home(async {
+                let server = MockServer::start().await;
+                mount_stalled_reply_once(&server).await;
+                let dir = tempfile::tempdir().unwrap();
+                let store = test_store(dir.path());
+                let mut engine = engine(server.uri(), &store, dir.path()).await;
+                engine.compaction = CompactionConfig::with_threshold_for_test(50_000);
+                engine.messages = tool_heavy_transcript();
+                engine.last_usage = Some(TokenUsage::new(50_000, 1));
+                let mut handle = engine.spawn(&[]);
+
+                handle
+                    .ops
+                    .send(Op::Prompt("five".to_owned()))
+                    .await
+                    .unwrap();
+                until_requested(&server, 1).await;
+                handle.ops.send(Op::Interrupt).await.unwrap();
+                let events = turn_events(&mut handle.events).await;
+                handle.shutdown().await.unwrap();
+
+                assert!(
+                    matches!(
+                        events.as_slice(),
+                        [Event::AutoCompactionStarted, Event::Cancelled]
+                    ),
+                    "{events:?}"
+                );
+                assert_eq!(
+                    request_bodies(&server).await.len(),
+                    1,
+                    "the prompt never reaches the model"
+                );
+                assert!(
+                    store.list().unwrap().is_empty(),
+                    "neither the prompt nor an interruption marker is recorded",
+                );
+            })
+            .await;
+        }
+
+        #[tokio::test]
+        async fn shutdown_mid_request_stops_without_a_terminal_event() {
+            with_pinned_home(async {
+                for (label, op) in [
+                    ("prompt", Op::Prompt("mid stream".to_owned())),
+                    ("compaction", Op::Compact { instructions: None }),
+                ] {
+                    let server = MockServer::start().await;
+                    mount_stalled_reply_once(&server).await;
+                    let dir = tempfile::tempdir().unwrap();
+                    let mut engine =
+                        engine(server.uri(), &test_store(dir.path()), dir.path()).await;
+                    engine.messages = tool_heavy_transcript();
+                    let EngineHandle {
+                        ops,
+                        mut events,
+                        task,
+                    } = engine.spawn(&[]);
+
+                    ops.send(op).await.unwrap();
+                    until_requested(&server, 1).await;
+                    ops.send(Op::Shutdown).await.unwrap();
+                    let failure = tokio::time::timeout(Duration::from_secs(5), task.join())
+                        .await
+                        .unwrap_or_else(|_| {
+                            panic!("Shutdown stops a {label} while the op channel is open")
+                        })
+                        .unwrap();
+
+                    assert_eq!(failure, None, "{label}");
+                    assert!(events.try_recv().is_err(), "{label}");
+                }
+            })
+            .await;
+        }
+
+        #[tokio::test]
+        async fn finalizes_when_the_op_channel_closes_mid_stream() {
+            with_pinned_home(async {
+                let server = MockServer::start().await;
+                mount_stalled_reply_once(&server).await;
+                let dir = tempfile::tempdir().unwrap();
+                let store = test_store(dir.path());
+                let engine = engine(server.uri(), &store, dir.path()).await;
+                let live_id = engine.session_id().to_owned();
+                let read_path = dir.path().join("read.txt");
+                std::fs::write(&read_path, "contents").unwrap();
+                seed_full_read(&engine.file_tracker, &read_path);
+                let handle = engine.spawn(&[]);
+
+                handle
+                    .ops
+                    .send(Op::Prompt("mid stream".to_owned()))
+                    .await
+                    .unwrap();
+                until_requested(&server, 1).await;
+                tokio::time::timeout(Duration::from_secs(5), handle.shutdown())
+                    .await
+                    .expect("the engine must stop waiting on the stream")
+                    .unwrap();
+
+                let data = store.load_session_data(&live_id).unwrap();
+                assert_eq!(
+                    data.messages,
+                    [Message::user("mid stream"), Message::interruption()]
+                );
+                let paths: Vec<_> = data
+                    .file_snapshots
+                    .iter()
+                    .map(|snapshot| &snapshot.path)
+                    .collect();
+                assert_eq!(paths, [&read_path]);
+            })
+            .await;
+        }
+
+        #[tokio::test]
+        async fn serves_login_and_logout_and_ends_a_sign_in_on_interrupt_or_shutdown() {
+            with_pinned_home(async {
+                let server = MockServer::start().await;
+                let dir = tempfile::tempdir().unwrap();
+                let data = tempfile::tempdir().unwrap();
+                temp_env::async_with_vars([("XDG_DATA_HOME", Some(data.path()))], async {
+                    let engine = engine(server.uri(), &test_store(dir.path()), dir.path()).await;
+                    let EngineHandle {
+                        ops,
+                        mut events,
+                        task,
+                    } = engine.spawn(&[]);
+
+                    ops.send(Op::Login).await.unwrap();
+                    let url = login_url(&mut events).await;
+                    ops.send(Op::Interrupt).await.unwrap();
+                    let cancelled = events.recv().await;
+                    ops.send(Op::Logout).await.unwrap();
+                    let signed_out = events.recv().await;
+                    ops.send(Op::Login).await.unwrap();
+                    login_url(&mut events).await;
+                    ops.send(Op::Shutdown).await.unwrap();
+                    let failure = tokio::time::timeout(Duration::from_secs(5), task.join())
+                        .await
+                        .expect("Shutdown stops the engine mid sign-in")
+                        .unwrap();
+
+                    assert!(
+                        url.starts_with("https://claude.ai/oauth/authorize?"),
+                        "{url}"
+                    );
+                    assert!(matches!(cancelled, Some(Event::Cancelled)), "{cancelled:?}");
+                    assert!(
+                        matches!(
+                            signed_out,
+                            Some(Event::SignedOut {
+                                removed: false,
+                                auth: Some(AuthSource::ApiKeyEnv),
+                                fallback_error: None,
+                            })
+                        ),
+                        "{signed_out:?}"
+                    );
+                    assert_eq!(failure, None);
+                })
+                .await;
+            })
+            .await;
+        }
     }
 
-    #[tokio::test]
-    async fn logout_falls_back_to_the_claude_code_login_or_stays_signed_out() {
-        with_pinned_home(async {
-            let server = MockServer::start().await;
-            let dir = tempfile::tempdir().unwrap();
-            let data = tempfile::tempdir().unwrap();
-            store_ox_login(data.path());
-            temp_env::async_with_vars([("XDG_DATA_HOME", Some(data.path()))], async {
-                let mut engine = engine(server.uri(), &test_store(dir.path()), dir.path()).await;
-                engine
-                    .client
-                    .set_auth(Some(Auth::new(AuthSource::OxLogin, "ox-token")));
+    mod submit_prompt {
+        use super::*;
+
+        #[tokio::test]
+        async fn keeps_the_prefix_and_sends_a_date_change_as_a_reminder() {
+            with_pinned_home(async {
+                let server = MockServer::start().await;
+                mount_reply(&server, "reply").await;
+                let dir = tempfile::tempdir().unwrap();
+                let store = test_store(dir.path());
+                let mut engine = engine(server.uri(), &store, dir.path()).await;
+                let today = engine.prompt.seen.date.clone();
                 let sink = CapturingSink::default();
-                let claude_code_file = std::env::home_dir()
-                    .unwrap()
-                    .join(".claude")
-                    .join(".credentials.json");
+                let mut ops = inert_ops();
 
-                engine.logout(&sink).await;
-                std::fs::create_dir(claude_code_file.parent().unwrap()).unwrap();
-                std::fs::write(&claude_code_file, "not json").unwrap();
-                engine.logout(&sink).await;
-                std::fs::write(&claude_code_file, credentials_json("claude-code-token")).unwrap();
-                engine.logout(&sink).await;
+                let end = engine.submit_prompt("first", &sink, &mut ops).await;
+                assert_eq!(end, TurnEnd::Completed);
+                "2000-01-01".clone_into(&mut engine.prompt.seen.date);
+                let end = engine.submit_prompt("second", &sink, &mut ops).await;
+                assert_eq!(end, TurnEnd::Completed);
 
-                assert_eq!(engine.client.auth().unwrap().secret(), "claude-code-token");
+                let turns = request_bodies(&server).await;
+                assert_eq!(
+                    turns.len(),
+                    2,
+                    "non-interactive turns must not request a title"
+                );
+                assert_eq!(system_prompt(&turns[1]), system_prompt(&turns[0]));
+                let (first, second) = (&turns[0]["messages"], &turns[1]["messages"]);
+                assert_eq!(first[0]["content"][0]["text"], SESSION_CONTEXT);
+                assert_eq!(second[0], first[0], "the first message must not change");
+                assert_eq!(second[1]["content"][0]["text"], "first");
+                assert_eq!(second[2]["content"][0]["text"], "reply");
+                let prompt = second[3]["content"].as_array().unwrap();
+                assert_eq!(prompt[0]["text"], "second");
+                let reminder = prompt[1]["text"].as_str().unwrap();
+                assert!(
+                    reminder.contains(&format!("Today's date is {today}.")),
+                    "{reminder}"
+                );
+                assert!(!reminder.contains("# CLAUDE.md"), "{reminder}");
+
+                let id = engine.session.session_id().to_owned();
+                let expected = engine.prompt.session_context();
+                engine.finalize().await;
+                let data = store.load_session_data(&id).unwrap();
+                assert_eq!(data.context, Some(expected));
+                assert!(matches!(
+                    &data.messages[2].content[..],
+                    [_, ContentBlock::Text { text }] if text == reminder
+                ));
+            })
+            .await;
+        }
+
+        #[tokio::test]
+        async fn shows_an_instruction_warning_each_time_it_appears() {
+            with_pinned_home(async {
+                let server = MockServer::start().await;
+                mount_reply(&server, "reply").await;
+                let dir = tempfile::tempdir().unwrap();
+                let mut engine = engine(server.uri(), &test_store(dir.path()), dir.path()).await;
+                let sink = CapturingSink::default();
+                let mut ops = inert_ops();
+                let warning = write_unreadable_instructions(dir.path());
+
+                engine.submit_prompt("broken", &sink, &mut ops).await;
+                engine.submit_prompt("still broken", &sink, &mut ops).await;
+                std::fs::write(dir.path().join("CLAUDE.md"), "Fixed rules.").unwrap();
+                engine.submit_prompt("fixed", &sink, &mut ops).await;
+                write_unreadable_instructions(dir.path());
+                engine.submit_prompt("broken again", &sink, &mut ops).await;
+
+                let notices: Vec<String> = sink
+                    .events()
+                    .into_iter()
+                    .filter_map(|event| match event {
+                        Event::Notice(notice) => Some(notice),
+                        _ => None,
+                    })
+                    .collect();
+                assert_eq!(notices, [warning.clone(), warning]);
+            })
+            .await;
+        }
+
+        #[tokio::test]
+        async fn reports_usage_and_accumulates_cost_across_turns() {
+            with_pinned_home(async {
+                let server = MockServer::start().await;
+                mount_reply(&server, "reply").await;
+                let dir = tempfile::tempdir().unwrap();
+                let mut engine = engine(server.uri(), &test_store(dir.path()), dir.path()).await;
+                let sink = CapturingSink::default();
+                let mut ops = inert_ops();
+
+                for text in ["first", "second"] {
+                    engine.submit_prompt(text, &sink, &mut ops).await;
+                }
+
+                let usage = sink
+                    .events()
+                    .into_iter()
+                    .rev()
+                    .find_map(|event| match event {
+                        Event::UsageUpdated(usage) => Some(usage),
+                        _ => None,
+                    });
+                let usage = usage.expect("each turn reports usage");
+                assert_eq!(usage.context_tokens, Some(1_000));
+                assert_eq!(usage.context_window, Some(1_000_000));
+                let cost = usage.estimated_cost_usd.unwrap();
+                assert!(
+                    (cost - 0.012).abs() < 1e-12,
+                    "two turns at $0.006 each: {cost}"
+                );
+            })
+            .await;
+        }
+
+        #[tokio::test]
+        async fn bills_nothing_for_a_title_request_that_fails() {
+            with_pinned_home(async {
+                let server = MockServer::start().await;
+                let failure = ResponseTemplate::new(500).insert_header("retry-after", "0");
+                mount_title(&server, failure).await;
+                mount_reply(&server, "reply").await;
+                let dir = tempfile::tempdir().unwrap();
+                let store = test_store(dir.path());
+                let mut engine = engine(server.uri(), &store, dir.path()).await;
+                engine.interactive = true;
+                let session_id = engine.session_id().to_owned();
+                let cache_ttl = engine.client.prompt_cache_ttl();
+                let sink = CapturingSink::default();
+
+                engine.submit_prompt("hello", &sink, &mut inert_ops()).await;
+                let title = engine.title_usage.as_mut().expect("a fresh session titles");
+                let delivered = title.await;
+                engine.emit_usage_update(&sink);
+                engine.finalize().await;
+
+                assert!(delivered.is_err(), "the failed request delivers no usage");
+                let shown = sink
+                    .events()
+                    .into_iter()
+                    .rev()
+                    .find_map(|event| match event {
+                        Event::UsageUpdated(usage) => usage.estimated_cost_usd,
+                        _ => None,
+                    });
+                let expected = request_cost(MODEL, REPLY_USAGE);
+                assert!(
+                    shown.is_some_and(|cost| (cost - expected).abs() < 1e-12),
+                    "only the turn counts: {shown:?}"
+                );
+                let data = store.load_session_data(&session_id).unwrap();
+                assert_eq!(
+                    data.usage,
+                    [UsageRecord {
+                        model: MODEL.to_owned(),
+                        cache_ttl,
+                        tokens: REPLY_USAGE,
+                    }]
+                );
+            })
+            .await;
+        }
+
+        #[tokio::test]
+        async fn adopts_the_task_list_a_tasks_call_sets() {
+            with_pinned_home(async {
+                let server = MockServer::start().await;
+                let input = serde_json::json!({ "tasks": plan() }).to_string();
+                mount_tool_call_once(&server, "call-1", "tasks", &input).await;
+                mount_reply(&server, "done").await;
+                let dir = tempfile::tempdir().unwrap();
+                let mut engine = engine(server.uri(), &test_store(dir.path()), dir.path())
+                    .await
+                    .with_tools(ToolRegistry::new(vec![Box::new(TasksTool)]));
+                let sink = CapturingSink::default();
+                let mut ops = inert_ops();
+
+                let end = engine.submit_prompt("plan it", &sink, &mut ops).await;
+
+                assert_eq!(end, TurnEnd::Completed);
+                assert_eq!(engine.tasks, plan());
+                let events = sink.events();
+                let updated = events
+                    .iter()
+                    .position(|event| matches!(event, Event::TasksUpdated(_)))
+                    .expect("the tasks call reports the new list");
+                assert!(
+                    matches!(
+                        &events[updated - 1],
+                        Event::ToolCallEnd(result) if result.id == "call-1"
+                    ),
+                    "{events:?}"
+                );
+                assert_eq!(events[updated], Event::TasksUpdated(plan()));
+            })
+            .await;
+        }
+
+        #[tokio::test]
+        async fn keeps_the_list_through_a_later_rejected_tasks_call() {
+            with_pinned_home(async {
+                let server = MockServer::start().await;
+                let planned = serde_json::json!({ "tasks": plan() }).to_string();
+                let rejected = serde_json::json!({ "tasks": [
+                    {"content": "Fix the parser", "status": "in_progress"},
+                    {"content": "Fix the lexer", "status": "in_progress"},
+                ]})
+                .to_string();
+                mount_tool_call_once(&server, "call-1", "tasks", &planned).await;
+                mount_tool_call_once(&server, "call-2", "tasks", &rejected).await;
+                mount_reply(&server, "done").await;
+                let dir = tempfile::tempdir().unwrap();
+                let mut engine = engine(server.uri(), &test_store(dir.path()), dir.path())
+                    .await
+                    .with_tools(ToolRegistry::new(vec![Box::new(TasksTool)]));
+                let mut ops = inert_ops();
+
+                let end = engine
+                    .submit_prompt("plan it", &CapturingSink::default(), &mut ops)
+                    .await;
+
+                assert_eq!(end, TurnEnd::Completed);
+                assert_eq!(server.received_requests().await.unwrap().len(), 3);
+                assert_eq!(engine.tasks, plan());
+            })
+            .await;
+        }
+
+        #[tokio::test]
+        async fn adopts_the_list_of_a_turn_that_fails_after_the_call() {
+            with_pinned_home(async {
+                let server = MockServer::start().await;
+                let input = serde_json::json!({ "tasks": plan() }).to_string();
+                mount_tool_call_once(&server, "call-1", "tasks", &input).await;
+                let dir = tempfile::tempdir().unwrap();
+                let mut engine = engine(server.uri(), &test_store(dir.path()), dir.path())
+                    .await
+                    .with_tools(ToolRegistry::new(vec![Box::new(TasksTool)]));
+                engine.max_tool_rounds = Some(1);
+                let mut ops = inert_ops();
+
+                let end = engine
+                    .submit_prompt("plan it", &CapturingSink::default(), &mut ops)
+                    .await;
+
+                assert_eq!(end, TurnEnd::Failed);
+                assert_eq!(engine.tasks, plan());
+            })
+            .await;
+        }
+
+        #[tokio::test]
+        async fn auto_compacts_before_recording_the_new_prompt() {
+            with_pinned_home(async {
+                let server = MockServer::start().await;
+                mount_reply(&server, "auto summary").await;
+                let dir = tempfile::tempdir().unwrap();
+                let mut engine = engine(server.uri(), &test_store(dir.path()), dir.path()).await;
+                engine.compaction = CompactionConfig::with_threshold_for_test(50_000);
+                engine.messages = tool_heavy_transcript();
+                engine.last_usage = Some(TokenUsage::new(50_000, 1));
+                engine.displayed_usage = engine.last_usage;
+                engine.total_estimated_cost_usd = 1.23;
+                engine.auto_compaction_failures = AutoCompactFailures::new(2);
+                let sink = CapturingSink::default();
+                let mut ops = inert_ops();
+
+                let end = engine.submit_prompt("five", &sink, &mut ops).await;
+
+                assert_eq!(end, TurnEnd::Completed);
+                assert_eq!(
+                    engine.auto_compaction_failures,
+                    AutoCompactFailures::default(),
+                    "a success resets the failure count"
+                );
+                let requests = request_bodies(&server).await;
+                assert_eq!(requests.len(), 2);
+                assert_eq!(
+                    requests[0]["messages"][0]["content"][0]["text"], SESSION_CONTEXT,
+                    "the summary forks the engine's own prompt",
+                );
+                let turn = requests[1]["messages"].as_array().unwrap();
+                assert!(
+                    turn[1]["content"][0]["text"]
+                        .as_str()
+                        .unwrap()
+                        .contains("auto summary"),
+                    "the turn must start from the summary: {turn:?}",
+                );
+                assert_eq!(turn.last().unwrap()["content"][0]["text"], "five");
+                assert!(matches!(
+                    &engine.messages[0].content[0],
+                    ContentBlock::Text { text } if text.contains("auto summary")
+                ));
+                assert_eq!(engine.messages.len(), 3);
+                assert_eq!(engine.last_usage, Some(TokenUsage::new(1_000, 100)));
+                assert!(
+                    (engine.total_estimated_cost_usd - (1.23 + 0.006 + 0.006)).abs() < 1e-12,
+                    "the session cost keeps earlier turns and adds the summary and the turn: {}",
+                    engine.total_estimated_cost_usd,
+                );
+                let events = sink.events();
+                let compacted = events
+                    .iter()
+                    .position(|event| {
+                        matches!(
+                            event,
+                            Event::SessionCompacted {
+                                automatic: true,
+                                ..
+                            }
+                        )
+                    })
+                    .unwrap();
+                let Event::UsageUpdated(usage) = &events[compacted + 1] else {
+                    panic!("the summary's cost shows right after the compaction: {events:?}");
+                };
+                assert_eq!(usage.context_tokens, None);
+                assert!((usage.estimated_cost_usd.unwrap() - (1.23 + 0.006)).abs() < 1e-12);
+                let completed = events
+                    .iter()
+                    .position(|event| matches!(event, Event::TurnComplete));
+                assert!(compacted < completed.unwrap());
+            })
+            .await;
+        }
+
+        #[tokio::test]
+        async fn fails_without_sending_the_prompt_when_auto_compaction_fails() {
+            with_pinned_home(async {
+                let server = MockServer::start().await;
+                mount_reply(&server, "   ").await;
+                let dir = tempfile::tempdir().unwrap();
+                let store = test_store(dir.path());
+                let mut engine = engine(server.uri(), &store, dir.path()).await;
+                engine.compaction = CompactionConfig::with_threshold_for_test(50_000);
+                engine.messages = tool_heavy_transcript();
+                engine.last_usage = Some(TokenUsage::new(50_000, 1));
+                let sink = CapturingSink::default();
+                let mut ops = inert_ops();
+
+                let end = engine.submit_prompt("five", &sink, &mut ops).await;
+
+                assert_eq!(end, TurnEnd::Failed);
+                assert_eq!(engine.messages, tool_heavy_transcript());
+                assert_eq!(engine.auto_compaction_failures, AutoCompactFailures::new(1));
+                assert_eq!(
+                    request_bodies(&server).await.len(),
+                    1,
+                    "only the summary request goes out"
+                );
+                let data = store.load_session_data(engine.session_id()).unwrap();
+                assert_eq!(data.messages, [] as [Message; 0]);
                 let events = sink.events();
                 assert!(
                     matches!(
                         events.as_slice(),
                         [
-                            Event::SignedOut {
-                                removed: true,
-                                auth: None,
-                                fallback_error: None,
-                            },
-                            Event::SignedOut {
-                                removed: false,
-                                auth: None,
-                                fallback_error: Some(unreadable),
-                            },
-                            Event::SignedOut {
-                                removed: false,
-                                auth: Some(AuthSource::ClaudeCodeLogin),
-                                fallback_error: None,
-                            },
-                        ] if unreadable.ends_with("Run `claude` to sign in again.")
+                            Event::AutoCompactionStarted,
+                            Event::SummaryToken(token),
+                            Event::SummaryDiscarded,
+                            Event::UsageUpdated(_),
+                            Event::TurnFailed(error),
+                        ] if token == "   "
+                            && error == "Auto-compaction failed: \
+                                         the model returned an empty summary. \
+                                         The prompt was not sent, so send it again to retry."
                     ),
                     "{events:?}"
                 );
             })
             .await;
-        })
-        .await;
-    }
+        }
 
-    #[tokio::test]
-    async fn logout_reports_a_login_it_cannot_remove() {
-        with_pinned_home(async {
-            let server = MockServer::start().await;
-            let dir = tempfile::tempdir().unwrap();
-            let data = tempfile::tempdir().unwrap();
-            std::fs::create_dir_all(data.path().join("ox").join("credentials.json")).unwrap();
-            temp_env::async_with_vars([("XDG_DATA_HOME", Some(data.path()))], async {
+        #[tokio::test]
+        async fn keeps_a_mode_switch_sent_during_a_failed_auto_compaction() {
+            with_pinned_home(async {
+                let server = MockServer::start().await;
+                mount_reply(&server, "   ").await;
+                let dir = tempfile::tempdir().unwrap();
                 let mut engine = engine(server.uri(), &test_store(dir.path()), dir.path()).await;
+                engine.compaction = CompactionConfig::with_threshold_for_test(50_000);
+                engine.messages = tool_heavy_transcript();
+                engine.last_usage = Some(TokenUsage::new(50_000, 1));
                 let sink = CapturingSink::default();
+                let (ops_tx, mut ops) = mpsc::channel(1);
+                ops_tx.try_send(Op::SetMode(Mode::Plan)).unwrap();
 
-                engine.logout(&sink).await;
+                let end = engine.submit_prompt("five", &sink, &mut ops).await;
 
-                assert_eq!(engine.client.auth_source(), Some(AuthSource::ApiKeyEnv));
+                assert_eq!(end, TurnEnd::Failed);
+                assert_eq!(engine.policy.mode(), Mode::Plan);
+            })
+            .await;
+        }
+
+        #[tokio::test]
+        async fn fails_while_signed_out_without_sending_a_request() {
+            with_pinned_home(async {
+                let server = MockServer::start().await;
+                mount_reply(&server, "reply").await;
+                let dir = tempfile::tempdir().unwrap();
+                let mut engine = engine(server.uri(), &test_store(dir.path()), dir.path()).await;
+                engine.client.set_auth(None);
+                let sink = CapturingSink::default();
+                let mut ops = inert_ops();
+
+                let end = engine.submit_prompt("hello", &sink, &mut ops).await;
+
+                assert_eq!(end, TurnEnd::Failed);
+                assert_eq!(engine.messages, [] as [Message; 0]);
+                assert_eq!(request_bodies(&server).await, [] as [serde_json::Value; 0]);
                 let events = sink.events();
                 assert!(
                     matches!(
                         events.as_slice(),
-                        [Event::Error(msg)] if msg.starts_with("Sign-out failed: failed to remove ")
+                        [Event::TurnFailed(msg)] if msg == "Not signed in. Run `/login` to sign in."
                     ),
                     "{events:?}"
                 );
             })
             .await;
-        })
-        .await;
-    }
-
-    // ── estimate_cost_usd ──
-
-    #[test]
-    fn estimate_cost_usd_prices_each_request_by_its_own_model_and_cache_ttl() {
-        let request = |model: &str, cache_ttl: &str| -> UsageRecord {
-            serde_json::from_value(serde_json::json!({
-                "model": model,
-                "cache_ttl": cache_ttl,
-                "input_tokens": 0,
-                "cache_creation_input_tokens": 1_000_000,
-                "cache_read_input_tokens": 0,
-                "output_tokens": 0,
-            }))
-            .unwrap()
-        };
-
-        let cost = estimate_cost_usd(&[
-            request("claude-opus-5-5", "1h"),
-            request("claude-sonnet-5-5", "5m"),
-            request("unpriced-model", "5m"),
-        ]);
-
-        assert!(
-            (cost - (8.0 + 2.5)).abs() < 1e-9,
-            "a 1h write on Opus, a 5m write on Sonnet, and nothing for an unknown model: {cost}"
-        );
-    }
-
-    // ── TurnEnd::of ──
-
-    #[test]
-    fn of_reads_only_the_terminal_events_of_the_op_in_flight() {
-        let prompt = Op::Prompt("hi".to_owned());
-        let compact = Op::Compact { instructions: None };
-        let resume = Op::Resume {
-            target: ResumeTarget::Prefix("1a2b".to_owned()),
-        };
-        let rename = Op::Rename {
-            title: "Fix login".to_owned(),
-        };
-        let set_model = Op::SetModel(ConfigPick::Effort(Effort::Low));
-        let set_mode = Op::SetMode(Mode::Plan);
-        let compacted = |automatic| Event::SessionCompacted {
-            summary: "summary".to_owned(),
-            pre_count: 4,
-            instructions: None,
-            automatic,
-        };
-        let rolled = Event::SessionRolled {
-            id: "new".to_owned(),
-            archived: false,
-        };
-        let notice = Event::Error("Session write failed".to_owned());
-        let failed = Event::TurnFailed("failure".to_owned());
-
-        for (op, event, end) in [
-            (&prompt, Event::TurnComplete, Some(TurnEnd::Completed)),
-            (&prompt, Event::Cancelled, Some(TurnEnd::Cancelled)),
-            (&prompt, failed.clone(), Some(TurnEnd::Failed)),
-            (&prompt, compacted(true), None),
-            (&prompt, notice.clone(), None),
-            (&compact, compacted(false), None),
-            (&compact, Event::SessionReady, Some(TurnEnd::Completed)),
-            (&compact, Event::Cancelled, Some(TurnEnd::Cancelled)),
-            (&compact, Event::TurnComplete, None),
-            (
-                &resume,
-                Event::SessionResumed {
-                    id: "1a2b".to_owned(),
-                    title: None,
-                    unarchived: false,
-                    history: Vec::new(),
-                },
-                None,
-            ),
-            (&resume, Event::SessionReady, Some(TurnEnd::Completed)),
-            (&resume, failed.clone(), Some(TurnEnd::Failed)),
-            (&Op::Clear, notice.clone(), None),
-            (&Op::Clear, rolled, None),
-            (&Op::Clear, Event::SessionReady, Some(TurnEnd::Completed)),
-            (
-                &rename,
-                Event::SessionTitleUpdated {
-                    session_id: "live".to_owned(),
-                    title: "Fix login".to_owned(),
-                },
-                Some(TurnEnd::Completed),
-            ),
-            (&rename, notice.clone(), None),
-            (
-                &rename,
-                Event::RenameFailed("Session write failed".to_owned()),
-                Some(TurnEnd::Failed),
-            ),
-            (
-                &set_model,
-                Event::ConfigChanged {
-                    model: ModelSpec::resolve(MODEL.to_owned()),
-                    effort: Some(Effort::Low),
-                    requested: ConfigPick::Effort(Effort::Low),
-                    auto_compaction: CompactionConfig::with_threshold_for_test(50_000).auto,
-                },
-                Some(TurnEnd::Completed),
-            ),
-            (
-                &set_model,
-                Event::ConfigChanged {
-                    model: ModelSpec::resolve("custom-model".to_owned()),
-                    effort: None,
-                    requested: ConfigPick::Effort(Effort::Low),
-                    auto_compaction: CompactionConfig::with_threshold_for_test(50_000).auto,
-                },
-                Some(TurnEnd::Failed),
-            ),
-            (&set_model, failed, None),
-            (
-                &set_mode,
-                Event::ModeChanged(Mode::Plan),
-                Some(TurnEnd::Completed),
-            ),
-            (&set_mode, notice.clone(), None),
-            (&Op::Archive, Event::SessionReady, None),
-        ] {
-            assert_eq!(TurnEnd::of(op, &event), end, "{op:?} then {event:?}");
         }
     }
 
-    // ── report_abort ──
+    mod compact {
+        use super::*;
 
-    #[test]
-    fn report_abort_shows_cancel_and_failure_but_keeps_shutdown_silent() {
-        let sink = CapturingSink::default();
+        /// Serves one summary that streams `text` and then stalls with the connection open. Returns
+        /// the base URL.
+        async fn serve_stalled_summary(text: &str) -> String {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let base_url = format!("http://{}", listener.local_addr().unwrap());
+            let body = sse_body(&[
+                serde_json::json!({"type": "message_start", "message": {"id": "msg_1", "model": MODEL, "usage": {"input_tokens": 1_000, "output_tokens": 0}}}),
+                serde_json::json!({"type": "content_block_start", "index": 0, "content_block": {"type": "text", "text": ""}}),
+                serde_json::json!({"type": "content_block_delta", "index": 0, "delta": {"type": "text_delta", "text": text}}),
+            ]);
+            let declared = body.len() + 1;
+            let response = formatdoc! {"
+                HTTP/1.1 200 OK\r
+                content-type: text/event-stream\r
+                content-length: {declared}\r
+                \r
+                {body}"
+            };
+            tokio::spawn(async move {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                _ = socket.read(&mut [0; 1024]).await.unwrap();
+                socket.write_all(response.as_bytes()).await.unwrap();
+                std::future::pending::<()>().await;
+            });
+            base_url
+        }
 
-        assert_eq!(
-            report_abort(&sink, TurnAbort::Cancelled, "label"),
-            TurnEnd::Cancelled
-        );
-        assert_eq!(
-            report_abort(&sink, TurnAbort::Shutdown, "label"),
-            TurnEnd::Shutdown
-        );
-        assert_eq!(
-            report_abort(&sink, TurnAbort::Failed(anyhow!("boom")), "label"),
-            TurnEnd::Failed
-        );
+        #[tokio::test]
+        async fn replaces_the_transcript_bills_the_summary_and_resumes_auto_compaction() {
+            with_pinned_home(async {
+                let server = MockServer::start().await;
+                mount_reply(&server, "manual summary").await;
+                let dir = tempfile::tempdir().unwrap();
+                let mut engine = engine(server.uri(), &test_store(dir.path()), dir.path()).await;
+                engine.messages = tool_heavy_transcript();
+                engine.displayed_usage = Some(TokenUsage::new(90_000, 9));
+                engine.total_estimated_cost_usd = 1.23;
+                engine.auto_compaction_failures = AutoCompactFailures::new(3);
+                let sink = CapturingSink::default();
+                let mut ops = inert_ops();
 
-        let events = sink.events();
-        assert!(
-            matches!(
-                events.as_slice(),
-                [Event::Cancelled, Event::TurnFailed(msg)] if msg == "boom"
-            ),
-            "{events:?}",
-        );
+                let end = engine
+                    .compact(&sink, &mut ops, Some("focus".to_owned()))
+                    .await;
+
+                assert_eq!(end, TurnEnd::Completed);
+                assert!(matches!(
+                    engine.messages.as_slice(),
+                    [Message { content, .. }] if matches!(
+                        &content[0],
+                        ContentBlock::Text { text } if text.contains("manual summary")
+                    )
+                ));
+                assert_eq!(engine.displayed_usage, None);
+                assert!(
+                    (engine.total_estimated_cost_usd - (1.23 + 0.006)).abs() < 1e-12,
+                    "the session cost keeps earlier turns and adds the summary: {}",
+                    engine.total_estimated_cost_usd,
+                );
+                assert_ne!(
+                    engine.prompt.user_context, SESSION_CONTEXT,
+                    "the compacted transcript starts from a fresh user context"
+                );
+                assert!(engine.prompt_unrecorded);
+                assert_eq!(
+                    engine.auto_compaction_failures,
+                    AutoCompactFailures::default()
+                );
+                let events = sink.events();
+                let [
+                    Event::SummaryToken(streamed),
+                    Event::SessionCompacted {
+                        automatic: false,
+                        instructions: Some(focus),
+                        ..
+                    },
+                    Event::AutoCompactionResumed,
+                    Event::UsageUpdated(usage),
+                    Event::SessionReady,
+                ] = events.as_slice()
+                else {
+                    panic!(
+                        "expected the summary, compaction, resume, cost, then the end: {events:?}"
+                    );
+                };
+                assert_eq!(streamed, "manual summary");
+                assert_eq!(focus, "focus");
+                assert_eq!(usage.context_tokens, None);
+                assert!((usage.estimated_cost_usd.unwrap() - (1.23 + 0.006)).abs() < 1e-12);
+            })
+            .await;
+        }
+
+        #[tokio::test]
+        async fn carries_the_task_list_into_the_summary_and_through_a_resume() {
+            with_pinned_home(async {
+                let server = MockServer::start().await;
+                mount_reply(&server, "manual summary").await;
+                let dir = tempfile::tempdir().unwrap();
+                let store = test_store(dir.path());
+                let mut engine = engine(server.uri(), &store, dir.path()).await;
+                let session_id = engine.session_id().to_owned();
+                engine.messages = tool_heavy_transcript();
+                engine.tasks = plan();
+                let mut ops = inert_ops();
+
+                let end = engine
+                    .compact(&CapturingSink::default(), &mut ops, None)
+                    .await;
+
+                assert_eq!(end, TurnEnd::Completed);
+                assert_eq!(
+                    engine.messages,
+                    [synthesize_post_compact_message(
+                        "manual summary",
+                        &plan(),
+                        &[]
+                    )]
+                );
+                assert_eq!(engine.tasks, plan());
+
+                engine.clear(&CapturingSink::default()).await;
+                let compacted = store.find_session_path(&session_id).unwrap();
+                engine
+                    .resume(&CapturingSink::default(), ResumeTarget::Path(compacted))
+                    .await;
+
+                assert_eq!(engine.session_id(), session_id);
+                assert_eq!(engine.tasks, plan());
+            })
+            .await;
+        }
+
+        #[tokio::test]
+        async fn lists_the_open_background_shells_in_the_summary_message() {
+            with_pinned_home(async {
+                let server = MockServer::start().await;
+                mount_reply(&server, "manual summary").await;
+                let dir = tempfile::tempdir().unwrap();
+                let store = test_store(dir.path());
+                let mut engine = engine(server.uri(), &store, dir.path()).await;
+                engine.messages = tool_heavy_transcript();
+                start_shell(&engine.shells, "sleep 30");
+                let mut ops = inert_ops();
+
+                let end = engine
+                    .compact(&CapturingSink::default(), &mut ops, None)
+                    .await;
+
+                assert_eq!(end, TurnEnd::Completed);
+                assert_eq!(
+                    engine.messages,
+                    [synthesize_post_compact_message(
+                        "manual summary",
+                        &[],
+                        &[shell("shell-1", "sleep 30", ShellState::Running)],
+                    )]
+                );
+                engine.shells.stop_all().await;
+            })
+            .await;
+        }
+
+        #[tokio::test]
+        async fn failure_or_cancel_keeps_the_transcript() {
+            with_pinned_home(async {
+                let server = MockServer::start().await;
+                mount_reply(&server, "summary").await;
+                let dir = tempfile::tempdir().unwrap();
+                let mut engine = engine(server.uri(), &test_store(dir.path()), dir.path()).await;
+                let sink = CapturingSink::default();
+                let (ops_tx, mut ops) = mpsc::channel(1);
+
+                engine.messages = vec![Message::user("too short")];
+                let end = engine.compact(&sink, &mut ops, None).await;
+                assert_eq!(end, TurnEnd::Failed);
+                assert_eq!(engine.messages, [Message::user("too short")]);
+
+                engine.messages = tool_heavy_transcript();
+                ops_tx.send(Op::Interrupt).await.unwrap();
+                let end = engine.compact(&sink, &mut ops, None).await;
+                assert_eq!(end, TurnEnd::Cancelled);
+                assert_eq!(engine.messages, tool_heavy_transcript());
+
+                engine.session = handle::testing::dead("dead");
+                let end = engine.compact(&sink, &mut ops, None).await;
+                assert_eq!(
+                    end,
+                    TurnEnd::Failed,
+                    "an unwritten boundary is a failed compaction"
+                );
+                assert_eq!(engine.messages, tool_heavy_transcript());
+
+                let events = sink.events();
+                assert!(
+                    matches!(
+                        events.as_slice(),
+                        [
+                            Event::TurnFailed(short),
+                            Event::Cancelled,
+                            Event::SummaryToken(_),
+                            Event::Error(usage_write),
+                            Event::SummaryDiscarded,
+                            Event::Error(boundary_write),
+                            Event::UsageUpdated(UsageSnapshot {
+                                context_tokens: None,
+                                estimated_cost_usd: Some(cost),
+                                ..
+                            }),
+                            Event::TurnFailed(unsaved),
+                        ] if short == "Compaction failed: the conversation has about 15 tokens, \
+                                       below the 1000-token minimum"
+                            && usage_write.starts_with("Session write failed")
+                            && boundary_write == "Session write failed: \
+                                                  session writer task has stopped"
+                            && (cost - 0.006).abs() < 1e-12
+                            && unsaved == "Compaction was not saved, so the transcript is unchanged"
+                    ),
+                    "{events:?}",
+                );
+            })
+            .await;
+        }
+
+        #[tokio::test]
+        async fn fails_while_signed_out_without_sending_a_request() {
+            with_pinned_home(async {
+                let server = MockServer::start().await;
+                mount_reply(&server, "summary").await;
+                let dir = tempfile::tempdir().unwrap();
+                let mut engine = engine(server.uri(), &test_store(dir.path()), dir.path()).await;
+                engine.client.set_auth(None);
+                engine.messages = tool_heavy_transcript();
+                let sink = CapturingSink::default();
+                let mut ops = inert_ops();
+
+                let end = engine.compact(&sink, &mut ops, None).await;
+
+                assert_eq!(end, TurnEnd::Failed);
+                assert_eq!(engine.messages, tool_heavy_transcript());
+                assert_eq!(request_bodies(&server).await, [] as [serde_json::Value; 0]);
+                let events = sink.events();
+                assert!(
+                    matches!(
+                        events.as_slice(),
+                        [Event::TurnFailed(msg)] if msg == "Not signed in. Run `/login` to sign in."
+                    ),
+                    "{events:?}"
+                );
+            })
+            .await;
+        }
+
+        #[tokio::test]
+        async fn keeps_a_mode_switch_sent_before_a_cancel() {
+            with_pinned_home(async {
+                let server = MockServer::start().await;
+                let dir = tempfile::tempdir().unwrap();
+                let mut engine = engine(server.uri(), &test_store(dir.path()), dir.path()).await;
+                engine.messages = tool_heavy_transcript();
+                let sink = CapturingSink::default();
+                let (ops_tx, mut ops) = mpsc::channel(2);
+                ops_tx.try_send(Op::SetMode(Mode::Plan)).unwrap();
+                ops_tx.try_send(Op::Interrupt).unwrap();
+
+                let end = engine.compact(&sink, &mut ops, None).await;
+
+                assert_eq!(end, TurnEnd::Cancelled);
+                assert_eq!(engine.policy.mode(), Mode::Plan);
+            })
+            .await;
+        }
+
+        #[tokio::test]
+        async fn cancelled_mid_summary_discards_it_before_the_cancel() {
+            with_pinned_home(async {
+                let base_url = serve_stalled_summary("partial").await;
+                let dir = tempfile::tempdir().unwrap();
+                let mut engine = engine(base_url, &test_store(dir.path()), dir.path()).await;
+                engine.messages = tool_heavy_transcript();
+                let sink = CapturingSink::default();
+                let (ops_tx, mut ops) = mpsc::channel(1);
+                let interrupt_once_streaming = async {
+                    while sink.events().is_empty() {
+                        tokio::task::yield_now().await;
+                    }
+                    ops_tx.send(Op::Interrupt).await.unwrap();
+                };
+
+                let (end, ()) = tokio::join!(
+                    engine.compact(&sink, &mut ops, None),
+                    interrupt_once_streaming,
+                );
+
+                assert_eq!(end, TurnEnd::Cancelled);
+                assert_eq!(engine.messages, tool_heavy_transcript());
+                let events = sink.events();
+                assert!(
+                    matches!(
+                        events.as_slice(),
+                        [
+                            Event::SummaryToken(partial),
+                            Event::SummaryDiscarded,
+                            Event::UsageUpdated(_),
+                            Event::Cancelled,
+                        ] if partial == "partial"
+                    ),
+                    "{events:?}",
+                );
+            })
+            .await;
+        }
+
+        #[tokio::test]
+        async fn failure_bills_and_shows_the_summary_cost() {
+            with_pinned_home(async {
+                let server = MockServer::start().await;
+                Mock::given(method("POST"))
+                    .and(path("/v1/messages"))
+                    .respond_with(sse_response(
+                        text_stream_body("", "partial").replace("end_turn", "max_tokens"),
+                    ))
+                    .mount(&server)
+                    .await;
+                let dir = tempfile::tempdir().unwrap();
+                let mut engine = engine(server.uri(), &test_store(dir.path()), dir.path()).await;
+                engine.messages = tool_heavy_transcript();
+                engine.displayed_usage = Some(TokenUsage::new(50_000, 1));
+                engine.total_estimated_cost_usd = 1.23;
+                let sink = CapturingSink::default();
+                let mut ops = inert_ops();
+
+                let end = engine.compact(&sink, &mut ops, None).await;
+
+                assert_eq!(end, TurnEnd::Failed);
+                assert_eq!(engine.messages, tool_heavy_transcript());
+                assert_eq!(engine.displayed_usage, Some(TokenUsage::new(50_000, 1)));
+                let expected = 1.23 + 0.006;
+                assert!(
+                    (engine.total_estimated_cost_usd - expected).abs() < 1e-12,
+                    "a rejected summary is still billed: {}",
+                    engine.total_estimated_cost_usd,
+                );
+                let events = sink.events();
+                let [
+                    Event::SummaryToken(partial),
+                    Event::SummaryDiscarded,
+                    Event::UsageUpdated(usage),
+                    Event::TurnFailed(msg),
+                ] = events.as_slice()
+                else {
+                    panic!(
+                        "expected the discarded summary and its cost before the failure: {events:?}"
+                    );
+                };
+                assert_eq!(partial, "partial");
+                assert_eq!(usage.context_tokens, Some(50_000));
+                assert!((usage.estimated_cost_usd.unwrap() - expected).abs() < 1e-12);
+                assert!(
+                    msg.starts_with("Compaction failed") && msg.contains("max_tokens"),
+                    "{msg}"
+                );
+            })
+            .await;
+        }
     }
 
-    // ── sign_in_failed ──
+    mod clear {
+        use super::*;
 
-    #[test]
-    fn sign_in_failed_keeps_a_cause_that_ends_a_sentence_verbatim() {
-        let cause = anyhow!("token exchange failed with 400 Bad Request: Code expired.");
+        #[tokio::test]
+        async fn keeps_a_pending_title_cost_out_of_the_new_session() {
+            with_pinned_home(async {
+                let server = MockServer::start().await;
+                mount_title(&server, greeting_title()).await;
+                let reply_without_usage = sse_body(&[
+                    serde_json::json!({"type": "message_start", "message": {"id": "msg_1", "model": MODEL}}),
+                    serde_json::json!({"type": "content_block_start", "index": 0, "content_block": {"type": "text", "text": "reply"}}),
+                    serde_json::json!({"type": "content_block_stop", "index": 0}),
+                    serde_json::json!({"type": "message_delta", "delta": {"stop_reason": "end_turn"}}),
+                    serde_json::json!({"type": "message_stop"}),
+                ]);
+                Mock::given(method("POST"))
+                    .and(path("/v1/messages"))
+                    .respond_with(sse_response(reply_without_usage))
+                    .mount(&server)
+                    .await;
+                let dir = tempfile::tempdir().unwrap();
+                let mut engine = engine(server.uri(), &test_store(dir.path()), dir.path()).await;
+                engine.interactive = true;
+                let (sink, mut events) = mpsc::unbounded_channel();
+                engine.submit_prompt("hello", &sink, &mut inert_ops()).await;
+                next_matching(&mut events, |event| {
+                    matches!(event, Event::SessionTitleUpdated { .. }).then_some(())
+                })
+                .await;
+                assert!(
+                    engine.total_estimated_cost_usd.abs() < f64::EPSILON,
+                    "a turn without usage emits nothing, so the title cost is still pending"
+                );
 
-        let abort = sign_in_failed(&cause);
+                engine.clear(&sink).await;
 
-        assert_eq!(
-            abort.to_string(),
-            "Sign-in failed: token exchange failed with 400 Bad Request: Code expired. \
-             Run `/login` to try again.",
-        );
+                assert!(
+                    engine.total_estimated_cost_usd.abs() < f64::EPSILON,
+                    "the new session starts at zero: {}",
+                    engine.total_estimated_cost_usd,
+                );
+            })
+            .await;
+        }
+
+        #[tokio::test]
+        async fn reports_the_finalize_failure_and_instruction_warnings_before_it_ends() {
+            with_pinned_home(async {
+                let server = MockServer::start().await;
+                let dir = tempfile::tempdir().unwrap();
+                let mut engine = engine(server.uri(), &test_store(dir.path()), dir.path()).await;
+                engine.session = handle::testing::dead("dead");
+                let warning = write_unreadable_instructions(dir.path());
+                let sink = CapturingSink::default();
+
+                engine.clear(&sink).await;
+
+                let events = sink.events();
+                assert!(
+                    matches!(
+                        events.as_slice(),
+                        [
+                            Event::SessionRolled {
+                                archived: false,
+                                ..
+                            },
+                            Event::Error(failure),
+                            Event::Notice(notice),
+                            Event::SessionReady,
+                        ] if failure == "Previous session write failed: \
+                                         session writer task has stopped. \
+                                         Conversation history may be incomplete."
+                            && *notice == warning
+                    ),
+                    "{events:?}",
+                );
+            })
+            .await;
+        }
+
+        #[tokio::test]
+        async fn drops_the_task_list_and_resume_restores_it_after_the_session() {
+            with_pinned_home(async {
+                let server = MockServer::start().await;
+                let input = serde_json::json!({ "tasks": plan() }).to_string();
+                mount_tool_call_once(&server, "call-1", "tasks", &input).await;
+                mount_reply(&server, "done").await;
+                let dir = tempfile::tempdir().unwrap();
+                let store = test_store(dir.path());
+                let mut engine = engine(server.uri(), &store, dir.path())
+                    .await
+                    .with_tools(ToolRegistry::new(vec![Box::new(TasksTool)]));
+                let planned_id = engine.session_id().to_owned();
+                let mut ops = inert_ops();
+                engine
+                    .submit_prompt("plan it", &CapturingSink::default(), &mut ops)
+                    .await;
+
+                engine.clear(&CapturingSink::default()).await;
+                assert_eq!(engine.tasks, []);
+
+                let sink = CapturingSink::default();
+                let planned_path = store.find_session_path(&planned_id).unwrap();
+                engine.resume(&sink, ResumeTarget::Path(planned_path)).await;
+                assert_eq!(engine.tasks, plan());
+                let events = sink.events();
+                let resumed = events
+                    .iter()
+                    .position(|event| matches!(event, Event::SessionResumed { .. }))
+                    .expect("the resume succeeds");
+                let restored = events
+                    .iter()
+                    .position(|event| *event == Event::TasksUpdated(plan()))
+                    .expect("the resume shows the restored list");
+                assert!(resumed < restored, "{events:?}");
+            })
+            .await;
+        }
     }
 
-    // ── format_drift_warning ──
+    mod archive {
+        use super::*;
 
-    #[test]
-    fn format_drift_warning_names_a_single_file() {
-        let warning = format_drift_warning(&[PathBuf::from("a.rs")]);
+        #[tokio::test]
+        async fn keeps_the_session_without_messages_or_after_each_failed_write() {
+            with_pinned_home(async {
+                let server = MockServer::start().await;
+                let dir = tempfile::tempdir().unwrap();
+                let store = test_store(dir.path());
+                let mut engine = engine(server.uri(), &store, dir.path()).await;
+                let live_id = engine.session.session_id().to_owned();
+                let sink = CapturingSink::default();
 
-        assert_eq!(
-            warning,
-            "1 tracked file changed on disk since the resumed session read it, \
-             so Edit needs a fresh Read first: a.rs",
-        );
+                engine.archive(&sink).await;
+                assert_eq!(engine.session.session_id(), live_id);
+                engine.messages = vec![Message::user("unsaved")];
+                engine.session = handle::testing::dead("dead");
+                engine.archive(&sink).await;
+                engine.archive(&sink).await;
+                assert_eq!(engine.session.session_id(), "dead");
+
+                let events = sink.events();
+                assert!(
+                    matches!(
+                        events.as_slice(),
+                        [Event::Error(empty), Event::Error(first), Event::Error(again)]
+                            if empty.starts_with("Nothing to archive")
+                                && first.starts_with("Archive failed: ")
+                                && again.starts_with("Archive failed: ")
+                    ),
+                    "{events:?}",
+                );
+            })
+            .await;
+        }
     }
 
-    #[test]
-    fn format_drift_warning_previews_three_paths_and_counts_the_rest() {
-        let drifted: Vec<PathBuf> = ["a.rs", "b.rs", "c.rs", "d.rs", "e.rs"]
-            .into_iter()
-            .map(PathBuf::from)
-            .collect();
+    mod resume {
+        use super::*;
 
-        let warning = format_drift_warning(&drifted);
+        #[tokio::test]
+        async fn replays_the_recorded_prompt() {
+            with_pinned_home(async {
+                let server = MockServer::start().await;
+                mount_reply(&server, "reply").await;
+                let dir = tempfile::tempdir().unwrap();
+                let store = test_store(dir.path());
+                let mut engine = engine(server.uri(), &store, dir.path()).await;
+                let recorded_id = engine.session.session_id().to_owned();
+                let sink = CapturingSink::default();
+                let mut ops = inert_ops();
+                engine.submit_prompt("first", &sink, &mut ops).await;
+                engine.clear(&sink).await;
 
-        assert_eq!(
-            warning,
-            "5 tracked files changed on disk since the resumed session read them, \
-             so Edit needs a fresh Read first: a.rs, b.rs, c.rs, and 2 more",
-        );
+                let recorded_path = store.find_session_path(&recorded_id).unwrap();
+                engine
+                    .resume(&sink, ResumeTarget::Path(recorded_path))
+                    .await;
+                assert_eq!(engine.prompt.user_context, SESSION_CONTEXT);
+                assert!(!engine.prompt_unrecorded);
+                engine.submit_prompt("second", &sink, &mut ops).await;
+
+                let turns = request_bodies(&server).await;
+                assert_eq!(system_prompt(&turns[1]), system_prompt(&turns[0]));
+                assert_eq!(turns[1]["messages"][0], turns[0]["messages"][0]);
+                assert_eq!(turns[1]["messages"][1]["content"][0]["text"], "first");
+            })
+            .await;
+        }
+
+        #[tokio::test]
+        async fn shows_and_replays_an_interruption() {
+            with_pinned_home(async {
+                let server = MockServer::start().await;
+                mount_reply(&server, "42").await;
+                let dir = tempfile::tempdir().unwrap();
+                let store = test_store(dir.path());
+                let mut engine = engine(server.uri(), &store, dir.path()).await;
+                let interrupted_id = engine.session_id().to_owned();
+                let sink = CapturingSink::default();
+                let (ops_tx, mut ops) = mpsc::channel(1);
+                ops_tx.send(Op::Interrupt).await.unwrap();
+                engine.submit_prompt("write a story", &sink, &mut ops).await;
+                engine.clear(&sink).await;
+                let path = store.find_session_path(&interrupted_id).unwrap();
+
+                engine.resume(&sink, ResumeTarget::Path(path)).await;
+                engine
+                    .submit_prompt("what is 7 times 6?", &sink, &mut ops)
+                    .await;
+
+                let history = sink.events().into_iter().find_map(|event| match event {
+                    Event::SessionResumed { history, .. } => Some(history),
+                    _ => None,
+                });
+                assert_eq!(
+                    history,
+                    Some(vec![
+                        Interaction::UserText("write a story".to_owned()),
+                        Interaction::Interrupted,
+                    ])
+                );
+                let request = &request_bodies(&server).await[0];
+                let replayed: Vec<&str> = request["messages"][1]["content"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|block| block["text"].as_str().unwrap())
+                    .collect();
+                assert_eq!(replayed, ["write a story", "[Request interrupted by user]"]);
+                assert_eq!(texts(request)[2..], ["what is 7 times 6?"]);
+            })
+            .await;
+        }
+
+        #[tokio::test]
+        async fn from_another_project_spills_beside_the_file_that_delete_removes() {
+            with_pinned_home(async {
+                let server = MockServer::start().await;
+                let dir = tempfile::tempdir().unwrap();
+                let store = test_store(dir.path());
+                let other =
+                    SessionStore::open_at(dir.path().to_path_buf(), "other-project").unwrap();
+                let other_id = finished_session(&other).await;
+                let other_path = store.find_session_path(&other_id).unwrap();
+                let mut engine = engine(server.uri(), &store, dir.path())
+                    .await
+                    .with_tools(ToolRegistry::new(vec![Box::new(EchoTool)]));
+                engine.set_mode(&CapturingSink::default(), Mode::Yolo);
+                engine
+                    .resume(
+                        &CapturingSink::default(),
+                        ResumeTarget::Path(other_path.clone()),
+                    )
+                    .await;
+
+                spill_echo_output(&server, &mut engine, "call-1").await;
+                let beside_file = other_path.with_file_name(&other_id);
+                assert_eq!(spill_names(&beside_file), ["call-1.txt"]);
+                engine.clear(&CapturingSink::default()).await;
+                delete_at(&other_path, engine.session_id()).unwrap();
+
+                assert!(!beside_file.exists(), "delete removes the spills");
+                assert!(!test_project_dir(dir.path()).join(&other_id).exists());
+            })
+            .await;
+        }
+
+        #[tokio::test]
+        async fn reports_the_old_session_finalize_failure_before_it_ends() {
+            with_pinned_home(async {
+                let server = MockServer::start().await;
+                let dir = tempfile::tempdir().unwrap();
+                let store = test_store(dir.path());
+                let target_id = finished_session(&store).await;
+                let mut engine = engine(server.uri(), &store, dir.path()).await;
+                engine.session = handle::testing::dead("dead");
+                let sink = CapturingSink::default();
+
+                let target_path = store.find_session_path(&target_id).unwrap();
+                engine.resume(&sink, ResumeTarget::Path(target_path)).await;
+
+                let events = sink.events();
+                assert!(
+                    matches!(
+                        events.as_slice(),
+                        [
+                            Event::SessionResumed { id, .. },
+                            Event::Error(msg),
+                            Event::SessionReady,
+                        ] if *id == target_id
+                                && msg == "Previous session write failed: \
+                                           session writer task has stopped. \
+                                           Conversation history may be incomplete."
+                    ),
+                    "{events:?}"
+                );
+            })
+            .await;
+        }
+
+        #[tokio::test]
+        async fn failure_preserves_current_session_state() {
+            with_pinned_home(async {
+                let server = MockServer::start().await;
+                let dir = tempfile::tempdir().unwrap();
+                let store = test_store(dir.path());
+                let mut engine = engine(server.uri(), &store, dir.path()).await;
+                let original_id = engine.session.session_id().to_owned();
+                let last_usage = TokenUsage::new(100_000, 10);
+                let displayed_usage = TokenUsage::new(90_000, 9);
+                engine.messages = vec![Message::user("still here")];
+                engine.auto_compaction_failures = AutoCompactFailures::new(2);
+                engine.last_usage = Some(last_usage);
+                engine.displayed_usage = Some(displayed_usage);
+                engine.total_estimated_cost_usd = 1.23;
+                let rule = Rule::parse(PermissionClass::Exec, "cargo test *").unwrap();
+                engine.policy.allow_for_session(rule.clone());
+                start_shell(&engine.shells, "sleep 30");
+                let sink = CapturingSink::default();
+
+                engine
+                    .resume(&sink, ResumeTarget::Path("missing-target.jsonl".into()))
+                    .await;
+
+                assert_eq!(engine.session.session_id(), original_id);
+                assert_eq!(engine.messages.len(), 1);
+                assert_eq!(engine.auto_compaction_failures, AutoCompactFailures::new(2));
+                assert_eq!(engine.last_usage, Some(last_usage));
+                assert_eq!(engine.displayed_usage, Some(displayed_usage));
+                assert!((engine.total_estimated_cost_usd - 1.23).abs() < f64::EPSILON);
+                assert_eq!(engine.policy.session_allow(), [rule]);
+                assert_eq!(
+                    engine.shells.list(),
+                    [shell("shell-1", "sleep 30", ShellState::Running)]
+                );
+                assert_eq!(
+                    sink.events(),
+                    [Event::TurnFailed(format!(
+                        "Resume failed (still on session {}): \
+                         session not found: missing-target.jsonl: {}",
+                        id_prefix(&original_id),
+                        std::fs::metadata("missing-target.jsonl").unwrap_err(),
+                    ))]
+                );
+                engine.shells.stop_all().await;
+            })
+            .await;
+        }
+    }
+
+    mod rename {
+        use super::*;
+
+        #[tokio::test]
+        async fn announces_only_a_persisted_title() {
+            with_pinned_home(async {
+                let server = MockServer::start().await;
+                let dir = tempfile::tempdir().unwrap();
+                let mut engine = engine(server.uri(), &test_store(dir.path()), dir.path()).await;
+                let live_id = engine.session.session_id().to_owned();
+                let sink = CapturingSink::default();
+
+                engine.rename(&sink, "Fix login".to_owned()).await;
+                assert!(engine.session.manual_title_set());
+                engine.session = handle::testing::dead("dead");
+                engine.rename(&sink, "Lost".to_owned()).await;
+
+                let events = sink.events();
+                assert!(
+                    matches!(
+                        events.as_slice(),
+                        [
+                            Event::SessionTitleUpdated { session_id, title },
+                            Event::RenameFailed(write),
+                        ] if *session_id == live_id && title == "Fix login"
+                            && write.starts_with("Session write failed")
+                    ),
+                    "{events:?}",
+                );
+            })
+            .await;
+        }
+    }
+
+    mod set_model {
+        use super::*;
+
+        fn sonnet_pick() -> ConfigPick {
+            ConfigPick::Model {
+                id: ResolvedModelId::new("claude-sonnet-5-5".to_owned()),
+                effort: None,
+            }
+        }
+
+        #[tokio::test]
+        async fn swap_keeps_the_system_prompt_and_names_the_model_next_turn() {
+            with_pinned_home(async {
+                let server = MockServer::start().await;
+                mount_reply(&server, "reply").await;
+                let dir = tempfile::tempdir().unwrap();
+                let mut engine = engine(server.uri(), &test_store(dir.path()), dir.path()).await;
+                let sink = CapturingSink::default();
+                let mut ops = inert_ops();
+
+                engine.submit_prompt("first", &sink, &mut ops).await;
+                engine.set_model(&sink, sonnet_pick());
+                engine.submit_prompt("second", &sink, &mut ops).await;
+
+                let turns = request_bodies(&server).await;
+                assert_eq!(turns[1]["model"], "claude-sonnet-5-5");
+                assert_eq!(system_prompt(&turns[1]), system_prompt(&turns[0]));
+                let (first, second) = (&turns[0]["messages"], &turns[1]["messages"]);
+                assert_eq!(second[0], first[0], "the first message must not change");
+                let prompt = second[3]["content"].as_array().unwrap();
+                assert_eq!(prompt[0]["text"], "second");
+                let reminder = prompt[1]["text"].as_str().unwrap();
+                assert!(
+                    reminder.contains(indoc! {"
+                        # Model
+
+                        You are powered by the model named Claude Sonnet 5.5. The exact model ID is claude-sonnet-5-5."
+                    }),
+                    "{reminder}"
+                );
+                assert!(!reminder.contains("# CLAUDE.md"), "{reminder}");
+            })
+            .await;
+        }
+
+        #[tokio::test]
+        async fn swap_keeps_sending_back_the_reasoning_of_the_previous_model() {
+            with_pinned_home(async {
+                let server = MockServer::start().await;
+                let reply = sse_body(&[
+                    serde_json::json!({"type": "message_start", "message": {"id": "msg_1", "model": MODEL}}),
+                    serde_json::json!({"type": "content_block_start", "index": 0, "content_block": {"type": "thinking", "thinking": "", "signature": ""}}),
+                    serde_json::json!({"type": "content_block_delta", "index": 0, "delta": {"type": "thinking_delta", "thinking": "plan"}}),
+                    serde_json::json!({"type": "content_block_delta", "index": 0, "delta": {"type": "signature_delta", "signature": "sig"}}),
+                    serde_json::json!({"type": "content_block_start", "index": 1, "content_block": {"type": "text", "text": "reply"}}),
+                    serde_json::json!({"type": "message_delta", "delta": {"stop_reason": "end_turn"}}),
+                    serde_json::json!({"type": "message_stop"}),
+                ]);
+                Mock::given(method("POST"))
+                    .and(path("/v1/messages"))
+                    .respond_with(sse_response(reply))
+                    .mount(&server)
+                    .await;
+                let dir = tempfile::tempdir().unwrap();
+                let mut engine = engine(server.uri(), &test_store(dir.path()), dir.path()).await;
+                let sink = CapturingSink::default();
+                let mut ops = inert_ops();
+
+                engine.submit_prompt("first", &sink, &mut ops).await;
+                engine.set_model(&sink, sonnet_pick());
+                engine.submit_prompt("second", &sink, &mut ops).await;
+
+                let turns = request_bodies(&server).await;
+                let assistant_turns: Vec<&serde_json::Value> = turns[1]["messages"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .filter(|message| message["role"] == "assistant")
+                    .collect();
+                assert_eq!(turns[1]["model"], "claude-sonnet-5-5");
+                assert_eq!(
+                    assistant_turns,
+                    [&serde_json::json!({"role": "assistant", "content": [
+                        {"type": "thinking", "thinking": "plan", "signature": "sig"},
+                        {"type": "text", "text": "reply"},
+                    ]})],
+                );
+            })
+            .await;
+        }
+
+        #[tokio::test]
+        async fn resolves_the_compaction_threshold_for_the_new_model() {
+            with_pinned_home(async {
+                let server = MockServer::start().await;
+                let dir = tempfile::tempdir().unwrap();
+                let mut engine = engine(server.uri(), &test_store(dir.path()), dir.path()).await;
+                let mut config = test_config(server.uri(), api_key(), "custom-model");
+                let sink = CapturingSink::default();
+                let unwindowed = CompactionConfig::default_for_test(&config.model, 16_000);
+                assert!(!unwindowed.auto.enabled, "precondition: no window");
+                let mut resolved = Vec::new();
+
+                for (max_tokens, configured, threshold) in [
+                    (None, unwindowed, test_thresholds::WINDOW_1M),
+                    (
+                        None,
+                        CompactionConfig::with_threshold_for_test(1_500_000),
+                        test_thresholds::WINDOW_1M,
+                    ),
+                    (Some(8_000), unwindowed, 979_000),
+                ] {
+                    config.max_tokens = max_tokens;
+                    engine.client = client_for(&config);
+                    engine.compaction = configured;
+
+                    engine.set_model(&sink, sonnet_pick());
+
+                    assert_eq!(
+                        engine.compaction.auto.threshold_tokens,
+                        Some(threshold),
+                        "{max_tokens:?}, {configured:?}",
+                    );
+                    resolved.push(engine.compaction.auto);
+                }
+                let announced: Vec<_> = sink
+                    .events()
+                    .into_iter()
+                    .filter_map(|event| match event {
+                        Event::ConfigChanged {
+                            auto_compaction, ..
+                        } => Some(auto_compaction),
+                        _ => None,
+                    })
+                    .collect();
+                assert_eq!(announced, resolved);
+            })
+            .await;
+        }
+
+        #[tokio::test]
+        async fn resumes_paused_auto_compaction() {
+            with_pinned_home(async {
+                let server = MockServer::start().await;
+                let dir = tempfile::tempdir().unwrap();
+                let mut engine = engine(server.uri(), &test_store(dir.path()), dir.path()).await;
+                engine.auto_compaction_failures = AutoCompactFailures::new(3);
+                engine.last_usage = Some(TokenUsage::new(100_000, 1));
+                engine.total_estimated_cost_usd = 1.23;
+                let sink = CapturingSink::default();
+
+                engine.set_model(&sink, ConfigPick::Effort(Effort::Xhigh));
+
+                assert_eq!(
+                    engine.auto_compaction_failures,
+                    AutoCompactFailures::default()
+                );
+                assert_eq!(engine.last_usage, Some(TokenUsage::new(100_000, 1)));
+                assert!(
+                    (engine.total_estimated_cost_usd - 1.23).abs() < f64::EPSILON,
+                    "session cost must accumulate across swaps: {}",
+                    engine.total_estimated_cost_usd,
+                );
+                let events = sink.events();
+                assert!(
+                    matches!(
+                        events.as_slice(),
+                        [
+                            Event::AutoCompactionResumed,
+                            Event::UsageUpdated(_),
+                            Event::ConfigChanged { .. },
+                        ]
+                    ),
+                    "{events:?}",
+                );
+            })
+            .await;
+        }
+    }
+
+    mod set_mode {
+        use super::*;
+
+        #[tokio::test]
+        async fn switches_the_gate_and_confirms() {
+            with_pinned_home(async {
+                let server = MockServer::start().await;
+                let dir = tempfile::tempdir().unwrap();
+                let mut engine = engine(server.uri(), &test_store(dir.path()), dir.path()).await;
+                let sink = CapturingSink::default();
+
+                engine.set_mode(&sink, Mode::Yolo);
+
+                assert_eq!(engine.policy.mode(), Mode::Yolo);
+                assert!(
+                    matches!(sink.events().as_slice(), [Event::ModeChanged(Mode::Yolo)]),
+                    "{:?}",
+                    sink.events()
+                );
+            })
+            .await;
+        }
+    }
+
+    mod adopt_mode {
+        use super::*;
+
+        #[tokio::test]
+        async fn keeps_a_switch_that_arrives_mid_turn() {
+            with_pinned_home(async {
+                let server = MockServer::start().await;
+                mount_reply(&server, "reply").await;
+                let dir = tempfile::tempdir().unwrap();
+                let mut engine = engine(server.uri(), &test_store(dir.path()), dir.path()).await;
+                let sink = CapturingSink::default();
+                let (tx, mut ops) = mpsc::channel(1);
+                tx.try_send(Op::SetMode(Mode::Plan)).unwrap();
+
+                engine.submit_prompt("hello", &sink, &mut ops).await;
+
+                assert_eq!(engine.policy.mode(), Mode::Plan);
+                assert!(
+                    matches!(sink.events().first(), Some(Event::ModeChanged(Mode::Plan))),
+                    "{:?}",
+                    sink.events()
+                );
+                drop(tx);
+            })
+            .await;
+        }
+    }
+
+    mod login {
+        use super::*;
+
+        /// Returns to the sign-in listener behind `url` with `query` and its `state`, as the
+        /// browser does, and reads the reply.
+        async fn return_from_browser(url: &str, query: &str) -> String {
+            let url = reqwest::Url::parse(url).unwrap();
+            let param = |name: &str| {
+                url.query_pairs()
+                    .find(|(key, _)| key == name)
+                    .map(|(_, value)| value.into_owned())
+                    .unwrap()
+            };
+            let redirect = reqwest::Url::parse(&param("redirect_uri")).unwrap();
+            let mut stream =
+                tokio::net::TcpStream::connect(("127.0.0.1", redirect.port().unwrap()))
+                    .await
+                    .unwrap();
+            let state = param("state");
+            let request = formatdoc! {"
+                GET /callback?{query}&state={state} HTTP/1.1\r
+                Host: localhost\r
+                \r
+            "};
+            stream.write_all(request.as_bytes()).await.unwrap();
+            let mut reply = String::new();
+            stream.read_to_string(&mut reply).await.unwrap();
+            reply
+        }
+
+        #[tokio::test]
+        async fn stores_the_browser_s_login_and_sends_it_with_the_next_prompt() {
+            with_pinned_home(async {
+                let server = MockServer::start().await;
+                Mock::given(method("POST"))
+                    .and(path("/token"))
+                    .and(body_partial_json(
+                        serde_json::json!({ "code": "auth-code" }),
+                    ))
+                    .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                        "access_token": "fresh-access",
+                        "refresh_token": "fresh-refresh",
+                        "expires_in": 3600,
+                        "scope": "user:inference",
+                    })))
+                    .expect(1)
+                    .mount(&server)
+                    .await;
+                mount_reply(&server, "reply").await;
+                let dir = tempfile::tempdir().unwrap();
+                let data = tempfile::tempdir().unwrap();
+                temp_env::async_with_vars([("XDG_DATA_HOME", Some(data.path()))], async {
+                    let mut engine =
+                        engine(server.uri(), &test_store(dir.path()), dir.path()).await;
+                    engine.client.set_auth(None);
+                    engine.oauth_token_url = format!("{}/token", server.uri());
+                    let mut handle = engine.spawn(&[]);
+
+                    handle.ops.send(Op::Login).await.unwrap();
+                    let url = login_url(&mut handle.events).await;
+                    let reply = return_from_browser(&url, "code=auth-code").await;
+                    let signed_in = handle.events.recv().await;
+                    let turn = submit(&mut handle, "hi").await;
+                    handle.shutdown().await.unwrap();
+
+                    assert!(reply.starts_with("HTTP/1.1 302 Found\r\n"), "{reply}");
+                    assert!(
+                        matches!(
+                            signed_in,
+                            Some(Event::SignedIn {
+                                auth: AuthSource::OxLogin
+                            })
+                        ),
+                        "{signed_in:?}"
+                    );
+                    assert!(matches!(turn.last(), Some(Event::TurnComplete)), "{turn:?}");
+                    let requests = server.received_requests().await.unwrap();
+                    let prompt = requests
+                        .iter()
+                        .find(|request| request.url.path() == "/v1/messages")
+                        .expect("the prompt reaches the API");
+                    assert_eq!(prompt.headers["authorization"], "Bearer fresh-access");
+                    assert!(data.path().join("ox").join("credentials.json").exists());
+                })
+                .await;
+            })
+            .await;
+        }
+
+        #[tokio::test]
+        async fn fails_the_sign_in_when_the_browser_returns_a_refusal() {
+            with_pinned_home(async {
+                let server = MockServer::start().await;
+                let dir = tempfile::tempdir().unwrap();
+                let engine = engine(server.uri(), &test_store(dir.path()), dir.path()).await;
+                let mut handle = engine.spawn(&[]);
+
+                handle.ops.send(Op::Login).await.unwrap();
+                let url = login_url(&mut handle.events).await;
+                let reply = return_from_browser(&url, "error=access_denied").await;
+                let failed = handle.events.recv().await;
+                handle.shutdown().await.unwrap();
+
+                assert!(reply.starts_with("HTTP/1.1 400 Bad Request\r\n"), "{reply}");
+                assert!(
+                    matches!(
+                        &failed,
+                        Some(Event::TurnFailed(msg))
+                            if msg == "Sign-in failed: authorization was refused (access_denied). \
+                                       Run `/login` to try again."
+                    ),
+                    "{failed:?}"
+                );
+            })
+            .await;
+        }
+
+        #[tokio::test]
+        async fn keeps_a_mode_switch_sent_before_a_cancel() {
+            with_pinned_home(async {
+                let server = MockServer::start().await;
+                let dir = tempfile::tempdir().unwrap();
+                let mut engine = engine(server.uri(), &test_store(dir.path()), dir.path()).await;
+                let sink = CapturingSink::default();
+                let (ops_tx, mut ops) = mpsc::channel(2);
+                ops_tx.try_send(Op::SetMode(Mode::Plan)).unwrap();
+                ops_tx.try_send(Op::Interrupt).unwrap();
+
+                let end = engine.login(&sink, &mut ops).await;
+
+                assert_eq!(end, TurnEnd::Cancelled);
+                assert_eq!(engine.policy.mode(), Mode::Plan);
+            })
+            .await;
+        }
+    }
+
+    mod adopt_login {
+        use super::*;
+
+        #[tokio::test]
+        async fn replaces_a_stored_or_missing_login_but_not_an_explicit_credential() {
+            with_pinned_home(async {
+                let server = MockServer::start().await;
+                let dir = tempfile::tempdir().unwrap();
+                let mut engine = engine(server.uri(), &test_store(dir.path()), dir.path()).await;
+                let sink = CapturingSink::default();
+                let ox_login = || Auth::new(AuthSource::OxLogin, "ox-token");
+
+                engine.adopt_login(&sink, ox_login());
+                assert_eq!(engine.client.auth_source(), Some(AuthSource::ApiKeyEnv));
+                for before in [
+                    None,
+                    Some(Auth::new(AuthSource::ClaudeCodeLogin, "claude-code-token")),
+                ] {
+                    engine.client.set_auth(before);
+                    engine.adopt_login(&sink, ox_login());
+                    assert_eq!(engine.client.auth().unwrap().secret(), "ox-token");
+                }
+
+                let events = sink.events();
+                assert!(
+                    matches!(
+                        events.as_slice(),
+                        [
+                            Event::SignedIn {
+                                auth: AuthSource::ApiKeyEnv
+                            },
+                            Event::SignedIn {
+                                auth: AuthSource::OxLogin
+                            },
+                            Event::SignedIn {
+                                auth: AuthSource::OxLogin
+                            },
+                        ]
+                    ),
+                    "{events:?}"
+                );
+            })
+            .await;
+        }
+    }
+
+    mod logout {
+        use super::*;
+
+        /// Stores an oxide-code login under `data`, standing in for `$XDG_DATA_HOME`.
+        fn store_ox_login(data: &Path) -> PathBuf {
+            let file = data.join("ox").join("credentials.json");
+            std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+            std::fs::write(&file, credentials_json("ox-token")).unwrap();
+            file
+        }
+
+        fn credentials_json(access_token: &str) -> String {
+            serde_json::json!({
+                "claudeAiOauth": {
+                    "accessToken": access_token,
+                    "expiresAt": 9_999_999_999_999_u64,
+                },
+            })
+            .to_string()
+        }
+
+        #[tokio::test]
+        async fn removes_the_oxide_code_login_and_keeps_an_explicit_credential() {
+            with_pinned_home(async {
+                let server = MockServer::start().await;
+                let dir = tempfile::tempdir().unwrap();
+                let data = tempfile::tempdir().unwrap();
+                let file = store_ox_login(data.path());
+                temp_env::async_with_vars([("XDG_DATA_HOME", Some(data.path()))], async {
+                    let mut engine =
+                        engine(server.uri(), &test_store(dir.path()), dir.path()).await;
+                    let sink = CapturingSink::default();
+
+                    engine.logout(&sink).await;
+
+                    assert!(!file.exists());
+                    assert_eq!(engine.client.auth_source(), Some(AuthSource::ApiKeyEnv));
+                    let events = sink.events();
+                    assert!(
+                        matches!(
+                            events.as_slice(),
+                            [Event::SignedOut {
+                                removed: true,
+                                auth: Some(AuthSource::ApiKeyEnv),
+                                fallback_error: None,
+                            }]
+                        ),
+                        "{events:?}"
+                    );
+                })
+                .await;
+            })
+            .await;
+        }
+
+        #[tokio::test]
+        async fn falls_back_to_the_claude_code_login_or_stays_signed_out() {
+            with_pinned_home(async {
+                let server = MockServer::start().await;
+                let dir = tempfile::tempdir().unwrap();
+                let data = tempfile::tempdir().unwrap();
+                store_ox_login(data.path());
+                temp_env::async_with_vars([("XDG_DATA_HOME", Some(data.path()))], async {
+                    let mut engine =
+                        engine(server.uri(), &test_store(dir.path()), dir.path()).await;
+                    engine
+                        .client
+                        .set_auth(Some(Auth::new(AuthSource::OxLogin, "ox-token")));
+                    let sink = CapturingSink::default();
+                    let claude_code_file = std::env::home_dir()
+                        .unwrap()
+                        .join(".claude")
+                        .join(".credentials.json");
+
+                    engine.logout(&sink).await;
+                    std::fs::create_dir(claude_code_file.parent().unwrap()).unwrap();
+                    std::fs::write(&claude_code_file, "not json").unwrap();
+                    engine.logout(&sink).await;
+                    std::fs::write(&claude_code_file, credentials_json("claude-code-token"))
+                        .unwrap();
+                    engine.logout(&sink).await;
+
+                    assert_eq!(engine.client.auth().unwrap().secret(), "claude-code-token");
+                    let events = sink.events();
+                    assert!(
+                        matches!(
+                            events.as_slice(),
+                            [
+                                Event::SignedOut {
+                                    removed: true,
+                                    auth: None,
+                                    fallback_error: None,
+                                },
+                                Event::SignedOut {
+                                    removed: false,
+                                    auth: None,
+                                    fallback_error: Some(unreadable),
+                                },
+                                Event::SignedOut {
+                                    removed: false,
+                                    auth: Some(AuthSource::ClaudeCodeLogin),
+                                    fallback_error: None,
+                                },
+                            ] if unreadable.ends_with("Run `claude` to sign in again.")
+                        ),
+                        "{events:?}"
+                    );
+                })
+                .await;
+            })
+            .await;
+        }
+
+        #[tokio::test]
+        async fn reports_a_login_it_cannot_remove() {
+            with_pinned_home(async {
+                let server = MockServer::start().await;
+                let dir = tempfile::tempdir().unwrap();
+                let data = tempfile::tempdir().unwrap();
+                std::fs::create_dir_all(data.path().join("ox").join("credentials.json")).unwrap();
+                temp_env::async_with_vars([("XDG_DATA_HOME", Some(data.path()))], async {
+                    let mut engine =
+                        engine(server.uri(), &test_store(dir.path()), dir.path()).await;
+                    let sink = CapturingSink::default();
+
+                    engine.logout(&sink).await;
+
+                    assert_eq!(engine.client.auth_source(), Some(AuthSource::ApiKeyEnv));
+                    let events = sink.events();
+                    assert!(
+                        matches!(
+                            events.as_slice(),
+                            [Event::Error(msg)]
+                                if msg.starts_with("Sign-out failed: failed to remove ")
+                        ),
+                        "{events:?}"
+                    );
+                })
+                .await;
+            })
+            .await;
+        }
+    }
+
+    mod estimate_cost_usd {
+        use super::*;
+
+        #[test]
+        fn prices_each_request_by_its_own_model_and_cache_ttl() {
+            let request = |model: &str, cache_ttl: &str| -> UsageRecord {
+                serde_json::from_value(serde_json::json!({
+                    "model": model,
+                    "cache_ttl": cache_ttl,
+                    "input_tokens": 0,
+                    "cache_creation_input_tokens": 1_000_000,
+                    "cache_read_input_tokens": 0,
+                    "output_tokens": 0,
+                }))
+                .unwrap()
+            };
+
+            let cost = estimate_cost_usd(&[
+                request("claude-opus-5-5", "1h"),
+                request("claude-sonnet-5-5", "5m"),
+                request("unpriced-model", "5m"),
+            ]);
+
+            assert!(
+                (cost - (8.0 + 2.5)).abs() < 1e-9,
+                "a 1h write on Opus, a 5m write on Sonnet, and nothing for an unknown model: {cost}"
+            );
+        }
+    }
+
+    mod turn_end {
+        use super::*;
+
+        mod of {
+            use super::*;
+
+            #[test]
+            fn reads_only_the_terminal_events_of_the_op_in_flight() {
+                let prompt = Op::Prompt("hi".to_owned());
+                let compact = Op::Compact { instructions: None };
+                let resume = Op::Resume {
+                    target: ResumeTarget::Prefix("1a2b".to_owned()),
+                };
+                let rename = Op::Rename {
+                    title: "Fix login".to_owned(),
+                };
+                let set_model = Op::SetModel(ConfigPick::Effort(Effort::Low));
+                let set_mode = Op::SetMode(Mode::Plan);
+                let compacted = |automatic| Event::SessionCompacted {
+                    summary: "summary".to_owned(),
+                    pre_count: 4,
+                    instructions: None,
+                    automatic,
+                };
+                let rolled = Event::SessionRolled {
+                    id: "new".to_owned(),
+                    archived: false,
+                };
+                let notice = Event::Error("Session write failed".to_owned());
+                let failed = Event::TurnFailed("failure".to_owned());
+
+                for (op, event, end) in [
+                    (&prompt, Event::TurnComplete, Some(TurnEnd::Completed)),
+                    (&prompt, Event::Cancelled, Some(TurnEnd::Cancelled)),
+                    (&prompt, failed.clone(), Some(TurnEnd::Failed)),
+                    (&prompt, compacted(true), None),
+                    (&prompt, notice.clone(), None),
+                    (&compact, compacted(false), None),
+                    (&compact, Event::SessionReady, Some(TurnEnd::Completed)),
+                    (&compact, Event::Cancelled, Some(TurnEnd::Cancelled)),
+                    (&compact, Event::TurnComplete, None),
+                    (
+                        &resume,
+                        Event::SessionResumed {
+                            id: "1a2b".to_owned(),
+                            title: None,
+                            unarchived: false,
+                            history: Vec::new(),
+                        },
+                        None,
+                    ),
+                    (&resume, Event::SessionReady, Some(TurnEnd::Completed)),
+                    (&resume, failed.clone(), Some(TurnEnd::Failed)),
+                    (&Op::Clear, notice.clone(), None),
+                    (&Op::Clear, rolled, None),
+                    (&Op::Clear, Event::SessionReady, Some(TurnEnd::Completed)),
+                    (
+                        &rename,
+                        Event::SessionTitleUpdated {
+                            session_id: "live".to_owned(),
+                            title: "Fix login".to_owned(),
+                        },
+                        Some(TurnEnd::Completed),
+                    ),
+                    (&rename, notice.clone(), None),
+                    (
+                        &rename,
+                        Event::RenameFailed("Session write failed".to_owned()),
+                        Some(TurnEnd::Failed),
+                    ),
+                    (
+                        &set_model,
+                        Event::ConfigChanged {
+                            model: ModelSpec::resolve(MODEL.to_owned()),
+                            effort: Some(Effort::Low),
+                            requested: ConfigPick::Effort(Effort::Low),
+                            auto_compaction: CompactionConfig::with_threshold_for_test(50_000).auto,
+                        },
+                        Some(TurnEnd::Completed),
+                    ),
+                    (
+                        &set_model,
+                        Event::ConfigChanged {
+                            model: ModelSpec::resolve("custom-model".to_owned()),
+                            effort: None,
+                            requested: ConfigPick::Effort(Effort::Low),
+                            auto_compaction: CompactionConfig::with_threshold_for_test(50_000).auto,
+                        },
+                        Some(TurnEnd::Failed),
+                    ),
+                    (&set_model, failed, None),
+                    (
+                        &set_mode,
+                        Event::ModeChanged(Mode::Plan),
+                        Some(TurnEnd::Completed),
+                    ),
+                    (&set_mode, notice.clone(), None),
+                    (&Op::Archive, Event::SessionReady, None),
+                ] {
+                    assert_eq!(TurnEnd::of(op, &event), end, "{op:?} then {event:?}");
+                }
+            }
+        }
+    }
+
+    mod report_abort {
+        use super::*;
+
+        #[test]
+        fn shows_cancel_and_failure_but_keeps_shutdown_silent() {
+            let sink = CapturingSink::default();
+
+            assert_eq!(
+                report_abort(&sink, TurnAbort::Cancelled, "label"),
+                TurnEnd::Cancelled
+            );
+            assert_eq!(
+                report_abort(&sink, TurnAbort::Shutdown, "label"),
+                TurnEnd::Shutdown
+            );
+            assert_eq!(
+                report_abort(&sink, TurnAbort::Failed(anyhow!("boom")), "label"),
+                TurnEnd::Failed
+            );
+
+            let events = sink.events();
+            assert!(
+                matches!(
+                    events.as_slice(),
+                    [Event::Cancelled, Event::TurnFailed(msg)] if msg == "boom"
+                ),
+                "{events:?}",
+            );
+        }
+    }
+
+    mod sign_in_failed {
+        use super::*;
+
+        #[test]
+        fn keeps_a_cause_that_ends_a_sentence_verbatim() {
+            let cause = anyhow!("token exchange failed with 400 Bad Request: Code expired.");
+
+            let abort = sign_in_failed(&cause);
+
+            assert_eq!(
+                abort.to_string(),
+                "Sign-in failed: token exchange failed with 400 Bad Request: Code expired. \
+                 Run `/login` to try again.",
+            );
+        }
+    }
+
+    mod format_drift_warning {
+        use super::*;
+
+        #[test]
+        fn names_a_single_file() {
+            let warning = format_drift_warning(&[PathBuf::from("a.rs")]);
+
+            assert_eq!(
+                warning,
+                "1 tracked file changed on disk since the resumed session read it, \
+                 so Edit needs a fresh Read first: a.rs",
+            );
+        }
+
+        #[test]
+        fn previews_three_paths_and_counts_the_rest() {
+            let drifted: Vec<PathBuf> = ["a.rs", "b.rs", "c.rs", "d.rs", "e.rs"]
+                .into_iter()
+                .map(PathBuf::from)
+                .collect();
+
+            let warning = format_drift_warning(&drifted);
+
+            assert_eq!(
+                warning,
+                "5 tracked files changed on disk since the resumed session read them, \
+                 so Edit needs a fresh Read first: a.rs, b.rs, c.rs, and 2 more",
+            );
+        }
     }
 }

@@ -103,179 +103,191 @@ mod tests {
     use super::super::CLAUDE_CLI_VERSION;
     use super::*;
 
-    fn spec(id: &str) -> ModelSpec {
-        ModelSpec::resolve(id.to_owned())
-    }
+    mod compute_betas {
+        use super::*;
 
-    // ── compute_betas ──
+        fn spec(id: &str) -> ModelSpec {
+            ModelSpec::resolve(id.to_owned())
+        }
 
-    #[test]
-    fn compute_betas_agentic_known_model_mirrors_claude_code_then_appends_binding() {
-        assert_eq!(
-            CLAUDE_CLI_VERSION, "2.1.296",
-            "the sequences below were captured from this release, so a bump needs a fresh capture",
-        );
-        let claude_code = "claude-code-20250219,\
-                           interleaved-thinking-2025-05-14,\
-                           thinking-token-count-2026-05-13,\
-                           context-management-2025-06-27,\
-                           prompt-caching-scope-2026-01-05,\
-                           mid-conversation-system-2026-04-07,\
-                           per-turn-control-2026-07-01,\
-                           advisor-tool-2026-03-01,\
-                           effort-2025-11-24";
-        let haiku = "interleaved-thinking-2025-05-14,\
-                     thinking-token-count-2026-05-13,\
-                     context-management-2025-06-27,\
-                     prompt-caching-scope-2026-01-05,\
-                     mid-conversation-system-2026-04-07,\
-                     claude-code-20250219,\
-                     per-turn-control-2026-07-01,\
-                     advisor-tool-2026-03-01,\
-                     effort-2025-11-24";
-        for (id, captured) in [
-            // Uncaptured on this release, so it reuses the Opus 5.5 sequence `compute_betas` cites.
-            ("claude-fable-5-1", claude_code),
-            ("claude-opus-5-5", claude_code),
-            ("claude-sonnet-5-5", claude_code),
-            ("claude-haiku-5-5", haiku),
-        ] {
-            let model = spec(id);
+        #[test]
+        fn agentic_known_model_mirrors_claude_code_then_appends_binding() {
             assert_eq!(
-                compute_betas(
-                    &model,
-                    model.thinking(true).as_ref(),
+                CLAUDE_CLI_VERSION, "2.1.296",
+                "the sequences below were captured from this release, \
+                 so a bump needs a fresh capture",
+            );
+            let claude_code = "claude-code-20250219,\
+                               interleaved-thinking-2025-05-14,\
+                               thinking-token-count-2026-05-13,\
+                               context-management-2025-06-27,\
+                               prompt-caching-scope-2026-01-05,\
+                               mid-conversation-system-2026-04-07,\
+                               per-turn-control-2026-07-01,\
+                               advisor-tool-2026-03-01,\
+                               effort-2025-11-24";
+            let haiku = "interleaved-thinking-2025-05-14,\
+                         thinking-token-count-2026-05-13,\
+                         context-management-2025-06-27,\
+                         prompt-caching-scope-2026-01-05,\
+                         mid-conversation-system-2026-04-07,\
+                         claude-code-20250219,\
+                         per-turn-control-2026-07-01,\
+                         advisor-tool-2026-03-01,\
+                         effort-2025-11-24";
+            for (id, captured) in [
+                // Uncaptured on this release, so it reuses the Opus 5.5 sequence
+                // `compute_betas` cites.
+                ("claude-fable-5-1", claude_code),
+                ("claude-opus-5-5", claude_code),
+                ("claude-sonnet-5-5", claude_code),
+                ("claude-haiku-5-5", haiku),
+            ] {
+                let model = spec(id);
+                assert_eq!(
+                    compute_betas(
+                        &model,
+                        model.thinking(true).as_ref(),
+                        AuthKind::ApiKey,
+                        true
+                    )
+                    .join(","),
+                    format!("{captured},thinking-binding-controls-2026-08-01"),
+                    "{id}",
+                );
+            }
+        }
+
+        #[test]
+        fn oauth_slots_auth_header_after_claude_code_tag() {
+            assert_eq!(
+                compute_betas(&spec("claude-opus-5-5"), None, AuthKind::OAuth, true)[..3],
+                [
+                    CLAUDE_CODE_BETA_HEADER,
+                    OAUTH_BETA_HEADER,
+                    INTERLEAVED_THINKING_BETA_HEADER,
+                ],
+            );
+            // Haiku's agentic claude-code tag comes later, so the auth header leads.
+            assert_eq!(
+                compute_betas(&spec("claude-haiku-5-5"), None, AuthKind::OAuth, true)[..2],
+                [OAUTH_BETA_HEADER, INTERLEAVED_THINKING_BETA_HEADER],
+            );
+            // A gateway auth token keeps API-key betas, since the OAuth beta is subscription-only.
+            let opus = spec("claude-opus-5-5");
+            assert_eq!(
+                compute_betas(&opus, None, AuthKind::AuthToken, true),
+                compute_betas(&opus, None, AuthKind::ApiKey, true),
+            );
+            assert!(
+                !compute_betas(&opus, None, AuthKind::ApiKey, true).contains(&OAUTH_BETA_HEADER)
+            );
+        }
+
+        #[test]
+        fn updates_display_appends_its_beta_last() {
+            let opus = spec("claude-opus-5-5");
+            let betas = compute_betas(&opus, opus.thinking(false).as_ref(), AuthKind::ApiKey, true);
+            assert_eq!(
+                betas[betas.len() - 3..],
+                [
+                    EFFORT_BETA_HEADER,
+                    THINKING_BINDING_CONTROLS_BETA_HEADER,
+                    THINKING_DISPLAY_UPDATES_BETA_HEADER,
+                ],
+            );
+            // Haiku has no progress updates, so hidden thinking sends no display and no beta.
+            let haiku = spec("claude-haiku-5-5");
+            assert!(
+                !compute_betas(
+                    &haiku,
+                    haiku.thinking(false).as_ref(),
                     AuthKind::ApiKey,
                     true
                 )
-                .join(","),
-                format!("{captured},thinking-binding-controls-2026-08-01"),
-                "{id}",
+                .contains(&THINKING_DISPLAY_UPDATES_BETA_HEADER),
+            );
+        }
+
+        #[test]
+        fn agentic_unknown_model_sends_only_tag_and_cache_scope() {
+            assert_eq!(
+                compute_betas(&spec("custom-model"), None, AuthKind::ApiKey, true),
+                vec![CLAUDE_CODE_BETA_HEADER, PROMPT_CACHING_SCOPE_BETA_HEADER],
+            );
+        }
+
+        #[test]
+        fn haiku_non_agentic_minimal() {
+            assert_eq!(
+                compute_betas(&spec("claude-haiku-5-5"), None, AuthKind::ApiKey, false),
+                Vec::<&str>::new(),
+            );
+            assert_eq!(
+                compute_betas(&spec("claude-haiku-5-5"), None, AuthKind::OAuth, false),
+                vec![OAUTH_BETA_HEADER],
+            );
+        }
+
+        #[test]
+        fn non_haiku_non_agentic_keeps_claude_code_tag() {
+            assert_eq!(
+                compute_betas(&spec("claude-sonnet-5-5"), None, AuthKind::OAuth, false),
+                vec![CLAUDE_CODE_BETA_HEADER, OAUTH_BETA_HEADER],
+            );
+            // Family comes from the catalog row, so an unknown id naming Haiku keeps the tag.
+            assert_eq!(
+                compute_betas(&spec("my-haiku-gateway"), None, AuthKind::ApiKey, false),
+                vec![CLAUDE_CODE_BETA_HEADER],
             );
         }
     }
 
-    #[test]
-    fn compute_betas_oauth_slots_auth_header_after_claude_code_tag() {
-        assert_eq!(
-            compute_betas(&spec("claude-opus-5-5"), None, AuthKind::OAuth, true)[..3],
-            [
-                CLAUDE_CODE_BETA_HEADER,
-                OAUTH_BETA_HEADER,
-                INTERLEAVED_THINKING_BETA_HEADER,
-            ],
-        );
-        // Haiku's agentic claude-code tag comes later, so the auth header leads.
-        assert_eq!(
-            compute_betas(&spec("claude-haiku-5-5"), None, AuthKind::OAuth, true)[..2],
-            [OAUTH_BETA_HEADER, INTERLEAVED_THINKING_BETA_HEADER],
-        );
-        // A gateway auth token keeps the API-key betas, since the OAuth beta is subscription-only.
-        let opus = spec("claude-opus-5-5");
-        assert_eq!(
-            compute_betas(&opus, None, AuthKind::AuthToken, true),
-            compute_betas(&opus, None, AuthKind::ApiKey, true),
-        );
-        assert!(!compute_betas(&opus, None, AuthKind::ApiKey, true).contains(&OAUTH_BETA_HEADER));
+    mod static_prefix_cache_control {
+        use super::*;
+
+        #[test]
+        fn emits_global_scope_on_first_party_only() {
+            let first = static_prefix_cache_control(true, PromptCacheTtl::OneHour);
+            assert_eq!(first.r#type, "ephemeral");
+            assert_eq!(first.scope, Some("global"));
+
+            let third = static_prefix_cache_control(false, PromptCacheTtl::OneHour);
+            assert_eq!(third.r#type, "ephemeral");
+            assert_eq!(third.scope, None);
+        }
+
+        #[test]
+        fn ttl_matches_config() {
+            let one_hour = static_prefix_cache_control(false, PromptCacheTtl::OneHour);
+            assert_eq!(
+                serde_json::to_string(&one_hour).unwrap(),
+                r#"{"type":"ephemeral","ttl":"1h"}"#,
+            );
+
+            let five_min = static_prefix_cache_control(false, PromptCacheTtl::FiveMin);
+            assert_eq!(
+                serde_json::to_string(&five_min).unwrap(),
+                r#"{"type":"ephemeral"}"#,
+            );
+        }
     }
 
-    #[test]
-    fn compute_betas_updates_display_appends_its_beta_last() {
-        let opus = spec("claude-opus-5-5");
-        let betas = compute_betas(&opus, opus.thinking(false).as_ref(), AuthKind::ApiKey, true);
-        assert_eq!(
-            betas[betas.len() - 3..],
-            [
-                EFFORT_BETA_HEADER,
-                THINKING_BINDING_CONTROLS_BETA_HEADER,
-                THINKING_DISPLAY_UPDATES_BETA_HEADER,
-            ],
-        );
-        // Haiku has no progress updates, so hidden thinking sends no display and no beta.
-        let haiku = spec("claude-haiku-5-5");
-        assert!(
-            !compute_betas(
-                &haiku,
-                haiku.thinking(false).as_ref(),
-                AuthKind::ApiKey,
-                true
-            )
-            .contains(&THINKING_DISPLAY_UPDATES_BETA_HEADER),
-        );
-    }
+    mod conversation_cache_control {
+        use super::*;
 
-    #[test]
-    fn compute_betas_agentic_unknown_model_sends_only_tag_and_cache_scope() {
-        assert_eq!(
-            compute_betas(&spec("custom-model"), None, AuthKind::ApiKey, true),
-            vec![CLAUDE_CODE_BETA_HEADER, PROMPT_CACHING_SCOPE_BETA_HEADER],
-        );
-    }
-
-    #[test]
-    fn compute_betas_haiku_non_agentic_minimal() {
-        assert_eq!(
-            compute_betas(&spec("claude-haiku-5-5"), None, AuthKind::ApiKey, false),
-            Vec::<&str>::new(),
-        );
-        assert_eq!(
-            compute_betas(&spec("claude-haiku-5-5"), None, AuthKind::OAuth, false),
-            vec![OAUTH_BETA_HEADER],
-        );
-    }
-
-    #[test]
-    fn compute_betas_non_haiku_non_agentic_keeps_claude_code_tag() {
-        assert_eq!(
-            compute_betas(&spec("claude-sonnet-5-5"), None, AuthKind::OAuth, false),
-            vec![CLAUDE_CODE_BETA_HEADER, OAUTH_BETA_HEADER],
-        );
-        // Family comes from the catalog row, so an unknown id naming Haiku keeps the tag.
-        assert_eq!(
-            compute_betas(&spec("my-haiku-gateway"), None, AuthKind::ApiKey, false),
-            vec![CLAUDE_CODE_BETA_HEADER],
-        );
-    }
-
-    // ── static_prefix_cache_control ──
-
-    #[test]
-    fn static_prefix_cache_control_emits_global_scope_on_first_party_only() {
-        let first = static_prefix_cache_control(true, PromptCacheTtl::OneHour);
-        assert_eq!(first.r#type, "ephemeral");
-        assert_eq!(first.scope, Some("global"));
-
-        let third = static_prefix_cache_control(false, PromptCacheTtl::OneHour);
-        assert_eq!(third.r#type, "ephemeral");
-        assert_eq!(third.scope, None);
-    }
-
-    #[test]
-    fn static_prefix_cache_control_ttl_matches_config() {
-        let one_hour = static_prefix_cache_control(false, PromptCacheTtl::OneHour);
-        assert_eq!(
-            serde_json::to_string(&one_hour).unwrap(),
-            r#"{"type":"ephemeral","ttl":"1h"}"#,
-        );
-
-        let five_min = static_prefix_cache_control(false, PromptCacheTtl::FiveMin);
-        assert_eq!(
-            serde_json::to_string(&five_min).unwrap(),
-            r#"{"type":"ephemeral"}"#,
-        );
-    }
-
-    // ── conversation_cache_control ──
-
-    #[test]
-    fn conversation_cache_control_carries_ttl_without_scope() {
-        assert_eq!(
-            serde_json::to_string(&conversation_cache_control(PromptCacheTtl::OneHour)).unwrap(),
-            r#"{"type":"ephemeral","ttl":"1h"}"#,
-        );
-        assert_eq!(
-            serde_json::to_string(&conversation_cache_control(PromptCacheTtl::FiveMin)).unwrap(),
-            r#"{"type":"ephemeral"}"#,
-        );
+        #[test]
+        fn carries_ttl_without_scope() {
+            assert_eq!(
+                serde_json::to_string(&conversation_cache_control(PromptCacheTtl::OneHour))
+                    .unwrap(),
+                r#"{"type":"ephemeral","ttl":"1h"}"#,
+            );
+            assert_eq!(
+                serde_json::to_string(&conversation_cache_control(PromptCacheTtl::FiveMin))
+                    .unwrap(),
+                r#"{"type":"ephemeral"}"#,
+            );
+        }
     }
 }

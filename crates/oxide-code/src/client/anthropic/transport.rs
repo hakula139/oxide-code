@@ -487,848 +487,874 @@ mod tests {
     use crate::client::anthropic::testing::{messages_request, plain_http};
     use crate::config::oauth::testing::{ok_refresh_body, ox_login_in, write_creds};
 
-    fn request(server: &MockServer) -> MessagesRequest {
-        messages_request(format!("{}/v1/messages", server.uri()))
-    }
+    mod with_retry {
+        use super::*;
 
-    async fn post_once(server: &MockServer) -> Result<reqwest::Response, AttemptError> {
-        post_messages(&plain_http(), &request(server), 0).await
-    }
-
-    async fn mount(server: &MockServer, response: ResponseTemplate) {
-        Mock::given(method("POST"))
-            .and(path("/v1/messages"))
-            .respond_with(response)
-            .mount(server)
-            .await;
-    }
-
-    // ── with_retry ──
-
-    #[tokio::test(start_paused = true)]
-    async fn with_retry_retries_transient_failures_until_success() {
-        let calls = &AtomicU32::new(0);
-        let mut notices = Vec::new();
-        let value = with_retry(
-            |retry| async move {
-                calls.fetch_add(1, Ordering::SeqCst);
-                if retry < 2 {
-                    Err(AttemptError::Retryable {
-                        error: anyhow!("transient {retry}"),
-                        cause: format!("Cause {retry}"),
-                        retry_after: Some(Duration::from_millis(1500)),
-                    })
-                } else {
-                    Ok(retry)
-                }
-            },
-            |notice| notices.push(notice.clone()),
-        )
-        .await
-        .unwrap();
-
-        assert_eq!(value, 2, "the attempt sees its retry count");
-        assert_eq!(calls.load(Ordering::SeqCst), 3);
-        let expected: Vec<RetryNotice> = (1..=2)
-            .map(|retry| RetryNotice {
-                delay: Duration::from_millis(1500),
-                retry,
-                cause: format!("Cause {}", retry - 1),
-            })
-            .collect();
-        assert_eq!(notices, expected, "one notice per retry, before its delay");
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn with_retry_gives_up_after_the_retry_budget() {
-        let calls = &AtomicU32::new(0);
-        let err = with_retry(
-            |_| async {
-                calls.fetch_add(1, Ordering::SeqCst);
-                Err::<(), _>(AttemptError::retryable(
-                    "Overloaded",
-                    anyhow!("still overloaded"),
-                ))
-            },
-            |_| {},
-        )
-        .await
-        .unwrap_err();
-
-        assert_eq!(calls.load(Ordering::SeqCst), MAX_RETRIES + 1);
-        assert_eq!(err.to_string(), "still overloaded", "last error surfaces");
-    }
-
-    #[tokio::test]
-    async fn with_retry_stops_on_a_fatal_failure() {
-        let calls = &AtomicU32::new(0);
-        let err = with_retry(
-            |_| async {
-                calls.fetch_add(1, Ordering::SeqCst);
-                Err::<(), _>(AttemptError::Fatal(anyhow!("bad request")))
-            },
-            |_| {},
-        )
-        .await
-        .unwrap_err();
-
-        assert_eq!(calls.load(Ordering::SeqCst), 1);
-        assert_eq!(err.to_string(), "bad request");
-    }
-
-    #[tokio::test]
-    async fn with_retry_fails_fast_when_retry_after_exceeds_the_cap() {
-        let calls = &AtomicU32::new(0);
-        let err = with_retry(
-            |_| async {
-                calls.fetch_add(1, Ordering::SeqCst);
-                Err::<(), _>(AttemptError::Retryable {
-                    error: anyhow!("quota exhausted"),
-                    cause: "HTTP 429 rate_limit_error".to_owned(),
-                    retry_after: Some(MAX_RETRY_AFTER + Duration::from_secs(1)),
-                })
-            },
-            |_| {},
-        )
-        .await
-        .unwrap_err();
-
-        assert_eq!(calls.load(Ordering::SeqCst), 1);
-        assert_eq!(err.to_string(), "quota exhausted");
-    }
-
-    // ── RetryNotice ──
-
-    #[test]
-    fn retry_notice_display_rounds_the_delay_up_to_whole_seconds() {
-        let notice = |delay| RetryNotice {
-            delay,
-            retry: 2,
-            cause: "HTTP 529 overloaded_error".to_owned(),
-        };
-        assert_eq!(
-            notice(Duration::from_millis(3200)).to_string(),
-            "HTTP 529 overloaded_error. Retrying in 4 s (retry 2 of 5).",
-        );
-        assert_eq!(
-            notice(Duration::from_secs(8)).to_string(),
-            "HTTP 529 overloaded_error. Retrying in 8 s (retry 2 of 5).",
-        );
-    }
-
-    // ── retry_delay ──
-
-    #[test]
-    fn retry_delay_doubles_the_backoff_with_bounded_jitter() {
-        for retry in 0..MAX_RETRIES {
-            let base = INITIAL_BACKOFF * 2_u32.pow(retry);
-            let delay = retry_delay(retry, None).expect("within budget");
-            assert!(
-                delay >= base && delay <= base.mul_f64(1.0 + MAX_JITTER),
-                "retry {retry}: {delay:?} outside [{base:?}, +{MAX_JITTER}]",
-            );
-        }
-    }
-
-    #[test]
-    fn retry_delay_honors_a_server_hint_within_the_cap() {
-        assert_eq!(
-            retry_delay(0, Some(Duration::from_secs(7))),
-            Some(Duration::from_secs(7)),
-        );
-        assert_eq!(retry_delay(0, Some(MAX_RETRY_AFTER)), Some(MAX_RETRY_AFTER));
-        assert_eq!(
-            retry_delay(0, Some(MAX_RETRY_AFTER + Duration::from_secs(1))),
-            None,
-        );
-    }
-
-    #[test]
-    fn retry_delay_is_none_once_the_budget_is_spent() {
-        assert!(retry_delay(MAX_RETRIES, None).is_none());
-        assert!(retry_delay(MAX_RETRIES, Some(Duration::ZERO)).is_none());
-    }
-
-    // ── post_messages ──
-
-    #[tokio::test]
-    async fn post_messages_sends_per_request_headers() {
-        let server = MockServer::start().await;
-        mount(&server, ResponseTemplate::new(200)).await;
-        let mut req = request(&server);
-        req.betas = "beta-a,beta-b".to_owned();
-
-        post_messages(&plain_http(), &req, 3)
-            .await
-            .expect("2xx passes through");
-
-        let received = server.received_requests().await.unwrap();
-        let headers = &received[0].headers;
-        assert_eq!(headers["anthropic-beta"], "beta-a,beta-b");
-        assert_eq!(headers["x-claude-code-session-id"], "sid");
-        assert_eq!(headers["x-stainless-retry-count"], "3");
-        assert_eq!(headers["x-api-key"], "k");
-    }
-
-    #[tokio::test]
-    async fn post_messages_connection_failure_is_retryable() {
-        // Port 9 (discard) is closed on test hosts, so the connect fails fast.
-        let req = messages_request("http://127.0.0.1:9/v1/messages");
-        let err = post_messages(&plain_http(), &req, 0)
-            .await
-            .expect_err("nothing listens on the discard port");
-        let AttemptError::Retryable { error, cause, .. } = &err else {
-            panic!("expected a retryable error, got {err:?}");
-        };
-        assert_eq!(cause, "API connection failed");
-        assert!(
-            format!("{error:#}").starts_with("API connection failed: "),
-            "{error:#}"
-        );
-    }
-
-    #[tokio::test]
-    async fn post_messages_malformed_url_is_fatal() {
-        let req = messages_request("not a url");
-        let err = post_messages(&plain_http(), &req, 0)
-            .await
-            .expect_err("the request cannot be built");
-        assert!(matches!(err, AttemptError::Fatal(_)), "{err:?}");
-    }
-
-    #[tokio::test]
-    async fn post_messages_classifies_status_codes() {
-        for (status, retryable) in [
-            (408_u16, true),
-            (409, true),
-            (429, true),
-            (500, true),
-            (502, true),
-            (529, true),
-            (307, false),
-            (400, false),
-            (401, false),
-            (404, false),
-        ] {
-            let server = MockServer::start().await;
-            mount(
-                &server,
-                ResponseTemplate::new(status).set_body_string("boom"),
+        #[tokio::test(start_paused = true)]
+        async fn retries_transient_failures_until_success() {
+            let calls = &AtomicU32::new(0);
+            let mut notices = Vec::new();
+            let value = with_retry(
+                |retry| async move {
+                    calls.fetch_add(1, Ordering::SeqCst);
+                    if retry < 2 {
+                        Err(AttemptError::Retryable {
+                            error: anyhow!("transient {retry}"),
+                            cause: format!("Cause {retry}"),
+                            retry_after: Some(Duration::from_millis(1500)),
+                        })
+                    } else {
+                        Ok(retry)
+                    }
+                },
+                |notice| notices.push(notice.clone()),
             )
-            .await;
+            .await
+            .unwrap();
 
-            let err = post_once(&server).await.expect_err("non-2xx fails");
+            assert_eq!(value, 2, "the attempt sees its retry count");
+            assert_eq!(calls.load(Ordering::SeqCst), 3);
+            let expected: Vec<RetryNotice> = (1..=2)
+                .map(|retry| RetryNotice {
+                    delay: Duration::from_millis(1500),
+                    retry,
+                    cause: format!("Cause {}", retry - 1),
+                })
+                .collect();
+            assert_eq!(notices, expected, "one notice per retry, before its delay");
+        }
+
+        #[tokio::test(start_paused = true)]
+        async fn gives_up_after_the_retry_budget() {
+            let calls = &AtomicU32::new(0);
+            let err = with_retry(
+                |_| async {
+                    calls.fetch_add(1, Ordering::SeqCst);
+                    Err::<(), _>(AttemptError::retryable(
+                        "Overloaded",
+                        anyhow!("still overloaded"),
+                    ))
+                },
+                |_| {},
+            )
+            .await
+            .unwrap_err();
+
+            assert_eq!(calls.load(Ordering::SeqCst), MAX_RETRIES + 1);
+            assert_eq!(err.to_string(), "still overloaded", "last error surfaces");
+        }
+
+        #[tokio::test]
+        async fn stops_on_a_fatal_failure() {
+            let calls = &AtomicU32::new(0);
+            let err = with_retry(
+                |_| async {
+                    calls.fetch_add(1, Ordering::SeqCst);
+                    Err::<(), _>(AttemptError::Fatal(anyhow!("bad request")))
+                },
+                |_| {},
+            )
+            .await
+            .unwrap_err();
+
+            assert_eq!(calls.load(Ordering::SeqCst), 1);
+            assert_eq!(err.to_string(), "bad request");
+        }
+
+        #[tokio::test]
+        async fn fails_fast_when_retry_after_exceeds_the_cap() {
+            let calls = &AtomicU32::new(0);
+            let err = with_retry(
+                |_| async {
+                    calls.fetch_add(1, Ordering::SeqCst);
+                    Err::<(), _>(AttemptError::Retryable {
+                        error: anyhow!("quota exhausted"),
+                        cause: "HTTP 429 rate_limit_error".to_owned(),
+                        retry_after: Some(MAX_RETRY_AFTER + Duration::from_secs(1)),
+                    })
+                },
+                |_| {},
+            )
+            .await
+            .unwrap_err();
+
+            assert_eq!(calls.load(Ordering::SeqCst), 1);
+            assert_eq!(err.to_string(), "quota exhausted");
+        }
+    }
+
+    mod retry_notice {
+        use super::*;
+
+        #[test]
+        fn display_rounds_the_delay_up_to_whole_seconds() {
+            let notice = |delay| RetryNotice {
+                delay,
+                retry: 2,
+                cause: "HTTP 529 overloaded_error".to_owned(),
+            };
             assert_eq!(
-                matches!(err, AttemptError::Retryable { .. }),
-                retryable,
-                "status {status}",
+                notice(Duration::from_millis(3200)).to_string(),
+                "HTTP 529 overloaded_error. Retrying in 4 s (retry 2 of 5).",
+            );
+            assert_eq!(
+                notice(Duration::from_secs(8)).to_string(),
+                "HTTP 529 overloaded_error. Retrying in 8 s (retry 2 of 5).",
             );
         }
     }
 
-    #[tokio::test]
-    async fn post_messages_resends_a_rejected_stored_login_with_the_token_another_process_stored() {
-        let server = MockServer::start().await;
-        for (token, status) in [("old", 401), ("new", 200)] {
+    mod retry_delay {
+        use super::*;
+
+        #[test]
+        fn doubles_the_backoff_with_bounded_jitter() {
+            for retry in 0..MAX_RETRIES {
+                let base = INITIAL_BACKOFF * 2_u32.pow(retry);
+                let delay = retry_delay(retry, None).expect("within budget");
+                assert!(
+                    delay >= base && delay <= base.mul_f64(1.0 + MAX_JITTER),
+                    "retry {retry}: {delay:?} outside [{base:?}, +{MAX_JITTER}]",
+                );
+            }
+        }
+
+        #[test]
+        fn honors_a_server_hint_within_the_cap() {
+            assert_eq!(
+                retry_delay(0, Some(Duration::from_secs(7))),
+                Some(Duration::from_secs(7)),
+            );
+            assert_eq!(retry_delay(0, Some(MAX_RETRY_AFTER)), Some(MAX_RETRY_AFTER));
+            assert_eq!(
+                retry_delay(0, Some(MAX_RETRY_AFTER + Duration::from_secs(1))),
+                None,
+            );
+        }
+
+        #[test]
+        fn stops_retrying_once_the_budget_is_spent() {
+            assert!(retry_delay(MAX_RETRIES, None).is_none());
+            assert!(retry_delay(MAX_RETRIES, Some(Duration::ZERO)).is_none());
+        }
+    }
+
+    mod post_messages {
+        use super::*;
+
+        fn request(server: &MockServer) -> MessagesRequest {
+            messages_request(format!("{}/v1/messages", server.uri()))
+        }
+
+        async fn post_once(server: &MockServer) -> Result<reqwest::Response, AttemptError> {
+            post_messages(&plain_http(), &request(server), 0).await
+        }
+
+        async fn mount(server: &MockServer, response: ResponseTemplate) {
+            Mock::given(method("POST"))
+                .and(path("/v1/messages"))
+                .respond_with(response)
+                .mount(server)
+                .await;
+        }
+
+        /// Answers `/v1/messages` sent with `token` with `status`, expecting `hits` such requests.
+        async fn mount_for_token(server: &MockServer, token: &str, status: u16, hits: u64) {
             Mock::given(method("POST"))
                 .and(path("/v1/messages"))
                 .and(header("authorization", format!("Bearer {token}")))
-                .respond_with(ResponseTemplate::new(status))
+                .respond_with(ResponseTemplate::new(status).set_body_string("token revoked"))
+                .expect(hits)
+                .mount(server)
+                .await;
+        }
+
+        /// Answers the token endpoint at `/token` with `response`, expecting `hits` refreshes.
+        async fn mount_refresh(server: &MockServer, response: ResponseTemplate, hits: u64) {
+            Mock::given(method("POST"))
+                .and(path("/token"))
+                .respond_with(response)
+                .expect(hits)
+                .mount(server)
+                .await;
+        }
+
+        /// A request sending the oxide-code login `token`, which its store at `file` also holds
+        /// with a refresh token and `server` refreshes at `/token`.
+        fn stored_login_request(
+            server: &MockServer,
+            file: &Path,
+            token: &str,
+            expires_at_ms: u64,
+        ) -> MessagesRequest {
+            write_creds(file, token, Some("ref"), expires_at_ms);
+            let mut req = request(server);
+            let refresh_url = format!("{}/token", server.uri());
+            req.auth = ox_login_in(file, &refresh_url, token, expires_at_ms);
+            req
+        }
+
+        fn refreshed() -> ResponseTemplate {
+            ResponseTemplate::new(200).set_body_json(ok_refresh_body(
+                "fresh-access",
+                "fresh-ref",
+                3600,
+            ))
+        }
+
+        #[tokio::test]
+        async fn sends_per_request_headers() {
+            let server = MockServer::start().await;
+            mount(&server, ResponseTemplate::new(200)).await;
+            let mut req = request(&server);
+            req.betas = "beta-a,beta-b".to_owned();
+
+            post_messages(&plain_http(), &req, 3)
+                .await
+                .expect("2xx passes through");
+
+            let received = server.received_requests().await.unwrap();
+            let headers = &received[0].headers;
+            assert_eq!(headers["anthropic-beta"], "beta-a,beta-b");
+            assert_eq!(headers["x-claude-code-session-id"], "sid");
+            assert_eq!(headers["x-stainless-retry-count"], "3");
+            assert_eq!(headers["x-api-key"], "k");
+        }
+
+        #[tokio::test]
+        async fn connection_failure_is_retryable() {
+            // Port 9 (discard) is closed on test hosts, so the connect fails fast.
+            let req = messages_request("http://127.0.0.1:9/v1/messages");
+            let err = post_messages(&plain_http(), &req, 0)
+                .await
+                .expect_err("nothing listens on the discard port");
+            let AttemptError::Retryable { error, cause, .. } = &err else {
+                panic!("expected a retryable error, got {err:?}");
+            };
+            assert_eq!(cause, "API connection failed");
+            assert!(
+                format!("{error:#}").starts_with("API connection failed: "),
+                "{error:#}"
+            );
+        }
+
+        #[tokio::test]
+        async fn malformed_url_is_fatal() {
+            let req = messages_request("not a url");
+            let err = post_messages(&plain_http(), &req, 0)
+                .await
+                .expect_err("the request cannot be built");
+            assert!(matches!(err, AttemptError::Fatal(_)), "{err:?}");
+        }
+
+        #[tokio::test]
+        async fn classifies_status_codes() {
+            for (status, retryable) in [
+                (408_u16, true),
+                (409, true),
+                (429, true),
+                (500, true),
+                (502, true),
+                (529, true),
+                (307, false),
+                (400, false),
+                (401, false),
+                (404, false),
+            ] {
+                let server = MockServer::start().await;
+                mount(
+                    &server,
+                    ResponseTemplate::new(status).set_body_string("boom"),
+                )
+                .await;
+
+                let err = post_once(&server).await.expect_err("non-2xx fails");
+                assert_eq!(
+                    matches!(err, AttemptError::Retryable { .. }),
+                    retryable,
+                    "status {status}",
+                );
+            }
+        }
+
+        #[tokio::test]
+        async fn resends_a_rejected_stored_login_with_the_token_another_process_stored() {
+            let server = MockServer::start().await;
+            for (token, status) in [("old", 401), ("new", 200)] {
+                Mock::given(method("POST"))
+                    .and(path("/v1/messages"))
+                    .and(header("authorization", format!("Bearer {token}")))
+                    .respond_with(ResponseTemplate::new(status))
+                    .expect(1)
+                    .mount(&server)
+                    .await;
+            }
+            let dir = tempfile::tempdir().unwrap();
+            let file = dir.path().join("credentials.json");
+            write_creds(&file, "new", Some("ref"), 9_999_999_999_999);
+            let mut req = request(&server);
+            req.auth = ox_login_in(&file, "http://unused", "old", 9_999_999_999_999);
+
+            post_messages(&plain_http(), &req, 0)
+                .await
+                .expect("the resend succeeds");
+
+            server.verify().await;
+        }
+
+        #[tokio::test]
+        async fn refreshes_a_rejected_stored_login_its_store_still_holds() {
+            let server = MockServer::start().await;
+            mount_refresh(&server, refreshed(), 1).await;
+            mount_for_token(&server, "revoked", 401, 1).await;
+            mount_for_token(&server, "fresh-access", 200, 1).await;
+            let dir = tempfile::tempdir().unwrap();
+            let file = dir.path().join("credentials.json");
+            let req = stored_login_request(&server, &file, "revoked", 9_999_999_999_999);
+
+            post_messages(&plain_http(), &req, 0)
+                .await
+                .expect("the resend with the refreshed token succeeds");
+
+            server.verify().await;
+        }
+
+        #[tokio::test]
+        async fn reports_a_401_the_refreshed_token_also_gets_with_the_sign_in_step() {
+            let server = MockServer::start().await;
+            mount_refresh(&server, refreshed(), 1).await;
+            mount_for_token(&server, "revoked", 401, 1).await;
+            mount_for_token(&server, "fresh-access", 401, 1).await;
+            let dir = tempfile::tempdir().unwrap();
+            let file = dir.path().join("credentials.json");
+            let req = stored_login_request(&server, &file, "revoked", 9_999_999_999_999);
+
+            let err = post_messages(&plain_http(), &req, 0)
+                .await
+                .expect_err("the second 401 fails the attempt");
+
+            let AttemptError::Fatal(error) = &err else {
+                panic!("expected a fatal error, got {err:?}");
+            };
+            assert_eq!(
+                format!("{error:#}"),
+                "Anthropic API rejected credentials (HTTP 401): token revoked. \
+                 Run `/login` to sign in again.",
+            );
+            server.verify().await;
+        }
+
+        #[tokio::test]
+        async fn reports_a_401_without_resending_when_the_refresh_is_rejected() {
+            let server = MockServer::start().await;
+            let invalid_grant =
+                ResponseTemplate::new(400).set_body_string(r#"{"error":"invalid_grant"}"#);
+            mount_refresh(&server, invalid_grant, 1).await;
+            mount_for_token(&server, "revoked", 401, 1).await;
+            let dir = tempfile::tempdir().unwrap();
+            let file = dir.path().join("credentials.json");
+            let req = stored_login_request(&server, &file, "revoked", 9_999_999_999_999);
+
+            let err = post_messages(&plain_http(), &req, 0)
+                .await
+                .expect_err("a login the refresh cannot restore fails the attempt");
+
+            let AttemptError::Fatal(error) = &err else {
+                panic!("expected a fatal error, got {err:?}");
+            };
+            assert_eq!(
+                format!("{error:#}"),
+                "Anthropic API rejected credentials (HTTP 401): token revoked. \
+                 Run `/login` to sign in again.",
+            );
+            server.verify().await;
+        }
+
+        #[tokio::test]
+        async fn retries_a_refresh_the_token_endpoint_failed_with_a_server_error() {
+            let server = MockServer::start().await;
+            Mock::given(method("POST"))
+                .and(path("/token"))
+                .respond_with(ResponseTemplate::new(503))
+                .up_to_n_times(1)
                 .expect(1)
                 .mount(&server)
                 .await;
+            mount_refresh(&server, refreshed(), 1).await;
+            mount_for_token(&server, "fresh-access", 200, 1).await;
+            let dir = tempfile::tempdir().unwrap();
+            let file = dir.path().join("credentials.json");
+            let req = stored_login_request(&server, &file, "expired", 0);
+            let http = plain_http();
+
+            let first = post_messages(&http, &req, 0).await;
+            let retry = post_messages(&http, &req, 1).await;
+
+            let Err(AttemptError::Retryable { cause, .. }) = &first else {
+                panic!("expected a retryable error, got {first:?}");
+            };
+            assert_eq!(cause, "Token refresh failed");
+            retry.expect("the retry refreshes and sends the request");
+            server.verify().await;
         }
-        let dir = tempfile::tempdir().unwrap();
-        let file = dir.path().join("credentials.json");
-        write_creds(&file, "new", Some("ref"), 9_999_999_999_999);
-        let mut req = request(&server);
-        req.auth = ox_login_in(&file, "http://unused", "old", 9_999_999_999_999);
 
-        post_messages(&plain_http(), &req, 0)
-            .await
-            .expect("the resend succeeds");
-
-        server.verify().await;
-    }
-
-    /// Answers `/v1/messages` sent with `token` with `status`, expecting `hits` such requests.
-    async fn mount_for_token(server: &MockServer, token: &str, status: u16, hits: u64) {
-        Mock::given(method("POST"))
-            .and(path("/v1/messages"))
-            .and(header("authorization", format!("Bearer {token}")))
-            .respond_with(ResponseTemplate::new(status).set_body_string("token revoked"))
-            .expect(hits)
-            .mount(server)
-            .await;
-    }
-
-    /// Answers the token endpoint at `/token` with `response`, expecting `hits` refreshes.
-    async fn mount_refresh(server: &MockServer, response: ResponseTemplate, hits: u64) {
-        Mock::given(method("POST"))
-            .and(path("/token"))
-            .respond_with(response)
-            .expect(hits)
-            .mount(server)
-            .await;
-    }
-
-    /// A request sending the oxide-code login `token`, which its store at `file` also holds with a
-    /// refresh token and `server` refreshes at `/token`.
-    fn stored_login_request(
-        server: &MockServer,
-        file: &Path,
-        token: &str,
-        expires_at_ms: u64,
-    ) -> MessagesRequest {
-        write_creds(file, token, Some("ref"), expires_at_ms);
-        let mut req = request(server);
-        let refresh_url = format!("{}/token", server.uri());
-        req.auth = ox_login_in(file, &refresh_url, token, expires_at_ms);
-        req
-    }
-
-    fn refreshed() -> ResponseTemplate {
-        ResponseTemplate::new(200).set_body_json(ok_refresh_body("fresh-access", "fresh-ref", 3600))
-    }
-
-    #[tokio::test]
-    async fn post_messages_refreshes_a_rejected_stored_login_its_store_still_holds() {
-        let server = MockServer::start().await;
-        mount_refresh(&server, refreshed(), 1).await;
-        mount_for_token(&server, "revoked", 401, 1).await;
-        mount_for_token(&server, "fresh-access", 200, 1).await;
-        let dir = tempfile::tempdir().unwrap();
-        let file = dir.path().join("credentials.json");
-        let req = stored_login_request(&server, &file, "revoked", 9_999_999_999_999);
-
-        post_messages(&plain_http(), &req, 0)
-            .await
-            .expect("the resend with the refreshed token succeeds");
-
-        server.verify().await;
-    }
-
-    #[tokio::test]
-    async fn post_messages_reports_a_401_the_refreshed_token_also_gets_with_the_sign_in_step() {
-        let server = MockServer::start().await;
-        mount_refresh(&server, refreshed(), 1).await;
-        mount_for_token(&server, "revoked", 401, 1).await;
-        mount_for_token(&server, "fresh-access", 401, 1).await;
-        let dir = tempfile::tempdir().unwrap();
-        let file = dir.path().join("credentials.json");
-        let req = stored_login_request(&server, &file, "revoked", 9_999_999_999_999);
-
-        let err = post_messages(&plain_http(), &req, 0)
-            .await
-            .expect_err("the second 401 fails the attempt");
-
-        let AttemptError::Fatal(error) = &err else {
-            panic!("expected a fatal error, got {err:?}");
-        };
-        assert_eq!(
-            format!("{error:#}"),
-            "Anthropic API rejected credentials (HTTP 401): token revoked. \
-             Run `/login` to sign in again.",
-        );
-        server.verify().await;
-    }
-
-    #[tokio::test]
-    async fn post_messages_reports_a_401_without_resending_when_the_refresh_is_rejected() {
-        let server = MockServer::start().await;
-        let invalid_grant =
-            ResponseTemplate::new(400).set_body_string(r#"{"error":"invalid_grant"}"#);
-        mount_refresh(&server, invalid_grant, 1).await;
-        mount_for_token(&server, "revoked", 401, 1).await;
-        let dir = tempfile::tempdir().unwrap();
-        let file = dir.path().join("credentials.json");
-        let req = stored_login_request(&server, &file, "revoked", 9_999_999_999_999);
-
-        let err = post_messages(&plain_http(), &req, 0)
-            .await
-            .expect_err("a login the refresh cannot restore fails the attempt");
-
-        let AttemptError::Fatal(error) = &err else {
-            panic!("expected a fatal error, got {err:?}");
-        };
-        assert_eq!(
-            format!("{error:#}"),
-            "Anthropic API rejected credentials (HTTP 401): token revoked. \
-             Run `/login` to sign in again.",
-        );
-        server.verify().await;
-    }
-
-    #[tokio::test]
-    async fn post_messages_retries_a_refresh_the_token_endpoint_failed_with_a_server_error() {
-        let server = MockServer::start().await;
-        Mock::given(method("POST"))
-            .and(path("/token"))
-            .respond_with(ResponseTemplate::new(503))
-            .up_to_n_times(1)
-            .expect(1)
-            .mount(&server)
-            .await;
-        mount_refresh(&server, refreshed(), 1).await;
-        mount_for_token(&server, "fresh-access", 200, 1).await;
-        let dir = tempfile::tempdir().unwrap();
-        let file = dir.path().join("credentials.json");
-        let req = stored_login_request(&server, &file, "expired", 0);
-        let http = plain_http();
-
-        let first = post_messages(&http, &req, 0).await;
-        let retry = post_messages(&http, &req, 1).await;
-
-        let Err(AttemptError::Retryable { cause, .. }) = &first else {
-            panic!("expected a retryable error, got {first:?}");
-        };
-        assert_eq!(cause, "Token refresh failed");
-        retry.expect("the retry refreshes and sends the request");
-        server.verify().await;
-    }
-
-    #[tokio::test]
-    async fn post_messages_condenses_a_gateway_page_to_its_title() {
-        let server = MockServer::start().await;
-        let page = indoc! {r#"
-            <!DOCTYPE html>
-            <html>
-            <head><TITLE lang="en">
-              example.com | 522: Connection timed out
-            </TITLE><style>body { margin: 0 }</style></head>
-            <body><h1>Connection timed out</h1></body>
-            </html>
-        "#};
-        mount(&server, ResponseTemplate::new(522).set_body_string(page)).await;
-
-        let Err(AttemptError::Retryable { error, cause, .. }) = post_once(&server).await else {
-            panic!("HTTP 522 is retryable");
-        };
-
-        assert_eq!(
-            error.to_string(),
-            "Anthropic API server error (HTTP 522): example.com | 522: Connection timed out. \
-             Retry in a few seconds.",
-        );
-        assert_eq!(cause, "HTTP 522");
-    }
-
-    #[tokio::test]
-    async fn post_messages_types_a_prompt_too_long_rejection() {
-        for (kind, message, expected) in [
-            (
-                "invalid_request_error",
-                "prompt is too long: 215000 tokens > 200000 maximum",
-                Some(Some(15_000)),
-            ),
-            ("invalid_request_error", "Prompt is too long", Some(None)),
-            ("invalid_request_error", "max_tokens: too large", None),
-            (
-                "api_error",
-                "prompt is too long: 3 tokens > 2 maximum",
-                None,
-            ),
-        ] {
+        #[tokio::test]
+        async fn condenses_a_gateway_page_to_its_title() {
             let server = MockServer::start().await;
-            let body =
-                format!(r#"{{"type":"error","error":{{"type":"{kind}","message":"{message}"}}}}"#);
-            mount(&server, ResponseTemplate::new(400).set_body_string(&body)).await;
+            let page = indoc! {r#"
+                <!DOCTYPE html>
+                <html>
+                <head><TITLE lang="en">
+                  example.com | 522: Connection timed out
+                </TITLE><style>body { margin: 0 }</style></head>
+                <body><h1>Connection timed out</h1></body>
+                </html>
+            "#};
+            mount(&server, ResponseTemplate::new(522).set_body_string(page)).await;
 
-            let Err(AttemptError::Fatal(error)) = post_once(&server).await else {
-                panic!("HTTP 400 is fatal");
+            let Err(AttemptError::Retryable { error, cause, .. }) = post_once(&server).await else {
+                panic!("HTTP 522 is retryable");
             };
 
-            let too_long = error.downcast_ref::<PromptTooLong>();
-            assert_eq!(too_long.map(|e| e.overflow), expected, "{body}");
             assert_eq!(
                 error.to_string(),
-                format!("API error (HTTP 400 Bad Request): {message}"),
+                "Anthropic API server error (HTTP 522): example.com | 522: Connection timed out. \
+                 Retry in a few seconds.",
             );
+            assert_eq!(cause, "HTTP 522");
         }
-    }
 
-    #[tokio::test]
-    async fn post_messages_threads_retry_after_into_the_hint_and_message() {
-        let server = MockServer::start().await;
-        mount(
-            &server,
-            ResponseTemplate::new(429).insert_header("retry-after", "12"),
-        )
-        .await;
+        #[tokio::test]
+        async fn types_a_prompt_too_long_rejection() {
+            for (kind, message, expected) in [
+                (
+                    "invalid_request_error",
+                    "prompt is too long: 215000 tokens > 200000 maximum",
+                    Some(Some(15_000)),
+                ),
+                ("invalid_request_error", "Prompt is too long", Some(None)),
+                ("invalid_request_error", "max_tokens: too large", None),
+                (
+                    "api_error",
+                    "prompt is too long: 3 tokens > 2 maximum",
+                    None,
+                ),
+            ] {
+                let server = MockServer::start().await;
+                let body = format!(
+                    r#"{{"type":"error","error":{{"type":"{kind}","message":"{message}"}}}}"#
+                );
+                mount(&server, ResponseTemplate::new(400).set_body_string(&body)).await;
 
-        let Err(AttemptError::Retryable {
-            error, retry_after, ..
-        }) = post_once(&server).await
-        else {
-            panic!("429 must be retryable");
-        };
-        assert_eq!(retry_after, Some(Duration::from_secs(12)));
-        assert_eq!(
-            error.to_string(),
-            "Anthropic API rate limited (HTTP 429). Retry after 12 s.",
-        );
-    }
+                let Err(AttemptError::Fatal(error)) = post_once(&server).await else {
+                    panic!("HTTP 400 is fatal");
+                };
 
-    #[tokio::test]
-    async fn post_messages_names_the_api_error_type_in_the_retry_cause() {
-        for (body, cause) in [
-            (
-                r#"{"type":"error","error":{"type":"overloaded_error","message":"Overloaded"}}"#,
-                "HTTP 529 overloaded_error",
-            ),
-            ("<html>busy</html>", "HTTP 529"),
-        ] {
-            let server = MockServer::start().await;
-            mount(&server, ResponseTemplate::new(529).set_body_string(body)).await;
-
-            let Err(AttemptError::Retryable { cause: got, .. }) = post_once(&server).await else {
-                panic!("529 must be retryable");
-            };
-            assert_eq!(got, cause);
+                let too_long = error.downcast_ref::<PromptTooLong>();
+                assert_eq!(too_long.map(|e| e.overflow), expected, "{body}");
+                assert_eq!(
+                    error.to_string(),
+                    format!("API error (HTTP 400 Bad Request): {message}"),
+                );
+            }
         }
-    }
 
-    #[tokio::test]
-    async fn post_messages_x_should_retry_overrides_the_status_rule() {
-        for (status, header, retryable) in [(529, "false", false), (400, "true", true)] {
+        #[tokio::test]
+        async fn threads_retry_after_into_the_hint_and_message() {
             let server = MockServer::start().await;
             mount(
                 &server,
-                ResponseTemplate::new(status).insert_header("x-should-retry", header),
+                ResponseTemplate::new(429).insert_header("retry-after", "12"),
             )
             .await;
 
-            let err = post_once(&server).await.expect_err("non-2xx fails");
+            let Err(AttemptError::Retryable {
+                error, retry_after, ..
+            }) = post_once(&server).await
+            else {
+                panic!("429 must be retryable");
+            };
+            assert_eq!(retry_after, Some(Duration::from_secs(12)));
             assert_eq!(
-                matches!(err, AttemptError::Retryable { .. }),
-                retryable,
-                "HTTP {status} with x-should-retry: {header}",
+                error.to_string(),
+                "Anthropic API rate limited (HTTP 429). Retry after 12 s.",
             );
         }
-    }
 
-    #[tokio::test(start_paused = true)]
-    async fn post_messages_with_retry_recovers_from_a_transient_status() {
-        let server = MockServer::start().await;
-        Mock::given(method("POST"))
-            .and(path("/v1/messages"))
-            .respond_with(ResponseTemplate::new(529))
-            .up_to_n_times(1)
-            .mount(&server)
-            .await;
-        mount(&server, ResponseTemplate::new(200).set_body_string("ok")).await;
-        let http = &plain_http();
-        let req = &request(&server);
-
-        let body = with_retry(
-            |retry| async move {
-                let response = post_messages(http, req, retry).await?;
-                Ok(response.text().await.map_err(anyhow::Error::from)?)
-            },
-            |_| {},
-        )
-        .await
-        .unwrap();
-
-        assert_eq!(body, "ok");
-        let counts: Vec<String> = server
-            .received_requests()
-            .await
-            .unwrap()
-            .iter()
-            .map(|r| {
-                r.headers["x-stainless-retry-count"]
-                    .to_str()
-                    .unwrap()
-                    .to_owned()
-            })
-            .collect();
-        assert_eq!(counts, ["0", "1"]);
-    }
-
-    // ── rate_limits ──
-
-    fn headers(pairs: &[(&'static str, &str)]) -> HeaderMap {
-        pairs
-            .iter()
-            .map(|&(name, value)| {
+        #[tokio::test]
+        async fn names_the_api_error_type_in_the_retry_cause() {
+            for (body, cause) in [
                 (
-                    HeaderName::from_static(name),
-                    HeaderValue::from_str(value).unwrap(),
-                )
-            })
-            .collect()
-    }
+                    r#"{"type":"error","error":{"type":"overloaded_error","message":"Overloaded"}}"#,
+                    "HTTP 529 overloaded_error",
+                ),
+                ("<html>busy</html>", "HTTP 529"),
+            ] {
+                let server = MockServer::start().await;
+                mount(&server, ResponseTemplate::new(529).set_body_string(body)).await;
 
-    fn window(utilization: f64, resets_at: i64) -> RateLimitWindow {
-        RateLimitWindow {
-            utilization,
-            resets_at,
-        }
-    }
-
-    #[test]
-    fn rate_limits_reads_each_window_the_response_reports() {
-        assert_eq!(
-            rate_limits(&headers(&[
-                ("anthropic-ratelimit-unified-5h-utilization", "0.42"),
-                ("anthropic-ratelimit-unified-5h-reset", "1760000000"),
-                ("anthropic-ratelimit-unified-7d-utilization", "0.13"),
-                ("anthropic-ratelimit-unified-7d-reset", "1760500000"),
-            ])),
-            Some(RateLimits {
-                five_hour: Some(window(0.42, 1_760_000_000)),
-                seven_day: Some(window(0.13, 1_760_500_000)),
-            }),
-        );
-        assert_eq!(
-            rate_limits(&headers(&[
-                ("anthropic-ratelimit-unified-7d-utilization", "1"),
-                ("anthropic-ratelimit-unified-7d-reset", "1760500000"),
-            ])),
-            Some(RateLimits {
-                five_hour: None,
-                seven_day: Some(window(1.0, 1_760_500_000)),
-            }),
-        );
-    }
-
-    #[test]
-    fn rate_limits_skips_an_incomplete_or_malformed_window() {
-        assert_eq!(rate_limits(&HeaderMap::new()), None, "API keys get none");
-        for (utilization, reset) in [("0.42", ""), ("NaN", "1760000000"), ("0.42", "soon")] {
-            let mut pairs = vec![("anthropic-ratelimit-unified-5h-utilization", utilization)];
-            if !reset.is_empty() {
-                pairs.push(("anthropic-ratelimit-unified-5h-reset", reset));
+                let Err(AttemptError::Retryable { cause: got, .. }) = post_once(&server).await
+                else {
+                    panic!("529 must be retryable");
+                };
+                assert_eq!(got, cause);
             }
-            assert_eq!(
-                rate_limits(&headers(&pairs)),
-                None,
-                "{utilization:?} / {reset:?}",
-            );
+        }
+
+        #[tokio::test]
+        async fn x_should_retry_overrides_the_status_rule() {
+            for (status, header, retryable) in [(529, "false", false), (400, "true", true)] {
+                let server = MockServer::start().await;
+                mount(
+                    &server,
+                    ResponseTemplate::new(status).insert_header("x-should-retry", header),
+                )
+                .await;
+
+                let err = post_once(&server).await.expect_err("non-2xx fails");
+                assert_eq!(
+                    matches!(err, AttemptError::Retryable { .. }),
+                    retryable,
+                    "HTTP {status} with x-should-retry: {header}",
+                );
+            }
+        }
+
+        #[tokio::test(start_paused = true)]
+        async fn numbers_each_attempt_in_the_retry_count_header() {
+            let server = MockServer::start().await;
+            Mock::given(method("POST"))
+                .and(path("/v1/messages"))
+                .respond_with(ResponseTemplate::new(529))
+                .up_to_n_times(1)
+                .mount(&server)
+                .await;
+            mount(&server, ResponseTemplate::new(200).set_body_string("ok")).await;
+            let http = &plain_http();
+            let req = &request(&server);
+
+            let body = with_retry(
+                |retry| async move {
+                    let response = post_messages(http, req, retry).await?;
+                    Ok(response.text().await.map_err(anyhow::Error::from)?)
+                },
+                |_| {},
+            )
+            .await
+            .unwrap();
+
+            assert_eq!(body, "ok");
+            let counts: Vec<String> = server
+                .received_requests()
+                .await
+                .unwrap()
+                .iter()
+                .map(|r| {
+                    r.headers["x-stainless-retry-count"]
+                        .to_str()
+                        .unwrap()
+                        .to_owned()
+                })
+                .collect();
+            assert_eq!(counts, ["0", "1"]);
         }
     }
 
-    // ── parse_retry_after ──
+    mod rate_limits {
+        use super::*;
 
-    #[test]
-    fn parse_retry_after_accepts_seconds_and_rejects_dates() {
-        assert_eq!(parse_retry_after(" 30 "), Some(Duration::from_secs(30)));
-        assert_eq!(parse_retry_after("Wed, 21 Oct 2026 07:28:00 GMT"), None);
-    }
+        fn headers(pairs: &[(&'static str, &str)]) -> HeaderMap {
+            pairs
+                .iter()
+                .map(|&(name, value)| {
+                    (
+                        HeaderName::from_static(name),
+                        HeaderValue::from_str(value).unwrap(),
+                    )
+                })
+                .collect()
+        }
 
-    // ── format_api_error ──
+        fn window(utilization: f64, resets_at: i64) -> RateLimitWindow {
+            RateLimitWindow {
+                utilization,
+                resets_at,
+            }
+        }
 
-    #[test]
-    fn format_api_error_puts_the_details_after_the_headline_and_the_hint_last() {
-        let secs = Some(Duration::from_secs(42));
-        for (status, retry_after, expected) in [
-            (
-                401,
-                None,
-                "Anthropic API rejected credentials (HTTP 401): boom. \
-                 CLAUDE_CODE_OAUTH_TOKEN may be expired or revoked. \
-                 Generate a new one with `claude setup-token`.",
-            ),
-            (
-                429,
-                secs,
-                "Anthropic API rate limited (HTTP 429): boom. Retry after 42 s.",
-            ),
-            (
-                429,
-                None,
-                "Anthropic API rate limited (HTTP 429): boom. Retry after a short delay.",
-            ),
-            (
-                529,
-                None,
-                "Anthropic API overloaded (HTTP 529): boom. Retry in a few seconds.",
-            ),
-            (
-                502,
-                None,
-                "Anthropic API server error (HTTP 502 Bad Gateway): boom. Retry in a few seconds.",
-            ),
-            (
-                522,
-                None,
-                "Anthropic API server error (HTTP 522): boom. Retry in a few seconds.",
-            ),
-            (400, secs, "API error (HTTP 400 Bad Request): boom"),
-        ] {
-            let status = StatusCode::from_u16(status).unwrap();
+        #[test]
+        fn reads_each_window_the_response_reports() {
             assert_eq!(
-                format_api_error(
-                    AuthSource::OAuthTokenEnv,
-                    status,
-                    retry_after,
+                rate_limits(&headers(&[
+                    ("anthropic-ratelimit-unified-5h-utilization", "0.42"),
+                    ("anthropic-ratelimit-unified-5h-reset", "1760000000"),
+                    ("anthropic-ratelimit-unified-7d-utilization", "0.13"),
+                    ("anthropic-ratelimit-unified-7d-reset", "1760500000"),
+                ])),
+                Some(RateLimits {
+                    five_hour: Some(window(0.42, 1_760_000_000)),
+                    seven_day: Some(window(0.13, 1_760_500_000)),
+                }),
+            );
+            assert_eq!(
+                rate_limits(&headers(&[
+                    ("anthropic-ratelimit-unified-7d-utilization", "1"),
+                    ("anthropic-ratelimit-unified-7d-reset", "1760500000"),
+                ])),
+                Some(RateLimits {
+                    five_hour: None,
+                    seven_day: Some(window(1.0, 1_760_500_000)),
+                }),
+            );
+        }
+
+        #[test]
+        fn skips_an_incomplete_or_malformed_window() {
+            assert_eq!(rate_limits(&HeaderMap::new()), None, "API keys get none");
+            for (utilization, reset) in [("0.42", ""), ("NaN", "1760000000"), ("0.42", "soon")] {
+                let mut pairs = vec![("anthropic-ratelimit-unified-5h-utilization", utilization)];
+                if !reset.is_empty() {
+                    pairs.push(("anthropic-ratelimit-unified-5h-reset", reset));
+                }
+                assert_eq!(
+                    rate_limits(&headers(&pairs)),
                     None,
-                    Some("boom"),
+                    "{utilization:?} / {reset:?}",
+                );
+            }
+        }
+    }
+
+    mod parse_retry_after {
+        use super::*;
+
+        #[test]
+        fn accepts_seconds_and_rejects_dates() {
+            assert_eq!(parse_retry_after(" 30 "), Some(Duration::from_secs(30)));
+            assert_eq!(parse_retry_after("Wed, 21 Oct 2026 07:28:00 GMT"), None);
+        }
+    }
+
+    mod format_api_error {
+        use super::*;
+
+        #[test]
+        fn puts_the_details_after_the_headline_and_the_hint_last() {
+            let secs = Some(Duration::from_secs(42));
+            for (status, retry_after, expected) in [
+                (
+                    401,
+                    None,
+                    "Anthropic API rejected credentials (HTTP 401): boom. \
+                     CLAUDE_CODE_OAUTH_TOKEN may be expired or revoked. \
+                     Generate a new one with `claude setup-token`.",
                 ),
-                expected,
-            );
-        }
-    }
-
-    #[test]
-    fn format_api_error_without_details_puts_the_hint_after_the_headline() {
-        for (status, expected) in [
-            (StatusCode::BAD_REQUEST, "API error (HTTP 400 Bad Request)"),
-            (
-                StatusCode::BAD_GATEWAY,
-                "Anthropic API server error (HTTP 502 Bad Gateway). Retry in a few seconds.",
-            ),
-        ] {
-            assert_eq!(
-                format_api_error(AuthSource::ApiKeyEnv, status, None, None, None),
-                expected,
-            );
-        }
-    }
-
-    #[test]
-    fn format_api_error_keeps_the_details_as_sent_and_ends_each_sentence_once() {
-        let truncated = body_details(&"x".repeat(MAX_DETAILS_WIDTH + 1), None).unwrap();
-        for (status, details, expected) in [
-            (
-                StatusCode::BAD_GATEWAY,
-                "Upstream is down.",
-                "Anthropic API server error (HTTP 502 Bad Gateway): Upstream is down. \
-                 Retry in a few seconds."
-                    .to_owned(),
-            ),
-            (
-                StatusCode::BAD_GATEWAY,
-                truncated.as_str(),
-                format!(
-                    "Anthropic API server error (HTTP 502 Bad Gateway): {}... \
+                (
+                    429,
+                    secs,
+                    "Anthropic API rate limited (HTTP 429): boom. Retry after 42 s.",
+                ),
+                (
+                    429,
+                    None,
+                    "Anthropic API rate limited (HTTP 429): boom. Retry after a short delay.",
+                ),
+                (
+                    529,
+                    None,
+                    "Anthropic API overloaded (HTTP 529): boom. Retry in a few seconds.",
+                ),
+                (
+                    502,
+                    None,
+                    "Anthropic API server error (HTTP 502 Bad Gateway): boom. \
                      Retry in a few seconds.",
-                    "x".repeat(MAX_DETAILS_WIDTH - 3),
                 ),
-            ),
-            (
-                StatusCode::BAD_GATEWAY,
-                "upstream connect error",
-                "Anthropic API server error (HTTP 502 Bad Gateway): upstream connect error. \
-                 Retry in a few seconds."
-                    .to_owned(),
-            ),
-            (
-                StatusCode::BAD_REQUEST,
-                "messages.0: The block is empty. Remove it.",
-                "API error (HTTP 400 Bad Request): messages.0: The block is empty. Remove it."
-                    .to_owned(),
-            ),
-        ] {
-            assert_eq!(
-                format_api_error(AuthSource::ApiKeyEnv, status, None, None, Some(details)),
-                expected,
-                "{details:?}",
-            );
-        }
-    }
-
-    #[test]
-    fn format_api_error_3xx_names_the_redirect_host() {
-        let redirected = "Anthropic API endpoint redirected (HTTP 307 Temporary Redirect)";
-        let advice = "Redirects are not followed, so point the base URL at the final endpoint.";
-        for (location, target) in [
-            (
-                Some("https://other.example.com/v1/messages"),
-                " to other.example.com",
-            ),
-            (Some("/v2/messages"), ""),
-            (None, ""),
-        ] {
-            assert_eq!(
-                format_api_error(
-                    AuthSource::ApiKeyEnv,
-                    StatusCode::TEMPORARY_REDIRECT,
+                (
+                    522,
                     None,
-                    location,
-                    Some("moved"),
+                    "Anthropic API server error (HTTP 522): boom. Retry in a few seconds.",
                 ),
-                format!("{redirected}{target}: moved. {advice}"),
-                "{location:?}",
-            );
+                (400, secs, "API error (HTTP 400 Bad Request): boom"),
+            ] {
+                let status = StatusCode::from_u16(status).unwrap();
+                assert_eq!(
+                    format_api_error(
+                        AuthSource::OAuthTokenEnv,
+                        status,
+                        retry_after,
+                        None,
+                        Some("boom"),
+                    ),
+                    expected,
+                );
+            }
+        }
+
+        #[test]
+        fn without_details_puts_the_hint_after_the_headline() {
+            for (status, expected) in [
+                (StatusCode::BAD_REQUEST, "API error (HTTP 400 Bad Request)"),
+                (
+                    StatusCode::BAD_GATEWAY,
+                    "Anthropic API server error (HTTP 502 Bad Gateway). Retry in a few seconds.",
+                ),
+            ] {
+                assert_eq!(
+                    format_api_error(AuthSource::ApiKeyEnv, status, None, None, None),
+                    expected,
+                );
+            }
+        }
+
+        #[test]
+        fn keeps_the_details_as_sent_and_ends_each_sentence_once() {
+            let truncated = body_details(&"x".repeat(MAX_DETAILS_WIDTH + 1), None).unwrap();
+            for (status, details, expected) in [
+                (
+                    StatusCode::BAD_GATEWAY,
+                    "Upstream is down.",
+                    "Anthropic API server error (HTTP 502 Bad Gateway): Upstream is down. \
+                     Retry in a few seconds."
+                        .to_owned(),
+                ),
+                (
+                    StatusCode::BAD_GATEWAY,
+                    truncated.as_str(),
+                    format!(
+                        "Anthropic API server error (HTTP 502 Bad Gateway): {}... \
+                         Retry in a few seconds.",
+                        "x".repeat(MAX_DETAILS_WIDTH - 3),
+                    ),
+                ),
+                (
+                    StatusCode::BAD_GATEWAY,
+                    "upstream connect error",
+                    "Anthropic API server error (HTTP 502 Bad Gateway): upstream connect error. \
+                     Retry in a few seconds."
+                        .to_owned(),
+                ),
+                (
+                    StatusCode::BAD_REQUEST,
+                    "messages.0: The block is empty. Remove it.",
+                    "API error (HTTP 400 Bad Request): messages.0: The block is empty. Remove it."
+                        .to_owned(),
+                ),
+            ] {
+                assert_eq!(
+                    format_api_error(AuthSource::ApiKeyEnv, status, None, None, Some(details)),
+                    expected,
+                    "{details:?}",
+                );
+            }
+        }
+
+        #[test]
+        fn on_3xx_names_the_redirect_host() {
+            let redirected = "Anthropic API endpoint redirected (HTTP 307 Temporary Redirect)";
+            let advice = "Redirects are not followed, so point the base URL at the final endpoint.";
+            for (location, target) in [
+                (
+                    Some("https://other.example.com/v1/messages"),
+                    " to other.example.com",
+                ),
+                (Some("/v2/messages"), ""),
+                (None, ""),
+            ] {
+                assert_eq!(
+                    format_api_error(
+                        AuthSource::ApiKeyEnv,
+                        StatusCode::TEMPORARY_REDIRECT,
+                        None,
+                        location,
+                        Some("moved"),
+                    ),
+                    format!("{redirected}{target}: moved. {advice}"),
+                    "{location:?}",
+                );
+            }
         }
     }
 
-    // ── body_details ──
+    mod format_stream_error {
+        use super::*;
 
-    #[test]
-    fn body_details_shows_the_api_error_message() {
-        let error = ApiError {
-            error_type: "invalid_request_error".to_owned(),
-            message: "max_tokens:\n  too large".to_owned(),
-        };
-
-        let details = body_details(r#"{"type":"error"}"#, Some(&error));
-
-        assert_eq!(details.as_deref(), Some("max_tokens: too large"));
-    }
-
-    #[test]
-    fn body_details_shows_the_title_of_a_markup_page() {
-        let nginx = indoc! {"
-            <html>
-            <head><title>502 Bad Gateway</title></head>
-            <body><center><h1>502 Bad Gateway</h1></center></body>
-            </html>
-        "};
-        assert_eq!(
-            body_details(nginx, None).as_deref(),
-            Some("502 Bad Gateway")
-        );
-        assert_eq!(body_details("<html><body>busy</body></html>", None), None);
-    }
-
-    #[test]
-    fn body_details_shows_plain_text_on_one_capped_line() {
-        let long = "x".repeat(MAX_DETAILS_WIDTH + 1);
-        for (body, expected) in [
-            (
-                "\n  upstream connect error\r\n\treset reason: overflow\n",
-                Some("upstream connect error reset reason: overflow".to_owned()),
-            ),
-            (
-                long.as_str(),
-                Some(format!("{}...", "x".repeat(MAX_DETAILS_WIDTH - 3))),
-            ),
-            (" \r\n", None),
-        ] {
-            assert_eq!(body_details(body, None), expected, "{body:?}");
+        #[test]
+        fn matches_the_http_diagnostic_for_the_same_failure() {
+            for (error_type, message, expected) in [
+                (
+                    "overloaded_error",
+                    "Overloaded",
+                    "Anthropic API overloaded (overloaded_error): Overloaded. \
+                     Retry in a few seconds.",
+                ),
+                (
+                    "api_error",
+                    "Internal server error.",
+                    "Anthropic API server error (api_error): Internal server error. \
+                     Retry in a few seconds.",
+                ),
+                (
+                    "invalid_request_error",
+                    "messages:\n  bad block",
+                    "API error (invalid_request_error): messages: bad block",
+                ),
+            ] {
+                assert_eq!(
+                    format_stream_error(error_type, message),
+                    expected,
+                    "{error_type}",
+                );
+            }
         }
     }
 
-    // ── format_stream_error ──
+    mod body_details {
+        use super::*;
 
-    #[test]
-    fn format_stream_error_matches_the_http_diagnostic_for_the_same_failure() {
-        for (error_type, message, expected) in [
-            (
-                "overloaded_error",
-                "Overloaded",
-                "Anthropic API overloaded (overloaded_error): Overloaded. Retry in a few seconds.",
-            ),
-            (
-                "api_error",
-                "Internal server error.",
-                "Anthropic API server error (api_error): Internal server error. \
-                 Retry in a few seconds.",
-            ),
-            (
-                "invalid_request_error",
-                "messages:\n  bad block",
-                "API error (invalid_request_error): messages: bad block",
-            ),
-        ] {
+        #[test]
+        fn shows_the_api_error_message() {
+            let error = ApiError {
+                error_type: "invalid_request_error".to_owned(),
+                message: "max_tokens:\n  too large".to_owned(),
+            };
+
+            let details = body_details(r#"{"type":"error"}"#, Some(&error));
+
+            assert_eq!(details.as_deref(), Some("max_tokens: too large"));
+        }
+
+        #[test]
+        fn shows_the_title_of_a_markup_page() {
+            let nginx = indoc! {"
+                <html>
+                <head><title>502 Bad Gateway</title></head>
+                <body><center><h1>502 Bad Gateway</h1></center></body>
+                </html>
+            "};
             assert_eq!(
-                format_stream_error(error_type, message),
-                expected,
-                "{error_type}",
+                body_details(nginx, None).as_deref(),
+                Some("502 Bad Gateway")
             );
+            assert_eq!(body_details("<html><body>busy</body></html>", None), None);
+        }
+
+        #[test]
+        fn shows_plain_text_on_one_capped_line() {
+            let long = "x".repeat(MAX_DETAILS_WIDTH + 1);
+            for (body, expected) in [
+                (
+                    "\n  upstream connect error\r\n\treset reason: overflow\n",
+                    Some("upstream connect error reset reason: overflow".to_owned()),
+                ),
+                (
+                    long.as_str(),
+                    Some(format!("{}...", "x".repeat(MAX_DETAILS_WIDTH - 3))),
+                ),
+                (" \r\n", None),
+            ] {
+                assert_eq!(body_details(body, None), expected, "{body:?}");
+            }
         }
     }
 }

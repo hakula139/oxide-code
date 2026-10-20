@@ -521,82 +521,6 @@ mod tests {
     use crate::session::post_compact::synthesize_post_compact_message;
     use crate::tool::tasks::testing::plan;
 
-    // ── AutoCompactFailures::reset ──
-
-    #[test]
-    fn reset_reports_a_resume_only_from_a_pause() {
-        let sink = CapturingSink::default();
-        let mut counting = AutoCompactFailures::new(MAX_AUTO_COMPACT_FAILURES - 1);
-        let mut paused = AutoCompactFailures::new(MAX_AUTO_COMPACT_FAILURES);
-
-        counting.reset(&sink);
-        let after_counting = sink.events();
-        paused.reset(&sink);
-
-        assert_eq!(counting, AutoCompactFailures::default());
-        assert_eq!(paused, AutoCompactFailures::default());
-        assert_eq!(after_counting, []);
-        assert_eq!(sink.events(), [Event::AutoCompactionResumed]);
-    }
-
-    // ── auto_compact_if_needed ──
-
-    struct CountingFailingClient {
-        calls: AtomicUsize,
-    }
-
-    impl CountingFailingClient {
-        fn new() -> Self {
-            Self {
-                calls: AtomicUsize::new(0),
-            }
-        }
-
-        fn calls(&self) -> usize {
-            self.calls.load(Ordering::SeqCst)
-        }
-    }
-
-    impl Wire for CountingFailingClient {
-        fn stream_message(
-            &self,
-            _messages: &[Message],
-            _system_sections: &[&str],
-            _user_context: Option<&str>,
-            _tools: &[ToolDefinition],
-        ) -> Result<mpsc::Receiver<Result<ResponseEvent>>> {
-            self.calls.fetch_add(1, Ordering::SeqCst);
-            Err(anyhow!("the summarizer is unavailable. Retry in a minute."))
-        }
-    }
-
-    struct DelayedSummaryClient {
-        started: Arc<Notify>,
-        release: Arc<Notify>,
-    }
-
-    impl Wire for DelayedSummaryClient {
-        fn stream_message(
-            &self,
-            _messages: &[Message],
-            _system_sections: &[&str],
-            _user_context: Option<&str>,
-            _tools: &[ToolDefinition],
-        ) -> Result<mpsc::Receiver<Result<ResponseEvent>>> {
-            let (tx, rx) = mpsc::channel(8);
-            let started = self.started.clone();
-            let release = self.release.clone();
-            tokio::spawn(async move {
-                started.notify_one();
-                release.notified().await;
-                for event in text_turn("auto summary") {
-                    tx.send(Ok(event)).await.expect("test receiver alive");
-                }
-            });
-            Ok(rx)
-        }
-    }
-
     /// Auto-compaction at `threshold` tokens after a turn whose last round reported `usage`,
     /// counting into `failures`. Its file tracker, tools, task list, shells, and spend start empty.
     fn auto_compact(
@@ -620,720 +544,6 @@ mod tests {
         }
     }
 
-    #[tokio::test]
-    async fn auto_compact_if_needed_skips_without_usage_or_below_the_threshold() {
-        let dir = tempfile::tempdir().unwrap();
-        let session = test_session(dir.path());
-        let client = FakeClient::new(Vec::new());
-        let sink = CapturingSink::default();
-        let mut messages = tool_heavy_transcript();
-        let mut inbox = Inbox::default();
-        let mut failures = AutoCompactFailures::default();
-
-        let missing_usage = auto_compact_if_needed(
-            &client,
-            &session,
-            &mut messages,
-            &sink,
-            &mut inert_ops(),
-            &mut inbox,
-            &mut auto_compact(10, None, &mut failures),
-        )
-        .await
-        .unwrap();
-        assert!(!missing_usage);
-
-        let below_threshold = auto_compact_if_needed(
-            &client,
-            &session,
-            &mut messages,
-            &sink,
-            &mut inert_ops(),
-            &mut inbox,
-            &mut auto_compact(100, Some(TokenUsage::new(20, 1)), &mut failures),
-        )
-        .await
-        .unwrap();
-        assert!(!below_threshold);
-        assert_eq!(messages, tool_heavy_transcript());
-        assert_eq!(failures, AutoCompactFailures::default());
-    }
-
-    #[tokio::test]
-    async fn auto_compact_if_needed_skips_a_transcript_too_short_to_shrink() {
-        let dir = tempfile::tempdir().unwrap();
-        let session = test_session(dir.path());
-        let client = FakeClient::new(Vec::new());
-        let sink = CapturingSink::default();
-        let short = vec![Message::user("hi"), Message::assistant("hello")];
-        let mut messages = short.clone();
-        let mut failures = AutoCompactFailures::default();
-
-        let compacted = auto_compact_if_needed(
-            &client,
-            &session,
-            &mut messages,
-            &sink,
-            &mut inert_ops(),
-            &mut Inbox::default(),
-            &mut auto_compact(10, Some(TokenUsage::new(20, 1)), &mut failures),
-        )
-        .await;
-
-        assert!(
-            matches!(compacted, Ok(false)),
-            "a prefix-heavy context goes out without compaction: {compacted:?}"
-        );
-        assert_eq!(messages, short);
-        assert_eq!(failures, AutoCompactFailures::default());
-        assert_eq!(sink.events(), []);
-        assert_eq!(client.requests(), [] as [Vec<Message>; 0]);
-    }
-
-    #[tokio::test]
-    async fn auto_compact_if_needed_fails_the_prompt_when_the_summary_fails() {
-        let dir = tempfile::tempdir().unwrap();
-        let session = test_session(dir.path());
-        let sink = CapturingSink::default();
-        let mut messages = tool_heavy_transcript();
-        let mut inbox = Inbox::default();
-        let mut failures = AutoCompactFailures::default();
-
-        let compacted = auto_compact_if_needed(
-            &CountingFailingClient::new(),
-            &session,
-            &mut messages,
-            &sink,
-            &mut inert_ops(),
-            &mut inbox,
-            &mut auto_compact(10, Some(TokenUsage::new(20, 1)), &mut failures),
-        )
-        .await;
-
-        let Err(TurnAbort::Failed(error)) = compacted else {
-            panic!("a failed summary fails the prompt: {compacted:?}");
-        };
-        assert_eq!(
-            format!("{error:#}"),
-            "Auto-compaction failed: the summarizer is unavailable. \
-             Retry in a minute. \
-             The prompt was not sent, so send it again to retry.",
-        );
-        assert_eq!(failures, AutoCompactFailures::new(1));
-        assert_eq!(messages, tool_heavy_transcript());
-        assert_eq!(sink.events(), [Event::AutoCompactionStarted]);
-    }
-
-    #[tokio::test]
-    async fn auto_compact_if_needed_fails_the_prompt_when_the_boundary_is_not_saved() {
-        let session = dead_test_session();
-        let client = FakeClient::new(vec![text_turn("auto summary")]);
-        let sink = CapturingSink::default();
-        let mut messages = tool_heavy_transcript();
-        let mut inbox = Inbox::default();
-        let mut failures = AutoCompactFailures::default();
-
-        let compacted = auto_compact_if_needed(
-            &client,
-            &session,
-            &mut messages,
-            &sink,
-            &mut inert_ops(),
-            &mut inbox,
-            &mut auto_compact(10, Some(TokenUsage::new(20, 1)), &mut failures),
-        )
-        .await;
-
-        let Err(TurnAbort::Failed(error)) = compacted else {
-            panic!("an unsaved boundary fails the prompt: {compacted:?}");
-        };
-        assert_eq!(
-            format!("{error:#}"),
-            "Auto-compaction was not saved. The prompt was not sent, so send it again to retry.",
-        );
-        assert_eq!(failures, AutoCompactFailures::new(1));
-        assert_eq!(messages, tool_heavy_transcript());
-        let events = sink.events();
-        assert!(
-            matches!(
-                events.as_slice(),
-                [
-                    Event::AutoCompactionStarted,
-                    Event::SummaryToken(summary),
-                    Event::SummaryDiscarded,
-                    Event::Error(message),
-                ] if summary == "auto summary" && message.starts_with("Session write failed")
-            ),
-            "the unsaved summary is discarded before the write failure: {events:?}",
-        );
-    }
-
-    #[tokio::test]
-    async fn auto_compact_if_needed_third_failure_turns_auto_compaction_off() {
-        let dir = tempfile::tempdir().unwrap();
-        let session = test_session(dir.path());
-        let client = CountingFailingClient::new();
-        let sink = CapturingSink::default();
-        let mut messages = tool_heavy_transcript();
-        let mut inbox = Inbox::default();
-        let mut failures = AutoCompactFailures::new(MAX_AUTO_COMPACT_FAILURES - 1);
-        let usage = Some(TokenUsage::new(50_000, 1));
-        let mut attempt = async || {
-            auto_compact_if_needed(
-                &client,
-                &session,
-                &mut messages,
-                &sink,
-                &mut inert_ops(),
-                &mut inbox,
-                &mut auto_compact(50_000, usage, &mut failures),
-            )
-            .await
-        };
-
-        let third = attempt().await;
-        let fourth = attempt().await;
-
-        let Err(TurnAbort::Failed(error)) = third else {
-            panic!("the third failure still fails its prompt: {third:?}");
-        };
-        assert_eq!(
-            format!("{error:#}"),
-            "Auto-compaction failed: the summarizer is unavailable. \
-             Retry in a minute. \
-             The prompt was not sent, and auto-compaction is paused after 3 failures in a row. \
-             Send the prompt again to run it without compaction, \
-             or run `/compact` to retry compaction first.",
-        );
-        assert!(
-            matches!(fourth, Ok(false)),
-            "the next prompt goes out without compaction: {fourth:?}"
-        );
-        assert_eq!(
-            failures,
-            AutoCompactFailures::new(MAX_AUTO_COMPACT_FAILURES)
-        );
-        assert_eq!(client.calls(), 1);
-        assert_eq!(
-            sink.events(),
-            [
-                Event::AutoCompactionStarted,
-                Event::AutoCompactionPaused { failures: 3 },
-            ],
-        );
-    }
-
-    #[tokio::test]
-    async fn auto_compact_if_needed_queues_submit_and_carries_the_task_list_over() {
-        let dir = tempfile::tempdir().unwrap();
-        let session = test_session(dir.path());
-        let started = Arc::new(Notify::new());
-        let release = Arc::new(Notify::new());
-        let client = DelayedSummaryClient {
-            started: started.clone(),
-            release: release.clone(),
-        };
-        let sink = CapturingSink::default();
-        let mut messages = tool_heavy_transcript();
-        let mut inbox = Inbox::default();
-        let mut failures = AutoCompactFailures::default();
-        let (tx, mut rx) = mpsc::channel::<Op>(1);
-        let mut auto = AutoCompact {
-            tasks: &plan(),
-            ..auto_compact(10, Some(TokenUsage::new(20, 1)), &mut failures)
-        };
-
-        let compact = auto_compact_if_needed(
-            &client,
-            &session,
-            &mut messages,
-            &sink,
-            &mut rx,
-            &mut inbox,
-            &mut auto,
-        );
-        let queue_prompt = async {
-            started.notified().await;
-            tx.send(Op::Queue("queued after summary".to_owned()))
-                .await
-                .unwrap();
-            tokio::task::yield_now().await;
-            release.notify_one();
-        };
-        let (compacted, ()) = tokio::join!(compact, queue_prompt);
-        let compacted = compacted.unwrap();
-
-        assert!(compacted);
-        assert_eq!(inbox.prompts, vec!["queued after summary"]);
-        assert_eq!(*auto.failures, AutoCompactFailures::default());
-        assert_eq!(
-            sink.events()
-                .iter()
-                .filter(|event| matches!(event, Event::PromptDrained(_)))
-                .count(),
-            0
-        );
-        assert!(sink.events().iter().any(|event| matches!(
-            event,
-            Event::SessionCompacted {
-                automatic: true,
-                ..
-            }
-        )));
-        assert_eq!(
-            messages,
-            [synthesize_post_compact_message(
-                "auto summary",
-                &plan(),
-                &[]
-            )]
-        );
-    }
-
-    #[tokio::test]
-    async fn auto_compact_if_needed_retries_an_overflowing_summary_without_the_oldest_rounds() {
-        let dir = tempfile::tempdir().unwrap();
-        let session = test_session(dir.path());
-        let client = FakeClient::new(vec![
-            with_stop(
-                text_turn("partial"),
-                StopReason::ModelContextWindowExceeded,
-                None,
-            ),
-            text_turn("auto summary"),
-        ]);
-        let sink = CapturingSink::default();
-        let mut messages = tool_heavy_transcript();
-        let mut failures = AutoCompactFailures::default();
-
-        let compacted = auto_compact_if_needed(
-            &client,
-            &session,
-            &mut messages,
-            &sink,
-            &mut inert_ops(),
-            &mut Inbox::default(),
-            &mut auto_compact(10, Some(TokenUsage::new(20, 1)), &mut failures),
-        )
-        .await
-        .unwrap();
-
-        assert!(compacted);
-        let rubric = Message::user(SUMMARIZATION_USER_RUBRIC);
-        assert_eq!(
-            client.requests(),
-            [
-                [tool_heavy_transcript(), vec![rubric.clone()]].concat(),
-                vec![
-                    Message::user(RETRY_TRUNCATION_MARKER),
-                    Message::assistant("alpha-end, beta-end"),
-                    rubric,
-                ],
-            ],
-            "the retry keeps only the newest round",
-        );
-        assert!(
-            matches!(&messages[0].content[0], ContentBlock::Text { text } if text.contains("auto summary"))
-        );
-        let events = sink.events();
-        assert!(
-            matches!(
-                events.as_slice(),
-                [
-                    Event::AutoCompactionStarted,
-                    Event::SummaryToken(overflowed),
-                    Event::SummaryDiscarded,
-                    Event::SummaryToken(retried),
-                    Event::SessionCompacted { automatic: true, .. },
-                ] if overflowed == "partial" && retried == "auto summary"
-            ),
-            "the overflowed summary is discarded before the retry streams: {events:?}",
-        );
-    }
-
-    // ── record_auto_compact_failure ──
-
-    #[test]
-    fn record_auto_compact_failure_keeps_the_cause_verbatim_before_the_next_step() {
-        for (cause, expected) in [
-            (
-                "upstream timed out...",
-                "Auto-compaction failed: upstream timed out... \
-                 The prompt was not sent, so send it again to retry.",
-            ),
-            (
-                "upstream timed out",
-                "Auto-compaction failed: upstream timed out. \
-                 The prompt was not sent, so send it again to retry.",
-            ),
-        ] {
-            let mut failures = AutoCompactFailures::default();
-
-            let abort = record_auto_compact_failure(
-                &mut auto_compact(10, None, &mut failures),
-                &CapturingSink::default(),
-                Some(&anyhow!(cause)),
-            );
-
-            assert_eq!(abort.to_string(), expected);
-        }
-    }
-
-    // ── compact_session ──
-
-    fn streamed_summary_body(text: &str) -> String {
-        summary_stream("", text, "end_turn", true)
-    }
-
-    /// SSE body for one summary reply. `finished: false` cuts the stream before `message_stop`.
-    fn summary_stream(
-        start_text: &str,
-        delta_text: &str,
-        stop_reason: &str,
-        finished: bool,
-    ) -> String {
-        let mut frames = vec![
-            json!({"type": "message_start", "message": {"id": "m", "model": "claude-haiku-5-5", "usage": {"input_tokens": 100, "output_tokens": 1}}}),
-            json!({"type": "content_block_start", "index": 0, "content_block": {"type": "text", "text": start_text}}),
-            json!({"type": "content_block_delta", "index": 0, "delta": {"type": "text_delta", "text": delta_text}}),
-            json!({"type": "content_block_stop", "index": 0}),
-            json!({"type": "message_delta", "delta": {"stop_reason": stop_reason}, "usage": {"output_tokens": 7}}),
-        ];
-        if finished {
-            frames.push(json!({"type": "message_stop"}));
-        }
-        sse_body(&frames)
-    }
-
-    async fn mount_summary(server: &MockServer, body: String) {
-        Mock::given(method("POST"))
-            .and(path("/v1/messages"))
-            .respond_with(
-                ResponseTemplate::new(200)
-                    .set_body_string(body)
-                    .insert_header("content-type", "text/event-stream"),
-            )
-            .mount(server)
-            .await;
-    }
-
-    fn parent_prompt() -> PromptParts {
-        let mut prompt = PromptParts::default();
-        prompt.system_sections = vec!["You are the parent conversation.".to_owned()];
-        "Project instructions.".clone_into(&mut prompt.user_context);
-        prompt
-    }
-
-    async fn summarize(client: &Client, transcript: &[Message]) -> Result<String> {
-        summarize_streaming(client, transcript).await.0
-    }
-
-    /// Summarizes `transcript` like [`summarize`], also returning the events the summary streamed.
-    async fn summarize_streaming(
-        client: &Client,
-        transcript: &[Message],
-    ) -> (Result<String>, Vec<Event>) {
-        let sink = CapturingSink::default();
-        let summary = compact_session(
-            client,
-            &parent_prompt(),
-            &[],
-            transcript,
-            None,
-            &sink,
-            &mut Vec::new(),
-        )
-        .await;
-        (summary, sink.events())
-    }
-
-    fn token(text: &str) -> Event {
-        Event::SummaryToken(text.to_owned())
-    }
-
-    #[tokio::test]
-    async fn compact_session_returns_trimmed_summary_on_happy_path() {
-        let server = MockServer::start().await;
-        mount_summary(&server, streamed_summary_body("  fixed login bug  \n")).await;
-
-        let client = test_client(server.uri(), api_key(), "claude-haiku-5-5");
-        let summary = summarize(&client, &tool_heavy_transcript()).await.unwrap();
-        assert_eq!(summary, "fixed login bug");
-    }
-
-    #[tokio::test]
-    async fn compact_session_collects_initial_text_from_content_block_start() {
-        let server = MockServer::start().await;
-        mount_summary(
-            &server,
-            summary_stream("  fixed", " login bug  \n", "end_turn", true),
-        )
-        .await;
-
-        let client = test_client(server.uri(), api_key(), "claude-haiku-5-5");
-        let (summary, events) = summarize_streaming(&client, &tool_heavy_transcript()).await;
-        assert_eq!(summary.unwrap(), "fixed login bug");
-        assert_eq!(
-            events,
-            [token("  fixed"), token(" login bug  \n")],
-            "the kept summary streams untrimmed and is not discarded",
-        );
-    }
-
-    #[tokio::test]
-    async fn compact_session_summary_leaves_out_the_reply_thinking() {
-        let server = MockServer::start().await;
-        mount_summary(
-            &server,
-            sse_body(&[
-                json!({"type": "message_start", "message": {"id": "m", "model": "claude-haiku-5-5"}}),
-                json!({"type": "content_block_start", "index": 0, "content_block": {"type": "thinking", "thinking": "", "signature": ""}}),
-                json!({"type": "content_block_delta", "index": 0, "delta": {"type": "thinking_delta", "thinking": "draft notes"}}),
-                json!({"type": "content_block_delta", "index": 0, "delta": {"type": "signature_delta", "signature": "sig"}}),
-                json!({"type": "content_block_stop", "index": 0}),
-                json!({"type": "content_block_start", "index": 1, "content_block": {"type": "text", "text": ""}}),
-                json!({"type": "content_block_delta", "index": 1, "delta": {"type": "text_delta", "text": "fixed login bug"}}),
-                json!({"type": "content_block_stop", "index": 1}),
-                json!({"type": "message_delta", "delta": {"stop_reason": "end_turn"}}),
-                json!({"type": "message_stop"}),
-            ]),
-        )
-        .await;
-
-        let client = test_client(server.uri(), api_key(), "claude-haiku-5-5");
-        let (summary, events) = summarize_streaming(&client, &tool_heavy_transcript()).await;
-        assert_eq!(summary.unwrap(), "fixed login bug");
-        assert_eq!(events, [token("fixed login bug")]);
-    }
-
-    #[tokio::test]
-    async fn compact_session_request_forks_the_conversation_prefix() {
-        let server = MockServer::start().await;
-        let bodies: Arc<Mutex<Vec<serde_json::Value>>> = Arc::default();
-        let recorded = Arc::clone(&bodies);
-        Mock::given(method("POST"))
-            .and(path("/v1/messages"))
-            .respond_with(move |req: &Request| {
-                recorded
-                    .lock()
-                    .unwrap()
-                    .push(serde_json::from_slice(&req.body).unwrap());
-                ResponseTemplate::new(200)
-                    .set_body_string(streamed_summary_body("done"))
-                    .insert_header("content-type", "text/event-stream")
-            })
-            .mount(&server)
-            .await;
-        let client = test_client(server.uri(), api_key(), "claude-haiku-5-5");
-        let prompt = parent_prompt();
-        let tools = [ToolDefinition {
-            name: "read".to_owned(),
-            description: "Read a file.".to_owned(),
-            input_schema: json!({"type": "object"}),
-        }];
-        let transcript = tool_heavy_transcript();
-
-        let sections: Vec<&str> = prompt.system_sections.iter().map(String::as_str).collect();
-        let mut rx = client
-            .stream_message(&transcript, &sections, Some(&prompt.user_context), &tools)
-            .unwrap();
-        while rx.recv().await.is_some() {}
-        compact_session(
-            &client,
-            &prompt,
-            &tools,
-            &transcript,
-            Some("focus on auth"),
-            &CapturingSink::default(),
-            &mut Vec::new(),
-        )
-        .await
-        .unwrap();
-
-        let mut bodies = bodies.lock().unwrap().clone();
-        bodies.iter_mut().for_each(strip_cache_control);
-        let [parent, fork] = bodies.as_slice() else {
-            panic!("expected two requests, got {}", bodies.len());
-        };
-        // Skips the billing block, whose `cch` hashes the whole body and so differs per request.
-        let system = |body: &serde_json::Value| body["system"].as_array().unwrap()[1..].to_vec();
-        assert_eq!(system(fork), system(parent));
-        assert_eq!(fork["tools"], parent["tools"]);
-        let parent_messages = parent["messages"].as_array().unwrap();
-        let fork_messages = fork["messages"].as_array().unwrap();
-        assert_eq!(fork_messages[..parent_messages.len()], parent_messages[..]);
-        assert_eq!(fork_messages.len(), parent_messages.len() + 1);
-        let rubric = fork_messages.last().unwrap();
-        assert_eq!(rubric["role"], "user");
-        let rubric = rubric.to_string();
-        assert!(rubric.contains("Do not call any tools"), "{rubric}");
-        assert!(rubric.contains("focus on auth"), "{rubric}");
-    }
-
-    fn strip_cache_control(value: &mut serde_json::Value) {
-        match value {
-            serde_json::Value::Object(map) => {
-                map.remove("cache_control");
-                map.values_mut().for_each(strip_cache_control);
-            }
-            serde_json::Value::Array(items) => items.iter_mut().for_each(strip_cache_control),
-            _ => {}
-        }
-    }
-
-    /// Transcript whose oldest round holds a large tool result and whose kept round has thinking.
-    fn overflowing_transcript() -> Vec<Message> {
-        vec![
-            Message::user("fix the bug"),
-            Message {
-                role: Role::Assistant,
-                content: vec![
-                    ContentBlock::Text {
-                        text: "reading".to_owned(),
-                    },
-                    ContentBlock::ToolUse {
-                        id: "t1".to_owned(),
-                        name: "read".to_owned(),
-                        input: json!({"path": "/tmp/a"}),
-                    },
-                ],
-            },
-            Message {
-                role: Role::User,
-                content: vec![ContentBlock::ToolResult {
-                    tool_use_id: "t1".to_owned(),
-                    content: "a".repeat(100_000),
-                    is_error: false,
-                }],
-            },
-            Message {
-                role: Role::Assistant,
-                content: vec![
-                    ContentBlock::Thinking {
-                        thinking: "the bug is in auth".to_owned(),
-                        replay: Replay::with_model(MODEL, "sig"),
-                    },
-                    ContentBlock::Text {
-                        text: "found it".to_owned(),
-                    },
-                ],
-            },
-            Message::user("any progress?"),
-            Message::assistant("fixed"),
-        ]
-    }
-
-    async fn mount_overflow_then(server: &MockServer, retry_body: String) {
-        Mock::given(method("POST"))
-            .and(path("/v1/messages"))
-            .respond_with(
-                ResponseTemplate::new(200)
-                    .set_body_string(summary_stream(
-                        "",
-                        "partial",
-                        "model_context_window_exceeded",
-                        true,
-                    ))
-                    .insert_header("content-type", "text/event-stream"),
-            )
-            .up_to_n_times(1)
-            .mount(server)
-            .await;
-        mount_summary(server, retry_body).await;
-    }
-
-    #[tokio::test]
-    async fn compact_session_retries_an_overflow_without_the_oldest_rounds_or_thinking() {
-        let server = MockServer::start().await;
-        mount_overflow_then(&server, streamed_summary_body("trimmed summary")).await;
-        let client = test_client(server.uri(), api_key(), "claude-haiku-5-5");
-        let sink = CapturingSink::default();
-        let mut spent = Vec::new();
-
-        let summary = compact_session(
-            &client,
-            &parent_prompt(),
-            &[],
-            &overflowing_transcript(),
-            None,
-            &sink,
-            &mut spent,
-        )
-        .await
-        .unwrap();
-
-        assert_eq!(summary, "trimmed summary");
-        assert_eq!(
-            sink.events(),
-            [
-                token("partial"),
-                Event::SummaryDiscarded,
-                token("trimmed summary")
-            ],
-            "the retry starts the summary over",
-        );
-        let requests = server.received_requests().await.unwrap();
-        assert_eq!(requests.len(), 2);
-        let mut retry: serde_json::Value = serde_json::from_slice(&requests[1].body).unwrap();
-        assert!(
-            !retry["messages"].to_string().contains("cache_control"),
-            "no later request extends the retry, so its transcript carries no breakpoint",
-        );
-        strip_cache_control(&mut retry);
-        let messages = retry["messages"].as_array().unwrap();
-        assert_eq!(
-            messages[..messages.len() - 1],
-            [
-                json!({"role": "user", "content": [{"type": "text", "text": "Project instructions."}]}),
-                json!({"role": "user", "content": [{"type": "text", "text": RETRY_TRUNCATION_MARKER}]}),
-                json!({"role": "assistant", "content": [{"type": "text", "text": "found it"}]}),
-                json!({"role": "user", "content": [{"type": "text", "text": "any progress?"}]}),
-                json!({"role": "assistant", "content": [{"type": "text", "text": "fixed"}]}),
-            ],
-        );
-        assert!(
-            messages
-                .last()
-                .unwrap()
-                .to_string()
-                .contains("Summarize the conversation"),
-            "the rubric stays last",
-        );
-        assert_eq!(
-            spent,
-            [TokenUsage::new(100, 7); 2],
-            "both requests are billed"
-        );
-    }
-
-    /// Transcript of `rounds` exchanges whose user messages each hold about 10,000 rough tokens.
-    fn heavy_rounds(rounds: usize) -> Vec<Message> {
-        (0..rounds)
-            .flat_map(|i| {
-                [
-                    Message::user("a".repeat(40_000)),
-                    Message::assistant(format!("reply {i}")),
-                ]
-            })
-            .collect()
-    }
-
-    fn prompt_too_long(message: &str) -> Mock {
-        Mock::given(method("POST"))
-            .and(path("/v1/messages"))
-            .respond_with(ResponseTemplate::new(400).set_body_json(json!({
-                "type": "error",
-                "error": {"type": "invalid_request_error", "message": message},
-            })))
-    }
-
-    /// Messages a request sent after its user-context message, without cache breakpoints.
-    fn sent_messages(request: &Request) -> Vec<serde_json::Value> {
-        let mut body: serde_json::Value = serde_json::from_slice(&request.body).unwrap();
-        strip_cache_control(&mut body);
-        body["messages"].as_array().unwrap()[1..].to_vec()
-    }
-
     fn to_json(messages: &[Message]) -> Vec<serde_json::Value> {
         messages
             .iter()
@@ -1341,225 +551,930 @@ mod tests {
             .collect()
     }
 
-    #[tokio::test]
-    async fn compact_session_retries_a_prompt_too_long_rejection_with_room_for_the_summary() {
-        let server = MockServer::start().await;
-        prompt_too_long("prompt is too long: 205000 tokens > 200000 maximum")
-            .up_to_n_times(1)
-            .mount(&server)
-            .await;
-        mount_summary(&server, streamed_summary_body("trimmed summary")).await;
-        let client = test_client(server.uri(), api_key(), "claude-haiku-5-5");
-        let transcript = heavy_rounds(4);
+    mod auto_compact_failures {
+        use super::*;
 
-        let (summary, events) = summarize_streaming(&client, &transcript).await;
+        mod reset {
+            use super::*;
 
-        assert_eq!(summary.unwrap(), "trimmed summary");
-        assert_eq!(
-            events,
-            [token("trimmed summary")],
-            "a rejection streams nothing to discard",
-        );
-        let requests = server.received_requests().await.unwrap();
-        assert_eq!(requests.len(), 2);
-        // Freeing the 5,000-token overflow plus the summary reserve takes the first five messages.
-        let expected: Vec<Message> = iter::once(Message::user(RETRY_TRUNCATION_MARKER))
-            .chain(transcript[5..].iter().cloned())
-            .chain([Message::user(build_user_message(None))])
-            .collect();
-        assert_eq!(sent_messages(&requests[1]), to_json(&expected));
+            #[test]
+            fn reports_a_resume_only_from_a_pause() {
+                let sink = CapturingSink::default();
+                let mut counting = AutoCompactFailures::new(MAX_AUTO_COMPACT_FAILURES - 1);
+                let mut paused = AutoCompactFailures::new(MAX_AUTO_COMPACT_FAILURES);
+
+                counting.reset(&sink);
+                let after_counting = sink.events();
+                paused.reset(&sink);
+
+                assert_eq!(counting, AutoCompactFailures::default());
+                assert_eq!(paused, AutoCompactFailures::default());
+                assert_eq!(after_counting, []);
+                assert_eq!(sink.events(), [Event::AutoCompactionResumed]);
+            }
+        }
     }
 
-    #[tokio::test]
-    async fn compact_session_retry_closes_a_tool_turn_the_kept_rounds_leave_open() {
-        let tool_call = ContentBlock::ToolUse {
-            id: "t1".to_owned(),
-            name: "read".to_owned(),
-            input: json!({"path": "/tmp/a"}),
-        };
-        let tool_result = Message {
-            role: Role::User,
-            content: vec![ContentBlock::ToolResult {
-                tool_use_id: "t1".to_owned(),
-                content: "file body".to_owned(),
-                is_error: false,
-            }],
-        };
-        for interrupted in [false, true] {
-            let server = MockServer::start().await;
-            mount_overflow_then(&server, streamed_summary_body("trimmed summary")).await;
-            let client = test_client(server.uri(), api_key(), "claude-haiku-5-5");
-            let mut transcript = vec![
-                Message::user("a".repeat(100_000)),
-                Message::assistant("reply 0"),
-                Message::user("check the file"),
-                Message {
-                    role: Role::Assistant,
-                    content: vec![
-                        ContentBlock::Thinking {
-                            thinking: "read it first".to_owned(),
-                            replay: Replay::with_model(MODEL, "sig"),
-                        },
-                        ContentBlock::Text {
-                            text: "reading".to_owned(),
-                        },
-                        tool_call.clone(),
-                    ],
-                },
-                tool_result.clone(),
-            ];
-            transcript.extend(interrupted.then(Message::interruption));
+    mod auto_compact_if_needed {
+        use super::*;
 
-            summarize(&client, &transcript).await.unwrap();
+        struct CountingFailingClient {
+            calls: AtomicUsize,
+        }
 
-            let requests = server.received_requests().await.unwrap();
-            let mut expected = vec![
-                Message::user(RETRY_TRUNCATION_MARKER),
-                Message::assistant("reply 0"),
-                Message::user("check the file"),
-                Message {
-                    role: Role::Assistant,
-                    content: vec![
-                        ContentBlock::Text {
-                            text: "reading".to_owned(),
-                        },
-                        tool_call.clone(),
-                    ],
-                },
-                tool_result.clone(),
-            ];
-            expected.extend(interrupted.then(Message::interruption));
-            expected.extend([
-                Message::assistant(RETRY_TURN_CLOSE_MARKER),
-                Message::user(build_user_message(None)),
-            ]);
+        impl CountingFailingClient {
+            fn new() -> Self {
+                Self {
+                    calls: AtomicUsize::new(0),
+                }
+            }
+
+            fn calls(&self) -> usize {
+                self.calls.load(Ordering::SeqCst)
+            }
+        }
+
+        impl Wire for CountingFailingClient {
+            fn stream_message(
+                &self,
+                _messages: &[Message],
+                _system_sections: &[&str],
+                _user_context: Option<&str>,
+                _tools: &[ToolDefinition],
+            ) -> Result<mpsc::Receiver<Result<ResponseEvent>>> {
+                self.calls.fetch_add(1, Ordering::SeqCst);
+                Err(anyhow!("the summarizer is unavailable. Retry in a minute."))
+            }
+        }
+
+        struct DelayedSummaryClient {
+            started: Arc<Notify>,
+            release: Arc<Notify>,
+        }
+
+        impl Wire for DelayedSummaryClient {
+            fn stream_message(
+                &self,
+                _messages: &[Message],
+                _system_sections: &[&str],
+                _user_context: Option<&str>,
+                _tools: &[ToolDefinition],
+            ) -> Result<mpsc::Receiver<Result<ResponseEvent>>> {
+                let (tx, rx) = mpsc::channel(8);
+                let started = self.started.clone();
+                let release = self.release.clone();
+                tokio::spawn(async move {
+                    started.notify_one();
+                    release.notified().await;
+                    for event in text_turn("auto summary") {
+                        tx.send(Ok(event)).await.expect("test receiver alive");
+                    }
+                });
+                Ok(rx)
+            }
+        }
+
+        #[tokio::test]
+        async fn skips_without_usage_or_below_the_threshold() {
+            let dir = tempfile::tempdir().unwrap();
+            let session = test_session(dir.path());
+            let client = FakeClient::new(Vec::new());
+            let sink = CapturingSink::default();
+            let mut messages = tool_heavy_transcript();
+            let mut inbox = Inbox::default();
+            let mut failures = AutoCompactFailures::default();
+
+            let missing_usage = auto_compact_if_needed(
+                &client,
+                &session,
+                &mut messages,
+                &sink,
+                &mut inert_ops(),
+                &mut inbox,
+                &mut auto_compact(10, None, &mut failures),
+            )
+            .await
+            .unwrap();
+            assert!(!missing_usage);
+
+            let below_threshold = auto_compact_if_needed(
+                &client,
+                &session,
+                &mut messages,
+                &sink,
+                &mut inert_ops(),
+                &mut inbox,
+                &mut auto_compact(100, Some(TokenUsage::new(20, 1)), &mut failures),
+            )
+            .await
+            .unwrap();
+            assert!(!below_threshold);
+            assert_eq!(messages, tool_heavy_transcript());
+            assert_eq!(failures, AutoCompactFailures::default());
+        }
+
+        #[tokio::test]
+        async fn skips_a_transcript_too_short_to_shrink() {
+            let dir = tempfile::tempdir().unwrap();
+            let session = test_session(dir.path());
+            let client = FakeClient::new(Vec::new());
+            let sink = CapturingSink::default();
+            let short = vec![Message::user("hi"), Message::assistant("hello")];
+            let mut messages = short.clone();
+            let mut failures = AutoCompactFailures::default();
+
+            let compacted = auto_compact_if_needed(
+                &client,
+                &session,
+                &mut messages,
+                &sink,
+                &mut inert_ops(),
+                &mut Inbox::default(),
+                &mut auto_compact(10, Some(TokenUsage::new(20, 1)), &mut failures),
+            )
+            .await;
+
+            assert!(
+                matches!(compacted, Ok(false)),
+                "a prefix-heavy context goes out without compaction: {compacted:?}"
+            );
+            assert_eq!(messages, short);
+            assert_eq!(failures, AutoCompactFailures::default());
+            assert_eq!(sink.events(), []);
+            assert_eq!(client.requests(), [] as [Vec<Message>; 0]);
+        }
+
+        #[tokio::test]
+        async fn fails_the_prompt_when_the_summary_fails() {
+            let dir = tempfile::tempdir().unwrap();
+            let session = test_session(dir.path());
+            let sink = CapturingSink::default();
+            let mut messages = tool_heavy_transcript();
+            let mut inbox = Inbox::default();
+            let mut failures = AutoCompactFailures::default();
+
+            let compacted = auto_compact_if_needed(
+                &CountingFailingClient::new(),
+                &session,
+                &mut messages,
+                &sink,
+                &mut inert_ops(),
+                &mut inbox,
+                &mut auto_compact(10, Some(TokenUsage::new(20, 1)), &mut failures),
+            )
+            .await;
+
+            let Err(TurnAbort::Failed(error)) = compacted else {
+                panic!("a failed summary fails the prompt: {compacted:?}");
+            };
             assert_eq!(
-                sent_messages(&requests[1]),
-                to_json(&expected),
-                "interrupted: {interrupted}",
+                format!("{error:#}"),
+                "Auto-compaction failed: the summarizer is unavailable. \
+                 Retry in a minute. \
+                 The prompt was not sent, so send it again to retry.",
+            );
+            assert_eq!(failures, AutoCompactFailures::new(1));
+            assert_eq!(messages, tool_heavy_transcript());
+            assert_eq!(sink.events(), [Event::AutoCompactionStarted]);
+        }
+
+        #[tokio::test]
+        async fn fails_the_prompt_when_the_boundary_is_not_saved() {
+            let session = dead_test_session();
+            let client = FakeClient::new(vec![text_turn("auto summary")]);
+            let sink = CapturingSink::default();
+            let mut messages = tool_heavy_transcript();
+            let mut inbox = Inbox::default();
+            let mut failures = AutoCompactFailures::default();
+
+            let compacted = auto_compact_if_needed(
+                &client,
+                &session,
+                &mut messages,
+                &sink,
+                &mut inert_ops(),
+                &mut inbox,
+                &mut auto_compact(10, Some(TokenUsage::new(20, 1)), &mut failures),
+            )
+            .await;
+
+            let Err(TurnAbort::Failed(error)) = compacted else {
+                panic!("an unsaved boundary fails the prompt: {compacted:?}");
+            };
+            assert_eq!(
+                format!("{error:#}"),
+                "Auto-compaction was not saved. \
+                 The prompt was not sent, so send it again to retry.",
+            );
+            assert_eq!(failures, AutoCompactFailures::new(1));
+            assert_eq!(messages, tool_heavy_transcript());
+            let events = sink.events();
+            assert!(
+                matches!(
+                    events.as_slice(),
+                    [
+                        Event::AutoCompactionStarted,
+                        Event::SummaryToken(summary),
+                        Event::SummaryDiscarded,
+                        Event::Error(message),
+                    ] if summary == "auto summary" && message.starts_with("Session write failed")
+                ),
+                "the unsaved summary is discarded before the write failure: {events:?}",
+            );
+        }
+
+        #[tokio::test]
+        async fn third_failure_turns_auto_compaction_off() {
+            let dir = tempfile::tempdir().unwrap();
+            let session = test_session(dir.path());
+            let client = CountingFailingClient::new();
+            let sink = CapturingSink::default();
+            let mut messages = tool_heavy_transcript();
+            let mut inbox = Inbox::default();
+            let mut failures = AutoCompactFailures::new(MAX_AUTO_COMPACT_FAILURES - 1);
+            let usage = Some(TokenUsage::new(50_000, 1));
+            let mut attempt = async || {
+                auto_compact_if_needed(
+                    &client,
+                    &session,
+                    &mut messages,
+                    &sink,
+                    &mut inert_ops(),
+                    &mut inbox,
+                    &mut auto_compact(50_000, usage, &mut failures),
+                )
+                .await
+            };
+
+            let third = attempt().await;
+            let fourth = attempt().await;
+
+            let Err(TurnAbort::Failed(error)) = third else {
+                panic!("the third failure still fails its prompt: {third:?}");
+            };
+            assert_eq!(
+                format!("{error:#}"),
+                "Auto-compaction failed: the summarizer is unavailable. \
+                 Retry in a minute. \
+                 The prompt was not sent, and auto-compaction is paused after 3 failures in a row. \
+                 Send the prompt again to run it without compaction, \
+                 or run `/compact` to retry compaction first.",
+            );
+            assert!(
+                matches!(fourth, Ok(false)),
+                "the next prompt goes out without compaction: {fourth:?}"
+            );
+            assert_eq!(
+                failures,
+                AutoCompactFailures::new(MAX_AUTO_COMPACT_FAILURES)
+            );
+            assert_eq!(client.calls(), 1);
+            assert_eq!(
+                sink.events(),
+                [
+                    Event::AutoCompactionStarted,
+                    Event::AutoCompactionPaused { failures: 3 },
+                ],
+            );
+        }
+
+        #[tokio::test]
+        async fn queues_submit_and_carries_the_task_list_over() {
+            let dir = tempfile::tempdir().unwrap();
+            let session = test_session(dir.path());
+            let started = Arc::new(Notify::new());
+            let release = Arc::new(Notify::new());
+            let client = DelayedSummaryClient {
+                started: started.clone(),
+                release: release.clone(),
+            };
+            let sink = CapturingSink::default();
+            let mut messages = tool_heavy_transcript();
+            let mut inbox = Inbox::default();
+            let mut failures = AutoCompactFailures::default();
+            let (tx, mut rx) = mpsc::channel::<Op>(1);
+            let mut auto = AutoCompact {
+                tasks: &plan(),
+                ..auto_compact(10, Some(TokenUsage::new(20, 1)), &mut failures)
+            };
+
+            let compact = auto_compact_if_needed(
+                &client,
+                &session,
+                &mut messages,
+                &sink,
+                &mut rx,
+                &mut inbox,
+                &mut auto,
+            );
+            let queue_prompt = async {
+                started.notified().await;
+                tx.send(Op::Queue("queued after summary".to_owned()))
+                    .await
+                    .unwrap();
+                tokio::task::yield_now().await;
+                release.notify_one();
+            };
+            let (compacted, ()) = tokio::join!(compact, queue_prompt);
+            let compacted = compacted.unwrap();
+
+            assert!(compacted);
+            assert_eq!(inbox.prompts, vec!["queued after summary"]);
+            assert_eq!(*auto.failures, AutoCompactFailures::default());
+            assert_eq!(
+                sink.events()
+                    .iter()
+                    .filter(|event| matches!(event, Event::PromptDrained(_)))
+                    .count(),
+                0
+            );
+            assert!(sink.events().iter().any(|event| matches!(
+                event,
+                Event::SessionCompacted {
+                    automatic: true,
+                    ..
+                }
+            )));
+            assert_eq!(
+                messages,
+                [synthesize_post_compact_message(
+                    "auto summary",
+                    &plan(),
+                    &[]
+                )]
+            );
+        }
+
+        #[tokio::test]
+        async fn retries_an_overflowing_summary_without_the_oldest_rounds() {
+            let dir = tempfile::tempdir().unwrap();
+            let session = test_session(dir.path());
+            let client = FakeClient::new(vec![
+                with_stop(
+                    text_turn("partial"),
+                    StopReason::ModelContextWindowExceeded,
+                    None,
+                ),
+                text_turn("auto summary"),
+            ]);
+            let sink = CapturingSink::default();
+            let mut messages = tool_heavy_transcript();
+            let mut failures = AutoCompactFailures::default();
+
+            let compacted = auto_compact_if_needed(
+                &client,
+                &session,
+                &mut messages,
+                &sink,
+                &mut inert_ops(),
+                &mut Inbox::default(),
+                &mut auto_compact(10, Some(TokenUsage::new(20, 1)), &mut failures),
+            )
+            .await
+            .unwrap();
+
+            assert!(compacted);
+            let rubric = Message::user(SUMMARIZATION_USER_RUBRIC);
+            assert_eq!(
+                client.requests(),
+                [
+                    [tool_heavy_transcript(), vec![rubric.clone()]].concat(),
+                    vec![
+                        Message::user(RETRY_TRUNCATION_MARKER),
+                        Message::assistant("alpha-end, beta-end"),
+                        rubric,
+                    ],
+                ],
+                "the retry keeps only the newest round",
+            );
+            assert!(
+                matches!(&messages[0].content[0], ContentBlock::Text { text } if text.contains("auto summary"))
+            );
+            let events = sink.events();
+            assert!(
+                matches!(
+                    events.as_slice(),
+                    [
+                        Event::AutoCompactionStarted,
+                        Event::SummaryToken(overflowed),
+                        Event::SummaryDiscarded,
+                        Event::SummaryToken(retried),
+                        Event::SessionCompacted { automatic: true, .. },
+                    ] if overflowed == "partial" && retried == "auto summary"
+                ),
+                "the overflowed summary is discarded before the retry streams: {events:?}",
             );
         }
     }
 
-    #[tokio::test]
-    async fn compact_session_fails_when_the_newest_round_alone_still_overflows() {
-        let server = MockServer::start().await;
-        mount_overflow_then(
-            &server,
-            summary_stream("", "partial", "model_context_window_exceeded", true),
-        )
-        .await;
-        let client = test_client(server.uri(), api_key(), "claude-haiku-5-5");
-        let sink = CapturingSink::default();
-        let mut spent = Vec::new();
+    mod record_auto_compact_failure {
+        use super::*;
 
-        let err = compact_session(
-            &client,
-            &parent_prompt(),
-            &[],
-            &overflowing_transcript(),
-            None,
-            &sink,
-            &mut spent,
-        )
-        .await
-        .expect_err("an overflow with no round left to drop fails the compaction");
+        #[test]
+        fn keeps_the_cause_verbatim_before_the_next_step() {
+            for (cause, expected) in [
+                (
+                    "upstream timed out...",
+                    "Auto-compaction failed: upstream timed out... \
+                     The prompt was not sent, so send it again to retry.",
+                ),
+                (
+                    "upstream timed out",
+                    "Auto-compaction failed: upstream timed out. \
+                     The prompt was not sent, so send it again to retry.",
+                ),
+            ] {
+                let mut failures = AutoCompactFailures::default();
 
-        assert!(
-            format!("{err:#}").contains("no room in the context window"),
-            "{err:#}"
-        );
-        let requests = server.received_requests().await.unwrap();
-        assert_eq!(requests.len(), 3);
-        assert_eq!(
-            sent_messages(&requests[2]),
-            to_json(&[
-                Message::user(RETRY_TRUNCATION_MARKER),
-                Message::assistant("fixed"),
-                Message::user(build_user_message(None)),
-            ]),
-        );
-        assert_eq!(
-            spent,
-            [TokenUsage::new(100, 7); 3],
-            "every request is billed"
-        );
-        assert_eq!(
-            sink.events(),
-            vec![vec![token("partial"), Event::SummaryDiscarded]; 3].concat(),
-            "each retry and the failure discard what streamed",
-        );
-    }
+                let abort = record_auto_compact_failure(
+                    &mut auto_compact(10, None, &mut failures),
+                    &CapturingSink::default(),
+                    Some(&anyhow!(cause)),
+                );
 
-    #[tokio::test]
-    async fn compact_session_gives_up_after_three_overflow_retries() {
-        let server = MockServer::start().await;
-        prompt_too_long("prompt is too long: 200001 tokens > 200000 maximum")
-            .mount(&server)
-            .await;
-        let client = test_client(server.uri(), api_key(), "claude-haiku-5-5");
-
-        let err = summarize(&client, &heavy_rounds(8))
-            .await
-            .expect_err("every retry overflows");
-
-        assert!(format!("{err:#}").contains("prompt is too long"), "{err:#}");
-        assert_eq!(server.received_requests().await.unwrap().len(), 4);
-    }
-
-    #[tokio::test]
-    async fn compact_session_refuses_an_empty_or_short_session_without_a_request() {
-        let server = MockServer::start().await;
-        let client = test_client(server.uri(), api_key(), "claude-haiku-5-5");
-        let short = vec![
-            Message::user("fix the bug"),
-            Message::assistant("looking now"),
-            Message::user("any progress?"),
-            Message::assistant("found it"),
-        ];
-
-        for (transcript, expected) in [
-            (Vec::new(), "the session has no messages yet"),
-            (
-                short,
-                "the conversation has about 65 tokens, below the 1000-token minimum",
-            ),
-        ] {
-            let err = summarize(&client, &transcript)
-                .await
-                .expect_err("the session is refused");
-
-            assert_eq!(format!("{err:#}"), expected);
+                assert_eq!(abort.to_string(), expected);
+            }
         }
-        assert_eq!(server.received_requests().await.unwrap().len(), 0);
     }
 
-    #[tokio::test]
-    async fn compact_session_empty_summary_errors() {
-        let server = MockServer::start().await;
-        mount_summary(&server, streamed_summary_body("   \n  ")).await;
+    mod compact_session {
+        use super::*;
 
-        let client = test_client(server.uri(), api_key(), "claude-haiku-5-5");
-        let (summary, events) = summarize_streaming(&client, &tool_heavy_transcript()).await;
-        let err = summary.expect_err("empty summary must error");
-        assert_eq!(format!("{err:#}"), "the model returned an empty summary");
-        assert_eq!(events, [token("   \n  "), Event::SummaryDiscarded]);
-    }
+        fn streamed_summary_body(text: &str) -> String {
+            summary_stream("", text, "end_turn", true)
+        }
 
-    #[tokio::test]
-    async fn compact_session_rejects_an_unfinished_summary_and_still_records_usage() {
-        let cases = [
-            ("max_tokens", true, "`max_tokens` output limit"),
-            ("refusal", true, "declined to summarize"),
-            ("tool_use", true, "called a tool"),
-            ("pause_turn", true, "stopped early (PauseTurn)"),
-            ("end_turn", false, "ended before message_stop"),
-        ];
-        for (stop_reason, finished, expected) in cases {
+        /// SSE body for one summary reply. `finished: false` cuts the stream before `message_stop`.
+        fn summary_stream(
+            start_text: &str,
+            delta_text: &str,
+            stop_reason: &str,
+            finished: bool,
+        ) -> String {
+            let mut frames = vec![
+                json!({"type": "message_start", "message": {"id": "m", "model": "claude-haiku-5-5", "usage": {"input_tokens": 100, "output_tokens": 1}}}),
+                json!({"type": "content_block_start", "index": 0, "content_block": {"type": "text", "text": start_text}}),
+                json!({"type": "content_block_delta", "index": 0, "delta": {"type": "text_delta", "text": delta_text}}),
+                json!({"type": "content_block_stop", "index": 0}),
+                json!({"type": "message_delta", "delta": {"stop_reason": stop_reason}, "usage": {"output_tokens": 7}}),
+            ];
+            if finished {
+                frames.push(json!({"type": "message_stop"}));
+            }
+            sse_body(&frames)
+        }
+
+        async fn mount_summary(server: &MockServer, body: String) {
+            Mock::given(method("POST"))
+                .and(path("/v1/messages"))
+                .respond_with(
+                    ResponseTemplate::new(200)
+                        .set_body_string(body)
+                        .insert_header("content-type", "text/event-stream"),
+                )
+                .mount(server)
+                .await;
+        }
+
+        fn parent_prompt() -> PromptParts {
+            let mut prompt = PromptParts::default();
+            prompt.system_sections = vec!["You are the parent conversation.".to_owned()];
+            "Project instructions.".clone_into(&mut prompt.user_context);
+            prompt
+        }
+
+        async fn summarize(client: &Client, transcript: &[Message]) -> Result<String> {
+            summarize_streaming(client, transcript).await.0
+        }
+
+        /// Summarizes `transcript` like [`summarize`], also returning the events it streamed.
+        async fn summarize_streaming(
+            client: &Client,
+            transcript: &[Message],
+        ) -> (Result<String>, Vec<Event>) {
+            let sink = CapturingSink::default();
+            let summary = compact_session(
+                client,
+                &parent_prompt(),
+                &[],
+                transcript,
+                None,
+                &sink,
+                &mut Vec::new(),
+            )
+            .await;
+            (summary, sink.events())
+        }
+
+        fn token(text: &str) -> Event {
+            Event::SummaryToken(text.to_owned())
+        }
+
+        fn strip_cache_control(value: &mut serde_json::Value) {
+            match value {
+                serde_json::Value::Object(map) => {
+                    map.remove("cache_control");
+                    map.values_mut().for_each(strip_cache_control);
+                }
+                serde_json::Value::Array(items) => items.iter_mut().for_each(strip_cache_control),
+                _ => {}
+            }
+        }
+
+        /// Transcript with a large tool result in its oldest round and thinking in its kept round.
+        fn overflowing_transcript() -> Vec<Message> {
+            vec![
+                Message::user("fix the bug"),
+                Message {
+                    role: Role::Assistant,
+                    content: vec![
+                        ContentBlock::Text {
+                            text: "reading".to_owned(),
+                        },
+                        ContentBlock::ToolUse {
+                            id: "t1".to_owned(),
+                            name: "read".to_owned(),
+                            input: json!({"path": "/tmp/a"}),
+                        },
+                    ],
+                },
+                Message {
+                    role: Role::User,
+                    content: vec![ContentBlock::ToolResult {
+                        tool_use_id: "t1".to_owned(),
+                        content: "a".repeat(100_000),
+                        is_error: false,
+                    }],
+                },
+                Message {
+                    role: Role::Assistant,
+                    content: vec![
+                        ContentBlock::Thinking {
+                            thinking: "the bug is in auth".to_owned(),
+                            replay: Replay::with_model(MODEL, "sig"),
+                        },
+                        ContentBlock::Text {
+                            text: "found it".to_owned(),
+                        },
+                    ],
+                },
+                Message::user("any progress?"),
+                Message::assistant("fixed"),
+            ]
+        }
+
+        async fn mount_overflow_then(server: &MockServer, retry_body: String) {
+            Mock::given(method("POST"))
+                .and(path("/v1/messages"))
+                .respond_with(
+                    ResponseTemplate::new(200)
+                        .set_body_string(summary_stream(
+                            "",
+                            "partial",
+                            "model_context_window_exceeded",
+                            true,
+                        ))
+                        .insert_header("content-type", "text/event-stream"),
+                )
+                .up_to_n_times(1)
+                .mount(server)
+                .await;
+            mount_summary(server, retry_body).await;
+        }
+
+        /// Transcript of `rounds` exchanges with user messages of about 10,000 rough tokens each.
+        fn heavy_rounds(rounds: usize) -> Vec<Message> {
+            (0..rounds)
+                .flat_map(|i| {
+                    [
+                        Message::user("a".repeat(40_000)),
+                        Message::assistant(format!("reply {i}")),
+                    ]
+                })
+                .collect()
+        }
+
+        fn prompt_too_long(message: &str) -> Mock {
+            Mock::given(method("POST"))
+                .and(path("/v1/messages"))
+                .respond_with(ResponseTemplate::new(400).set_body_json(json!({
+                    "type": "error",
+                    "error": {"type": "invalid_request_error", "message": message},
+                })))
+        }
+
+        /// Messages a request sent after its user-context message, without cache breakpoints.
+        fn sent_messages(request: &Request) -> Vec<serde_json::Value> {
+            let mut body: serde_json::Value = serde_json::from_slice(&request.body).unwrap();
+            strip_cache_control(&mut body);
+            body["messages"].as_array().unwrap()[1..].to_vec()
+        }
+
+        /// Replies with a stream the test feeds, which stays open while the test holds its sender.
+        struct HeldStreamClient(Mutex<Option<mpsc::Receiver<Result<ResponseEvent>>>>);
+
+        impl Wire for HeldStreamClient {
+            fn stream_message(
+                &self,
+                _messages: &[Message],
+                _system_sections: &[&str],
+                _user_context: Option<&str>,
+                _tools: &[ToolDefinition],
+            ) -> Result<mpsc::Receiver<Result<ResponseEvent>>> {
+                Ok(self.0.lock().unwrap().take().expect("one request"))
+            }
+        }
+
+        #[tokio::test]
+        async fn returns_trimmed_summary_on_happy_path() {
+            let server = MockServer::start().await;
+            mount_summary(&server, streamed_summary_body("  fixed login bug  \n")).await;
+
+            let client = test_client(server.uri(), api_key(), "claude-haiku-5-5");
+            let summary = summarize(&client, &tool_heavy_transcript()).await.unwrap();
+            assert_eq!(summary, "fixed login bug");
+        }
+
+        #[tokio::test]
+        async fn collects_initial_text_from_content_block_start() {
             let server = MockServer::start().await;
             mount_summary(
                 &server,
-                summary_stream("", "partial", stop_reason, finished),
+                summary_stream("  fixed", " login bug  \n", "end_turn", true),
+            )
+            .await;
+
+            let client = test_client(server.uri(), api_key(), "claude-haiku-5-5");
+            let (summary, events) = summarize_streaming(&client, &tool_heavy_transcript()).await;
+            assert_eq!(summary.unwrap(), "fixed login bug");
+            assert_eq!(
+                events,
+                [token("  fixed"), token(" login bug  \n")],
+                "the kept summary streams untrimmed and is not discarded",
+            );
+        }
+
+        #[tokio::test]
+        async fn summary_leaves_out_the_reply_thinking() {
+            let server = MockServer::start().await;
+            mount_summary(
+                &server,
+                sse_body(&[
+                    json!({"type": "message_start", "message": {"id": "m", "model": "claude-haiku-5-5"}}),
+                    json!({"type": "content_block_start", "index": 0, "content_block": {"type": "thinking", "thinking": "", "signature": ""}}),
+                    json!({"type": "content_block_delta", "index": 0, "delta": {"type": "thinking_delta", "thinking": "draft notes"}}),
+                    json!({"type": "content_block_delta", "index": 0, "delta": {"type": "signature_delta", "signature": "sig"}}),
+                    json!({"type": "content_block_stop", "index": 0}),
+                    json!({"type": "content_block_start", "index": 1, "content_block": {"type": "text", "text": ""}}),
+                    json!({"type": "content_block_delta", "index": 1, "delta": {"type": "text_delta", "text": "fixed login bug"}}),
+                    json!({"type": "content_block_stop", "index": 1}),
+                    json!({"type": "message_delta", "delta": {"stop_reason": "end_turn"}}),
+                    json!({"type": "message_stop"}),
+                ]),
+            )
+            .await;
+
+            let client = test_client(server.uri(), api_key(), "claude-haiku-5-5");
+            let (summary, events) = summarize_streaming(&client, &tool_heavy_transcript()).await;
+            assert_eq!(summary.unwrap(), "fixed login bug");
+            assert_eq!(events, [token("fixed login bug")]);
+        }
+
+        #[tokio::test]
+        async fn request_forks_the_conversation_prefix() {
+            let server = MockServer::start().await;
+            let bodies: Arc<Mutex<Vec<serde_json::Value>>> = Arc::default();
+            let recorded = Arc::clone(&bodies);
+            Mock::given(method("POST"))
+                .and(path("/v1/messages"))
+                .respond_with(move |req: &Request| {
+                    recorded
+                        .lock()
+                        .unwrap()
+                        .push(serde_json::from_slice(&req.body).unwrap());
+                    ResponseTemplate::new(200)
+                        .set_body_string(streamed_summary_body("done"))
+                        .insert_header("content-type", "text/event-stream")
+                })
+                .mount(&server)
+                .await;
+            let client = test_client(server.uri(), api_key(), "claude-haiku-5-5");
+            let prompt = parent_prompt();
+            let tools = [ToolDefinition {
+                name: "read".to_owned(),
+                description: "Read a file.".to_owned(),
+                input_schema: json!({"type": "object"}),
+            }];
+            let transcript = tool_heavy_transcript();
+
+            let sections: Vec<&str> = prompt.system_sections.iter().map(String::as_str).collect();
+            let mut rx = client
+                .stream_message(&transcript, &sections, Some(&prompt.user_context), &tools)
+                .unwrap();
+            while rx.recv().await.is_some() {}
+            compact_session(
+                &client,
+                &prompt,
+                &tools,
+                &transcript,
+                Some("focus on auth"),
+                &CapturingSink::default(),
+                &mut Vec::new(),
+            )
+            .await
+            .unwrap();
+
+            let mut bodies = bodies.lock().unwrap().clone();
+            bodies.iter_mut().for_each(strip_cache_control);
+            let [parent, fork] = bodies.as_slice() else {
+                panic!("expected two requests, got {}", bodies.len());
+            };
+            // Skips the billing block, whose `cch` hashes the body and so differs per request.
+            let system =
+                |body: &serde_json::Value| body["system"].as_array().unwrap()[1..].to_vec();
+            assert_eq!(system(fork), system(parent));
+            assert_eq!(fork["tools"], parent["tools"]);
+            let parent_messages = parent["messages"].as_array().unwrap();
+            let fork_messages = fork["messages"].as_array().unwrap();
+            assert_eq!(fork_messages[..parent_messages.len()], parent_messages[..]);
+            assert_eq!(fork_messages.len(), parent_messages.len() + 1);
+            let rubric = fork_messages.last().unwrap();
+            assert_eq!(rubric["role"], "user");
+            let rubric = rubric.to_string();
+            assert!(rubric.contains("Do not call any tools"), "{rubric}");
+            assert!(rubric.contains("focus on auth"), "{rubric}");
+        }
+
+        #[tokio::test]
+        async fn retries_an_overflow_without_the_oldest_rounds_or_thinking() {
+            let server = MockServer::start().await;
+            mount_overflow_then(&server, streamed_summary_body("trimmed summary")).await;
+            let client = test_client(server.uri(), api_key(), "claude-haiku-5-5");
+            let sink = CapturingSink::default();
+            let mut spent = Vec::new();
+
+            let summary = compact_session(
+                &client,
+                &parent_prompt(),
+                &[],
+                &overflowing_transcript(),
+                None,
+                &sink,
+                &mut spent,
+            )
+            .await
+            .unwrap();
+
+            assert_eq!(summary, "trimmed summary");
+            assert_eq!(
+                sink.events(),
+                [
+                    token("partial"),
+                    Event::SummaryDiscarded,
+                    token("trimmed summary")
+                ],
+                "the retry starts the summary over",
+            );
+            let requests = server.received_requests().await.unwrap();
+            assert_eq!(requests.len(), 2);
+            let mut retry: serde_json::Value = serde_json::from_slice(&requests[1].body).unwrap();
+            assert!(
+                !retry["messages"].to_string().contains("cache_control"),
+                "no later request extends the retry, so its transcript carries no breakpoint",
+            );
+            strip_cache_control(&mut retry);
+            let messages = retry["messages"].as_array().unwrap();
+            assert_eq!(
+                messages[..messages.len() - 1],
+                [
+                    json!({"role": "user", "content": [{"type": "text", "text": "Project instructions."}]}),
+                    json!({"role": "user", "content": [{"type": "text", "text": RETRY_TRUNCATION_MARKER}]}),
+                    json!({"role": "assistant", "content": [{"type": "text", "text": "found it"}]}),
+                    json!({"role": "user", "content": [{"type": "text", "text": "any progress?"}]}),
+                    json!({"role": "assistant", "content": [{"type": "text", "text": "fixed"}]}),
+                ],
+            );
+            assert!(
+                messages
+                    .last()
+                    .unwrap()
+                    .to_string()
+                    .contains("Summarize the conversation"),
+                "the rubric stays last",
+            );
+            assert_eq!(
+                spent,
+                [TokenUsage::new(100, 7); 2],
+                "both requests are billed"
+            );
+        }
+
+        #[tokio::test]
+        async fn retries_a_prompt_too_long_rejection_with_room_for_the_summary() {
+            let server = MockServer::start().await;
+            prompt_too_long("prompt is too long: 205000 tokens > 200000 maximum")
+                .up_to_n_times(1)
+                .mount(&server)
+                .await;
+            mount_summary(&server, streamed_summary_body("trimmed summary")).await;
+            let client = test_client(server.uri(), api_key(), "claude-haiku-5-5");
+            let transcript = heavy_rounds(4);
+
+            let (summary, events) = summarize_streaming(&client, &transcript).await;
+
+            assert_eq!(summary.unwrap(), "trimmed summary");
+            assert_eq!(
+                events,
+                [token("trimmed summary")],
+                "a rejection streams nothing to discard",
+            );
+            let requests = server.received_requests().await.unwrap();
+            assert_eq!(requests.len(), 2);
+            // Freeing the 5,000-token overflow and summary reserve takes the first five messages.
+            let expected: Vec<Message> = iter::once(Message::user(RETRY_TRUNCATION_MARKER))
+                .chain(transcript[5..].iter().cloned())
+                .chain([Message::user(build_user_message(None))])
+                .collect();
+            assert_eq!(sent_messages(&requests[1]), to_json(&expected));
+        }
+
+        #[tokio::test]
+        async fn retry_closes_a_tool_turn_the_kept_rounds_leave_open() {
+            let tool_call = ContentBlock::ToolUse {
+                id: "t1".to_owned(),
+                name: "read".to_owned(),
+                input: json!({"path": "/tmp/a"}),
+            };
+            let tool_result = Message {
+                role: Role::User,
+                content: vec![ContentBlock::ToolResult {
+                    tool_use_id: "t1".to_owned(),
+                    content: "file body".to_owned(),
+                    is_error: false,
+                }],
+            };
+            for interrupted in [false, true] {
+                let server = MockServer::start().await;
+                mount_overflow_then(&server, streamed_summary_body("trimmed summary")).await;
+                let client = test_client(server.uri(), api_key(), "claude-haiku-5-5");
+                let mut transcript = vec![
+                    Message::user("a".repeat(100_000)),
+                    Message::assistant("reply 0"),
+                    Message::user("check the file"),
+                    Message {
+                        role: Role::Assistant,
+                        content: vec![
+                            ContentBlock::Thinking {
+                                thinking: "read it first".to_owned(),
+                                replay: Replay::with_model(MODEL, "sig"),
+                            },
+                            ContentBlock::Text {
+                                text: "reading".to_owned(),
+                            },
+                            tool_call.clone(),
+                        ],
+                    },
+                    tool_result.clone(),
+                ];
+                transcript.extend(interrupted.then(Message::interruption));
+
+                summarize(&client, &transcript).await.unwrap();
+
+                let requests = server.received_requests().await.unwrap();
+                let mut expected = vec![
+                    Message::user(RETRY_TRUNCATION_MARKER),
+                    Message::assistant("reply 0"),
+                    Message::user("check the file"),
+                    Message {
+                        role: Role::Assistant,
+                        content: vec![
+                            ContentBlock::Text {
+                                text: "reading".to_owned(),
+                            },
+                            tool_call.clone(),
+                        ],
+                    },
+                    tool_result.clone(),
+                ];
+                expected.extend(interrupted.then(Message::interruption));
+                expected.extend([
+                    Message::assistant(RETRY_TURN_CLOSE_MARKER),
+                    Message::user(build_user_message(None)),
+                ]);
+                assert_eq!(
+                    sent_messages(&requests[1]),
+                    to_json(&expected),
+                    "interrupted: {interrupted}",
+                );
+            }
+        }
+
+        #[tokio::test]
+        async fn fails_when_the_newest_round_alone_still_overflows() {
+            let server = MockServer::start().await;
+            mount_overflow_then(
+                &server,
+                summary_stream("", "partial", "model_context_window_exceeded", true),
             )
             .await;
             let client = test_client(server.uri(), api_key(), "claude-haiku-5-5");
@@ -1570,326 +1485,429 @@ mod tests {
                 &client,
                 &parent_prompt(),
                 &[],
-                &tool_heavy_transcript(),
+                &overflowing_transcript(),
                 None,
                 &sink,
                 &mut spent,
             )
             .await
-            .expect_err("an unfinished summary must not replace the transcript");
+            .expect_err("an overflow with no round left to drop fails the compaction");
 
             assert!(
-                format!("{err:#}").contains(expected),
-                "{stop_reason}: {err:#}"
+                format!("{err:#}").contains("no room in the context window"),
+                "{err:#}"
             );
-            assert_eq!(spent, [TokenUsage::new(100, 7)], "{stop_reason}");
+            let requests = server.received_requests().await.unwrap();
+            assert_eq!(requests.len(), 3);
+            assert_eq!(
+                sent_messages(&requests[2]),
+                to_json(&[
+                    Message::user(RETRY_TRUNCATION_MARKER),
+                    Message::assistant("fixed"),
+                    Message::user(build_user_message(None)),
+                ]),
+            );
+            assert_eq!(
+                spent,
+                [TokenUsage::new(100, 7); 3],
+                "every request is billed"
+            );
             assert_eq!(
                 sink.events(),
-                [token("partial"), Event::SummaryDiscarded],
-                "{stop_reason}",
+                vec![vec![token("partial"), Event::SummaryDiscarded]; 3].concat(),
+                "each retry and the failure discard what streamed",
+            );
+        }
+
+        #[tokio::test]
+        async fn gives_up_after_three_overflow_retries() {
+            let server = MockServer::start().await;
+            prompt_too_long("prompt is too long: 200001 tokens > 200000 maximum")
+                .mount(&server)
+                .await;
+            let client = test_client(server.uri(), api_key(), "claude-haiku-5-5");
+
+            let err = summarize(&client, &heavy_rounds(8))
+                .await
+                .expect_err("every retry overflows");
+
+            assert!(format!("{err:#}").contains("prompt is too long"), "{err:#}");
+            assert_eq!(server.received_requests().await.unwrap().len(), 4);
+        }
+
+        #[tokio::test]
+        async fn refuses_an_empty_or_short_session_without_a_request() {
+            let server = MockServer::start().await;
+            let client = test_client(server.uri(), api_key(), "claude-haiku-5-5");
+            let short = vec![
+                Message::user("fix the bug"),
+                Message::assistant("looking now"),
+                Message::user("any progress?"),
+                Message::assistant("found it"),
+            ];
+
+            for (transcript, expected) in [
+                (Vec::new(), "the session has no messages yet"),
+                (
+                    short,
+                    "the conversation has about 65 tokens, below the 1000-token minimum",
+                ),
+            ] {
+                let err = summarize(&client, &transcript)
+                    .await
+                    .expect_err("the session is refused");
+
+                assert_eq!(format!("{err:#}"), expected);
+            }
+            assert_eq!(server.received_requests().await.unwrap().len(), 0);
+        }
+
+        #[tokio::test]
+        async fn empty_summary_errors() {
+            let server = MockServer::start().await;
+            mount_summary(&server, streamed_summary_body("   \n  ")).await;
+
+            let client = test_client(server.uri(), api_key(), "claude-haiku-5-5");
+            let (summary, events) = summarize_streaming(&client, &tool_heavy_transcript()).await;
+            let err = summary.expect_err("empty summary must error");
+            assert_eq!(format!("{err:#}"), "the model returned an empty summary");
+            assert_eq!(events, [token("   \n  "), Event::SummaryDiscarded]);
+        }
+
+        #[tokio::test]
+        async fn rejects_an_unfinished_summary_and_still_records_usage() {
+            let cases = [
+                ("max_tokens", true, "`max_tokens` output limit"),
+                ("refusal", true, "declined to summarize"),
+                ("tool_use", true, "called a tool"),
+                ("pause_turn", true, "stopped early (PauseTurn)"),
+                ("end_turn", false, "ended before message_stop"),
+            ];
+            for (stop_reason, finished, expected) in cases {
+                let server = MockServer::start().await;
+                mount_summary(
+                    &server,
+                    summary_stream("", "partial", stop_reason, finished),
+                )
+                .await;
+                let client = test_client(server.uri(), api_key(), "claude-haiku-5-5");
+                let sink = CapturingSink::default();
+                let mut spent = Vec::new();
+
+                let err = compact_session(
+                    &client,
+                    &parent_prompt(),
+                    &[],
+                    &tool_heavy_transcript(),
+                    None,
+                    &sink,
+                    &mut spent,
+                )
+                .await
+                .expect_err("an unfinished summary must not replace the transcript");
+
+                assert!(
+                    format!("{err:#}").contains(expected),
+                    "{stop_reason}: {err:#}"
+                );
+                assert_eq!(spent, [TokenUsage::new(100, 7)], "{stop_reason}");
+                assert_eq!(
+                    sink.events(),
+                    [token("partial"), Event::SummaryDiscarded],
+                    "{stop_reason}",
+                );
+            }
+        }
+
+        #[tokio::test]
+        async fn dropped_mid_summary_discards_what_streamed() {
+            let (tx, rx) = mpsc::channel(1);
+            tx.send(Ok(ResponseEvent::Text("partial".to_owned())))
+                .await
+                .unwrap();
+            let client = HeldStreamClient(Mutex::new(Some(rx)));
+            let (prompt, transcript) = (parent_prompt(), tool_heavy_transcript());
+            let sink = CapturingSink::default();
+            let mut spent = Vec::new();
+
+            {
+                let mut compaction = pin!(compact_session(
+                    &client,
+                    &prompt,
+                    &[],
+                    &transcript,
+                    None,
+                    &sink,
+                    &mut spent,
+                ));
+                assert!(futures::poll!(compaction.as_mut()).is_pending());
+                assert_eq!(sink.events(), [token("partial")]);
+            }
+
+            assert_eq!(sink.events(), [token("partial"), Event::SummaryDiscarded]);
+        }
+
+        #[tokio::test]
+        async fn passes_retry_notices_and_usage_limits_through() {
+            let notice = "HTTP 529 overloaded_error. Retrying in 1 s (retry 1 of 5).";
+            let limits = five_hour_limit();
+            let (tx, rx) = mpsc::channel(4);
+            for event in [
+                ResponseEvent::Retrying(notice.to_owned()),
+                ResponseEvent::RateLimits(limits),
+                ResponseEvent::Text("Recap".to_owned()),
+                ResponseEvent::Completed(Response {
+                    content: vec![ContentBlock::Text {
+                        text: "Recap".to_owned(),
+                    }],
+                    ..Response::default()
+                }),
+            ] {
+                tx.send(Ok(event)).await.unwrap();
+            }
+            let client = HeldStreamClient(Mutex::new(Some(rx)));
+            let sink = CapturingSink::default();
+
+            let summary = compact_session(
+                &client,
+                &parent_prompt(),
+                &[],
+                &tool_heavy_transcript(),
+                None,
+                &sink,
+                &mut Vec::new(),
+            )
+            .await
+            .unwrap();
+
+            assert_eq!(summary, "Recap");
+            assert_eq!(
+                sink.events(),
+                [
+                    Event::Retrying(notice.to_owned()),
+                    Event::RateLimitsUpdated(limits),
+                    token("Recap"),
+                ],
+            );
+        }
+
+        #[tokio::test]
+        async fn surfaces_stream_error_event() {
+            let server = MockServer::start().await;
+            mount_summary(
+                &server,
+                indoc! {r#"
+                    event: ping
+                    data: {"type":"message_start","message":{"id":"m","model":"claude-haiku-5-5"}}
+
+                    event: ping
+                    data: {"type":"error","error":{"type":"invalid_request_error","message":"summary request rejected"}}
+
+                "#}
+                .to_owned(),
+            )
+            .await;
+
+            let client = test_client(server.uri(), api_key(), "claude-haiku-5-5");
+            let err = summarize(&client, &tool_heavy_transcript())
+                .await
+                .expect_err("in-band error must propagate");
+            assert_eq!(
+                format!("{err:#}"),
+                "API error (invalid_request_error): summary request rejected"
+            );
+        }
+
+        #[tokio::test]
+        async fn propagates_http_error() {
+            let server = MockServer::start().await;
+            Mock::given(method("POST"))
+                .and(path("/v1/messages"))
+                .respond_with(ResponseTemplate::new(400).set_body_string(
+                    r#"{"type":"error","error":{"type":"invalid_request_error","message":"summary request rejected"}}"#,
+                ))
+                .mount(&server)
+                .await;
+
+            let client = test_client(server.uri(), api_key(), "claude-haiku-5-5");
+            let err = summarize(&client, &tool_heavy_transcript())
+                .await
+                .expect_err("expected error");
+            assert_eq!(
+                format!("{err:#}"),
+                "API error (HTTP 400 Bad Request): summary request rejected"
             );
         }
     }
 
-    #[tokio::test]
-    async fn compact_session_dropped_mid_summary_discards_what_streamed() {
-        let (tx, rx) = mpsc::channel(1);
-        tx.send(Ok(ResponseEvent::Text("partial".to_owned())))
-            .await
-            .unwrap();
-        let client = HeldStreamClient(Mutex::new(Some(rx)));
-        let (prompt, transcript) = (parent_prompt(), tool_heavy_transcript());
-        let sink = CapturingSink::default();
-        let mut spent = Vec::new();
+    mod drop_oldest_rounds {
+        use super::*;
 
-        {
-            let mut compaction = pin!(compact_session(
-                &client,
-                &prompt,
-                &[],
-                &transcript,
-                None,
-                &sink,
-                &mut spent,
-            ));
-            assert!(futures::poll!(compaction.as_mut()).is_pending());
-            assert_eq!(sink.events(), [token("partial")]);
+        fn server_call(id: &str) -> ContentBlock {
+            ContentBlock::ServerToolUse {
+                id: id.to_owned(),
+                name: "web_search".to_owned(),
+                input: json!({}),
+            }
         }
 
-        assert_eq!(sink.events(), [token("partial"), Event::SummaryDiscarded]);
-    }
-
-    #[tokio::test]
-    async fn compact_session_passes_retry_notices_and_usage_limits_through() {
-        let notice = "HTTP 529 overloaded_error. Retrying in 1 s (retry 1 of 5).";
-        let limits = five_hour_limit();
-        let (tx, rx) = mpsc::channel(4);
-        for event in [
-            ResponseEvent::Retrying(notice.to_owned()),
-            ResponseEvent::RateLimits(limits),
-            ResponseEvent::Text("Recap".to_owned()),
-            ResponseEvent::Completed(Response {
-                content: vec![ContentBlock::Text {
-                    text: "Recap".to_owned(),
-                }],
-                ..Response::default()
-            }),
-        ] {
-            tx.send(Ok(event)).await.unwrap();
+        fn server_result(id: &str) -> ContentBlock {
+            ContentBlock::ServerToolResult {
+                tool_use_id: id.to_owned(),
+                kind: "web_search_tool_result".to_owned(),
+                fields: serde_json::Map::new(),
+            }
         }
-        let client = HeldStreamClient(Mutex::new(Some(rx)));
-        let sink = CapturingSink::default();
 
-        let summary = compact_session(
-            &client,
-            &parent_prompt(),
-            &[],
-            &tool_heavy_transcript(),
-            None,
-            &sink,
-            &mut Vec::new(),
-        )
-        .await
-        .unwrap();
-
-        assert_eq!(summary, "Recap");
-        assert_eq!(
-            sink.events(),
-            [
-                Event::Retrying(notice.to_owned()),
-                Event::RateLimitsUpdated(limits),
-                token("Recap"),
-            ],
-        );
-    }
-
-    /// Replies with a stream the test feeds, which stays open while the test holds its sender.
-    struct HeldStreamClient(Mutex<Option<mpsc::Receiver<Result<ResponseEvent>>>>);
-
-    impl Wire for HeldStreamClient {
-        fn stream_message(
-            &self,
-            _messages: &[Message],
-            _system_sections: &[&str],
-            _user_context: Option<&str>,
-            _tools: &[ToolDefinition],
-        ) -> Result<mpsc::Receiver<Result<ResponseEvent>>> {
-            Ok(self.0.lock().unwrap().take().expect("one request"))
-        }
-    }
-
-    #[tokio::test]
-    async fn compact_session_surfaces_stream_error_event() {
-        let server = MockServer::start().await;
-        mount_summary(
-            &server,
-            indoc! {r#"
-                event: ping
-                data: {"type":"message_start","message":{"id":"m","model":"claude-haiku-5-5"}}
-
-                event: ping
-                data: {"type":"error","error":{"type":"invalid_request_error","message":"summary request rejected"}}
-
-            "#}
-            .to_owned(),
-        )
-        .await;
-
-        let client = test_client(server.uri(), api_key(), "claude-haiku-5-5");
-        let err = summarize(&client, &tool_heavy_transcript())
-            .await
-            .expect_err("in-band error must propagate");
-        assert_eq!(
-            format!("{err:#}"),
-            "API error (invalid_request_error): summary request rejected"
-        );
-    }
-
-    #[tokio::test]
-    async fn compact_session_propagates_http_error() {
-        let server = MockServer::start().await;
-        Mock::given(method("POST"))
-            .and(path("/v1/messages"))
-            .respond_with(ResponseTemplate::new(400).set_body_string(
-                r#"{"type":"error","error":{"type":"invalid_request_error","message":"summary request rejected"}}"#,
-            ))
-            .mount(&server)
-            .await;
-
-        let client = test_client(server.uri(), api_key(), "claude-haiku-5-5");
-        let err = summarize(&client, &tool_heavy_transcript())
-            .await
-            .expect_err("expected error");
-        assert_eq!(
-            format!("{err:#}"),
-            "API error (HTTP 400 Bad Request): summary request rejected"
-        );
-    }
-
-    // ── drop_oldest_rounds ──
-
-    #[test]
-    fn drop_oldest_rounds_keeps_the_newest_round_when_the_gap_exceeds_the_transcript() {
-        let kept = drop_oldest_rounds(&tool_heavy_transcript(), u32::MAX).unwrap();
-
-        assert_eq!(
-            kept,
-            [
-                Message::user(RETRY_TRUNCATION_MARKER),
-                Message::assistant("alpha-end, beta-end"),
-            ],
-        );
-    }
-
-    #[test]
-    fn drop_oldest_rounds_replaces_an_earlier_truncation_marker() {
-        let transcript = [
-            Message::user(RETRY_TRUNCATION_MARKER),
-            Message::assistant("older"),
-            Message::user("next"),
-            Message::assistant("newer"),
-        ];
-
-        let kept = drop_oldest_rounds(&transcript, 0).unwrap();
-
-        assert_eq!(
-            to_json(&kept),
-            to_json(&[
-                Message::user(RETRY_TRUNCATION_MARKER),
-                Message::assistant("newer")
-            ]),
-        );
-    }
-
-    fn server_call(id: &str) -> ContentBlock {
-        ContentBlock::ServerToolUse {
-            id: id.to_owned(),
-            name: "web_search".to_owned(),
-            input: json!({}),
-        }
-    }
-
-    fn server_result(id: &str) -> ContentBlock {
-        ContentBlock::ServerToolResult {
-            tool_use_id: id.to_owned(),
-            kind: "web_search_tool_result".to_owned(),
-            fields: serde_json::Map::new(),
-        }
-    }
-
-    fn reply(content: Vec<ContentBlock>) -> Message {
-        Message {
-            role: Role::Assistant,
-            content,
-        }
-    }
-
-    #[test]
-    fn drop_oldest_rounds_keeps_a_deferred_server_call_with_its_result() {
-        let transcript = [
-            Message::user("search the web and list the files"),
-            reply(vec![
-                server_call("s1"),
-                ContentBlock::ToolUse {
-                    id: "t1".to_owned(),
-                    name: "bash".to_owned(),
-                    input: json!({"command": "ls"}),
-                },
-            ]),
+        fn reply(content: Vec<ContentBlock>) -> Message {
             Message {
-                role: Role::User,
-                content: vec![ContentBlock::ToolResult {
-                    tool_use_id: "t1".to_owned(),
-                    content: "f.rs".to_owned(),
-                    is_error: false,
+                role: Role::Assistant,
+                content,
+            }
+        }
+
+        #[test]
+        fn keeps_the_newest_round_when_the_gap_exceeds_the_transcript() {
+            let kept = drop_oldest_rounds(&tool_heavy_transcript(), u32::MAX).unwrap();
+
+            assert_eq!(
+                kept,
+                [
+                    Message::user(RETRY_TRUNCATION_MARKER),
+                    Message::assistant("alpha-end, beta-end"),
+                ],
+            );
+        }
+
+        #[test]
+        fn replaces_an_earlier_truncation_marker() {
+            let transcript = [
+                Message::user(RETRY_TRUNCATION_MARKER),
+                Message::assistant("older"),
+                Message::user("next"),
+                Message::assistant("newer"),
+            ];
+
+            let kept = drop_oldest_rounds(&transcript, 0).unwrap();
+
+            assert_eq!(
+                to_json(&kept),
+                to_json(&[
+                    Message::user(RETRY_TRUNCATION_MARKER),
+                    Message::assistant("newer")
+                ]),
+            );
+        }
+
+        #[test]
+        fn keeps_a_deferred_server_call_with_its_result() {
+            let transcript = [
+                Message::user("search the web and list the files"),
+                reply(vec![
+                    server_call("s1"),
+                    ContentBlock::ToolUse {
+                        id: "t1".to_owned(),
+                        name: "bash".to_owned(),
+                        input: json!({"command": "ls"}),
+                    },
+                ]),
+                Message {
+                    role: Role::User,
+                    content: vec![ContentBlock::ToolResult {
+                        tool_use_id: "t1".to_owned(),
+                        content: "f.rs".to_owned(),
+                        is_error: false,
+                    }],
+                },
+                reply(vec![
+                    server_result("s1"),
+                    ContentBlock::Text {
+                        text: "Found it.".to_owned(),
+                    },
+                ]),
+            ];
+
+            let kept = drop_oldest_rounds(&transcript, u32::MAX).unwrap();
+
+            assert_eq!(kept[0], Message::user(RETRY_TRUNCATION_MARKER));
+            assert_eq!(kept[1..], transcript[1..]);
+        }
+
+        #[test]
+        fn keeps_a_paused_server_call_with_its_continuation() {
+            let transcript = [
+                Message::user("research X"),
+                reply(vec![
+                    ContentBlock::Text {
+                        text: "Searching.".to_owned(),
+                    },
+                    server_call("s1"),
+                ]),
+                reply(vec![
+                    server_result("s1"),
+                    ContentBlock::Text {
+                        text: "Found X.".to_owned(),
+                    },
+                ]),
+            ];
+
+            let kept = drop_oldest_rounds(&transcript, u32::MAX).unwrap();
+
+            assert_eq!(kept[0], Message::user(RETRY_TRUNCATION_MARKER));
+            assert_eq!(kept[1..], transcript[1..]);
+        }
+
+        #[test]
+        fn needs_a_reply_to_keep() {
+            let thinking_only = Message {
+                role: Role::Assistant,
+                content: vec![ContentBlock::Thinking {
+                    thinking: "hmm".to_owned(),
+                    replay: Replay::with_model(MODEL, "sig"),
                 }],
-            },
-            reply(vec![
-                server_result("s1"),
-                ContentBlock::Text {
-                    text: "Found it.".to_owned(),
-                },
-            ]),
-        ];
+            };
 
-        let kept = drop_oldest_rounds(&transcript, u32::MAX).unwrap();
-
-        assert_eq!(kept[0], Message::user(RETRY_TRUNCATION_MARKER));
-        assert_eq!(kept[1..], transcript[1..]);
-    }
-
-    #[test]
-    fn drop_oldest_rounds_keeps_a_paused_server_call_with_its_continuation() {
-        let transcript = [
-            Message::user("research X"),
-            reply(vec![
-                ContentBlock::Text {
-                    text: "Searching.".to_owned(),
-                },
-                server_call("s1"),
-            ]),
-            reply(vec![
-                server_result("s1"),
-                ContentBlock::Text {
-                    text: "Found X.".to_owned(),
-                },
-            ]),
-        ];
-
-        let kept = drop_oldest_rounds(&transcript, u32::MAX).unwrap();
-
-        assert_eq!(kept[0], Message::user(RETRY_TRUNCATION_MARKER));
-        assert_eq!(kept[1..], transcript[1..]);
-    }
-
-    #[test]
-    fn drop_oldest_rounds_needs_a_reply_to_keep() {
-        let thinking_only = Message {
-            role: Role::Assistant,
-            content: vec![ContentBlock::Thinking {
-                thinking: "hmm".to_owned(),
-                replay: Replay::with_model(MODEL, "sig"),
-            }],
-        };
-
-        assert!(drop_oldest_rounds(&[Message::user("one"), thinking_only], 0).is_none());
-    }
-
-    // ── build_user_message ──
-
-    #[test]
-    fn build_user_message_without_instructions_is_just_the_rubric() {
-        for instructions in [None, Some("   \n\t  ")] {
-            let message = build_user_message(instructions);
-
-            assert_eq!(message, SUMMARIZATION_USER_RUBRIC, "{instructions:?}");
+            assert!(drop_oldest_rounds(&[Message::user("one"), thinking_only], 0).is_none());
         }
     }
 
-    #[test]
-    fn build_user_message_asks_which_checks_ran() {
-        let message = build_user_message(None);
+    mod build_user_message {
+        use super::*;
 
-        let prose = message.split_whitespace().collect::<Vec<_>>().join(" ");
-        assert!(
-            prose.contains("which checks passed, failed, or have not run"),
-            "{message}"
-        );
-    }
+        #[test]
+        fn without_instructions_is_just_the_rubric() {
+            for instructions in [None, Some("   \n\t  ")] {
+                let message = build_user_message(instructions);
 
-    #[test]
-    fn build_user_message_with_instructions_appends_them_under_an_anchor() {
-        let message = build_user_message(Some("  focus on the build error\n"));
+                assert_eq!(message, SUMMARIZATION_USER_RUBRIC, "{instructions:?}");
+            }
+        }
 
-        assert_eq!(
-            message,
-            formatdoc! {"
-                {SUMMARIZATION_USER_RUBRIC}
+        #[test]
+        fn asks_which_checks_ran() {
+            let message = build_user_message(None);
 
-                Additional instructions from the engineer:
+            let prose = message.split_whitespace().collect::<Vec<_>>().join(" ");
+            assert!(
+                prose.contains("which checks passed, failed, or have not run"),
+                "{message}"
+            );
+        }
 
-                focus on the build error"
-            },
-        );
+        #[test]
+        fn with_instructions_appends_them_under_an_anchor() {
+            let message = build_user_message(Some("  focus on the build error\n"));
+
+            assert_eq!(
+                message,
+                formatdoc! {"
+                    {SUMMARIZATION_USER_RUBRIC}
+
+                    Additional instructions from the engineer:
+
+                    focus on the build error"
+                },
+            );
+        }
     }
 }

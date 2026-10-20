@@ -87,121 +87,134 @@ mod tests {
 
     use super::*;
 
-    // ── load_or_create_device_id ──
+    mod load_or_create_device_id {
+        use super::*;
 
-    #[test]
-    fn load_or_create_device_id_stores_the_id_under_the_data_dir() {
-        let dir = tempdir().unwrap();
+        #[test]
+        fn stores_the_id_under_the_data_dir() {
+            let dir = tempdir().unwrap();
 
-        let id = temp_env::with_var("XDG_DATA_HOME", Some(dir.path()), load_or_create_device_id);
+            let id =
+                temp_env::with_var("XDG_DATA_HOME", Some(dir.path()), load_or_create_device_id);
 
-        assert!(is_valid_id(&id), "{id}");
-        let on_disk = fs::read_to_string(dir.path().join("ox/user-id")).unwrap();
-        assert_eq!(on_disk, id);
+            assert!(is_valid_id(&id), "{id}");
+            let on_disk = fs::read_to_string(dir.path().join("ox/user-id")).unwrap();
+            assert_eq!(on_disk, id);
+        }
     }
 
-    // ── fallback_to_ephemeral ──
+    mod fallback_to_ephemeral {
+        use super::*;
 
-    #[test]
-    fn fallback_to_ephemeral_keeps_the_persisted_id() {
-        let persisted = "a".repeat(64);
-        assert_eq!(fallback_to_ephemeral(Ok(persisted.clone())), persisted);
+        #[test]
+        fn keeps_the_persisted_id() {
+            let persisted = "a".repeat(64);
+            assert_eq!(fallback_to_ephemeral(Ok(persisted.clone())), persisted);
+        }
+
+        #[test]
+        fn mints_an_id_when_storage_fails() {
+            let id = fallback_to_ephemeral(Err(anyhow::anyhow!("disk full")));
+            assert!(is_valid_id(&id), "fallback mints a valid id: {id}");
+        }
     }
 
-    #[test]
-    fn fallback_to_ephemeral_mints_an_id_when_storage_fails() {
-        let id = fallback_to_ephemeral(Err(anyhow::anyhow!("disk full")));
-        assert!(is_valid_id(&id), "fallback mints a valid id: {id}");
+    mod try_load_or_create_at {
+        use super::*;
+
+        #[test]
+        fn persists_across_calls() {
+            let dir = tempdir().unwrap();
+            let path = dir.path().join("ox/user-id");
+
+            let id1 = try_load_or_create_at(&path).unwrap();
+            let id2 = try_load_or_create_at(&path).unwrap();
+
+            assert!(is_valid_id(&id1));
+            assert_eq!(id1, id2, "second call returns the persisted id");
+            assert_eq!(fs::read_to_string(&path).unwrap(), id1);
+        }
+
+        #[test]
+        fn replaces_invalid_persisted_value() {
+            let dir = tempdir().unwrap();
+            let path = dir.path().join("ox/user-id");
+            create_private_dir_all(path.parent().unwrap()).unwrap();
+            atomic_write_private(&path, b"not-a-valid-id").unwrap();
+            let id = try_load_or_create_at(&path).unwrap();
+            assert!(is_valid_id(&id));
+            let on_disk = fs::read_to_string(&path).unwrap();
+            assert_eq!(on_disk.trim(), id, "invalid value rewritten");
+        }
+
+        #[test]
+        fn propagates_unwritable_parent_as_error() {
+            // `blocker` is a regular file, so no path beneath it can be read or created.
+            let dir = tempdir().unwrap();
+            let blocker = dir.path().join("blocker");
+            fs::write(&blocker, "").unwrap();
+            let err = try_load_or_create_at(&blocker.join("ox/user-id")).unwrap_err();
+            let chain = format!("{err:#}");
+            assert!(
+                chain.contains(&*blocker.to_string_lossy()),
+                "actionable path in error: {chain}"
+            );
+        }
+
+        #[test]
+        fn errors_on_path_without_parent() {
+            // Empty path: NotFound from read_existing, then `.parent()` is None.
+            let err = try_load_or_create_at(Path::new("")).unwrap_err();
+            assert_eq!(format!("{err:#}"), "device-id path has no parent");
+        }
     }
 
-    // ── try_load_or_create_at ──
+    mod read_existing {
+        use super::*;
 
-    #[test]
-    fn try_load_or_create_at_persists_across_calls() {
-        let dir = tempdir().unwrap();
-        let path = dir.path().join("ox/user-id");
+        #[test]
+        fn treats_non_utf8_content_as_absent() {
+            let dir = tempdir().unwrap();
+            let path = dir.path().join("user-id");
+            std::fs::write(&path, [0xff, 0xfe, 0xfd]).unwrap();
+            assert!(read_existing(&path).unwrap().is_none());
+        }
 
-        let id1 = try_load_or_create_at(&path).unwrap();
-        let id2 = try_load_or_create_at(&path).unwrap();
-
-        assert!(is_valid_id(&id1));
-        assert_eq!(id1, id2, "second call returns the persisted id");
-        assert_eq!(fs::read_to_string(&path).unwrap(), id1);
+        #[test]
+        fn propagates_io_error_other_than_not_found() {
+            // Reading a directory as a file errors with IsADirectory.
+            let dir = tempdir().unwrap();
+            let err = read_existing(dir.path()).unwrap_err();
+            assert_eq!(
+                err.to_string(),
+                format!("failed to read device ID at {}", dir.path().display()),
+            );
+        }
     }
 
-    #[test]
-    fn try_load_or_create_at_replaces_invalid_persisted_value() {
-        let dir = tempdir().unwrap();
-        let path = dir.path().join("ox/user-id");
-        create_private_dir_all(path.parent().unwrap()).unwrap();
-        atomic_write_private(&path, b"not-a-valid-id").unwrap();
-        let id = try_load_or_create_at(&path).unwrap();
-        assert!(is_valid_id(&id));
-        let on_disk = fs::read_to_string(&path).unwrap();
-        assert_eq!(on_disk.trim(), id, "invalid value rewritten");
+    mod is_valid_id {
+        use super::*;
+
+        #[test]
+        fn accepts_only_64_lowercase_hex_chars() {
+            assert!(is_valid_id(&"a".repeat(64)));
+            assert!(!is_valid_id(&"A".repeat(64)), "rejects uppercase");
+            assert!(!is_valid_id(&"g".repeat(64)), "rejects non-hex");
+            assert!(!is_valid_id(&"a".repeat(63)), "rejects short");
+            assert!(!is_valid_id(&"a".repeat(65)), "rejects long");
+        }
     }
 
-    #[test]
-    fn try_load_or_create_at_propagates_unwritable_parent_as_error() {
-        // `blocker` is a regular file, so no path beneath it can be read or created.
-        let dir = tempdir().unwrap();
-        let blocker = dir.path().join("blocker");
-        fs::write(&blocker, "").unwrap();
-        let err = try_load_or_create_at(&blocker.join("ox/user-id")).unwrap_err();
-        let chain = format!("{err:#}");
-        assert!(
-            chain.contains(&*blocker.to_string_lossy()),
-            "actionable path in error: {chain}"
-        );
-    }
+    mod generate {
+        use super::*;
 
-    #[test]
-    fn try_load_or_create_at_errors_on_path_without_parent() {
-        // Empty path: NotFound from read_existing, then `.parent()` is None.
-        let err = try_load_or_create_at(Path::new("")).unwrap_err();
-        assert_eq!(format!("{err:#}"), "device-id path has no parent");
-    }
-
-    // ── read_existing ──
-
-    #[test]
-    fn read_existing_treats_non_utf8_content_as_absent() {
-        let dir = tempdir().unwrap();
-        let path = dir.path().join("user-id");
-        std::fs::write(&path, [0xff, 0xfe, 0xfd]).unwrap();
-        assert!(read_existing(&path).unwrap().is_none());
-    }
-
-    #[test]
-    fn read_existing_propagates_io_error_other_than_not_found() {
-        // Reading a directory as a file errors with IsADirectory.
-        let dir = tempdir().unwrap();
-        let err = read_existing(dir.path()).unwrap_err();
-        assert_eq!(
-            err.to_string(),
-            format!("failed to read device ID at {}", dir.path().display()),
-        );
-    }
-
-    // ── is_valid_id ──
-
-    #[test]
-    fn is_valid_id_accepts_only_64_lowercase_hex_chars() {
-        assert!(is_valid_id(&"a".repeat(64)));
-        assert!(!is_valid_id(&"A".repeat(64)), "rejects uppercase");
-        assert!(!is_valid_id(&"g".repeat(64)), "rejects non-hex");
-        assert!(!is_valid_id(&"a".repeat(63)), "rejects short");
-        assert!(!is_valid_id(&"a".repeat(65)), "rejects long");
-    }
-
-    // ── generate ──
-
-    #[test]
-    fn generate_produces_unique_64_char_lowercase_hex() {
-        let a = generate();
-        let b = generate();
-        assert!(is_valid_id(&a), "{a}");
-        assert!(is_valid_id(&b), "{b}");
-        assert_ne!(a, b, "two calls produce distinct ids");
+        #[test]
+        fn produces_unique_64_char_lowercase_hex() {
+            let a = generate();
+            let b = generate();
+            assert!(is_valid_id(&a), "{a}");
+            assert!(is_valid_id(&b), "{b}");
+            assert_ne!(a, b, "two calls produce distinct ids");
+        }
     }
 }
