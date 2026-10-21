@@ -8,7 +8,7 @@ use ratatui::widgets::Paragraph;
 use unicode_width::UnicodeWidthStr;
 
 use ox_core::config::display_effort;
-use ox_core::util::text::{center_truncate_to_width, truncate_to_width};
+use ox_core::util::text::{center_truncate_to_width, pad_to_width, truncate_to_width};
 
 use crate::glyphs::INLINE_SEPARATOR;
 use crate::slash::LiveSessionInfo;
@@ -224,8 +224,10 @@ fn starter_rows(picked: &[Starter; STARTER_PICK]) -> Vec<(String, String)> {
     picked
         .iter()
         .map(|(name, desc)| {
-            let pad = " ".repeat(name_col_width.saturating_sub(name.width()));
-            (format!("  {name}{pad}"), (*desc).to_owned())
+            (
+                format!("  {}", pad_to_width(name, name_col_width)),
+                (*desc).to_owned(),
+            )
         })
         .collect()
 }

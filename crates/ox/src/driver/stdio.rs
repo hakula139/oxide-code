@@ -19,7 +19,7 @@ use ox_core::session::display::{UNTITLED_MARKER, archive_notice, id_prefix};
 use ox_core::tool::ApprovalPreview;
 use ox_core::tool::tasks::{Progress, Task};
 use ox_core::util::sync::lock_or_recover;
-use ox_core::util::text::escape_controls;
+use ox_core::util::text::{escape_controls, escape_line};
 use ox_tui::glyphs::{INTERRUPTED_MARKER, task_marker};
 
 // ── Turn Rendering ──
@@ -198,7 +198,7 @@ impl StdioSink {
                 writeln!(stderr, "{label} {pre_count} messages into summary")?;
             }
             Event::SessionTitleUpdated { title, .. } => {
-                let title = escape_controls(&title);
+                let title = escape_line(&title);
                 writeln!(stderr, "Renamed the session to {title}")?;
             }
             Event::SessionRolled { id, .. } => {
@@ -322,7 +322,7 @@ fn task_lines(tasks: &[Task]) -> String {
 
 /// The session an [`Event::SessionResumed`] continues, then a note when resuming it unarchived it.
 fn resumed_notice(id: &str, title: Option<&str>, unarchived: bool) -> String {
-    let title = title.map_or_else(|| UNTITLED_MARKER.to_owned(), escape_controls);
+    let title = title.map_or_else(|| UNTITLED_MARKER.to_owned(), escape_line);
     let resumed = format!("Resumed session {}: {title}", id_prefix(id));
     if unarchived {
         return format!("{resumed}\n{}", archive_notice(id, false));
