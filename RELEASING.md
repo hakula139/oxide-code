@@ -8,7 +8,7 @@ Pushing a tag that matches `v[0-9]+.*` starts `.github/workflows/release.yml`, w
 - **Soak:** each rc starts a seven-day soak. A bug found during the soak joins the milestone, its fix ships in the next rc, and the soak restarts. Once a soak ends without a new bug, tag `main` as `v0.1.0`.
 - **Main during a soak:** merge only `fix`, `docs`, `test`, and `chore(release)` PRs. Feature and refactor PRs wait for the stable tag, so the stable commit matches the soaked rc plus its fixes. Renovate automerges dependency bumps, so set `"enabled": false` in `.github/renovate.json` when the soak starts and revert it after the stable tag, both through `ci(renovate)` PRs.
 - **After 0.1.0:** a breaking change to the [stability surface](#stability-surface) bumps the minor version, and every other change bumps the patch version. Give a stable version a milestone (`v0.2.0`) once its scope is planned. Patch releases and prereleases get no milestone, and prereleases of the next minor (`v0.2.0-alpha.N`) follow the rules above.
-- **Breaking changes:** put `!` in the title of every PR that breaks the stability surface, as in `feat(config)!: ...`, both before and after 0.1.0. Before 0.1.0, the version still advances within the prerelease sequence.
+- **Breaking changes:** a PR that breaks the stability surface marks its title with [`!`](docs/conventions/github.md#commits-and-branches) both before and after 0.1.0. Before 0.1.0, the version still advances within the prerelease sequence.
 - **MSRV:** the CI MSRV job checks `rust-version`. A bump affects only `cargo install` users, so it ships as a normal change that names the new floor in its PR title.
 
 ### Stability Surface
@@ -27,13 +27,12 @@ Before 0.1.0, config, environment variable, and session format changes may freel
 
 ## Changelog
 
-[git-cliff](https://git-cliff.org) drafts each release's `CHANGELOG.md` section from `cliff.toml`, and the release PR curates the draft into the published notes. Curate a section only in its release PR after git-cliff drafts it, and never regenerate an older section. The GitHub Release keeps its own copy of the notes, so a later PR that corrects a published section also needs `gh release edit vX.Y.Z --notes-file <(parse-changelog CHANGELOG.md X.Y.Z)` once it merges. `cargo install parse-changelog` provides the parser `release.yml` uses.
+[git-cliff](https://git-cliff.org) drafts each release's `CHANGELOG.md` section from `cliff.toml`, and the release PR curates the draft into the published notes. Curate a section only in its release PR after git-cliff drafts it, and never regenerate an older section. The GitHub Release keeps its own copy of the notes, so once a PR that corrects a published section merges, run the [Release workflow](https://github.com/hakula139/oxide-code/actions/workflows/release.yml) on `main` from the Actions tab with the tag in its `notes` input. That run republishes the tag's section from `main`'s `CHANGELOG.md` and builds nothing.
 
-- Each squash-merged PR title becomes one draft entry, so write titles for users.
+- Each squash-merged PR title becomes one draft entry.
 - `feat`, `fix`, `perf`, and `revert` titles appear under Added, Fixed, Changed, and Removed, respectively. Titles with `!` appear under Breaking changes. All other types are skipped, including routine `chore(deps)` and `chore(flake)` bumps. Use `fix(deps): ...` for a bump that fixes an advisory or changes behavior in the shipped `ox`. `.github/dependabot.yml` applies this title to every Cargo security update. npm packages are development tools that never ship in `ox`, so their bumps remain `chore`, including advisory fixes.
 - Within each group, the draft lists unscoped entries first, then the rest sorted by scope in merge order, so related entries sit together. Each `(#N)` links to its PR.
 - A stable section includes every change since the previous stable release. A prerelease section includes only changes since the previous tag.
-- Highlights passed to git-cliff hold only bullets, which render under `### Highlights` at the top of the section. Their only source is the merged section, from which the [tag](#tag) annotation is extracted.
 - `--prepend` adds one section while preserving the rest. Avoid `--output CHANGELOG.md`, which regenerates the whole file with a single tag pattern, so it drops every curated section and compare link, along with either the prerelease sections or the stable roll-ups.
 
 ### Curate the Section
@@ -79,7 +78,7 @@ The draft lists PR titles, which are short and written for reviewers at merge ti
    git cliff --unreleased --tag vX.Y.Z --tag-pattern '^v[0-9]+\.' --prepend CHANGELOG.md     # Prerelease
    ```
 
-   For a notable release, list the highlights as Markdown bullets in `highlights.md` and add `--with-tag-message="$(<highlights.md)"`. The `=` form prevents a message starting with a `-` bullet from parsing as a flag.
+   For a notable release, list the highlights as Markdown bullets in `highlights.md` and add `--with-tag-message="$(<highlights.md)"`, which renders them under `### Highlights` at the top of the section. The `=` form prevents a message starting with a `-` bullet from parsing as a flag.
 
 6. Because `--prepend` writes no compare link, add the section's link reference above the first one at the end of `CHANGELOG.md`. A stable release compares against the previous stable tag, and a prerelease against the previous tag:
 
@@ -106,16 +105,12 @@ The draft lists PR titles, which are short and written for reviewers at merge ti
 
 Pushing the tag starts the Release workflow and is hard to undo, so get approval for it separately from the release PR. Push it soon after the merge, because the pinned install snippets on `main` return 404 until the release publishes.
 
-Tag the release PR's squash commit by its SHA, since a later PR may already sit on top of `main`. When the merged section has highlights, annotate the tag with them. The `awk` filter prints the `### Highlights` block of the commit's newest section, and `--cleanup=whitespace` trims the blank lines around it without stripping lines that start with `#`:
+Tag the release PR's squash commit by its SHA, since a later PR may already sit on top of `main`:
 
 ```bash
 git fetch origin
 sha=$(gh pr view <release-pr> --json mergeCommit --jq .mergeCommit.oid)
-git show "$sha:CHANGELOG.md" |
-  awk '/^## / { n++ } /^#/ { h = n == 1 && $0 == "### Highlights"; next } h' >highlights.md
-git tag vX.Y.Z "$sha"                                               # Without highlights
-git tag -a --cleanup=whitespace -F highlights.md vX.Y.Z "$sha"      # With highlights
-git push origin vX.Y.Z
+git tag vX.Y.Z "$sha" && git push origin vX.Y.Z
 ```
 
 ## Verify Publication
@@ -126,17 +121,15 @@ Watch the [Release workflow](https://github.com/hakula139/oxide-code/actions/wor
 - Every [target](#targets) archive and its `.sha256` sidecar are attached, and `gh attestation verify <archive> --repo hakula139/oxide-code` passes for one of them.
 - `nix run github:hakula139/oxide-code/vX.Y.Z -- --version` prints the version on one host.
 
-The workflow then opens a `chore(release): refresh Homebrew formula for vX.Y.Z` PR and dispatches CI on it. Merging that PR is the final release step, so merge it like any other PR, then check that `brew upgrade oxide-code` installs the version. The formula follows the latest release, or the newest prerelease until the first stable release, so other tags skip this job. If the job fails, fix the cause and rerun it, since a rerun rebuilds the branch and reuses an open PR.
+The workflow then opens a `chore(release): refresh Homebrew formula for vX.Y.Z` PR and dispatches CI on it. Merging that PR is the final release step, so merge it like any other PR, then check that `brew update && brew upgrade oxide-code` installs the version. The formula follows the latest release, or the newest prerelease until the first stable release, so other tags skip this job. If the job fails, fix the cause and rerun it, since a rerun rebuilds the branch and reuses an open PR.
 
 ## Re-Cut an Existing Tag
 
-The PR-based flow tags only reviewed, CI-green commits, so re-cutting should be rare. If a release still needs to be redone (e.g., bad assets), let any in-flight release run finish first. To rebuild the same commit, delete only the release with `gh release delete vX.Y.Z --yes` and run the release workflow from the Actions tab against the tag. To release a different commit, delete the release and its tag, then move and push the tag. Extract the highlights from `<commit>` with the [Tag](#tag) filter first, so the new tag keeps them:
+The PR-based flow tags only reviewed, CI-green commits, so re-cutting should be rare. If a release still needs to be redone (e.g., bad assets), let any in-flight release run finish first. To rebuild the same commit, delete only the release with `gh release delete vX.Y.Z --yes` and run the release workflow from the Actions tab against the tag. To release a different commit, delete the release and its tag, then move and push the tag:
 
 ```bash
 gh release delete vX.Y.Z --cleanup-tag --yes
-git tag -f vX.Y.Z <commit>                                             # Without highlights
-git tag -f -a --cleanup=whitespace -F highlights.md vX.Y.Z <commit>    # With highlights
-git push origin vX.Y.Z
+git tag -f vX.Y.Z <commit> && git push origin vX.Y.Z
 ```
 
 Either way, the new run updates the open formula PR with the new checksums, or opens a new one.
@@ -161,10 +154,7 @@ The `v0.1.0` release PR also switches the install snippets to `releases/latest/d
 
 ## Targets
 
-The matrix in `release.yml` builds `x86_64-unknown-linux-gnu` on the latest Ubuntu runner, `aarch64-apple-darwin` on macOS, and `x86_64-pc-windows-msvc` on Windows. Each release attaches `oxide-code-<target>.tar.gz`, or `.zip` on Windows, with an `oxide-code-<target>.sha256` sidecar and a build provenance attestation, and each archive contains the `ox` binary, `LICENSE`, and `THIRD-PARTY-NOTICES`. The build job generates the notices with cargo-about and appends the bundled syntect asset licenses from `licenses/`.
+The build matrix in `release.yml` lists the targets. Each release attaches one archive per target with a `.sha256` sidecar and a build provenance attestation, and release asset names belong to the [stability surface](#stability-surface).
 
-- Every build job extracts its archive on its own runner, checks both license files against their inputs, and checks that `ox --version` reports the tag's version, or the Cargo version outside a tag.
-- The Linux job fails when the binary needs a newer glibc than the floor in `docs/guide/install.md`. The check reads the floor from the phrase `Linux with glibc <version> or later` in the guide, so keep that wording when editing it. If a runner image update trips it, either pin the Linux build to the previous image or raise the floor in the guide.
-- Publishing also waits for the full CI workflow, which the release workflow calls on the tag.
-- Pull requests that change `release.yml`, the notice configuration or template, `LICENSE`, bundled asset licenses, the Cargo manifests, `Cargo.lock`, `rust-toolchain.toml`, or `docs/guide/install.md` build and check every target without publishing. Running the workflow from the Actions tab on a branch adds a CI run.
-- Add a target by extending the matrix, since the archive name template (`oxide-code-$target`) and `bin: ox` apply uniformly. Each target needs a runner that executes its binary.
+- The platform floors in `docs/guide/install.md` bind the build. The Linux job fails when the binary needs a newer glibc than the guide promises, reading the floor from the phrase `Linux with glibc <version> or later`, so keep that wording when editing it. If a runner image update trips the check, either pin the Linux build to the previous image or raise the floor in the guide. The macOS job fails when the binary's minimum macOS version differs from the guide's `**macOS**: <version> or later` floor. Raising that floor also means changing `MACOSX_DEPLOYMENT_TARGET` in `release.yml` and the formula's `depends_on macos:` in `scripts/update-homebrew-formula.sh`.
+- Add a target by extending the matrix. Each target needs a runner that executes its binary, since every build job checks its archive there.

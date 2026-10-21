@@ -48,6 +48,7 @@ class OxideCode < Formula
   # Every platform needs a URL for the arch requirements below to load and report.
   on_macos do
     depends_on arch: :arm64
+    depends_on macos: :monterey
 
     on_arm do
       url "$base/oxide-code-aarch64-apple-darwin.tar.gz"
