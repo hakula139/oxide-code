@@ -151,8 +151,8 @@ impl App {
 
     fn finish_turn(&mut self) {
         self.chat.commit_streaming();
-        // A cancel that lost the race to the turn's end, or a failed resume or archive, still leaves
-        // the next step to the user.
+        // A cancel that lost the race to the turn's end, or a failed resume or archive, still
+        // leaves the next step to the user.
         if matches!(
             &self.status,
             Status::Cancelling | Status::Resuming | Status::Archiving
@@ -300,7 +300,7 @@ impl App {
                 {url}"
             },
             Err(e) => {
-                debug!("failed to open the browser: {e}");
+                debug!(error = %e, "failed to open the browser");
                 formatdoc! {"
                     Could not open the browser. Sign in at this URL in a browser on this machine:
                     {url}"

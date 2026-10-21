@@ -217,8 +217,8 @@ pub enum Event {
     },
     /// A compaction finished. The in-memory transcript has already been swapped to the synthetic
     /// continuation, so the frontend clears its chat and replays a single boundary block. After an
-    /// [`CompactTrigger::Auto`] compaction the frontend stays busy, since the prompt it ran ahead
-    /// of goes out next.
+    /// automatic compaction the frontend stays busy, since the prompt it ran ahead of goes out
+    /// next.
     SessionCompacted {
         summary: String,
         pre_count: u32,
@@ -291,7 +291,7 @@ pub enum Event {
 pub enum CompactTrigger {
     /// The user ran `/compact`.
     Manual,
-    /// The context neared the threshold ahead of a submitted prompt.
+    /// The latest usage reached the threshold ahead of a submitted prompt.
     Auto,
 }
 

@@ -435,9 +435,10 @@ pub(super) async fn collect_response(
 
 #[cfg(test)]
 mod tests {
+    use std::collections::VecDeque;
     use std::path::Path;
     use std::pin::Pin;
-    use std::sync::Arc;
+    use std::sync::{Arc, LazyLock, Mutex as StdMutex};
 
     use indoc::indoc;
     use serde_json::json;
@@ -451,8 +452,7 @@ mod tests {
     use crate::config::Effort;
     use crate::engine::dispatch::NOT_RUN;
     use crate::engine::local_testing::{
-        EchoTool, FakeClient, dead_test_session, dispatch_with, empty_prompt, inert_ops, reply_of,
-        reply_turn, test_session, text_block, text_turn, thinking_block, with_stop,
+        EchoTool, dead_test_session, dispatch_with, inert_ops, thinking_block,
     };
     use crate::engine::testing::MODEL;
     use crate::message::{Replay, Role};
@@ -460,14 +460,131 @@ mod tests {
     use crate::prompt::SystemPrompt;
     use crate::protocol::testing::CapturingSink;
     use crate::protocol::{ConfigPick, Decision, ResumeTarget, ToolCall, ToolResult};
+    use crate::session::handle;
+    use crate::session::store::testing::test_store;
     use crate::tool::view::{NumberedLine, ToolResultView};
     use crate::tool::{
         DEFAULT_TOOL_ICON, Prepared, Tool, ToolCtx, ToolMetadata, ToolOutput, ToolRegistry,
         ToolSpec,
     };
 
+    fn text_block(text: &str) -> ContentBlock {
+        ContentBlock::Text {
+            text: text.to_owned(),
+        }
+    }
+
     mod agent_turn {
         use super::*;
+
+        /// In-process fake that scripts a [`ResponseEvent`] stream per turn and records every
+        /// request. A request past the last scripted turn panics.
+        struct FakeClient {
+            turns: StdMutex<VecDeque<Vec<Result<ResponseEvent>>>>,
+            requests: StdMutex<Vec<Vec<Message>>>,
+        }
+
+        impl FakeClient {
+            fn new(turns: Vec<Vec<ResponseEvent>>) -> Self {
+                let turns = turns
+                    .into_iter()
+                    .map(|events| events.into_iter().map(Ok).collect())
+                    .collect();
+                Self {
+                    turns: StdMutex::new(turns),
+                    requests: StdMutex::default(),
+                }
+            }
+
+            /// Appends a turn whose stream fails with `error`.
+            fn then_fail(self, error: &str) -> Self {
+                self.turns
+                    .lock()
+                    .unwrap()
+                    .push_back(vec![Err(anyhow!("{error}"))]);
+                self
+            }
+
+            fn requests(&self) -> Vec<Vec<Message>> {
+                self.requests.lock().unwrap().clone()
+            }
+        }
+
+        impl Wire for FakeClient {
+            fn stream_message(
+                &self,
+                messages: &[Message],
+                _system: &SystemPrompt,
+                _user_context: Option<&str>,
+                _tools: &[ToolDefinition],
+            ) -> Result<mpsc::Receiver<Result<ResponseEvent>>> {
+                self.requests.lock().unwrap().push(messages.to_vec());
+                let events = self
+                    .turns
+                    .lock()
+                    .unwrap()
+                    .pop_front()
+                    .expect("every request has a scripted turn");
+                let (tx, rx) = mpsc::channel(events.len().max(1));
+                for event in events {
+                    tx.try_send(event).expect("channel capacity");
+                }
+                Ok(rx)
+            }
+        }
+
+        /// One reply completing with `content`, streaming its text and thinking first.
+        fn reply_turn(content: Vec<ContentBlock>) -> Vec<ResponseEvent> {
+            let mut events: Vec<ResponseEvent> = content
+                .iter()
+                .filter_map(|block| match block {
+                    ContentBlock::Text { text } => Some(ResponseEvent::Text(text.clone())),
+                    ContentBlock::Thinking { thinking, .. } => {
+                        Some(ResponseEvent::Thinking(thinking.clone()))
+                    }
+                    _ => None,
+                })
+                .collect();
+            events.push(ResponseEvent::Completed(Response {
+                content,
+                ..Response::default()
+            }));
+            events
+        }
+
+        fn text_turn(text: &str) -> Vec<ResponseEvent> {
+            reply_turn(vec![text_block(text)])
+        }
+
+        /// The turn's completed reply.
+        fn reply_of(events: &mut [ResponseEvent]) -> &mut Response {
+            match events.last_mut() {
+                Some(ResponseEvent::Completed(response)) => response,
+                last => panic!("the turn ends in its reply: {last:?}"),
+            }
+        }
+
+        /// Ends the turn's reply on `stop_reason`.
+        fn with_stop(
+            mut events: Vec<ResponseEvent>,
+            stop_reason: StopReason,
+            stop_details: Option<StopDetails>,
+        ) -> Vec<ResponseEvent> {
+            let reply = reply_of(&mut events);
+            reply.stop_reason = Some(stop_reason);
+            reply.stop_details = stop_details;
+            events
+        }
+
+        fn empty_prompt() -> &'static PromptParts {
+            static PROMPT: LazyLock<PromptParts> = LazyLock::new(PromptParts::default);
+            &PROMPT
+        }
+
+        fn test_session(dir: &Path) -> SessionHandle {
+            let store = test_store(dir);
+            handle::start(&store, "claude-sonnet-5-5", None)
+        }
 
         fn tool_use_block(id: &str, name: &str, input_json: &str) -> ContentBlock {
             ContentBlock::ToolUse {

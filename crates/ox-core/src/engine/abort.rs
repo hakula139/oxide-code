@@ -18,17 +18,6 @@ pub(super) enum TurnAbort {
     Failed(anyhow::Error),
 }
 
-#[cfg(test)]
-impl TurnAbort {
-    /// The error a `Failed` abort holds. Panics on any other abort.
-    pub(super) fn into_failure(self) -> anyhow::Error {
-        match self {
-            Self::Failed(e) => e,
-            other => panic!("expected a failure: {other:?}"),
-        }
-    }
-}
-
 pub(super) type AbortResult<T> = std::result::Result<T, TurnAbort>;
 
 /// What an operation in flight keeps from the ops it receives: the prompts queued for its next
@@ -97,7 +86,7 @@ where
                 // Unreachable under current wiring, and a `Resolve` here is a stale reply for an
                 // already-resolved call.
                 if let Some(op) = inbox.absorb(op, sink)? {
-                    warn!("dropped mid-turn op: {op:?}");
+                    warn!(?op, "dropped mid-turn op");
                 }
             }
             output = &mut fut => return Ok(output),

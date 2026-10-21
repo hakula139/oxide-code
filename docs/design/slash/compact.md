@@ -10,21 +10,21 @@ Companions: [commands.md](commands.md), [session/persistence.md](../session/pers
 
 `engine/compaction` owns the summarization request:
 
-- `compact_session` forks the live conversation. It sends the conversation's own system prompt, user context, tools, and transcript, appends the rubric as the last user message, and reads the reply through the agent loop's `collect_response`. The rubric, `SUMMARIZATION_USER_RUBRIC`, asks for a terse list of the intent, decisions, code paths touched, current state, and next step, and ends by asking for text only. Every request it sends records its usage, even when the summary fails or the caller drops the future.
+- `request_summary` forks the live conversation. It sends the conversation's own system prompt, user context, tools, and transcript, appends the rubric as the last user message, and reads the reply through the agent loop's `collect_response`. The rubric, `SUMMARIZATION_USER_RUBRIC`, asks for a terse list of the intent, decisions, code paths touched, current state, and next step, and ends by asking for text only. Every request it sends records its usage, even when the summary fails or the caller drops the future.
 - Its `SummaryStream` sink forwards the reply's text as `Event::SummaryToken` for manual and automatic compaction alike, passes retry notices and usage limits through, and drops its thinking. A retry, a failure, or a dropped future emits `Event::SummaryDiscarded` when any text has streamed.
 - A request the API rejects with HTTP 400 `prompt is too long`, or a reply that stops on `model_context_window_exceeded`, gets up to three retries. Each retry copies the transcript without thinking blocks and drops its oldest API rounds until it frees the overflow the error reports plus about 20k tokens of output room for the summary.
-- It rejects a reply cut short by `max_tokens`, a refusal, a tool call, a truncated stream, or an overflow that outlasts the retries or leaves only the newest round, and otherwise returns the trimmed summary.
+- It rejects a reply cut short by `max_tokens`, a refusal, a tool call, a pause or an unknown stop reason that ends the summary early, a truncated stream, or an overflow that outlasts the retries or leaves only the newest round, and otherwise returns the trimmed summary.
 
-`session/handle` exposes `compact(summary, instructions, tasks, synthetic_message) -> CompactOutcome`:
+`session/handle` exposes `compact(boundary, synthetic_message) -> CompactOutcome`, where `CompactBoundary` carries the summary, instructions, task list, and trigger:
 
-- The actor writes one `Entry::Compact`, tagged `"type": "compact"` with the `summary`, `pre_message_count`, optional `instructions`, the `tasks` (omitted when empty), and a `timestamp`, followed by the synthetic post-compact `Entry::Message` (a `role: user` carrying `SUMMARY_PREFIX + summary`, plus reminders of the task list and the open background shells when there are any), with the synthetic message's `parent_uuid` set to `None`.
+- The actor writes one `Entry::Compact`, tagged `"type": "compact"` with the `summary`, `pre_message_count`, optional `instructions`, the `tasks` (omitted when empty), the `trigger` that started the compaction (omitted when absent, as in boundaries that 0.1.0-alpha.5 and earlier wrote), and a `timestamp`, followed by the synthetic post-compact `Entry::Message` (a `role: user` carrying `SUMMARY_PREFIX + summary`, plus reminders of the task list and the open background shells when there are any), with the synthetic message's `parent_uuid` set to `None`.
 - `SessionState`'s `last_message_uuid` is reset to the synthetic message's ID and `message_count` resets to `1`.
 - `SessionCmd::Compact` is a batch barrier, so queued writes cannot share the same flush after the boundary.
-- It returns `CompactOutcome { pre_count, failure }`, and like `archive`, it reports a failure whenever the command or its ack cannot reach the writer task.
-- The caller resets the file tracker, as `/clear` does, only after the boundary flush succeeds.
+- It returns `CompactOutcome { pre_count, committed, failure }`, and like `archive`, it reports a failure whenever the command or its ack cannot reach the writer task. `committed` is true once the boundary takes effect, on disk or, after persistence has stopped, in memory alone.
+- The caller resets the file tracker, as `/clear` does, only once the boundary commits.
 - On resume, `load_session_data_from_path` treats `Entry::Compact` as a generation boundary, clears pre-compact sidecars, filters out later stale writes from the old chain, and carries `CompactInfo` so the TUI can render the boundary block while the model transcript keeps the synthetic root. The loader starts a fresh `ChainBuilder` at the boundary, and the walk back from the latest tail leaf stops at the post-compact head because its `parent_uuid` is `None`, so `ChainBuilder::resolve` needs no compaction logic. `session::sanitize` treats the synthetic continuation as an ordinary `role: user` text message.
 
-`Engine::compact` in `engine/compaction.rs` coordinates compaction through `Engine::summarize`, the pipeline auto-compaction also runs:
+`Engine::compact` in `engine/compaction.rs` coordinates compaction through `Engine::run_compaction`, the pipeline auto-compaction also runs:
 
 - On success, it hands the summary and the session's task list to `Engine::replace_with_summary`, which calls `session.compact(...)`, clears the file tracker, replaces the in-memory `Vec<Message>` with the synthetic continuation, and emits `Event::SessionCompacted { summary, pre_count, instructions, trigger }` with `trigger: CompactTrigger::Manual`. The engine then shows any instruction warning the rebuilt prompt newly raises, and ends the compaction with `SessionReady`.
 - Failure paths (stream error, unfinished or empty summary, too-short guard) emit `Event::TurnFailed` and leave the transcript unchanged. A summary whose boundary write fails is discarded before the failure is reported. Once session persistence has stopped, the summary still replaces the transcript, and the stop is reported after `SessionCompacted`.
@@ -41,7 +41,7 @@ The stdio driver's `StdioSink` prints the same header on stderr, which `protocol
 
 2. **Optional free-text custom instructions.** `/compact <instructions>` lets the user steer the summary toward what they care about (`focus on the build error and how we fixed it`). The argument takes the same typed-arg form as `/rename <title>` and `/model <id>`, and Claude Code accepts the same argument.
 
-3. **Same model and request path as a turn.** The summarization request reuses the live model selection, thinking / effort settings, and OAuth / API-key auth, because it goes through the same `Wire` and the agent loop's `collect_response`. It also inherits the turn's truncated-stream detection and stop-reason handling, so a summary cut off by `max_tokens` fails the compaction before it can replace the transcript.
+3. **Same model and request path as a turn.** The summarization request reuses the live model selection, thinking / effort settings, and OAuth / API-key auth, because it goes through the same `Wire` and the agent loop's `collect_response`, which also detects a truncated stream. `request_summary` checks the stop reason itself, so a summary cut off by `max_tokens` or stopped early fails the compaction before it can replace the transcript.
 
 4. **Keep the conversation's tools and ask for text only.** The `tools` array is part of the cached prefix, so dropping it would miss the conversation's cache. The rubric ends by asking the model not to call any tool, as Claude Code's `NO_TOOLS_PREAMBLE` does on its fork path, and a reply that stops on `tool_use` fails the compaction.
 
@@ -72,7 +72,7 @@ The stdio driver's `StdioSink` prints the same header on stderr, which `protocol
 
 15. **Refuse on empty summary.** If the model returns whitespace-only text (model errored quietly, content filter, etc.), fail the compaction and leave the transcript unchanged. Better to retry than to commit a useless summary.
 
-16. **No `pre_tokens` field.** `pre_message_count` is enough for the post-compact UI line, and auto-compaction reads its trigger from the last turn's usage without persisting it.
+16. **No `pre_tokens` field.** `pre_message_count` is enough for the post-compact UI line, and auto-compaction reads its threshold signal from the latest reported usage without persisting it.
 
 17. **Custom instructions appended verbatim under an "Additional instructions" section in the user message.** Matches Claude Code's pattern: the rubric runs first, then custom instructions follow as steering for the same task.
 
@@ -92,10 +92,10 @@ The stdio driver's `StdioSink` prints the same header on stderr, which `protocol
 
 - `crates/ox-core/src/client.rs`: `PromptTooLong`, the wire-neutral rejection that carries the reported overflow.
 - `crates/ox-core/src/client/anthropic/transport.rs`: `prompt_too_long_message`, which types an HTTP 400 `prompt is too long` as `PromptTooLong`.
-- `crates/ox-core/src/engine.rs`: session-cost accounting.
 - `crates/ox-core/src/engine/abort.rs`: `await_unless_aborted`, which races the summarization against cancel and quit.
-- `crates/ox-core/src/engine/compaction.rs`: `Engine::compact`, `Engine::summarize` and `Engine::replace_with_summary`, shared by manual and automatic compaction, the `compact_session` driver, the `SummaryStream` sink, the context-window retries (`drop_oldest_rounds`, `retry_request`), and the `SUMMARIZATION_USER_RUBRIC` constant.
+- `crates/ox-core/src/engine/compaction.rs`: `Engine::compact`, `Engine::run_compaction` and `Engine::replace_with_summary`, shared by manual and automatic compaction, the `request_summary` driver, the `SummaryStream` sink, the context-window retries (`drop_oldest_rounds`, `retry_request`), and the `SUMMARIZATION_USER_RUBRIC` constant.
 - `crates/ox-core/src/engine/turn.rs`: `collect_response`, which reads the summary the way it reads a turn's reply.
+- `crates/ox-core/src/engine/usage.rs`: session-cost accounting.
 - `crates/ox-core/src/protocol.rs`: `Op::Compact`, `Event::SummaryToken`, `Event::SummaryDiscarded`, `Event::SessionCompacted`.
 - `crates/ox-core/src/protocol/notice.rs`: `compacted`, the boundary header every frontend shows.
 - `crates/ox-core/src/session/actor.rs`: `SessionCmd::Compact` handler.

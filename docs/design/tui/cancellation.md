@@ -41,6 +41,8 @@ The picks lean toward the Codex precedent on most surfaces, since it is the one 
 - `crates/ox-core/src/engine.rs`: `Engine::run`, which ignores an `Op::Queue` that arrives between turns, plus `Engine::submit_prompt`, `report_abort`, and `TurnEnd::of`, shared by the TUI, REPL, and headless drivers.
 - `crates/ox-core/src/engine/abort.rs`: `TurnAbort` enum, `await_unless_aborted`.
 - `crates/ox-core/src/engine/dispatch.rs`: `run_tool_round` / `ToolRound`, `Dispatcher::run_ready`, which cancels the running calls on an abort.
+- `crates/ox-core/src/engine/login.rs`: `Engine::logout`, which ends a failed sign-out with `TurnFailed`.
+- `crates/ox-core/src/engine/sessions.rs`: `Engine::archive`, which ends a refused or failed archive with `TurnFailed`.
 - `crates/ox-core/src/engine/turn.rs`: `agent_turn` round loop, `interrupt_turn`, `record_drained_prompts`.
 - `crates/ox-core/src/file_tracker.rs`: `FileTracker::write_and_record`.
 - `crates/ox-core/src/message.rs`: `Message::interruption`, the marker a user abort records.
@@ -52,7 +54,7 @@ The picks lean toward the Codex precedent on most surfaces, since it is the one 
 - `crates/ox-core/src/tool/search.rs`: `walk_files`.
 - `crates/ox-tui/src/app.rs`: `App::status` and `App::set_status`.
 - `crates/ox-tui/src/app/dispatch.rs`: `dispatch_op` / `start_turn` / `forward_queued_prompts`, `handle_esc`, `handle_ctrl_c`, the Ctrl+D POSIX gate in `handle_ctrl_d`, and `expire_armed_exit`.
-- `crates/ox-tui/src/app/events.rs`: `finish_turn`, `apply_turn_failed`, `finalize_idle` / `enter_idle` / `drain_pending_prompt`, `set_active_status`.
+- `crates/ox-tui/src/app/events.rs`: `finish_turn`, `apply_turn_failed`, `apply_session_ready`, `finalize_idle` / `enter_idle` / `drain_pending_prompt`, `set_active_status`.
 - `crates/ox-tui/src/app/queue.rs`: `PromptQueue`, the active prompt, the queued prompts, and what a failed turn hands back.
 - `crates/ox-tui/src/components/chat.rs`: `ChatView::clear_pending_calls`, which evicts orphan tool calls at turn boundaries, and `ChatView::load_history`, which shows a resumed interruption as the `(interrupted)` line.
 - `crates/ox-tui/src/components/chat/blocks/interrupted.rs`: `InterruptedMarker` block.

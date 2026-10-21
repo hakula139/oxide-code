@@ -6,13 +6,13 @@ Companion docs: [research/agent/auto-compaction.md](../../research/agent/auto-co
 
 ## Scope
 
-Auto-compaction is **default on** and can be disabled independently from manual `/compact`. The trigger runs before recording a new user prompt when the previous completed turn left usage over threshold. Tool results are compacted only after the assistant has consumed them and returned a final response.
+Auto-compaction is **default on** and can be disabled independently from manual `/compact`. The trigger runs before recording a new user prompt when the previous turn left usage over threshold, whether that turn completed, failed, or was cancelled.
 
 It does not interrupt an in-flight stream or tool call. A prompt that arrives during compaction stays queued and drains afterward, unless the compaction fails, in which case the queue waits for the user.
 
 ## Token Signal
 
-The trigger reads the usage of the previous turn's last round as one total:
+The trigger reads the usage of the last round the previous turn reported as one total:
 
 ```text
 input_tokens + cache_creation_input_tokens + cache_read_input_tokens + output_tokens
@@ -59,12 +59,12 @@ Explicit thresholds snap into a usable range. Token values below `50_000` rise t
 
 ## Trigger Flow
 
-`Engine` owns the automatic trigger because it can compact before a new prompt is recorded. The agent turn reports the latest usage signal after each completed turn.
+`Engine` owns the automatic trigger because it can compact before a new prompt is recorded. The agent turn reports the latest usage signal after each turn.
 
-1. `agent_turn` streams a complete turn, persists the transcript tail, and returns the latest token usage in its `TurnReport`.
+1. `agent_turn` streams a turn, persists the transcript tail, and returns the latest token usage in its `TurnReport`, including when the turn fails or is cancelled.
 2. `Engine` stores that usage as the pending automatic trigger signal.
 3. When the next prompt arrives, `Engine::auto_compact` checks the stored usage before `submit_prompt` records the prompt.
-4. If the total crosses the threshold, it runs `Engine::summarize`, the same pipeline `/compact` uses. A transcript below the `/compact` size floor is skipped without counting a failure, since the system prompt, instructions, and tools then fill most of the context and a summary would not shrink the request.
+4. If the total crosses the threshold, it runs `Engine::run_compaction`, the same pipeline `/compact` uses. A transcript below the `/compact` size floor is skipped without counting a failure, since the system prompt, instructions, and tools then fill most of the context and a summary would not shrink the request.
 5. `Engine::auto_compact` emits `AutoCompactionStarted` so the TUI can show compaction status while the summarizer runs, and the summary streams into the chat as it does for `/compact`.
 6. On success, `Engine::replace_with_summary` persists the compact boundary, clears the file tracker, replaces `messages` with the synthetic post-compact message, and emits `SessionCompacted`.
 7. On failure, the streamed summary is discarded, `AutoCompactFailures::fail` increments the failure counter, and `submit_prompt` ends with `TurnFailed` without recording or sending the new prompt.
@@ -98,3 +98,11 @@ During TUI auto-compaction, the status bar shows the `Compacting` state. Automat
 ## Related Issues
 
 Mid-turn compaction is tracked in [#184](https://github.com/hakula139/oxide-code/issues/184), and a `pre_compact` hook in [#168](https://github.com/hakula139/oxide-code/issues/168).
+
+## Sources
+
+- `crates/ox-core/src/config/compaction.rs`: `CompactionConfig`, which resolves the threshold and its snapping.
+- `crates/ox-core/src/engine/compaction.rs`: `Engine::auto_compact`, `Engine::run_compaction`, `Engine::replace_with_summary`, and `AutoCompactFailures`, the failure counter and its pause.
+- `crates/ox-core/src/engine/usage.rs`: `Engine::account_usage`, which stores the latest usage as the trigger signal.
+- `crates/ox-core/src/protocol.rs`: `Event::AutoCompactionStarted`, `Event::AutoCompactionPaused`, `Event::AutoCompactionResumed`, and `CompactTrigger`.
+- `crates/ox-tui/src/app/events.rs`: the TUI's handling of the auto-compaction events and the unsent prompt.
