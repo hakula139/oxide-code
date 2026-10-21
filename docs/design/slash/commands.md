@@ -107,7 +107,7 @@ Client-side command surface: `/help`, `/clear`, `/model`, `/status`, and friends
 - `crates/ox-tui/src/slash/archive.rs`: `ArchiveCmd` and `UnarchiveCmd`.
 - `crates/ox-tui/src/slash/clear.rs`: `ClearCmd` sends first.
 - `crates/ox-tui/src/slash/config.rs`: `/config` row builder plus sectioned `KvOverview` constructor.
-- `crates/ox-tui/src/slash/confirm.rs`: `ConfirmDeleteSessionModal` (destructive-action gate, sticky inline error cleared only on deliberate Y / N).
+- `crates/ox-tui/src/slash/confirm.rs`: `ConfirmDeleteSessionModal` (destructive-action gate, inline error kept until a retry or close).
 - `crates/ox-tui/src/slash/context.rs`: `SlashContext` (`LiveSessionInfo` plus the live title).
 - `crates/ox-tui/src/slash/delete.rs`: `DeleteCmd` refuses prefixes that match only the live session.
 - `crates/ox-tui/src/slash/diff.rs`: `DiffCmd` and the git calls it makes from the project root.
