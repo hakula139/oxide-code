@@ -1,5 +1,8 @@
 //! Live end-to-end checks against the Anthropic API or a compatible gateway, skipped by default.
 
+#[path = "support/env.rs"]
+mod env;
+
 use std::fmt::Write as _;
 use std::fs;
 use std::io::Write as _;
@@ -8,9 +11,6 @@ use std::process::{Command, Output, Stdio};
 
 use serde_json::Value;
 use tempfile::TempDir;
-
-#[path = "support/env.rs"]
-mod env;
 
 const DEFAULT_MODEL: &str = "claude-haiku-5-5";
 const DEFAULT_THINKING_MODEL: &str = "claude-opus-5-5";

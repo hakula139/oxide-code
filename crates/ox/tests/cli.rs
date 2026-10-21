@@ -1,5 +1,8 @@
 //! CLI startup, headless session persistence, signal exits, and session-list output.
 
+#[path = "support/env.rs"]
+mod env;
+
 use std::path::Path;
 use std::process::{Command, Stdio};
 
@@ -9,9 +12,6 @@ use wiremock::{Mock, MockServer, ResponseTemplate};
 
 use ox_core::engine::testing::{mount_reply, mount_tool_call_once, request_bodies};
 use ox_core::util::tls::testing::TEST_CA_PATH;
-
-#[path = "support/env.rs"]
-mod env;
 
 fn ox(root: &Path) -> Command {
     let mut ox = Command::new(env!("CARGO_BIN_EXE_ox"));
