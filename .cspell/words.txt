@@ -44,6 +44,7 @@ fpats
 fprint
 fprintf
 frappe
+getpgid
 Ghostty
 gitui
 GOARCH
@@ -118,6 +119,7 @@ serde
 serie
 sess
 shopt
+SIGTTIN
 smol
 statix
 stdenv
