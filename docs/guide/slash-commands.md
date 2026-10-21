@@ -46,7 +46,7 @@ See [`effort`](configuration.md#effort-intelligence-tier) for each model's defau
 
 ## Permission Mode
 
-`/mode` opens a picker of the [permission modes](configuration.md#permission-tool-approval). Use **Up / Down** or a number key to move, **Enter** to switch, and **Esc** to cancel. `/mode <mode>` switches directly, and **Shift+Tab** switches between `manual` and `plan`. [Tool Approval](configuration.md#permission-tool-approval) explains when its cycle includes `yolo`.
+`/mode` opens a picker of the [permission modes](permissions.md#modes). Use **Up / Down** or a number key to move, **Enter** to switch, and **Esc** to cancel. `/mode <mode>` switches directly, and **Shift+Tab** switches between `manual` and `plan`. [Modes](permissions.md#modes) explains when its cycle includes `yolo`.
 
 ## Compaction
 
