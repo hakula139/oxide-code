@@ -28,11 +28,12 @@ pub enum Shipped {
     Devices,
     Rm,
     Ssh,
+    Cloud,
     Credentials,
 }
 
 impl Shipped {
-    pub(super) const ALL: [Self; 11] = [
+    pub(super) const ALL: [Self; 12] = [
         Self::Git,
         Self::Direnv,
         Self::Editors,
@@ -43,6 +44,7 @@ impl Shipped {
         Self::Devices,
         Self::Rm,
         Self::Ssh,
+        Self::Cloud,
         Self::Credentials,
     ];
 
@@ -59,6 +61,7 @@ impl Shipped {
             Self::Devices => "devices",
             Self::Rm => "rm",
             Self::Ssh => "ssh",
+            Self::Cloud => "cloud",
             Self::Credentials => "credentials",
         }
     }
@@ -73,7 +76,7 @@ impl Shipped {
             Self::Shell => Some(&SHELL),
             Self::Agents => Some(&AGENTS),
             Self::Ox => Some(&OX),
-            Self::Devices | Self::Rm | Self::Ssh | Self::Credentials => None,
+            Self::Devices | Self::Rm | Self::Ssh | Self::Cloud | Self::Credentials => None,
         }
     }
 
@@ -89,7 +92,8 @@ impl Shipped {
             | Self::Agents
             | Self::Ox
             | Self::Devices
-            | Self::Rm => ShippedTier::Ask,
+            | Self::Rm
+            | Self::Cloud => ShippedTier::Ask,
         }
     }
 
@@ -118,6 +122,8 @@ impl Shipped {
                 [
                     app_dir(XdgBase::Data).map(|dir| dir.join("credentials.json")),
                     home().map(|home| home.join(".claude").join(".credentials.json")),
+                    home().map(|home| home.join(".git-credentials")),
+                    xdg_dir(XdgBase::Config).map(|dir| dir.join("git").join("credentials")),
                 ]
                 .into_iter()
                 .flatten()
@@ -131,7 +137,8 @@ impl Shipped {
             | Self::Shell
             | Self::Agents
             | Self::Ox
-            | Self::Rm => return Ok(None),
+            | Self::Rm
+            | Self::Cloud => return Ok(None),
         };
         let rules = patterns
             .iter()
@@ -204,28 +211,39 @@ const CARGO: Names = Names {
     nested_files: &[(".cargo", "config"), (".cargo", "config.toml")],
 };
 
-/// Shell startup files.
+/// The files a shell runs when it starts or a login shell exits, and fish's autoloaded config and
+/// functions.
 const SHELL: Names = Names {
     dirs: &[],
     files: &[
+        ".bash_aliases",
         ".bash_login",
+        ".bash_logout",
         ".bash_profile",
         ".bashrc",
+        ".cshrc",
+        ".kshrc",
+        ".login",
+        ".logout",
+        ".mkshrc",
         ".profile",
+        ".tcshrc",
         ".zlogin",
+        ".zlogout",
         ".zprofile",
         ".zshenv",
         ".zshrc",
     ],
-    nested_dirs: &[],
-    nested_files: &[],
+    nested_dirs: &[("fish", "conf.d"), ("fish", "functions")],
+    nested_files: &[("fish", "config.fish")],
 };
 
-/// Codex's project config, plus Claude Code's hooks and the settings that register them. The rest
-/// of `.claude`, such as worktrees and plans, stays editable.
+/// Codex's project config, Claude Code's hooks and the settings that register them, and the
+/// files that register MCP servers it starts. The rest of `.claude`, such as worktrees and plans,
+/// stays editable.
 const AGENTS: Names = Names {
     dirs: &[".codex"],
-    files: &[],
+    files: &[".claude.json", ".mcp.json"],
     nested_dirs: &[(".claude", "hooks")],
     nested_files: &[
         (".claude", "settings.json"),
@@ -267,10 +285,9 @@ impl Names {
     }
 }
 
-/// The protected locations whose insides belong to a group wherever their names sit: oxide-code's
-/// own directories, the user's git and SSH config, plus where each protected name directly under
-/// `cwd` or a workspace root resolves, so a `.vscode` symlinked to `tools/vscode` protects its
-/// target too.
+/// The protected locations whose insides belong to a group wherever their names sit: the
+/// [`home_locations`], plus where each protected name directly under `cwd` or a workspace root
+/// resolves, so a `.vscode` symlinked to `tools/vscode` protects its target too.
 pub(super) fn protected_roots(cwd: &Path, workspace_roots: &[PathBuf]) -> Vec<(Shipped, PathBuf)> {
     let extra = workspace_roots.iter().filter(|root| *root != cwd);
     let bases: Vec<&Path> = std::iter::once(cwd)
@@ -293,21 +310,32 @@ pub(super) fn protected_roots(cwd: &Path, workspace_roots: &[PathBuf]) -> Vec<(S
     roots
 }
 
-/// oxide-code's own config, data, and state directories, the XDG git config, and the SSH client
-/// config and `authorized_keys`, each with its group and resolved like a target so a symlinked
-/// home or XDG base still compares equal.
+/// oxide-code's own config, data, and state directories, the XDG git directory and the git
+/// credential store, `~/.ssh`, whose `authorized_keys`, `rc`, and `environment` set what a login
+/// runs, and the cloud CLIs' config directories, whose credential helpers run commands. Each comes
+/// with its group, resolved like a target so a symlinked home or XDG base still compares equal.
 fn home_locations() -> Vec<(Shipped, PathBuf)> {
     let app_dirs = XdgBase::ALL
         .into_iter()
         .filter_map(app_dir)
         .map(|dir| (Shipped::Ox, dir));
-    let git = xdg_dir(XdgBase::Config).map(|dir| (Shipped::Git, dir.join("git").join("config")));
-    let ssh = std::env::home_dir().into_iter().flat_map(|home| {
-        ["authorized_keys", "config"].map(|name| (Shipped::Ssh, home.join(".ssh").join(name)))
+    let git_dir = xdg_dir(XdgBase::Config).map(|dir| (Shipped::Git, dir.join("git")));
+    let home = std::env::home_dir();
+    let in_home = home.iter().flat_map(|home| {
+        [
+            (Shipped::Git, ".git-credentials"),
+            (Shipped::Ssh, ".ssh"),
+            (Shipped::Cloud, ".aws"),
+            (Shipped::Cloud, ".azure"),
+            (Shipped::Cloud, ".config/gcloud"),
+            (Shipped::Cloud, ".docker"),
+            (Shipped::Cloud, ".kube"),
+        ]
+        .map(|(group, name)| (group, home.join(name)))
     });
     app_dirs
-        .chain(git)
-        .chain(ssh)
+        .chain(git_dir)
+        .chain(in_home)
         .map(|(group, path)| (group, resolve(&path).unwrap_or(path)))
         .collect()
 }
@@ -352,6 +380,7 @@ mod tests {
                 [
                     (HOME_VAR, Some(abs("/home/u"))),
                     ("XDG_DATA_HOME", Some(abs("/data"))),
+                    ("XDG_CONFIG_HOME", Some(abs("/config"))),
                 ],
                 || {
                     let patterns = |group: Shipped| {
@@ -363,6 +392,7 @@ mod tests {
                     };
                     let home = slash_separated(Path::new(&abs("/home/u")));
                     let data = slash_separated(Path::new(&abs("/data")));
+                    let config = slash_separated(Path::new(&abs("/config")));
                     assert_eq!(
                         patterns(Shipped::Devices),
                         (
@@ -391,15 +421,18 @@ mod tests {
                         patterns(Shipped::Credentials),
                         (
                             ShippedTier::Deny,
-                            vec![PermissionClass::Read; 2],
+                            vec![PermissionClass::Read; 4],
                             vec![
                                 format!("{data}/ox/credentials.json"),
                                 format!("{home}/.claude/.credentials.json"),
+                                format!("{home}/.git-credentials"),
+                                format!("{config}/git/credentials"),
                             ]
                         )
                     );
                     assert!(Shipped::Git.rules().unwrap().is_none());
                     assert!(Shipped::Rm.rules().unwrap().is_none());
+                    assert!(Shipped::Cloud.rules().unwrap().is_none());
                 },
             );
         }
@@ -431,7 +464,11 @@ mod tests {
                     format!("{home}/x/.."),
                 ] {
                     let patterns = temp_env::with_vars(
-                        [(HOME_VAR, Some(spelling.as_str())), ("XDG_DATA_HOME", None)],
+                        [
+                            (HOME_VAR, Some(spelling.as_str())),
+                            ("XDG_DATA_HOME", None),
+                            ("XDG_CONFIG_HOME", None),
+                        ],
                         || {
                             [Shipped::Ssh, Shipped::Credentials].map(|group| {
                                 let rules = group.rules().unwrap().unwrap();
@@ -449,6 +486,8 @@ mod tests {
                             vec![
                                 format!("{expected}/.local/share/ox/credentials.json"),
                                 format!("{expected}/.claude/.credentials.json"),
+                                format!("{expected}/.git-credentials"),
+                                format!("{expected}/.config/git/credentials"),
                             ],
                         ],
                         "{spelling}"
@@ -511,11 +550,25 @@ mod tests {
                 ("/repo/.zshenv", Shipped::Shell),
                 ("/repo/.zprofile", Shipped::Shell),
                 ("/repo/.zlogin", Shipped::Shell),
+                ("/repo/.zlogout", Shipped::Shell),
+                ("/repo/.bash_logout", Shipped::Shell),
+                ("/repo/.bash_aliases", Shipped::Shell),
+                ("/repo/.cshrc", Shipped::Shell),
+                ("/repo/.tcshrc", Shipped::Shell),
+                ("/repo/.kshrc", Shipped::Shell),
+                ("/repo/.mkshrc", Shipped::Shell),
+                ("/repo/.login", Shipped::Shell),
+                ("/repo/.logout", Shipped::Shell),
+                ("/home/u/.config/fish/config.fish", Shipped::Shell),
+                ("/home/u/.config/fish/conf.d/env.fish", Shipped::Shell),
+                ("/home/u/.config/fish/functions/ls.fish", Shipped::Shell),
                 ("/repo/.codex/config.toml", Shipped::Agents),
                 ("/repo/.claude/settings.json", Shipped::Agents),
                 ("/repo/.claude/settings.local.json", Shipped::Agents),
                 ("/repo/.claude/hooks/format.sh", Shipped::Agents),
                 ("/home/u/.claude/settings.json", Shipped::Agents),
+                ("/home/u/.claude.json", Shipped::Agents),
+                ("/repo/.mcp.json", Shipped::Agents),
                 ("/repo/sub/.OX/config.toml", Shipped::Ox),
                 ("/repo/.cargo/con\u{fb01}g.toml", Shipped::Cargo),
                 ("/repo/.v\u{17f}code/tasks.json", Shipped::Editors),
@@ -546,6 +599,8 @@ mod tests {
                 "/repo/.claude/plans/next.md",
                 "/repo/.claude/settings.json/notes.md",
                 "/repo/hooks/format.sh",
+                "/repo/fish/notes.md",
+                "/repo/docs/config.fish",
             ] {
                 assert_eq!(groups(raw), [], "{raw}");
             }
