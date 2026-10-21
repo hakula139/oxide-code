@@ -34,7 +34,7 @@ When either limit trips: take head or tail slice, write full output to temp file
 
 | Repo        | Cap location | Per-tool cap | System cap | Strategy          | Spillover         | Per-tool override |
 | ----------- | ------------ | ------------ | ---------- | ----------------- | ----------------- | ----------------- |
-| Claude Code | dispatcher   | 50 KB chars  | 100 K toks | tail-cut + spill  | yes (file path)   | yes               |
+| Claude Code | dispatcher   | 50,000 chars | 100 K toks | tail-cut + spill  | yes (file path)   | yes               |
 | Codex       | tool output  | none         | per model  | head-tail         | no                | exec, lower only  |
 | opencode    | dispatcher   | 50 KB        | none       | head/tail + spill | yes (file + hint) | no                |
-| oxide-code  | dispatcher   | per-tool     | 128 KB     | head-tail + spill | yes (file path)   | yes               |
+| oxide-code  | dispatcher   | per-tool     | 128 KiB    | head-tail + spill | yes (file path)   | yes               |

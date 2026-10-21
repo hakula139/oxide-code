@@ -736,7 +736,7 @@ mod tests {
 
             assert_eq!(
                 err,
-                "File is too large (10.0 MB, max 10 MB). Use the bash tool to read large files."
+                "File is too large (10.0 MiB, max 10 MiB). Use the bash tool to read large files."
             );
         }
 

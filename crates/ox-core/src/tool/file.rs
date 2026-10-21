@@ -9,6 +9,7 @@ use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 use super::ToolCtx;
 use crate::file_tracker::{TrackableFileError, validate_trackable_file};
 use crate::util::path::lexical_normalize;
+use crate::util::text::format_size;
 
 // ── Tracker Keys ──
 
@@ -64,22 +65,12 @@ pub(super) fn validate_file_target(
             "{path} is not a regular file (fifo, socket, or device). Refusing to {verb_name}.",
         )),
         Err(TrackableFileError::TooLarge { size, max }) => {
-            let mb = bytes_to_mb(size);
-            let limit_mb = max / (1024 * 1024);
+            let (size, max) = (format_size(size), format_size(max));
             Err(format!(
-                "File is too large ({mb:.1} MB, max {limit_mb} MB). \
-                 Use the bash tool to {verb_name} large files.",
+                "File is too large ({size}, max {max}). Use the bash tool to {verb_name} large files.",
             ))
         }
     }
-}
-
-#[expect(
-    clippy::cast_precision_loss,
-    reason = "MB display loses precision only above 2^53 bytes, far beyond any file size cap"
-)]
-pub(super) fn bytes_to_mb(bytes: u64) -> f64 {
-    bytes as f64 / (1024.0 * 1024.0)
 }
 
 // ── Binary Detection ──
