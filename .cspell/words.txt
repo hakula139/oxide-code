@@ -120,6 +120,7 @@ taplo
 tcsh
 tengu
 termio
+textconv
 tildified
 tildifies
 tildify

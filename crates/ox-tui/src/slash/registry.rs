@@ -2,6 +2,8 @@
 
 use std::borrow::Cow;
 
+use futures::future::BoxFuture;
+
 use ox_core::command;
 
 use super::archive::{ArchiveCmd, UnarchiveCmd};
@@ -10,7 +12,7 @@ use super::compact::CompactCmd;
 use super::config::ConfigCmd;
 use super::context::SlashContext;
 use super::delete::DeleteCmd;
-use super::diff::DiffCmd;
+use super::diff::{DiffCmd, WorkingTreeDiff};
 use super::effort::EffortCmd;
 use super::help::HelpCmd;
 use super::init::InitCmd;
@@ -32,18 +34,26 @@ pub(crate) enum SlashOutcome {
     Modal(Box<dyn Modal>),
     /// Prints a system message into chat.
     SystemMessage(String),
-    /// Prints a unified git diff into chat.
-    GitDiff(String),
+    /// Runs off the event loop so slow I/O does not stall input or rendering, then prints its
+    /// result into chat. A session switch drops it unfinished.
+    Background(BoxFuture<'static, Result<ChatOutput, String>>),
 }
 
-/// Hand-rolled because `Box<dyn Modal>` can't derive `Debug` without forcing every impl to.
+/// What a [`SlashOutcome::Background`] command prints when it finishes.
+#[derive(Debug)]
+pub(crate) enum ChatOutput {
+    SystemMessage(String),
+    GitDiff(WorkingTreeDiff),
+}
+
+/// Hand-rolled because `Box<dyn Modal>` and futures can't derive `Debug`.
 impl std::fmt::Debug for SlashOutcome {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Forward(action) => f.debug_tuple("Forward").field(action).finish(),
             Self::Modal(_) => f.write_str("Modal(<modal>)"),
             Self::SystemMessage(text) => f.debug_tuple("SystemMessage").field(text).finish(),
-            Self::GitDiff(diff) => f.debug_tuple("GitDiff").field(diff).finish(),
+            Self::Background(_) => f.write_str("Background(<task>)"),
         }
     }
 }
@@ -68,6 +78,13 @@ impl SlashOutcome {
         match self {
             Self::SystemMessage(text) => text,
             other => panic!("expected SystemMessage, got {other:?}"),
+        }
+    }
+
+    pub(super) fn into_background(self) -> BoxFuture<'static, Result<ChatOutput, String>> {
+        match self {
+            Self::Background(task) => task,
+            other => panic!("expected Background, got {other:?}"),
         }
     }
 }
@@ -227,6 +244,10 @@ mod tests {
             SlashOutcome::SystemMessage("done".to_owned())
         }
 
+        fn background() -> SlashOutcome {
+            SlashOutcome::Background(Box::pin(async { Err("never run".to_owned()) }))
+        }
+
         #[test]
         fn debug_names_each_variant() {
             let modal = SlashOutcome::Modal(Box::new(ScriptedModal::new(ModalAction::Cancelled)));
@@ -236,10 +257,7 @@ mod tests {
             );
             assert_eq!(format!("{modal:?}"), "Modal(<modal>)");
             assert_eq!(format!("{:?}", done()), r#"SystemMessage("done")"#);
-            assert_eq!(
-                format!("{:?}", SlashOutcome::GitDiff("+x".to_owned())),
-                r#"GitDiff("+x")"#
-            );
+            assert_eq!(format!("{:?}", background()), "Background(<task>)");
         }
 
         mod into_forward {
@@ -256,9 +274,9 @@ mod tests {
             use super::*;
 
             #[test]
-            #[should_panic(expected = r#"expected Modal, got GitDiff("+x")"#)]
+            #[should_panic(expected = "expected Modal, got Background(<task>)")]
             fn names_the_variant_it_got() {
-                SlashOutcome::GitDiff("+x".to_owned()).into_modal();
+                background().into_modal();
             }
         }
 
@@ -269,6 +287,16 @@ mod tests {
             #[should_panic(expected = "expected SystemMessage, got Forward(Op(Clear))")]
             fn names_the_variant_it_got() {
                 SlashOutcome::Forward(Action::Op(Op::Clear)).into_system_message();
+            }
+        }
+
+        mod into_background {
+            use super::*;
+
+            #[test]
+            #[should_panic(expected = r#"expected Background, got SystemMessage("done")"#)]
+            fn names_the_variant_it_got() {
+                _ = done().into_background();
             }
         }
     }

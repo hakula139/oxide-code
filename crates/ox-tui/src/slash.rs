@@ -27,12 +27,12 @@ mod status;
 mod theme;
 
 pub(crate) use context::{LiveSessionInfo, SlashContext};
-#[cfg(test)]
-pub(crate) use diff::truncate_for_display;
-pub(crate) use diff::{TRUNCATION_FOOTER, UNTRACKED_HEADING};
+pub(crate) use diff::{DiffRow, WorkingTreeDiff};
 pub(crate) use matcher::MatchedCommand;
-pub(crate) use registry::{ArgCompletion, SlashKind, SlashOutcome};
+pub(crate) use registry::{ArgCompletion, ChatOutput, SlashKind, SlashOutcome};
 pub use resume::ResumePicker;
+
+use futures::TryFutureExt;
 
 use ox_core::command::Parsed;
 
@@ -62,7 +62,7 @@ pub(crate) fn echoes_input(parsed: &Parsed) -> bool {
 }
 
 /// Resolves and runs `parsed` against the built-in registry. `Err` carries the chat-ready
-/// message for an unknown or failed command.
+/// message for an unknown or failed command, as does a failed [`SlashOutcome::Background`] task.
 pub(crate) fn dispatch(parsed: &Parsed, ctx: &SlashContext<'_>) -> Result<SlashOutcome, String> {
     dispatch_with(registry::BUILT_INS, parsed, ctx)
 }
@@ -81,8 +81,15 @@ fn dispatch_with(
             available = format_available(commands),
         ));
     };
-    cmd.execute(&parsed.args, ctx)
-        .map_err(|msg| parsed.named_error(&msg))
+    match cmd.execute(&parsed.args, ctx) {
+        Ok(SlashOutcome::Background(task)) => {
+            let parsed = parsed.clone();
+            Ok(SlashOutcome::Background(Box::pin(
+                task.map_err(move |msg| parsed.named_error(&msg)),
+            )))
+        }
+        outcome => outcome.map_err(|msg| parsed.named_error(&msg)),
+    }
 }
 
 fn format_available(commands: &[&dyn registry::SlashCommand]) -> String {
@@ -130,6 +137,8 @@ pub(crate) mod testing {
 
 #[cfg(test)]
 mod tests {
+    use ox_core::util::git::testing::with_isolated_git_env_async;
+
     use super::testing::test_session_info;
     use super::*;
     use crate::slash::registry::testing::FakeCmd;
@@ -180,6 +189,23 @@ mod tests {
         #[test]
         fn known_command_returns_its_outcome() {
             run_dispatch("help").unwrap().into_modal();
+        }
+
+        #[tokio::test]
+        async fn background_failure_prefixes_the_command_name() {
+            let dir = tempfile::tempdir().unwrap();
+            let mut info = test_session_info();
+            info.project_root = dir.path().to_owned();
+
+            let task = dispatch(&parsed("diff", ""), &SlashContext::new(&info, None))
+                .unwrap()
+                .into_background();
+            let msg = with_isolated_git_env_async(task).await.unwrap_err();
+
+            assert!(
+                msg.starts_with("/diff: Failed to collect working-tree changes: "),
+                "{msg}",
+            );
         }
 
         #[test]

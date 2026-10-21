@@ -13,7 +13,7 @@ After `/effort`, `/init`, `/mode`, `/model`, or `/theme`, type a space to switch
 | `/compact [<instructions>]`                 | Compress the conversation into a summary. Trailing text steers the focus.                                                                     |
 | `/config`                                   | Open the resolved configuration, where each value came from, and the loaded config files.                                                     |
 | `/delete <id-prefix>`                       | Delete a saved session by ID prefix, after a Y / N confirmation.                                                                              |
-| `/diff`                                     | Show uncommitted git changes and untracked files in chat, capped at 64 KB.                                                                    |
+| `/diff`                                     | Show the repository's uncommitted git changes and untracked files in chat, capped at 64 KiB.                                                  |
 | `/effort [<level>]`                         | Open the slider, or set the level directly (`low`, `medium`, `high`, `xhigh`, `max`).                                                         |
 | `/help`                                     | Open a read-only list of available commands.                                                                                                  |
 | `/init [<file>]`                            | Propose edits to an existing `AGENTS.md` or `CLAUDE.md` as a diff to confirm. Without either, pick or name the one to create.                 |

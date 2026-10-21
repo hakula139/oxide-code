@@ -421,13 +421,14 @@ impl App {
         self.apply_slash_outcome(outcome)
     }
 
-    /// Shows a slash command's chat output or modal, returning a forwarded action unapplied.
+    /// Shows a slash command's chat output or modal, or starts its background task, returning a
+    /// forwarded action unapplied. Must run inside a tokio runtime.
     fn apply_slash_outcome(&mut self, outcome: Result<SlashOutcome, String>) -> Option<Action> {
         match outcome {
             Ok(SlashOutcome::Forward(action)) => return Some(action),
             Ok(SlashOutcome::Modal(modal)) => self.modals.push(modal),
             Ok(SlashOutcome::SystemMessage(text)) => self.chat.push_system_message(text),
-            Ok(SlashOutcome::GitDiff(diff)) => self.chat.push_git_diff(diff),
+            Ok(SlashOutcome::Background(task)) => _ = self.slash_tasks.spawn(task),
             Err(msg) => self.chat.push_error(&msg),
         }
         None
@@ -450,7 +451,6 @@ mod tests {
     use std::time::Duration;
 
     use base64::Engine as _;
-    use indoc::indoc;
     use ratatui::buffer::CellWidth;
     use ratatui::layout::Rect;
     use ratatui::style::Color;
@@ -470,6 +470,7 @@ mod tests {
     };
     use crate::components::status::StatusHyperlink;
     use crate::modal::testing::ScriptedModal;
+    use crate::slash::ChatOutput;
     use crate::testing::{key_event, mouse_event, mouse_event_at};
     use crate::theme::{ThemeOverrides, builtin, resolve_theme};
 
@@ -2053,14 +2054,6 @@ mod tests {
 
         #[test]
         fn shows_output_and_hands_back_forwards_whether_idle_or_busy() {
-            let diff = indoc! {"
-                diff --git a/src/lib.rs b/src/lib.rs
-                --- a/src/lib.rs
-                +++ b/src/lib.rs
-                @@ -1 +1 @@
-                -old line
-                +new line
-            "};
             for busy in [false, true] {
                 let (mut app, mut rx, _event_tx) = test_app(None);
                 if busy {
@@ -2070,13 +2063,6 @@ mod tests {
                 let clean = SlashOutcome::SystemMessage("Working tree clean".to_owned());
                 assert_eq!(app.apply_slash_outcome(Ok(clean)), None);
                 assert_eq!(app.chat.last_system_text(), Some("Working tree clean"));
-
-                assert_eq!(
-                    app.apply_slash_outcome(Ok(SlashOutcome::GitDiff(diff.to_owned()))),
-                    None
-                );
-                let text = rendered_text(&mut app, 60, 24);
-                assert!(text.contains("new line"), "busy = {busy}: {text}");
 
                 assert_eq!(app.apply_slash_outcome(Err("/diff: boom".to_owned())), None);
                 assert_eq!(app.chat.last_error_text(), Some("/diff: boom"));
@@ -2096,6 +2082,23 @@ mod tests {
                     "the caller routes a forwarded action"
                 );
             }
+        }
+
+        #[tokio::test]
+        async fn runs_a_background_task_and_prints_nothing_until_it_finishes() {
+            let (mut app, _rx, _event_tx) = test_app(None);
+            let (tx, rx) = tokio::sync::oneshot::channel::<String>();
+            let task = SlashOutcome::Background(Box::pin(async move {
+                Ok(ChatOutput::SystemMessage(rx.await.unwrap()))
+            }));
+
+            assert_eq!(app.apply_slash_outcome(Ok(task)), None);
+            assert_eq!(app.chat.entry_count(), 0);
+
+            tx.send("done".to_owned()).unwrap();
+            let finished = app.slash_tasks.join_next().await.expect("the task runs");
+            app.apply_slash_task(finished);
+            assert_eq!(app.chat.last_system_text(), Some("done"));
         }
     }
 }
