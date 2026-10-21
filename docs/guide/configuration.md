@@ -329,7 +329,7 @@ Each request carries one credential. oxide-code uses the first source that is se
 
 The environment variables and the stored logins keep credentials out of config files. An `api_key` in `~/.config/ox/config.toml` works but sits on disk in plaintext, and a project config cannot set it.
 
-Commands the assistant runs with `bash` cannot access `ANTHROPIC_AUTH_TOKEN`, `ANTHROPIC_API_KEY`, `CLAUDE_CODE_OAUTH_TOKEN`, or `ANTHROPIC_CUSTOM_HEADERS`, so prompt injection cannot make them print your credential. A script that needs its own Anthropic key, such as a test suite that calls the API, must read it from another variable or a file.
+Commands the assistant runs with `bash` cannot access `ANTHROPIC_AUTH_TOKEN`, `ANTHROPIC_API_KEY`, `CLAUDE_CODE_OAUTH_TOKEN`, or `ANTHROPIC_CUSTOM_HEADERS`, so no command can print your credential from the environment. A script that needs its own Anthropic key, such as a test suite that calls the API, must read it from another variable or a file.
 
 ## LLM Gateways
 
