@@ -29,6 +29,8 @@ use crate::theme::Theme;
 const MAX_VISIBLE_LINES: u16 = 6;
 const BORDER_ROWS: u16 = 2;
 
+// ── InputOutcome ──
+
 /// Result of routing one terminal event through [`InputArea::handle_event`].
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) enum InputOutcome {
@@ -62,13 +64,12 @@ impl InputArea {
         textarea.set_cursor_line_style(Style::default());
         textarea.set_style(theme.text());
         textarea.set_wrap_mode(WrapMode::WordOrGlyph);
-        textarea.set_block(Block::default());
 
         Self {
             theme: theme.clone(),
             textarea,
-            enabled: true,
             popup: SlashPopup::new(theme),
+            enabled: true,
             rendered_width: Cell::new(0),
             visual_lines: Cell::new(None),
         }
@@ -335,17 +336,16 @@ impl InputArea {
         self.popup.set_state(state.as_ref());
     }
 
-    /// Dim placeholder painted at the cursor in arg-mode with an empty prefix.
-    fn ghost_text(&self) -> Option<String> {
+    /// The command's usage, as `/help` lists it, painted dim at the cursor until an argument
+    /// starts.
+    fn ghost_text(&self) -> Option<&'static str> {
         let [single] = self.textarea.lines() else {
             return None;
         };
-        let state = popup_state(single)?;
-        let usage = match &state {
-            PopupState::Arg { name, .. } => arg_placeholder_for(name),
-            PopupState::Name(_) => None,
-        };
-        ghost_text_from_state(&state, usage)
+        match popup_state(single)? {
+            PopupState::Arg { name, prefix: "" } => arg_placeholder_for(name),
+            _ => None,
+        }
     }
 
     /// Screen rows in the textarea's own wrap layout at its last-rendered width.
@@ -374,35 +374,6 @@ impl InputArea {
     }
 }
 
-// ── Helpers ──
-
-/// Fires only in `Arg` mode with an empty prefix and a `usage()` to surface.
-fn ghost_text_from_state(state: &PopupState<'_>, usage: Option<&str>) -> Option<String> {
-    let PopupState::Arg { prefix, .. } = state else {
-        return None;
-    };
-    if !prefix.is_empty() {
-        return None;
-    }
-    Some(normalize_placeholder(usage?))
-}
-
-/// Normalizes a `usage()` syntax fragment to a single bracketed token. Strips one optional layer
-/// each of `[...]` and `<...>` so `[<id>]`, `<id>`, and `[id]` all render as `[id]`.
-fn normalize_placeholder(usage: &str) -> String {
-    let inner = usage.trim();
-    let inner = inner
-        .strip_prefix('[')
-        .and_then(|s| s.strip_suffix(']'))
-        .unwrap_or(inner)
-        .trim();
-    let inner = inner
-        .strip_prefix('<')
-        .and_then(|s| s.strip_suffix('>'))
-        .unwrap_or(inner);
-    format!("[{inner}]")
-}
-
 #[cfg(test)]
 mod tests {
     use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
@@ -422,10 +393,9 @@ mod tests {
 
     fn type_text(input: &mut InputArea, text: &str) {
         for ch in text.chars() {
-            input.textarea.input(Event::Key(KeyEvent::new(
-                KeyCode::Char(ch),
-                KeyModifiers::NONE,
-            )));
+            input
+                .textarea
+                .input(key(KeyCode::Char(ch), KeyModifiers::NONE));
         }
     }
 
@@ -524,10 +494,7 @@ mod tests {
             // Ctrl+D mid-prompt keeps the typed text, as in bash, zsh, and Codex. Typing reaches
             // the buffer while busy too, so the same holds in both states.
             let mut input = test_input();
-            input.textarea.input(Event::Key(KeyEvent::new(
-                KeyCode::Char('h'),
-                KeyModifiers::NONE,
-            )));
+            type_text(&mut input, "h");
             let idle = input.handle_event(&key(KeyCode::Char('d'), KeyModifiers::CONTROL));
             assert_eq!(idle, InputOutcome::Consumed);
             assert_eq!(input.textarea.lines(), vec!["h"]);
@@ -723,10 +690,7 @@ mod tests {
         #[test]
         fn shift_enter_inserts_newline() {
             let mut input = test_input();
-            input.textarea.input(Event::Key(KeyEvent::new(
-                KeyCode::Char('a'),
-                KeyModifiers::NONE,
-            )));
+            type_text(&mut input, "a");
 
             let outcome = input.handle_event(&key(KeyCode::Enter, KeyModifiers::SHIFT));
             assert_eq!(outcome, InputOutcome::Consumed);
@@ -737,10 +701,7 @@ mod tests {
         fn alt_enter_inserts_newline() {
             // VS Code and Cursor send Shift+Enter as `\x1b\r`, which crossterm parses as Alt+Enter.
             let mut input = test_input();
-            input.textarea.input(Event::Key(KeyEvent::new(
-                KeyCode::Char('a'),
-                KeyModifiers::NONE,
-            )));
+            type_text(&mut input, "a");
 
             let outcome = input.handle_event(&key(KeyCode::Enter, KeyModifiers::ALT));
             assert_eq!(outcome, InputOutcome::Consumed);
@@ -750,14 +711,7 @@ mod tests {
         #[test]
         fn enter_submits_nonempty() {
             let mut input = test_input();
-            input.textarea.input(Event::Key(KeyEvent::new(
-                KeyCode::Char('h'),
-                KeyModifiers::NONE,
-            )));
-            input.textarea.input(Event::Key(KeyEvent::new(
-                KeyCode::Char('i'),
-                KeyModifiers::NONE,
-            )));
+            type_text(&mut input, "hi");
 
             let outcome = input.handle_event(&key(KeyCode::Enter, KeyModifiers::NONE));
             assert_eq!(
@@ -972,7 +926,7 @@ mod tests {
             let buf = terminal.backend().buffer();
             let row: String = (0..60).map(|x| buf[(x, 1)].symbol()).collect();
             assert!(
-                row.contains("/model  [id]"),
+                row.contains("/model  [<id>]"),
                 "ghost-text must sit one column past the cursor: {row:?}",
             );
 
@@ -993,7 +947,7 @@ mod tests {
             let backend = render_to_backend(&input, 60, 3);
             let rendered = format!("{backend}");
             assert!(
-                !rendered.contains("[id]"),
+                !rendered.contains("[<id>]"),
                 "ghost-text must hide once prefix is typed: {rendered}",
             );
         }
@@ -1047,11 +1001,22 @@ mod tests {
         use super::*;
 
         #[test]
-        fn suppresses_in_name_mode() {
-            let mut input = test_input();
-            type_text(&mut input, "/mod");
-            input.refresh_popup();
-            assert_eq!(input.ghost_text(), None);
+        fn shows_the_declared_usage_until_an_argument_starts() {
+            let cases = [
+                ("/model ", Some("[<id>]")),
+                ("/unarchive ", Some("<id-prefix>")),
+                ("/model claude-", None),
+                ("/mod", None),
+                ("/help ", None),
+                ("hello ", None),
+            ];
+
+            for (text, expected) in cases {
+                let mut input = test_input();
+                type_text(&mut input, text);
+
+                assert_eq!(input.ghost_text(), expected, "{text:?}");
+            }
         }
     }
 
@@ -1122,10 +1087,7 @@ mod tests {
         #[test]
         fn clears_textarea() {
             let mut input = test_input();
-            input.textarea.input(Event::Key(KeyEvent::new(
-                KeyCode::Char('x'),
-                KeyModifiers::NONE,
-            )));
+            type_text(&mut input, "x");
 
             input.handle_event(&key(KeyCode::Enter, KeyModifiers::NONE));
             assert_eq!(input.textarea.lines(), vec![""]);
@@ -1160,67 +1122,6 @@ mod tests {
                 outcome,
                 InputOutcome::Action(Action::Submit("    fn main() {}\n  done".to_owned())),
             );
-        }
-    }
-
-    mod ghost_text_from_state {
-        use super::*;
-
-        #[test]
-        fn arg_with_empty_prefix_and_usage_renders_token() {
-            let state = PopupState::Arg {
-                name: "model",
-                prefix: "",
-            };
-            assert_eq!(
-                ghost_text_from_state(&state, Some("[<id>]")),
-                Some("[id]".to_owned()),
-            );
-        }
-
-        #[test]
-        fn non_empty_prefix_is_absent() {
-            let state = PopupState::Arg {
-                name: "model",
-                prefix: "claude-",
-            };
-            assert_eq!(ghost_text_from_state(&state, Some("[<id>]")), None);
-        }
-
-        #[test]
-        fn arg_without_usage_is_absent() {
-            let state = PopupState::Arg {
-                name: "init",
-                prefix: "",
-            };
-            assert_eq!(ghost_text_from_state(&state, None), None);
-        }
-
-        #[test]
-        fn name_mode_is_absent_even_with_usage() {
-            let state = PopupState::Name("mo");
-            assert_eq!(ghost_text_from_state(&state, Some("[<id>]")), None);
-        }
-    }
-
-    mod normalize_placeholder {
-        use super::*;
-
-        #[test]
-        fn strips_outer_brackets_and_inner_angles() {
-            assert_eq!(normalize_placeholder("[<id>]"), "[id]");
-        }
-
-        #[test]
-        fn handles_missing_layers() {
-            assert_eq!(normalize_placeholder("<level>"), "[level]");
-            assert_eq!(normalize_placeholder("[name]"), "[name]");
-            assert_eq!(normalize_placeholder("topic"), "[topic]");
-        }
-
-        #[test]
-        fn trims_whitespace_inside_brackets() {
-            assert_eq!(normalize_placeholder("[ <id> ]"), "[id]");
         }
     }
 }

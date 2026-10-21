@@ -17,22 +17,34 @@ impl Parsed {
 
 /// `None` for plain prompts, `//` escape, bare `/`, or names with disallowed chars.
 pub fn parse_slash(input: &str) -> Option<Parsed> {
-    let rest = input.trim_start().strip_prefix('/')?;
-    if rest.is_empty() || rest.starts_with('/') {
-        return None;
-    }
-    let (name, args) = rest.split_once(char::is_whitespace).unwrap_or((rest, ""));
-    if name.is_empty() || !name.chars().all(is_name_char) {
+    let (name, args) = split_slash(input)?;
+    if name.is_empty() {
         return None;
     }
     Some(Parsed {
         name: name.to_owned(),
-        args: args.trim().to_owned(),
+        args: args.unwrap_or_default().trim_end().to_owned(),
     })
 }
 
+/// Splits a slash-command line into its name and, once whitespace follows the name, the text after
+/// that whitespace with its start trimmed. `None` for plain prompts, the `//` escape, and names
+/// with disallowed chars. The name may be empty, as for a bare `/`, which a caller completing a
+/// name accepts and [`parse_slash`] rejects.
+pub fn split_slash(input: &str) -> Option<(&str, Option<&str>)> {
+    let rest = input.trim_start().strip_prefix('/')?;
+    if rest.starts_with('/') {
+        return None;
+    }
+    let (name, args) = match rest.split_once(char::is_whitespace) {
+        Some((name, args)) => (name, Some(args.trim_start())),
+        None => (rest, None),
+    };
+    name.chars().all(is_name_char).then_some((name, args))
+}
+
 /// Returns whether `c` may appear in a command name.
-pub fn is_name_char(c: char) -> bool {
+fn is_name_char(c: char) -> bool {
     c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | ':' | '.')
 }
 
@@ -114,6 +126,23 @@ mod tests {
             assert!(parse_slash("/foo🦀").is_none());
             assert!(parse_slash("/foo!").is_none());
             assert!(parse_slash("/foo,bar").is_none());
+        }
+    }
+
+    mod split_slash {
+        use super::*;
+
+        #[test]
+        fn tells_a_bare_name_from_one_followed_by_whitespace() {
+            assert_eq!(split_slash("/help"), Some(("help", None)));
+            assert_eq!(split_slash("/help "), Some(("help", Some(""))));
+            assert_eq!(split_slash("/model  opus "), Some(("model", Some("opus "))));
+        }
+
+        #[test]
+        fn keeps_an_empty_name_for_the_caller_to_judge() {
+            assert_eq!(split_slash("/"), Some(("", None)));
+            assert_eq!(split_slash("/ x"), Some(("", Some("x"))));
         }
     }
 

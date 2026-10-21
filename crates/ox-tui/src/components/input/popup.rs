@@ -17,17 +17,16 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph};
 use unicode_width::UnicodeWidthStr;
 
-use ox_core::command::is_name_char;
+use ox_core::command::split_slash;
 use ox_core::util::text::truncate_to_width;
 
+use crate::modal::chrome::COLUMN_GAP;
 use crate::saturating_u16;
 use crate::slash::{complete_arg_for, filter_built_ins};
 use crate::theme::Theme;
 use crate::viewport::{wrap_next, wrap_prev};
 
 const MAX_VISIBLE_ROWS: usize = 8;
-
-const COLUMN_GAP: usize = 2;
 
 /// Rows of chrome above the row list. One dim horizontal rule frames the popup as a separate
 /// overlay so it doesn't bleed into whatever sits above (welcome, chat, preview).
@@ -249,26 +248,14 @@ impl PopupList {
 }
 
 /// Classifies a single-line input as a command name being typed or an argument of the named
-/// command, by the name rules of [`parse_slash`](ox_core::command::parse_slash). An empty `prefix`
-/// in `Arg` means the user typed `/cmd ` and has not started the argument yet.
+/// command, as [`split_slash`] splits it. A bare `/` is a name being typed, which lists every
+/// command. An empty `prefix` in `Arg` means the user typed `/cmd ` and has not started the
+/// argument yet.
 pub(super) fn popup_state(buffer: &str) -> Option<PopupState<'_>> {
-    let rest = buffer.trim_start().strip_prefix('/')?;
-    if rest.starts_with('/') {
-        return None;
+    match split_slash(buffer)? {
+        (name, None) => Some(PopupState::Name(name)),
+        (name, Some(prefix)) => (!name.is_empty()).then_some(PopupState::Arg { name, prefix }),
     }
-    let Some((name, after)) = rest.split_once(char::is_whitespace) else {
-        return rest
-            .chars()
-            .all(is_name_char)
-            .then_some(PopupState::Name(rest));
-    };
-    if name.is_empty() || !name.chars().all(is_name_char) {
-        return None;
-    }
-    Some(PopupState::Arg {
-        name,
-        prefix: after.trim_start(),
-    })
 }
 
 #[cfg(test)]
@@ -279,12 +266,8 @@ mod tests {
 
     use super::*;
 
-    fn theme() -> Theme {
-        Theme::default()
-    }
-
     fn popup_with_state(state: Option<&PopupState<'_>>) -> SlashPopup {
-        let mut p = SlashPopup::new(&theme());
+        let mut p = SlashPopup::new(&Theme::default());
         p.set_state(state);
         p
     }
@@ -303,7 +286,7 @@ mod tests {
 
     fn long_popup(n: usize) -> SlashPopup {
         // Hand-rolled list keeps the test independent of registry growth.
-        let mut p = SlashPopup::new(&theme());
+        let mut p = SlashPopup::new(&Theme::default());
         p.list = Some(PopupList {
             mode: PopupMode::Name,
             rows: (0..n)
@@ -580,7 +563,7 @@ mod tests {
             // selected from unselected. Pin the bold-vs-dim contrast on the rendered cells.
             use ratatui::style::Modifier;
 
-            let theme = theme();
+            let theme = Theme::default();
             let mut popup = name_popup("");
             popup.select_next();
             let backend = render_to_backend(&popup, 60);
