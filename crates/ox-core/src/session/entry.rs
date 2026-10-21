@@ -15,7 +15,7 @@ use crate::tool::ToolMetadata;
 use crate::tool::tasks::Task;
 
 /// On-disk schema version stamped into every `Header`.
-pub(crate) const CURRENT_VERSION: u32 = 1;
+pub(super) const CURRENT_VERSION: u32 = 1;
 
 /// The first line of every session file, identifying the session and where it started.
 #[derive(Debug, Clone, Serialize, Deserialize)]

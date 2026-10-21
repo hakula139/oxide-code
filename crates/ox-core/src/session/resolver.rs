@@ -140,7 +140,7 @@ pub enum ResolveError {
 
 /// Matches `prefix` against session IDs other than `live_id`, first in the current project, then
 /// in every project.
-pub(crate) fn resolve_prefix_to_info(
+fn resolve_prefix_to_info(
     store: &SessionStore,
     prefix: &str,
     live_id: Option<&str>,

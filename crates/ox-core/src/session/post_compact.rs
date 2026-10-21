@@ -84,7 +84,7 @@ fn shell_reminder(shells: &[BackgroundShell]) -> Option<String> {
 
 /// Removes the synthetic summary block from a resumed post-compact root message, returning whether
 /// it was there.
-pub(crate) fn strip_synthetic_post_compact_prefix(message: &mut Message) -> bool {
+pub(super) fn strip_synthetic_post_compact_prefix(message: &mut Message) -> bool {
     if message.role != Role::User {
         return false;
     }

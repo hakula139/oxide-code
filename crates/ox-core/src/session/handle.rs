@@ -74,7 +74,7 @@ impl SharedState {
         surface_once(&self.persistence_stop_surfaced)
     }
 
-    pub(super) fn surface_first_actor_gone(&self) -> bool {
+    fn surface_first_actor_gone(&self) -> bool {
         surface_once(&self.actor_gone_surfaced)
     }
 
@@ -86,7 +86,7 @@ impl SharedState {
         self.manual_title_set.load(Ordering::Acquire)
     }
 
-    pub(super) fn last_flush_failure(&self) -> Option<String> {
+    fn last_flush_failure(&self) -> Option<String> {
         lock_or_recover(&self.last_flush_failure, "last_flush_failure").clone()
     }
 }
@@ -200,7 +200,7 @@ impl SessionHandle {
     }
 
     /// Appends an AI-generated session title (supersedes the first-prompt title).
-    pub(crate) async fn append_ai_title(&self, title: String) -> Outcome {
+    pub(super) async fn append_ai_title(&self, title: String) -> Outcome {
         let (ack, rx) = oneshot::channel();
         self.dispatch_outcome(SessionCmd::AppendAiTitle { title, ack }, rx)
             .await
@@ -454,7 +454,7 @@ pub(crate) async fn roll_into(
 
 /// Resumes the session file at `path`: loads, sanitizes, opens it for append, unarchives it, and
 /// spawns the actor.
-pub(crate) fn resume_from_path(store: &SessionStore, path: &Path) -> Result<ResumedSession> {
+pub(super) fn resume_from_path(store: &SessionStore, path: &Path) -> Result<ResumedSession> {
     resume_loaded(store, path, load_session_data_from_path(path)?)
 }
 

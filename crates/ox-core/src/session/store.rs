@@ -125,7 +125,7 @@ impl SessionStore {
 // ── Path-Keyed Primitives ──
 
 /// Opens an existing session file in append mode by explicit path.
-pub(crate) fn open_append_at(path: &Path) -> Result<SessionWriter> {
+pub(super) fn open_append_at(path: &Path) -> Result<SessionWriter> {
     Ok(SessionWriter {
         path: path.to_owned(),
         file: Some(open_append_file(path)?),
@@ -134,7 +134,7 @@ pub(crate) fn open_append_at(path: &Path) -> Result<SessionWriter> {
 
 /// Loads session data from an explicit path with DAG-based chain resolution. The file must begin
 /// with a header in a format version this build reads.
-pub(crate) fn load_session_data_from_path(path: &Path) -> Result<SessionData> {
+pub(super) fn load_session_data_from_path(path: &Path) -> Result<SessionData> {
     let file = File::open(path).with_context(|| format!("failed to open {}", path.display()))?;
     let mut lines = JsonlLines::new(BufReader::new(file));
     let Header {
@@ -325,7 +325,7 @@ impl SessionDataBuilder {
 }
 
 /// Reads just the `session_id` from a session file's header line.
-pub(crate) fn read_session_id_from_path(path: &Path) -> Result<String> {
+pub(super) fn read_session_id_from_path(path: &Path) -> Result<String> {
     let file = File::open(path).with_context(|| format!("failed to open {}", path.display()))?;
     let header = read_header(&mut JsonlLines::new(BufReader::new(file)), path)?;
     Ok(header.session_id)
@@ -359,7 +359,7 @@ pub(crate) fn delete_at(path: &Path) -> Result<()> {
 
 /// Sets the archive state of the session file at `path`. The file keeps its mtime, since listings
 /// order sessions by activity and toggling the state is not activity.
-pub(crate) fn set_archived_at(path: &Path, archived: bool) -> Result<()> {
+pub(super) fn set_archived_at(path: &Path, archived: bool) -> Result<()> {
     let mut writer = open_append_at(path)?;
     let modified = fs::metadata(path)
         .and_then(|meta| meta.modified())
