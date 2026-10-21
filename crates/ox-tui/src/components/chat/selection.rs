@@ -32,7 +32,7 @@ const WORD_DELIMITERS: &[&str] = &[
 // ── Selection ──
 
 /// What one press selects, by how many quick presses landed on the same cell.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Unit {
     Cell,
     Word,
@@ -47,7 +47,7 @@ struct Point {
 }
 
 /// Cells from `start` to `end`, each a stack row and column, with `end` exclusive.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct SelectionSpan {
     start: (usize, u16),
     end: (usize, u16),
