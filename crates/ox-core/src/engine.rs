@@ -201,8 +201,7 @@ impl Engine {
             tasks,
             file_snapshots,
         } = transcript;
-        let file_tracker = Arc::new(FileTracker::default());
-        let drifted = file_tracker.restore_verified(file_snapshots);
+        let (file_tracker, drifted) = FileTracker::restored(file_snapshots);
         let prompt_unrecorded = context.is_none();
         let workspace = Arc::new(config.workspace.clone());
         let (prompt, instruction_warnings) =
@@ -226,7 +225,7 @@ impl Engine {
             prompt_unrecorded,
             startup_notices: config.notices(),
             instruction_warnings,
-            file_tracker,
+            file_tracker: Arc::new(file_tracker),
             drifted,
             shells,
             policy: config.permission.clone(),
@@ -692,7 +691,9 @@ impl Engine {
         } = transcript;
         self.client
             .set_session_id(self.session.session_id().to_owned());
-        self.drifted = self.file_tracker.restore_verified(file_snapshots);
+        let (file_tracker, drifted) = FileTracker::restored(file_snapshots);
+        self.file_tracker = Arc::new(file_tracker);
+        self.drifted = drifted;
         self.messages = messages;
         self.compact = compact;
         self.tool_metadata = tool_metadata;
@@ -931,9 +932,8 @@ impl Engine {
     }
 
     /// Shows what a session carries as the engine starts on it: its usage and task list, the
-    /// warnings its prompt raised, the tracked files that drifted on disk, and a transcript that
-    /// ends on an interrupted response. Follows the event that swaps the session, which clears the
-    /// chat.
+    /// warnings its prompt raised, the tracked files that drifted, and a transcript that ends on
+    /// an interrupted response. Follows the event that swaps the session, which clears the chat.
     fn emit_session_start(&mut self, sink: &dyn EventSink) {
         self.emit_usage_update(sink);
         self.emit_restored_tasks(sink);
@@ -1175,6 +1175,7 @@ mod tests {
     use crate::permission::rule::Rule;
     use crate::permission::{Mode, PermissionClass, Workspace};
     use crate::protocol::testing::CapturingSink;
+    use crate::session::handle::testing::record_write_call;
     use crate::session::post_compact::synthesize_post_compact_message;
     use crate::session::store::delete_at;
     use crate::session::store::local_testing::test_session_file;
@@ -1736,19 +1737,16 @@ mod tests {
             })
             .await;
         }
-    }
-
-    mod spawn {
-        use super::*;
 
         #[tokio::test]
-        async fn reports_the_tracked_files_that_drifted_since_the_session_read_them() {
+        async fn keeps_the_tracked_files_that_match_disk_and_holds_back_the_drift() {
             with_pinned_home(async {
                 let dir = tempfile::tempdir().unwrap();
                 let store = test_store(dir.path());
                 let (snapshots, kept, drifted) = tracked_files(dir.path());
                 let mut config = test_config("http://127.0.0.1:9".to_owned(), api_key(), MODEL);
                 config.workspace = Workspace::new(dir.path());
+
                 let engine = Engine::new(
                     &config,
                     NoRoots,
@@ -1765,22 +1763,16 @@ mod tests {
                 )
                 .await
                 .unwrap();
-                let tracked = tracked_paths(&engine);
 
-                let mut handle = engine.spawn();
-                let notice = next_matching(&mut handle.events, |event| match event {
-                    Event::Notice(notice) => Some(notice),
-                    _ => None,
-                })
-                .await;
-                let failure = handle.shutdown().await.unwrap();
-
-                assert_eq!(tracked, [kept]);
-                assert_eq!(notice, format_drift_warning(&[drifted]));
-                assert_eq!(failure, None);
+                assert_eq!(tracked_paths(&engine), [kept]);
+                assert_eq!(engine.drifted, [drifted]);
             })
             .await;
         }
+    }
+
+    mod spawn {
+        use super::*;
 
         #[tokio::test]
         async fn reports_the_startup_notices_resumed_cost_tasks_warnings_drift_and_interruption() {
@@ -1802,7 +1794,6 @@ mod tests {
                 ];
                 engine.total_estimated_cost_usd = 1.23;
                 engine.tasks = plan();
-
                 engine.drifted = vec![PathBuf::from("a.rs")];
 
                 let mut handle = engine.spawn();
@@ -2375,39 +2366,6 @@ mod tests {
                 assert_eq!(handle.task.join().await.unwrap(), None);
 
                 assert!(store.list().unwrap().is_empty());
-            })
-            .await;
-        }
-
-        #[tokio::test]
-        async fn finalizes_the_live_session_after_a_clear() {
-            with_pinned_home(async {
-                let server = MockServer::start().await;
-                mount_reply(&server, "reply").await;
-                let dir = tempfile::tempdir().unwrap();
-                let store = test_store(dir.path());
-                let engine = engine(server.uri(), &store, dir.path()).await;
-                let tracker = Arc::clone(&engine.file_tracker);
-                let read_path = dir.path().join("read.txt");
-                std::fs::write(&read_path, "contents").unwrap();
-                let mut handle = engine.spawn();
-
-                handle.ops.send(Op::Clear).await.unwrap();
-                let live_id = next_matching(&mut handle.events, |event| match event {
-                    Event::SessionRolled {
-                        id,
-                        archived: false,
-                    } => Some(id),
-                    _ => None,
-                })
-                .await;
-                seed_full_read(&tracker, &read_path);
-                submit(&mut handle, "after clear").await;
-                handle.shutdown().await.unwrap();
-
-                let snapshots = store.load_session_data(&live_id).unwrap().file_snapshots;
-                let paths: Vec<_> = snapshots.iter().map(|snapshot| &snapshot.path).collect();
-                assert_eq!(paths, [&read_path]);
             })
             .await;
         }
@@ -3623,6 +3581,48 @@ mod tests {
         use super::*;
 
         #[tokio::test]
+        async fn saves_the_reads_with_the_session_that_made_them() {
+            with_pinned_home(async {
+                let server = MockServer::start().await;
+                mount_reply(&server, "reply").await;
+                let dir = tempfile::tempdir().unwrap();
+                let store = test_store(dir.path());
+                let mut engine = engine(server.uri(), &store, dir.path()).await;
+                let old_id = engine.session_id().to_owned();
+                let before = dir.path().join("before.txt");
+                let after = dir.path().join("after.txt");
+                let late = dir.path().join("late.txt");
+                for path in [&before, &after, &late] {
+                    std::fs::write(path, "contents").unwrap();
+                }
+                let sink = CapturingSink::default();
+                let mut ops = inert_ops();
+                engine.submit_prompt("before clear", &sink, &mut ops).await;
+                seed_full_read(&engine.file_tracker, &before);
+                let old_tracker = Arc::clone(&engine.file_tracker);
+
+                engine.clear(&sink).await;
+                assert_eq!(tracked_paths(&engine), [] as [PathBuf; 0]);
+                seed_full_read(&old_tracker, &late);
+                let new_id = engine.session_id().to_owned();
+                engine.submit_prompt("after clear", &sink, &mut ops).await;
+                seed_full_read(&engine.file_tracker, &after);
+                assert_eq!(engine.finalize().await, None);
+
+                let saved_paths = |id: &str| -> Vec<PathBuf> {
+                    let snapshots = store.load_session_data(id).unwrap().file_snapshots;
+                    snapshots
+                        .into_iter()
+                        .map(|snapshot| snapshot.path)
+                        .collect()
+                };
+                assert_eq!(saved_paths(&old_id), [before]);
+                assert_eq!(saved_paths(&new_id), [after]);
+            })
+            .await;
+        }
+
+        #[tokio::test]
         async fn keeps_a_pending_title_cost_out_of_the_new_session() {
             with_pinned_home(async {
                 let server = MockServer::start().await;
@@ -3784,31 +3784,19 @@ mod tests {
             with_pinned_home(async {
                 let dir = tempfile::tempdir().unwrap();
                 let store = test_store(dir.path());
-                let (snapshots, kept, drifted) = tracked_files(dir.path());
                 let saved = handle::start(&store, MODEL, None);
                 let saved_id = saved.session_id().to_owned();
-                saved.record_message(Message::user("read them")).await;
-                for id in ["toolu_kept", "toolu_drifted"] {
-                    let read = ContentBlock::ToolUse {
-                        id: id.to_owned(),
-                        name: "read".to_owned(),
-                        input: serde_json::json!({}),
-                    };
-                    let result = ContentBlock::ToolResult {
-                        tool_use_id: id.to_owned(),
-                        content: "read".to_owned(),
-                        is_error: false,
-                    };
-                    for (role, block) in [(Role::Assistant, read), (Role::User, result)] {
-                        let message = Message {
-                            role,
-                            content: vec![block],
-                        };
-                        saved.record_message(message).await;
-                    }
-                }
-                saved.finalize(snapshots).await;
+                let saved_tracker = FileTracker::default();
+                let kept = dir.path().join("kept.txt");
+                let drifted = dir.path().join("drifted.txt");
+                saved.record_message(Message::user("write them")).await;
+                record_write_call(&saved, &saved_tracker, "toolu_kept", &kept, true).await;
+                record_write_call(&saved, &saved_tracker, "toolu_drifted", &drifted, true).await;
+                std::fs::write(&drifted, "changed").unwrap();
+                saved.finalize(saved_tracker.snapshot_all()).await;
                 let mut engine = engine("http://127.0.0.1:9".to_owned(), &store, dir.path()).await;
+                let live_id = engine.session_id().to_owned();
+                engine.session.record_message(Message::user("live")).await;
                 let live = dir.path().join("live.txt");
                 std::fs::write(&live, "live").unwrap();
                 seed_full_read(&engine.file_tracker, &live);
@@ -3820,6 +3808,9 @@ mod tests {
                 assert_eq!(tracked_paths(&engine), [kept]);
                 let notice = Event::Notice(format_drift_warning(&[drifted]));
                 assert!(sink.events().contains(&notice), "{:?}", sink.events());
+                let live_files = store.load_session_data(&live_id).unwrap().file_snapshots;
+                let live_paths: Vec<_> = live_files.into_iter().map(|file| file.path).collect();
+                assert_eq!(live_paths, [live]);
             })
             .await;
         }
@@ -3983,6 +3974,9 @@ mod tests {
                 let rule = Rule::parse(PermissionClass::Exec, "cargo test *").unwrap();
                 engine.policy.allow_for_session(rule.clone());
                 start_shell(&engine.shells, "sleep 30");
+                let read = dir.path().join("read.txt");
+                std::fs::write(&read, "read").unwrap();
+                seed_full_read(&engine.file_tracker, &read);
                 let sink = CapturingSink::default();
 
                 engine
@@ -3996,6 +3990,7 @@ mod tests {
                 assert_eq!(engine.displayed_usage, Some(displayed_usage));
                 assert!((engine.total_estimated_cost_usd - 1.23).abs() < f64::EPSILON);
                 assert_eq!(engine.policy.session_allow(), [rule]);
+                assert_eq!(tracked_paths(&engine), [read]);
                 assert_eq!(
                     engine.shells.list(),
                     [shell("shell-1", "sleep 30", ShellState::Running)]

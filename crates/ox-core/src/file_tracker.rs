@@ -29,9 +29,9 @@ pub(crate) const MAX_TRACKED_FILE_SIZE: u64 = 10 * 1024 * 1024;
 ///   [`Self::verify_current_content`], and only matching xxh64 content counts as unchanged.
 ///
 /// State is persisted into the session JSONL as [`FileSnapshot`]s and re-verified against disk on
-/// resume by [`Self::restore_verified`].
+/// resume by [`Self::restored`].
 #[derive(Default)]
-pub struct FileTracker {
+pub(crate) struct FileTracker {
     by_path: Mutex<HashMap<PathBuf, FileState>>,
 }
 
@@ -48,6 +48,40 @@ pub(crate) struct FileState {
 }
 
 impl FileTracker {
+    /// Builds the tracker of a resumed session from the `snapshots` it saved. On duplicate paths
+    /// the snapshot with the newer `recorded_at` wins, and it must still match disk by content
+    /// hash. Also returns the dropped paths, sorted, which need a fresh Read before any mutation.
+    pub(crate) fn restored(snapshots: Vec<FileSnapshot>) -> (Self, Vec<PathBuf>) {
+        let mut latest = HashMap::<PathBuf, FileState>::new();
+        for FileSnapshot { path, state } in snapshots {
+            let replace = latest
+                .get(&path)
+                .is_none_or(|cur| state.recorded_at >= cur.recorded_at);
+            if replace {
+                latest.insert(path, state);
+            }
+        }
+
+        let mut dropped: Vec<_> = latest
+            .extract_if(|path, state| {
+                verify_on_disk(path, state.content_hash)
+                    .inspect_err(|e| {
+                        debug!(
+                            "dropping tracked file {} ({e:#}), so it needs a fresh Read",
+                            path.display()
+                        );
+                    })
+                    .is_err()
+            })
+            .map(|(path, _)| path)
+            .collect();
+        dropped.sort();
+        let tracker = Self {
+            by_path: Mutex::new(latest),
+        };
+        (tracker, dropped)
+    }
+
     /// Returns `CacheHit` when a file already tracked as `Full` is read in full again unchanged.
     /// Reads of unchanged content accumulate their line windows, and changed content starts over.
     /// A read that returns content attributes the state to its tool call, `tool_use_id`.
@@ -180,38 +214,6 @@ impl FileTracker {
         self.lock().clear();
     }
 
-    /// Replaces the tracked state with the `snapshots` a resumed session saved. On duplicate paths
-    /// the snapshot with the newer `recorded_at` wins, and it must still match disk by content
-    /// hash. Returns the dropped paths, sorted, since those files need a fresh Read before any
-    /// mutation.
-    pub(crate) fn restore_verified(&self, snapshots: Vec<FileSnapshot>) -> Vec<PathBuf> {
-        let mut latest = HashMap::<PathBuf, FileState>::new();
-        for FileSnapshot { path, state } in snapshots {
-            let replace = latest
-                .get(&path)
-                .is_none_or(|cur| state.recorded_at >= cur.recorded_at);
-            if replace {
-                latest.insert(path, state);
-            }
-        }
-
-        let mut dropped = Vec::new();
-        latest.retain(|path, state| {
-            let verified = verify_on_disk(path, state.content_hash);
-            if let Err(e) = &verified {
-                debug!(
-                    "dropping tracked file {} ({e:#}), so it needs a fresh Read",
-                    path.display()
-                );
-                dropped.push(path.clone());
-            }
-            verified.is_ok()
-        });
-        *self.lock() = latest;
-        dropped.sort();
-        dropped
-    }
-
     fn lock(&self) -> MutexGuard<'_, HashMap<PathBuf, FileState>> {
         lock_or_recover(&self.by_path, "FileTracker")
     }
@@ -334,10 +336,10 @@ pub(crate) fn validate_trackable_file(metadata: &Metadata) -> Result<(), Trackab
 // ── FileSnapshot ──
 
 /// JSONL-persisted record of one tracked file. Written into the session log on `finish` and read
-/// back on resume by [`FileTracker::restore_verified`], which rehashes each path before
-/// re-admitting it to the live tracker.
+/// back on resume by [`FileTracker::restored`], which rehashes each path before re-admitting it
+/// to the live tracker.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct FileSnapshot {
+pub(crate) struct FileSnapshot {
     pub(crate) path: PathBuf,
     #[serde(flatten)]
     pub(crate) state: FileState,
@@ -770,7 +772,7 @@ mod tests {
         }
     }
 
-    mod restore_verified {
+    mod restored {
         use super::*;
 
         fn snapshot(path: &Path, content: &[u8], recorded_at: OffsetDateTime) -> FileSnapshot {
@@ -786,31 +788,15 @@ mod tests {
         }
 
         #[test]
-        fn matching_content_repopulates_entry() {
+        fn keeps_the_snapshots_that_match_disk() {
             let dir = tempfile::tempdir().unwrap();
             let path = dir.path().join("a.rs");
             std::fs::write(&path, b"persisted bytes").unwrap();
-
             let snap = snapshot(&path, b"persisted bytes", OffsetDateTime::now_utc());
 
-            let tracker = FileTracker::default();
-            tracker.restore_verified(vec![snap.clone()]);
+            let (tracker, dropped) = FileTracker::restored(vec![snap.clone()]);
 
-            assert_eq!(tracker.lock().get(&path), Some(&snap.state));
-        }
-
-        #[test]
-        fn replaces_what_the_tracker_held() {
-            let dir = tempfile::tempdir().unwrap();
-            let path = dir.path().join("a.rs");
-            std::fs::write(&path, b"persisted bytes").unwrap();
-            let snap = snapshot(&path, b"persisted bytes", OffsetDateTime::UNIX_EPOCH);
-            let tracker = FileTracker::default();
-            _ = tracker.record_read(&path, b"newer read", LastView::Full, "toolu_live");
-            _ = tracker.record_read(Path::new("/tmp/b"), b"b", LastView::Full, "toolu_live");
-
-            tracker.restore_verified(vec![snap.clone()]);
-
+            assert_eq!(dropped, [] as [PathBuf; 0]);
             assert_eq!(tracker.snapshot_all(), [snap]);
         }
 
@@ -822,8 +808,7 @@ mod tests {
 
             let snap = snapshot(&path, b"old", OffsetDateTime::now_utc());
 
-            let tracker = FileTracker::default();
-            let dropped = tracker.restore_verified(vec![snap]);
+            let (tracker, dropped) = FileTracker::restored(vec![snap]);
             assert_eq!(dropped, vec![path.clone()]);
             assert!(tracker.lock().get(&path).is_none());
         }
@@ -835,8 +820,7 @@ mod tests {
             std::fs::create_dir(&path).unwrap();
             let snap = snapshot(&path, b"", OffsetDateTime::now_utc());
 
-            let tracker = FileTracker::default();
-            let dropped = tracker.restore_verified(vec![snap]);
+            let (tracker, dropped) = FileTracker::restored(vec![snap]);
 
             assert_eq!(dropped, vec![path.clone()]);
             assert!(tracker.lock().is_empty());
@@ -850,8 +834,7 @@ mod tests {
             f.set_len(MAX_TRACKED_FILE_SIZE + 1).unwrap();
             let snap = snapshot(&path, b"", OffsetDateTime::now_utc());
 
-            let tracker = FileTracker::default();
-            let dropped = tracker.restore_verified(vec![snap]);
+            let (tracker, dropped) = FileTracker::restored(vec![snap]);
 
             assert_eq!(dropped, vec![path.clone()]);
             assert!(tracker.lock().is_empty());
@@ -872,8 +855,7 @@ mod tests {
                 snapshot(&missing_path, b"", OffsetDateTime::now_utc()),
             ];
 
-            let tracker = FileTracker::default();
-            let dropped = tracker.restore_verified(snaps);
+            let (tracker, dropped) = FileTracker::restored(snaps);
             let mut expected = vec![drifted_path, missing_path];
             expected.sort();
             assert_eq!(
@@ -898,14 +880,12 @@ mod tests {
                 OffsetDateTime::UNIX_EPOCH + Duration::from_mins(1),
             );
 
-            let tracker = FileTracker::default();
-            let dropped = tracker.restore_verified(vec![older.clone(), newer.clone()]);
+            let (tracker, dropped) = FileTracker::restored(vec![older.clone(), newer.clone()]);
             assert_eq!(dropped, [] as [PathBuf; 0]);
             let stored = tracker.lock().get(&path).cloned().unwrap();
             assert_eq!(stored.last_view, LastView::Full, "newer recorded_at wins");
 
-            let tracker = FileTracker::default();
-            let dropped = tracker.restore_verified(vec![newer, older]);
+            let (tracker, dropped) = FileTracker::restored(vec![newer, older]);
             assert_eq!(dropped, [] as [PathBuf; 0]);
             let stored = tracker.lock().get(&path).cloned().unwrap();
             assert_eq!(
@@ -924,8 +904,7 @@ mod tests {
             let snap = snapshot(&path, b"content", OffsetDateTime::now_utc());
 
             std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o000)).unwrap();
-            let tracker = FileTracker::default();
-            let dropped = tracker.restore_verified(vec![snap]);
+            let (tracker, dropped) = FileTracker::restored(vec![snap]);
             std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
 
             assert_eq!(dropped, vec![path.clone()]);

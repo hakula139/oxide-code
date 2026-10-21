@@ -353,8 +353,7 @@ impl SessionHandle {
 
 // ── Resumed Sessions ──
 
-/// A session's transcript as loaded from disk, with the prompt state and display extras saved
-/// beside its messages.
+/// A session's transcript as loaded from disk, with the state saved beside its messages.
 #[derive(Debug, Default)]
 pub struct LoadedTranscript {
     pub(crate) messages: Vec<Message>,
@@ -549,6 +548,7 @@ mod tests {
     use crate::message::{ContentBlock, Replay, Role};
     use crate::prompt::PromptParts;
     use crate::session::entry::{Entry, SessionInfo};
+    use crate::session::handle::testing::record_write_call;
     use crate::session::store::local_testing::test_session_file;
     use crate::session::store::testing::{seed_test_session, test_project_dir, test_store};
     use crate::tool::tasks::testing::plan;
@@ -557,38 +557,6 @@ mod tests {
     /// Resumes the session whose file name carries `session_id`.
     fn resume_id(store: &SessionStore, session_id: &str) -> Result<ResumedSession> {
         resume_from_path(store, &store.find_session_path(session_id)?)
-    }
-
-    async fn record_write_call(
-        handle: &SessionHandle,
-        tracker: &FileTracker,
-        tool_use_id: &str,
-        path: &std::path::Path,
-        answered: bool,
-    ) {
-        handle
-            .record_message(Message {
-                role: Role::Assistant,
-                content: vec![ContentBlock::ToolUse {
-                    id: tool_use_id.to_owned(),
-                    name: "write".to_owned(),
-                    input: serde_json::Value::Null,
-                }],
-            })
-            .await;
-        record_tracked_file(tracker, path, b"alpha", tool_use_id);
-        if answered {
-            handle
-                .record_message(Message {
-                    role: Role::User,
-                    content: vec![ContentBlock::ToolResult {
-                        tool_use_id: tool_use_id.to_owned(),
-                        content: "wrote".to_owned(),
-                        is_error: false,
-                    }],
-                })
-                .await;
-        }
     }
 
     mod record_message {
@@ -1696,7 +1664,7 @@ mod tests {
         }
 
         #[tokio::test]
-        async fn finalizes_the_old_session_with_its_snapshots_and_loads_the_target_s() {
+        async fn finalizes_the_old_session_with_its_snapshots_and_returns_the_target_s_snapshots() {
             let dir = tempfile::tempdir().unwrap();
             let store = test_store(dir.path());
             let tracker = FileTracker::default();
@@ -1973,9 +1941,8 @@ mod tests {
             handle.finish(tracker.snapshot_all()).await;
             drop(handle);
 
-            let resumed_tracker = FileTracker::default();
             let resumed = resume_id(&store, &session_id).unwrap();
-            resumed_tracker.restore_verified(resumed.transcript.file_snapshots);
+            let (resumed_tracker, _) = FileTracker::restored(resumed.transcript.file_snapshots);
 
             let restored =
                 resumed_tracker.verify_current_content(&path_a, b"alpha", GatePurpose::Edit);
@@ -2008,9 +1975,8 @@ mod tests {
 
             std::fs::write(&path_a, b"externally edited bytes").unwrap();
 
-            let resumed_tracker = FileTracker::default();
             let resumed = resume_id(&store, &session_id).unwrap();
-            resumed_tracker.restore_verified(resumed.transcript.file_snapshots);
+            let (resumed_tracker, _) = FileTracker::restored(resumed.transcript.file_snapshots);
 
             let result = resumed_tracker.verify_current_content(
                 &path_a,
@@ -2043,9 +2009,8 @@ mod tests {
 
             std::fs::remove_file(&path_a).unwrap();
 
-            let resumed_tracker = FileTracker::default();
             let resumed = resume_id(&store, &session_id).unwrap();
-            resumed_tracker.restore_verified(resumed.transcript.file_snapshots);
+            let (resumed_tracker, _) = FileTracker::restored(resumed.transcript.file_snapshots);
             let result = resumed_tracker.verify_current_content(&path_a, b"", GatePurpose::Edit);
             assert_eq!(
                 result,

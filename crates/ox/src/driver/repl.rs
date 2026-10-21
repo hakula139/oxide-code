@@ -393,7 +393,8 @@ mod tests {
                     .await;
                 mount_reply(&server, "reply").await;
                 let dir = tempfile::tempdir().unwrap();
-                fs::write(dir.path().join("CLAUDE.md"), b"\xff\xfe").unwrap();
+                let instructions = dir.path().join("CLAUDE.md");
+                fs::write(&instructions, b"\xff\xfe").unwrap();
                 let store = test_store(dir.path());
                 let engine = engine(server.uri(), &store, dir.path()).await;
                 let session_id = engine.session_id().to_owned();
@@ -432,9 +433,12 @@ mod tests {
                     })
                     .collect();
                 assert_eq!(reports.len(), 3, "{reports:?}");
-                assert!(
-                    reports[0].starts_with("Skipped instruction file"),
-                    "{reports:?}"
+                assert_eq!(
+                    reports[0],
+                    format!(
+                        "Skipped instruction file {}: stream did not contain valid UTF-8",
+                        instructions.display(),
+                    ),
                 );
                 assert!(reports[1].contains("HTTP 400"), "{reports:?}");
                 assert_eq!(
