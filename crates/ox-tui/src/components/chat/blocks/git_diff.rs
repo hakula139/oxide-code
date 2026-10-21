@@ -230,16 +230,6 @@ mod tests {
     mod render {
         use super::*;
 
-        fn ctx_at(width: u16, theme: &Theme) -> RenderCtx<'_> {
-            RenderCtx {
-                width,
-                theme,
-                show_thinking: false,
-                expanded: false,
-                expand_hint: None,
-            }
-        }
-
         fn body_rows(lines: &[Line<'_>]) -> Vec<String> {
             lines
                 .iter()
@@ -264,7 +254,7 @@ mod tests {
                  context
             "});
 
-            let lines = block.render(&ctx_at(80, &theme));
+            let lines = block.render(&RenderCtx::new(80, &theme));
 
             assert_eq!(
                 body_rows(&lines),
@@ -289,7 +279,7 @@ mod tests {
                 +++ b/foo.rs
             "});
 
-            let lines = block.render(&ctx_at(80, &theme));
+            let lines = block.render(&RenderCtx::new(80, &theme));
 
             assert_eq!(body_rows(&lines), ["foo.rs"]);
         }
@@ -308,7 +298,7 @@ mod tests {
                 +++ counter
                  outro
             "});
-            let lines = block.render(&ctx_at(80, &theme));
+            let lines = block.render(&RenderCtx::new(80, &theme));
             assert_eq!(
                 body_rows(&lines[2..]),
                 [
@@ -341,7 +331,7 @@ mod tests {
                 -x
                 +y
             "#});
-            let lines = block.render(&ctx_at(80, &theme));
+            let lines = block.render(&RenderCtx::new(80, &theme));
             assert_eq!(
                 body_rows(&lines),
                 [
@@ -375,7 +365,7 @@ mod tests {
                 +b
             "});
 
-            let lines = block.render(&ctx_at(80, &theme));
+            let lines = block.render(&RenderCtx::new(80, &theme));
 
             assert_eq!(
                 body_rows(&lines),
@@ -395,7 +385,7 @@ mod tests {
                 rename to new.sh
             "});
 
-            let lines = block.render(&ctx_at(80, &theme));
+            let lines = block.render(&RenderCtx::new(80, &theme));
 
             assert_eq!(
                 body_rows(&lines),
@@ -416,7 +406,7 @@ mod tests {
                 +C
             "});
 
-            let lines = block.render(&ctx_at(80, &theme));
+            let lines = block.render(&RenderCtx::new(80, &theme));
 
             assert_eq!(
                 body_rows(&lines),
@@ -448,7 +438,7 @@ mod tests {
                   new.txt
             "});
 
-            let lines = block.render(&ctx_at(80, &theme));
+            let lines = block.render(&RenderCtx::new(80, &theme));
 
             assert_eq!(
                 body_rows(&lines),
@@ -481,7 +471,7 @@ mod tests {
                 +d
             "});
 
-            let lines = block.render(&ctx_at(80, &theme));
+            let lines = block.render(&RenderCtx::new(80, &theme));
 
             assert_eq!(
                 body_rows(&lines),
@@ -507,7 +497,7 @@ mod tests {
                 @@ -1 +1 @@
                 +only added
             "});
-            let lines = block.render(&ctx_at(80, &theme));
+            let lines = block.render(&RenderCtx::new(80, &theme));
             // Layout: [path header, hunk header, add row]. The number, separator, and text spans
             // carry the bg, while the bar stays clear.
             let add_row = lines.last().expect("at least one row");
@@ -528,7 +518,7 @@ mod tests {
                 -only removed
                 +replacement
             "});
-            let lines = block.render(&ctx_at(80, &theme));
+            let lines = block.render(&RenderCtx::new(80, &theme));
             let del_row = lines
                 .iter()
                 .find(|line| line.spans.iter().any(|s| s.content.as_ref() == " - "))
@@ -550,7 +540,7 @@ mod tests {
                   also-new.rs
             "});
 
-            let lines = block.render(&ctx_at(80, &theme));
+            let lines = block.render(&RenderCtx::new(80, &theme));
 
             let row = |text, style| {
                 Line::from(vec![
@@ -579,7 +569,7 @@ mod tests {
             let footer = text.lines().last().unwrap().to_owned();
             let block = GitDiffBlock::new(text);
 
-            let lines = block.render(&ctx_at(80, &theme));
+            let lines = block.render(&RenderCtx::new(80, &theme));
 
             let row = |text| {
                 Line::from(vec![
@@ -603,7 +593,7 @@ mod tests {
                 +gamma
                 +delta
             "});
-            let lines = block.render(&ctx_at(80, &theme));
+            let lines = block.render(&RenderCtx::new(80, &theme));
             let body = &lines[2..]; // skip path + hunk headers
             let numbers: Vec<String> = body
                 .iter()
@@ -625,7 +615,7 @@ mod tests {
                 +third
                 -fourth
             "});
-            let lines = block.render(&ctx_at(80, &theme));
+            let lines = block.render(&RenderCtx::new(80, &theme));
             let body = &lines[2..];
             let numbers: Vec<String> = body
                 .iter()
@@ -646,7 +636,7 @@ mod tests {
                 corrupt-no-marker
                 +second add
             "});
-            let lines = block.render(&ctx_at(80, &theme));
+            let lines = block.render(&RenderCtx::new(80, &theme));
             let body = &lines[2..];
             assert_eq!(body.len(), 3, "{body:#?}");
 

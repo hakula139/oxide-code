@@ -60,11 +60,8 @@ mod tests {
         fn render_rows(content: &str, label: &str, expanded: bool) -> Vec<String> {
             let theme = Theme::default();
             let ctx = RenderCtx {
-                width: 4096,
-                theme: &theme,
-                show_thinking: false,
                 expanded,
-                expand_hint: None,
+                ..RenderCtx::new(4096, &theme)
             };
             let mut out = BlockRows::default();
             render(&mut out, &ctx, theme.tool_border(), content, label);

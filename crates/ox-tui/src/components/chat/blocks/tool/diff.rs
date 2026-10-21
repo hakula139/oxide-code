@@ -214,20 +214,10 @@ mod tests {
         }
     }
 
-    fn ctx(theme: &Theme) -> RenderCtx<'_> {
-        RenderCtx {
-            width: 80,
-            theme,
-            show_thinking: true,
-            expanded: false,
-            expand_hint: None,
-        }
-    }
-
     fn expanded_ctx(theme: &Theme) -> RenderCtx<'_> {
         RenderCtx {
             expanded: true,
-            ..ctx(theme)
+            ..RenderCtx::new(80, theme)
         }
     }
 
@@ -248,7 +238,7 @@ mod tests {
 
             render(
                 &mut out,
-                &ctx(&theme),
+                &RenderCtx::new(80, &theme),
                 theme.tool_border(),
                 &[chunk_of(&[], &[])],
             );
@@ -263,7 +253,7 @@ mod tests {
 
             render(
                 &mut out,
-                &ctx(&theme),
+                &RenderCtx::new(80, &theme),
                 theme.tool_border(),
                 &[chunk_of(&["foo"], &["bar"])],
             );
@@ -288,7 +278,7 @@ mod tests {
 
             render(
                 &mut out,
-                &ctx(&theme),
+                &RenderCtx::new(80, &theme),
                 theme.tool_border(),
                 &[chunk_at(12), chunk_at(47)],
             );
@@ -319,7 +309,12 @@ mod tests {
             let mut compact = BlockRows::default();
             let mut expanded = BlockRows::default();
 
-            render_chunk_body(&mut compact, &ctx(&theme), theme.tool_border(), &chunk);
+            render_chunk_body(
+                &mut compact,
+                &RenderCtx::new(80, &theme),
+                theme.tool_border(),
+                &chunk,
+            );
             render_chunk_body(
                 &mut expanded,
                 &expanded_ctx(&theme),
@@ -348,9 +343,8 @@ mod tests {
         fn caps_with_and_more_suffix_past_max() {
             let theme = Theme::default();
             let ctx = RenderCtx {
-                width: 100,
                 expand_hint: Some("Ctrl+O to expand"),
-                ..ctx(&theme)
+                ..RenderCtx::new(100, &theme)
             };
             let locations: Vec<usize> = (1..=10).collect();
             let mut out = BlockRows::default();
@@ -389,7 +383,12 @@ mod tests {
             let theme = Theme::default();
             let mut out = BlockRows::default();
 
-            render_locations_footer(&mut out, &ctx(&theme), theme.tool_border(), &[42]);
+            render_locations_footer(
+                &mut out,
+                &RenderCtx::new(80, &theme),
+                theme.tool_border(),
+                &[42],
+            );
 
             assert_eq!(rows(&out.lines), ["▎   applied at line 42"]);
         }
@@ -399,7 +398,12 @@ mod tests {
             let theme = Theme::default();
             let mut out = BlockRows::default();
 
-            render_locations_footer(&mut out, &ctx(&theme), theme.tool_border(), &[]);
+            render_locations_footer(
+                &mut out,
+                &RenderCtx::new(80, &theme),
+                theme.tool_border(),
+                &[],
+            );
 
             assert_eq!(out.lines, []);
         }
@@ -407,13 +411,7 @@ mod tests {
         #[test]
         fn wraps_under_the_bar_in_a_narrow_chat() {
             let theme = Theme::default();
-            let ctx = RenderCtx {
-                width: 24,
-                theme: &theme,
-                show_thinking: true,
-                expanded: false,
-                expand_hint: None,
-            };
+            let ctx = RenderCtx::new(24, &theme);
             let mut out = BlockRows::default();
 
             render_locations_footer(&mut out, &ctx, theme.tool_border(), &[12, 47, 200]);

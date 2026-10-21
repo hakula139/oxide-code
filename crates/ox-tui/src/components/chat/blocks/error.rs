@@ -49,22 +49,12 @@ mod tests {
     mod render {
         use super::*;
 
-        fn ctx_at(width: u16, theme: &Theme) -> RenderCtx<'_> {
-            RenderCtx {
-                width,
-                theme,
-                show_thinking: false,
-                expanded: false,
-                expand_hint: None,
-            }
-        }
-
         #[test]
         fn single_line_message_emits_icon_then_body() {
             let theme = Theme::default();
             let block = ErrorBlock::new("boom");
 
-            let lines = block.render(&ctx_at(60, &theme));
+            let lines = block.render(&RenderCtx::new(60, &theme));
 
             let style = theme.error();
             assert_eq!(
@@ -87,7 +77,7 @@ mod tests {
                 - `claude-opus-5-5` — Claude Opus 5.5
                 - `claude-haiku-5-5` — Claude Haiku 5.5"
             });
-            let lines = block.render(&ctx_at(80, &theme));
+            let lines = block.render(&RenderCtx::new(80, &theme));
             let bodies: Vec<&str> = lines
                 .iter()
                 .map(|l| l.spans.last().expect("non-empty").content.as_ref())
@@ -110,7 +100,7 @@ mod tests {
             let theme = Theme::default();
             let block = ErrorBlock::new("first\nsecond");
 
-            let lines = block.render(&ctx_at(60, &theme));
+            let lines = block.render(&RenderCtx::new(60, &theme));
 
             let rows: Vec<String> = lines.iter().map(ToString::to_string).collect();
             assert_eq!(rows, ["✗ first", "  second"]);

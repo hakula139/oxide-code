@@ -19,11 +19,6 @@ impl SystemMessageBlock {
 }
 
 impl ChatBlock for SystemMessageBlock {
-    #[cfg(test)]
-    fn system_text(&self) -> Option<&str> {
-        Some(&self.text)
-    }
-
     fn render(&self, ctx: &RenderCtx<'_>) -> Vec<Line<'static>> {
         let bar_style = ctx.theme.accent();
         let mut out = Vec::new();
@@ -46,6 +41,11 @@ impl ChatBlock for SystemMessageBlock {
         }
         out
     }
+
+    #[cfg(test)]
+    fn system_text(&self) -> Option<&str> {
+        Some(&self.text)
+    }
 }
 
 #[cfg(test)]
@@ -58,16 +58,6 @@ mod tests {
 
     mod render {
         use super::*;
-
-        fn ctx_at(width: u16, theme: &Theme) -> RenderCtx<'_> {
-            RenderCtx {
-                width,
-                theme,
-                show_thinking: false,
-                expanded: false,
-                expand_hint: None,
-            }
-        }
 
         fn rows(lines: &[Line<'_>]) -> Vec<String> {
             lines.iter().map(ToString::to_string).collect()
@@ -82,7 +72,7 @@ mod tests {
                 third
             "});
 
-            let lines = block.render(&ctx_at(60, &theme));
+            let lines = block.render(&RenderCtx::new(60, &theme));
 
             let row = |text| {
                 Line::from(vec![
@@ -99,7 +89,7 @@ mod tests {
             let theme = Theme::default();
             let block = SystemMessageBlock::new("");
 
-            let lines = block.render(&ctx_at(60, &theme));
+            let lines = block.render(&RenderCtx::new(60, &theme));
 
             assert_eq!(
                 lines,
@@ -116,7 +106,7 @@ mod tests {
                 beta
             "});
 
-            let lines = block.render(&ctx_at(60, &theme));
+            let lines = block.render(&RenderCtx::new(60, &theme));
 
             assert_eq!(rows(&lines), ["▎ alpha", "▎ beta"]);
         }
@@ -127,7 +117,7 @@ mod tests {
             let theme = Theme::default();
             let block = SystemMessageBlock::new("alpha beta gamma delta epsilon zeta");
 
-            let lines = block.render(&ctx_at(16, &theme));
+            let lines = block.render(&RenderCtx::new(16, &theme));
 
             assert_eq!(
                 rows(&lines),
@@ -152,7 +142,7 @@ mod tests {
                 "first really long line of text\nsecond really long line of text",
             );
 
-            let lines = block.render(&ctx_at(20, &theme));
+            let lines = block.render(&RenderCtx::new(20, &theme));
 
             assert_eq!(
                 rows(&lines),

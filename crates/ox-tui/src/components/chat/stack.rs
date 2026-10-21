@@ -5,7 +5,7 @@ use std::ops::Range;
 use ratatui::style::Style;
 use ratatui::text::Line;
 
-use super::blocks::{BlockRows, ChatBlock, RenderCtx, last_has_width};
+use super::blocks::{BlockRows, ChatBlock, RenderCtx};
 
 /// Separator row borrowed by every stack gap, and the stand-in for a block that never rendered.
 static BLANK: [Line<'static>; 1] = [Line {
@@ -36,9 +36,9 @@ pub(super) struct CachedBlock {
 }
 
 impl CachedBlock {
-    /// Settles the block's visibility, which depends only on settings fixed for the chat's life.
-    pub(super) fn new(block: Box<dyn ChatBlock>, ctx: &RenderCtx<'_>) -> Self {
-        let visible = block.visible(ctx);
+    /// Settles the block's visibility for whether the chat shows thinking.
+    pub(super) fn new(block: Box<dyn ChatBlock>, show_thinking: bool) -> Self {
+        let visible = block.visible(show_thinking);
         Self {
             block,
             expanded: false,
@@ -269,7 +269,10 @@ impl<'a> Stack<'a> {
 
     /// Returns whether the bottom row has visible width, so the next block needs a separator.
     pub(super) fn last_has_width(&self) -> bool {
-        self.runs.last().is_some_and(|run| last_has_width(run))
+        self.runs
+            .last()
+            .and_then(|run| run.last())
+            .is_some_and(|line| line.width() > 0)
     }
 
     pub(super) fn height(&self) -> usize {
@@ -360,16 +363,13 @@ mod tests {
     fn with_view_ctx<T>(width: u16, expanded: bool, f: impl FnOnce(&RenderCtx<'_>) -> T) -> T {
         let theme = Theme::default();
         f(&RenderCtx {
-            width,
-            theme: &theme,
-            show_thinking: true,
             expanded,
-            expand_hint: None,
+            ..RenderCtx::new(width, &theme)
         })
     }
 
     fn cached(block: impl ChatBlock + 'static) -> CachedBlock {
-        with_ctx(40, |ctx| CachedBlock::new(Box::new(block), ctx))
+        CachedBlock::new(Box::new(block), true)
     }
 
     fn standalone(rows: &[&'static str]) -> CachedBlock {

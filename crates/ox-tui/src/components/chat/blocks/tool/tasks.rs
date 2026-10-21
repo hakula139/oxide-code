@@ -46,11 +46,8 @@ mod tests {
         fn rows(tasks: &[Task], expanded: bool) -> Vec<(String, Style)> {
             let theme = Theme::default();
             let ctx = RenderCtx {
-                width: 80,
-                theme: &theme,
-                show_thinking: false,
                 expanded,
-                expand_hint: None,
+                ..RenderCtx::new(80, &theme)
             };
             let mut out = BlockRows::default();
             render(&mut out, &ctx, theme.tool_border(), tasks);

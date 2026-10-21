@@ -37,14 +37,11 @@ use crate::theme::Theme;
 // ── Trait ──
 
 /// Per-render snapshot threaded through every [`ChatBlock::render`] call.
-///
-/// `width` is the inner content width (already stripped of any chrome). `show_thinking` lets
-/// thinking blocks elide their content without removing themselves from the block list.
 #[derive(Clone, Copy)]
 pub(super) struct RenderCtx<'a> {
+    /// Inner content width, with any chrome already stripped.
     pub(super) width: u16,
     pub(super) theme: &'a Theme,
-    pub(super) show_thinking: bool,
     /// Whether the block renders in full. A compact block caps its body and ends it with an
     /// overflow footer.
     pub(super) expanded: bool,
@@ -54,6 +51,17 @@ pub(super) struct RenderCtx<'a> {
 }
 
 impl RenderCtx<'_> {
+    /// A compact-view context at `width` with no expand hint.
+    #[cfg(test)]
+    pub(super) fn new(width: u16, theme: &Theme) -> RenderCtx<'_> {
+        RenderCtx {
+            width,
+            theme,
+            expanded: false,
+            expand_hint: None,
+        }
+    }
+
     /// The most items a body shows: `compact` in the compact view, or all of them when expanded.
     pub(super) fn cap(&self, compact: usize) -> usize {
         if self.expanded { usize::MAX } else { compact }
@@ -110,8 +118,9 @@ impl BlockRows {
 
 /// Render contract for one chat block (assistant prose, tool call, error marker, etc.).
 ///
-/// `render`, `render_rows`, and `visible` must be pure functions of the block's state and the
-/// [`RenderCtx`], since the chat view caches them until the width, theme, or view changes.
+/// A block's state is fixed once the chat pushes it. `render` and `render_rows` must be pure
+/// functions of that state and the [`RenderCtx`], since the chat caches their rows until the
+/// width, theme, or view changes.
 pub(super) trait ChatBlock {
     fn render(&self, ctx: &RenderCtx<'_>) -> Vec<Line<'static>>;
 
@@ -135,7 +144,9 @@ pub(super) trait ChatBlock {
         false
     }
 
-    fn visible(&self, _ctx: &RenderCtx<'_>) -> bool {
+    /// Returns whether the chat shows this block, given whether it shows thinking. The chat asks
+    /// once at push, since the setting is fixed for the chat's lifetime.
+    fn visible(&self, _show_thinking: bool) -> bool {
         true
     }
 
@@ -197,10 +208,6 @@ fn prepend_markdown_prefix(
     line.spans
         .insert(0, Span::styled(prefix.to_owned(), prefix_style));
     line
-}
-
-pub(super) fn last_has_width(lines: &[Line<'_>]) -> bool {
-    lines.last().is_some_and(|l| l.width() > 0)
 }
 
 #[cfg(test)]

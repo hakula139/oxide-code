@@ -92,7 +92,6 @@ impl RenderSettings {
         RenderCtx {
             width,
             theme: &self.theme,
-            show_thinking: self.show_thinking,
             expanded: self.expanded,
             expand_hint: self.expand_hint.as_deref(),
         }
@@ -265,8 +264,8 @@ impl ChatView {
     /// `AssistantThinking` block in the transcript.
     pub(crate) fn commit_streaming(&mut self) {
         self.commit_thinking_buffer();
-        if let Some(mut s) = self.streaming.take() {
-            let text = s.take_buffer();
+        if let Some(streaming) = self.streaming.take() {
+            let text = streaming.into_buffer();
             if !text.is_empty() {
                 self.push_block(AssistantText::new(text));
             }
@@ -315,11 +314,6 @@ impl ChatView {
     /// Forgets calls whose results never arrived, such as those of a cancelled turn.
     pub(crate) fn clear_pending_calls(&mut self) {
         self.pending_calls.clear();
-    }
-
-    #[cfg(test)]
-    pub(crate) fn pending_call_count(&self) -> usize {
-        self.pending_calls.len()
     }
 
     pub(crate) fn push_error(&mut self, msg: &str) {
@@ -386,10 +380,23 @@ impl ChatView {
         self.new_content_since_pause
     }
 
+    /// Returns whether the chat shows nothing: no committed block, reply, thinking, or summary.
+    pub(crate) fn is_empty(&self) -> bool {
+        self.blocks.is_empty()
+            && self.streaming.is_none()
+            && self.thinking_buffer.is_empty()
+            && self.summary_buffer.is_empty()
+    }
+
     /// Number of committed chat blocks.
     #[cfg(test)]
     pub(crate) fn entry_count(&self) -> usize {
         self.blocks.len()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn pending_call_count(&self) -> usize {
+        self.pending_calls.len()
     }
 
     /// Returns the error text of the tail block, if it is an [`ErrorBlock`].
@@ -498,15 +505,14 @@ impl ChatView {
 
 impl ChatView {
     fn push_block(&mut self, block: impl ChatBlock + 'static) {
-        let ctx = self.settings.ctx(self.viewport.width);
-        self.blocks.push(CachedBlock::new(Box::new(block), &ctx));
+        let block = CachedBlock::new(Box::new(block), self.settings.show_thinking);
+        self.blocks.push(block);
     }
 
     /// Inserts `block` at index `at`, so a paused view stays anchored on the block it showed.
     fn insert_block(&mut self, at: usize, block: impl ChatBlock + 'static) {
-        let ctx = self.settings.ctx(self.viewport.width);
-        self.blocks
-            .insert(at, CachedBlock::new(Box::new(block), &ctx));
+        let block = CachedBlock::new(Box::new(block), self.settings.show_thinking);
+        self.blocks.insert(at, block);
         self.pending_calls.shift_from(at);
         self.painted.insert_empty(at);
         if let Some(selection) = &mut self.selection {
@@ -614,7 +620,7 @@ impl ChatView {
 
     fn render_live(&self, width: u16) -> LiveLines {
         let ctx = self.settings.ctx(width);
-        let thinking = if ctx.show_thinking && !self.thinking_buffer.is_empty() {
+        let thinking = if self.settings.show_thinking && !self.thinking_buffer.is_empty() {
             AssistantThinking::render_streaming(&self.thinking_buffer, self.spinner, &ctx)
         } else {
             Vec::new()
@@ -667,14 +673,6 @@ impl ChatView {
         self.blocks
             .last()
             .is_some_and(|b| b.block().continues_assistant_turn())
-    }
-
-    /// Returns whether the chat shows nothing: no committed block, reply, thinking, or summary.
-    pub(crate) fn is_empty(&self) -> bool {
-        self.blocks.is_empty()
-            && self.streaming.is_none()
-            && self.thinking_buffer.is_empty()
-            && self.summary_buffer.is_empty()
     }
 }
 
@@ -733,7 +731,7 @@ mod testing {
             self.standalone
         }
 
-        fn visible(&self, _ctx: &RenderCtx<'_>) -> bool {
+        fn visible(&self, _show_thinking: bool) -> bool {
             !self.hidden
         }
     }
@@ -753,6 +751,7 @@ mod tests {
     use ratatui::backend::TestBackend;
     use unicode_width::UnicodeWidthStr;
 
+    use ox_core::protocol::testing::text_result;
     use ox_core::tool::testing::diff_chunk;
     use ox_core::tool::{ReadExcerptLine, ToolResultView};
 
@@ -775,18 +774,6 @@ mod tests {
             input: serde_json::json!({}),
             icon: icon.to_owned(),
             label: label.to_owned(),
-        }
-    }
-
-    fn text_result(id: &str, content: &str, is_error: bool, title: Option<&str>) -> ToolResult {
-        ToolResult {
-            id: id.to_owned(),
-            content: content.to_owned(),
-            is_error,
-            title: title.map(ToOwned::to_owned),
-            view: ToolResultView::Text {
-                content: content.to_owned(),
-            },
         }
     }
 

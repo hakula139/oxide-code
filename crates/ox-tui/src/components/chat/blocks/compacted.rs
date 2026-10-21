@@ -92,16 +92,6 @@ mod tests {
     mod render_boundary {
         use super::*;
 
-        fn ctx_at(width: u16, theme: &Theme) -> RenderCtx<'_> {
-            RenderCtx {
-                width,
-                theme,
-                show_thinking: false,
-                expanded: false,
-                expand_hint: None,
-            }
-        }
-
         fn rows(lines: &[Line<'_>]) -> Vec<String> {
             lines.iter().map(ToString::to_string).collect()
         }
@@ -111,7 +101,7 @@ mod tests {
             let theme = Theme::default();
             let block = CompactedBlock::new(4, None, "body line");
 
-            let lines = block.render(&ctx_at(60, &theme));
+            let lines = block.render(&RenderCtx::new(60, &theme));
 
             let bar = theme.accent();
             assert_eq!(
@@ -138,7 +128,7 @@ mod tests {
             let theme = Theme::default();
             let block = CompactedBlock::new(4, None, "   \n  ");
 
-            let lines = block.render(&ctx_at(60, &theme));
+            let lines = block.render(&RenderCtx::new(60, &theme));
 
             assert_eq!(rows(&lines), ["▎ Compacted 4 messages → 1 summary"]);
         }
@@ -155,7 +145,7 @@ mod tests {
                 "},
             );
 
-            let lines = block.render(&ctx_at(60, &theme));
+            let lines = block.render(&RenderCtx::new(60, &theme));
 
             assert_eq!(
                 rows(&lines),
@@ -181,7 +171,7 @@ mod tests {
                 },
             );
 
-            let lines = block.render(&ctx_at(60, &theme));
+            let lines = block.render(&RenderCtx::new(60, &theme));
 
             let code = lines
                 .iter()
@@ -199,7 +189,7 @@ mod tests {
             let block =
                 CompactedBlock::new(42, Some("focus on a long failing build transcript"), "");
 
-            let lines = block.render(&ctx_at(24, &theme));
+            let lines = block.render(&RenderCtx::new(24, &theme));
 
             assert_eq!(
                 rows(&lines),

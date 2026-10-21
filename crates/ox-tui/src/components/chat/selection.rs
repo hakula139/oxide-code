@@ -461,8 +461,8 @@ mod tests {
     use ratatui::backend::TestBackend;
     use ratatui::layout::Rect;
 
-    use ox_core::protocol::{ToolCall, ToolResult};
-    use ox_core::tool::ToolResultView;
+    use ox_core::protocol::ToolCall;
+    use ox_core::protocol::testing::text_result;
 
     use super::*;
     use crate::components::chat::testing::FixedBlock;
@@ -611,18 +611,6 @@ mod tests {
                 }
             }
 
-            fn tool_result(id: &str, content: &str) -> ToolResult {
-                ToolResult {
-                    id: id.to_owned(),
-                    content: content.to_owned(),
-                    is_error: false,
-                    title: None,
-                    view: ToolResultView::Text {
-                        content: content.to_owned(),
-                    },
-                }
-            }
-
             /// Results of eight lines for the calls `ids`, which the compact view caps at five with
             /// a footer, painted at the tail of a 10-row chat.
             fn long_results(ids: &[&str]) -> (ChatView, Vec<String>) {
@@ -633,7 +621,7 @@ mod tests {
                 let mut chat = ChatView::new(&Theme::default(), false);
                 for id in ids {
                     chat.push_tool_call(tool_call(id));
-                    chat.push_tool_result(tool_result(id, &output));
+                    chat.push_tool_result(text_result(id, &output, false, None));
                 }
                 let screen = paint_rows(&mut chat);
                 (chat, screen)
@@ -818,7 +806,7 @@ mod tests {
                 let now = Instant::now();
                 hold(&mut chat, (x, y), (x + 6, y), now);
 
-                chat.push_tool_result(tool_result("Grep(a)", "a hits"));
+                chat.push_tool_result(text_result("Grep(a)", "a hits", false, None));
                 let buf = paint_in(&mut chat, area);
                 let copied = release(&mut chat, (x + 6, y), now);
 
