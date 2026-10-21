@@ -20,7 +20,7 @@ The tree lists only the top-level entries whose names leave their purpose unclea
 ├── docs/                                   # User guides, conventions, design specs, and research notes
 ├── Formula/                                # Homebrew formula, served from this repo as a tap
 ├── licenses/                               # Licenses for bundled syntax definitions and themes
-└── scripts/                                # Homebrew formula updater run by the Release workflow
+└── scripts/                                # Homebrew formula updater run by the Release workflow, and the credential leak check
 ```
 
 ## Read Before You Edit
@@ -36,7 +36,7 @@ The tree lists only the top-level entries whose names leave their purpose unclea
 
 ## Rules for Every Change
 
-- Run the pre-commit hooks on every commit. In each new checkout or worktree, run `nix develop -c true` once to generate the hook config and install the Node tools the hooks need. Never bypass the hooks with `--no-verify` or `PRE_COMMIT_ALLOW_NO_CONFIG`.
+- Run the pre-commit hooks on every commit. In each new checkout or worktree, run `nix develop -c true` once to generate the hook config. Never bypass the hooks with `--no-verify` or `PRE_COMMIT_ALLOW_NO_CONFIG`.
 - Run the [verification](#verification) block before review.
 - Add new words to `.cspell/words.txt` in alphabetical order. `cspell` scans Rust sources too, so a new word in a doc comment fails the same way as one in `README.md`.
 - Update whatever the change makes stale: the `README.md` Features and Scope sections, the trust model in `SECURITY.md`, the user guides, design docs and the module map, research notes whose follow-ups it resolves, and open issues it resolves or invalidates.

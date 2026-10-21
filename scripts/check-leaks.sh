@@ -12,6 +12,12 @@ dirs=(
   "${XDG_STATE_HOME:-$HOME/.local/state}/ox"
   "${XDG_DATA_HOME:-$HOME/.local/share}/ox/sessions"
 )
+for dir in "${dirs[@]}"; do
+  if [[ ! -d "$dir" ]]; then
+    echo "$dir is missing. Rerun with the XDG directories the sessions used." >&2
+    exit 2
+  fi
+done
 
 secrets=()
 names=()
@@ -24,6 +30,7 @@ done
 while IFS= read -r line; do
   value="${line#*:}"
   value="${value#"${value%%[![:space:]]*}"}"
+  value="${value%"${value##*[![:space:]]}"}"
   if [[ "$line" == *:* && ${#value} -ge 8 ]]; then
     secrets+=("$value")
     names+=("ANTHROPIC_CUSTOM_HEADERS (${line%%:*})")
