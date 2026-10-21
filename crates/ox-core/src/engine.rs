@@ -103,13 +103,12 @@ impl EnginePanic {
 
 // ── Engine ──
 
-/// The session an [`Engine`] continues: the store it rolls new sessions into, the live handle and
-/// the transcript it loaded, and the tracker holding the file state it restored.
+/// The session an [`Engine`] continues: the store it rolls new sessions into, and the live handle
+/// and the transcript it loaded.
 pub struct SessionParts {
     pub store: SessionStore,
     pub handle: SessionHandle,
     pub transcript: LoadedTranscript,
-    pub file_tracker: Arc<FileTracker>,
 }
 
 /// The live session with its transcript, prompt, and usage accounting.
@@ -142,6 +141,9 @@ pub struct Engine {
     /// Warnings about the instruction files the latest user context load could not read.
     instruction_warnings: Vec<String>,
     file_tracker: Arc<FileTracker>,
+    /// The tracked files the loaded session read that changed on disk since, until
+    /// [`Self::emit_session_start`] reports them.
+    drifted: Vec<PathBuf>,
     /// The background shells the `bash` tools start, which end with the session.
     shells: Arc<BackgroundShells>,
     /// The configured policy plus the session allow rules granted since the live session began.
@@ -180,7 +182,6 @@ impl Engine {
             store,
             handle: session,
             transcript,
-            file_tracker,
         } = session;
         let client = Client::new(
             config,
@@ -198,7 +199,9 @@ impl Engine {
             tool_metadata,
             usage,
             tasks,
+            file_snapshots,
         } = transcript;
+        let (file_tracker, drifted) = FileTracker::restored(file_snapshots);
         let prompt_unrecorded = context.is_none();
         let workspace = Arc::new(config.workspace.clone());
         let (prompt, instruction_warnings) =
@@ -222,7 +225,8 @@ impl Engine {
             prompt_unrecorded,
             startup_notices: config.notices(),
             instruction_warnings,
-            file_tracker,
+            file_tracker: Arc::new(file_tracker),
+            drifted,
             shells,
             policy: config.permission.clone(),
             max_tool_rounds: config.max_tool_rounds,
@@ -260,9 +264,8 @@ impl Engine {
     }
 
     /// Starts the engine task, which first emits the config's startup notices, then what
-    /// [`Self::emit_session_start`] shows. `drifted` lists the tracked files that changed on disk
-    /// since the resumed session read them.
-    pub fn spawn(mut self, drifted: &[PathBuf]) -> EngineHandle {
+    /// [`Self::emit_session_start`] shows.
+    pub fn spawn(mut self) -> EngineHandle {
         let (ops, op_rx) = mpsc::channel(OP_CHANNEL_CAP);
         // Unbounded, so the engine never waits on or drops events for a frontend that falls behind.
         let (sink, events) = mpsc::unbounded_channel();
@@ -270,7 +273,7 @@ impl Engine {
         for notice in std::mem::take(&mut self.startup_notices) {
             sink.emit(Event::Notice(notice), "startup-notice");
         }
-        self.emit_session_start(&sink, drifted);
+        self.emit_session_start(&sink);
         let task = EngineTask(tokio::spawn(self.run(sink, op_rx)));
         EngineHandle { ops, events, task }
     }
@@ -614,7 +617,7 @@ impl Engine {
         let outcome = handle::roll(
             &mut self.session,
             &self.store,
-            &self.file_tracker,
+            self.file_tracker.snapshot_all(),
             self.client.model().id(),
             git_branch,
         )
@@ -628,7 +631,7 @@ impl Engine {
             "session-rolled",
         );
         report_finalize_failure(sink, outcome.finalize_failure);
-        self.emit_session_start(sink, &[]);
+        self.emit_session_start(sink);
         sink.emit(Event::SessionReady, "session-ready");
     }
 
@@ -658,7 +661,7 @@ impl Engine {
             "session-resumed",
         );
         report_finalize_failure(sink, outcome.finalize_failure);
-        self.emit_session_start(sink, &outcome.drifted_paths);
+        self.emit_session_start(sink);
         sink.emit(Event::SessionReady, "session-ready");
     }
 
@@ -671,7 +674,8 @@ impl Engine {
                 resolve_saved_prefix(&self.store, &prefix, self.session.session_id())?.path
             }
         };
-        handle::roll_into(&mut self.session, &self.store, &self.file_tracker, &path).await
+        let snapshots = self.file_tracker.snapshot_all();
+        handle::roll_into(&mut self.session, &self.store, snapshots, &path).await
     }
 
     async fn adopt_session(&mut self, sink: &dyn EventSink, transcript: LoadedTranscript) {
@@ -683,9 +687,13 @@ impl Engine {
             tool_metadata,
             usage,
             tasks,
+            file_snapshots,
         } = transcript;
         self.client
             .set_session_id(self.session.session_id().to_owned());
+        let (file_tracker, drifted) = FileTracker::restored(file_snapshots);
+        self.file_tracker = Arc::new(file_tracker);
+        self.drifted = drifted;
         self.messages = messages;
         self.compact = compact;
         self.tool_metadata = tool_metadata;
@@ -924,15 +932,15 @@ impl Engine {
     }
 
     /// Shows what a session carries as the engine starts on it: its usage and task list, the
-    /// warnings its prompt raised, the tracked files in `drifted`, and a transcript that ends on an
-    /// interrupted response. Follows the event that swaps the session, which clears the chat.
-    fn emit_session_start(&mut self, sink: &dyn EventSink, drifted: &[PathBuf]) {
+    /// warnings its prompt raised, the tracked files that drifted, and a transcript that ends on
+    /// an interrupted response. Follows the event that swaps the session, which clears the chat.
+    fn emit_session_start(&mut self, sink: &dyn EventSink) {
         self.emit_usage_update(sink);
         self.emit_restored_tasks(sink);
         for warning in &self.instruction_warnings {
             sink.emit(Event::Notice(warning.clone()), "instruction-warning");
         }
-        report_drift(sink, drifted);
+        report_drift(sink, &std::mem::take(&mut self.drifted));
         turn::notify_if_interrupted(&self.messages, sink);
     }
 
@@ -1160,12 +1168,14 @@ mod tests {
     use crate::config::compaction::testing::WINDOW_1M_THRESHOLD;
     use crate::config::oauth::testing::write_creds;
     use crate::config::{Effort, PromptCacheTtl, display_auto_compaction};
-    use crate::file_tracker::testing::seed_full_read;
+    use crate::file_tracker::FileSnapshot;
+    use crate::file_tracker::testing::{record_tracked_file, seed_full_read};
     use crate::message::{Replay, Role};
     use crate::model::ResolvedModelId;
     use crate::permission::rule::Rule;
     use crate::permission::{Mode, PermissionClass, Workspace};
     use crate::protocol::testing::CapturingSink;
+    use crate::session::handle::testing::record_write_call;
     use crate::session::post_compact::synthesize_post_compact_message;
     use crate::session::store::delete_at;
     use crate::session::store::local_testing::test_session_file;
@@ -1268,6 +1278,30 @@ mod tests {
         std::fs::write(&path, b"\xff\xfe").unwrap();
         let cause = std::fs::read_to_string(&path).unwrap_err();
         format!("Skipped instruction file {}: {cause}", path.display())
+    }
+
+    /// Tracker snapshots of `kept.txt` and `drifted.txt` in `dir`, after which `drifted.txt`
+    /// changes on disk. Returns the snapshots and both paths.
+    fn tracked_files(dir: &Path) -> (Vec<FileSnapshot>, PathBuf, PathBuf) {
+        let tracker = FileTracker::default();
+        let kept = dir.join("kept.txt");
+        let drifted = dir.join("drifted.txt");
+        record_tracked_file(&tracker, &kept, b"kept", "toolu_kept");
+        record_tracked_file(&tracker, &drifted, b"before", "toolu_drifted");
+        std::fs::write(&drifted, b"after").unwrap();
+        (tracker.snapshot_all(), kept, drifted)
+    }
+
+    /// Paths the engine's file tracker holds, sorted.
+    fn tracked_paths(engine: &Engine) -> Vec<PathBuf> {
+        let mut paths: Vec<_> = engine
+            .file_tracker
+            .snapshot_all()
+            .into_iter()
+            .map(|snapshot| snapshot.path)
+            .collect();
+        paths.sort();
+        paths
     }
 
     /// Records one exchange in a new session in `store` and finishes it, returning its ID.
@@ -1510,7 +1544,7 @@ mod tests {
                         engine(server.uri(), &test_store(dir.path()), dir.path()).await;
                     engine.session = handle::testing::dead("dead");
 
-                    let failure = engine.spawn(&[]).shutdown().await.unwrap();
+                    let failure = engine.spawn().shutdown().await.unwrap();
 
                     assert!(
                         failure.is_some_and(|f| f.starts_with("session writer task has stopped")),
@@ -1574,7 +1608,6 @@ mod tests {
                                 usage: usage.to_vec(),
                                 ..LoadedTranscript::default()
                             },
-                            file_tracker: Arc::new(FileTracker::default()),
                         },
                         false,
                     )
@@ -1632,7 +1665,6 @@ mod tests {
                         store: store.clone(),
                         handle: session.clone(),
                         transcript: LoadedTranscript::default(),
-                        file_tracker: Arc::new(FileTracker::default()),
                     },
                     false,
                 )
@@ -1674,7 +1706,6 @@ mod tests {
                         store: store.clone(),
                         handle: handle::start(&store, MODEL, None),
                         transcript: LoadedTranscript::default(),
-                        file_tracker: Arc::new(FileTracker::default()),
                     },
                     false,
                 )
@@ -1706,6 +1737,38 @@ mod tests {
             })
             .await;
         }
+
+        #[tokio::test]
+        async fn keeps_the_tracked_files_that_match_disk_and_holds_back_the_drift() {
+            with_pinned_home(async {
+                let dir = tempfile::tempdir().unwrap();
+                let store = test_store(dir.path());
+                let (snapshots, kept, drifted) = tracked_files(dir.path());
+                let mut config = test_config("http://127.0.0.1:9".to_owned(), api_key(), MODEL);
+                config.workspace = Workspace::new(dir.path());
+
+                let engine = Engine::new(
+                    &config,
+                    NoRoots,
+                    DEVICE_ID.to_owned(),
+                    SessionParts {
+                        store: store.clone(),
+                        handle: handle::start(&store, MODEL, None),
+                        transcript: LoadedTranscript {
+                            file_snapshots: snapshots,
+                            ..LoadedTranscript::default()
+                        },
+                    },
+                    false,
+                )
+                .await
+                .unwrap();
+
+                assert_eq!(tracked_paths(&engine), [kept]);
+                assert_eq!(engine.drifted, [drifted]);
+            })
+            .await;
+        }
     }
 
     mod spawn {
@@ -1731,8 +1794,9 @@ mod tests {
                 ];
                 engine.total_estimated_cost_usd = 1.23;
                 engine.tasks = plan();
+                engine.drifted = vec![PathBuf::from("a.rs")];
 
-                let mut handle = engine.spawn(&[PathBuf::from("a.rs")]);
+                let mut handle = engine.spawn();
                 let notice = handle.events.recv().await.unwrap();
                 let cost = handle.events.recv().await.unwrap();
                 let tasks = handle.events.recv().await.unwrap();
@@ -1811,7 +1875,7 @@ mod tests {
                 let store = test_store(dir.path());
                 let engine = engine(server.uri(), &store, dir.path()).await;
                 let session_id = engine.session_id().to_owned();
-                let mut handle = engine.spawn(&[]);
+                let mut handle = engine.spawn();
 
                 let events = submit(&mut handle, "hello").await;
                 let failure = handle.shutdown().await.unwrap();
@@ -1847,7 +1911,7 @@ mod tests {
                 let mut engine = engine(server.uri(), &test_store(dir.path()), dir.path()).await;
                 engine.interactive = true;
                 let live_id = engine.session_id().to_owned();
-                let mut handle = engine.spawn(&[]);
+                let mut handle = engine.spawn();
 
                 handle
                     .ops
@@ -1897,7 +1961,7 @@ mod tests {
                 engine.interactive = true;
                 let session_id = engine.session_id().to_owned();
                 let cache_ttl = engine.client.prompt_cache_ttl();
-                let mut handle = engine.spawn(&[]);
+                let mut handle = engine.spawn();
 
                 handle
                     .ops
@@ -1957,7 +2021,7 @@ mod tests {
                 mount_reply(&server, "done").await;
                 let dir = tempfile::tempdir().unwrap();
                 let engine = engine(server.uri(), &test_store(dir.path()), dir.path()).await;
-                let mut handle = engine.spawn(&[]);
+                let mut handle = engine.spawn();
 
                 for op in [
                     Op::Queue("early".to_owned()),
@@ -2010,7 +2074,7 @@ mod tests {
                 let store = test_store(dir.path());
                 let engine = engine(server.uri(), &store, dir.path()).await;
                 let session_id = engine.session_id().to_owned();
-                let mut handle = engine.spawn(&[]);
+                let mut handle = engine.spawn();
 
                 submit(&mut handle, &pasted_logs()).await;
                 submit(&mut handle, "two").await;
@@ -2058,7 +2122,7 @@ mod tests {
                 let store = test_store(dir.path());
                 let target_id = finished_session(&store).await;
                 let engine = engine(server.uri(), &store, dir.path()).await;
-                let mut handle = engine.spawn(&[]);
+                let mut handle = engine.spawn();
 
                 let target = ResumeTarget::Prefix(target_id[..8].to_owned());
                 handle.ops.send(Op::Resume { target }).await.unwrap();
@@ -2108,7 +2172,7 @@ mod tests {
                 let store = test_store(dir.path());
                 let engine = engine(server.uri(), &store, dir.path()).await;
                 let live_id = engine.session_id().to_owned();
-                let mut handle = engine.spawn(&[]);
+                let mut handle = engine.spawn();
 
                 submit(&mut handle, "first").await;
                 let target = ResumeTarget::Prefix(live_id[..8].to_owned());
@@ -2144,7 +2208,7 @@ mod tests {
                 let store = test_store(dir.path());
                 let engine = engine(server.uri(), &store, dir.path()).await;
                 let session_id = engine.session_id().to_owned();
-                let mut handle = engine.spawn(&[]);
+                let mut handle = engine.spawn();
 
                 submit(&mut handle, &pasted_logs()).await;
                 submit(&mut handle, "two").await;
@@ -2211,7 +2275,7 @@ mod tests {
                 let store = test_store(dir.path());
                 let engine = engine(server.uri(), &store, dir.path()).await;
                 let archived_id = engine.session.session_id().to_owned();
-                let mut handle = engine.spawn(&[]);
+                let mut handle = engine.spawn();
 
                 submit(&mut handle, "first").await;
                 handle.ops.send(Op::Archive).await.unwrap();
@@ -2250,7 +2314,7 @@ mod tests {
                     ops,
                     mut events,
                     task,
-                } = engine.spawn(&[]);
+                } = engine.spawn();
 
                 for op in [
                     Op::Rename {
@@ -2296,45 +2360,12 @@ mod tests {
                 let server = MockServer::start().await;
                 let dir = tempfile::tempdir().unwrap();
                 let store = test_store(dir.path());
-                let handle = engine(server.uri(), &store, dir.path()).await.spawn(&[]);
+                let handle = engine(server.uri(), &store, dir.path()).await.spawn();
 
                 handle.ops.send(Op::Shutdown).await.unwrap();
                 assert_eq!(handle.task.join().await.unwrap(), None);
 
                 assert!(store.list().unwrap().is_empty());
-            })
-            .await;
-        }
-
-        #[tokio::test]
-        async fn finalizes_the_live_session_after_a_clear() {
-            with_pinned_home(async {
-                let server = MockServer::start().await;
-                mount_reply(&server, "reply").await;
-                let dir = tempfile::tempdir().unwrap();
-                let store = test_store(dir.path());
-                let engine = engine(server.uri(), &store, dir.path()).await;
-                let tracker = Arc::clone(&engine.file_tracker);
-                let read_path = dir.path().join("read.txt");
-                std::fs::write(&read_path, "contents").unwrap();
-                let mut handle = engine.spawn(&[]);
-
-                handle.ops.send(Op::Clear).await.unwrap();
-                let live_id = next_matching(&mut handle.events, |event| match event {
-                    Event::SessionRolled {
-                        id,
-                        archived: false,
-                    } => Some(id),
-                    _ => None,
-                })
-                .await;
-                seed_full_read(&tracker, &read_path);
-                submit(&mut handle, "after clear").await;
-                handle.shutdown().await.unwrap();
-
-                let snapshots = store.load_session_data(&live_id).unwrap().file_snapshots;
-                let paths: Vec<_> = snapshots.iter().map(|snapshot| &snapshot.path).collect();
-                assert_eq!(paths, [&read_path]);
             })
             .await;
         }
@@ -2347,7 +2378,7 @@ mod tests {
                 let store = test_store(dir.path());
                 let engine = engine(server.uri(), &store, dir.path()).await;
                 let shells = Arc::clone(&engine.shells);
-                let mut handle = engine.spawn(&[]);
+                let mut handle = engine.spawn();
 
                 start_shell(&shells, "sleep 30");
                 let listed = next_matching(&mut handle.events, |event| match event {
@@ -2374,7 +2405,7 @@ mod tests {
                 let store = test_store(dir.path());
                 let engine = engine(server.uri(), &store, dir.path()).await;
                 let live_id = engine.session_id().to_owned();
-                let mut handle = engine.spawn(&[]);
+                let mut handle = engine.spawn();
 
                 let mut cancelled = Vec::new();
                 for (count, prompt) in [(1, "write a story"), (2, "write a poem")] {
@@ -2430,7 +2461,7 @@ mod tests {
                 engine.compaction = CompactionConfig::with_threshold_for_test(50_000);
                 engine.messages = tool_heavy_transcript();
                 engine.last_usage = Some(TokenUsage::new(50_000, 1));
-                let mut handle = engine.spawn(&[]);
+                let mut handle = engine.spawn();
 
                 handle
                     .ops
@@ -2479,7 +2510,7 @@ mod tests {
                         ops,
                         mut events,
                         task,
-                    } = engine.spawn(&[]);
+                    } = engine.spawn();
 
                     ops.send(op).await.unwrap();
                     until_requested(&server, 1).await;
@@ -2510,7 +2541,7 @@ mod tests {
                 let read_path = dir.path().join("read.txt");
                 std::fs::write(&read_path, "contents").unwrap();
                 seed_full_read(&engine.file_tracker, &read_path);
-                let handle = engine.spawn(&[]);
+                let handle = engine.spawn();
 
                 handle
                     .ops
@@ -2550,7 +2581,7 @@ mod tests {
                         ops,
                         mut events,
                         task,
-                    } = engine.spawn(&[]);
+                    } = engine.spawn();
 
                     ops.send(Op::Login).await.unwrap();
                     let url = login_url(&mut events).await;
@@ -3550,6 +3581,48 @@ mod tests {
         use super::*;
 
         #[tokio::test]
+        async fn saves_the_reads_with_the_session_that_made_them() {
+            with_pinned_home(async {
+                let server = MockServer::start().await;
+                mount_reply(&server, "reply").await;
+                let dir = tempfile::tempdir().unwrap();
+                let store = test_store(dir.path());
+                let mut engine = engine(server.uri(), &store, dir.path()).await;
+                let old_id = engine.session_id().to_owned();
+                let before = dir.path().join("before.txt");
+                let after = dir.path().join("after.txt");
+                let late = dir.path().join("late.txt");
+                for path in [&before, &after, &late] {
+                    std::fs::write(path, "contents").unwrap();
+                }
+                let sink = CapturingSink::default();
+                let mut ops = inert_ops();
+                engine.submit_prompt("before clear", &sink, &mut ops).await;
+                seed_full_read(&engine.file_tracker, &before);
+                let old_tracker = Arc::clone(&engine.file_tracker);
+
+                engine.clear(&sink).await;
+                assert_eq!(tracked_paths(&engine), [] as [PathBuf; 0]);
+                seed_full_read(&old_tracker, &late);
+                let new_id = engine.session_id().to_owned();
+                engine.submit_prompt("after clear", &sink, &mut ops).await;
+                seed_full_read(&engine.file_tracker, &after);
+                assert_eq!(engine.finalize().await, None);
+
+                let saved_paths = |id: &str| -> Vec<PathBuf> {
+                    let snapshots = store.load_session_data(id).unwrap().file_snapshots;
+                    snapshots
+                        .into_iter()
+                        .map(|snapshot| snapshot.path)
+                        .collect()
+                };
+                assert_eq!(saved_paths(&old_id), [before]);
+                assert_eq!(saved_paths(&new_id), [after]);
+            })
+            .await;
+        }
+
+        #[tokio::test]
         async fn keeps_a_pending_title_cost_out_of_the_new_session() {
             with_pinned_home(async {
                 let server = MockServer::start().await;
@@ -3705,6 +3778,42 @@ mod tests {
 
     mod resume {
         use super::*;
+
+        #[tokio::test]
+        async fn swaps_in_the_file_state_that_still_matches_disk_and_reports_the_rest() {
+            with_pinned_home(async {
+                let dir = tempfile::tempdir().unwrap();
+                let store = test_store(dir.path());
+                let saved = handle::start(&store, MODEL, None);
+                let saved_id = saved.session_id().to_owned();
+                let saved_tracker = FileTracker::default();
+                let kept = dir.path().join("kept.txt");
+                let drifted = dir.path().join("drifted.txt");
+                saved.record_message(Message::user("write them")).await;
+                record_write_call(&saved, &saved_tracker, "toolu_kept", &kept, true).await;
+                record_write_call(&saved, &saved_tracker, "toolu_drifted", &drifted, true).await;
+                std::fs::write(&drifted, "changed").unwrap();
+                saved.finalize(saved_tracker.snapshot_all()).await;
+                let mut engine = engine("http://127.0.0.1:9".to_owned(), &store, dir.path()).await;
+                let live_id = engine.session_id().to_owned();
+                engine.session.record_message(Message::user("live")).await;
+                let live = dir.path().join("live.txt");
+                std::fs::write(&live, "live").unwrap();
+                seed_full_read(&engine.file_tracker, &live);
+                let sink = CapturingSink::default();
+                let path = store.find_session_path(&saved_id).unwrap();
+
+                engine.resume(&sink, ResumeTarget::Path(path)).await;
+
+                assert_eq!(tracked_paths(&engine), [kept]);
+                let notice = Event::Notice(format_drift_warning(&[drifted]));
+                assert!(sink.events().contains(&notice), "{:?}", sink.events());
+                let live_files = store.load_session_data(&live_id).unwrap().file_snapshots;
+                let live_paths: Vec<_> = live_files.into_iter().map(|file| file.path).collect();
+                assert_eq!(live_paths, [live]);
+            })
+            .await;
+        }
 
         #[tokio::test]
         async fn replays_the_recorded_prompt() {
@@ -3865,6 +3974,9 @@ mod tests {
                 let rule = Rule::parse(PermissionClass::Exec, "cargo test *").unwrap();
                 engine.policy.allow_for_session(rule.clone());
                 start_shell(&engine.shells, "sleep 30");
+                let read = dir.path().join("read.txt");
+                std::fs::write(&read, "read").unwrap();
+                seed_full_read(&engine.file_tracker, &read);
                 let sink = CapturingSink::default();
 
                 engine
@@ -3878,6 +3990,7 @@ mod tests {
                 assert_eq!(engine.displayed_usage, Some(displayed_usage));
                 assert!((engine.total_estimated_cost_usd - 1.23).abs() < f64::EPSILON);
                 assert_eq!(engine.policy.session_allow(), [rule]);
+                assert_eq!(tracked_paths(&engine), [read]);
                 assert_eq!(
                     engine.shells.list(),
                     [shell("shell-1", "sleep 30", ShellState::Running)]
@@ -3936,7 +4049,7 @@ mod tests {
 
         fn sonnet_pick() -> ConfigPick {
             ConfigPick::Model {
-                id: ResolvedModelId::new("claude-sonnet-5-5".to_owned()),
+                id: ResolvedModelId::new("claude-sonnet-5-5"),
                 effort: None,
             }
         }
@@ -3948,14 +4061,14 @@ mod tests {
                 let dir = tempfile::tempdir().unwrap();
                 let mut engine = engine(server.uri(), &test_store(dir.path()), dir.path()).await;
                 engine.client.set_effort(Effort::High);
-                let opus = ModelSpec::resolve(MODEL.to_owned());
+                let opus = ModelSpec::resolve(MODEL);
                 engine.compaction =
                     CompactionConfig::default_for_test(&opus, engine.client.max_tokens());
                 let opus_compaction = display_auto_compaction(engine.compaction.auto);
                 let sink = CapturingSink::default();
 
                 for id in ["custom-model", MODEL] {
-                    let id = ResolvedModelId::new(id.to_owned());
+                    let id = ResolvedModelId::new(id);
                     engine.set_model(&sink, ConfigPick::Model { id, effort: None });
                 }
 
@@ -4517,7 +4630,7 @@ mod tests {
                         engine(server.uri(), &test_store(dir.path()), dir.path()).await;
                     engine.client.set_auth(None);
                     engine.oauth_token_url = format!("{}/token", server.uri());
-                    let mut handle = engine.spawn(&[]);
+                    let mut handle = engine.spawn();
 
                     handle.ops.send(Op::Login).await.unwrap();
                     let url = login_url(&mut handle.events).await;
@@ -4556,7 +4669,7 @@ mod tests {
                 let server = MockServer::start().await;
                 let dir = tempfile::tempdir().unwrap();
                 let engine = engine(server.uri(), &test_store(dir.path()), dir.path()).await;
-                let mut handle = engine.spawn(&[]);
+                let mut handle = engine.spawn();
 
                 handle.ops.send(Op::Login).await.unwrap();
                 let url = login_url(&mut handle.events).await;
@@ -4942,7 +5055,7 @@ mod tests {
                     (
                         &set_model,
                         Event::ConfigChanged {
-                            model: ModelSpec::resolve(MODEL.to_owned()),
+                            model: ModelSpec::resolve(MODEL),
                             effort: Some(Effort::Low),
                             requested: ConfigPick::Effort(Effort::Low),
                             auto_compaction: CompactionConfig::with_threshold_for_test(50_000).auto,
@@ -4953,7 +5066,7 @@ mod tests {
                     (
                         &set_model,
                         Event::ConfigChanged {
-                            model: ModelSpec::resolve("custom-model".to_owned()),
+                            model: ModelSpec::resolve("custom-model"),
                             effort: None,
                             requested: ConfigPick::Effort(Effort::Low),
                             auto_compaction: CompactionConfig::with_threshold_for_test(50_000).auto,

@@ -5,7 +5,7 @@ pub mod client;
 pub mod command;
 pub mod config;
 pub mod engine;
-pub mod file_tracker;
+mod file_tracker;
 mod message;
 pub mod model;
 pub mod permission;

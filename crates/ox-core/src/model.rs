@@ -8,14 +8,14 @@
 mod pricing;
 mod usage;
 
+pub(crate) use usage::TokenUsage;
+
 use std::fmt::Write as _;
 
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 use crate::config::Effort;
-pub(crate) use pricing::TokenCostRates;
-use pricing::{FABLE_5_1_RATES, HAIKU_5_5_RATES, OPUS_5_5_RATES, SONNET_5_5_RATES};
-pub(crate) use usage::TokenUsage;
+use pricing::{FABLE_5_1_RATES, HAIKU_5_5_RATES, OPUS_5_5_RATES, SONNET_5_5_RATES, TokenCostRates};
 
 // ── ModelInfo ──
 
@@ -30,9 +30,9 @@ pub struct ModelInfo {
     /// UI shows the level the request actually runs at.
     pub default_effort: Effort,
     /// Whether the model accepts `thinking.display = "updates"`.
-    pub(crate) progress_updates: bool,
+    progress_updates: bool,
     /// First-party Claude API token prices in USD per million tokens.
-    pub(crate) cost_rates: TokenCostRates,
+    cost_rates: TokenCostRates,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -141,7 +141,8 @@ pub struct ModelSpec {
 }
 
 impl ModelSpec {
-    pub fn resolve(id: String) -> Self {
+    pub fn resolve(id: impl Into<String>) -> Self {
+        let id = id.into();
         let info = lookup(&id);
         Self { id, info }
     }
@@ -288,8 +289,8 @@ pub(crate) enum BlockBinding {
 pub struct ResolvedModelId(String);
 
 impl ResolvedModelId {
-    pub fn new(id: String) -> Self {
-        Self(id)
+    pub fn new(id: impl Into<String>) -> Self {
+        Self(id.into())
     }
 
     pub(crate) fn into_inner(self) -> String {
@@ -301,10 +302,6 @@ impl ResolvedModelId {
 mod tests {
     use super::*;
     use crate::config::PromptCacheTtl;
-
-    fn spec(id: &str) -> ModelSpec {
-        ModelSpec::resolve(id.to_owned())
-    }
 
     mod replacement_for {
         use super::*;
@@ -378,7 +375,7 @@ mod tests {
         #[test]
         fn finds_every_row_by_exact_id() {
             for info in MODELS {
-                let resolved = spec(info.id).info().map(|row| row.id);
+                let resolved = ModelSpec::resolve(info.id).info().map(|row| row.id);
                 assert_eq!(resolved, Some(info.id));
             }
         }
@@ -392,7 +389,7 @@ mod tests {
                 "anthropic.claude-opus-5-5",
                 "gpt-5",
             ] {
-                let model = spec(unknown);
+                let model = ModelSpec::resolve(unknown);
                 assert!(model.info().is_none(), "{unknown} must not resolve");
                 assert_eq!(model.id(), unknown);
             }
@@ -410,7 +407,11 @@ mod tests {
                 ("claude-sonnet-5-5", Effort::High),
                 ("claude-haiku-5-5", Effort::Medium),
             ] {
-                assert_eq!(spec(id).resolve_effort(None), Some(expected), "{id}");
+                assert_eq!(
+                    ModelSpec::resolve(id).resolve_effort(None),
+                    Some(expected),
+                    "{id}"
+                );
             }
         }
 
@@ -419,7 +420,7 @@ mod tests {
             for info in MODELS {
                 for level in Effort::ALL {
                     assert_eq!(
-                        spec(info.id).resolve_effort(Some(level)),
+                        ModelSpec::resolve(info.id).resolve_effort(Some(level)),
                         Some(level),
                         "{} {level}",
                         info.id,
@@ -430,7 +431,7 @@ mod tests {
 
         #[test]
         fn omits_effort_for_an_unknown_model() {
-            let model = spec("custom-model");
+            let model = ModelSpec::resolve("custom-model");
             assert_eq!(model.resolve_effort(None), None);
             assert_eq!(model.resolve_effort(Some(Effort::High)), None);
         }
@@ -448,7 +449,7 @@ mod tests {
                 ("claude-haiku-5-5", 64_000),
                 ("custom-model", 16_000),
             ] {
-                let model = spec(id);
+                let model = ModelSpec::resolve(id);
                 assert_eq!(model.resolve_max_tokens(None), default, "{id}");
                 assert_eq!(model.resolve_max_tokens(Some(4_096)), 4_096, "{id}");
             }
@@ -467,7 +468,7 @@ mod tests {
                 ("claude-sonnet-5-5", Some("updates")),
                 ("claude-haiku-5-5", None),
             ] {
-                let model = spec(id);
+                let model = ModelSpec::resolve(id);
                 assert_eq!(
                     serde_json::to_value(model.thinking(true)).unwrap(),
                     serde_json::json!({
@@ -492,7 +493,7 @@ mod tests {
 
         #[test]
         fn unknown_model_is_omitted() {
-            assert!(spec("custom-model").thinking(true).is_none());
+            assert!(ModelSpec::resolve("custom-model").thinking(true).is_none());
         }
     }
 
@@ -503,7 +504,7 @@ mod tests {
         fn supported_models_is_1m() {
             for info in MODELS {
                 assert_eq!(
-                    spec(info.id).context_window(),
+                    ModelSpec::resolve(info.id).context_window(),
                     Some(1_000_000),
                     "{}",
                     info.id
@@ -513,7 +514,7 @@ mod tests {
 
         #[test]
         fn unknown_model_has_no_known_window() {
-            assert_eq!(spec("claude-future-9").context_window(), None);
+            assert_eq!(ModelSpec::resolve("claude-future-9").context_window(), None);
         }
     }
 
@@ -528,13 +529,15 @@ mod tests {
                 ("claude-sonnet-5-5", "Claude Sonnet 5.5"),
                 ("claude-haiku-5-5", "Claude Haiku 5.5"),
             ] {
-                assert_eq!(spec(id).display_name(), expected, "{id}");
+                assert_eq!(ModelSpec::resolve(id).display_name(), expected, "{id}");
             }
         }
 
         #[test]
         fn unknown_id_falls_through_to_raw() {
-            assert_eq!(spec("custom-model").display_name(), "custom-model");
+            let custom = ModelSpec::resolve("custom-model");
+
+            assert_eq!(custom.display_name(), "custom-model");
         }
     }
 
@@ -549,13 +552,19 @@ mod tests {
                 ("claude-sonnet-5-5", "Sonnet 5.5"),
                 ("claude-haiku-5-5", "Haiku 5.5"),
             ] {
-                assert_eq!(spec(id).short_display_name(), expected, "{id}");
+                assert_eq!(
+                    ModelSpec::resolve(id).short_display_name(),
+                    expected,
+                    "{id}"
+                );
             }
         }
 
         #[test]
         fn unknown_id_falls_through_to_raw() {
-            assert_eq!(spec("custom-model").short_display_name(), "custom-model");
+            let custom = ModelSpec::resolve("custom-model");
+
+            assert_eq!(custom.short_display_name(), "custom-model");
         }
     }
 
@@ -565,7 +574,7 @@ mod tests {
         #[test]
         fn names_lost_features_and_suggests_replacement() {
             assert_eq!(
-                spec("claude-opus-5-5-20261001")
+                ModelSpec::resolve("claude-opus-5-5-20261001")
                     .unsupported_notice()
                     .as_deref(),
                 Some(
@@ -576,7 +585,9 @@ mod tests {
                 ),
             );
             assert_eq!(
-                spec("gateway-model").unsupported_notice().as_deref(),
+                ModelSpec::resolve("gateway-model")
+                    .unsupported_notice()
+                    .as_deref(),
                 Some(
                     "`gateway-model` is not a supported model, \
                      so requests go without thinking, effort, and context management, \
@@ -588,33 +599,12 @@ mod tests {
         #[test]
         fn is_absent_for_catalog_models() {
             for info in MODELS {
-                assert_eq!(spec(info.id).unsupported_notice(), None, "{}", info.id);
-            }
-        }
-    }
-
-    mod thinking_config {
-        use super::*;
-
-        #[test]
-        fn adaptive_serializes_display_and_block_binding() {
-            let binding = serde_json::json!({"prefix_mismatch_behavior": "drop_block"});
-            for (display, wire) in [
-                (None, None),
-                (Some(ThinkingDisplay::Summarized), Some("summarized")),
-                (Some(ThinkingDisplay::Updates), Some("updates")),
-            ] {
-                let json = serde_json::to_value(&ThinkingConfig::Adaptive {
-                    display,
-                    block_binding: BlockBinding::DropBlock,
-                })
-                .unwrap();
-                let mut expected =
-                    serde_json::json!({"type": "adaptive", "block_binding": binding});
-                if let Some(wire) = wire {
-                    expected["display"] = wire.into();
-                }
-                assert_eq!(json, expected);
+                assert_eq!(
+                    ModelSpec::resolve(info.id).unsupported_notice(),
+                    None,
+                    "{}",
+                    info.id
+                );
             }
         }
     }

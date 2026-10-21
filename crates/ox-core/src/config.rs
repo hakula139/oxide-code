@@ -785,7 +785,7 @@ mod tests {
                 attribution: false,
                 structured_outputs: true,
             },
-            model: ModelSpec::resolve("claude-test-1-0".to_owned()),
+            model: ModelSpec::resolve("claude-test-1-0"),
             effort: Some(Effort::Xhigh),
             max_tokens: None,
             max_tool_rounds: Some(100),
@@ -834,7 +834,7 @@ mod tests {
                 assert_eq!(snap.provenance.effort, Source::Session);
                 assert_eq!(snap.effort, Some(Effort::Low));
 
-                let opus = ModelSpec::resolve("claude-opus-5-5".to_owned());
+                let opus = ModelSpec::resolve("claude-opus-5-5");
                 snap.apply_swap(opus, Some(Effort::Low), None, auto);
                 assert_eq!(snap.provenance.model, Source::Session);
                 assert_eq!(snap.provenance.effort, Source::Session);
@@ -844,14 +844,14 @@ mod tests {
             #[test]
             fn reverts_an_effort_the_model_derived_to_the_default_source() {
                 let mut snap = sample_config().snapshot();
-                let custom = ModelSpec::resolve("gateway-alias".to_owned());
+                let custom = ModelSpec::resolve("gateway-alias");
                 let auto = AutoCompactionConfig::disabled();
 
                 snap.apply_swap(custom, None, Some(Effort::High), auto);
                 assert_eq!(snap.provenance.effort, Source::Default);
                 assert_eq!(snap.effort, None);
 
-                let opus = ModelSpec::resolve("claude-opus-5-5".to_owned());
+                let opus = ModelSpec::resolve("claude-opus-5-5");
                 snap.apply_swap(opus, Some(Effort::Medium), None, auto);
                 assert_eq!(snap.provenance.effort, Source::Default);
                 assert_eq!(snap.effort, Some(Effort::Medium));
@@ -2268,7 +2268,7 @@ mod tests {
         #[test]
         fn are_empty_for_a_current_setup() {
             let mut cfg = sample_config();
-            cfg.model = ModelSpec::resolve("claude-opus-5-5".to_owned());
+            cfg.model = ModelSpec::resolve("claude-opus-5-5");
             assert_eq!(cfg.notices(), [] as [String; 0]);
         }
     }

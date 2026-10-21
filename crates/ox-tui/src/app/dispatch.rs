@@ -4,8 +4,8 @@
 use std::time::Instant;
 
 use crossterm::event::{
-    Event as CrosstermEvent, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton,
-    MouseEvent, MouseEventKind,
+    Event as CrosstermEvent, KeyCode, KeyEvent, KeyEventKind, MouseButton, MouseEvent,
+    MouseEventKind,
 };
 use ratatui::layout::Position;
 use tokio::sync::mpsc::error::TrySendError;
@@ -19,6 +19,7 @@ use super::{App, EXIT_WINDOW};
 use crate::action::{APP_KEYMAP, Action, AppAction};
 use crate::components::input::InputOutcome;
 use crate::components::status::Status;
+use crate::keymap::CTRL_C;
 use crate::modal::ModalAction;
 use crate::now;
 use crate::slash::{self, SlashContext, SlashKind, SlashOutcome};
@@ -152,7 +153,7 @@ impl App {
             return false;
         }
         self.dirty = true;
-        let ctrl_c = key.code == KeyCode::Char('c') && key.modifiers == KeyModifiers::CONTROL;
+        let ctrl_c = CTRL_C.matches(key);
         let Some(text) = self.chat.take_selection().filter(|_| ctrl_c) else {
             return false;
         };
@@ -452,6 +453,7 @@ mod tests {
     use std::time::Duration;
 
     use base64::Engine as _;
+    use crossterm::event::KeyModifiers;
     use ratatui::buffer::CellWidth;
     use ratatui::layout::Rect;
     use ratatui::style::Color;
@@ -1692,7 +1694,7 @@ mod tests {
             // A modal-emitted `SetModel` must reach the engine so it can emit `ConfigChanged`.
             for op in [
                 Op::SetModel(ConfigPick::Model {
-                    id: ResolvedModelId::new("claude-opus-5-5".to_owned()),
+                    id: ResolvedModelId::new("claude-opus-5-5"),
                     effort: None,
                 }),
                 Op::SetModel(ConfigPick::Effort(Effort::High)),
@@ -1924,7 +1926,7 @@ mod tests {
             assert_eq!(
                 forwarded,
                 Op::SetModel(ConfigPick::Model {
-                    id: ResolvedModelId::new("claude-haiku-5-5".to_owned()),
+                    id: ResolvedModelId::new("claude-haiku-5-5"),
                     effort: None,
                 }),
             );

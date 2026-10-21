@@ -651,7 +651,7 @@ mod tests {
                 let engine = engine(server.uri(), &test_store(dir.path()), dir.path()).await;
                 let instructions = dir.path().join("CLAUDE.md");
                 std::fs::write(&instructions, b"\xff\xfe").unwrap();
-                let mut handle = engine.spawn(&[]);
+                let mut handle = engine.spawn();
                 handle.ops.send(Op::Clear).await.unwrap();
                 let sink = CapturingSink::default();
                 let mut approver = fixed(Decision::Deny);
@@ -1067,7 +1067,7 @@ mod tests {
             #[test]
             fn config_changed_writes_its_notice_to_stderr() {
                 let event = Event::ConfigChanged {
-                    model: ModelSpec::resolve("claude-opus-5-5".to_owned()),
+                    model: ModelSpec::resolve("claude-opus-5-5"),
                     effort: Some(Effort::Low),
                     requested: ConfigPick::Effort(Effort::Low),
                     auto_compaction: AutoCompactionConfig::disabled(),

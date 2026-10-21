@@ -1,5 +1,6 @@
 //! Test-only [`SessionHandle`] constructors.
 
+use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -7,7 +8,44 @@ use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 
 use super::{CompactOutcome, Outcome, RecordOutcome, SessionHandle, SharedState};
+use crate::file_tracker::FileTracker;
+use crate::file_tracker::testing::record_tracked_file;
+use crate::message::{ContentBlock, Message, Role};
 use crate::session::actor::SessionCmd;
+
+/// Records a Write call of `tool_use_id` on `handle` that leaves `alpha` at `path`, as `tracker`
+/// records it. An `answered` call also gets its tool result.
+pub(crate) async fn record_write_call(
+    handle: &SessionHandle,
+    tracker: &FileTracker,
+    tool_use_id: &str,
+    path: &Path,
+    answered: bool,
+) {
+    handle
+        .record_message(Message {
+            role: Role::Assistant,
+            content: vec![ContentBlock::ToolUse {
+                id: tool_use_id.to_owned(),
+                name: "write".to_owned(),
+                input: serde_json::Value::Null,
+            }],
+        })
+        .await;
+    record_tracked_file(tracker, path, b"alpha", tool_use_id);
+    if answered {
+        handle
+            .record_message(Message {
+                role: Role::User,
+                content: vec![ContentBlock::ToolResult {
+                    tool_use_id: tool_use_id.to_owned(),
+                    content: "wrote".to_owned(),
+                    is_error: false,
+                }],
+            })
+            .await;
+    }
+}
 
 /// Handle whose actor channel is already closed, so every write fails as actor-gone.
 pub(crate) fn dead(session_id: &str) -> SessionHandle {

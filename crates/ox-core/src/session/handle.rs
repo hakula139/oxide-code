@@ -5,7 +5,7 @@
 pub(crate) mod testing;
 
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -23,7 +23,7 @@ use super::store::{
     SessionData, SessionStore, SessionWriter, load_session_data_from_path, open_append_at,
     read_session_id_from_path,
 };
-use crate::file_tracker::{FileSnapshot, FileTracker};
+use crate::file_tracker::FileSnapshot;
 use crate::message::Message;
 use crate::prompt::SessionContext;
 use crate::tool::ToolMetadata;
@@ -353,8 +353,7 @@ impl SessionHandle {
 
 // ── Resumed Sessions ──
 
-/// A session's transcript as loaded from disk, with the prompt state and display extras saved
-/// beside its messages.
+/// A session's transcript as loaded from disk, with the state saved beside its messages.
 #[derive(Debug, Default)]
 pub struct LoadedTranscript {
     pub(crate) messages: Vec<Message>,
@@ -366,6 +365,9 @@ pub struct LoadedTranscript {
     pub(crate) usage: Vec<UsageRecord>,
     /// The task list the transcript leaves, from its last `tasks` call or else its compaction.
     pub(crate) tasks: Vec<Task>,
+    /// The file tracker state the session saved for reads the transcript still shows, which the
+    /// engine restores where it still matches disk.
+    pub(crate) file_snapshots: Vec<FileSnapshot>,
 }
 
 /// Live handle plus display-only extras the TUI uses to reconstruct what the user saw live.
@@ -375,9 +377,6 @@ pub struct ResumedSession {
     pub title: Option<String>,
     /// Whether the session was archived, so resuming it appended an entry unarchiving it.
     pub unarchived: bool,
-    /// Persisted tracker snapshots passed to `FileTracker::restore_verified` so the
-    /// Read-before-Edit gate clears for files that still match disk.
-    pub file_snapshots: Vec<FileSnapshot>,
 }
 
 // ── Constructors ──
@@ -398,17 +397,15 @@ pub(crate) struct RollOutcome {
     pub(crate) finalize_failure: Option<String>,
 }
 
-/// Rolls `session` to a fresh handle on `git_branch` and finalizes the old one with the tracker
-/// snapshots taken before the clear.
+/// Rolls `session` to a fresh handle on `git_branch` and finalizes the old one with `snapshots`,
+/// its file tracker state.
 pub(crate) async fn roll(
     session: &mut SessionHandle,
     store: &SessionStore,
-    file_tracker: &FileTracker,
+    snapshots: Vec<FileSnapshot>,
     model: &str,
     git_branch: Option<String>,
 ) -> RollOutcome {
-    let snapshots = file_tracker.snapshot_all();
-    file_tracker.clear();
     let new_session = start(store, model, git_branch);
     let new_id = new_session.session_id().to_owned();
     let old_session = std::mem::replace(session, new_session);
@@ -426,18 +423,15 @@ pub(crate) struct RollIntoOutcome {
     pub(crate) title: Option<String>,
     pub(crate) unarchived: bool,
     pub(crate) finalize_failure: Option<String>,
-    /// Tracked files that changed on disk since the session saved them, which need a fresh Read
-    /// before an Edit.
-    pub(crate) drifted_paths: Vec<PathBuf>,
 }
 
-/// Loads and sanitizes the session at `target`, swaps it in, then finalizes the old one. Fails
-/// without swapping when `target` is the live session, whose append writer is in flight, or cannot
-/// be loaded.
+/// Loads and sanitizes the session at `target`, swaps it in, then finalizes the old one with
+/// `snapshots`, its file tracker state. Fails without swapping when `target` is the live session,
+/// whose append writer is in flight, or cannot be loaded.
 pub(crate) async fn roll_into(
     session: &mut SessionHandle,
     store: &SessionStore,
-    file_tracker: &FileTracker,
+    snapshots: Vec<FileSnapshot>,
     target: &Path,
 ) -> Result<RollIntoOutcome> {
     if read_session_id_from_path(target)? == session.session_id() {
@@ -448,21 +442,15 @@ pub(crate) async fn roll_into(
         transcript,
         title,
         unarchived,
-        file_snapshots,
     } = resume_from_path(store, target)?;
 
-    let old_snapshots = file_tracker.snapshot_all();
-    file_tracker.clear();
-    let drifted_paths = file_tracker.restore_verified(file_snapshots);
-
     let old_session = std::mem::replace(session, target_handle);
-    let finalize_failure = old_session.finalize(old_snapshots).await;
+    let finalize_failure = old_session.finalize(snapshots).await;
     Ok(RollIntoOutcome {
         transcript,
         title,
         unarchived,
         finalize_failure,
-        drifted_paths,
     })
 }
 
@@ -520,10 +508,10 @@ fn from_resumed_data(
             tool_metadata: data.tool_result_metadata,
             usage: data.usage,
             tasks,
+            file_snapshots: data.file_snapshots,
         },
         title,
         unarchived: data.archived,
-        file_snapshots: data.file_snapshots,
     })
 }
 
@@ -546,18 +534,21 @@ fn spawn_actor(state: SessionState) -> SessionHandle {
 
 #[cfg(test)]
 mod tests {
+    use std::path::PathBuf;
+
     use time::OffsetDateTime;
     use time::format_description::well_known::Rfc3339;
     use time::macros::datetime;
 
     use super::*;
     use crate::file_tracker::{
-        FileState, GateError, GatePurpose, LastView,
+        FileState, FileTracker, GateError, GatePurpose, LastView,
         testing::{record_tracked_file, seed_full_read},
     };
     use crate::message::{ContentBlock, Replay, Role};
     use crate::prompt::PromptParts;
     use crate::session::entry::{Entry, SessionInfo};
+    use crate::session::handle::testing::record_write_call;
     use crate::session::store::local_testing::test_session_file;
     use crate::session::store::testing::{seed_test_session, test_project_dir, test_store};
     use crate::tool::tasks::testing::plan;
@@ -566,38 +557,6 @@ mod tests {
     /// Resumes the session whose file name carries `session_id`.
     fn resume_id(store: &SessionStore, session_id: &str) -> Result<ResumedSession> {
         resume_from_path(store, &store.find_session_path(session_id)?)
-    }
-
-    async fn record_write_call(
-        handle: &SessionHandle,
-        tracker: &FileTracker,
-        tool_use_id: &str,
-        path: &std::path::Path,
-        answered: bool,
-    ) {
-        handle
-            .record_message(Message {
-                role: Role::Assistant,
-                content: vec![ContentBlock::ToolUse {
-                    id: tool_use_id.to_owned(),
-                    name: "write".to_owned(),
-                    input: serde_json::Value::Null,
-                }],
-            })
-            .await;
-        record_tracked_file(tracker, path, b"alpha", tool_use_id);
-        if answered {
-            handle
-                .record_message(Message {
-                    role: Role::User,
-                    content: vec![ContentBlock::ToolResult {
-                        tool_use_id: tool_use_id.to_owned(),
-                        content: "wrote".to_owned(),
-                        is_error: false,
-                    }],
-                })
-                .await;
-        }
     }
 
     mod record_message {
@@ -1542,7 +1501,6 @@ mod tests {
         async fn swaps_session_in_place_and_finalizes_old_with_summary() {
             let dir = tempfile::tempdir().unwrap();
             let store = test_store(dir.path());
-            let tracker = FileTracker::default();
             let mut session = start(&store, "test-model", None);
             let original_id = session.session_id().to_owned();
             session.record_message(Message::user("original")).await;
@@ -1550,7 +1508,7 @@ mod tests {
             let outcome = roll(
                 &mut session,
                 &store,
-                &tracker,
+                Vec::new(),
                 "test-model",
                 Some("feat/x".to_owned()),
             )
@@ -1589,26 +1547,27 @@ mod tests {
         }
 
         #[tokio::test]
-        async fn persists_tracker_snapshots_into_old_session_then_clears_tracker() {
+        async fn persists_the_tracker_snapshots_into_the_old_session() {
             let dir = tempfile::tempdir().unwrap();
             let store = test_store(dir.path());
             let tracker = FileTracker::default();
             let seed = dir.path().join("seed.txt");
             std::fs::write(&seed, b"hello").unwrap();
             seed_full_read(&tracker, &seed);
-            assert!(!tracker.snapshot_all().is_empty(), "tracker seeded");
-
             let mut session = start(&store, "test-model", None);
             let original_id = session.session_id().to_owned();
             session.record_message(Message::user("seed")).await;
 
-            let outcome = roll(&mut session, &store, &tracker, "test-model", None).await;
-            assert_eq!(outcome.finalize_failure, None);
+            let outcome = roll(
+                &mut session,
+                &store,
+                tracker.snapshot_all(),
+                "test-model",
+                None,
+            )
+            .await;
 
-            assert!(
-                tracker.snapshot_all().is_empty(),
-                "tracker cleared after roll",
-            );
+            assert_eq!(outcome.finalize_failure, None);
             let old_jsonl = std::fs::read_to_string(test_session_file(dir.path(), &original_id))
                 .expect("old session file lands on disk");
             assert!(
@@ -1625,7 +1584,6 @@ mod tests {
         async fn swaps_to_target_and_finalizes_old() {
             let dir = tempfile::tempdir().unwrap();
             let store = test_store(dir.path());
-            let tracker = FileTracker::default();
 
             let target = start(&store, "test-model", None);
             let target_id = target.session_id().to_owned();
@@ -1641,7 +1599,7 @@ mod tests {
             session.record_message(Message::user("live")).await;
 
             let target = test_session_file(dir.path(), &target_id);
-            let outcome = roll_into(&mut session, &store, &tracker, &target)
+            let outcome = roll_into(&mut session, &store, Vec::new(), &target)
                 .await
                 .expect("roll_into must succeed for healthy target");
 
@@ -1672,29 +1630,17 @@ mod tests {
         async fn target_load_failure_keeps_live_session_intact() {
             let dir = tempfile::tempdir().unwrap();
             let store = test_store(dir.path());
-            let tracker = FileTracker::default();
-            let seed = dir.path().join("seed.txt");
-            std::fs::write(&seed, b"hello").unwrap();
-            seed_full_read(&tracker, &seed);
-            let snapshot_count_before = tracker.snapshot_all().len();
-
             let mut session = start(&store, "test-model", None);
             let original_id = session.session_id().to_owned();
             session.record_message(Message::user("live")).await;
 
             let missing = dir.path().join("missing-target.jsonl");
-            let result = roll_into(&mut session, &store, &tracker, &missing).await;
+            let result = roll_into(&mut session, &store, Vec::new(), &missing).await;
             assert!(result.is_err(), "missing target file must error");
             assert_eq!(
                 session.session_id(),
                 original_id,
                 "live session id unchanged after failure",
-            );
-            assert_eq!(
-                tracker.snapshot_all().len(),
-                snapshot_count_before,
-                "load failure must leave tracker untouched \
-                 (clear-before-error would wipe snapshots)",
             );
         }
 
@@ -1702,13 +1648,12 @@ mod tests {
         async fn rejects_resuming_into_live_session_id() {
             let dir = tempfile::tempdir().unwrap();
             let store = test_store(dir.path());
-            let tracker = FileTracker::default();
             let mut session = start(&store, "test-model", None);
             let live_id = session.session_id().to_owned();
             session.record_message(Message::user("live")).await;
 
             let live_path = test_session_file(dir.path(), &live_id);
-            let err = roll_into(&mut session, &store, &tracker, &live_path)
+            let err = roll_into(&mut session, &store, Vec::new(), &live_path)
                 .await
                 .expect_err("self-resume must be rejected");
             assert_eq!(
@@ -1719,7 +1664,7 @@ mod tests {
         }
 
         #[tokio::test]
-        async fn swaps_tracker_snapshots_between_sessions() {
+        async fn finalizes_the_old_session_with_its_snapshots_and_returns_the_target_s_snapshots() {
             let dir = tempfile::tempdir().unwrap();
             let store = test_store(dir.path());
             let tracker = FileTracker::default();
@@ -1742,7 +1687,7 @@ mod tests {
             session.record_message(Message::user("live")).await;
 
             let target = test_session_file(dir.path(), &target_id);
-            roll_into(&mut session, &store, &tracker, &target)
+            let outcome = roll_into(&mut session, &store, tracker.snapshot_all(), &target)
                 .await
                 .expect("roll_into must succeed");
 
@@ -1752,19 +1697,13 @@ mod tests {
                 old_jsonl.contains("live.txt"),
                 "live tracker snapshot drains into old JSONL: {old_jsonl}",
             );
-            let restored: Vec<_> = tracker
-                .snapshot_all()
+            let loaded: Vec<_> = outcome
+                .transcript
+                .file_snapshots
                 .into_iter()
-                .map(|s| s.path.clone())
+                .map(|s| s.path)
                 .collect();
-            assert!(
-                restored.iter().any(|p| p.ends_with("target.txt")),
-                "target's snapshots restored into tracker, got {restored:?}",
-            );
-            assert!(
-                !restored.iter().any(|p| p.ends_with("live.txt")),
-                "live snapshot should NOT remain in tracker after swap, got {restored:?}",
-            );
+            assert_eq!(loaded, [target_seed]);
         }
     }
 
@@ -2002,9 +1941,8 @@ mod tests {
             handle.finish(tracker.snapshot_all()).await;
             drop(handle);
 
-            let resumed_tracker = FileTracker::default();
             let resumed = resume_id(&store, &session_id).unwrap();
-            resumed_tracker.restore_verified(resumed.file_snapshots);
+            let (resumed_tracker, _) = FileTracker::restored(resumed.transcript.file_snapshots);
 
             let restored =
                 resumed_tracker.verify_current_content(&path_a, b"alpha", GatePurpose::Edit);
@@ -2037,9 +1975,8 @@ mod tests {
 
             std::fs::write(&path_a, b"externally edited bytes").unwrap();
 
-            let resumed_tracker = FileTracker::default();
             let resumed = resume_id(&store, &session_id).unwrap();
-            resumed_tracker.restore_verified(resumed.file_snapshots);
+            let (resumed_tracker, _) = FileTracker::restored(resumed.transcript.file_snapshots);
 
             let result = resumed_tracker.verify_current_content(
                 &path_a,
@@ -2072,9 +2009,8 @@ mod tests {
 
             std::fs::remove_file(&path_a).unwrap();
 
-            let resumed_tracker = FileTracker::default();
             let resumed = resume_id(&store, &session_id).unwrap();
-            resumed_tracker.restore_verified(resumed.file_snapshots);
+            let (resumed_tracker, _) = FileTracker::restored(resumed.transcript.file_snapshots);
             let result = resumed_tracker.verify_current_content(&path_a, b"", GatePurpose::Edit);
             assert_eq!(
                 result,
@@ -2390,7 +2326,7 @@ mod tests {
                 "tool_metadata": transcript.tool_metadata,
                 "usage": transcript.usage,
                 "tasks": transcript.tasks,
-                "file_snapshots": resumed.file_snapshots,
+                "file_snapshots": resumed.transcript.file_snapshots,
             });
 
             let before = load_session_data_from_path(&path).unwrap().messages;
