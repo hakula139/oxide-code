@@ -36,10 +36,8 @@ use crate::message::{ContentBlock, Message};
 use crate::model::{self, ModelSpec, TokenUsage};
 use crate::permission::{Mode, Policy, Workspace};
 use crate::prompt::{self, PromptParts, SessionContext, UserContext};
-use crate::protocol::{
-    ConfigPick, Event, EventSink, Interaction, Op, ResumeTarget, UsageSnapshot,
-    session_write_failed,
-};
+use crate::protocol::notice::{self, ConfigSettings};
+use crate::protocol::{ConfigPick, Event, EventSink, Interaction, Op, ResumeTarget, UsageSnapshot};
 use crate::session::display::id_prefix;
 use crate::session::entry::{CompactInfo, UsageRecord};
 use crate::session::handle::{self, Checkpoint, LoadedTranscript, RollIntoOutcome, SessionHandle};
@@ -105,13 +103,12 @@ impl EnginePanic {
 
 // ── Engine ──
 
-/// The session an [`Engine`] continues: the store it rolls new sessions into, the live handle and
-/// the transcript it loaded, and the tracker holding the file state it restored.
+/// The session an [`Engine`] continues: the store it rolls new sessions into, and the live handle
+/// and the transcript it loaded.
 pub struct SessionParts {
     pub store: SessionStore,
     pub handle: SessionHandle,
     pub transcript: LoadedTranscript,
-    pub file_tracker: Arc<FileTracker>,
 }
 
 /// The live session with its transcript, prompt, and usage accounting.
@@ -121,6 +118,9 @@ pub struct Engine {
     oauth_token_url: String,
     /// The Keychain `/logout` checks for the Claude Code login before its file, none in tests.
     claude_code_keychain: ClaudeCodeKeychain,
+    /// Whether the next prompt or compaction loads the stored login again,
+    /// since a transient failure signed the session out.
+    retry_login: bool,
     tools: Arc<ToolRegistry>,
     store: SessionStore,
     session: SessionHandle,
@@ -136,9 +136,14 @@ pub struct Engine {
     /// Whether `prompt` changed since the session last recorded it, so the next user message
     /// records it.
     prompt_unrecorded: bool,
+    /// The config's startup notices, which [`Self::spawn`] shows once.
+    startup_notices: Vec<String>,
     /// Warnings about the instruction files the latest user context load could not read.
     instruction_warnings: Vec<String>,
     file_tracker: Arc<FileTracker>,
+    /// The tracked files the loaded session read that changed on disk since, until
+    /// [`Self::emit_session_start`] reports them.
+    drifted: Vec<PathBuf>,
     /// The background shells the `bash` tools start, which end with the session.
     shells: Arc<BackgroundShells>,
     /// The configured policy plus the session allow rules granted since the live session began.
@@ -177,7 +182,6 @@ impl Engine {
             store,
             handle: session,
             transcript,
-            file_tracker,
         } = session;
         let client = Client::new(
             config,
@@ -195,7 +199,9 @@ impl Engine {
             tool_metadata,
             usage,
             tasks,
+            file_snapshots,
         } = transcript;
+        let (file_tracker, drifted) = FileTracker::restored(file_snapshots);
         let prompt_unrecorded = context.is_none();
         let workspace = Arc::new(config.workspace.clone());
         let (prompt, instruction_warnings) =
@@ -204,6 +210,10 @@ impl Engine {
             client,
             oauth_token_url: oauth::OAUTH_TOKEN_URL.to_owned(),
             claude_code_keychain: ClaudeCodeKeychain::SYSTEM,
+            retry_login: config
+                .signed_out
+                .as_ref()
+                .is_some_and(|signed_out| signed_out.retry),
             tools,
             store,
             session,
@@ -213,8 +223,10 @@ impl Engine {
             tasks,
             prompt,
             prompt_unrecorded,
+            startup_notices: config.notices(),
             instruction_warnings,
-            file_tracker,
+            file_tracker: Arc::new(file_tracker),
+            drifted,
             shells,
             policy: config.permission.clone(),
             max_tool_rounds: config.max_tool_rounds,
@@ -251,14 +263,17 @@ impl Engine {
         )
     }
 
-    /// Starts the engine task, which first emits what [`Self::emit_session_start`] shows. `drifted`
-    /// lists the tracked files that changed on disk since the resumed session read them.
-    pub fn spawn(mut self, drifted: &[PathBuf]) -> EngineHandle {
+    /// Starts the engine task, which first emits the config's startup notices, then what
+    /// [`Self::emit_session_start`] shows.
+    pub fn spawn(mut self) -> EngineHandle {
         let (ops, op_rx) = mpsc::channel(OP_CHANNEL_CAP);
         // Unbounded, so the engine never waits on or drops events for a frontend that falls behind.
         let (sink, events) = mpsc::unbounded_channel();
         self.shells.attach(Arc::new(sink.clone()));
-        self.emit_session_start(&sink, drifted);
+        for notice in std::mem::take(&mut self.startup_notices) {
+            sink.emit(Event::Notice(notice), "startup-notice");
+        }
+        self.emit_session_start(&sink);
         let task = EngineTask(tokio::spawn(self.run(sink, op_rx)));
         EngineHandle { ops, events, task }
     }
@@ -314,10 +329,11 @@ impl Engine {
     where
         S: EventSink + Clone + 'static,
     {
-        if self.client.auth_source().is_none() {
-            return report_abort(sink, signed_out(), "turn-failed");
-        }
         let mut inbox = Inbox::default();
+        if let Err(abort) = self.ensure_signed_in(sink, ops, &mut inbox).await {
+            self.adopt_mode(&mut inbox);
+            return report_abort(sink, abort, "turn-failed");
+        }
         let compacted = self.auto_compact(sink, ops, &mut inbox).await;
         self.adopt_mode(&mut inbox);
         if let Err(abort) = compacted {
@@ -481,12 +497,13 @@ impl Engine {
         ops: &mut mpsc::Receiver<Op>,
         instructions: Option<String>,
     ) -> TurnEnd {
-        if self.client.auth_source().is_none() {
-            return report_abort(sink, signed_out(), "compact-failed");
+        let mut inbox = Inbox::default();
+        if let Err(abort) = self.ensure_signed_in(sink, ops, &mut inbox).await {
+            self.adopt_mode(&mut inbox);
+            return report_abort(sink, abort, "compact-failed");
         }
         let tools = self.tools.definitions();
         let mut spent = Vec::new();
-        let mut inbox = Inbox::default();
         let summary = abort::await_unless_aborted(
             compaction::compact_session(
                 &self.client,
@@ -600,7 +617,7 @@ impl Engine {
         let outcome = handle::roll(
             &mut self.session,
             &self.store,
-            &self.file_tracker,
+            self.file_tracker.snapshot_all(),
             self.client.model().id(),
             git_branch,
         )
@@ -614,7 +631,7 @@ impl Engine {
             "session-rolled",
         );
         report_finalize_failure(sink, outcome.finalize_failure);
-        self.emit_session_start(sink, &[]);
+        self.emit_session_start(sink);
         sink.emit(Event::SessionReady, "session-ready");
     }
 
@@ -644,7 +661,7 @@ impl Engine {
             "session-resumed",
         );
         report_finalize_failure(sink, outcome.finalize_failure);
-        self.emit_session_start(sink, &outcome.drifted_paths);
+        self.emit_session_start(sink);
         sink.emit(Event::SessionReady, "session-ready");
     }
 
@@ -657,7 +674,8 @@ impl Engine {
                 resolve_saved_prefix(&self.store, &prefix, self.session.session_id())?.path
             }
         };
-        handle::roll_into(&mut self.session, &self.store, &self.file_tracker, &path).await
+        let snapshots = self.file_tracker.snapshot_all();
+        handle::roll_into(&mut self.session, &self.store, snapshots, &path).await
     }
 
     async fn adopt_session(&mut self, sink: &dyn EventSink, transcript: LoadedTranscript) {
@@ -669,9 +687,13 @@ impl Engine {
             tool_metadata,
             usage,
             tasks,
+            file_snapshots,
         } = transcript;
         self.client
             .set_session_id(self.session.session_id().to_owned());
+        let (file_tracker, drifted) = FileTracker::restored(file_snapshots);
+        self.file_tracker = Arc::new(file_tracker);
+        self.drifted = drifted;
         self.messages = messages;
         self.compact = compact;
         self.tool_metadata = tool_metadata;
@@ -689,7 +711,7 @@ impl Engine {
         let outcome = self.session.set_manual_title(title.clone()).await;
         if let Some(failure) = outcome.failure {
             sink.emit(
-                Event::RenameFailed(session_write_failed(&failure)),
+                Event::RenameFailed(notice::session_write_failed(&failure)),
                 "rename-failed",
             );
             return;
@@ -705,6 +727,11 @@ impl Engine {
 
     /// Applies a model and / or effort pick. The model goes first because it re-resolves effort.
     fn set_model(&mut self, sink: &dyn EventSink, pick: ConfigPick) {
+        let before = ConfigSettings {
+            model: self.client.model().clone(),
+            effort: self.client.effort(),
+            auto_compaction: self.compaction.auto,
+        };
         if let ConfigPick::Model { id, .. } = &pick {
             self.client.set_model(id.clone().into_inner());
             self.compaction = self
@@ -717,12 +744,24 @@ impl Engine {
         };
         self.auto_compaction_failures.reset(sink);
         self.emit_usage_update(sink);
+        let after = ConfigSettings {
+            model: self.client.model().clone(),
+            effort: resolved,
+            auto_compaction: self.compaction.auto,
+        };
+        let notice = notice::config_changed(&before, &after, &pick);
+        let ConfigSettings {
+            model,
+            effort,
+            auto_compaction,
+        } = after;
         sink.emit(
             Event::ConfigChanged {
-                model: self.client.model().clone(),
-                effort: resolved,
+                model,
+                effort,
                 requested: pick,
-                auto_compaction: self.compaction.auto,
+                auto_compaction,
+                notice,
             },
             "config-changed",
         );
@@ -739,6 +778,43 @@ impl Engine {
         if let Some(mode) = inbox.mode.take() {
             self.policy.set_mode(mode);
         }
+    }
+
+    /// Fails while signed out.
+    /// A session that a transient failure signed out first loads the stored login again,
+    /// and keeps doing so on later prompts and compactions while the failure stays transient.
+    /// An interrupt or a closed channel stops only the wait.
+    async fn ensure_signed_in(
+        &mut self,
+        sink: &dyn EventSink,
+        ops: &mut mpsc::Receiver<Op>,
+        inbox: &mut Inbox,
+    ) -> Result<(), TurnAbort> {
+        if self.client.auth_source().is_some() {
+            return Ok(());
+        }
+        if !self.retry_login {
+            return Err(signed_out());
+        }
+        let retry = self.client.retry_stored_login(self.claude_code_keychain);
+        match abort::await_unless_aborted(retry, ops, inbox, sink).await? {
+            Ok(auth) => {
+                let source = auth.source();
+                self.set_stored_login(Some(auth), false);
+                sink.emit(Event::LoginRestored { auth: source }, "login-restored");
+                Ok(())
+            }
+            Err(unavailable) => {
+                self.retry_login = unavailable.retry;
+                Err(TurnAbort::Failed(anyhow!(unavailable.notice)))
+            }
+        }
+    }
+
+    /// `retry` says whether the next prompt or compaction loads the stored login again.
+    fn set_stored_login(&mut self, auth: Option<Auth>, retry: bool) {
+        self.client.set_auth(auth);
+        self.retry_login = retry;
     }
 
     /// Signs in through the browser and stores the new oxide-code login.
@@ -773,7 +849,7 @@ impl Engine {
         let active = match self.client.auth_source() {
             Some(source) if !source.is_stored_login() => source,
             _ => {
-                self.client.set_auth(Some(auth));
+                self.set_stored_login(Some(auth), false);
                 AuthSource::OxLogin
             }
         };
@@ -799,13 +875,15 @@ impl Engine {
             .auth_source()
             .is_none_or(|source| source == AuthSource::OxLogin)
         {
+            let mut retry = false;
             let fallback = auth::claude_code_login(self.claude_code_keychain, self.client.trust())
                 .await
                 .unwrap_or_else(|e| {
+                    retry = auth::is_transient(&e);
                     fallback_error = Some(format!("{e:#}"));
                     None
                 });
-            self.client.set_auth(fallback);
+            self.set_stored_login(fallback, retry);
         }
         sink.emit(
             Event::SignedOut {
@@ -854,15 +932,15 @@ impl Engine {
     }
 
     /// Shows what a session carries as the engine starts on it: its usage and task list, the
-    /// warnings its prompt raised, the tracked files in `drifted`, and a transcript that ends on an
-    /// interrupted response. Follows the event that swaps the session, which clears the chat.
-    fn emit_session_start(&mut self, sink: &dyn EventSink, drifted: &[PathBuf]) {
+    /// warnings its prompt raised, the tracked files that drifted, and a transcript that ends on
+    /// an interrupted response. Follows the event that swaps the session, which clears the chat.
+    fn emit_session_start(&mut self, sink: &dyn EventSink) {
         self.emit_usage_update(sink);
         self.emit_restored_tasks(sink);
         for warning in &self.instruction_warnings {
             sink.emit(Event::Notice(warning.clone()), "instruction-warning");
         }
-        report_drift(sink, drifted);
+        report_drift(sink, &std::mem::take(&mut self.drifted));
         turn::notify_if_interrupted(&self.messages, sink);
     }
 
@@ -1074,27 +1152,30 @@ mod tests {
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
     use super::local_testing::{
-        EchoTool, inert_ops, mount_stalled_reply_once, service_log, system_prompt,
-        tool_heavy_transcript, until_requested,
+        EchoTool, inert_ops, service_log, system_prompt, tool_heavy_transcript,
     };
     use super::testing::{
-        MODEL, SESSION_CONTEXT, engine, mount_reply, mount_tool_call_once, panic_message,
-        request_bodies, with_pinned_home,
+        MODEL, SESSION_CONTEXT, engine, mount_reply, mount_stalled_reply_once,
+        mount_tool_call_once, panic_message, request_bodies, until_requested, with_pinned_home,
     };
     use super::*;
     use crate::client::anthropic::local_testing::{COMPLETION_USAGE, client_for, completion_body};
     use crate::client::anthropic::testing::{
         DEVICE_ID, api_key, sse_body, sse_response, test_config, text_stream_body,
     };
+    use crate::config::auth::LoginUnavailable;
     use crate::config::compaction::CompactionConfig;
     use crate::config::compaction::testing::WINDOW_1M_THRESHOLD;
-    use crate::config::{Effort, PromptCacheTtl};
-    use crate::file_tracker::testing::seed_full_read;
+    use crate::config::oauth::testing::write_creds;
+    use crate::config::{Effort, PromptCacheTtl, display_auto_compaction};
+    use crate::file_tracker::FileSnapshot;
+    use crate::file_tracker::testing::{record_tracked_file, seed_full_read};
     use crate::message::{Replay, Role};
     use crate::model::ResolvedModelId;
     use crate::permission::rule::Rule;
     use crate::permission::{Mode, PermissionClass, Workspace};
     use crate::protocol::testing::CapturingSink;
+    use crate::session::handle::testing::record_write_call;
     use crate::session::post_compact::synthesize_post_compact_message;
     use crate::session::store::delete_at;
     use crate::session::store::local_testing::test_session_file;
@@ -1199,6 +1280,30 @@ mod tests {
         format!("Skipped instruction file {}: {cause}", path.display())
     }
 
+    /// Tracker snapshots of `kept.txt` and `drifted.txt` in `dir`, after which `drifted.txt`
+    /// changes on disk. Returns the snapshots and both paths.
+    fn tracked_files(dir: &Path) -> (Vec<FileSnapshot>, PathBuf, PathBuf) {
+        let tracker = FileTracker::default();
+        let kept = dir.join("kept.txt");
+        let drifted = dir.join("drifted.txt");
+        record_tracked_file(&tracker, &kept, b"kept", "toolu_kept");
+        record_tracked_file(&tracker, &drifted, b"before", "toolu_drifted");
+        std::fs::write(&drifted, b"after").unwrap();
+        (tracker.snapshot_all(), kept, drifted)
+    }
+
+    /// Paths the engine's file tracker holds, sorted.
+    fn tracked_paths(engine: &Engine) -> Vec<PathBuf> {
+        let mut paths: Vec<_> = engine
+            .file_tracker
+            .snapshot_all()
+            .into_iter()
+            .map(|snapshot| snapshot.path)
+            .collect();
+        paths.sort();
+        paths
+    }
+
     /// Records one exchange in a new session in `store` and finishes it, returning its ID.
     async fn finished_session(store: &SessionStore) -> String {
         let session = handle::start(store, MODEL, None);
@@ -1243,6 +1348,14 @@ mod tests {
             .collect();
         names.sort();
         names
+    }
+
+    /// Stores an oxide-code login under `data`, standing in for `$XDG_DATA_HOME`.
+    fn store_ox_login(data: &Path) -> PathBuf {
+        let file = data.join("ox").join("credentials.json");
+        std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+        write_creds(&file, "ox-token", None, 9_999_999_999_999);
+        file
     }
 
     #[tokio::test]
@@ -1431,7 +1544,7 @@ mod tests {
                         engine(server.uri(), &test_store(dir.path()), dir.path()).await;
                     engine.session = handle::testing::dead("dead");
 
-                    let failure = engine.spawn(&[]).shutdown().await.unwrap();
+                    let failure = engine.spawn().shutdown().await.unwrap();
 
                     assert!(
                         failure.is_some_and(|f| f.starts_with("session writer task has stopped")),
@@ -1495,7 +1608,6 @@ mod tests {
                                 usage: usage.to_vec(),
                                 ..LoadedTranscript::default()
                             },
-                            file_tracker: Arc::new(FileTracker::default()),
                         },
                         false,
                     )
@@ -1540,6 +1652,10 @@ mod tests {
                 config.compaction = CompactionConfig::with_threshold_for_test(50_000);
                 config.permission.set_mode(Mode::Plan);
                 config.workspace = Workspace::new(dir.path());
+                config.signed_out = Some(LoginUnavailable {
+                    notice: "Not signed in. Run `/login` to sign in.".to_owned(),
+                    retry: true,
+                });
 
                 let engine = Engine::new(
                     &config,
@@ -1549,7 +1665,6 @@ mod tests {
                         store: store.clone(),
                         handle: session.clone(),
                         transcript: LoadedTranscript::default(),
-                        file_tracker: Arc::new(FileTracker::default()),
                     },
                     false,
                 )
@@ -1560,6 +1675,11 @@ mod tests {
                 assert_eq!(engine.max_tool_rounds, Some(3));
                 assert_eq!(engine.compaction, config.compaction);
                 assert_eq!(engine.policy.mode(), Mode::Plan);
+                assert_eq!(
+                    engine.startup_notices,
+                    ["Not signed in. Run `/login` to sign in."],
+                );
+                assert!(engine.retry_login);
                 assert_eq!(engine.client.session_id(), session.session_id());
             })
             .await;
@@ -1586,7 +1706,6 @@ mod tests {
                         store: store.clone(),
                         handle: handle::start(&store, MODEL, None),
                         transcript: LoadedTranscript::default(),
-                        file_tracker: Arc::new(FileTracker::default()),
                     },
                     false,
                 )
@@ -1618,18 +1737,51 @@ mod tests {
             })
             .await;
         }
+
+        #[tokio::test]
+        async fn keeps_the_tracked_files_that_match_disk_and_holds_back_the_drift() {
+            with_pinned_home(async {
+                let dir = tempfile::tempdir().unwrap();
+                let store = test_store(dir.path());
+                let (snapshots, kept, drifted) = tracked_files(dir.path());
+                let mut config = test_config("http://127.0.0.1:9".to_owned(), api_key(), MODEL);
+                config.workspace = Workspace::new(dir.path());
+
+                let engine = Engine::new(
+                    &config,
+                    NoRoots,
+                    DEVICE_ID.to_owned(),
+                    SessionParts {
+                        store: store.clone(),
+                        handle: handle::start(&store, MODEL, None),
+                        transcript: LoadedTranscript {
+                            file_snapshots: snapshots,
+                            ..LoadedTranscript::default()
+                        },
+                    },
+                    false,
+                )
+                .await
+                .unwrap();
+
+                assert_eq!(tracked_paths(&engine), [kept]);
+                assert_eq!(engine.drifted, [drifted]);
+            })
+            .await;
+        }
     }
 
     mod spawn {
         use super::*;
 
         #[tokio::test]
-        async fn reports_the_resumed_cost_tasks_warnings_drift_and_an_interrupted_transcript() {
+        async fn reports_the_startup_notices_resumed_cost_tasks_warnings_drift_and_interruption() {
             with_pinned_home(async {
                 let server = MockServer::start().await;
                 let dir = tempfile::tempdir().unwrap();
                 let warning = write_unreadable_instructions(dir.path());
                 let mut engine = engine(server.uri(), &test_store(dir.path()), dir.path()).await;
+                engine.startup_notices = vec!["Not signed in. Run `/login` to sign in.".to_owned()];
                 engine.messages = vec![
                     Message::user("hi"),
                     Message {
@@ -1642,8 +1794,10 @@ mod tests {
                 ];
                 engine.total_estimated_cost_usd = 1.23;
                 engine.tasks = plan();
+                engine.drifted = vec![PathBuf::from("a.rs")];
 
-                let mut handle = engine.spawn(&[PathBuf::from("a.rs")]);
+                let mut handle = engine.spawn();
+                let notice = handle.events.recv().await.unwrap();
                 let cost = handle.events.recv().await.unwrap();
                 let tasks = handle.events.recv().await.unwrap();
                 let instructions = handle.events.recv().await.unwrap();
@@ -1651,6 +1805,10 @@ mod tests {
                 let interrupted = handle.events.recv().await.unwrap();
                 let failure = handle.shutdown().await.unwrap();
 
+                assert_eq!(
+                    notice,
+                    Event::Notice("Not signed in. Run `/login` to sign in.".to_owned()),
+                );
                 assert!(
                     matches!(
                         &cost,
@@ -1717,7 +1875,7 @@ mod tests {
                 let store = test_store(dir.path());
                 let engine = engine(server.uri(), &store, dir.path()).await;
                 let session_id = engine.session_id().to_owned();
-                let mut handle = engine.spawn(&[]);
+                let mut handle = engine.spawn();
 
                 let events = submit(&mut handle, "hello").await;
                 let failure = handle.shutdown().await.unwrap();
@@ -1753,7 +1911,7 @@ mod tests {
                 let mut engine = engine(server.uri(), &test_store(dir.path()), dir.path()).await;
                 engine.interactive = true;
                 let live_id = engine.session_id().to_owned();
-                let mut handle = engine.spawn(&[]);
+                let mut handle = engine.spawn();
 
                 handle
                     .ops
@@ -1803,7 +1961,7 @@ mod tests {
                 engine.interactive = true;
                 let session_id = engine.session_id().to_owned();
                 let cache_ttl = engine.client.prompt_cache_ttl();
-                let mut handle = engine.spawn(&[]);
+                let mut handle = engine.spawn();
 
                 handle
                     .ops
@@ -1863,7 +2021,7 @@ mod tests {
                 mount_reply(&server, "done").await;
                 let dir = tempfile::tempdir().unwrap();
                 let engine = engine(server.uri(), &test_store(dir.path()), dir.path()).await;
-                let mut handle = engine.spawn(&[]);
+                let mut handle = engine.spawn();
 
                 for op in [
                     Op::Queue("early".to_owned()),
@@ -1916,7 +2074,7 @@ mod tests {
                 let store = test_store(dir.path());
                 let engine = engine(server.uri(), &store, dir.path()).await;
                 let session_id = engine.session_id().to_owned();
-                let mut handle = engine.spawn(&[]);
+                let mut handle = engine.spawn();
 
                 submit(&mut handle, &pasted_logs()).await;
                 submit(&mut handle, "two").await;
@@ -1964,7 +2122,7 @@ mod tests {
                 let store = test_store(dir.path());
                 let target_id = finished_session(&store).await;
                 let engine = engine(server.uri(), &store, dir.path()).await;
-                let mut handle = engine.spawn(&[]);
+                let mut handle = engine.spawn();
 
                 let target = ResumeTarget::Prefix(target_id[..8].to_owned());
                 handle.ops.send(Op::Resume { target }).await.unwrap();
@@ -2014,7 +2172,7 @@ mod tests {
                 let store = test_store(dir.path());
                 let engine = engine(server.uri(), &store, dir.path()).await;
                 let live_id = engine.session_id().to_owned();
-                let mut handle = engine.spawn(&[]);
+                let mut handle = engine.spawn();
 
                 submit(&mut handle, "first").await;
                 let target = ResumeTarget::Prefix(live_id[..8].to_owned());
@@ -2050,7 +2208,7 @@ mod tests {
                 let store = test_store(dir.path());
                 let engine = engine(server.uri(), &store, dir.path()).await;
                 let session_id = engine.session_id().to_owned();
-                let mut handle = engine.spawn(&[]);
+                let mut handle = engine.spawn();
 
                 submit(&mut handle, &pasted_logs()).await;
                 submit(&mut handle, "two").await;
@@ -2117,7 +2275,7 @@ mod tests {
                 let store = test_store(dir.path());
                 let engine = engine(server.uri(), &store, dir.path()).await;
                 let archived_id = engine.session.session_id().to_owned();
-                let mut handle = engine.spawn(&[]);
+                let mut handle = engine.spawn();
 
                 submit(&mut handle, "first").await;
                 handle.ops.send(Op::Archive).await.unwrap();
@@ -2156,7 +2314,7 @@ mod tests {
                     ops,
                     mut events,
                     task,
-                } = engine.spawn(&[]);
+                } = engine.spawn();
 
                 for op in [
                     Op::Rename {
@@ -2202,45 +2360,12 @@ mod tests {
                 let server = MockServer::start().await;
                 let dir = tempfile::tempdir().unwrap();
                 let store = test_store(dir.path());
-                let handle = engine(server.uri(), &store, dir.path()).await.spawn(&[]);
+                let handle = engine(server.uri(), &store, dir.path()).await.spawn();
 
                 handle.ops.send(Op::Shutdown).await.unwrap();
                 assert_eq!(handle.task.join().await.unwrap(), None);
 
                 assert!(store.list().unwrap().is_empty());
-            })
-            .await;
-        }
-
-        #[tokio::test]
-        async fn finalizes_the_live_session_after_a_clear() {
-            with_pinned_home(async {
-                let server = MockServer::start().await;
-                mount_reply(&server, "reply").await;
-                let dir = tempfile::tempdir().unwrap();
-                let store = test_store(dir.path());
-                let engine = engine(server.uri(), &store, dir.path()).await;
-                let tracker = Arc::clone(&engine.file_tracker);
-                let read_path = dir.path().join("read.txt");
-                std::fs::write(&read_path, "contents").unwrap();
-                let mut handle = engine.spawn(&[]);
-
-                handle.ops.send(Op::Clear).await.unwrap();
-                let live_id = next_matching(&mut handle.events, |event| match event {
-                    Event::SessionRolled {
-                        id,
-                        archived: false,
-                    } => Some(id),
-                    _ => None,
-                })
-                .await;
-                seed_full_read(&tracker, &read_path);
-                submit(&mut handle, "after clear").await;
-                handle.shutdown().await.unwrap();
-
-                let snapshots = store.load_session_data(&live_id).unwrap().file_snapshots;
-                let paths: Vec<_> = snapshots.iter().map(|snapshot| &snapshot.path).collect();
-                assert_eq!(paths, [&read_path]);
             })
             .await;
         }
@@ -2253,7 +2378,7 @@ mod tests {
                 let store = test_store(dir.path());
                 let engine = engine(server.uri(), &store, dir.path()).await;
                 let shells = Arc::clone(&engine.shells);
-                let mut handle = engine.spawn(&[]);
+                let mut handle = engine.spawn();
 
                 start_shell(&shells, "sleep 30");
                 let listed = next_matching(&mut handle.events, |event| match event {
@@ -2280,7 +2405,7 @@ mod tests {
                 let store = test_store(dir.path());
                 let engine = engine(server.uri(), &store, dir.path()).await;
                 let live_id = engine.session_id().to_owned();
-                let mut handle = engine.spawn(&[]);
+                let mut handle = engine.spawn();
 
                 let mut cancelled = Vec::new();
                 for (count, prompt) in [(1, "write a story"), (2, "write a poem")] {
@@ -2336,7 +2461,7 @@ mod tests {
                 engine.compaction = CompactionConfig::with_threshold_for_test(50_000);
                 engine.messages = tool_heavy_transcript();
                 engine.last_usage = Some(TokenUsage::new(50_000, 1));
-                let mut handle = engine.spawn(&[]);
+                let mut handle = engine.spawn();
 
                 handle
                     .ops
@@ -2385,7 +2510,7 @@ mod tests {
                         ops,
                         mut events,
                         task,
-                    } = engine.spawn(&[]);
+                    } = engine.spawn();
 
                     ops.send(op).await.unwrap();
                     until_requested(&server, 1).await;
@@ -2416,7 +2541,7 @@ mod tests {
                 let read_path = dir.path().join("read.txt");
                 std::fs::write(&read_path, "contents").unwrap();
                 seed_full_read(&engine.file_tracker, &read_path);
-                let handle = engine.spawn(&[]);
+                let handle = engine.spawn();
 
                 handle
                     .ops
@@ -2456,7 +2581,7 @@ mod tests {
                         ops,
                         mut events,
                         task,
-                    } = engine.spawn(&[]);
+                    } = engine.spawn();
 
                     ops.send(Op::Login).await.unwrap();
                     let url = login_url(&mut events).await;
@@ -3456,6 +3581,48 @@ mod tests {
         use super::*;
 
         #[tokio::test]
+        async fn saves_the_reads_with_the_session_that_made_them() {
+            with_pinned_home(async {
+                let server = MockServer::start().await;
+                mount_reply(&server, "reply").await;
+                let dir = tempfile::tempdir().unwrap();
+                let store = test_store(dir.path());
+                let mut engine = engine(server.uri(), &store, dir.path()).await;
+                let old_id = engine.session_id().to_owned();
+                let before = dir.path().join("before.txt");
+                let after = dir.path().join("after.txt");
+                let late = dir.path().join("late.txt");
+                for path in [&before, &after, &late] {
+                    std::fs::write(path, "contents").unwrap();
+                }
+                let sink = CapturingSink::default();
+                let mut ops = inert_ops();
+                engine.submit_prompt("before clear", &sink, &mut ops).await;
+                seed_full_read(&engine.file_tracker, &before);
+                let old_tracker = Arc::clone(&engine.file_tracker);
+
+                engine.clear(&sink).await;
+                assert_eq!(tracked_paths(&engine), [] as [PathBuf; 0]);
+                seed_full_read(&old_tracker, &late);
+                let new_id = engine.session_id().to_owned();
+                engine.submit_prompt("after clear", &sink, &mut ops).await;
+                seed_full_read(&engine.file_tracker, &after);
+                assert_eq!(engine.finalize().await, None);
+
+                let saved_paths = |id: &str| -> Vec<PathBuf> {
+                    let snapshots = store.load_session_data(id).unwrap().file_snapshots;
+                    snapshots
+                        .into_iter()
+                        .map(|snapshot| snapshot.path)
+                        .collect()
+                };
+                assert_eq!(saved_paths(&old_id), [before]);
+                assert_eq!(saved_paths(&new_id), [after]);
+            })
+            .await;
+        }
+
+        #[tokio::test]
         async fn keeps_a_pending_title_cost_out_of_the_new_session() {
             with_pinned_home(async {
                 let server = MockServer::start().await;
@@ -3611,6 +3778,42 @@ mod tests {
 
     mod resume {
         use super::*;
+
+        #[tokio::test]
+        async fn swaps_in_the_file_state_that_still_matches_disk_and_reports_the_rest() {
+            with_pinned_home(async {
+                let dir = tempfile::tempdir().unwrap();
+                let store = test_store(dir.path());
+                let saved = handle::start(&store, MODEL, None);
+                let saved_id = saved.session_id().to_owned();
+                let saved_tracker = FileTracker::default();
+                let kept = dir.path().join("kept.txt");
+                let drifted = dir.path().join("drifted.txt");
+                saved.record_message(Message::user("write them")).await;
+                record_write_call(&saved, &saved_tracker, "toolu_kept", &kept, true).await;
+                record_write_call(&saved, &saved_tracker, "toolu_drifted", &drifted, true).await;
+                std::fs::write(&drifted, "changed").unwrap();
+                saved.finalize(saved_tracker.snapshot_all()).await;
+                let mut engine = engine("http://127.0.0.1:9".to_owned(), &store, dir.path()).await;
+                let live_id = engine.session_id().to_owned();
+                engine.session.record_message(Message::user("live")).await;
+                let live = dir.path().join("live.txt");
+                std::fs::write(&live, "live").unwrap();
+                seed_full_read(&engine.file_tracker, &live);
+                let sink = CapturingSink::default();
+                let path = store.find_session_path(&saved_id).unwrap();
+
+                engine.resume(&sink, ResumeTarget::Path(path)).await;
+
+                assert_eq!(tracked_paths(&engine), [kept]);
+                let notice = Event::Notice(format_drift_warning(&[drifted]));
+                assert!(sink.events().contains(&notice), "{:?}", sink.events());
+                let live_files = store.load_session_data(&live_id).unwrap().file_snapshots;
+                let live_paths: Vec<_> = live_files.into_iter().map(|file| file.path).collect();
+                assert_eq!(live_paths, [live]);
+            })
+            .await;
+        }
 
         #[tokio::test]
         async fn replays_the_recorded_prompt() {
@@ -3771,6 +3974,9 @@ mod tests {
                 let rule = Rule::parse(PermissionClass::Exec, "cargo test *").unwrap();
                 engine.policy.allow_for_session(rule.clone());
                 start_shell(&engine.shells, "sleep 30");
+                let read = dir.path().join("read.txt");
+                std::fs::write(&read, "read").unwrap();
+                seed_full_read(&engine.file_tracker, &read);
                 let sink = CapturingSink::default();
 
                 engine
@@ -3784,6 +3990,7 @@ mod tests {
                 assert_eq!(engine.displayed_usage, Some(displayed_usage));
                 assert!((engine.total_estimated_cost_usd - 1.23).abs() < f64::EPSILON);
                 assert_eq!(engine.policy.session_allow(), [rule]);
+                assert_eq!(tracked_paths(&engine), [read]);
                 assert_eq!(
                     engine.shells.list(),
                     [shell("shell-1", "sleep 30", ShellState::Running)]
@@ -3842,9 +4049,53 @@ mod tests {
 
         fn sonnet_pick() -> ConfigPick {
             ConfigPick::Model {
-                id: ResolvedModelId::new("claude-sonnet-5-5".to_owned()),
+                id: ResolvedModelId::new("claude-sonnet-5-5"),
                 effort: None,
             }
+        }
+
+        #[tokio::test]
+        async fn notices_the_change_against_the_settings_before_it() {
+            with_pinned_home(async {
+                let server = MockServer::start().await;
+                let dir = tempfile::tempdir().unwrap();
+                let mut engine = engine(server.uri(), &test_store(dir.path()), dir.path()).await;
+                engine.client.set_effort(Effort::High);
+                let opus = ModelSpec::resolve(MODEL);
+                engine.compaction =
+                    CompactionConfig::default_for_test(&opus, engine.client.max_tokens());
+                let opus_compaction = display_auto_compaction(engine.compaction.auto);
+                let sink = CapturingSink::default();
+
+                for id in ["custom-model", MODEL] {
+                    let id = ResolvedModelId::new(id);
+                    engine.set_model(&sink, ConfigPick::Model { id, effort: None });
+                }
+
+                let notices: Vec<String> = sink
+                    .events()
+                    .into_iter()
+                    .filter_map(|event| match event {
+                        Event::ConfigChanged { notice, .. } => Some(notice),
+                        _ => None,
+                    })
+                    .collect();
+                assert_eq!(
+                    notices,
+                    [
+                        "Switched to custom-model (custom-model). \
+                         Effort cleared (model has no effort tier). \
+                         Auto compaction off."
+                            .to_owned(),
+                        format!(
+                            "Switched to Claude Opus 5.5 (claude-opus-5-5) · \
+                             effort medium (model default). \
+                             Auto compaction {opus_compaction}.",
+                        ),
+                    ],
+                );
+            })
+            .await;
         }
 
         #[tokio::test]
@@ -4069,6 +4320,260 @@ mod tests {
         }
     }
 
+    mod ensure_signed_in {
+        use super::*;
+
+        /// The authorization header of the first Messages request `server` received.
+        async fn sent_authorization(server: &MockServer) -> String {
+            let requests = server.received_requests().await.unwrap();
+            let request = requests
+                .iter()
+                .find(|request| request.url.path() == "/v1/messages")
+                .expect("a request reaches the API");
+            request.headers["authorization"]
+                .to_str()
+                .unwrap()
+                .to_owned()
+        }
+
+        /// Stores an expired, refreshable oxide-code login under `data` and holds its lock,
+        /// so loading it fails transiently after the lock wait.
+        fn hold_expired_ox_login(data: &Path) {
+            let file = store_ox_login(data);
+            write_creds(&file, "dead", Some("refresh"), 0);
+            std::fs::create_dir(data.join("ox").join("credentials.lock")).unwrap();
+        }
+
+        #[tokio::test]
+        async fn restores_the_stored_login_and_goes_on_with_the_prompt() {
+            with_pinned_home(async {
+                let server = MockServer::start().await;
+                mount_reply(&server, "reply").await;
+                let dir = tempfile::tempdir().unwrap();
+                let data = tempfile::tempdir().unwrap();
+                store_ox_login(data.path());
+                temp_env::async_with_vars([("XDG_DATA_HOME", Some(data.path()))], async {
+                    let mut engine =
+                        engine(server.uri(), &test_store(dir.path()), dir.path()).await;
+                    engine.client.set_auth(None);
+                    engine.retry_login = true;
+                    let sink = CapturingSink::default();
+                    let mut ops = inert_ops();
+
+                    let end = engine.submit_prompt("hi", &sink, &mut ops).await;
+
+                    assert_eq!(end, TurnEnd::Completed);
+                    assert!(!engine.retry_login);
+                    let events = sink.events();
+                    assert!(
+                        matches!(
+                            events.first(),
+                            Some(Event::LoginRestored {
+                                auth: AuthSource::OxLogin
+                            })
+                        ),
+                        "{events:?}"
+                    );
+                    assert!(
+                        matches!(events.last(), Some(Event::TurnComplete)),
+                        "{events:?}"
+                    );
+                    assert_eq!(sent_authorization(&server).await, "Bearer ox-token");
+                })
+                .await;
+            })
+            .await;
+        }
+
+        #[tokio::test]
+        async fn restores_the_stored_login_and_goes_on_with_the_compaction() {
+            with_pinned_home(async {
+                let server = MockServer::start().await;
+                mount_reply(&server, "summary").await;
+                let dir = tempfile::tempdir().unwrap();
+                let data = tempfile::tempdir().unwrap();
+                store_ox_login(data.path());
+                temp_env::async_with_vars([("XDG_DATA_HOME", Some(data.path()))], async {
+                    let mut engine =
+                        engine(server.uri(), &test_store(dir.path()), dir.path()).await;
+                    engine.messages = tool_heavy_transcript();
+                    engine.client.set_auth(None);
+                    engine.retry_login = true;
+                    let sink = CapturingSink::default();
+                    let mut ops = inert_ops();
+
+                    let end = engine.compact(&sink, &mut ops, None).await;
+
+                    let events = sink.events();
+                    assert_eq!(end, TurnEnd::Completed, "{events:?}");
+                    assert!(
+                        matches!(
+                            events.first(),
+                            Some(Event::LoginRestored {
+                                auth: AuthSource::OxLogin
+                            })
+                        ),
+                        "{events:?}"
+                    );
+                    assert!(
+                        events
+                            .iter()
+                            .any(|event| matches!(event, Event::SessionCompacted { .. })),
+                        "{events:?}"
+                    );
+                    assert_eq!(sent_authorization(&server).await, "Bearer ox-token");
+                })
+                .await;
+            })
+            .await;
+        }
+
+        #[tokio::test(start_paused = true)]
+        async fn keeps_retrying_while_the_failure_stays_transient() {
+            with_pinned_home(async {
+                let dir = tempfile::tempdir().unwrap();
+                let data = tempfile::tempdir().unwrap();
+                hold_expired_ox_login(data.path());
+                temp_env::async_with_vars([("XDG_DATA_HOME", Some(data.path()))], async {
+                    let mut engine = engine(
+                        "http://127.0.0.1:9".to_owned(),
+                        &test_store(dir.path()),
+                        dir.path(),
+                    )
+                    .await;
+                    engine.client.set_auth(None);
+                    engine.retry_login = true;
+                    let sink = CapturingSink::default();
+                    let mut ops = inert_ops();
+
+                    let end = engine.submit_prompt("hi", &sink, &mut ops).await;
+
+                    assert_eq!(end, TurnEnd::Failed);
+                    assert!(engine.retry_login);
+                    let events = sink.events();
+                    assert!(
+                        matches!(
+                            events.as_slice(),
+                            [Event::TurnFailed(notice)]
+                                if notice.ends_with("The next prompt tries the stored login again.")
+                        ),
+                        "{events:?}"
+                    );
+                })
+                .await;
+            })
+            .await;
+        }
+
+        #[tokio::test(start_paused = true)]
+        async fn an_interrupt_ends_the_wait_and_the_reload_still_finishes() {
+            with_pinned_home(async {
+                let dir = tempfile::tempdir().unwrap();
+                let data = tempfile::tempdir().unwrap();
+                hold_expired_ox_login(data.path());
+                temp_env::async_with_vars([("XDG_DATA_HOME", Some(data.path()))], async {
+                    let mut engine = engine(
+                        "http://127.0.0.1:9".to_owned(),
+                        &test_store(dir.path()),
+                        dir.path(),
+                    )
+                    .await;
+                    engine.client.set_auth(None);
+                    engine.retry_login = true;
+                    let sink = CapturingSink::default();
+                    let (tx, mut ops) = mpsc::channel(1);
+                    tx.try_send(Op::Interrupt).unwrap();
+                    let start = tokio::time::Instant::now();
+
+                    let end = engine.submit_prompt("hi", &sink, &mut ops).await;
+                    let waited = start.elapsed();
+                    engine.client.finish_reloads().await;
+
+                    assert_eq!(end, TurnEnd::Cancelled);
+                    assert!(waited < Duration::from_secs(1), "{waited:?}");
+                    assert!(engine.retry_login);
+                    assert_eq!(engine.client.auth_source(), None);
+                    assert!(matches!(sink.events().as_slice(), [Event::Cancelled]));
+                })
+                .await;
+            })
+            .await;
+        }
+
+        #[tokio::test]
+        async fn stops_retrying_once_the_failure_is_not_transient() {
+            with_pinned_home(async {
+                let dir = tempfile::tempdir().unwrap();
+                let data = tempfile::tempdir().unwrap();
+                temp_env::async_with_vars([("XDG_DATA_HOME", Some(data.path()))], async {
+                    let mut engine = engine(
+                        "http://127.0.0.1:9".to_owned(),
+                        &test_store(dir.path()),
+                        dir.path(),
+                    )
+                    .await;
+                    engine.client.set_auth(None);
+                    engine.retry_login = true;
+                    let sink = CapturingSink::default();
+                    let mut ops = inert_ops();
+
+                    let end = engine.submit_prompt("hi", &sink, &mut ops).await;
+
+                    assert_eq!(end, TurnEnd::Failed);
+                    assert!(!engine.retry_login);
+                    assert_eq!(engine.client.auth_source(), None);
+                    assert!(
+                        matches!(
+                            sink.events().as_slice(),
+                            [Event::TurnFailed(notice)]
+                                if notice == "Not signed in. Run `/login` to sign in."
+                        ),
+                        "{:?}",
+                        sink.events()
+                    );
+                })
+                .await;
+            })
+            .await;
+        }
+
+        #[tokio::test]
+        async fn reads_no_store_without_a_transient_sign_out() {
+            with_pinned_home(async {
+                let dir = tempfile::tempdir().unwrap();
+                let data = tempfile::tempdir().unwrap();
+                store_ox_login(data.path());
+                temp_env::async_with_vars([("XDG_DATA_HOME", Some(data.path()))], async {
+                    let mut engine = engine(
+                        "http://127.0.0.1:9".to_owned(),
+                        &test_store(dir.path()),
+                        dir.path(),
+                    )
+                    .await;
+                    engine.client.set_auth(None);
+                    let sink = CapturingSink::default();
+                    let mut ops = inert_ops();
+
+                    let end = engine.submit_prompt("hi", &sink, &mut ops).await;
+
+                    assert_eq!(end, TurnEnd::Failed);
+                    assert_eq!(engine.client.auth_source(), None);
+                    assert!(
+                        matches!(
+                            sink.events().as_slice(),
+                            [Event::TurnFailed(notice)]
+                                if notice == "Not signed in. Run `/login` to sign in."
+                        ),
+                        "{:?}",
+                        sink.events()
+                    );
+                })
+                .await;
+            })
+            .await;
+        }
+    }
+
     mod login {
         use super::*;
 
@@ -4125,7 +4630,7 @@ mod tests {
                         engine(server.uri(), &test_store(dir.path()), dir.path()).await;
                     engine.client.set_auth(None);
                     engine.oauth_token_url = format!("{}/token", server.uri());
-                    let mut handle = engine.spawn(&[]);
+                    let mut handle = engine.spawn();
 
                     handle.ops.send(Op::Login).await.unwrap();
                     let url = login_url(&mut handle.events).await;
@@ -4164,7 +4669,7 @@ mod tests {
                 let server = MockServer::start().await;
                 let dir = tempfile::tempdir().unwrap();
                 let engine = engine(server.uri(), &test_store(dir.path()), dir.path()).await;
-                let mut handle = engine.spawn(&[]);
+                let mut handle = engine.spawn();
 
                 handle.ops.send(Op::Login).await.unwrap();
                 let url = login_url(&mut handle.events).await;
@@ -4225,8 +4730,10 @@ mod tests {
                     Some(Auth::new(AuthSource::ClaudeCodeLogin, "claude-code-token")),
                 ] {
                     engine.client.set_auth(before);
+                    engine.retry_login = true;
                     engine.adopt_login(&sink, ox_login());
                     assert_eq!(engine.client.auth().unwrap().secret(), "ox-token");
+                    assert!(!engine.retry_login);
                 }
 
                 let events = sink.events();
@@ -4254,24 +4761,6 @@ mod tests {
 
     mod logout {
         use super::*;
-
-        /// Stores an oxide-code login under `data`, standing in for `$XDG_DATA_HOME`.
-        fn store_ox_login(data: &Path) -> PathBuf {
-            let file = data.join("ox").join("credentials.json");
-            std::fs::create_dir_all(file.parent().unwrap()).unwrap();
-            std::fs::write(&file, credentials_json("ox-token")).unwrap();
-            file
-        }
-
-        fn credentials_json(access_token: &str) -> String {
-            serde_json::json!({
-                "claudeAiOauth": {
-                    "accessToken": access_token,
-                    "expiresAt": 9_999_999_999_999_u64,
-                },
-            })
-            .to_string()
-        }
 
         #[tokio::test]
         async fn removes_the_oxide_code_login_and_keeps_an_explicit_credential() {
@@ -4330,8 +4819,12 @@ mod tests {
                     std::fs::create_dir(claude_code_file.parent().unwrap()).unwrap();
                     std::fs::write(&claude_code_file, "not json").unwrap();
                     engine.logout(&sink).await;
-                    std::fs::write(&claude_code_file, credentials_json("claude-code-token"))
-                        .unwrap();
+                    write_creds(
+                        &claude_code_file,
+                        "claude-code-token",
+                        None,
+                        9_999_999_999_999,
+                    );
                     engine.logout(&sink).await;
 
                     assert_eq!(engine.client.auth().unwrap().secret(), "claude-code-token");
@@ -4386,6 +4879,69 @@ mod tests {
                             events.as_slice(),
                             [Event::Error(msg)]
                                 if msg.starts_with("Sign-out failed: failed to remove ")
+                        ),
+                        "{events:?}"
+                    );
+                })
+                .await;
+            })
+            .await;
+        }
+
+        #[tokio::test(start_paused = true)]
+        async fn retries_a_claude_code_login_a_transient_failure_kept_from_taking_over() {
+            with_pinned_home(async {
+                let dir = tempfile::tempdir().unwrap();
+                let data = tempfile::tempdir().unwrap();
+                store_ox_login(data.path());
+                let home = std::env::home_dir().unwrap();
+                let claude_code_file = home.join(".claude").join(".credentials.json");
+                std::fs::create_dir(home.join(".claude")).unwrap();
+                write_creds(&claude_code_file, "dead", Some("refresh"), 0);
+                let lock = home.join(".claude.lock");
+                std::fs::create_dir(&lock).unwrap();
+                temp_env::async_with_vars([("XDG_DATA_HOME", Some(data.path()))], async {
+                    let mut engine = engine(
+                        "http://127.0.0.1:9".to_owned(),
+                        &test_store(dir.path()),
+                        dir.path(),
+                    )
+                    .await;
+                    engine
+                        .client
+                        .set_auth(Some(Auth::new(AuthSource::OxLogin, "ox-token")));
+                    let sink = CapturingSink::default();
+
+                    engine.logout(&sink).await;
+                    let retrying = engine.retry_login;
+                    std::fs::remove_dir(&lock).unwrap();
+                    write_creds(
+                        &claude_code_file,
+                        "claude-code-token",
+                        None,
+                        9_999_999_999_999,
+                    );
+                    let restored = engine
+                        .ensure_signed_in(&sink, &mut inert_ops(), &mut Inbox::default())
+                        .await;
+
+                    assert!(retrying);
+                    assert!(restored.is_ok(), "the next prompt loads the login again");
+                    assert_eq!(engine.client.auth().unwrap().secret(), "claude-code-token");
+                    let events = sink.events();
+                    assert!(
+                        matches!(
+                            events.as_slice(),
+                            [
+                                Event::SignedOut {
+                                    removed: true,
+                                    auth: None,
+                                    fallback_error: Some(error),
+                                },
+                                Event::LoginRestored {
+                                    auth: AuthSource::ClaudeCodeLogin
+                                },
+                            ] if error.ends_with("Try again in a moment.")
                         ),
                         "{events:?}"
                     );
@@ -4499,20 +5055,22 @@ mod tests {
                     (
                         &set_model,
                         Event::ConfigChanged {
-                            model: ModelSpec::resolve(MODEL.to_owned()),
+                            model: ModelSpec::resolve(MODEL),
                             effort: Some(Effort::Low),
                             requested: ConfigPick::Effort(Effort::Low),
                             auto_compaction: CompactionConfig::with_threshold_for_test(50_000).auto,
+                            notice: String::new(),
                         },
                         Some(TurnEnd::Completed),
                     ),
                     (
                         &set_model,
                         Event::ConfigChanged {
-                            model: ModelSpec::resolve("custom-model".to_owned()),
+                            model: ModelSpec::resolve("custom-model"),
                             effort: None,
                             requested: ConfigPick::Effort(Effort::Low),
                             auto_compaction: CompactionConfig::with_threshold_for_test(50_000).auto,
+                            notice: String::new(),
                         },
                         Some(TurnEnd::Failed),
                     ),

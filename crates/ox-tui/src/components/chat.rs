@@ -27,6 +27,7 @@ use self::stack::{Anchor, CachedBlock, SlotTops, Stack};
 use crate::action::{APP_KEYMAP, AppAction};
 use crate::glyphs::SPINNER_FRAMES;
 use crate::pending_calls::{PendingCalls, result_header};
+use crate::slash::WorkingTreeDiff;
 use crate::theme::Theme;
 
 /// Rows one wheel notch scrolls, the common terminal default.
@@ -344,9 +345,9 @@ impl ChatView {
         self.push_block(CompactedBlock::new(pre_count, instructions, summary));
     }
 
-    pub(crate) fn push_git_diff(&mut self, text: impl Into<String>) {
+    pub(crate) fn push_git_diff(&mut self, diff: WorkingTreeDiff) {
         self.bump_paused_counter();
-        self.push_block(GitDiffBlock::new(text));
+        self.push_block(GitDiffBlock::new(diff));
     }
 
     /// Appends an interrupted marker. Flushes any in-flight streaming buffer first.
@@ -751,7 +752,7 @@ mod tests {
 
     use ox_core::protocol::testing::text_result;
     use ox_core::tool::testing::edit_diff;
-    use ox_core::tool::{ReadExcerptLine, ToolResultView};
+    use ox_core::tool::view::{NumberedLine, ToolResultView};
 
     use super::*;
     use crate::glyphs::{
@@ -1684,7 +1685,7 @@ mod tests {
         #[test]
         fn renders_a_structured_view_in_place_of_the_content() {
             let mut chat = test_chat();
-            let lines = vec![ReadExcerptLine {
+            let lines = vec![NumberedLine {
                 number: 2,
                 text: "fn main() {".to_owned(),
             }];
@@ -1949,7 +1950,7 @@ mod tests {
                 view: ToolResultView::ReadExcerpt {
                     path: "src/loader.rs".to_owned(),
                     lines: (1..=8)
-                        .map(|number| ReadExcerptLine {
+                        .map(|number| NumberedLine {
                             number,
                             text: format!("let step_{number} = load({number});"),
                         })

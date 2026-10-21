@@ -1,5 +1,8 @@
 //! Live end-to-end checks against the Anthropic API or a compatible gateway, skipped by default.
 
+#[path = "support/env.rs"]
+mod env;
+
 use std::fmt::Write as _;
 use std::fs;
 use std::io::Write as _;
@@ -8,9 +11,6 @@ use std::process::{Command, Output, Stdio};
 
 use serde_json::Value;
 use tempfile::TempDir;
-
-#[path = "support/env.rs"]
-mod env;
 
 const DEFAULT_MODEL: &str = "claude-haiku-5-5";
 const DEFAULT_THINKING_MODEL: &str = "claude-opus-5-5";
@@ -170,7 +170,7 @@ fn continue_answers_from_the_resumed_transcript_and_cache() {
         .unwrap()
         .to_owned();
     let mut repl = live.repl(&env_or("OX_LIVE_MODEL", DEFAULT_MODEL));
-    repl.args(["--continue", &session_id]);
+    repl.args(["--resume", &session_id]);
     let output = live.send(
         repl,
         &["What code word did I ask you to remember? Reply with only the word."],
@@ -237,14 +237,10 @@ impl Live {
     fn ox(&self, model: &str) -> Command {
         let mut command = Command::new(env!("CARGO_BIN_EXE_ox"));
         env::remove_inherited(&mut command, env::is_ox_setting);
+        env::use_scratch_dirs(&mut command, self.root.path());
         command
             .current_dir(self.cwd())
-            .env("HOME", self.root.path().join("home"))
-            .env("USERPROFILE", self.root.path().join("home"))
-            .env("ANTHROPIC_MODEL", model)
-            .env("XDG_CONFIG_HOME", self.root.path().join("config"))
-            .env("XDG_DATA_HOME", self.root.path().join("data"))
-            .env("XDG_STATE_HOME", self.root.path().join("state"));
+            .env("ANTHROPIC_MODEL", model);
         command
     }
 
@@ -429,9 +425,8 @@ fn log_text(seed: u64, marker: &str) -> String {
     let mut text = String::new();
     for number in 1..=680 {
         let words: Vec<&str> = (0..11).map(|_| WORDS[rng.usize(..WORDS.len())]).collect();
-        writeln!(text, "entry {number:04}: {}", words.join(" "))
-            .expect("String writes are infallible");
+        _ = writeln!(text, "entry {number:04}: {}", words.join(" "));
     }
-    writeln!(text, "final marker: {marker}").expect("String writes are infallible");
+    _ = writeln!(text, "final marker: {marker}");
     text
 }

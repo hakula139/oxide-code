@@ -153,9 +153,9 @@ expression: recovered
         {
           "id": "t3",
           "input": {
-            "pattern": "fn "
+            "pattern": "*.rs"
           },
-          "name": "grep",
+          "name": "glob",
           "type": "tool_use"
         },
         {
@@ -194,7 +194,7 @@ expression: recovered
           "type": "tool_result"
         },
         {
-          "content": "g.rs:1: fn main() {}",
+          "content": "g.rs",
           "tool_use_id": "t3",
           "type": "tool_result"
         },
@@ -260,11 +260,8 @@ expression: recovered
       "title": "Read g.rs"
     },
     "t3": {
-      "title": "Found 250 matches",
+      "title": "Found 100 files",
       "truncated_total": 250
-    },
-    "t4": {
-      "truncated_bytes": 4096
     }
   },
   "unarchived": true,

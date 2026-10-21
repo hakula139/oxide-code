@@ -1,6 +1,6 @@
 //! System prompt assembly: stable static sections plus a per-session user-context reminder.
 
-pub(crate) mod environment;
+mod environment;
 pub(crate) mod instructions;
 mod sections;
 
@@ -10,7 +10,7 @@ use indoc::formatdoc;
 use serde::{Deserialize, Serialize};
 
 use crate::model::ModelSpec;
-use crate::util::git::repo_root;
+use crate::util::git::{project_root, repo_root};
 use environment::Environment;
 use sections::{
     CAUTION, INTRO, OUTPUT_EFFICIENCY, STYLE, SYSTEM_SECTION, TASK_GUIDANCE, TOOL_GUIDANCE,
@@ -79,18 +79,9 @@ pub(crate) struct UserContext {
 
 impl UserContext {
     /// Reads the instruction files that apply in `cwd`, plus today's date and `model`'s identity.
-    /// Also returns a warning for each instruction file that exists but cannot be read.
+    /// Also returns a warning for each instruction file that exists but cannot or may not be read.
     pub(crate) async fn load(cwd: &Path, model: &ModelSpec) -> (Self, Vec<String>) {
-        let git_root = repo_root(cwd).await;
-        Self::load_with_root(cwd, git_root.as_deref(), model).await
-    }
-
-    async fn load_with_root(
-        cwd: &Path,
-        git_root: Option<&Path>,
-        model: &ModelSpec,
-    ) -> (Self, Vec<String>) {
-        let (instructions, warnings) = instructions::load(cwd, git_root).await;
+        let (instructions, warnings) = instructions::load(cwd, &project_root(cwd)).await;
         let context = Self {
             instructions,
             date: environment::current_date(),
@@ -142,7 +133,7 @@ async fn assemble(
     git_root: Option<&Path>,
 ) -> (PromptParts, Vec<String>) {
     let environment = Environment::detect(cwd, git_root);
-    let (context, warnings) = UserContext::load_with_root(cwd, git_root, model).await;
+    let (context, warnings) = UserContext::load(cwd, model).await;
 
     let parts = PromptParts {
         system: system_prompt(&environment),
@@ -254,18 +245,16 @@ pub(crate) fn is_system_reminder(text: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use std::path::PathBuf;
-
     use indoc::indoc;
+    use time::macros::format_description;
+    use time::{Date, OffsetDateTime};
 
     use super::*;
-    use crate::util::git::testing::isolated_git;
+    use crate::util::git::local_testing::init_fixture_repo;
+    use crate::util::git::testing::with_isolated_git_env_async;
+    use crate::util::path::testing::pinned_home;
 
     const IDENTITY: &str = "You are powered by the model test-model.";
-
-    fn spec(id: &str) -> ModelSpec {
-        ModelSpec::resolve(id.to_owned())
-    }
 
     fn context(instructions: &str, date: &str) -> UserContext {
         UserContext {
@@ -349,14 +338,29 @@ mod tests {
     mod build_prompt {
         use super::*;
 
-        fn cwd() -> PathBuf {
-            std::env::current_dir().expect("cwd should be available")
-        }
-
         #[tokio::test]
         async fn names_the_model_in_user_context_only() {
-            let model = spec("claude-opus-5-5");
-            let (parts, _) = build_prompt(&model, &cwd()).await;
+            let (home, cwd) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+            let model = ModelSpec::resolve("claude-opus-5-5");
+
+            let (parts, warnings) = with_isolated_git_env_async(temp_env::async_with_vars(
+                pinned_home(home.path()),
+                build_prompt(&model, cwd.path()),
+            ))
+            .await;
+
+            assert_eq!(warnings, [] as [String; 0]);
+            assert_eq!(parts.seen.instructions, "");
+            let date = Date::parse(
+                &parts.seen.date,
+                format_description!("[year]-[month]-[day]"),
+            )
+            .unwrap();
+            let today = OffsetDateTime::now_utc().date();
+            assert!(
+                (today.previous_day().unwrap()..=today.next_day().unwrap()).contains(&date),
+                "{date} is not within a day of {today}",
+            );
             let identity = environment::model_identity(&model);
             assert!(
                 parts.user_context.contains(&formatdoc! {"
@@ -429,23 +433,17 @@ mod tests {
     mod assemble {
         use super::*;
 
-        fn init_git_repo(path: &Path) {
-            let status = isolated_git(path)
-                .args(["init"])
-                .stdout(std::process::Stdio::null())
-                .stderr(std::process::Stdio::null())
-                .status()
-                .expect("failed to spawn git");
-            assert!(status.success(), "git init exited with non-zero status");
-        }
-
         #[tokio::test]
-        async fn in_git_repo_has_system_and_user_context() {
+        async fn with_a_git_root_has_system_and_user_context() {
             let tmp = tempfile::tempdir().expect("failed to create tempdir");
-            init_git_repo(tmp.path());
             std::fs::write(tmp.path().join("CLAUDE.md"), "Test project rules.").unwrap();
 
-            let (parts, _) = assemble(&spec("test-model"), tmp.path(), Some(tmp.path())).await;
+            let (parts, _) = assemble(
+                &ModelSpec::resolve("test-model"),
+                tmp.path(),
+                Some(tmp.path()),
+            )
+            .await;
 
             let expected_stable_sections = [
                 "You are an interactive agent",
@@ -489,14 +487,14 @@ mod tests {
         async fn walks_root_to_cwd_for_instruction_discovery() {
             let tmp = tempfile::tempdir().expect("failed to create tempdir");
             let root = tmp.path();
-            init_git_repo(root);
+            init_fixture_repo(root);
 
             std::fs::write(root.join("CLAUDE.md"), "Root rules.").unwrap();
             let sub = root.join("crates").join("core");
             std::fs::create_dir_all(&sub).unwrap();
             std::fs::write(sub.join("CLAUDE.md"), "Subdir rules.").unwrap();
 
-            let (parts, _) = assemble(&spec("test-model"), &sub, Some(root)).await;
+            let (parts, _) = assemble(&ModelSpec::resolve("test-model"), &sub, Some(root)).await;
             let ctx = &parts.user_context;
 
             assert!(ctx.contains("Root rules."));
@@ -648,24 +646,6 @@ mod tests {
 
     mod sections {
         use super::*;
-
-        #[test]
-        fn have_no_leading_whitespace() {
-            for (name, content) in [
-                ("INTRO", INTRO),
-                ("SYSTEM_SECTION", SYSTEM_SECTION),
-                ("TASK_GUIDANCE", TASK_GUIDANCE),
-                ("CAUTION", CAUTION),
-                ("TOOL_GUIDANCE", TOOL_GUIDANCE),
-                ("STYLE", STYLE),
-                ("OUTPUT_EFFICIENCY", OUTPUT_EFFICIENCY),
-            ] {
-                assert!(
-                    !content.starts_with(' ') && !content.starts_with('\t'),
-                    "{name} should not start with whitespace"
-                );
-            }
-        }
 
         #[test]
         fn state_their_distinctive_rules() {

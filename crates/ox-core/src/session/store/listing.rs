@@ -26,18 +26,14 @@ pub struct ListScope {
 // ── ListPage ──
 
 /// One page of sessions, and whether more matching sessions follow it.
-#[derive(Debug, Default)]
-pub(crate) struct ListPage {
+#[derive(Debug)]
+pub struct ListPage {
     sessions: Vec<SessionInfo>,
     more: bool,
 }
 
 impl ListPage {
-    pub(crate) fn new(sessions: Vec<SessionInfo>, more: bool) -> Self {
-        Self { sessions, more }
-    }
-
-    pub(crate) fn sessions(&self) -> &[SessionInfo] {
+    pub fn sessions(&self) -> &[SessionInfo] {
         &self.sessions
     }
 
@@ -46,7 +42,7 @@ impl ListPage {
         self.sessions
     }
 
-    pub(crate) fn has_more(&self) -> bool {
+    pub fn has_more(&self) -> bool {
         self.more
     }
 }
@@ -104,12 +100,12 @@ impl SessionStore {
 
     /// Up to `limit` sessions from the [`walk`](Self::walk) of `scope`, unbounded for `None`.
     /// Archive state lives in each file, so the walk reads on to the next match past the page.
-    pub(crate) fn list_paged(&self, limit: Option<usize>, scope: ListScope) -> Result<ListPage> {
+    pub fn list_paged(&self, limit: Option<usize>, scope: ListScope) -> Result<ListPage> {
         let limit = limit.unwrap_or(usize::MAX);
         let mut sessions: Vec<_> = self.walk(scope)?.take(limit.saturating_add(1)).collect();
         let more = sessions.len() > limit;
         sessions.truncate(limit);
-        Ok(ListPage::new(sessions, more))
+        Ok(ListPage { sessions, more })
     }
 
     /// The most recently active readable unarchived session.
@@ -174,7 +170,7 @@ fn collect_session_paths(dir: &Path) -> Result<Vec<(PathBuf, OffsetDateTime)>> {
 
 /// The entries of `dir`, warn-skipping any the OS fails to read.
 fn read_dir_entries(dir: &Path) -> Result<impl Iterator<Item = fs::DirEntry>> {
-    let entries = fs::read_dir(dir).with_context(|| format!("cannot read {}", dir.display()))?;
+    let entries = fs::read_dir(dir).with_context(|| format!("failed to read {}", dir.display()))?;
     Ok(entries.filter_map(|entry| {
         entry
             .inspect_err(|e| warn!("skipping directory entry: {e}"))
@@ -197,7 +193,7 @@ fn read_session_infos(
 /// [`read_session_info`], warn-skipping an unreadable file.
 fn read_readable(path: &Path, modified: OffsetDateTime) -> Option<SessionInfo> {
     read_session_info(path, modified)
-        .inspect_err(|e| warn!("skipping unreadable session file {}: {e}", path.display()))
+        .inspect_err(|e| warn!("skipping unreadable session file {}: {e:#}", path.display()))
         .ok()
 }
 
@@ -556,7 +552,7 @@ mod tests {
             let error = store.list().unwrap_err();
             assert_eq!(
                 error.to_string(),
-                format!("cannot read {}", project_dir.display())
+                format!("failed to read {}", project_dir.display())
             );
             assert_eq!(
                 error.downcast_ref::<std::io::Error>().unwrap().kind(),

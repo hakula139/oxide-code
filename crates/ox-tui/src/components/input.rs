@@ -19,6 +19,7 @@ use self::popup::{PopupState, SlashPopup, popup_state};
 use crate::action::Action;
 use crate::cursor::place_clamped;
 use crate::glyphs::{USER_PROMPT_PREFIX, USER_PROMPT_PREFIX_WIDTH};
+use crate::keymap::{CTRL_C, CTRL_D};
 use crate::saturating_u16;
 use crate::slash::arg_placeholder_for;
 use crate::theme::Theme;
@@ -169,6 +170,10 @@ impl InputArea {
             prompt_area,
         );
 
+        // A textarea drawn with no rows scrolls one past its cursor, which has no cell to sit in.
+        if textarea_area.is_empty() {
+            return;
+        }
         frame.render_widget(&self.textarea, textarea_area);
         if self.rendered_width.replace(textarea_area.width) != textarea_area.width {
             self.visual_lines.set(None);
@@ -205,21 +210,21 @@ impl InputArea {
     // ── Key Routing ──
 
     fn handle_key(&mut self, key: &KeyEvent) -> InputOutcome {
+        if CTRL_C.matches(key) {
+            return InputOutcome::Action(if self.enabled {
+                Action::ConfirmExit
+            } else {
+                Action::Op(Op::Interrupt)
+            });
+        }
+        if CTRL_D.matches(key) {
+            return if self.enabled && self.is_empty() {
+                InputOutcome::Action(Action::Op(Op::Shutdown))
+            } else {
+                InputOutcome::Consumed
+            };
+        }
         match (key.code, key.modifiers) {
-            (KeyCode::Char('d'), KeyModifiers::CONTROL) => {
-                return if self.enabled && self.is_empty() {
-                    InputOutcome::Action(Action::Op(Op::Shutdown))
-                } else {
-                    InputOutcome::Consumed
-                };
-            }
-            (KeyCode::Char('c'), KeyModifiers::CONTROL) => {
-                return InputOutcome::Action(if self.enabled {
-                    Action::ConfirmExit
-                } else {
-                    Action::Op(Op::Interrupt)
-                });
-            }
             (KeyCode::BackTab, _) => return InputOutcome::Action(Action::CycleMode),
             (KeyCode::PageUp | KeyCode::PageDown, _)
             | (KeyCode::Home | KeyCode::End, KeyModifiers::CONTROL) => {
@@ -817,6 +822,20 @@ mod tests {
 
     mod render {
         use super::*;
+
+        #[test]
+        fn paints_nothing_into_a_zero_height_area() {
+            let mut input = test_input();
+            type_text(&mut input, "draft");
+            let mut terminal = Terminal::new(TestBackend::new(10, 2)).unwrap();
+
+            terminal
+                .draw(|frame| input.render(frame, Rect::new(0, 0, 10, 0)))
+                .unwrap();
+
+            let buffer = terminal.backend().buffer();
+            assert!(buffer.content.iter().all(|cell| cell.symbol() == " "));
+        }
 
         #[test]
         fn empty_buffer_shows_only_prompt_marker_and_borders() {

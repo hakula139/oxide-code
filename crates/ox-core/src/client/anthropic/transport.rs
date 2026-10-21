@@ -12,7 +12,7 @@ use regex::Regex;
 use reqwest::StatusCode;
 use reqwest::header::HeaderMap;
 use tokio_util::task::TaskTracker;
-use tracing::{debug, warn};
+use tracing::debug;
 
 use super::Client;
 use super::wire::{ApiError, ErrorResponse};
@@ -205,7 +205,7 @@ where
             return Err(error);
         };
         retry += 1;
-        warn!(?delay, retry, error = %format_args!("{error:#}"), "retrying Anthropic request");
+        debug!(?delay, retry, error = %format_args!("{error:#}"), "retrying Anthropic request");
         on_retry(&RetryNotice {
             delay,
             retry,
@@ -500,7 +500,9 @@ mod tests {
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
     use super::*;
-    use crate::client::anthropic::local_testing::{messages_request, plain_http};
+    use crate::client::anthropic::local_testing::{
+        messages_request, plain_http, retry_counts, serve,
+    };
     use crate::config::oauth::testing::{ok_refresh_body, ox_login_in, write_creds};
 
     mod post_messages {
@@ -512,14 +514,6 @@ mod tests {
 
         async fn post_once(server: &MockServer) -> Result<reqwest::Response, AttemptError> {
             post_messages(&plain_http(), &request(server), 0).await
-        }
-
-        async fn mount(server: &MockServer, response: ResponseTemplate) {
-            Mock::given(method("POST"))
-                .and(path("/v1/messages"))
-                .respond_with(response)
-                .mount(server)
-                .await;
         }
 
         /// Answers `/v1/messages` sent with `token` with `status`, expecting `hits` such requests.
@@ -568,8 +562,7 @@ mod tests {
 
         #[tokio::test]
         async fn sends_per_request_headers() {
-            let server = MockServer::start().await;
-            mount(&server, ResponseTemplate::new(200)).await;
+            let server = serve(vec![ResponseTemplate::new(200)]).await;
             let mut req = request(&server);
             req.betas = "beta-a,beta-b".to_owned();
 
@@ -589,12 +582,14 @@ mod tests {
         async fn connection_failure_is_retryable() {
             // Port 9 (discard) is closed on test hosts, so the connect fails fast.
             let req = messages_request("http://127.0.0.1:9/v1/messages");
+
             let err = post_messages(&plain_http(), &req, 0)
                 .await
                 .expect_err("nothing listens on the discard port");
             let AttemptError::Retryable { error, cause, .. } = &err else {
                 panic!("expected a retryable error, got {err:?}");
             };
+
             assert_eq!(cause, "Anthropic API connection failed");
             assert!(
                 format!("{error:#}").starts_with("Anthropic API connection failed: "),
@@ -625,12 +620,8 @@ mod tests {
                 (401, false),
                 (404, false),
             ] {
-                let server = MockServer::start().await;
-                mount(
-                    &server,
-                    ResponseTemplate::new(status).set_body_string("boom"),
-                )
-                .await;
+                let server =
+                    serve(vec![ResponseTemplate::new(status).set_body_string("boom")]).await;
 
                 let err = post_once(&server).await.expect_err("non-2xx fails");
                 assert_eq!(
@@ -764,7 +755,6 @@ mod tests {
 
         #[tokio::test]
         async fn condenses_a_gateway_page_to_its_title() {
-            let server = MockServer::start().await;
             let page = indoc! {r#"
                 <!DOCTYPE html>
                 <html>
@@ -774,7 +764,7 @@ mod tests {
                 <body><h1>Connection timed out</h1></body>
                 </html>
             "#};
-            mount(&server, ResponseTemplate::new(522).set_body_string(page)).await;
+            let server = serve(vec![ResponseTemplate::new(522).set_body_string(page)]).await;
 
             let Err(AttemptError::Retryable { error, cause, .. }) = post_once(&server).await else {
                 panic!("HTTP 522 is retryable");
@@ -804,11 +794,10 @@ mod tests {
                     None,
                 ),
             ] {
-                let server = MockServer::start().await;
                 let body = format!(
                     r#"{{"type":"error","error":{{"type":"{kind}","message":"{message}"}}}}"#
                 );
-                mount(&server, ResponseTemplate::new(400).set_body_string(&body)).await;
+                let server = serve(vec![ResponseTemplate::new(400).set_body_string(&body)]).await;
 
                 let Err(AttemptError::Fatal(error)) = post_once(&server).await else {
                     panic!("HTTP 400 is fatal");
@@ -825,11 +814,9 @@ mod tests {
 
         #[tokio::test]
         async fn threads_retry_after_into_the_hint_and_message() {
-            let server = MockServer::start().await;
-            mount(
-                &server,
+            let server = serve(vec![
                 ResponseTemplate::new(429).insert_header("retry-after", "12"),
-            )
+            ])
             .await;
 
             let Err(AttemptError::Retryable {
@@ -854,8 +841,7 @@ mod tests {
                 ),
                 ("<html>busy</html>", "HTTP 529"),
             ] {
-                let server = MockServer::start().await;
-                mount(&server, ResponseTemplate::new(529).set_body_string(body)).await;
+                let server = serve(vec![ResponseTemplate::new(529).set_body_string(body)]).await;
 
                 let Err(AttemptError::Retryable { cause: got, .. }) = post_once(&server).await
                 else {
@@ -868,11 +854,9 @@ mod tests {
         #[tokio::test]
         async fn x_should_retry_overrides_the_status_rule() {
             for (status, header, retryable) in [(529, "false", false), (400, "true", true)] {
-                let server = MockServer::start().await;
-                mount(
-                    &server,
+                let server = serve(vec![
                     ResponseTemplate::new(status).insert_header("x-should-retry", header),
-                )
+                ])
                 .await;
 
                 let err = post_once(&server).await.expect_err("non-2xx fails");
@@ -886,14 +870,11 @@ mod tests {
 
         #[tokio::test(start_paused = true)]
         async fn numbers_each_attempt_in_the_retry_count_header() {
-            let server = MockServer::start().await;
-            Mock::given(method("POST"))
-                .and(path("/v1/messages"))
-                .respond_with(ResponseTemplate::new(529))
-                .up_to_n_times(1)
-                .mount(&server)
-                .await;
-            mount(&server, ResponseTemplate::new(200).set_body_string("ok")).await;
+            let server = serve(vec![
+                ResponseTemplate::new(529),
+                ResponseTemplate::new(200).set_body_string("ok"),
+            ])
+            .await;
             let http = &plain_http();
             let req = &request(&server);
 
@@ -908,18 +889,7 @@ mod tests {
             .unwrap();
 
             assert_eq!(body, "ok");
-            let counts: Vec<String> = server
-                .received_requests()
-                .await
-                .unwrap()
-                .iter()
-                .map(|r| {
-                    r.headers["x-stainless-retry-count"]
-                        .to_str()
-                        .unwrap()
-                        .to_owned()
-                })
-                .collect();
+            let counts = retry_counts(&server).await;
             assert_eq!(counts, ["0", "1"]);
         }
     }
@@ -1030,10 +1000,12 @@ mod tests {
                 retry: 2,
                 cause: "HTTP 529 overloaded_error".to_owned(),
             };
+
             assert_eq!(
                 notice(Duration::from_millis(3200)).to_string(),
                 "HTTP 529 overloaded_error. Retrying in 4 s (retry 2 of 5).",
             );
+
             assert_eq!(
                 notice(Duration::from_secs(8)).to_string(),
                 "HTTP 529 overloaded_error. Retrying in 8 s (retry 2 of 5).",
@@ -1212,6 +1184,7 @@ mod tests {
         fn on_3xx_names_the_redirect_host() {
             let redirected = "Anthropic API endpoint redirected (HTTP 307 Temporary Redirect)";
             let advice = "Redirects are not followed, so point the base URL at the final endpoint.";
+
             for (location, target) in [
                 (
                     Some("https://other.example.com/v1/messages"),
@@ -1291,10 +1264,12 @@ mod tests {
                 <body><center><h1>502 Bad Gateway</h1></center></body>
                 </html>
             "};
+
             assert_eq!(
                 body_details(nginx, None).as_deref(),
                 Some("502 Bad Gateway")
             );
+
             assert_eq!(body_details("<html><body>busy</body></html>", None), None);
         }
 

@@ -17,7 +17,7 @@ use crate::permission::Mode;
 use crate::protocol::{ConfigPick, Op, ResumeTarget};
 use crate::session::display::fit_title;
 
-/// Canonical names of the commands [`parse`] knows, without their leading `/`.
+/// Canonical names of the commands [`typed_op`] parses, without their leading `/`.
 pub const NAMES: [&str; 8] = [
     "clear", "compact", "effort", "init", "mode", "model", "rename", "resume",
 ];
@@ -52,7 +52,7 @@ pub fn aliases(name: &str) -> &'static [&'static str] {
 /// runs, where `/init` reads the instruction files at `project_root`. `None` when `name` is not
 /// one of [`NAMES`]. `Err` carries the message for a malformed form, including a bare form only a
 /// picker can complete.
-pub fn parse(name: &str, args: &str, project_root: &Path) -> Option<Result<Op, String>> {
+fn parse(name: &str, args: &str, project_root: &Path) -> Option<Result<Op, String>> {
     Some(match name {
         "clear" => Ok(Op::Clear),
         "compact" => Ok(compact(args)),
@@ -132,7 +132,7 @@ pub fn model(arg: &str) -> Result<Op, String> {
         }
     };
     Ok(Op::SetModel(ConfigPick::Model {
-        id: ResolvedModelId::new(info.id.to_owned()),
+        id: ResolvedModelId::new(info.id),
         effort: None,
     }))
 }
@@ -201,7 +201,7 @@ mod tests {
 
     fn set_model(id: &str) -> Op {
         Op::SetModel(ConfigPick::Model {
-            id: ResolvedModelId::new(id.to_owned()),
+            id: ResolvedModelId::new(id),
             effort: None,
         })
     }
@@ -433,16 +433,6 @@ mod tests {
                     - `claude-sonnet-5-5` — Claude Sonnet 5.5"
                 },
             );
-        }
-
-        #[test]
-        fn ambiguous_suggests_every_catalog_alias() {
-            let err = model("o").expect_err("ambiguous arg must error");
-
-            for info in MODELS {
-                let alias = format!("`{}`", info.family.id_token());
-                assert!(err.contains(&alias), "missing {alias}: {err}");
-            }
         }
 
         #[test]

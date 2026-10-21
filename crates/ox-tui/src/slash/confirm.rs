@@ -15,7 +15,7 @@ use ox_core::util::text::truncate_to_width;
 use super::sessions::{CLEAR_THEN_DELETE_HINT, saved_error_message};
 use crate::glyphs::MODAL_ERROR_PREFIX;
 use crate::modal::chrome::{FOOTER_HEIGHT, Header, render_footer};
-use crate::modal::{Modal, ModalAction, ModalKey, is_plain_char};
+use crate::modal::{Modal, ModalAction, ModalKey};
 use crate::theme::Theme;
 
 // ── Constants ──
@@ -23,7 +23,7 @@ use crate::theme::Theme;
 const TITLE: &str = "Delete this session?";
 const FOOTER_HINTS: [&str; 2] = ["Y to delete", "N to cancel"];
 
-/// The identity and metadata rows.
+/// The title and metadata rows.
 const BODY_HEIGHT: u16 = 2;
 /// Width floor so narrow terminals still paint the full body without panicking.
 const MIN_BUDGET: usize = 8;
@@ -36,10 +36,11 @@ pub(super) struct ConfirmDeleteSessionModal {
     path: PathBuf,
     session_id: String,
     display_title: String,
-    /// Pre-formatted metadata, such as `abcd1234 · 2 hours ago · 14 msgs`.
+    /// The [`format_metadata_line`](ox_core::session::display::format_metadata_line) row, such as
+    /// `abcd1234 · 2 hours ago · 14 msgs`, which carries the ID prefix.
     metadata: String,
     live_session_id: String,
-    /// Sticky error from a failed delete attempt. Kept until a deliberate confirm or cancel key.
+    /// Error from the last failed delete, shown until a retry replaces it or the modal closes.
     error: Option<String>,
 }
 
@@ -89,9 +90,8 @@ impl Modal for ConfirmDeleteSessionModal {
         let mut lines: Vec<Line<'static>> = Vec::with_capacity(usize::from(area.height));
         self.header.push_lines(&mut lines, area.width, theme);
 
-        let identity = format!("{} — {}", id_prefix(&self.session_id), self.display_title);
         lines.push(Line::from(Span::styled(
-            truncate_to_width(&identity, budget),
+            truncate_to_width(&self.display_title, budget),
             theme.text(),
         )));
         lines.push(Line::from(Span::styled(
@@ -111,15 +111,9 @@ impl Modal for ConfirmDeleteSessionModal {
     fn handle_key(&mut self, event: &KeyEvent) -> ModalKey {
         // The modal stack handles Esc and Ctrl+C.
         match event.code {
-            KeyCode::Char('y' | 'Y') if is_plain_char(event) => {
-                self.error = None;
-                self.confirm()
-            }
-            KeyCode::Enter if event.modifiers.is_empty() => {
-                self.error = None;
-                self.confirm()
-            }
-            KeyCode::Char('n' | 'N') if is_plain_char(event) => ModalKey::Cancelled,
+            KeyCode::Char('y' | 'Y') => self.confirm(),
+            KeyCode::Enter if event.modifiers.is_empty() => self.confirm(),
+            KeyCode::Char('n' | 'N') => ModalKey::Cancelled,
             _ => ModalKey::Consumed,
         }
     }
@@ -128,34 +122,49 @@ impl Modal for ConfirmDeleteSessionModal {
 #[cfg(test)]
 mod tests {
     use crossterm::event::KeyModifiers;
+    use time::macros::datetime;
+    use time::{OffsetDateTime, UtcOffset};
 
+    use ox_core::session::display::format_metadata_line;
     use ox_core::session::store::SessionStore;
-    use ox_core::session::store::testing::{seed_test_session, test_store};
+    use ox_core::session::store::testing::{isolated_store, seed_test_session};
 
     use super::*;
+    use crate::modal::ModalStack;
     use crate::modal::testing::render_rows;
+    use crate::slash::testing::stamped_id;
 
-    fn isolated_store() -> (tempfile::TempDir, SessionStore) {
-        let dir = tempfile::tempdir().unwrap();
-        let store = test_store(dir.path());
-        (dir, store)
+    const LAST_ACTIVE: OffsetDateTime = datetime!(2026-04-18 09:00:00 UTC);
+    const MESSAGES: u32 = 3;
+
+    fn seed_modal(store: &SessionStore, byte: u8, title: &str) -> ConfirmDeleteSessionModal {
+        seed_modal_with_live(store, byte, title, "live-session-id")
     }
 
-    fn seed_modal(store: &SessionStore, id: &str, title: &str) -> ConfirmDeleteSessionModal {
-        let stamped_id = format!("{id:0<36}");
-        seed_test_session(
-            store,
-            &stamped_id,
-            Some(title),
-            Some(3),
-            time::macros::datetime!(2026-04-18 09:00:00 UTC),
-        );
-        ConfirmDeleteSessionModal::new(
-            store.find_session_path(&stamped_id).unwrap(),
-            stamped_id,
-            title.to_owned(),
-            "3 msgs · 2 hours ago".to_owned(),
-            "live-session-id".to_owned(),
+    /// Seeds a session stamped with `byte` and opens its confirm modal, with `live_id` live.
+    fn seed_modal_with_live(
+        store: &SessionStore,
+        byte: u8,
+        title: &str,
+        live_id: &str,
+    ) -> ConfirmDeleteSessionModal {
+        let id = stamped_id(byte);
+        seed_test_session(store, &id, Some(title), Some(MESSAGES), LAST_ACTIVE);
+        let path = store.find_session_path(&id).unwrap();
+        let metadata = metadata(&id);
+        ConfirmDeleteSessionModal::new(path, id, title.to_owned(), metadata, live_id.to_owned())
+    }
+
+    /// The [`format_metadata_line`] row of a seeded session, as the `/resume` picker builds it in
+    /// the current project.
+    fn metadata(session_id: &str) -> String {
+        format_metadata_line(
+            session_id,
+            LAST_ACTIVE,
+            UtcOffset::UTC,
+            MESSAGES,
+            None,
+            None,
         )
     }
 
@@ -170,16 +179,19 @@ mod tests {
         }
 
         #[test]
-        fn paints_title_identity_metadata_and_footer() {
+        fn names_the_session_by_title_above_the_metadata_that_carries_its_id() {
             let (_dir, store) = isolated_store();
-            let modal = seed_modal(&store, "abcd1234", "Fix auth flow");
+            let modal = seed_modal(&store, 0xab, "Fix auth flow");
+
+            let rows = rendered_rows(&modal, 60);
+
             assert_eq!(
-                rendered_rows(&modal, 60),
+                rows,
                 [
                     "Delete this session?",
                     "",
-                    "abcd1234 — Fix auth flow",
-                    "3 msgs · 2 hours ago",
+                    "Fix auth flow",
+                    "abababab · 2026-04-18 · 3 msgs",
                     "",
                     "Y to delete  ·  N to cancel",
                 ],
@@ -189,12 +201,15 @@ mod tests {
         #[test]
         fn places_the_error_row_above_the_footer() {
             let (_dir, store) = isolated_store();
-            let mut modal = seed_modal(&store, "abcd1234", "Fix auth flow");
+            let mut modal = seed_modal(&store, 0xab, "Fix auth flow");
             modal.error = Some("permission denied".to_owned());
+
+            let rows = rendered_rows(&modal, 60);
+
             assert_eq!(
-                rendered_rows(&modal, 60)[3..],
+                rows[3..],
                 [
-                    "3 msgs · 2 hours ago",
+                    "abababab · 2026-04-18 · 3 msgs",
                     "! permission denied",
                     "",
                     "Y to delete  ·  N to cancel",
@@ -205,7 +220,7 @@ mod tests {
         #[test]
         fn does_not_panic_at_minimum_widths() {
             let (_dir, store) = isolated_store();
-            let modal = seed_modal(&store, "abcd1234", "T");
+            let modal = seed_modal(&store, 0xab, "T");
             for width in [4_u16, 8, 20] {
                 rendered_rows(&modal, width);
             }
@@ -215,143 +230,133 @@ mod tests {
     mod handle_key {
         use super::*;
 
+        fn is_listed(store: &SessionStore, session_id: &str) -> bool {
+            store
+                .list()
+                .unwrap()
+                .iter()
+                .any(|s| s.session_id == session_id)
+        }
+
+        /// The error a delete of the live session stamped `0xab` reports.
+        const LIVE_REFUSAL: &str = "Session abababab is the live session. \
+                                    Run `/clear` to start a new one, then delete it.";
+
         #[test]
-        fn y_press_runs_delete_and_submits_with_chat_confirmation() {
+        fn y_deletes_and_submits_a_chat_confirmation() {
             let (_dir, store) = isolated_store();
-            let mut modal = seed_modal(&store, "abcd1234", "Fix auth flow");
-            let id_to_delete = modal.session_id.clone();
+            let mut modal = seed_modal(&store, 0xab, "Fix auth flow");
 
             let outcome = modal.handle_key(&KeyEvent::from(KeyCode::Char('y')));
-            let ModalKey::Submitted(ModalAction::SystemMessage(msg)) = outcome else {
-                panic!("Y must Submit(SystemMessage), got {outcome:?}");
-            };
-            assert_eq!(msg, "Deleted session abcd1234: Fix auth flow");
+
             assert!(
-                store
-                    .list()
-                    .unwrap()
-                    .iter()
-                    .all(|s| s.session_id != id_to_delete),
-                "row gone from list",
+                matches!(&outcome, ModalKey::Submitted(ModalAction::SystemMessage(msg))
+                    if msg == "Deleted session abababab: Fix auth flow"),
+                "{outcome:?}",
             );
+            assert!(!is_listed(&store, &stamped_id(0xab)), "row gone from list");
         }
 
         #[test]
-        fn enter_press_is_an_alias_for_y_and_runs_delete() {
-            let (_dir, store) = isolated_store();
-            let mut modal = seed_modal(&store, "abcd1234", "Fix auth flow");
-            let outcome = modal.handle_key(&KeyEvent::from(KeyCode::Enter));
-            assert!(matches!(
-                outcome,
-                ModalKey::Submitted(ModalAction::SystemMessage(_)),
-            ));
-            assert!(store.list().unwrap().is_empty());
+        fn shifted_y_and_plain_enter_also_delete() {
+            for event in [
+                KeyEvent::new(KeyCode::Char('Y'), KeyModifiers::SHIFT),
+                KeyEvent::from(KeyCode::Enter),
+            ] {
+                let (_dir, store) = isolated_store();
+                let mut modal = seed_modal(&store, 0xab, "Fix auth flow");
+
+                let outcome = modal.handle_key(&event);
+
+                assert!(
+                    matches!(outcome, ModalKey::Submitted(ModalAction::SystemMessage(_))),
+                    "{event:?}: {outcome:?}",
+                );
+                assert!(!is_listed(&store, &stamped_id(0xab)), "{event:?}");
+            }
         }
 
         #[test]
-        fn uppercase_y_also_confirms() {
+        fn modified_confirmation_keys_do_not_delete() {
             let (_dir, store) = isolated_store();
-            let mut modal = seed_modal(&store, "abcd1234", "Fix auth");
-            let outcome = modal.handle_key(&KeyEvent::from(KeyCode::Char('Y')));
-            assert!(matches!(
-                outcome,
-                ModalKey::Submitted(ModalAction::SystemMessage(_)),
-            ));
-        }
+            let modal = seed_modal(&store, 0xab, "Fix auth");
 
-        #[test]
-        fn control_y_and_control_enter_do_not_confirm_delete() {
-            let (_dir, store) = isolated_store();
-            let mut modal = seed_modal(&store, "abcd1234", "Fix auth");
-            let id_kept = modal.session_id.clone();
+            let mut stack = ModalStack::default();
+            stack.push(Box::new(modal));
 
             for event in [
                 KeyEvent::new(KeyCode::Char('y'), KeyModifiers::CONTROL),
                 KeyEvent::new(KeyCode::Enter, KeyModifiers::CONTROL),
+                KeyEvent::new(KeyCode::Enter, KeyModifiers::SHIFT),
             ] {
-                assert!(matches!(modal.handle_key(&event), ModalKey::Consumed));
+                assert!(stack.handle_key(&event).is_none(), "{event:?}");
             }
+
             assert!(
-                store
-                    .list()
-                    .unwrap()
-                    .iter()
-                    .any(|s| s.session_id == id_kept),
+                is_listed(&store, &stamped_id(0xab)),
                 "modified confirmation keys must not delete the session",
             );
         }
 
         #[test]
-        fn n_press_cancels_without_running_delete() {
+        fn n_cancels_without_deleting() {
             let (_dir, store) = isolated_store();
-            let mut modal = seed_modal(&store, "abcd1234", "Fix auth flow");
-            let id_kept = modal.session_id.clone();
+            let mut modal = seed_modal(&store, 0xab, "Fix auth flow");
 
             let outcome = modal.handle_key(&KeyEvent::from(KeyCode::Char('n')));
+
             assert!(
                 matches!(outcome, ModalKey::Cancelled),
                 "N must Cancel, got {outcome:?}"
             );
             assert!(
-                store
-                    .list()
-                    .unwrap()
-                    .iter()
-                    .any(|s| s.session_id == id_kept),
+                is_listed(&store, &stamped_id(0xab)),
                 "session must still exist after cancel",
             );
         }
 
         #[test]
-        fn confirm_failure_latches_error_until_a_deliberate_y_or_n_choice() {
+        fn a_failed_delete_keeps_the_modal_open_through_stray_keys() {
             // Deleting the live session fails, so the modal stays open with the error.
             let (_dir, store) = isolated_store();
-            let live_id = format!("{:0<36}", "abcd1234");
-            seed_test_session(
-                &store,
-                &live_id,
-                Some("Fix auth flow"),
-                Some(3),
-                time::macros::datetime!(2026-04-18 09:00:00 UTC),
-            );
-            let mut modal = ConfirmDeleteSessionModal::new(
-                store.find_session_path(&live_id).unwrap(),
-                live_id.clone(),
-                "Fix auth flow".to_owned(),
-                "3 msgs · 2 hours ago".to_owned(),
-                live_id.clone(),
-            );
+            let live_id = stamped_id(0xab);
+            let mut modal = seed_modal_with_live(&store, 0xab, "Fix auth flow", &live_id);
 
             let outcome = modal.handle_key(&KeyEvent::from(KeyCode::Char('y')));
             assert!(matches!(outcome, ModalKey::Consumed));
-            assert_eq!(
-                modal.error.as_deref(),
-                Some(
-                    "Session abcd1234 is the live session. \
-                     Run `/clear` to start a new one, then delete it."
-                ),
-            );
 
             for stray in [KeyCode::Char('x'), KeyCode::Up, KeyCode::Down, KeyCode::Tab] {
                 let outcome = modal.handle_key(&KeyEvent::from(stray));
                 assert!(matches!(outcome, ModalKey::Consumed), "{stray:?}");
-                assert!(modal.error.is_some(), "{stray:?} must not clear the latch");
             }
 
-            // The retry clears the error, and the same refusal sets it again.
+            assert_eq!(modal.error.as_deref(), Some(LIVE_REFUSAL));
+            assert!(is_listed(&store, &live_id), "the live session survives");
+        }
+
+        #[test]
+        fn a_retry_replaces_the_previous_error() {
+            let (_dir, store) = isolated_store();
+            let live_id = stamped_id(0xab);
+            let mut modal = seed_modal_with_live(&store, 0xab, "Fix auth flow", &live_id);
+            modal.error = Some("permission denied".to_owned());
+
             let outcome = modal.handle_key(&KeyEvent::from(KeyCode::Char('y')));
+
             assert!(matches!(outcome, ModalKey::Consumed));
-            assert!(modal.error.is_some(), "fresh failure re-latches");
+            assert_eq!(modal.error.as_deref(), Some(LIVE_REFUSAL));
         }
 
         #[test]
         fn unrecognized_keys_consume_silently_without_running_delete() {
             let (_dir, store) = isolated_store();
-            let mut modal = seed_modal(&store, "abcd1234", "Fix auth flow");
+            let mut modal = seed_modal(&store, 0xab, "Fix auth flow");
+
             let outcome = modal.handle_key(&KeyEvent::from(KeyCode::Char('z')));
+
             assert!(matches!(outcome, ModalKey::Consumed));
             assert!(
-                !store.list().unwrap().is_empty(),
+                is_listed(&store, &stamped_id(0xab)),
                 "session untouched on unrecognized key",
             );
         }

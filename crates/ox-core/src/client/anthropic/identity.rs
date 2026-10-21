@@ -34,7 +34,7 @@ fn fallback_to_ephemeral(result: Result<String>) -> String {
 }
 
 fn try_load_or_create() -> Result<String> {
-    let path = device_id_path().context("cannot determine device-id storage location")?;
+    let path = device_id_path().context("failed to determine the device-id storage location")?;
     try_load_or_create_at(&path)
 }
 
@@ -84,8 +84,6 @@ fn generate() -> String {
 
 #[cfg(test)]
 mod tests {
-    use std::fs;
-
     use tempfile::tempdir;
 
     use super::*;
@@ -144,7 +142,9 @@ mod tests {
             let path = dir.path().join("ox/user-id");
             create_private_dir_all(path.parent().unwrap()).unwrap();
             atomic_write_private(&path, b"not-a-valid-id").unwrap();
+
             let id = try_load_or_create_at(&path).unwrap();
+
             assert!(is_valid_id(&id));
             let on_disk = fs::read_to_string(&path).unwrap();
             assert_eq!(on_disk.trim(), id, "invalid value rewritten");
@@ -156,7 +156,9 @@ mod tests {
             let dir = tempdir().unwrap();
             let blocker = dir.path().join("blocker");
             fs::write(&blocker, "").unwrap();
+
             let err = try_load_or_create_at(&blocker.join("ox/user-id")).unwrap_err();
+
             let chain = format!("{err:#}");
             assert!(
                 chain.contains(&*blocker.to_string_lossy()),
@@ -179,7 +181,8 @@ mod tests {
         fn treats_non_utf8_content_as_absent() {
             let dir = tempdir().unwrap();
             let path = dir.path().join("user-id");
-            std::fs::write(&path, [0xff, 0xfe, 0xfd]).unwrap();
+            fs::write(&path, [0xff, 0xfe, 0xfd]).unwrap();
+
             assert!(read_existing(&path).unwrap().is_none());
         }
 
@@ -215,6 +218,7 @@ mod tests {
         fn produces_unique_64_char_lowercase_hex() {
             let a = generate();
             let b = generate();
+
             assert!(is_valid_id(&a), "{a}");
             assert!(is_valid_id(&b), "{b}");
             assert_ne!(a, b, "two calls produce distinct ids");

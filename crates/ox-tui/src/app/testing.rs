@@ -14,7 +14,7 @@ use tokio::sync::mpsc;
 use ox_core::client::{RateLimitWindow, RateLimits};
 use ox_core::model::ModelSpec;
 use ox_core::protocol::{Event, Op};
-use ox_core::tool::{ApprovalBody, ApprovalPreview};
+use ox_core::tool::view::{ApprovalBody, ApprovalPreview};
 
 use super::{App, AppHistory};
 use crate::clipboard::{self, Clipboard, Environment};
@@ -70,7 +70,7 @@ pub(super) fn test_app_with(
 /// id, keeping insta snapshots stable.
 pub(super) fn test_session_info() -> LiveSessionInfo {
     let mut info = slash::testing::test_session_info();
-    info.config.model = ModelSpec::resolve("test-model".to_owned());
+    info.config.model = ModelSpec::resolve("test-model");
     info
 }
 

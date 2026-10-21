@@ -9,11 +9,11 @@ After `/effort`, `/init`, `/mode`, `/model`, or `/theme`, type a space to switch
 | Command                                     | Description                                                                                                                                   |
 | ------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------- |
 | `/archive [<id-prefix>]`                    | Archive this session and start a fresh one, or archive a saved session by ID prefix.                                                          |
-| `/clear` (aliases `/new`, `/reset`)         | Start a fresh session. The previous one stays resumable with `ox -c`.                                                                         |
+| `/clear` (aliases `/new`, `/reset`)         | Start a fresh session. The previous one stays resumable with `/resume` or `ox -r <id-prefix>`.                                                |
 | `/compact [<instructions>]`                 | Compress the conversation into a summary. Trailing text steers the focus.                                                                     |
 | `/config`                                   | Open the resolved configuration, where each value came from, and the loaded config files.                                                     |
 | `/delete <id-prefix>`                       | Delete a saved session by ID prefix, after a Y / N confirmation.                                                                              |
-| `/diff`                                     | Show uncommitted git changes and untracked files in chat, capped at 64 KB.                                                                    |
+| `/diff`                                     | Show the repository's uncommitted git changes and untracked files in chat, capped at 64 KiB.                                                  |
 | `/effort [<level>]`                         | Open the slider, or set the level directly (`low`, `medium`, `high`, `xhigh`, `max`).                                                         |
 | `/help`                                     | Open a read-only list of available commands.                                                                                                  |
 | `/init [<file>]`                            | Propose edits to an existing `AGENTS.md` or `CLAUDE.md` as a diff to confirm. Without either, pick or name the one to create.                 |
@@ -46,11 +46,11 @@ See [`effort`](configuration.md#effort-intelligence-tier) for each model's defau
 
 ## Permission Mode
 
-`/mode` opens a picker of the [permission modes](configuration.md#permission-tool-approval). Use **Up / Down** or a number key to move, **Enter** to switch, and **Esc** to cancel. `/mode <mode>` switches directly, and **Shift+Tab** switches between `manual` and `plan`. [Tool Approval](configuration.md#permission-tool-approval) explains when its cycle includes `yolo`.
+`/mode` opens a picker of the [permission modes](permissions.md#modes). Use **Up / Down** or a number key to move, **Enter** to switch, and **Esc** to cancel. `/mode <mode>` switches directly, and **Shift+Tab** switches between `manual` and `plan`. [Modes](permissions.md#modes) explains when its cycle includes `yolo`.
 
 ## Compaction
 
-`/compact` summarizes the visible conversation in a single `Compacted N messages → 1 summary` block. The next prompt continues from that summary. Text after the command adds focus instructions, as in `/compact focus on the build error and how we fixed it`. This helps when only part of the work matters going forward.
+`/compact` summarizes the visible conversation in a single `Compacted N messages into a summary` block. The next prompt continues from that summary. Text after the command adds focus instructions, as in `/compact focus on the build error and how we fixed it`. This helps when only part of the work matters going forward.
 
 After compaction:
 
@@ -68,7 +68,7 @@ After you approve access, oxide-code stores the login in `$XDG_DATA_HOME/ox/cred
 
 `/logout` deletes that file. A session using it switches to the Claude Code login if one is available. Otherwise, it stays open signed out until the next `/login`. If the Claude Code login exists but cannot be used, for example because it expired, `/logout` explains why.
 
-Both commands end by naming the credential that requests will now use. An environment variable or `client.api_key` takes precedence over either login, and `/login` tells you when one of them keeps the session on that credential. See [Authentication](configuration.md#authentication) for the full order.
+Both commands end by naming the credential that requests will now use. An environment variable or `client.api_key` takes precedence over either login, and `/login` tells you when one of them keeps the session on that credential and how to remove it so the new login takes over after a restart. See [Authentication](configuration.md#authentication) for the full order.
 
 ## Sessions
 

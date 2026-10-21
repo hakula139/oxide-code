@@ -2,15 +2,14 @@
 //! transcript leaves behind.
 
 use std::collections::HashMap;
-use std::future::Future;
+use std::fmt;
 use std::path::Path;
 use std::pin::Pin;
 
 use serde::{Deserialize, Serialize};
 
-use super::{
-    Prepared, Tool, ToolCtx, ToolMetadata, ToolOutput, ToolResultView, ToolSpec, invalid_input,
-};
+use super::view::ToolResultView;
+use super::{Prepared, Tool, ToolCtx, ToolMetadata, ToolOutput, ToolSpec, invalid_input};
 use crate::message::{ContentBlock, Message};
 use crate::permission::PermissionClass;
 use crate::util::text::plural;
@@ -35,6 +34,8 @@ pub enum TaskStatus {
 }
 
 impl TaskStatus {
+    const ALL: [Self; 3] = [Self::Pending, Self::InProgress, Self::Completed];
+
     /// The name the tool schema uses.
     pub(crate) fn as_str(self) -> &'static str {
         match self {
@@ -59,6 +60,13 @@ impl Progress {
             completed: count(tasks, TaskStatus::Completed),
             total: tasks.len(),
         })
+    }
+}
+
+/// Shows the progress as `completed/total`, as in `1/3`.
+impl fmt::Display for Progress {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}/{}", self.completed, self.total)
     }
 }
 
@@ -141,7 +149,7 @@ fn input_schema() -> serde_json::Value {
                         },
                         "status": {
                             "type": "string",
-                            "enum": ["pending", "in_progress", "completed"]
+                            "enum": TaskStatus::ALL.map(TaskStatus::as_str)
                         }
                     },
                     "required": ["content", "status"]
@@ -290,8 +298,34 @@ mod tests {
         json!({ "tasks": tasks })
     }
 
+    mod task_status {
+        use super::*;
+
+        #[test]
+        fn names_each_status_the_way_serde_does() {
+            for (status, name) in
+                TaskStatus::ALL
+                    .into_iter()
+                    .zip(["pending", "in_progress", "completed"])
+            {
+                assert_eq!(serde_json::to_value(status).unwrap(), name);
+                assert_eq!(status.as_str(), name);
+            }
+        }
+    }
+
     mod progress {
         use super::*;
+
+        #[test]
+        fn displays_completed_out_of_total() {
+            let progress = Progress {
+                completed: 1,
+                total: 3,
+            };
+
+            assert_eq!(progress.to_string(), "1/3");
+        }
 
         mod of {
             use super::*;

@@ -1,6 +1,7 @@
-//! Git probes for the session's repository: its root, current branch, and pull request.
-//! Best-effort: every probe collapses to `None` on missing git, non-repo cwd, detached HEAD, or
-//! non-UTF-8 output. Failures log at `debug` to help diagnose a misbehaving status bar.
+//! The session's repository: its project root, and git probes for its root, current branch, and
+//! pull request. Best-effort: every probe collapses to `None` on missing git, non-repo cwd,
+//! detached HEAD, or non-UTF-8 output. Failures log at `debug` to help diagnose a misbehaving
+//! status bar.
 
 use std::collections::HashSet;
 use std::io;
@@ -43,9 +44,15 @@ pub(crate) async fn repo_root(cwd: &Path) -> Option<PathBuf> {
     stdout_line(&output.stdout).map(PathBuf::from)
 }
 
-/// The project root: the [`repo_root`] of `cwd`, or `cwd` itself outside a repository.
-pub async fn project_root(cwd: &Path) -> PathBuf {
-    repo_root(cwd).await.unwrap_or_else(|| cwd.to_owned())
+/// The nearest directory at or above `cwd` with a `.git` entry, which is a file in a worktree or
+/// submodule, or `cwd` itself outside a repository. Project config and project instruction files
+/// are read only within it. It reads `.git` entries directly, since a `.git/config` a checkout
+/// ships can point git's `core.worktree` at an ancestor.
+pub fn project_root(cwd: &Path) -> PathBuf {
+    cwd.ancestors()
+        .find(|dir| dir.join(".git").symlink_metadata().is_ok())
+        .unwrap_or(cwd)
+        .to_owned()
 }
 
 /// The trimmed stdout of a one-line probe, or `None` when it is empty or not UTF-8.
@@ -350,7 +357,7 @@ mod tests {
     use std::path::PathBuf;
 
     use super::local_testing::init_fixture_repo;
-    use super::testing::with_isolated_git_env_async;
+    use super::testing::{isolated_git, with_isolated_git_env_async};
     use super::*;
 
     mod current_branch {
@@ -419,27 +426,49 @@ mod tests {
     mod project_root {
         use super::*;
 
-        #[tokio::test]
-        async fn in_a_subdirectory_is_the_repository_top_level() {
+        #[test]
+        fn is_the_nearest_directory_with_a_git_entry() {
             let dir = tempfile::tempdir().unwrap();
-            init_fixture_repo(dir.path());
-            let nested = dir.path().join("crates/app");
-            std::fs::create_dir_all(&nested).unwrap();
+            let repo = dir.path().join("repo");
+            let submodule = repo.join("vendor").join("lib");
+            std::fs::create_dir_all(dir.path().join(".git")).unwrap();
+            std::fs::create_dir_all(repo.join(".git")).unwrap();
+            std::fs::create_dir_all(submodule.join("src")).unwrap();
+            std::fs::write(submodule.join(".git"), "gitdir: ../../.git/modules/lib\n").unwrap();
 
-            let root = with_isolated_git_env_async(project_root(&nested)).await;
-
-            // macOS routes tempdirs through `/private`.
-            assert_eq!(
-                root.canonicalize().unwrap(),
-                dir.path().canonicalize().unwrap()
-            );
+            assert_eq!(project_root(&repo.join("vendor")), repo);
+            assert_eq!(project_root(&submodule.join("src")), submodule);
         }
 
         #[tokio::test]
-        async fn outside_a_repo_is_the_working_directory() {
+        async fn ignores_a_core_worktree_above_the_checkout() {
+            let dir = tempfile::tempdir().unwrap();
+            let repo = dir.path().join("outer").join("repo");
+            let sub = repo.join("sub");
+            std::fs::create_dir_all(&sub).unwrap();
+            init_fixture_repo(&repo);
+            let status = isolated_git(&repo)
+                .args(["config", "core.worktree", "../.."])
+                .status()
+                .unwrap();
+            assert!(status.success(), "git config failed: {status}");
+            let git_root = with_isolated_git_env_async(repo_root(&sub)).await.unwrap();
+            assert_eq!(
+                git_root.canonicalize().unwrap(),
+                dir.path().join("outer").canonicalize().unwrap(),
+                "git should report the ancestor the shipped config names",
+            );
+
+            let root = project_root(&sub);
+
+            assert_eq!(root, repo);
+        }
+
+        #[test]
+        fn outside_a_repo_is_the_working_directory() {
             let dir = tempfile::tempdir().unwrap();
 
-            let root = with_isolated_git_env_async(project_root(dir.path())).await;
+            let root = project_root(dir.path());
 
             assert_eq!(root, dir.path());
         }

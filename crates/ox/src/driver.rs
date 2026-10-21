@@ -27,6 +27,9 @@ impl Exit {
     }
 }
 
+// ── Shutdown ──
+
+/// The signal that ended a run.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Shutdown {
     #[cfg(unix)]
@@ -63,7 +66,7 @@ pub(crate) async fn shutdown_signal() -> Shutdown {
         ) {
             (Ok(sigterm), Ok(sighup)) => (sigterm, sighup),
             (Err(e), _) | (_, Err(e)) => {
-                warn!("cannot listen for SIGTERM and SIGHUP, falling back to SIGINT alone: {e}");
+                warn!("failed to listen for SIGTERM and SIGHUP, so only SIGINT stops ox: {e}");
                 _ = ctrl_c.await;
                 return Shutdown::Interrupt;
             }
@@ -78,6 +81,49 @@ pub(crate) async fn shutdown_signal() -> Shutdown {
     {
         _ = tokio::signal::ctrl_c().await;
         Shutdown::Interrupt
+    }
+}
+
+// ── Testing ──
+
+#[cfg(test)]
+pub(crate) mod testing {
+    use std::cell::RefCell;
+    use std::io::{self, Write};
+    use std::rc::Rc;
+
+    /// A stdout whose reader went away.
+    pub(crate) struct ClosedPipe;
+
+    impl Write for ClosedPipe {
+        fn write(&mut self, _buf: &[u8]) -> io::Result<usize> {
+            Err(io::ErrorKind::BrokenPipe.into())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    /// A terminal that stdout and stderr both write to, so a test sees the order of their lines.
+    #[derive(Clone, Default)]
+    pub(super) struct Screen(Rc<RefCell<Vec<u8>>>);
+
+    impl Screen {
+        pub(super) fn text(&self) -> String {
+            String::from_utf8(self.0.borrow().clone()).expect("the screen is UTF-8")
+        }
+    }
+
+    impl Write for Screen {
+        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+            self.0.borrow_mut().extend_from_slice(buf);
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
     }
 }
 

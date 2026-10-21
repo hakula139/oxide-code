@@ -1,20 +1,22 @@
 //! Engine events and background task results: chat and status updates, the turn lifecycle they
-//! drive, session swaps, config changes, sign-in results, git probe updates, and copy reports.
+//! drive, session swaps, config changes, sign-in results, git probe updates, copy reports, and
+//! background slash-command output.
 
 use std::time::Instant;
 
 use indoc::formatdoc;
+use tokio::task::{JoinError, JoinSet};
 use tracing::{debug, warn};
 
 use ox_core::command;
+use ox_core::config::Effort;
 use ox_core::config::auth::AuthSource;
 use ox_core::config::compaction::AutoCompactionConfig;
-use ox_core::config::{Effort, display_auto_compaction};
 use ox_core::model::ModelSpec;
 use ox_core::permission::{Basis, Mode, SessionGrant};
-use ox_core::protocol::{ConfigPick, Event, Interaction, Op};
+use ox_core::protocol::{Event, Interaction, Op, notice};
 use ox_core::session::display::archive_notice;
-use ox_core::tool::ApprovalPreview;
+use ox_core::tool::view::ApprovalPreview;
 use ox_core::util::text::plural;
 
 use super::{App, CopyNotice, HandBack};
@@ -22,6 +24,7 @@ use crate::clipboard::{CopyReport, Delivery};
 use crate::components::status::Status;
 use crate::git_probes::GitUpdate;
 use crate::modal::approval::ApprovalModal;
+use crate::slash::ChatOutput;
 use crate::{NOTICE_DURATION, now};
 
 impl App {
@@ -96,10 +99,18 @@ impl App {
                 effort,
                 requested,
                 auto_compaction,
-            } => self.apply_config_changed(model, effort, &requested, auto_compaction),
+                notice,
+            } => self.apply_config_changed(
+                model,
+                effort,
+                requested.effort(),
+                auto_compaction,
+                notice,
+            ),
             Event::ModeChanged(mode) => self.apply_mode_changed(mode),
             Event::LoginStarted { url } => self.open_sign_in_url(&url),
             Event::SignedIn { auth } => self.apply_signed_in(auth),
+            Event::LoginRestored { auth } => self.apply_login_restored(auth),
             Event::SignedOut {
                 removed,
                 auth,
@@ -245,12 +256,14 @@ impl App {
     }
 
     /// Rebinds to session `id` titled `title`, clearing the previous session's chat, rules,
-    /// background shells, tasks, usage, and in-flight prompt. Returns the previous session's ID.
+    /// background shells, tasks, slash-command tasks, usage, and in-flight prompt. Returns the
+    /// previous session's ID.
     fn rebind_session(&mut self, id: String, title: Option<String>) -> String {
         let old_id = std::mem::replace(&mut self.session_info.session_id, id);
         self.session_info.session_allow.clear();
         self.session_info.background_shells.clear();
         self.tasks.clear();
+        self.slash_tasks = JoinSet::new();
         self.status_bar.set_title(title);
         self.status_bar.set_usage(None);
         self.chat.clear_history();
@@ -294,39 +307,24 @@ impl App {
         &mut self,
         model: ModelSpec,
         effort: Option<Effort>,
-        requested: &ConfigPick,
+        requested_effort: Option<Effort>,
         auto_compaction: AutoCompactionConfig,
+        notice: String,
     ) {
-        let config = &self.session_info.config;
-        let model_changed = model.id() != config.model.id();
-        let confirmation = format_config_change(
-            &ConfigSettings {
-                model: &config.model,
-                effort: config.effort,
-                auto_compaction: config.compaction.auto,
-            },
-            &ConfigSettings {
-                model: &model,
-                effort,
-                auto_compaction,
-            },
-            requested,
-        );
-        if model_changed {
+        if model.id() != self.session_info.config.model.id() {
             self.status_bar
                 .set_model(model.short_display_name().to_owned());
         }
         self.status_bar.set_effort(effort);
         self.session_info
             .config
-            .apply_swap(model, effort, requested.effort(), auto_compaction);
-        self.chat.push_system_message(confirmation);
+            .apply_swap(model, effort, requested_effort, auto_compaction);
+        self.chat.push_system_message(notice);
     }
 
     fn apply_mode_changed(&mut self, mode: Mode) {
         self.session_info.config.apply_mode(mode);
-        self.chat
-            .push_system_message(format!("Switched to {mode} mode"));
+        self.chat.push_system_message(notice::mode_changed(mode));
     }
 
     /// Opens `url` in the browser and prints it in case the browser does not open. The sign-in
@@ -351,13 +349,30 @@ impl App {
     fn apply_signed_in(&mut self, auth: AuthSource) {
         self.session_info.config.auth = Some(auth);
         self.status_bar.set_rate_limits(None);
-        let message = if auth == AuthSource::OxLogin {
-            format!("Signed in. Requests now use {auth}.")
-        } else {
-            format!("Signed in. {auth} takes precedence, so requests keep using it.")
+        let message = match auth {
+            AuthSource::OxLogin | AuthSource::ClaudeCodeLogin => {
+                format!("Signed in. Requests now use {auth}.")
+            }
+            AuthSource::ApiKeyFile => format!(
+                "Signed in. {auth} takes precedence, so requests keep using it. \
+                 Remove `client.api_key` and restart ox to use the new login."
+            ),
+            AuthSource::AuthTokenEnv | AuthSource::ApiKeyEnv | AuthSource::OAuthTokenEnv => {
+                format!(
+                    "Signed in. {auth} takes precedence, so requests keep using it. \
+                 Unset it and restart ox to use the new login."
+                )
+            }
         };
         self.chat.push_system_message(message);
         self.finish_turn();
+    }
+
+    fn apply_login_restored(&mut self, auth: AuthSource) {
+        self.session_info.config.auth = Some(auth);
+        self.status_bar.set_rate_limits(None);
+        self.chat
+            .push_system_message(format!("Signed in. Requests now use {auth}."));
     }
 
     fn apply_signed_out(
@@ -449,58 +464,20 @@ impl App {
             .take_if(|notice| now >= notice.until)
             .is_some()
     }
-}
 
-/// The settings an `Event::ConfigChanged` confirmation compares, before or after the change.
-struct ConfigSettings<'a> {
-    model: &'a ModelSpec,
-    effort: Option<Effort>,
-    auto_compaction: AutoCompactionConfig,
-}
-
-/// `Event::ConfigChanged` confirmation, surfacing silent effort shifts.
-fn format_config_change(
-    before: &ConfigSettings<'_>,
-    after: &ConfigSettings<'_>,
-    requested: &ConfigPick,
-) -> String {
-    let requested_effort = match *requested {
-        ConfigPick::Model { effort, .. } => effort,
-        ConfigPick::Effort(pick) => {
-            return match after.effort {
-                Some(effort) => format!("Effort set to {effort}"),
-                None => pick.unapplied_notice(),
-            };
+    /// Prints what a background slash command resolved to. A panicked task only logs, since the
+    /// panic hook already reports the panic.
+    pub(super) fn apply_slash_task(
+        &mut self,
+        finished: Result<Result<ChatOutput, String>, JoinError>,
+    ) {
+        match finished {
+            Ok(Ok(ChatOutput::SystemMessage(text))) => self.chat.push_system_message(text),
+            Ok(Ok(ChatOutput::GitDiff(diff))) => self.chat.push_git_diff(diff),
+            Ok(Err(msg)) => self.chat.push_error(&msg),
+            Err(e) => warn!("background slash command failed: {e}"),
         }
-    };
-    let model = after.model;
-    let action = if model.id() == before.model.id() {
-        "Using"
-    } else {
-        "Switched to"
-    };
-    let named = format!("{action} {} ({})", model.display_name(), model.id());
-    let (head, effort) = match (requested_effort, before.effort, after.effort) {
-        (Some(req), _, None) => (named, Some(req.unapplied_notice())),
-        (None, None, None) => (named, None),
-        (None, Some(_), None) => (
-            named,
-            Some("Effort cleared (model has no effort tier)".to_owned()),
-        ),
-        (None, None, Some(eff)) => (format!("{named} · effort {eff} (model default)"), None),
-        (_, _, Some(eff)) => (format!("{named} · effort {eff}"), None),
-    };
-    let compaction = (before.auto_compaction != after.auto_compaction).then(|| {
-        format!(
-            "Auto compaction {}",
-            display_auto_compaction(after.auto_compaction)
-        )
-    });
-    match (effort, compaction) {
-        (None, None) => head,
-        (Some(effort), None) => format!("{head}. {effort}."),
-        (None, Some(compaction)) => format!("{head}. {compaction}."),
-        (Some(effort), Some(compaction)) => format!("{head}. {effort}. {compaction}."),
+        self.dirty = true;
     }
 }
 
@@ -518,12 +495,12 @@ mod tests {
     use ox_core::permission::PermissionClass;
     use ox_core::permission::rule::Rule;
     use ox_core::permission::testing::exec_grant;
-    use ox_core::protocol::{ResumeTarget, ToolCall, ToolResult, UsageSnapshot};
+    use ox_core::protocol::{ConfigPick, ResumeTarget, ToolCall, ToolResult, UsageSnapshot};
     use ox_core::tool::bash::background::ShellState;
     use ox_core::tool::bash::background::testing::{shell, shells_in_each_state};
     use ox_core::tool::tasks::TaskStatus;
     use ox_core::tool::tasks::testing::{plan, task};
-    use ox_core::tool::{ApprovalBody, ToolResultView};
+    use ox_core::tool::view::{ApprovalBody, ToolResultView};
     use ox_core::util::git::PullRequest;
 
     use super::*;
@@ -531,6 +508,7 @@ mod tests {
     use crate::app::testing::{five_hour_limit, rendered_text, test_app};
     use crate::clipboard::CopyError;
     use crate::glyphs::INTERRUPTED_MARKER;
+    use crate::slash::WorkingTreeDiff;
 
     fn bash_call_start(id: &str, command: &str) -> Event {
         Event::ToolCallStart(ToolCall {
@@ -542,13 +520,9 @@ mod tests {
         })
     }
 
-    fn spec(id: &str) -> ModelSpec {
-        ModelSpec::resolve(id.to_owned())
-    }
-
     fn model_pick(model: &ModelSpec, effort: Option<Effort>) -> ConfigPick {
         ConfigPick::Model {
-            id: ResolvedModelId::new(model.id().to_owned()),
+            id: ResolvedModelId::new(model.id()),
             effort,
         }
     }
@@ -1285,6 +1259,20 @@ mod tests {
             assert!(app.dirty);
         }
 
+        #[tokio::test]
+        async fn session_rolled_drops_the_old_session_slash_tasks() {
+            let (mut app, _rx, _event_tx) = test_app(None);
+            app.slash_tasks
+                .spawn(async { Ok(ChatOutput::SystemMessage("old session's output".to_owned())) });
+
+            app.handle_engine_event(Event::SessionRolled {
+                id: "rolled-session".to_owned(),
+                archived: false,
+            });
+
+            assert!(app.slash_tasks.join_next().await.is_none());
+        }
+
         #[test]
         fn session_rolled_after_archive_names_the_archived_session() {
             let (mut app, _rx, _event_tx) = test_app(None);
@@ -1306,7 +1294,7 @@ mod tests {
         #[test]
         fn session_resumed_replays_transcript_and_clears_pending() {
             let (mut app, _rx, _event_tx) = test_app(Some("Old"));
-            app.session_info.config.model = spec("claude-opus-5-5");
+            app.session_info.config.model = ModelSpec::resolve("claude-opus-5-5");
             app.chat.push_user_message("live prompt".to_owned());
             app.status_bar.set_usage(Some(usage_snapshot()));
             app.pending_prompts
@@ -1362,7 +1350,7 @@ mod tests {
         #[test]
         fn session_resumed_with_no_queued_prompts_is_silent() {
             let (mut app, _rx, _event_tx) = test_app(None);
-            app.session_info.config.model = spec("claude-opus-5-5");
+            app.session_info.config.model = ModelSpec::resolve("claude-opus-5-5");
             app.handle_engine_event(Event::SessionResumed {
                 id: "resumed".to_owned(),
                 title: None,
@@ -1379,7 +1367,7 @@ mod tests {
         #[test]
         fn session_resumed_after_unarchiving_appends_a_notice() {
             let (mut app, _rx, _event_tx) = test_app(None);
-            app.session_info.config.model = spec("claude-opus-5-5");
+            app.session_info.config.model = ModelSpec::resolve("claude-opus-5-5");
             app.handle_engine_event(Event::SessionResumed {
                 id: "bbbb2222-resumed".to_owned(),
                 title: None,
@@ -1395,7 +1383,7 @@ mod tests {
         #[test]
         fn session_resumed_with_compact_replays_boundary_block() {
             let (mut app, _rx, _event_tx) = test_app(None);
-            app.session_info.config.model = spec("claude-opus-5-5");
+            app.session_info.config.model = ModelSpec::resolve("claude-opus-5-5");
             app.handle_engine_event(Event::SessionResumed {
                 id: "resumed".to_owned(),
                 title: None,
@@ -1420,7 +1408,7 @@ mod tests {
         #[test]
         fn session_resumed_with_no_title_clears_stale_chrome() {
             let (mut app, _rx, _event_tx) = test_app(Some("Stale"));
-            app.session_info.config.model = spec("claude-opus-5-5");
+            app.session_info.config.model = ModelSpec::resolve("claude-opus-5-5");
             app.handle_engine_event(Event::SessionResumed {
                 id: "resumed".to_owned(),
                 title: None,
@@ -1655,14 +1643,17 @@ mod tests {
             // Three surfaces refresh in one shot: status-bar label, `session_info` (backs `/status`
             // / `/config`), and a chat confirmation block.
             let (mut app, _rx, _event_tx) = test_app(None);
+            let sonnet = ModelSpec::resolve("claude-sonnet-5-5");
             app.handle_engine_event(Event::ConfigChanged {
-                model: spec("claude-sonnet-5-5"),
+                model: sonnet.clone(),
                 effort: Some(Effort::High),
-                requested: model_pick(&spec("claude-sonnet-5-5"), None),
+                requested: model_pick(&sonnet, None),
                 auto_compaction: AutoCompactionConfig {
                     enabled: true,
                     threshold_tokens: Some(WINDOW_1M_THRESHOLD),
                 },
+                notice: "Switched to Claude Sonnet 5.5 (claude-sonnet-5-5) · effort high"
+                    .to_owned(),
             });
 
             assert_eq!(app.session_info.config.model.id(), "claude-sonnet-5-5");
@@ -1672,13 +1663,9 @@ mod tests {
                 app.session_info.config.compaction.auto.threshold_tokens,
                 Some(WINDOW_1M_THRESHOLD),
             );
-            let body = app.chat.last_system_text().expect("confirmation block");
             assert_eq!(
-                body,
-                format!(
-                    "Switched to Claude Sonnet 5.5 (claude-sonnet-5-5) · effort high. \
-                     Auto compaction at {WINDOW_1M_THRESHOLD} tokens.",
-                ),
+                app.chat.last_system_text(),
+                Some("Switched to Claude Sonnet 5.5 (claude-sonnet-5-5) · effort high"),
             );
             assert!(app.dirty);
         }
@@ -1694,11 +1681,12 @@ mod tests {
                 effort: Some(Effort::Xhigh),
                 requested: ConfigPick::Effort(Effort::Xhigh),
                 auto_compaction: app.session_info.config.compaction.auto,
+                notice: "Effort set to xhigh".to_owned(),
             });
+
             assert_eq!(app.session_info.config.effort, Some(Effort::Xhigh),);
             assert_eq!(app.status_bar.model(), original_model);
-            let body = app.chat.last_system_text().expect("confirmation block");
-            assert_eq!(body, "Effort set to xhigh");
+            assert_eq!(app.chat.last_system_text(), Some("Effort set to xhigh"));
             assert!(app.dirty);
         }
 
@@ -1759,7 +1747,14 @@ mod tests {
                 (
                     AuthSource::ApiKeyEnv,
                     "Signed in. \
-                     API key (ANTHROPIC_API_KEY) takes precedence, so requests keep using it.",
+                     API key (ANTHROPIC_API_KEY) takes precedence, so requests keep using it. \
+                     Unset it and restart ox to use the new login.",
+                ),
+                (
+                    AuthSource::ApiKeyFile,
+                    "Signed in. \
+                     API key (client.api_key) takes precedence, so requests keep using it. \
+                     Remove `client.api_key` and restart ox to use the new login.",
                 ),
             ] {
                 let (mut app, _rx, _event_tx) = test_app(None);
@@ -1812,6 +1807,27 @@ mod tests {
         }
 
         #[test]
+        fn login_restored_names_the_credential_and_keeps_the_turn_running() {
+            let (mut app, _rx, _event_tx) = test_app(None);
+            app.session_info.config.auth = None;
+            app.status_bar.set_status(Status::Streaming);
+
+            app.handle_engine_event(Event::LoginRestored {
+                auth: AuthSource::ClaudeCodeLogin,
+            });
+
+            assert_eq!(
+                app.session_info.config.auth,
+                Some(AuthSource::ClaudeCodeLogin)
+            );
+            assert_eq!(
+                app.chat.last_system_text(),
+                Some("Signed in. Requests now use OAuth (Claude Code login).")
+            );
+            assert_eq!(app.status_bar.status(), &Status::Streaming);
+        }
+
+        #[test]
         fn signed_out_reports_the_removal_and_the_credential_requests_use() {
             for (removed, auth, fallback_error, expected) in [
                 (
@@ -1856,10 +1872,13 @@ mod tests {
         }
 
         #[test]
-        fn signed_in_or_out_drops_the_previous_accounts_usage_limits() {
+        fn credential_changes_drop_the_previous_accounts_usage_limits() {
             for event in [
                 Event::SignedIn {
                     auth: AuthSource::OxLogin,
+                },
+                Event::LoginRestored {
+                    auth: AuthSource::ClaudeCodeLogin,
                 },
                 Event::SignedOut {
                     removed: true,
@@ -2028,6 +2047,48 @@ mod tests {
         }
     }
 
+    mod apply_slash_task {
+        use super::*;
+
+        async fn finish(
+            output: Result<ChatOutput, String>,
+        ) -> Result<Result<ChatOutput, String>, JoinError> {
+            tokio::spawn(async { output }).await
+        }
+
+        #[tokio::test]
+        async fn prints_the_message_diff_or_error_the_task_resolved_to() {
+            let (mut app, _rx, _event_tx) = test_app(None);
+            let diff = WorkingTreeDiff {
+                untracked: vec!["new.txt".to_owned()],
+                ..WorkingTreeDiff::default()
+            };
+
+            app.apply_slash_task(finish(Ok(ChatOutput::SystemMessage("clean".to_owned()))).await);
+            assert_eq!(app.chat.last_system_text(), Some("clean"));
+
+            app.dirty = false;
+            app.apply_slash_task(finish(Ok(ChatOutput::GitDiff(diff))).await);
+            assert!(app.dirty);
+            assert!(rendered_text(&mut app, 60, 24).contains("  new.txt"));
+
+            app.apply_slash_task(finish(Err("/diff: boom".to_owned())).await);
+            assert_eq!(app.chat.last_error_text(), Some("/diff: boom"));
+        }
+
+        #[tokio::test]
+        async fn a_panicked_task_prints_nothing() {
+            let (mut app, _rx, _event_tx) = test_app(None);
+            let mut tasks = JoinSet::<Result<ChatOutput, String>>::new();
+            tasks.spawn(async { panic!("task bug") });
+            let finished = tasks.join_next().await.expect("one task spawned");
+
+            app.apply_slash_task(finished);
+
+            assert_eq!(app.chat.entry_count(), 0);
+        }
+    }
+
     mod expire_copy_notice {
         use super::*;
 
@@ -2050,208 +2111,6 @@ mod tests {
             assert!(app.expire_copy_notice(now()));
             assert!(app.copy_notice.is_none());
             assert!(!app.expire_copy_notice(now()), "nothing left to clear");
-        }
-    }
-
-    mod format_config_change {
-        use super::*;
-
-        fn base_auto_compaction() -> AutoCompactionConfig {
-            AutoCompactionConfig {
-                enabled: true,
-                threshold_tokens: Some(155_000),
-            }
-        }
-
-        fn settings(model: &ModelSpec, effort: Option<Effort>) -> ConfigSettings<'_> {
-            ConfigSettings {
-                model,
-                effort,
-                auto_compaction: base_auto_compaction(),
-            }
-        }
-
-        #[test]
-        fn swap_both_none_omits_effort_clause() {
-            let (opus, custom) = (spec("claude-opus-5-5"), spec("custom-model"));
-
-            let s = format_config_change(
-                &settings(&opus, None),
-                &settings(&custom, None),
-                &model_pick(&custom, None),
-            );
-
-            assert_eq!(s, "Switched to custom-model (custom-model)");
-        }
-
-        #[test]
-        fn swap_to_no_tier_model_surfaces_requested_effort() {
-            // The user needs to know the requested tier didn't apply, or else a silent drop reads
-            // as a landed config change.
-            let (opus, custom) = (spec("claude-opus-5-5"), spec("custom-model"));
-
-            let s = format_config_change(
-                &settings(&opus, None),
-                &settings(&custom, None),
-                &model_pick(&custom, Some(Effort::High)),
-            );
-
-            assert_eq!(
-                s,
-                "Switched to custom-model (custom-model). \
-                 Effort unchanged (model has no effort tier, asked for high).",
-            );
-        }
-
-        #[test]
-        fn swap_clears_effort_when_new_model_drops_it() {
-            let (opus, custom) = (spec("claude-opus-5-5"), spec("custom-model"));
-
-            let s = format_config_change(
-                &settings(&opus, Some(Effort::Xhigh)),
-                &settings(&custom, None),
-                &model_pick(&custom, None),
-            );
-
-            assert_eq!(
-                s,
-                "Switched to custom-model (custom-model). \
-                 Effort cleared (model has no effort tier)."
-            );
-        }
-
-        #[test]
-        fn swap_marks_default_when_previous_was_none() {
-            // None → Some means the new model's default kicked in. Distinguishing this from "user's
-            // pick survived" keeps the user from thinking they chose this tier.
-            let (custom, opus) = (spec("custom-model"), spec("claude-opus-5-5"));
-
-            let s = format_config_change(
-                &settings(&custom, None),
-                &settings(&opus, Some(Effort::Medium)),
-                &model_pick(&opus, None),
-            );
-
-            assert_eq!(
-                s,
-                "Switched to Claude Opus 5.5 (claude-opus-5-5) · effort medium (model default)"
-            );
-        }
-
-        #[test]
-        fn swap_reports_carried_or_picked_effort_plainly() {
-            let (sonnet, opus) = (spec("claude-sonnet-5-5"), spec("claude-opus-5-5"));
-            for (prev, requested, new) in [
-                (Effort::High, None, Effort::High),
-                (Effort::Medium, Some(Effort::Max), Effort::Max),
-            ] {
-                let s = format_config_change(
-                    &settings(&sonnet, Some(prev)),
-                    &settings(&opus, Some(new)),
-                    &model_pick(&opus, requested),
-                );
-
-                assert_eq!(
-                    s,
-                    format!("Switched to Claude Opus 5.5 (claude-opus-5-5) · effort {new}"),
-                );
-            }
-        }
-
-        #[test]
-        fn model_pick_of_the_active_model_reads_as_using_it() {
-            let opus = spec("claude-opus-5-5");
-
-            let s = format_config_change(
-                &settings(&opus, Some(Effort::High)),
-                &settings(&opus, Some(Effort::High)),
-                &model_pick(&opus, None),
-            );
-
-            assert_eq!(s, "Using Claude Opus 5.5 (claude-opus-5-5) · effort high");
-        }
-
-        #[test]
-        fn effort_explicit_pick_matches_resolution() {
-            let opus = spec("claude-opus-5-5");
-
-            let s = format_config_change(
-                &settings(&opus, Some(Effort::High)),
-                &settings(&opus, Some(Effort::Xhigh)),
-                &ConfigPick::Effort(Effort::Xhigh),
-            );
-
-            assert_eq!(s, "Effort set to xhigh");
-        }
-
-        #[test]
-        fn effort_pick_on_no_tier_model_surfaces_loss() {
-            // The `/effort` preflight stops this, but client-driven flows could still emit it.
-            let custom = spec("custom-model");
-
-            let s = format_config_change(
-                &settings(&custom, None),
-                &settings(&custom, None),
-                &ConfigPick::Effort(Effort::High),
-            );
-
-            assert_eq!(
-                s,
-                "Effort unchanged (model has no effort tier, asked for high)"
-            );
-        }
-
-        #[test]
-        fn model_swap_mentions_compaction_threshold_change() {
-            let (opus, sonnet) = (spec("claude-opus-5-5"), spec("claude-sonnet-5-5"));
-            let after = ConfigSettings {
-                auto_compaction: AutoCompactionConfig {
-                    enabled: true,
-                    threshold_tokens: Some(WINDOW_1M_THRESHOLD),
-                },
-                ..settings(&sonnet, Some(Effort::High))
-            };
-
-            let s = format_config_change(
-                &settings(&opus, Some(Effort::High)),
-                &after,
-                &model_pick(&sonnet, None),
-            );
-
-            assert_eq!(
-                s,
-                format!(
-                    "Switched to Claude Sonnet 5.5 (claude-sonnet-5-5) · effort high. \
-                     Auto compaction at {WINDOW_1M_THRESHOLD} tokens.",
-                ),
-            );
-        }
-
-        #[test]
-        fn model_swap_reports_lost_effort_and_compaction_change() {
-            let (opus, custom) = (spec("claude-opus-5-5"), spec("custom-model"));
-            let after = ConfigSettings {
-                auto_compaction: AutoCompactionConfig {
-                    enabled: true,
-                    threshold_tokens: Some(WINDOW_1M_THRESHOLD),
-                },
-                ..settings(&custom, None)
-            };
-
-            let s = format_config_change(
-                &settings(&opus, Some(Effort::High)),
-                &after,
-                &model_pick(&custom, Some(Effort::Max)),
-            );
-
-            assert_eq!(
-                s,
-                format!(
-                    "Switched to custom-model (custom-model). \
-                     Effort unchanged (model has no effort tier, asked for max). \
-                     Auto compaction at {WINDOW_1M_THRESHOLD} tokens.",
-                ),
-            );
         }
     }
 }

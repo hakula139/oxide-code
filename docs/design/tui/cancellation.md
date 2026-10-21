@@ -12,6 +12,8 @@ The TUI exposes these controls and behaviors:
 - **Interrupt work.** Cancellation drops the `agent_turn` future: reqwest closes the SSE stream, the bash tool kills the command's process tree, and a dim italic `(interrupted)` marker lands in chat. The transcript then ends on a `[Request interrupted by user]` user message, so the model knows the user abandoned that prompt.
 - **Show status.** The status bar puts the key that stops the work beside the spinner: `Streaming · Esc to interrupt`, `Running {tool} · Esc to interrupt`, `Compacting · Esc to interrupt`, `Signing in · Esc to cancel`, `Resuming`, and `Cancelling`. An armed exit shows `Press Ctrl+C again to exit`.
 
+The bare REPL maps SIGINT the way a shell does when stdin is a terminal. During an operation, it sends `Op::Interrupt`, and once cancellation ends the operation, `render_op` drops any approval question still awaiting an answer. At the prompt, SIGINT discards the line and prompts again, so only the end of input exits. With piped stdin, SIGINT ends the run, as SIGTERM and SIGHUP always do.
+
 ## Design Decisions
 
 The picks lean toward the Codex precedent on most surfaces, since it is the one Rust reference and its patterns map onto our async / actor architecture without reshaping. The wire-shape choice (3) is the deliberate exception.
@@ -44,8 +46,10 @@ The picks lean toward the Codex precedent on most surfaces, since it is the one 
 - `crates/ox-core/src/message.rs`: `Message::interruption`, the marker a user abort records.
 - `crates/ox-core/src/protocol.rs`: `Event::{Cancelled, PromptDrained, TurnFailed}`, `Interaction::Interrupted`, `Op::{Interrupt, Queue, Shutdown}`.
 - `crates/ox-core/src/session/history.rs`: `walk_transcript`, which shows a resumed interruption marker as `Interaction::Interrupted`.
-- `crates/ox-core/src/tool.rs`: `Tool::run` drop contract, `ToolCtx::cancel`, `walk_files`, `write_tracked`.
+- `crates/ox-core/src/tool.rs`: `Tool::run` drop contract, `ToolCtx::cancel`.
 - `crates/ox-core/src/tool/bash.rs`: `ShellTree`, which kills the shell's process group (Unix) or Job Object (Windows) when a call times out or drops before finishing.
+- `crates/ox-core/src/tool/file.rs`: `write_tracked`.
+- `crates/ox-core/src/tool/search.rs`: `walk_files`.
 - `crates/ox-tui/src/action.rs`: `Action::ConfirmExit`.
 - `crates/ox-tui/src/app.rs`: `App::pending_prompts` / `forwarded_prompts`, and `App::active_prompt` / `auto_compacting`.
 - `crates/ox-tui/src/app/dispatch.rs`: `dispatch_op` / `start_turn` / `forward_queued_prompts`, `handle_esc`, `expire_armed_exit`.
@@ -55,4 +59,5 @@ The picks lean toward the Codex precedent on most surfaces, since it is the one 
 - `crates/ox-tui/src/components/input.rs`: Ctrl+D POSIX gate, plus `set_text` and `is_empty`, which the idle Esc recall uses.
 - `crates/ox-tui/src/components/status.rs`: `Status` variants, busy hints, spinner.
 - `crates/ox-tui/src/glyphs.rs`: `INTERRUPTED_MARKER`.
+- `crates/ox/src/driver/repl.rs`: `drive`, which turns SIGINT during an operation into `Op::Interrupt` and SIGINT at the prompt into a fresh prompt when stdin is a terminal.
 - `crates/ox/src/driver/stdio.rs`: `StdioSink::render`, and `render_op`, which renders until the op it sent ends.

@@ -1,12 +1,21 @@
-//! XDG directory lookup, `~` expansion and display, lexical path normalization, and the
-//! slash-separated spelling of paths the model reads.
+//! XDG and Claude Code directory lookup, `~` expansion and display, lexical path normalization,
+//! and the slash-separated spelling of paths the model reads.
 
 use std::path::{Component, Path, PathBuf};
 
 use anyhow::{Result, anyhow};
+use unicode_normalization::UnicodeNormalization as _;
+
+use crate::util::env;
 
 /// The directory oxide-code keeps under each XDG base directory.
 const APP_DIR: &str = "ox";
+
+/// The variable that moves Claude Code's config directory away from `~/.claude`.
+const CLAUDE_CONFIG_DIR: &str = "CLAUDE_CONFIG_DIR";
+
+/// The file in [`claude_dir`] that holds Claude Code's login.
+pub(crate) const CLAUDE_CREDENTIALS: &str = ".credentials.json";
 
 /// An XDG base directory that oxide-code keeps files under.
 #[derive(Debug, Clone, Copy)]
@@ -51,6 +60,22 @@ pub(crate) fn app_dir(base: XdgBase) -> Option<PathBuf> {
     Some(xdg_dir(base)?.join(APP_DIR))
 }
 
+/// `$CLAUDE_CONFIG_DIR` in Unicode NFC, the form Claude Code reads it in, or `None` when unset or
+/// empty, as Claude Code's Keychain naming treats an empty value.
+pub(crate) fn claude_config_var() -> Option<String> {
+    env::string(CLAUDE_CONFIG_DIR).map(|dir| dir.nfc().collect())
+}
+
+/// Claude Code's config directory, which holds its login, user settings, and user `CLAUDE.md`:
+/// [`claude_config_var`] made absolute against the working directory, as Claude Code opens it, or
+/// `~/.claude`. `None` without a home directory to fall back to.
+pub(crate) fn claude_dir() -> Option<PathBuf> {
+    match claude_config_var() {
+        Some(dir) => std::path::absolute(dir).ok(),
+        None => std::env::home_dir().map(|home| home.join(".claude")),
+    }
+}
+
 /// Replaces a `$HOME` prefix with `~`, falling back to the full path.
 pub fn tildify(path: &Path) -> String {
     match std::env::home_dir().and_then(|home| path.strip_prefix(home).ok()) {
@@ -71,7 +96,7 @@ pub fn expand_user(raw: &str) -> Result<PathBuf> {
         return Ok(PathBuf::from(raw));
     }
     let home = std::env::home_dir()
-        .ok_or_else(|| anyhow!("cannot expand `~` in {raw:?}: no home directory"))?;
+        .ok_or_else(|| anyhow!("failed to expand `~` in {raw:?}: no home directory"))?;
     if tail.is_empty() {
         return Ok(home);
     }
@@ -120,8 +145,21 @@ pub(crate) mod local_testing {
 
 #[cfg(any(test, feature = "testing"))]
 pub mod testing {
+    use std::path::Path;
+
     /// The variable [`std::env::home_dir`] reads first, so tests can point it at a fixture.
     pub const HOME_VAR: &str = if cfg!(windows) { "USERPROFILE" } else { "HOME" };
+
+    /// Variables for `temp_env` that point the home directory at `home` and unset
+    /// `XDG_CONFIG_HOME` and `CLAUDE_CONFIG_DIR`, so user-level config and instructions resolve
+    /// under `home` alone.
+    pub fn pinned_home(home: &Path) -> [(&'static str, Option<&Path>); 3] {
+        [
+            (HOME_VAR, Some(home)),
+            ("XDG_CONFIG_HOME", None),
+            ("CLAUDE_CONFIG_DIR", None),
+        ]
+    }
 }
 
 #[cfg(test)]
@@ -170,6 +208,54 @@ mod tests {
                 || app_dir(XdgBase::State),
             );
             assert_eq!(dir, Some(Path::new(&home).join(".local/state/ox")));
+        }
+    }
+
+    mod claude_config_var {
+        use super::*;
+
+        #[test]
+        fn normalizes_the_variable_to_nfc_and_reads_empty_as_unset() {
+            let read = |value| temp_env::with_var(CLAUDE_CONFIG_DIR, value, claude_config_var);
+
+            assert_eq!(
+                read(Some("/srv/cafe\u{301}")),
+                Some("/srv/caf\u{e9}".to_owned())
+            );
+            assert_eq!(read(Some("")), None);
+            assert_eq!(read(None), None);
+        }
+    }
+
+    mod claude_dir {
+        use super::*;
+
+        #[test]
+        fn prefers_the_variable_then_the_home_default() {
+            let (home, custom) = (abs("/home/u"), abs("/srv/claude"));
+
+            let (set, unset) = temp_env::with_vars(
+                [
+                    (HOME_VAR, Some(home.as_str())),
+                    (CLAUDE_CONFIG_DIR, Some(custom.as_str())),
+                ],
+                || {
+                    (
+                        claude_dir(),
+                        temp_env::with_var_unset(CLAUDE_CONFIG_DIR, claude_dir),
+                    )
+                },
+            );
+
+            assert_eq!(set, Some(PathBuf::from(&custom)));
+            assert_eq!(unset, Some(Path::new(&home).join(".claude")));
+        }
+
+        #[test]
+        fn resolves_a_relative_variable_against_the_working_directory() {
+            let dir = temp_env::with_var(CLAUDE_CONFIG_DIR, Some("claude-a"), claude_dir);
+
+            assert_eq!(dir, Some(std::env::current_dir().unwrap().join("claude-a")));
         }
     }
 

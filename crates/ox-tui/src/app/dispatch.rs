@@ -4,8 +4,8 @@
 use std::time::Instant;
 
 use crossterm::event::{
-    Event as CrosstermEvent, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton,
-    MouseEvent, MouseEventKind,
+    Event as CrosstermEvent, KeyCode, KeyEvent, KeyEventKind, MouseButton, MouseEvent,
+    MouseEventKind,
 };
 use ratatui::layout::Position;
 use tokio::sync::mpsc::error::TrySendError;
@@ -13,11 +13,13 @@ use tracing::debug;
 
 use ox_core::command::{self, Parsed};
 use ox_core::protocol::Op;
+use ox_core::protocol::notice::ENGINE_STOPPED;
 
 use super::{App, EXIT_WINDOW};
 use crate::action::{APP_KEYMAP, Action, AppAction};
 use crate::components::input::InputOutcome;
 use crate::components::status::Status;
+use crate::keymap::CTRL_C;
 use crate::modal::ModalAction;
 use crate::now;
 use crate::slash::{self, SlashContext, SlashKind, SlashOutcome};
@@ -151,7 +153,7 @@ impl App {
             return false;
         }
         self.dirty = true;
-        let ctrl_c = key.code == KeyCode::Char('c') && key.modifiers == KeyModifiers::CONTROL;
+        let ctrl_c = CTRL_C.matches(key);
         let Some(text) = self.chat.take_selection().filter(|_| ctrl_c) else {
             return false;
         };
@@ -208,7 +210,7 @@ impl App {
 
     /// Routes an input, slash-command, or modal action. TUI-only actions apply here, and an op goes
     /// through [`Self::dispatch_op`].
-    pub(super) fn dispatch_action(&mut self, action: Action) {
+    pub(crate) fn dispatch_action(&mut self, action: Action) {
         match action {
             Action::Submit(text) => self.handle_submit_prompt(&text),
             Action::Op(op) => self.dispatch_op(op),
@@ -260,7 +262,7 @@ impl App {
         match e {
             TrySendError::Closed(_) => {
                 self.chat
-                    .push_error("The engine stopped unexpectedly. Restart `ox` to recover.");
+                    .push_error(&format!("{ENGINE_STOPPED}. Restart it to recover."));
                 self.input.set_enabled(false);
                 self.should_quit = true;
             }
@@ -273,7 +275,7 @@ impl App {
             }
             TrySendError::Full(_) => {
                 self.chat
-                    .push_error("The engine is busy, so the request was dropped. Try again.");
+                    .push_error("ox is busy, so the request was dropped. Try again.");
             }
         }
     }
@@ -421,13 +423,14 @@ impl App {
         self.apply_slash_outcome(outcome)
     }
 
-    /// Shows a slash command's chat output or modal, returning a forwarded action unapplied.
+    /// Shows a slash command's chat output or modal, or starts its background task, returning a
+    /// forwarded action unapplied. Must run inside a tokio runtime.
     fn apply_slash_outcome(&mut self, outcome: Result<SlashOutcome, String>) -> Option<Action> {
         match outcome {
             Ok(SlashOutcome::Forward(action)) => return Some(action),
             Ok(SlashOutcome::Modal(modal)) => self.modals.push(modal),
             Ok(SlashOutcome::SystemMessage(text)) => self.chat.push_system_message(text),
-            Ok(SlashOutcome::GitDiff(diff)) => self.chat.push_git_diff(diff),
+            Ok(SlashOutcome::Background(task)) => _ = self.slash_tasks.spawn(task),
             Err(msg) => self.chat.push_error(&msg),
         }
         None
@@ -450,18 +453,19 @@ mod tests {
     use std::time::Duration;
 
     use base64::Engine as _;
-    use indoc::indoc;
+    use crossterm::event::KeyModifiers;
     use ratatui::buffer::CellWidth;
     use ratatui::layout::Rect;
     use ratatui::style::Color;
     use tokio::sync::mpsc::error::TryRecvError;
 
+    use ox_core::config::provenance::Source;
     use ox_core::config::{Effort, ThemeConfig};
     use ox_core::model::ResolvedModelId;
     use ox_core::permission::defaults::Shipped;
     use ox_core::permission::{Basis, Mode};
     use ox_core::protocol::{ConfigPick, Decision, Event, ResumeTarget, ToolResult};
-    use ox_core::tool::{ApprovalBody, ApprovalPreview, ToolResultView};
+    use ox_core::tool::view::{ApprovalBody, ApprovalPreview, ToolResultView};
 
     use super::*;
     use crate::app::testing::{
@@ -470,6 +474,7 @@ mod tests {
     };
     use crate::components::status::StatusHyperlink;
     use crate::modal::testing::ScriptedModal;
+    use crate::slash::ChatOutput;
     use crate::testing::{key_event, mouse_event, mouse_event_at};
     use crate::theme::{ThemeOverrides, builtin, resolve_theme};
 
@@ -487,6 +492,7 @@ mod tests {
     fn red_text_overrides() -> ThemeOverrides {
         let config = ThemeConfig {
             base: "mocha".to_owned(),
+            base_source: Source::Default,
             overrides: r##"text = "#ff0000""##.parse().unwrap(),
         };
         resolve_theme(&config).unwrap().overrides
@@ -1270,7 +1276,7 @@ mod tests {
             assert_eq!(app.chat.entry_count(), 2);
             assert_eq!(
                 app.chat.last_error_text(),
-                Some("The engine stopped unexpectedly. Restart `ox` to recover."),
+                Some("ox stopped unexpectedly. Restart it to recover."),
             );
         }
 
@@ -1293,7 +1299,7 @@ mod tests {
             );
             assert_eq!(
                 app.chat.last_error_text(),
-                Some("The engine is busy, so the request was dropped. Try again."),
+                Some("ox is busy, so the request was dropped. Try again."),
             );
         }
 
@@ -1688,7 +1694,7 @@ mod tests {
             // A modal-emitted `SetModel` must reach the engine so it can emit `ConfigChanged`.
             for op in [
                 Op::SetModel(ConfigPick::Model {
-                    id: ResolvedModelId::new("claude-opus-5-5".to_owned()),
+                    id: ResolvedModelId::new("claude-opus-5-5"),
                     effort: None,
                 }),
                 Op::SetModel(ConfigPick::Effort(Effort::High)),
@@ -1920,7 +1926,7 @@ mod tests {
             assert_eq!(
                 forwarded,
                 Op::SetModel(ConfigPick::Model {
-                    id: ResolvedModelId::new("claude-haiku-5-5".to_owned()),
+                    id: ResolvedModelId::new("claude-haiku-5-5"),
                     effort: None,
                 }),
             );
@@ -2041,7 +2047,7 @@ mod tests {
             assert_eq!(app.chat.entry_count(), entries_before + 1);
             assert_eq!(
                 app.chat.last_error_text(),
-                Some("The engine stopped unexpectedly. Restart `ox` to recover."),
+                Some("ox stopped unexpectedly. Restart it to recover."),
             );
             assert!(app.should_quit);
             assert_eq!(app.forwarded_prompts, 0);
@@ -2053,14 +2059,6 @@ mod tests {
 
         #[test]
         fn shows_output_and_hands_back_forwards_whether_idle_or_busy() {
-            let diff = indoc! {"
-                diff --git a/src/lib.rs b/src/lib.rs
-                --- a/src/lib.rs
-                +++ b/src/lib.rs
-                @@ -1 +1 @@
-                -old line
-                +new line
-            "};
             for busy in [false, true] {
                 let (mut app, mut rx, _event_tx) = test_app(None);
                 if busy {
@@ -2070,13 +2068,6 @@ mod tests {
                 let clean = SlashOutcome::SystemMessage("Working tree clean".to_owned());
                 assert_eq!(app.apply_slash_outcome(Ok(clean)), None);
                 assert_eq!(app.chat.last_system_text(), Some("Working tree clean"));
-
-                assert_eq!(
-                    app.apply_slash_outcome(Ok(SlashOutcome::GitDiff(diff.to_owned()))),
-                    None
-                );
-                let text = rendered_text(&mut app, 60, 24);
-                assert!(text.contains("new line"), "busy = {busy}: {text}");
 
                 assert_eq!(app.apply_slash_outcome(Err("/diff: boom".to_owned())), None);
                 assert_eq!(app.chat.last_error_text(), Some("/diff: boom"));
@@ -2096,6 +2087,23 @@ mod tests {
                     "the caller routes a forwarded action"
                 );
             }
+        }
+
+        #[tokio::test]
+        async fn runs_a_background_task_and_prints_nothing_until_it_finishes() {
+            let (mut app, _rx, _event_tx) = test_app(None);
+            let (tx, rx) = tokio::sync::oneshot::channel::<String>();
+            let task = SlashOutcome::Background(Box::pin(async move {
+                Ok(ChatOutput::SystemMessage(rx.await.unwrap()))
+            }));
+
+            assert_eq!(app.apply_slash_outcome(Ok(task)), None);
+            assert_eq!(app.chat.entry_count(), 0);
+
+            tx.send("done".to_owned()).unwrap();
+            let finished = app.slash_tasks.join_next().await.expect("the task runs");
+            app.apply_slash_task(finished);
+            assert_eq!(app.chat.last_system_text(), Some("done"));
         }
     }
 }

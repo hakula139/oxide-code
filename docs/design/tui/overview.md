@@ -27,11 +27,12 @@ The app's own keys live in `APP_KEYMAP` in `ox_tui::action`, a table of named `A
 
 ```text
 tokio::select! {
-    event = crossterm_events.next()       => { /* keyboard, mouse, resize */ }
-    event = self.events.recv()            => { /* Event: stream tokens, tool calls, session updates */ }
-    Some(update) = self.git_probes.recv() => { /* branch / PR probe results for the status line */ }
-    Some(report) = self.clipboard.recv()  => { /* outcome of a copy, shown as a notice */ }
-    _ = tick.tick()                       => { /* spinner frame, probe scheduling, exit-arm expiry, selection edge scroll, copy-notice expiry, render when dirty */ }
+    event = crossterm_events.next()               => { /* keyboard, mouse, resize */ }
+    event = self.events.recv()                    => { /* Event: stream tokens, tool calls, session updates */ }
+    Some(update) = self.git_probes.recv()         => { /* branch / PR probe results for the status line */ }
+    Some(report) = self.clipboard.recv()          => { /* outcome of a copy, shown as a notice */ }
+    Some(finished) = self.slash_tasks.join_next() => { /* output of a background slash command, such as /diff */ }
+    _ = tick.tick()                               => { /* spinner frame, probe scheduling, exit-arm expiry, selection edge scroll, copy-notice expiry, render when dirty */ }
 }
 ```
 

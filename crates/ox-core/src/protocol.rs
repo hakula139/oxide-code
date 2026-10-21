@@ -4,6 +4,8 @@
 //! cross a process boundary. Headless `stream-json` output prints events in this form, so renaming
 //! a tag or field breaks the release stability surface.
 
+pub mod notice;
+
 use std::path::PathBuf;
 
 use anyhow::{Result, anyhow};
@@ -19,7 +21,7 @@ use crate::permission::rule::Rule;
 use crate::permission::{Basis, Mode, SessionGrant};
 use crate::tool::bash::background::BackgroundShell;
 use crate::tool::tasks::Task;
-use crate::tool::{ApprovalPreview, ToolResultView};
+use crate::tool::view::{ApprovalPreview, ToolResultView};
 
 // ── Ops ──
 
@@ -226,13 +228,15 @@ pub enum Event {
     /// transcript. Follows every event that reports the new transcript's state, such as its usage
     /// and notices.
     SessionReady,
-    /// Live config after an [`Op::SetModel`]. `effort` is the resolved value, and `requested` is
-    /// the op's pick, whose effort an unknown model drops.
+    /// Live config after an [`Op::SetModel`]. `effort` is the resolved value, `requested` is the
+    /// op's pick, whose effort an unknown model drops, and `notice` confirms the change against the
+    /// settings before it.
     ConfigChanged {
         model: ModelSpec,
         effort: Option<Effort>,
         requested: ConfigPick,
         auto_compaction: AutoCompactionConfig,
+        notice: String,
     },
     /// The permission mode after an [`Op::SetMode`].
     ModeChanged(Mode),
@@ -241,6 +245,10 @@ pub enum Event {
     /// An [`Op::Login`] stored a new oxide-code login. `auth` is the credential requests now use,
     /// which stays an env var or `client.api_key` when one outranks the login.
     SignedIn { auth: AuthSource },
+    /// A prompt or compaction in a session that a transient failure signed out
+    /// loaded the stored login, which requests now use as `auth`.
+    /// The prompt or compaction goes on.
+    LoginRestored { auth: AuthSource },
     /// An [`Op::Logout`] finished. `removed` reports whether an oxide-code login was stored, and
     /// `auth` is the credential requests now use, `None` when none is left. `fallback_error` says
     /// why a stored Claude Code login could not take over.
@@ -348,7 +356,7 @@ pub trait EventSink: Send + Sync {
     fn session_write_error(&self, failure: Option<&str>) {
         if let Some(failure) = failure {
             self.emit(
-                Event::Error(session_write_failed(failure)),
+                Event::Error(notice::session_write_failed(failure)),
                 "session-write-failed",
             );
         }
@@ -363,11 +371,6 @@ impl EventSink for mpsc::UnboundedSender<Event> {
     }
 }
 
-/// The message that reports a session-writer failure.
-pub(crate) fn session_write_failed(failure: &str) -> String {
-    format!("Session write failed: {failure}")
-}
-
 // ── Testing ──
 
 #[cfg(any(test, feature = "testing"))]
@@ -378,7 +381,7 @@ pub mod testing {
     use serde_json::json;
 
     use super::{Event, EventSink, ToolCall, ToolResult};
-    use crate::tool::ToolResultView;
+    use crate::tool::view::ToolResultView;
 
     /// An [`EventSink`] that keeps every event it receives. Clones share one log.
     #[derive(Clone, Default)]
@@ -449,8 +452,8 @@ mod tests {
     use crate::tool::bash::background::testing::shells_in_each_state;
     use crate::tool::tasks::testing::plan;
     use crate::tool::testing::bash_preview;
-    use crate::tool::{
-        ApprovalBody, DiffChunk, DiffLine, EditDiff, GrepFileGroup, GrepMatchLine, ReadExcerptLine,
+    use crate::tool::view::{
+        ApprovalBody, DiffChunk, EditDiff, GrepFileGroup, GrepMatchLine, NumberedLine,
     };
 
     mod op {
@@ -507,7 +510,7 @@ mod tests {
                     decision: Decision::Abort,
                 },
                 Op::SetModel(ConfigPick::Model {
-                    id: ResolvedModelId::new("claude-opus-5-5".to_owned()),
+                    id: ResolvedModelId::new("claude-opus-5-5"),
                     effort: Some(Effort::High),
                 }),
                 Op::SetModel(ConfigPick::Effort(Effort::Low)),
@@ -591,11 +594,11 @@ mod tests {
 
         fn diff_chunk() -> DiffChunk {
             DiffChunk {
-                old: vec![DiffLine {
+                old: vec![NumberedLine {
                     number: 3,
                     text: "old".to_owned(),
                 }],
-                new: vec![DiffLine {
+                new: vec![NumberedLine {
                     number: 3,
                     text: "new".to_owned(),
                 }],
@@ -628,7 +631,7 @@ mod tests {
                 },
                 ToolResultView::ReadExcerpt {
                     path: "src/main.rs".to_owned(),
-                    lines: vec![ReadExcerptLine {
+                    lines: vec![NumberedLine {
                         number: 1,
                         text: "fn main() {}".to_owned(),
                     }],
@@ -706,6 +709,7 @@ mod tests {
                 Event::ModeChanged(_) => "mode_changed",
                 Event::LoginStarted { .. } => "login_started",
                 Event::SignedIn { .. } => "signed_in",
+                Event::LoginRestored { .. } => "login_restored",
                 Event::SignedOut { .. } => "signed_out",
                 Event::Notice(_) => "notice",
                 Event::Error(_) => "error",
@@ -723,7 +727,7 @@ mod tests {
                     id: "t2".to_owned(),
                     preview: ApprovalPreview {
                         title: "Edit".to_owned(),
-                        body: ApprovalBody::Diff(vec![diff_chunk()]),
+                        body: ApprovalBody::Diff(diff_chunk()),
                     },
                     basis: Basis::Mode(Mode::Manual),
                     grant: None,
@@ -788,13 +792,14 @@ mod tests {
                 },
                 Event::SessionReady,
                 Event::ConfigChanged {
-                    model: ModelSpec::resolve("claude-opus-5-5".to_owned()),
+                    model: ModelSpec::resolve("claude-opus-5-5"),
                     effort: Some(Effort::High),
                     requested: ConfigPick::Effort(Effort::Max),
                     auto_compaction: AutoCompactionConfig {
                         enabled: true,
                         threshold_tokens: Some(400_000),
                     },
+                    notice: "Effort set to high".to_owned(),
                 },
                 Event::ModeChanged(Mode::Yolo),
                 Event::LoginStarted {
@@ -802,6 +807,9 @@ mod tests {
                 },
                 Event::SignedIn {
                     auth: AuthSource::OxLogin,
+                },
+                Event::LoginRestored {
+                    auth: AuthSource::ClaudeCodeLogin,
                 },
                 Event::SignedOut {
                     removed: true,
@@ -910,13 +918,14 @@ mod tests {
         #[test]
         fn serializes_a_model_as_its_id() {
             let event = Event::ConfigChanged {
-                model: ModelSpec::resolve("claude-opus-5-5".to_owned()),
+                model: ModelSpec::resolve("claude-opus-5-5"),
                 effort: None,
-                auto_compaction: AutoCompactionConfig::disabled(),
                 requested: ConfigPick::Model {
-                    id: ResolvedModelId::new("claude-opus-5-5".to_owned()),
+                    id: ResolvedModelId::new("claude-opus-5-5"),
                     effort: None,
                 },
+                auto_compaction: AutoCompactionConfig::disabled(),
+                notice: "Using Claude Opus 5.5 (claude-opus-5-5)".to_owned(),
             };
             let value = serde_json::to_value(&event).unwrap();
             assert_eq!(value["data"]["model"], "claude-opus-5-5");

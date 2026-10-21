@@ -55,12 +55,14 @@ impl SlashCommand for DeleteCmd {
         let live_id = ctx.info.session_id.as_str();
         let info = resolve_saved_prefix(&store, arg, live_id)
             .map_err(|e| resolve_error_message(e, Some(CLEAR_THEN_DELETE_HINT)))?;
+        let title = display_title(&info);
+        let metadata = metadata_line(&info);
         Ok(SlashOutcome::Modal(Box::new(
             ConfirmDeleteSessionModal::new(
-                info.path.clone(),
-                info.session_id.clone(),
-                display_title(&info),
-                metadata_line(&info),
+                info.path,
+                info.session_id,
+                title,
+                metadata,
                 live_id.to_owned(),
             ),
         )))
@@ -87,10 +89,14 @@ fn metadata_line(info: &SessionInfo) -> String {
 mod tests {
     use time::macros::datetime;
 
+    use ox_core::session::entry::ExitInfo;
     use ox_core::session::store::SessionStore;
     use ox_core::session::store::testing::seed_test_session;
+    use ox_core::util::path::testing::HOME_VAR;
 
     use super::*;
+    use crate::modal::Modal;
+    use crate::modal::testing::render_rows;
     use crate::slash::registry::SlashCommand;
     use crate::slash::testing::{stamped_id, test_session_info, with_isolated_xdg};
 
@@ -126,6 +132,12 @@ mod tests {
 
     mod execute {
         use super::*;
+
+        /// The title and metadata rows the confirm modal shows for the session it will delete.
+        fn target_rows(modal: &dyn Modal) -> [String; 2] {
+            let rows = render_rows(modal, 80, modal.height(80, u16::MAX));
+            [rows[2].trim_end().to_owned(), rows[3].trim_end().to_owned()]
+        }
 
         #[test]
         fn bare_points_to_the_picker_and_typed_form() {
@@ -165,10 +177,14 @@ mod tests {
                 let info = test_session_info();
                 let ctx = SlashContext::new(&info, None);
 
-                DeleteCmd
+                let modal = DeleteCmd
                     .execute(&target_id[..4], &ctx)
                     .unwrap()
                     .into_modal();
+
+                let [title, metadata] = target_rows(&*modal);
+                assert_eq!(title, "Doomed session");
+                assert!(metadata.starts_with("abababab · "), "{metadata}");
             });
         }
 
@@ -189,10 +205,14 @@ mod tests {
                 let info = test_session_info();
                 let ctx = SlashContext::new(&info, None);
 
-                DeleteCmd
+                let modal = DeleteCmd
                     .execute(&target_id[..4], &ctx)
                     .unwrap()
                     .into_modal();
+
+                let [title, metadata] = target_rows(&*modal);
+                assert_eq!(title, "Foreign");
+                assert!(metadata.starts_with("abababab · "), "{metadata}");
             });
         }
 
@@ -286,7 +306,11 @@ mod tests {
                 let info = test_session_info();
                 let ctx = SlashContext::new(&info, None);
 
-                DeleteCmd.execute("test-", &ctx).unwrap().into_modal();
+                let modal = DeleteCmd.execute("test-", &ctx).unwrap().into_modal();
+
+                let [title, metadata] = target_rows(&*modal);
+                assert_eq!(title, "Other");
+                assert!(metadata.starts_with("test-oth · "), "{metadata}");
             });
         }
 
@@ -321,19 +345,28 @@ mod tests {
         use super::*;
 
         #[test]
-        fn includes_tildified_project_when_cwd_is_non_empty() {
+        fn shows_the_count_branch_and_tildified_project() {
+            let last_active_at = datetime!(2026-05-08 09:00:00 UTC);
             let info = SessionInfo {
                 session_id: stamped_id(0xab),
                 path: std::path::PathBuf::new(),
                 cwd: "/work/oxide".to_owned(),
-                last_active_at: datetime!(2026-05-08 09:00:00 UTC),
+                last_active_at,
                 title: None,
-                exit: None,
-                git_branch: None,
+                exit: Some(ExitInfo {
+                    message_count: 14,
+                    updated_at: last_active_at,
+                }),
+                git_branch: Some("feat/login".to_owned()),
                 archived: false,
             };
-            let line = metadata_line(&info);
-            assert!(line.contains("/work/oxide"), "project shown: {line}");
+
+            let line = temp_env::with_var(HOME_VAR, Some("/work"), || metadata_line(&info));
+
+            assert_eq!(
+                line,
+                "abababab · 2026-05-08 · 14 msgs · feat/login · ~/oxide"
+            );
         }
 
         #[test]

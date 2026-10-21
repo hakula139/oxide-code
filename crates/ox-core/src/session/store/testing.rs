@@ -42,7 +42,7 @@ impl SessionStore {
     /// Finds a session file by the ID in its name, in any project.
     pub fn find_session_path(&self, session_id: &str) -> Result<PathBuf> {
         for entry in fs::read_dir(&self.sessions_dir)
-            .with_context(|| format!("cannot read {}", self.sessions_dir.display()))?
+            .with_context(|| format!("failed to read {}", self.sessions_dir.display()))?
         {
             let dir = entry?.path();
             if dir.is_dir()
@@ -75,6 +75,13 @@ impl SessionWriter {
 
 pub fn test_store(dir: &Path) -> SessionStore {
     SessionStore::open_at(dir.to_path_buf(), TEST_PROJECT).expect("the test store opens")
+}
+
+/// A [`test_store`] in a fresh temp dir, which lives as long as the returned guard.
+pub fn isolated_store() -> (tempfile::TempDir, SessionStore) {
+    let dir = tempfile::tempdir().expect("a temp dir opens");
+    let store = test_store(dir.path());
+    (dir, store)
 }
 
 pub fn test_project_dir(dir: &Path) -> PathBuf {

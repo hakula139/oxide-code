@@ -40,41 +40,43 @@ By default, the listing shows at most 30 rows, so long-running projects don't du
 
 ## Resuming a Session
 
-Resume the most recent unarchived session in the current project:
+Continue the most recent unarchived session in the current project:
 
 ```bash
 ox -c              # Short form
 ox --continue      # Long form
 ```
 
-Resume by ID prefix (searches the current project):
+Resume a specific session with `--resume` / `-r`, using an ID prefix searched within the current project or a session file path. A file path is useful for sessions copied between machines or stored outside the store root:
 
 ```bash
-ox -c a1b2
+ox -r a1b2
+ox -r ./conversation.jsonl
+ox -r /home/me/archive/2026-04/session.jsonl
 ```
 
-Widen the search to every project with `--all` / `-a`:
+Search every project with `--all` / `-a`:
 
 ```bash
 ox -c --all        # Latest unarchived session across all projects
-ox -c a1b2 -a      # Prefix match across all projects
+ox -r a1b2 -a      # Prefix match across all projects
 ```
 
-Resume from an explicit file path, useful for sessions copied between machines or kept outside the store root:
+A prompt after `-c` or after `-r <id-prefix>` continues the session with that prompt, in the TUI or, with `-p`, as a [headless run](headless.md):
 
 ```bash
-ox -c ./conversation.jsonl
-ox -c /home/me/archive/2026-04/session.jsonl
+ox -c "Run the tests again"
+ox -r a1b2 -p "Summarize what changed"
 ```
 
-Pick a session from a list with `--resume` / `-r`:
+Without a value, `--resume` lets you pick a session from a list:
 
 ```bash
 ox -r              # Sessions in the current project
 ox -r --all        # Sessions in every project
 ```
 
-This opens the TUI to the same picker as [`/resume`](#mid-session-resume). Press **Enter** to resume the highlighted session, or **Esc** to quit `ox` without creating a session file. `--resume` cannot be combined with `--continue`, `--list`, `--no-tui`, or `-p`. The picker requires the TUI, so this also fails when stdout is not a terminal.
+This opens the TUI to the same picker as [`/resume`](#mid-session-resume). Press **Enter** to resume the highlighted session or **Esc** to quit `ox` without creating a session file. The picker cannot be combined with a prompt, `--continue`, `--list`, `--no-tui`, or `-p`. It requires the TUI and fails when stdout is not a terminal.
 
 On resume, oxide-code loads the saved history and appends new messages to the same file, so the session keeps its original ID. The model's [task list](quickstart.md#what-it-can-do) returns as it was, while background shells do not, since they end with the run that started them. The status line's session cost continues from the requests the file recorded, or starts at zero for a file saved by a release that did not record them.
 
@@ -93,7 +95,7 @@ Inside the `/resume` picker, **Ctrl+D** on the cursor row opens a Y/N confirm mo
 
 ### Archiving a Session
 
-Archiving hides a session from `ox --list`, the `/resume` picker, and bare `ox -c`, while leaving its file in place.
+Archiving hides a session from `ox --list`, the `/resume` picker, and `ox -c`, while leaving its file in place.
 
 - `/archive` archives the live session and starts a fresh one, as `/clear` does. A note in the new chat names the archived session.
 - `/archive <id-prefix>` archives another saved session. If the prefix matches only the live session, the command is refused and points to bare `/archive`.
@@ -102,7 +104,7 @@ Archiving hides a session from `ox --list`, the `/resume` picker, and bare `ox -
 
 The typed commands and **Ctrl+X** leave a session's last-active time unchanged, so an unarchived session returns to its previous position in the list.
 
-To find archived sessions, run `ox --list --archived` or press **Ctrl+A** in the `/resume` picker to switch to the archived view. Resuming an archived session unarchives it and displays a note, whether you select it in that view or specify it with `/resume <id-prefix>`, `ox -c <id-prefix>`, or a file path.
+To find archived sessions, run `ox --list --archived` or press **Ctrl+A** in the `/resume` picker to switch to the archived view. Resuming an archived session unarchives it and displays a note, whether you select it in that view or specify it with `/resume <id-prefix>`, `ox -r <id-prefix>`, or a file path.
 
 ## Titles
 
@@ -126,4 +128,4 @@ Sessions are recorded in every mode:
 
 - **TUI** (`ox`): Saved automatically.
 - **Bare REPL** (`ox --no-tui`): Saved automatically.
-- **Headless** (`ox -p "prompt"`): Single-turn session saved, useful for audit trails.
+- **Headless** (`ox -p "prompt"`): One turn, saved in a new session or appended to the one `-c` or `-r` names, useful for audit trails.

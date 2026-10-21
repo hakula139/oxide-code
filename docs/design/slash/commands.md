@@ -16,7 +16,7 @@ Client-side command surface: `/help`, `/clear`, `/model`, `/status`, and friends
 - `/rename` sets the session title manually and locks out the AI title generator. Bare opens a single-line editor pre-filled with the current title.
 - `/resume` swaps to a different session in place. Bare opens a searchable picker, while typed-arg jumps directly. Full design: [resume.md](resume.md).
 - `/delete <id-prefix>` removes a saved session's JSONL and its artifact directory after a Y/N confirmation. The `/resume` picker offers the same gesture via Ctrl+D on the cursor row.
-- `/archive` and `/unarchive` set whether a session shows in default listings and bare `ox -c`. Bare `/archive` archives the live session and rolls like `/clear`.
+- `/archive` and `/unarchive` set whether a session shows in default listings and `ox -c`. Bare `/archive` archives the live session and rolls like `/clear`.
 - `/config`, `/help`, and `/status` open a read-only [`KvOverview`](modals.md) modal. `/diff` is the lone printer because its output can run to hundreds of lines, where scrollback value beats modal cropping.
 
 ## Design Decisions
@@ -43,7 +43,7 @@ Client-side command surface: `/help`, `/clear`, `/model`, `/status`, and friends
 
 11. **Read-only commands fast-path the busy turn.** `classify` defaults to `SlashKind::ReadOnly`, and the dispatcher runs them client-side even when input is disabled, discarding any action they forward. State-mutating commands override to `SlashKind::Mutating` and refuse mid-turn. `SlashKind::Steering` marks a form whose forwarded action applies mid-turn, either a TUI-only change or an op the engine applies to the turn in flight, so the dispatcher forwards it mid-turn too. `/mode <mode>` and `/theme <name>` are the two.
 
-12. **One trait return carries every effect: `SlashOutcome`.** `Forward(Action)` hands a state-mutating action back to the App, which applies a TUI-only action locally and sends an op to the engine. `Modal(_)` opens a modal, and `SystemMessage` / `GitDiff` print into chat. A failure returns `Err(String)`, which the dispatcher prefixes with the typed command name.
+12. **One trait return carries every effect: `SlashOutcome`.** `Forward(Action)` hands a state-mutating action back to the App, which applies a TUI-only action locally and sends an op to the engine. `Modal(_)` opens a modal, and `SystemMessage` prints into chat. `Background` carries a future for a command whose work is slow I/O, which the App runs in a `JoinSet` off the event loop. It prints the `ChatOutput` the future resolves to, and a session switch drops the future unfinished, so its output never lands in the next session's chat. A failure returns `Err(String)`, which the dispatcher prefixes with the typed command name, and it wraps a background future so that future's failure gets the same prefix.
 
 13. **Commands read a borrowed `SlashContext` and write nothing.** The context carries `LiveSessionInfo` and the live session title. The App applies the returned outcome in one place on both the idle and busy paths, so no command reaches into `ChatView` or the modal stack. See [modals.md](modals.md) for the full modal design.
 
@@ -75,7 +75,7 @@ Client-side command surface: `/help`, `/clear`, `/model`, `/status`, and friends
 
 - **`/help`**: Opens a [`KvOverview`](modals.md) listing every registered command with its description. Aliases follow the canonical name in parentheses, then the `usage()` placeholder.
 
-- **`/diff`**: The lone printer. Pushes uncommitted git changes plus untracked files into chat as a diff block, capped at 64 KB on a UTF-8 boundary, or a `Working tree clean` system message when there are none. After the first commit it uses `git diff HEAD`. Before the first commit it combines `git diff --cached` and `git diff` because `HEAD` does not exist yet. Modal output would crop without scrollback, so the diff earns its place in the transcript.
+- **`/diff`**: The lone printer. Pushes uncommitted git changes plus untracked files into chat as a diff block, or a `Working tree clean` system message when there are none. After the first commit it uses `git diff HEAD`. Before the first commit it combines `git diff --cached` and `git diff` because `HEAD` does not exist yet. Untracked paths come from `git ls-files -z --others --exclude-standard --directory --no-empty-directory`, which lists a wholly untracked directory once and skips empty ones, as `git status` does. Git runs from the work tree root, which `/diff` resolves on each run because `ls-files` lists only the paths under its working directory, so a session started in a subdirectory still sees the whole repository, even after the user fixes a repository git refused at startup. It runs as a `Background` outcome, so a slow repository leaves input and a streaming reply responsive. Each call skips git's optional locks, and each diff pins the config that shapes its output, such as `core.quotePath`, `diff.renames`, the `a/` and `b/` prefixes, and external diff and textconv drivers. The output is parsed once into a `WorkingTreeDiff` of typed rows, capped at 64 KiB on a line boundary, with a note naming the command that prints what the cap cut: the diff command, or `git status` when only untracked paths were cut. Paths git still quotes have their quotes, backslashes, and non-ASCII bytes decoded, while control-character escapes stay visible as written. When git refuses the repository, as for dubious ownership, the error carries git's own message and the fix it names. Modal output would crop without scrollback, so the diff earns its place in the transcript.
 
 - **`/rename`**: Bare opens a single-line title editor pre-filled with the current title, and `/rename <title>` applies directly. Both forms build their `Op::Rename` through `command::rename`, which keeps the title's first non-blank line and truncates it to the 80-column cap that first-prompt titles share, and the editor stops taking input at that cap. Both lock out AI title generation for the rest of the session so a slow Haiku call can't overwrite the user's pick. `classify` is always `Mutating`. See [modals.md](modals.md).
 
@@ -90,13 +90,15 @@ Client-side command surface: `/help`, `/clear`, `/model`, `/status`, and friends
 - `crates/ox-core/src/command.rs`: the alias table, `typed_op`, `parse`, and the typed forms of `/clear`, `/compact`, `/effort`, `/mode`, `/model`, `/rename`, and `/resume`, plus the model resolver.
 - `crates/ox-core/src/command/init.rs`: the typed form of `/init`, the instruction-file discovery, and the create and update prompts.
 - `crates/ox-core/src/command/parser.rs`: `parse_slash`, which parses a typed line into a command name and its arguments, `split_slash`, the borrowed split it shares with the popup, and `unescape_literal` for the `//` escape.
-- `crates/ox-core/src/engine.rs`: `Engine::run` arms for `Op::Clear`, `Op::SetModel`, and `Op::SetMode`, `Engine::set_model`, which re-resolves the compaction threshold for the new model, `Engine::archive`, which waits for the archive entry to reach disk before rolling the session, and `TurnEnd::of`.
+- `crates/ox-core/src/engine.rs`: `Engine::run` arms for `Op::Clear`, `Op::SetModel`, and `Op::SetMode`, `Engine::set_model`, which re-resolves the compaction threshold for the new model and words the `ConfigChanged` notice against the settings before the swap, `Engine::archive`, which waits for the archive entry to reach disk before rolling the session, and `TurnEnd::of`.
+- `crates/ox-core/src/protocol/notice.rs`: `config_changed` and `mode_changed`, the confirmations every frontend shows.
 - `crates/ox-core/src/session/display.rs`: shared `id_prefix`, `display_title`, and `format_metadata_line` for the picker row and delete confirm modal, `archive_notice`, and the `MAX_TITLE_WIDTH` cap that `fit_title` applies to every title.
 - `crates/ox-core/src/session/resolver.rs`: `resolve_prefix_to_info` checks the current project first, widens the search on a miss, and returns a typed `ResolveError` that the CLI prints as is and slash commands rephrase. `resolve_saved_prefix` reports a live-only match as `ResolveError::Live` for `/archive`, `/unarchive`, `/delete`, and the engine's prefix resume.
 - `crates/ox-core/src/session/saved.rs`: `set_archived` and `delete`, shared by the typed commands and the `/resume` picker, which refuse the live session and return a typed `SavedError`.
 - `crates/ox-core/src/session/store.rs`: `delete_at` and `set_archived_at`, the file operations behind `saved`.
 - `crates/ox-tui/src/action.rs`: `Action`, which slash commands forward.
 - `crates/ox-tui/src/app/dispatch.rs`: `dispatch_action`, `dispatch_op`, `run_slash`, `apply_slash_outcome`, modal gate, echo gate.
+- `crates/ox-tui/src/app/events.rs`: `apply_slash_task`, which prints a finished `Background` outcome.
 - `crates/ox-tui/src/components/input/popup.rs`: `popup_state`, which reads the typed line as a command name or an argument, and `SlashPopup`, which lists the matching commands or the typed command's arg completions for Tab and Enter to complete.
 - `crates/ox-tui/src/modal.rs`: `Modal` trait, `ModalStack`, key routing.
 - `crates/ox-tui/src/modal/kv_overview.rs`: generic `KvOverview` / `KvSection` primitive.
@@ -106,10 +108,11 @@ Client-side command surface: `/help`, `/clear`, `/model`, `/status`, and friends
 - `crates/ox-tui/src/slash/archive.rs`: `ArchiveCmd` and `UnarchiveCmd`.
 - `crates/ox-tui/src/slash/clear.rs`: `ClearCmd` sends first.
 - `crates/ox-tui/src/slash/config.rs`: `/config` row builder plus sectioned `KvOverview` constructor.
-- `crates/ox-tui/src/slash/confirm.rs`: `ConfirmDeleteSessionModal` (destructive-action gate, sticky inline error cleared only on deliberate Y / N).
+- `crates/ox-tui/src/slash/confirm.rs`: `ConfirmDeleteSessionModal` (destructive-action gate, inline error kept until a retry or close).
 - `crates/ox-tui/src/slash/context.rs`: `SlashContext` (`LiveSessionInfo` plus the live title).
 - `crates/ox-tui/src/slash/delete.rs`: `DeleteCmd` refuses prefixes that match only the live session.
-- `crates/ox-tui/src/slash/diff.rs`: `/diff` printer with 64 KB UTF-8-boundary cap.
+- `crates/ox-tui/src/slash/diff.rs`: `DiffCmd` and the git calls it makes from the project root.
+- `crates/ox-tui/src/slash/diff/view.rs`: `WorkingTreeDiff`, the typed rows parsed from git's output within the 64 KiB cap.
 - `crates/ox-tui/src/slash/effort.rs`: `EffortCmd`.
 - `crates/ox-tui/src/slash/effort_slider.rs`: bare `/effort` Speed ↔ Intelligence slider modal.
 - `crates/ox-tui/src/slash/help.rs`: `/help` row builder plus `KvOverview` constructor.
@@ -118,7 +121,7 @@ Client-side command surface: `/help`, `/clear`, `/model`, `/status`, and friends
 - `crates/ox-tui/src/slash/mode.rs`: `ModeCmd` plus `ModePicker`.
 - `crates/ox-tui/src/slash/model.rs`: `ModelCmd`.
 - `crates/ox-tui/src/slash/picker.rs`: combined model and effort picker modal.
-- `crates/ox-tui/src/slash/registry.rs`: `BUILT_INS`, `SlashKind`, `SlashOutcome`, and the `SlashCommand` trait, whose aliases default to `command::aliases`.
+- `crates/ox-tui/src/slash/registry.rs`: `BUILT_INS`, `SlashKind`, `SlashOutcome`, `ChatOutput`, and the `SlashCommand` trait, whose aliases default to `command::aliases`.
 - `crates/ox-tui/src/slash/rename.rs`: `RenameCmd` plus `RenameModal` editor.
 - `crates/ox-tui/src/slash/resume.rs`: `ResumeCmd` plus `ResumePicker` (see `resume.md`).
 - `crates/ox-tui/src/slash/sessions.rs`: `open_store`, `resolve_error_message`, `saved_error_message`, and the live-session recovery hints, shared by the session commands.

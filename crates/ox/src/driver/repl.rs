@@ -1,7 +1,8 @@
 //! Bare REPL driver for `--no-tui`: prompts and slash commands from stdin, replies on stdout.
 
 use std::io::{self, IsTerminal, Write};
-use std::path::{Path, PathBuf};
+use std::path::Path;
+use std::pin::pin;
 
 use anyhow::{Result, bail};
 use tokio::io::{AsyncBufRead, AsyncBufReadExt, BufReader, Lines};
@@ -10,55 +11,78 @@ use ox_core::command::{self, Parsed};
 use ox_core::engine::{Engine, EngineHandle, TurnEnd};
 use ox_core::permission::rule::Rule;
 use ox_core::permission::{Basis, SessionGrant};
+use ox_core::protocol::notice::ENGINE_STOPPED;
 use ox_core::protocol::{Decision, Event, EventSink, Op};
-use ox_core::tool::{ApprovalBody, ApprovalPreview};
+use ox_core::tool::view::{ApprovalBody, ApprovalPreview};
 use ox_core::util::git;
 use ox_core::util::text::escape_hidden;
 
 use super::stdio::{Approver, StdioSink, Unattended, render_op, render_queued};
-use super::{Exit, shutdown_signal};
+use super::{Exit, Shutdown, shutdown_signal};
 
 /// Reads prompts and slash commands until EOF or a signal, then finalizes the session. EOF after
-/// an operation failed or a command was rejected exits with failure. Approvals are asked only when
-/// stdin is a terminal, so a piped line is never taken as an answer.
-pub(crate) async fn run(engine: Engine, show_thinking: bool, drifted: &[PathBuf]) -> Result<Exit> {
+/// an operation failed or a command was rejected exits with failure. Only a terminal on stdin
+/// answers approvals, so a piped line is never taken as an answer. With a terminal, SIGINT
+/// interrupts the running operation or discards the line at the prompt, as shells do. Every other
+/// signal ends the run. `first`, when given, runs as the first input line.
+pub(crate) async fn run(
+    engine: Engine,
+    show_thinking: bool,
+    first: Option<String>,
+) -> Result<Exit> {
     let sink = StdioSink::new(show_thinking);
     let attended = io::stdin().is_terminal();
     let stdin = BufReader::new(tokio::io::stdin());
-    let project_root = git::project_root(engine.cwd()).await;
-    drive(engine.spawn(drifted), &project_root, &sink, stdin, attended).await
+    let project_root = git::project_root(engine.cwd());
+    let handle = engine.spawn();
+    let signal = async || {
+        let caught = shutdown_signal().await;
+        _ = sink.break_line(&mut io::stdout(), &mut io::stderr());
+        caught
+    };
+    drive(handle, &project_root, &sink, first, stdin, attended, signal).await
 }
 
+/// Runs the REPL over `first`, then the lines of `input`, where each `signal` call waits for the
+/// next signal.
 async fn drive<R>(
     mut handle: EngineHandle,
     project_root: &Path,
     sink: &dyn EventSink,
+    mut first: Option<String>,
     input: R,
     attended: bool,
+    mut signal: impl AsyncFnMut() -> Shutdown,
 ) -> Result<Exit>
 where
     R: AsyncBufRead + Unpin,
 {
     let mut lines = input.lines();
-    let mut signal = None;
+    let mut stopped = None;
     let mut failed = false;
 
     let result: Result<()> = async {
-        loop {
+        'repl: loop {
             render_queued(&mut handle.events, sink);
-            eprint!("> ");
-            std::io::stderr().flush()?;
-
-            let line = tokio::select! {
-                line = lines.next_line() => line?,
-                caught = shutdown_signal() => {
-                    eprintln!();
-                    signal = Some(caught);
-                    None
-                }
-            };
-            let Some(line) = line else {
-                break;
+            let line = if let Some(line) = first.take() {
+                line
+            } else {
+                _ = write!(io::stderr(), "> ");
+                _ = io::stderr().flush();
+                let line = tokio::select! {
+                    line = lines.next_line() => line?,
+                    caught = signal() => {
+                        if attended && caught == Shutdown::Interrupt {
+                            continue;
+                        }
+                        stopped = Some(caught);
+                        break;
+                    }
+                };
+                let Some(line) = line else {
+                    break;
+                };
+                line
             };
 
             let input = line.trim();
@@ -84,23 +108,30 @@ where
                 out: io::stderr(),
                 attended,
             };
-            let rendered = render_op(&mut handle.events, sink, &handle.ops, &op, &mut prompter);
-            tokio::select! {
-                end = rendered => match end {
-                    Some(TurnEnd::Failed) => {
-                        if matches!(op, Op::Prompt(_)) {
-                            println!();
+            let mut rendered = pin!(render_op(
+                &mut handle.events,
+                sink,
+                &handle.ops,
+                &op,
+                &mut prompter
+            ));
+            let end = loop {
+                tokio::select! {
+                    end = &mut rendered => break end,
+                    caught = signal() => {
+                        if !(attended && caught == Shutdown::Interrupt) {
+                            stopped = Some(caught);
+                            break 'repl;
                         }
-                        failed = true;
+                        // A send fails only once the engine has stopped, which `rendered` reports.
+                        _ = handle.ops.send(Op::Interrupt).await;
                     }
-                    Some(_) => {}
-                    None => bail!("the engine stopped"),
-                },
-                caught = shutdown_signal() => {
-                    eprintln!();
-                    signal = Some(caught);
-                    break;
                 }
+            };
+            match end {
+                Some(TurnEnd::Failed) => failed = true,
+                Some(_) => {}
+                None => bail!(ENGINE_STOPPED),
             }
         }
         Ok(())
@@ -110,7 +141,7 @@ where
     let failure = handle.shutdown().await?;
     sink.session_write_error(failure.as_deref());
     result?;
-    Ok(match signal {
+    Ok(match stopped {
         Some(signal) => Exit::Signal(signal),
         None if failed => Exit::Failure,
         None => Exit::Success,
@@ -239,14 +270,12 @@ fn write_preview(out: &mut impl Write, preview: &ApprovalPreview, basis: &Basis)
                 writeln!(out, "  {}", escape_hidden(line))?;
             }
         }
-        ApprovalBody::Diff(chunks) => {
-            for chunk in chunks {
-                for line in &chunk.old {
-                    writeln!(out, "  - {}", escape_hidden(&line.text))?;
-                }
-                for line in &chunk.new {
-                    writeln!(out, "  + {}", escape_hidden(&line.text))?;
-                }
+        ApprovalBody::Diff(chunk) => {
+            for line in &chunk.old {
+                writeln!(out, "  - {}", escape_hidden(&line.text))?;
+            }
+            for line in &chunk.new {
+                writeln!(out, "  + {}", escape_hidden(&line.text))?;
             }
         }
     }
@@ -266,20 +295,24 @@ mod tests {
 
     use ox_core::engine::EnginePanic;
     use ox_core::engine::testing::{
-        engine, mount_reply, mount_tool_call_once, panic_message, panicked_engine, request_bodies,
-        with_pinned_home,
+        engine, mount_reply, mount_stalled_reply_once, mount_tool_call_once, panic_message,
+        panicked_engine, request_bodies, until_requested, with_pinned_home,
     };
     use ox_core::permission::testing::exec_grant;
     use ox_core::permission::{Mode, PermissionClass, Tier};
     use ox_core::protocol::testing::CapturingSink;
     use ox_core::session::store::testing::{saved_message_count, test_store};
     use ox_core::tool::testing::{bash_preview, bash_registry};
-    use ox_core::tool::{DiffChunk, DiffLine};
+    use ox_core::tool::view::{DiffChunk, NumberedLine};
 
     use super::*;
 
     mod drive {
         use super::*;
+
+        async fn no_signal() -> Shutdown {
+            std::future::pending().await
+        }
 
         #[tokio::test]
         async fn skips_blank_lines_and_exits_cleanly_at_eof() {
@@ -291,15 +324,59 @@ mod tests {
                 let sink = CapturingSink::default();
                 let input: &[u8] = b"\n   \nhello\n";
 
-                let exit = Box::pin(drive(engine.spawn(&[]), dir.path(), &sink, input, true))
-                    .await
-                    .unwrap();
+                let exit = Box::pin(drive(
+                    engine.spawn(),
+                    dir.path(),
+                    &sink,
+                    None,
+                    input,
+                    true,
+                    no_signal,
+                ))
+                .await
+                .unwrap();
 
                 assert_eq!(exit, Exit::Success);
                 let requests = request_bodies(&server).await;
                 assert_eq!(requests.len(), 1, "blank lines never reach the model");
                 let last = requests[0]["messages"].as_array().unwrap().last().unwrap();
                 assert_eq!(last["content"][0]["text"], "hello");
+            })
+            .await;
+        }
+
+        #[tokio::test]
+        async fn runs_the_first_prompt_before_reading_input() {
+            with_pinned_home(async {
+                let server = MockServer::start().await;
+                mount_reply(&server, "reply").await;
+                let dir = tempfile::tempdir().unwrap();
+                let engine = engine(server.uri(), &test_store(dir.path()), dir.path()).await;
+                let first = Some("Explain\nthis".to_owned());
+                let input: &[u8] = b"second\n";
+
+                let exit = Box::pin(drive(
+                    engine.spawn(),
+                    dir.path(),
+                    &CapturingSink::default(),
+                    first,
+                    input,
+                    true,
+                    no_signal,
+                ))
+                .await
+                .unwrap();
+
+                assert_eq!(exit, Exit::Success);
+                let prompts: Vec<serde_json::Value> = request_bodies(&server)
+                    .await
+                    .iter()
+                    .map(|request| {
+                        let last = request["messages"].as_array().unwrap().last().unwrap();
+                        last["content"][0]["text"].clone()
+                    })
+                    .collect();
+                assert_eq!(prompts, ["Explain\nthis", "second"]);
             })
             .await;
         }
@@ -316,6 +393,8 @@ mod tests {
                     .await;
                 mount_reply(&server, "reply").await;
                 let dir = tempfile::tempdir().unwrap();
+                let instructions = dir.path().join("CLAUDE.md");
+                fs::write(&instructions, b"\xff\xfe").unwrap();
                 let store = test_store(dir.path());
                 let engine = engine(server.uri(), &store, dir.path()).await;
                 let session_id = engine.session_id().to_owned();
@@ -327,11 +406,13 @@ mod tests {
                 "};
 
                 let exit = Box::pin(drive(
-                    engine.spawn(&[PathBuf::from("drifted.rs")]),
+                    engine.spawn(),
                     dir.path(),
                     &sink,
+                    None,
                     input,
                     true,
+                    no_signal,
                 ))
                 .await
                 .unwrap();
@@ -352,7 +433,13 @@ mod tests {
                     })
                     .collect();
                 assert_eq!(reports.len(), 3, "{reports:?}");
-                assert!(reports[0].ends_with(": drifted.rs"), "{reports:?}");
+                assert_eq!(
+                    reports[0],
+                    format!(
+                        "Skipped instruction file {}: stream did not contain valid UTF-8",
+                        instructions.display(),
+                    ),
+                );
                 assert!(reports[1].contains("HTTP 400"), "{reports:?}");
                 assert_eq!(
                     reports[2],
@@ -397,11 +484,13 @@ mod tests {
                 "};
 
                 let exit = Box::pin(drive(
-                    engine.spawn(&[]),
+                    engine.spawn(),
                     dir.path(),
                     &sink,
+                    None,
                     input.as_bytes(),
                     true,
+                    no_signal,
                 ))
                 .await
                 .unwrap();
@@ -428,9 +517,7 @@ mod tests {
                         Event::SessionTitleUpdated { title, .. } => {
                             Some(format!("renamed to {title}"))
                         }
-                        Event::ConfigChanged { model, effort, .. } => {
-                            Some(format!("using {} at {effort:?}", model.id()))
-                        }
+                        Event::ConfigChanged { notice, .. } => Some(notice),
                         Event::SessionRolled { .. } => Some("rolled".to_owned()),
                         Event::SessionResumed { id, title, .. } => {
                             Some(format!("resumed {id} titled {title:?}"))
@@ -444,8 +531,9 @@ mod tests {
                     [
                         "compacted with Some(\"focus on login\")",
                         "renamed to Fix login",
-                        "using claude-sonnet-5-5 at Some(High)",
-                        "using claude-sonnet-5-5 at Some(Low)",
+                        "Switched to Claude Sonnet 5.5 (claude-sonnet-5-5) · \
+                         effort high (model default)",
+                        "Effort set to low",
                         "rolled",
                         resumed.as_str(),
                     ],
@@ -465,17 +553,19 @@ mod tests {
                 let input: &[u8] = b"/init\n";
 
                 let exit = Box::pin(drive(
-                    engine.spawn(&[]),
+                    engine.spawn(),
                     dir.path(),
                     &CapturingSink::default(),
+                    None,
                     input,
                     true,
+                    no_signal,
                 ))
                 .await
                 .unwrap();
 
                 assert_eq!(exit, Exit::Success);
-                let Some(Ok(Op::Prompt(prompt))) = command::parse("init", "", dir.path()) else {
+                let Ok(Some(Op::Prompt(prompt))) = command::init::resolve("", dir.path()) else {
                     panic!("bare /init must resolve once AGENTS.md exists");
                 };
                 let requests = request_bodies(&server).await;
@@ -499,9 +589,17 @@ mod tests {
                     /init CLAUDE.md
                 "};
 
-                let exit = Box::pin(drive(engine.spawn(&[]), dir.path(), &sink, input, true))
-                    .await
-                    .unwrap();
+                let exit = Box::pin(drive(
+                    engine.spawn(),
+                    dir.path(),
+                    &sink,
+                    None,
+                    input,
+                    true,
+                    no_signal,
+                ))
+                .await
+                .unwrap();
 
                 assert_eq!(exit, Exit::Failure);
                 let errors: Vec<String> = sink
@@ -541,9 +639,17 @@ mod tests {
                     /help
                 "};
 
-                let exit = Box::pin(drive(engine.spawn(&[]), dir.path(), &sink, input, true))
-                    .await
-                    .unwrap();
+                let exit = Box::pin(drive(
+                    engine.spawn(),
+                    dir.path(),
+                    &sink,
+                    None,
+                    input,
+                    true,
+                    no_signal,
+                ))
+                .await
+                .unwrap();
 
                 assert_eq!(exit, Exit::Failure);
                 assert_eq!(request_bodies(&server).await, [] as [serde_json::Value; 0]);
@@ -591,11 +697,13 @@ mod tests {
                 "};
 
                 let exit = Box::pin(drive(
-                    engine.spawn(&[]),
+                    engine.spawn(),
                     dir.path(),
                     &CapturingSink::default(),
+                    None,
                     input.as_bytes(),
                     true,
+                    no_signal,
                 ))
                 .await
                 .unwrap();
@@ -629,11 +737,13 @@ mod tests {
                 "};
 
                 let exit = Box::pin(drive(
-                    engine.spawn(&[]),
+                    engine.spawn(),
                     dir.path(),
                     &CapturingSink::default(),
+                    None,
                     input.as_bytes(),
                     false,
+                    no_signal,
                 ))
                 .await
                 .unwrap();
@@ -655,6 +765,135 @@ mod tests {
         }
 
         #[tokio::test]
+        async fn sigint_from_a_terminal_interrupts_the_turn_and_keeps_reading() {
+            with_pinned_home(async {
+                let server = MockServer::start().await;
+                mount_stalled_reply_once(&server).await;
+                mount_reply(&server, "reply").await;
+                let dir = tempfile::tempdir().unwrap();
+                let store = test_store(dir.path());
+                let engine = engine(server.uri(), &store, dir.path()).await;
+                let session_id = engine.session_id().to_owned();
+                let sink = CapturingSink::default();
+                let input: &[u8] = indoc! {b"
+                    first
+                    second
+                "};
+                let mut interrupted = false;
+                let signal = async || {
+                    if !interrupted {
+                        until_requested(&server, 1).await;
+                        interrupted = true;
+                        return Shutdown::Interrupt;
+                    }
+                    std::future::pending().await
+                };
+
+                let exit = Box::pin(drive(
+                    engine.spawn(),
+                    dir.path(),
+                    &sink,
+                    None,
+                    input,
+                    true,
+                    signal,
+                ))
+                .await
+                .unwrap();
+
+                assert_eq!(exit, Exit::Success);
+                let ends: Vec<Event> = sink
+                    .events()
+                    .into_iter()
+                    .filter(|event| matches!(event, Event::Cancelled | Event::TurnComplete))
+                    .collect();
+                assert_eq!(ends, [Event::Cancelled, Event::TurnComplete]);
+                let requests = request_bodies(&server).await;
+                assert_eq!(requests.len(), 2, "{requests:?}");
+                let last = requests[1]["messages"].as_array().unwrap().last().unwrap();
+                assert_eq!(last["content"][0]["text"], "second");
+                assert_eq!(saved_message_count(&store, &session_id), 4);
+            })
+            .await;
+        }
+
+        #[tokio::test]
+        async fn sigint_at_a_terminal_prompt_keeps_reading() {
+            with_pinned_home(async {
+                let server = MockServer::start().await;
+                mount_reply(&server, "reply").await;
+                let dir = tempfile::tempdir().unwrap();
+                let engine = engine(server.uri(), &test_store(dir.path()), dir.path()).await;
+                let (writer, reader) = tokio::io::duplex(64);
+                let mut writer = Some(writer);
+                let signal = async || {
+                    let Some(mut writer) = writer.take() else {
+                        return std::future::pending().await;
+                    };
+                    tokio::io::AsyncWriteExt::write_all(&mut writer, b"hello\n")
+                        .await
+                        .unwrap();
+                    Shutdown::Interrupt
+                };
+
+                let exit = Box::pin(drive(
+                    engine.spawn(),
+                    dir.path(),
+                    &CapturingSink::default(),
+                    None,
+                    BufReader::new(reader),
+                    true,
+                    signal,
+                ))
+                .await
+                .unwrap();
+
+                assert_eq!(exit, Exit::Success);
+                let requests = request_bodies(&server).await;
+                assert_eq!(requests.len(), 1, "{requests:?}");
+                let last = requests[0]["messages"].as_array().unwrap().last().unwrap();
+                assert_eq!(last["content"][0]["text"], "hello");
+            })
+            .await;
+        }
+
+        #[tokio::test]
+        async fn sigint_with_piped_input_ends_the_run() {
+            with_pinned_home(async {
+                let server = MockServer::start().await;
+                mount_stalled_reply_once(&server).await;
+                let dir = tempfile::tempdir().unwrap();
+                let engine = engine(server.uri(), &test_store(dir.path()), dir.path()).await;
+                let input: &[u8] = b"first\n";
+                let mut interrupted = false;
+                let signal = async || {
+                    if interrupted {
+                        return std::future::pending().await;
+                    }
+                    until_requested(&server, 1).await;
+                    interrupted = true;
+                    Shutdown::Interrupt
+                };
+
+                let exit = Box::pin(drive(
+                    engine.spawn(),
+                    dir.path(),
+                    &CapturingSink::default(),
+                    None,
+                    input,
+                    false,
+                    signal,
+                ))
+                .await
+                .unwrap();
+
+                assert_eq!(exit, Exit::Signal(Shutdown::Interrupt));
+                assert_eq!(request_bodies(&server).await.len(), 1);
+            })
+            .await;
+        }
+
+        #[tokio::test]
         async fn hands_back_the_panic_of_an_engine_that_stops() {
             let input: &[u8] = b"hello\n";
 
@@ -662,8 +901,10 @@ mod tests {
                 panicked_engine(),
                 Path::new("/repo"),
                 &CapturingSink::default(),
+                None,
                 input,
                 true,
+                no_signal,
             ))
             .await;
 
@@ -816,16 +1057,16 @@ mod tests {
                 &mut out,
                 &ApprovalPreview {
                     title: "Edit(src/a.rs)".to_owned(),
-                    body: ApprovalBody::Diff(vec![DiffChunk {
-                        old: vec![DiffLine {
+                    body: ApprovalBody::Diff(DiffChunk {
+                        old: vec![NumberedLine {
                             number: 3,
                             text: "let a = 1;".to_owned(),
                         }],
-                        new: vec![DiffLine {
+                        new: vec![NumberedLine {
                             number: 3,
                             text: "let a = 2;\u{1b}[2K\u{200b}".to_owned(),
                         }],
-                    }]),
+                    }),
                 },
                 &basis,
             )

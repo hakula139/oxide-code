@@ -22,6 +22,7 @@ jobs:
   flake-check:
     name: Nix Flake Check
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - name: Checkout
         uses: actions/checkout@v7
@@ -35,6 +36,7 @@ jobs:
   node-check:
     name: Node Check
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - name: Checkout
         uses: actions/checkout@v7
@@ -59,6 +61,7 @@ jobs:
   rust-check:
     name: Rust Check
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - name: Checkout
         uses: actions/checkout@v7
@@ -86,6 +89,7 @@ jobs:
   dependency-check:
     name: Dependency Check
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - name: Checkout
         uses: actions/checkout@v7
@@ -101,6 +105,7 @@ jobs:
   msrv-check:
     name: MSRV Check
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - name: Checkout
         uses: actions/checkout@v7
@@ -120,6 +125,7 @@ jobs:
   macos-check:
     name: macOS Check
     runs-on: macos-latest
+    timeout-minutes: 20
     steps:
       - name: Checkout
         uses: actions/checkout@v7
@@ -145,6 +151,7 @@ jobs:
   windows-check:
     name: Windows Check
     runs-on: windows-latest
+    timeout-minutes: 20
     steps:
       - name: Checkout
         uses: actions/checkout@v7
@@ -170,6 +177,7 @@ jobs:
   coverage:
     name: Coverage
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - name: Checkout
         uses: actions/checkout@v7
@@ -194,6 +202,7 @@ jobs:
   nix-build:
     name: Nix Build (${{ matrix.runner }})
     runs-on: ${{ matrix.runner }}
+    timeout-minutes: 40
     strategy:
       fail-fast: false
       matrix:
@@ -225,6 +234,7 @@ jobs:
       - coverage
       - nix-build
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     steps:
       - name: Check results
         if: contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled')

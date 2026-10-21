@@ -1,5 +1,5 @@
 //! `/resume` (alias `/continue`) opens a [`SearchableList`] session picker, and
-//! `/resume <id-prefix>` resumes directly. `ox --resume` opens the same picker at startup.
+//! `/resume <id-prefix>` resumes directly. `ox -r` without a session opens the same picker at startup.
 
 use std::borrow::Cow;
 use std::path::{Path, PathBuf};
@@ -39,8 +39,11 @@ use super::registry::{SlashCommand, SlashKind, SlashOutcome};
 use super::sessions::{BARE_ARCHIVE_HINT, open_store, saved_error_message};
 use crate::action::Action;
 use crate::glyphs::MODAL_ERROR_PREFIX;
-use crate::keymap::{KeyAction, KeyChord, Keymap};
-use crate::modal::chrome::{COLUMN_GAP, FOOTER_HEIGHT, render_footer, render_footer_text};
+use crate::keymap::{KeyAction, KeyChord, Keymap, is_unmodified};
+use crate::modal::chrome::{
+    COLUMN_GAP, FOOTER_HEIGHT, above, height_above, render_footer, render_footer_text,
+};
+use crate::modal::line_editor::LineEditor;
 use crate::modal::searchable_list::{SearchableItem, SearchableList};
 use crate::modal::{Modal, ModalAction, ModalKey};
 use crate::theme::Theme;
@@ -52,7 +55,7 @@ const PICKER_TITLE: &str = "Resume session";
 const PICKER_DESCRIPTION: &str = "Pick a session to resume in place";
 const ARCHIVED_PICKER_TITLE: &str = "Resume archived session";
 const ARCHIVED_PICKER_DESCRIPTION: &str = "Pick a session to unarchive and resume in place";
-const EMPTY_TEXT: &str = "no sessions found";
+const EMPTY_TEXT: &str = "No sessions found";
 const VIEWPORT_HEIGHT: u16 = 12;
 /// Sessions a worker reads per page.
 const PAGE_SIZE: usize = 30;
@@ -124,7 +127,7 @@ struct SessionRow {
 }
 
 /// One column of a picker row. The title takes whatever width the other columns leave.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Column {
     Id,
     Title,
@@ -284,7 +287,7 @@ impl SearchableItem for SessionRow {
 
 // ── Actions ──
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum PickerAction {
     Resume,
     Dismiss,
@@ -508,7 +511,7 @@ impl ResumePicker {
         Self::open(store, live_session_id, false, Dismissal::Cancel)
     }
 
-    /// The `ox --resume` picker, scoped to every project when `all` is set.
+    /// The picker `ox -r` opens without a session, scoped to every project when `all` is set.
     pub fn at_startup(store: SessionStore, live_session_id: String, all: bool) -> Self {
         Self::open(store, live_session_id, all, Dismissal::Quit)
     }
@@ -695,16 +698,13 @@ impl ResumePicker {
 
 impl Modal for ResumePicker {
     fn height(&self, width: u16, max_height: u16) -> u16 {
-        let list_max = max_height.saturating_sub(FOOTER_HEIGHT);
-        self.list.height(width, list_max) + FOOTER_HEIGHT
+        height_above(max_height, FOOTER_HEIGHT, |room| {
+            self.list.height(width, room)
+        })
     }
 
     fn render(&self, frame: &mut Frame<'_>, area: Rect, theme: &Theme) {
-        let list_area = Rect {
-            height: area.height.saturating_sub(FOOTER_HEIGHT),
-            ..area
-        };
-        self.list.render(frame, list_area, theme);
+        self.list.render(frame, above(area, FOOTER_HEIGHT), theme);
 
         if let Some(err) = &self.load_error {
             let text = format!("{MODAL_ERROR_PREFIX}{err}");
@@ -727,10 +727,10 @@ impl Modal for ResumePicker {
             self.run(action)
         } else {
             match event.code {
-                KeyCode::Up => self.list.select_prev(),
-                KeyCode::Down => self.list.select_next(),
-                KeyCode::PageUp => self.list.page_up(),
-                KeyCode::PageDown => self.list.page_down(),
+                KeyCode::Up if is_unmodified(event) => self.list.select_prev(),
+                KeyCode::Down if is_unmodified(event) => self.list.select_next(),
+                KeyCode::PageUp if is_unmodified(event) => self.list.page_up(),
+                KeyCode::PageDown if is_unmodified(event) => self.list.page_down(),
                 _ => self.list.edit_query(event),
             }
             ModalKey::Consumed
@@ -784,6 +784,10 @@ impl Modal for ResumePicker {
     fn captures_esc(&self) -> bool {
         true
     }
+
+    fn binds_modified_key(&self, event: &KeyEvent) -> bool {
+        LineEditor::binds_modified_key(event)
+    }
 }
 
 #[cfg(test)]
@@ -799,7 +803,8 @@ mod tests {
     use ox_core::session::display::UNTITLED_MARKER;
     use ox_core::session::entry::{ExitInfo, TitleInfo};
     use ox_core::session::store::testing::{
-        archive_test_session, listed_ids, seed_test_session, test_project_dir, test_store,
+        archive_test_session, isolated_store, listed_ids, seed_test_session, test_project_dir,
+        test_store,
     };
 
     use super::Column::{Branch, Id, Msgs, Project, Title, When};
@@ -842,12 +847,6 @@ mod tests {
                 archive_test_session(store, &id);
             }
         }
-    }
-
-    fn isolated_store() -> (tempfile::TempDir, SessionStore) {
-        let dir = tempfile::tempdir().unwrap();
-        let store = test_store(dir.path());
-        (dir, store)
     }
 
     fn footer_row(picker: &ResumePicker, width: u16) -> String {
@@ -1376,16 +1375,19 @@ mod tests {
             );
             let expected = store.find_session_path(&stamped_id(0x11)).unwrap();
             let mut picker = opened(ResumePicker::new(store, "live-session-id".to_owned()));
-            for modifiers in [KeyModifiers::NONE, KeyModifiers::CONTROL] {
-                let outcome = picker.handle_key(&KeyEvent::new(KeyCode::Enter, modifiers));
-                let ModalKey::Submitted(ModalAction::Dispatch(Action::Op(Op::Resume {
-                    target: ResumeTarget::Path(path),
-                }))) = outcome
-                else {
-                    panic!("expected Submitted(Resume) for {modifiers:?}, got {outcome:?}");
-                };
-                assert_eq!(path, expected);
-            }
+
+            let ctrl_enter =
+                picker.handle_key(&KeyEvent::new(KeyCode::Enter, KeyModifiers::CONTROL));
+            let outcome = picker.handle_key(&KeyEvent::from(KeyCode::Enter));
+
+            assert!(matches!(ctrl_enter, ModalKey::Consumed), "{ctrl_enter:?}");
+            let ModalKey::Submitted(ModalAction::Dispatch(Action::Op(Op::Resume {
+                target: ResumeTarget::Path(path),
+            }))) = outcome
+            else {
+                panic!("expected Submitted(Resume), got {outcome:?}");
+            };
+            assert_eq!(path, expected);
         }
 
         #[test]
@@ -1873,7 +1875,8 @@ mod tests {
                 panic!("Ctrl+D must push the confirm modal, got {outcome:?}");
             };
             let rows = render_rows(confirm.as_ref(), 60, confirm.height(60, u16::MAX));
-            assert_eq!(rows[2].trim_end(), "11111111 — Fix auth");
+            assert_eq!(rows[2].trim_end(), "Fix auth");
+            assert_eq!(rows[3].trim_end(), "11111111 · 2026-04-18 · 3 msgs");
         }
 
         #[test]

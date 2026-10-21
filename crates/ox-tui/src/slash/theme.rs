@@ -11,7 +11,7 @@ use super::context::SlashContext;
 use super::matcher::rank_by_prefix;
 use super::registry::{ArgCompletion, SlashCommand, SlashKind, SlashOutcome};
 use crate::action::Action;
-use crate::modal::chrome::{CONFIRM_HINTS, FOOTER_HEIGHT, render_footer};
+use crate::modal::chrome::CONFIRM_HINTS;
 use crate::modal::list_picker::{ListPicker, PickerItem, numeric_hint};
 use crate::modal::{Modal, ModalAction, ModalKey};
 use crate::theme::Theme;
@@ -101,12 +101,15 @@ impl PickerItem for ThemeRow {
     fn label(&self) -> &str {
         self.theme.name
     }
+
     fn description(&self) -> Option<&str> {
         Some(self.theme.description)
     }
+
     fn is_active(&self) -> bool {
         self.is_active
     }
+
     fn key_hint(&self) -> Option<char> {
         self.hint
     }
@@ -133,61 +136,35 @@ impl ThemePicker {
         }
     }
 
-    /// `Preview` of the row under the cursor, or `Consumed` when the list is empty.
-    fn preview_current(&self) -> ModalKey {
-        match self.list.selected() {
-            Some(row) => ModalKey::Preview(ModalAction::Dispatch(Action::PreviewTheme(row.theme))),
-            None => ModalKey::Consumed,
-        }
-    }
-
     /// Enter commits when the cursor moved off the original theme and cancels otherwise.
     fn submit(&self) -> ModalKey {
-        let Some(row) = self.list.selected() else {
-            return ModalKey::Cancelled;
-        };
-        if row.theme.name == self.original_name {
+        let theme = self.list.selected().theme;
+        if theme.name == self.original_name {
             return ModalKey::Cancelled;
         }
-        ModalKey::Submitted(ModalAction::Dispatch(Action::SwapTheme(row.theme)))
+        ModalKey::Submitted(ModalAction::Dispatch(Action::SwapTheme(theme)))
     }
 }
 
 impl Modal for ThemePicker {
     fn height(&self, width: u16, max_height: u16) -> u16 {
-        let list_max = max_height.saturating_sub(FOOTER_HEIGHT);
-        self.list.height(width, list_max) + FOOTER_HEIGHT
+        self.list.height_with_footer(width, max_height)
     }
 
     fn render(&self, frame: &mut Frame<'_>, area: Rect, theme: &Theme) {
-        let list_area = Rect {
-            height: area.height.saturating_sub(FOOTER_HEIGHT),
-            ..area
-        };
-        self.list.render(frame, list_area, theme);
-        render_footer(frame, area, &CONFIRM_HINTS, theme);
+        self.list
+            .render_with_footer(frame, area, &CONFIRM_HINTS, theme);
     }
 
     fn handle_key(&mut self, event: &KeyEvent) -> ModalKey {
-        match event.code {
-            KeyCode::Enter => self.submit(),
-            KeyCode::Up | KeyCode::Char('k') => {
-                self.list.select_prev();
-                self.preview_current()
-            }
-            KeyCode::Down | KeyCode::Char('j') => {
-                self.list.select_next();
-                self.preview_current()
-            }
-            KeyCode::Char(c @ '1'..='9') => {
-                if self.list.select_by_hint(c) {
-                    self.preview_current()
-                } else {
-                    ModalKey::Consumed
-                }
-            }
-            _ => ModalKey::Consumed,
+        if event.code == KeyCode::Enter {
+            return self.submit();
         }
+        if !self.list.navigate(event) {
+            return ModalKey::Consumed;
+        }
+        let theme = self.list.selected().theme;
+        ModalKey::Preview(ModalAction::Dispatch(Action::PreviewTheme(theme)))
     }
 }
 
@@ -327,7 +304,7 @@ mod tests {
             #[test]
             fn positions_cursor_on_active_theme() {
                 let p = picker_with_active("latte");
-                let row = p.list.selected().expect("active row");
+                let row = p.list.selected();
                 assert_eq!(row.theme.name, "latte");
                 assert!(row.is_active);
             }
@@ -336,7 +313,7 @@ mod tests {
             fn with_unknown_active_keeps_cursor_on_first_row() {
                 // A custom path matches no built-in row, so the cursor falls back to the first.
                 let p = picker_with_active("~/themes/custom.toml");
-                let row = p.list.selected().expect("first row");
+                let row = p.list.selected();
                 assert_eq!(row.theme.name, "mocha");
             }
         }
@@ -373,40 +350,21 @@ mod tests {
             use super::*;
 
             #[test]
-            fn down_and_j_emit_preview_for_next_row_without_popping() {
-                for code in [KeyCode::Down, KeyCode::Char('j')] {
+            fn arrows_preview_the_row_they_land_on_without_popping() {
+                for (code, expected) in [
+                    (KeyCode::Down, "macchiato"),
+                    (KeyCode::Up, BUILT_IN.last().unwrap().name),
+                ] {
                     let mut p = picker_with_active("mocha");
-                    let outcome = p.handle_key(&KeyEvent::from(code));
-                    match outcome {
-                        ModalKey::Preview(ModalAction::Dispatch(Action::PreviewTheme(theme))) => {
-                            assert_eq!(
-                                theme.name, "macchiato",
-                                "{code:?} from mocha lands on macchiato"
-                            );
-                        }
-                        other => {
-                            panic!("expected Preview(PreviewTheme) for {code:?}, got {other:?}")
-                        }
-                    }
-                }
-            }
 
-            #[test]
-            fn up_and_k_emit_preview_for_prev_row_without_popping() {
-                // From the first row they wrap to the last via `select_prev`.
-                for code in [KeyCode::Up, KeyCode::Char('k')] {
-                    let mut p = picker_with_active("mocha");
                     let outcome = p.handle_key(&KeyEvent::from(code));
-                    match outcome {
-                        ModalKey::Preview(ModalAction::Dispatch(Action::PreviewTheme(theme))) => {
-                            assert_eq!(
-                                theme.name,
-                                BUILT_IN.last().unwrap().name,
-                                "{code:?} from first row wraps to last",
-                            );
-                        }
-                        other => panic!("expected Preview for {code:?}, got {other:?}"),
-                    }
+
+                    let ModalKey::Preview(ModalAction::Dispatch(Action::PreviewTheme(theme))) =
+                        outcome
+                    else {
+                        panic!("expected a preview for {code:?}, got {outcome:?}");
+                    };
+                    assert_eq!(theme.name, expected, "{code:?} from mocha");
                 }
             }
 

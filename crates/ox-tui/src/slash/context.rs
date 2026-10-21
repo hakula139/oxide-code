@@ -11,11 +11,11 @@ use ox_core::tool::bash::background::BackgroundShell;
 /// events. The saved record `--list` reads is [`ox_core::session::entry::SessionInfo`].
 pub(crate) struct LiveSessionInfo {
     pub(crate) cwd: String,
-    /// The real path behind the display `cwd`, for the status bar's git probes, `/diff`, and the
-    /// session store.
+    /// The real path behind the display `cwd`, for the status bar's git probes and the session
+    /// store.
     pub(crate) working_dir: Option<PathBuf>,
-    /// The root `/init` checks for instruction files: the git repository containing the session's
-    /// working directory, or that directory itself outside a repository.
+    /// The git repository containing the session's working directory, or that directory itself
+    /// outside a repository. `/init` checks it for instruction files, and `/diff` runs git there.
     pub(crate) project_root: PathBuf,
     pub(crate) version: &'static str,
     pub(crate) session_id: String,
@@ -72,7 +72,6 @@ pub(crate) mod testing {
             background_shells: Vec::new(),
             config: ConfigSnapshot {
                 auth: Some(AuthSource::ApiKeyEnv),
-                signed_out_notice: None,
                 base_url: "https://api.test.invalid".to_owned(),
                 extra_ca_certs: None,
                 gateway: GatewaySnapshot {
@@ -80,7 +79,7 @@ pub(crate) mod testing {
                     attribution: true,
                     structured_outputs: true,
                 },
-                model: ModelSpec::resolve("claude-opus-5-5".to_owned()),
+                model: ModelSpec::resolve("claude-opus-5-5"),
                 effort: Some(Effort::High),
                 max_tokens: None,
                 max_tool_rounds: None,

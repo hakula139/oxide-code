@@ -15,7 +15,7 @@ use super::context::SlashContext;
 use super::matcher::rank_by_prefix;
 use super::registry::{ArgCompletion, SlashCommand, SlashKind, SlashOutcome};
 use crate::action::Action;
-use crate::modal::chrome::{CONFIRM_HINTS, FOOTER_HEIGHT, render_footer};
+use crate::modal::chrome::CONFIRM_HINTS;
 use crate::modal::list_picker::{ListPicker, PickerItem, numeric_hint};
 use crate::modal::{Modal, ModalAction, ModalKey};
 use crate::theme::Theme;
@@ -81,12 +81,15 @@ impl PickerItem for ModeRow {
     fn label(&self) -> &str {
         self.mode.as_str()
     }
+
     fn description(&self) -> Option<&str> {
         Some(self.mode.description())
     }
+
     fn is_active(&self) -> bool {
         self.is_active
     }
+
     fn key_hint(&self) -> Option<char> {
         self.hint
     }
@@ -119,47 +122,30 @@ impl ModePicker {
     }
 
     fn submit(&self) -> ModalKey {
-        match self.list.selected() {
-            Some(row) if row.mode != self.current => {
-                ModalKey::Submitted(ModalAction::Dispatch(Action::Op(Op::SetMode(row.mode))))
-            }
-            _ => ModalKey::Cancelled,
+        let mode = self.list.selected().mode;
+        if mode == self.current {
+            return ModalKey::Cancelled;
         }
+        ModalKey::Submitted(ModalAction::Dispatch(Action::Op(Op::SetMode(mode))))
     }
 }
 
 impl Modal for ModePicker {
     fn height(&self, width: u16, max_height: u16) -> u16 {
-        let list_max = max_height.saturating_sub(FOOTER_HEIGHT);
-        self.list.height(width, list_max) + FOOTER_HEIGHT
+        self.list.height_with_footer(width, max_height)
     }
 
     fn render(&self, frame: &mut Frame<'_>, area: Rect, theme: &Theme) {
-        let list_area = Rect {
-            height: area.height.saturating_sub(FOOTER_HEIGHT),
-            ..area
-        };
-        self.list.render(frame, list_area, theme);
-        render_footer(frame, area, &CONFIRM_HINTS, theme);
+        self.list
+            .render_with_footer(frame, area, &CONFIRM_HINTS, theme);
     }
 
     fn handle_key(&mut self, event: &KeyEvent) -> ModalKey {
-        match event.code {
-            KeyCode::Enter => self.submit(),
-            KeyCode::Up | KeyCode::Char('k') => {
-                self.list.select_prev();
-                ModalKey::Consumed
-            }
-            KeyCode::Down | KeyCode::Char('j') => {
-                self.list.select_next();
-                ModalKey::Consumed
-            }
-            KeyCode::Char(c @ '1'..='9') => {
-                self.list.select_by_hint(c);
-                ModalKey::Consumed
-            }
-            _ => ModalKey::Consumed,
+        if event.code == KeyCode::Enter {
+            return self.submit();
         }
+        self.list.navigate(event);
+        ModalKey::Consumed
     }
 }
 
@@ -257,9 +243,9 @@ mod tests {
                         "Select permission mode",
                         "Switch the permission mode for this session. Restarting returns to your config.",
                         "",
-                        "  1. manual    Ask about calls no rule settles",
+                        "  1. manual    Ask before tool calls that no permission rule allows or denies",
                         "> 2. plan    ✓ Read-only: deny edits and commands",
-                        "  3. yolo      Run calls no rule settles",
+                        "  3. yolo      Run tool calls without asking unless a rule denies or asks",
                         "",
                         "Enter to confirm  ·  Esc to cancel",
                     ]
