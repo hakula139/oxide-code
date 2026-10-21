@@ -1869,7 +1869,7 @@ mod tests {
             };
             let rows = render_rows(confirm.as_ref(), 60, confirm.height(60, u16::MAX));
             assert_eq!(rows[2].trim_end(), "Fix auth");
-            assert!(rows[3].starts_with("11111111 · "), "{}", rows[3]);
+            assert_eq!(rows[3].trim_end(), "11111111 · 2026-04-18 · 3 msgs");
         }
 
         #[test]

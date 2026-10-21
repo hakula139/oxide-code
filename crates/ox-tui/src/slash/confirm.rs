@@ -111,7 +111,8 @@ impl Modal for ConfirmDeleteSessionModal {
     fn handle_key(&mut self, event: &KeyEvent) -> ModalKey {
         // The modal stack handles Esc and Ctrl+C.
         match event.code {
-            KeyCode::Char('y' | 'Y') | KeyCode::Enter if is_plain_char(event) => self.confirm(),
+            KeyCode::Char('y' | 'Y') if is_plain_char(event) => self.confirm(),
+            KeyCode::Enter if event.modifiers.is_empty() => self.confirm(),
             KeyCode::Char('n' | 'N') if is_plain_char(event) => ModalKey::Cancelled,
             _ => ModalKey::Consumed,
         }
@@ -121,8 +122,8 @@ impl Modal for ConfirmDeleteSessionModal {
 #[cfg(test)]
 mod tests {
     use crossterm::event::KeyModifiers;
-    use time::UtcOffset;
     use time::macros::datetime;
+    use time::{OffsetDateTime, UtcOffset};
 
     use ox_core::session::display::format_metadata_line;
     use ox_core::session::store::SessionStore;
@@ -132,10 +133,11 @@ mod tests {
     use crate::modal::testing::render_rows;
     use crate::slash::testing::stamped_id;
 
-    /// The metadata row `/delete` and the `/resume` picker build for a 3-message session.
-    fn metadata(session_id: &str) -> String {
-        let last_active = datetime!(2026-04-18 09:00:00 UTC);
-        format_metadata_line(session_id, last_active, UtcOffset::UTC, 3, None, None)
+    const LAST_ACTIVE: OffsetDateTime = datetime!(2026-04-18 09:00:00 UTC);
+    const MESSAGES: u32 = 3;
+
+    fn seed_modal(store: &SessionStore, byte: u8, title: &str) -> ConfirmDeleteSessionModal {
+        seed_modal_with_live(store, byte, title, "live-session-id")
     }
 
     /// Seeds a session stamped with `byte` and opens its confirm modal, with `live_id` live.
@@ -146,32 +148,23 @@ mod tests {
         live_id: &str,
     ) -> ConfirmDeleteSessionModal {
         let id = stamped_id(byte);
-        seed_test_session(
-            store,
-            &id,
-            Some(title),
-            Some(3),
-            datetime!(2026-04-18 09:00:00 UTC),
-        );
-        ConfirmDeleteSessionModal::new(
-            store.find_session_path(&id).unwrap(),
-            id.clone(),
-            title.to_owned(),
-            metadata(&id),
-            live_id.to_owned(),
+        seed_test_session(store, &id, Some(title), Some(MESSAGES), LAST_ACTIVE);
+        let path = store.find_session_path(&id).unwrap();
+        let metadata = metadata(&id);
+        ConfirmDeleteSessionModal::new(path, id, title.to_owned(), metadata, live_id.to_owned())
+    }
+
+    /// The [`format_metadata_line`] row of a seeded session, as the `/resume` picker builds it in
+    /// the current project.
+    fn metadata(session_id: &str) -> String {
+        format_metadata_line(
+            session_id,
+            LAST_ACTIVE,
+            UtcOffset::UTC,
+            MESSAGES,
+            None,
+            None,
         )
-    }
-
-    fn seed_modal(store: &SessionStore, byte: u8, title: &str) -> ConfirmDeleteSessionModal {
-        seed_modal_with_live(store, byte, title, "live-session-id")
-    }
-
-    fn is_listed(store: &SessionStore, session_id: &str) -> bool {
-        store
-            .list()
-            .unwrap()
-            .iter()
-            .any(|s| s.session_id == session_id)
     }
 
     mod render {
@@ -188,16 +181,16 @@ mod tests {
         fn names_the_session_by_title_above_the_metadata_that_carries_its_id() {
             let (_dir, store) = isolated_store();
             let modal = seed_modal(&store, 0xab, "Fix auth flow");
-            let metadata = metadata(&stamped_id(0xab));
-            assert!(metadata.starts_with("abababab · "), "{metadata}");
+
+            let rows = rendered_rows(&modal, 60);
 
             assert_eq!(
-                rendered_rows(&modal, 60),
+                rows,
                 [
                     "Delete this session?",
                     "",
                     "Fix auth flow",
-                    metadata.as_str(),
+                    "abababab · 2026-04-18 · 3 msgs",
                     "",
                     "Y to delete  ·  N to cancel",
                 ],
@@ -209,10 +202,13 @@ mod tests {
             let (_dir, store) = isolated_store();
             let mut modal = seed_modal(&store, 0xab, "Fix auth flow");
             modal.error = Some("permission denied".to_owned());
+
+            let rows = rendered_rows(&modal, 60);
+
             assert_eq!(
-                rendered_rows(&modal, 60)[3..],
+                rows[3..],
                 [
-                    metadata(&stamped_id(0xab)).as_str(),
+                    "abababab · 2026-04-18 · 3 msgs",
                     "! permission denied",
                     "",
                     "Y to delete  ·  N to cancel",
@@ -233,6 +229,18 @@ mod tests {
     mod handle_key {
         use super::*;
 
+        fn is_listed(store: &SessionStore, session_id: &str) -> bool {
+            store
+                .list()
+                .unwrap()
+                .iter()
+                .any(|s| s.session_id == session_id)
+        }
+
+        /// The error a delete of the live session stamped `0xab` reports.
+        const LIVE_REFUSAL: &str = "Session abababab is the live session. \
+                                    Run `/clear` to start a new one, then delete it.";
+
         #[test]
         fn y_deletes_and_submits_a_chat_confirmation() {
             let (_dir, store) = isolated_store();
@@ -249,32 +257,40 @@ mod tests {
         }
 
         #[test]
-        fn uppercase_y_and_enter_also_delete() {
-            for key in [KeyCode::Char('Y'), KeyCode::Enter] {
+        fn shifted_y_and_plain_enter_also_delete() {
+            for event in [
+                KeyEvent::new(KeyCode::Char('Y'), KeyModifiers::SHIFT),
+                KeyEvent::from(KeyCode::Enter),
+            ] {
                 let (_dir, store) = isolated_store();
                 let mut modal = seed_modal(&store, 0xab, "Fix auth flow");
 
-                let outcome = modal.handle_key(&KeyEvent::from(key));
+                let outcome = modal.handle_key(&event);
 
                 assert!(
                     matches!(outcome, ModalKey::Submitted(ModalAction::SystemMessage(_))),
-                    "{key:?}: {outcome:?}",
+                    "{event:?}: {outcome:?}",
                 );
-                assert!(!is_listed(&store, &stamped_id(0xab)), "{key:?}");
+                assert!(!is_listed(&store, &stamped_id(0xab)), "{event:?}");
             }
         }
 
         #[test]
-        fn control_y_and_control_enter_do_not_confirm_delete() {
+        fn modified_confirmation_keys_do_not_delete() {
             let (_dir, store) = isolated_store();
             let mut modal = seed_modal(&store, 0xab, "Fix auth");
 
             for event in [
                 KeyEvent::new(KeyCode::Char('y'), KeyModifiers::CONTROL),
                 KeyEvent::new(KeyCode::Enter, KeyModifiers::CONTROL),
+                KeyEvent::new(KeyCode::Enter, KeyModifiers::SHIFT),
             ] {
-                assert!(matches!(modal.handle_key(&event), ModalKey::Consumed));
+                assert!(
+                    matches!(modal.handle_key(&event), ModalKey::Consumed),
+                    "{event:?}"
+                );
             }
+
             assert!(
                 is_listed(&store, &stamped_id(0xab)),
                 "modified confirmation keys must not delete the session",
@@ -282,7 +298,7 @@ mod tests {
         }
 
         #[test]
-        fn n_press_cancels_without_running_delete() {
+        fn n_cancels_without_deleting() {
             let (_dir, store) = isolated_store();
             let mut modal = seed_modal(&store, 0xab, "Fix auth flow");
 
@@ -299,28 +315,35 @@ mod tests {
         }
 
         #[test]
-        fn a_failed_delete_keeps_the_modal_open_with_its_error() {
+        fn a_failed_delete_keeps_the_modal_open_through_stray_keys() {
             // Deleting the live session fails, so the modal stays open with the error.
             let (_dir, store) = isolated_store();
             let live_id = stamped_id(0xab);
             let mut modal = seed_modal_with_live(&store, 0xab, "Fix auth flow", &live_id);
 
             let outcome = modal.handle_key(&KeyEvent::from(KeyCode::Char('y')));
-
             assert!(matches!(outcome, ModalKey::Consumed));
-            assert_eq!(
-                modal.error.as_deref(),
-                Some(
-                    "Session abcd1234 is the live session. \
-                     Run `/clear` to start a new one, then delete it."
-                ),
-            );
+
             for stray in [KeyCode::Char('x'), KeyCode::Up, KeyCode::Down, KeyCode::Tab] {
                 let outcome = modal.handle_key(&KeyEvent::from(stray));
                 assert!(matches!(outcome, ModalKey::Consumed), "{stray:?}");
-                assert!(modal.error.is_some(), "{stray:?} must not clear the error");
             }
-            assert!(is_listed(&store, &live_id));
+
+            assert_eq!(modal.error.as_deref(), Some(LIVE_REFUSAL));
+            assert!(is_listed(&store, &live_id), "the live session survives");
+        }
+
+        #[test]
+        fn a_retry_replaces_the_previous_error() {
+            let (_dir, store) = isolated_store();
+            let live_id = stamped_id(0xab);
+            let mut modal = seed_modal_with_live(&store, 0xab, "Fix auth flow", &live_id);
+            modal.error = Some("permission denied".to_owned());
+
+            let outcome = modal.handle_key(&KeyEvent::from(KeyCode::Char('y')));
+
+            assert!(matches!(outcome, ModalKey::Consumed));
+            assert_eq!(modal.error.as_deref(), Some(LIVE_REFUSAL));
         }
 
         #[test]
