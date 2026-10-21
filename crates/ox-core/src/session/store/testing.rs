@@ -77,6 +77,13 @@ pub fn test_store(dir: &Path) -> SessionStore {
     SessionStore::open_at(dir.to_path_buf(), TEST_PROJECT).expect("the test store opens")
 }
 
+/// A [`test_store`] in a fresh temp dir, which lives as long as the returned guard.
+pub fn isolated_store() -> (tempfile::TempDir, SessionStore) {
+    let dir = tempfile::tempdir().expect("a temp dir opens");
+    let store = test_store(dir.path());
+    (dir, store)
+}
+
 pub fn test_project_dir(dir: &Path) -> PathBuf {
     dir.join(TEST_PROJECT)
 }
