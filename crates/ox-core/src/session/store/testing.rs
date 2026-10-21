@@ -42,7 +42,7 @@ impl SessionStore {
     /// Finds a session file by the ID in its name, in any project.
     pub fn find_session_path(&self, session_id: &str) -> Result<PathBuf> {
         for entry in fs::read_dir(&self.sessions_dir)
-            .with_context(|| format!("cannot read {}", self.sessions_dir.display()))?
+            .with_context(|| format!("failed to read {}", self.sessions_dir.display()))?
         {
             let dir = entry?.path();
             if dir.is_dir()

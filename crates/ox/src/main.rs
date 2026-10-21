@@ -1,11 +1,11 @@
 //! CLI entry point: config loading, session resolution, mode dispatch.
 
 mod driver;
+mod session_list;
 
 use std::env;
 use std::ffi::OsStr;
 use std::io::{self, IsTerminal, Write};
-use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::sync::Arc;
 
@@ -18,13 +18,12 @@ use time::error::IndeterminateOffset;
 use tracing::warn;
 
 use ox_core::client::anthropic::identity;
-use ox_core::config::{Config, ConfigSnapshot};
+use ox_core::config::Config;
 use ox_core::engine::{Engine, EnginePanic, SessionParts};
 use ox_core::file_tracker::FileTracker;
 use ox_core::permission::Mode;
 use ox_core::session::display::archive_notice;
 use ox_core::session::handle::ResumedSession;
-use ox_core::session::list_view::render_list;
 use ox_core::session::resolver::{SessionTarget, resolve_session};
 use ox_core::session::store::SessionStore;
 use ox_core::session::store::listing::{DEFAULT_SESSION_LIST_LIMIT, ListScope};
@@ -33,7 +32,7 @@ use ox_core::util::tls::PlatformTrust;
 use ox_tui::Startup;
 use ox_tui::slash::ResumePicker;
 use ox_tui::terminal;
-use ox_tui::theme::{ResolvedTheme, resolve_theme};
+use ox_tui::theme::resolve_theme;
 
 use driver::Exit;
 use driver::headless::OutputFormat;
@@ -304,14 +303,16 @@ async fn async_main(offset_error: Option<IndeterminateOffset>) -> Result<Exit> {
     let cwd = env::current_dir().context("failed to read the current working directory")?;
 
     if cli.list {
-        list_sessions(
+        let store = SessionStore::open(&cwd)?;
+        session_list::write(
             &mut io::stdout().lock(),
-            &cwd,
+            &store,
             ListScope {
                 all: cli.all,
                 archived: cli.archived,
             },
             cli.limit,
+            terminal::stdout_width(),
         )?;
         return Ok(Exit::Success);
     }
@@ -385,37 +386,16 @@ async fn async_main(offset_error: Option<IndeterminateOffset>) -> Result<Exit> {
         unarchived,
     };
     // Boxed, since on Windows this future passes clippy's 16 KiB `large_futures` threshold.
-    Box::pin(run_tui(engine, theme, config.snapshot(), startup, &drifted)).await
-}
-
-/// Runs the TUI until the user quits or a shutdown signal arrives, which then sets the exit status.
-async fn run_tui(
-    engine: Engine,
-    theme: ResolvedTheme,
-    snapshot: ConfigSnapshot,
-    startup: Startup,
-    drifted: &[PathBuf],
-) -> Result<Exit> {
-    let signal = ox_tui::run(
+    let signal = Box::pin(ox_tui::run(
         engine,
         theme,
-        snapshot,
+        config.snapshot(),
         startup,
-        drifted,
+        &drifted,
         driver::shutdown_signal(),
-    )
+    ))
     .await?;
     Ok(signal.map_or(Exit::Success, Exit::Signal))
-}
-
-// ── Session Helpers ──
-
-fn list_sessions(out: &mut dyn Write, cwd: &Path, scope: ListScope, limit: usize) -> Result<()> {
-    let store = SessionStore::open(cwd)?;
-    let local_offset = util::time::local_offset();
-    let term_width = terminal::stdout_width();
-    let cap = (limit > 0).then_some(limit);
-    render_list(out, &store, scope, local_offset, term_width, cap)
 }
 
 #[cfg(test)]
@@ -423,9 +403,6 @@ mod tests {
     use std::ffi::OsString;
 
     use indoc::formatdoc;
-    use time::macros::datetime;
-
-    use ox_core::session::store::testing::{archive_test_session, seed_test_session};
 
     use super::*;
 
@@ -652,101 +629,6 @@ mod tests {
                 );
                 assert_eq!(parse(&["ox"]).session_target(), None);
             }
-        }
-    }
-
-    mod list_sessions {
-        use super::*;
-
-        #[test]
-        fn scope_limit_and_archive_state() {
-            let dir = tempfile::tempdir().unwrap();
-            let cwd = Path::new("/work/local");
-            temp_env::with_var("XDG_DATA_HOME", Some(dir.path()), || {
-                let store = SessionStore::open(cwd).unwrap();
-                seed_test_session(
-                    &store,
-                    "local-session",
-                    Some("Local session"),
-                    Some(2),
-                    datetime!(2026-01-01 00:00 UTC),
-                );
-                let other = SessionStore::open_at(dir.path().join("ox/sessions"), "other").unwrap();
-                seed_test_session(
-                    &other,
-                    "other-session",
-                    Some("Other session"),
-                    Some(3),
-                    datetime!(2026-01-02 00:00 UTC),
-                );
-
-                let mut output = Vec::new();
-                list_sessions(&mut output, cwd, ListScope::default(), 0).unwrap();
-                let local = String::from_utf8(output).unwrap();
-                assert!(local.contains("Local session"));
-                assert!(!local.contains("Other session"));
-                assert!(!local.contains("Project"));
-
-                let mut output = Vec::new();
-                list_sessions(
-                    &mut output,
-                    cwd,
-                    ListScope {
-                        all: true,
-                        ..ListScope::default()
-                    },
-                    0,
-                )
-                .unwrap();
-                let all = String::from_utf8(output).unwrap();
-                assert!(all.contains("Local session"));
-                assert!(all.contains("Other session"));
-                assert!(all.contains("Project"));
-                assert!(!all.contains("... more"));
-
-                let mut output = Vec::new();
-                list_sessions(
-                    &mut output,
-                    cwd,
-                    ListScope {
-                        all: true,
-                        ..ListScope::default()
-                    },
-                    1,
-                )
-                .unwrap();
-                let capped = String::from_utf8(output).unwrap();
-                assert!(capped.contains("Other session"));
-                assert!(!capped.contains("Local session"));
-                assert!(capped.contains("... more"));
-
-                archive_test_session(&other, "other-session");
-                let mut output = Vec::new();
-                list_sessions(
-                    &mut output,
-                    cwd,
-                    ListScope {
-                        all: true,
-                        archived: true,
-                    },
-                    0,
-                )
-                .unwrap();
-                let archived = String::from_utf8(output).unwrap();
-                assert!(archived.contains("Other session"));
-                assert!(!archived.contains("Local session"));
-            });
-        }
-
-        #[test]
-        fn storage_error() {
-            let file = tempfile::NamedTempFile::new().unwrap();
-            temp_env::with_var("XDG_DATA_HOME", Some(file.path()), || {
-                assert!(
-                    list_sessions(&mut Vec::new(), Path::new("/work"), ListScope::default(), 0)
-                        .is_err()
-                );
-            });
         }
     }
 }
