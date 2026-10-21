@@ -1,7 +1,8 @@
 //! Background shells: `bash` commands that keep running after their call, and the `bash_output`
 //! and `bash_stop` tools that read and end them.
+//!
+//! Design: `docs/design/tools/background-shells.md`.
 
-use std::future::Future;
 use std::io;
 use std::pin::Pin;
 use std::process::ExitStatus;
@@ -450,7 +451,6 @@ pub(super) fn start(shells: &Arc<BackgroundShells>, command: &str, ctx: &ToolCtx
 // ── Bash Output Tool ──
 
 /// Reads what a background shell printed since the last read.
-#[cfg_attr(test, derive(Default))]
 pub(crate) struct BashOutputTool {
     shells: Arc<BackgroundShells>,
 }
@@ -502,7 +502,6 @@ impl Tool for BashOutputTool {
 // ── Bash Stop Tool ──
 
 /// Ends a background shell and every process it started.
-#[cfg_attr(test, derive(Default))]
 pub(crate) struct BashStopTool {
     shells: Arc<BackgroundShells>,
 }
@@ -696,6 +695,7 @@ pub mod testing {
 
 #[cfg(test)]
 mod tests {
+    use std::fs;
     use std::path::Path;
     use std::task::{Context, Poll};
     use std::time::Instant;
@@ -915,7 +915,7 @@ mod tests {
                 tokio::time::sleep(Duration::from_millis(20)).await;
                 first = output(&shells, "shell-1", 0).await;
             }
-            std::fs::write(&go, "").unwrap();
+            fs::write(&go, "").unwrap();
             let second = output(&shells, "shell-1", 5_000).await;
             let third = output(&shells, "shell-1", 0).await;
 
@@ -967,7 +967,7 @@ mod tests {
             until_recorded(&ready).await;
 
             let first = output(&shells, "shell-1", 0).await;
-            std::fs::write(&go, "").unwrap();
+            fs::write(&go, "").unwrap();
             let second = output(&shells, "shell-1", 5_000).await;
 
             let spills = [1, 2].map(|read| spill_path(dir.path(), &format!(".{read}.stdout.txt")));
@@ -980,7 +980,7 @@ mod tests {
                 assert!(read.len() <= MAX_OUTPUT_BYTES);
             }
             assert!(second.ends_with("\n\n(exit code 0)"));
-            let spilled = spills.map(|spill| std::fs::read(spill).unwrap()).concat();
+            let spilled = spills.map(|spill| fs::read(spill).unwrap()).concat();
             let sent = [vec![b'a'; 400_000], vec![b'b'; 400_000]].concat();
             assert!(spilled == sent, "the spills hold every byte sent");
             shells.stop_all().await;
@@ -1098,7 +1098,7 @@ mod tests {
 
             let stopped = stop(&shells, "shell-1").await;
 
-            let pid = std::fs::read_to_string(&pid_file).unwrap();
+            let pid = fs::read_to_string(&pid_file).unwrap();
             let signal = |args: &[&str]| {
                 std::process::Command::new("kill")
                     .args(args)
@@ -1127,10 +1127,18 @@ mod tests {
         async fn is_required_by_bash_output_and_bash_stop() {
             let ctx = temp_ctx();
 
-            let read =
-                local_testing::run(&BashOutputTool::default(), serde_json::json!({}), &ctx).await;
-            let stopped =
-                local_testing::run(&BashStopTool::default(), serde_json::json!({}), &ctx).await;
+            let read = local_testing::run(
+                &BashOutputTool::new(Arc::default()),
+                serde_json::json!({}),
+                &ctx,
+            )
+            .await;
+            let stopped = local_testing::run(
+                &BashStopTool::new(Arc::default()),
+                serde_json::json!({}),
+                &ctx,
+            )
+            .await;
 
             for output in [read, stopped] {
                 assert!(output.is_error);

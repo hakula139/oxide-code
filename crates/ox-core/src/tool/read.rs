@@ -1,7 +1,6 @@
 //! File reading tool with line numbers and pagination.
 
 use std::fmt::Write as _;
-use std::future::Future;
 use std::path::Path;
 use std::pin::Pin;
 
@@ -10,7 +9,6 @@ use serde::Deserialize;
 use super::view::{ReadExcerptLine, ToolResultView};
 use super::{
     Prepared, Tool, ToolCtx, ToolMetadata, ToolOutput, ToolSpec, display_path, extract_input_field,
-    summarize_path_call,
 };
 use crate::file_tracker::{CACHE_HIT_STUB, LastView, RecordRead};
 use crate::permission::PermissionClass;
@@ -42,14 +40,6 @@ impl Tool for ReadTool {
 
     fn icon(&self) -> &'static str {
         "→"
-    }
-
-    fn summarize_input<'a>(&self, input: &'a serde_json::Value) -> Option<&'a str> {
-        extract_input_field(input, "file_path")
-    }
-
-    fn summarize_call(&self, name: &str, input: &serde_json::Value, cwd: &Path) -> String {
-        summarize_path_call(name, input, "file_path", cwd)
     }
 
     fn result_view(
@@ -259,6 +249,8 @@ fn parse_total_lines_footer(footer: &str) -> Option<usize> {
 
 #[cfg(test)]
 mod tests {
+    use std::fs;
+
     use indoc::indoc;
 
     use super::*;
@@ -397,7 +389,7 @@ mod tests {
         async fn existing_file_renders_content() {
             let dir = canonical_tempdir();
             let path = dir.path().join("test.txt");
-            std::fs::write(&path, "hello\nworld\n").unwrap();
+            fs::write(&path, "hello\nworld\n").unwrap();
 
             let output = run(
                 serde_json::json!({"file_path": path.to_str().unwrap()}),
@@ -413,7 +405,7 @@ mod tests {
         async fn records_full_read_in_tracker() {
             let dir = canonical_tempdir();
             let path = dir.path().join("test.txt");
-            std::fs::write(&path, "hello\n").unwrap();
+            fs::write(&path, "hello\n").unwrap();
             let ctx = temp_ctx();
 
             let output = run(
@@ -433,7 +425,7 @@ mod tests {
         async fn full_reread_is_cache_hit_stub() {
             let dir = canonical_tempdir();
             let path = dir.path().join("test.txt");
-            std::fs::write(&path, "hello\nworld\n").unwrap();
+            fs::write(&path, "hello\nworld\n").unwrap();
             let ctx = temp_ctx();
 
             let first = run(
@@ -457,7 +449,7 @@ mod tests {
             // Partial reads always return the slice so the model can re-request a different range.
             let dir = canonical_tempdir();
             let path = dir.path().join("test.txt");
-            std::fs::write(
+            fs::write(
                 &path,
                 indoc! {"
                     a
@@ -482,7 +474,7 @@ mod tests {
         #[tokio::test]
         async fn resolves_a_relative_path_against_the_ctx_cwd() {
             let dir = canonical_tempdir();
-            std::fs::write(dir.path().join("notes.txt"), "in the ctx cwd\n").unwrap();
+            fs::write(dir.path().join("notes.txt"), "in the ctx cwd\n").unwrap();
             let ctx = ctx(dir.path());
 
             let output = run(serde_json::json!({"file_path": "notes.txt"}), &ctx).await;
@@ -526,7 +518,7 @@ mod tests {
         async fn existing_file_numbers_lines() {
             let dir = canonical_tempdir();
             let path = dir.path().join("test.txt");
-            std::fs::write(
+            fs::write(
                 &path,
                 indoc! {"
                     alpha
@@ -553,7 +545,7 @@ mod tests {
         async fn respects_offset_and_limit() {
             let dir = canonical_tempdir();
             let path = dir.path().join("test.txt");
-            std::fs::write(
+            fs::write(
                 &path,
                 indoc! {"
                     a
@@ -583,7 +575,7 @@ mod tests {
         async fn window_covering_every_line_records_full() {
             let dir = canonical_tempdir();
             let path = dir.path().join("test.txt");
-            std::fs::write(&path, "a\nb\n").unwrap();
+            fs::write(&path, "a\nb\n").unwrap();
             let ctx = temp_ctx();
 
             read_file(path.to_str().unwrap(), Some(1), Some(10), &ctx)
@@ -601,7 +593,7 @@ mod tests {
             let dir = canonical_tempdir();
             let path = dir.path().join("long.txt");
             let content = "x\n".repeat(DEFAULT_LINE_LIMIT + 1);
-            std::fs::write(&path, &content).unwrap();
+            fs::write(&path, &content).unwrap();
             let ctx = temp_ctx();
 
             let output = read_file(path.to_str().unwrap(), None, None, &ctx)
@@ -627,7 +619,7 @@ mod tests {
             let dir = canonical_tempdir();
             let path = dir.path().join("wide.txt");
             let content = format!("{}\n", "x".repeat(199)).repeat(1000);
-            std::fs::write(&path, &content).unwrap();
+            fs::write(&path, &content).unwrap();
             let ctx = temp_ctx();
 
             let output = read_file(path.to_str().unwrap(), None, None, &ctx)
@@ -658,7 +650,7 @@ mod tests {
             let path = dir.path().join("long_line.txt");
             let fits = "a".repeat(2000);
             let over = "b".repeat(2001);
-            std::fs::write(&path, format!("{fits}\n{over}\n")).unwrap();
+            fs::write(&path, format!("{fits}\n{over}\n")).unwrap();
 
             let output = read_file(path.to_str().unwrap(), None, None, &temp_ctx())
                 .await
@@ -673,7 +665,7 @@ mod tests {
         async fn offset_zero_treated_as_one() {
             let dir = canonical_tempdir();
             let path = dir.path().join("test.txt");
-            std::fs::write(&path, "first\nsecond\n").unwrap();
+            fs::write(&path, "first\nsecond\n").unwrap();
 
             let result = read_file(path.to_str().unwrap(), Some(0), None, &temp_ctx())
                 .await
@@ -685,7 +677,7 @@ mod tests {
         async fn strips_bom() {
             let dir = canonical_tempdir();
             let path = dir.path().join("bom.txt");
-            std::fs::write(&path, "\u{feff}hello\n").unwrap();
+            fs::write(&path, "\u{feff}hello\n").unwrap();
 
             let result = read_file(path.to_str().unwrap(), None, None, &temp_ctx())
                 .await
@@ -698,7 +690,7 @@ mod tests {
         async fn empty_file_renders_marker() {
             let dir = canonical_tempdir();
             let path = dir.path().join("empty.txt");
-            std::fs::write(&path, "").unwrap();
+            fs::write(&path, "").unwrap();
 
             let result = read_file(path.to_str().unwrap(), None, None, &temp_ctx())
                 .await
@@ -712,17 +704,21 @@ mod tests {
 
             let err = read_file(path, None, None, &temp_ctx()).await.unwrap_err();
 
-            let cause = std::fs::metadata(path).unwrap_err();
+            let cause = fs::metadata(path).unwrap_err();
             assert_eq!(err, format!("Failed to access {path}: {cause}"));
         }
 
         #[tokio::test]
         async fn directory_reports_error() {
             let dir = canonical_tempdir();
-            let err = read_file(dir.path().to_str().unwrap(), None, None, &temp_ctx())
-                .await
-                .unwrap_err();
-            assert!(err.contains("is a directory"));
+            let path = dir.path().to_str().unwrap();
+
+            let err = read_file(path, None, None, &temp_ctx()).await.unwrap_err();
+
+            assert_eq!(
+                err,
+                format!("{path} is a directory. Use the glob tool to list directory contents."),
+            );
         }
 
         #[tokio::test]
@@ -745,7 +741,7 @@ mod tests {
         async fn binary_content_reports_error() {
             let dir = canonical_tempdir();
             let path = dir.path().join("binary.bin");
-            std::fs::write(&path, b"hello\x00world").unwrap();
+            fs::write(&path, b"hello\x00world").unwrap();
 
             let err = read_file(path.to_str().unwrap(), None, None, &temp_ctx())
                 .await
@@ -757,7 +753,7 @@ mod tests {
         async fn offset_beyond_end_reports_error() {
             let dir = canonical_tempdir();
             let path = dir.path().join("test.txt");
-            std::fs::write(&path, "a\nb\n").unwrap();
+            fs::write(&path, "a\nb\n").unwrap();
 
             let err = read_file(path.to_str().unwrap(), Some(100), None, &temp_ctx())
                 .await
@@ -771,7 +767,7 @@ mod tests {
             // its target was never gated.
             let dir = canonical_tempdir();
             let secret = dir.path().join("secret.txt");
-            std::fs::write(&secret, "SECRET=1\n").unwrap();
+            fs::write(&secret, "SECRET=1\n").unwrap();
             let path = dir.path().join("notes.md");
             symlink_file(&secret, &path);
 

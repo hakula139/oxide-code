@@ -548,18 +548,15 @@ fn flatten_body(body: &ApprovalBody) -> Vec<BodyLine> {
                 text: line.to_owned(),
             })
             .collect(),
-        ApprovalBody::Diff(chunks) => diff_rows(chunks),
+        ApprovalBody::Diff(chunk) => diff_rows(chunk),
     }
 }
 
-fn diff_rows(chunks: &[DiffChunk]) -> Vec<BodyLine> {
-    chunks
-        .iter()
-        .flat_map(|chunk| {
-            let removed = chunk.old.iter().map(|line| (BodyKind::Removed, line));
-            let added = chunk.new.iter().map(|line| (BodyKind::Added, line));
-            removed.chain(added)
-        })
+fn diff_rows(chunk: &DiffChunk) -> Vec<BodyLine> {
+    let removed = chunk.old.iter().map(|line| (BodyKind::Removed, line));
+    let added = chunk.new.iter().map(|line| (BodyKind::Added, line));
+    removed
+        .chain(added)
         .map(|(kind, line)| BodyLine {
             kind,
             text: expand_tabs(&line.text),
@@ -722,7 +719,7 @@ mod tests {
                 "call-1".to_owned(),
                 ApprovalPreview {
                     title: "Write(src/main.rs)".to_owned(),
-                    body: ApprovalBody::Diff(vec![DiffChunk {
+                    body: ApprovalBody::Diff(DiffChunk {
                         old: vec![DiffLine {
                             number: 1,
                             text: "old line".to_owned(),
@@ -731,7 +728,7 @@ mod tests {
                             number: 1,
                             text: "new line".to_owned(),
                         }],
-                    }]),
+                    }),
                 },
                 None,
                 None,
@@ -1349,13 +1346,13 @@ mod tests {
 
         #[test]
         fn expands_diff_tabs() {
-            let rows = flatten_body(&ApprovalBody::Diff(vec![DiffChunk {
+            let rows = flatten_body(&ApprovalBody::Diff(DiffChunk {
                 old: Vec::new(),
                 new: vec![DiffLine {
                     number: 1,
                     text: "\tfoo()".to_owned(),
                 }],
-            }]));
+            }));
             assert_eq!(rows[0].text, "    foo()");
         }
     }

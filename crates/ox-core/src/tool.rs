@@ -14,7 +14,6 @@ pub mod view;
 pub(crate) mod write;
 
 use std::borrow::Cow;
-use std::future::Future;
 use std::path::Path;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -120,22 +119,6 @@ pub struct ToolOutput {
     pub(crate) tasks: Option<Vec<Task>>,
 }
 
-/// Structured data for UI display and logging. The model never sees it.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ToolMetadata {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub(crate) title: Option<String>,
-    /// What a successful `edit` changed.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub(crate) diff: Option<EditDiff>,
-    /// Unbounded match count when a tool capped returned rows.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub(crate) truncated_total: Option<usize>,
-    /// Pre-cap byte count when the registry byte safety net fired.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub(crate) truncated_bytes: Option<usize>,
-}
-
 impl ToolOutput {
     pub fn success(content: impl Into<String>) -> Self {
         Self {
@@ -176,6 +159,23 @@ impl ToolOutput {
     }
 }
 
+/// Structured data for UI display and logging. The model never sees it.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ToolMetadata {
+    /// A one-line summary of the call, which the UI shows on its result.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) title: Option<String>,
+    /// What a successful `edit` changed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) diff: Option<EditDiff>,
+    /// Unbounded match count when a tool capped returned rows.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) truncated_total: Option<usize>,
+    /// Pre-cap byte count when the registry byte safety net fired.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) truncated_bytes: Option<usize>,
+}
+
 // ── Tool Trait ──
 
 /// A tool the agent can invoke.
@@ -213,17 +213,23 @@ pub trait Tool: Send + Sync {
         DEFAULT_TOOL_ICON
     }
 
-    /// Pulls the tool's primary argument out of `input` for terse `Name(arg)` labels in the UI.
-    /// Returning `None` falls back to the bare name.
+    /// Pulls the primary argument of a tool without a [`Self::path_field`] out of `input` for terse
+    /// `Name(arg)` labels in the UI. Returning `None` falls back to the bare name.
     fn summarize_input<'a>(&self, _input: &'a serde_json::Value) -> Option<&'a str> {
         None
     }
 
-    /// The label the UI shows for a call of the tool registered as `name`, with a path argument
-    /// shown relative to `cwd`.
-    fn summarize_call(&self, name: &str, input: &serde_json::Value, _cwd: &Path) -> String {
+    /// The label the UI shows for a call of the tool registered as `name`. By default it is
+    /// `Name(arg)`, where `arg` is the [`Self::path_field`] relative to `cwd` or else the
+    /// [`Self::summarize_input`] argument, and the bare name when the call has neither.
+    fn summarize_call(&self, name: &str, input: &serde_json::Value, cwd: &Path) -> String {
         let label = pascal_case(name);
-        match self.summarize_input(input) {
+        let arg = match self.path_field() {
+            Some(field) => extract_input_field(input, field)
+                .map(|path| Cow::Owned(display_path(Path::new(path), cwd))),
+            None => self.summarize_input(input).map(Cow::Borrowed),
+        };
+        match arg {
             Some(arg) => format!("{label}({arg})"),
             None => label,
         }
@@ -381,21 +387,6 @@ fn invalid_input(error: &serde_json::Error) -> String {
 
 // ── Path Utilities ──
 
-/// Renders a `Name(path)` summary for a call of the tool registered as `name`, showing the
-/// `path_key` field relative to `cwd`, or the bare label when that field is absent or not a string.
-fn summarize_path_call(
-    name: &str,
-    input: &serde_json::Value,
-    path_key: &str,
-    cwd: &Path,
-) -> String {
-    let label = pascal_case(name);
-    match extract_input_field(input, path_key) {
-        Some(path) => format!("{label}({})", display_path(Path::new(path), cwd)),
-        None => label,
-    }
-}
-
 /// Renders `path` for chat display, relative to `base` when under it, as its file name when it is
 /// `base` itself, and in full otherwise.
 fn display_path(path: &Path, base: &Path) -> String {
@@ -452,6 +443,7 @@ fn truncate_line(line: &str, max_chars: usize) -> Cow<'_, str> {
 
 #[cfg(test)]
 pub(crate) mod local_testing {
+    use std::fs::{self, File, Permissions};
     use std::path::{Path, PathBuf};
     use std::sync::Arc;
     use std::time::{Duration, SystemTime};
@@ -461,7 +453,7 @@ pub(crate) mod local_testing {
 
     use super::search::SearchRoot;
     use super::spill::run_capped;
-    use super::{Tool, ToolCtx, ToolOutput, ToolRegistry};
+    use super::{Tool, ToolCtx, ToolOutput, ToolRegistry, ToolSpec};
     use crate::file_tracker::FileTracker;
     use crate::permission::rule::Rule;
     use crate::permission::{Access, Mode, PermissionClass, Policy, ReadFilter, Workspace};
@@ -534,6 +526,11 @@ pub(crate) mod local_testing {
             let (_, tool) = self.get(name).expect("tool is registered");
             run_capped(tool, tool.prepare(input, ctx), ctx).await
         }
+
+        /// The registered tools with their specs, in registration order.
+        pub(crate) fn iter(&self) -> impl Iterator<Item = (&ToolSpec, &dyn Tool)> {
+            self.tools.iter().map(|(spec, tool)| (spec, tool.as_ref()))
+        }
     }
 
     /// A temp dir with a canonical path, the form a resolved workspace path takes.
@@ -556,7 +553,7 @@ pub(crate) mod local_testing {
 
     /// Creates an empty file at `path`, last modified `secs` seconds after the Unix epoch.
     pub(super) fn create_modified_at(path: &Path, secs: u64) {
-        let file = std::fs::File::create(path).unwrap();
+        let file = File::create(path).unwrap();
         file.set_modified(SystemTime::UNIX_EPOCH + Duration::from_secs(secs))
             .unwrap();
     }
@@ -568,8 +565,8 @@ pub(crate) mod local_testing {
         let mode = {
             use std::os::unix::fs::PermissionsExt as _;
 
-            let mode = std::fs::metadata(path).unwrap().permissions().mode();
-            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o000)).unwrap();
+            let mode = fs::metadata(path).unwrap().permissions().mode();
+            fs::set_permissions(path, Permissions::from_mode(0o000)).unwrap();
             mode
         };
         // `(RD)` is the right to read a file's data or list a directory.
@@ -582,9 +579,9 @@ pub(crate) mod local_testing {
         };
 
         let readable = if path.is_dir() {
-            std::fs::read_dir(path).is_ok()
+            fs::read_dir(path).is_ok()
         } else {
-            std::fs::File::open(path).is_ok()
+            File::open(path).is_ok()
         };
         assert!(!readable, "{} stayed readable", path.display());
         denied
@@ -603,8 +600,7 @@ pub(crate) mod local_testing {
             {
                 use std::os::unix::fs::PermissionsExt as _;
 
-                std::fs::set_permissions(&self.path, std::fs::Permissions::from_mode(self.mode))
-                    .unwrap();
+                fs::set_permissions(&self.path, Permissions::from_mode(self.mode)).unwrap();
             }
             #[cfg(windows)]
             icacls(&self.path, &["/remove:d", EVERYONE]);
@@ -632,6 +628,8 @@ pub(crate) mod local_testing {
 
 #[cfg(any(test, feature = "testing"))]
 pub mod testing {
+    use std::sync::Arc;
+
     use super::bash::BashTool;
     use super::edit::synthesize_diff;
     use super::{ApprovalBody, ApprovalPreview, EditDiff, Tool, ToolRegistry};
@@ -646,7 +644,7 @@ pub mod testing {
 
     /// A registry of `tools` followed by a `bash` tool with background shells of its own.
     pub fn bash_registry(mut tools: Vec<Box<dyn Tool>>) -> ToolRegistry {
-        tools.push(Box::new(BashTool::default()));
+        tools.push(Box::new(BashTool::new(Arc::default())));
         ToolRegistry::new(tools)
     }
 
@@ -659,42 +657,30 @@ pub mod testing {
 #[cfg(test)]
 mod tests {
     use std::collections::HashSet;
+    use std::fs;
 
     use super::local_testing::{canonical_tempdir, ctx, deny_reads, temp_ctx};
+    use super::testing::bash_registry;
     use super::view::{DiffChunk, DiffLine, GrepFileGroup, GrepMatchLine, ReadExcerptLine};
     use super::*;
     use crate::permission::rule::Rule;
     use crate::permission::{Decision, Mode, PermissionClass, Policy, Zone};
 
-    fn all_tools() -> Vec<Box<dyn Tool>> {
-        vec![
-            Box::new(BashTool::default()),
-            Box::new(BashOutputTool::default()),
-            Box::new(BashStopTool::default()),
-            Box::new(EditTool),
-            Box::new(GlobTool::default()),
-            Box::new(GrepTool::default()),
-            Box::new(ReadTool),
-            Box::new(TasksTool),
-            Box::new(WriteTool),
-        ]
-    }
-
-    fn find<'a>(tools: &'a [Box<dyn Tool>], name: &str) -> &'a dyn Tool {
-        tools
-            .iter()
-            .find(|t| t.spec().name == name)
-            .unwrap_or_else(|| panic!("tool {name} missing from catalog"))
-            .as_ref()
+    /// The built-in tools, with no read rules and background shells of their own.
+    fn built_in() -> ToolRegistry {
+        ToolRegistry::built_in(&ReadFilter::default(), &Arc::default())
     }
 
     #[test]
     fn catalog_names_and_icons_are_unique() {
-        let tools = all_tools();
-        let names: HashSet<_> = tools.iter().map(|t| t.spec().name).collect();
-        assert_eq!(names.len(), tools.len(), "duplicate name");
-        let icons: HashSet<_> = tools.iter().map(|t| t.icon()).collect();
-        assert_eq!(icons.len(), tools.len(), "duplicate icon");
+        let tools = built_in();
+
+        let names: HashSet<_> = tools.iter().map(|(spec, _)| &spec.name).collect();
+        let icons: HashSet<_> = tools.iter().map(|(_, tool)| tool.icon()).collect();
+
+        let count = tools.iter().count();
+        assert_eq!(names.len(), count, "duplicate name");
+        assert_eq!(icons.len(), count, "duplicate icon");
     }
 
     mod spec {
@@ -702,13 +688,13 @@ mod tests {
 
         #[test]
         fn every_tool_exposes_non_empty_name_description_and_object_schema() {
-            for t in all_tools() {
+            for (spec, _) in built_in().iter() {
                 let ToolSpec {
                     name,
                     description,
                     input_schema,
                     ..
-                } = t.spec();
+                } = spec;
                 assert!(!name.is_empty(), "tool with empty name in catalog");
                 assert!(!description.is_empty(), "{name}: empty description");
                 assert_eq!(input_schema["type"], "object", "{name}: schema type");
@@ -725,25 +711,25 @@ mod tests {
 
         #[test]
         fn catalog_classes_and_parallel_safety_match_each_tool() {
-            let catalog: Vec<_> = all_tools()
+            let tools = built_in();
+
+            let catalog: Vec<_> = tools
                 .iter()
-                .map(|t| {
-                    let spec = t.spec();
-                    (spec.name, spec.class, spec.parallel_safe)
-                })
+                .map(|(spec, _)| (spec.name.as_str(), spec.class, spec.parallel_safe))
                 .collect();
+
             assert_eq!(
                 catalog,
                 [
-                    ("bash".to_owned(), PermissionClass::Exec, false),
-                    ("bash_output".to_owned(), PermissionClass::Read, false),
-                    ("bash_stop".to_owned(), PermissionClass::Read, false),
-                    ("edit".to_owned(), PermissionClass::Edit, false),
-                    ("glob".to_owned(), PermissionClass::Read, true),
-                    ("grep".to_owned(), PermissionClass::Read, true),
-                    ("read".to_owned(), PermissionClass::Read, true),
-                    ("tasks".to_owned(), PermissionClass::Read, false),
-                    ("write".to_owned(), PermissionClass::Edit, false),
+                    ("bash", PermissionClass::Exec, false),
+                    ("bash_output", PermissionClass::Read, false),
+                    ("bash_stop", PermissionClass::Read, false),
+                    ("read", PermissionClass::Read, true),
+                    ("write", PermissionClass::Edit, false),
+                    ("edit", PermissionClass::Edit, false),
+                    ("glob", PermissionClass::Read, true),
+                    ("grep", PermissionClass::Read, true),
+                    ("tasks", PermissionClass::Read, false),
                 ],
             );
         }
@@ -751,7 +737,7 @@ mod tests {
         #[test]
         fn class_rules_cover_every_tool_in_the_class() {
             let dir = canonical_tempdir();
-            std::fs::write(dir.path().join(".env"), "SECRET=1").unwrap();
+            fs::write(dir.path().join(".env"), "SECRET=1").unwrap();
             let deny = [
                 (PermissionClass::Read, ".env"),
                 (PermissionClass::Edit, ".env"),
@@ -773,13 +759,13 @@ mod tests {
                 ),
                 ("bash", serde_json::json!({"command": "cat .env"})),
             ];
-            let tools = all_tools();
+            let tools = built_in();
             let ctx = ctx(dir.path());
             for (name, input) in &cases {
-                let t = find(&tools, name);
+                let (spec, t) = tools.get(name).unwrap();
                 let prepared = t.prepare(input.clone(), &ctx);
                 assert_eq!(
-                    policy.decide(t.spec().class, &prepared.access.as_target()),
+                    policy.decide(spec.class, &prepared.access.as_target()),
                     Decision::Deny,
                     "tool {name}",
                 );
@@ -795,9 +781,9 @@ mod tests {
             let dir = canonical_tempdir();
             let ctx = ctx(dir.path());
             let resolved = dir.path().join("a.rs");
-            let tools = all_tools();
+            let tools = built_in();
             for name in ["read", "edit", "write"] {
-                let t = find(&tools, name);
+                let (_, t) = tools.get(name).unwrap();
 
                 let prepared = t.prepare(
                     serde_json::json!({"file_path": "a.rs", "content": "a.rs"}),
@@ -834,8 +820,8 @@ mod tests {
                 let dir = canonical_tempdir();
                 let ctx = ctx(dir.path());
                 let path = dir.path().join("notes");
-                std::fs::write(&path, "original").unwrap();
-                let native = std::fs::read_to_string(dir.path().join(name));
+                fs::write(&path, "original").unwrap();
+                let native = fs::read_to_string(dir.path().join(name));
                 let succeeds = native.is_ok();
 
                 let prepared = ReadTool.prepare(serde_json::json!({"file_path": name}), &ctx);
@@ -859,7 +845,7 @@ mod tests {
                 assert_eq!(write.is_error, !succeeds, "{name}: {}", write.content);
 
                 assert_eq!(
-                    std::fs::read_to_string(&path).unwrap(),
+                    fs::read_to_string(&path).unwrap(),
                     if succeeds { "replacement" } else { "original" },
                     "{name}",
                 );
@@ -895,7 +881,8 @@ mod tests {
             let dir = canonical_tempdir();
             let input = serde_json::json!({"pattern": "x", "path": "."});
 
-            let prepared = GrepTool::default().prepare(input.clone(), &ctx(dir.path()));
+            let prepared =
+                GrepTool::new(ReadFilter::default()).prepare(input.clone(), &ctx(dir.path()));
 
             let Access::Path { canonical, .. } = &prepared.access else {
                 panic!("expected a path target, got {prepared:?}");
@@ -910,8 +897,8 @@ mod tests {
             // The edit gate must see the outside path that the tool then opens.
             let dir = canonical_tempdir();
             let (cwd, outside) = (dir.path().join("repo"), dir.path().join("outside"));
-            std::fs::create_dir(&cwd).unwrap();
-            std::fs::create_dir(&outside).unwrap();
+            fs::create_dir(&cwd).unwrap();
+            fs::create_dir(&outside).unwrap();
             std::os::unix::fs::symlink("../outside/notes.md", cwd.join("notes.md")).unwrap();
             let target = outside.join("notes.md");
 
@@ -952,61 +939,9 @@ mod tests {
                 ("tasks", "≡"),
                 ("write", "←"),
             ];
-            let tools = all_tools();
+            let tools = built_in();
             for (name, icon) in expected {
-                assert_eq!(find(&tools, name).icon(), icon, "tool {name}");
-            }
-        }
-    }
-
-    mod summarize_input {
-        use super::*;
-
-        #[test]
-        fn plucks_the_primary_field() {
-            let cases = [
-                ("bash", serde_json::json!({"command": "ls"}), Some("ls")),
-                (
-                    "edit",
-                    serde_json::json!({
-                        "file_path": "/a/b.rs",
-                        "old_string": "x",
-                        "new_string": "y",
-                    }),
-                    Some("/a/b.rs"),
-                ),
-                (
-                    "glob",
-                    serde_json::json!({"pattern": "**/*.rs"}),
-                    Some("**/*.rs"),
-                ),
-                ("grep", serde_json::json!({"pattern": "fn "}), Some("fn ")),
-                (
-                    "read",
-                    serde_json::json!({"file_path": "/a/b.rs"}),
-                    Some("/a/b.rs"),
-                ),
-                (
-                    "write",
-                    serde_json::json!({"file_path": "/a/b.rs", "content": "x"}),
-                    Some("/a/b.rs"),
-                ),
-            ];
-            let tools = all_tools();
-            for (name, input, expected) in &cases {
-                let t = find(&tools, name);
-                assert_eq!(t.summarize_input(input), *expected, "tool {name}");
-            }
-        }
-
-        #[test]
-        fn plucks_no_argument_without_the_primary_field() {
-            for t in all_tools() {
-                assert!(
-                    t.summarize_input(&serde_json::json!({})).is_none(),
-                    "tool {} returned Some on empty input",
-                    t.spec().name,
-                );
+                assert_eq!(tools.icon(name), icon, "tool {name}");
             }
         }
     }
@@ -1054,11 +989,10 @@ mod tests {
                     "Write(/a/b.rs)",
                 ),
             ];
-            let tools = all_tools();
+            let tools = built_in();
             for (name, input, expected) in &cases {
-                let t = find(&tools, name);
                 assert_eq!(
-                    t.summarize_call(name, input, Path::new("/repo")),
+                    tools.label(name, input, Path::new("/repo")),
                     *expected,
                     "tool {name}",
                 );
@@ -1067,10 +1001,11 @@ mod tests {
 
         #[test]
         fn falls_back_to_bare_name_when_arg_missing() {
-            for t in all_tools() {
-                let name = t.spec().name;
-                let got = t.summarize_call(&name, &serde_json::json!({}), Path::new("/repo"));
-                assert_eq!(got, pascal_case(&name), "tool {name}");
+            let tools = built_in();
+            for (spec, _) in tools.iter() {
+                let name = &spec.name;
+                let got = tools.label(name, &serde_json::json!({}), Path::new("/repo"));
+                assert_eq!(got, pascal_case(name), "tool {name}");
             }
         }
 
@@ -1094,11 +1029,10 @@ mod tests {
                     "Write(crates/ox-core/src/tool/read.rs)",
                 ),
             ];
-            let tools = all_tools();
+            let tools = built_in();
             for (name, input, expected) in &cases {
-                let t = find(&tools, name);
                 assert_eq!(
-                    t.summarize_call(name, input, Path::new("/repo")),
+                    tools.label(name, input, Path::new("/repo")),
                     *expected,
                     "tool {name}",
                 );
@@ -1111,7 +1045,7 @@ mod tests {
 
         #[tokio::test]
         async fn default_titles_with_the_tool_name() {
-            let preview = GlobTool::default()
+            let preview = GlobTool::new(ReadFilter::default())
                 .approval_preview(
                     "glob",
                     &serde_json::json!({"pattern": "*.rs"}),
@@ -1210,8 +1144,8 @@ mod tests {
             #[tokio::test]
             async fn hands_the_read_filter_to_the_search_tools() {
                 let dir = canonical_tempdir();
-                std::fs::write(dir.path().join("notes.txt"), "token").unwrap();
-                std::fs::write(dir.path().join("secret.txt"), "token").unwrap();
+                fs::write(dir.path().join("notes.txt"), "token").unwrap();
+                fs::write(dir.path().join("secret.txt"), "token").unwrap();
                 let tools = ToolRegistry::built_in(&deny_reads(&["secret.txt"]), &Arc::default());
                 let ctx = ctx(dir.path());
 
@@ -1246,13 +1180,13 @@ mod tests {
 
             #[test]
             fn finds_registered_tool() {
-                let registry = ToolRegistry::new(vec![Box::new(BashTool::default())]);
+                let registry = bash_registry(Vec::new());
                 assert_eq!(registry.get("bash").unwrap().0.name, "bash");
             }
 
             #[test]
             fn unknown_tool_has_no_entry() {
-                let registry = ToolRegistry::new(vec![Box::new(BashTool::default())]);
+                let registry = bash_registry(Vec::new());
                 assert!(registry.get("nonexistent").is_none());
             }
         }
@@ -1262,7 +1196,7 @@ mod tests {
 
             #[test]
             fn produces_tool_with_valid_schema() {
-                let registry = ToolRegistry::new(vec![Box::new(BashTool::default())]);
+                let registry = bash_registry(Vec::new());
                 let defs = registry.definitions();
                 assert_eq!(defs.len(), 1);
                 assert_eq!(defs[0].name, "bash");
@@ -1277,14 +1211,8 @@ mod tests {
             use super::*;
 
             #[test]
-            fn delegates_to_registered_tool() {
-                let registry = ToolRegistry::new(vec![Box::new(BashTool::default())]);
-                assert_eq!(registry.icon("bash"), "$");
-            }
-
-            #[test]
             fn unknown_tool_falls_back_to_default() {
-                let registry = ToolRegistry::new(vec![Box::new(BashTool::default())]);
+                let registry = bash_registry(Vec::new());
                 assert_eq!(registry.icon("nonexistent"), DEFAULT_TOOL_ICON);
             }
         }
@@ -1293,32 +1221,8 @@ mod tests {
             use super::*;
 
             #[test]
-            fn delegates_to_registered_tool() {
-                let registry = ToolRegistry::new(vec![
-                    Box::new(BashTool::default()),
-                    Box::new(GrepTool::default()),
-                ]);
-                assert_eq!(
-                    registry.label(
-                        "bash",
-                        &serde_json::json!({"command": "echo hi"}),
-                        Path::new("/repo")
-                    ),
-                    "echo hi",
-                );
-                assert_eq!(
-                    registry.label(
-                        "grep",
-                        &serde_json::json!({"pattern": "fn "}),
-                        Path::new("/repo")
-                    ),
-                    "Grep(fn )",
-                );
-            }
-
-            #[test]
             fn unknown_tool_falls_back_to_raw_name() {
-                let registry = ToolRegistry::new(vec![Box::new(BashTool::default())]);
+                let registry = bash_registry(Vec::new());
                 let input = serde_json::json!({"command": "echo hi"});
                 assert_eq!(
                     registry.label("nonexistent", &input, Path::new("/repo")),
@@ -1367,7 +1271,8 @@ mod tests {
 
             #[test]
             fn delegates_grep_matches() {
-                let registry = ToolRegistry::new(vec![Box::new(GrepTool::default())]);
+                let registry =
+                    ToolRegistry::new(vec![Box::new(GrepTool::new(ReadFilter::default()))]);
                 let input = serde_json::json!({"pattern": "fn"});
                 let metadata = ToolMetadata::default();
                 let view = registry.result_view(
@@ -1422,7 +1327,8 @@ mod tests {
 
             #[test]
             fn delegates_glob_files() {
-                let registry = ToolRegistry::new(vec![Box::new(GlobTool::default())]);
+                let registry =
+                    ToolRegistry::new(vec![Box::new(GlobTool::new(ReadFilter::default()))]);
                 let input = serde_json::json!({"pattern": "*.rs"});
                 let metadata = ToolMetadata::default();
                 let view = registry.result_view(
@@ -1470,7 +1376,7 @@ mod tests {
 
             #[test]
             fn falls_back_to_text_for_unknown_tool() {
-                let registry = ToolRegistry::new(vec![Box::new(BashTool::default())]);
+                let registry = bash_registry(Vec::new());
                 let metadata = ToolMetadata::default();
                 let view = registry.result_view(
                     "nonexistent",
@@ -1490,7 +1396,7 @@ mod tests {
 
             #[test]
             fn falls_back_to_text_when_tool_has_no_structured_view() {
-                let registry = ToolRegistry::new(vec![Box::new(BashTool::default())]);
+                let registry = bash_registry(Vec::new());
                 let metadata = ToolMetadata::default();
                 let view = registry.result_view(
                     "bash",

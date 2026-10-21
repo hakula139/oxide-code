@@ -84,7 +84,7 @@ pub struct GrepMatchLine {
 /// What a pending approval shows the user, rendered by the tool so the modal only displays it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ApprovalPreview {
-    /// Tool display label, such as `Bash(cargo test)` or `Write(src/main.rs)`.
+    /// Tool display label, such as `Bash` or `Write(src/main.rs)`.
     pub title: String,
     pub body: ApprovalBody,
 }
@@ -93,8 +93,8 @@ pub struct ApprovalPreview {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", content = "data", rename_all = "snake_case")]
 pub enum ApprovalBody {
-    /// A shell command string (`bash`).
+    /// A one-line call label, which for `bash` is the command.
     Command(String),
-    /// A unified diff (`edit` / `write`), reusing the chat's `+` / `-` chunk shape.
-    Diff(Vec<DiffChunk>),
+    /// The change an `edit` or `write` would make, in the chat's `+` / `-` chunk shape.
+    Diff(DiffChunk),
 }

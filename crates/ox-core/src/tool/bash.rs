@@ -1,9 +1,10 @@
 //! Shell command execution tool with timeout.
+//!
+//! Design: `docs/design/tools/bash.md`.
 
 pub mod background;
 
 use std::collections::VecDeque;
-use std::future::Future;
 use std::io;
 use std::path::Path;
 use std::pin::Pin;
@@ -54,7 +55,6 @@ const PIPE_READ_CHUNK_BYTES: usize = 8 * 1024;
 
 const NO_OUTPUT_MARKER: &str = "(no output)";
 
-#[cfg_attr(any(test, feature = "testing"), derive(Default))]
 pub(crate) struct BashTool {
     shells: Arc<BackgroundShells>,
 }
@@ -92,10 +92,6 @@ impl Tool for BashTool {
 
     fn icon(&self) -> &'static str {
         "$"
-    }
-
-    fn summarize_input<'a>(&self, input: &'a serde_json::Value) -> Option<&'a str> {
-        extract_input_field(input, "command")
     }
 
     fn summarize_call(&self, name: &str, input: &serde_json::Value, _cwd: &Path) -> String {
@@ -742,6 +738,7 @@ mod testing {
 
 #[cfg(test)]
 mod tests {
+    use std::fs;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     use indoc::indoc;
@@ -778,8 +775,8 @@ mod tests {
         #[test]
         fn extracts_the_command() {
             let ctx = temp_ctx();
-            let prepared =
-                BashTool::default().prepare(serde_json::json!({"command": "ls -la"}), &ctx);
+            let prepared = BashTool::new(Arc::default())
+                .prepare(serde_json::json!({"command": "ls -la"}), &ctx);
             assert_eq!(
                 prepared.access,
                 Access::for_command("ls -la", &ctx.workspace)
@@ -790,7 +787,8 @@ mod tests {
         fn missing_command_has_no_target() {
             // Only a tool-wide rule matches `None`, so a malformed call cannot slip past a
             // command-specific allow.
-            let prepared = BashTool::default().prepare(serde_json::json!({}), &temp_ctx());
+            let prepared =
+                BashTool::new(Arc::default()).prepare(serde_json::json!({}), &temp_ctx());
             assert!(matches!(prepared.access, Access::None));
         }
     }
@@ -800,7 +798,7 @@ mod tests {
 
         #[tokio::test]
         async fn marks_a_background_command_in_the_title() {
-            let tool = BashTool::default();
+            let tool = BashTool::new(Arc::default());
             let cwd = Path::new("/repo");
 
             let foreground = tool
@@ -854,7 +852,8 @@ mod tests {
                 "description": "Print greeting",
             });
 
-            let output = local_testing::run(&BashTool::default(), input, &temp_ctx()).await;
+            let output =
+                local_testing::run(&BashTool::new(Arc::default()), input, &temp_ctx()).await;
 
             assert!(!output.is_error);
             assert_eq!(output.content, "hello");
@@ -947,7 +946,7 @@ mod tests {
 
             assert!(!output.is_error);
             let path = spill_path(dir.path(), ".stdout.txt");
-            let full = std::fs::read_to_string(&path).unwrap();
+            let full = fs::read_to_string(&path).unwrap();
             assert_eq!(full, format!("HEAD\n{}TAIL\n", "x\n".repeat(filler / 2)));
             let (head, rest) = output.content.split_once("\n... [").unwrap();
             let (marker, tail) = rest.split_once("] ...\n").unwrap();
@@ -973,7 +972,7 @@ mod tests {
             assert!(!output.is_error, "{}", output.content);
             for (name, byte) in [("stdout", b'o'), ("stderr", b'e')] {
                 let path = spill_path(dir.path(), &format!(".{name}.txt"));
-                assert_eq!(std::fs::read(&path).unwrap(), vec![byte; bytes], "{name}");
+                assert_eq!(fs::read(&path).unwrap(), vec![byte; bytes], "{name}");
                 let note = format!(
                     "bytes omitted, full {name} saved to {}] ...",
                     path.display()
@@ -1033,7 +1032,7 @@ mod tests {
             let diagnostics_path = diagnostics.display();
             let script = dir.path().join("child.sh");
             let script_path = script.display();
-            std::fs::write(
+            fs::write(
                 &script,
                 formatdoc! {"
                     {ready_command} || exit
@@ -1054,19 +1053,19 @@ mod tests {
             "#};
 
             let output = run_default(&command).await;
-            std::fs::write(&release, "").unwrap();
+            fs::write(&release, "").unwrap();
             assert_eq!(
                 output.content,
                 "started",
                 "child diagnostics: {:?}",
-                std::fs::read_to_string(&diagnostics),
+                fs::read_to_string(&diagnostics),
             );
             let pid = until_recorded(&ready).await;
             assert_ne!(pid, until_recorded(&parent).await);
             until_gone(&pid).await;
 
-            let completed_pid = std::fs::read_to_string(&completed).unwrap_or_else(|error| {
-                let diagnostics = std::fs::read_to_string(&diagnostics).unwrap();
+            let completed_pid = fs::read_to_string(&completed).unwrap_or_else(|error| {
+                let diagnostics = fs::read_to_string(&diagnostics).unwrap();
                 panic!(
                     "descendant {pid} exited without recording completion: {error}. {diagnostics}"
                 )
@@ -1182,16 +1181,16 @@ mod tests {
             let [shims, mingw, cmd, bin] =
                 ["shims", r"Git\mingw64\bin", r"Git\cmd", r"Git\bin"].map(|d| dir.path().join(d));
             for d in [&shims, &mingw, &cmd, &bin] {
-                std::fs::create_dir_all(d).unwrap();
+                fs::create_dir_all(d).unwrap();
             }
             for d in [&shims, &mingw, &cmd] {
-                std::fs::write(d.join("git.exe"), "").unwrap();
+                fs::write(d.join("git.exe"), "").unwrap();
             }
             let path = |entries: &[&std::path::PathBuf]| std::env::join_paths(entries).unwrap();
             assert_eq!(git_bash_on(&path(&[&shims, &cmd])), None, "no bash.exe yet");
 
             let bash = bin.join("bash.exe");
-            std::fs::write(&bash, "").unwrap();
+            fs::write(&bash, "").unwrap();
             for git_dir in [&mingw, &cmd] {
                 assert_eq!(git_bash_on(&path(&[&shims, git_dir])).as_ref(), Some(&bash));
             }
@@ -1350,7 +1349,7 @@ mod tests {
                 rendered,
                 format!("a{r}{r}\n{}\nw{r}yz", marker(dir.path(), 4))
             );
-            let spilled = std::fs::read(spill_path(dir.path(), ".stdout.txt")).unwrap();
+            let spilled = fs::read(spill_path(dir.path(), ".stdout.txt")).unwrap();
             assert_eq!(spilled, b"a\xFF\xFFcd\xFF\xFFw\xE2\x82yz");
         }
 
@@ -1406,7 +1405,7 @@ mod tests {
                 let mut pipe = empty_capture(dir.path());
                 pipe.drain(&mut sent.as_slice()).await.unwrap();
 
-                let spilled = std::fs::read(spill_path(dir.path(), ".stdout.txt")).unwrap();
+                let spilled = fs::read(spill_path(dir.path(), ".stdout.txt")).unwrap();
                 assert!(spilled == sent, "the spill holds every byte sent");
                 let buffered = pipe.head.capacity() + pipe.tail.capacity();
                 let bound = 2 * (PIPE_HEAD_BYTES + PIPE_TAIL_BYTES + PIPE_READ_CHUNK_BYTES);
@@ -1429,7 +1428,7 @@ mod tests {
                 assert_eq!(pipe.head, vec![b'h'; PIPE_HEAD_BYTES]);
                 assert_eq!(pipe.tail, vec![b't'; PIPE_TAIL_BYTES]);
                 assert_eq!(pipe.omitted, 100);
-                let spilled = std::fs::read(spill_path(dir.path(), ".stdout.txt")).unwrap();
+                let spilled = fs::read(spill_path(dir.path(), ".stdout.txt")).unwrap();
                 let sent = [
                     vec![b'h'; PIPE_HEAD_BYTES],
                     vec![b'm'; 100],

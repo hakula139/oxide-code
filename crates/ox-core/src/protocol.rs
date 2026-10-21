@@ -718,7 +718,7 @@ mod tests {
                     id: "t2".to_owned(),
                     preview: ApprovalPreview {
                         title: "Edit".to_owned(),
-                        body: ApprovalBody::Diff(vec![diff_chunk()]),
+                        body: ApprovalBody::Diff(diff_chunk()),
                     },
                     basis: Basis::Mode(Mode::Manual),
                     grant: None,

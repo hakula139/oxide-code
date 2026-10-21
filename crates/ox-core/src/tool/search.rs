@@ -245,6 +245,8 @@ pub(super) fn strip_search_notes(content: &str) -> &str {
 
 #[cfg(test)]
 mod tests {
+    use std::fs;
+
     use indoc::{formatdoc, indoc};
 
     use super::*;
@@ -261,8 +263,8 @@ mod tests {
             #[test]
             fn resolves_relative_and_absolute_paths_and_keeps_their_spelling() {
                 let dir = canonical_tempdir();
-                std::fs::create_dir(dir.path().join("src")).unwrap();
-                std::fs::create_dir(dir.path().join("lib")).unwrap();
+                fs::create_dir(dir.path().join("src")).unwrap();
+                fs::create_dir(dir.path().join("lib")).unwrap();
                 let lib = dir.path().join("lib");
 
                 let relative = search_root(dir.path(), Some("./src/../lib")).unwrap();
@@ -297,7 +299,7 @@ mod tests {
 
                 let err = search_root(dir.path(), Some("missing")).err().unwrap();
 
-                let cause = std::fs::metadata(dir.path().join("missing")).unwrap_err();
+                let cause = fs::metadata(dir.path().join("missing")).unwrap_err();
                 assert_eq!(err, format!("Failed to access missing: {cause}"));
             }
 
@@ -317,9 +319,9 @@ mod tests {
             #[test]
             fn resolves_dot_dot_after_a_symlink_physically() {
                 let dir = canonical_tempdir();
-                std::fs::create_dir_all(dir.path().join("real/target")).unwrap();
+                fs::create_dir_all(dir.path().join("real/target")).unwrap();
                 let cwd = dir.path().join("cwd");
-                std::fs::create_dir(&cwd).unwrap();
+                fs::create_dir(&cwd).unwrap();
                 std::os::unix::fs::symlink(dir.path().join("real/target"), cwd.join("link"))
                     .unwrap();
 
@@ -334,7 +336,7 @@ mod tests {
                 use std::os::unix::ffi::OsStrExt as _;
                 let dir = canonical_tempdir();
                 let cwd = dir.path().join(std::ffi::OsStr::from_bytes(b"caf\xe9"));
-                std::fs::create_dir(&cwd).unwrap();
+                fs::create_dir(&cwd).unwrap();
 
                 let root = search_root(&cwd, None).unwrap();
 
@@ -350,7 +352,7 @@ mod tests {
         fn stops_once_cancelled() {
             let dir = canonical_tempdir();
             for name in ["a.txt", "b.txt", "c.txt"] {
-                std::fs::write(dir.path().join(name), "").unwrap();
+                fs::write(dir.path().join(name), "").unwrap();
             }
             let cancel = CancellationToken::new();
             let mut unreadable = Vec::new();
@@ -367,10 +369,10 @@ mod tests {
         fn records_a_directory_it_cannot_read_and_walks_on() {
             let dir = canonical_tempdir();
             let readable = dir.path().join("a.txt");
-            std::fs::write(&readable, "").unwrap();
+            fs::write(&readable, "").unwrap();
             let locked = dir.path().join("locked");
-            std::fs::create_dir(&locked).unwrap();
-            std::fs::write(locked.join("b.txt"), "").unwrap();
+            fs::create_dir(&locked).unwrap();
+            fs::write(locked.join("b.txt"), "").unwrap();
             let _denied = deny_read_access(&locked);
             let mut unreadable = Vec::new();
 
@@ -378,7 +380,7 @@ mod tests {
                 .map(ignore::DirEntry::into_path)
                 .collect();
 
-            let cause = std::fs::read_dir(&locked).unwrap_err().to_string();
+            let cause = fs::read_dir(&locked).unwrap_err().to_string();
             assert_eq!(files, [readable]);
             assert_eq!(
                 unreadable,

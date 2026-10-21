@@ -1,6 +1,7 @@
 //! File access for the file tools: target validation, reads checked on the opened file, and writes
 //! that never follow a symlink at the final component.
 
+use std::fs::{File, Metadata, OpenOptions};
 use std::path::{Path, PathBuf};
 
 use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
@@ -27,14 +28,17 @@ pub(super) async fn tracker_key(path: &Path) -> PathBuf {
 /// refusal for `verb` (`read`, `edit`, `write`).
 pub(super) fn validate_file_target(
     path: &str,
-    metadata: &std::fs::Metadata,
+    metadata: &Metadata,
     verb: &str,
 ) -> Result<(), String> {
     match validate_trackable_file(metadata) {
         Ok(()) => Ok(()),
-        Err(TrackableFileError::Directory) => Err(format!(
+        Err(TrackableFileError::Directory) if verb == "read" => Err(format!(
             "{path} is a directory. Use the glob tool to list directory contents."
         )),
+        Err(TrackableFileError::Directory) => {
+            Err(format!("{path} is a directory. Refusing to {verb}."))
+        }
         Err(TrackableFileError::NonRegular) => Err(format!(
             "{path} is not a regular file (fifo, socket, or device). Refusing to {verb}.",
         )),
@@ -75,15 +79,15 @@ pub(super) fn is_binary(bytes: &[u8]) -> bool {
 pub(super) async fn read_validated(
     path: &Path,
     shown: &str,
-    validate: impl Fn(&std::fs::Metadata) -> Result<(), String>,
-) -> Result<(std::fs::Metadata, Vec<u8>), String> {
+    validate: impl Fn(&Metadata) -> Result<(), String>,
+) -> Result<(Metadata, Vec<u8>), String> {
     let metadata = tokio::fs::metadata(path)
         .await
         .map_err(|e| format!("Failed to access {shown}: {e}"))?;
     validate(&metadata)?;
 
     let error = |e: std::io::Error| format!("Failed to read {shown}: {e}");
-    let mut options = std::fs::OpenOptions::new();
+    let mut options = OpenOptions::new();
     options.read(true);
     let mut file = open_no_follow(path, options).await.map_err(error)?;
     let metadata = file.metadata().await.map_err(error)?;
@@ -105,7 +109,7 @@ pub(super) enum WriteMode {
 /// Writes `bytes` through [`open_no_follow`], refusing existing entries in `CreateNew` mode and
 /// truncating only after a successful open in `Overwrite` mode.
 async fn write_no_follow(path: &Path, bytes: &[u8], mode: WriteMode) -> std::io::Result<()> {
-    let mut options = std::fs::OpenOptions::new();
+    let mut options = OpenOptions::new();
     options
         .write(true)
         .create_new(matches!(mode, WriteMode::CreateNew));
@@ -140,10 +144,7 @@ pub(super) async fn write_tracked(
 
 /// Opens `path` without following a symlink at the final component, so a link swapped in after the
 /// gate resolved the path cannot redirect the call, and without blocking on a fifo.
-async fn open_no_follow(
-    path: &Path,
-    options: std::fs::OpenOptions,
-) -> std::io::Result<tokio::fs::File> {
+async fn open_no_follow(path: &Path, options: OpenOptions) -> std::io::Result<tokio::fs::File> {
     let path = path.to_owned();
     let file =
         tokio::task::spawn_blocking(move || open_no_follow_blocking(&path, options)).await??;
@@ -153,8 +154,8 @@ async fn open_no_follow(
 #[cfg(unix)]
 pub(super) fn open_no_follow_blocking(
     path: &Path,
-    mut options: std::fs::OpenOptions,
-) -> std::io::Result<std::fs::File> {
+    mut options: OpenOptions,
+) -> std::io::Result<File> {
     use std::os::unix::fs::OpenOptionsExt as _;
 
     use nix::fcntl::OFlag;
@@ -171,8 +172,8 @@ pub(super) fn open_no_follow_blocking(
 #[cfg(windows)]
 pub(super) fn open_no_follow_blocking(
     path: &Path,
-    mut options: std::fs::OpenOptions,
-) -> std::io::Result<std::fs::File> {
+    mut options: OpenOptions,
+) -> std::io::Result<File> {
     use std::os::windows::fs::{MetadataExt as _, OpenOptionsExt as _};
 
     use windows_sys::Win32::Storage::FileSystem::{
@@ -204,13 +205,15 @@ pub(super) fn open_no_follow_blocking(
 
 /// The volume and file index that identify a file across handles.
 #[cfg(windows)]
-fn file_id(file: &std::fs::File) -> std::io::Result<(u64, u64)> {
+fn file_id(file: &File) -> std::io::Result<(u64, u64)> {
     let info = winapi_util::file::information(file)?;
     Ok((info.volume_serial_number(), info.file_index()))
 }
 
 #[cfg(test)]
 mod tests {
+    use std::fs;
+
     use super::*;
     use crate::tool::local_testing::canonical_tempdir;
     use crate::util::fs::testing::symlink_file;
@@ -221,9 +224,9 @@ mod tests {
         #[tokio::test]
         async fn resolves_dotted_spellings_to_one_key() {
             let dir = canonical_tempdir();
-            std::fs::create_dir(dir.path().join("src")).unwrap();
+            fs::create_dir(dir.path().join("src")).unwrap();
             let file = dir.path().join("src/main.rs");
-            std::fs::write(&file, "").unwrap();
+            fs::write(&file, "").unwrap();
 
             assert_eq!(tracker_key(&file).await, file);
             assert_eq!(
@@ -245,8 +248,8 @@ mod tests {
         #[tokio::test]
         async fn resolves_a_symlinked_spelling_to_the_target() {
             let dir = canonical_tempdir();
-            std::fs::create_dir(dir.path().join("real")).unwrap();
-            std::fs::write(dir.path().join("real/a.rs"), "").unwrap();
+            fs::create_dir(dir.path().join("real")).unwrap();
+            fs::write(dir.path().join("real/a.rs"), "").unwrap();
             std::os::unix::fs::symlink(dir.path().join("real"), dir.path().join("link")).unwrap();
 
             assert_eq!(
@@ -263,11 +266,11 @@ mod tests {
         async fn reads_a_regular_file_but_refuses_a_symlink() {
             let dir = tempfile::tempdir().unwrap();
             let target = dir.path().join("target.txt");
-            std::fs::write(&target, "original").unwrap();
+            fs::write(&target, "original").unwrap();
             let link = dir.path().join("link.txt");
             symlink_file(&target, &link);
 
-            let accept = |_: &std::fs::Metadata| Ok(());
+            let accept = |_: &Metadata| Ok(());
             let (metadata, bytes) = read_validated(&target, "target.txt", accept).await.unwrap();
             assert_eq!(
                 (metadata.len(), bytes.as_slice()),
@@ -288,20 +291,20 @@ mod tests {
             // the size limit must catch, then a fifo the open must not block on.
             fn grow(path: &Path) {
                 let staged = path.with_extension("new");
-                std::fs::write(&staged, "SECRET=1").unwrap();
-                std::fs::rename(&staged, path).unwrap();
+                fs::write(&staged, "SECRET=1").unwrap();
+                fs::rename(&staged, path).unwrap();
             }
             fn fifo(path: &Path) {
-                std::fs::remove_file(path).unwrap();
+                fs::remove_file(path).unwrap();
                 nix::unistd::mkfifo(path, nix::sys::stat::Mode::S_IRWXU).unwrap();
             }
 
             let dir = tempfile::tempdir().unwrap();
             let path = dir.path().join("notes.md");
             for swap in [grow as fn(&Path), fifo] {
-                std::fs::write(&path, "ok").unwrap();
+                fs::write(&path, "ok").unwrap();
                 let swapped = std::cell::Cell::new(false);
-                let validate = |meta: &std::fs::Metadata| {
+                let validate = |meta: &Metadata| {
                     if !meta.is_file() || meta.len() > 4 {
                         return Err("rejected".to_owned());
                     }
@@ -325,19 +328,19 @@ mod tests {
         async fn overwrite_truncates_a_regular_file() {
             let dir = tempfile::tempdir().unwrap();
             let path = dir.path().join("file.txt");
-            std::fs::write(&path, "a much longer original").unwrap();
+            fs::write(&path, "a much longer original").unwrap();
 
             write_no_follow(&path, b"short", WriteMode::Overwrite)
                 .await
                 .unwrap();
-            assert_eq!(std::fs::read_to_string(&path).unwrap(), "short");
+            assert_eq!(fs::read_to_string(&path).unwrap(), "short");
         }
 
         #[tokio::test]
         async fn create_new_refuses_existing_entries_and_dangling_links() {
             let dir = tempfile::tempdir().unwrap();
             let existing = dir.path().join("existing.txt");
-            std::fs::write(&existing, "original").unwrap();
+            fs::write(&existing, "original").unwrap();
             let target = dir.path().join("target.txt");
             let link = dir.path().join("link.txt");
             symlink_file(&target, &link);
@@ -347,7 +350,7 @@ mod tests {
                     .await
                     .is_err()
             );
-            assert_eq!(std::fs::read_to_string(&existing).unwrap(), "original");
+            assert_eq!(fs::read_to_string(&existing).unwrap(), "original");
             assert!(
                 write_no_follow(&link, b"x", WriteMode::CreateNew)
                     .await
@@ -360,7 +363,7 @@ mod tests {
         async fn overwrite_refuses_a_symlink() {
             let dir = tempfile::tempdir().unwrap();
             let target = dir.path().join("target.txt");
-            std::fs::write(&target, "original").unwrap();
+            fs::write(&target, "original").unwrap();
             let link = dir.path().join("link.txt");
             symlink_file(&target, &link);
 
@@ -371,7 +374,7 @@ mod tests {
             assert_eq!(err.raw_os_error(), Some(nix::errno::Errno::ELOOP as i32));
             #[cfg(windows)]
             assert_eq!(err.to_string(), "the final path component is a symlink");
-            assert_eq!(std::fs::read_to_string(&target).unwrap(), "original");
+            assert_eq!(fs::read_to_string(&target).unwrap(), "original");
         }
 
         #[cfg(unix)]
@@ -396,7 +399,7 @@ mod tests {
             let dir = tempfile::tempdir().unwrap();
             let path = dir.path().join("notes.txt");
             let content = "a compressible line\n".repeat(4096);
-            std::fs::write(&path, &content).unwrap();
+            fs::write(&path, &content).unwrap();
             // `compact /EXE` stores the data compressed behind the WOF filter, which hides the
             // file's reparse point from user mode, so the no-follow open keeps its first handle.
             let compact = std::process::Command::new("compact.exe")
@@ -410,13 +413,13 @@ mod tests {
                 String::from_utf8_lossy(&compact.stdout)
             );
 
-            let accept = |_: &std::fs::Metadata| Ok(());
+            let accept = |_: &Metadata| Ok(());
             let (_, bytes) = read_validated(&path, "notes.txt", accept).await.unwrap();
             assert_eq!(bytes, content.as_bytes());
             write_no_follow(&path, b"rewritten", WriteMode::Overwrite)
                 .await
                 .unwrap();
-            assert_eq!(std::fs::read(&path).unwrap(), b"rewritten");
+            assert_eq!(fs::read(&path).unwrap(), b"rewritten");
         }
     }
 }

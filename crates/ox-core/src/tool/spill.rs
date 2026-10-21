@@ -3,6 +3,7 @@
 //! Design: `docs/design/tools/truncation.md`.
 
 use std::fmt::Write as _;
+use std::fs::File;
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
 
@@ -121,7 +122,7 @@ enum SpillState {
     Pending,
     /// `full` once the file reached [`MAX_SPILL_BYTES`] and dropped bytes.
     Open {
-        file: std::fs::File,
+        file: File,
         written: u64,
         full: bool,
     },
@@ -199,7 +200,7 @@ impl Spill {
 }
 
 /// Creates the new file at `path` with `0600` perms on Unix, and its directory with `0700` perms.
-fn create_spill_file(path: &Path) -> Result<std::fs::File, String> {
+fn create_spill_file(path: &Path) -> Result<File, String> {
     let dir = path
         .parent()
         .expect("a spill file sits in the spill directory");
@@ -217,14 +218,15 @@ fn create_spill_file(path: &Path) -> Result<std::fs::File, String> {
 
 #[cfg(test)]
 mod tests {
-    use std::future::Future;
+    use std::fs;
     use std::pin::Pin;
 
     use super::*;
     use crate::permission::PermissionClass;
-    use crate::tool::bash::BashTool;
+    use crate::permission::ReadFilter;
     use crate::tool::grep::GrepTool;
     use crate::tool::local_testing::{ctx, spill_path};
+    use crate::tool::testing::bash_registry;
     use crate::tool::view::ToolResultView;
     use crate::tool::{ToolRegistry, ToolSpec};
 
@@ -273,7 +275,7 @@ mod tests {
             let dir = tempfile::tempdir().unwrap();
             let path = dir.path().join("big.txt");
             let line = "x".repeat(400);
-            std::fs::write(&path, format!("{line}\n").repeat(500)).unwrap();
+            fs::write(&path, format!("{line}\n").repeat(500)).unwrap();
             let input = serde_json::json!({"pattern": "x", "path": path, "head_limit": 0});
             (dir, input)
         }
@@ -302,7 +304,7 @@ mod tests {
                 ),
             );
             assert!((MAX_OUTPUT_BYTES - 1..=MAX_OUTPUT_BYTES).contains(&output.content.len()));
-            assert_eq!(std::fs::read_to_string(&path).unwrap(), full);
+            assert_eq!(fs::read_to_string(&path).unwrap(), full);
             assert_eq!(output.metadata.truncated_bytes, Some(full.len()));
         }
 
@@ -321,13 +323,13 @@ mod tests {
         #[tokio::test]
         async fn byte_cap_on_grep_keeps_the_row_count_apart_and_falls_through_to_text_view() {
             let (dir, input) = oversize_grep_input();
-            let registry = ToolRegistry::new(vec![Box::new(GrepTool::default())]);
+            let registry = ToolRegistry::new(vec![Box::new(GrepTool::new(ReadFilter::default()))]);
 
             let output = registry
                 .run_input("grep", input.clone(), &ctx(dir.path()))
                 .await;
 
-            let spilled = std::fs::read(spill_path(dir.path(), ".txt")).unwrap();
+            let spilled = fs::read(spill_path(dir.path(), ".txt")).unwrap();
             assert_eq!(output.metadata.truncated_bytes, Some(spilled.len()));
             assert!(output.metadata.truncated_total.is_none());
             let view = registry.result_view(
@@ -346,8 +348,8 @@ mod tests {
             // Each byte decodes as the three bytes of U+FFFD.
             let dir = tempfile::tempdir().unwrap();
             let bytes = vec![0xFF; 300 << 10];
-            std::fs::write(dir.path().join("image.bin"), &bytes).unwrap();
-            let registry = ToolRegistry::new(vec![Box::new(BashTool::default())]);
+            fs::write(dir.path().join("image.bin"), &bytes).unwrap();
+            let registry = bash_registry(Vec::new());
 
             let output = registry
                 .run_input(
@@ -363,10 +365,10 @@ mod tests {
             let note = format!("full stdout saved to {}] ...", stdout.display());
             assert!(output.content.contains(&note));
             assert!(
-                std::fs::read(&stdout).unwrap() == bytes,
+                fs::read(&stdout).unwrap() == bytes,
                 "the spill holds the raw bytes"
             );
-            let spills: Vec<_> = std::fs::read_dir(stdout.parent().unwrap())
+            let spills: Vec<_> = fs::read_dir(stdout.parent().unwrap())
                 .unwrap()
                 .map(|entry| entry.unwrap().path())
                 .collect();
@@ -412,13 +414,13 @@ mod tests {
             assert!(out.len() <= MAX_OUTPUT_BYTES, "{}", out.len());
             let (_, marker, _) = split_capped(&out);
             assert!(marker.ends_with(&format!("full output saved to {}", path.display())));
-            assert_eq!(std::fs::read_to_string(&path).unwrap(), content);
+            assert_eq!(fs::read_to_string(&path).unwrap(), content);
         }
 
         #[test]
         fn names_why_the_spill_failed_in_place_of_its_path() {
             let dir = tempfile::tempdir().unwrap();
-            std::fs::write(dir.path().join("session"), "a file").unwrap();
+            fs::write(dir.path().join("session"), "a file").unwrap();
             let content = "x".repeat(MAX_OUTPUT_BYTES * 2);
 
             let out = cap_output(&content, ctx(dir.path()).spills().file(".txt"));
@@ -458,7 +460,7 @@ mod tests {
                 }
 
                 let path = spill_path(dir.path(), ".stdout.txt");
-                let spilled = std::fs::metadata(&path).unwrap().len();
+                let spilled = fs::metadata(&path).unwrap().len();
                 assert_eq!(spilled, MAX_SPILL_BYTES);
                 assert_eq!(
                     spill.note("stdout"),
@@ -470,8 +472,8 @@ mod tests {
             fn names_the_error_of_a_write_the_file_refuses() {
                 let dir = tempfile::tempdir().unwrap();
                 let path = dir.path().join("toolu_test.stdout.txt");
-                std::fs::write(&path, "").unwrap();
-                let read_only = || std::fs::File::open(&path).unwrap();
+                fs::write(&path, "").unwrap();
+                let read_only = || File::open(&path).unwrap();
                 let mut spill = Spill {
                     path: path.clone(),
                     state: SpillState::Open {
@@ -502,11 +504,11 @@ mod tests {
         fn refuses_to_replace_an_existing_file() {
             let dir = tempfile::tempdir().unwrap();
             let path = dir.path().join("toolu_test.txt");
-            std::fs::write(&path, "earlier").unwrap();
+            fs::write(&path, "earlier").unwrap();
 
             assert!(create_spill_file(&path).is_err());
 
-            assert_eq!(std::fs::read_to_string(&path).unwrap(), "earlier");
+            assert_eq!(fs::read_to_string(&path).unwrap(), "earlier");
         }
 
         #[cfg(unix)]
@@ -519,7 +521,7 @@ mod tests {
 
             create_spill_file(&path).unwrap();
 
-            let mode = |path: &Path| std::fs::metadata(path).unwrap().permissions().mode() & 0o777;
+            let mode = |path: &Path| fs::metadata(path).unwrap().permissions().mode() & 0o777;
             assert_eq!(mode(&path), 0o600);
             assert_eq!(mode(path.parent().unwrap()), 0o700);
         }

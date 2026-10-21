@@ -203,13 +203,13 @@ mod tests {
     use crate::protocol::testing;
     use crate::session::post_compact::synthesize_post_compact_message;
     use crate::tool::DEFAULT_TOOL_ICON;
-    use crate::tool::bash::BashTool;
     use crate::tool::edit::EditTool;
     use crate::tool::tasks::testing::plan;
+    use crate::tool::testing::bash_registry;
     use crate::tool::view::{DiffChunk, DiffLine, EditDiff};
 
     fn tools() -> ToolRegistry {
-        ToolRegistry::new(vec![Box::new(BashTool::default()), Box::new(EditTool)])
+        bash_registry(vec![Box::new(EditTool)])
     }
 
     mod interactions {

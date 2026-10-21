@@ -239,14 +239,12 @@ fn write_preview(out: &mut impl Write, preview: &ApprovalPreview, basis: &Basis)
                 writeln!(out, "  {}", escape_hidden(line))?;
             }
         }
-        ApprovalBody::Diff(chunks) => {
-            for chunk in chunks {
-                for line in &chunk.old {
-                    writeln!(out, "  - {}", escape_hidden(&line.text))?;
-                }
-                for line in &chunk.new {
-                    writeln!(out, "  + {}", escape_hidden(&line.text))?;
-                }
+        ApprovalBody::Diff(chunk) => {
+            for line in &chunk.old {
+                writeln!(out, "  - {}", escape_hidden(&line.text))?;
+            }
+            for line in &chunk.new {
+                writeln!(out, "  + {}", escape_hidden(&line.text))?;
             }
         }
     }
@@ -816,7 +814,7 @@ mod tests {
                 &mut out,
                 &ApprovalPreview {
                     title: "Edit(src/a.rs)".to_owned(),
-                    body: ApprovalBody::Diff(vec![DiffChunk {
+                    body: ApprovalBody::Diff(DiffChunk {
                         old: vec![DiffLine {
                             number: 3,
                             text: "let a = 1;".to_owned(),
@@ -825,7 +823,7 @@ mod tests {
                             number: 3,
                             text: "let a = 2;\u{1b}[2K\u{200b}".to_owned(),
                         }],
-                    }]),
+                    }),
                 },
                 &basis,
             )
