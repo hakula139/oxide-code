@@ -74,21 +74,22 @@ impl LineEditor {
             return false;
         }
         let stops = GraphemeStops::new(self.text());
-        let cursor = self.textarea.cursor().1;
-        let at = stops.at_char(cursor);
+        let at = stops.at_char(self.textarea.cursor().1);
 
         let mut changed = self.textarea.input(*event);
         // ratatui-textarea steps by char, so finish a deletion or move that stopped mid-cluster.
-        if stops.char(stops.len()) == self.text().chars().count() + 1 {
-            if self.textarea.cursor().1 + 1 == cursor {
+        match char_deletion(event) {
+            Some(Side::Before) if at > 0 => {
                 for _ in 1..stops.char(at) - stops.char(at - 1) {
                     self.textarea.delete_char();
                 }
-            } else {
+            }
+            Some(Side::After) if at < stops.len() => {
                 for _ in 1..stops.char(at + 1) - stops.char(at) {
                     self.textarea.delete_next_char();
                 }
             }
+            _ => {}
         }
         while !self.cursor_on_boundary() {
             let before = self.textarea.cursor();
@@ -211,6 +212,27 @@ impl GraphemeStops {
     /// The first stop at or after char index `char`.
     fn at_char(&self, char: usize) -> usize {
         self.0.partition_point(|&(_, start, _)| start < char)
+    }
+}
+
+/// Which side of the cursor a deletion removes from.
+enum Side {
+    Before,
+    After,
+}
+
+/// The side of the cursor from which the textarea deletes one char for the key, mirroring
+/// `TextArea::input`'s Backspace / Ctrl+H and Delete / Ctrl+D bindings.
+fn char_deletion(event: &KeyEvent) -> Option<Side> {
+    let modifiers = event.modifiers - KeyModifiers::SHIFT;
+    match (event.code, modifiers) {
+        (KeyCode::Backspace, KeyModifiers::NONE) | (KeyCode::Char('h'), KeyModifiers::CONTROL) => {
+            Some(Side::Before)
+        }
+        (KeyCode::Delete, KeyModifiers::NONE) | (KeyCode::Char('d'), KeyModifiers::CONTROL) => {
+            Some(Side::After)
+        }
+        _ => None,
     }
 }
 
@@ -372,6 +394,18 @@ mod tests {
 
             assert!(deleted);
             assert_eq!(editor.text(), "x");
+        }
+
+        #[test]
+        fn undo_restores_only_the_last_edit_inside_a_cluster() {
+            let mut editor = LineEditor::new("❤");
+            type_str(&mut editor, "\u{fe0f}");
+
+            let undone =
+                editor.handle_key(&KeyEvent::new(KeyCode::Char('u'), KeyModifiers::CONTROL));
+
+            assert!(undone);
+            assert_eq!(editor.text(), "❤");
         }
     }
 
