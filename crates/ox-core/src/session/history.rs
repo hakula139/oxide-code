@@ -204,7 +204,7 @@ mod tests {
     use crate::tool::bash::BashTool;
     use crate::tool::edit::EditTool;
     use crate::tool::tasks::testing::plan;
-    use crate::tool::{DEFAULT_TOOL_ICON, DiffChunk, DiffLine};
+    use crate::tool::{DEFAULT_TOOL_ICON, DiffChunk, DiffLine, EditDiff};
 
     fn tools() -> ToolRegistry {
         ToolRegistry::new(vec![Box::new(BashTool::default()), Box::new(EditTool)])
@@ -524,16 +524,19 @@ mod tests {
 
         #[test]
         fn resolves_a_result_through_its_tool_with_persisted_metadata() {
-            let chunks = vec![DiffChunk {
-                old: vec![DiffLine {
-                    number: 10,
-                    text: "a".to_owned(),
-                }],
-                new: vec![DiffLine {
-                    number: 10,
-                    text: "b".to_owned(),
-                }],
-            }];
+            let diff = EditDiff {
+                chunk: DiffChunk {
+                    old: vec![DiffLine {
+                        number: 10,
+                        text: "a".to_owned(),
+                    }],
+                    new: vec![DiffLine {
+                        number: 10,
+                        text: "b".to_owned(),
+                    }],
+                },
+                locations: vec![10, 20],
+            };
             let input = serde_json::json!({
                 "file_path": "/repo/f.rs",
                 "old_string": "a",
@@ -554,7 +557,7 @@ mod tests {
                 "e1".to_owned(),
                 ToolMetadata {
                     title: Some("Edited f.rs".to_owned()),
-                    diff_chunks: Some(chunks.clone()),
+                    diff: Some(diff.clone()),
                     ..ToolMetadata::default()
                 },
             )]);
@@ -568,11 +571,7 @@ mod tests {
                     content: "Edited.".to_owned(),
                     is_error: false,
                     title: Some("Edited f.rs".to_owned()),
-                    view: ToolResultView::Diff {
-                        chunks,
-                        replace_all: true,
-                        replacements: 1,
-                    },
+                    view: ToolResultView::Diff(diff),
                 })
             );
         }

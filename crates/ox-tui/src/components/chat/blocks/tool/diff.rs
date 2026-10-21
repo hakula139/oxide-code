@@ -1,8 +1,8 @@
-//! Edit-tool diff body: a unified `-` / `+` layout of the [`DiffChunk`]s.
+//! Edit-tool diff body: a unified `-` / `+` layout of an [`EditDiff`]'s hunk.
 
 use ratatui::style::Style;
 
-use ox_core::tool::{DiffChunk, DiffLine};
+use ox_core::tool::{DiffChunk, DiffLine, EditDiff};
 use ox_core::util::text::plural;
 
 use super::overflow_footer;
@@ -19,9 +19,9 @@ pub(super) fn render(
     out: &mut BlockRows,
     ctx: &RenderCtx<'_>,
     border_style: Style,
-    chunks: &[DiffChunk],
+    diff: &EditDiff,
 ) {
-    if !any_chunk_has_content(chunks) {
+    if diff.chunk.old.is_empty() && diff.chunk.new.is_empty() {
         body_row(
             &mut out.lines,
             ctx,
@@ -32,11 +32,10 @@ pub(super) fn render(
         return;
     }
 
-    render_chunk_body(out, ctx, border_style, &chunks[0]);
+    render_chunk_body(out, ctx, border_style, &diff.chunk);
 
-    if chunks.len() > 1 {
-        let locations: Vec<usize> = chunks.iter().filter_map(chunk_anchor_line).collect();
-        render_locations_footer(out, ctx, border_style, &locations);
+    if diff.locations.len() > 1 {
+        render_locations_footer(out, ctx, border_style, &diff.locations);
     }
 }
 
@@ -106,20 +105,6 @@ fn render_locations_footer(
     }
     let text = ctx.with_expand_hint(&format!("{text} and {hidden} more"));
     out.push_expander(|lines| body_row(lines, ctx, border_style, text, style));
-}
-
-fn any_chunk_has_content(chunks: &[DiffChunk]) -> bool {
-    chunks
-        .iter()
-        .any(|c| !c.old.is_empty() || !c.new.is_empty())
-}
-
-fn chunk_anchor_line(chunk: &DiffChunk) -> Option<usize> {
-    chunk
-        .old
-        .first()
-        .or_else(|| chunk.new.first())
-        .map(|l| l.number)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -232,47 +217,11 @@ mod tests {
         use super::*;
 
         #[test]
-        fn marks_chunks_without_lines_as_no_change() {
+        fn marks_a_hunk_without_lines_as_no_change() {
             let theme = Theme::default();
-            let mut out = BlockRows::default();
-
-            render(
-                &mut out,
-                &RenderCtx::new(80, &theme),
-                theme.tool_border(),
-                &[chunk_of(&[], &[])],
-            );
-
-            assert_eq!(rows(&out.lines), ["▎   (no change)"]);
-        }
-
-        #[test]
-        fn single_chunk_emits_body_without_locations_footer() {
-            let theme = Theme::default();
-            let mut out = BlockRows::default();
-
-            render(
-                &mut out,
-                &RenderCtx::new(80, &theme),
-                theme.tool_border(),
-                &[chunk_of(&["foo"], &["bar"])],
-            );
-
-            assert_eq!(rows(&out.lines), ["▎   1 - foo", "▎   1 + bar"]);
-        }
-
-        #[test]
-        fn multi_chunk_emits_one_body_plus_locations_footer() {
-            let theme = Theme::default();
-            let chunk_at = |number| DiffChunk {
-                old: vec![DiffLine {
-                    number,
-                    text: "foo".to_owned(),
-                }],
-                new: vec![DiffLine {
-                    number,
-                    text: "bar".to_owned(),
-                }],
+            let diff = EditDiff {
+                chunk: chunk_of(&[], &[]),
+                locations: vec![],
             };
             let mut out = BlockRows::default();
 
@@ -280,7 +229,52 @@ mod tests {
                 &mut out,
                 &RenderCtx::new(80, &theme),
                 theme.tool_border(),
-                &[chunk_at(12), chunk_at(47)],
+                &diff,
+            );
+
+            assert_eq!(rows(&out.lines), ["▎   (no change)"]);
+        }
+
+        #[test]
+        fn single_location_emits_body_without_locations_footer() {
+            let theme = Theme::default();
+            let diff = EditDiff {
+                chunk: chunk_of(&["foo"], &["bar"]),
+                locations: vec![1],
+            };
+            let mut out = BlockRows::default();
+
+            render(
+                &mut out,
+                &RenderCtx::new(80, &theme),
+                theme.tool_border(),
+                &diff,
+            );
+
+            assert_eq!(rows(&out.lines), ["▎   1 - foo", "▎   1 + bar"]);
+        }
+
+        #[test]
+        fn several_locations_emit_one_body_plus_locations_footer() {
+            let theme = Theme::default();
+            let line = |text: &str| DiffLine {
+                number: 12,
+                text: text.to_owned(),
+            };
+            let diff = EditDiff {
+                chunk: DiffChunk {
+                    old: vec![line("foo")],
+                    new: vec![line("bar")],
+                },
+                locations: vec![12, 47],
+            };
+            let mut out = BlockRows::default();
+
+            render(
+                &mut out,
+                &RenderCtx::new(80, &theme),
+                theme.tool_border(),
+                &diff,
             );
 
             assert_eq!(
@@ -420,72 +414,6 @@ mod tests {
                 rows(&out.lines),
                 ["▎   applied at lines 12,", "▎   47, 200"]
             );
-        }
-    }
-
-    mod any_chunk_has_content {
-        use super::*;
-
-        #[test]
-        fn empty_chunks_is_false() {
-            let chunks = vec![chunk_of(&[], &[])];
-            assert!(!any_chunk_has_content(&chunks));
-        }
-
-        #[test]
-        fn one_side_filled_is_true() {
-            let chunks = vec![chunk_of(&["a"], &[])];
-            assert!(any_chunk_has_content(&chunks));
-            let chunks = vec![chunk_of(&[], &["b"])];
-            assert!(any_chunk_has_content(&chunks));
-        }
-
-        #[test]
-        fn empty_vec_is_false() {
-            assert!(!any_chunk_has_content(&[]));
-        }
-    }
-
-    mod chunk_anchor_line {
-        use super::*;
-
-        #[test]
-        fn uses_old_side_first_line() {
-            let chunk = DiffChunk {
-                old: vec![
-                    DiffLine {
-                        number: 47,
-                        text: "a".to_owned(),
-                    },
-                    DiffLine {
-                        number: 48,
-                        text: "b".to_owned(),
-                    },
-                ],
-                new: vec![DiffLine {
-                    number: 47,
-                    text: "X".to_owned(),
-                }],
-            };
-            assert_eq!(chunk_anchor_line(&chunk), Some(47));
-        }
-
-        #[test]
-        fn falls_back_to_new_side_for_pure_insertions() {
-            let chunk = DiffChunk {
-                old: vec![],
-                new: vec![DiffLine {
-                    number: 99,
-                    text: "added".to_owned(),
-                }],
-            };
-            assert_eq!(chunk_anchor_line(&chunk), Some(99));
-        }
-
-        #[test]
-        fn leaves_an_empty_chunk_unanchored() {
-            let chunk = chunk_of(&[], &[]);
-            assert_eq!(chunk_anchor_line(&chunk), None);
         }
     }
 

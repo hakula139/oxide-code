@@ -101,8 +101,8 @@ impl ChatBlock for ToolResultBlock {
             } => {
                 read_excerpt::render(&mut out, ctx, border_style, path, lines, *total_lines);
             }
-            ToolResultView::Diff { chunks, .. } => {
-                diff::render(&mut out, ctx, border_style, chunks);
+            ToolResultView::Diff(diff) => {
+                diff::render(&mut out, ctx, border_style, diff);
             }
             ToolResultView::GrepMatches { groups, truncated } => {
                 grep::render(&mut out, ctx, border_style, groups, *truncated);
@@ -210,7 +210,9 @@ fn overflow_footer(
 mod tests {
     use ox_core::tool::tasks::TaskStatus;
     use ox_core::tool::tasks::testing::task;
-    use ox_core::tool::{DiffChunk, DiffLine, GrepFileGroup, GrepMatchLine, ReadExcerptLine};
+    use ox_core::tool::{
+        DiffChunk, DiffLine, EditDiff, GrepFileGroup, GrepMatchLine, ReadExcerptLine,
+    };
 
     use super::*;
     use crate::theme::Theme;
@@ -239,8 +241,8 @@ mod tests {
                     &["src/lib.rs:1", "1 │ fn f() {}"],
                 ),
                 (
-                    ToolResultView::Diff {
-                        chunks: vec![DiffChunk {
+                    ToolResultView::Diff(EditDiff {
+                        chunk: DiffChunk {
                             old: vec![DiffLine {
                                 number: 1,
                                 text: "a".to_owned(),
@@ -249,10 +251,9 @@ mod tests {
                                 number: 1,
                                 text: "b".to_owned(),
                             }],
-                        }],
-                        replace_all: false,
-                        replacements: 1,
-                    },
+                        },
+                        locations: vec![1],
+                    }),
                     &["1 - a", "1 + b"],
                 ),
                 (

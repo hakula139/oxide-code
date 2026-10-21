@@ -534,7 +534,7 @@ mod tests {
     use crate::session::store::local_testing::test_session_file;
     use crate::session::store::testing::{seed_test_session, test_project_dir, test_store};
     use crate::tool::tasks::testing::plan;
-    use crate::tool::{DiffChunk, DiffLine};
+    use crate::tool::{DiffChunk, DiffLine, EditDiff};
 
     /// Resumes the session whose file name carries `session_id`.
     fn resume_id(store: &SessionStore, session_id: &str) -> Result<ResumedSession> {
@@ -2125,16 +2125,19 @@ mod tests {
                     "t1".to_owned(),
                     ToolMetadata {
                         title: Some("Edited f.rs".to_owned()),
-                        diff_chunks: Some(vec![DiffChunk {
-                            old: vec![DiffLine {
-                                number: 1,
-                                text: "fn main() {}".to_owned(),
-                            }],
-                            new: vec![DiffLine {
-                                number: 1,
-                                text: "fn run() {}".to_owned(),
-                            }],
-                        }]),
+                        diff: Some(EditDiff {
+                            chunk: DiffChunk {
+                                old: vec![DiffLine {
+                                    number: 1,
+                                    text: "fn main() {}".to_owned(),
+                                }],
+                                new: vec![DiffLine {
+                                    number: 1,
+                                    text: "fn run() {}".to_owned(),
+                                }],
+                            },
+                            locations: vec![1],
+                        }),
                         ..ToolMetadata::default()
                     },
                 )])

@@ -1,7 +1,9 @@
 //! Regex content search tool.
 
 use std::fmt::Write as _;
+use std::fs::OpenOptions;
 use std::future::Future;
+use std::io::{self, Read as _};
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::sync::Arc;
@@ -128,7 +130,7 @@ fn input_schema() -> serde_json::Value {
             },
             "head_limit": {
                 "type": "integer",
-                "description": "Limit output to first N entries (default: 250, 0 for unlimited)"
+                "description": "Limit output to first N entries (default: 250, 0 for no row limit)"
             }
         },
         "required": ["pattern"]
@@ -274,7 +276,7 @@ fn grep_files(params: &GrepParams<'_>) -> Result<String, String> {
     );
 
     let cwd = &root.cwd;
-    let texts = texts(&files, &params.cancel, &mut unreadable);
+    let texts = texts(&files, size_limit, &params.cancel, &mut unreadable);
     let mut result = match params.output_mode {
         OutputMode::FilesWithMatches => format_files_with_matches(texts, cwd, &re, head_limit),
         OutputMode::Count => format_count(texts, cwd, &re, head_limit),
@@ -365,20 +367,22 @@ fn collect_files(
     }
 }
 
-/// Each of `files` that reads as text, with its content, until `cancel` fires. Each file whose read
-/// fails goes to `unreadable`, except one that vanished after the walk found it.
+/// Each of `files` that reads as text within `size_limit` bytes, with its content, until `cancel`
+/// fires. Each file whose read fails goes to `unreadable`, except one that vanished after the walk
+/// found it.
 fn texts<'a>(
     files: &'a [PathBuf],
+    size_limit: u64,
     cancel: &'a CancellationToken,
     unreadable: &'a mut Vec<Unreadable>,
 ) -> impl Iterator<Item = (&'a Path, String)> + 'a {
     files
         .iter()
         .take_while(|_| !cancel.is_cancelled())
-        .filter_map(move |path| match read_text(path) {
+        .filter_map(move |path| match read_text(path, size_limit) {
             Ok(text) => text.map(|text| (path.as_path(), text)),
             Err(e) => {
-                if e.kind() != std::io::ErrorKind::NotFound {
+                if e.kind() != io::ErrorKind::NotFound {
                     unreadable.push(Unreadable::from_read(path, &e));
                 }
                 None
@@ -386,9 +390,26 @@ fn texts<'a>(
         })
 }
 
-/// The text of the file at `path`, or `None` when it is binary.
-fn read_text(path: &Path) -> std::io::Result<Option<String>> {
-    let bytes = std::fs::read(path)?;
+/// The text of the file at `path`, or `None` when it is binary. The open refuses a symlink and
+/// never blocks on a fifo, and the opened file must be a regular file within `size_limit` bytes,
+/// so an entry swapped after the walk checked it is not read through.
+fn read_text(path: &Path, size_limit: u64) -> io::Result<Option<String>> {
+    let mut options = OpenOptions::new();
+    options.read(true);
+    let mut file = super::open_no_follow_blocking(path, options)?;
+    let metadata = file.metadata()?;
+    if !metadata.is_file() {
+        return Err(io::Error::other("not a regular file"));
+    }
+    if metadata.len() > size_limit {
+        let limit_mb = size_limit / (1024 * 1024);
+        return Err(io::Error::other(format!(
+            "grew past the {limit_mb} MB size limit"
+        )));
+    }
+
+    let mut bytes = Vec::new();
+    file.read_to_end(&mut bytes)?;
     if super::is_binary(&bytes) {
         return Ok(None);
     }
@@ -417,61 +438,85 @@ fn format_content<'a>(
     context: usize,
     head_limit: usize,
 ) -> String {
-    // Collecting one row past the limit proves more output exists, so the footer only appears when
-    // a row was actually dropped.
-    let capacity = head_limit.saturating_add(1);
-    let mut output_lines: Vec<String> = Vec::new();
+    let mut rows = Rows::new(head_limit);
 
     for (path, text) in texts {
-        if output_lines.len() >= capacity {
+        if rows.full() {
             break;
         }
 
         let display_path = super::display_path(path, cwd);
 
         if context == 0 {
-            search_no_context(&text, re, &display_path, &mut output_lines, capacity);
+            search_no_context(&text, re, &display_path, &mut rows);
         } else {
-            search_with_context(
-                &text,
-                re,
-                &display_path,
-                context,
-                &mut output_lines,
-                capacity,
-            );
+            search_with_context(&text, re, &display_path, context, &mut rows);
         }
     }
 
-    if output_lines.is_empty() {
-        return NO_MATCHES_FOUND.into();
-    }
-
-    let truncated = output_lines.len() > head_limit;
-    output_lines.truncate(head_limit);
-    let mut output = output_lines.join("\n");
-
-    if truncated {
-        _ = write!(output, "\n\n{RESULTS_LIMIT_PREFIX}{head_limit} lines)");
-    }
-
-    output
+    rows.render()
 }
 
-fn search_no_context(
-    text: &str,
-    re: &regex::Regex,
-    display_path: &str,
-    output_lines: &mut Vec<String>,
-    capacity: usize,
-) {
+/// The content rows a search keeps: one past `head_limit`, which proves more output exists, so the
+/// footer appears only when a row was dropped, and at most about [`super::MAX_SPILL_BYTES`], the
+/// most the dispatcher keeps of a result, so `head_limit: 0` cannot hold every match of a large
+/// tree in memory.
+struct Rows {
+    kept: Vec<String>,
+    bytes: u64,
+    head_limit: usize,
+}
+
+impl Rows {
+    fn new(head_limit: usize) -> Self {
+        Self {
+            kept: Vec::new(),
+            bytes: 0,
+            head_limit,
+        }
+    }
+
+    /// Returns whether the search can stop, since another row would be dropped.
+    fn full(&self) -> bool {
+        self.kept.len() > self.head_limit || self.bytes >= super::MAX_SPILL_BYTES
+    }
+
+    fn push(&mut self, row: String) {
+        self.bytes += row.len() as u64 + 1;
+        self.kept.push(row);
+    }
+
+    /// The kept rows, cut to `head_limit`, with a footer naming the limit that dropped any.
+    fn render(mut self) -> String {
+        if self.kept.is_empty() {
+            return NO_MATCHES_FOUND.into();
+        }
+
+        let footer = if self.kept.len() > self.head_limit {
+            self.kept.truncate(self.head_limit);
+            Some(format!("{} lines", self.head_limit))
+        } else if self.bytes >= super::MAX_SPILL_BYTES {
+            Some(format!("{} MiB of output", super::MAX_SPILL_BYTES >> 20))
+        } else {
+            None
+        };
+
+        let mut output = self.kept.join("\n");
+        if let Some(footer) = footer {
+            _ = write!(output, "\n\n{RESULTS_LIMIT_PREFIX}{footer})");
+        }
+        output
+    }
+}
+
+fn search_no_context(text: &str, re: &regex::Regex, display_path: &str, rows: &mut Rows) {
     for (line_num, line) in text.lines().enumerate() {
-        if output_lines.len() >= capacity {
+        if rows.full() {
             return;
         }
         if re.is_match(line) {
             let truncated = super::truncate_line(line, MAX_LINE_CHARS);
-            output_lines.push(format!("{display_path}:{}:{truncated}", line_num + 1));
+            rows.push(format!("{display_path}:{}:{truncated}", line_num + 1));
         }
     }
 }
@@ -481,8 +526,7 @@ fn search_with_context(
     re: &regex::Regex,
     display_path: &str,
     context: usize,
-    output_lines: &mut Vec<String>,
-    capacity: usize,
+    rows: &mut Rows,
 ) {
     let lines: Vec<&str> = text.lines().collect();
     let match_indices: Vec<usize> = lines
@@ -499,7 +543,7 @@ fn search_with_context(
     let mut ranges: Vec<(usize, usize)> = Vec::new();
     for &idx in &match_indices {
         let start = idx.saturating_sub(context);
-        let end = (idx + context).min(lines.len() - 1);
+        let end = idx.saturating_add(context).min(lines.len() - 1);
         if let Some(last) = ranges.last_mut()
             && start <= last.1 + 1
         {
@@ -510,14 +554,14 @@ fn search_with_context(
     }
 
     for (range_idx, &(start, end)) in ranges.iter().enumerate() {
-        if output_lines.len() >= capacity {
+        if rows.full() {
             return;
         }
         if range_idx > 0 {
-            output_lines.push("--".to_owned());
+            rows.push("--".to_owned());
         }
         for (i, line) in lines.iter().enumerate().take(end + 1).skip(start) {
-            if output_lines.len() >= capacity {
+            if rows.full() {
                 return;
             }
             let sep = if match_indices.binary_search(&i).is_ok() {
@@ -526,7 +570,7 @@ fn search_with_context(
                 '-'
             };
             let truncated = super::truncate_line(line, MAX_LINE_CHARS);
-            output_lines.push(format!("{display_path}:{}{sep}{truncated}", i + 1));
+            rows.push(format!("{display_path}:{}{sep}{truncated}", i + 1));
         }
     }
 }
@@ -699,6 +743,7 @@ mod tests {
     use crate::tool::local_testing::{
         self, canonical_tempdir, ctx, deny_reads, search_root, temp_ctx,
     };
+    use crate::util::fs::testing::symlink_file;
     use crate::util::path::slash_separated;
 
     /// Content-mode params searching all of `cwd`, so result paths render relative to it.
@@ -1615,7 +1660,8 @@ mod tests {
             let cancel = CancellationToken::new();
             let mut unreadable = Vec::new();
 
-            let read: Vec<_> = texts(&files, &cancel, &mut unreadable).collect();
+            let read: Vec<_> =
+                texts(&files, MAX_WALK_FILE_SIZE, &cancel, &mut unreadable).collect();
 
             let cause = std::fs::read(&secret).unwrap_err().to_string();
             assert_eq!(read, []);
@@ -1626,6 +1672,176 @@ mod tests {
                     error: cause,
                 }]
             );
+        }
+    }
+
+    mod read_text {
+        use super::*;
+
+        #[test]
+        fn reads_text_and_skips_binary() {
+            let dir = canonical_tempdir();
+            let text = dir.path().join("a.txt");
+            let binary = dir.path().join("a.bin");
+            std::fs::write(&text, "fn main() {}\n").unwrap();
+            std::fs::write(&binary, b"\0\x01").unwrap();
+
+            assert_eq!(
+                read_text(&text, MAX_WALK_FILE_SIZE).unwrap().as_deref(),
+                Some("fn main() {}\n"),
+            );
+            assert_eq!(read_text(&binary, MAX_WALK_FILE_SIZE).unwrap(), None);
+        }
+
+        #[test]
+        fn refuses_a_file_past_the_size_limit() {
+            let dir = canonical_tempdir();
+            let path = dir.path().join("big.txt");
+            let limit = 1024 * 1024;
+            std::fs::write(&path, vec![b'a'; 1024 * 1024 + 1]).unwrap();
+
+            let err = read_text(&path, limit).unwrap_err();
+
+            assert_eq!(err.to_string(), "grew past the 1 MB size limit");
+        }
+
+        #[test]
+        fn refuses_a_symlink() {
+            let dir = canonical_tempdir();
+            let target = dir.path().join("target.txt");
+            std::fs::write(&target, "SECRET=1").unwrap();
+            let link = dir.path().join("link.txt");
+            symlink_file(&target, &link);
+
+            let err = read_text(&link, MAX_WALK_FILE_SIZE).unwrap_err();
+
+            #[cfg(unix)]
+            let cause = io::Error::from_raw_os_error(nix::errno::Errno::ELOOP as i32).to_string();
+            #[cfg(windows)]
+            let cause = "the final path component is a symlink";
+            assert_eq!(err.to_string(), cause);
+        }
+
+        #[cfg(unix)]
+        #[test]
+        fn refuses_a_fifo_without_blocking() {
+            let dir = canonical_tempdir();
+            let path = dir.path().join("fifo");
+            nix::unistd::mkfifo(&path, nix::sys::stat::Mode::S_IRWXU).unwrap();
+
+            let err = read_text(&path, MAX_WALK_FILE_SIZE).unwrap_err();
+
+            assert_eq!(err.to_string(), "not a regular file");
+        }
+    }
+
+    mod format_content {
+        use super::*;
+
+        #[test]
+        fn stops_reading_files_once_the_rows_are_full() {
+            let re = regex::Regex::new("m").unwrap();
+            let texts = [
+                (Path::new("/repo/a.rs"), "m\nm\n".to_owned()),
+                (Path::new("/repo/b.rs"), "m\n".to_owned()),
+            ];
+
+            let output = format_content(texts.into_iter(), Path::new("/repo"), &re, 0, 1);
+
+            assert_eq!(
+                output,
+                indoc! {"
+                    a.rs:1:m
+
+                    (Results limited to 1 lines)"
+                },
+            );
+        }
+    }
+
+    mod rows {
+        use super::*;
+
+        mod render {
+            use super::*;
+
+            #[test]
+            fn keeps_every_row_under_both_limits() {
+                let mut rows = Rows::new(2);
+                rows.push("a".to_owned());
+                rows.push("b".to_owned());
+
+                assert!(!rows.full());
+                assert_eq!(rows.render(), "a\nb");
+            }
+
+            #[test]
+            fn cuts_to_the_head_limit_and_names_it() {
+                let mut rows = Rows::new(2);
+                for row in ["a", "b", "c"] {
+                    rows.push(row.to_owned());
+                }
+
+                assert!(rows.full());
+                assert_eq!(
+                    rows.render(),
+                    indoc! {"
+                        a
+                        b
+
+                        (Results limited to 2 lines)"
+                    },
+                );
+            }
+
+            #[test]
+            fn stops_at_the_spill_limit_without_a_head_limit() {
+                let row = "x".repeat(1 << 20);
+                let mut rows = Rows::new(usize::MAX);
+                let mut pushed = 0;
+                while !rows.full() {
+                    rows.push(row.clone());
+                    pushed += 1;
+                }
+
+                let rendered = rows.render();
+
+                assert_eq!(pushed, 10);
+                let kept = vec![row; 10].join("\n");
+                assert!(
+                    rendered == format!("{kept}\n\n(Results limited to 10 MiB of output)"),
+                    "the rows and the footer naming the byte limit",
+                );
+            }
+
+            #[test]
+            fn without_rows_reports_no_matches() {
+                assert_eq!(Rows::new(2).render(), "No matches found");
+            }
+        }
+    }
+
+    mod search_with_context {
+        use super::*;
+
+        #[test]
+        fn context_past_the_file_shows_every_line_around_the_match() {
+            let re = regex::Regex::new("b").unwrap();
+            let mut rows = Rows::new(usize::MAX);
+
+            search_with_context("a\nb\nc\n", &re, "f.txt", usize::MAX, &mut rows);
+
+            assert_eq!(rows.kept, ["f.txt:1-a", "f.txt:2:b", "f.txt:3-c"]);
+        }
+
+        #[test]
+        fn stops_between_ranges_once_the_rows_are_full() {
+            let re = regex::Regex::new("a").unwrap();
+            let mut rows = Rows::new(1);
+
+            search_with_context("a\nx\nx\nx\na\n", &re, "f.txt", 1, &mut rows);
+
+            assert_eq!(rows.kept, ["f.txt:1:a", "f.txt:2-x"]);
         }
     }
 
