@@ -18,6 +18,7 @@ use crate::util::fs::{atomic_write_private, create_private_dir_all};
 #[cfg(any(target_os = "macos", test))]
 use crate::util::path::claude_config_var;
 use crate::util::path::{CLAUDE_CREDENTIALS, XdgBase, app_dir, claude_dir, tildify};
+use crate::util::response::{self, condense};
 use crate::util::sync::lock_or_recover;
 use crate::util::text::join_sentences;
 use crate::util::tls::Trust;
@@ -855,9 +856,9 @@ async fn request_tokens(
     let status = response.status();
     if !status.is_success() {
         let body = response.text().await.unwrap_or_default();
-        let error = match body.trim() {
-            "" => anyhow!("{what} failed with {status}"),
-            body => anyhow!("{what} failed with {status}: {body}"),
+        let error = match token_error_details(&body) {
+            Some(details) => anyhow!("{what} failed with {status}: {details}"),
+            None => anyhow!("{what} failed with {status}"),
         };
         return Err(TokenRequestError {
             error,
@@ -869,6 +870,27 @@ async fn request_tokens(
         .json()
         .await
         .with_context(|| format!("failed to parse {what} response"))?)
+}
+
+/// What a token endpoint's error `body` says, condensed: RFC 6749's `error_description`, or else its
+/// `error` code, or else [`response::body_details`].
+fn token_error_details(body: &str) -> Option<String> {
+    #[derive(Deserialize)]
+    struct TokenError {
+        error: String,
+        error_description: Option<String>,
+    }
+
+    match serde_json::from_str::<TokenError>(body) {
+        Ok(TokenError {
+            error,
+            error_description,
+        }) => error_description
+            .as_deref()
+            .and_then(condense)
+            .or_else(|| condense(&error)),
+        Err(_) => response::body_details(body),
+    }
 }
 
 fn write_refreshed_credentials(
@@ -2531,22 +2553,24 @@ mod tests {
         }
 
         #[tokio::test]
-        async fn propagates_http_error_with_status_and_body() {
+        async fn propagates_http_error_with_status_and_condensed_body() {
             let server = MockServer::start().await;
             Mock::given(method("POST"))
                 .and(wm_path("/"))
-                .respond_with(
-                    ResponseTemplate::new(401).set_body_string(r#"{"error":"invalid_grant"}"#),
-                )
+                .respond_with(ResponseTemplate::new(401).set_body_string(
+                    r#"{"error":"invalid_grant","error_description":"Refresh token\nnot found"}"#,
+                ))
                 .mount(&server)
                 .await;
 
             let err = refresh_oauth_token(&server.uri(), "bad", &NoRoots)
                 .await
                 .expect_err("expected HTTP error");
-            let msg = format!("{:#}", err.error);
-            assert!(msg.contains("401"), "status: {msg}");
-            assert!(msg.contains("invalid_grant"), "body: {msg}");
+
+            assert_eq!(
+                format!("{:#}", err.error),
+                "token refresh failed with 401 Unauthorized: Refresh token not found",
+            );
             assert!(!err.transient, "a 4xx needs a new sign-in");
         }
 
@@ -2602,6 +2626,33 @@ mod tests {
             let msg = format!("{:#}", err.error);
             assert!(msg.contains("failed to read extra CA bundle"), "{msg}");
             assert!(msg.contains("/definitely/does/not/exist.pem"), "{msg}");
+        }
+    }
+
+    mod token_error_details {
+        use super::*;
+
+        #[test]
+        fn prefers_the_description_then_the_code_then_the_page_title() {
+            for (body, expected) in [
+                (
+                    r#"{"error":"invalid_grant","error_description":"Token revoked."}"#,
+                    Some("Token revoked."),
+                ),
+                (r#"{"error":"invalid_grant"}"#, Some("invalid_grant")),
+                (
+                    r#"{"error":"invalid_grant","error_description":" "}"#,
+                    Some("invalid_grant"),
+                ),
+                (
+                    "<!DOCTYPE html>\n<html><head><title>503 Service Unavailable</title>\n\
+                     <style>body { margin: 0 }</style></head><body>...</body></html>",
+                    Some("503 Service Unavailable"),
+                ),
+                ("", None),
+            ] {
+                assert_eq!(token_error_details(body).as_deref(), expected, "{body:?}");
+            }
         }
     }
 
