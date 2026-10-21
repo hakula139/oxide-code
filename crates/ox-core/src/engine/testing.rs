@@ -24,7 +24,7 @@ use crate::prompt;
 use crate::session::handle;
 use crate::session::store::SessionStore;
 use crate::tool::ToolRegistry;
-use crate::util::path::testing::HOME_VAR;
+use crate::util::path::testing::pinned_home;
 use crate::util::tls::testing::NoRoots;
 
 // ── Engine ──
@@ -38,7 +38,7 @@ pub(super) const SESSION_CONTEXT: &str = "<system-reminder>session context</syst
 /// reads the developer's instruction files or git state.
 pub async fn engine(base_url: String, store: &SessionStore, cwd: &Path) -> Engine {
     let (mut prompt, instruction_warnings) =
-        prompt::build_prompt(&ModelSpec::resolve(MODEL.to_owned()), cwd).await;
+        prompt::build_prompt(&ModelSpec::resolve(MODEL), cwd).await;
     SESSION_CONTEXT.clone_into(&mut prompt.user_context);
     let config = test_config(base_url, api_key(), MODEL);
     let session = handle::start(store, MODEL, None);
@@ -117,12 +117,7 @@ pub fn with_pinned_home<'a>(
 ) -> Pin<Box<dyn Future<Output = ()> + 'a>> {
     Box::pin(async {
         let home = tempfile::tempdir().expect("the temp home is created");
-        let vars = [
-            (HOME_VAR, Some(home.path())),
-            ("XDG_CONFIG_HOME", None),
-            ("CLAUDE_CONFIG_DIR", None),
-        ];
-        temp_env::async_with_vars(vars, test).await;
+        temp_env::async_with_vars(pinned_home(home.path()), test).await;
     })
 }
 

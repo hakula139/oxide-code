@@ -273,7 +273,7 @@ mod tests {
             };
             assert_max_tokens(&info, "64000");
 
-            info.config.model = ModelSpec::resolve("custom-model".to_owned());
+            info.config.model = ModelSpec::resolve("custom-model");
             assert_max_tokens(&info, "16000");
 
             info.config.max_tokens = Some(1_000);

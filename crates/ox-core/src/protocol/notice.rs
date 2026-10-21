@@ -121,13 +121,9 @@ mod tests {
     mod config_changed {
         use super::*;
 
-        fn spec(id: &str) -> ModelSpec {
-            ModelSpec::resolve(id.to_owned())
-        }
-
         fn model_pick(model: &ModelSpec, effort: Option<Effort>) -> ConfigPick {
             ConfigPick::Model {
-                id: ResolvedModelId::new(model.id().to_owned()),
+                id: ResolvedModelId::new(model.id()),
                 effort,
             }
         }
@@ -145,7 +141,8 @@ mod tests {
 
         #[test]
         fn swap_both_none_omits_effort_clause() {
-            let (opus, custom) = (spec("claude-opus-5-5"), spec("custom-model"));
+            let opus = ModelSpec::resolve("claude-opus-5-5");
+            let custom = ModelSpec::resolve("custom-model");
 
             let s = config_changed(
                 &settings(&opus, None),
@@ -160,7 +157,8 @@ mod tests {
         fn swap_to_no_tier_model_surfaces_requested_effort() {
             // The user needs to know the requested tier didn't apply, or else a silent drop reads
             // as a landed config change.
-            let (opus, custom) = (spec("claude-opus-5-5"), spec("custom-model"));
+            let opus = ModelSpec::resolve("claude-opus-5-5");
+            let custom = ModelSpec::resolve("custom-model");
 
             let s = config_changed(
                 &settings(&opus, None),
@@ -177,7 +175,8 @@ mod tests {
 
         #[test]
         fn swap_clears_effort_when_new_model_drops_it() {
-            let (opus, custom) = (spec("claude-opus-5-5"), spec("custom-model"));
+            let opus = ModelSpec::resolve("claude-opus-5-5");
+            let custom = ModelSpec::resolve("custom-model");
 
             let s = config_changed(
                 &settings(&opus, Some(Effort::Xhigh)),
@@ -196,7 +195,8 @@ mod tests {
         fn swap_marks_default_when_previous_was_none() {
             // None → Some means the new model's default kicked in. Distinguishing this from "user's
             // pick survived" keeps the user from thinking they chose this tier.
-            let (custom, opus) = (spec("custom-model"), spec("claude-opus-5-5"));
+            let custom = ModelSpec::resolve("custom-model");
+            let opus = ModelSpec::resolve("claude-opus-5-5");
 
             let s = config_changed(
                 &settings(&custom, None),
@@ -212,7 +212,8 @@ mod tests {
 
         #[test]
         fn swap_reports_carried_or_picked_effort_plainly() {
-            let (sonnet, opus) = (spec("claude-sonnet-5-5"), spec("claude-opus-5-5"));
+            let sonnet = ModelSpec::resolve("claude-sonnet-5-5");
+            let opus = ModelSpec::resolve("claude-opus-5-5");
             for (prev, requested, new) in [
                 (Effort::High, None, Effort::High),
                 (Effort::Medium, Some(Effort::Max), Effort::Max),
@@ -232,7 +233,7 @@ mod tests {
 
         #[test]
         fn model_pick_of_the_active_model_reads_as_using_it() {
-            let opus = spec("claude-opus-5-5");
+            let opus = ModelSpec::resolve("claude-opus-5-5");
 
             let s = config_changed(
                 &settings(&opus, Some(Effort::High)),
@@ -245,7 +246,7 @@ mod tests {
 
         #[test]
         fn effort_explicit_pick_matches_resolution() {
-            let opus = spec("claude-opus-5-5");
+            let opus = ModelSpec::resolve("claude-opus-5-5");
 
             let s = config_changed(
                 &settings(&opus, Some(Effort::High)),
@@ -258,7 +259,7 @@ mod tests {
 
         #[test]
         fn effort_pick_on_no_tier_model_surfaces_loss() {
-            let custom = spec("custom-model");
+            let custom = ModelSpec::resolve("custom-model");
 
             let s = config_changed(
                 &settings(&custom, None),
@@ -274,7 +275,8 @@ mod tests {
 
         #[test]
         fn model_swap_mentions_compaction_threshold_change() {
-            let (opus, sonnet) = (spec("claude-opus-5-5"), spec("claude-sonnet-5-5"));
+            let opus = ModelSpec::resolve("claude-opus-5-5");
+            let sonnet = ModelSpec::resolve("claude-sonnet-5-5");
             let after = ConfigSettings {
                 auto_compaction: AutoCompactionConfig {
                     enabled: true,
@@ -300,7 +302,8 @@ mod tests {
 
         #[test]
         fn model_swap_reports_lost_effort_and_compaction_change() {
-            let (opus, custom) = (spec("claude-opus-5-5"), spec("custom-model"));
+            let opus = ModelSpec::resolve("claude-opus-5-5");
+            let custom = ModelSpec::resolve("custom-model");
             let after = ConfigSettings {
                 auto_compaction: AutoCompactionConfig {
                     enabled: true,

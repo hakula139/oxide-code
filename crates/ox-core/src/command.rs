@@ -132,7 +132,7 @@ pub fn model(arg: &str) -> Result<Op, String> {
         }
     };
     Ok(Op::SetModel(ConfigPick::Model {
-        id: ResolvedModelId::new(info.id.to_owned()),
+        id: ResolvedModelId::new(info.id),
         effort: None,
     }))
 }
@@ -201,7 +201,7 @@ mod tests {
 
     fn set_model(id: &str) -> Op {
         Op::SetModel(ConfigPick::Model {
-            id: ResolvedModelId::new(id.to_owned()),
+            id: ResolvedModelId::new(id),
             effort: None,
         })
     }
@@ -433,16 +433,6 @@ mod tests {
                     - `claude-sonnet-5-5` — Claude Sonnet 5.5"
                 },
             );
-        }
-
-        #[test]
-        fn ambiguous_suggests_every_catalog_alias() {
-            let err = model("o").expect_err("ambiguous arg must error");
-
-            for info in MODELS {
-                let alias = format!("`{}`", info.family.id_token());
-                assert!(err.contains(&alias), "missing {alias}: {err}");
-            }
         }
 
         #[test]

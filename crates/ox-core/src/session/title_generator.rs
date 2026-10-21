@@ -89,7 +89,7 @@ async fn generate_and_record(
     let output_format = title_output_format();
     let (raw, usage) = client
         .complete(
-            &ModelSpec::resolve(HAIKU_MODEL.to_owned()),
+            &ModelSpec::resolve(HAIKU_MODEL),
             SYSTEM_PROMPT,
             &prompt,
             MAX_TOKENS,

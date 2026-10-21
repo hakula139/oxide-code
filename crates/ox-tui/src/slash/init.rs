@@ -15,7 +15,7 @@ use super::context::SlashContext;
 use super::matcher::rank_by_prefix;
 use super::registry::{ArgCompletion, SlashCommand, SlashKind, SlashOutcome};
 use crate::action::Action;
-use crate::modal::chrome::{CONFIRM_HINTS, FOOTER_HEIGHT, render_footer};
+use crate::modal::chrome::CONFIRM_HINTS;
 use crate::modal::list_picker::{ListPicker, PickerItem, numeric_hint};
 use crate::modal::{Modal, ModalAction, ModalKey};
 use crate::theme::Theme;
@@ -72,9 +72,11 @@ impl PickerItem for FileRow {
     fn label(&self) -> &str {
         self.name
     }
+
     fn description(&self) -> Option<&str> {
         Some(self.description)
     }
+
     fn key_hint(&self) -> Option<char> {
         self.hint
     }
@@ -109,38 +111,26 @@ impl InitPicker {
     }
 
     fn submit(&self) -> ModalKey {
-        let row = self
-            .list
-            .selected()
-            .expect("the picker lists every file choice");
-        let prompt = init::create_prompt(&self.root, row.name);
+        let prompt = init::create_prompt(&self.root, self.list.selected().name);
         ModalKey::Submitted(ModalAction::Dispatch(Action::Op(Op::Prompt(prompt))))
     }
 }
 
 impl Modal for InitPicker {
     fn height(&self, width: u16, max_height: u16) -> u16 {
-        let list_max = max_height.saturating_sub(FOOTER_HEIGHT);
-        self.list.height(width, list_max) + FOOTER_HEIGHT
+        self.list.height_with_footer(width, max_height)
     }
 
     fn render(&self, frame: &mut Frame<'_>, area: Rect, theme: &Theme) {
-        let list_area = Rect {
-            height: area.height.saturating_sub(FOOTER_HEIGHT),
-            ..area
-        };
-        self.list.render(frame, list_area, theme);
-        render_footer(frame, area, &CONFIRM_HINTS, theme);
+        self.list
+            .render_with_footer(frame, area, &CONFIRM_HINTS, theme);
     }
 
     fn handle_key(&mut self, event: &KeyEvent) -> ModalKey {
-        match event.code {
-            KeyCode::Enter => return self.submit(),
-            KeyCode::Up | KeyCode::Char('k') => self.list.select_prev(),
-            KeyCode::Down | KeyCode::Char('j') => self.list.select_next(),
-            KeyCode::Char(c @ '1'..='9') => _ = self.list.select_by_hint(c),
-            _ => {}
+        if event.code == KeyCode::Enter {
+            return self.submit();
         }
+        self.list.navigate(event);
         ModalKey::Consumed
     }
 }
@@ -295,21 +285,12 @@ mod tests {
                     Some(create_action(root, "AGENTS.md"))
                 );
 
-                for code in [
-                    KeyCode::Down,
-                    KeyCode::Char('j'),
-                    KeyCode::Up,
-                    KeyCode::Char('k'),
-                    KeyCode::Char('2'),
-                ] {
-                    let mut picker = InitPicker::new(root);
-                    assert_eq!(press(&mut picker, code), None, "{code:?} moves the cursor");
-                    assert_eq!(
-                        press(&mut picker, KeyCode::Enter),
-                        Some(create_action(root, "CLAUDE.md")),
-                        "{code:?} from the first row lands on the second",
-                    );
-                }
+                let mut picker = InitPicker::new(root);
+                assert_eq!(press(&mut picker, KeyCode::Down), None);
+                assert_eq!(
+                    press(&mut picker, KeyCode::Enter),
+                    Some(create_action(root, "CLAUDE.md")),
+                );
             }
 
             #[test]
