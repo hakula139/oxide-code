@@ -524,7 +524,8 @@ mod tests {
                     [
                         "compacted with Some(\"focus on login\")",
                         "renamed to Fix login",
-                        "Switched to Claude Sonnet 5.5 (claude-sonnet-5-5) · effort high (model default)",
+                        "Switched to Claude Sonnet 5.5 (claude-sonnet-5-5) · \
+                         effort high (model default)",
                         "Effort set to low",
                         "rolled",
                         resumed.as_str(),

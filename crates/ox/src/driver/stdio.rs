@@ -224,6 +224,9 @@ impl StdioSink {
             }
             Event::ToolCallEnd(result) => self.render_result(result, stderr)?,
             Event::TasksUpdated(tasks) => write!(stderr, "{}", task_lines(&tasks))?,
+            Event::AutoCompactionStarted => {
+                self.end_reply_then(stdout, stderr, notice::AUTO_COMPACTING)?;
+            }
             Event::SessionCompacted {
                 pre_count,
                 instructions,
@@ -255,7 +258,6 @@ impl StdioSink {
             | Event::TurnRolledBack
             | Event::UsageUpdated(_)
             | Event::RateLimitsUpdated(_)
-            | Event::AutoCompactionStarted
             | Event::AutoCompactionPaused { .. }
             | Event::AutoCompactionResumed
             | Event::SummaryToken(_)
@@ -988,6 +990,17 @@ mod tests {
             }
 
             #[test]
+            fn auto_compaction_started_explains_the_pause_before_the_prompt() {
+                let (stdout, stderr) = render_one(&test_sink(false), Event::AutoCompactionStarted);
+
+                assert_eq!(stdout, "");
+                assert_eq!(
+                    stderr,
+                    "Compacting the conversation before sending the prompt\n"
+                );
+            }
+
+            #[test]
             fn session_compacted_writes_the_boundary_with_its_focus_escaped() {
                 let (stdout, stderr) = render_one(
                     &test_sink(false),
@@ -1063,10 +1076,8 @@ mod tests {
 
                 let (stdout, stderr) = render_one(&test_sink(false), event);
 
-                assert_eq!(
-                    (stdout.as_str(), stderr.as_str()),
-                    ("", "Effort set to low\n")
-                );
+                assert_eq!(stdout, "");
+                assert_eq!(stderr, "Effort set to low\n");
             }
 
             #[test]
@@ -1074,7 +1085,7 @@ mod tests {
                 let (stdout, stderr) =
                     render_one(&test_sink(false), Event::ModeChanged(Mode::Plan));
 
-                assert!(stdout.is_empty(), "stdout must stay empty: {stdout:?}");
+                assert_eq!(stdout, "");
                 assert_eq!(stderr, "Switched to plan mode\n");
             }
 
@@ -1089,7 +1100,6 @@ mod tests {
                             resets_at: 1_760_000_000,
                         }),
                     }),
-                    Event::AutoCompactionStarted,
                     Event::AutoCompactionPaused { failures: 3 },
                     Event::AutoCompactionResumed,
                     Event::SummaryToken("Recap".to_owned()),

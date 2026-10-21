@@ -4,6 +4,8 @@
 //! cross a process boundary. Headless `stream-json` output prints events in this form, so renaming
 //! a tag or field breaks the release stability surface.
 
+pub mod notice;
+
 use std::path::PathBuf;
 
 use anyhow::{Result, anyhow};
@@ -20,8 +22,6 @@ use crate::permission::{Basis, Mode, SessionGrant};
 use crate::tool::bash::background::BackgroundShell;
 use crate::tool::tasks::Task;
 use crate::tool::view::{ApprovalPreview, ToolResultView};
-
-pub mod notice;
 
 // ── Ops ──
 

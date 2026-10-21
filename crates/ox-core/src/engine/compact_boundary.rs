@@ -254,8 +254,10 @@ mod tests {
             assert!(compacted);
             assert_eq!(tracker.snapshot_all(), []);
             assert_eq!(messages.len(), 1);
+            let first = &messages[0].content[0];
             assert!(
-                matches!(&messages[0].content[0], ContentBlock::Text { text } if text.contains("fixed login bug"))
+                matches!(first, ContentBlock::Text { text } if text.contains("fixed login bug")),
+                "{first:?}"
             );
         }
     }

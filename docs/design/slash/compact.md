@@ -116,6 +116,7 @@ A `pre_compact` hook is tracked in [#168](https://github.com/hakula139/oxide-cod
 - `crates/ox-core/src/engine/compaction.rs`: `compact_session` driver, the `SummaryStream` sink, the context-window retries (`drop_oldest_rounds`, `retry_request`), and the `SUMMARIZATION_USER_RUBRIC` constant.
 - `crates/ox-core/src/engine/turn.rs`: `collect_response`, which reads the summary the way it reads a turn's reply.
 - `crates/ox-core/src/protocol.rs`: `Op::Compact`, `Event::SummaryToken`, `Event::SummaryDiscarded`, `Event::SessionCompacted`.
+- `crates/ox-core/src/protocol/notice.rs`: `compacted`, the boundary header every frontend shows.
 - `crates/ox-core/src/session/actor.rs`: `SessionCmd::Compact` handler.
 - `crates/ox-core/src/session/entry.rs`: `Entry::Compact` variant.
 - `crates/ox-core/src/session/handle.rs`: `SessionHandle::compact`, `CompactOutcome`.

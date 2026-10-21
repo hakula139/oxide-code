@@ -1,4 +1,6 @@
-//! The text every frontend shows for an event, so the TUI and the stdio drivers word it alike.
+//! The text every frontend shows for an event, so the TUI and the stdio drivers word it alike. An
+//! event whose wording needs engine state, such as the settings before a change, carries the text
+//! in a field, as [`Event::ConfigChanged`](super::Event::ConfigChanged) does.
 
 use super::ConfigPick;
 use crate::config::compaction::AutoCompactionConfig;
@@ -9,6 +11,10 @@ use crate::util::text::plural;
 
 /// The error a frontend reports when the engine ends before the op it waits on.
 pub const ENGINE_STOPPED: &str = "ox stopped unexpectedly";
+
+/// Explains the pause an [`Event::AutoCompactionStarted`](super::Event::AutoCompactionStarted)
+/// opens before the prompt goes out.
+pub const AUTO_COMPACTING: &str = "Compacting the conversation before sending the prompt";
 
 /// Confirms an [`Event::ModeChanged`](super::Event::ModeChanged).
 pub fn mode_changed(mode: Mode) -> String {
@@ -28,8 +34,8 @@ pub fn compacted(pre_count: u32, instructions: Option<&str>) -> String {
 
 /// The settings an [`Event::ConfigChanged`](super::Event::ConfigChanged) notice compares, before
 /// or after the change.
-pub(crate) struct ConfigSettings<'a> {
-    pub(crate) model: &'a ModelSpec,
+pub(crate) struct ConfigSettings {
+    pub(crate) model: ModelSpec,
     pub(crate) effort: Option<Effort>,
     pub(crate) auto_compaction: AutoCompactionConfig,
 }
@@ -37,8 +43,8 @@ pub(crate) struct ConfigSettings<'a> {
 /// Confirms an [`Event::ConfigChanged`](super::Event::ConfigChanged), surfacing an effort or
 /// compaction threshold the change shifted without being asked.
 pub(crate) fn config_changed(
-    before: &ConfigSettings<'_>,
-    after: &ConfigSettings<'_>,
+    before: &ConfigSettings,
+    after: &ConfigSettings,
     requested: &ConfigPick,
 ) -> String {
     let requested_effort = match *requested {
@@ -50,7 +56,7 @@ pub(crate) fn config_changed(
             };
         }
     };
-    let model = after.model;
+    let model = &after.model;
     let action = if model.id() == before.model.id() {
         "Using"
     } else {
@@ -92,17 +98,6 @@ mod tests {
     use crate::config::compaction::testing::WINDOW_1M_THRESHOLD;
     use crate::model::ResolvedModelId;
 
-    fn spec(id: &str) -> ModelSpec {
-        ModelSpec::resolve(id.to_owned())
-    }
-
-    fn model_pick(model: &ModelSpec, effort: Option<Effort>) -> ConfigPick {
-        ConfigPick::Model {
-            id: ResolvedModelId::new(model.id().to_owned()),
-            effort,
-        }
-    }
-
     mod compacted {
         use super::*;
 
@@ -126,9 +121,20 @@ mod tests {
     mod config_changed {
         use super::*;
 
-        fn settings(model: &ModelSpec, effort: Option<Effort>) -> ConfigSettings<'_> {
+        fn spec(id: &str) -> ModelSpec {
+            ModelSpec::resolve(id.to_owned())
+        }
+
+        fn model_pick(model: &ModelSpec, effort: Option<Effort>) -> ConfigPick {
+            ConfigPick::Model {
+                id: ResolvedModelId::new(model.id().to_owned()),
+                effort,
+            }
+        }
+
+        fn settings(model: &ModelSpec, effort: Option<Effort>) -> ConfigSettings {
             ConfigSettings {
-                model,
+                model: model.clone(),
                 effort,
                 auto_compaction: AutoCompactionConfig {
                     enabled: true,
