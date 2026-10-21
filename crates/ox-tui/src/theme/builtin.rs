@@ -13,7 +13,8 @@ pub(crate) struct BuiltinTheme {
 }
 
 impl BuiltinTheme {
-    /// Parses the vendored palette, which `parse_theme::all_builtins` checks parses.
+    /// Parses the vendored palette. Panics if it fails to parse, which `parse_theme::all_builtins`
+    /// rules out.
     pub(crate) fn load(&self) -> Theme {
         loader::parse_theme(self.body).expect("vendored builtin theme TOML must parse")
     }
