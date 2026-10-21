@@ -127,6 +127,7 @@ tcsh
 tcshrc
 tengu
 termio
+textconv
 tildified
 tildifies
 tildify
