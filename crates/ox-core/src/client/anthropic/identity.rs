@@ -34,7 +34,7 @@ fn fallback_to_ephemeral(result: Result<String>) -> String {
 }
 
 fn try_load_or_create() -> Result<String> {
-    let path = device_id_path().context("cannot determine device-id storage location")?;
+    let path = device_id_path().context("failed to determine the device-id storage location")?;
     try_load_or_create_at(&path)
 }
 

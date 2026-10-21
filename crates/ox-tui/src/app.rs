@@ -226,7 +226,7 @@ impl App {
                 event = crossterm_events.next() => {
                     match event {
                         Some(Ok(event)) => self.handle_crossterm_event(&event),
-                        Some(Err(e)) => return Err(e).context("cannot read terminal input"),
+                        Some(Err(e)) => return Err(e).context("failed to read terminal input"),
                         None => self.should_quit = true,
                     }
                 }
@@ -461,7 +461,10 @@ mod tests {
                 .await
                 .unwrap_err();
 
-            assert_eq!(format!("{err:#}"), "cannot read terminal input: tty gone");
+            assert_eq!(
+                format!("{err:#}"),
+                "failed to read terminal input: tty gone"
+            );
         }
 
         #[tokio::test]
