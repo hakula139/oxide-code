@@ -28,7 +28,7 @@ pub(crate) enum Action {
 // ── App Keymap ──
 
 /// A named action whose key works while no modal holds the keyboard.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum AppAction {
     /// Switches the chat between its compact and expanded views.
     ToggleExpanded,

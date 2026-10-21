@@ -21,7 +21,7 @@ use crate::glyphs::SEGMENT_SEPARATOR;
 /// Each component is independently optional so an override can patch one axis (e.g., bg only)
 /// without forcing callers to also restate the other two. [`Slot::style`] folds the three into
 /// a ratatui `Style`, leaving unset axes as the terminal's default.
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub(crate) struct Slot {
     pub(crate) fg: Option<Color>,
     pub(crate) bg: Option<Color>,
