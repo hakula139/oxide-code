@@ -282,12 +282,14 @@ fn read_session_info(
                 updated_at,
                 ..
             }) = serde_json::from_str(line)
-            && title.as_ref().is_none_or(|cur| updated_at > cur.updated_at)
         {
-            title = Some(TitleInfo {
-                title: text,
-                updated_at,
-            });
+            TitleInfo::keep_newer(
+                &mut title,
+                TitleInfo {
+                    title: text,
+                    updated_at,
+                },
+            );
         } else if line.starts_with(SUMMARY_LINE_PREFIX)
             && let Ok(Entry::Summary {
                 message_count,

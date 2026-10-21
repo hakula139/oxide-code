@@ -134,6 +134,18 @@ pub struct TitleInfo {
     pub updated_at: OffsetDateTime,
 }
 
+impl TitleInfo {
+    /// Puts `title` in `slot` unless the title there is at least as new, so the newest wins.
+    pub(crate) fn keep_newer(slot: &mut Option<Self>, title: Self) {
+        if slot
+            .as_ref()
+            .is_none_or(|current| title.updated_at > current.updated_at)
+        {
+            *slot = Some(title);
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct ExitInfo {
     pub message_count: u32,

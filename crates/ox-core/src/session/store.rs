@@ -199,13 +199,7 @@ impl SessionDataBuilder {
             Entry::Rewind { tip, .. } => self.chain.rewind(tip),
             Entry::Title {
                 title, updated_at, ..
-            } if self
-                .latest_title
-                .as_ref()
-                .is_none_or(|cur| updated_at > cur.updated_at) =>
-            {
-                self.latest_title = Some(TitleInfo { title, updated_at });
-            }
+            } => TitleInfo::keep_newer(&mut self.latest_title, TitleInfo { title, updated_at }),
             Entry::Archive { archived, .. } => self.archived = archived,
             Entry::ToolResultMetadata {
                 tool_use_id,
