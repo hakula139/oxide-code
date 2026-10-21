@@ -289,7 +289,7 @@ impl Credential {
 
 /// Why no credential resolved.
 #[derive(Debug, thiserror::Error)]
-pub(super) enum ResolveError {
+pub(super) enum NoCredential {
     /// `base_url` is a gateway, which never receives a stored login.
     #[error("{}", gateway_error(.0))]
     Gateway(String),
@@ -391,7 +391,7 @@ pub(super) async fn resolve(
     explicit: impl IntoIterator<Item = (AuthSource, Option<String>)>,
     base_url: &str,
     stored: impl Future<Output = Result<Auth, LoginError>>,
-) -> Result<Auth, ResolveError> {
+) -> Result<Auth, NoCredential> {
     if let Some((source, secret)) = explicit
         .into_iter()
         .find_map(|(source, value)| value.map(|secret| (source, secret)))
@@ -400,9 +400,9 @@ pub(super) async fn resolve(
     }
 
     if !super::is_first_party_base_url(base_url) {
-        return Err(ResolveError::Gateway(base_url.to_owned()));
+        return Err(NoCredential::Gateway(base_url.to_owned()));
     }
-    stored.await.map_err(ResolveError::SignedOut)
+    stored.await.map_err(NoCredential::SignedOut)
 }
 
 /// Loads the stored login to fall back on, trying oxide-code's own before Claude Code's. A login
@@ -810,7 +810,7 @@ mod tests {
                 })
                 .await;
 
-            assert!(matches!(err, ResolveError::Gateway(_)), "{err:?}");
+            assert!(matches!(err, NoCredential::Gateway(_)), "{err:?}");
             assert_eq!(
                 message,
                 format!(
@@ -846,7 +846,7 @@ mod tests {
             .await;
 
             assert!(
-                matches!(err, ResolveError::SignedOut(LoginError::Missing)),
+                matches!(err, NoCredential::SignedOut(LoginError::Missing)),
                 "{err:?}"
             );
             assert_eq!(

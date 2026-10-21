@@ -24,7 +24,7 @@ use anyhow::{Context as _, Result, anyhow, bail};
 use serde::{Deserialize, Serialize};
 use tracing::warn;
 
-use self::auth::{Auth, AuthSource, LoginUnavailable, ResolveError};
+use self::auth::{Auth, AuthSource, LoginUnavailable, NoCredential};
 use self::compaction::{AutoCompactionConfig, CompactionConfig};
 use self::gateway::{GatewayCompat, GatewaySnapshot};
 use self::load::Loaded;
@@ -318,8 +318,7 @@ pub struct Config {
     pub model: ModelSpec,
     /// `None` for models outside the catalog.
     pub(crate) effort: Option<Effort>,
-    /// `None` while signed out, which only an interactive session starts in, since `/login` can
-    /// sign it in.
+    /// `None` while signed out, which only a session that can run `/login` starts in.
     pub(crate) auth: Option<Auth>,
     /// Why the session started signed out.
     pub(crate) signed_out: Option<LoginUnavailable>,
@@ -347,11 +346,12 @@ pub struct Config {
 }
 
 impl Config {
-    /// Resolves config from env, the config files [`load::load`] finds from `cwd` within its
-    /// [`project_root`], and built-in defaults. A TOML or env parse error fails the load. Without
-    /// a working credential, an `interactive` session starts signed out and any other session
-    /// fails.
-    pub async fn load(cwd: &Path, interactive: bool) -> Result<Self> {
+    /// Resolves config from env, the config files [`load::load`] finds from `cwd`
+    /// within its [`project_root`], and built-in defaults.
+    /// A TOML or env parse error fails the load.
+    /// Without a working credential, a session that `can_sign_in` with `/login`,
+    /// which only the TUI can, starts signed out and any other session fails.
+    pub async fn load(cwd: &Path, can_sign_in: bool) -> Result<Self> {
         let Loaded { config, origins } = load::load(cwd, &project_root(cwd))?;
         let FileConfig {
             client,
@@ -370,16 +370,6 @@ impl Config {
         )?;
 
         let gateway = GatewayCompat::load()?;
-
-        let credential = resolve_auth(
-            client.api_key,
-            &origins,
-            &base_url.value,
-            &PlatformTrust(extra_ca_certs.value.clone()),
-            &gateway,
-            interactive,
-        )
-        .await?;
 
         let model_id = env_string("ANTHROPIC_MODEL")
             .or_else(|| origins.sourced("client.model", client.model))
@@ -426,6 +416,18 @@ impl Config {
             base_source: origins.source("tui.theme.base"),
             overrides: tui.theme.overrides,
         };
+
+        // Resolved last, so a typo in another setting fails before a Keychain prompt or a token
+        // refresh.
+        let credential = resolve_auth(
+            client.api_key,
+            &origins,
+            &base_url.value,
+            &PlatformTrust(extra_ca_certs.value.clone()),
+            &gateway,
+            can_sign_in,
+        )
+        .await?;
 
         let provenance = Provenance {
             layers: origins.into_layers(),
@@ -550,7 +552,7 @@ async fn resolve_auth(
     base_url: &str,
     trust: &dyn Trust,
     gateway: &GatewayCompat,
-    interactive: bool,
+    can_sign_in: bool,
 ) -> Result<ResolvedAuth> {
     let resolved = auth::resolve(
         auth::explicit_credentials(file_api_key),
@@ -560,7 +562,7 @@ async fn resolve_auth(
     .await;
     let (auth, signed_out) = match resolved {
         Ok(auth) => (Some(auth), None),
-        Err(ResolveError::SignedOut(e)) if interactive => (None, Some(LoginUnavailable::new(&e))),
+        Err(NoCredential::SignedOut(e)) if can_sign_in => (None, Some(LoginUnavailable::new(&e))),
         Err(e) => return Err(e.into()),
     };
     let source = auth.as_ref().map_or(AuthSource::OxLogin, Auth::source);
@@ -1057,8 +1059,8 @@ mod tests {
             (key, Some(value.to_owned()))
         }
 
-        /// Loads a non-interactive session from the user config under `dir` and the baseline env
-        /// plus `overrides`.
+        /// Loads a session that cannot sign in from the user config under `dir` and the baseline
+        /// env plus `overrides`.
         async fn load_with(dir: &TempDir, overrides: &[(&'static str, &str)]) -> Result<Config> {
             let overrides = overrides.iter().map(|&(key, value)| env(key, value));
             let vars = env_vars([xdg(dir)].into_iter().chain(overrides));
@@ -1286,6 +1288,30 @@ mod tests {
             assert_eq!(config.model.id(), "claude-sonnet-5-5");
             assert_eq!(config.max_tokens, Some(128));
             assert!(!config.show_thinking, "env `0` overrides file `true`");
+        }
+
+        #[tokio::test]
+        async fn fails_on_another_setting_before_resolving_the_credential() {
+            let dir = tempfile::tempdir().unwrap();
+
+            let err = load_with(
+                &dir,
+                &[
+                    ("ANTHROPIC_API_KEY", ""),
+                    ("ANTHROPIC_BASE_URL", "https://gw.example.com"),
+                    ("OX_MAX_TOKENS", "32k"),
+                ],
+            )
+            .await
+            .expect_err("both the setting and the credential are invalid");
+
+            assert_eq!(
+                format!("{err:#}"),
+                format!(
+                    "invalid OX_MAX_TOKENS \"32k\": expected a whole number from 1 to {}",
+                    u32::MAX
+                ),
+            );
         }
 
         #[tokio::test]
@@ -1588,10 +1614,10 @@ mod tests {
         }
 
         #[tokio::test]
-        async fn starts_an_interactive_session_signed_out_when_the_stored_login_fails() {
+        async fn starts_signed_out_when_the_stored_login_fails_and_it_can_sign_in() {
             let (dir, data) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
             let vars = ox_login_env(&dir, &data, 1);
-            let (interactive, other) = temp_env::async_with_vars(vars, async {
+            let (can_sign_in, cannot) = temp_env::async_with_vars(vars, async {
                 (
                     Config::load(dir.path(), true).await,
                     Config::load(dir.path(), false).await,
@@ -1599,9 +1625,9 @@ mod tests {
             })
             .await;
 
-            let interactive = interactive.unwrap();
-            assert!(interactive.auth.is_none());
-            let signed_out = interactive.signed_out.expect("signed out");
+            let can_sign_in = can_sign_in.unwrap();
+            assert!(can_sign_in.auth.is_none());
+            let signed_out = can_sign_in.signed_out.expect("signed out");
             assert_eq!(
                 signed_out.notice,
                 "Not signed in: oxide-code login has expired. Run `/login` to sign in again.",
@@ -1610,7 +1636,7 @@ mod tests {
             assert_eq!(
                 format!(
                     "{:#}",
-                    other.expect_err("only an interactive session starts signed out")
+                    cannot.expect_err("only a session that can sign in starts signed out")
                 ),
                 "oxide-code login has expired. Run `/login` to sign in again.",
             );
