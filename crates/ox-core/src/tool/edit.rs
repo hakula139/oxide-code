@@ -22,10 +22,10 @@ impl Tool for EditTool {
             name: "edit".to_owned(),
             description: "Perform exact string replacement in a file. \
                           The old_string must be unique in the file unless replace_all is true. \
-                          Read the file in this session before editing it. \
-                          A Read of the lines being changed is enough. \
-                          The Read-before-Edit gate refuses files that changed externally \
-                          since the last Read."
+                          Read the file with the `read` tool in this session before editing it. \
+                          A `read` of the lines being changed is enough. \
+                          An edit also fails for a file that changed externally \
+                          since the last `read`."
                 .to_owned(),
             input_schema: input_schema(),
             class: PermissionClass::Edit,
