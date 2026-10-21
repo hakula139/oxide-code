@@ -89,9 +89,11 @@ App owns `ModalStack` and runs the key gate first inside `handle_crossterm_event
 
 12. **Parents refresh through `Modal::on_focus_regained`.** A picker whose sub-modal mutates shared state overrides the no-op default to refresh on pop, as the `/resume` picker does after a delete.
 
+13. **List pickers share navigation and layout.** `ListPicker::navigate` steps the cursor on Up / `k` and Down / `j` and jumps on a row's digit, and `ListPicker::render_with_footer` draws the confirm footer below the list, so each picker writes only what Enter does. Every picker lists a fixed roster, so `ListPicker::new` rejects an empty one and `selected` always returns a row.
+
 ## Per-Modal Notes
 
-- **Combined `/model + /effort` picker**: `ModelEffortPicker` wraps `ListPicker<ModelRow>` and tracks the effort axis separately. Left / Right cycles the effort row through all five tiers, which every supported model accepts. Until the user picks a tier, the row shows the active effort, falling back to the highlighted model's default. Submit emits one `Op::SetModel` whose `ConfigPick` carries only the changed axes, and Enter on a no-op cancels.
+- **Combined `/model + /effort` picker**: `ModelEffortPicker` wraps `ListPicker<ModelRow>` and tracks the effort axis separately. Left / Right steps the effort row through all five levels, which every supported model accepts, and stops at either end as the `/effort` slider does, so holding a key cannot land on the opposite end. Until the user picks a level, the row shows the active effort, falling back to the highlighted model's default. Submit emits one `Op::SetModel` whose `ConfigPick` carries only the changed axes, and Enter on a no-op cancels.
 
 - **`/effort` slider**: `EffortSlider` is a horizontal Speed ↔ Intelligence visual. Lists all five tiers and seeds the cursor at the active effort. Unknown model IDs have no effort, so bare `/effort` errors on them. Tiers render with uniform `●` / `○` glyphs plus per-tier ANSI color along blue → red. Color encodes identity, bold encodes the active pick. ANSI-named colors decouple the gradient from theme TOML, so the user's terminal palette renders it.
 

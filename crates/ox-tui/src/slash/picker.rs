@@ -19,7 +19,6 @@ use crate::modal::chrome::{CONFIRM_HINTS, FOOTER_HEIGHT, KEY_LEFT_RIGHT, render_
 use crate::modal::list_picker::{ListPicker, PickerItem, numeric_hint};
 use crate::modal::{Modal, ModalAction, ModalKey};
 use crate::theme::Theme;
-use crate::viewport::{wrap_next, wrap_prev};
 
 // ── Constants ──
 
@@ -52,12 +51,15 @@ impl PickerItem for ModelRow {
     fn label(&self) -> &str {
         self.info.id
     }
+
     fn description(&self) -> Option<&str> {
         Some(self.info.display_name)
     }
+
     fn is_active(&self) -> bool {
         self.is_active
     }
+
     fn key_hint(&self) -> Option<char> {
         self.hint
     }
@@ -98,27 +100,22 @@ impl ModelEffortPicker {
     }
 
     /// Effort the highlighted model would run at if submitted now.
-    fn shown_effort(&self) -> Option<Effort> {
-        let row = self.list.selected()?;
-        Some(
-            self.picked_effort
-                .or(self.active_effort)
-                .unwrap_or(row.info.default_effort),
-        )
+    fn shown_effort(&self) -> Effort {
+        self.picked_effort
+            .or(self.active_effort)
+            .unwrap_or(self.list.selected().info.default_effort)
     }
 
-    fn cycle_effort(&mut self, direction: Direction) {
-        let Some(current) = self.shown_effort() else {
-            return;
-        };
-        let len = Effort::ALL.len();
+    /// Steps the effort one level, stopping at either end of the ladder as the `/effort` slider
+    /// does, so holding a key cannot overshoot onto the opposite end.
+    fn step_effort(&mut self, direction: Direction) {
         let idx = Effort::ALL
             .iter()
-            .position(|level| *level == current)
+            .position(|level| *level == self.shown_effort())
             .expect("Effort::ALL lists every level");
         let next = match direction {
-            Direction::Forward => wrap_next(idx, len),
-            Direction::Backward => wrap_prev(idx, len),
+            Direction::Forward => (idx + 1).min(Effort::ALL.len() - 1),
+            Direction::Backward => idx.saturating_sub(1),
         };
         self.picked_effort = Some(Effort::ALL[next]);
     }
@@ -127,17 +124,14 @@ impl ModelEffortPicker {
     /// open-time state. A no-touch Enter, or a pick that returns to the active effort, cancels
     /// without re-resolving config defaults.
     fn submit(&self) -> ModalKey {
-        let model = self
-            .list
-            .selected()
-            .map_or_else(|| self.active_model.clone(), |row| row.info.id.to_owned());
+        let model = self.list.selected().info.id;
         let effort = self
             .picked_effort
             .filter(|pick| Some(*pick) != self.active_effort);
 
         let pick = if model != self.active_model {
             ConfigPick::Model {
-                id: ResolvedModelId::new(model),
+                id: ResolvedModelId::new(model.to_owned()),
                 effort,
             }
         } else if let Some(effort) = effort {
@@ -148,19 +142,19 @@ impl ModelEffortPicker {
         ModalKey::Submitted(ModalAction::Dispatch(Action::Op(Op::SetModel(pick))))
     }
 
-    fn render_effort_row(&self, theme: &Theme) -> Option<Line<'static>> {
-        let level = self.shown_effort()?;
+    fn render_effort_row(&self, theme: &Theme) -> Line<'static> {
+        let level = self.shown_effort();
         let was_default = self.picked_effort.is_none() && self.active_effort.is_none();
         let suffix = if was_default { " (default)" } else { "" };
         let color = tier_color(level);
-        Some(Line::from(vec![
+        Line::from(vec![
             Span::styled(format!("{RADIO_SELECTED} "), Style::default().fg(color)),
             Span::styled(
                 format!("{level} effort{suffix}"),
                 Style::default().fg(color).add_modifier(Modifier::BOLD),
             ),
             Span::styled(format!("  {KEY_LEFT_RIGHT} to adjust"), theme.dim()),
-        ]))
+        ])
     }
 }
 
@@ -183,14 +177,13 @@ impl Modal for ModelEffortPicker {
         );
 
         let effort_y = area.y + list_h + 1;
-        if let Some(line) = self.render_effort_row(theme)
-            && effort_y < area.bottom()
-        {
+        if effort_y < area.bottom() {
             let row = Rect {
                 y: effort_y,
                 height: 1,
                 ..area
             };
+            let line = self.render_effort_row(theme);
             frame.render_widget(Paragraph::new(line).style(theme.surface()), row);
         }
         render_footer(frame, area, &CONFIRM_HINTS, theme);
@@ -198,29 +191,12 @@ impl Modal for ModelEffortPicker {
 
     fn handle_key(&mut self, event: &KeyEvent) -> ModalKey {
         match event.code {
-            KeyCode::Enter => self.submit(),
-            KeyCode::Up | KeyCode::Char('k') => {
-                self.list.select_prev();
-                ModalKey::Consumed
-            }
-            KeyCode::Down | KeyCode::Char('j') => {
-                self.list.select_next();
-                ModalKey::Consumed
-            }
-            KeyCode::Right | KeyCode::Char('l') => {
-                self.cycle_effort(Direction::Forward);
-                ModalKey::Consumed
-            }
-            KeyCode::Left | KeyCode::Char('h') => {
-                self.cycle_effort(Direction::Backward);
-                ModalKey::Consumed
-            }
-            KeyCode::Char(c @ '1'..='9') => {
-                self.list.select_by_hint(c);
-                ModalKey::Consumed
-            }
-            _ => ModalKey::Consumed,
+            KeyCode::Enter => return self.submit(),
+            KeyCode::Right | KeyCode::Char('l') => self.step_effort(Direction::Forward),
+            KeyCode::Left | KeyCode::Char('h') => self.step_effort(Direction::Backward),
+            _ => _ = self.list.navigate(event),
         }
+        ModalKey::Consumed
     }
 }
 
@@ -258,23 +234,23 @@ mod tests {
         #[test]
         fn lists_catalog_and_positions_cursor_on_active_model() {
             let p = picker();
-            let row = p.list.selected().expect("active row");
+            let row = p.list.selected();
             assert_eq!(row.info.id, "claude-opus-5-5");
             assert!(row.is_active);
-            assert_eq!(p.shown_effort(), Some(Effort::High));
+            assert_eq!(p.shown_effort(), Effort::High);
         }
 
         #[test]
         fn on_unknown_model_highlights_default_model_and_shows_row_default() {
             let mut p = picker_on_unknown_model();
 
-            let row = p.list.selected().expect("default model row");
+            let row = p.list.selected();
             assert_eq!(row.info.id, "claude-opus-5-5");
             assert!(!row.is_active);
-            assert_eq!(p.shown_effort(), Some(Effort::Medium), "Opus 5.5 default");
+            assert_eq!(p.shown_effort(), Effort::Medium, "Opus 5.5 default");
 
             p.handle_key(&KeyEvent::from(KeyCode::Char('1')));
-            assert_eq!(p.shown_effort(), Some(Effort::High), "Fable 5.1 default");
+            assert_eq!(p.shown_effort(), Effort::High, "Fable 5.1 default");
         }
     }
 
@@ -284,9 +260,7 @@ mod tests {
         #[test]
         fn marks_default_only_without_active_effort() {
             let theme = Theme::default();
-            let row_text = |p: &ModelEffortPicker| {
-                p.render_effort_row(&theme).expect("effort row").to_string()
-            };
+            let row_text = |p: &ModelEffortPicker| p.render_effort_row(&theme).to_string();
 
             assert_eq!(row_text(&picker()), "● high effort  ← / → to adjust");
             assert_eq!(
@@ -370,20 +344,26 @@ mod tests {
         fn numeric_jump_routes_cursor_to_matching_row() {
             let mut p = picker();
             p.handle_key(&KeyEvent::from(KeyCode::Char('4')));
-            let row = p.list.selected().expect("selected row");
+            let row = p.list.selected();
             assert_eq!(row.info.id, "claude-haiku-5-5");
         }
 
         #[test]
-        fn right_and_left_walk_the_full_ladder_with_wrap() {
+        fn right_and_left_step_the_ladder_and_stop_at_its_ends() {
             let mut p = picker();
-            p.handle_key(&KeyEvent::from(KeyCode::Right));
-            assert_eq!(p.shown_effort(), Some(Effort::Xhigh));
-            p.handle_key(&KeyEvent::from(KeyCode::Right));
-            p.handle_key(&KeyEvent::from(KeyCode::Right));
-            assert_eq!(p.shown_effort(), Some(Effort::Low), "Right wraps past max");
-            p.handle_key(&KeyEvent::from(KeyCode::Left));
-            assert_eq!(p.shown_effort(), Some(Effort::Max), "Left wraps past low");
+            let mut press = |code| {
+                p.handle_key(&KeyEvent::from(code));
+                p.shown_effort()
+            };
+
+            assert_eq!(press(KeyCode::Right), Effort::Xhigh);
+            assert_eq!(press(KeyCode::Char('l')), Effort::Max);
+            assert_eq!(press(KeyCode::Right), Effort::Max, "Right stops at max");
+            for _ in 0..3 {
+                press(KeyCode::Left);
+            }
+            assert_eq!(press(KeyCode::Char('h')), Effort::Low);
+            assert_eq!(press(KeyCode::Left), Effort::Low, "Left stops at low");
         }
 
         #[test]
@@ -391,7 +371,7 @@ mod tests {
             let mut p = picker();
             p.handle_key(&KeyEvent::from(KeyCode::Left));
             p.handle_key(&KeyEvent::from(KeyCode::Down));
-            assert_eq!(p.shown_effort(), Some(Effort::Medium));
+            assert_eq!(p.shown_effort(), Effort::Medium);
         }
 
         #[test]
