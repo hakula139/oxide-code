@@ -18,7 +18,6 @@ use crate::client::anthropic::testing::{
     DEVICE_ID, api_key, sse_response, test_config, text_stream_body, tool_use_stream_body,
 };
 use crate::config::oauth::ClaudeCodeKeychain;
-use crate::file_tracker::FileTracker;
 use crate::model::ModelSpec;
 use crate::permission::Workspace;
 use crate::prompt;
@@ -65,7 +64,8 @@ pub async fn engine(base_url: String, store: &SessionStore, cwd: &Path) -> Engin
         prompt_unrecorded: true,
         startup_notices: Vec::new(),
         instruction_warnings,
-        file_tracker: Arc::new(FileTracker::default()),
+        file_tracker: Arc::default(),
+        drifted: Vec::new(),
         shells: Arc::default(),
         policy: config.permission,
         max_tool_rounds: config.max_tool_rounds,

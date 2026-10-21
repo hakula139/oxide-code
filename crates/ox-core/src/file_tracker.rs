@@ -5,6 +5,7 @@ use std::fs::Metadata;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard};
 
+use anyhow::{Context, ensure};
 use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;
 use tracing::debug;
@@ -179,13 +180,11 @@ impl FileTracker {
         self.lock().clear();
     }
 
-    /// Rehydrates from session JSONL on resume. On duplicate paths the snapshot with the newer
-    /// `recorded_at` wins, and it must still match disk by content hash. Returns the dropped paths
-    /// so the caller can warn that those files need a fresh Read before any mutation.
-    pub fn restore_verified(&self, snapshots: Vec<FileSnapshot>) -> Vec<PathBuf> {
-        let mut by_path = self.lock();
-        let mut dropped = Vec::new();
-
+    /// Replaces the tracked state with the `snapshots` a resumed session saved. On duplicate paths
+    /// the snapshot with the newer `recorded_at` wins, and it must still match disk by content
+    /// hash. Returns the dropped paths, sorted, since those files need a fresh Read before any
+    /// mutation.
+    pub(crate) fn restore_verified(&self, snapshots: Vec<FileSnapshot>) -> Vec<PathBuf> {
         let mut latest = HashMap::<PathBuf, FileState>::new();
         for FileSnapshot { path, state } in snapshots {
             let replace = latest
@@ -196,22 +195,19 @@ impl FileTracker {
             }
         }
 
-        for (path, state) in latest {
-            if let Err(reason) = verify_on_disk(&path, state.content_hash) {
+        let mut dropped = Vec::new();
+        latest.retain(|path, state| {
+            let verified = verify_on_disk(path, state.content_hash);
+            if let Err(e) = &verified {
                 debug!(
-                    "dropping tracked file {} ({reason}, will require fresh Read)",
+                    "dropping tracked file {} ({e:#}), so it needs a fresh Read",
                     path.display()
                 );
-                dropped.push(path);
-                continue;
+                dropped.push(path.clone());
             }
-            let keep = by_path
-                .get(&path)
-                .is_none_or(|cur| state.recorded_at >= cur.recorded_at);
-            if keep {
-                by_path.insert(path, state);
-            }
-        }
+            verified.is_ok()
+        });
+        *self.lock() = latest;
         dropped.sort();
         dropped
     }
@@ -221,13 +217,12 @@ impl FileTracker {
     }
 }
 
-fn verify_on_disk(path: &Path, content_hash: u64) -> Result<(), String> {
-    let metadata = std::fs::metadata(path).map_err(|error| format!("stat failed: {error}"))?;
-    validate_trackable_file(&metadata).map_err(|error| error.to_string())?;
-    let bytes = std::fs::read(path).map_err(|error| format!("read failed: {error}"))?;
-    if xxh64(&bytes, HASH_SEED) != content_hash {
-        return Err("content drift".to_owned());
-    }
+/// Checks that the file at `path` is still trackable and holds the content `content_hash` names.
+fn verify_on_disk(path: &Path, content_hash: u64) -> anyhow::Result<()> {
+    let metadata = std::fs::metadata(path).context("stat failed")?;
+    validate_trackable_file(&metadata)?;
+    let bytes = std::fs::read(path).context("read failed")?;
+    ensure!(xxh64(&bytes, HASH_SEED) == content_hash, "content changed");
     Ok(())
 }
 
@@ -802,6 +797,21 @@ mod tests {
             tracker.restore_verified(vec![snap.clone()]);
 
             assert_eq!(tracker.lock().get(&path), Some(&snap.state));
+        }
+
+        #[test]
+        fn replaces_what_the_tracker_held() {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("a.rs");
+            std::fs::write(&path, b"persisted bytes").unwrap();
+            let snap = snapshot(&path, b"persisted bytes", OffsetDateTime::UNIX_EPOCH);
+            let tracker = FileTracker::default();
+            _ = tracker.record_read(&path, b"newer read", LastView::Full, "toolu_live");
+            _ = tracker.record_read(Path::new("/tmp/b"), b"b", LastView::Full, "toolu_live");
+
+            tracker.restore_verified(vec![snap.clone()]);
+
+            assert_eq!(tracker.snapshot_all(), [snap]);
         }
 
         #[test]

@@ -651,7 +651,7 @@ mod tests {
                 let engine = engine(server.uri(), &test_store(dir.path()), dir.path()).await;
                 let instructions = dir.path().join("CLAUDE.md");
                 std::fs::write(&instructions, b"\xff\xfe").unwrap();
-                let mut handle = engine.spawn(&[]);
+                let mut handle = engine.spawn();
                 handle.ops.send(Op::Clear).await.unwrap();
                 let sink = CapturingSink::default();
                 let mut approver = fixed(Decision::Deny);

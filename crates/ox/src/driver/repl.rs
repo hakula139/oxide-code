@@ -1,7 +1,7 @@
 //! Bare REPL driver for `--no-tui`: prompts and slash commands from stdin, replies on stdout.
 
 use std::io::{self, IsTerminal, Write};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::pin::pin;
 
 use anyhow::{Result, bail};
@@ -28,14 +28,13 @@ use super::{Exit, Shutdown, shutdown_signal};
 pub(crate) async fn run(
     engine: Engine,
     show_thinking: bool,
-    drifted: &[PathBuf],
     first: Option<String>,
 ) -> Result<Exit> {
     let sink = StdioSink::new(show_thinking);
     let attended = io::stdin().is_terminal();
     let stdin = BufReader::new(tokio::io::stdin());
     let project_root = git::project_root(engine.cwd());
-    let handle = engine.spawn(drifted);
+    let handle = engine.spawn();
     let signal = async || {
         let caught = shutdown_signal().await;
         _ = sink.break_line(&mut io::stdout(), &mut io::stderr());
@@ -326,7 +325,7 @@ mod tests {
                 let input: &[u8] = b"\n   \nhello\n";
 
                 let exit = Box::pin(drive(
-                    engine.spawn(&[]),
+                    engine.spawn(),
                     dir.path(),
                     &sink,
                     None,
@@ -357,7 +356,7 @@ mod tests {
                 let input: &[u8] = b"second\n";
 
                 let exit = Box::pin(drive(
-                    engine.spawn(&[]),
+                    engine.spawn(),
                     dir.path(),
                     &CapturingSink::default(),
                     first,
@@ -394,6 +393,7 @@ mod tests {
                     .await;
                 mount_reply(&server, "reply").await;
                 let dir = tempfile::tempdir().unwrap();
+                fs::write(dir.path().join("CLAUDE.md"), b"\xff\xfe").unwrap();
                 let store = test_store(dir.path());
                 let engine = engine(server.uri(), &store, dir.path()).await;
                 let session_id = engine.session_id().to_owned();
@@ -405,7 +405,7 @@ mod tests {
                 "};
 
                 let exit = Box::pin(drive(
-                    engine.spawn(&[PathBuf::from("drifted.rs")]),
+                    engine.spawn(),
                     dir.path(),
                     &sink,
                     None,
@@ -432,7 +432,10 @@ mod tests {
                     })
                     .collect();
                 assert_eq!(reports.len(), 3, "{reports:?}");
-                assert!(reports[0].ends_with(": drifted.rs"), "{reports:?}");
+                assert!(
+                    reports[0].starts_with("Skipped instruction file"),
+                    "{reports:?}"
+                );
                 assert!(reports[1].contains("HTTP 400"), "{reports:?}");
                 assert_eq!(
                     reports[2],
@@ -477,7 +480,7 @@ mod tests {
                 "};
 
                 let exit = Box::pin(drive(
-                    engine.spawn(&[]),
+                    engine.spawn(),
                     dir.path(),
                     &sink,
                     None,
@@ -546,7 +549,7 @@ mod tests {
                 let input: &[u8] = b"/init\n";
 
                 let exit = Box::pin(drive(
-                    engine.spawn(&[]),
+                    engine.spawn(),
                     dir.path(),
                     &CapturingSink::default(),
                     None,
@@ -583,7 +586,7 @@ mod tests {
                 "};
 
                 let exit = Box::pin(drive(
-                    engine.spawn(&[]),
+                    engine.spawn(),
                     dir.path(),
                     &sink,
                     None,
@@ -633,7 +636,7 @@ mod tests {
                 "};
 
                 let exit = Box::pin(drive(
-                    engine.spawn(&[]),
+                    engine.spawn(),
                     dir.path(),
                     &sink,
                     None,
@@ -690,7 +693,7 @@ mod tests {
                 "};
 
                 let exit = Box::pin(drive(
-                    engine.spawn(&[]),
+                    engine.spawn(),
                     dir.path(),
                     &CapturingSink::default(),
                     None,
@@ -730,7 +733,7 @@ mod tests {
                 "};
 
                 let exit = Box::pin(drive(
-                    engine.spawn(&[]),
+                    engine.spawn(),
                     dir.path(),
                     &CapturingSink::default(),
                     None,
@@ -783,7 +786,7 @@ mod tests {
                 };
 
                 let exit = Box::pin(drive(
-                    engine.spawn(&[]),
+                    engine.spawn(),
                     dir.path(),
                     &sink,
                     None,
@@ -830,7 +833,7 @@ mod tests {
                 };
 
                 let exit = Box::pin(drive(
-                    engine.spawn(&[]),
+                    engine.spawn(),
                     dir.path(),
                     &CapturingSink::default(),
                     None,
@@ -869,7 +872,7 @@ mod tests {
                 };
 
                 let exit = Box::pin(drive(
-                    engine.spawn(&[]),
+                    engine.spawn(),
                     dir.path(),
                     &CapturingSink::default(),
                     None,
