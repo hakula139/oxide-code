@@ -799,7 +799,8 @@ mod tests {
     use ox_core::session::display::UNTITLED_MARKER;
     use ox_core::session::entry::{ExitInfo, TitleInfo};
     use ox_core::session::store::testing::{
-        archive_test_session, listed_ids, seed_test_session, test_project_dir, test_store,
+        archive_test_session, isolated_store, listed_ids, seed_test_session, test_project_dir,
+        test_store,
     };
 
     use super::Column::{Branch, Id, Msgs, Project, Title, When};
@@ -842,12 +843,6 @@ mod tests {
                 archive_test_session(store, &id);
             }
         }
-    }
-
-    fn isolated_store() -> (tempfile::TempDir, SessionStore) {
-        let dir = tempfile::tempdir().unwrap();
-        let store = test_store(dir.path());
-        (dir, store)
     }
 
     fn footer_row(picker: &ResumePicker, width: u16) -> String {
@@ -1873,7 +1868,8 @@ mod tests {
                 panic!("Ctrl+D must push the confirm modal, got {outcome:?}");
             };
             let rows = render_rows(confirm.as_ref(), 60, confirm.height(60, u16::MAX));
-            assert_eq!(rows[2].trim_end(), "11111111 — Fix auth");
+            assert_eq!(rows[2].trim_end(), "Fix auth");
+            assert_eq!(rows[3].trim_end(), "11111111 · 2026-04-18 · 3 msgs");
         }
 
         #[test]
