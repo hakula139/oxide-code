@@ -105,7 +105,7 @@ The literal script in `sh -c` and the joined arguments to `eval` are parsed too,
 
 The analysis does not follow commands that run another command from their arguments or input, such as `sudo`, `xargs`, or `find -exec`, or variables set by `read` or `printf -v`. These are neither wrappers nor known-safe reads, so each requires a rule or asks.
 
-Some read-only commands run without an allow rule. `echo`, `false`, `pwd`, and `true` are always safe. `cat`, `head`, `ls`, `tail`, `wc`, `find`, `grep`, and `sed` are safe when every argument is a literal word without globs and the command runs under its bare name. The commands that can do more have these guards:
+Some read-only commands run without an allow rule. `echo`, `false`, `pwd`, and `true` are always safe. Because `echo` can print any variable it expands, every command runs without the [credentials](bash.md#credentials) ox authenticates with. `cat`, `head`, `ls`, `tail`, `wc`, `find`, `grep`, and `sed` are safe when every argument is a literal word without globs and the command runs under its bare name. The commands that can do more have these guards:
 
 - `find` must not use an action that runs a command, deletes, or writes a file (`-exec`, `-execdir`, `-ok`, `-okdir`, `-delete`, `-fls`, `-fprint`, `-fprint0`, `-fprintf`).
 - `grep` must not use a recursive option or `-d`.

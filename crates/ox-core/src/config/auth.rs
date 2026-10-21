@@ -10,6 +10,7 @@ use serde::{Deserialize, Serialize};
 use tokio_util::task::TaskTracker;
 use tracing::warn;
 
+use super::gateway::CUSTOM_HEADERS_VAR;
 use super::oauth::{ClaudeCodeKeychain, LOGIN_STORES, Login, LoginError, SessionLogin};
 use crate::util::env;
 use crate::util::tls::Trust;
@@ -64,6 +65,15 @@ pub enum AuthSource {
 }
 
 impl AuthSource {
+    /// The env and config sources, in the precedence order they win over each other and over the
+    /// stored logins.
+    const EXPLICIT: [Self; 4] = [
+        Self::AuthTokenEnv,
+        Self::ApiKeyEnv,
+        Self::ApiKeyFile,
+        Self::OAuthTokenEnv,
+    ];
+
     pub const fn kind(self) -> AuthKind {
         match self {
             Self::AuthTokenEnv => AuthKind::AuthToken,
@@ -317,15 +327,25 @@ pub(super) fn signed_out_notice(e: &LoginError) -> String {
 
 /// Explicit credentials in precedence order: env and config values, before the stored logins.
 pub(super) fn explicit_credentials(
-    file_api_key: Option<String>,
+    mut file_api_key: Option<String>,
 ) -> [(AuthSource, Option<String>); 4] {
-    let from_env = |source: AuthSource| (source, env::string(source.origin()));
-    [
-        from_env(AuthSource::AuthTokenEnv),
-        from_env(AuthSource::ApiKeyEnv),
-        (AuthSource::ApiKeyFile, file_api_key),
-        from_env(AuthSource::OAuthTokenEnv),
-    ]
+    AuthSource::EXPLICIT.map(|source| {
+        let secret = match source.env_var() {
+            Some(var) => env::string(var),
+            None => file_api_key.take(),
+        };
+        (source, secret)
+    })
+}
+
+/// The env vars that can carry a secret ox authenticates with: each credential variable, and
+/// [`CUSTOM_HEADERS_VAR`], which gateways use for their keys. Commands run for the model do not
+/// inherit them.
+pub(crate) fn secret_env_vars() -> impl Iterator<Item = &'static str> {
+    AuthSource::EXPLICIT
+        .into_iter()
+        .filter_map(AuthSource::env_var)
+        .chain([CUSTOM_HEADERS_VAR])
 }
 
 /// Picks the first explicit credential, falling back to a stored login. `stored` is awaited only
@@ -645,6 +665,23 @@ mod tests {
                     (AuthSource::ApiKeyEnv, None),
                     (AuthSource::ApiKeyFile, Some("file-key".to_owned())),
                     (AuthSource::OAuthTokenEnv, Some("oauth".to_owned())),
+                ],
+            );
+        }
+    }
+
+    mod secret_env_vars {
+        use super::*;
+
+        #[test]
+        fn lists_each_credential_variable_and_the_custom_headers() {
+            assert_eq!(
+                secret_env_vars().collect::<Vec<_>>(),
+                [
+                    "ANTHROPIC_AUTH_TOKEN",
+                    "ANTHROPIC_API_KEY",
+                    "CLAUDE_CODE_OAUTH_TOKEN",
+                    "ANTHROPIC_CUSTOM_HEADERS",
                 ],
             );
         }

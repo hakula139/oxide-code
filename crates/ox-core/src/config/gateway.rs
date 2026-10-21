@@ -6,6 +6,9 @@ use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
 use super::auth::AuthSource;
 use crate::util::env;
 
+/// The env var holding extra request headers, which gateways also use to carry their keys.
+pub(super) const CUSTOM_HEADERS_VAR: &str = "ANTHROPIC_CUSTOM_HEADERS";
+
 // ── GatewayCompat ──
 
 /// How requests adapt to a gateway between ox and the Anthropic API.
@@ -22,7 +25,7 @@ pub(crate) struct GatewayCompat {
 
 impl GatewayCompat {
     pub(super) fn load() -> Result<Self> {
-        let custom_headers = env::string("ANTHROPIC_CUSTOM_HEADERS")
+        let custom_headers = env::string(CUSTOM_HEADERS_VAR)
             .map(|raw| parse_headers(&raw))
             .transpose()
             .context("invalid ANTHROPIC_CUSTOM_HEADERS")?

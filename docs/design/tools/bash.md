@@ -13,7 +13,7 @@ Because the session has no controlling terminal, a command that prompts on `/dev
 
 ## Environment
 
-The command inherits ox's environment and adds these variables:
+The command inherits ox's environment minus the [credentials](#credentials) ox authenticates with, and it adds these variables:
 
 | Variable                         | Value            | Purpose                                                                                          |
 | -------------------------------- | ---------------- | ------------------------------------------------------------------------------------------------ |
@@ -22,13 +22,21 @@ The command inherits ox's environment and adds these variables:
 
 With the editor set to `true`, `git rebase --continue` and `git cherry-pick --continue` keep the prepared message, while `git commit` without `-m` stops with `Aborting commit due to empty commit message`. `GIT_EDITOR` takes precedence over git's `core.editor`, which takes precedence over `VISUAL` and `EDITOR`, so all three are needed for git and for tools that fall back to the generic pair, such as `gh` and `crontab -e`.
 
+### Credentials
+
+Every command runs without `ANTHROPIC_AUTH_TOKEN`, `ANTHROPIC_API_KEY`, `CLAUDE_CODE_OAUTH_TOKEN`, and `ANTHROPIC_CUSTOM_HEADERS`, which carries gateway keys. `secret_env_vars` derives the list from the order in which credentials are resolved, so ox withholds each new credential variable as soon as it reads it. ox reads these variables from its own environment, which this does not change.
+
+`echo` is a [known-safe command](permissions.md#command-targets), so in `manual` mode `echo $ANTHROPIC_API_KEY` would run without approval and put the key into the session file and the model's context. A workspace `write` could then copy it into the repository. Withholding these variables closes that path and every other path through commands the gate allows, such as a build script run by an allowed `cargo test`. A script that needs its own Anthropic key, such as a test suite that calls the API, has to read it from another variable or a file. Other secrets in ox's environment, such as cloud or GitHub tokens, still reach every command.
+
 ## Design Decisions
 
 1. **Detach from the terminal with a new session.** A child in a new process group still shares ox's controlling terminal, so a `/dev/tty` prompt appears on the user's screen with no way for the model to answer it. Codex detaches its shell tool the same way (`detach_from_tty` in `codex-rs/utils/pty/src/process_group.rs`), while Claude Code and pi spawn bash with Node's `detached: true`, which also calls `setsid`. A session leader also leads its process group, so the group kill still reaches every descendant.
 2. **Set the editors and leave pagers alone.** Pagers such as `less` and git's pager start only when stdout is a terminal. Here stdout is always a pipe, so setting a pager variable would have no effect. An editor starts regardless of stdout, and a GUI editor opens on the user's screen. Claude Code sets only `GIT_EDITOR=true`, leaving tools that read `VISUAL` or `EDITOR` uncovered. Codex sets `PAGER` and `GIT_PAGER` to `cat` because its unified exec runs commands in a pseudo-terminal. oh-my-pi sets those variables, the editors, and about 40 other non-interactive defaults, such as `CI=true` and `TERM=dumb`. Those defaults change how builds and tests behave, so ox sets only the variables that keep a command from waiting for input that cannot arrive.
 3. **Leave credential prompts to the missing terminal.** Without a controlling terminal, git's and ssh's terminal prompts fail on their own, so `GIT_TERMINAL_PROMPT=0` would add nothing. A GUI credential helper, such as Git Credential Manager, still opens because the user can answer its prompt.
+4. **Withhold ox's own credentials by default.** ox needs its credentials only in its own process, and its permission gate cannot prevent an allowed command from reading the environment. Claude Code strips the same variables, along with cloud and CI tokens, only when `CLAUDE_CODE_SUBPROCESS_ENV_SCRUB` is set. Its GitHub Action sets this flag for workflows that untrusted users can trigger. Codex withholds only the tokens it creates for itself, oh-my-pi strips provider keys from its Python kernel but not from bash, and pi passes everything through. Making this depend on a flag would leave the interactive case exposed because prompt injection can reach the model just as easily. ox leaves other secrets alone because it cannot tell which ones a build or deploy command needs.
 
 ## Sources
 
+- `crates/ox-core/src/config/auth.rs`: `secret_env_vars`, derived from `AuthSource::EXPLICIT` and `CUSTOM_HEADERS_VAR`.
 - `crates/ox-core/src/tool/bash.rs`: `ShellTree`, `SESSION_ID_VAR`, `EDITOR_VARS`, and `bash`, which finds Git Bash on Windows.
 - `crates/ox-core/src/tool/bash/background.rs`: `BackgroundShells::start`, which spawns a background shell through the same `ShellTree`.
