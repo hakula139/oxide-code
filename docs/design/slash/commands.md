@@ -27,7 +27,7 @@ Client-side command surface: `/help`, `/clear`, `/model`, `/status`, and friends
 
 3. **One synthetic block kind: `SystemMessageBlock`.** Left-bar in `accent`. Errors reuse `ErrorBlock`.
 
-4. **Two-column popup, plain rows.** Name left, description right. Filter ranks name-prefix > alias-prefix > name-substring > alias-substring, alphabetical within each tier. Names accept `:` and `.`, so namespaced names such as `/plugin:cmd` parse.
+4. **Two-column popup, plain rows.** Name left, description right. Filter ranks name-prefix > alias-prefix > name-substring > alias-substring, alphabetical within each tier. Names accept `:` and `.`, so namespaced names such as `/plugin:cmd` parse. The popup and `parse_slash` split the line with the same `split_slash`, so they agree on every name, and once a space follows the name, the input shows the command's usage as `/help` lists it, dim at the cursor, until an argument starts.
 
 5. **Swap the model and effort mid-session via `&mut Client`.** Both `/model <id>` and `/effort <level>` return `Forward(Action::Op(Op::SetModel(pick)))`, the same payload both modals emit, so the typed-arg path and the modals share one resolver. The `ConfigPick` names a model, with an optional effort, or an effort alone, so every pick sets at least one axis. Each request reads the client's active model and effort, so betas and `output_config` pick up the swap. `Engine::set_model` also re-resolves the compaction threshold for the new model. See [modals.md](modals.md).
 
@@ -89,7 +89,7 @@ Client-side command surface: `/help`, `/clear`, `/model`, `/status`, and friends
 
 - `crates/ox-core/src/command.rs`: the alias table, `typed_op`, `parse`, and the typed forms of `/clear`, `/compact`, `/effort`, `/mode`, `/model`, `/rename`, and `/resume`, plus the model resolver.
 - `crates/ox-core/src/command/init.rs`: the typed form of `/init`, the instruction-file discovery, and the create and update prompts.
-- `crates/ox-core/src/command/parser.rs`: `parse_slash`, which splits a typed line into a command name and its arguments, and `unescape_literal` for the `//` escape.
+- `crates/ox-core/src/command/parser.rs`: `parse_slash`, which parses a typed line into a command name and its arguments, `split_slash`, the borrowed split it shares with the popup, and `unescape_literal` for the `//` escape.
 - `crates/ox-core/src/engine.rs`: `Engine::run` arms for `Op::Clear`, `Op::SetModel`, and `Op::SetMode`, `Engine::set_model`, which re-resolves the compaction threshold for the new model, `Engine::archive`, which waits for the archive entry to reach disk before rolling the session, and `TurnEnd::of`.
 - `crates/ox-core/src/session/display.rs`: shared `id_prefix`, `display_title`, and `format_metadata_line` for the picker row and delete confirm modal, `archive_notice`, and the `MAX_TITLE_WIDTH` cap that `fit_title` applies to first-prompt and `/rename` titles.
 - `crates/ox-core/src/session/resolver.rs`: `resolve_prefix_to_info` checks the current project first, widens the search on a miss, and returns a typed `ResolveError` that the CLI prints as is and slash commands rephrase. `resolve_saved_prefix` distinguishes live-only matches for `/archive`, `/unarchive`, and `/delete`.
