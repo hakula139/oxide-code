@@ -15,6 +15,9 @@ pub(super) enum TurnAbort {
     Cancelled,
     #[error("engine shut down")]
     Shutdown,
+    /// The model declined the turn's request, so the engine rolls the turn back. Holds the notice.
+    #[error("{0}")]
+    Refused(String),
     #[error(transparent)]
     Failed(#[from] anyhow::Error),
 }

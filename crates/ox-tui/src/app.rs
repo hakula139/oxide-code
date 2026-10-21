@@ -1,9 +1,10 @@
 //! Root TUI application.
 //!
 //! [`App`] owns every component, holds the cross-task channels, and runs the `tokio::select!`
-//! loop multiplexing crossterm events, engine events, git probe results, clipboard reports, and a
-//! 60 FPS render tick. A dirty flag coalesces redraws so each state change renders once. Terminal
-//! input, engine events, and drawing live in the `dispatch`, `events`, and `render` submodules.
+//! loop multiplexing crossterm events, engine events, git probe results, clipboard reports,
+//! background slash-command results, and a 60 FPS render tick. A dirty flag coalesces redraws so
+//! each state change renders once. Terminal input, engine events, and drawing live in the
+//! `dispatch`, `events`, and `render` submodules.
 
 mod dispatch;
 mod events;
@@ -20,6 +21,7 @@ use crossterm::event::{Event as CrosstermEvent, EventStream};
 use futures::{Stream, StreamExt};
 use ratatui::Terminal;
 use tokio::sync::mpsc;
+use tokio::task::JoinSet;
 
 use ox_core::permission::Mode;
 use ox_core::protocol::{Event, Interaction, Op};
@@ -33,7 +35,7 @@ use crate::components::tasks::TaskPanel;
 use crate::git_probes::GitProbes;
 use crate::modal::{Modal, ModalStack};
 use crate::now;
-use crate::slash::LiveSessionInfo;
+use crate::slash::{ChatOutput, LiveSessionInfo};
 use crate::terminal::{Tui, TuiBackend};
 use crate::theme::{Theme, ThemeOverrides};
 
@@ -72,19 +74,36 @@ pub(crate) struct App {
     /// OSC 52 sequence the next frame writes to the terminal.
     pending_clipboard: Option<String>,
     copy_notice: Option<CopyNotice>,
+    /// Background slash commands still running for the live session.
+    slash_tasks: JoinSet<Result<ChatOutput, String>>,
     /// Prompt already painted for the in-flight turn, kept as typed. Replayed if auto-compaction
     /// clears chat, and handed back if auto-compaction fails before the prompt is sent.
     active_prompt: Option<String>,
-    /// Whether an automatic compaction runs ahead of the active prompt, so a failure means the
-    /// engine never sent it.
-    auto_compacting: bool,
+    /// What a failure of the active prompt hands back to the user.
+    hand_back: HandBack,
     /// FIFO of prompts submitted mid-turn, kept as typed so Esc restores a `//` escape. Each stays
     /// with the TUI until the engine confirms it with `PromptDrained` or it starts its own turn.
     pending_prompts: VecDeque<String>,
     /// How many leading `pending_prompts` the in-flight turn already holds.
     forwarded_prompts: usize,
+    /// Queued prompts the in-flight turn took in, kept as typed so a rolled-back turn hands them
+    /// back.
+    drained_prompts: Vec<String>,
     should_quit: bool,
     dirty: bool,
+}
+
+/// What a failure of the active prompt hands back to the user.
+#[derive(Clone, Copy, Default)]
+enum HandBack {
+    /// Nothing, since the prompt ran and the queue goes on.
+    #[default]
+    Nothing,
+    /// The prompt, since an automatic compaction runs ahead of it and a failure means the engine
+    /// never sent it.
+    UnsentPrompt,
+    /// The prompt and the queued prompts its turn took in, since the engine rolled the turn back.
+    RolledBackTurn,
 }
 
 /// Outcome of the last copy, shown over the chat until `until`.
@@ -159,10 +178,12 @@ impl App {
             clipboard: Clipboard::new(Environment::detect()),
             pending_clipboard: None,
             copy_notice: None,
+            slash_tasks: JoinSet::new(),
             active_prompt: None,
-            auto_compacting: false,
+            hand_back: HandBack::Nothing,
             pending_prompts: VecDeque::new(),
             forwarded_prompts: 0,
+            drained_prompts: Vec::new(),
             should_quit: false,
             dirty: true,
         }
@@ -199,7 +220,7 @@ impl App {
         self.render(terminal)?;
 
         loop {
-            // Five sources can wake the loop. The tick arm is the only renderer, so handlers only
+            // Six sources can wake the loop. The tick arm is the only renderer, so handlers only
             // mark `dirty` and render work stays paced by the 60 FPS clock.
             tokio::select! {
                 event = crossterm_events.next() => {
@@ -218,6 +239,7 @@ impl App {
                 }
                 Some(update) = self.git_probes.recv() => self.apply_git_update(update),
                 Some(report) = self.clipboard.recv() => self.apply_copy_report(report),
+                Some(finished) = self.slash_tasks.join_next() => self.apply_slash_task(finished),
                 _ = tick.tick() => {
                     let now = now();
                     self.git_probes.poll(now);

@@ -16,7 +16,7 @@ use anyhow::{Context, Result, anyhow, bail, ensure};
 use globset::{Glob, GlobBuilder, GlobMatcher, GlobSet, GlobSetBuilder};
 use serde::{Deserialize, Serialize};
 
-use crate::permission::shell::{PatternWord, Segment, ShellWord, pattern_words};
+use crate::permission::shell::{PatternWord, Segment, ShellWord, bare_program, pattern_words};
 use crate::permission::{PermissionClass, Target, fold_name, resolve};
 use crate::util::path::{lexical_normalize, slash_separated};
 use crate::util::text::is_hidden;
@@ -292,14 +292,14 @@ fn quote(word: &str) -> String {
     }
 }
 
-/// Returns whether a deny or ask pattern holds `segment` by its named words, its program words, or
-/// its program words with the program's directory dropped.
+/// Returns whether a deny or ask pattern holds `segment` by its named words, or by the words of a
+/// program it may run, as written or with the program's directory dropped.
 fn segment_held(pattern: &[PatternWord], segment: &Segment) -> bool {
     words_held(pattern, segment.named())
-        || words_held(pattern, segment.program())
-        || segment
-            .bare_program()
-            .is_some_and(|bare| words_held(pattern, &bare))
+        || segment.programs().any(|program| {
+            words_held(pattern, program)
+                || bare_program(program).is_some_and(|bare| words_held(pattern, &bare))
+        })
 }
 
 /// Returns whether an allow `pattern` matches all of `words`. A trailing `*` matches whatever words

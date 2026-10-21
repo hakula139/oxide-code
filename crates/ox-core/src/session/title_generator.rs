@@ -546,7 +546,7 @@ mod tests {
                 .expect_err("HTTP error must propagate");
             assert_eq!(
                 format!("{err:#}"),
-                "Haiku completion failed: API error (HTTP 400 Bad Request): bad request"
+                "Haiku completion failed: Anthropic API error (HTTP 400 Bad Request): bad request"
             );
         }
     }

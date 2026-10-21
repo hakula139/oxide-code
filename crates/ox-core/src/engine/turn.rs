@@ -84,7 +84,8 @@ pub(super) struct TurnContext<'a> {
 /// stop. [`Op::Queue`]s splice in as user messages at round boundaries, and an [`Op::SetMode`]
 /// waits in `inbox` for the next gated call. An abort mid-stream commits none of the reply, while
 /// an abort mid-round commits the round with the unfinished calls marked interrupted. Either way
-/// the transcript then ends on [`Message::interruption`].
+/// the transcript then ends on [`Message::interruption`]. A refusal commits none of the reply and
+/// ends the turn with [`TurnAbort::Refused`], so the caller can roll the turn back.
 pub(super) async fn agent_turn(
     turn: TurnContext<'_>,
     messages: &mut Vec<Message>,
@@ -213,9 +214,9 @@ async fn settle_stop_reason(
 ) -> StopAction {
     match stop_reason {
         // The API asks clients to drop refused output without running it.
-        Some(StopReason::Refusal) => StopAction::Finish(Err(TurnAbort::Failed(anyhow!(
-            refusal_message(stop_details)
-        )))),
+        Some(StopReason::Refusal) => {
+            StopAction::Finish(Err(TurnAbort::Refused(refusal_message(stop_details))))
+        }
         // Running a cut-off call, or asking the model to retry it, would repeat the same
         // oversized output, so the round stops and keeps only the finished prose.
         Some(reason @ (StopReason::MaxTokens | StopReason::ModelContextWindowExceeded)) => {
@@ -270,9 +271,11 @@ async fn interrupt_turn(
 }
 
 /// User-facing notice for a `refusal` stop, naming the policy category and explanation when the
-/// API supplied them.
+/// API supplied them. The API keeps refusing while the turn stays in the conversation, so the
+/// notice says the engine removed it.
 fn refusal_message(details: Option<&StopDetails>) -> String {
-    const REPHRASE: &str = "Rephrase it, or run `/clear` to start over.";
+    const REPHRASE: &str =
+        "The request was removed from the conversation, so rephrase it to try again.";
     let category = details
         .and_then(|d| d.category.as_deref())
         .map(|c| format!(" (category: {c})"))
@@ -432,7 +435,6 @@ pub(super) async fn collect_response(
 
 #[cfg(test)]
 mod tests {
-    use std::future::Future;
     use std::path::Path;
     use std::pin::Pin;
     use std::sync::Arc;
@@ -2037,10 +2039,16 @@ mod tests {
             .await;
 
             let abort = outcome.into_result().expect_err("a refusal fails the turn");
-            assert_eq!(
-                abort.to_string(),
-                "The model declined this request (category: cyber): Exploit development. \
-                 Rephrase it, or run `/clear` to start over.",
+            assert!(
+                matches!(
+                    &abort,
+                    TurnAbort::Refused(notice)
+                        if notice == "The model declined this request (category: cyber): \
+                                      Exploit development. \
+                                      The request was removed from the conversation, \
+                                      so rephrase it to try again."
+                ),
+                "{abort:?}",
             );
             assert_eq!(
                 messages.len(),
@@ -2309,27 +2317,33 @@ mod tests {
             for (details, expected) in [
                 (
                     None,
-                    "The model declined this request. Rephrase it, or run `/clear` to start over.",
+                    "The model declined this request. \
+                     The request was removed from the conversation, \
+                     so rephrase it to try again.",
                 ),
                 (
                     Some(stop(Some("cyber"), None)),
                     "The model declined this request (category: cyber). \
-                     Rephrase it, or run `/clear` to start over.",
+                     The request was removed from the conversation, \
+                     so rephrase it to try again.",
                 ),
                 (
                     Some(stop(Some("cyber"), Some(" \n "))),
                     "The model declined this request (category: cyber). \
-                     Rephrase it, or run `/clear` to start over.",
+                     The request was removed from the conversation, \
+                     so rephrase it to try again.",
                 ),
                 (
                     Some(stop(None, Some(" Unsafe request "))),
                     "The model declined this request: Unsafe request. \
-                     Rephrase it, or run `/clear` to start over.",
+                     The request was removed from the conversation, \
+                     so rephrase it to try again.",
                 ),
                 (
                     Some(stop(None, Some("Unsafe request..."))),
                     "The model declined this request: Unsafe request... \
-                     Rephrase it, or run `/clear` to start over.",
+                     The request was removed from the conversation, \
+                     so rephrase it to try again.",
                 ),
             ] {
                 assert_eq!(refusal_message(details.as_ref()), expected, "{details:?}");

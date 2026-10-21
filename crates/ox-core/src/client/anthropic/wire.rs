@@ -205,7 +205,7 @@ impl<'a> OutputConfig<'a> {
     }
 }
 
-/// Mirrors claude-code 2.1.119: a single `clear_thinking_20251015` edit with `keep = "all"`.
+/// One `clear_thinking_20251015` edit with `keep = "all"`, the directive Claude Code sends.
 #[derive(Serialize)]
 pub(super) struct ContextManagement {
     edits: [ContextEdit; 1],
@@ -214,33 +214,27 @@ pub(super) struct ContextManagement {
 impl ContextManagement {
     pub(super) fn clear_thinking_keep_all() -> Self {
         Self {
-            edits: [ContextEdit {
-                r#type: "clear_thinking_20251015",
-                keep: "all",
-            }],
+            edits: [ContextEdit { keep: "all" }],
         }
     }
 }
 
 #[derive(Serialize)]
+#[serde(tag = "type", rename = "clear_thinking_20251015")]
 struct ContextEdit {
-    r#type: &'static str,
     keep: &'static str,
 }
 
 /// JSON-schema-constrained completion format.
 #[derive(Debug, Serialize)]
+#[serde(tag = "type", rename = "json_schema")]
 pub(crate) struct OutputFormat {
-    r#type: &'static str,
     schema: serde_json::Value,
 }
 
 impl OutputFormat {
     pub(crate) fn json_schema(schema: serde_json::Value) -> Self {
-        Self {
-            r#type: "json_schema",
-            schema,
-        }
+        Self { schema }
     }
 }
 
@@ -252,18 +246,18 @@ pub(super) struct RequestMetadata {
 
 /// Array form is required so the identity prefix occupies its own block (OAuth non-Haiku gate).
 #[derive(Serialize)]
+#[serde(tag = "type", rename = "text")]
 pub(super) struct SystemBlock<'a> {
-    pub(super) r#type: &'static str,
     pub(super) text: &'a str,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(super) cache_control: Option<CacheControl>,
 }
 
-/// `scope: "global"` shares cache across sessions (1P only). Default ttl is `"1h"`. Opt out via
-/// `prompt_cache_ttl = "5m"` to use the server-side 5-minute default.
+/// An ephemeral prompt-cache breakpoint. `scope: "global"` shares the cache across sessions, and
+/// `ttl` overrides the API's 5-minute lifetime.
 #[derive(Clone, Copy, Serialize)]
+#[serde(tag = "type", rename = "ephemeral")]
 pub(super) struct CacheControl {
-    pub(super) r#type: &'static str,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(super) scope: Option<&'static str>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -401,18 +395,12 @@ mod tests {
     use serde_json::json;
 
     use super::*;
+    use crate::client::anthropic::betas::conversation_cache_control;
+    use crate::config::PromptCacheTtl;
     use crate::message::Replay;
 
     mod request_messages {
         use super::*;
-
-        fn one_hour_breakpoint() -> CacheControl {
-            CacheControl {
-                r#type: "ephemeral",
-                scope: None,
-                ttl: Some("1h"),
-            }
-        }
 
         #[test]
         fn breakpoint_marks_only_last_block_of_final_message() {
@@ -436,7 +424,7 @@ mod tests {
             let v = serde_json::to_value(RequestMessages {
                 user_context: None,
                 messages: &messages,
-                breakpoint: Some(one_hour_breakpoint()),
+                breakpoint: Some(conversation_cache_control(PromptCacheTtl::OneHour)),
             })
             .unwrap();
 
@@ -470,7 +458,7 @@ mod tests {
             let v = serde_json::to_value(RequestMessages {
                 user_context: None,
                 messages: &messages,
-                breakpoint: Some(one_hour_breakpoint()),
+                breakpoint: Some(conversation_cache_control(PromptCacheTtl::OneHour)),
             })
             .unwrap();
 
@@ -500,7 +488,7 @@ mod tests {
             let empty = serde_json::to_value(RequestMessages {
                 user_context: None,
                 messages: &[],
-                breakpoint: Some(one_hour_breakpoint()),
+                breakpoint: Some(conversation_cache_control(PromptCacheTtl::OneHour)),
             })
             .unwrap();
             assert_eq!(empty, json!([]));
@@ -532,7 +520,7 @@ mod tests {
                 let v = serde_json::to_value(RequestMessages {
                     user_context: Some("context"),
                     messages: &messages,
-                    breakpoint: Some(one_hour_breakpoint()),
+                    breakpoint: Some(conversation_cache_control(PromptCacheTtl::OneHour)),
                 })
                 .unwrap();
 
@@ -621,7 +609,7 @@ mod tests {
             let v = serde_json::to_value(RequestMessages {
                 user_context: None,
                 messages: &messages,
-                breakpoint: Some(one_hour_breakpoint()),
+                breakpoint: Some(conversation_cache_control(PromptCacheTtl::OneHour)),
             })
             .unwrap();
 

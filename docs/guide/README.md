@@ -10,5 +10,5 @@ Documentation for using oxide-code (`ox`).
 | [Slash Commands](slash-commands.md)  | Built-in client-side commands and autocomplete                                                       |
 | [Instruction Files](instructions.md) | AGENTS.md / CLAUDE.md setup and discovery rules                                                      |
 | [Sessions](sessions.md)              | Storage, listing, resume, titles, deletion, archiving, security                                      |
-| [Headless Mode](headless.md)         | One-shot `-p` runs, output formats, exit status, the JSON result and event schema                    |
+| [Headless Mode](headless.md)         | One-shot `-p` runs, output formats, exit status, the JSON result and event schema, the bare REPL     |
 | [Theming](theming.md)                | Built-in palettes, custom themes, slot overrides                                                     |

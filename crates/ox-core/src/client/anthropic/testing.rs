@@ -1,6 +1,7 @@
 //! Shared test fixtures for the Anthropic client and its consumers.
 
 use std::fmt::Write as _;
+use std::path::Path;
 
 use indoc::writedoc;
 use reqwest::header::HeaderMap;
@@ -9,8 +10,10 @@ use wiremock::ResponseTemplate;
 use crate::config::auth::{Auth, AuthSource};
 use crate::config::compaction::CompactionConfig;
 use crate::config::gateway::GatewayCompat;
+use crate::config::provenance::Provenance;
 use crate::config::{Config, DEFAULT_THEME, PromptCacheTtl, StatusLineSegment, ThemeConfig};
 use crate::model::ModelSpec;
+use crate::permission::{Policy, Workspace};
 
 pub(crate) const DEVICE_ID: &str = "did";
 
@@ -32,16 +35,17 @@ pub(crate) fn test_config(base_url: impl Into<String>, auth: Auth, model: &str) 
         max_tool_rounds: None,
         prompt_cache_ttl: PromptCacheTtl::OneHour,
         compaction: CompactionConfig::disabled(),
-        permission: crate::permission::Policy::default(),
-        workspace: crate::permission::Workspace::new(std::path::Path::new("/repo")),
+        permission: Policy::default(),
+        workspace: Workspace::new(Path::new("/repo")),
         show_thinking: false,
         show_welcome: true,
         status_line: StatusLineSegment::DEFAULT.to_vec(),
         theme: ThemeConfig {
             base: DEFAULT_THEME.to_owned(),
+            base_source: crate::config::provenance::Source::Default,
             overrides: toml::Table::new(),
         },
-        provenance: crate::config::provenance::Provenance::default(),
+        provenance: Provenance::default(),
     }
 }
 

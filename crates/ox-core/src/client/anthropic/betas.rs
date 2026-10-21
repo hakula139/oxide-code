@@ -1,14 +1,13 @@
 //! Per-request `anthropic-beta` header computation.
 
+use super::RequestKind;
+use super::wire::CacheControl;
 use crate::config::PromptCacheTtl;
 use crate::config::auth::AuthKind;
 use crate::model::{Family, ModelSpec, ThinkingConfig, ThinkingDisplay};
 
-use super::RequestKind;
-use super::wire::CacheControl;
-
 const ADVISOR_TOOL_BETA_HEADER: &str = "advisor-tool-2026-03-01";
-pub(super) const CLAUDE_CODE_BETA_HEADER: &str = "claude-code-20250219";
+const CLAUDE_CODE_BETA_HEADER: &str = "claude-code-20250219";
 const CONTEXT_MANAGEMENT_BETA_HEADER: &str = "context-management-2025-06-27";
 const EFFORT_BETA_HEADER: &str = "effort-2025-11-24";
 const INTERLEAVED_THINKING_BETA_HEADER: &str = "interleaved-thinking-2025-05-14";
@@ -93,7 +92,6 @@ pub(super) fn static_prefix_cache_control(
 /// session-specific, so it never carries `scope`.
 pub(super) fn conversation_cache_control(ttl: PromptCacheTtl) -> CacheControl {
     CacheControl {
-        r#type: "ephemeral",
         scope: None,
         ttl: ttl.wire(),
     }
@@ -256,12 +254,16 @@ mod tests {
         #[test]
         fn emits_global_scope_on_first_party_only() {
             let first = static_prefix_cache_control(true, PromptCacheTtl::OneHour);
-            assert_eq!(first.r#type, "ephemeral");
-            assert_eq!(first.scope, Some("global"));
+            assert_eq!(
+                serde_json::to_string(&first).unwrap(),
+                r#"{"type":"ephemeral","scope":"global","ttl":"1h"}"#,
+            );
 
             let third = static_prefix_cache_control(false, PromptCacheTtl::OneHour);
-            assert_eq!(third.r#type, "ephemeral");
-            assert_eq!(third.scope, None);
+            assert_eq!(
+                serde_json::to_string(&third).unwrap(),
+                r#"{"type":"ephemeral","ttl":"1h"}"#,
+            );
         }
 
         #[test]

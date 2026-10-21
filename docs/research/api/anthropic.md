@@ -15,6 +15,8 @@ Claude Code stores OAuth tokens in **platform-specific secure storage** with a p
 - **macOS**: macOS Keychain (service `"Claude Code-credentials"`), falling back to `~/.claude/.credentials.json`.
 - **Linux**: `~/.claude/.credentials.json` (plaintext only).
 
+`CLAUDE_CONFIG_DIR` moves the config directory, and so the file, away from `~/.claude`. Claude Code reads the variable in Unicode NFC, and when it is set, the Keychain service becomes `Claude Code-credentials-<hash>`, where `<hash>` is the first 8 hex digits of the SHA-256 of the variable's value.
+
 Both backends store the same JSON structure:
 
 ```json
@@ -307,7 +309,7 @@ For raw HTTP (as in oxide-code), replicate the headers manually. oxide-code mirr
 
 ## Token Refresh
 
-OAuth tokens expire (check `expiresAt` in milliseconds). Claude Code refreshes them automatically with a 5-minute buffer before expiry, using a `POST` to `platform.claude.com/v1/oauth/token` with the `refresh_token`. Cross-process safety is handled via directory-based locking (`proper-lockfile` creates a `~/.claude.lock/` directory).
+OAuth tokens expire (check `expiresAt` in milliseconds). Claude Code refreshes them automatically with a 5-minute buffer before expiry, using a `POST` to `platform.claude.com/v1/oauth/token` with the `refresh_token`. Cross-process safety is handled via directory-based locking: `proper-lockfile` creates a `.lock` directory beside the real path of the config directory, as in `~/.claude.lock/`, refreshes its mtime every 5 seconds while held, and treats a lock untouched for 10 seconds as stale, its `update` and `stale` defaults.
 
 oxide-code implements the same refresh flow: proactive refresh with the 5-minute buffer, directory-based locking compatible with Claude Code, and credential write-back preserving unknown fields.
 

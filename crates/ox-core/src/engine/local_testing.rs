@@ -1,21 +1,17 @@
-//! Test fixtures for this crate's engine, turn, dispatch, and compaction tests. They mock stalled
-//! replies, script turns, and seed transcripts large enough to compact.
+//! Test fixtures for this crate's engine, turn, dispatch, and compaction tests. They script turns
+//! and seed transcripts large enough to compact.
 
 use std::collections::VecDeque;
 use std::path::Path;
 use std::pin::Pin;
 use std::sync::{Arc, LazyLock, Mutex as StdMutex};
-use std::time::Duration;
 
 use anyhow::{Result, anyhow};
 use serde_json::json;
 use tokio::sync::mpsc;
-use wiremock::matchers::{method, path};
-use wiremock::{Mock, MockServer};
 
 use super::dispatch::DispatchContext;
 use super::testing::MODEL;
-use crate::client::anthropic::testing::{sse_response, text_stream_body};
 use crate::client::{Response, ResponseEvent, StopDetails, StopReason, Wire};
 use crate::file_tracker::FileTracker;
 use crate::message::{ContentBlock, Message, Replay, Role};
@@ -28,26 +24,6 @@ use crate::session::store::testing::test_store;
 use crate::tool::{Prepared, Tool, ToolCtx, ToolDefinition, ToolOutput, ToolSpec};
 
 // ── Engine ──
-
-/// Answers the next Messages request only after a minute, so it stays in flight until the test
-/// cancels or quits it. Mount it before the reply that should follow.
-pub(super) async fn mount_stalled_reply_once(server: &MockServer) {
-    Mock::given(method("POST"))
-        .and(path("/v1/messages"))
-        .respond_with(
-            sse_response(text_stream_body("", "too late")).set_delay(Duration::from_secs(60)),
-        )
-        .up_to_n_times(1)
-        .mount(server)
-        .await;
-}
-
-/// Waits until `server` has received `count` requests, so the engine is mid-request.
-pub(super) async fn until_requested(server: &MockServer, count: usize) {
-    while server.received_requests().await.unwrap().len() < count {
-        tokio::task::yield_now().await;
-    }
-}
 
 /// The system blocks of `request` without the billing attestation, whose body hash varies with
 /// every request.

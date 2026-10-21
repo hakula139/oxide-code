@@ -2,8 +2,9 @@
 
 mod driver;
 
+use std::env;
 use std::ffi::OsStr;
-use std::io::IsTerminal;
+use std::io::{self, IsTerminal, Write};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::sync::Arc;
@@ -137,15 +138,29 @@ impl TypedValueParser for ModeParser {
     }
 }
 
-fn main() -> Result<ExitCode> {
+fn main() -> ExitCode {
+    try_main().unwrap_or_else(|e| {
+        _ = writeln!(
+            io::stderr(),
+            "Error: {}",
+            util::text::escape_controls(&format!("{e:#}"))
+        );
+        ExitCode::FAILURE
+    })
+}
+
+fn try_main() -> Result<ExitCode> {
     let offset_error = util::time::init_local_offset().err();
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
-        .build()?;
-    let exit = match runtime.block_on(async_main(offset_error)) {
-        Ok(exit) => exit,
-        Err(e) => e.downcast::<EnginePanic>()?.resume(),
-    };
+        .build()
+        .context("failed to start the async runtime")?;
+    let exit = runtime.block_on(async_main(offset_error)).map_err(|e| {
+        match e.downcast::<EnginePanic>() {
+            Ok(panic) => panic.resume(),
+            Err(e) => e,
+        }
+    })?;
     if matches!(exit, Exit::Signal(_)) {
         // tokio's stdin reader can stay blocked in `read`, and a regular drop waits for it.
         runtime.shutdown_background();
@@ -156,20 +171,19 @@ fn main() -> Result<ExitCode> {
 async fn async_main(offset_error: Option<IndeterminateOffset>) -> Result<Exit> {
     let cli = Cli::parse();
 
-    let tui_mode =
-        !cli.no_tui && cli.prompt.is_none() && !cli.list && std::io::stdout().is_terminal();
+    let tui_mode = !cli.no_tui && cli.prompt.is_none() && !cli.list && io::stdout().is_terminal();
     if cli.resume && !tui_mode {
         bail!("--resume opens the session picker in the TUI, which needs a terminal on stdout");
     }
     let _log_guard = util::log::init_tracing(tui_mode)?;
     if let Some(e) = offset_error {
-        warn!("cannot read local timezone offset, falling back to UTC: {e}");
+        warn!("failed to read the local timezone offset, so times show in UTC: {e}");
     }
-    let cwd = std::env::current_dir().context("failed to read the current working directory")?;
+    let cwd = env::current_dir().context("failed to read the current working directory")?;
 
     if cli.list {
         list_sessions(
-            &mut std::io::stdout().lock(),
+            &mut io::stdout().lock(),
             &cwd,
             ListScope {
                 all: cli.all,
@@ -186,11 +200,6 @@ async fn async_main(offset_error: Option<IndeterminateOffset>) -> Result<Exit> {
     }
     let show_thinking = config.show_thinking;
     let theme = tui_mode.then(|| resolve_theme(&config.theme)).transpose()?;
-    let snapshot = config.snapshot();
-    let theme_notices = theme.iter().flat_map(|resolved| &resolved.notices);
-    for notice in snapshot.notices().iter().chain(theme_notices) {
-        warn!("{notice}");
-    }
 
     let store = SessionStore::open(&cwd)?;
     let file_tracker = Arc::new(FileTracker::default());
@@ -209,7 +218,11 @@ async fn async_main(offset_error: Option<IndeterminateOffset>) -> Result<Exit> {
         cli.all,
     )?;
     if unarchived && !tui_mode {
-        eprintln!("{}", archive_notice(handle.session_id(), false));
+        _ = writeln!(
+            io::stderr(),
+            "{}",
+            archive_notice(handle.session_id(), false)
+        );
     }
     let drifted = file_tracker.restore_verified(file_snapshots);
     let picker = cli
@@ -245,7 +258,7 @@ async fn async_main(offset_error: Option<IndeterminateOffset>) -> Result<Exit> {
         unarchived,
     };
     // Boxed, since on Windows this future passes clippy's 16 KiB `large_futures` threshold.
-    Box::pin(run_tui(engine, theme, snapshot, startup, &drifted)).await
+    Box::pin(run_tui(engine, theme, config.snapshot(), startup, &drifted)).await
 }
 
 /// Runs the TUI until the user quits or a shutdown signal arrives, which then sets the exit status.
@@ -270,12 +283,7 @@ async fn run_tui(
 
 // ── Session Helpers ──
 
-fn list_sessions(
-    out: &mut dyn std::io::Write,
-    cwd: &Path,
-    scope: ListScope,
-    limit: usize,
-) -> Result<()> {
+fn list_sessions(out: &mut dyn Write, cwd: &Path, scope: ListScope, limit: usize) -> Result<()> {
     let store = SessionStore::open(cwd)?;
     let local_offset = util::time::local_offset();
     let term_width = terminal::stdout_width();

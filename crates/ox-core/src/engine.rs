@@ -31,7 +31,7 @@ use crate::config::auth::{self, Auth, AuthSource};
 use crate::config::compaction::CompactionConfig;
 use crate::config::login::PendingLogin;
 use crate::config::oauth::{self, ClaudeCodeKeychain};
-use crate::file_tracker::FileTracker;
+use crate::file_tracker::{FileSnapshot, FileTracker};
 use crate::message::{ContentBlock, Message};
 use crate::model::{self, ModelSpec, TokenUsage};
 use crate::permission::{Mode, Policy, Workspace};
@@ -42,7 +42,7 @@ use crate::protocol::{
 };
 use crate::session::display::id_prefix;
 use crate::session::entry::{CompactInfo, UsageRecord};
-use crate::session::handle::{self, LoadedTranscript, RollIntoOutcome, SessionHandle};
+use crate::session::handle::{self, Checkpoint, LoadedTranscript, RollIntoOutcome, SessionHandle};
 use crate::session::history;
 use crate::session::resolver::resolve_saved_prefix;
 use crate::session::store::SessionStore;
@@ -136,6 +136,8 @@ pub struct Engine {
     /// Whether `prompt` changed since the session last recorded it, so the next user message
     /// records it.
     prompt_unrecorded: bool,
+    /// The config's startup notices, which [`Self::spawn`] shows once.
+    startup_notices: Vec<String>,
     /// Warnings about the instruction files the latest user context load could not read.
     instruction_warnings: Vec<String>,
     file_tracker: Arc<FileTracker>,
@@ -152,9 +154,10 @@ pub struct Engine {
     /// Whether a TUI is attached, so titles generate in the background.
     interactive: bool,
     auto_compaction_failures: AutoCompactFailures,
-    /// The latest turn's last round usage, `None` when that turn reported none.
+    /// The last round usage of the latest turn the transcript keeps, `None` when that turn reported
+    /// none.
     last_usage: Option<TokenUsage>,
-    /// The latest usage any turn reported, which the status line shows.
+    /// The latest usage any turn the transcript keeps reported, which the status line shows.
     displayed_usage: Option<TokenUsage>,
     total_estimated_cost_usd: f64,
     /// Delivers the usage of the live session's title request, which joins the session total once
@@ -212,6 +215,7 @@ impl Engine {
             tasks,
             prompt,
             prompt_unrecorded,
+            startup_notices: config.notices(),
             instruction_warnings,
             file_tracker,
             shells,
@@ -250,13 +254,17 @@ impl Engine {
         )
     }
 
-    /// Starts the engine task, which first emits what [`Self::emit_session_start`] shows. `drifted`
-    /// lists the tracked files that changed on disk since the resumed session read them.
+    /// Starts the engine task, which first emits the config's startup notices, then what
+    /// [`Self::emit_session_start`] shows. `drifted` lists the tracked files that changed on disk
+    /// since the resumed session read them.
     pub fn spawn(mut self, drifted: &[PathBuf]) -> EngineHandle {
         let (ops, op_rx) = mpsc::channel(OP_CHANNEL_CAP);
         // Unbounded, so the engine never waits on or drops events for a frontend that falls behind.
         let (sink, events) = mpsc::unbounded_channel();
         self.shells.attach(Arc::new(sink.clone()));
+        for notice in std::mem::take(&mut self.startup_notices) {
+            sink.emit(Event::Notice(notice), "startup-notice");
+        }
         self.emit_session_start(&sink, drifted);
         let task = EngineTask(tokio::spawn(self.run(sink, op_rx)));
         EngineHandle { ops, events, task }
@@ -302,7 +310,8 @@ impl Engine {
         self.finalize().await
     }
 
-    /// Runs `text` through auto-compaction and one agent turn, reporting how it ended on `sink`.
+    /// Runs `text` through auto-compaction and one agent turn, rolling back a refused turn, and
+    /// reports how it ended on `sink`.
     async fn submit_prompt<S>(
         &mut self,
         text: &str,
@@ -322,6 +331,7 @@ impl Engine {
             return report_abort(sink, abort, "auto-compact-failed");
         }
 
+        let start = self.turn_start();
         let mut user_msg = Message::user(text);
         let fresh = self.load_user_context(sink).await;
         if let Some(reminder) = self.prompt.catch_up(fresh) {
@@ -378,9 +388,14 @@ impl Engine {
         )
         .await;
         self.adopt_mode(&mut inbox);
-        self.account_usage(sink, &report).await;
-        if let Some(tasks) = report.tasks.take() {
-            self.tasks = tasks;
+        if let Err(TurnAbort::Refused(_)) = result {
+            self.roll_back(sink, start, outcome.checkpoint, &report)
+                .await;
+        } else {
+            self.account_usage(sink, &report).await;
+            if let Some(tasks) = report.tasks.take() {
+                self.tasks = tasks;
+            }
         }
         match result {
             Ok(()) => {
@@ -389,6 +404,42 @@ impl Engine {
             }
             Err(abort) => report_abort(sink, abort, "turn-failed"),
         }
+    }
+
+    /// What [`Self::roll_back`] returns to if the model refuses the turn about to start.
+    fn turn_start(&self) -> TurnStart {
+        TurnStart {
+            transcript_len: self.messages.len(),
+            seen: self.prompt.seen.clone(),
+            prompt_unrecorded: self.prompt_unrecorded,
+            files: self.file_tracker.snapshot_all(),
+        }
+    }
+
+    /// Returns the engine and the session to `start` and `checkpoint` after the model refused the
+    /// turn `report` describes. Keeps the context usage from before the turn, since the transcript
+    /// its requests measured is gone.
+    async fn roll_back(
+        &mut self,
+        sink: &dyn EventSink,
+        start: TurnStart,
+        checkpoint: Option<Checkpoint>,
+        report: &TurnReport,
+    ) {
+        self.bill(sink, &report.billable_rounds).await;
+        self.messages.truncate(start.transcript_len);
+        self.prompt.seen = start.seen;
+        self.prompt_unrecorded = start.prompt_unrecorded;
+        self.file_tracker.reset_to(start.files);
+        if let Some(checkpoint) = checkpoint {
+            let outcome = self.session.rewind(checkpoint).await;
+            sink.session_write_error(outcome.failure.as_deref());
+        }
+        if report.tasks.is_some() {
+            sink.emit(Event::TasksUpdated(self.tasks.clone()), "tasks-rolled-back");
+        }
+        self.emit_usage_update(sink);
+        sink.emit(Event::TurnRolledBack, "turn-rolled-back");
     }
 
     async fn auto_compact(
@@ -877,6 +928,15 @@ impl Engine {
     }
 }
 
+/// The engine state before a turn's prompt: the transcript length, what the model had seen of the
+/// user context and whether the prompt context awaits recording, and the tracked files.
+struct TurnStart {
+    transcript_len: usize,
+    seen: UserContext,
+    prompt_unrecorded: bool,
+    files: Vec<FileSnapshot>,
+}
+
 /// Replays the prompt a session recorded, or builds a fresh one for a session without one. Also
 /// returns the warnings about instruction files a fresh build could not read.
 async fn session_prompt(
@@ -945,6 +1005,10 @@ fn report_abort(sink: &dyn EventSink, abort: TurnAbort, label: &'static str) -> 
             TurnEnd::Cancelled
         }
         TurnAbort::Shutdown => TurnEnd::Shutdown,
+        TurnAbort::Refused(notice) => {
+            sink.emit(Event::TurnFailed(notice), label);
+            TurnEnd::Failed
+        }
         TurnAbort::Failed(e) => {
             sink.emit(Event::TurnFailed(format!("{e:#}")), label);
             TurnEnd::Failed
@@ -1017,12 +1081,11 @@ mod tests {
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
     use super::local_testing::{
-        EchoTool, inert_ops, mount_stalled_reply_once, service_log, system_prompt,
-        tool_heavy_transcript, until_requested,
+        EchoTool, inert_ops, service_log, system_prompt, tool_heavy_transcript,
     };
     use super::testing::{
-        MODEL, SESSION_CONTEXT, engine, mount_reply, mount_tool_call_once, panic_message,
-        request_bodies, with_pinned_home,
+        MODEL, SESSION_CONTEXT, engine, mount_reply, mount_stalled_reply_once,
+        mount_tool_call_once, panic_message, request_bodies, until_requested, with_pinned_home,
     };
     use super::*;
     use crate::client::anthropic::local_testing::{COMPLETION_USAGE, client_for, completion_body};
@@ -1046,6 +1109,7 @@ mod tests {
     use crate::tool::bash::background::local_testing::start_shell;
     use crate::tool::bash::background::testing::shell;
     use crate::tool::local_testing::{canonical_tempdir, ctx};
+    use crate::tool::read::ReadTool;
     use crate::tool::tasks::TasksTool;
     use crate::tool::tasks::testing::plan;
     use crate::util::git::local_testing::init_fixture_repo;
@@ -1482,6 +1546,8 @@ mod tests {
                 config.compaction = CompactionConfig::with_threshold_for_test(50_000);
                 config.permission.set_mode(Mode::Plan);
                 config.workspace = Workspace::new(dir.path());
+                config.signed_out_notice =
+                    Some("Not signed in. Run `/login` to sign in.".to_owned());
 
                 let engine = Engine::new(
                     &config,
@@ -1502,6 +1568,10 @@ mod tests {
                 assert_eq!(engine.max_tool_rounds, Some(3));
                 assert_eq!(engine.compaction, config.compaction);
                 assert_eq!(engine.policy.mode(), Mode::Plan);
+                assert_eq!(
+                    engine.startup_notices,
+                    ["Not signed in. Run `/login` to sign in."],
+                );
                 assert_eq!(engine.client.session_id(), session.session_id());
             })
             .await;
@@ -1566,12 +1636,13 @@ mod tests {
         use super::*;
 
         #[tokio::test]
-        async fn reports_the_resumed_cost_tasks_warnings_drift_and_an_interrupted_transcript() {
+        async fn reports_the_startup_notices_resumed_cost_tasks_warnings_drift_and_interruption() {
             with_pinned_home(async {
                 let server = MockServer::start().await;
                 let dir = tempfile::tempdir().unwrap();
                 let warning = write_unreadable_instructions(dir.path());
                 let mut engine = engine(server.uri(), &test_store(dir.path()), dir.path()).await;
+                engine.startup_notices = vec!["Not signed in. Run `/login` to sign in.".to_owned()];
                 engine.messages = vec![
                     Message::user("hi"),
                     Message {
@@ -1586,6 +1657,7 @@ mod tests {
                 engine.tasks = plan();
 
                 let mut handle = engine.spawn(&[PathBuf::from("a.rs")]);
+                let notice = handle.events.recv().await.unwrap();
                 let cost = handle.events.recv().await.unwrap();
                 let tasks = handle.events.recv().await.unwrap();
                 let instructions = handle.events.recv().await.unwrap();
@@ -1593,6 +1665,10 @@ mod tests {
                 let interrupted = handle.events.recv().await.unwrap();
                 let failure = handle.shutdown().await.unwrap();
 
+                assert_eq!(
+                    notice,
+                    Event::Notice("Not signed in. Run `/login` to sign in.".to_owned()),
+                );
                 assert!(
                     matches!(
                         &cost,
@@ -2690,6 +2766,163 @@ mod tests {
 
                 assert_eq!(end, TurnEnd::Failed);
                 assert_eq!(engine.tasks, plan());
+            })
+            .await;
+        }
+
+        /// Answers the next Messages request with `text`.
+        async fn mount_reply_once(server: &MockServer, text: &str) {
+            Mock::given(method("POST"))
+                .and(path("/v1/messages"))
+                .respond_with(sse_response(text_stream_body("", text)))
+                .up_to_n_times(1)
+                .mount(server)
+                .await;
+        }
+
+        /// Answers the next Messages request with a refusal that reports `input_tokens`.
+        async fn mount_refusal_once(server: &MockServer, input_tokens: u64) {
+            let start = serde_json::json!({
+                "type": "message_start",
+                "message": {"id": "msg_1", "model": MODEL, "usage": {"input_tokens": input_tokens}},
+            });
+            let stop = serde_json::json!({
+                "type": "message_delta",
+                "delta": {"stop_reason": "refusal"},
+                "usage": {"output_tokens": 1},
+            });
+            let end = serde_json::json!({"type": "message_stop"});
+            Mock::given(method("POST"))
+                .and(path("/v1/messages"))
+                .respond_with(sse_response(sse_body(&[start, stop, end])))
+                .up_to_n_times(1)
+                .mount(server)
+                .await;
+        }
+
+        #[tokio::test]
+        async fn rolls_back_a_refused_turn_to_the_state_before_it() {
+            with_pinned_home(async {
+                let server = MockServer::start().await;
+                let dir = canonical_tempdir();
+                let notes = dir.path().join("notes.txt");
+                let other = dir.path().join("other.txt");
+                std::fs::write(&notes, "notes").unwrap();
+                std::fs::write(&other, "other").unwrap();
+                let tasks = serde_json::json!({ "tasks": plan() }).to_string();
+                let read = serde_json::json!({ "file_path": notes }).to_string();
+                mount_tool_call_once(&server, "call-1", "tasks", &tasks).await;
+                mount_tool_call_once(&server, "call-2", "read", &read).await;
+                mount_reply_once(&server, "done").await;
+                let refused_tasks = serde_json::json!({ "tasks": [] }).to_string();
+                let refused_read = serde_json::json!({ "file_path": other }).to_string();
+                mount_tool_call_once(&server, "call-3", "tasks", &refused_tasks).await;
+                mount_tool_call_once(&server, "call-4", "read", &refused_read).await;
+                mount_refusal_once(&server, 5_000).await;
+                mount_reply(&server, "reply").await;
+                let store = test_store(dir.path());
+                let mut engine =
+                    engine(server.uri(), &store, dir.path())
+                        .await
+                        .with_tools(ToolRegistry::new(vec![
+                            Box::new(TasksTool),
+                            Box::new(ReadTool),
+                        ]));
+                let today = engine.prompt.seen.date.clone();
+                let sink = CapturingSink::default();
+                let mut ops = inert_ops();
+                let first = engine.submit_prompt("first", &sink, &mut ops).await;
+                assert_eq!(first, TurnEnd::Completed);
+                "2000-01-01".clone_into(&mut engine.prompt.seen.date);
+                let before_refusal = sink.events().len();
+
+                let refused = engine.submit_prompt("refused", &sink, &mut ops).await;
+                let refused_events = sink.events().split_off(before_refusal);
+                let tracked: Vec<_> = engine
+                    .file_tracker
+                    .snapshot_all()
+                    .into_iter()
+                    .map(|snapshot| snapshot.path)
+                    .collect();
+                let tasks = engine.tasks.clone();
+                let rephrased = engine.submit_prompt("rephrased", &sink, &mut ops).await;
+
+                assert_eq!(refused, TurnEnd::Failed);
+                let [
+                    ..,
+                    restored,
+                    Event::UsageUpdated(usage),
+                    rolled_back,
+                    failed,
+                ] = &refused_events[..]
+                else {
+                    panic!("{refused_events:?}");
+                };
+                assert_eq!(*restored, Event::TasksUpdated(plan()));
+                assert_eq!(usage.context_tokens, Some(REPLY_USAGE.context_tokens()));
+                assert_eq!(*rolled_back, Event::TurnRolledBack);
+                assert_eq!(
+                    *failed,
+                    Event::TurnFailed(
+                        "The model declined this request. \
+                         The request was removed from the conversation, \
+                         so rephrase it to try again."
+                            .to_owned()
+                    ),
+                );
+                assert_eq!(tracked, [notes]);
+                assert_eq!(tasks, plan());
+                assert_eq!(rephrased, TurnEnd::Completed);
+                let turns = request_bodies(&server).await;
+                let messages = turns.last().unwrap()["messages"].as_array().unwrap();
+                let [.., done, prompt] = &messages[..] else {
+                    panic!("{messages:?}");
+                };
+                assert_eq!(done["content"][0]["text"], "done");
+                assert_eq!(prompt["content"][0]["text"], "rephrased");
+                let reminder = prompt["content"][1]["text"].as_str().unwrap();
+                assert!(
+                    reminder.contains(&format!("Today's date is {today}.")),
+                    "the rolled-back reminder is sent again: {reminder}"
+                );
+
+                let id = engine.session.session_id().to_owned();
+                let expected = engine.prompt.session_context();
+                engine.finalize().await;
+                let data = store.load_session_data(&id).unwrap();
+                let [.., done, prompt, reply] = &data.messages[..] else {
+                    panic!("{:?}", data.messages);
+                };
+                assert_eq!(*done, Message::assistant("done"));
+                assert!(matches!(
+                    &prompt.content[..],
+                    [ContentBlock::Text { text }, _] if text == "rephrased"
+                ));
+                assert_eq!(*reply, Message::assistant("reply"));
+                assert_eq!(data.context, Some(expected));
+            })
+            .await;
+        }
+
+        #[tokio::test]
+        async fn rolls_back_a_refused_turn_in_memory_when_the_session_is_gone() {
+            with_pinned_home(async {
+                let server = MockServer::start().await;
+                mount_refusal_once(&server, 1_000).await;
+                mount_reply(&server, "reply").await;
+                let dir = tempfile::tempdir().unwrap();
+                let mut engine = engine(server.uri(), &test_store(dir.path()), dir.path()).await;
+                engine.session = handle::testing::dead("dead");
+                let sink = CapturingSink::default();
+                let mut ops = inert_ops();
+
+                let refused = engine.submit_prompt("refused", &sink, &mut ops).await;
+                let rephrased = engine.submit_prompt("rephrased", &sink, &mut ops).await;
+
+                assert_eq!(refused, TurnEnd::Failed);
+                assert_eq!(rephrased, TurnEnd::Completed);
+                let turns = request_bodies(&server).await;
+                assert_eq!(texts(&turns[1]), [SESSION_CONTEXT, "rephrased"]);
             })
             .await;
         }

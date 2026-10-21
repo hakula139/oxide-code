@@ -7,7 +7,7 @@ oxide-code's TUI palette is user-configurable. Pick one of the bundled Catppucci
 ```toml
 # ~/.config/ox/config.toml or .ox/config.toml
 
-# Built-in name (mocha, macchiato, frappe, latte, material) or filesystem path.
+# Built-in name (mocha, macchiato, frappe, latte, material), or a file path in user config.
 [tui.theme]
 base = "latte"
 
@@ -35,7 +35,7 @@ Each ships as a vendored TOML file [in the source tree][themes-src] and doubles 
 
 ## Custom Theme Files
 
-`base` accepts any filesystem path to a TOML body using the same shape as the vendored themes. A leading `~/` expands to `$HOME`, but no other expansion happens: environment variables (`$HOME`, `${XDG_CONFIG_HOME}`) and Windows-style references (`%USERPROFILE%`) pass through literally and will fail to read. Relative paths resolve against the directory you launched `ox` from, so prefer absolute or `~/`-anchored paths.
+In your user config or a drop-in, `base` accepts any filesystem path to a TOML body using the same shape as the vendored themes. A project `.ox/config.toml` may only name a built-in theme, since a path there would have `ox` read a file the repository chooses. A leading `~/` expands to `$HOME`, but no other expansion happens: environment variables (`$HOME`, `${XDG_CONFIG_HOME}`) and Windows-style references (`%USERPROFILE%`) pass through literally and will fail to read. Relative paths resolve against the directory you launched `ox` from, so prefer absolute or `~/`-anchored paths.
 
 ```toml
 [tui.theme]
@@ -260,10 +260,8 @@ Overrides from every [config layer](configuration.md#layers) merge by slot name,
 
 Theme errors fall into two severities:
 
-- **Theme selection errors** are fatal when the TUI starts. An unknown built-in name with no matching file path, a path that is not a regular file of at most 64 KiB, a file that cannot be read, or a file with a parse error in the base body stops oxide-code at startup with a message identifying what went wrong. `-p` and `--no-tui` runs never load the theme, so a theme error does not stop them.
-- **Per-slot value errors** warn and fall back. If an override's color string can't be parsed, its slot name isn't recognized, its patch is neither a color string nor a table of `fg`, `bg`, and modifier flags, or an inline patch is empty, oxide-code uses the base slot's value for that role, shows a notice in the chat, and logs a warning. The TUI still launches.
-
-The default log level is `warn`, so per-slot fallback warnings appear in the [log](configuration.md#logs) even when `RUST_LOG` is unset.
+- **Theme selection errors** are fatal when the TUI starts. An unknown built-in name with no matching file path, a file path set in a project file, a path that is not a regular file of at most 64 KiB, a file that cannot be read, or a file with a parse error in the base body stops oxide-code at startup with a message identifying what went wrong. A parse error gives its line and column without quoting the source line. `-p` and `--no-tui` runs never load the theme, so a theme error does not stop them.
+- **Per-slot value errors** warn and fall back. If an override's color string can't be parsed, its slot name isn't recognized, its patch is neither a color string nor a table of `fg`, `bg`, and modifier flags, or an inline patch is empty, oxide-code uses the base slot's value for that role and shows a notice in the chat. The TUI still launches.
 
 ## Examples
 
