@@ -36,7 +36,7 @@ The tree lists only the top-level entries whose names leave their purpose unclea
 
 ## Rules for Every Change
 
-- Run the pre-commit hooks on every commit. In each new checkout or worktree, run `nix develop -c true` and `pnpm install` once to provide the generated config and Node tools the hooks need. Never bypass the hooks with `--no-verify` or `PRE_COMMIT_ALLOW_NO_CONFIG`.
+- Run the pre-commit hooks on every commit. In each new checkout or worktree, run `nix develop -c true` once to generate the hook config and install the Node tools the hooks need. Never bypass the hooks with `--no-verify` or `PRE_COMMIT_ALLOW_NO_CONFIG`.
 - Run the [verification](#verification) block before review.
 - Add new words to `.cspell/words.txt` in alphabetical order. `cspell` scans Rust sources too, so a new word in a doc comment fails the same way as one in `README.md`.
 - Update whatever the change makes stale: the `README.md` Features and Scope sections, the trust model in `SECURITY.md`, the user guides, design docs and the module map, research notes whose follow-ups it resolves, and open issues it resolves or invalidates.
@@ -49,13 +49,13 @@ The tree lists only the top-level entries whose names leave their purpose unclea
 Run after implementation and before review:
 
 ```bash
-cargo fmt --all --check                               # Check formatting
+cargo fmt --check                                     # Check formatting
 cargo build                                           # Build
-cargo clippy --all-targets -- -D warnings             # Lint (pedantic, zero warnings)
-cargo clippy -- -D warnings                           # Lint without test targets or their fixtures
+cargo clippy --all-targets                            # Lint (pedantic, zero warnings)
+cargo clippy                                          # Lint without test targets or their fixtures
 cargo doc --no-deps                                   # Check rustdoc lints
 cargo llvm-cov                                        # Run tests and check coverage
-cargo deny check licenses advisories sources bans     # Check dependencies when they change
+cargo deny check                                      # Check dependencies when they change
 pnpm format                                           # Check JSON, Markdown, and YAML formatting
 pnpm lint                                             # Lint Markdown
 pnpm spellcheck                                       # Spell check

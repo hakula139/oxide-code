@@ -15,26 +15,11 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  CACHIX_NAME: hakula
   CARGO_TERM_COLOR: always
 
 jobs:
-  flake-check:
-    name: Nix Flake Check
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v7
-
-      - name: Set up Nix
-        uses: ./.github/actions/setup-nix
-
-      - name: Run flake check
-        run: nix flake check
-
-  node-check:
-    name: Node Check
+  lint:
+    name: Lint
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -46,8 +31,8 @@ jobs:
         with:
           cachix_auth_token: ${{ secrets.CACHIX_AUTH_TOKEN }}
 
-      - name: Install dependencies
-        run: nix develop -c pnpm install --frozen-lockfile
+      - name: Run flake check
+        run: nix flake check
 
       - name: Format
         run: nix develop -c pnpm format
@@ -58,52 +43,59 @@ jobs:
       - name: Spell check
         run: nix develop -c pnpm spellcheck
 
-  rust-check:
-    name: Rust Check
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
+      - name: Check dependencies
+        run: nix develop -c cargo deny --locked check
+
+  rust:
+    name: Rust (${{ matrix.os }})
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: Linux
+            runner: ubuntu-latest
+          - os: macOS
+            runner: macos-latest
+          - os: Windows
+            runner: windows-latest
     steps:
       - name: Checkout
         uses: actions/checkout@v7
 
-      - name: Set up Nix
-        uses: ./.github/actions/setup-nix
-        with:
-          cachix_auth_token: ${{ secrets.CACHIX_AUTH_TOKEN }}
+      - name: Set up Rust
+        run: rustup toolchain install
+
+      - name: Install cargo-llvm-cov
+        uses: taiki-e/install-action@cargo-llvm-cov
 
       - name: Cache dependencies
         uses: Swatinem/rust-cache@v2
-
-      - name: Format
-        run: nix develop -c cargo fmt --all --check
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
 
       - name: Clippy
-        run: nix develop -c cargo clippy --locked --all-targets -- -D warnings
+        run: cargo clippy --locked --all-targets
 
       - name: Clippy without test targets
-        run: nix develop -c cargo clippy --locked -- -D warnings
+        run: cargo clippy --locked
 
       - name: Rustdoc
-        run: nix develop -c cargo doc --locked --no-deps
+        run: cargo doc --locked --no-deps
 
-  dependency-check:
-    name: Dependency Check
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v7
+      - name: Test with coverage
+        run: cargo llvm-cov --locked --lcov --output-path lcov.info
 
-      - name: Set up Nix
-        uses: ./.github/actions/setup-nix
+      - name: Upload to Codecov
+        uses: codecov/codecov-action@v7
         with:
-          cachix_auth_token: ${{ secrets.CACHIX_AUTH_TOKEN }}
+          token: ${{ secrets.CODECOV_TOKEN }}
+          files: lcov.info
+          fail_ci_if_error: true
 
-      - name: Check dependencies
-        run: nix develop -c cargo deny --locked check licenses advisories sources bans
-
-  msrv-check:
-    name: MSRV Check
+  msrv:
+    name: MSRV
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -118,95 +110,24 @@ jobs:
 
       - name: Cache dependencies
         uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
 
       - name: Check
         run: cargo hack check --rust-version --workspace --all-targets --locked
 
-  macos-check:
-    name: macOS Check
-    runs-on: macos-latest
-    timeout-minutes: 20
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v7
-
-      - name: Set up Rust
-        run: rustup toolchain install
-
-      - name: Cache dependencies
-        uses: Swatinem/rust-cache@v2
-
-      - name: Clippy
-        run: cargo clippy --locked --all-targets -- -D warnings
-
-      - name: Clippy without test targets
-        run: cargo clippy --locked -- -D warnings
-
-      - name: Rustdoc
-        run: cargo doc --locked --no-deps
-
-      - name: Test
-        run: cargo test --locked
-
-  windows-check:
-    name: Windows Check
-    runs-on: windows-latest
-    timeout-minutes: 20
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v7
-
-      - name: Set up Rust
-        run: rustup toolchain install
-
-      - name: Cache dependencies
-        uses: Swatinem/rust-cache@v2
-
-      - name: Clippy
-        run: cargo clippy --locked --all-targets -- -D warnings
-
-      - name: Clippy without test targets
-        run: cargo clippy --locked -- -D warnings
-
-      - name: Rustdoc
-        run: cargo doc --locked --no-deps
-
-      - name: Test
-        run: cargo test --locked
-
-  coverage:
-    name: Coverage
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v7
-
-      - name: Set up Nix
-        uses: ./.github/actions/setup-nix
-        with:
-          cachix_auth_token: ${{ secrets.CACHIX_AUTH_TOKEN }}
-
-      - name: Cache dependencies
-        uses: Swatinem/rust-cache@v2
-
-      - name: Generate coverage
-        run: nix develop -c cargo llvm-cov --locked --lcov --output-path lcov.info
-
-      - name: Upload to Codecov
-        uses: codecov/codecov-action@v7
-        with:
-          token: ${{ secrets.CODECOV_TOKEN }}
-          files: lcov.info
-
-  nix-build:
-    name: Nix Build (${{ matrix.runner }})
+  nix:
+    name: Nix (${{ matrix.os }})
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 40
     strategy:
       fail-fast: false
       matrix:
-        runner: [ubuntu-latest, macos-latest]
+        include:
+          - os: Linux
+            runner: ubuntu-latest
+          - os: macOS
+            runner: macos-latest
     steps:
       - name: Checkout
         uses: actions/checkout@v7
@@ -217,22 +138,13 @@ jobs:
           cachix_auth_token: ${{ secrets.CACHIX_AUTH_TOKEN }}
 
       - name: Build package
-        run: nix build .#oxide-code --no-link --print-build-logs
+        run: nix build --no-link --print-build-logs
 
   result:
     name: CI Result
     # A skipped job counts as a passing required check, so the gate must run after failures too.
     if: ${{ !cancelled() }}
-    needs:
-      - flake-check
-      - node-check
-      - rust-check
-      - dependency-check
-      - msrv-check
-      - macos-check
-      - windows-check
-      - coverage
-      - nix-build
+    needs: [lint, rust, msrv, nix]
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:

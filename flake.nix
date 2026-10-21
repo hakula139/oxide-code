@@ -61,7 +61,6 @@
         rustToolchain = pkgs.rust-bin.fromRustupToolchainFile ./rust-toolchain.toml;
         rustDevToolchain = rustToolchain.override (prev: {
           extensions = prev.extensions ++ [
-            "llvm-tools-preview"
             "rust-analyzer"
             "rust-src"
           ];
@@ -98,7 +97,7 @@
         };
 
         # These hooks run the tools pinned in node_modules, which the Nix sandbox lacks. The flake
-        # check leaves them to CI's Node Check job.
+        # check leaves them to CI's Lint job.
         nodeHook =
           name: cmd:
           pkgs.lib.getExe (
@@ -182,7 +181,8 @@
           # git-hooks.nix stores a hooks path relative to the main checkout, which linked worktrees
           # can't resolve (cachix/git-hooks.nix#688), so unset it to fall back to the shared hooks
           # directory. The lock keeps a concurrent load from setting it while `pre-commit install`
-          # runs, since pre-commit refuses to install with the path set.
+          # runs, since pre-commit refuses to install with the path set. A checkout without
+          # node_modules installs it, since the Node-based hooks fail without it.
           shellHook = ''
             if common=$(${git} rev-parse --path-format=absolute --git-common-dir 2>/dev/null); then
               (
@@ -190,10 +190,11 @@
                 ${preCommit.config.installationScript}
                 ${git} config --local --unset-all core.hooksPath || true
               ) 9>"$common/git-hooks.lock"
+
+              top=$(${git} rev-parse --show-toplevel)
+              [ -d "$top/node_modules" ] || pnpm install --dir "$top"
             fi
           '';
-
-          env.RUST_BACKTRACE = "1";
         };
 
         # ------------------------------------------------------------------------------------------
