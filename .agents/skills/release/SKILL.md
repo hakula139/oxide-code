@@ -1,6 +1,6 @@
 ---
 name: release
-description: Cut an oxide-code release tag. Use whenever the user asks to release, tag, ship, or cut version X.Y.Z of oxide-code (e.g., "release v0.1.0", "let's tag 0.2.0-rc.1", "ship the release"). Follows the canonical procedure in `RELEASING.md`. Use even if the user just says "release X.Y.Z" without further context.
+description: Cut an oxide-code release, from the release PR through the published Release and Homebrew formula. Use when asked to release, tag, ship, or cut a version.
 ---
 
 # Cut an oxide-code Release

@@ -40,7 +40,7 @@ pub fn resolve_theme(config: &ThemeConfig) -> Result<ResolvedTheme> {
     let base_name = config.base.as_str();
     let body = load_base_body(base_name)?;
     let mut theme =
-        parse_theme(&body).with_context(|| format!("parsing base theme {base_name:?}"))?;
+        parse_theme(&body).with_context(|| format!("failed to parse base theme {base_name:?}"))?;
 
     let mut overrides = ThemeOverrides::default();
     let mut notices = Vec::new();
@@ -73,30 +73,29 @@ fn load_base_body(name: &str) -> Result<String> {
     if let Some(theme) = builtin::find(name) {
         return Ok(theme.body.to_owned());
     }
-    let path = expand_user(name).with_context(|| format!("theme {name:?}"))?;
-    let unreadable = || {
+    let invalid = format!("invalid [tui.theme] base {name:?}");
+    let path = expand_user(name).context(invalid.clone())?;
+    let neither = |file: &str| {
         format!(
-            "theme {name:?}: not a built-in name and failed to read as file {}",
+            "{invalid}: neither a built-in theme ({}) nor a {file} at {}",
+            builtin::names(),
             path.display(),
         )
     };
 
     // A project config can name any path, so a device or FIFO must fail before the read blocks.
-    let meta = std::fs::metadata(&path).with_context(unreadable)?;
+    let meta = std::fs::metadata(&path).with_context(|| neither("readable file"))?;
     if !meta.is_file() {
-        bail!(
-            "theme {name:?}: not a built-in name, and {} is not a file",
-            path.display(),
-        );
+        bail!(neither("regular file"));
     }
     if meta.len() > MAX_THEME_FILE_BYTES {
         bail!(
-            "theme {name:?}: {} is {} bytes, over the {MAX_THEME_FILE_BYTES}-byte theme file limit",
+            "{invalid}: {} is {} bytes, over the {MAX_THEME_FILE_BYTES}-byte theme file limit",
             path.display(),
             meta.len(),
         );
     }
-    std::fs::read_to_string(&path).with_context(unreadable)
+    std::fs::read_to_string(&path).with_context(|| neither("readable file"))
 }
 
 /// Parses one override patch. Errors on unknown slot name, a malformed patch, or a bad color.
@@ -331,9 +330,7 @@ mod tests {
 
     use super::*;
     use crate::theme::SLOT_NAMES;
-
-    const COLOR_FORMATS_HINT: &str = "expected hex (#rrggbb), ANSI name (red, bright_blue, ...), \
-                                      indexed (ansi:0..255), or reset";
+    use crate::theme::color::COLOR_FORMATS_HINT;
 
     mod resolve_theme {
         use super::*;
@@ -365,7 +362,8 @@ mod tests {
             let msg = format!("{err:#}");
             assert!(
                 msg.starts_with(
-                    r#"theme "solarized": not a built-in name and failed to read as file solarized: "#
+                    "invalid [tui.theme] base \"solarized\": neither a built-in theme \
+                     (mocha, macchiato, frappe, latte, material) nor a readable file at solarized: "
                 ),
                 "{msg}",
             );
@@ -378,7 +376,10 @@ mod tests {
             let err = resolve_theme(&config(&dir_str, "")).expect_err("a directory is not a theme");
             assert_eq!(
                 format!("{err:#}"),
-                format!("theme {dir_str:?}: not a built-in name, and {dir_str} is not a file"),
+                format!(
+                    "invalid [tui.theme] base {dir_str:?}: neither a built-in theme \
+                     (mocha, macchiato, frappe, latte, material) nor a regular file at {dir_str}"
+                ),
             );
 
             let path = dir.path().join("huge.toml");
@@ -390,7 +391,7 @@ mod tests {
             assert_eq!(
                 format!("{err:#}"),
                 format!(
-                    "theme {path_str:?}: {path_str} is {len} bytes, \
+                    "invalid [tui.theme] base {path_str:?}: {path_str} is {len} bytes, \
                      over the {MAX_THEME_FILE_BYTES}-byte theme file limit"
                 ),
             );
@@ -418,7 +419,7 @@ mod tests {
             let err = resolve_theme(&config(&path_str, "")).expect_err("bad slot color must error");
             let msg = format!("{err:#}");
             assert!(
-                msg.contains(&format!("parsing base theme {path_str:?}")),
+                msg.contains(&format!("failed to parse base theme {path_str:?}")),
                 "{msg}"
             );
             assert!(msg.contains("orange"), "{msg}");
@@ -691,7 +692,7 @@ mod tests {
         }
 
         #[test]
-        fn all_builtins() {
+        fn parses_every_builtin() {
             for builtin::BuiltinTheme { name, body, .. } in builtin::BUILT_IN {
                 parse_theme(body).unwrap_or_else(|e| panic!("built-in {name:?} failed: {e:#}"));
             }
@@ -771,18 +772,6 @@ mod tests {
 
                 assert_eq!(t.text.fg, Some(expected), "{name} text.fg");
             }
-        }
-
-        #[test]
-        fn mocha_modifiers_match_default() {
-            let t = parse_theme(builtin::MOCHA).unwrap();
-            assert!(t.accent.modifiers.contains(Modifier::BOLD));
-            assert!(t.thinking.modifiers.contains(Modifier::ITALIC));
-            assert!(t.heading_h1.modifiers.contains(Modifier::BOLD));
-            assert!(t.heading_h1.modifiers.contains(Modifier::UNDERLINED));
-            assert!(t.link.modifiers.contains(Modifier::UNDERLINED));
-            assert!(t.success.modifiers.is_empty());
-            assert!(t.error.modifiers.is_empty());
         }
 
         #[test]

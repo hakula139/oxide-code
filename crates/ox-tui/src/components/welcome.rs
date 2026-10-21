@@ -8,7 +8,7 @@ use ratatui::widgets::Paragraph;
 use unicode_width::UnicodeWidthStr;
 
 use ox_core::config::display_effort;
-use ox_core::util::text::{center_truncate_to_width, truncate_to_width};
+use ox_core::util::text::{center_truncate_to_width, pad_to_width, truncate_to_width};
 
 use crate::glyphs::INLINE_SEPARATOR;
 use crate::slash::LiveSessionInfo;
@@ -85,7 +85,7 @@ pub(crate) struct WelcomeSnapshot {
 
 impl WelcomeSnapshot {
     pub(crate) fn from_live(info: &LiveSessionInfo) -> Self {
-        // Derive seed from session id: the same welcome paints across re-renders within a session
+        // Derive seed from session ID: the same welcome paints across re-renders within a session
         // but `/clear` (which rolls the session) and fresh launches get a new pick.
         Self::from_live_with_seed(info, hash_seed(&info.session_id))
     }
@@ -224,8 +224,10 @@ fn starter_rows(picked: &[Starter; STARTER_PICK]) -> Vec<(String, String)> {
     picked
         .iter()
         .map(|(name, desc)| {
-            let pad = " ".repeat(name_col_width.saturating_sub(name.width()));
-            (format!("  {name}{pad}"), (*desc).to_owned())
+            (
+                format!("  {}", pad_to_width(name, name_col_width)),
+                (*desc).to_owned(),
+            )
         })
         .collect()
 }
@@ -446,7 +448,7 @@ mod tests {
         }
 
         #[test]
-        fn full_width_renders_box_environment_starters_and_trailer() {
+        fn full_width_flanks_the_wordmark_and_indents_the_body() {
             let snap = snap_for(&fixture());
             insta::assert_snapshot!(render(80, 14, &snap));
         }
@@ -458,7 +460,7 @@ mod tests {
         }
 
         #[test]
-        fn collapsed_drops_box_but_keeps_starters() {
+        fn collapsed_drops_the_ribbon_and_keeps_starters() {
             let snap = snap_for(&fixture());
             insta::assert_snapshot!(render(50, 14, &snap));
         }
@@ -538,13 +540,16 @@ mod tests {
         }
 
         #[test]
-        fn zero_height_is_a_noop() {
+        fn paints_nothing_into_a_zero_height_area() {
             let snap = snap_for(&fixture());
-            let backend = render(80, 0, &snap);
-            assert!(
-                backend.buffer().content.is_empty(),
-                "zero-height area paints nothing",
-            );
+            let mut terminal = Terminal::new(TestBackend::new(80, 4)).unwrap();
+
+            terminal
+                .draw(|frame| paint(frame, Rect::new(0, 2, 80, 0), &Theme::default(), &snap))
+                .unwrap();
+
+            let buffer = terminal.backend().buffer();
+            assert!(buffer.content.iter().all(|cell| cell.symbol() == " "));
         }
     }
 
@@ -553,7 +558,7 @@ mod tests {
 
         #[test]
         fn lists_every_built_in_that_runs_bare_on_an_empty_session() {
-            // `/delete` and `/unarchive` need an id, `/archive` has nothing to archive yet, and
+            // `/delete` and `/unarchive` need an ID, `/archive` has nothing to archive yet, and
             // `/logout` only undoes a `/login`.
             let mut built_ins: Vec<String> = filter_built_ins("")
                 .into_iter()

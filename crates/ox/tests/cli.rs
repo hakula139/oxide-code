@@ -1,28 +1,26 @@
-//! CLI startup, headless session persistence, and session-list output.
-
-use std::fmt::Write as _;
-use std::path::Path;
-use std::process::{Command, Stdio};
-
-use indoc::{indoc, writedoc};
-use wiremock::matchers::{method, path};
-use wiremock::{Mock, MockServer, ResponseTemplate};
-
-use ox_core::util::tls::testing::TEST_CA_PATH;
+//! CLI startup, headless session persistence, signal exits, and session-list output.
 
 #[path = "support/env.rs"]
 mod env;
 
+use std::path::Path;
+use std::process::{Command, Stdio};
+
+use indoc::indoc;
+use wiremock::matchers::{method, path};
+use wiremock::{Mock, MockServer, ResponseTemplate};
+
+use ox_core::engine::testing::{mount_reply, mount_tool_call_once, request_bodies};
+use ox_core::util::tls::testing::TEST_CA_PATH;
+
 fn ox(root: &Path) -> Command {
     let mut ox = Command::new(env!("CARGO_BIN_EXE_ox"));
     env::remove_inherited(&mut ox, |name| {
-        env::is_provider_var(name) || env::is_ox_setting(name) || name == "RUST_LOG"
+        env::is_provider_var(name)
+            || env::is_ox_setting(name)
+            || matches!(name, "RUST_BACKTRACE" | "RUST_LOG")
     });
-    ox.env("HOME", root.join("home"))
-        .env("USERPROFILE", root.join("home"))
-        .env("XDG_CONFIG_HOME", root.join("config"))
-        .env("XDG_DATA_HOME", root.join("data"))
-        .env("XDG_STATE_HOME", root.join("state"));
+    env::use_scratch_dirs(&mut ox, root);
     // On Linux, building the HTTP client reads the system trust store and fails when it holds no
     // certificates, so the tests pin it to a test CA.
     ox.env("SSL_CERT_FILE", TEST_CA_PATH);
@@ -30,13 +28,7 @@ fn ox(root: &Path) -> Command {
 }
 
 #[tokio::test]
-async fn headless_reports_an_unreadable_extra_ca_bundle() {
-    let server = MockServer::start().await;
-    Mock::given(method("POST"))
-        .and(path("/v1/messages"))
-        .respond_with(ResponseTemplate::new(400))
-        .mount(&server)
-        .await;
+async fn headless_prints_a_startup_error_as_one_line_even_with_backtraces_on() {
     let dir = tempfile::tempdir().unwrap();
     let missing = dir.path().join("missing.pem");
 
@@ -44,22 +36,70 @@ async fn headless_reports_an_unreadable_extra_ca_bundle() {
         .args(["-p", "hello"])
         .current_dir(dir.path())
         .env("ANTHROPIC_API_KEY", "test-key")
-        .env("ANTHROPIC_BASE_URL", server.uri())
         .env("OX_EXTRA_CA_CERTS", &missing)
+        .env("RUST_BACKTRACE", "1")
         .output()
         .await
         .unwrap();
 
-    assert!(!output.status.success(), "{output:?}");
+    assert_eq!(output.status.code(), Some(1), "{output:?}");
     assert!(output.stdout.is_empty(), "{:?}", output.stdout);
     let stderr = String::from_utf8(output.stderr).unwrap();
-    assert_eq!(
-        stderr.lines().next().unwrap(),
-        format!(
-            "Error: failed to read extra CA bundle at {}",
-            missing.display()
-        ),
+    let headline = format!(
+        "Error: failed to read extra CA bundle at {}: ",
+        missing.display()
     );
+    assert!(stderr.starts_with(&headline), "{stderr}");
+    assert_eq!(stderr.lines().count(), 1, "{stderr}");
+}
+
+#[tokio::test]
+async fn headless_reports_startup_notices_and_retries_once_as_plain_text() {
+    for format in ["text", "stream-json"] {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/messages"))
+            .respond_with(ResponseTemplate::new(529).insert_header("retry-after", "0"))
+            .up_to_n_times(1)
+            .mount(&server)
+            .await;
+        mount_reply(&server, "Done.").await;
+        let dir = tempfile::tempdir().unwrap();
+
+        let output = tokio::process::Command::from(ox(dir.path()))
+            .args(["-p", "hello", "--output", format])
+            .current_dir(dir.path())
+            .env("ANTHROPIC_API_KEY", "test-key")
+            .env("ANTHROPIC_BASE_URL", server.uri())
+            .env("ANTHROPIC_MODEL", "claude-nonexistent-9")
+            .stdin(Stdio::null())
+            .output()
+            .await
+            .unwrap();
+
+        assert!(output.status.success(), "{output:?}");
+        let stderr = String::from_utf8(output.stderr).unwrap();
+        let lines: Vec<&str> = stderr.lines().collect();
+        assert_eq!(lines.len(), 2, "{stderr}");
+        assert!(
+            lines[0].starts_with("`claude-nonexistent-9` is not a supported model"),
+            "{stderr}"
+        );
+        assert!(
+            lines[1].contains("Retrying in 0 s (retry 1 of "),
+            "{stderr}"
+        );
+        assert!(!stderr.contains('\x1b'), "{stderr:?}");
+        if format == "stream-json" {
+            let stdout = String::from_utf8(output.stdout).unwrap();
+            let first: serde_json::Value =
+                serde_json::from_str(stdout.lines().next().unwrap()).unwrap();
+            assert_eq!(
+                first,
+                serde_json::json!({"type": "notice", "data": lines[0]})
+            );
+        }
+    }
 }
 
 #[test]
@@ -256,31 +296,8 @@ async fn headless_rejected_request_preserves_branch_and_user_message() {
 #[tokio::test]
 async fn headless_mode_flag_overrides_the_configured_mode() {
     let server = MockServer::start().await;
-    let start = serde_json::json!({"type": "message_start", "message": {"id": "msg_1", "model": "claude-opus-5-5", "usage": {"input_tokens": 1, "output_tokens": 0}}});
-    Mock::given(method("POST"))
-        .and(path("/v1/messages"))
-        .respond_with(sse(&[
-            start.clone(),
-            serde_json::json!({"type": "content_block_start", "index": 0, "content_block": {"type": "tool_use", "id": "toolu_1", "name": "bash"}}),
-            serde_json::json!({"type": "content_block_delta", "index": 0, "delta": {"type": "input_json_delta", "partial_json": r#"{"command":"ls"}"#}}),
-            serde_json::json!({"type": "content_block_stop", "index": 0}),
-            serde_json::json!({"type": "message_delta", "delta": {"stop_reason": "tool_use"}, "usage": {"output_tokens": 1}}),
-            serde_json::json!({"type": "message_stop"}),
-        ]))
-        .up_to_n_times(1)
-        .mount(&server)
-        .await;
-    Mock::given(method("POST"))
-        .and(path("/v1/messages"))
-        .respond_with(sse(&[
-            start,
-            serde_json::json!({"type": "content_block_start", "index": 0, "content_block": {"type": "text", "text": "Done."}}),
-            serde_json::json!({"type": "content_block_stop", "index": 0}),
-            serde_json::json!({"type": "message_delta", "delta": {"stop_reason": "end_turn"}, "usage": {"output_tokens": 1}}),
-            serde_json::json!({"type": "message_stop"}),
-        ]))
-        .mount(&server)
-        .await;
+    mount_tool_call_once(&server, "toolu_1", "bash", r#"{"command":"ls"}"#).await;
+    mount_reply(&server, "Done.").await;
     let dir = tempfile::tempdir().unwrap();
     let config_dir = dir.path().join("config/ox");
     std::fs::create_dir_all(&config_dir).unwrap();
@@ -302,10 +319,9 @@ async fn headless_mode_flag_overrides_the_configured_mode() {
         .unwrap();
 
     assert!(output.status.success(), "{output:?}");
-    let requests = server.received_requests().await.unwrap();
+    let requests = request_bodies(&server).await;
     assert_eq!(requests.len(), 2, "the denial goes back to the model");
-    let followup: serde_json::Value = serde_json::from_slice(&requests[1].body).unwrap();
-    let result = &followup["messages"].as_array().unwrap().last().unwrap()["content"][0];
+    let result = &requests[1]["messages"].as_array().unwrap().last().unwrap()["content"][0];
     assert_eq!(result["type"], "tool_result", "{result}");
     assert!(
         result["content"]
@@ -315,21 +331,70 @@ async fn headless_mode_flag_overrides_the_configured_mode() {
     );
 }
 
-/// A streamed Messages reply of `frames`, each under an event named for its `type`.
-fn sse(frames: &[serde_json::Value]) -> ResponseTemplate {
-    let mut body = String::new();
-    for frame in frames {
-        let event = frame["type"].as_str().expect("each frame has a type");
-        _ = writedoc!(
-            body,
-            "
-            event: {event}
-            data: {frame}
+/// Runs `ox` with `args` until its request reaches a reply that never comes, then sends it
+/// `signal`. Returns its exit status and stdout.
+#[cfg(unix)]
+async fn interrupted_run(args: &[&str], signal: &str) -> (Option<i32>, String) {
+    use std::time::Duration;
 
-            ",
-        );
+    use tokio::io::AsyncWriteExt;
+
+    use ox_core::engine::testing::{mount_stalled_reply_once, until_requested};
+
+    let server = MockServer::start().await;
+    mount_stalled_reply_once(&server).await;
+    let dir = tempfile::tempdir().expect("create a scratch directory");
+    let mut child = tokio::process::Command::from(ox(dir.path()))
+        .args(args)
+        .current_dir(dir.path())
+        .env("ANTHROPIC_API_KEY", "test-key")
+        .env("ANTHROPIC_BASE_URL", server.uri())
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("start ox");
+    let mut stdin = child.stdin.take().expect("stdin is piped");
+    stdin.write_all(b"hello\n").await.expect("write the prompt");
+    drop(stdin);
+
+    tokio::time::timeout(Duration::from_secs(60), until_requested(&server, 1))
+        .await
+        .expect("ox sends its request");
+    let pid = child.id().expect("ox is still running").to_string();
+    let killed = Command::new("kill")
+        .args(["-s", signal, &pid])
+        .status()
+        .expect("run kill");
+    assert!(killed.success());
+    let output = tokio::time::timeout(Duration::from_secs(60), child.wait_with_output())
+        .await
+        .expect("ox exits after the signal")
+        .expect("wait for ox");
+
+    let stdout = String::from_utf8(output.stdout).expect("stdout is UTF-8");
+    (output.status.code(), stdout)
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn headless_exits_with_the_signal_status_after_a_shutdown_result() {
+    for (signal, status) in [("HUP", 129), ("INT", 130), ("TERM", 143)] {
+        let (code, stdout) = interrupted_run(&["-p", "hello", "--output", "json"], signal).await;
+
+        assert_eq!(code, Some(status), "SIG{signal}");
+        let result: serde_json::Value = serde_json::from_str(stdout.trim_end()).unwrap();
+        assert_eq!(result["type"], "result", "{stdout}");
+        assert_eq!(result["data"]["stop_reason"], "shutdown", "{stdout}");
     }
-    ResponseTemplate::new(200)
-        .set_body_string(body)
-        .insert_header("content-type", "text/event-stream")
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn repl_with_piped_input_exits_with_the_signal_status() {
+    for (signal, status) in [("HUP", 129), ("INT", 130), ("TERM", 143)] {
+        let (code, _) = interrupted_run(&["--no-tui"], signal).await;
+
+        assert_eq!(code, Some(status), "SIG{signal}");
+    }
 }

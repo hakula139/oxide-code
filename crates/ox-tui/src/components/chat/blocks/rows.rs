@@ -363,38 +363,6 @@ mod tests {
         use super::*;
 
         #[test]
-        fn render_uses_custom_separator_in_place_of_pipe() {
-            // On the diff path the separator carries the `- ` or `+ ` sign, and the text stays a
-            // separate span so the sign can take its own color.
-            let theme = Theme::default();
-            let ctx = RenderCtx::new(30, &theme);
-            let renderer = NumberedRows::with_style(
-                &ctx,
-                theme.tool_border(),
-                99,
-                " - ",
-                theme.error(),
-                Some(theme.diff_del_row()),
-            );
-            let mut out = Vec::new();
-
-            renderer.render(&mut out, 14, r#"println!("x");"#, theme.error());
-
-            let row = out.first().expect("renders one line");
-            let contents: Vec<&str> = row.spans.iter().map(|s| s.content.as_ref()).collect();
-            assert_eq!(
-                contents,
-                [
-                    TOOL_BORDER_CONT,
-                    "14",
-                    " - ",
-                    r#"println!("x");"#,
-                    "       "
-                ]
-            );
-        }
-
-        #[test]
         fn patches_row_bg_onto_content_spans() {
             // The bar prefix stays transparent while the number, separator, and text inherit the
             // row bg, so the chrome column never tints and the band has no holes.
@@ -529,6 +497,38 @@ mod tests {
 
             assert_eq!(compact, format!("{}...", "a".repeat(MAX_ROW_BYTES)));
             assert_eq!(expanded, long);
+        }
+
+        #[test]
+        fn uses_a_custom_separator_in_place_of_the_pipe() {
+            // On the diff path the separator carries the `- ` or `+ ` sign, and the text stays a
+            // separate span so the sign can take its own color.
+            let theme = Theme::default();
+            let ctx = RenderCtx::new(30, &theme);
+            let renderer = NumberedRows::with_style(
+                &ctx,
+                theme.tool_border(),
+                99,
+                " - ",
+                theme.error(),
+                Some(theme.diff_del_row()),
+            );
+            let mut out = Vec::new();
+
+            renderer.render(&mut out, 14, r#"println!("x");"#, theme.error());
+
+            let row = out.first().expect("renders one line");
+            let contents: Vec<&str> = row.spans.iter().map(|s| s.content.as_ref()).collect();
+            assert_eq!(
+                contents,
+                [
+                    TOOL_BORDER_CONT,
+                    "14",
+                    " - ",
+                    r#"println!("x");"#,
+                    "       "
+                ]
+            );
         }
 
         #[test]

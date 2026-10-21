@@ -3,8 +3,6 @@
 //! command on its own. Leading assignments and transparent wrappers are stripped first. A command
 //! the analysis cannot vouch for is opaque: rules may deny it or leave it to ask, but never allow
 //! it. `exec` patterns parse here too, so they read words the way commands do.
-//!
-//! Design: `docs/design/tools/permissions.md`.
 
 use std::path::{Component, Path, PathBuf};
 use std::sync::LazyLock;

@@ -15,7 +15,6 @@ use ratatui::layout::Rect;
 use ratatui::style::Modifier;
 use ratatui::text::{Line, Span};
 use time::{OffsetDateTime, UtcOffset};
-use unicode_width::UnicodeWidthStr;
 
 use ox_core::command;
 use ox_core::protocol::{Op, ResumeTarget};
@@ -28,7 +27,10 @@ use ox_core::session::saved;
 use ox_core::session::store::SessionStore;
 use ox_core::session::store::listing::{ListScope, SessionWalk};
 use ox_core::util::path::tildify;
-use ox_core::util::text::{center_truncate_to_width, compact_count, plural, truncate_to_width};
+use ox_core::util::text::{
+    center_truncate_to_width, compact_count, escape_line, pad_start_to_width, pad_to_width, plural,
+    truncate_to_width,
+};
 use ox_core::util::time::local_offset;
 
 use super::confirm::ConfirmDeleteSessionModal;
@@ -167,8 +169,8 @@ fn fixed_width(columns: &[Column]) -> usize {
 
 impl SessionRow {
     fn from_info(info: SessionInfo, local_offset: UtcOffset, show_project: bool) -> Self {
-        let title = display_title(&info);
-        let project_path = tildify(Path::new(&info.cwd));
+        let title = escape_line(&display_title(&info));
+        let project_path = escape_line(&tildify(Path::new(&info.cwd)));
         // The project is searchable only when shown, since every scoped row shares it.
         let haystack = if show_project {
             format!("{} {} {}", info.session_id, title, project_path)
@@ -225,37 +227,27 @@ impl SessionRow {
     /// The text of `column`, fit to `width` columns.
     fn cell(&self, column: Column, width: usize) -> String {
         match column {
-            Column::Id => pad(id_prefix(&self.session_id), width, false),
-            Column::Title => pad(&truncate_to_width(&self.title, width), width, false),
+            Column::Id => pad_to_width(id_prefix(&self.session_id), width),
+            Column::Title => pad_to_width(&truncate_to_width(&self.title, width), width),
             Column::Branch => {
                 let branch = self.git_branch.as_deref().unwrap_or_default();
-                pad(&truncate_to_width(branch, width), width, false)
+                pad_to_width(&truncate_to_width(branch, width), width)
             }
             Column::Project => {
                 let project = self.project.as_deref().unwrap_or_default();
-                pad(&center_truncate_to_width(project, width), width, false)
+                pad_to_width(&center_truncate_to_width(project, width), width)
             }
             Column::Msgs if self.message_count == 0 => " ".repeat(width),
             Column::Msgs => {
                 let n = self.message_count;
                 let msgs = format!("{} {}", compact_count(n), plural(n, "msg", "msgs"));
-                pad(&truncate_to_width(&msgs, width), width, true)
+                pad_start_to_width(&truncate_to_width(&msgs, width), width)
             }
             Column::When => {
                 let when = format_short_relative_time(self.last_active_at, self.local_offset);
-                pad(&when, width, true)
+                pad_start_to_width(&when, width)
             }
         }
-    }
-}
-
-/// `text` padded with spaces to `width` columns, on the left when `right` is set.
-fn pad(text: &str, width: usize, right: bool) -> String {
-    let fill = " ".repeat(width.saturating_sub(text.width()));
-    if right {
-        format!("{fill}{text}")
-    } else {
-        format!("{text}{fill}")
     }
 }
 

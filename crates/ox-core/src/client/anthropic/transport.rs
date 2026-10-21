@@ -1,8 +1,8 @@
 //! Shared `POST /v1/messages` plumbing for the streaming and side-query paths: per-request headers,
-//! non-2xx classification, and bounded retry with exponential backoff.
+//! bounded retry with exponential backoff, diagnostics for non-2xx responses and in-band stream
+//! errors, and the subscription rate-limit headers.
 
 use std::fmt;
-use std::future::Future;
 use std::sync::{Arc, LazyLock};
 use std::time::Duration;
 
@@ -12,17 +12,16 @@ use regex::Regex;
 use reqwest::StatusCode;
 use reqwest::header::HeaderMap;
 use tokio_util::task::TaskTracker;
-use tracing::{debug, warn};
+use tracing::debug;
 
 use super::Client;
 use super::wire::{ApiError, ErrorResponse};
-use crate::client::PromptTooLong;
-use crate::client::{RateLimitWindow, RateLimits};
+use crate::client::{PromptTooLong, RateLimitWindow, RateLimits};
 use crate::config::auth::{self, Auth, AuthSource, Credential};
 use crate::util::text::{join_sentences, truncate_to_width};
 use crate::util::tls::Trust;
 
-// ── Retry Policy ──
+// ── Constants ──
 
 /// Retries after the first attempt, so one request makes at most `MAX_RETRIES + 1` attempts.
 const MAX_RETRIES: u32 = 5;
@@ -33,6 +32,20 @@ const MAX_JITTER: f64 = 0.25;
 /// Longest server-requested `retry-after` worth waiting out. A longer hint, such as an exhausted
 /// quota, fails fast so the user sees the error promptly.
 const MAX_RETRY_AFTER: Duration = Duration::from_mins(1);
+
+/// Headline of an overload, reported as HTTP 529 or an in-band `overloaded_error`.
+const OVERLOADED: &str = "Anthropic API overloaded";
+/// Headline of a server failure, reported as a 5xx status or an in-band `api_error`.
+const SERVER_ERROR: &str = "Anthropic API server error";
+/// Advice for an overload or a server failure, both of which usually pass.
+const TRANSIENT_ADVICE: &str = "Retry in a few seconds.";
+
+/// Most terminal columns [`condense`] keeps, so a verbose body cannot bury the advice.
+const MAX_DETAILS_WIDTH: usize = 300;
+
+static HTML_TITLE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?is)<title[^>]*>(.*?)</title>").expect("the title pattern is a valid regex")
+});
 
 // ── Request ──
 
@@ -72,103 +85,6 @@ impl Client {
             reloads: self.reloads.clone(),
         }
     }
-}
-
-/// A failed attempt, classified by whether sending the same request again may succeed.
-#[derive(Debug)]
-pub(super) enum AttemptError {
-    /// Transient failure. `cause` names it in a few words for the retry notice, and `retry_after`
-    /// carries the server's delay hint when it sent one.
-    Retryable {
-        error: anyhow::Error,
-        cause: String,
-        retry_after: Option<Duration>,
-    },
-    Fatal(anyhow::Error),
-}
-
-impl AttemptError {
-    pub(super) fn retryable(cause: impl Into<String>, error: anyhow::Error) -> Self {
-        Self::Retryable {
-            error,
-            cause: cause.into(),
-            retry_after: None,
-        }
-    }
-}
-
-impl From<anyhow::Error> for AttemptError {
-    fn from(error: anyhow::Error) -> Self {
-        Self::Fatal(error)
-    }
-}
-
-/// Runs `attempt` until it succeeds, fails fatally, or exhausts [`MAX_RETRIES`]. `attempt`
-/// receives the zero-based retry count for `x-stainless-retry-count`, and `on_retry` hears of each
-/// retry before its delay starts.
-pub(super) async fn with_retry<T, F, Fut, R>(mut attempt: F, mut on_retry: R) -> Result<T>
-where
-    F: FnMut(u32) -> Fut,
-    Fut: Future<Output = Result<T, AttemptError>>,
-    R: FnMut(&RetryNotice),
-{
-    let mut retry = 0;
-    loop {
-        let (error, cause, retry_after) = match attempt(retry).await {
-            Ok(value) => return Ok(value),
-            Err(AttemptError::Fatal(error)) => return Err(error),
-            Err(AttemptError::Retryable {
-                error,
-                cause,
-                retry_after,
-            }) => (error, cause, retry_after),
-        };
-        let Some(delay) = retry_delay(retry, retry_after) else {
-            return Err(error);
-        };
-        retry += 1;
-        warn!("retrying Anthropic request in {delay:?} ({retry}/{MAX_RETRIES}): {error:#}");
-        on_retry(&RetryNotice {
-            delay,
-            retry,
-            cause,
-        });
-        tokio::time::sleep(delay).await;
-    }
-}
-
-/// A retry about to wait out its delay, surfaced so a slow recovery never looks like a hang. The
-/// full error, with its details and advice, surfaces only if every retry fails.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(super) struct RetryNotice {
-    delay: Duration,
-    /// One-based, out of [`MAX_RETRIES`].
-    retry: u32,
-    cause: String,
-}
-
-impl fmt::Display for RetryNotice {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let secs = self.delay.as_secs() + u64::from(self.delay.subsec_nanos() > 0);
-        write!(
-            f,
-            "{}. Retrying in {secs} s (retry {} of {MAX_RETRIES}).",
-            self.cause, self.retry,
-        )
-    }
-}
-
-/// Delay before the next attempt, or `None` when the budget is spent or the server asked for a
-/// longer wait than [`MAX_RETRY_AFTER`].
-fn retry_delay(retry: u32, retry_after: Option<Duration>) -> Option<Duration> {
-    if retry >= MAX_RETRIES {
-        return None;
-    }
-    if let Some(hint) = retry_after {
-        return (hint <= MAX_RETRY_AFTER).then_some(hint);
-    }
-    let backoff = INITIAL_BACKOFF.saturating_mul(1 << retry);
-    Some(backoff.mul_f64(1.0 + MAX_JITTER * fastrand::f64()))
 }
 
 /// Sends one attempt and classifies a transport failure or a non-2xx status. A stored login is
@@ -227,12 +143,113 @@ async fn send(
                 AttemptError::Fatal(e.into())
             } else {
                 AttemptError::retryable(
-                    "API connection failed",
-                    anyhow::Error::new(e).context("API connection failed"),
+                    "Anthropic API connection failed",
+                    anyhow::Error::new(e).context("Anthropic API connection failed"),
                 )
             }
         })
 }
+
+// ── Retry ──
+
+/// A failed attempt, classified by whether sending the same request again may succeed.
+#[derive(Debug)]
+pub(super) enum AttemptError {
+    /// Transient failure. `cause` names it in a few words for the retry notice, and `retry_after`
+    /// carries the server's delay hint when it sent one.
+    Retryable {
+        error: anyhow::Error,
+        cause: String,
+        retry_after: Option<Duration>,
+    },
+    Fatal(anyhow::Error),
+}
+
+impl AttemptError {
+    pub(super) fn retryable(cause: impl Into<String>, error: anyhow::Error) -> Self {
+        Self::Retryable {
+            error,
+            cause: cause.into(),
+            retry_after: None,
+        }
+    }
+}
+
+impl From<anyhow::Error> for AttemptError {
+    fn from(error: anyhow::Error) -> Self {
+        Self::Fatal(error)
+    }
+}
+
+/// Runs `attempt` until it succeeds, fails fatally, or exhausts [`MAX_RETRIES`]. `attempt`
+/// receives the zero-based retry count for `x-stainless-retry-count`, and `on_retry` hears of each
+/// retry before its delay starts.
+pub(super) async fn with_retry<T, F, Fut, R>(mut attempt: F, mut on_retry: R) -> Result<T>
+where
+    F: FnMut(u32) -> Fut,
+    Fut: Future<Output = Result<T, AttemptError>>,
+    R: FnMut(&RetryNotice),
+{
+    let mut retry = 0;
+    loop {
+        let (error, cause, retry_after) = match attempt(retry).await {
+            Ok(value) => return Ok(value),
+            Err(AttemptError::Fatal(error)) => return Err(error),
+            Err(AttemptError::Retryable {
+                error,
+                cause,
+                retry_after,
+            }) => (error, cause, retry_after),
+        };
+        let Some(delay) = retry_delay(retry, retry_after) else {
+            return Err(error);
+        };
+        retry += 1;
+        debug!(?delay, retry, error = %format_args!("{error:#}"), "retrying Anthropic request");
+        on_retry(&RetryNotice {
+            delay,
+            retry,
+            cause,
+        });
+        tokio::time::sleep(delay).await;
+    }
+}
+
+/// A retry about to wait out its delay, surfaced so a slow recovery never looks like a hang. The
+/// full error, with its details and advice, surfaces only if every retry fails.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct RetryNotice {
+    delay: Duration,
+    /// One-based, out of [`MAX_RETRIES`].
+    retry: u32,
+    cause: String,
+}
+
+impl fmt::Display for RetryNotice {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let secs = self.delay.as_secs() + u64::from(self.delay.subsec_nanos() > 0);
+        write!(
+            f,
+            "{}. Retrying in {secs} s (retry {} of {MAX_RETRIES}).",
+            self.cause, self.retry,
+        )
+    }
+}
+
+/// Delay before the next attempt, or `None` when the budget is spent or the server asked for a
+/// longer wait than [`MAX_RETRY_AFTER`].
+fn retry_delay(retry: u32, retry_after: Option<Duration>) -> Option<Duration> {
+    if retry >= MAX_RETRIES {
+        return None;
+    }
+    if let Some(hint) = retry_after {
+        return (hint <= MAX_RETRY_AFTER).then_some(hint);
+    }
+    let backoff = INITIAL_BACKOFF.saturating_mul(1 << retry);
+    Some(backoff.mul_f64(1.0 + MAX_JITTER * fastrand::f64()))
+}
+
+// ── Response Classification ──
 
 /// Passes a 2xx response through. Otherwise reads the body into a user-facing error. As in the
 /// Anthropic SDKs, `x-should-retry: true` or `false` decides whether to retry, and without it 408,
@@ -257,7 +274,7 @@ async fn error_for_status(
     let location = header("location");
     let should_retry = header("x-should-retry");
     let body = response.text().await.unwrap_or_default();
-    debug!(status = status.as_u16(), body, "API error response");
+    debug!(status = status.as_u16(), body, "Anthropic API error");
     let api_error = serde_json::from_str::<ErrorResponse>(&body)
         .ok()
         .map(|response| response.error);
@@ -292,31 +309,6 @@ async fn error_for_status(
         error,
         cause: status_cause(status, api_error.as_ref()),
         retry_after,
-    })
-}
-
-/// Reads the unified rate-limit headers that subscription sign-ins receive. `None` when the
-/// response reports neither window, as for API keys.
-pub(super) fn rate_limits(headers: &HeaderMap) -> Option<RateLimits> {
-    let limits = RateLimits {
-        five_hour: rate_limit_window(headers, "5h"),
-        seven_day: rate_limit_window(headers, "7d"),
-    };
-    (limits.five_hour.is_some() || limits.seven_day.is_some()).then_some(limits)
-}
-
-fn rate_limit_window(headers: &HeaderMap, window: &str) -> Option<RateLimitWindow> {
-    let field = |name: &str| {
-        headers
-            .get(format!("anthropic-ratelimit-unified-{window}-{name}"))
-            .and_then(|value| value.to_str().ok())
-    };
-    Some(RateLimitWindow {
-        utilization: field("utilization")?
-            .parse::<f64>()
-            .ok()
-            .filter(|utilization| utilization.is_finite())?,
-        resets_at: field("reset")?.parse().ok()?,
     })
 }
 
@@ -369,12 +361,7 @@ fn parse_retry_after(value: &str) -> Option<Duration> {
     value.trim().parse().ok().map(Duration::from_secs)
 }
 
-/// Headline of an overload, reported as HTTP 529 or an in-band `overloaded_error`.
-const OVERLOADED: &str = "Anthropic API overloaded";
-/// Headline of a server failure, reported as a 5xx status or an in-band `api_error`.
-const SERVER_ERROR: &str = "Anthropic API server error";
-/// Advice for an overload or a server failure, both of which usually pass.
-const TRANSIENT_ADVICE: &str = "Retry in a few seconds.";
+// ── Diagnostics ──
 
 /// Renders a user-facing diagnostic for a non-2xx Anthropic response: a per-status headline, the
 /// body's `details` after a colon, then a per-status hint.
@@ -421,7 +408,10 @@ fn format_api_error(
             format!("{SERVER_ERROR} ({})", http_status(status)),
             Some(TRANSIENT_ADVICE.to_owned()),
         ),
-        _ => (format!("API error ({})", http_status(status)), None),
+        _ => (
+            format!("Anthropic API error ({})", http_status(status)),
+            None,
+        ),
     };
     with_details(&headline, details, advice.as_deref())
 }
@@ -432,7 +422,7 @@ pub(super) fn format_stream_error(error_type: &str, message: &str) -> String {
     let (headline, advice) = match error_type {
         "overloaded_error" => (OVERLOADED, Some(TRANSIENT_ADVICE)),
         "api_error" => (SERVER_ERROR, Some(TRANSIENT_ADVICE)),
-        _ => ("API error", None),
+        _ => ("Anthropic API error", None),
     };
     let details = condense(message);
     with_details(
@@ -453,13 +443,6 @@ fn with_details(headline: &str, details: Option<&str>, advice: Option<&str>) -> 
     }
 }
 
-/// Most terminal columns [`condense`] keeps, so a verbose body cannot bury the advice.
-const MAX_DETAILS_WIDTH: usize = 300;
-
-static HTML_TITLE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"(?is)<title[^>]*>(.*?)</title>").expect("the title pattern is a valid regex")
-});
-
 /// What a non-2xx `body` says, [condensed](condense): the message of an API `error`, the title of
 /// a markup page such as a gateway's HTML error, or else the text itself. `None` when that is
 /// blank or a page has no title.
@@ -479,6 +462,33 @@ fn condense(text: &str) -> Option<String> {
     (!text.is_empty()).then(|| truncate_to_width(&text, MAX_DETAILS_WIDTH))
 }
 
+// ── Rate Limits ──
+
+/// Reads the unified rate-limit headers that subscription sign-ins receive. `None` when the
+/// response reports neither window, as for API keys.
+pub(super) fn rate_limits(headers: &HeaderMap) -> Option<RateLimits> {
+    let limits = RateLimits {
+        five_hour: rate_limit_window(headers, "5h"),
+        seven_day: rate_limit_window(headers, "7d"),
+    };
+    (limits.five_hour.is_some() || limits.seven_day.is_some()).then_some(limits)
+}
+
+fn rate_limit_window(headers: &HeaderMap, window: &str) -> Option<RateLimitWindow> {
+    let field = |name: &str| {
+        headers
+            .get(format!("anthropic-ratelimit-unified-{window}-{name}"))
+            .and_then(|value| value.to_str().ok())
+    };
+    Some(RateLimitWindow {
+        utilization: field("utilization")?
+            .parse::<f64>()
+            .ok()
+            .filter(|utilization| utilization.is_finite())?,
+        resets_at: field("reset")?.parse().ok()?,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use std::path::Path;
@@ -492,158 +502,6 @@ mod tests {
     use super::*;
     use crate::client::anthropic::local_testing::{messages_request, plain_http};
     use crate::config::oauth::testing::{ok_refresh_body, ox_login_in, write_creds};
-
-    mod with_retry {
-        use super::*;
-
-        #[tokio::test(start_paused = true)]
-        async fn retries_transient_failures_until_success() {
-            let calls = &AtomicU32::new(0);
-            let mut notices = Vec::new();
-            let value = with_retry(
-                |retry| async move {
-                    calls.fetch_add(1, Ordering::SeqCst);
-                    if retry < 2 {
-                        Err(AttemptError::Retryable {
-                            error: anyhow!("transient {retry}"),
-                            cause: format!("Cause {retry}"),
-                            retry_after: Some(Duration::from_millis(1500)),
-                        })
-                    } else {
-                        Ok(retry)
-                    }
-                },
-                |notice| notices.push(notice.clone()),
-            )
-            .await
-            .unwrap();
-
-            assert_eq!(value, 2, "the attempt sees its retry count");
-            assert_eq!(calls.load(Ordering::SeqCst), 3);
-            let expected: Vec<RetryNotice> = (1..=2)
-                .map(|retry| RetryNotice {
-                    delay: Duration::from_millis(1500),
-                    retry,
-                    cause: format!("Cause {}", retry - 1),
-                })
-                .collect();
-            assert_eq!(notices, expected, "one notice per retry, before its delay");
-        }
-
-        #[tokio::test(start_paused = true)]
-        async fn gives_up_after_the_retry_budget() {
-            let calls = &AtomicU32::new(0);
-            let err = with_retry(
-                |_| async {
-                    calls.fetch_add(1, Ordering::SeqCst);
-                    Err::<(), _>(AttemptError::retryable(
-                        "Overloaded",
-                        anyhow!("still overloaded"),
-                    ))
-                },
-                |_| {},
-            )
-            .await
-            .unwrap_err();
-
-            assert_eq!(calls.load(Ordering::SeqCst), MAX_RETRIES + 1);
-            assert_eq!(err.to_string(), "still overloaded", "last error surfaces");
-        }
-
-        #[tokio::test]
-        async fn stops_on_a_fatal_failure() {
-            let calls = &AtomicU32::new(0);
-            let err = with_retry(
-                |_| async {
-                    calls.fetch_add(1, Ordering::SeqCst);
-                    Err::<(), _>(AttemptError::Fatal(anyhow!("bad request")))
-                },
-                |_| {},
-            )
-            .await
-            .unwrap_err();
-
-            assert_eq!(calls.load(Ordering::SeqCst), 1);
-            assert_eq!(err.to_string(), "bad request");
-        }
-
-        #[tokio::test]
-        async fn fails_fast_when_retry_after_exceeds_the_cap() {
-            let calls = &AtomicU32::new(0);
-            let err = with_retry(
-                |_| async {
-                    calls.fetch_add(1, Ordering::SeqCst);
-                    Err::<(), _>(AttemptError::Retryable {
-                        error: anyhow!("quota exhausted"),
-                        cause: "HTTP 429 rate_limit_error".to_owned(),
-                        retry_after: Some(MAX_RETRY_AFTER + Duration::from_secs(1)),
-                    })
-                },
-                |_| {},
-            )
-            .await
-            .unwrap_err();
-
-            assert_eq!(calls.load(Ordering::SeqCst), 1);
-            assert_eq!(err.to_string(), "quota exhausted");
-        }
-    }
-
-    mod retry_notice {
-        use super::*;
-
-        #[test]
-        fn display_rounds_the_delay_up_to_whole_seconds() {
-            let notice = |delay| RetryNotice {
-                delay,
-                retry: 2,
-                cause: "HTTP 529 overloaded_error".to_owned(),
-            };
-            assert_eq!(
-                notice(Duration::from_millis(3200)).to_string(),
-                "HTTP 529 overloaded_error. Retrying in 4 s (retry 2 of 5).",
-            );
-            assert_eq!(
-                notice(Duration::from_secs(8)).to_string(),
-                "HTTP 529 overloaded_error. Retrying in 8 s (retry 2 of 5).",
-            );
-        }
-    }
-
-    mod retry_delay {
-        use super::*;
-
-        #[test]
-        fn doubles_the_backoff_with_bounded_jitter() {
-            for retry in 0..MAX_RETRIES {
-                let base = INITIAL_BACKOFF * 2_u32.pow(retry);
-                let delay = retry_delay(retry, None).expect("within budget");
-                assert!(
-                    delay >= base && delay <= base.mul_f64(1.0 + MAX_JITTER),
-                    "retry {retry}: {delay:?} outside [{base:?}, +{MAX_JITTER}]",
-                );
-            }
-        }
-
-        #[test]
-        fn honors_a_server_hint_within_the_cap() {
-            assert_eq!(
-                retry_delay(0, Some(Duration::from_secs(7))),
-                Some(Duration::from_secs(7)),
-            );
-            assert_eq!(retry_delay(0, Some(MAX_RETRY_AFTER)), Some(MAX_RETRY_AFTER));
-            assert_eq!(
-                retry_delay(0, Some(MAX_RETRY_AFTER + Duration::from_secs(1))),
-                None,
-            );
-        }
-
-        #[test]
-        fn stops_retrying_once_the_budget_is_spent() {
-            assert!(retry_delay(MAX_RETRIES, None).is_none());
-            assert!(retry_delay(MAX_RETRIES, Some(Duration::ZERO)).is_none());
-        }
-    }
 
     mod post_messages {
         use super::*;
@@ -737,9 +595,9 @@ mod tests {
             let AttemptError::Retryable { error, cause, .. } = &err else {
                 panic!("expected a retryable error, got {err:?}");
             };
-            assert_eq!(cause, "API connection failed");
+            assert_eq!(cause, "Anthropic API connection failed");
             assert!(
-                format!("{error:#}").starts_with("API connection failed: "),
+                format!("{error:#}").starts_with("Anthropic API connection failed: "),
                 "{error:#}"
             );
         }
@@ -960,7 +818,7 @@ mod tests {
                 assert_eq!(too_long.map(|e| e.overflow), expected, "{body}");
                 assert_eq!(
                     error.to_string(),
-                    format!("API error (HTTP 400 Bad Request): {message}"),
+                    format!("Anthropic API error (HTTP 400 Bad Request): {message}"),
                 );
             }
         }
@@ -1066,6 +924,399 @@ mod tests {
         }
     }
 
+    mod with_retry {
+        use super::*;
+
+        #[tokio::test(start_paused = true)]
+        async fn retries_transient_failures_until_success() {
+            let calls = &AtomicU32::new(0);
+            let mut notices = Vec::new();
+            let value = with_retry(
+                |retry| async move {
+                    calls.fetch_add(1, Ordering::SeqCst);
+                    if retry < 2 {
+                        Err(AttemptError::Retryable {
+                            error: anyhow!("transient {retry}"),
+                            cause: format!("Cause {retry}"),
+                            retry_after: Some(Duration::from_millis(1500)),
+                        })
+                    } else {
+                        Ok(retry)
+                    }
+                },
+                |notice| notices.push(notice.clone()),
+            )
+            .await
+            .unwrap();
+
+            assert_eq!(value, 2, "the attempt sees its retry count");
+            assert_eq!(calls.load(Ordering::SeqCst), 3);
+            let expected: Vec<RetryNotice> = (1..=2)
+                .map(|retry| RetryNotice {
+                    delay: Duration::from_millis(1500),
+                    retry,
+                    cause: format!("Cause {}", retry - 1),
+                })
+                .collect();
+            assert_eq!(notices, expected, "one notice per retry, before its delay");
+        }
+
+        #[tokio::test(start_paused = true)]
+        async fn gives_up_after_the_retry_budget() {
+            let calls = &AtomicU32::new(0);
+            let err = with_retry(
+                |_| async {
+                    calls.fetch_add(1, Ordering::SeqCst);
+                    Err::<(), _>(AttemptError::retryable(
+                        "Overloaded",
+                        anyhow!("still overloaded"),
+                    ))
+                },
+                |_| {},
+            )
+            .await
+            .unwrap_err();
+
+            assert_eq!(calls.load(Ordering::SeqCst), MAX_RETRIES + 1);
+            assert_eq!(err.to_string(), "still overloaded", "last error surfaces");
+        }
+
+        #[tokio::test]
+        async fn stops_on_a_fatal_failure() {
+            let calls = &AtomicU32::new(0);
+            let err = with_retry(
+                |_| async {
+                    calls.fetch_add(1, Ordering::SeqCst);
+                    Err::<(), _>(AttemptError::Fatal(anyhow!("bad request")))
+                },
+                |_| {},
+            )
+            .await
+            .unwrap_err();
+
+            assert_eq!(calls.load(Ordering::SeqCst), 1);
+            assert_eq!(err.to_string(), "bad request");
+        }
+
+        #[tokio::test]
+        async fn fails_fast_when_retry_after_exceeds_the_cap() {
+            let calls = &AtomicU32::new(0);
+            let err = with_retry(
+                |_| async {
+                    calls.fetch_add(1, Ordering::SeqCst);
+                    Err::<(), _>(AttemptError::Retryable {
+                        error: anyhow!("quota exhausted"),
+                        cause: "HTTP 429 rate_limit_error".to_owned(),
+                        retry_after: Some(MAX_RETRY_AFTER + Duration::from_secs(1)),
+                    })
+                },
+                |_| {},
+            )
+            .await
+            .unwrap_err();
+
+            assert_eq!(calls.load(Ordering::SeqCst), 1);
+            assert_eq!(err.to_string(), "quota exhausted");
+        }
+    }
+
+    mod retry_notice {
+        use super::*;
+
+        #[test]
+        fn display_rounds_the_delay_up_to_whole_seconds() {
+            let notice = |delay| RetryNotice {
+                delay,
+                retry: 2,
+                cause: "HTTP 529 overloaded_error".to_owned(),
+            };
+            assert_eq!(
+                notice(Duration::from_millis(3200)).to_string(),
+                "HTTP 529 overloaded_error. Retrying in 4 s (retry 2 of 5).",
+            );
+            assert_eq!(
+                notice(Duration::from_secs(8)).to_string(),
+                "HTTP 529 overloaded_error. Retrying in 8 s (retry 2 of 5).",
+            );
+        }
+    }
+
+    mod retry_delay {
+        use super::*;
+
+        #[test]
+        fn doubles_the_backoff_with_bounded_jitter() {
+            for retry in 0..MAX_RETRIES {
+                let base = INITIAL_BACKOFF * 2_u32.pow(retry);
+                let delay = retry_delay(retry, None).expect("within budget");
+                assert!(
+                    delay >= base && delay <= base.mul_f64(1.0 + MAX_JITTER),
+                    "retry {retry}: {delay:?} outside [{base:?}, +{MAX_JITTER}]",
+                );
+            }
+        }
+
+        #[test]
+        fn honors_a_server_hint_within_the_cap() {
+            assert_eq!(
+                retry_delay(0, Some(Duration::from_secs(7))),
+                Some(Duration::from_secs(7)),
+            );
+            assert_eq!(retry_delay(0, Some(MAX_RETRY_AFTER)), Some(MAX_RETRY_AFTER));
+            assert_eq!(
+                retry_delay(0, Some(MAX_RETRY_AFTER + Duration::from_secs(1))),
+                None,
+            );
+        }
+
+        #[test]
+        fn stops_retrying_once_the_budget_is_spent() {
+            assert!(retry_delay(MAX_RETRIES, None).is_none());
+            assert!(retry_delay(MAX_RETRIES, Some(Duration::ZERO)).is_none());
+        }
+    }
+
+    mod parse_retry_after {
+        use super::*;
+
+        #[test]
+        fn accepts_seconds_and_rejects_dates() {
+            assert_eq!(parse_retry_after(" 30 "), Some(Duration::from_secs(30)));
+            assert_eq!(parse_retry_after("Wed, 21 Oct 2026 07:28:00 GMT"), None);
+        }
+    }
+
+    mod format_api_error {
+        use super::*;
+
+        #[test]
+        fn puts_the_details_after_the_headline_and_the_hint_last() {
+            let secs = Some(Duration::from_secs(42));
+            for (status, retry_after, expected) in [
+                (
+                    401,
+                    None,
+                    "Anthropic API rejected credentials (HTTP 401): boom. \
+                     CLAUDE_CODE_OAUTH_TOKEN may be expired or revoked. \
+                     Generate a new one with `claude setup-token`.",
+                ),
+                (
+                    429,
+                    secs,
+                    "Anthropic API rate limited (HTTP 429): boom. Retry after 42 s.",
+                ),
+                (
+                    429,
+                    None,
+                    "Anthropic API rate limited (HTTP 429): boom. Retry after a short delay.",
+                ),
+                (
+                    529,
+                    None,
+                    "Anthropic API overloaded (HTTP 529): boom. Retry in a few seconds.",
+                ),
+                (
+                    502,
+                    None,
+                    "Anthropic API server error (HTTP 502 Bad Gateway): boom. \
+                     Retry in a few seconds.",
+                ),
+                (
+                    522,
+                    None,
+                    "Anthropic API server error (HTTP 522): boom. Retry in a few seconds.",
+                ),
+                (
+                    400,
+                    secs,
+                    "Anthropic API error (HTTP 400 Bad Request): boom",
+                ),
+            ] {
+                let status = StatusCode::from_u16(status).unwrap();
+                assert_eq!(
+                    format_api_error(
+                        AuthSource::OAuthTokenEnv,
+                        status,
+                        retry_after,
+                        None,
+                        Some("boom"),
+                    ),
+                    expected,
+                );
+            }
+        }
+
+        #[test]
+        fn without_details_puts_the_hint_after_the_headline() {
+            for (status, expected) in [
+                (
+                    StatusCode::BAD_REQUEST,
+                    "Anthropic API error (HTTP 400 Bad Request)",
+                ),
+                (
+                    StatusCode::BAD_GATEWAY,
+                    "Anthropic API server error (HTTP 502 Bad Gateway). Retry in a few seconds.",
+                ),
+            ] {
+                assert_eq!(
+                    format_api_error(AuthSource::ApiKeyEnv, status, None, None, None),
+                    expected,
+                );
+            }
+        }
+
+        #[test]
+        fn keeps_the_details_as_sent_and_ends_each_sentence_once() {
+            let truncated = body_details(&"x".repeat(MAX_DETAILS_WIDTH + 1), None).unwrap();
+            for (status, details, expected) in [
+                (
+                    StatusCode::BAD_GATEWAY,
+                    "Upstream is down.",
+                    "Anthropic API server error (HTTP 502 Bad Gateway): Upstream is down. \
+                     Retry in a few seconds."
+                        .to_owned(),
+                ),
+                (
+                    StatusCode::BAD_GATEWAY,
+                    truncated.as_str(),
+                    format!(
+                        "Anthropic API server error (HTTP 502 Bad Gateway): {}... \
+                         Retry in a few seconds.",
+                        "x".repeat(MAX_DETAILS_WIDTH - 3),
+                    ),
+                ),
+                (
+                    StatusCode::BAD_GATEWAY,
+                    "upstream connect error",
+                    "Anthropic API server error (HTTP 502 Bad Gateway): upstream connect error. \
+                     Retry in a few seconds."
+                        .to_owned(),
+                ),
+                (
+                    StatusCode::BAD_REQUEST,
+                    "messages.0: The block is empty. Remove it.",
+                    "Anthropic API error (HTTP 400 Bad Request): \
+                     messages.0: The block is empty. Remove it."
+                        .to_owned(),
+                ),
+            ] {
+                assert_eq!(
+                    format_api_error(AuthSource::ApiKeyEnv, status, None, None, Some(details)),
+                    expected,
+                    "{details:?}",
+                );
+            }
+        }
+
+        #[test]
+        fn on_3xx_names_the_redirect_host() {
+            let redirected = "Anthropic API endpoint redirected (HTTP 307 Temporary Redirect)";
+            let advice = "Redirects are not followed, so point the base URL at the final endpoint.";
+            for (location, target) in [
+                (
+                    Some("https://other.example.com/v1/messages"),
+                    " to other.example.com",
+                ),
+                (Some("/v2/messages"), ""),
+                (None, ""),
+            ] {
+                assert_eq!(
+                    format_api_error(
+                        AuthSource::ApiKeyEnv,
+                        StatusCode::TEMPORARY_REDIRECT,
+                        None,
+                        location,
+                        Some("moved"),
+                    ),
+                    format!("{redirected}{target}: moved. {advice}"),
+                    "{location:?}",
+                );
+            }
+        }
+    }
+
+    mod format_stream_error {
+        use super::*;
+
+        #[test]
+        fn matches_the_http_diagnostic_for_the_same_failure() {
+            for (error_type, message, expected) in [
+                (
+                    "overloaded_error",
+                    "Overloaded",
+                    "Anthropic API overloaded (overloaded_error): Overloaded. \
+                     Retry in a few seconds.",
+                ),
+                (
+                    "api_error",
+                    "Internal server error.",
+                    "Anthropic API server error (api_error): Internal server error. \
+                     Retry in a few seconds.",
+                ),
+                (
+                    "invalid_request_error",
+                    "messages:\n  bad block",
+                    "Anthropic API error (invalid_request_error): messages: bad block",
+                ),
+            ] {
+                assert_eq!(
+                    format_stream_error(error_type, message),
+                    expected,
+                    "{error_type}",
+                );
+            }
+        }
+    }
+
+    mod body_details {
+        use super::*;
+
+        #[test]
+        fn shows_the_api_error_message() {
+            let error = ApiError {
+                error_type: "invalid_request_error".to_owned(),
+                message: "max_tokens:\n  too large".to_owned(),
+            };
+
+            let details = body_details(r#"{"type":"error"}"#, Some(&error));
+
+            assert_eq!(details.as_deref(), Some("max_tokens: too large"));
+        }
+
+        #[test]
+        fn shows_the_title_of_a_markup_page() {
+            let nginx = indoc! {"
+                <html>
+                <head><title>502 Bad Gateway</title></head>
+                <body><center><h1>502 Bad Gateway</h1></center></body>
+                </html>
+            "};
+            assert_eq!(
+                body_details(nginx, None).as_deref(),
+                Some("502 Bad Gateway")
+            );
+            assert_eq!(body_details("<html><body>busy</body></html>", None), None);
+        }
+
+        #[test]
+        fn shows_plain_text_on_one_capped_line() {
+            let long = "x".repeat(MAX_DETAILS_WIDTH + 1);
+            for (body, expected) in [
+                (
+                    "\n  upstream connect error\r\n\treset reason: overflow\n",
+                    Some("upstream connect error reset reason: overflow".to_owned()),
+                ),
+                (
+                    long.as_str(),
+                    Some(format!("{}...", "x".repeat(MAX_DETAILS_WIDTH - 3))),
+                ),
+                (" \r\n", None),
+            ] {
+                assert_eq!(body_details(body, None), expected, "{body:?}");
+            }
+        }
+    }
+
     mod rate_limits {
         use super::*;
 
@@ -1127,239 +1378,6 @@ mod tests {
                     None,
                     "{utilization:?} / {reset:?}",
                 );
-            }
-        }
-    }
-
-    mod parse_retry_after {
-        use super::*;
-
-        #[test]
-        fn accepts_seconds_and_rejects_dates() {
-            assert_eq!(parse_retry_after(" 30 "), Some(Duration::from_secs(30)));
-            assert_eq!(parse_retry_after("Wed, 21 Oct 2026 07:28:00 GMT"), None);
-        }
-    }
-
-    mod format_api_error {
-        use super::*;
-
-        #[test]
-        fn puts_the_details_after_the_headline_and_the_hint_last() {
-            let secs = Some(Duration::from_secs(42));
-            for (status, retry_after, expected) in [
-                (
-                    401,
-                    None,
-                    "Anthropic API rejected credentials (HTTP 401): boom. \
-                     CLAUDE_CODE_OAUTH_TOKEN may be expired or revoked. \
-                     Generate a new one with `claude setup-token`.",
-                ),
-                (
-                    429,
-                    secs,
-                    "Anthropic API rate limited (HTTP 429): boom. Retry after 42 s.",
-                ),
-                (
-                    429,
-                    None,
-                    "Anthropic API rate limited (HTTP 429): boom. Retry after a short delay.",
-                ),
-                (
-                    529,
-                    None,
-                    "Anthropic API overloaded (HTTP 529): boom. Retry in a few seconds.",
-                ),
-                (
-                    502,
-                    None,
-                    "Anthropic API server error (HTTP 502 Bad Gateway): boom. \
-                     Retry in a few seconds.",
-                ),
-                (
-                    522,
-                    None,
-                    "Anthropic API server error (HTTP 522): boom. Retry in a few seconds.",
-                ),
-                (400, secs, "API error (HTTP 400 Bad Request): boom"),
-            ] {
-                let status = StatusCode::from_u16(status).unwrap();
-                assert_eq!(
-                    format_api_error(
-                        AuthSource::OAuthTokenEnv,
-                        status,
-                        retry_after,
-                        None,
-                        Some("boom"),
-                    ),
-                    expected,
-                );
-            }
-        }
-
-        #[test]
-        fn without_details_puts_the_hint_after_the_headline() {
-            for (status, expected) in [
-                (StatusCode::BAD_REQUEST, "API error (HTTP 400 Bad Request)"),
-                (
-                    StatusCode::BAD_GATEWAY,
-                    "Anthropic API server error (HTTP 502 Bad Gateway). Retry in a few seconds.",
-                ),
-            ] {
-                assert_eq!(
-                    format_api_error(AuthSource::ApiKeyEnv, status, None, None, None),
-                    expected,
-                );
-            }
-        }
-
-        #[test]
-        fn keeps_the_details_as_sent_and_ends_each_sentence_once() {
-            let truncated = body_details(&"x".repeat(MAX_DETAILS_WIDTH + 1), None).unwrap();
-            for (status, details, expected) in [
-                (
-                    StatusCode::BAD_GATEWAY,
-                    "Upstream is down.",
-                    "Anthropic API server error (HTTP 502 Bad Gateway): Upstream is down. \
-                     Retry in a few seconds."
-                        .to_owned(),
-                ),
-                (
-                    StatusCode::BAD_GATEWAY,
-                    truncated.as_str(),
-                    format!(
-                        "Anthropic API server error (HTTP 502 Bad Gateway): {}... \
-                         Retry in a few seconds.",
-                        "x".repeat(MAX_DETAILS_WIDTH - 3),
-                    ),
-                ),
-                (
-                    StatusCode::BAD_GATEWAY,
-                    "upstream connect error",
-                    "Anthropic API server error (HTTP 502 Bad Gateway): upstream connect error. \
-                     Retry in a few seconds."
-                        .to_owned(),
-                ),
-                (
-                    StatusCode::BAD_REQUEST,
-                    "messages.0: The block is empty. Remove it.",
-                    "API error (HTTP 400 Bad Request): messages.0: The block is empty. Remove it."
-                        .to_owned(),
-                ),
-            ] {
-                assert_eq!(
-                    format_api_error(AuthSource::ApiKeyEnv, status, None, None, Some(details)),
-                    expected,
-                    "{details:?}",
-                );
-            }
-        }
-
-        #[test]
-        fn on_3xx_names_the_redirect_host() {
-            let redirected = "Anthropic API endpoint redirected (HTTP 307 Temporary Redirect)";
-            let advice = "Redirects are not followed, so point the base URL at the final endpoint.";
-            for (location, target) in [
-                (
-                    Some("https://other.example.com/v1/messages"),
-                    " to other.example.com",
-                ),
-                (Some("/v2/messages"), ""),
-                (None, ""),
-            ] {
-                assert_eq!(
-                    format_api_error(
-                        AuthSource::ApiKeyEnv,
-                        StatusCode::TEMPORARY_REDIRECT,
-                        None,
-                        location,
-                        Some("moved"),
-                    ),
-                    format!("{redirected}{target}: moved. {advice}"),
-                    "{location:?}",
-                );
-            }
-        }
-    }
-
-    mod format_stream_error {
-        use super::*;
-
-        #[test]
-        fn matches_the_http_diagnostic_for_the_same_failure() {
-            for (error_type, message, expected) in [
-                (
-                    "overloaded_error",
-                    "Overloaded",
-                    "Anthropic API overloaded (overloaded_error): Overloaded. \
-                     Retry in a few seconds.",
-                ),
-                (
-                    "api_error",
-                    "Internal server error.",
-                    "Anthropic API server error (api_error): Internal server error. \
-                     Retry in a few seconds.",
-                ),
-                (
-                    "invalid_request_error",
-                    "messages:\n  bad block",
-                    "API error (invalid_request_error): messages: bad block",
-                ),
-            ] {
-                assert_eq!(
-                    format_stream_error(error_type, message),
-                    expected,
-                    "{error_type}",
-                );
-            }
-        }
-    }
-
-    mod body_details {
-        use super::*;
-
-        #[test]
-        fn shows_the_api_error_message() {
-            let error = ApiError {
-                error_type: "invalid_request_error".to_owned(),
-                message: "max_tokens:\n  too large".to_owned(),
-            };
-
-            let details = body_details(r#"{"type":"error"}"#, Some(&error));
-
-            assert_eq!(details.as_deref(), Some("max_tokens: too large"));
-        }
-
-        #[test]
-        fn shows_the_title_of_a_markup_page() {
-            let nginx = indoc! {"
-                <html>
-                <head><title>502 Bad Gateway</title></head>
-                <body><center><h1>502 Bad Gateway</h1></center></body>
-                </html>
-            "};
-            assert_eq!(
-                body_details(nginx, None).as_deref(),
-                Some("502 Bad Gateway")
-            );
-            assert_eq!(body_details("<html><body>busy</body></html>", None), None);
-        }
-
-        #[test]
-        fn shows_plain_text_on_one_capped_line() {
-            let long = "x".repeat(MAX_DETAILS_WIDTH + 1);
-            for (body, expected) in [
-                (
-                    "\n  upstream connect error\r\n\treset reason: overflow\n",
-                    Some("upstream connect error reset reason: overflow".to_owned()),
-                ),
-                (
-                    long.as_str(),
-                    Some(format!("{}...", "x".repeat(MAX_DETAILS_WIDTH - 3))),
-                ),
-                (" \r\n", None),
-            ] {
-                assert_eq!(body_details(body, None), expected, "{body:?}");
             }
         }
     }

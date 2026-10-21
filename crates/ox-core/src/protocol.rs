@@ -166,6 +166,10 @@ pub enum Event {
     PromptDrained(String),
     /// Turn ended cleanly with a final assistant reply (no further tool rounds).
     TurnComplete,
+    /// The model refused the turn in flight, so the engine removed it from the conversation along
+    /// with its prompt and the [`Self::PromptDrained`] prompts it took in, and a
+    /// [`Self::TurnFailed`] follows. The frontend hands those prompts back to the user.
+    TurnRolledBack,
     /// The in-flight prompt, compaction, resume, or sign-in failed. Like [`Self::TurnComplete`]
     /// and [`Self::Cancelled`], it ends the operation.
     TurnFailed(String),
@@ -682,6 +686,7 @@ mod tests {
                 Event::ToolCallEnd(_) => "tool_call_end",
                 Event::PromptDrained(_) => "prompt_drained",
                 Event::TurnComplete => "turn_complete",
+                Event::TurnRolledBack => "turn_rolled_back",
                 Event::TurnFailed(_) => "turn_failed",
                 Event::UsageUpdated(_) => "usage_updated",
                 Event::RateLimitsUpdated(_) => "rate_limits_updated",
@@ -746,6 +751,7 @@ mod tests {
                 Event::ToolCallEnd(text_result("t1", "ok", true, None)),
                 Event::PromptDrained("next".to_owned()),
                 Event::TurnComplete,
+                Event::TurnRolledBack,
                 Event::TurnFailed("boom".to_owned()),
                 Event::UsageUpdated(UsageSnapshot {
                     context_tokens: Some(1_200),

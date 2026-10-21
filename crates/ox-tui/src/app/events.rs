@@ -17,7 +17,7 @@ use ox_core::session::display::archive_notice;
 use ox_core::tool::ApprovalPreview;
 use ox_core::util::text::plural;
 
-use super::{App, CopyNotice};
+use super::{App, CopyNotice, HandBack};
 use crate::clipboard::{CopyReport, Delivery};
 use crate::components::status::Status;
 use crate::git_probes::GitUpdate;
@@ -47,6 +47,7 @@ impl App {
             Event::ToolCallEnd(result) => self.chat.push_tool_result(result),
             Event::PromptDrained(text) => self.apply_prompt_drained(text),
             Event::TurnComplete => self.finish_turn(),
+            Event::TurnRolledBack => self.hand_back = HandBack::RolledBackTurn,
             Event::TurnFailed(msg) => self.apply_turn_failed(&msg),
             Event::UsageUpdated(usage) => self.status_bar.set_usage(Some(usage)),
             Event::RateLimitsUpdated(limits) => self.status_bar.set_rate_limits(Some(limits)),
@@ -56,7 +57,7 @@ impl App {
                 self.enter_idle();
             }
             Event::AutoCompactionStarted => {
-                self.auto_compacting = true;
+                self.hand_back = HandBack::UnsentPrompt;
                 self.set_active_status(Status::Compacting);
                 self.input.set_enabled(false);
             }
@@ -126,7 +127,8 @@ impl App {
                 .front()
                 .is_some_and(|queued| command::unescape_literal(queued) == text)
         {
-            self.pending_prompts.pop_front();
+            self.drained_prompts
+                .extend(self.pending_prompts.pop_front());
             self.forwarded_prompts -= 1;
         } else {
             warn!("drained prompt {text:?} does not lead the forwarded queue");
@@ -168,11 +170,28 @@ impl App {
 
     fn apply_turn_failed(&mut self, msg: &str) {
         self.chat.push_error(msg);
-        if self.auto_compacting {
-            self.return_unsent_prompt();
-        } else {
-            self.finish_turn();
+        match self.hand_back {
+            HandBack::Nothing => self.finish_turn(),
+            HandBack::UnsentPrompt => self.return_unsent_prompt(),
+            HandBack::RolledBackTurn => self.return_rolled_back_prompts(),
         }
+    }
+
+    /// Ends a turn the engine rolled back after a refusal. Goes idle without starting the queue,
+    /// and hands the prompts back: the queued ones the turn took in to the queue head, and the
+    /// refused one into the empty input for rephrasing, or else ahead of them.
+    fn return_rolled_back_prompts(&mut self) {
+        for drained in self.drained_prompts.drain(..).rev() {
+            self.pending_prompts.push_front(drained);
+        }
+        if let Some(prompt) = self.active_prompt.take() {
+            if self.input.is_empty() {
+                self.input.set_text(&prompt);
+            } else {
+                self.pending_prompts.push_front(prompt);
+            }
+        }
+        self.enter_idle();
     }
 
     /// Ends a prompt whose automatic compaction failed before it was sent. Goes idle without
@@ -252,7 +271,7 @@ impl App {
         self.status_bar.set_usage(None);
         self.chat
             .push_compacted_block(pre_count, instructions, summary.to_owned());
-        self.auto_compacting = false;
+        self.hand_back = HandBack::Nothing;
         if automatic && let Some(prompt) = &self.active_prompt {
             self.chat
                 .push_user_message(command::unescape_literal(prompt).to_owned());
@@ -371,9 +390,10 @@ impl App {
     /// Resets to idle, clears orphan calls, and re-enables input. Queued prompts stay queued, and
     /// the ended turn no longer holds any of them.
     fn enter_idle(&mut self) {
-        self.auto_compacting = false;
+        self.hand_back = HandBack::Nothing;
         self.chat.clear_pending_calls();
         self.forwarded_prompts = 0;
+        self.drained_prompts.clear();
         self.status_bar.set_status(Status::Idle);
         self.input.set_enabled(true);
     }
@@ -901,6 +921,35 @@ mod tests {
                 "Enter sends the prompt again as typed",
             );
             assert!(app.pending_prompts.is_empty());
+            assert_eq!(
+                rx.try_recv(),
+                Err(TryRecvError::Empty),
+                "nothing reaches the engine until the user sends"
+            );
+        }
+
+        #[tokio::test]
+        async fn turn_rolled_back_hands_the_refused_prompt_and_the_drained_ones_back() {
+            let (mut app, mut rx, _event_tx) = test_app(None);
+            app.dispatch_action(Action::Submit("//refused".to_owned()));
+            rx.recv().await.expect("prompt forwarded");
+            app.dispatch_action(Action::Submit("drained".to_owned()));
+            rx.recv().await.expect("queued prompt forwarded");
+            app.handle_engine_event(Event::PromptDrained("drained".to_owned()));
+            app.dispatch_action(Action::Submit("queued".to_owned()));
+            rx.recv().await.expect("queued prompt forwarded");
+
+            app.handle_engine_event(Event::TurnRolledBack);
+            app.handle_engine_event(Event::TurnFailed(
+                "The model declined this request.".to_owned(),
+            ));
+
+            assert_eq!(app.status_bar.status(), &Status::Idle);
+            assert_eq!(app.input.lines(), ["//refused".to_owned()]);
+            assert_eq!(
+                app.pending_prompts.iter().cloned().collect::<Vec<_>>(),
+                ["drained".to_owned(), "queued".to_owned()],
+            );
             assert_eq!(
                 rx.try_recv(),
                 Err(TryRecvError::Empty),

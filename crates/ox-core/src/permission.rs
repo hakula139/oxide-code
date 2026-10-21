@@ -4,8 +4,6 @@
 //! settled it.
 //!
 //! oxide-code has no sandbox, so this gate is the whole safety boundary around a tool call.
-//!
-//! Design: `docs/design/tools/permissions.md`.
 
 pub mod defaults;
 pub mod rule;

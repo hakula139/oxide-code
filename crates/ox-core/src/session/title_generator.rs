@@ -7,6 +7,7 @@ use tokio::sync::oneshot;
 use tracing::warn;
 use unicode_width::UnicodeWidthStr;
 
+use super::display::fit_title;
 use super::entry::UsageRecord;
 use super::handle::SessionHandle;
 use crate::client::anthropic::Client;
@@ -157,11 +158,11 @@ fn parse_title(response: &str) -> Result<String> {
             truncate_for_log(unwrapped)
         )
     })?;
-    let cleaned = title.trim();
-    if cleaned.is_empty() {
+    let title = fit_title(&title);
+    if title.is_empty() {
         bail!("title envelope had an empty title field");
     }
-    Ok(cleaned.to_owned())
+    Ok(title)
 }
 
 /// Caps `s` for log and error messages, so a long Haiku refusal stays readable.
@@ -545,7 +546,7 @@ mod tests {
                 .expect_err("HTTP error must propagate");
             assert_eq!(
                 format!("{err:#}"),
-                "Haiku completion failed: API error (HTTP 400 Bad Request): bad request"
+                "Haiku completion failed: Anthropic API error (HTTP 400 Bad Request): bad request"
             );
         }
     }
@@ -577,6 +578,17 @@ mod tests {
         fn trims_whitespace_inside_json_envelope() {
             let out = parse_title(r#"{"title": "  padded  "}"#).unwrap();
             assert_eq!(out, "padded");
+        }
+
+        #[test]
+        fn keeps_one_line_of_at_most_max_title_width() {
+            let envelope = |title: String| serde_json::json!({ "title": title }).to_string();
+
+            let short = parse_title(&envelope("\nFix auth flow\nDetails below".to_owned()));
+            let long = parse_title(&envelope("word ".repeat(30)));
+
+            assert_eq!(short.unwrap(), "Fix auth flow");
+            assert_eq!(long.unwrap(), format!("{}wo...", "word ".repeat(15)));
         }
 
         #[test]

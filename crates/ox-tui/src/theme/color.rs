@@ -3,13 +3,17 @@
 //! - **6-digit hex**: `"#rrggbb"` for true color (24-bit RGB).
 //! - **ANSI 16 named**: `"red"`, `"bright_blue"`, `"dark_gray"`, ... (`light_X` aliases
 //!   `bright_X`, `grey` aliases `gray`).
-//! - **Indexed 256-color**: `"ansi:N"` where `N` is 0–255.
+//! - **Indexed 256-color**: `"ansi:N"` where `N` is 0-255.
 //! - **Terminal default**: `"reset"` follows the user's terminal palette.
 //!
 //! Three-digit hex shorthand (`#fff`) is rejected to keep the format unambiguous.
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result, anyhow, bail};
 use ratatui::style::Color;
+
+/// Every accepted color format, which an unknown color lists.
+pub(super) const COLOR_FORMATS_HINT: &str =
+    "expected hex (#rrggbb), ANSI name (red, bright_blue, ...), indexed (ansi:0-255), or reset";
 
 /// Parses a theme color string. Trims whitespace and surfaces actionable errors that name the
 /// offending input and supported formats.
@@ -46,7 +50,9 @@ fn parse_hex(hex: &str) -> Result<Color> {
 }
 
 fn parse_indexed(s: &str) -> Result<Color> {
-    let n: u8 = s.parse().context("expected 0-255 (e.g., ansi:174)")?;
+    let n: u8 = s
+        .parse()
+        .map_err(|_| anyhow!("expected 0-255 (e.g., ansi:174)"))?;
     Ok(Color::Indexed(n))
 }
 
@@ -74,10 +80,7 @@ fn parse_named(s: &str) -> Result<Color> {
         "bright_cyan" | "light_cyan" => Color::LightCyan,
         "white" | "bright_white" | "light_white" => Color::White,
 
-        _ => bail!(
-            "expected hex (#rrggbb), ANSI name (red, bright_blue, ...), \
-             indexed (ansi:0..255), or reset"
-        ),
+        _ => bail!(COLOR_FORMATS_HINT),
     })
 }
 
@@ -87,9 +90,6 @@ mod tests {
 
     mod parse_color {
         use super::*;
-
-        const FORMATS_HINT: &str = "expected hex (#rrggbb), ANSI name (red, bright_blue, ...), \
-                                    indexed (ansi:0..255), or reset";
 
         fn error_text(input: &str) -> String {
             format!("{:#}", parse_color(input).unwrap_err())
@@ -123,7 +123,7 @@ mod tests {
         }
 
         #[test]
-        fn hex_pure_red_green_blue() {
+        fn hex_maps_each_channel() {
             assert_eq!(parse_color("#ff0000").unwrap(), Color::Rgb(255, 0, 0));
             assert_eq!(parse_color("#00ff00").unwrap(), Color::Rgb(0, 255, 0));
             assert_eq!(parse_color("#0000ff").unwrap(), Color::Rgb(0, 0, 255));
@@ -151,27 +151,22 @@ mod tests {
         fn hex_rejects_missing_hash_prefix() {
             assert_eq!(
                 error_text("cdd6f4"),
-                format!(r#"unknown color "cdd6f4": {FORMATS_HINT}"#),
+                format!(r#"unknown color "cdd6f4": {COLOR_FORMATS_HINT}"#),
             );
         }
 
         #[test]
-        fn indexed_min_max() {
+        fn indexed_accepts_the_full_range() {
             assert_eq!(parse_color("ansi:0").unwrap(), Color::Indexed(0));
-            assert_eq!(parse_color("ansi:255").unwrap(), Color::Indexed(255));
-        }
-
-        #[test]
-        fn indexed_mid_value() {
             assert_eq!(parse_color("ansi:174").unwrap(), Color::Indexed(174));
+            assert_eq!(parse_color("ansi:255").unwrap(), Color::Indexed(255));
         }
 
         #[test]
         fn indexed_rejects_out_of_range() {
             assert_eq!(
                 error_text("ansi:256"),
-                "invalid indexed color \"ansi:256\": expected 0-255 (e.g., ansi:174): \
-                 number too large to fit in target type",
+                "invalid indexed color \"ansi:256\": expected 0-255 (e.g., ansi:174)",
             );
         }
 
@@ -179,8 +174,7 @@ mod tests {
         fn indexed_rejects_non_numeric() {
             assert_eq!(
                 error_text("ansi:abc"),
-                "invalid indexed color \"ansi:abc\": expected 0-255 (e.g., ansi:174): \
-                 invalid digit found in string",
+                "invalid indexed color \"ansi:abc\": expected 0-255 (e.g., ansi:174)",
             );
         }
 
@@ -191,7 +185,7 @@ mod tests {
         }
 
         #[test]
-        fn named_standard_8() {
+        fn named_maps_the_standard_eight() {
             assert_eq!(parse_color("black").unwrap(), Color::Black);
             assert_eq!(parse_color("red").unwrap(), Color::Red);
             assert_eq!(parse_color("green").unwrap(), Color::Green);
@@ -203,7 +197,7 @@ mod tests {
         }
 
         #[test]
-        fn named_bright_8() {
+        fn named_maps_the_bright_eight() {
             assert_eq!(parse_color("dark_gray").unwrap(), Color::DarkGray);
             assert_eq!(parse_color("bright_red").unwrap(), Color::LightRed);
             assert_eq!(parse_color("bright_green").unwrap(), Color::LightGreen);
@@ -243,7 +237,7 @@ mod tests {
         fn named_rejects_unknown_color() {
             assert_eq!(
                 error_text("orange"),
-                format!(r#"unknown color "orange": {FORMATS_HINT}"#),
+                format!(r#"unknown color "orange": {COLOR_FORMATS_HINT}"#),
             );
         }
     }
