@@ -2,13 +2,14 @@
 
 mod driver;
 
+use std::env;
 use std::ffi::OsStr;
-use std::io::IsTerminal;
+use std::io::{self, IsTerminal, Write};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::sync::Arc;
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result, anyhow, bail};
 use clap::builder::{PossibleValue, PossibleValuesParser, TypedValueParser};
 use clap::{Arg, ArgGroup, Command, Parser};
 use time::error::IndeterminateOffset;
@@ -137,39 +138,51 @@ impl TypedValueParser for ModeParser {
     }
 }
 
-fn main() -> Result<ExitCode> {
+fn main() -> ExitCode {
     let offset_error = util::time::init_local_offset().err();
-    let runtime = tokio::runtime::Builder::new_multi_thread()
+    let runtime = match tokio::runtime::Builder::new_multi_thread()
         .enable_all()
-        .build()?;
+        .build()
+    {
+        Ok(runtime) => runtime,
+        Err(e) => return report_error(&anyhow!(e).context("failed to start the async runtime")),
+    };
     let exit = match runtime.block_on(async_main(offset_error)) {
         Ok(exit) => exit,
-        Err(e) => e.downcast::<EnginePanic>()?.resume(),
+        Err(e) => match e.downcast::<EnginePanic>() {
+            Ok(panic) => panic.resume(),
+            Err(e) => return report_error(&e),
+        },
     };
     if matches!(exit, Exit::Signal(_)) {
         // tokio's stdin reader can stay blocked in `read`, and a regular drop waits for it.
         runtime.shutdown_background();
     }
-    Ok(exit.code())
+    exit.code()
+}
+
+/// Prints `e` as one `Error:` line with its cause chain and returns the failure status.
+fn report_error(e: &anyhow::Error) -> ExitCode {
+    _ = writeln!(io::stderr(), "Error: {e:#}");
+    ExitCode::FAILURE
 }
 
 async fn async_main(offset_error: Option<IndeterminateOffset>) -> Result<Exit> {
     let cli = Cli::parse();
 
-    let tui_mode =
-        !cli.no_tui && cli.prompt.is_none() && !cli.list && std::io::stdout().is_terminal();
+    let tui_mode = !cli.no_tui && cli.prompt.is_none() && !cli.list && io::stdout().is_terminal();
     if cli.resume && !tui_mode {
         bail!("--resume opens the session picker in the TUI, which needs a terminal on stdout");
     }
     let _log_guard = util::log::init_tracing(tui_mode)?;
     if let Some(e) = offset_error {
-        warn!("cannot read local timezone offset, falling back to UTC: {e}");
+        warn!("failed to read the local timezone offset, so times show in UTC: {e}");
     }
-    let cwd = std::env::current_dir().context("failed to read the current working directory")?;
+    let cwd = env::current_dir().context("failed to read the current working directory")?;
 
     if cli.list {
         list_sessions(
-            &mut std::io::stdout().lock(),
+            &mut io::stdout().lock(),
             &cwd,
             ListScope {
                 all: cli.all,
@@ -187,10 +200,6 @@ async fn async_main(offset_error: Option<IndeterminateOffset>) -> Result<Exit> {
     let show_thinking = config.show_thinking;
     let theme = tui_mode.then(|| resolve_theme(&config.theme)).transpose()?;
     let snapshot = config.snapshot();
-    let theme_notices = theme.iter().flat_map(|resolved| &resolved.notices);
-    for notice in snapshot.notices().iter().chain(theme_notices) {
-        warn!("{notice}");
-    }
 
     let store = SessionStore::open(&cwd)?;
     let file_tracker = Arc::new(FileTracker::default());
@@ -209,7 +218,11 @@ async fn async_main(offset_error: Option<IndeterminateOffset>) -> Result<Exit> {
         cli.all,
     )?;
     if unarchived && !tui_mode {
-        eprintln!("{}", archive_notice(handle.session_id(), false));
+        _ = writeln!(
+            io::stderr(),
+            "{}",
+            archive_notice(handle.session_id(), false)
+        );
     }
     let drifted = file_tracker.restore_verified(file_snapshots);
     let picker = cli
@@ -270,12 +283,7 @@ async fn run_tui(
 
 // ── Session Helpers ──
 
-fn list_sessions(
-    out: &mut dyn std::io::Write,
-    cwd: &Path,
-    scope: ListScope,
-    limit: usize,
-) -> Result<()> {
+fn list_sessions(out: &mut dyn Write, cwd: &Path, scope: ListScope, limit: usize) -> Result<()> {
     let store = SessionStore::open(cwd)?;
     let local_offset = util::time::local_offset();
     let term_width = terminal::stdout_width();

@@ -27,6 +27,9 @@ impl Exit {
     }
 }
 
+// ── Shutdown ──
+
+/// The signal that ended a run.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Shutdown {
     #[cfg(unix)]
@@ -63,7 +66,7 @@ pub(crate) async fn shutdown_signal() -> Shutdown {
         ) {
             (Ok(sigterm), Ok(sighup)) => (sigterm, sighup),
             (Err(e), _) | (_, Err(e)) => {
-                warn!("cannot listen for SIGTERM and SIGHUP, falling back to SIGINT alone: {e}");
+                warn!("failed to listen for SIGTERM and SIGHUP, so only SIGINT stops ox: {e}");
                 _ = ctrl_c.await;
                 return Shutdown::Interrupt;
             }
@@ -78,6 +81,26 @@ pub(crate) async fn shutdown_signal() -> Shutdown {
     {
         _ = tokio::signal::ctrl_c().await;
         Shutdown::Interrupt
+    }
+}
+
+// ── Testing ──
+
+#[cfg(test)]
+mod testing {
+    use std::io::{self, Write};
+
+    /// A stdout whose reader went away.
+    pub(super) struct ClosedPipe;
+
+    impl Write for ClosedPipe {
+        fn write(&mut self, _buf: &[u8]) -> io::Result<usize> {
+            Err(io::ErrorKind::BrokenPipe.into())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
     }
 }
 

@@ -50,8 +50,6 @@ pub struct ConfigSnapshot {
     pub effort: Option<Effort>,
     /// `None` while signed out.
     pub auth: Option<AuthSource>,
-    /// Why the session started signed out, shown among the startup [`Self::notices`].
-    pub signed_out_notice: Option<String>,
     pub base_url: String,
     /// PEM bundle appended to reqwest's trust anchors.
     pub extra_ca_certs: Option<PathBuf>,
@@ -72,15 +70,6 @@ pub struct ConfigSnapshot {
 }
 
 impl ConfigSnapshot {
-    /// Startup notices: an unsupported model, then why the session is signed out.
-    pub fn notices(&self) -> Vec<String> {
-        self.model
-            .unsupported_notice()
-            .into_iter()
-            .chain(self.signed_out_notice.clone())
-            .collect()
-    }
-
     /// Applies a `/model` or `/effort` swap. A changed model and an honored effort pick become
     /// session-set, while an effort the new model derived on its own reverts to the default source.
     pub fn apply_swap(
@@ -472,6 +461,15 @@ impl Config {
         })
     }
 
+    /// Startup notices: an unsupported model, then why the session is signed out.
+    pub fn notices(&self) -> Vec<String> {
+        self.model
+            .unsupported_notice()
+            .into_iter()
+            .chain(self.signed_out_notice.clone())
+            .collect()
+    }
+
     /// Applies `--mode`, which overrides the config files and `OX_PERMISSION_MODE`.
     pub fn apply_mode_flag(&mut self, mode: Mode) {
         self.permission.set_mode(mode);
@@ -484,7 +482,6 @@ impl Config {
             model: self.model.clone(),
             effort: self.effort,
             auth: self.auth.as_ref().map(Auth::source),
-            signed_out_notice: self.signed_out_notice.clone(),
             base_url: self.base_url.clone(),
             extra_ca_certs: self.extra_ca_certs.clone(),
             gateway: self.gateway.snapshot(),
@@ -802,33 +799,6 @@ mod tests {
 
     mod config_snapshot {
         use super::*;
-
-        mod notices {
-            use super::*;
-
-            #[test]
-            fn list_an_unsupported_model_then_why_the_session_is_signed_out() {
-                let mut cfg = sample_config();
-                cfg.auth = None;
-                cfg.signed_out_notice = Some("Not signed in. Run `/login` to sign in.".to_owned());
-
-                let notices = cfg.snapshot().notices();
-
-                assert_eq!(notices.len(), 2, "{notices:?}");
-                assert!(
-                    notices[0].starts_with("`claude-test-1-0` is not a supported model"),
-                    "{notices:?}"
-                );
-                assert_eq!(notices[1], "Not signed in. Run `/login` to sign in.");
-            }
-
-            #[test]
-            fn are_empty_for_a_current_setup() {
-                let mut cfg = sample_config();
-                cfg.model = ModelSpec::resolve("claude-opus-5-5".to_owned());
-                assert_eq!(cfg.snapshot().notices(), [] as [String; 0]);
-            }
-        }
 
         mod apply_swap {
             use super::*;
@@ -2228,6 +2198,33 @@ mod tests {
                     ..Provenance::default()
                 },
             );
+        }
+    }
+
+    mod notices {
+        use super::*;
+
+        #[test]
+        fn list_an_unsupported_model_then_why_the_session_is_signed_out() {
+            let mut cfg = sample_config();
+            cfg.auth = None;
+            cfg.signed_out_notice = Some("Not signed in. Run `/login` to sign in.".to_owned());
+
+            let notices = cfg.notices();
+
+            assert_eq!(notices.len(), 2, "{notices:?}");
+            assert!(
+                notices[0].starts_with("`claude-test-1-0` is not a supported model"),
+                "{notices:?}"
+            );
+            assert_eq!(notices[1], "Not signed in. Run `/login` to sign in.");
+        }
+
+        #[test]
+        fn are_empty_for_a_current_setup() {
+            let mut cfg = sample_config();
+            cfg.model = ModelSpec::resolve("claude-opus-5-5".to_owned());
+            assert_eq!(cfg.notices(), [] as [String; 0]);
         }
     }
 

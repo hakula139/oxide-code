@@ -1,6 +1,17 @@
-//! Inherited settings removed from CLI and live subprocesses.
+//! The scratch environment of CLI and live subprocesses, without the settings they would inherit.
 
+use std::path::Path;
 use std::process::Command;
+
+/// Points the home, config, data, and state directories of `command` under `root`.
+pub(super) fn use_scratch_dirs(command: &mut Command, root: &Path) {
+    command
+        .env("HOME", root.join("home"))
+        .env("USERPROFILE", root.join("home"))
+        .env("XDG_CONFIG_HOME", root.join("config"))
+        .env("XDG_DATA_HOME", root.join("data"))
+        .env("XDG_STATE_HOME", root.join("state"));
+}
 
 pub(super) fn is_provider_var(name: &str) -> bool {
     name.starts_with("ANTHROPIC_")

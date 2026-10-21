@@ -1,8 +1,10 @@
 //! Stdio rendering of engine events for the `--no-tui` REPL and `--prompt` headless modes.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::fmt::Write as _;
-use std::io::Write;
+use std::io::{self, Write};
+use std::pin::pin;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, MutexGuard};
 
 use anyhow::Result;
@@ -26,7 +28,8 @@ use ox_tui::glyphs::{INTERRUPTED_MARKER, task_marker};
 
 /// Renders `events` on `sink` until `op`, already sent, ends, returning how it ended, or `None`
 /// once the engine has stopped. Approval requests go to `approver` in place of `sink`, and its
-/// answer goes back on `ops`.
+/// answer goes back on `ops`. Events that arrive while `approver` decides wait until it answers,
+/// unless one ends `op`, such as the cancellation an interrupt causes, which drops the question.
 pub(super) async fn render_op(
     events: &mut mpsc::UnboundedReceiver<Event>,
     sink: &dyn EventSink,
@@ -34,7 +37,12 @@ pub(super) async fn render_op(
     op: &Op,
     approver: &mut impl Approver,
 ) -> Option<TurnEnd> {
-    while let Some(event) = events.recv().await {
+    let mut held = VecDeque::new();
+    loop {
+        let event = match held.pop_front() {
+            Some(event) => event,
+            None => events.recv().await?,
+        };
         let Event::ApprovalRequested {
             id,
             preview,
@@ -49,11 +57,28 @@ pub(super) async fn render_op(
             }
             continue;
         };
-        let decision = approver.decide(&preview, &basis, grant.as_deref()).await;
-        // A send fails only once the engine has stopped, which the next `recv` reports.
-        _ = ops.send(Op::Resolve { id, decision }).await;
+
+        let mut decision = pin!(approver.decide(&preview, &basis, grant.as_deref()));
+        let decision = loop {
+            tokio::select! {
+                biased;
+
+                decision = &mut decision => break Some(decision),
+                event = events.recv() => {
+                    let event = event?;
+                    let ends = TurnEnd::of(op, &event).is_some();
+                    held.push_back(event);
+                    if ends {
+                        break None;
+                    }
+                }
+            }
+        };
+        if let Some(decision) = decision {
+            // A send fails only once the engine has stopped, which the next `recv` reports.
+            _ = ops.send(Op::Resolve { id, decision }).await;
+        }
     }
-    None
 }
 
 /// How a stdio frontend answers an approval request.
@@ -129,13 +154,21 @@ impl Approver for Unattended {
 
 // ── StdioSink ──
 
+/// Starts dim text, the style used for thinking.
+const DIM: &str = "\x1b[2m";
+/// Restores normal intensity.
+const NORMAL_INTENSITY: &str = "\x1b[22m";
+
 /// [`EventSink`] for the `--no-tui` REPL: assistant tokens stream to stdout and everything else to
 /// stderr, so piped output stays clean. Headless runs reuse [`Self::render`] for their text output.
 /// Model and tool text passes through [`escape_controls`], so it cannot redraw the terminal around
-/// a REPL approval prompt.
+/// a REPL approval prompt. An open reply line on stdout ends before a tool call starts and when the
+/// operation ends.
 pub(super) struct StdioSink {
     show_thinking: bool,
     calls: Mutex<StartedCalls>,
+    /// Whether the last text written to stdout left the current line open.
+    line_open: AtomicBool,
 }
 
 /// The started calls awaiting a result, so a result printed after another call's header can repeat
@@ -151,9 +184,11 @@ impl StdioSink {
         Self {
             show_thinking,
             calls: Mutex::default(),
+            line_open: AtomicBool::new(false),
         }
     }
 
+    /// Writes `event` to `stdout` or `stderr`.
     pub(super) fn render<W1: Write, W2: Write>(
         &self,
         event: Event,
@@ -162,13 +197,12 @@ impl StdioSink {
     ) -> Result<()> {
         match event {
             Event::StreamToken(text) => {
-                stdout.write_all(escape_controls(&text).as_bytes())?;
-                stdout.flush()?;
+                self.write_reply(stdout, &escape_controls(&text), "", "")?;
             }
             Event::ThinkingToken(text) => {
                 if self.show_thinking {
-                    write!(stdout, "\x1b[2m{}\x1b[22m", escape_controls(&text))?;
-                    stdout.flush()?;
+                    let text = escape_controls(&text);
+                    self.write_reply(stdout, &text, DIM, NORMAL_INTENSITY)?;
                 }
             }
             Event::ProgressUpdate(text) => {
@@ -180,7 +214,7 @@ impl StdioSink {
                 id, icon, label, ..
             }) => {
                 let header = format!("{icon} {}", escape_controls(&label));
-                writeln!(stderr, "{header}")?;
+                self.end_reply_then(stdout, stderr, &header)?;
                 self.calls().start(id, header);
             }
             Event::ToolCallEnd(result) => self.render_result(result, stderr)?,
@@ -240,25 +274,62 @@ impl StdioSink {
             | Event::SessionRulesUpdated(_)
             | Event::BackgroundShellsUpdated(_)
             | Event::SessionReady => {}
-            Event::TurnComplete => {
-                writeln!(stdout)?;
-            }
-            Event::Cancelled => {
-                writeln!(stdout)?;
-                writeln!(stderr, "{INTERRUPTED_MARKER}")?;
-            }
+            Event::TurnComplete => self.end_line(stdout)?,
+            Event::Cancelled => self.end_reply_then(stdout, stderr, INTERRUPTED_MARKER)?,
             Event::Retrying(msg) | Event::Notice(msg) => {
                 writeln!(stderr, "{}", escape_controls(&msg))?;
             }
-            Event::Error(msg) | Event::TurnFailed(msg) | Event::RenameFailed(msg) => {
+            Event::TurnFailed(msg) => {
+                let line = format!("Error: {}", escape_controls(&msg));
+                self.end_reply_then(stdout, stderr, &line)?;
+            }
+            Event::Error(msg) | Event::RenameFailed(msg) => {
                 writeln!(stderr, "Error: {}", escape_controls(&msg))?;
             }
         }
         Ok(())
     }
-}
 
-impl StdioSink {
+    /// Ends the reply line left open on `stdout`, if any.
+    pub(super) fn end_line(&self, stdout: &mut impl Write) -> io::Result<()> {
+        if self.line_open.swap(false, Ordering::Relaxed) {
+            writeln!(stdout)?;
+            stdout.flush()?;
+        }
+        Ok(())
+    }
+
+    /// Writes reply or thinking `text` to `stdout` between `start` and `end` styles, noting
+    /// whether it leaves the line open.
+    fn write_reply(
+        &self,
+        stdout: &mut impl Write,
+        text: &str,
+        start: &str,
+        end: &str,
+    ) -> io::Result<()> {
+        write!(stdout, "{start}{text}{end}")?;
+        stdout.flush()?;
+        if !text.is_empty() {
+            self.line_open
+                .store(!text.ends_with('\n'), Ordering::Relaxed);
+        }
+        Ok(())
+    }
+
+    /// Ends the open reply line, then writes `line` to `stderr`, which it does even when ending the
+    /// reply line failed.
+    fn end_reply_then(
+        &self,
+        stdout: &mut impl Write,
+        stderr: &mut impl Write,
+        line: &str,
+    ) -> io::Result<()> {
+        let ended = self.end_line(stdout);
+        writeln!(stderr, "{line}")?;
+        ended
+    }
+
     fn calls(&self) -> MutexGuard<'_, StartedCalls> {
         lock_or_recover(&self.calls, "started tool calls")
     }
@@ -300,9 +371,7 @@ impl StartedCalls {
 
 impl EventSink for StdioSink {
     fn send(&self, event: Event) -> Result<()> {
-        let stdout = std::io::stdout();
-        let stderr = std::io::stderr();
-        self.render(event, &mut stdout.lock(), &mut stderr.lock())
+        self.render(event, &mut io::stdout().lock(), &mut io::stderr().lock())
     }
 }
 
@@ -364,6 +433,7 @@ mod tests {
     use ox_core::tool::testing::bash_preview;
 
     use super::*;
+    use crate::driver::testing::ClosedPipe;
 
     mod render_op {
         use super::*;
@@ -429,6 +499,48 @@ mod tests {
                 }),
             );
             assert_eq!(sink.events(), [Event::TurnComplete]);
+        }
+
+        #[tokio::test]
+        async fn drops_an_unanswered_approval_once_the_op_ends() {
+            /// Never answers, as a person who has not typed an answer yet.
+            struct Undecided;
+
+            impl Approver for Undecided {
+                fn decide(
+                    &mut self,
+                    _: &ApprovalPreview,
+                    _: &Basis,
+                    _: Option<&SessionGrant>,
+                ) -> impl Future<Output = Decision> {
+                    std::future::pending()
+                }
+            }
+
+            let (tx, mut events) = mpsc::unbounded_channel();
+            for event in [
+                Event::ApprovalRequested {
+                    id: "t1".to_owned(),
+                    preview: bash_preview("ls"),
+                    basis: Basis::Mode(Mode::Manual),
+                    grant: None,
+                },
+                Event::ModeChanged(Mode::Plan),
+                Event::Cancelled,
+            ] {
+                tx.send(event).unwrap();
+            }
+            let (ops_tx, mut ops) = mpsc::channel(1);
+            let sink = CapturingSink::default();
+
+            let end = render_op(&mut events, &sink, &ops_tx, &prompt(), &mut Undecided).await;
+
+            assert_eq!(end, Some(TurnEnd::Cancelled));
+            assert_eq!(
+                sink.events(),
+                [Event::ModeChanged(Mode::Plan), Event::Cancelled],
+            );
+            assert_eq!(ops.try_recv().ok(), None);
         }
 
         #[tokio::test]
@@ -710,6 +822,17 @@ mod tests {
             }
 
             #[test]
+            fn tool_call_start_ends_the_reply_line_before_its_header() {
+                let sink = test_sink(false);
+                render_one(&sink, Event::StreamToken("Let me look.".to_owned()));
+
+                let (stdout, stderr) = render_one(&sink, Event::ToolCallStart(ls_call()));
+
+                assert_eq!(stdout, "\n");
+                assert_eq!(stderr, "$ ls\n");
+            }
+
+            #[test]
             fn tool_call_end_with_title_writes_title_then_content() {
                 let (_, stderr) = render_one(
                     &test_sink(false),
@@ -937,17 +1060,37 @@ mod tests {
             }
 
             #[test]
-            fn turn_complete_writes_trailing_newline_to_stdout() {
-                let (stdout, stderr) = render_one(&test_sink(false), Event::TurnComplete);
-                assert_eq!(stdout, "\n");
-                assert_eq!(stderr, "");
+            fn turn_complete_ends_the_open_reply_line_once() {
+                let sink = test_sink(true);
+                render_one(&sink, Event::ThinkingToken("plan".to_owned()));
+
+                let ended = render_one(&sink, Event::TurnComplete);
+                let again = render_one(&sink, Event::TurnComplete);
+
+                assert_eq!(ended, ("\n".to_owned(), String::new()));
+                assert_eq!(again, (String::new(), String::new()));
             }
 
             #[test]
-            fn cancelled_writes_marker_to_stderr_and_blank_to_stdout() {
-                let (stdout, stderr) = render_one(&test_sink(false), Event::Cancelled);
+            fn turn_complete_leaves_a_closed_reply_line_alone() {
+                let sink = test_sink(false);
+                render_one(&sink, Event::StreamToken("Done.\n".to_owned()));
+
+                assert_eq!(
+                    render_one(&sink, Event::TurnComplete),
+                    (String::new(), String::new()),
+                );
+            }
+
+            #[test]
+            fn cancelled_ends_the_reply_line_then_writes_the_marker_to_stderr() {
+                let sink = test_sink(false);
+                render_one(&sink, Event::StreamToken("partial".to_owned()));
+
+                let (stdout, stderr) = render_one(&sink, Event::Cancelled);
+
                 assert_eq!(stdout, "\n");
-                assert_eq!(stderr.trim(), INTERRUPTED_MARKER);
+                assert_eq!(stderr, format!("{INTERRUPTED_MARKER}\n"));
             }
 
             #[test]
@@ -964,6 +1107,33 @@ mod tests {
                 assert_eq!(retry_stderr, format!("{retry}\n"));
                 assert_eq!(notice_stdout, "");
                 assert_eq!(notice_stderr, format!("{notice}\n"));
+            }
+
+            #[test]
+            fn turn_failed_ends_a_partial_reply_even_when_stderr_is_written_first() {
+                let sink = test_sink(false);
+                render_one(&sink, Event::StreamToken("partial reply".to_owned()));
+
+                let (stdout, stderr) = render_one(&sink, Event::TurnFailed("boom".to_owned()));
+
+                assert_eq!(stdout, "\n");
+                assert_eq!(stderr, "Error: boom\n");
+            }
+
+            #[test]
+            fn turn_failed_still_writes_stderr_when_stdout_is_closed() {
+                let sink = test_sink(false);
+                render_one(&sink, Event::StreamToken("partial reply".to_owned()));
+                let mut stderr = Vec::new();
+
+                let rendered = sink.render(
+                    Event::TurnFailed("boom".to_owned()),
+                    &mut ClosedPipe,
+                    &mut stderr,
+                );
+
+                assert!(rendered.is_err());
+                assert_eq!(stderr, b"Error: boom\n");
             }
 
             #[test]
