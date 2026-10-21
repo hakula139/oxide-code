@@ -2,7 +2,6 @@
 //! [`EngineHandle`], sending ops on a bounded channel and reading events from an unbounded one.
 
 mod abort;
-mod compact_boundary;
 mod compaction;
 mod dispatch;
 #[cfg(test)]
@@ -21,8 +20,8 @@ use tokio::sync::oneshot::error::TryRecvError;
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::{JoinError, JoinHandle};
 
-use self::abort::{AbortResult, Inbox, TurnAbort};
-use self::compaction::{AutoCompact, AutoCompactFailures};
+use self::abort::{Inbox, TurnAbort};
+use self::compaction::AutoCompactFailures;
 use self::turn::{TurnContext, TurnOutcome, TurnReport};
 use crate::client::anthropic::Client;
 use crate::config::Config;
@@ -36,11 +35,9 @@ use crate::model::{self, ModelSpec, TokenUsage};
 use crate::permission::{Mode, Policy, Workspace};
 use crate::prompt::{self, PromptParts, SessionContext, UserContext};
 use crate::protocol::notice::{self, ConfigSettings};
-use crate::protocol::{
-    CompactTrigger, ConfigPick, Event, EventSink, Interaction, Op, ResumeTarget, UsageSnapshot,
-};
+use crate::protocol::{ConfigPick, Event, EventSink, Interaction, Op, ResumeTarget, UsageSnapshot};
 use crate::session::display::id_prefix;
-use crate::session::entry::{CompactBoundary, CompactInfo, UsageRecord};
+use crate::session::entry::{CompactInfo, UsageRecord};
 use crate::session::handle::{self, Checkpoint, LoadedTranscript, RollIntoOutcome, SessionHandle};
 use crate::session::history;
 use crate::session::resolver::resolve_saved_prefix;
@@ -455,130 +452,6 @@ impl Engine {
         }
         self.emit_usage_update(sink);
         sink.emit(Event::TurnRolledBack, "turn-rolled-back");
-    }
-
-    async fn auto_compact(
-        &mut self,
-        sink: &dyn EventSink,
-        ops: &mut mpsc::Receiver<Op>,
-        inbox: &mut Inbox,
-    ) -> AbortResult<()> {
-        let tools = self.tools.definitions();
-        let mut spent = Vec::new();
-        let compacted = compaction::auto_compact_if_needed(
-            &self.client,
-            &self.session,
-            &mut self.messages,
-            sink,
-            ops,
-            inbox,
-            &mut AutoCompact {
-                config: self.compaction.auto,
-                usage: self.last_usage,
-                failures: &mut self.auto_compaction_failures,
-                file_tracker: &self.file_tracker,
-                prompt: &self.prompt,
-                tools: &tools,
-                tasks: &self.tasks,
-                shells: &self.shells,
-                spent: &mut spent,
-            },
-        )
-        .await;
-        self.bill(sink, &spent).await;
-        if matches!(compacted, Ok(true)) {
-            self.refresh_prompt(sink).await;
-            self.reset_context_usage(sink);
-        }
-        if !spent.is_empty() {
-            self.emit_usage_update(sink);
-        }
-        compacted.map(|_| ())
-    }
-
-    /// Replaces the transcript with a summary steered by `instructions`. Failures leave it intact.
-    async fn compact(
-        &mut self,
-        sink: &dyn EventSink,
-        ops: &mut mpsc::Receiver<Op>,
-        instructions: Option<String>,
-    ) -> TurnEnd {
-        let mut inbox = Inbox::default();
-        if let Err(abort) = self.ensure_signed_in(sink, ops, &mut inbox).await {
-            self.adopt_mode(&mut inbox);
-            return report_abort(sink, abort, "compact-failed");
-        }
-        let tools = self.tools.definitions();
-        let mut spent = Vec::new();
-        let summary = abort::await_unless_aborted(
-            compaction::compact_session(
-                &self.client,
-                &self.prompt,
-                &tools,
-                &self.messages,
-                instructions.as_deref(),
-                sink,
-                &mut spent,
-            ),
-            ops,
-            &mut inbox,
-            sink,
-        )
-        .await;
-        self.adopt_mode(&mut inbox);
-        let summary = match summary {
-            Ok(Ok(summary)) => summary,
-            Ok(Err(e)) => {
-                self.bill(sink, &spent).await;
-                let abort = TurnAbort::Failed(e.context("Compaction failed"));
-                return self.fail_compact(sink, abort);
-            }
-            Err(abort) => {
-                self.bill(sink, &spent).await;
-                return self.fail_compact(sink, abort);
-            }
-        };
-        let compacted = compact_boundary::replace_session_with_summary(
-            &self.session,
-            &self.file_tracker,
-            &mut self.messages,
-            sink,
-            CompactBoundary {
-                summary,
-                instructions,
-                tasks: self.tasks.clone(),
-                trigger: CompactTrigger::Manual,
-            },
-            &self.shells.list(),
-        )
-        .await;
-        // Bills after the boundary, as auto-compaction does, so a write error it surfaces follows
-        // the compaction event that clears the TUI's chat.
-        self.bill(sink, &spent).await;
-        if !compacted {
-            let abort = TurnAbort::Failed(anyhow!(
-                "Compaction was not saved, so the transcript is unchanged"
-            ));
-            return self.fail_compact(sink, abort);
-        }
-        self.refresh_prompt(sink).await;
-        self.reset_context_usage(sink);
-        self.emit_usage_update(sink);
-        sink.emit(Event::SessionReady, "session-ready");
-        TurnEnd::Completed
-    }
-
-    /// Ends a compaction that left the transcript unchanged, showing the summary's cost first.
-    fn fail_compact(&mut self, sink: &dyn EventSink, abort: TurnAbort) -> TurnEnd {
-        self.emit_usage_update(sink);
-        report_abort(sink, abort, "compact-failed")
-    }
-
-    /// Starts the compacted transcript from the current instructions and date.
-    async fn refresh_prompt(&mut self, sink: &dyn EventSink) {
-        let fresh = self.load_user_context(sink).await;
-        self.prompt.refresh(fresh);
-        self.prompt_unrecorded = true;
     }
 
     /// Reads the user context afresh, showing each instruction file warning the previous load did
@@ -1180,6 +1053,7 @@ mod tests {
     use crate::model::ResolvedModelId;
     use crate::permission::rule::Rule;
     use crate::permission::{Mode, PermissionClass, Workspace};
+    use crate::protocol::CompactTrigger;
     use crate::protocol::testing::CapturingSink;
     use crate::session::handle::testing::record_write_call;
     use crate::session::post_compact::synthesize_post_compact_message;

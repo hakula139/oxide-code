@@ -64,10 +64,10 @@ Explicit thresholds snap into a usable range. Token values below `50_000` rise t
 1. `agent_turn` streams a complete turn, persists the transcript tail, and returns the latest token usage in its `TurnReport`.
 2. `Engine` stores that usage as the pending automatic trigger signal.
 3. When the next prompt arrives, `Engine::auto_compact` checks the stored usage before `submit_prompt` records the prompt.
-4. If the total crosses the threshold, it calls the same compact driver used by `/compact`. A transcript below the `/compact` size floor is skipped without counting a failure, since the system prompt, instructions, and tools then fill most of the context and a summary would not shrink the request.
-5. `auto_compact_if_needed` emits `AutoCompactionStarted` so the TUI can show compaction status while the summarizer runs, and the summary streams into the chat as it does for `/compact`.
-6. On success, `compact_boundary` persists the compact boundary, clears the file tracker, replaces `messages` with the synthetic post-compact message, and emits `SessionCompacted`.
-7. On failure, the streamed summary is discarded, `auto_compact_if_needed` increments the failure counter, and `submit_prompt` ends with `TurnFailed` without recording or sending the new prompt.
+4. If the total crosses the threshold, it runs `Engine::summarize`, the same pipeline `/compact` uses. A transcript below the `/compact` size floor is skipped without counting a failure, since the system prompt, instructions, and tools then fill most of the context and a summary would not shrink the request.
+5. `Engine::auto_compact` emits `AutoCompactionStarted` so the TUI can show compaction status while the summarizer runs, and the summary streams into the chat as it does for `/compact`.
+6. On success, `Engine::replace_with_summary` persists the compact boundary, clears the file tracker, replaces `messages` with the synthetic post-compact message, and emits `SessionCompacted`.
+7. On failure, the streamed summary is discarded, `AutoCompactFailures::fail` increments the failure counter, and `submit_prompt` ends with `TurnFailed` without recording or sending the new prompt.
 
 The failure counter lives on `Engine`. Three consecutive automatic failures pause further automatic attempts until a successful compaction, a model or effort change, `/clear`, `/archive`, or `/resume` resets the counter. Manual `/compact` does not consult it. The failure that pauses it emits `AutoCompactionPaused` with the failure count, and a reset of the paused counter emits `AutoCompactionResumed`, which the TUI follows to show the pause in `/status`.
 

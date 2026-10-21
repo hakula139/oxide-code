@@ -24,12 +24,12 @@ Companions: [commands.md](commands.md), [session/persistence.md](../session/pers
 - The caller resets the file tracker, as `/clear` does, only after the boundary flush succeeds.
 - On resume, `load_session_data_from_path` treats `Entry::Compact` as a generation boundary, clears pre-compact sidecars, filters out later stale writes from the old chain, and carries `CompactInfo` so the TUI can render the boundary block while the model transcript keeps the synthetic root. The loader starts a fresh `ChainBuilder` at the boundary, and the walk back from the latest tail leaf stops at the post-compact head because its `parent_uuid` is `None`, so `ChainBuilder::resolve` needs no compaction logic. `session::sanitize` treats the synthetic continuation as an ordinary `role: user` text message.
 
-`Engine::compact` in `engine.rs` coordinates compaction:
+`Engine::compact` in `engine/compaction.rs` coordinates compaction through `Engine::summarize`, the pipeline auto-compaction also runs:
 
-- On success, it hands the summary and the session's task list to `engine/compact_boundary`'s `replace_session_with_summary`, which calls `session.compact(...)`, clears the file tracker, replaces the in-memory `Vec<Message>` with the synthetic continuation, and emits `Event::SessionCompacted { summary, pre_count, instructions, trigger }` with `trigger: CompactTrigger::Manual`. The engine then shows any instruction warning the rebuilt prompt newly raises, and ends the compaction with `SessionReady`.
+- On success, it hands the summary and the session's task list to `Engine::replace_with_summary`, which calls `session.compact(...)`, clears the file tracker, replaces the in-memory `Vec<Message>` with the synthetic continuation, and emits `Event::SessionCompacted { summary, pre_count, instructions, trigger }` with `trigger: CompactTrigger::Manual`. The engine then shows any instruction warning the rebuilt prompt newly raises, and ends the compaction with `SessionReady`.
 - Failure paths (stream error, unfinished or empty summary, too-short guard) emit `Event::TurnFailed` and leave the transcript unchanged. A summary whose boundary write fails is discarded before the failure is reported. Once session persistence has stopped, the summary still replaces the transcript, and the stop is reported after `SessionCompacted`.
 - Cancellation emits `Event::Cancelled` like a regular turn, and a quit ends the compaction without a terminal event. Dropping the summarization future discards the streamed summary first.
-- Each summary request is recorded as a `usage` entry, and its estimated cost joins the session total whether the summary succeeds, fails, or is cancelled. An `Event::UsageUpdated` then shows the new total, between `SessionCompacted` and `SessionReady` on success and before the terminal event otherwise.
+- Each summary request is recorded as a `usage` entry, and its estimated cost joins the session total whether the summary succeeds, fails, or is cancelled. An `Event::UsageUpdated` then shows the new total, between `SessionCompacted` and `SessionReady` on success, and before the terminal event when a failed or cancelled summary request reported usage.
 
 While the summary streams, the TUI shows it below the chat under a `Summarizing the conversation...` header through `CompactedBlock::render_streaming`, laid out like the block it becomes, and `Event::SummaryDiscarded` removes it. `App::apply_session_compacted` clears the chat, pushes a single `CompactedBlock`, keeps queued prompts, and clears the modal stack. The block has an accent-bar surface and no footer. It fills its `Compacted N messages into a summary` header from `pre_count`, adding a `(focus: ...)` suffix when `instructions` were given, and renders `summary` as Markdown below it. At `Event::SessionReady`, a manual compact returns to idle and submits the queue head, so the prompt renders below the notices the rebuilt prompt raises, or only returns to idle after a cancel that lost the race to the swap. Resume renders the same boundary block and skips the synthetic root in visible chat.
 
@@ -92,10 +92,9 @@ The stdio driver's `StdioSink` prints the same header on stderr, which `protocol
 
 - `crates/ox-core/src/client.rs`: `PromptTooLong`, the wire-neutral rejection that carries the reported overflow.
 - `crates/ox-core/src/client/anthropic/transport.rs`: `prompt_too_long_message`, which types an HTTP 400 `prompt is too long` as `PromptTooLong`.
-- `crates/ox-core/src/engine.rs`: `Engine::compact` beside `Engine::resume`, and session-cost accounting.
+- `crates/ox-core/src/engine.rs`: session-cost accounting.
 - `crates/ox-core/src/engine/abort.rs`: `await_unless_aborted`, which races the summarization against cancel and quit.
-- `crates/ox-core/src/engine/compact_boundary.rs`: `replace_session_with_summary`, shared by manual and automatic compaction.
-- `crates/ox-core/src/engine/compaction.rs`: `compact_session` driver, the `SummaryStream` sink, the context-window retries (`drop_oldest_rounds`, `retry_request`), and the `SUMMARIZATION_USER_RUBRIC` constant.
+- `crates/ox-core/src/engine/compaction.rs`: `Engine::compact`, `Engine::summarize` and `Engine::replace_with_summary`, shared by manual and automatic compaction, the `compact_session` driver, the `SummaryStream` sink, the context-window retries (`drop_oldest_rounds`, `retry_request`), and the `SUMMARIZATION_USER_RUBRIC` constant.
 - `crates/ox-core/src/engine/turn.rs`: `collect_response`, which reads the summary the way it reads a turn's reply.
 - `crates/ox-core/src/protocol.rs`: `Op::Compact`, `Event::SummaryToken`, `Event::SummaryDiscarded`, `Event::SessionCompacted`.
 - `crates/ox-core/src/protocol/notice.rs`: `compacted`, the boundary header every frontend shows.
