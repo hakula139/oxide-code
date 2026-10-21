@@ -42,7 +42,15 @@
       git-hooks-nix,
       ...
     }:
-    flake-utils.lib.eachDefaultSystem (
+    let
+      # git-hooks.nix has dropped x86_64-darwin, which Nixpkgs supports only through 26.05.
+      systems = [
+        "aarch64-darwin"
+        "aarch64-linux"
+        "x86_64-linux"
+      ];
+    in
+    flake-utils.lib.eachSystem systems (
       system:
       let
         pkgs = import nixpkgs {

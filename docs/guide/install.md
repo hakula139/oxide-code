@@ -7,7 +7,7 @@ How to install `ox` on macOS, Linux, and Windows. For first-run setup once insta
 - **macOS**: 12 or later on Apple Silicon.
 - **Linux**: x86_64 Linux with glibc 2.39 or later, such as Ubuntu 24.04, Debian 13, Fedora 40, or RHEL 10.
 - **Windows**: 10 or later on x86_64, with [Git for Windows](https://git-scm.com/downloads/win) and `git.exe` on `PATH`. The `bash` tool runs the `bash.exe` included with Git for Windows.
-- **Other platforms**: Intel Macs, ARM Linux, Linux with an older glibc, and musl-based Linux such as Alpine need a source build through [Cargo](#from-source-via-cargo) or [Nix](#nix).
+- **Other platforms**: ARM Linux, Linux with an older glibc, and musl-based Linux such as Alpine need a source build through [Cargo](#from-source-via-cargo) or [Nix](#nix). Intel Macs need a source build through Cargo, since the flake does not support them.
 - **Network**: Outbound HTTPS access to `api.anthropic.com` or your [LLM gateway](configuration.md#llm-gateways). Claude account logins also exchange and refresh tokens through `platform.claude.com`.
 
 ## Install `ox`
@@ -17,7 +17,7 @@ How to install `ox` on macOS, Linux, and Windows. For first-run setup once insta
 | [Prebuilt binary](#prebuilt-binary) | Apple Silicon macOS, x86_64 Linux and Windows | No                 |
 | [Homebrew](#homebrew)               | Apple Silicon macOS, x86_64 Linux             | No                 |
 | [Cargo](#from-source-via-cargo)     | Any platform Rust supports                    | Yes                |
-| [Nix](#nix)                         | Linux and macOS                               | Yes                |
+| [Nix](#nix)                         | Linux and Apple Silicon macOS                 | Yes                |
 
 ### Prebuilt Binary
 
