@@ -4,7 +4,8 @@ use std::sync::Arc;
 
 use bytes::Bytes;
 use tokio_util::task::TaskTracker;
-use wiremock::MockServer;
+use wiremock::matchers::{method, path};
+use wiremock::{Mock, MockServer, ResponseTemplate};
 
 use super::Client;
 use super::testing::{DEVICE_ID, api_key, test_config};
@@ -52,6 +53,33 @@ pub(super) fn messages_request(url: impl Into<String>) -> MessagesRequest {
         trust: Arc::new(NoRoots),
         reloads: TaskTracker::new(),
     }
+}
+
+/// A mock server answering `/v1/messages` with `responses` in order, one request each, then
+/// repeating the last one.
+pub(crate) async fn serve(responses: Vec<ResponseTemplate>) -> MockServer {
+    let server = MockServer::start().await;
+    let last = responses.len() - 1;
+    for (i, response) in responses.into_iter().enumerate() {
+        let mock = Mock::given(method("POST"))
+            .and(path("/v1/messages"))
+            .respond_with(response);
+        let mock = if i == last {
+            mock
+        } else {
+            mock.up_to_n_times(1)
+        };
+        mock.mount(&server).await;
+    }
+    server
+}
+
+pub(super) async fn request_count(server: &MockServer) -> usize {
+    server
+        .received_requests()
+        .await
+        .expect("the server records requests")
+        .len()
 }
 
 /// The `x-stainless-retry-count` of each request `server` received, in order.

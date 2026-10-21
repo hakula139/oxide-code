@@ -1233,19 +1233,7 @@ mod tests {
         #[tokio::test]
         async fn request_forks_the_conversation_prefix() {
             let server = MockServer::start().await;
-            let bodies: Arc<Mutex<Vec<serde_json::Value>>> = Arc::default();
-            let recorded = Arc::clone(&bodies);
-            Mock::given(method("POST"))
-                .and(path("/v1/messages"))
-                .respond_with(move |req: &Request| {
-                    recorded
-                        .lock()
-                        .unwrap()
-                        .push(serde_json::from_slice(&req.body).unwrap());
-                    sse_response(streamed_summary_body("done"))
-                })
-                .mount(&server)
-                .await;
+            mount_summary(&server, streamed_summary_body("done")).await;
             let client = test_client(server.uri(), api_key(), "claude-haiku-5-5");
             let prompt = parent_prompt();
             let tools = [ToolDefinition {
@@ -1276,7 +1264,13 @@ mod tests {
             .await
             .unwrap();
 
-            let mut bodies = bodies.lock().unwrap().clone();
+            let mut bodies: Vec<serde_json::Value> = server
+                .received_requests()
+                .await
+                .unwrap()
+                .iter()
+                .map(|request| serde_json::from_slice(&request.body).unwrap())
+                .collect();
             bodies.iter_mut().for_each(strip_cache_control);
             let [parent, fork] = bodies.as_slice() else {
                 panic!("expected two requests, got {}", bodies.len());

@@ -136,29 +136,27 @@ mod tests {
         use super::*;
 
         #[test]
-        fn replaces_placeholder() {
+        fn hashes_the_body_into_the_placeholder() {
             let body = r#"{"system":[{"type":"text","text":"cch=00000;"}],"messages":[]}"#;
 
             let result = inject_cch(body).unwrap();
 
-            let hash = xxh64::xxh64(body.as_bytes(), CCH_SEED);
-            let cch = format!("{:05x}", hash & 0xFFFFF);
             assert_eq!(
                 result,
-                format!(r#"{{"system":[{{"type":"text","text":"cch={cch};"}}],"messages":[]}}"#),
+                r#"{"system":[{"type":"text","text":"cch=62b56;"}],"messages":[]}"#,
             );
         }
 
         #[test]
-        fn replaces_only_first_occurrence() {
+        fn zero_pads_the_hash_and_replaces_only_the_first_placeholder() {
             // `system` precedes `messages`, as in the request struct's field order.
             let body = r#"{"system":[{"type":"text","text":"cch=00000;"}],"messages":[{"role":"user","content":[{"type":"text","text":"cch=00000"}]}]}"#;
+
             let result = inject_cch(body).unwrap();
 
             assert_eq!(
-                result.matches("cch=00000").count(),
-                1,
-                "only the second occurrence (in messages) should remain"
+                result,
+                r#"{"system":[{"type":"text","text":"cch=04c72;"}],"messages":[{"role":"user","content":[{"type":"text","text":"cch=00000"}]}]}"#,
             );
         }
 

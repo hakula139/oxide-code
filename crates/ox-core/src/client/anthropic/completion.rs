@@ -1,4 +1,4 @@
-//! Non-streaming `/v1/messages` one-shot path. Returns flattened assistant text and the response's
+//! Non-streaming `/v1/messages` side-query path. Returns flattened assistant text and the response's
 //! usage.
 
 use anyhow::{Context, Result};
@@ -84,7 +84,8 @@ mod tests {
 
     use super::*;
     use crate::client::anthropic::local_testing::{
-        COMPLETION_USAGE, auth_token, client_for, completion_body, oauth, test_client,
+        COMPLETION_USAGE, auth_token, client_for, completion_body, oauth, request_count, serve,
+        test_client,
     };
     use crate::client::anthropic::testing::{DEVICE_ID, api_key, test_config};
     use crate::client::anthropic::{SYSTEM_PROMPT_PREFIX, attribution_text, build_metadata};
@@ -101,16 +102,6 @@ mod tests {
                 ModelSpec::resolve(HAIKU.to_owned())
             }
 
-            async fn serve(response: ResponseTemplate) -> MockServer {
-                let server = MockServer::start().await;
-                Mock::given(method("POST"))
-                    .and(path("/v1/messages"))
-                    .respond_with(response)
-                    .mount(&server)
-                    .await;
-                server
-            }
-
             async fn complete_err(client: &Client) -> String {
                 let err = client
                     .complete(&haiku(), "", "u", 40, None, None)
@@ -120,30 +111,10 @@ mod tests {
             }
 
             #[tokio::test]
-            async fn sends_the_current_session_id_header() {
-                // `/clear` rolls the id in place, so `complete` must send the current one.
-                let server = MockServer::start().await;
-                Mock::given(method("POST"))
-                    .and(path("/v1/messages"))
-                    .and(header("x-claude-code-session-id", "sid-rolled"))
-                    .respond_with(ResponseTemplate::new(200).set_body_string(completion_body("ok")))
-                    .expect(1)
-                    .mount(&server)
-                    .await;
-                let mut client = test_client(server.uri(), api_key(), HAIKU);
-                client.set_session_id("sid-rolled".to_owned());
-
-                client
-                    .complete(&haiku(), "", "u", 40, None, None)
-                    .await
-                    .unwrap();
-            }
-
-            #[tokio::test]
             async fn happy_path_produces_assistant_text_and_usage() {
-                let server = serve(
+                let server = serve(vec![
                     ResponseTemplate::new(200).set_body_string(completion_body("Fix login bug")),
-                )
+                ])
                 .await;
                 let client = test_client(server.uri(), api_key(), HAIKU);
 
@@ -158,8 +129,10 @@ mod tests {
 
             #[tokio::test]
             async fn sends_the_caller_system_and_prompt_as_a_side_query() {
-                let server =
-                    serve(ResponseTemplate::new(200).set_body_string(completion_body("ok"))).await;
+                let server = serve(vec![
+                    ResponseTemplate::new(200).set_body_string(completion_body("ok")),
+                ])
+                .await;
                 let mut config = test_config(server.uri(), api_key(), HAIKU);
                 config.gateway.attribution = false;
                 let client = client_for(&config);
@@ -190,107 +163,23 @@ mod tests {
             }
 
             #[tokio::test]
-            async fn retries_a_transient_status_before_the_reply() {
+            async fn sends_the_current_session_id_header() {
+                // `/clear` rolls the id in place, so `complete` must send the current one.
                 let server = MockServer::start().await;
                 Mock::given(method("POST"))
                     .and(path("/v1/messages"))
-                    .respond_with(ResponseTemplate::new(529).insert_header("retry-after", "0"))
-                    .up_to_n_times(1)
+                    .and(header("x-claude-code-session-id", "sid-rolled"))
+                    .respond_with(ResponseTemplate::new(200).set_body_string(completion_body("ok")))
+                    .expect(1)
                     .mount(&server)
                     .await;
-                Mock::given(method("POST"))
-                    .and(path("/v1/messages"))
-                    .respond_with(
-                        ResponseTemplate::new(200)
-                            .set_body_string(completion_body("Fix login bug")),
-                    )
-                    .mount(&server)
-                    .await;
-                let client = test_client(server.uri(), api_key(), HAIKU);
+                let mut client = test_client(server.uri(), api_key(), HAIKU);
+                client.set_session_id("sid-rolled".to_owned());
 
-                let (text, _) = client
-                    .complete(&haiku(), "sys", "user input", 40, None, None)
-                    .await
-                    .unwrap();
-
-                assert_eq!(text, "Fix login bug");
-                assert_eq!(server.received_requests().await.unwrap().len(), 2);
-            }
-
-            #[tokio::test]
-            async fn while_signed_out_fails_without_a_request() {
-                let mut config = test_config("https://example.invalid", api_key(), HAIKU);
-                config.auth = None;
-                let client = client_for(&config);
-
-                let err = complete_err(&client).await;
-
-                assert_eq!(err, "not signed in");
-            }
-
-            #[tokio::test]
-            async fn http_error_propagates_status_and_body() {
-                let server = serve(ResponseTemplate::new(400).set_body_string(
-                    r#"{"type":"error","error":{"type":"invalid_request_error","message":"max_tokens: must be positive"}}"#,
-                ))
-                .await;
-                let client = test_client(server.uri(), api_key(), HAIKU);
-
-                let err = complete_err(&client).await;
-
-                assert_eq!(
-                    err,
-                    "Anthropic API error (HTTP 400 Bad Request): max_tokens: must be positive"
-                );
-            }
-
-            #[tokio::test]
-            async fn on_429_surfaces_retry_after_header_in_error() {
-                let server = serve(
-                    ResponseTemplate::new(429)
-                        .insert_header("retry-after", "120")
-                        .set_body_string(
-                            r#"{"type":"error","error":{"type":"rate_limit_error","message":"Slow down"}}"#,
-                        ),
-                )
-                .await;
-                let client = test_client(server.uri(), api_key(), HAIKU);
-
-                let err = complete_err(&client).await;
-
-                assert_eq!(
-                    err,
-                    "Anthropic API rate limited (HTTP 429): Slow down. Retry after 120 s."
-                );
-            }
-
-            #[tokio::test]
-            async fn on_401_names_the_gateway_token_variable() {
-                let server =
-                    serve(ResponseTemplate::new(401).set_body_string("unauthorized")).await;
-                let client = test_client(server.uri(), auth_token(), HAIKU);
-
-                let err = complete_err(&client).await;
-
-                assert_eq!(
-                    err,
-                    "Anthropic API rejected credentials (HTTP 401): unauthorized. \
-                     Check ANTHROPIC_AUTH_TOKEN."
-                );
-            }
-
-            #[tokio::test]
-            async fn malformed_response_body_errors_with_parse_context() {
-                // A 200 with non-JSON must surface a parse error so the title path falls back.
-                let server = serve(ResponseTemplate::new(200).set_body_string("<not json>")).await;
-                let client = test_client(server.uri(), api_key(), HAIKU);
-
-                let err = client
+                client
                     .complete(&haiku(), "", "u", 40, None, None)
                     .await
-                    .expect_err("the request must fail");
-
-                assert_eq!(err.to_string(), "failed to parse completion response");
+                    .unwrap();
             }
 
             #[tokio::test]
@@ -304,9 +193,10 @@ mod tests {
                 });
                 let fmt = OutputFormat::json_schema(schema.clone());
                 for structured_outputs in [true, false] {
-                    let server =
-                        serve(ResponseTemplate::new(200).set_body_string(completion_body("ok")))
-                            .await;
+                    let server = serve(vec![
+                        ResponseTemplate::new(200).set_body_string(completion_body("ok")),
+                    ])
+                    .await;
                     let mut config = test_config(server.uri(), oauth(), HAIKU);
                     config.gateway.structured_outputs = structured_outputs;
                     let client = client_for(&config);
@@ -341,9 +231,10 @@ mod tests {
                     (oauth(), true),
                     (api_key(), false),
                 ] {
-                    let server =
-                        serve(ResponseTemplate::new(200).set_body_string(completion_body("ok")))
-                            .await;
+                    let server = serve(vec![
+                        ResponseTemplate::new(200).set_body_string(completion_body("ok")),
+                    ])
+                    .await;
                     let kind = auth.kind();
                     let mut config = test_config(server.uri(), auth, HAIKU);
                     config.gateway.attribution = attribution;
@@ -366,6 +257,105 @@ mod tests {
                         "{kind:?} {attribution}"
                     );
                 }
+            }
+
+            #[tokio::test]
+            async fn retries_a_transient_status_before_the_reply() {
+                let server = serve(vec![
+                    ResponseTemplate::new(529).insert_header("retry-after", "0"),
+                    ResponseTemplate::new(200).set_body_string(completion_body("Fix login bug")),
+                ])
+                .await;
+                let client = test_client(server.uri(), api_key(), HAIKU);
+
+                let (text, _) = client
+                    .complete(&haiku(), "sys", "user input", 40, None, None)
+                    .await
+                    .unwrap();
+
+                assert_eq!(text, "Fix login bug");
+                assert_eq!(request_count(&server).await, 2);
+            }
+
+            #[tokio::test]
+            async fn while_signed_out_fails_without_a_request() {
+                let mut config = test_config("https://example.invalid", api_key(), HAIKU);
+                config.auth = None;
+                let client = client_for(&config);
+
+                let err = complete_err(&client).await;
+
+                assert_eq!(err, "not signed in");
+            }
+
+            #[tokio::test]
+            async fn http_error_propagates_status_and_body() {
+                let server = serve(vec![ResponseTemplate::new(400).set_body_string(
+                    r#"{"type":"error","error":{"type":"invalid_request_error","message":"max_tokens: must be positive"}}"#,
+                )])
+                .await;
+                let client = test_client(server.uri(), api_key(), HAIKU);
+
+                let err = complete_err(&client).await;
+
+                assert_eq!(
+                    err,
+                    "Anthropic API error (HTTP 400 Bad Request): max_tokens: must be positive"
+                );
+            }
+
+            #[tokio::test]
+            async fn on_429_surfaces_retry_after_header_in_error() {
+                let server = serve(vec![
+                    ResponseTemplate::new(429)
+                        .insert_header("retry-after", "120")
+                        .set_body_string(
+                            r#"{"type":"error","error":{"type":"rate_limit_error","message":"Slow down"}}"#,
+                        ),
+                ])
+                .await;
+                let client = test_client(server.uri(), api_key(), HAIKU);
+
+                let err = complete_err(&client).await;
+
+                assert_eq!(
+                    err,
+                    "Anthropic API rate limited (HTTP 429): Slow down. Retry after 120 s."
+                );
+            }
+
+            #[tokio::test]
+            async fn on_401_names_the_gateway_token_variable() {
+                let server = serve(vec![
+                    ResponseTemplate::new(401).set_body_string("unauthorized"),
+                ])
+                .await;
+                let client = test_client(server.uri(), auth_token(), HAIKU);
+
+                let err = complete_err(&client).await;
+
+                assert_eq!(
+                    err,
+                    "Anthropic API rejected credentials (HTTP 401): unauthorized. \
+                     Check ANTHROPIC_AUTH_TOKEN."
+                );
+            }
+
+            #[tokio::test]
+            async fn malformed_response_body_errors_with_parse_context() {
+                // A 200 with non-JSON must surface a parse error so the title path falls back.
+                let server = serve(vec![
+                    ResponseTemplate::new(200).set_body_string("<not json>"),
+                ])
+                .await;
+                let client = test_client(server.uri(), api_key(), HAIKU);
+
+                let err = client
+                    .complete(&haiku(), "", "u", 40, None, None)
+                    .await
+                    .expect_err("the request must fail");
+
+                assert_eq!(err.to_string(), "failed to parse completion response");
             }
         }
     }

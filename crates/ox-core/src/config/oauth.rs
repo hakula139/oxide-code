@@ -1041,7 +1041,7 @@ mod tests {
 
     use indoc::indoc;
     use wiremock::matchers::{body_partial_json, method, path as wm_path};
-    use wiremock::{Mock, MockServer, Request, ResponseTemplate};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
 
     use super::testing::{HeldRefresh, creds_json, ok_refresh_body, write_creds};
     use super::*;
@@ -2241,24 +2241,20 @@ mod tests {
         #[tokio::test]
         async fn sends_grant_and_client_id_and_produces_parsed_response() {
             let server = MockServer::start().await;
-            let captured: Arc<Mutex<Option<serde_json::Value>>> = Arc::new(Mutex::new(None));
-            let captured_clone = Arc::clone(&captured);
             Mock::given(method("POST"))
                 .and(wm_path("/"))
-                .respond_with(move |req: &Request| {
-                    *captured_clone.lock().unwrap() = serde_json::from_slice(&req.body).ok();
-                    ResponseTemplate::new(200).set_body_json(ok_refresh_body(
-                        "new-access",
-                        "new-refresh",
-                        3600,
-                    ))
-                })
+                .respond_with(ResponseTemplate::new(200).set_body_json(ok_refresh_body(
+                    "new-access",
+                    "new-refresh",
+                    3600,
+                )))
                 .mount(&server)
                 .await;
 
             let response = refresh_oauth_token(&server.uri(), "old-refresh", &NoRoots)
                 .await
                 .unwrap();
+
             assert_eq!(response.access_token, "new-access");
             assert_eq!(response.refresh_token, "new-refresh");
             assert_eq!(response.expires_in, 3600);
@@ -2267,11 +2263,17 @@ mod tests {
                 Some("user:profile user:inference")
             );
 
-            let body = captured.lock().unwrap().take().expect("body captured");
-            assert_eq!(body["grant_type"], "refresh_token");
-            assert_eq!(body["refresh_token"], "old-refresh");
-            assert_eq!(body["client_id"], OAUTH_CLIENT_ID);
-            assert_eq!(body["scope"], OAUTH_SCOPES.join(" "));
+            let received = server.received_requests().await.unwrap();
+            let body: serde_json::Value = serde_json::from_slice(&received[0].body).unwrap();
+            assert_eq!(
+                body,
+                serde_json::json!({
+                    "grant_type": "refresh_token",
+                    "refresh_token": "old-refresh",
+                    "client_id": OAUTH_CLIENT_ID,
+                    "scope": OAUTH_SCOPES.join(" "),
+                }),
+            );
         }
 
         #[tokio::test]

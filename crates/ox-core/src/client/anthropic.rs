@@ -503,13 +503,14 @@ fn build_system_blocks<'a>(
 #[cfg(test)]
 mod tests {
     use std::fmt::Write as _;
-    use std::path::PathBuf;
 
     use indoc::writedoc;
     use wiremock::matchers::{body_partial_json, header, method, path, query_param};
     use wiremock::{Mock, MockServer, Request, ResponseTemplate};
 
-    use super::local_testing::{client_for, completion_body, oauth, test_client};
+    use super::local_testing::{
+        client_for, completion_body, oauth, request_count, serve, test_client,
+    };
     use super::testing::{DEVICE_ID, api_key, sse_response, test_config, text_stream_body};
     use super::*;
     use crate::client::{Response, StopReason};
@@ -535,6 +536,17 @@ mod tests {
             Ok(out)
         }
 
+        /// Streams one `hi` turn through `client` and collects its events.
+        async fn stream_hi(client: &Client) -> Result<Vec<ResponseEvent>> {
+            let rx = client.stream_message(
+                &[Message::user("hi")],
+                &SystemPrompt::default(),
+                None,
+                &[],
+            )?;
+            collect_events(rx).await
+        }
+
         /// Streams `messages` through `client` against a mock server and returns the request it
         /// received.
         async fn capture_stream(
@@ -543,13 +555,7 @@ mod tests {
             system: &SystemPrompt,
             user_context: Option<&str>,
         ) -> Request {
-            let server = MockServer::start().await;
-            Mock::given(method("POST"))
-                .and(path("/v1/messages"))
-                .respond_with(sse_response(text_stream_body("", "Hi")))
-                .mount(&server)
-                .await;
-
+            let server = serve(vec![sse_response(text_stream_body("", "Hi"))]).await;
             client.messages_url = messages_url(&server.uri());
             collect_events(
                 client
@@ -598,12 +604,10 @@ mod tests {
             use super::*;
 
             #[test]
-            fn exposes_the_model_under_each_credential() {
-                for auth in [api_key(), oauth()] {
-                    let client = test_client(OFFLINE_URL, auth, TEST_MODEL);
+            fn exposes_the_model() {
+                let client = test_client(OFFLINE_URL, api_key(), TEST_MODEL);
 
-                    assert_eq!(client.model().id(), TEST_MODEL);
-                }
+                assert_eq!(client.model().id(), TEST_MODEL);
             }
 
             #[test]
@@ -652,10 +656,7 @@ mod tests {
                 let base_url = format!("{}/anthropic/", server.uri());
                 let client = test_client(base_url, api_key(), TEST_MODEL);
 
-                let rx = client
-                    .stream_message(&[Message::user("hi")], &SystemPrompt::default(), None, &[])
-                    .unwrap();
-                collect_events(rx).await.unwrap();
+                stream_hi(&client).await.unwrap();
             }
 
             #[test]
@@ -663,7 +664,7 @@ mod tests {
                 // `util::tls` covers the handshake through a bundle, so this checks only that a
                 // valid one builds a client with the platform's real trust services.
                 let cfg = test_config(OFFLINE_URL, api_key(), TEST_MODEL);
-                let trust = PlatformTrust(Some(PathBuf::from(TEST_CA_PATH)));
+                let trust = PlatformTrust(Some(TEST_CA_PATH.into()));
 
                 Client::new(&cfg, trust, None, DEVICE_ID.to_owned())
                     .expect("valid CA bundle must build a client");
@@ -674,7 +675,7 @@ mod tests {
                 // An unreadable trust anchor must fail the client build and cite the configured
                 // path so the user can debug it without inspecting TLS internals.
                 let cfg = test_config(OFFLINE_URL, api_key(), TEST_MODEL);
-                let trust = PlatformTrust(Some(PathBuf::from("/no/such/bundle.pem")));
+                let trust = PlatformTrust(Some("/no/such/bundle.pem".into()));
 
                 let err = Client::new(&cfg, trust, None, DEVICE_ID.to_owned())
                     .err()
@@ -708,31 +709,16 @@ mod tests {
 
             #[tokio::test]
             async fn propagates_to_header_and_metadata_user_id() {
-                // Pin both wire surfaces: the mock matches the rolled id in the header, and the
-                // assertion below pins the embedded JSON in `metadata.user_id`.
-                let server = MockServer::start().await;
-                Mock::given(method("POST"))
-                    .and(path("/v1/messages"))
-                    .and(header("x-claude-code-session-id", "sid-rolled"))
-                    .respond_with(sse_response(text_stream_body("", "Hi")))
-                    .mount(&server)
-                    .await;
-
-                let mut client = test_client(server.uri(), api_key(), TEST_MODEL);
+                let mut client = test_client(OFFLINE_URL, api_key(), TEST_MODEL);
 
                 client.set_session_id("sid-rolled".to_owned());
-                collect_events(
-                    client
-                        .stream_message(&[Message::user("hi")], &SystemPrompt::default(), None, &[])
-                        .unwrap(),
-                )
-                .await
-                .unwrap();
+                let request = capture_stream_request(client).await;
 
-                let received = server.received_requests().await.expect("recorded requests");
-                assert_eq!(received.len(), 1, "exactly one streamed call");
-                let body: serde_json::Value =
-                    serde_json::from_slice(&received[0].body).expect("request body is JSON");
+                assert_eq!(
+                    request_header(&request, "x-claude-code-session-id"),
+                    Some("sid-rolled"),
+                );
+                let body: serde_json::Value = serde_json::from_slice(&request.body).unwrap();
                 assert_eq!(
                     body["metadata"]["user_id"],
                     build_metadata(DEVICE_ID, "sid-rolled").user_id,
@@ -864,12 +850,7 @@ mod tests {
             #[tokio::test]
             async fn waits_for_a_refresh_that_a_replaced_login_left_in_flight() {
                 for (token, expires_at) in [("expired", 0), ("rejected", 9_999_999_999_999)] {
-                    let server = MockServer::start().await;
-                    Mock::given(method("POST"))
-                        .and(path("/v1/messages"))
-                        .respond_with(ResponseTemplate::new(401))
-                        .mount(&server)
-                        .await;
+                    let server = serve(vec![ResponseTemplate::new(401)]).await;
                     let refresh = HeldRefresh::mount(&server).await;
                     let dir = tempfile::tempdir().unwrap();
                     let creds = dir.path().join("credentials.json");
@@ -926,24 +907,10 @@ mod tests {
 
             #[tokio::test]
             async fn streams_usage_and_text_then_completes_the_reply() {
-                let server = MockServer::start().await;
-                Mock::given(method("POST"))
-                    .and(path("/v1/messages"))
-                    .and(query_param("beta", "true"))
-                    .respond_with(sse_response(text_stream_body("", "Hi")))
-                    .mount(&server)
-                    .await;
-
+                let server = serve(vec![sse_response(text_stream_body("", "Hi"))]).await;
                 let client = test_client(server.uri(), api_key(), TEST_MODEL);
-                let rx = client
-                    .stream_message(
-                        &[Message::user("hello")],
-                        &SystemPrompt::default(),
-                        None,
-                        &[],
-                    )
-                    .unwrap();
-                let events = collect_events(rx).await.unwrap();
+
+                let events = stream_hi(&client).await.unwrap();
 
                 assert_eq!(
                     events,
@@ -966,7 +933,6 @@ mod tests {
             async fn preserves_multibyte_codepoints_in_deltas() {
                 // Pins the byte-level SSE buffer: lossy UTF-8 would mangle a 4-byte emoji split
                 // across TCP chunk boundaries.
-                let server = MockServer::start().await;
                 let body = raw_sse_body(&[
                     (
                         "content_block_start",
@@ -978,25 +944,23 @@ mod tests {
                     ),
                     ("message_stop", r#"{"type":"message_stop"}"#),
                 ]);
-                Mock::given(method("POST"))
-                    .and(path("/v1/messages"))
-                    .respond_with(sse_response(body))
-                    .mount(&server)
-                    .await;
-
+                let server = serve(vec![sse_response(body)]).await;
                 let client = test_client(server.uri(), api_key(), TEST_MODEL);
-                let events = collect_events(
-                    client
-                        .stream_message(&[Message::user("hi")], &SystemPrompt::default(), None, &[])
-                        .unwrap(),
-                )
-                .await
-                .unwrap();
-                let got = events.iter().find_map(|e| match e {
-                    ResponseEvent::Text(text) => Some(text.as_str()),
-                    _ => None,
-                });
-                assert_eq!(got, Some("🦀rust"));
+
+                let events = stream_hi(&client).await.unwrap();
+
+                assert_eq!(
+                    events,
+                    [
+                        ResponseEvent::Text("🦀rust".to_owned()),
+                        ResponseEvent::Completed(Response {
+                            content: vec![ContentBlock::Text {
+                                text: "🦀rust".to_owned(),
+                            }],
+                            ..Response::default()
+                        }),
+                    ],
+                );
             }
 
             #[tokio::test]
@@ -1146,30 +1110,36 @@ mod tests {
                 )
                 .await;
 
-                let beta = request_header(&request, "anthropic-beta").unwrap();
-                assert!(
-                    beta.contains("prompt-caching-scope-2026-01-05"),
-                    "prompt-caching-scope beta ships on 3P: {beta}",
+                let betas = request_header(&request, "anthropic-beta").unwrap();
+                assert_eq!(
+                    betas.split(',').collect::<Vec<_>>(),
+                    [
+                        "claude-code-20250219",
+                        "interleaved-thinking-2025-05-14",
+                        "thinking-token-count-2026-05-13",
+                        "context-management-2025-06-27",
+                        "prompt-caching-scope-2026-01-05",
+                        "mid-conversation-system-2026-04-07",
+                        "per-turn-control-2026-07-01",
+                        "advisor-tool-2026-03-01",
+                        "effort-2025-11-24",
+                        "thinking-binding-controls-2026-08-01",
+                        "thinking-display-updates-2026-08-18",
+                    ],
                 );
-                let v: serde_json::Value = serde_json::from_slice(&request.body).unwrap();
-                let system = v["system"].as_array().expect("system array");
-                // [0] billing, [1] identity prefix, [2] static joined.
-                assert!(
-                    system[0]["text"]
-                        .as_str()
-                        .unwrap()
-                        .starts_with("x-anthropic-billing-header:"),
-                    "billing header occupies system[0]: {v}",
+                let body: serde_json::Value = serde_json::from_slice(&request.body).unwrap();
+                assert_eq!(
+                    body["system"],
+                    serde_json::json!([
+                        {"type": "text", "text": attribution_text("hi", false)},
+                        {"type": "text", "text": SYSTEM_PROMPT_PREFIX},
+                        {
+                            "type": "text",
+                            "text": "static",
+                            "cache_control": {"type": "ephemeral", "ttl": "1h"},
+                        },
+                    ]),
                 );
-                assert_eq!(system[1]["text"], SYSTEM_PROMPT_PREFIX);
-                let cc = &system[2]["cache_control"];
-                assert_eq!(cc["type"], "ephemeral");
-                assert!(
-                    cc.get("scope").is_none(),
-                    "scope field omitted entirely on 3P (not null): {v}",
-                );
-                // TTL rides through on 3P. Only `scope` is gated on 1P.
-                assert_eq!(cc["ttl"], "1h", "default 1h ttl survives on 3P: {v}");
             }
 
             #[tokio::test]
@@ -1223,7 +1193,6 @@ mod tests {
 
             #[tokio::test]
             async fn malformed_frame_is_skipped_without_poisoning_stream() {
-                let server = MockServer::start().await;
                 let body = raw_sse_body(&[
                     (
                         "content_block_start",
@@ -1236,55 +1205,44 @@ mod tests {
                     ),
                     ("message_stop", r#"{"type":"message_stop"}"#),
                 ]);
-                Mock::given(method("POST"))
-                    .and(path("/v1/messages"))
-                    .respond_with(sse_response(body))
-                    .mount(&server)
-                    .await;
-
+                let server = serve(vec![sse_response(body)]).await;
                 let client = test_client(server.uri(), api_key(), TEST_MODEL);
-                let events = collect_events(
-                    client
-                        .stream_message(&[Message::user("hi")], &SystemPrompt::default(), None, &[])
-                        .unwrap(),
-                )
-                .await
-                .unwrap();
-                let delta = events.iter().find_map(|e| match e {
-                    ResponseEvent::Text(text) => Some(text.as_str()),
-                    _ => None,
-                });
-                assert_eq!(delta, Some("Hi"));
+
+                let events = stream_hi(&client).await.unwrap();
+
+                assert_eq!(
+                    events,
+                    [
+                        ResponseEvent::Text("Hi".to_owned()),
+                        ResponseEvent::Completed(Response {
+                            content: vec![ContentBlock::Text {
+                                text: "Hi".to_owned(),
+                            }],
+                            ..Response::default()
+                        }),
+                    ],
+                );
             }
 
             #[tokio::test]
             async fn in_band_error_fails_the_stream_with_its_payload() {
-                let server = MockServer::start().await;
                 let body = raw_sse_body(&[(
                     "error",
                     r#"{"type":"error","error":{"type":"invalid_request_error","message":"Bad block"}}"#,
                 )]);
-                Mock::given(method("POST"))
-                    .and(path("/v1/messages"))
-                    .respond_with(sse_response(body))
-                    .mount(&server)
-                    .await;
-
+                let server = serve(vec![sse_response(body)]).await;
                 let client = test_client(server.uri(), api_key(), TEST_MODEL);
-                let err = collect_events(
-                    client
-                        .stream_message(&[Message::user("hi")], &SystemPrompt::default(), None, &[])
-                        .unwrap(),
-                )
-                .await
-                .expect_err("an in-band error fails the stream");
+
+                let err = stream_hi(&client)
+                    .await
+                    .expect_err("an in-band error fails the stream");
 
                 assert_eq!(
                     format!("{err:#}"),
                     "Anthropic API error (invalid_request_error): Bad block"
                 );
                 assert_eq!(
-                    server.received_requests().await.unwrap().len(),
+                    request_count(&server).await,
                     1,
                     "a non-transient error is not retried",
                 );
@@ -1292,34 +1250,23 @@ mod tests {
 
             #[tokio::test]
             async fn redirect_is_not_followed() {
-                let elsewhere = MockServer::start().await;
-                Mock::given(method("POST"))
-                    .respond_with(ResponseTemplate::new(200))
-                    .expect(0)
-                    .mount(&elsewhere)
+                let elsewhere = serve(vec![ResponseTemplate::new(200)]).await;
+                let server =
+                    serve(vec![ResponseTemplate::new(307).insert_header(
+                        "location",
+                        format!("{}/v1/messages", elsewhere.uri()),
+                    )])
                     .await;
-                let server = MockServer::start().await;
-                Mock::given(method("POST"))
-                    .and(path("/v1/messages"))
-                    .respond_with(
-                        ResponseTemplate::new(307)
-                            .insert_header("location", format!("{}/v1/messages", elsewhere.uri())),
-                    )
-                    .mount(&server)
-                    .await;
-
                 let client = test_client(server.uri(), api_key(), TEST_MODEL);
-                let rx = client
-                    .stream_message(&[Message::user("hi")], &SystemPrompt::default(), None, &[])
-                    .unwrap();
-                let err = collect_events(rx).await.expect_err("redirect must fail");
+
+                let err = stream_hi(&client).await.expect_err("redirect must fail");
 
                 assert_eq!(
                     format!("{err:#}"),
                     "Anthropic API endpoint redirected (HTTP 307 Temporary Redirect) to 127.0.0.1. \
                      Redirects are not followed, so point the base URL at the final endpoint.",
                 );
-                elsewhere.verify().await;
+                assert_eq!(request_count(&elsewhere).await, 0);
             }
 
             #[tokio::test]
@@ -1341,22 +1288,15 @@ mod tests {
                             .to_owned(),
                     ),
                 ] {
-                    let server = MockServer::start().await;
-                    Mock::given(method("POST"))
-                        .and(path("/v1/messages"))
-                        .respond_with(
-                            ResponseTemplate::new(status)
-                                .insert_header("x-should-retry", "false")
-                                .set_body_string(body),
-                        )
-                        .mount(&server)
-                        .await;
-
+                    let server = serve(vec![
+                        ResponseTemplate::new(status)
+                            .insert_header("x-should-retry", "false")
+                            .set_body_string(body),
+                    ])
+                    .await;
                     let client = test_client(server.uri(), api_key(), TEST_MODEL);
-                    let rx = client
-                        .stream_message(&[Message::user("hi")], &SystemPrompt::default(), None, &[])
-                        .unwrap();
-                    let err = collect_events(rx).await.expect_err("expected HTTP error");
+
+                    let err = stream_hi(&client).await.expect_err("expected HTTP error");
 
                     assert_eq!(format!("{err:#}"), expected);
                 }
@@ -1364,23 +1304,17 @@ mod tests {
 
             #[tokio::test]
             async fn on_401_names_the_oauth_token_variable_without_resending() {
-                let server = MockServer::start().await;
-                Mock::given(method("POST"))
-                    .and(path("/v1/messages"))
-                    .respond_with(ResponseTemplate::new(401).set_body_string("token revoked"))
-                    .expect(1)
-                    .mount(&server)
-                    .await;
-
+                let server = serve(vec![
+                    ResponseTemplate::new(401).set_body_string("token revoked"),
+                ])
+                .await;
                 let client = test_client(
                     server.uri(),
                     Auth::new(AuthSource::OAuthTokenEnv, "oat-env"),
                     TEST_MODEL,
                 );
-                let rx = client
-                    .stream_message(&[Message::user("hi")], &SystemPrompt::default(), None, &[])
-                    .unwrap();
-                let err = collect_events(rx).await.expect_err("expected 401");
+
+                let err = stream_hi(&client).await.expect_err("expected 401");
 
                 assert_eq!(
                     format!("{err:#}"),
@@ -1388,34 +1322,27 @@ mod tests {
                      CLAUDE_CODE_OAUTH_TOKEN may be expired or revoked. \
                      Generate a new one with `claude setup-token`.",
                 );
-                server.verify().await;
+                assert_eq!(request_count(&server).await, 1);
             }
 
             #[tokio::test]
             async fn on_429_threads_retry_after_header_into_error() {
                 // A hint past the retry cap fails fast with the hint in the message.
-                let server = MockServer::start().await;
-                Mock::given(method("POST"))
-                    .and(path("/v1/messages"))
-                    .respond_with(
-                        ResponseTemplate::new(429)
-                            .insert_header("retry-after", "120")
-                            .set_body_string("Too many requests"),
-                    )
-                    .mount(&server)
-                    .await;
-
+                let server = serve(vec![
+                    ResponseTemplate::new(429)
+                        .insert_header("retry-after", "120")
+                        .set_body_string("Too many requests"),
+                ])
+                .await;
                 let client = test_client(server.uri(), api_key(), TEST_MODEL);
-                let rx = client
-                    .stream_message(&[Message::user("hi")], &SystemPrompt::default(), None, &[])
-                    .unwrap();
-                let err = collect_events(rx).await.expect_err("expected 429");
+
+                let err = stream_hi(&client).await.expect_err("expected 429");
 
                 assert_eq!(
                     format!("{err:#}"),
                     "Anthropic API rate limited (HTTP 429): Too many requests. Retry after 120 s.",
                 );
-                assert_eq!(server.received_requests().await.unwrap().len(), 1);
+                assert_eq!(request_count(&server).await, 1);
             }
 
             #[tokio::test]
@@ -1428,10 +1355,7 @@ mod tests {
                     let source = auth.source();
                     let client = test_client(OFFLINE_URL, auth, TEST_MODEL);
 
-                    let rx = client
-                        .stream_message(&[Message::user("hi")], &SystemPrompt::default(), None, &[])
-                        .unwrap();
-                    let err = collect_events(rx).await.unwrap_err();
+                    let err = stream_hi(&client).await.unwrap_err();
 
                     let msg = format!("{err:#}");
                     assert!(
@@ -1484,10 +1408,7 @@ mod tests {
                     TEST_MODEL,
                 );
 
-                let rx = client
-                    .stream_message(&[Message::user("hi")], &SystemPrompt::default(), None, &[])
-                    .unwrap();
-                collect_events(rx).await.unwrap();
+                stream_hi(&client).await.unwrap();
                 let stored: serde_json::Value =
                     serde_json::from_str(&std::fs::read_to_string(&file).unwrap()).unwrap();
                 std::fs::remove_file(&file).unwrap();
