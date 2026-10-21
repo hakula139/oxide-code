@@ -1382,7 +1382,12 @@ mod tests {
                     Store::locate(Login::ClaudeCode, None).unwrap()
                 });
 
-                assert_eq!(store.file, spelled.join(".credentials.json"));
+                assert_eq!(
+                    store.file,
+                    std::path::absolute(&spelled)
+                        .unwrap()
+                        .join(".credentials.json")
+                );
                 assert_eq!(store.lock, root.join("claude-work.lock"));
             }
 
