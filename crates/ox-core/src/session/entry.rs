@@ -50,8 +50,8 @@ pub(crate) enum Entry {
         timestamp: OffsetDateTime,
     },
     /// Moves the active branch's tip back to the message `tip` names, or to an empty transcript
-    /// when `None`. The messages it abandons stay in the file. Resume follows the latest rewind
-    /// unless a message newer than it ends another branch.
+    /// when `None`. The messages it abandons stay in the file. Resume follows a rewind until a
+    /// message line follows it in the file.
     Rewind {
         #[serde(skip_serializing_if = "Option::is_none")]
         tip: Option<Uuid>,

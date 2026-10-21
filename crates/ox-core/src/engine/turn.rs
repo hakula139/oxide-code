@@ -2045,7 +2045,9 @@ mod tests {
                     &abort,
                     TurnAbort::Refused(notice)
                         if notice == "The model declined this request (category: cyber): \
-                                      Exploit development. The request was removed from the conversation, so rephrase it to try again."
+                                      Exploit development. \
+                                      The request was removed from the conversation, \
+                                      so rephrase it to try again."
                 ),
                 "{abort:?}",
             );
@@ -2316,27 +2318,33 @@ mod tests {
             for (details, expected) in [
                 (
                     None,
-                    "The model declined this request. The request was removed from the conversation, so rephrase it to try again.",
+                    "The model declined this request. \
+                     The request was removed from the conversation, \
+                     so rephrase it to try again.",
                 ),
                 (
                     Some(stop(Some("cyber"), None)),
                     "The model declined this request (category: cyber). \
-                     The request was removed from the conversation, so rephrase it to try again.",
+                     The request was removed from the conversation, \
+                     so rephrase it to try again.",
                 ),
                 (
                     Some(stop(Some("cyber"), Some(" \n "))),
                     "The model declined this request (category: cyber). \
-                     The request was removed from the conversation, so rephrase it to try again.",
+                     The request was removed from the conversation, \
+                     so rephrase it to try again.",
                 ),
                 (
                     Some(stop(None, Some(" Unsafe request "))),
                     "The model declined this request: Unsafe request. \
-                     The request was removed from the conversation, so rephrase it to try again.",
+                     The request was removed from the conversation, \
+                     so rephrase it to try again.",
                 ),
                 (
                     Some(stop(None, Some("Unsafe request..."))),
                     "The model declined this request: Unsafe request... \
-                     The request was removed from the conversation, so rephrase it to try again.",
+                     The request was removed from the conversation, \
+                     so rephrase it to try again.",
                 ),
             ] {
                 assert_eq!(refusal_message(details.as_ref()), expected, "{details:?}");

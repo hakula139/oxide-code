@@ -152,9 +152,10 @@ pub struct Engine {
     /// Whether a TUI is attached, so titles generate in the background.
     interactive: bool,
     auto_compaction_failures: AutoCompactFailures,
-    /// The latest turn's last round usage, `None` when that turn reported none.
+    /// The last round usage of the latest turn the transcript keeps, `None` when that turn reported
+    /// none.
     last_usage: Option<TokenUsage>,
-    /// The latest usage any turn reported, which the status line shows.
+    /// The latest usage any turn the transcript keeps reported, which the status line shows.
     displayed_usage: Option<TokenUsage>,
     total_estimated_cost_usd: f64,
     /// Delivers the usage of the live session's title request, which joins the session total once
@@ -302,8 +303,8 @@ impl Engine {
         self.finalize().await
     }
 
-    /// Runs `text` through auto-compaction and one agent turn, which a refusal rolls back, reporting
-    /// how it ended on `sink`.
+    /// Runs `text` through auto-compaction and one agent turn, rolling back a refused turn, and
+    /// reports how it ended on `sink`.
     async fn submit_prompt<S>(
         &mut self,
         text: &str,
@@ -401,18 +402,16 @@ impl Engine {
     /// What [`Self::roll_back`] returns to if the model refuses the turn about to start.
     fn turn_start(&self) -> TurnStart {
         TurnStart {
-            message_count: self.messages.len(),
+            transcript_len: self.messages.len(),
             seen: self.prompt.seen.clone(),
             prompt_unrecorded: self.prompt_unrecorded,
             files: self.file_tracker.snapshot_all(),
         }
     }
 
-    /// Returns to `start` after the model refused the turn `report` describes, since the API keeps
-    /// refusing while the refused turn stays in the conversation. Moves the session's tip back to
-    /// `checkpoint`, the branch point of the turn's prompt, and resends the task list when the turn
-    /// changed it. Bills the turn's requests but keeps the context usage from before it, since the
-    /// transcript they measured is gone.
+    /// Returns the engine and the session to `start` and `checkpoint` after the model refused the
+    /// turn `report` describes. Keeps the context usage from before the turn, since the transcript
+    /// its requests measured is gone.
     async fn roll_back(
         &mut self,
         sink: &dyn EventSink,
@@ -421,7 +420,7 @@ impl Engine {
         report: &TurnReport,
     ) {
         self.bill(sink, &report.billable_rounds).await;
-        self.messages.truncate(start.message_count);
+        self.messages.truncate(start.transcript_len);
         self.prompt.seen = start.seen;
         self.prompt_unrecorded = start.prompt_unrecorded;
         self.file_tracker.reset_to(start.files);
@@ -433,6 +432,7 @@ impl Engine {
             sink.emit(Event::TasksUpdated(self.tasks.clone()), "tasks-rolled-back");
         }
         self.emit_usage_update(sink);
+        sink.emit(Event::TurnRolledBack, "turn-rolled-back");
     }
 
     async fn auto_compact(
@@ -920,7 +920,7 @@ impl Engine {
 /// The engine state before a turn's prompt: the transcript length, what the model had seen of the
 /// user context and whether the prompt context awaits recording, and the tracked files.
 struct TurnStart {
-    message_count: usize,
+    transcript_len: usize,
     seen: UserContext,
     prompt_unrecorded: bool,
     files: Vec<FileSnapshot>,
@@ -2748,49 +2748,97 @@ mod tests {
             .await;
         }
 
+        /// Answers the next Messages request with `text`.
+        async fn mount_reply_once(server: &MockServer, text: &str) {
+            Mock::given(method("POST"))
+                .and(path("/v1/messages"))
+                .respond_with(sse_response(text_stream_body("", text)))
+                .up_to_n_times(1)
+                .mount(server)
+                .await;
+        }
+
+        /// Answers the next Messages request with a refusal that reports `input_tokens`.
+        async fn mount_refusal_once(server: &MockServer, input_tokens: u64) {
+            let start = serde_json::json!({
+                "type": "message_start",
+                "message": {"id": "msg_1", "model": MODEL, "usage": {"input_tokens": input_tokens}},
+            });
+            let stop = serde_json::json!({
+                "type": "message_delta",
+                "delta": {"stop_reason": "refusal"},
+                "usage": {"output_tokens": 1},
+            });
+            let end = serde_json::json!({"type": "message_stop"});
+            Mock::given(method("POST"))
+                .and(path("/v1/messages"))
+                .respond_with(sse_response(sse_body(&[start, stop, end])))
+                .up_to_n_times(1)
+                .mount(server)
+                .await;
+        }
+
         #[tokio::test]
-        async fn rolls_back_a_refused_turn_so_the_next_prompt_is_sent_without_it() {
+        async fn rolls_back_a_refused_turn_to_the_state_before_it() {
             with_pinned_home(async {
                 let server = MockServer::start().await;
                 let dir = canonical_tempdir();
                 let notes = dir.path().join("notes.txt");
+                let other = dir.path().join("other.txt");
                 std::fs::write(&notes, "notes").unwrap();
+                std::fs::write(&other, "other").unwrap();
                 let tasks = serde_json::json!({ "tasks": plan() }).to_string();
                 let read = serde_json::json!({ "file_path": notes }).to_string();
                 mount_tool_call_once(&server, "call-1", "tasks", &tasks).await;
                 mount_tool_call_once(&server, "call-2", "read", &read).await;
-                Mock::given(method("POST"))
-                    .and(path("/v1/messages"))
-                    .respond_with(sse_response(sse_body(&[
-                        serde_json::json!({"type": "message_start", "message": {"id": "msg_1", "model": MODEL, "usage": {"input_tokens": 1_000, "output_tokens": 0}}}),
-                        serde_json::json!({"type": "message_delta", "delta": {"stop_reason": "refusal"}, "usage": {"output_tokens": 1}}),
-                        serde_json::json!({"type": "message_stop"}),
-                    ])))
-                    .up_to_n_times(1)
-                    .mount(&server)
-                    .await;
+                mount_reply_once(&server, "done").await;
+                let refused_tasks = serde_json::json!({ "tasks": [] }).to_string();
+                let refused_read = serde_json::json!({ "file_path": other }).to_string();
+                mount_tool_call_once(&server, "call-3", "tasks", &refused_tasks).await;
+                mount_tool_call_once(&server, "call-4", "read", &refused_read).await;
+                mount_refusal_once(&server, 5_000).await;
                 mount_reply(&server, "reply").await;
                 let store = test_store(dir.path());
-                let mut engine = engine(server.uri(), &store, dir.path())
-                    .await
-                    .with_tools(ToolRegistry::new(vec![
-                        Box::new(TasksTool),
-                        Box::new(ReadTool),
-                    ]));
+                let mut engine =
+                    engine(server.uri(), &store, dir.path())
+                        .await
+                        .with_tools(ToolRegistry::new(vec![
+                            Box::new(TasksTool),
+                            Box::new(ReadTool),
+                        ]));
+                let today = engine.prompt.seen.date.clone();
                 let sink = CapturingSink::default();
                 let mut ops = inert_ops();
+                let first = engine.submit_prompt("first", &sink, &mut ops).await;
+                assert_eq!(first, TurnEnd::Completed);
+                "2000-01-01".clone_into(&mut engine.prompt.seen.date);
+                let before_refusal = sink.events().len();
 
-                let refused = engine.submit_prompt("refused prompt", &sink, &mut ops).await;
-                let refused_events = sink.events();
-                let tracked_after_refusal = engine.file_tracker.snapshot_all();
+                let refused = engine.submit_prompt("refused", &sink, &mut ops).await;
+                let refused_events = sink.events().split_off(before_refusal);
+                let tracked: Vec<_> = engine
+                    .file_tracker
+                    .snapshot_all()
+                    .into_iter()
+                    .map(|snapshot| snapshot.path)
+                    .collect();
+                let tasks = engine.tasks.clone();
                 let rephrased = engine.submit_prompt("rephrased", &sink, &mut ops).await;
 
                 assert_eq!(refused, TurnEnd::Failed);
-                let [.., rolled_back, Event::UsageUpdated(usage), failed] = &refused_events[..] else {
+                let [
+                    ..,
+                    restored,
+                    Event::UsageUpdated(usage),
+                    rolled_back,
+                    failed,
+                ] = &refused_events[..]
+                else {
                     panic!("{refused_events:?}");
                 };
-                assert_eq!(*rolled_back, Event::TasksUpdated(Vec::new()));
-                assert_eq!(usage.context_tokens, None, "the context usage stays as it was before the turn");
+                assert_eq!(*restored, Event::TasksUpdated(plan()));
+                assert_eq!(usage.context_tokens, Some(REPLY_USAGE.context_tokens()));
+                assert_eq!(*rolled_back, Event::TurnRolledBack);
                 assert_eq!(
                     *failed,
                     Event::TurnFailed(
@@ -2800,22 +2848,59 @@ mod tests {
                             .to_owned()
                     ),
                 );
-                assert_eq!(tracked_after_refusal, []);
+                assert_eq!(tracked, [notes]);
+                assert_eq!(tasks, plan());
                 assert_eq!(rephrased, TurnEnd::Completed);
-                assert_eq!(engine.tasks, []);
                 let turns = request_bodies(&server).await;
-                assert_eq!(turns.len(), 4);
-                assert_eq!(texts(&turns[3]), [SESSION_CONTEXT, "rephrased"]);
+                let messages = turns.last().unwrap()["messages"].as_array().unwrap();
+                let [.., done, prompt] = &messages[..] else {
+                    panic!("{messages:?}");
+                };
+                assert_eq!(done["content"][0]["text"], "done");
+                assert_eq!(prompt["content"][0]["text"], "rephrased");
+                let reminder = prompt["content"][1]["text"].as_str().unwrap();
+                assert!(
+                    reminder.contains(&format!("Today's date is {today}.")),
+                    "the rolled-back reminder is sent again: {reminder}"
+                );
 
                 let id = engine.session.session_id().to_owned();
                 let expected = engine.prompt.session_context();
                 engine.finalize().await;
                 let data = store.load_session_data(&id).unwrap();
-                assert_eq!(
-                    data.messages,
-                    [Message::user("rephrased"), Message::assistant("reply")],
-                );
+                let [.., done, prompt, reply] = &data.messages[..] else {
+                    panic!("{:?}", data.messages);
+                };
+                assert_eq!(*done, Message::assistant("done"));
+                assert!(matches!(
+                    &prompt.content[..],
+                    [ContentBlock::Text { text }, _] if text == "rephrased"
+                ));
+                assert_eq!(*reply, Message::assistant("reply"));
                 assert_eq!(data.context, Some(expected));
+            })
+            .await;
+        }
+
+        #[tokio::test]
+        async fn rolls_back_a_refused_turn_in_memory_when_the_session_is_gone() {
+            with_pinned_home(async {
+                let server = MockServer::start().await;
+                mount_refusal_once(&server, 1_000).await;
+                mount_reply(&server, "reply").await;
+                let dir = tempfile::tempdir().unwrap();
+                let mut engine = engine(server.uri(), &test_store(dir.path()), dir.path()).await;
+                engine.session = handle::testing::dead("dead");
+                let sink = CapturingSink::default();
+                let mut ops = inert_ops();
+
+                let refused = engine.submit_prompt("refused", &sink, &mut ops).await;
+                let rephrased = engine.submit_prompt("rephrased", &sink, &mut ops).await;
+
+                assert_eq!(refused, TurnEnd::Failed);
+                assert_eq!(rephrased, TurnEnd::Completed);
+                let turns = request_bodies(&server).await;
+                assert_eq!(texts(&turns[1]), [SESSION_CONTEXT, "rephrased"]);
             })
             .await;
         }

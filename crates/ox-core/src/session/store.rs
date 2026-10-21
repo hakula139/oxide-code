@@ -179,7 +179,7 @@ impl SessionDataBuilder {
                 message,
                 timestamp,
             } => self.insert_message(uuid, parent_uuid, message, timestamp, line_no),
-            Entry::Rewind { tip, timestamp } => self.chain.rewind(tip, timestamp),
+            Entry::Rewind { tip, .. } => self.chain.rewind(tip),
             Entry::Title {
                 title, updated_at, ..
             } if self

@@ -16,8 +16,18 @@ pub(super) struct ChainBuilder {
     nodes: HashMap<Uuid, ChainNode>,
     /// UUIDs some message names as its `parent_uuid`.
     referenced: HashSet<Uuid>,
-    /// The latest rewind read: the tip it moved to and when.
-    rewind: Option<(Option<Uuid>, OffsetDateTime)>,
+    tip: Tip,
+    /// Leaves a rewind moved the tip away from, which no longer count as the newest leaf.
+    abandoned: HashSet<Uuid>,
+}
+
+/// Where the resolved branch ends.
+#[derive(Clone, Copy, Default)]
+enum Tip {
+    #[default]
+    NewestLeaf,
+    /// The tip of a rewind no message followed, `None` for one to before the first message.
+    Rewound(Option<Uuid>),
 }
 
 struct ChainNode {
@@ -37,7 +47,8 @@ pub(super) struct Chain {
 }
 
 impl ChainBuilder {
-    /// Adds a message. A duplicate UUID, as a retried or replayed write leaves, keeps the last one.
+    /// Adds a message, which ends any earlier rewind's hold on the tip. A duplicate UUID, as a
+    /// retried or replayed write leaves, keeps the last one.
     pub(super) fn insert(
         &mut self,
         uuid: Uuid,
@@ -46,6 +57,7 @@ impl ChainBuilder {
         timestamp: OffsetDateTime,
         context: Option<Box<SessionContext>>,
     ) {
+        self.tip = Tip::NewestLeaf;
         if let Some(p) = parent_uuid {
             self.referenced.insert(p);
         }
@@ -60,36 +72,32 @@ impl ChainBuilder {
         );
     }
 
-    /// Moves the tip to `tip` as of `timestamp`, superseding any earlier rewind.
-    pub(super) fn rewind(&mut self, tip: Option<Uuid>, timestamp: OffsetDateTime) {
-        self.rewind = Some((tip, timestamp));
+    /// Moves the tip to `tip`, superseding any earlier rewind, and abandons every other leaf so the
+    /// newest-leaf rule skips them. Ignores a rewind to a message not read before it, such as one
+    /// before the last compaction.
+    pub(super) fn rewind(&mut self, tip: Option<Uuid>) {
+        if let Some(uuid) = tip
+            && !self.nodes.contains_key(&uuid)
+        {
+            warn!("ignoring rewind to unknown message {uuid}");
+            return;
+        }
+        let leaves = self
+            .nodes
+            .keys()
+            .filter(|uuid| !self.referenced.contains(uuid) && Some(**uuid) != tip);
+        self.abandoned.extend(leaves);
+        self.tip = Tip::Rewound(tip);
     }
 
-    /// Flattens the branch ending at the newest leaf, with UUID order breaking timestamp ties so
-    /// every load picks the same branch. The latest rewind outranks every leaf no newer than it.
-    /// The walk takes each node out of the map, so a cycle or an orphan parent ends it at a missing
-    /// node. Returns an empty chain when no leaf exists, as in a pure cycle.
+    /// Flattens the branch ending at the tip: the tip of a rewind no message followed in the file,
+    /// or else the newest leaf no rewind abandoned, with UUID order breaking timestamp ties so
+    /// every load picks the same branch. The walk takes each node out of the map, so a cycle or an
+    /// orphan parent ends it at a missing node. A pure cycle, which has no leaf, yields no chain.
     pub(super) fn resolve(mut self) -> Chain {
-        let newest_leaf = self
-            .nodes
-            .iter()
-            .filter(|(uuid, _)| !self.referenced.contains(uuid))
-            .max_by(|(a_uuid, a), (b_uuid, b)| {
-                a.timestamp
-                    .cmp(&b.timestamp)
-                    .then_with(|| a_uuid.cmp(b_uuid))
-            })
-            .map(|(uuid, node)| (*uuid, node.timestamp));
-        let rewound = self
-            .rewind
-            .filter(|&(_, at)| newest_leaf.is_none_or(|(_, leaf_at)| leaf_at <= at));
-        let tip = match rewound {
-            Some((Some(uuid), _)) if !self.nodes.contains_key(&uuid) => {
-                warn!("ignoring rewind to unknown message {uuid}");
-                newest_leaf.map(|(uuid, _)| uuid)
-            }
-            Some((tip, _)) => tip,
-            None => newest_leaf.map(|(uuid, _)| uuid),
+        let tip = match self.tip {
+            Tip::NewestLeaf => self.newest_leaf(),
+            Tip::Rewound(tip) => tip,
         };
         let Some(tip_uuid) = tip else {
             return Chain::default();
@@ -113,6 +121,18 @@ impl ChainBuilder {
             tip: Some(tip_uuid),
             context,
         }
+    }
+
+    fn newest_leaf(&self) -> Option<Uuid> {
+        self.nodes
+            .iter()
+            .filter(|(uuid, _)| !self.referenced.contains(uuid) && !self.abandoned.contains(uuid))
+            .max_by(|(a_uuid, a), (b_uuid, b)| {
+                a.timestamp
+                    .cmp(&b.timestamp)
+                    .then_with(|| a_uuid.cmp(b_uuid))
+            })
+            .map(|(uuid, _)| *uuid)
     }
 }
 
@@ -139,6 +159,27 @@ mod tests {
                     matches!(&msg.content[0], ContentBlock::Text { text } if text == want_text)
                 );
             }
+        }
+
+        /// Inserts the line root → refused and returns both UUIDs.
+        fn refused_line(b: &mut ChainBuilder) -> (Uuid, Uuid) {
+            let root = Uuid::new_v4();
+            let refused = Uuid::new_v4();
+            b.insert(
+                root,
+                None,
+                user_message("root"),
+                datetime!(2026-04-16 12:00:00 UTC),
+                None,
+            );
+            b.insert(
+                refused,
+                Some(root),
+                user_message("refused"),
+                datetime!(2026-04-16 12:00:01 UTC),
+                None,
+            );
+            (root, refused)
         }
 
         #[test]
@@ -293,32 +334,11 @@ mod tests {
             );
         }
 
-        /// Inserts the line root → refused, the refused message at 12:00:01, and returns both UUIDs.
-        fn refused_line(b: &mut ChainBuilder) -> (Uuid, Uuid) {
-            let root = Uuid::new_v4();
-            let refused = Uuid::new_v4();
-            b.insert(
-                root,
-                None,
-                user_message("root"),
-                datetime!(2026-04-16 12:00:00 UTC),
-                None,
-            );
-            b.insert(
-                refused,
-                Some(root),
-                user_message("refused"),
-                datetime!(2026-04-16 12:00:01 UTC),
-                None,
-            );
-            (root, refused)
-        }
-
         #[test]
         fn rewind_moves_the_tip_back_to_an_earlier_message() {
             let mut b = ChainBuilder::default();
             let (root, _) = refused_line(&mut b);
-            b.rewind(Some(root), datetime!(2026-04-16 12:00:02 UTC));
+            b.rewind(Some(root));
 
             let chain = b.resolve();
 
@@ -330,7 +350,7 @@ mod tests {
         fn rewind_to_no_message_resolves_an_empty_chain() {
             let mut b = ChainBuilder::default();
             refused_line(&mut b);
-            b.rewind(None, datetime!(2026-04-16 12:00:02 UTC));
+            b.rewind(None);
 
             let chain = b.resolve();
 
@@ -339,22 +359,38 @@ mod tests {
         }
 
         #[test]
-        fn message_newer_than_the_rewind_ends_the_branch() {
+        fn later_rewind_supersedes_an_earlier_one() {
+            let mut b = ChainBuilder::default();
+            let (root, refused) = refused_line(&mut b);
+            b.rewind(Some(refused));
+            b.rewind(Some(root));
+
+            let chain = b.resolve();
+
+            assert_eq!(chain.tip, Some(root));
+        }
+
+        #[test]
+        fn message_after_the_rewind_ends_the_branch_whatever_its_timestamp() {
             let mut b = ChainBuilder::default();
             let (root, _) = refused_line(&mut b);
-            b.rewind(Some(root), datetime!(2026-04-16 12:00:02 UTC));
+            b.rewind(Some(root));
             let next = Uuid::new_v4();
             b.insert(
                 next,
                 Some(root),
                 user_message("next"),
-                datetime!(2026-04-16 12:00:03 UTC),
+                datetime!(2026-04-16 11:00:00 UTC),
                 None,
             );
 
             let chain = b.resolve();
 
-            assert_eq!(chain.tip, Some(next));
+            assert_eq!(
+                chain.tip,
+                Some(next),
+                "the clock stepped back, the file order holds"
+            );
             assert_chain_texts(&chain.messages, &["root", "next"]);
         }
 
@@ -362,7 +398,7 @@ mod tests {
         fn rewind_to_an_unknown_message_keeps_the_newest_leaf() {
             let mut b = ChainBuilder::default();
             let (_, refused) = refused_line(&mut b);
-            b.rewind(Some(Uuid::new_v4()), datetime!(2026-04-16 12:00:02 UTC));
+            b.rewind(Some(Uuid::new_v4()));
 
             let chain = b.resolve();
 

@@ -98,11 +98,13 @@ fn surface_once(surfaced: &AtomicBool) -> bool {
 }
 
 /// A point in the active branch that [`SessionHandle::rewind`] can move the tip back to.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy)]
 pub(crate) struct Checkpoint {
     /// The message the next one chains from, `None` before the first.
     pub(super) tip: Option<Uuid>,
     pub(super) message_count: u32,
+    /// Whether a user prompt before this point titled the session.
+    pub(super) first_user_prompt_seen: bool,
 }
 
 /// Ack from [`SessionHandle::record_message`].
@@ -166,7 +168,13 @@ impl SessionHandle {
     }
 
     /// Moves the session's tip back to `checkpoint`, abandoning the messages recorded after it.
+    /// `checkpoint` must come from a record since the last compaction, whose boundary the loader
+    /// cannot rewind across. A rewind to before the first user prompt stops the title request that
+    /// prompt started, so the next prompt titles the session.
     pub(crate) async fn rewind(&self, checkpoint: Checkpoint) -> Outcome {
+        if !checkpoint.first_user_prompt_seen {
+            self.stop_title_task().await;
+        }
         let (ack, rx) = oneshot::channel();
         self.dispatch_outcome(SessionCmd::Rewind { checkpoint, ack }, rx)
             .await
@@ -677,6 +685,55 @@ mod tests {
             let resumed = resume_id(&store, &session_id).unwrap().handle;
             let outcome = resumed.record_message(Message::user("more text")).await;
             assert!(outcome.ai_title_seed.is_none());
+        }
+    }
+
+    mod rewind {
+        use super::*;
+
+        #[tokio::test]
+        async fn to_before_the_first_prompt_stops_the_title_request_it_started() {
+            let dir = tempfile::tempdir().unwrap();
+            let handle = start(&test_store(dir.path()), "m", None);
+            let refused = handle.record_message(Message::user("refused")).await;
+            let (started_tx, started) = oneshot::channel();
+            let (alive, mut ended) = oneshot::channel::<()>();
+            handle.set_title_task(tokio::spawn(async move {
+                let _alive = alive;
+                started_tx.send(()).unwrap();
+                std::future::pending::<()>().await;
+            }));
+            started.await.unwrap();
+
+            let outcome = handle
+                .rewind(refused.checkpoint.expect("the actor is running"))
+                .await;
+
+            assert_eq!(outcome.failure, None);
+            assert_eq!(ended.try_recv(), Err(oneshot::error::TryRecvError::Closed));
+        }
+
+        #[tokio::test]
+        async fn to_after_the_first_prompt_keeps_the_title_request() {
+            let dir = tempfile::tempdir().unwrap();
+            let handle = start(&test_store(dir.path()), "m", None);
+            handle.record_message(Message::user("first")).await;
+            let refused = handle.record_message(Message::user("refused")).await;
+            let (started_tx, started) = oneshot::channel();
+            let (alive, mut ended) = oneshot::channel::<()>();
+            handle.set_title_task(tokio::spawn(async move {
+                let _alive = alive;
+                started_tx.send(()).unwrap();
+                std::future::pending::<()>().await;
+            }));
+            started.await.unwrap();
+
+            handle
+                .rewind(refused.checkpoint.expect("the actor is running"))
+                .await;
+
+            assert_eq!(ended.try_recv(), Err(oneshot::error::TryRecvError::Empty));
+            handle.finalize(Vec::new()).await;
         }
     }
 

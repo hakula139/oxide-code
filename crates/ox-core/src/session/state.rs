@@ -160,13 +160,16 @@ impl SessionState {
         Checkpoint {
             tip: self.last_message_uuid,
             message_count: self.message_count,
+            first_user_prompt_seen: self.first_user_prompt_seen,
         }
     }
 
-    /// Moves the chain anchor back to `checkpoint`, returning the entry that records the move.
+    /// Moves the chain anchor back to `checkpoint`, returning the entry that records the move. A
+    /// rewind to before the first user prompt lets the next one title the session again.
     pub(super) fn rewind_entry(&mut self, checkpoint: Checkpoint, now: OffsetDateTime) -> Entry {
         self.last_message_uuid = checkpoint.tip;
         self.message_count = checkpoint.message_count;
+        self.first_user_prompt_seen = checkpoint.first_user_prompt_seen;
         Entry::Rewind {
             tip: checkpoint.tip,
             timestamp: now,
@@ -501,6 +504,21 @@ mod tests {
                 [Entry::Message { parent_uuid: Some(parent), .. }] if *parent == first,
             ));
             assert_eq!(state.message_count, 2);
+        }
+
+        #[test]
+        fn to_before_the_first_prompt_lets_the_next_one_title_the_session() {
+            let dir = tempfile::tempdir().unwrap();
+            let mut state = SessionState::fresh(test_store(dir.path()), "m", None);
+            let now = OffsetDateTime::now_utc();
+            let checkpoint = state.checkpoint();
+            _ = state.queue_message_entries(&Message::user("refused"), now, false);
+
+            _ = state.rewind_entry(checkpoint, now);
+            let (entries, seed) = state.queue_message_entries(&Message::user("next"), now, false);
+
+            assert!(matches!(&entries[0], Entry::Title { title, .. } if title == "next"));
+            assert_eq!(seed.as_deref(), Some("next"));
         }
     }
 
