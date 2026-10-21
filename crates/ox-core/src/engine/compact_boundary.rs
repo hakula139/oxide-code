@@ -74,7 +74,7 @@ mod tests {
     use super::*;
     use crate::file_tracker::LastView;
     use crate::message::{ContentBlock, Message};
-    use crate::protocol::session_write_failed;
+    use crate::protocol::notice::session_write_failed;
     use crate::protocol::testing::{CapturingSink, FailingSink};
     use crate::session::handle;
     use crate::session::store::testing::{test_project_dir, test_store};
@@ -254,8 +254,10 @@ mod tests {
             assert!(compacted);
             assert_eq!(tracker.snapshot_all(), []);
             assert_eq!(messages.len(), 1);
+            let first = &messages[0].content[0];
             assert!(
-                matches!(&messages[0].content[0], ContentBlock::Text { text } if text.contains("fixed login bug"))
+                matches!(first, ContentBlock::Text { text } if text.contains("fixed login bug")),
+                "{first:?}"
             );
         }
     }

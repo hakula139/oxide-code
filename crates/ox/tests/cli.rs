@@ -140,7 +140,10 @@ fn list_in_empty_project_reports_no_sessions() {
         .unwrap();
 
     assert!(output.status.success(), "{output:?}");
-    assert_eq!(output.stdout, b"No sessions found in this project\n");
+    assert_eq!(
+        output.stdout,
+        b"No sessions found in this project (use --all to search every project)\n",
+    );
     assert!(output.stderr.is_empty(), "{:?}", output.stderr);
 }
 
@@ -164,7 +167,7 @@ fn list_with_unusable_storage_fails() {
 }
 
 #[test]
-fn continue_in_the_repl_unarchives_the_session_with_a_note() {
+fn resume_in_the_repl_unarchives_the_session_with_a_note() {
     let dir = tempfile::tempdir().unwrap();
     let session = dir.path().join("session.jsonl");
     std::fs::write(
@@ -179,7 +182,7 @@ fn continue_in_the_repl_unarchives_the_session_with_a_note() {
 
     let output = ox(dir.path())
         .arg("--no-tui")
-        .arg("--continue")
+        .arg("--resume")
         .arg(&session)
         .current_dir(dir.path())
         .env("ANTHROPIC_AUTH_TOKEN", "test-token")
@@ -203,10 +206,10 @@ fn continue_in_the_repl_unarchives_the_session_with_a_note() {
 }
 
 #[test]
-fn continue_with_an_unmatched_prefix_fails_with_a_scope_hint() {
+fn resume_with_an_unmatched_prefix_fails_with_a_scope_hint() {
     let dir = tempfile::tempdir().unwrap();
     let output = ox(dir.path())
-        .args(["--no-tui", "--continue", "deadbeef"])
+        .args(["--no-tui", "--resume", "deadbeef"])
         .current_dir(dir.path())
         .env("ANTHROPIC_AUTH_TOKEN", "test-token")
         .env("ANTHROPIC_BASE_URL", "http://127.0.0.1:9")
@@ -237,7 +240,7 @@ fn resume_without_a_terminal_fails_before_writing_anything() {
     assert!(!output.status.success(), "{output:?}");
     let stderr = String::from_utf8(output.stderr).unwrap();
     assert!(
-        stderr.contains("--resume opens the session picker in the TUI"),
+        stderr.contains("`--resume` without a session opens the picker in the TUI"),
         "{stderr}"
     );
     assert!(std::fs::read_dir(dir.path()).unwrap().next().is_none());
@@ -318,6 +321,125 @@ async fn headless_rejected_request_preserves_branch_and_user_message() {
             "content": [{"type": "text", "text": "hello"}],
         })],
     );
+}
+
+#[tokio::test]
+async fn headless_attaches_piped_stdin_and_continues_its_session() {
+    let server = MockServer::start().await;
+    mount_reply(&server, "Done.").await;
+    let dir = tempfile::tempdir().unwrap();
+    let run = |args: &[&str], stdin: Stdio| {
+        let mut command = tokio::process::Command::from(ox(dir.path()));
+        command
+            .args(args)
+            .args(["--output", "json"])
+            .current_dir(dir.path())
+            .env("ANTHROPIC_API_KEY", "test-key")
+            .env("ANTHROPIC_BASE_URL", server.uri())
+            .stdin(stdin)
+            .stdout(Stdio::piped());
+        command
+    };
+    let session_id = |stdout: &[u8]| {
+        let result: serde_json::Value = serde_json::from_slice(stdout).unwrap();
+        result["data"]["session_id"].as_str().unwrap().to_owned()
+    };
+
+    let mut first = run(&["-p", "Review this diff"], Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut stdin = first.stdin.take().unwrap();
+    tokio::io::AsyncWriteExt::write_all(&mut stdin, b"+fix\n")
+        .await
+        .unwrap();
+    drop(stdin);
+    let first = first.wait_with_output().await.unwrap();
+    let next = run(&["-c", "-p", "Next step"], Stdio::null())
+        .output()
+        .await
+        .unwrap();
+
+    assert!(first.status.success(), "{first:?}");
+    assert!(next.status.success(), "{next:?}");
+    assert_eq!(session_id(&first.stdout), session_id(&next.stdout));
+    let prompts: Vec<Vec<serde_json::Value>> = request_bodies(&server)
+        .await
+        .iter()
+        .map(|request| {
+            let messages = request["messages"].as_array().unwrap();
+            messages
+                .iter()
+                .filter(|message| message["role"] == "user")
+                .map(|message| {
+                    message["content"].as_array().unwrap().last().unwrap()["text"].clone()
+                })
+                .filter(|text| !text.as_str().unwrap().starts_with("<system-reminder>"))
+                .collect()
+        })
+        .collect();
+    let attached = "Review this diff\n\n<stdin>\n+fix\n</stdin>";
+    assert_eq!(prompts, [vec![attached], vec![attached, "Next step"]]);
+}
+
+#[tokio::test]
+async fn headless_continue_reports_files_changed_since_the_session_read_them() {
+    let server = MockServer::start().await;
+    let dir = tempfile::tempdir().unwrap();
+    let notes = dir.path().join("notes.txt");
+    std::fs::write(&notes, "v1\n").unwrap();
+    let input = serde_json::json!({ "file_path": notes }).to_string();
+    mount_tool_call_once(&server, "toolu_1", "read", &input).await;
+    mount_reply(&server, "Done.").await;
+    let run = |prompt: &[&str]| {
+        let mut command = tokio::process::Command::from(ox(dir.path()));
+        command
+            .args(prompt)
+            .current_dir(dir.path())
+            .env("ANTHROPIC_API_KEY", "test-key")
+            .env("ANTHROPIC_BASE_URL", server.uri())
+            .stdin(Stdio::null());
+        command
+    };
+    let first = run(&["-p", "Read the notes"]).output().await.unwrap();
+    assert!(first.status.success(), "{first:?}");
+    std::fs::write(&notes, "v2\n").unwrap();
+
+    let next = run(&["-c", "-p", "Next step"]).output().await.unwrap();
+
+    assert!(next.status.success(), "{next:?}");
+    let stderr = String::from_utf8(next.stderr).unwrap();
+    assert!(
+        stderr.contains("1 tracked file changed on disk since the resumed session read it"),
+        "{stderr}"
+    );
+}
+
+#[tokio::test]
+async fn headless_without_a_prompt_or_with_a_list_flag_fails_with_a_usage_error() {
+    let server = MockServer::start().await;
+    let dir = tempfile::tempdir().unwrap();
+
+    for (args, message) in [
+        (
+            &["-p"][..],
+            "`--print` needs a prompt argument or text on stdin",
+        ),
+        (&["--archived", "-p", "hello"], "cannot be used with"),
+    ] {
+        let output = tokio::process::Command::from(ox(dir.path()))
+            .args(args)
+            .current_dir(dir.path())
+            .env("ANTHROPIC_API_KEY", "test-key")
+            .env("ANTHROPIC_BASE_URL", server.uri())
+            .output()
+            .await
+            .unwrap();
+
+        assert_eq!(output.status.code(), Some(2), "{output:?}");
+        let stderr = String::from_utf8(output.stderr).unwrap();
+        assert!(stderr.contains(message), "{stderr}");
+    }
+    assert_eq!(request_bodies(&server).await.len(), 0);
 }
 
 #[tokio::test]

@@ -107,7 +107,7 @@ The session's [task list](../tools/tasks.md) needs no entry of its own. On resum
 
 ### Archiving
 
-An `archive` entry sets whether default listings and bare `ox -c` skip the session, and the latest one wins. Bare `/archive` queues one through the actor before the roll that finalizes the session. `/archive <prefix>`, `/unarchive <prefix>`, and Ctrl+X in the `/resume` picker append an entry to another session's file and restore its mtime, so toggling its archive status does not change its position in listings. Resuming an archived session appends an entry that unarchives it. Files never move, so path-based resume and every other reference to a session file keep working.
+An `archive` entry sets whether default listings and `ox -c` skip the session, and the latest one wins. Bare `/archive` queues one through the actor before the roll that finalizes the session. `/archive <prefix>`, `/unarchive <prefix>`, and Ctrl+X in the `/resume` picker append an entry to another session's file and restore its mtime, so toggling its archive status does not change its position in listings. Resuming an archived session appends an entry that unarchives it. Files never move, so path-based resume and every other reference to a session file keep working.
 
 ### Fork-on-Conflict Concurrency
 
@@ -139,7 +139,7 @@ Write failures surface through the session handle:
 Session listing separates file discovery from metadata parsing:
 
 - **Scope.** `ox --list` walks the current project subdirectory by default, and `--all` widens to every project.
-- **Discovery.** The walk only stats files, so bare `ox -c` parses files only until it finds the newest readable unarchived one, and a prefix lookup parses only files whose name carries a matching ID.
+- **Discovery.** The walk only stats files, so `ox -c` parses files only until it finds the newest readable unarchived one, and a prefix lookup parses only files whose name carries a matching ID.
 - **Metadata.** A parsed file yields its header, the latest `Entry::Title` and `Entry::Summary`, and the archive state. A prefix pre-filter on the `"type"` discriminator keeps message lines off the full-parse hot path.
 - **Archive view.** `--list` and the `/resume` picker show unarchived sessions, or only archived ones with `--list --archived` and the picker's Ctrl+A.
 - **Page budget.** Archive state is stored in each file, so a listing parses sessions in order until it finds one beyond the page, then reports only whether more sessions follow. When few sessions are archived, the archived view parses further.
@@ -177,7 +177,6 @@ Listings sort rows and render them as follows:
 - `crates/ox-core/src/session/display.rs`: the title and metadata formatting that listings use.
 - `crates/ox-core/src/session/entry.rs`: the JSONL entry schema and its header `version`.
 - `crates/ox-core/src/session/handle.rs`: `SessionHandle`, the public API that sends each write to the actor and surfaces the first write failure of each kind.
-- `crates/ox-core/src/session/list_view.rs`: the `ox --list` table.
 - `crates/ox-core/src/session/path.rs`: the sanitized per-project subdirectory names.
 - `crates/ox-core/src/session/resolver.rs`: the `--continue` argument and session-ID prefix resolution.
 - `crates/ox-core/src/session/sanitize.rs`: resume-time transcript repair.
@@ -186,3 +185,4 @@ Listings sort rows and render them as follows:
 - `crates/ox-core/src/session/store.rs`: session file I/O and the `{epoch}-{uuid}.jsonl` file names.
 - `crates/ox-core/src/session/store/listing.rs`: stat-only listing walks and metadata parsing.
 - `crates/ox-core/src/session/title_generator.rs`: the background AI title generator.
+- `crates/ox/src/session_list.rs`: the `ox --list` table.

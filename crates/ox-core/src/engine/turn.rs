@@ -442,14 +442,13 @@ mod tests {
     use indoc::indoc;
     use serde_json::json;
     use tokio::sync::Notify;
-    use wiremock::matchers::{method, path as wm_path};
-    use wiremock::{Mock, MockServer, ResponseTemplate};
+    use wiremock::ResponseTemplate;
 
     use super::*;
-    use crate::client::anthropic::local_testing::test_client;
+    use crate::client::anthropic::local_testing::{serve, test_client};
+    use crate::client::anthropic::testing::{api_key, sse_response};
     use crate::client::testing::five_hour_limit;
     use crate::config::Effort;
-    use crate::config::auth::{Auth, AuthSource};
     use crate::engine::dispatch::NOT_RUN;
     use crate::engine::local_testing::{
         EchoTool, FakeClient, dead_test_session, dispatch_with, empty_prompt, inert_ops, reply_of,
@@ -461,9 +460,10 @@ mod tests {
     use crate::prompt::SystemPrompt;
     use crate::protocol::testing::CapturingSink;
     use crate::protocol::{ConfigPick, Decision, ResumeTarget, ToolCall, ToolResult};
+    use crate::tool::view::{NumberedLine, ToolResultView};
     use crate::tool::{
-        DEFAULT_TOOL_ICON, Prepared, ReadExcerptLine, Tool, ToolCtx, ToolMetadata, ToolOutput,
-        ToolRegistry, ToolResultView, ToolSpec,
+        DEFAULT_TOOL_ICON, Prepared, Tool, ToolCtx, ToolMetadata, ToolOutput, ToolRegistry,
+        ToolSpec,
     };
 
     mod agent_turn {
@@ -545,7 +545,7 @@ mod tests {
             ) -> Option<ToolResultView> {
                 Some(ToolResultView::ReadExcerpt {
                     path: input["file_path"].as_str().unwrap_or_default().to_owned(),
-                    lines: vec![ReadExcerptLine {
+                    lines: vec![NumberedLine {
                         number: 1,
                         text: metadata.title.clone().unwrap_or_default(),
                     }],
@@ -690,36 +690,14 @@ mod tests {
 
         "#};
 
-        fn sse(body: &'static str) -> ResponseTemplate {
-            ResponseTemplate::new(200)
-                .insert_header("content-type", "text/event-stream")
-                .set_body_string(body)
-        }
-
         /// Drives one turn through the real `<Client as Wire>` path. The server answers with
         /// `responses` in order, one request each, and repeats the last one.
         async fn real_client_turn(
             responses: Vec<ResponseTemplate>,
             tools: &ToolRegistry,
         ) -> (TurnOutcome, Vec<Message>, CapturingSink) {
-            let server = MockServer::start().await;
-            let last = responses.len() - 1;
-            for (i, response) in responses.into_iter().enumerate() {
-                let mock = Mock::given(method("POST"))
-                    .and(wm_path("/v1/messages"))
-                    .respond_with(response);
-                let mock = if i == last {
-                    mock
-                } else {
-                    mock.up_to_n_times(1)
-                };
-                mock.mount(&server).await;
-            }
-            let client = test_client(
-                server.uri(),
-                Auth::new(AuthSource::ApiKeyEnv, "sk"),
-                "claude-sonnet-5-5",
-            );
+            let server = serve(responses).await;
+            let client = test_client(server.uri(), api_key(), "claude-sonnet-5-5");
             let dir = tempfile::tempdir().unwrap();
             let session = test_session(dir.path());
             let sink = CapturingSink::default();
@@ -977,7 +955,7 @@ mod tests {
                         title: Some("Viewed notes".to_owned()),
                         view: ToolResultView::ReadExcerpt {
                             path: "notes.txt".to_owned(),
-                            lines: vec![ReadExcerptLine {
+                            lines: vec![NumberedLine {
                                 number: 1,
                                 text: "Viewed notes".to_owned(),
                             }],
@@ -1912,7 +1890,7 @@ mod tests {
         #[tokio::test]
         async fn drives_real_client_over_wiremock() {
             let (outcome, messages, _) =
-                real_client_turn(vec![sse(HELLO_SSE)], &ToolRegistry::new(vec![])).await;
+                real_client_turn(vec![sse_response(HELLO_SSE)], &ToolRegistry::new(vec![])).await;
 
             outcome.into_result().unwrap();
             assert_eq!(messages.len(), 2);
@@ -1927,7 +1905,7 @@ mod tests {
                 vec![
                     ResponseTemplate::new(529).insert_header("retry-after", "0"),
                     ResponseTemplate::new(503).insert_header("retry-after", "0"),
-                    sse(HELLO_SSE),
+                    sse_response(HELLO_SSE),
                 ],
                 &ToolRegistry::new(vec![]),
             )
@@ -1993,9 +1971,11 @@ mod tests {
 
             "#};
 
-            let (outcome, _, _) =
-                real_client_turn(vec![sse(failed), sse(answered)], &ToolRegistry::new(vec![]))
-                    .await;
+            let (outcome, _, _) = real_client_turn(
+                vec![sse_response(failed), sse_response(answered)],
+                &ToolRegistry::new(vec![]),
+            )
+            .await;
 
             assert_eq!(
                 outcome.report.usage,
@@ -2033,7 +2013,7 @@ mod tests {
             "#};
 
             let (outcome, messages, sink) = real_client_turn(
-                vec![sse(body)],
+                vec![sse_response(body)],
                 &ToolRegistry::new(vec![Box::new(EchoTool)]),
             )
             .await;

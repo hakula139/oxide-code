@@ -8,7 +8,6 @@ pub mod display;
 pub mod entry;
 pub mod handle;
 pub(crate) mod history;
-pub mod list_view;
 mod path;
 pub(crate) mod post_compact;
 pub mod resolver;

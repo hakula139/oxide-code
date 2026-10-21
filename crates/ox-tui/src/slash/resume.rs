@@ -1,5 +1,5 @@
 //! `/resume` (alias `/continue`) opens a [`SearchableList`] session picker, and
-//! `/resume <id-prefix>` resumes directly. `ox --resume` opens the same picker at startup.
+//! `/resume <id-prefix>` resumes directly. `ox -r` without a session opens the same picker at startup.
 
 use std::borrow::Cow;
 use std::path::{Path, PathBuf};
@@ -124,7 +124,7 @@ struct SessionRow {
 }
 
 /// One column of a picker row. The title takes whatever width the other columns leave.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Column {
     Id,
     Title,
@@ -284,7 +284,7 @@ impl SearchableItem for SessionRow {
 
 // ── Actions ──
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum PickerAction {
     Resume,
     Dismiss,
@@ -508,7 +508,7 @@ impl ResumePicker {
         Self::open(store, live_session_id, false, Dismissal::Cancel)
     }
 
-    /// The `ox --resume` picker, scoped to every project when `all` is set.
+    /// The picker `ox -r` opens without a session, scoped to every project when `all` is set.
     pub fn at_startup(store: SessionStore, live_session_id: String, all: bool) -> Self {
         Self::open(store, live_session_id, all, Dismissal::Quit)
     }

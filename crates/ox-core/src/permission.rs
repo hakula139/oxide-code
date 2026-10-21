@@ -31,7 +31,7 @@ use crate::util::path::{expand_user, lexical_normalize};
 // ── Mode ──
 
 /// The standing permission posture, which settles the calls no rule does.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Mode {
     /// Asks about every call the rules leave open.
@@ -57,9 +57,9 @@ impl Mode {
 
     pub const fn description(self) -> &'static str {
         match self {
-            Self::Manual => "Ask about calls no rule settles",
+            Self::Manual => "Ask before tool calls that no permission rule allows or denies",
             Self::Plan => "Read-only: deny edits and commands",
-            Self::Yolo => "Run calls no rule settles",
+            Self::Yolo => "Run tool calls without asking unless a rule denies or asks",
         }
     }
 }

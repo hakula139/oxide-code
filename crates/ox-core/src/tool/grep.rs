@@ -2,7 +2,6 @@
 
 use std::fmt::Write as _;
 use std::fs::OpenOptions;
-use std::future::Future;
 use std::io::{self, Read as _};
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
@@ -12,10 +11,10 @@ use indoc::formatdoc;
 use serde::Deserialize;
 use tokio_util::sync::CancellationToken;
 
-use super::{
-    GrepFileGroup, GrepMatchLine, NO_FILES_FOUND, Prepared, SearchRoot, Tool, ToolCtx,
-    ToolMetadata, ToolOutput, ToolResultView, ToolSpec, Unreadable, extract_input_field,
-};
+use super::search::{NO_FILES_FOUND, SearchRoot, Unreadable};
+use super::spill::MAX_SPILL_BYTES;
+use super::view::{GrepFileGroup, GrepMatchLine, ToolResultView};
+use super::{Prepared, Tool, ToolCtx, ToolMetadata, ToolOutput, ToolSpec, extract_input_field};
 use crate::file_tracker::MAX_TRACKED_FILE_SIZE;
 use crate::permission::{PermissionClass, ReadFilter, WalkFilter};
 use crate::util::text::plural;
@@ -31,7 +30,6 @@ const MAX_WALK_FILE_SIZE: u64 = 1024 * 1024;
 const REGEX_SIZE_LIMIT: usize = 1 << 20;
 
 /// Withholds each file a `read` deny or ask rule matches from the results.
-#[cfg_attr(test, derive(Default))]
 pub(crate) struct GrepTool {
     read_filter: ReadFilter,
 }
@@ -54,7 +52,7 @@ impl Tool for GrepTool {
     }
 
     fn prepare(&self, input: serde_json::Value, ctx: &ToolCtx) -> Prepared {
-        super::prepare_search_root(input, ctx)
+        super::search::prepare_search_root(input, ctx)
     }
 
     fn icon(&self) -> &'static str {
@@ -195,29 +193,9 @@ async fn run(prepared: Prepared, ctx: &ToolCtx, read_filter: ReadFilter) -> Tool
     })
     .await
     {
-        Ok(content) => {
-            let title = grep_title(super::strip_search_notes(&content));
-            ToolOutput::success(content).with_title(title)
-        }
+        Ok(GrepOutput { content, title }) => ToolOutput::success(content).with_title(title),
         Err(msg) => ToolOutput::error(msg),
     }
-}
-
-fn grep_title(output: &str) -> String {
-    if matches!(output, NO_MATCHES_FOUND | NO_FILES_FOUND) {
-        return NO_MATCHES_FOUND.into();
-    }
-    // Count / files-with-matches modes lead with "Found N ...".
-    if let Some(line) = output.lines().find(|l| l.starts_with("Found ")) {
-        return line.to_owned();
-    }
-    let match_count = output
-        .lines()
-        .filter_map(parse_match_line)
-        .filter(|(_, m)| m.is_match)
-        .count();
-    let word = plural(match_count, "match", "matches");
-    format!("{match_count} {word}")
 }
 
 // ── Search ──
@@ -236,7 +214,14 @@ struct GrepParams<'a> {
     cancel: CancellationToken,
 }
 
-fn grep_files(params: &GrepParams<'_>) -> Result<String, String> {
+/// What a search found: the text the model reads and the title the UI shows for it.
+#[derive(Debug)]
+struct GrepOutput {
+    content: String,
+    title: String,
+}
+
+fn grep_files(params: &GrepParams<'_>) -> Result<GrepOutput, String> {
     // Each line is matched alone, so `^` and `$` anchor at line boundaries without the multi-line
     // flag. The size limits keep an adversarial pattern from exhausting memory.
     let re = regex::RegexBuilder::new(params.pattern)
@@ -277,17 +262,17 @@ fn grep_files(params: &GrepParams<'_>) -> Result<String, String> {
 
     let cwd = &root.cwd;
     let texts = texts(&files, size_limit, &params.cancel, &mut unreadable);
-    let mut result = match params.output_mode {
+    let GrepOutput { mut content, title } = match params.output_mode {
         OutputMode::FilesWithMatches => format_files_with_matches(texts, cwd, &re, head_limit),
         OutputMode::Count => format_count(texts, cwd, &re, head_limit),
         OutputMode::Content => format_content(texts, cwd, &re, params.context, head_limit),
     };
 
-    push_skipped_note(&mut result, &skipped_large, size_limit, cwd);
-    super::push_unreadable_note(&mut result, &unreadable, cwd);
-    super::push_withheld_note(&mut result, withheld);
+    push_skipped_note(&mut content, &skipped_large, size_limit, cwd);
+    super::search::push_unreadable_note(&mut content, &unreadable, cwd);
+    super::search::push_withheld_note(&mut content, withheld);
 
-    Ok(result)
+    Ok(GrepOutput { content, title })
 }
 
 struct CollectedFiles {
@@ -331,7 +316,7 @@ fn collect_files(
     let mut skipped_large = Vec::new();
     let mut unreadable = Vec::new();
     let mut withheld = 0;
-    let entries = super::walk_files(base, cancel, &mut unreadable)
+    let entries = super::search::walk_files(base, cancel, &mut unreadable)
         .filter(|entry| {
             include_matcher.is_none_or(|m| {
                 let name = entry.file_name().to_string_lossy();
@@ -352,11 +337,11 @@ fn collect_files(
             }
             true
         });
-    let files = super::newest_first(entries)
+    let files = super::search::newest_first(entries)
         .into_iter()
         .map(ignore::DirEntry::into_path)
         .collect();
-    withheld += super::withhold_unreadable(&mut unreadable, read_filter);
+    withheld += super::search::withhold_unreadable(&mut unreadable, read_filter);
 
     CollectedFiles {
         files,
@@ -396,7 +381,7 @@ fn texts<'a>(
 fn read_text(path: &Path, size_limit: u64) -> io::Result<Option<String>> {
     let mut options = OpenOptions::new();
     options.read(true);
-    let mut file = super::open_no_follow_blocking(path, options)?;
+    let mut file = super::file::open_no_follow_blocking(path, options)?;
     let metadata = file.metadata()?;
     if !metadata.is_file() {
         return Err(io::Error::other("not a regular file"));
@@ -410,7 +395,7 @@ fn read_text(path: &Path, size_limit: u64) -> io::Result<Option<String>> {
 
     let mut bytes = Vec::new();
     file.read_to_end(&mut bytes)?;
-    if super::is_binary(&bytes) {
+    if super::file::is_binary(&bytes) {
         return Ok(None);
     }
     Ok(Some(String::from_utf8_lossy(&bytes).into_owned()))
@@ -421,12 +406,12 @@ fn push_skipped_note(output: &mut String, skipped: &[(PathBuf, u64)], limit: u64
     let lines: Vec<String> = skipped
         .iter()
         .map(|(path, size)| {
-            let mb = super::bytes_to_mb(*size);
+            let mb = super::file::bytes_to_mb(*size);
             format!("{} ({mb:.1} MB)", super::display_path(path, cwd))
         })
         .collect();
     let header = format!("Skipped (exceeds {limit_mb} MB size limit):");
-    super::push_path_note(output, &header, &lines);
+    super::search::push_path_note(output, &header, &lines);
 }
 
 // ── Content Mode ──
@@ -437,7 +422,7 @@ fn format_content<'a>(
     re: &regex::Regex,
     context: usize,
     head_limit: usize,
-) -> String {
+) -> GrepOutput {
     let mut rows = Rows::new(head_limit);
 
     for (path, text) in texts {
@@ -458,13 +443,14 @@ fn format_content<'a>(
 }
 
 /// The content rows a search keeps: one past `head_limit`, which proves more output exists, so the
-/// footer appears only when a row was dropped, and at most about [`super::MAX_SPILL_BYTES`], the
-/// most the dispatcher keeps of a result, so `head_limit: 0` cannot hold every match of a large
-/// tree in memory.
+/// footer appears only when a row was dropped, and at most about [`MAX_SPILL_BYTES`], the most
+/// the dispatcher keeps of a result, so `head_limit: 0` cannot buffer every match of a large tree.
 struct Rows {
     kept: Vec<String>,
     bytes: u64,
     head_limit: usize,
+    /// How many of the rows `render` keeps matched the pattern.
+    matches: usize,
 }
 
 impl Rows {
@@ -473,39 +459,53 @@ impl Rows {
             kept: Vec::new(),
             bytes: 0,
             head_limit,
+            matches: 0,
         }
     }
 
     /// Returns whether the search can stop, since another row would be dropped.
     fn full(&self) -> bool {
-        self.kept.len() > self.head_limit || self.bytes >= super::MAX_SPILL_BYTES
+        self.kept.len() > self.head_limit || self.bytes >= MAX_SPILL_BYTES
     }
 
-    fn push(&mut self, row: String) {
+    /// Keeps `row`, a line that matched the pattern when `is_match`
+    /// and a context line or range separator otherwise.
+    fn push(&mut self, row: String, is_match: bool) {
+        if is_match && self.kept.len() < self.head_limit {
+            self.matches += 1;
+        }
         self.bytes += row.len() as u64 + 1;
         self.kept.push(row);
     }
 
-    /// The kept rows, cut to `head_limit`, with a footer naming the limit that dropped any.
-    fn render(mut self) -> String {
+    /// The kept rows, cut to `head_limit`, with a footer naming the limit that dropped any,
+    /// titled with the match count they show.
+    fn render(mut self) -> GrepOutput {
         if self.kept.is_empty() {
-            return NO_MATCHES_FOUND.into();
+            return GrepOutput {
+                content: NO_MATCHES_FOUND.into(),
+                title: NO_MATCHES_FOUND.into(),
+            };
         }
 
         let footer = if self.kept.len() > self.head_limit {
             self.kept.truncate(self.head_limit);
             Some(format!("{} lines", self.head_limit))
-        } else if self.bytes >= super::MAX_SPILL_BYTES {
-            Some(format!("{} MiB of output", super::MAX_SPILL_BYTES >> 20))
+        } else if self.bytes >= MAX_SPILL_BYTES {
+            Some(format!("{} MiB of output", MAX_SPILL_BYTES >> 20))
         } else {
             None
         };
 
-        let mut output = self.kept.join("\n");
+        let mut content = self.kept.join("\n");
         if let Some(footer) = footer {
-            _ = write!(output, "\n\n{RESULTS_LIMIT_PREFIX}{footer})");
+            _ = write!(content, "\n\n{RESULTS_LIMIT_PREFIX}{footer})");
         }
-        output
+        let word = plural(self.matches, "match", "matches");
+        GrepOutput {
+            content,
+            title: format!("{} {word}", self.matches),
+        }
     }
 }
 
@@ -516,7 +516,7 @@ fn search_no_context(text: &str, re: &regex::Regex, display_path: &str, rows: &m
         }
         if re.is_match(line) {
             let truncated = super::truncate_line(line, MAX_LINE_CHARS);
-            rows.push(format!("{display_path}:{}:{truncated}", line_num + 1));
+            rows.push(format!("{display_path}:{}:{truncated}", line_num + 1), true);
         }
     }
 }
@@ -558,19 +558,19 @@ fn search_with_context(
             return;
         }
         if range_idx > 0 {
-            rows.push("--".to_owned());
+            rows.push("--".to_owned(), false);
         }
         for (i, line) in lines.iter().enumerate().take(end + 1).skip(start) {
             if rows.full() {
                 return;
             }
-            let sep = if match_indices.binary_search(&i).is_ok() {
-                ':'
-            } else {
-                '-'
-            };
+            let is_match = match_indices.binary_search(&i).is_ok();
+            let sep = if is_match { ':' } else { '-' };
             let truncated = super::truncate_line(line, MAX_LINE_CHARS);
-            rows.push(format!("{display_path}:{}{sep}{truncated}", i + 1));
+            rows.push(
+                format!("{display_path}:{}{sep}{truncated}", i + 1),
+                is_match,
+            );
         }
     }
 }
@@ -582,7 +582,7 @@ fn format_files_with_matches<'a>(
     cwd: &Path,
     re: &regex::Regex,
     head_limit: usize,
-) -> String {
+) -> GrepOutput {
     let mut matching_files: Vec<String> = Vec::new();
 
     for (path, text) in texts {
@@ -596,7 +596,10 @@ fn format_files_with_matches<'a>(
     }
 
     if matching_files.is_empty() {
-        return NO_FILES_FOUND.into();
+        return GrepOutput {
+            content: NO_FILES_FOUND.into(),
+            title: NO_MATCHES_FOUND.into(),
+        };
     }
 
     let truncated = matching_files.len() > head_limit;
@@ -604,17 +607,18 @@ fn format_files_with_matches<'a>(
     let num_files = matching_files.len();
     let file_word = plural(num_files, "file", "files");
 
+    let title = format!("Found {num_files} {file_word}");
     let files = matching_files.join("\n");
-    let mut output = formatdoc! {"
-        Found {num_files} {file_word}
+    let mut content = formatdoc! {"
+        {title}
         {files}"
     };
 
     if truncated {
-        _ = write!(output, "\n\n{RESULTS_LIMIT_PREFIX}{head_limit} files)");
+        _ = write!(content, "\n\n{RESULTS_LIMIT_PREFIX}{head_limit} files)");
     }
 
-    output
+    GrepOutput { content, title }
 }
 
 // ── Count Mode ──
@@ -624,7 +628,7 @@ fn format_count<'a>(
     cwd: &Path,
     re: &regex::Regex,
     head_limit: usize,
-) -> String {
+) -> GrepOutput {
     let mut counts: Vec<(String, usize)> = Vec::new();
     let mut total_matches: usize = 0;
 
@@ -637,26 +641,30 @@ fn format_count<'a>(
     }
 
     if counts.is_empty() {
-        return NO_MATCHES_FOUND.into();
+        return GrepOutput {
+            content: NO_MATCHES_FOUND.into(),
+            title: NO_MATCHES_FOUND.into(),
+        };
     }
 
     let total_files = counts.len();
     let truncated = total_files > head_limit;
     counts.truncate(head_limit);
 
-    let mut output = format!(
+    let title = format!(
         "Found {total_matches} total {} across {total_files} {}",
         plural(total_matches, "occurrence", "occurrences"),
         plural(total_files, "file", "files"),
     );
+    let mut content = title.clone();
     for (p, c) in &counts {
-        _ = write!(output, "\n{p}:{c}");
+        _ = write!(content, "\n{p}:{c}");
     }
     if truncated {
-        _ = write!(output, "\n\n{RESULTS_LIMIT_PREFIX}{head_limit} files)");
+        _ = write!(content, "\n\n{RESULTS_LIMIT_PREFIX}{head_limit} files)");
     }
 
-    output
+    GrepOutput { content, title }
 }
 
 // ── Result View ──
@@ -736,6 +744,8 @@ fn parse_match_line(line: &str) -> Option<(&str, GrepMatchLine)> {
 
 #[cfg(test)]
 mod tests {
+    use std::fs::{self, File};
+
     use indoc::indoc;
 
     use super::*;
@@ -745,6 +755,11 @@ mod tests {
     };
     use crate::util::fs::testing::symlink_file;
     use crate::util::path::slash_separated;
+
+    /// A `grep` tool without read rules.
+    fn grep_tool() -> GrepTool {
+        GrepTool::new(ReadFilter::default())
+    }
 
     /// Content-mode params searching all of `cwd`, so result paths render relative to it.
     fn params<'a>(pattern: &'a str, cwd: &Path) -> GrepParams<'a> {
@@ -770,7 +785,7 @@ mod tests {
             let dir = canonical_tempdir();
 
             let prepared =
-                GrepTool::default().prepare(serde_json::json!({"pattern": "x"}), &ctx(dir.path()));
+                grep_tool().prepare(serde_json::json!({"pattern": "x"}), &ctx(dir.path()));
 
             let Access::Path {
                 canonical,
@@ -806,7 +821,7 @@ mod tests {
                 serde_json::json!({"pattern": "fn"}),
                 serde_json::json!({"pattern": "fn", "output_mode": "content"}),
             ] {
-                let view = GrepTool::default().result_view(
+                let view = grep_tool().result_view(
                     &input,
                     "src/main.rs:10:fn main()",
                     &ToolMetadata::default(),
@@ -821,7 +836,7 @@ mod tests {
         fn non_content_mode_falls_back_to_text() {
             for mode in ["files_with_matches", "count"] {
                 let input = serde_json::json!({"pattern": "fn", "output_mode": mode});
-                let view = GrepTool::default().result_view(
+                let view = grep_tool().result_view(
                     &input,
                     "irrelevant",
                     &ToolMetadata::default(),
@@ -838,7 +853,7 @@ mod tests {
         #[tokio::test]
         async fn matching_pattern_reports_matches() {
             let dir = canonical_tempdir();
-            std::fs::write(
+            fs::write(
                 dir.path().join("test.rs"),
                 indoc! {"
                     fn main() {}
@@ -849,7 +864,7 @@ mod tests {
 
             let input = serde_json::json!({"pattern": "fn main"});
 
-            let output = local_testing::run(&GrepTool::default(), input, &ctx(dir.path())).await;
+            let output = local_testing::run(&grep_tool(), input, &ctx(dir.path())).await;
 
             assert!(!output.is_error, "{}", output.content);
             assert_eq!(output.content, "test.rs:1:fn main() {}");
@@ -857,8 +872,7 @@ mod tests {
 
         #[tokio::test]
         async fn missing_pattern_reports_input_error() {
-            let output =
-                local_testing::run(&GrepTool::default(), serde_json::json!({}), &temp_ctx()).await;
+            let output = local_testing::run(&grep_tool(), serde_json::json!({}), &temp_ctx()).await;
             assert!(output.is_error);
             assert!(output.content.contains("Invalid input"));
         }
@@ -867,7 +881,7 @@ mod tests {
         async fn invalid_regex_omits_title() {
             let input = serde_json::json!({"pattern": "(unclosed"});
 
-            let output = local_testing::run(&GrepTool::default(), input, &temp_ctx()).await;
+            let output = local_testing::run(&grep_tool(), input, &temp_ctx()).await;
             assert!(output.is_error);
             assert!(
                 output.content.contains("Invalid regex"),
@@ -878,58 +892,24 @@ mod tests {
         }
     }
 
-    mod grep_title {
-        use super::*;
-
-        #[test]
-        fn with_context_counts_matches_only() {
-            let dir = canonical_tempdir();
-            std::fs::write(
-                dir.path().join("test.txt"),
-                indoc! {"
-                    a
-                    MATCH
-                    b
-                    c
-                    MATCH
-                    d
-                "},
-            )
-            .unwrap();
-
-            let mut p = params("MATCH", dir.path());
-            p.context = 1;
-            let result = grep_files(&p).unwrap();
-            assert_eq!(grep_title(&result), "2 matches");
-        }
-
-        #[test]
-        fn summary_modes_reuse_the_found_line() {
-            let count = indoc! {"
-                Found 3 total occurrences across 2 files
-                a.rs:2
-                b.rs:1"
-            };
-            assert_eq!(
-                grep_title(count),
-                "Found 3 total occurrences across 2 files"
-            );
-        }
-
-        #[test]
-        fn empty_results_say_no_matches() {
-            assert_eq!(grep_title("No matches found"), "No matches found");
-            assert_eq!(grep_title("No files found"), "No matches found");
-        }
-    }
-
     mod grep_files {
         use super::*;
 
         #[test]
+        fn titles_a_row_that_starts_like_a_summary_by_its_match_count() {
+            let dir = canonical_tempdir();
+            fs::write(dir.path().join("Found x.rs"), "hit\n").unwrap();
+
+            let result = grep_files(&params("hit", dir.path())).unwrap();
+
+            assert_eq!(result.content, "Found x.rs:1:hit");
+            assert_eq!(result.title, "1 match");
+        }
+
+        #[test]
         fn plain_pattern_finds_matching_lines() {
             let dir = canonical_tempdir();
-            std::fs::write(
+            fs::write(
                 dir.path().join("a.rs"),
                 indoc! {"
                     fn foo() {}
@@ -937,16 +917,16 @@ mod tests {
                 "},
             )
             .unwrap();
-            std::fs::write(dir.path().join("b.rs"), "fn baz() {}\n").unwrap();
+            fs::write(dir.path().join("b.rs"), "fn baz() {}\n").unwrap();
 
-            let result = grep_files(&params("fn foo", dir.path())).unwrap();
+            let result = grep_files(&params("fn foo", dir.path())).unwrap().content;
             assert_eq!(result, "a.rs:1:fn foo() {}");
         }
 
         #[test]
         fn regex_finds_matching_lines() {
             let dir = canonical_tempdir();
-            std::fs::write(
+            fs::write(
                 dir.path().join("test.txt"),
                 indoc! {"
                     hello123
@@ -956,14 +936,16 @@ mod tests {
             )
             .unwrap();
 
-            let result = grep_files(&params(r"hello\d+", dir.path())).unwrap();
+            let result = grep_files(&params(r"hello\d+", dir.path()))
+                .unwrap()
+                .content;
             assert_eq!(result, "test.txt:1:hello123\ntest.txt:3:hello789");
         }
 
         #[test]
         fn case_insensitive_matches_mixed_case() {
             let dir = canonical_tempdir();
-            std::fs::write(
+            fs::write(
                 dir.path().join("test.txt"),
                 indoc! {"
                     Hello World
@@ -974,7 +956,7 @@ mod tests {
 
             let mut p = params("hello", dir.path());
             p.case_insensitive = true;
-            let result = grep_files(&p).unwrap();
+            let result = grep_files(&p).unwrap().content;
             assert!(result.contains("test.txt:1:Hello World"));
             assert!(result.contains("test.txt:2:hello world"));
         }
@@ -982,7 +964,7 @@ mod tests {
         #[test]
         fn with_context_includes_surrounding_lines() {
             let dir = canonical_tempdir();
-            std::fs::write(
+            fs::write(
                 dir.path().join("test.txt"),
                 indoc! {"
                     aaa
@@ -996,7 +978,7 @@ mod tests {
 
             let mut p = params("ccc", dir.path());
             p.context = 1;
-            let result = grep_files(&p).unwrap();
+            let result = grep_files(&p).unwrap().content;
             assert!(result.contains("test.txt:2-bbb"));
             assert!(result.contains("test.txt:3:ccc"));
             assert!(result.contains("test.txt:4-ddd"));
@@ -1007,7 +989,7 @@ mod tests {
         #[test]
         fn with_context_merges_adjacent_ranges() {
             let dir = canonical_tempdir();
-            std::fs::write(
+            fs::write(
                 dir.path().join("test.txt"),
                 indoc! {"
                     a
@@ -1024,7 +1006,7 @@ mod tests {
 
             let mut p = params("MATCH", dir.path());
             p.context = 1;
-            let result = grep_files(&p).unwrap();
+            let result = grep_files(&p).unwrap().content;
             // MATCH1 ctx → 2-4 and MATCH2 ctx → 5-7, so lines 4-5 bridge the gap and ranges merge.
             assert!(!result.contains("--"));
             assert!(result.contains("test.txt:2-b"));
@@ -1038,7 +1020,7 @@ mod tests {
         #[test]
         fn with_context_separates_distant_ranges() {
             let dir = canonical_tempdir();
-            std::fs::write(
+            fs::write(
                 dir.path().join("test.txt"),
                 indoc! {"
                     MATCH1
@@ -1055,8 +1037,12 @@ mod tests {
 
             let mut p = params("MATCH", dir.path());
             p.context = 1;
-            let result = grep_files(&p).unwrap();
+            let GrepOutput {
+                content: result,
+                title,
+            } = grep_files(&p).unwrap();
             // MATCH1 ctx → 1-2 and MATCH2 ctx → 7-8, so the gap forces a "--" separator.
+            assert_eq!(title, "2 matches");
             assert!(result.contains("--"));
             assert!(result.contains("test.txt:1:MATCH1"));
             assert!(result.contains("test.txt:2-a"));
@@ -1071,7 +1057,7 @@ mod tests {
         #[test]
         fn with_context_no_matches_in_file() {
             let dir = canonical_tempdir();
-            std::fs::write(
+            fs::write(
                 dir.path().join("test.txt"),
                 indoc! {"
                     aaa
@@ -1083,14 +1069,14 @@ mod tests {
 
             let mut p = params("xyz", dir.path());
             p.context = 1;
-            let result = grep_files(&p).unwrap();
+            let result = grep_files(&p).unwrap().content;
             assert_eq!(result, "No matches found");
         }
 
         #[test]
         fn with_context_respects_head_limit() {
             let dir = canonical_tempdir();
-            std::fs::write(
+            fs::write(
                 dir.path().join("test.txt"),
                 indoc! {"
                     before1
@@ -1107,7 +1093,7 @@ mod tests {
             let mut p = params("MATCH", dir.path());
             p.context = 1;
             p.head_limit = Some(3);
-            let result = grep_files(&p).unwrap();
+            let result = grep_files(&p).unwrap().content;
             assert!(result.contains("Results limited to 3 lines"));
             let entry_count = result.lines().filter(|l| l.contains("test.txt:")).count();
             assert_eq!(entry_count, 3);
@@ -1116,19 +1102,19 @@ mod tests {
         #[test]
         fn with_include_filter() {
             let dir = canonical_tempdir();
-            std::fs::write(dir.path().join("code.rs"), "fn test() {}\n").unwrap();
-            std::fs::write(dir.path().join("readme.md"), "fn test()\n").unwrap();
+            fs::write(dir.path().join("code.rs"), "fn test() {}\n").unwrap();
+            fs::write(dir.path().join("readme.md"), "fn test()\n").unwrap();
 
             let mut p = params("fn test", dir.path());
             p.include_glob = Some("*.rs");
-            let result = grep_files(&p).unwrap();
+            let result = grep_files(&p).unwrap().content;
             assert_eq!(result, "code.rs:1:fn test() {}");
         }
 
         #[test]
         fn single_file_finds_matching_lines() {
             let dir = canonical_tempdir();
-            std::fs::write(
+            fs::write(
                 dir.path().join("test.txt"),
                 indoc! {"
                     alpha
@@ -1140,7 +1126,7 @@ mod tests {
 
             let mut p = params("beta", dir.path());
             p.root = search_root(dir.path(), Some("test.txt")).unwrap();
-            let result = grep_files(&p).unwrap();
+            let result = grep_files(&p).unwrap().content;
             assert_eq!(result, "test.txt:2:beta");
         }
 
@@ -1154,13 +1140,13 @@ mod tests {
                 "{}error: last line\n",
                 format!("{}\n", "x".repeat(99)).repeat(lines)
             );
-            std::fs::create_dir_all(dir.path().join("session/tool-results")).unwrap();
-            std::fs::write(dir.path().join(spill), &text).unwrap();
+            fs::create_dir_all(dir.path().join("session/tool-results")).unwrap();
+            fs::write(dir.path().join(spill), &text).unwrap();
             assert!(text.len() as u64 > 2 * MAX_WALK_FILE_SIZE);
 
             let mut p = params("^error", dir.path());
             p.root = search_root(dir.path(), Some(spill)).unwrap();
-            let result = grep_files(&p).unwrap();
+            let result = grep_files(&p).unwrap().content;
 
             assert_eq!(result, format!("{spill}:{}:error: last line", lines + 1));
         }
@@ -1169,21 +1155,21 @@ mod tests {
         fn renders_paths_relative_to_cwd() {
             let dir = canonical_tempdir();
             let cwd = dir.path().join("project");
-            std::fs::create_dir_all(cwd.join("src")).unwrap();
-            std::fs::write(cwd.join("src/lib.rs"), "hit\n").unwrap();
+            fs::create_dir_all(cwd.join("src")).unwrap();
+            fs::write(cwd.join("src/lib.rs"), "hit\n").unwrap();
             let outside = dir.path().join("outside.txt");
-            std::fs::write(&outside, "hit\n").unwrap();
+            fs::write(&outside, "hit\n").unwrap();
 
             let mut p = params("hit", &cwd);
             p.root = search_root(&cwd, Some("src")).unwrap();
-            assert_eq!(grep_files(&p).unwrap(), "src/lib.rs:1:hit");
+            assert_eq!(grep_files(&p).unwrap().content, "src/lib.rs:1:hit");
 
             p.root = search_root(&cwd, Some("src/lib.rs")).unwrap();
-            assert_eq!(grep_files(&p).unwrap(), "src/lib.rs:1:hit");
+            assert_eq!(grep_files(&p).unwrap().content, "src/lib.rs:1:hit");
 
             p.root = search_root(&cwd, Some("../outside.txt")).unwrap();
             assert_eq!(
-                grep_files(&p).unwrap(),
+                grep_files(&p).unwrap().content,
                 format!("{}:1:hit", slash_separated(&outside)),
                 "hits outside cwd fall back to an absolute path",
             );
@@ -1192,10 +1178,10 @@ mod tests {
         #[test]
         fn skips_binary() {
             let dir = canonical_tempdir();
-            std::fs::write(dir.path().join("binary.bin"), b"match\x00here").unwrap();
-            std::fs::write(dir.path().join("text.txt"), "match here\n").unwrap();
+            fs::write(dir.path().join("binary.bin"), b"match\x00here").unwrap();
+            fs::write(dir.path().join("text.txt"), "match here\n").unwrap();
 
-            let result = grep_files(&params("match", dir.path())).unwrap();
+            let result = grep_files(&params("match", dir.path())).unwrap().content;
             assert_eq!(result, "text.txt:1:match here");
         }
 
@@ -1203,37 +1189,37 @@ mod tests {
         fn includes_hidden_paths_but_skips_vcs_dirs() {
             let dir = canonical_tempdir();
             let cargo = dir.path().join(".cargo");
-            std::fs::create_dir(&cargo).unwrap();
-            std::fs::write(cargo.join("config.toml"), "match me\n").unwrap();
+            fs::create_dir(&cargo).unwrap();
+            fs::write(cargo.join("config.toml"), "match me\n").unwrap();
             let git = dir.path().join(".git");
-            std::fs::create_dir(&git).unwrap();
-            std::fs::write(git.join("config"), "match me\n").unwrap();
+            fs::create_dir(&git).unwrap();
+            fs::write(git.join("config"), "match me\n").unwrap();
 
-            let result = grep_files(&params("match", dir.path())).unwrap();
+            let result = grep_files(&params("match", dir.path())).unwrap().content;
             assert_eq!(result, ".cargo/config.toml:1:match me");
         }
 
         #[test]
         fn respects_gitignore() {
             let dir = canonical_tempdir();
-            std::fs::create_dir(dir.path().join(".git")).unwrap();
-            std::fs::write(dir.path().join(".gitignore"), "ignored.txt\n").unwrap();
-            std::fs::write(dir.path().join("ignored.txt"), "match me\n").unwrap();
-            std::fs::write(dir.path().join("tracked.txt"), "match me\n").unwrap();
+            fs::create_dir(dir.path().join(".git")).unwrap();
+            fs::write(dir.path().join(".gitignore"), "ignored.txt\n").unwrap();
+            fs::write(dir.path().join("ignored.txt"), "match me\n").unwrap();
+            fs::write(dir.path().join("tracked.txt"), "match me\n").unwrap();
 
-            let result = grep_files(&params("match", dir.path())).unwrap();
+            let result = grep_files(&params("match", dir.path())).unwrap().content;
             assert_eq!(result, "tracked.txt:1:match me");
         }
 
         #[test]
         fn warns_about_skipped_large_files() {
             let dir = canonical_tempdir();
-            std::fs::write(dir.path().join("small.txt"), "match here\n").unwrap();
+            fs::write(dir.path().join("small.txt"), "match here\n").unwrap();
             let large = dir.path().join("large.txt");
-            let f = std::fs::File::create(&large).unwrap();
+            let f = File::create(&large).unwrap();
             f.set_len(MAX_WALK_FILE_SIZE + 1).unwrap();
 
-            let result = grep_files(&params("match", dir.path())).unwrap();
+            let result = grep_files(&params("match", dir.path())).unwrap().content;
 
             assert_eq!(
                 result,
@@ -1249,21 +1235,24 @@ mod tests {
         #[test]
         fn lists_what_it_could_not_read_after_the_matches() {
             let dir = canonical_tempdir();
-            std::fs::write(dir.path().join("a.rs"), "hit\n").unwrap();
+            fs::write(dir.path().join("a.rs"), "hit\n").unwrap();
             let locked = dir.path().join("locked");
-            std::fs::create_dir(&locked).unwrap();
-            std::fs::write(locked.join("b.rs"), "hit\n").unwrap();
+            fs::create_dir(&locked).unwrap();
+            fs::write(locked.join("b.rs"), "hit\n").unwrap();
             let secret = dir.path().join("secret.rs");
-            std::fs::write(&secret, "hit\n").unwrap();
+            fs::write(&secret, "hit\n").unwrap();
             let _denied = [
                 local_testing::deny_read_access(&locked),
                 local_testing::deny_read_access(&secret),
             ];
 
-            let result = grep_files(&params("hit", dir.path())).unwrap();
+            let GrepOutput {
+                content: result,
+                title,
+            } = grep_files(&params("hit", dir.path())).unwrap();
 
-            let dir_cause = std::fs::read_dir(&locked).unwrap_err();
-            let file_cause = std::fs::read(&secret).unwrap_err();
+            let dir_cause = fs::read_dir(&locked).unwrap_err();
+            let file_cause = fs::read(&secret).unwrap_err();
             assert_eq!(
                 result,
                 formatdoc! {"
@@ -1274,11 +1263,8 @@ mod tests {
                       secret.rs: {file_cause}"
                 }
             );
-            assert_eq!(
-                grep_title(crate::tool::strip_search_notes(&result)),
-                "1 match"
-            );
-            let view = GrepTool::default().result_view(
+            assert_eq!(title, "1 match");
+            let view = grep_tool().result_view(
                 &serde_json::json!({"pattern": "hit"}),
                 &result,
                 &ToolMetadata::default(),
@@ -1290,14 +1276,14 @@ mod tests {
         #[test]
         fn withholds_an_unreadable_directory_a_read_deny_rule_matches() {
             let dir = canonical_tempdir();
-            std::fs::write(dir.path().join("a.rs"), "hit\n").unwrap();
+            fs::write(dir.path().join("a.rs"), "hit\n").unwrap();
             let secrets = dir.path().join("secrets");
-            std::fs::create_dir(&secrets).unwrap();
+            fs::create_dir(&secrets).unwrap();
             let _denied = local_testing::deny_read_access(&secrets);
             let mut p = params("hit", dir.path());
             p.read_filter = deny_reads(&["secrets"]);
 
-            let result = grep_files(&p).unwrap();
+            let result = grep_files(&p).unwrap().content;
 
             assert_eq!(
                 result,
@@ -1313,12 +1299,12 @@ mod tests {
         fn without_matches_still_lists_what_it_could_not_read() {
             let dir = canonical_tempdir();
             let secret = dir.path().join("secret.rs");
-            std::fs::write(&secret, "hit\n").unwrap();
+            fs::write(&secret, "hit\n").unwrap();
             let _denied = local_testing::deny_read_access(&secret);
 
-            let result = grep_files(&params("hit", dir.path())).unwrap();
+            let result = grep_files(&params("hit", dir.path())).unwrap().content;
 
-            let cause = std::fs::read(&secret).unwrap_err();
+            let cause = fs::read(&secret).unwrap_err();
             assert_eq!(
                 result,
                 formatdoc! {"
@@ -1333,13 +1319,13 @@ mod tests {
         #[test]
         fn withholds_files_a_read_deny_rule_matches() {
             let dir = canonical_tempdir();
-            std::fs::write(dir.path().join("a.rs"), "TOKEN=public\n").unwrap();
-            std::fs::create_dir(dir.path().join("sub")).unwrap();
-            std::fs::write(dir.path().join("sub/.env"), "TOKEN=secret\n").unwrap();
+            fs::write(dir.path().join("a.rs"), "TOKEN=public\n").unwrap();
+            fs::create_dir(dir.path().join("sub")).unwrap();
+            fs::write(dir.path().join("sub/.env"), "TOKEN=secret\n").unwrap();
             let mut p = params("TOKEN", dir.path());
             p.read_filter = deny_reads(&[".env"]);
             assert_eq!(
-                grep_files(&p).unwrap(),
+                grep_files(&p).unwrap().content,
                 indoc! {"
                     a.rs:1:TOKEN=public
 
@@ -1348,7 +1334,10 @@ mod tests {
             );
 
             p.pattern = "secret";
-            let result = grep_files(&p).unwrap();
+            let GrepOutput {
+                content: result,
+                title,
+            } = grep_files(&p).unwrap();
             assert_eq!(
                 result,
                 indoc! {"
@@ -1357,11 +1346,10 @@ mod tests {
                     (1 file withheld by read deny or ask rules)"
                 }
             );
-            let title = grep_title(crate::tool::strip_search_notes(&result));
             assert_eq!(title, "No matches found");
             // The structured view would drop the note, so the text view shows it.
             let input = serde_json::json!({"pattern": "secret"});
-            let view = GrepTool::default().result_view(
+            let view = grep_tool().result_view(
                 &input,
                 &result,
                 &ToolMetadata::default(),
@@ -1373,10 +1361,11 @@ mod tests {
         #[test]
         fn unmatched_pattern_reports_no_matches() {
             let dir = canonical_tempdir();
-            std::fs::write(dir.path().join("test.txt"), "hello world\n").unwrap();
+            fs::write(dir.path().join("test.txt"), "hello world\n").unwrap();
 
             let result = grep_files(&params("nonexistent", dir.path())).unwrap();
-            assert_eq!(result, "No matches found");
+            assert_eq!(result.content, "No matches found");
+            assert_eq!(result.title, "No matches found");
         }
 
         #[test]
@@ -1398,12 +1387,12 @@ mod tests {
         fn single_file_too_large() {
             let dir = canonical_tempdir();
             let large = dir.path().join("large.txt");
-            let f = std::fs::File::create(&large).unwrap();
+            let f = File::create(&large).unwrap();
             f.set_len(MAX_TRACKED_FILE_SIZE + 1).unwrap();
 
             let mut p = params("match", dir.path());
             p.root = search_root(dir.path(), Some("large.txt")).unwrap();
-            let result = grep_files(&p).unwrap();
+            let result = grep_files(&p).unwrap().content;
 
             assert_eq!(
                 result,
@@ -1421,17 +1410,17 @@ mod tests {
         fn withholds_a_denied_file_below_a_symlinked_root() {
             let dir = canonical_tempdir();
             let (cwd, outside) = (dir.path().join("cwd"), dir.path().join("outside"));
-            std::fs::create_dir(&cwd).unwrap();
-            std::fs::create_dir_all(outside.join("secrets")).unwrap();
-            std::fs::write(outside.join("secrets/db.key"), "TOKEN=secret\n").unwrap();
-            std::fs::write(outside.join("app.toml"), "TOKEN=public\n").unwrap();
+            fs::create_dir(&cwd).unwrap();
+            fs::create_dir_all(outside.join("secrets")).unwrap();
+            fs::write(outside.join("secrets/db.key"), "TOKEN=secret\n").unwrap();
+            fs::write(outside.join("app.toml"), "TOKEN=public\n").unwrap();
             std::os::unix::fs::symlink(&outside, cwd.join("config")).unwrap();
             let mut p = params("TOKEN", &cwd);
             p.root = search_root(&cwd, Some("config")).unwrap();
             p.read_filter = deny_reads(&["secrets"]);
             let app = outside.join("app.toml").display().to_string();
             assert_eq!(
-                grep_files(&p).unwrap(),
+                grep_files(&p).unwrap().content,
                 formatdoc! {"
                     {app}:1:TOKEN=public
 
@@ -1447,11 +1436,11 @@ mod tests {
                 _ = writeln!(s, "match line {i}");
                 s
             });
-            std::fs::write(dir.path().join("test.txt"), &content).unwrap();
+            fs::write(dir.path().join("test.txt"), &content).unwrap();
 
             let mut p = params("match", dir.path());
             p.head_limit = Some(5);
-            let result = grep_files(&p).unwrap();
+            let result = grep_files(&p).unwrap().content;
             let lines: Vec<&str> = result.lines().collect();
             // 5 match lines + blank + truncation notice
             assert!(result.contains("Results limited to 5 lines"));
@@ -1461,11 +1450,11 @@ mod tests {
         #[test]
         fn head_limit_exactly_reached_is_not_flagged() {
             let dir = canonical_tempdir();
-            std::fs::write(dir.path().join("test.txt"), "match\nmatch\nmatch\n").unwrap();
+            fs::write(dir.path().join("test.txt"), "match\nmatch\nmatch\n").unwrap();
 
             let mut p = params("match", dir.path());
             p.head_limit = Some(3);
-            let result = grep_files(&p).unwrap();
+            let result = grep_files(&p).unwrap().content;
             assert_eq!(
                 result,
                 indoc! {"
@@ -1484,11 +1473,11 @@ mod tests {
                 _ = writeln!(s, "match line {i}");
                 s
             });
-            std::fs::write(dir.path().join("test.txt"), &content).unwrap();
+            fs::write(dir.path().join("test.txt"), &content).unwrap();
 
             let mut p = params("match", dir.path());
             p.head_limit = Some(0);
-            let result = grep_files(&p).unwrap();
+            let result = grep_files(&p).unwrap().content;
             assert!(!result.contains("Results limited"));
             assert!(result.contains(&format!("test.txt:{}:", DEFAULT_HEAD_LIMIT + 1)));
         }
@@ -1497,12 +1486,12 @@ mod tests {
         fn head_limit_across_multiple_files() {
             let dir = canonical_tempdir();
             for name in ["a.txt", "b.txt"] {
-                std::fs::write(dir.path().join(name), "match\nmatch\nmatch\n").unwrap();
+                fs::write(dir.path().join(name), "match\nmatch\nmatch\n").unwrap();
             }
 
             let mut p = params("match", dir.path());
             p.head_limit = Some(3);
-            let result = grep_files(&p).unwrap();
+            let result = grep_files(&p).unwrap().content;
             assert!(result.contains("Results limited to 3 lines"));
             let match_lines: Vec<_> = result.lines().filter(|l| l.contains(":match")).collect();
             assert_eq!(match_lines.len(), 3);
@@ -1511,13 +1500,17 @@ mod tests {
         #[test]
         fn files_with_matches_mode_lists_matching_paths() {
             let dir = canonical_tempdir();
-            std::fs::write(dir.path().join("a.rs"), "fn foo() {}\n").unwrap();
-            std::fs::write(dir.path().join("b.rs"), "fn bar() {}\n").unwrap();
-            std::fs::write(dir.path().join("c.txt"), "no match\n").unwrap();
+            fs::write(dir.path().join("a.rs"), "fn foo() {}\n").unwrap();
+            fs::write(dir.path().join("b.rs"), "fn bar() {}\n").unwrap();
+            fs::write(dir.path().join("c.txt"), "no match\n").unwrap();
 
             let mut p = params("fn", dir.path());
             p.output_mode = OutputMode::FilesWithMatches;
-            let result = grep_files(&p).unwrap();
+            let GrepOutput {
+                content: result,
+                title,
+            } = grep_files(&p).unwrap();
+            assert_eq!(title, "Found 2 files");
             assert!(result.starts_with("Found 2 files\n"));
             assert!(result.lines().any(|l| l == "a.rs"));
             assert!(result.lines().any(|l| l == "b.rs"));
@@ -1528,13 +1521,13 @@ mod tests {
         fn files_with_matches_truncated() {
             let dir = canonical_tempdir();
             for i in 0..5 {
-                std::fs::write(dir.path().join(format!("{i}.txt")), "match\n").unwrap();
+                fs::write(dir.path().join(format!("{i}.txt")), "match\n").unwrap();
             }
 
             let mut p = params("match", dir.path());
             p.output_mode = OutputMode::FilesWithMatches;
             p.head_limit = Some(2);
-            let result = grep_files(&p).unwrap();
+            let result = grep_files(&p).unwrap().content;
             assert!(result.starts_with("Found 2 files\n"));
             assert!(result.contains("Results limited to 2 files"));
             let file_count = result.lines().filter(|l| l.contains(".txt")).count();
@@ -1545,13 +1538,13 @@ mod tests {
         fn files_with_matches_exactly_at_limit_is_not_flagged() {
             let dir = canonical_tempdir();
             for i in 0..2 {
-                std::fs::write(dir.path().join(format!("{i}.txt")), "match\n").unwrap();
+                fs::write(dir.path().join(format!("{i}.txt")), "match\n").unwrap();
             }
 
             let mut p = params("match", dir.path());
             p.output_mode = OutputMode::FilesWithMatches;
             p.head_limit = Some(2);
-            let result = grep_files(&p).unwrap();
+            let result = grep_files(&p).unwrap().content;
             assert!(result.starts_with("Found 2 files\n"));
             assert!(
                 !result.contains("Results limited"),
@@ -1562,18 +1555,19 @@ mod tests {
         #[test]
         fn files_with_matches_no_matches() {
             let dir = canonical_tempdir();
-            std::fs::write(dir.path().join("a.rs"), "fn foo() {}\n").unwrap();
+            fs::write(dir.path().join("a.rs"), "fn foo() {}\n").unwrap();
 
             let mut p = params("nonexistent", dir.path());
             p.output_mode = OutputMode::FilesWithMatches;
             let result = grep_files(&p).unwrap();
-            assert_eq!(result, "No files found");
+            assert_eq!(result.content, "No files found");
+            assert_eq!(result.title, "No matches found");
         }
 
         #[test]
         fn count_mode_reports_occurrences() {
             let dir = canonical_tempdir();
-            std::fs::write(
+            fs::write(
                 dir.path().join("test.txt"),
                 indoc! {"
                     aaa
@@ -1585,7 +1579,7 @@ mod tests {
 
             let mut p = params("aaa", dir.path());
             p.output_mode = OutputMode::Count;
-            let result = grep_files(&p).unwrap();
+            let result = grep_files(&p).unwrap().content;
             assert!(result.contains("\ntest.txt:2"));
             assert!(result.contains("2 total occurrences"));
         }
@@ -1594,13 +1588,13 @@ mod tests {
         fn count_mode_truncated() {
             let dir = canonical_tempdir();
             for i in 0..5 {
-                std::fs::write(dir.path().join(format!("{i}.txt")), "match\n").unwrap();
+                fs::write(dir.path().join(format!("{i}.txt")), "match\n").unwrap();
             }
 
             let mut p = params("match", dir.path());
             p.output_mode = OutputMode::Count;
             p.head_limit = Some(2);
-            let result = grep_files(&p).unwrap();
+            let result = grep_files(&p).unwrap().content;
             // The summary counts all 5 files even though `head_limit` caps the listing at 2.
             assert!(result.contains("5 total occurrences across 5 files"));
             assert!(result.contains("Results limited to 2 files"));
@@ -1611,11 +1605,11 @@ mod tests {
         #[test]
         fn count_mode_singular() {
             let dir = canonical_tempdir();
-            std::fs::write(dir.path().join("a.txt"), "match once\n").unwrap();
+            fs::write(dir.path().join("a.txt"), "match once\n").unwrap();
 
             let mut p = params("match", dir.path());
             p.output_mode = OutputMode::Count;
-            let result = grep_files(&p).unwrap();
+            let result = grep_files(&p).unwrap().content;
             assert!(result.contains("1 total occurrence across 1 file"));
             assert!(!result.contains("occurrences"));
             assert!(!result.contains(" files"));
@@ -1624,12 +1618,16 @@ mod tests {
         #[test]
         fn count_mode_summary_first() {
             let dir = canonical_tempdir();
-            std::fs::write(dir.path().join("a.txt"), "match\n").unwrap();
-            std::fs::write(dir.path().join("b.txt"), "match\n").unwrap();
+            fs::write(dir.path().join("a.txt"), "match\n").unwrap();
+            fs::write(dir.path().join("b.txt"), "match\n").unwrap();
 
             let mut p = params("match", dir.path());
             p.output_mode = OutputMode::Count;
-            let result = grep_files(&p).unwrap();
+            let GrepOutput {
+                content: result,
+                title,
+            } = grep_files(&p).unwrap();
+            assert_eq!(title, "Found 2 total occurrences across 2 files");
             assert!(
                 result.starts_with("Found 2 total occurrences across 2 files\n"),
                 "summary must lead the body: {result:?}",
@@ -1639,11 +1637,13 @@ mod tests {
         #[test]
         fn count_mode_without_matches_reports_no_matches() {
             let dir = canonical_tempdir();
-            std::fs::write(dir.path().join("test.txt"), "other\n").unwrap();
+            fs::write(dir.path().join("test.txt"), "other\n").unwrap();
 
             let mut p = params("absent", dir.path());
             p.output_mode = OutputMode::Count;
-            assert_eq!(grep_files(&p).unwrap(), "No matches found");
+            let result = grep_files(&p).unwrap();
+            assert_eq!(result.content, "No matches found");
+            assert_eq!(result.title, "No matches found");
         }
     }
 
@@ -1654,7 +1654,7 @@ mod tests {
         fn records_a_failed_read_but_skips_a_file_that_vanished() {
             let dir = canonical_tempdir();
             let secret = dir.path().join("secret.txt");
-            std::fs::write(&secret, "x").unwrap();
+            fs::write(&secret, "x").unwrap();
             let _denied = local_testing::deny_read_access(&secret);
             let files = [dir.path().join("gone.txt"), secret.clone()];
             let cancel = CancellationToken::new();
@@ -1663,7 +1663,7 @@ mod tests {
             let read: Vec<_> =
                 texts(&files, MAX_WALK_FILE_SIZE, &cancel, &mut unreadable).collect();
 
-            let cause = std::fs::read(&secret).unwrap_err().to_string();
+            let cause = fs::read(&secret).unwrap_err().to_string();
             assert_eq!(read, []);
             assert_eq!(
                 unreadable,
@@ -1683,8 +1683,8 @@ mod tests {
             let dir = canonical_tempdir();
             let text = dir.path().join("a.txt");
             let binary = dir.path().join("a.bin");
-            std::fs::write(&text, "fn main() {}\n").unwrap();
-            std::fs::write(&binary, b"\0\x01").unwrap();
+            fs::write(&text, "fn main() {}\n").unwrap();
+            fs::write(&binary, b"\0\x01").unwrap();
 
             assert_eq!(
                 read_text(&text, MAX_WALK_FILE_SIZE).unwrap().as_deref(),
@@ -1698,7 +1698,7 @@ mod tests {
             let dir = canonical_tempdir();
             let path = dir.path().join("big.txt");
             let limit = 1024 * 1024;
-            std::fs::write(&path, vec![b'a'; 1024 * 1024 + 1]).unwrap();
+            fs::write(&path, vec![b'a'; 1024 * 1024 + 1]).unwrap();
 
             let err = read_text(&path, limit).unwrap_err();
 
@@ -1709,7 +1709,7 @@ mod tests {
         fn refuses_a_symlink() {
             let dir = canonical_tempdir();
             let target = dir.path().join("target.txt");
-            std::fs::write(&target, "SECRET=1").unwrap();
+            fs::write(&target, "SECRET=1").unwrap();
             let link = dir.path().join("link.txt");
             symlink_file(&target, &link);
 
@@ -1746,7 +1746,7 @@ mod tests {
                 (Path::new("/repo/b.rs"), "m\n".to_owned()),
             ];
 
-            let output = format_content(texts.into_iter(), Path::new("/repo"), &re, 0, 1);
+            let output = format_content(texts.into_iter(), Path::new("/repo"), &re, 0, 1).content;
 
             assert_eq!(
                 output,
@@ -1768,23 +1768,24 @@ mod tests {
             #[test]
             fn keeps_every_row_under_both_limits() {
                 let mut rows = Rows::new(2);
-                rows.push("a".to_owned());
-                rows.push("b".to_owned());
+                rows.push("a".to_owned(), true);
+                rows.push("b".to_owned(), true);
 
                 assert!(!rows.full());
-                assert_eq!(rows.render(), "a\nb");
+                assert_eq!(rows.render().content, "a\nb");
             }
 
             #[test]
             fn cuts_to_the_head_limit_and_names_it() {
                 let mut rows = Rows::new(2);
                 for row in ["a", "b", "c"] {
-                    rows.push(row.to_owned());
+                    rows.push(row.to_owned(), true);
                 }
 
                 assert!(rows.full());
+                let rendered = rows.render();
                 assert_eq!(
-                    rows.render(),
+                    rendered.content,
                     indoc! {"
                         a
                         b
@@ -1792,6 +1793,7 @@ mod tests {
                         (Results limited to 2 lines)"
                     },
                 );
+                assert_eq!(rendered.title, "2 matches");
             }
 
             #[test]
@@ -1800,11 +1802,11 @@ mod tests {
                 let mut rows = Rows::new(usize::MAX);
                 let mut pushed = 0;
                 while !rows.full() {
-                    rows.push(row.clone());
+                    rows.push(row.clone(), true);
                     pushed += 1;
                 }
 
-                let rendered = rows.render();
+                let rendered = rows.render().content;
 
                 assert_eq!(pushed, 10);
                 let kept = vec![row; 10].join("\n");
@@ -1816,7 +1818,7 @@ mod tests {
 
             #[test]
             fn without_rows_reports_no_matches() {
-                assert_eq!(Rows::new(2).render(), "No matches found");
+                assert_eq!(Rows::new(2).render().content, "No matches found");
             }
         }
     }

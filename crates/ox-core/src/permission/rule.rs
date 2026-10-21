@@ -24,7 +24,7 @@ use crate::util::text::is_hidden;
 // ── Rule ──
 
 /// One parsed permission rule, which serializes as its class and its pattern as written.
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(try_from = "RuleSpec", into = "RuleSpec")]
 pub struct Rule {
     class: PermissionClass,
@@ -34,7 +34,7 @@ pub struct Rule {
 }
 
 /// The serialized form of a [`Rule`].
-#[derive(Deserialize, Serialize)]
+#[derive(Serialize, Deserialize)]
 struct RuleSpec {
     class: PermissionClass,
     pattern: String,

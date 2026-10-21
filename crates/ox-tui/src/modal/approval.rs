@@ -14,7 +14,7 @@ use ratatui::widgets::Paragraph;
 
 use ox_core::permission::SessionGrant;
 use ox_core::protocol::{Decision, Op};
-use ox_core::tool::{ApprovalBody, ApprovalPreview, DiffChunk};
+use ox_core::tool::view::{ApprovalBody, ApprovalPreview, DiffChunk};
 use ox_core::util::text::{is_hidden, truncate_to_width};
 
 use super::line_editor::LineEditor;
@@ -535,7 +535,7 @@ impl Palette {
     }
 }
 
-/// Flattens an [`ApprovalBody`] into preview rows: a command's lines verbatim, or a diff's hunks as
+/// Flattens an [`ApprovalBody`] into preview rows: a command's lines verbatim, or a diff's hunk as
 /// `-` / `+` rows.
 fn flatten_body(body: &ApprovalBody) -> Vec<BodyLine> {
     match body {
@@ -546,18 +546,15 @@ fn flatten_body(body: &ApprovalBody) -> Vec<BodyLine> {
                 text: line.to_owned(),
             })
             .collect(),
-        ApprovalBody::Diff(chunks) => diff_rows(chunks),
+        ApprovalBody::Diff(chunk) => diff_rows(chunk),
     }
 }
 
-fn diff_rows(chunks: &[DiffChunk]) -> Vec<BodyLine> {
-    chunks
-        .iter()
-        .flat_map(|chunk| {
-            let removed = chunk.old.iter().map(|line| (BodyKind::Removed, line));
-            let added = chunk.new.iter().map(|line| (BodyKind::Added, line));
-            removed.chain(added)
-        })
+fn diff_rows(chunk: &DiffChunk) -> Vec<BodyLine> {
+    let removed = chunk.old.iter().map(|line| (BodyKind::Removed, line));
+    let added = chunk.new.iter().map(|line| (BodyKind::Added, line));
+    removed
+        .chain(added)
         .map(|(kind, line)| BodyLine {
             kind,
             text: expand_tabs(&line.text),
@@ -632,7 +629,7 @@ mod tests {
     use ox_core::permission::PermissionClass;
     use ox_core::permission::rule::Rule;
     use ox_core::permission::testing::exec_grant;
-    use ox_core::tool::DiffLine;
+    use ox_core::tool::view::NumberedLine;
 
     use super::*;
     use crate::modal::ModalStack;
@@ -720,16 +717,16 @@ mod tests {
                 "call-1".to_owned(),
                 ApprovalPreview {
                     title: "Write(src/main.rs)".to_owned(),
-                    body: ApprovalBody::Diff(vec![DiffChunk {
-                        old: vec![DiffLine {
+                    body: ApprovalBody::Diff(DiffChunk {
+                        old: vec![NumberedLine {
                             number: 1,
                             text: "old line".to_owned(),
                         }],
-                        new: vec![DiffLine {
+                        new: vec![NumberedLine {
                             number: 1,
                             text: "new line".to_owned(),
                         }],
-                    }]),
+                    }),
                 },
                 None,
                 None,
@@ -1347,13 +1344,13 @@ mod tests {
 
         #[test]
         fn expands_diff_tabs() {
-            let rows = flatten_body(&ApprovalBody::Diff(vec![DiffChunk {
+            let rows = flatten_body(&ApprovalBody::Diff(DiffChunk {
                 old: Vec::new(),
-                new: vec![DiffLine {
+                new: vec![NumberedLine {
                     number: 1,
                     text: "\tfoo()".to_owned(),
                 }],
-            }]));
+            }));
             assert_eq!(rows[0].text, "    foo()");
         }
     }
