@@ -193,6 +193,20 @@ mod tests {
         }
     }
 
+    fn assistant(content: Vec<ContentBlock>) -> Message {
+        Message {
+            role: Role::Assistant,
+            content,
+        }
+    }
+
+    fn user(content: Vec<ContentBlock>) -> Message {
+        Message {
+            role: Role::User,
+            content,
+        }
+    }
+
     mod sanitize_resumed_messages {
         use super::*;
 
@@ -204,12 +218,10 @@ mod tests {
                 Message::user("bye"),
             ];
             let before = messages.clone();
+
             sanitize_resumed_messages(&mut messages);
-            assert_eq!(messages.len(), before.len());
-            for (got, want) in messages.iter().zip(before.iter()) {
-                assert_eq!(got.role, want.role);
-                assert_eq!(got.content.len(), want.content.len());
-            }
+
+            assert_eq!(messages, before);
         }
 
         #[test]
@@ -229,16 +241,17 @@ mod tests {
                     content: vec![tool_result("t1", "ok")],
                 },
             ];
+
             sanitize_resumed_messages(&mut messages);
 
-            let assistant_blocks = &messages[1].content;
-            assert_eq!(assistant_blocks.len(), 2);
-            assert!(matches!(&assistant_blocks[0], ContentBlock::Text { .. }));
-            assert!(matches!(&assistant_blocks[1], ContentBlock::ToolUse { id, .. } if id == "t1"));
-            assert_eq!(messages.len(), 4);
-            assert_eq!(messages[3].role, Role::Assistant);
-            assert!(
-                matches!(&messages[3].content[0], ContentBlock::Text { text } if text == RESUME_CONTINUATION_SENTINEL)
+            assert_eq!(
+                messages,
+                [
+                    Message::user("do X"),
+                    assistant(vec![text("checking"), unresolved_tool_use("t1")]),
+                    user(vec![tool_result("t1", "ok")]),
+                    Message::assistant(RESUME_CONTINUATION_SENTINEL),
+                ],
             );
         }
 
@@ -252,13 +265,17 @@ mod tests {
                     content: vec![tool_result("orphan", "ghost"), text("follow-up")],
                 },
             ];
+
             sanitize_resumed_messages(&mut messages);
 
-            assert_eq!(messages.len(), 3);
-            let last = &messages[2];
-            assert_eq!(last.role, Role::User);
-            assert_eq!(last.content.len(), 1);
-            assert!(matches!(&last.content[0], ContentBlock::Text { text } if text == "follow-up"));
+            assert_eq!(
+                messages,
+                [
+                    Message::user("do X"),
+                    Message::assistant("done, no tool needed"),
+                    Message::user("follow-up"),
+                ],
+            );
         }
 
         #[test]
@@ -271,11 +288,13 @@ mod tests {
                     content: vec![tool_result("ghost", "nobody asked")],
                 },
             ];
+
             sanitize_resumed_messages(&mut messages);
 
-            assert_eq!(messages.len(), 2);
-            assert_eq!(messages[0].role, Role::User);
-            assert_eq!(messages[1].role, Role::Assistant);
+            assert_eq!(
+                messages,
+                [Message::user("do X"), Message::assistant("all clear")],
+            );
         }
 
         #[test]
@@ -288,18 +307,10 @@ mod tests {
                 },
                 Message::user("and now Y"),
             ];
+
             sanitize_resumed_messages(&mut messages);
 
-            assert_eq!(messages.len(), 1);
-            assert_eq!(messages[0].role, Role::User);
-            assert_eq!(messages[0].content.len(), 2);
-            assert!(
-                matches!(&messages[0].content[0], ContentBlock::Text { text } if text == "do X")
-            );
-            assert!(matches!(
-                &messages[0].content[1],
-                ContentBlock::Text { text } if text == "and now Y"
-            ));
+            assert_eq!(messages, [user(vec![text("do X"), text("and now Y")])]);
         }
 
         #[test]
@@ -313,15 +324,16 @@ mod tests {
                 },
                 Message::assistant("second answer"),
             ];
+
             sanitize_resumed_messages(&mut messages);
 
-            assert_eq!(messages.len(), 2);
-            assert_eq!(messages[0].role, Role::User);
-            assert_eq!(messages[1].role, Role::Assistant);
-            let answer = &messages[1].content;
-            assert_eq!(answer.len(), 2);
-            assert!(matches!(&answer[0], ContentBlock::Text { text } if text == "first answer"));
-            assert!(matches!(&answer[1], ContentBlock::Text { text } if text == "second answer"));
+            assert_eq!(
+                messages,
+                [
+                    Message::user("do X"),
+                    assistant(vec![text("first answer"), text("second answer")]),
+                ],
+            );
         }
 
         #[test]
@@ -337,14 +349,13 @@ mod tests {
                     content: vec![tool_result("t2", "stale")],
                 },
             ];
+
             sanitize_resumed_messages(&mut messages);
 
-            assert_eq!(messages.len(), 2);
-            assert_eq!(messages[0].role, Role::User);
-            assert_eq!(messages[1].role, Role::Assistant);
-            let assistant = &messages[1].content;
-            assert_eq!(assistant.len(), 1);
-            assert!(matches!(&assistant[0], ContentBlock::Text { text } if text == "checking"));
+            assert_eq!(
+                messages,
+                [Message::user("do X"), Message::assistant("checking")],
+            );
         }
 
         #[test]
@@ -395,15 +406,17 @@ mod tests {
                 Message::assistant("carrying on"),
                 Message::user("next question"),
             ];
+
             sanitize_resumed_messages(&mut messages);
 
-            assert_eq!(messages.len(), 3);
-            assert_eq!(messages[0].role, Role::User);
-            assert!(
-                matches!(&messages[0].content[0], ContentBlock::Text { text } if text == RESUME_HEAD_SENTINEL)
+            assert_eq!(
+                messages,
+                [
+                    Message::user(RESUME_HEAD_SENTINEL),
+                    Message::assistant("carrying on"),
+                    Message::user("next question"),
+                ],
             );
-            assert_eq!(messages[1].role, Role::Assistant);
-            assert_eq!(messages[2].role, Role::User);
         }
     }
 
@@ -460,10 +473,10 @@ mod tests {
                     content: vec![tool_result("other", "irrelevant")],
                 },
             ];
+
             drop_unresolved_tool_uses(&mut messages);
 
-            assert_eq!(messages[0].content.len(), 1);
-            assert!(matches!(&messages[0].content[0], ContentBlock::Text { .. }));
+            assert_eq!(messages[0].content, [text("checking")]);
         }
 
         #[test]
@@ -522,10 +535,11 @@ mod tests {
                     content: vec![tool_result("kept", "ok")],
                 },
             ];
+            let before = messages.clone();
+
             drop_unresolved_tool_uses(&mut messages);
 
-            assert_eq!(messages[0].content.len(), 1);
-            assert_eq!(messages[1].content.len(), 1, "user role untouched");
+            assert_eq!(messages, before);
         }
     }
 
@@ -544,12 +558,10 @@ mod tests {
                     content: vec![tool_result("real", "ok"), tool_result("ghost", "stale")],
                 },
             ];
+
             drop_orphan_tool_results(&mut messages);
 
-            assert_eq!(messages[1].content.len(), 1);
-            assert!(
-                matches!(&messages[1].content[0], ContentBlock::ToolResult { tool_use_id, .. } if tool_use_id == "real")
-            );
+            assert_eq!(messages[1].content, [tool_result("real", "ok")]);
         }
 
         #[test]
@@ -589,12 +601,10 @@ mod tests {
                     content: vec![tool_result("ghost", "stale")],
                 },
             ];
+
             drop_orphan_tool_results(&mut messages);
 
-            assert_eq!(messages.len(), 1, "user message with only orphan dropped");
-            assert!(
-                matches!(&messages[0].content[0], ContentBlock::Text { text } if text == "first")
-            );
+            assert_eq!(messages, [Message::user("first")]);
         }
     }
 
@@ -610,13 +620,16 @@ mod tests {
                 Message::user("u1"),
                 Message::user("u2"),
             ];
+
             collapse_consecutive_roles(&mut messages);
 
-            assert_eq!(messages.len(), 2);
-            assert_eq!(messages[0].role, Role::Assistant);
-            assert_eq!(messages[0].content.len(), 3);
-            assert_eq!(messages[1].role, Role::User);
-            assert_eq!(messages[1].content.len(), 2);
+            assert_eq!(
+                messages,
+                [
+                    assistant(vec![text("a1"), text("a2"), text("a3")]),
+                    user(vec![text("u1"), text("u2")]),
+                ],
+            );
         }
 
         #[test]
@@ -626,9 +639,11 @@ mod tests {
                 Message::assistant("a"),
                 Message::user("u2"),
             ];
+            let before = messages.clone();
+
             collapse_consecutive_roles(&mut messages);
 
-            assert_eq!(messages.len(), 3);
+            assert_eq!(messages, before);
         }
     }
 
@@ -638,12 +653,16 @@ mod tests {
         #[test]
         fn prepends_user_when_leading_assistant() {
             let mut messages = vec![Message::assistant("orphaned"), Message::user("next")];
+
             insert_resume_sentinels(&mut messages);
 
-            assert_eq!(messages.len(), 3);
-            assert_eq!(messages[0].role, Role::User);
-            assert!(
-                matches!(&messages[0].content[0], ContentBlock::Text { text } if text == RESUME_HEAD_SENTINEL)
+            assert_eq!(
+                messages,
+                [
+                    Message::user(RESUME_HEAD_SENTINEL),
+                    Message::assistant("orphaned"),
+                    Message::user("next"),
+                ],
             );
         }
 
@@ -656,12 +675,16 @@ mod tests {
                     content: vec![tool_result("t1", "ok")],
                 },
             ];
+
             insert_resume_sentinels(&mut messages);
 
-            assert_eq!(messages.len(), 3);
-            assert_eq!(messages[2].role, Role::Assistant);
-            assert!(
-                matches!(&messages[2].content[0], ContentBlock::Text { text } if text == RESUME_CONTINUATION_SENTINEL)
+            assert_eq!(
+                messages,
+                [
+                    Message::user("do X"),
+                    user(vec![tool_result("t1", "ok")]),
+                    Message::assistant(RESUME_CONTINUATION_SENTINEL),
+                ],
             );
         }
 
@@ -674,10 +697,11 @@ mod tests {
                     content: vec![tool_result("t1", "ok"), text("and a question")],
                 },
             ];
-            let before_len = messages.len();
+            let before = messages.clone();
+
             insert_resume_sentinels(&mut messages);
 
-            assert_eq!(messages.len(), before_len);
+            assert_eq!(messages, before);
         }
 
         #[test]
