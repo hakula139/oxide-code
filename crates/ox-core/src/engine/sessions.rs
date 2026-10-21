@@ -215,7 +215,7 @@ pub(super) fn format_drift_warning(drifted: &[PathBuf]) -> String {
     };
     format!(
         "{count} tracked {file} changed on disk since the resumed session read {it}, \
-         so Edit needs a fresh Read first: {}{suffix}",
+         so Edit and Write need a fresh Read first: {}{suffix}",
         preview.join(", "),
         file = plural(count, "file", "files"),
         it = plural(count, "it", "them"),
@@ -234,8 +234,8 @@ mod tests {
     use crate::client::anthropic::testing::{sse_body, sse_response};
     use crate::engine::compaction::AutoCompactFailures;
     use crate::engine::local_testing::{
-        EchoTool, finished_session, greeting_title, inert_ops, mount_title, next_matching,
-        system_prompt, texts, tracked_paths, write_unreadable_instructions,
+        EchoTool, dead_test_session, finished_session, greeting_title, inert_ops, mount_title,
+        next_matching, system_prompt, texts, tracked_paths, write_unreadable_instructions,
     };
     use crate::engine::testing::{
         MODEL, SESSION_CONTEXT, engine, mount_reply, mount_tool_call_once, request_bodies,
@@ -557,7 +557,7 @@ mod tests {
                 let server = MockServer::start().await;
                 let dir = tempfile::tempdir().unwrap();
                 let mut engine = engine(server.uri(), &test_store(dir.path()), dir.path()).await;
-                engine.session = handle::testing::dead("dead");
+                engine.session = dead_test_session();
                 let warning = write_unreadable_instructions(dir.path());
                 let sink = CapturingSink::default();
 
@@ -642,10 +642,10 @@ mod tests {
                 engine.archive(&sink).await;
                 assert_eq!(engine.session.session_id(), live_id);
                 engine.messages = vec![Message::user("unsaved")];
-                engine.session = handle::testing::dead("dead");
+                engine.session = dead_test_session();
                 engine.archive(&sink).await;
                 engine.archive(&sink).await;
-                assert_eq!(engine.session.session_id(), "dead");
+                assert_eq!(engine.session.session_id(), "dead-test-session");
 
                 let events = sink.events();
                 assert!(
@@ -822,7 +822,7 @@ mod tests {
                 let store = test_store(dir.path());
                 let target_id = finished_session(&store).await;
                 let mut engine = engine(server.uri(), &store, dir.path()).await;
-                engine.session = handle::testing::dead("dead");
+                engine.session = dead_test_session();
                 let sink = CapturingSink::default();
 
                 let target_path = store.find_session_path(&target_id).unwrap();
@@ -915,7 +915,7 @@ mod tests {
 
                 engine.rename(&sink, "Fix login".to_owned()).await;
                 assert!(engine.session.manual_title_set());
-                engine.session = handle::testing::dead("dead");
+                engine.session = dead_test_session();
                 engine.rename(&sink, "Lost".to_owned()).await;
 
                 let events = sink.events();
@@ -926,7 +926,8 @@ mod tests {
                             Event::SessionTitleUpdated { session_id, title },
                             Event::RenameFailed(write),
                         ] if *session_id == live_id && title == "Fix login"
-                            && write.starts_with("Session write failed")
+                            && write == "Session write failed: session writer task has stopped. \
+                                         Conversation history may be incomplete."
                     ),
                     "{events:?}",
                 );
@@ -945,7 +946,7 @@ mod tests {
             assert_eq!(
                 warning,
                 "1 tracked file changed on disk since the resumed session read it, \
-                 so Edit needs a fresh Read first: a.rs",
+                 so Edit and Write need a fresh Read first: a.rs",
             );
         }
 
@@ -961,7 +962,7 @@ mod tests {
             assert_eq!(
                 warning,
                 "5 tracked files changed on disk since the resumed session read them, \
-                 so Edit needs a fresh Read first: a.rs, b.rs, c.rs, and 2 more",
+                 so Edit and Write need a fresh Read first: a.rs, b.rs, c.rs, and 2 more",
             );
         }
     }

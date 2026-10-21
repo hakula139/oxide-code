@@ -11,6 +11,7 @@ use std::path::PathBuf;
 use anyhow::{Result, anyhow};
 use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
+use tracing::error;
 
 use crate::client::RateLimits;
 use crate::config::Effort;
@@ -41,31 +42,27 @@ pub enum Op {
     /// Answers the outstanding [`Event::ApprovalRequested`]. The `id` is matched against the
     /// blocked call so a decision for an already-dropped call is ignored.
     Resolve { id: String, decision: Decision },
-    /// Swaps the model, the effort, or both for later turns, and confirms with
-    /// [`Event::ConfigChanged`].
+    /// Swaps the model, the effort, or both for later turns.
     SetModel(ConfigPick),
-    /// Switches the permission mode and confirms with [`Event::ModeChanged`]. Mid-turn, the switch
-    /// applies from the next tool call the gate weighs.
+    /// Switches the permission mode. Mid-turn, the switch applies from the next tool call the gate
+    /// weighs.
     SetMode(Mode),
     /// Summarizes the transcript into a synthetic continuation, focused by `instructions`, and
-    /// persists the compaction boundary. Confirms with [`Event::SessionCompacted`].
+    /// persists the compaction boundary, which [`Event::SessionCompacted`] reports.
     Compact { instructions: Option<String> },
     /// Finalizes the live session and continues in a fresh, empty one.
     Clear,
-    /// Archives the live session, then continues in a fresh one like [`Self::Clear`]. Reports a
-    /// session it cannot archive with [`Event::TurnFailed`].
+    /// Archives the live session, then continues in a fresh one like [`Self::Clear`].
     Archive,
-    /// Finalizes the live session and continues `target`'s saved session in place. Confirms with
-    /// [`Event::SessionResumed`], or reports a target it cannot load with [`Event::TurnFailed`].
+    /// Finalizes the live session and continues `target`'s saved session in place, which
+    /// [`Event::SessionResumed`] reports.
     Resume { target: ResumeTarget },
     /// Sets the session title by hand, which stops AI title generation for this session.
     Rename { title: String },
     /// Starts a browser sign-in for the oxide-code login, announced with [`Event::LoginStarted`].
-    /// It ends with [`Event::SignedIn`], or with [`Event::TurnFailed`] or [`Event::Cancelled`]
-    /// like a turn, and [`Self::Interrupt`] cancels it.
+    /// [`Self::Interrupt`] cancels it like a turn.
     Login,
-    /// Removes the oxide-code login and confirms with [`Event::SignedOut`], or reports a login it
-    /// cannot remove with [`Event::TurnFailed`].
+    /// Removes the oxide-code login.
     Logout,
     /// Ends any running operation without a terminal event, finalizes the live session, and stops
     /// the engine. Closing the op channel does the same.
@@ -145,6 +142,22 @@ pub struct UsageSnapshot {
 
 /// Notifications from the engine to a frontend, which receives them on the `events` channel of
 /// the [`EngineHandle`](crate::engine::EngineHandle) it drives.
+///
+/// Unless [`Op::Shutdown`] stops it first, the engine ends each op below with one terminal event,
+/// sent last:
+///
+/// - [`Op::Prompt`] ends with [`Self::TurnComplete`], [`Self::TurnFailed`], or [`Self::Cancelled`].
+/// - [`Op::Compact`] ends with [`Self::SessionReady`], `TurnFailed`, or `Cancelled`.
+/// - [`Op::Resume`] and [`Op::Archive`] end with `SessionReady` or `TurnFailed`.
+/// - [`Op::Clear`] ends with `SessionReady`.
+/// - [`Op::Login`] ends with [`Self::SignedIn`], `TurnFailed`, or `Cancelled`.
+/// - [`Op::Logout`] ends with [`Self::SignedOut`] or `TurnFailed`.
+/// - [`Op::Rename`] ends with [`Self::SessionTitleUpdated`] or [`Self::RenameFailed`].
+/// - [`Op::SetModel`] ends with [`Self::ConfigChanged`].
+/// - [`Op::SetMode`] ends with [`Self::ModeChanged`].
+///
+/// [`Op::Queue`], [`Op::Interrupt`], and [`Op::Resolve`] act on the op in flight and have no
+/// terminal event of their own.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", content = "data", rename_all = "snake_case")]
 pub enum Event {
@@ -226,8 +239,9 @@ pub enum Event {
         trigger: CompactTrigger,
     },
     /// Ends an [`Op::Clear`], [`Op::Archive`], [`Op::Resume`], or [`Op::Compact`] that replaced the
-    /// transcript. Follows every event that reports the new transcript's state, such as its usage
-    /// and notices.
+    /// transcript. Follows the swap event, [`Self::SessionRolled`], [`Self::SessionResumed`], or
+    /// [`Self::SessionCompacted`], and every event that reports the new transcript's state, such
+    /// as its usage, task list, and notices.
     SessionReady,
     /// Live config after an [`Op::SetModel`]. `effort` is the resolved value, `requested` is the
     /// op's pick, whose effort an unknown model drops, and `notice` confirms the change against the
@@ -361,7 +375,7 @@ pub trait EventSink: Send + Sync {
     /// would leave the frontend inconsistent, such as an error, a cancellation, or a turn's end.
     fn emit(&self, event: Event, label: &'static str) {
         if let Err(e) = self.send(event) {
-            tracing::error!("{label} event dropped: {e}");
+            error!(label, error = %format_args!("{e:#}"), "event dropped");
         }
     }
 
@@ -865,6 +879,7 @@ mod tests {
                 title: Some("Edited f.rs".to_owned()),
                 view: ToolResultView::Diff(edit_diff()),
             });
+
             assert_eq!(
                 serde_json::to_value(event).unwrap(),
                 json!({
@@ -892,6 +907,7 @@ mod tests {
         #[test]
         fn carries_a_task_list_as_content_and_status_pairs() {
             let event = Event::TasksUpdated(plan());
+
             assert_eq!(
                 serde_json::to_value(event).unwrap(),
                 json!({
@@ -908,6 +924,7 @@ mod tests {
         #[test]
         fn carries_each_background_shell_with_its_state_tagged() {
             let event = Event::BackgroundShellsUpdated(shells_in_each_state());
+
             assert_eq!(
                 serde_json::to_value(event).unwrap(),
                 json!({
@@ -942,9 +959,10 @@ mod tests {
                 notice: "Using Claude Opus 5.5 (claude-opus-5-5)".to_owned(),
             };
             let value = serde_json::to_value(&event).unwrap();
-            assert_eq!(value["data"]["model"], "claude-opus-5-5");
+            let parsed = serde_json::from_value(value.clone()).unwrap();
 
-            let Event::ConfigChanged { model, .. } = serde_json::from_value(value).unwrap() else {
+            assert_eq!(value["data"]["model"], "claude-opus-5-5");
+            let Event::ConfigChanged { model, .. } = parsed else {
                 panic!("config_changed must round-trip to ConfigChanged");
             };
             assert_eq!(model.short_display_name(), "Opus 5.5");
@@ -957,6 +975,7 @@ mod tests {
                 auth: Some(AuthSource::ClaudeCodeLogin),
                 fallback_error: None,
             };
+
             assert_eq!(
                 serde_json::to_value(event).unwrap(),
                 json!({

@@ -361,8 +361,11 @@ impl<'r> Dispatcher<'r, '_> {
             .policy
             .verdict(class, &prepared.access.as_target());
         debug!(
-            "permission: {name} call {id} settled as {:?} by {}",
-            verdict.decision, verdict.basis
+            tool = name,
+            id,
+            decision = ?verdict.decision,
+            basis = %verdict.basis,
+            "permission settled"
         );
         match verdict.decision {
             crate::permission::Decision::Allow => Ok(None),
@@ -469,7 +472,7 @@ async fn await_approval(
                 id: target,
                 decision,
             }) if target == id => return Ok(decision),
-            Some(other) => warn!("ignored op while awaiting approval {id}: {other:?}"),
+            Some(other) => warn!(id, op = ?other, "ignored op while awaiting approval"),
             None => {}
         }
     }
@@ -488,6 +491,8 @@ mod tests {
     use crate::engine::local_testing::{EchoTool, dispatch_with, inert_ops};
     use crate::permission::{Basis, Mode, PermissionClass};
     use crate::protocol::testing::{CapturingSink, FailingSink};
+    #[cfg(unix)]
+    use crate::tool::local_testing::canonical_tempdir;
     #[cfg(unix)]
     use crate::tool::read::ReadTool;
     use crate::tool::tasks::TasksTool;
@@ -1204,12 +1209,12 @@ mod tests {
             #[cfg(unix)]
             #[tokio::test]
             async fn pins_a_path_input_to_the_resolved_target() {
-                let dir = tempfile::tempdir().unwrap();
-                let cwd = dunce::canonicalize(dir.path()).unwrap();
+                let dir = canonical_tempdir();
+                let cwd = dir.path();
                 std::fs::write(cwd.join("real.txt"), "x").unwrap();
                 std::os::unix::fs::symlink("real.txt", cwd.join("link.txt")).unwrap();
                 let tools = ToolRegistry::new(vec![Box::new(ReadTool)]);
-                let mut dispatch_ctx = dispatch_with(Mode::Manual, &[], &[], &cwd);
+                let mut dispatch_ctx = dispatch_with(Mode::Manual, &[], &[], cwd);
 
                 let gate = gate_call(
                     &tools,
@@ -1234,8 +1239,8 @@ mod tests {
             async fn allows_edits_inside_every_root_and_asks_past_a_symlink_out_of_them() {
                 // The cwd and the extra root form one set of roots: a link from one into the other
                 // stays inside, and a link from either to anywhere else asks.
-                let dir = tempfile::tempdir().unwrap();
-                let base = dunce::canonicalize(dir.path()).unwrap();
+                let dir = canonical_tempdir();
+                let base = dir.path();
                 let (repo, extra, outside) =
                     (base.join("repo"), base.join("extra"), base.join("outside"));
                 for root in [&repo, &extra, &outside] {

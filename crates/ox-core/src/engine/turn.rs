@@ -438,7 +438,7 @@ mod tests {
     use std::collections::VecDeque;
     use std::path::Path;
     use std::pin::Pin;
-    use std::sync::{Arc, LazyLock, Mutex as StdMutex};
+    use std::sync::{Arc, LazyLock, Mutex};
 
     use indoc::indoc;
     use serde_json::json;
@@ -462,6 +462,7 @@ mod tests {
     use crate::protocol::{ConfigPick, Decision, ResumeTarget, ToolCall, ToolResult};
     use crate::session::handle;
     use crate::session::store::testing::test_store;
+    use crate::tool::local_testing::canonical_tempdir;
     use crate::tool::view::{NumberedLine, ToolResultView};
     use crate::tool::{
         DEFAULT_TOOL_ICON, Prepared, Tool, ToolCtx, ToolMetadata, ToolOutput, ToolRegistry,
@@ -480,8 +481,8 @@ mod tests {
         /// In-process fake that scripts a [`ResponseEvent`] stream per turn and records every
         /// request. A request past the last scripted turn panics.
         struct FakeClient {
-            turns: StdMutex<VecDeque<Vec<Result<ResponseEvent>>>>,
-            requests: StdMutex<Vec<Vec<Message>>>,
+            turns: Mutex<VecDeque<Vec<Result<ResponseEvent>>>>,
+            requests: Mutex<Vec<Vec<Message>>>,
         }
 
         impl FakeClient {
@@ -491,8 +492,8 @@ mod tests {
                     .map(|events| events.into_iter().map(Ok).collect())
                     .collect();
                 Self {
-                    turns: StdMutex::new(turns),
-                    requests: StdMutex::default(),
+                    turns: Mutex::new(turns),
+                    requests: Mutex::default(),
                 }
             }
 
@@ -919,10 +920,9 @@ mod tests {
             .into_result()
             .unwrap();
 
-            assert_eq!(messages.len(), 2);
-            assert_eq!(messages[1].role, Role::Assistant);
-            assert!(
-                matches!(&messages[1].content[0], ContentBlock::Text { text } if text == "Hello there!"),
+            assert_eq!(
+                messages,
+                [Message::user("hi"), Message::assistant("Hello there!")]
             );
             let streamed: Vec<String> = sink
                 .events()
@@ -983,27 +983,29 @@ mod tests {
             .into_result()
             .unwrap();
 
-            // Message ordering: user → assistant(tool_use) → user(tool_result) → assistant(text).
-            assert_eq!(messages.len(), 4);
-            assert!(matches!(
-                &messages[1].content[0],
-                ContentBlock::ToolUse { name, .. } if name == "echo",
-            ));
-            let ContentBlock::ToolResult {
-                tool_use_id,
-                content,
-                is_error,
-            } = &messages[2].content[0]
-            else {
-                panic!("expected ToolResult, got {:?}", messages[2].content[0]);
-            };
-            assert_eq!(tool_use_id, "tool_1");
-            assert_eq!(content, r#"{"v":42}"#);
-            assert!(!is_error);
-            assert!(matches!(
-                &messages[3].content[0],
-                ContentBlock::Text { text } if text == "Done",
-            ));
+            assert_eq!(
+                messages,
+                [
+                    Message::user("run echo"),
+                    Message {
+                        role: Role::Assistant,
+                        content: vec![ContentBlock::ToolUse {
+                            id: "tool_1".to_owned(),
+                            name: "echo".to_owned(),
+                            input: json!({"v": 42}),
+                        }],
+                    },
+                    Message {
+                        role: Role::User,
+                        content: vec![ContentBlock::ToolResult {
+                            tool_use_id: "tool_1".to_owned(),
+                            content: r#"{"v":42}"#.to_owned(),
+                            is_error: false,
+                        }],
+                    },
+                    Message::assistant("Done"),
+                ],
+            );
 
             let (calls, results) = tool_events(&sink.events());
             assert_eq!(
@@ -1034,7 +1036,7 @@ mod tests {
         async fn resolves_result_views_from_the_unpinned_input_and_tool_metadata() {
             let dir = tempfile::tempdir().unwrap();
             let session = test_session(dir.path());
-            let cwd = tempfile::tempdir().unwrap();
+            let cwd = canonical_tempdir();
             let client = FakeClient::new(vec![
                 tool_use_turn("tool_1", "path_view", r#"{"file_path":"notes.txt"}"#),
                 tool_use_turn(
@@ -1059,7 +1061,7 @@ mod tests {
             .into_result()
             .unwrap();
 
-            let pinned = dunce::canonicalize(cwd.path()).unwrap().join("notes.txt");
+            let pinned = cwd.path().join("notes.txt");
             let pinned = pinned.to_str().unwrap();
             let (_, results) = tool_events(&sink.events());
             assert_eq!(
@@ -1975,7 +1977,7 @@ mod tests {
             .into_result()
             .unwrap();
 
-            assert_eq!(messages.len(), 1, "{messages:?}");
+            assert_eq!(messages, [Message::user("hi")]);
         }
 
         #[tokio::test]
@@ -2004,7 +2006,7 @@ mod tests {
                 abort.into_failure().to_string(),
                 "API stream ended before the reply completed"
             );
-            assert_eq!(messages.len(), 1, "{messages:?}");
+            assert_eq!(messages, [Message::user("hi")]);
         }
 
         #[tokio::test]
@@ -2013,10 +2015,7 @@ mod tests {
                 real_client_turn(vec![sse_response(HELLO_SSE)], &ToolRegistry::new(vec![])).await;
 
             outcome.into_result().unwrap();
-            assert_eq!(messages.len(), 2);
-            assert!(
-                matches!(&messages[1].content[0], ContentBlock::Text { text } if text == "hello"),
-            );
+            assert_eq!(messages, [Message::user("hi"), Message::assistant("hello")]);
         }
 
         #[tokio::test]
@@ -2032,7 +2031,7 @@ mod tests {
             .await;
 
             outcome.into_result().expect("the third attempt succeeds");
-            assert_eq!(messages.len(), 2, "{messages:?}");
+            assert_eq!(messages, [Message::user("hi"), Message::assistant("hello")]);
             let events = sink.events();
             let notices: Vec<&str> = events
                 .iter()
@@ -2151,9 +2150,9 @@ mod tests {
                 "{abort:?}",
             );
             assert_eq!(
-                messages.len(),
-                1,
-                "the refused reply is dropped: {messages:?}"
+                messages,
+                [Message::user("hi")],
+                "the refused reply is dropped"
             );
             assert!(
                 !sink
@@ -2345,8 +2344,8 @@ mod tests {
         async fn write_through_a_dangling_symlink_is_never_auto_allowed() {
             // A dangling `notes.md -> ../escape.txt` must resolve to its outside target, so the
             // write never passes as a new in-cwd file.
-            let dir = tempfile::tempdir().unwrap();
-            let root = dunce::canonicalize(dir.path()).unwrap();
+            let dir = canonical_tempdir();
+            let root = dir.path();
             let cwd = root.join("repo");
             std::fs::create_dir(&cwd).unwrap();
             std::os::unix::fs::symlink("../escape.txt", cwd.join("notes.md")).unwrap();

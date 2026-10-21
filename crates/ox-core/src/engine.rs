@@ -584,7 +584,7 @@ impl TurnEnd {
 }
 
 /// Shows `abort` on `sink` as the operation's one terminal event, logging `label` if a failure
-/// event is dropped. `Shutdown` stays silent. See `docs/design/tui/cancellation.md` for the set.
+/// event is dropped. `Shutdown` stays silent. [`Event`] lists each op's terminal events.
 fn report_abort(sink: &dyn EventSink, abort: TurnAbort, label: &'static str) -> TurnEnd {
     match abort {
         TurnAbort::Cancelled => {
@@ -613,9 +613,9 @@ mod tests {
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
     use super::local_testing::{
-        TITLE_MODEL, finished_session, greeting_title, inert_ops, login_url, mount_title,
-        next_matching, service_log, submit, system_prompt, texts, tool_heavy_transcript,
-        tracked_paths, turn_events, write_unreadable_instructions,
+        TITLE_MODEL, dead_test_session, finished_session, greeting_title, inert_ops, login_url,
+        mount_title, next_matching, service_log, session_paths, submit, system_prompt, texts,
+        tool_heavy_transcript, tracked_paths, turn_events, write_unreadable_instructions,
     };
     use super::sessions::format_drift_warning;
     use super::testing::{
@@ -673,13 +673,16 @@ mod tests {
                     let dir = tempfile::tempdir().unwrap();
                     let mut engine =
                         engine(server.uri(), &test_store(dir.path()), dir.path()).await;
-                    engine.session = handle::testing::dead("dead");
+                    engine.session = dead_test_session();
 
                     let failure = engine.spawn().shutdown().await.unwrap();
 
-                    assert!(
-                        failure.is_some_and(|f| f.starts_with("session writer task has stopped")),
-                        "a session that cannot finish reports why"
+                    assert_eq!(
+                        failure.as_deref(),
+                        Some(
+                            "session writer task has stopped. \
+                             Conversation history may be incomplete."
+                        ),
                     );
                 })
                 .await;
@@ -1532,7 +1535,7 @@ mod tests {
                 handle.ops.send(Op::Shutdown).await.unwrap();
                 assert_eq!(handle.task.join().await.unwrap(), None);
 
-                assert!(store.list().unwrap().is_empty());
+                assert_eq!(session_paths(&store), [] as [PathBuf; 0]);
             })
             .await;
         }
@@ -1652,8 +1655,9 @@ mod tests {
                     1,
                     "the prompt never reaches the model"
                 );
-                assert!(
-                    store.list().unwrap().is_empty(),
+                assert_eq!(
+                    session_paths(&store),
+                    [] as [PathBuf; 0],
                     "neither the prompt nor an interruption marker is recorded",
                 );
             })
@@ -2186,7 +2190,7 @@ mod tests {
                 mount_reply(&server, "reply").await;
                 let dir = tempfile::tempdir().unwrap();
                 let mut engine = engine(server.uri(), &test_store(dir.path()), dir.path()).await;
-                engine.session = handle::testing::dead("dead");
+                engine.session = dead_test_session();
                 let sink = CapturingSink::default();
                 let mut ops = inert_ops();
 
