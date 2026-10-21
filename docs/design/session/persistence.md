@@ -12,6 +12,7 @@ Every session is a single append-only `.jsonl` file with one JSON object per lin
 | ---------------------- | -------------- | --------------------------------------------------------------------------------- |
 | `header`               | First line     | Session metadata: ID, working directory, model, created timestamp, format version |
 | `message`              | Middle lines   | Conversation message with `uuid`, optional `parent_uuid`, timestamp               |
+| `rewind`               | After messages | Moves the active branch's tip back to an earlier message, or before the first one |
 | `title`                | Re-appended    | Session title + source. Latest wins                                               |
 | `tool_result_metadata` | Sidecar        | Display metadata for replaying tool results                                       |
 | `file_snapshot`        | Sidecar        | File-tracker state restored on resume when disk state still matches               |
@@ -24,7 +25,7 @@ Every session is a single append-only `.jsonl` file with one JSON object per lin
 ### Schema Invariants
 
 1. **Explicit entry schema.** The loader treats unknown discriminators as malformed lines, so schema compatibility stays explicit.
-2. **`parent_uuid` chain.** Each message links to its predecessor. Concurrent resumes can fork, and the newest-leaf rule resolves the active branch without rewriting history.
+2. **`parent_uuid` chain.** Each message links to its predecessor. Concurrent resumes can fork, and the newest-leaf rule resolves the active branch without rewriting history. A `rewind` entry moves the tip back the same way, by leaving the abandoned messages in place.
 3. **`version` field.** Bump on incompatible changes so older binaries fail fast on session state they cannot read.
 
 ## Compatibility
@@ -37,7 +38,7 @@ Within the stability surface, a newer binary can read an older file as long as e
 - **Removals.** A removed field, since the loader ignores fields it does not know. The data the field held is lost on resume.
 - **Changed shapes with a loader.** Renaming a field or changing its type or meaning requires a loader that still reads the old shape.
 
-An older binary reading a newer file skips entry types it does not know as malformed lines and ignores unknown fields. Bump the header's `version` only when an older binary would misread a newer file, since an older binary refuses any file whose `version` is newer than it supports.
+An older binary reading a newer file skips entry types it does not know as malformed lines and ignores unknown fields. Bump the header's `version` only when an older binary would misread a newer file, since an older binary refuses any file whose `version` is newer than it supports. A prerelease binary that predates `rewind` entries skips them, so until a newer message follows a rewind it resumes the abandoned branch.
 
 A reasoning block stores the `wire` and `model` that produced it alongside a `payload` that only that wire can read, such as the `signature` of an Anthropic `thinking` block or the `data` of a `redacted_thinking` block. The Anthropic wire sends every Anthropic block back unchanged whichever model produced it, as Anthropic's guide to [switching models](https://platform.claude.com/docs/en/build-with-claude/preserved-thinking#switching-models) asks, so the recorded `model` changes no request. Which blocks a model reads depends on the platform, and the API drops or ignores the rest, as the [research note](../../research/api/extended-thinking.md#constraints) details.
 
@@ -85,7 +86,11 @@ Starting a session stages the header in memory. The on-disk file is created by t
 
 ### Resume and Sanitization
 
-`ox -c` reopens the existing session file. The loader walks `Entry::Message` lines into a UUID-indexed DAG, picks the newest-timestamped leaf as the tip, and walks back via `parent_uuid` to produce a linear chain. The sanitization pipeline then drops tool calls without results and results without calls, merges adjacent same-role survivors, and injects head / tail sentinels. A client call pairs with a user `tool_result`, and a server call with the result block in the same or a later reply. A server call that a `pause_turn` left waiting is dropped, because the next prompt closes the turn and the API rejects a call without its result.
+`ox -c` reopens the existing session file. The loader walks `Entry::Message` lines into a UUID-indexed DAG, picks the newest-timestamped leaf as the tip, and walks back via `parent_uuid` to produce a linear chain. A `rewind` entry moves the tip to the message it names and abandons the other leaves, so the newest-leaf rule skips them from then on. Its tip ends the chain until another message line follows it in the file. A rewind naming a message the loader has not read, such as one before the last compaction, is ignored. The sanitization pipeline then drops tool calls without results and results without calls, merges adjacent same-role survivors, and injects head / tail sentinels. A client call pairs with a user `tool_result`, and a server call with the result block in the same or a later reply. A server call that a `pause_turn` left waiting is dropped, because the next prompt closes the turn and the API rejects a call without its result.
+
+### Refused Turns
+
+The API keeps refusing while a refused turn stays in the conversation, so when the model stops with `refusal`, the engine rolls the whole turn back: its prompt, any queued prompts it took in, and its tool rounds. It truncates the live transcript to its length before the prompt, and it restores what the model had seen of the user context and the file tracker. It also appends a `rewind` entry whose tip is the message the prompt chained from, so a resume leaves the turn out too. The next prompt then chains from that message and records the prompt context again if the refused prompt was the first to carry it. A rewind to before the first prompt stops the title request that prompt started, so the next prompt titles the session. The engine emits `TurnRolledBack` ahead of the turn's `TurnFailed`, and the TUI hands the prompts back: the refused one into the empty input for rephrasing, and the queued ones the turn took in to the head of the queue, which waits for the user. The turn's requests stay in the session's cost estimate, and its tool calls' effects remain, such as the files it changed and the background shells it started.
 
 ### Prompt Context
 
@@ -106,7 +111,7 @@ An `archive` entry sets whether default listings and bare `ox -c` skip the sessi
 
 ### Fork-on-Conflict Concurrency
 
-There is no file-level lock: two processes resuming the same session both append, and the newest-leaf rule resolves forks deterministically. Each batch lands in one append write (`O_APPEND` on Unix, an end-of-file-offset write on Windows), so concurrent appends interleave only between batches.
+There is no file-level lock: two processes resuming the same session both append, and the newest-leaf rule resolves forks deterministically. A rewind abandons every leaf it moves away from, including one another process wrote, so that branch ends the chain again only once a newer message extends it. Each batch lands in one append write (`O_APPEND` on Unix, an end-of-file-offset write on Windows), so concurrent appends interleave only between batches.
 
 ### AI-Generated Titles
 

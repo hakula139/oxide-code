@@ -225,6 +225,7 @@ impl StdioSink {
             Event::ModeChanged(mode) => writeln!(stderr, "Using {mode} mode")?,
             // TUI-only events and the `SessionReady` marker have no stdio surface to update.
             Event::PromptDrained(_)
+            | Event::TurnRolledBack
             | Event::UsageUpdated(_)
             | Event::RateLimitsUpdated(_)
             | Event::AutoCompactionStarted
