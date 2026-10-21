@@ -41,6 +41,7 @@ use crate::util::tls::Trust;
 
 use betas::{compute_betas, conversation_cache_control, static_prefix_cache_control};
 use sse::forward_sse;
+use transport::messages_url;
 use wire::{
     CacheControl, ContextManagement, CreateMessageRequest, OutputConfig, RequestMessages,
     RequestMetadata, SystemBlock,
@@ -74,7 +75,8 @@ pub(crate) struct Client {
     effort: Option<Effort>,
     /// `None` while signed out.
     auth: Option<Auth>,
-    base_url: String,
+    /// The `/v1/messages` endpoint under the configured base URL.
+    messages_url: String,
     trust: Arc<dyn Trust>,
     /// Stored-login reloads that outlive their requests, which the session waits for at exit.
     reloads: TaskTracker,
@@ -116,7 +118,7 @@ impl Client {
             model: model.clone(),
             effort: *effort,
             auth: auth.clone(),
-            base_url: base_url.clone(),
+            messages_url: messages_url(base_url),
             trust: Arc::new(trust),
             reloads: TaskTracker::new(),
             gateway: gateway.clone(),
@@ -548,7 +550,7 @@ mod tests {
                 .mount(&server)
                 .await;
 
-            client.base_url = server.uri();
+            client.messages_url = messages_url(&server.uri());
             collect_events(
                 client
                     .stream_message(&[Message::user("hi")], &[], None, &[])
@@ -663,6 +665,25 @@ mod tests {
                 )
                 .unwrap();
                 assert_eq!(client.session_id(), sid);
+            }
+
+            #[tokio::test]
+            async fn joins_the_messages_path_under_a_base_url_with_a_trailing_slash() {
+                let server = MockServer::start().await;
+                Mock::given(method("POST"))
+                    .and(path("/anthropic/v1/messages"))
+                    .and(query_param("beta", "true"))
+                    .respond_with(sse_response(text_stream_body("", "Hi")))
+                    .expect(1)
+                    .mount(&server)
+                    .await;
+                let base_url = format!("{}/anthropic/", server.uri());
+                let client = test_client(base_url, api_key(), TEST_MODEL);
+
+                let rx = client
+                    .stream_message(&[Message::user("hi")], &[], None, &[])
+                    .unwrap();
+                collect_events(rx).await.unwrap();
             }
 
             #[test]
