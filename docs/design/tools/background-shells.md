@@ -12,7 +12,7 @@ The `bash` tool can start a command in a background shell that keeps running aft
 
 ## Process Lifecycle
 
-Each shell runs under a supervisor task that owns its `ShellTree`: the process group on Unix or Job Object on Windows that also holds a foreground call. The supervisor copies stdout and stderr into the shell's captures as they arrive, then publishes the exit state when the shell exits.
+Each shell runs under a supervisor task that owns its `ShellTree`, the [process tree](bash.md#process-tree) that also holds a foreground call. The supervisor copies stdout and stderr into the shell's captures as they arrive, then publishes the exit state when the shell exits.
 
 A stop kills the whole tree while the shell is running. It also kills the tree after the shell exits if a descendant still holds one of its pipes, as with a server started with a trailing `&`. Once the shell has exited and its pipes have closed, the supervisor releases the tree, as it does for a foreground call. A descendant that redirected its output elsewhere then keeps running. `bash_stop` returns after the supervisor has killed or released the tree and drained the remaining output.
 

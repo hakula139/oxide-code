@@ -37,6 +37,13 @@ const DRAIN_GRACE: Duration = Duration::from_millis(250);
 /// which session started it.
 const SESSION_ID_VAR: &str = "OX_SESSION_ID";
 
+/// Editor variables each command's environment points at `true`, so a command that opens an
+/// editor, such as `git commit` without `-m` or `git rebase --continue`, keeps its default text and
+/// moves on. Nobody can type into an editor started here, and a GUI one such as `code --wait`
+/// would open on the user's screen and hold the call until its timeout. `GIT_EDITOR` outranks
+/// git's `core.editor`, which outranks `VISUAL` and `EDITOR`.
+const EDITOR_VARS: [&str; 3] = ["EDITOR", "GIT_EDITOR", "VISUAL"];
+
 /// Bytes of pipe output one call renders, less the spill paths its omission markers name. The
 /// reserve below the dispatcher cap holds the rest of the markers, the stream separator, and the
 /// footer, so the dispatcher never re-truncates bash output.
@@ -192,7 +199,8 @@ fn resolve_timeout(millis: Option<u64>) -> Duration {
     }
 }
 
-/// Runs `command` in the context's cwd, with [`SESSION_ID_VAR`] set to its session ID.
+/// Runs `command` in the context's cwd, with [`SESSION_ID_VAR`] set to its session ID and each of
+/// the [`EDITOR_VARS`] to `true`.
 async fn execute(command: &str, timeout: Duration, ctx: &ToolCtx) -> ToolOutput {
     match execute_until(command, tokio::time::sleep(timeout), ctx).await {
         Ok(output) => output,
@@ -552,6 +560,10 @@ where
 /// The shell and every descendant it starts, held in a process group on Unix and a Job Object on
 /// Windows. Dropping it while armed kills the whole tree, so a timeout, failure, or cancelled call
 /// leaves no descendant running. A finished call disarms it.
+///
+/// On Unix the shell also leads its own session, which has no controlling terminal. A command that
+/// prompts on `/dev/tty`, such as `sudo` or `ssh` asking for a password, then fails at once. In
+/// ox's session it would print onto the TUI and stop on `SIGTTIN` until killed.
 struct ShellTree {
     child: Box<dyn ChildWrapper>,
     armed: bool,
@@ -564,12 +576,13 @@ impl ShellTree {
                 .arg(command)
                 .current_dir(ctx.cwd())
                 .env(SESSION_ID_VAR, &ctx.session_id)
+                .envs(EDITOR_VARS.map(|var| (var, "true")))
                 .stdin(Stdio::null())
                 .stdout(Stdio::piped())
                 .stderr(Stdio::piped());
         });
         #[cfg(unix)]
-        cmd.wrap(process_wrap::tokio::ProcessGroup::leader());
+        cmd.wrap(process_wrap::tokio::ProcessSession);
         #[cfg(windows)]
         cmd.wrap(process_wrap::tokio::JobObject);
         Ok(Self {
@@ -729,6 +742,8 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     use indoc::indoc;
+    #[cfg(unix)]
+    use nix::unistd::{Pid, getpgid, getsid};
     use tokio::io::AsyncWriteExt as _;
 
     use super::testing::{record_pid, until_gone, until_recorded};
@@ -1054,6 +1069,13 @@ mod tests {
                 )
             });
             assert_eq!(completed_pid.trim(), pid);
+        }
+
+        #[tokio::test]
+        async fn points_every_editor_at_true() {
+            let output = run_default(r#"printf %s "$EDITOR $GIT_EDITOR $VISUAL""#).await;
+            assert!(!output.is_error, "{}", output.content);
+            assert_eq!(output.content, "true true true");
         }
 
         #[cfg(unix)]
@@ -1417,6 +1439,20 @@ mod tests {
 
     mod shell_tree {
         use super::*;
+
+        #[cfg(unix)]
+        mod spawn {
+            use super::*;
+
+            #[tokio::test]
+            async fn leads_a_new_session_and_process_group() {
+                let tree = ShellTree::spawn("sleep 30", &temp_ctx()).unwrap();
+                let pid = Pid::from_raw(tree.child.id().unwrap().try_into().unwrap());
+
+                assert_eq!(getsid(Some(pid)), Ok(pid));
+                assert_eq!(getpgid(Some(pid)), Ok(pid));
+            }
+        }
 
         mod kill {
             use super::*;

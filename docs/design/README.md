@@ -41,6 +41,7 @@ Organized by topic. Each subdirectory shares its topic with a directory in [`doc
 | [Background Shells](tools/background-shells.md) | `bash` background runs, `bash_output`, and `bash_stop`               |
 | [Output Truncation](tools/truncation.md)        | Per-tool view-shape caps, a centralized byte budget, and spill files |
 | [Permissions](tools/permissions.md)             | Tiered deny / ask / allow gate, modes, rule grammar                  |
+| [Shell Execution](tools/bash.md)                | `bash` process tree, terminal detachment, and environment            |
 | [Task List](tools/tasks.md)                     | `tasks` tool, task panel, resume and compaction                      |
 
 ## Terminal UI
