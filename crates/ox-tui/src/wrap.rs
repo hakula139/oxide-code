@@ -3,7 +3,7 @@
 use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 use unicode_segmentation::UnicodeSegmentation;
-use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
+use unicode_width::UnicodeWidthStr;
 
 /// Wraps a line to fit within `max_width`, preserving visual indentation on continuation lines.
 ///
@@ -139,10 +139,13 @@ fn take_one_line(
         if width + g_width > max_width {
             let space_break = (is_whitespace(g) && width >= lead_width).then_some(i);
             // Break at the last opportunity, or else split before the overflowing grapheme, one
-            // earlier when it is closing punctuation.
+            // earlier when it is closing punctuation or the row would end on opening punctuation.
             let end = space_break.or(last_break).unwrap_or(if i == start {
                 i + 1
-            } else if i - 1 > start && is_closing_punctuation(g) {
+            } else if i - 1 > start
+                && (is_punctuation_in(g, CLOSING_PUNCTUATION)
+                    || is_punctuation_in(graphemes[i - 1].0, OPENING_PUNCTUATION))
+            {
                 i - 1
             } else {
                 i
@@ -168,19 +171,24 @@ fn is_whitespace(grapheme: &str) -> bool {
 }
 
 /// Returns whether a row may end between `before` and `after` without whitespace. CJK text has no
-/// spaces, so a wide grapheme can break from either neighbor unless closing punctuation follows.
+/// spaces, so a wide grapheme can break from either neighbor unless opening punctuation precedes
+/// or closing punctuation follows.
 fn breaks_around_wide(before: &str, after: &str) -> bool {
     !is_whitespace(before)
         && !is_whitespace(after)
         && (before.width() > 1 || after.width() > 1)
-        && !is_closing_punctuation(after)
+        && !is_punctuation_in(before, OPENING_PUNCTUATION)
+        && !is_punctuation_in(after, CLOSING_PUNCTUATION)
 }
 
-/// Punctuation that must not start a row.
-const CLOSING_PUNCTUATION: &str = "、。，．：；！？）］｝〉》」』】〕,.:;!?)]}";
+/// Punctuation that must not end a row.
+const OPENING_PUNCTUATION: &str = "「『（［｛〈《【〔“‘([{";
 
-fn is_closing_punctuation(grapheme: &str) -> bool {
-    grapheme.chars().all(|c| CLOSING_PUNCTUATION.contains(c))
+/// Punctuation that must not start a row.
+const CLOSING_PUNCTUATION: &str = "、。，．：；！？）］｝〉》」』】〕”’,.:;!?)]}";
+
+fn is_punctuation_in(grapheme: &str, set: &str) -> bool {
+    grapheme.chars().all(|c| set.contains(c))
 }
 
 // ── Span Reconstruction ──
@@ -239,14 +247,14 @@ pub(crate) fn expand_tabs_in_spans(spans: Vec<Span<'static>>) -> Vec<Span<'stati
 
 fn expand_tabs_from(s: &str, col: &mut usize) -> String {
     let mut out = String::with_capacity(s.len() + 16);
-    for ch in s.chars() {
-        if ch == '\t' {
+    for g in s.graphemes(true) {
+        if g == "\t" {
             let spaces = TAB_WIDTH - (*col % TAB_WIDTH);
             out.extend(std::iter::repeat_n(' ', spaces));
             *col += spaces;
         } else {
-            out.push(ch);
-            *col += ch.width().unwrap_or(0);
+            out.push_str(g);
+            *col += g.width();
         }
     }
     out
@@ -406,6 +414,17 @@ mod tests {
         }
 
         #[test]
+        fn keeps_opening_punctuation_off_the_row_end() {
+            let wrap = |s, width| texts(&wrap_line(Line::from(s), width, 0, None));
+            assert_eq!(
+                wrap("这是「测试」文本", 6),
+                ["这是", "「测", "试」文", "本"]
+            );
+            assert_eq!(wrap("看看（例子）吧", 6), ["看看", "（例", "子）吧"]);
+            assert_eq!(wrap("abcd（e", 5), ["abcd", "（e"]);
+        }
+
+        #[test]
         fn drops_whitespace_left_over_at_a_break() {
             let wrap = |s| texts(&wrap_line(Line::from(s), 3, 0, None));
             assert_eq!(wrap("ab   cd"), ["ab ", "cd"]);
@@ -461,12 +480,12 @@ mod tests {
         use super::*;
 
         #[test]
-        fn no_tabs_unchanged() {
+        fn leaves_text_without_tabs_unchanged() {
             assert_eq!(expand_tabs("hello world"), "hello world");
         }
 
         #[test]
-        fn line_number_format() {
+        fn aligns_line_number_prefixes_to_the_first_stop() {
             assert_eq!(expand_tabs("1\tuse std::io;"), "1   use std::io;");
             assert_eq!(expand_tabs("10\tuse std::io;"), "10  use std::io;");
             assert_eq!(expand_tabs("100\tuse std::io;"), "100 use std::io;");
@@ -476,6 +495,12 @@ mod tests {
         fn mid_line_aligns_to_stop() {
             assert_eq!(expand_tabs("ab\tcd"), "ab  cd");
             assert_eq!(expand_tabs("abcd\tx"), "abcd    x");
+        }
+
+        #[test]
+        fn measures_emoji_sequences_as_whole_clusters() {
+            assert_eq!(expand_tabs("❤️\tx"), "❤️  x");
+            assert_eq!(expand_tabs("👨‍👩‍👧\tx"), "👨‍👩‍👧  x");
         }
     }
 
