@@ -4,7 +4,7 @@
 use std::fmt;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 
 use anyhow::{Context, Result, anyhow, bail};
 use serde::{Deserialize, Serialize};
@@ -17,7 +17,8 @@ use crate::util::env;
 use crate::util::fs::{atomic_write_private, create_private_dir_all};
 #[cfg(any(target_os = "macos", test))]
 use crate::util::path::claude_config_var;
-use crate::util::path::{XdgBase, app_dir, claude_dir, tildify};
+use crate::util::path::{CLAUDE_CREDENTIALS, XdgBase, app_dir, claude_dir, tildify};
+use crate::util::sync::lock_or_recover;
 use crate::util::text::join_sentences;
 use crate::util::tls::Trust;
 
@@ -41,9 +42,6 @@ const LOCK_UPDATE_INTERVAL: Duration = Duration::from_secs(5);
 /// request plus one mtime update.
 const LOCK_WAIT: Duration = TOKEN_REQUEST_TIMEOUT.saturating_add(LOCK_UPDATE_INTERVAL);
 const LOCK_RETRY_INTERVAL: Duration = Duration::from_secs(1);
-
-/// The file in Claude Code's config directory that holds its login.
-const CREDENTIALS_FILE: &str = ".credentials.json";
 
 #[cfg(any(target_os = "macos", test))]
 const KEYCHAIN_SERVICE: &str = "Claude Code-credentials";
@@ -297,7 +295,7 @@ impl<'a> Store<'a> {
                 Ok(Self {
                     login,
                     keychain,
-                    file: dir.join(CREDENTIALS_FILE),
+                    file: dir.join(CLAUDE_CREDENTIALS),
                     lock: sibling_lock(&dir),
                 })
             }
@@ -343,6 +341,19 @@ pub(super) async fn save_login(tokens: &TokenResponse, token_url: &str) -> Resul
 /// Removes the oxide-code login, returning whether one was stored. Claude Code's store stays.
 pub(crate) async fn delete_login() -> Result<bool> {
     Store::locate(Login::Ox, None)?.delete().await
+}
+
+/// Where [`SessionLogin::load`] looks for the Claude Code login, as error messages name it.
+pub(super) fn login_stores() -> String {
+    let file = claude_dir().map_or_else(
+        || format!("~/.claude/{CLAUDE_CREDENTIALS}"),
+        |dir| tildify(&dir.join(CLAUDE_CREDENTIALS)),
+    );
+    if cfg!(target_os = "macos") {
+        format!("the macOS Keychain or {file}")
+    } else {
+        file
+    }
 }
 
 // ── SessionLogin ──
@@ -485,8 +496,7 @@ async fn load_token_from(
         return usable_until_expiry(login, creds.oauth);
     }
 
-    let fresh = || load().is_ok_and(|creds| !is_near_expiry(creds.oauth.expires_at_ms()));
-    let _lock = match wait_for_lock(&store.lock, fresh).await {
+    let _lock = match wait_for_lock(&store.lock).await {
         Ok(lock) => lock,
         Err(unlocked) => {
             // The lock holder may have written a fresh token before releasing.
@@ -499,12 +509,11 @@ async fn load_token_from(
                     Unlocked::Failed(e) => {
                         warn!("skipping OAuth token refresh, using existing: {e:#}");
                     }
-                    Unlocked::Settled => {}
                 }
                 return Ok(creds.into_token());
             }
             return Err(match unlocked {
-                Unlocked::Held | Unlocked::Settled => LoginError::LockHeld {
+                Unlocked::Held => LoginError::LockHeld {
                     login,
                     lock: store.lock.clone(),
                 },
@@ -705,7 +714,7 @@ fn keychain_account() -> Result<String> {
 }
 
 /// The Keychain service Claude Code keeps its login under. A `CLAUDE_CONFIG_DIR` adds the first 8
-/// hex digits of the directory's SHA-256, so each config directory keeps its own login.
+/// hex digits of the SHA-256 of the variable's value, so each config directory keeps its own login.
 #[cfg(any(target_os = "macos", test))]
 fn keychain_service() -> String {
     use sha2::{Digest, Sha256};
@@ -718,19 +727,6 @@ fn keychain_service() -> String {
             format!("{KEYCHAIN_SERVICE}-{prefix:08x}")
         },
     )
-}
-
-/// Where [`SessionLogin::load`] looks for the Claude Code login, as error messages name it.
-pub(super) fn login_stores() -> String {
-    let file = claude_dir().map_or_else(
-        || format!("~/.claude/{CREDENTIALS_FILE}"),
-        |dir| tildify(&dir.join(CREDENTIALS_FILE)),
-    );
-    if cfg!(target_os = "macos") {
-        format!("the macOS Keychain or {file}")
-    } else {
-        file
-    }
 }
 
 // ── Token Requests ──
@@ -921,35 +917,53 @@ fn now_millis() -> Option<u64> {
 // ── File Locking ──
 
 /// A held credentials lock, whose mtime a background task keeps fresh so other processes do not
-/// take it for abandoned. Dropping it stops the task and removes the lock.
+/// take it for abandoned. Dropping it stops the task and removes the lock. Like `proper-lockfile`,
+/// it stops refreshing and leaves the lock alone once the mtime is no longer the one it last set,
+/// since another process then took the lock for stale, as after this one was suspended.
 struct LockGuard {
     path: PathBuf,
+    /// The mtime this process last gave the lock, `None` once another process took it over.
+    mtime: Arc<std::sync::Mutex<Option<SystemTime>>>,
     heartbeat: tokio::task::JoinHandle<()>,
 }
 
 impl LockGuard {
-    fn hold(path: &Path) -> Self {
+    fn hold(path: &Path) -> std::io::Result<Self> {
+        let mtime = Arc::new(std::sync::Mutex::new(Some(lock_mtime(path)?)));
         let heartbeat = tokio::spawn({
             let path = path.to_owned();
+            let mtime = Arc::clone(&mtime);
             async move {
                 loop {
                     tokio::time::sleep(LOCK_UPDATE_INTERVAL).await;
-                    if let Err(e) = touch_dir(&path) {
-                        debug!("failed to refresh lock {}: {e}", path.display());
+                    let mut held = lock_or_recover(&mtime, "credentials lock");
+                    if !held.is_some_and(|set| owns_lock(&path, set)) {
+                        warn!("another process took over the lock at {}", path.display());
+                        *held = None;
+                        return;
+                    }
+                    match touch_dir(&path).and_then(|()| lock_mtime(&path)) {
+                        Ok(set) => *held = Some(set),
+                        Err(e) => debug!("failed to refresh lock {}: {e}", path.display()),
                     }
                 }
             }
         });
-        Self {
+        Ok(Self {
             path: path.to_owned(),
+            mtime,
             heartbeat,
-        }
+        })
     }
 }
 
 impl Drop for LockGuard {
     fn drop(&mut self) {
         self.heartbeat.abort();
+        let held = *lock_or_recover(&self.mtime, "credentials lock");
+        if !held.is_some_and(|set| owns_lock(&self.path, set)) {
+            return;
+        }
         if let Err(e) = std::fs::remove_dir_all(&self.path) {
             debug!("failed to release lock {}: {e}", self.path.display());
         }
@@ -960,17 +974,15 @@ impl Drop for LockGuard {
 enum Unlocked {
     /// Another process held the lock for all of [`LOCK_WAIT`].
     Held,
-    /// The caller no longer needs the lock.
-    Settled,
     Failed(anyhow::Error),
 }
 
 /// Directory-based advisory lock around credential writes. `mkdir` is the cross-platform atomic
 /// primitive, and the guard `rmdir`s on drop.
 async fn acquire_lock(path: &Path) -> Result<LockGuard> {
-    match wait_for_lock(path, || false).await {
+    match wait_for_lock(path).await {
         Ok(lock) => Ok(lock),
-        Err(Unlocked::Held | Unlocked::Settled) => bail!(
+        Err(Unlocked::Held) => bail!(
             "another process held {} for over {} s",
             path.display(),
             LOCK_WAIT.as_secs()
@@ -979,17 +991,21 @@ async fn acquire_lock(path: &Path) -> Result<LockGuard> {
     }
 }
 
-/// Takes the lock at `path`, retrying for up to [`LOCK_WAIT`] while another process holds it, until
-/// `settled` says the caller no longer needs it. A lock whose mtime is older
-/// than [`LOCK_STALE_THRESHOLD`] was abandoned by a crashed process and is cleared.
-async fn wait_for_lock(
-    path: &Path,
-    mut settled: impl FnMut() -> bool,
-) -> Result<LockGuard, Unlocked> {
+/// Takes the lock at `path`, retrying for up to [`LOCK_WAIT`] while another process holds it. A
+/// lock whose mtime is older than [`LOCK_STALE_THRESHOLD`] was abandoned by a crashed process and
+/// is cleared.
+async fn wait_for_lock(path: &Path) -> Result<LockGuard, Unlocked> {
     let deadline = tokio::time::Instant::now() + LOCK_WAIT;
     loop {
         match std::fs::create_dir(path) {
-            Ok(()) => return Ok(LockGuard::hold(path)),
+            Ok(()) => {
+                return LockGuard::hold(path).map_err(|e| {
+                    Unlocked::Failed(
+                        anyhow::Error::new(e)
+                            .context(format!("failed to read lock {}", path.display())),
+                    )
+                });
+            }
             Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
                 if is_stale_lock(path)
                     && let Err(e) = std::fs::remove_dir_all(path)
@@ -1008,21 +1024,25 @@ async fn wait_for_lock(
             return Err(Unlocked::Held);
         }
         tokio::time::sleep(LOCK_RETRY_INTERVAL).await;
-        if settled() {
-            return Err(Unlocked::Settled);
-        }
     }
 }
 
 fn is_stale_lock(path: &Path) -> bool {
-    std::fs::metadata(path)
-        .and_then(|m| m.modified())
-        .is_ok_and(|t| t.elapsed().unwrap_or_default() > LOCK_STALE_THRESHOLD)
+    lock_mtime(path).is_ok_and(|t| t.elapsed().unwrap_or_default() > LOCK_STALE_THRESHOLD)
+}
+
+fn lock_mtime(path: &Path) -> std::io::Result<SystemTime> {
+    std::fs::metadata(path)?.modified()
+}
+
+/// Returns whether the lock at `path` still has the mtime this process last gave it, `set`.
+fn owns_lock(path: &Path, set: SystemTime) -> bool {
+    lock_mtime(path).is_ok_and(|mtime| mtime == set)
 }
 
 /// Sets the lock directory's mtime to now, as `proper-lockfile` refreshes a held lock.
 fn touch_dir(path: &Path) -> std::io::Result<()> {
-    open_dir(path)?.set_modified(std::time::SystemTime::now())
+    open_dir(path)?.set_modified(SystemTime::now())
 }
 
 /// Opens a directory with enough access to set its mtime.
@@ -1186,6 +1206,7 @@ mod tests {
 
     use super::testing::{HeldRefresh, creds_json, ok_refresh_body, write_creds};
     use super::*;
+    use crate::util::fs::testing::symlink_dir;
     use crate::util::path::local_testing::abs;
     use crate::util::path::testing::HOME_VAR;
     use crate::util::tls::PlatformTrust;
@@ -1352,26 +1373,25 @@ mod tests {
             #[test]
             fn keeps_the_claude_code_login_in_claude_config_dir_and_locks_beside_its_real_path() {
                 let root = tempfile::tempdir().unwrap();
-                let real = dunce::canonicalize(root.path())
-                    .unwrap()
-                    .join("claude-work");
-                std::fs::create_dir(&real).unwrap();
+                let root = dunce::canonicalize(root.path()).unwrap();
+                std::fs::create_dir(root.join("other")).unwrap();
+                std::fs::create_dir(root.join("claude-work")).unwrap();
+                let spelled = root.join("other").join("..").join("claude-work");
 
-                let store = temp_env::with_var("CLAUDE_CONFIG_DIR", Some(&real), || {
+                let store = temp_env::with_var("CLAUDE_CONFIG_DIR", Some(&spelled), || {
                     Store::locate(Login::ClaudeCode, None).unwrap()
                 });
 
-                assert_eq!(store.file, real.join(".credentials.json"));
-                assert_eq!(store.lock, real.with_file_name("claude-work.lock"));
+                assert_eq!(store.file, spelled.join(".credentials.json"));
+                assert_eq!(store.lock, root.join("claude-work.lock"));
             }
 
-            #[cfg(unix)]
             #[test]
             fn locks_where_a_symlinked_claude_directory_resolves() {
                 let home = tempfile::tempdir().unwrap();
                 let home = dunce::canonicalize(home.path()).unwrap();
                 std::fs::create_dir(home.join("dotfiles")).unwrap();
-                std::os::unix::fs::symlink("dotfiles", home.join(".claude")).unwrap();
+                symlink_dir(&home.join("dotfiles"), &home.join(".claude"));
 
                 let store = temp_env::with_vars(
                     [
@@ -1495,7 +1515,10 @@ mod tests {
                 );
 
                 let login = temp_env::async_with_vars(
-                    [(HOME_VAR, Some(home.path().to_string_lossy().into_owned()))],
+                    [
+                        (HOME_VAR, Some(home.path().to_string_lossy().into_owned())),
+                        ("CLAUDE_CONFIG_DIR", None),
+                    ],
                     async {
                         SessionLogin::load(Login::ClaudeCode, ClaudeCodeKeychain::NONE, &NoRoots)
                             .await
@@ -2755,15 +2778,19 @@ mod tests {
             let dir = tempfile::tempdir().unwrap();
             let lock_path = dir.path().join("test.lock");
             std::fs::create_dir(&lock_path).unwrap();
-            let abandoned_at =
-                std::time::SystemTime::now() - LOCK_STALE_THRESHOLD - Duration::from_secs(1);
-            open_dir(&lock_path)
-                .unwrap()
-                .set_modified(abandoned_at)
-                .unwrap();
+            set_lock_mtime(
+                &lock_path,
+                SystemTime::now() - LOCK_STALE_THRESHOLD - Duration::from_secs(1),
+            );
 
             let _guard = acquire_lock(&lock_path).await.unwrap();
             assert!(!is_stale_lock(&lock_path));
+        }
+
+        /// Sets the lock's mtime to `at`, as its holder or a process taking it over would.
+        fn set_lock_mtime(lock_path: &Path, at: SystemTime) -> SystemTime {
+            open_dir(lock_path).unwrap().set_modified(at).unwrap();
+            lock_mtime(lock_path).unwrap()
         }
 
         #[tokio::test(start_paused = true)]
@@ -2771,17 +2798,47 @@ mod tests {
             let dir = tempfile::tempdir().unwrap();
             let lock_path = dir.path().join("test.lock");
             let guard = acquire_lock(&lock_path).await.unwrap();
-            let long_ago = std::time::SystemTime::now() - LOCK_STALE_THRESHOLD * 2;
-            open_dir(&lock_path)
-                .unwrap()
-                .set_modified(long_ago)
-                .unwrap();
+            let long_ago = SystemTime::now() - LOCK_STALE_THRESHOLD * 2;
+            *guard.mtime.lock().unwrap() = Some(set_lock_mtime(&lock_path, long_ago));
 
             tokio::time::sleep(LOCK_UPDATE_INTERVAL + Duration::from_millis(1)).await;
 
             assert!(!is_stale_lock(&lock_path));
             drop(guard);
             assert!(!lock_path.exists());
+        }
+
+        #[tokio::test(start_paused = true)]
+        async fn leaves_a_lock_another_process_took_over_alone() {
+            let dir = tempfile::tempdir().unwrap();
+            let lock_path = dir.path().join("test.lock");
+            let guard = acquire_lock(&lock_path).await.unwrap();
+            let other = set_lock_mtime(&lock_path, SystemTime::now() - Duration::from_secs(3));
+
+            tokio::time::sleep(LOCK_UPDATE_INTERVAL * 2).await;
+
+            assert_eq!(lock_mtime(&lock_path).unwrap(), other);
+            assert_eq!(*guard.mtime.lock().unwrap(), None);
+            drop(guard);
+            assert!(lock_path.exists());
+        }
+
+        #[tokio::test]
+        async fn leaves_a_lock_taken_over_before_the_next_refresh_alone() {
+            let dir = tempfile::tempdir().unwrap();
+            let lock_path = dir.path().join("test.lock");
+            let guard = acquire_lock(&lock_path).await.unwrap();
+            set_lock_mtime(&lock_path, SystemTime::now() - Duration::from_secs(3));
+
+            drop(guard);
+
+            assert!(lock_path.exists());
+        }
+
+        #[test]
+        fn matches_proper_lockfiles_defaults() {
+            assert_eq!(LOCK_STALE_THRESHOLD, Duration::from_secs(10));
+            assert_eq!(LOCK_UPDATE_INTERVAL, Duration::from_secs(5));
         }
 
         #[tokio::test(start_paused = true)]

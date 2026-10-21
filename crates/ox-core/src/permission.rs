@@ -2393,13 +2393,21 @@ mod tests {
             }
 
             #[test]
-            fn protects_the_user_git_ssh_and_cloud_config_until_disabled() {
+            fn protects_the_user_git_ssh_cloud_and_claude_code_config_until_disabled() {
                 let (_dir, root) = temp_cwd();
-                let (cwd, home, config) =
-                    (root.join("repo"), root.join("home"), root.join("config"));
+                let (cwd, home, config, claude) = (
+                    root.join("repo"),
+                    root.join("home"),
+                    root.join("config"),
+                    root.join("claude-work"),
+                );
                 std::fs::create_dir(&cwd).unwrap();
                 temp_env::with_vars(
-                    [(HOME_VAR, Some(&home)), ("XDG_CONFIG_HOME", Some(&config))],
+                    [
+                        (HOME_VAR, Some(&home)),
+                        ("XDG_CONFIG_HOME", Some(&config)),
+                        ("CLAUDE_CONFIG_DIR", Some(&claude)),
+                    ],
                     || {
                         let workspace = Workspace::new(&cwd);
                         let resolve = |disabled: &[Shipped]| {
@@ -2433,6 +2441,8 @@ mod tests {
                             ),
                             (home.join(".docker/config.json"), Shipped::Cloud),
                             (home.join(".kube/config"), Shipped::Cloud),
+                            (claude.join("settings.json"), Shipped::Agents),
+                            (claude.join("hooks/pre.sh"), Shipped::Agents),
                         ] {
                             let target = edit(path.clone());
                             assert_eq!(

@@ -14,6 +14,9 @@ const APP_DIR: &str = "ox";
 /// The variable that moves Claude Code's config directory away from `~/.claude`.
 const CLAUDE_CONFIG_DIR: &str = "CLAUDE_CONFIG_DIR";
 
+/// The file in [`claude_dir`] that holds Claude Code's login.
+pub(crate) const CLAUDE_CREDENTIALS: &str = ".credentials.json";
+
 /// An XDG base directory that oxide-code keeps files under.
 #[derive(Debug, Clone, Copy)]
 pub(crate) enum XdgBase {
@@ -58,14 +61,14 @@ pub(crate) fn app_dir(base: XdgBase) -> Option<PathBuf> {
 }
 
 /// `$CLAUDE_CONFIG_DIR` in Unicode NFC, the form Claude Code reads it in, or `None` when unset or
-/// empty, where Claude Code uses `~/.claude`.
+/// empty, as Claude Code's Keychain naming treats an empty value.
 pub(crate) fn claude_config_var() -> Option<String> {
     env::string(CLAUDE_CONFIG_DIR).map(|dir| dir.nfc().collect())
 }
 
-/// Claude Code's config directory, which holds its login and user `CLAUDE.md`: [`claude_config_var`]
-/// made absolute against the working directory, as Claude Code opens it, or `~/.claude`. `None`
-/// without a home directory to fall back to.
+/// Claude Code's config directory, which holds its login, user settings, and user `CLAUDE.md`:
+/// [`claude_config_var`] made absolute against the working directory, as Claude Code opens it, or
+/// `~/.claude`. `None` without a home directory to fall back to.
 pub(crate) fn claude_dir() -> Option<PathBuf> {
     match claude_config_var() {
         Some(dir) => std::path::absolute(dir).ok(),

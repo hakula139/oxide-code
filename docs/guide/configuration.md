@@ -278,20 +278,20 @@ A `net` pattern is a host glob such as `*.example.com`, and an `mcp` pattern is 
 
 oxide-code ships the rules below. The ones that ask about edits protect their paths: such an edit asks even when an allow pattern, the working-directory allow, or `yolo` would run it. Protected file names match the way deny patterns do, ignoring case, Unicode normalization, invisible characters, and trailing dots, and a symlinked protected name in the launch directory or an extra root protects its target as well.
 
-| Name          | Rule                                                                                                                                                                                          |
-| ------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `git`         | Edits to `.git`, `.githooks`, and `.husky` at any depth, to `.gitconfig` and `.gitmodules` anywhere, and to the XDG git directory, such as `~/.config/git`, and `~/.git-credentials` ask      |
-| `direnv`      | Edits to `.envrc` anywhere ask                                                                                                                                                                |
-| `editors`     | Edits to `.vscode`, `.idea`, and `.devcontainer` at any depth ask                                                                                                                             |
-| `cargo`       | Edits to `.cargo/config`, `.cargo/config.toml`, `rust-toolchain`, and `rust-toolchain.toml` ask                                                                                               |
-| `shell`       | Edits to shell startup and logout files such as `.bashrc`, `.zshrc`, and `.bash_logout`, and to fish's `config.fish`, `conf.d`, and `functions`, ask                                          |
-| `agents`      | Edits to `.codex` at any depth, `.claude/settings.json`, `.claude/settings.local.json`, `.claude/hooks`, `.claude.json`, and `.mcp.json` ask                                                  |
-| `ox`          | Edits to `.ox` at any depth and oxide-code's own config, data, and state directories ask                                                                                                      |
-| `devices`     | Edits under `/dev` ask on Unix, as does a `bash` redirection to any device there except `/dev/null`, `/dev/stdout`, `/dev/stderr`, and `/dev/tty`                                             |
-| `rm`          | An `rm` with both its recursive and force options asks in any spelling, such as `rm -rf x`, `rm -r --force x`, `rm x -Rf`, and `sudo rm -rf x`                                                |
-| `ssh`         | Reads of `~/.ssh` and everything in it are denied, and edits to anything in it ask                                                                                                            |
-| `cloud`       | Edits to `~/.aws`, `~/.azure`, `~/.config/gcloud`, `~/.docker`, and `~/.kube` ask                                                                                                             |
-| `credentials` | Reads of oxide-code's `credentials.json`, Claude Code's `.credentials.json` in `~/.claude` or `$CLAUDE_CONFIG_DIR`, and git's `~/.git-credentials` and `~/.config/git/credentials` are denied |
+| Name          | Rule                                                                                                                                                                                                  |
+| ------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `git`         | Edits to `.git`, `.githooks`, and `.husky` at any depth, to `.gitconfig` and `.gitmodules` anywhere, and to the XDG git directory, such as `~/.config/git`, and `~/.git-credentials` ask              |
+| `direnv`      | Edits to `.envrc` anywhere ask                                                                                                                                                                        |
+| `editors`     | Edits to `.vscode`, `.idea`, and `.devcontainer` at any depth ask                                                                                                                                     |
+| `cargo`       | Edits to `.cargo/config`, `.cargo/config.toml`, `rust-toolchain`, and `rust-toolchain.toml` ask                                                                                                       |
+| `shell`       | Edits to shell startup and logout files such as `.bashrc`, `.zshrc`, and `.bash_logout`, and to fish's `config.fish`, `conf.d`, and `functions`, ask                                                  |
+| `agents`      | Edits to `.codex` at any depth, `.claude/settings.json`, `.claude/settings.local.json`, `.claude/hooks`, the `settings.json` and `hooks` in `$CLAUDE_CONFIG_DIR`, `.claude.json`, and `.mcp.json` ask |
+| `ox`          | Edits to `.ox` at any depth and oxide-code's own config, data, and state directories ask                                                                                                              |
+| `devices`     | Edits under `/dev` ask on Unix, as does a `bash` redirection to any device there except `/dev/null`, `/dev/stdout`, `/dev/stderr`, and `/dev/tty`                                                     |
+| `rm`          | An `rm` with both its recursive and force options asks in any spelling, such as `rm -rf x`, `rm -r --force x`, `rm x -Rf`, and `sudo rm -rf x`                                                        |
+| `ssh`         | Reads of `~/.ssh` and everything in it are denied, and edits to anything in it ask                                                                                                                    |
+| `cloud`       | Edits to `~/.aws`, `~/.azure`, `~/.config/gcloud`, `~/.docker`, and `~/.kube` ask                                                                                                                     |
+| `credentials` | Reads of oxide-code's `credentials.json`, Claude Code's `.credentials.json` in `~/.claude` or `$CLAUDE_CONFIG_DIR`, and git's `~/.git-credentials` and `~/.config/git/credentials` are denied         |
 
 Built-in rules sit in the deny and ask tiers, so an allow pattern cannot override one. To turn one off, set its name to `false` under `[permission.defaults]` in user config. A later layer can set it back to `true`.
 
@@ -365,6 +365,7 @@ Environment variables override all config file values.
 | `ANTHROPIC_AUTH_TOKEN`                   | -                                          | -                           | Gateway bearer token         |
 | `ANTHROPIC_API_KEY`                      | `client.api_key`                           | -                           | Anthropic API key            |
 | `CLAUDE_CODE_OAUTH_TOKEN`                | -                                          | -                           | Long-lived OAuth token       |
+| `CLAUDE_CONFIG_DIR`                      | -                                          | `~/.claude`                 | Claude Code's config dir     |
 | `ANTHROPIC_BASE_URL`                     | `client.base_url`                          | `https://api.anthropic.com` | API base URL                 |
 | `ANTHROPIC_MODEL`                        | `client.model`                             | `claude-opus-5-5`           | Model to use                 |
 | `OX_EFFORT`                              | `client.effort`                            | per-model                   | Intelligence-vs-latency tier |

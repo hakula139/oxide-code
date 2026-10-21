@@ -59,8 +59,8 @@ pub enum AuthSource {
     /// oxide-code's stored login from `/login` (`$XDG_DATA_HOME/ox/credentials.json`), refreshed
     /// before a request near its expiry and reloaded after a 401.
     OxLogin,
-    /// Claude Code's stored login (macOS Keychain or `~/.claude/.credentials.json`), refreshed
-    /// before a request near its expiry and reloaded after a 401.
+    /// Claude Code's stored login (macOS Keychain or `.credentials.json` in `~/.claude` or
+    /// `$CLAUDE_CONFIG_DIR`), refreshed before a request near its expiry and reloaded after a 401.
     ClaudeCodeLogin,
 }
 
@@ -420,8 +420,6 @@ async fn load_login(
 
 #[cfg(test)]
 mod tests {
-    use std::path::Path;
-
     use super::*;
     use crate::config::oauth::testing::{ox_login_in, write_creds};
     use crate::util::path::local_testing::abs;
@@ -796,7 +794,10 @@ mod tests {
                     } else {
                         ""
                     },
-                    file = Path::new(&claude_dir).join(".credentials.json").display(),
+                    file = std::path::absolute(&claude_dir)
+                        .unwrap()
+                        .join(".credentials.json")
+                        .display(),
                 ),
             );
         }
