@@ -209,18 +209,14 @@ mod tests {
 
     use super::*;
     use crate::client::anthropic::local_testing::{COMPLETION_USAGE, completion_body, test_client};
-    use crate::config::auth::{Auth, AuthSource};
+    use crate::client::anthropic::testing::api_key;
     use crate::message::Message;
     use crate::protocol::testing::CapturingSink;
     use crate::session::handle::testing::dead;
     use crate::session::store::testing::test_store;
 
     fn title_client(base_url: String) -> Client {
-        test_client(
-            base_url,
-            Auth::new(AuthSource::ApiKeyEnv, "sk"),
-            HAIKU_MODEL,
-        )
+        test_client(base_url, api_key(), HAIKU_MODEL)
     }
 
     /// The usage record of one title request that `client` sent.

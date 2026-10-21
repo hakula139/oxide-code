@@ -656,7 +656,7 @@ mod tests {
     /// An owned copy of a [`BasicEvaluation`], with the leaf leading the chain and the anchors
     /// in DER.
     #[cfg(target_os = "macos")]
-    #[derive(Clone, Debug, PartialEq)]
+    #[derive(Debug, Clone, PartialEq)]
     struct RecordedEvaluation {
         chain: Vec<CertificateDer<'static>>,
         anchors: Vec<CertificateDer<'static>>,

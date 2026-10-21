@@ -506,7 +506,7 @@ mod tests {
     use super::*;
     use crate::client::anthropic::Client;
     use crate::client::anthropic::local_testing::test_client;
-    use crate::client::anthropic::testing::{api_key, sse_body};
+    use crate::client::anthropic::testing::{api_key, sse_body, sse_response};
     use crate::client::testing::five_hour_limit;
     use crate::engine::local_testing::{
         FakeClient, dead_test_session, empty_prompt, inert_ops, test_session, text_turn,
@@ -1025,11 +1025,7 @@ mod tests {
         async fn mount_summary(server: &MockServer, body: String) {
             Mock::given(method("POST"))
                 .and(path("/v1/messages"))
-                .respond_with(
-                    ResponseTemplate::new(200)
-                        .set_body_string(body)
-                        .insert_header("content-type", "text/event-stream"),
-                )
+                .respond_with(sse_response(body))
                 .mount(server)
                 .await;
         }
@@ -1124,16 +1120,12 @@ mod tests {
         async fn mount_overflow_then(server: &MockServer, retry_body: String) {
             Mock::given(method("POST"))
                 .and(path("/v1/messages"))
-                .respond_with(
-                    ResponseTemplate::new(200)
-                        .set_body_string(summary_stream(
-                            "",
-                            "partial",
-                            "model_context_window_exceeded",
-                            true,
-                        ))
-                        .insert_header("content-type", "text/event-stream"),
-                )
+                .respond_with(sse_response(summary_stream(
+                    "",
+                    "partial",
+                    "model_context_window_exceeded",
+                    true,
+                )))
                 .up_to_n_times(1)
                 .mount(server)
                 .await;
@@ -1241,21 +1233,7 @@ mod tests {
         #[tokio::test]
         async fn request_forks_the_conversation_prefix() {
             let server = MockServer::start().await;
-            let bodies: Arc<Mutex<Vec<serde_json::Value>>> = Arc::default();
-            let recorded = Arc::clone(&bodies);
-            Mock::given(method("POST"))
-                .and(path("/v1/messages"))
-                .respond_with(move |req: &Request| {
-                    recorded
-                        .lock()
-                        .unwrap()
-                        .push(serde_json::from_slice(&req.body).unwrap());
-                    ResponseTemplate::new(200)
-                        .set_body_string(streamed_summary_body("done"))
-                        .insert_header("content-type", "text/event-stream")
-                })
-                .mount(&server)
-                .await;
+            mount_summary(&server, streamed_summary_body("done")).await;
             let client = test_client(server.uri(), api_key(), "claude-haiku-5-5");
             let prompt = parent_prompt();
             let tools = [ToolDefinition {
@@ -1286,7 +1264,13 @@ mod tests {
             .await
             .unwrap();
 
-            let mut bodies = bodies.lock().unwrap().clone();
+            let mut bodies: Vec<serde_json::Value> = server
+                .received_requests()
+                .await
+                .unwrap()
+                .iter()
+                .map(|request| serde_json::from_slice(&request.body).unwrap())
+                .collect();
             bodies.iter_mut().for_each(strip_cache_control);
             let [parent, fork] = bodies.as_slice() else {
                 panic!("expected two requests, got {}", bodies.len());

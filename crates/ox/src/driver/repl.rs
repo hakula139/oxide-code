@@ -11,6 +11,7 @@ use ox_core::command::{self, Parsed};
 use ox_core::engine::{Engine, EngineHandle, TurnEnd};
 use ox_core::permission::rule::Rule;
 use ox_core::permission::{Basis, SessionGrant};
+use ox_core::protocol::notice::ENGINE_STOPPED;
 use ox_core::protocol::{Decision, Event, EventSink, Op};
 use ox_core::tool::view::{ApprovalBody, ApprovalPreview};
 use ox_core::util::git;
@@ -131,7 +132,7 @@ where
             match end {
                 Some(TurnEnd::Failed) => failed = true,
                 Some(_) => {}
-                None => bail!("the engine stopped"),
+                None => bail!(ENGINE_STOPPED),
             }
         }
         Ok(())
@@ -509,9 +510,7 @@ mod tests {
                         Event::SessionTitleUpdated { title, .. } => {
                             Some(format!("renamed to {title}"))
                         }
-                        Event::ConfigChanged { model, effort, .. } => {
-                            Some(format!("using {} at {effort:?}", model.id()))
-                        }
+                        Event::ConfigChanged { notice, .. } => Some(notice),
                         Event::SessionRolled { .. } => Some("rolled".to_owned()),
                         Event::SessionResumed { id, title, .. } => {
                             Some(format!("resumed {id} titled {title:?}"))
@@ -525,8 +524,9 @@ mod tests {
                     [
                         "compacted with Some(\"focus on login\")",
                         "renamed to Fix login",
-                        "using claude-sonnet-5-5 at Some(High)",
-                        "using claude-sonnet-5-5 at Some(Low)",
+                        "Switched to Claude Sonnet 5.5 (claude-sonnet-5-5) · \
+                         effort high (model default)",
+                        "Effort set to low",
                         "rolled",
                         resumed.as_str(),
                     ],

@@ -2,6 +2,7 @@
 //! transcript leaves behind.
 
 use std::collections::HashMap;
+use std::fmt;
 use std::path::Path;
 use std::pin::Pin;
 
@@ -59,6 +60,13 @@ impl Progress {
             completed: count(tasks, TaskStatus::Completed),
             total: tasks.len(),
         })
+    }
+}
+
+/// Shows the progress as `completed/total`, as in `1/3`.
+impl fmt::Display for Progress {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}/{}", self.completed, self.total)
     }
 }
 
@@ -308,6 +316,16 @@ mod tests {
 
     mod progress {
         use super::*;
+
+        #[test]
+        fn displays_completed_out_of_total() {
+            let progress = Progress {
+                completed: 1,
+                total: 3,
+            };
+
+            assert_eq!(progress.to_string(), "1/3");
+        }
 
         mod of {
             use super::*;

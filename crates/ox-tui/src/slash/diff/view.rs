@@ -228,7 +228,7 @@ impl HunkCursor {
 }
 
 /// One side of a hunk: its next line number and how many lines it has left.
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 struct HunkRange {
     start: usize,
     count: usize,
