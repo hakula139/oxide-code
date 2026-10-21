@@ -1,8 +1,6 @@
 //! Slash-command input shared by the TUI's slash commands and the bare REPL: the line parser, the
 //! command aliases, and the typed forms parsed into the [`Op`] each one runs. The TUI adds the
 //! pickers and modals behind the bare forms.
-//!
-//! Design: `docs/design/slash/commands.md`.
 
 pub mod init;
 mod parser;

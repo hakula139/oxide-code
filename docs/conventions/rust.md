@@ -33,15 +33,12 @@ Conventions for Rust code under `crates/`. Tooling enforces some style rules, so
 
 ### Error Messages
 
-`anyhow` formats a chain as `headline: cause` with `{:#}` and puts the outermost headline first in a startup error, so each message in the chain should read as one clause of that sentence.
+`anyhow` formats a chain as `headline: cause` with `{:#}` and puts the outermost headline first in a startup error, so each message in the chain should read as one clause of that sentence. [Writing](writing.md#messages) covers the wording, casing, and punctuation of every message, and these rules add the headline form and how a chain composes.
 
-- Start with a headline that says what failed and identifies the variable, key, file, or value involved, as in `invalid OX_MAX_TOKENS "32k": expected a whole number from 1 to 4294967295`. Quote user-supplied text with `{:?}`.
-- A message that composes into a chain is a fragment of that sentence, as the example above is. [Writing](writing.md#prose) owns the casing and punctuation of fragments and of messages shown on their own.
+- Start with a headline that says what failed and identifies the variable, key, file, or value involved. A failed operation reads `failed to <verb> ...`, as in `failed to read the current working directory`, and rejected input names the problem first, as in `invalid OX_MAX_TOKENS "32k": expected a whole number from 1 to 4294967295`. Quote user-supplied text with `{:?}`.
+- A message that composes into a chain is a fragment of that sentence, as the examples above are.
 - Where a surface shows a chain on its own, give it a capitalized headline at the display site, as in `Rule rejected: {e:#}`, so the fragments inside stay lowercase. `main` prints a startup chain after `Error:`, so its outermost headline is lowercase too.
-- Explain what is accepted or what went wrong in the user's terms. A raw library message such as `invalid digit found in string` does not explain the accepted range.
-- If the user can fix the problem, end the message with a separate sentence giving the recovery step, as in ``Not signed in. Run `/login` to sign in.`` In a chain, that sentence follows the innermost cause, which renders last, as in `invalid OX_STATUS_LINE "a,,b": empty segment between commas. Remove the stray comma.` A short hint may qualify a fragment in parentheses, as in `no sessions to resume in this project (use --all to search every project)`. When such an error wraps a cause, format the cause into the headline so the recovery step stays last.
-- Include units with numbers, as in `Retrying in 1 s`.
-- Name the variable or store that holds a secret, never its value.
+- In a chain, the recovery step follows the innermost cause, which renders last, as in `invalid OX_STATUS_LINE "a,,b": empty segment between commas. Remove the stray comma.` When such an error wraps a cause, format the cause into the headline so the recovery step stays last.
 
 ## Visibility
 
@@ -53,22 +50,24 @@ Conventions for Rust code under `crates/`. Tooling enforces some style rules, so
 - Keep each file focused on one primary type or concern. Split it when it starts mixing several.
 - Avoid `pub use` re-exports that obscure where items are defined. If a module re-exports some items, re-export all related items so callers can use consistent paths.
 - Put helper functions after their callers within each section so the file reads from top to bottom.
-- Place new struct fields and enum variants where they fit best semantically.
 - Keep `#[cfg(unix)]`, `#[cfg(windows)]`, and `#[cfg(target_os = "macos")]` variants together in the modules they belong to, rather than splitting them into per-platform files.
 
 ## Layout
 
+- Order entries such as struct fields, enum variants, and list items by meaning: the general case before its exceptions, related entries together, and dependencies before their dependents. Use alphabetical order only when no stronger relationship applies.
+- List derives in the order `Debug`, `Clone`, `Copy`, `Default`, `PartialEq`, `Eq`, `PartialOrd`, `Ord`, `Hash`, followed by `Serialize`, `Deserialize`, and then other crates' derives, such as `thiserror::Error`. Give parallel types the same set.
 - Separate distinct groups of items with `// ── Section Name ──` banners using U+2500. Tests group by function in child modules, as described in [Testing](testing.md#grouping-and-naming).
 - Leave one blank line between top-level items. Closely related one-line `const` or `static` items may be grouped when they share a theme, such as the OAuth client constants. Leave one blank line after the group before unrelated items.
 - Leave one blank line before and after each banner.
 - In function bodies, use blank lines to separate logical phases such as setup, validation, execution, and result.
 - Put a single-line computation directly above its early-return guard, with no blank line between them. For a multi-line `let` binding, such as an async chain or builder, leave a blank line before the guard.
+- Open a module with its `//!` doc, then its `mod` declarations, its re-exports at any visibility as a group of their own, and its `use` groups.
 - Order `use` groups as std, external crates, workspace crates (`ox_core::`, `ox_tui::`), then internal paths (`crate::`, `super::`, `self::`, and the file's child modules), with a blank line between groups. rustfmt sorts imports within each group, putting `self` before `super` before `crate`, but does not move imports between groups. Authors and reviewers must maintain the grouping.
 
 ## Strings
 
 - Use a raw string (`r"..."`) only when a literal contains characters that would otherwise need escaping, and only when it fits on one line or forms a multiline `indoc!` or `formatdoc!` body. A raw string cannot continue with `\`, so prose that would run past 100 columns, such as a message, a tool description, or the text a test expects, becomes an escaped `\`-continued literal. A single-line machine-format fixture, such as compact JSON or a regex, stays raw at any length.
-- Write text that renders as one line as a plain literal when it fits within 100 columns, and otherwise continue it with `\`, starting each continued line one column past the opening quote. Start each sentence on a new continued line. Break a sentence that does not fit at its strongest clause, parenthetical, or phrase boundary, without filling lines to the limit, so an edit reflows only the lines it touches. Keep the space between the joined words before the `\`, since the continuation also drops the next line's leading whitespace. When rustfmt moves a continued literal, it leaves the continuation lines where they were, so realign them by hand.
+- Write text that renders as one line as a plain literal when it fits within 100 columns, and otherwise continue it with `\`, starting each continued line one column past the opening quote and breaking lines as [Writing](writing.md#comments) describes. Keep the space between the joined words before the `\`, since the continuation also drops the next line's leading whitespace. When rustfmt moves a continued literal, it leaves the continuation lines where they were, so realign them by hand.
 - Use `indoc!` for literals and `formatdoc!` for formatted text whenever prose or a structured document, such as a prompt, message, Markdown, diff, or file fixture, spans a paragraph break or three or more lines. This applies to production code and tests. Use `writedoc!` with a writer. Indent content with the surrounding code, inline it when used once, and name a constant only when shared or very large. For CRLF protocol text such as an HTTP request, end each line with `\r` and let the source line break supply the `\n`.
 - In a multiline `indoc!` or `formatdoc!`, `}` begins its own line at the indentation of the line that opens the macro, which is `"}` when the text ends in a newline. Otherwise the closing `"` stays on the last content line, since a `"` on its own line adds a final newline. rustfmt lays out a multiline `writedoc!(writer, "...")` like a function call, so the writer, the literal, and the closing `)` each start their own line.
 - In `formatdoc!` and `writedoc!`, capture each value inline by name, as in `{name}`, the inline style Clippy's `uninlined_format_args` enforces for `format!`. Bind a value that is not a plain identifier, such as `body.len() + 1`, to a local named for its placeholder before the call, so the template reads on its own.
@@ -77,10 +76,9 @@ Conventions for Rust code under `crates/`. Tooling enforces some style rules, so
 - Build an interpolated list or section without a trailing newline, joining its items with `join`, so the template that interpolates it owns the line breaks around it.
 - Build a shared envelope, such as the `<system-reminder>` block, through one owning helper that wraps each body, so its delimiters are spelled out in one place.
 - Convert a literal to a `String` with `.to_owned()` and keep the layout rustfmt gives it. Don't wrap the literal in `String::from` or bind it to a local only to change that layout.
-- Keep each clap flag's `///` help to one sentence, since clap drops the final period of a flag's help.
 
 ## Dependencies
 
 - Pin each dependency version in the root `Cargo.toml` under `[workspace.dependencies]`, then reference it from member crates with `dep.workspace = true`.
 - Add dependencies to the workspace only when a change first requires them, and prefer crates with few transitive dependencies.
-- Declare platform-specific dependencies in the crate's `Cargo.toml` under `[target.'cfg(unix)'.dependencies]` or `[target.'cfg(target_os = "macos")'.dependencies]`.
+- Declare platform-specific dependencies in the crate's `Cargo.toml` under `[target.'cfg(unix)'.dependencies]`, `[target.'cfg(windows)'.dependencies]`, or `[target.'cfg(target_os = "macos")'.dependencies]`.

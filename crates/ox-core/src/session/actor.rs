@@ -2,8 +2,6 @@
 //! [`SessionCmd`]s into one batch and appends it in one write, so an isolated write flushes at once
 //! with no interval timer. A compaction and `/archive` end their batch so a failed one can be
 //! unqueued, and cmds after a compaction see its committed synthetic root.
-//!
-//! Design: `docs/design/session/persistence.md`.
 
 use std::sync::Arc;
 

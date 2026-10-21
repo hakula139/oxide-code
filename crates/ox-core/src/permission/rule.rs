@@ -9,8 +9,6 @@
 //! Allow rules widen what runs, so they match conservatively, and deny and ask rules hold calls
 //! back, so they match aggressively (see [`MatchDiscipline`]). Matching a command narrows the ways
 //! a rule can be fooled, but it is not a security boundary.
-//!
-//! Design: `docs/design/tools/permissions.md`.
 
 use std::path::{Path, PathBuf};
 
