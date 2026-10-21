@@ -44,6 +44,7 @@ mod tests {
 
     use super::*;
     use crate::session::entry::TitleInfo;
+    use crate::session::store::testing::listed_session;
 
     mod id_prefix {
         use super::*;
@@ -61,17 +62,7 @@ mod tests {
 
         #[test]
         fn uses_title_when_present_else_untitled_marker() {
-            let mut info = SessionInfo {
-                session_id: "abc".to_owned(),
-                path: std::path::PathBuf::new(),
-                cwd: String::new(),
-                project_root: None,
-                last_active_at: datetime!(2026-05-08 09:00:00 UTC),
-                title: None,
-                exit: None,
-                git_branch: None,
-                archived: false,
-            };
+            let mut info = listed_session("abc");
             assert_eq!(display_title(&info), UNTITLED_MARKER);
 
             info.title = Some(TitleInfo {

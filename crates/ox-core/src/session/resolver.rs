@@ -216,7 +216,9 @@ mod tests {
     use crate::message::Message;
     use crate::session::store::local_testing::{test_session_file, write_newest_corrupt_session};
     use crate::session::store::set_archived_at;
-    use crate::session::store::testing::{seed_test_session, test_project_dir, test_store};
+    use crate::session::store::testing::{
+        isolated_store, seed_test_session, test_project_dir, test_store,
+    };
 
     mod resolve_session {
         use super::*;
@@ -271,8 +273,7 @@ mod tests {
 
         #[tokio::test]
         async fn prefix_resumes_single_match() {
-            let dir = tempfile::tempdir().unwrap();
-            let store = test_store(dir.path());
+            let (_dir, store) = isolated_store();
             let original = handle::start(&store, "m", None);
             let full_id = original.session_id().to_owned();
             original.record_message(Message::user("hello")).await;
@@ -410,8 +411,7 @@ mod tests {
 
         #[tokio::test]
         async fn continue_errors_without_sessions() {
-            let dir = tempfile::tempdir().unwrap();
-            let store = test_store(dir.path());
+            let (_dir, store) = isolated_store();
             let latest = |projects: ProjectScope| {
                 resolve_session(&store, "m", None, Some(SessionTarget::Latest), projects)
                     .err()
@@ -428,8 +428,7 @@ mod tests {
 
         #[tokio::test]
         async fn prefix_errors_on_no_match() {
-            let dir = tempfile::tempdir().unwrap();
-            let store = test_store(dir.path());
+            let (_dir, store) = isolated_store();
             let s = handle::start(&store, "m", None);
             s.record_message(Message::user("noop")).await;
             s.finish(Vec::new()).await;
@@ -451,8 +450,7 @@ mod tests {
 
         #[tokio::test]
         async fn prefix_reports_ambiguous_matches_newest_first() {
-            let dir = tempfile::tempdir().unwrap();
-            let store = test_store(dir.path());
+            let (_dir, store) = isolated_store();
             for i in 0..7 {
                 seed_test_session(
                     &store,
@@ -509,8 +507,7 @@ mod tests {
 
         #[tokio::test]
         async fn path_errors_on_missing_file() {
-            let dir = tempfile::tempdir().unwrap();
-            let store = test_store(dir.path());
+            let (_dir, store) = isolated_store();
             let arg = "/does/not/exist.jsonl".to_owned();
             let err = resolve_session(
                 &store,
@@ -620,8 +617,7 @@ mod tests {
 
         #[test]
         fn no_match_resolves_to_no_session() {
-            let dir = tempfile::tempdir().unwrap();
-            let store = test_store(dir.path());
+            let (_dir, store) = isolated_store();
             assert!(
                 resolve_prefix_to_info(&store, "zzz", Some("live"))
                     .unwrap()
@@ -632,8 +628,7 @@ mod tests {
 
         #[test]
         fn filters_live_id_so_caller_layers_its_own_message() {
-            let dir = tempfile::tempdir().unwrap();
-            let store = test_store(dir.path());
+            let (_dir, store) = isolated_store();
             let live_id = "abcd1234-eeff-1122-3344-556677889900";
             seed_test_session(
                 &store,
@@ -653,8 +648,7 @@ mod tests {
 
         #[test]
         fn ambiguous_lists_short_ids() {
-            let dir = tempfile::tempdir().unwrap();
-            let store = test_store(dir.path());
+            let (_dir, store) = isolated_store();
             for (id, created_at) in [
                 (
                     "abcd1111-eeff-1122-3344-556677889900",
@@ -686,8 +680,7 @@ mod tests {
 
         #[test]
         fn tells_a_live_only_match_from_no_match() {
-            let dir = tempfile::tempdir().unwrap();
-            let store = test_store(dir.path());
+            let (_dir, store) = isolated_store();
             let live_id = "abcd1234-eeff-1122-3344-556677889900";
             let saved_id = "abcd5678-eeff-1122-3344-556677889900";
             seed_test_session(

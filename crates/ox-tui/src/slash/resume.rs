@@ -815,15 +815,15 @@ mod tests {
     use ox_core::session::display::UNTITLED_MARKER;
     use ox_core::session::entry::{ExitInfo, TitleInfo};
     use ox_core::session::store::testing::{
-        archive_test_session, isolated_store, listed_ids, seed_test_session, test_project_dir,
-        test_store,
+        archive_test_session, isolated_store, listed_ids, listed_session, seed_test_session,
+        stamped_id, test_project_dir, test_store, with_isolated_xdg,
     };
 
     use super::Column::{Branch, Id, Msgs, Project, Title, When};
     use super::*;
     use crate::modal::chrome::HINT_SEPARATOR;
     use crate::modal::testing::{render_rows, rendered_text};
-    use crate::slash::testing::{stamped_id, test_session_info, with_isolated_xdg};
+    use crate::slash::testing::test_session_info;
 
     fn seed_session(
         store: &SessionStore,
@@ -972,19 +972,16 @@ mod tests {
         /// A session last active on 2026-04-18, more than 30 days ago, so rows show the date.
         /// `message_count` is `None` for a session that never finalized.
         fn raw_session_info(
-            session_id: String,
+            session_id: &str,
             cwd: &str,
             title: Option<&str>,
             message_count: Option<u32>,
             git_branch: Option<&str>,
         ) -> SessionInfo {
-            let last_active_at = datetime!(2026-04-18 09:00:00 UTC);
+            let info = listed_session(session_id);
+            let last_active_at = info.last_active_at;
             SessionInfo {
-                session_id,
-                path: PathBuf::new(),
                 cwd: cwd.to_owned(),
-                project_root: None,
-                last_active_at,
                 title: title.map(|t| TitleInfo {
                     title: t.to_owned(),
                     updated_at: last_active_at,
@@ -994,14 +991,14 @@ mod tests {
                     updated_at: last_active_at,
                 }),
                 git_branch: git_branch.map(str::to_owned),
-                archived: false,
+                ..info
             }
         }
 
         /// The `Fix auth` row with 14 messages on `feat/login` in `/work/oxide`.
         fn fix_auth_row(show_project: bool) -> SessionRow {
             let info = raw_session_info(
-                stamped_id(0xab),
+                &stamped_id(0xab),
                 "/work/oxide",
                 Some("Fix auth"),
                 Some(14),
@@ -1015,14 +1012,14 @@ mod tests {
 
             #[test]
             fn handles_titled_and_untitled_sessions() {
-                let absent = raw_session_info(stamped_id(0xab), "/work/oxide", None, None, None);
+                let absent = raw_session_info(&stamped_id(0xab), "/work/oxide", None, None, None);
                 let row = SessionRow::from_info(absent, LISTED_AT, true);
                 assert_eq!(row.title, UNTITLED_MARKER);
                 assert!(row.haystack.contains(&row.session_id));
                 assert!(row.haystack.contains("/work/oxide"));
 
                 let present = raw_session_info(
-                    stamped_id(0xcd),
+                    &stamped_id(0xcd),
                     "/work/oxide",
                     Some("Fix auth bug"),
                     None,
@@ -1089,14 +1086,14 @@ mod tests {
             #[test]
             fn aligns_each_cell_in_its_column() {
                 let one = raw_session_info(
-                    stamped_id(0x22),
+                    &stamped_id(0x22),
                     "/work/oxide",
                     Some("First turn"),
                     Some(1),
                     None,
                 );
                 let unfinished =
-                    raw_session_info(stamped_id(0x33), "/work/oxide", None, None, None);
+                    raw_session_info(&stamped_id(0x33), "/work/oxide", None, None, None);
 
                 let recent = SessionRow {
                     listed_at: datetime!(2026-04-18 12:00:00 UTC),
@@ -1125,7 +1122,7 @@ mod tests {
             fn abbreviates_counts_past_999_to_fit_the_column() {
                 let row = |count| {
                     let info = raw_session_info(
-                        stamped_id(0xab),
+                        &stamped_id(0xab),
                         "/work/oxide",
                         Some("Long run"),
                         Some(count),
@@ -1146,7 +1143,7 @@ mod tests {
             #[test]
             fn truncates_every_long_cell_to_fill_exactly_its_width() {
                 let info = raw_session_info(
-                    stamped_id(0xab),
+                    &stamped_id(0xab),
                     "/home/user/projects/a-rather-deep/checkout",
                     Some("修复登录重定向 and a long English tail that never fits"),
                     Some(123_456),

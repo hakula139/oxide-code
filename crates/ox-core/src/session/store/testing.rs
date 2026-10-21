@@ -97,6 +97,20 @@ pub fn test_project_dir(dir: &Path) -> PathBuf {
     dir.join(TEST_PROJECT)
 }
 
+/// Session ID with every byte set to `byte`, in the hyphenated UUID form real session IDs use.
+pub fn stamped_id(byte: u8) -> String {
+    uuid::Uuid::from_bytes([byte; 16]).to_string()
+}
+
+/// Runs `f` with `XDG_DATA_HOME` set to a fresh temp dir, so [`SessionStore::open`] lands there,
+/// and passes `f` the dir so it can add stores beneath it.
+pub fn with_isolated_xdg<R>(f: impl FnOnce(&Path) -> R) -> R {
+    let dir = tempfile::tempdir().expect("a temp dir is created");
+    temp_env::with_var("XDG_DATA_HOME", Some(dir.path().as_os_str()), || {
+        f(dir.path())
+    })
+}
+
 /// Session `session_id` as a listing reports it: in the [`test_store`] project, last active at
 /// 2026-04-18 09:00 UTC, untitled, unarchived, and never finalized.
 pub fn listed_session(session_id: &str) -> SessionInfo {

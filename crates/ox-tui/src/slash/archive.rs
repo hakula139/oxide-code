@@ -126,10 +126,12 @@ mod tests {
     use time::macros::datetime;
 
     use ox_core::session::store::SessionStore;
-    use ox_core::session::store::testing::{archive_test_session, listed_ids, seed_test_session};
+    use ox_core::session::store::testing::{
+        archive_test_session, listed_ids, seed_test_session, stamped_id, with_isolated_xdg,
+    };
 
     use super::*;
-    use crate::slash::testing::{stamped_id, test_session_info, with_isolated_xdg};
+    use crate::slash::testing::test_session_info;
 
     fn seed_saved(store: &SessionStore, session_id: &str) {
         seed_test_session(

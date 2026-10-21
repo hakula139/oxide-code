@@ -548,7 +548,7 @@ mod tests {
     use crate::session::handle::testing::record_write_call;
     use crate::session::store::local_testing::test_session_file;
     use crate::session::store::testing::{
-        TEST_PROJECT, seed_test_session, test_project_dir, test_store,
+        TEST_PROJECT, isolated_store, seed_test_session, test_project_dir, test_store,
     };
     use crate::tool::tasks::testing::plan;
     use crate::tool::view::{DiffChunk, EditDiff, NumberedLine};
@@ -581,8 +581,7 @@ mod tests {
 
         #[tokio::test]
         async fn seeds_ai_title_only_for_first_user_text() {
-            let dir = tempfile::tempdir().unwrap();
-            let store = test_store(dir.path());
+            let (_dir, store) = isolated_store();
             let handle = start(&store, "m", None);
 
             let outcome_first = handle.record_message(Message::user("Fix login bug")).await;
@@ -638,8 +637,7 @@ mod tests {
 
         #[tokio::test]
         async fn resumed_session_does_not_seed_ai_title() {
-            let dir = tempfile::tempdir().unwrap();
-            let store = test_store(dir.path());
+            let (_dir, store) = isolated_store();
             let original = start(&store, "m", None);
             let session_id = original.session_id().to_owned();
             original.record_message(Message::user("hello")).await;
@@ -706,8 +704,7 @@ mod tests {
 
         #[tokio::test]
         async fn writes_all_non_default_in_one_cmd() {
-            let dir = tempfile::tempdir().unwrap();
-            let store = test_store(dir.path());
+            let (_dir, store) = isolated_store();
             let handle = start(&store, "m", None);
             let sid = handle.session_id().to_owned();
             handle.record_message(Message::user("trigger")).await;
@@ -844,8 +841,7 @@ mod tests {
 
         #[tokio::test]
         async fn writes_title_entry_and_supersedes_first_prompt_on_list() {
-            let dir = tempfile::tempdir().unwrap();
-            let store = test_store(dir.path());
+            let (_dir, store) = isolated_store();
             let handle = start(&store, "m", None);
             let sid = handle.session_id().to_owned();
             handle.record_message(Message::user("Fix login bug")).await;
@@ -974,8 +970,7 @@ mod tests {
 
         #[tokio::test]
         async fn writes_user_provided_title_and_latches_shared_flag() {
-            let dir = tempfile::tempdir().unwrap();
-            let store = test_store(dir.path());
+            let (_dir, store) = isolated_store();
             let handle = start(&store, "m", None);
             let sid = handle.session_id().to_owned();
 
@@ -1218,8 +1213,7 @@ mod tests {
 
         #[tokio::test]
         async fn writes_summary_with_count() {
-            let dir = tempfile::tempdir().unwrap();
-            let store = test_store(dir.path());
+            let (_dir, store) = isolated_store();
             let handle = start(&store, "m", None);
             let sid = handle.session_id().to_owned();
 
@@ -1358,8 +1352,7 @@ mod tests {
 
         #[tokio::test]
         async fn ends_the_title_task_before_it_returns() {
-            let dir = tempfile::tempdir().unwrap();
-            let store = test_store(dir.path());
+            let (_dir, store) = isolated_store();
             let handle = start(&store, "m", None);
             let (started_tx, started) = oneshot::channel();
             let (alive, mut ended) = oneshot::channel::<()>();
@@ -1437,8 +1430,7 @@ mod tests {
 
         #[tokio::test]
         async fn cancelled_actor_completes_without_panicking() {
-            let dir = tempfile::tempdir().unwrap();
-            let store = test_store(dir.path());
+            let (_dir, store) = isolated_store();
             let handle = start(&store, "m", None);
             if let Some(j) = handle.actor_join.lock().unwrap().as_ref() {
                 j.abort();
@@ -1705,8 +1697,7 @@ mod tests {
 
         #[tokio::test]
         async fn loads_messages_and_keeps_session_id() {
-            let dir = tempfile::tempdir().unwrap();
-            let store = test_store(dir.path());
+            let (_dir, store) = isolated_store();
             let original = start(&store, "m", None);
             let session_id = original.session_id().to_owned();
             original.record_message(Message::user("hello")).await;
@@ -1746,8 +1737,7 @@ mod tests {
 
         #[tokio::test]
         async fn works_on_unfinished_session() {
-            let dir = tempfile::tempdir().unwrap();
-            let store = test_store(dir.path());
+            let (_dir, store) = isolated_store();
             let original = start(&store, "m", None);
             let session_id = original.session_id().to_owned();
             original.record_message(Message::user("hello")).await;
@@ -1809,8 +1799,7 @@ mod tests {
 
         #[tokio::test]
         async fn empty_session_errors() {
-            let dir = tempfile::tempdir().unwrap();
-            let store = test_store(dir.path());
+            let (_dir, store) = isolated_store();
             let original = start(&store, "m", None);
             let session_id = original.session_id().to_owned();
             original.finish(Vec::new()).await;
@@ -1822,8 +1811,7 @@ mod tests {
         #[tokio::test]
         async fn all_messages_sanitized_errors() {
             // Sanitize drops the lone unresolved tool_use, so the empty chain makes resume bail.
-            let dir = tempfile::tempdir().unwrap();
-            let store = test_store(dir.path());
+            let (_dir, store) = isolated_store();
             let original = start(&store, "m", None);
             let session_id = original.session_id().to_owned();
             original
@@ -1850,8 +1838,7 @@ mod tests {
 
         #[tokio::test]
         async fn drops_assistant_message_with_only_unresolved_tool_use() {
-            let dir = tempfile::tempdir().unwrap();
-            let store = test_store(dir.path());
+            let (_dir, store) = isolated_store();
             let original = start(&store, "m", None);
             let session_id = original.session_id().to_owned();
             original.record_message(Message::user("do X")).await;

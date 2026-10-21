@@ -126,13 +126,12 @@ mod tests {
     use time::macros::datetime;
 
     use ox_core::session::store::SessionStore;
-    use ox_core::session::store::testing::{isolated_store, seed_test_session};
+    use ox_core::session::store::testing::{isolated_store, seed_test_session, stamped_id};
 
     use super::*;
     use crate::modal::ModalStack;
     use crate::modal::testing::render_rows;
     use crate::slash::sessions::format_metadata_line;
-    use crate::slash::testing::stamped_id;
 
     const LAST_ACTIVE: OffsetDateTime = datetime!(2026-04-18 09:00:00 UTC);
     /// Past the 30 days after which the metadata line shows a date.

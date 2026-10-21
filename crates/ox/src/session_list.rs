@@ -143,7 +143,9 @@ mod tests {
     use time::macros::datetime;
 
     use ox_core::session::entry::{ExitInfo, TitleInfo};
-    use ox_core::session::store::testing::{archive_test_session, seed_test_session};
+    use ox_core::session::store::testing::{
+        archive_test_session, listed_session, seed_test_session,
+    };
 
     use super::*;
 
@@ -241,15 +243,9 @@ mod tests {
 
         fn session(session_id: &str, last_active_at: time::OffsetDateTime) -> SessionInfo {
             SessionInfo {
-                session_id: session_id.to_owned(),
-                path: std::path::PathBuf::new(),
                 cwd: "/work/project".to_owned(),
-                project_root: None,
                 last_active_at,
-                title: None,
-                exit: None,
-                git_branch: None,
-                archived: false,
+                ..listed_session(session_id)
             }
         }
 

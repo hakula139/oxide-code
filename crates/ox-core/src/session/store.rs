@@ -654,7 +654,7 @@ mod tests {
         sample_header, sample_message_at, sample_message_entry, sample_summary_entry,
         sample_title_entry, test_session_file,
     };
-    use super::testing::{TEST_PROJECT, test_store};
+    use super::testing::{TEST_PROJECT, isolated_store, test_store};
     use super::*;
     use crate::config::PromptCacheTtl;
     use crate::file_tracker::{FileState, LastView};
@@ -965,8 +965,7 @@ mod tests {
 
         #[tokio::test]
         async fn includes_only_messages_with_last_uuid() {
-            let dir = tempfile::tempdir().unwrap();
-            let store = test_store(dir.path());
+            let (_dir, store) = isolated_store();
             let mut writer = store.create(&sample_header("load-test"), &[]).unwrap();
 
             let u1 = Uuid::new_v4();
@@ -1008,8 +1007,7 @@ mod tests {
 
         #[test]
         fn resets_sidecars_at_compact_boundary() {
-            let dir = tempfile::tempdir().unwrap();
-            let store = test_store(dir.path());
+            let (_dir, store) = isolated_store();
             let mut writer = store
                 .create(&sample_header("compact-sidecars"), &[])
                 .unwrap();
@@ -1083,8 +1081,7 @@ mod tests {
 
         #[test]
         fn takes_the_latest_context_since_the_last_compact_boundary() {
-            let dir = tempfile::tempdir().unwrap();
-            let store = test_store(dir.path());
+            let (_dir, store) = isolated_store();
             let mut writer = store
                 .create(&sample_header("compact-context"), &[])
                 .unwrap();
@@ -1151,8 +1148,7 @@ mod tests {
 
         #[test]
         fn drops_a_context_whose_message_was_torn_off() {
-            let dir = tempfile::tempdir().unwrap();
-            let store = test_store(dir.path());
+            let (_dir, store) = isolated_store();
             let mut writer = store.create(&sample_header("torn-context"), &[]).unwrap();
             let root = Uuid::new_v4();
             writer
@@ -1188,8 +1184,7 @@ mod tests {
 
         #[test]
         fn drops_the_context_of_a_rejected_pre_compact_append() {
-            let dir = tempfile::tempdir().unwrap();
-            let store = test_store(dir.path());
+            let (_dir, store) = isolated_store();
             let mut writer = store
                 .create(&sample_header("rejected-context"), &[])
                 .unwrap();
@@ -1243,8 +1238,7 @@ mod tests {
 
         #[test]
         fn replays_the_context_recorded_on_the_resolved_branch() {
-            let dir = tempfile::tempdir().unwrap();
-            let store = test_store(dir.path());
+            let (_dir, store) = isolated_store();
             let mut writer = store.create(&sample_header("fork-context"), &[]).unwrap();
             let load = || store.load_session_data("fork-context").unwrap().context;
 
@@ -1297,8 +1291,7 @@ mod tests {
 
         #[test]
         fn ignores_newer_old_chain_messages_after_compact() {
-            let dir = tempfile::tempdir().unwrap();
-            let store = test_store(dir.path());
+            let (_dir, store) = isolated_store();
             let mut writer = store
                 .create(&sample_header("compact-generation"), &[])
                 .unwrap();
@@ -1361,8 +1354,7 @@ mod tests {
 
         #[test]
         fn ignores_a_compact_whose_root_never_landed() {
-            let dir = tempfile::tempdir().unwrap();
-            let store = test_store(dir.path());
+            let (_dir, store) = isolated_store();
             let mut writer = store.create(&sample_header("torn-compact"), &[]).unwrap();
             let pre = Uuid::new_v4();
             writer
@@ -1402,8 +1394,7 @@ mod tests {
 
         #[test]
         fn skips_sidecars_after_rejected_compact_tail_message() {
-            let dir = tempfile::tempdir().unwrap();
-            let store = test_store(dir.path());
+            let (_dir, store) = isolated_store();
             let mut writer = store
                 .create(&sample_header("compact-stale-sidecars"), &[])
                 .unwrap();
@@ -1574,8 +1565,7 @@ mod tests {
 
         #[tokio::test]
         async fn resolves_transcript_through_newest_chain_leaf() {
-            let dir = tempfile::tempdir().unwrap();
-            let store = test_store(dir.path());
+            let (_dir, store) = isolated_store();
             let mut writer = store.create(&sample_header("fork"), &[]).unwrap();
 
             let root = Uuid::new_v4();

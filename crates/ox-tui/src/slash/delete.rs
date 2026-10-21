@@ -95,14 +95,16 @@ mod tests {
 
     use ox_core::session::entry::ExitInfo;
     use ox_core::session::store::SessionStore;
-    use ox_core::session::store::testing::{listed_session, seed_test_session};
+    use ox_core::session::store::testing::{
+        listed_session, seed_test_session, stamped_id, with_isolated_xdg,
+    };
     use ox_core::util::path::testing::HOME_VAR;
 
     use super::*;
     use crate::modal::Modal;
     use crate::modal::testing::render_rows;
     use crate::slash::registry::SlashCommand;
-    use crate::slash::testing::{stamped_id, test_session_info, with_isolated_xdg};
+    use crate::slash::testing::test_session_info;
 
     #[test]
     fn name_and_metadata_match_built_ins_contract() {

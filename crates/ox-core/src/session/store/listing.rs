@@ -336,7 +336,8 @@ mod tests {
     };
     use crate::session::store::set_archived_at;
     use crate::session::store::testing::{
-        listed_ids, seed_test_session, set_modified, test_header, test_project_dir, test_store,
+        isolated_store, listed_ids, seed_test_session, set_modified, test_header, test_project_dir,
+        test_store,
     };
     use crate::util::path::testing::HOME_VAR;
 
@@ -420,8 +421,7 @@ mod tests {
 
         #[test]
         fn leaves_out_another_project_whose_directory_name_collides() {
-            let dir = tempfile::tempdir().unwrap();
-            let store = test_store(dir.path());
+            let (_dir, store) = isolated_store();
             seed_test_session(
                 &store,
                 "home",
@@ -504,8 +504,7 @@ mod tests {
 
         #[tokio::test]
         async fn orders_sessions_by_mtime_newest_first() {
-            let dir = tempfile::tempdir().unwrap();
-            let store = test_store(dir.path());
+            let (_dir, store) = isolated_store();
 
             let mut wa = store
                 .create(
@@ -537,8 +536,7 @@ mod tests {
 
         #[tokio::test]
         async fn mtime_overrides_header_created_at_order() {
-            let dir = tempfile::tempdir().unwrap();
-            let store = test_store(dir.path());
+            let (_dir, store) = isolated_store();
 
             let mut w_old = store
                 .create(
@@ -573,8 +571,7 @@ mod tests {
 
         #[tokio::test]
         async fn picks_latest_title_when_re_appended() {
-            let dir = tempfile::tempdir().unwrap();
-            let store = test_store(dir.path());
+            let (_dir, store) = isolated_store();
             let mut writer = store.create(&sample_header("retitled"), &[]).unwrap();
             writer
                 .append(&[Entry::Title {
@@ -598,8 +595,7 @@ mod tests {
 
         #[tokio::test]
         async fn finds_ai_title_buried_between_head_and_tail() {
-            let dir = tempfile::tempdir().unwrap();
-            let store = test_store(dir.path());
+            let (_dir, store) = isolated_store();
             let mut writer = store.create(&sample_header("buried"), &[]).unwrap();
             writer
                 .append(&[Entry::Title {
@@ -633,8 +629,7 @@ mod tests {
 
         #[tokio::test]
         async fn leaves_absent_title_and_exit_fields_unset() {
-            let dir = tempfile::tempdir().unwrap();
-            let store = test_store(dir.path());
+            let (_dir, store) = isolated_store();
             let _writer = store.create(&sample_header("bare"), &[]).unwrap();
 
             let sessions = store.list().unwrap();
@@ -707,8 +702,7 @@ mod tests {
 
         #[tokio::test]
         async fn caps_at_limit_keeping_most_recent() {
-            let dir = tempfile::tempdir().unwrap();
-            let store = test_store(dir.path());
+            let (_dir, store) = isolated_store();
             seed_n_sessions(&store, 10);
 
             let page = store.list_paged(Some(3), ListScope::default()).unwrap();
@@ -720,8 +714,7 @@ mod tests {
 
         #[tokio::test]
         async fn unbounded_includes_every_session_without_more() {
-            let dir = tempfile::tempdir().unwrap();
-            let store = test_store(dir.path());
+            let (_dir, store) = isolated_store();
             seed_n_sessions(&store, 4);
 
             let page = store.list_paged(None, ListScope::default()).unwrap();
@@ -851,8 +844,7 @@ mod tests {
         #[tokio::test]
         async fn zero_limit_yields_no_rows_but_flags_more() {
             // The CLI maps `--limit 0` to `None`, so `Some(0)` reaching the store means zero rows.
-            let dir = tempfile::tempdir().unwrap();
-            let store = test_store(dir.path());
+            let (_dir, store) = isolated_store();
             seed_n_sessions(&store, 3);
 
             let page = store.list_paged(Some(0), ListScope::default()).unwrap();
@@ -921,8 +913,7 @@ mod tests {
 
         #[test]
         fn leaves_out_another_project_whose_directory_name_collides() {
-            let dir = tempfile::tempdir().unwrap();
-            let store = test_store(dir.path());
+            let (_dir, store) = isolated_store();
             seed_test_session(
                 &store,
                 "abcd-home",
@@ -947,8 +938,7 @@ mod tests {
 
         #[test]
         fn matches_the_id_part_of_file_names_newest_first() {
-            let dir = tempfile::tempdir().unwrap();
-            let store = test_store(dir.path());
+            let (_dir, store) = isolated_store();
             for (id, created_at) in [
                 ("abc-older", datetime!(2026-04-16 12:00:00 UTC)),
                 ("abd-newer", datetime!(2026-04-16 12:00:01 UTC)),
