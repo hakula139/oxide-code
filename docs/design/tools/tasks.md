@@ -29,7 +29,7 @@ The list has no dedicated entry type. When resuming, the loader uses the last su
 
 ## Compaction
 
-Manual and automatic compaction both pass the engine's list to `Engine::replace_with_summary`. The `compact` entry records the list because the summary replaces the calls that built it. The synthetic summary message ends with a `<system-reminder>` block listing each task and its status, and asking the model to keep the list current. Since the engine retains the list, the panel and status line stay unchanged across the boundary.
+Manual and automatic compaction both pass the engine's list to `Engine::replace_with_summary`. The `compact` entry records the list because the summary replaces the calls that built it. The synthetic summary message carries a `<system-reminder>` block after the summary, listing each task and its status and asking the model to keep the list current. Since the engine retains the list, the panel and status line stay unchanged across the boundary.
 
 ## Design Decisions
 

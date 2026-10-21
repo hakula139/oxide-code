@@ -13,8 +13,8 @@ use crate::util::text::plural;
 pub const ENGINE_STOPPED: &str = "ox stopped unexpectedly";
 
 /// Explains the pause an [`Event::AutoCompactionStarted`](super::Event::AutoCompactionStarted)
-/// opens before the prompt goes out.
-pub const AUTO_COMPACTING: &str = "Compacting the conversation before sending the prompt";
+/// opens before the prompt goes out or between the rounds of a turn.
+pub const AUTO_COMPACTING: &str = "Compacting the conversation to free up context";
 
 /// Confirms an [`Event::ModeChanged`](super::Event::ModeChanged).
 pub fn mode_changed(mode: Mode) -> String {

@@ -10,8 +10,9 @@ use ox_core::command;
 /// escape.
 #[derive(Default)]
 pub(super) struct PromptQueue {
-    /// Prompt already painted for the in-flight turn. Replayed if auto-compaction clears chat, and
-    /// handed back if the turn fails before it is sent or is rolled back.
+    /// Prompt already painted for the in-flight turn.
+    /// Replayed if auto-compaction clears chat, handed back if the turn fails before it is sent
+    /// or is rolled back, and dropped once a mid-turn compaction summarizes it.
     active: Option<String>,
     /// What a failure of the active prompt hands back to the user.
     hand_back: HandBack,
@@ -31,8 +32,10 @@ enum HandBack {
     /// Nothing, since the prompt ran and the queue goes on.
     #[default]
     Nothing,
-    /// The prompt, since an automatic compaction runs ahead of it and a failure means the engine
-    /// never sent it.
+    /// Nothing, but the queue waits for the user, since an automatic compaction is running
+    /// and after its failure the next prompt would start another summary request.
+    HeldQueue,
+    /// The prompt, since the automatic compaction ahead of it failed, so the engine never sent it.
     UnsentPrompt,
     /// The prompt and the queued prompts its turn took in, since the engine rolled the turn back.
     RolledBackTurn,
@@ -43,6 +46,8 @@ enum HandBack {
 pub(super) enum FailedTurn {
     /// The prompt ran, so nothing comes back and the queue goes on.
     Ran,
+    /// The prompt ran, but the queue waits for the user.
+    Held,
     /// The prompts came back to the queue, apart from the one returned for the empty input.
     HandedBack(Option<String>),
 }
@@ -65,14 +70,27 @@ impl PromptQueue {
         self.active = None;
     }
 
-    /// Notes that an automatic compaction runs before the active prompt is sent.
+    /// Notes that an automatic compaction is running, so a failure holds the queue.
+    pub(super) fn mark_compacting(&mut self) {
+        self.hand_back = HandBack::HeldQueue;
+    }
+
+    /// Notes that the engine will not send the active prompt.
     pub(super) fn mark_unsent(&mut self) {
         self.hand_back = HandBack::UnsentPrompt;
     }
 
-    /// Notes that the active prompt reached the model after all.
-    pub(super) fn mark_sent(&mut self) {
+    /// Notes that a compaction finished, so a later failure is the turn's own.
+    pub(super) fn mark_compacted(&mut self) {
         self.hand_back = HandBack::Nothing;
+    }
+
+    /// Forgets the active prompt and the prompts the turn took in,
+    /// once a mid-turn compaction summarizes them,
+    /// so a rollback hands back only the prompts drained after it.
+    pub(super) fn mark_summarized(&mut self) {
+        self.active = None;
+        self.drained.clear();
     }
 
     /// Notes that the engine rolled the in-flight turn back.
@@ -130,13 +148,16 @@ impl PromptQueue {
         }
     }
 
-    /// Settles a failed turn by what it marked. An unsent prompt returns for the input when the
-    /// input and the queue are empty, so Enter sends it again, and otherwise heads the queue so it
-    /// still runs first. A rolled-back turn returns the queued prompts it took in to the queue
-    /// head and its own prompt for the input when `input_empty`, or else ahead of them.
+    /// Settles a failed turn by what it marked.
+    /// A failed automatic compaction holds the queue.
+    /// An unsent prompt returns for the input when the input and the queue are empty,
+    /// so Enter sends it again, and otherwise heads the queue so it still runs first.
+    /// A rolled-back turn returns the queued prompts it took in to the queue head,
+    /// and its own prompt for the input when `input_empty`, or else ahead of them.
     pub(super) fn fail_turn(&mut self, input_empty: bool) -> FailedTurn {
         match self.hand_back {
             HandBack::Nothing => FailedTurn::Ran,
+            HandBack::HeldQueue => FailedTurn::Held,
             HandBack::UnsentPrompt => {
                 let into_input = input_empty && self.pending.is_empty();
                 FailedTurn::HandedBack(self.restore_active(into_input))
@@ -227,6 +248,31 @@ mod tests {
         }
 
         #[test]
+        fn a_failed_automatic_compaction_holds_the_queue() {
+            let mut queue = queue_with("active", &["d1"], &["queued"]);
+            queue.mark_compacting();
+
+            let failed = queue.fail_turn(true);
+
+            assert_eq!(failed, FailedTurn::Held);
+            assert_eq!(*queue.pending(), ["queued"]);
+        }
+
+        #[test]
+        fn a_mid_turn_summary_leaves_only_later_prompts_to_a_rollback() {
+            let mut queue = queue_with("active", &["d1"], &["d2"]);
+            queue.mark_summarized();
+            queue.mark_forwarded();
+            queue.confirm_drained("d2");
+            queue.mark_rolled_back();
+
+            let failed = queue.fail_turn(true);
+
+            assert_eq!(failed, FailedTurn::HandedBack(None));
+            assert_eq!(*queue.pending(), ["d2"]);
+        }
+
+        #[test]
         fn an_unsent_prompt_returns_for_the_input_only_when_nothing_else_waits() {
             let mut lone = queue_with("active", &[], &[]);
             lone.mark_unsent();
@@ -246,10 +292,10 @@ mod tests {
         }
 
         #[test]
-        fn a_sent_prompt_hands_nothing_back() {
+        fn a_turn_past_its_compaction_hands_nothing_back() {
             let mut queue = queue_with("active", &["d1"], &["queued"]);
-            queue.mark_unsent();
-            queue.mark_sent();
+            queue.mark_compacting();
+            queue.mark_compacted();
 
             let failed = queue.fail_turn(true);
 

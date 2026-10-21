@@ -187,6 +187,7 @@ impl SessionState {
             instructions,
             tasks,
             trigger,
+            context,
         } = boundary;
         let synthetic_uuid = Uuid::new_v4();
         let entries = vec![
@@ -196,6 +197,10 @@ impl SessionState {
                 instructions,
                 tasks,
                 trigger: Some(trigger),
+                timestamp: now,
+            },
+            Entry::Context {
+                context: Box::new(context),
                 timestamp: now,
             },
             Entry::Message {
@@ -520,6 +525,7 @@ mod tests {
 
     mod compact_entries {
         use super::*;
+        use crate::prompt::SessionContext;
 
         #[test]
         fn writes_boundary_and_synthetic_message_without_committing() {
@@ -538,12 +544,13 @@ mod tests {
                     instructions: Some("focus on auth".to_owned()),
                     tasks: plan(),
                     trigger: CompactTrigger::Auto,
+                    context: SessionContext::default(),
                 },
                 Message::user("post-compact"),
                 now,
             );
 
-            assert_eq!(entries.len(), 2);
+            assert_eq!(entries.len(), 3);
             assert!(
                 matches!(
                     &entries[0],
@@ -563,6 +570,15 @@ mod tests {
             assert!(
                 matches!(
                     &entries[1],
+                    Entry::Context { context, timestamp }
+                        if **context == SessionContext::default() && *timestamp == now
+                ),
+                "the context binds to the synthetic message through its timestamp: {:?}",
+                entries[1],
+            );
+            assert!(
+                matches!(
+                    &entries[2],
                     Entry::Message {
                         uuid,
                         parent_uuid: None,
@@ -570,7 +586,7 @@ mod tests {
                     } if *uuid == synthetic_uuid
                 ),
                 "synthetic post-compact message must reset the parent chain: {:?}",
-                entries[1],
+                entries[2],
             );
             assert_eq!(
                 state.message_count(),
