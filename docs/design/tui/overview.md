@@ -100,9 +100,10 @@ A `<br>` in a cell starts a new line in that cell, since a GFM cell has no other
 
 - `crates/ox-tui/src/action.rs`: `APP_KEYMAP`, the app's named keys and their hints.
 - `crates/ox-tui/src/app.rs`: `App`, its `tokio::select!` loop, and `TICK_INTERVAL`, the frame tick.
-- `crates/ox-tui/src/components/chat.rs`: `ChatView`, the compact and expanded views, and the anchored placement each frame paints.
+- `crates/ox-tui/src/components/chat.rs`: `ChatView` and the compact and expanded views.
 - `crates/ox-tui/src/components/chat/blocks.rs`: `ChatBlock` and `RenderCtx`, the render contract of a chat block.
 - `crates/ox-tui/src/components/chat/blocks/streaming.rs`: `StreamingAssistant`, the stable-prefix cache of a streaming reply.
+- `crates/ox-tui/src/components/chat/scroll.rs`: `ChatView::place`, the anchored placement each frame paints, and the auto-scroll that follows the tail.
 - `crates/ox-tui/src/components/chat/stack.rs`: `CachedBlock`, `SlotTops`, and `Stack`, the block cache and the row anchors.
 - `crates/ox-tui/src/keymap.rs`: `KeyAction`, `KeyChord`, and `Keymap`.
 - `crates/ox-tui/src/markdown.rs`: `render_markdown_chunk` and `complete_blocks_len`, the stable block boundaries.
