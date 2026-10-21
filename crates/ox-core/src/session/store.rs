@@ -616,23 +616,24 @@ struct HeaderInfo {
 
 /// Parses the first non-empty line as the session header and validates its ID.
 fn read_header<R: BufRead>(lines: &mut JsonlLines<R>, path: &Path) -> Result<HeaderInfo> {
-    let not_a_session = || format!("{} is not an oxide-code session file", path.display());
+    let not_a_session = |reason| {
+        format!(
+            "{} is not an oxide-code session file: {reason}",
+            path.display()
+        )
+    };
+    let no_header = || not_a_session("its first line is not a session header");
     let Some((_, line)) = lines.next_line()? else {
-        bail!("{}: it is empty", not_a_session());
+        bail!(not_a_session("it is empty"));
     };
     let Entry::Header {
         session_id,
         cwd,
         git_branch,
         ..
-    } = serde_json::from_str(line)
-        .context("its first line is not a session header")
-        .with_context(not_a_session)?
+    } = serde_json::from_str(line).with_context(no_header)?
     else {
-        bail!(
-            "{}: its first line is not a session header",
-            not_a_session()
-        );
+        bail!(no_header());
     };
     validate_session_id(&session_id)?;
     Ok(HeaderInfo {

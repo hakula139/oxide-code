@@ -197,7 +197,7 @@ fn read_session_infos(
 /// [`read_session_info`], warn-skipping an unreadable file.
 fn read_readable(path: &Path, modified: OffsetDateTime) -> Option<SessionInfo> {
     read_session_info(path, modified)
-        .inspect_err(|e| warn!("skipping unreadable session file {}: {e}", path.display()))
+        .inspect_err(|e| warn!("skipping unreadable session file {}: {e:#}", path.display()))
         .ok()
 }
 

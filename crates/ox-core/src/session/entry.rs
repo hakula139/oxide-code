@@ -64,7 +64,7 @@ pub(crate) enum Entry {
         #[serde(with = "time::serde::rfc3339")]
         updated_at: OffsetDateTime,
     },
-    /// Sets whether default listings and bare `--continue` skip the session. The last one in the
+    /// Sets whether default listings and `--continue` skip the session. The last one in the
     /// file wins.
     Archive {
         archived: bool,

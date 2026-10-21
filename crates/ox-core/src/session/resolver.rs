@@ -23,7 +23,7 @@ pub enum SessionTarget<'a> {
 enum ResumeMode<'a> {
     /// No target starts a new session.
     Fresh,
-    /// [`SessionTarget::Latest`].
+    /// The most recent unarchived session in scope.
     Latest,
     /// The unique session whose ID starts with the prefix.
     Prefix(&'a str),
@@ -84,7 +84,10 @@ fn normalize_target(target: Option<SessionTarget<'_>>) -> Result<ResumeMode<'_>>
         Some(SessionTarget::Named(raw)) => {
             let trimmed = raw.trim();
             if trimmed.is_empty() {
-                bail!("empty session ID prefix (run `ox -c` to resume the latest session)");
+                bail!(
+                    "empty session ID prefix (run `ox -c` to continue the latest session or `ox -r` \
+                     to pick one)"
+                );
             }
             if looks_like_path(trimmed) {
                 Ok(ResumeMode::Path(Path::new(trimmed)))
@@ -321,7 +324,7 @@ mod tests {
         }
 
         #[tokio::test]
-        async fn bare_continue_resumes_the_newest_readable_unarchived_session() {
+        async fn continue_resumes_the_newest_readable_unarchived_session() {
             let dir = tempfile::tempdir().unwrap();
             let store = test_store(dir.path());
             seed_test_session(
@@ -382,12 +385,12 @@ mod tests {
                     .map(|s| s.session_id)
                     .as_deref(),
                 Some("archived"),
-                "bare --continue finds the session again",
+                "--continue finds the session again",
             );
         }
 
         #[tokio::test]
-        async fn bare_continue_errors_without_sessions() {
+        async fn continue_errors_without_sessions() {
             let dir = tempfile::tempdir().unwrap();
             let store = test_store(dir.path());
             let err = resolve_session(&store, "m", None, Some(SessionTarget::Latest), false)
@@ -508,7 +511,7 @@ mod tests {
         }
 
         #[test]
-        fn maps_bare_flag_to_latest() {
+        fn maps_continue_to_latest() {
             assert!(matches!(
                 normalize_target(Some(SessionTarget::Latest)).unwrap(),
                 ResumeMode::Latest
@@ -556,7 +559,9 @@ mod tests {
                     .unwrap()
                     .to_string();
                 assert_eq!(
-                    err, "empty session ID prefix (run `ox -c` to resume the latest session)",
+                    err,
+                    "empty session ID prefix (run `ox -c` to continue the latest session or \
+                     `ox -r` to pick one)",
                     "{raw:?}",
                 );
             }

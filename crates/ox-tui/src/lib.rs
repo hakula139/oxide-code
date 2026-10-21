@@ -52,7 +52,7 @@ const NOTICE_DURATION: Duration = Duration::from_secs(3);
 pub struct Startup {
     /// The branch checked out at startup, which the status bar shows until its first git probe.
     pub git_branch: Option<String>,
-    /// The `ox --resume` session picker, opened over the first frame.
+    /// The session picker that `--resume` without a session opens over the first frame.
     pub picker: Option<ResumePicker>,
     /// The `ox <prompt>` text, submitted as if typed once the TUI opens.
     pub prompt: Option<String>,

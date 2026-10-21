@@ -1,12 +1,16 @@
 //! Headless driver for `--print`: one turn, printed to stdout as text or JSON.
 
-use std::io::{self, Write};
+use std::io::{self, IsTerminal, Write};
+use std::path::PathBuf;
+use std::pin::pin;
 use std::sync::{Mutex, MutexGuard};
+use std::time::Duration;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use clap::ValueEnum;
 use indoc::formatdoc;
 use serde::Serialize;
+use tokio::io::{AsyncRead, AsyncReadExt};
 
 use ox_core::command;
 use ox_core::engine::{Engine, EngineHandle, EnginePanic, TurnEnd};
@@ -16,12 +20,16 @@ use ox_core::util::sync::lock_or_recover;
 use super::stdio::{StdioSink, Unattended, render_op};
 use super::{Exit, shutdown_signal};
 
+/// How long [`read_prompt`] waits on an open stdin before saying what it waits for.
+const STDIN_NOTICE_DELAY: Duration = Duration::from_secs(3);
+
 /// Runs `prompt` as a single turn, printed in `format`. A turn that does not complete exits with
 /// failure, and a signal exits with its own status. If the engine panics, the panic is returned
 /// after the failed result is printed.
 pub(crate) async fn run(
     engine: Engine,
     show_thinking: bool,
+    drifted: &[PathBuf],
     prompt: &str,
     format: OutputFormat,
 ) -> Result<Exit, EnginePanic> {
@@ -33,13 +41,50 @@ pub(crate) async fn run(
         io::stdout(),
         io::stderr(),
     );
-    drive(engine.spawn(&[]), &printer, prompt).await
+    drive(engine.spawn(drifted), &printer, prompt).await
+}
+
+/// The prompt a `--print` run answers: `prompt` with stdin attached when stdin is not a terminal,
+/// or `None` when neither holds text.
+pub(crate) async fn read_prompt(prompt: Option<&str>) -> Result<Option<String>> {
+    let stdin = if io::stdin().is_terminal() {
+        None
+    } else {
+        let text = read_input(tokio::io::stdin(), &mut io::stderr(), STDIN_NOTICE_DELAY)
+            .await
+            .context("failed to read the prompt from stdin")?;
+        Some(text)
+    };
+    Ok(compose_prompt(prompt, stdin.as_deref()))
+}
+
+/// Reads `input` to its end. If `input` stays open past `delay`, as a pipe that a parent program
+/// never closes does, it writes one notice to `notice` and keeps reading.
+async fn read_input(
+    mut input: impl AsyncRead + Unpin,
+    notice: &mut impl Write,
+    delay: Duration,
+) -> io::Result<String> {
+    let mut text = String::new();
+    let mut read = pin!(input.read_to_string(&mut text));
+    tokio::select! {
+        read = &mut read => read?,
+        () = tokio::time::sleep(delay) => {
+            _ = writeln!(
+                notice,
+                "Waiting for stdin to close, since `--print` reads it as input. \
+                 Redirect stdin from /dev/null to skip it."
+            );
+            read.await?
+        }
+    };
+    Ok(text)
 }
 
 /// The prompt a headless run sends: `prompt` followed by `stdin` in a `<stdin>` block, or
 /// whichever of the two is given. Blank stdin counts as absent, so `None` means neither holds
 /// text.
-pub(crate) fn compose_prompt(prompt: Option<&str>, stdin: Option<&str>) -> Option<String> {
+fn compose_prompt(prompt: Option<&str>, stdin: Option<&str>) -> Option<String> {
     let stdin = stdin
         .filter(|text| !text.trim().is_empty())
         .map(|text| text.trim_end_matches(['\r', '\n']));
@@ -292,23 +337,58 @@ mod tests {
         record["data"].take()
     }
 
+    mod read_input {
+        use super::*;
+
+        #[tokio::test(start_paused = true)]
+        async fn says_once_that_it_waits_for_an_open_stdin_to_close() {
+            let (mut writer, reader) = tokio::io::duplex(64);
+            tokio::io::AsyncWriteExt::write_all(&mut writer, b"+fix\n")
+                .await
+                .unwrap();
+            let closer = tokio::spawn(async move {
+                tokio::time::sleep(Duration::from_secs(10)).await;
+                drop(writer);
+            });
+            let mut notice = Vec::new();
+
+            let text = read_input(reader, &mut notice, Duration::from_secs(3)).await;
+
+            assert_eq!(text.unwrap(), "+fix\n");
+            assert_eq!(
+                String::from_utf8(notice).unwrap(),
+                "Waiting for stdin to close, since `--print` reads it as input. \
+                 Redirect stdin from /dev/null to skip it.\n",
+            );
+            closer.await.unwrap();
+        }
+
+        #[tokio::test(start_paused = true)]
+        async fn reads_a_closed_stdin_without_a_notice() {
+            let input: &[u8] = b"+fix\n";
+            let mut notice = Vec::new();
+
+            let text = read_input(input, &mut notice, Duration::from_secs(3)).await;
+
+            assert_eq!(
+                (text.unwrap().as_str(), notice.as_slice()),
+                ("+fix\n", &b""[..])
+            );
+        }
+    }
+
     mod compose_prompt {
         use super::*;
 
         #[test]
         fn attaches_stdin_after_the_prompt_in_a_tagged_block() {
-            let prompt = compose_prompt(Some("Review this diff."), Some("+fix\n-bug\n"));
+            let stdin = "    let x = 1;\r\n+fix\r\n";
+
+            let prompt = compose_prompt(Some("Review this diff."), Some(stdin));
 
             assert_eq!(
                 prompt.as_deref(),
-                Some(indoc! {"
-                    Review this diff.
-
-                    <stdin>
-                    +fix
-                    -bug
-                    </stdin>"
-                }),
+                Some("Review this diff.\n\n<stdin>\n    let x = 1;\r\n+fix\n</stdin>"),
             );
         }
 

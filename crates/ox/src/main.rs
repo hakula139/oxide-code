@@ -15,7 +15,6 @@ use clap::error::ErrorKind;
 use clap::{Arg, ArgGroup, Command, CommandFactory, Parser};
 use indoc::indoc;
 use time::error::IndeterminateOffset;
-use tokio::io::AsyncReadExt;
 use tracing::warn;
 
 use ox_core::client::anthropic::identity;
@@ -39,35 +38,35 @@ use ox_tui::theme::{ResolvedTheme, resolve_theme};
 use driver::Exit;
 use driver::headless::OutputFormat;
 
-const LONG_ABOUT: &str = indoc! {"
-    A terminal-based AI coding assistant.
-
-    Run `ox` to start an interactive session in the working directory, or `ox -p \"<prompt>\"` to \
-    answer one prompt and print the reply."
-};
-
-const AFTER_HELP: &str = indoc! {"
-    Examples:
-      ox                                    Start an interactive session
-      ox \"Fix the failing test\"             Start one with a first prompt
-      ox -c                                 Continue the latest session in this project
-      ox -r                                 Pick a session to resume
-      git diff | ox -p \"Review this diff\"   Answer once, with the diff attached from stdin
-
-    Guides: https://github.com/hakula139/oxide-code/tree/main/docs/guide"
-};
-
 #[derive(Parser)]
 #[command(
     name = "ox",
     version,
     about = "A terminal-based AI coding assistant",
-    long_about = LONG_ABOUT,
-    after_help = AFTER_HELP
+    long_about = indoc! {"
+        A terminal-based AI coding assistant.
+
+        Run `ox` to start an interactive session in the working directory, or `ox -p \"<prompt>\"` to answer one prompt and print the reply."
+    },
+    after_help = indoc! {"
+        Examples:
+          ox                                    Start an interactive session
+          ox \"Fix the failing test\"             Start one with a first prompt
+          ox -c                                 Continue the latest session in this project
+          ox -r                                 Pick a session to resume
+          git diff | ox -p \"Review this diff\"   Answer once, with the diff attached from stdin
+
+        Guides: https://github.com/hakula139/oxide-code/tree/main/docs/guide"
+    }
 )]
 #[command(group(
     ArgGroup::new("scope")
         .args(["list", "continue", "resume"])
+        .multiple(true),
+))]
+#[command(group(
+    ArgGroup::new("session")
+        .args(["continue", "print", "prompt", "resume"])
         .multiple(true),
 ))]
 #[expect(
@@ -75,8 +74,8 @@ const AFTER_HELP: &str = indoc! {"
     reason = "each bool is an independent CLI switch that clap parses into its own field"
 )]
 struct Cli {
-    /// The first prompt of the session, or with `--print`, the prompt to answer.
-    #[arg(value_name = "PROMPT", value_parser = non_blank_prompt)]
+    /// Start with this prompt, or with `--print`, answer it.
+    #[arg(value_parser = non_blank)]
     prompt: Option<String>,
 
     /// Widen `--list`, `--continue`, and `--resume` from this project to every project.
@@ -84,7 +83,7 @@ struct Cli {
     all: bool,
 
     /// With `--list`, show only archived sessions.
-    #[arg(long, requires = "list", conflicts_with = "print")]
+    #[arg(long, requires = "list", conflicts_with = "session")]
     archived: bool,
 
     /// Continue the most recent session in this project.
@@ -96,13 +95,13 @@ struct Cli {
         long,
         value_name = "N",
         requires = "list",
-        conflicts_with = "print",
+        conflicts_with = "session",
         default_value_t = DEFAULT_SESSION_LIST_LIMIT
     )]
     limit: usize,
 
     /// List recent sessions and exit.
-    #[arg(short, long, conflicts_with_all = ["continue", "print", "prompt", "resume"])]
+    #[arg(short, long, conflicts_with = "session")]
     list: bool,
 
     /// Start in this permission mode, overriding `permission.mode` and `OX_PERMISSION_MODE`.
@@ -110,7 +109,7 @@ struct Cli {
     mode: Option<Mode>,
 
     /// Use a bare REPL that reads one prompt per line in place of the TUI.
-    #[arg(long, conflicts_with = "print")]
+    #[arg(long)]
     no_tui: bool,
 
     /// With `--print`, print the reply as text, one JSON result, or a JSON line per event.
@@ -127,13 +126,14 @@ struct Cli {
     #[arg(short, long)]
     print: bool,
 
-    /// Resume the session an ID prefix or session file names, or pick one from a list.
+    /// Resume the session with this ID prefix or session file, or pick one from a list without a
+    /// value.
     #[expect(
         clippy::option_option,
         reason = "encodes three CLI states: \
                   absent (None), flag only (Some(None)), flag with value (Some(Some))"
     )]
-    #[arg(short, long, value_name = "SESSION", num_args = 0..=1)]
+    #[arg(short, long, value_name = "SESSION", num_args = 0..=1, value_parser = non_blank)]
     resume: Option<Option<String>>,
 }
 
@@ -177,9 +177,16 @@ impl Cli {
     }
 
     /// Returns whether the run opens the TUI, which needs a terminal on stdout. Fails when the
-    /// session picker needs the TUI but stdout is not a terminal.
+    /// session picker needs the TUI but stdout is not a terminal, or when the TUI would open with
+    /// stdin piped, since it reads keys from stdin.
     fn tui_mode(&self) -> Result<bool> {
         let tui_mode = !self.no_tui && !self.print && !self.list && io::stdout().is_terminal();
+        if tui_mode && !io::stdin().is_terminal() {
+            bail!(
+                "stdin is not a terminal, so the TUI cannot read keys. Pass `-p` to answer the \
+                 piped input, or `--no-tui` to read prompts from it."
+            );
+        }
         if self.opens_picker() && !tui_mode {
             bail!(
                 "`--resume` without a session opens the picker in the TUI, which needs a terminal \
@@ -187,6 +194,23 @@ impl Cli {
             );
         }
         Ok(tui_mode)
+    }
+
+    /// The prompt a `--print` run answers, or `None` without `--print`. Exits with a usage error
+    /// when `--print` has neither a prompt argument nor text on stdin.
+    async fn headless_prompt(&self) -> Result<Option<String>> {
+        if !self.print {
+            return Ok(None);
+        }
+        let Some(prompt) = driver::headless::read_prompt(self.prompt.as_deref()).await? else {
+            Self::command()
+                .error(
+                    ErrorKind::MissingRequiredArgument,
+                    "`--print` needs a prompt argument or text on stdin",
+                )
+                .exit()
+        };
+        Ok(Some(prompt))
     }
 
     /// The saved session to continue, or `None` for a new session, which the picker also starts.
@@ -198,10 +222,10 @@ impl Cli {
     }
 }
 
-/// Parses a prompt, which must hold more than whitespace.
-fn non_blank_prompt(value: &str) -> Result<String, &'static str> {
+/// Parses a prompt or session, which must hold more than whitespace.
+fn non_blank(value: &str) -> Result<String, &'static str> {
     if value.trim().is_empty() {
-        return Err("the prompt is empty");
+        return Err("the value is empty");
     }
     Ok(value.to_owned())
 }
@@ -288,11 +312,7 @@ async fn async_main(offset_error: Option<IndeterminateOffset>) -> Result<Exit> {
         return Ok(Exit::Success);
     }
 
-    let headless_prompt = if cli.print {
-        Some(read_headless_prompt(cli.prompt.as_deref()).await?)
-    } else {
-        None
-    };
+    let headless_prompt = cli.headless_prompt().await?;
 
     let mut config = Config::load(&cwd, tui_mode).await?;
     if let Some(mode) = cli.mode {
@@ -344,7 +364,9 @@ async fn async_main(offset_error: Option<IndeterminateOffset>) -> Result<Exit> {
     .await?;
 
     if let Some(prompt) = headless_prompt {
-        return Ok(driver::headless::run(engine, show_thinking, &prompt, cli.output).await?);
+        return Ok(
+            driver::headless::run(engine, show_thinking, &drifted, &prompt, cli.output).await?,
+        );
     }
 
     let Some(theme) = theme else {
@@ -360,30 +382,6 @@ async fn async_main(offset_error: Option<IndeterminateOffset>) -> Result<Exit> {
     };
     // Boxed, since on Windows this future passes clippy's 16 KiB `large_futures` threshold.
     Box::pin(run_tui(engine, theme, config.snapshot(), startup, &drifted)).await
-}
-
-/// The prompt `--print` answers: `prompt` with any piped stdin attached, or the stdin alone. Exits
-/// with a usage error when neither holds text.
-async fn read_headless_prompt(prompt: Option<&str>) -> Result<String> {
-    let stdin = if io::stdin().is_terminal() {
-        None
-    } else {
-        let mut text = String::new();
-        tokio::io::stdin()
-            .read_to_string(&mut text)
-            .await
-            .context("failed to read the prompt from stdin")?;
-        Some(text)
-    };
-    let Some(prompt) = driver::headless::compose_prompt(prompt, stdin.as_deref()) else {
-        Cli::command()
-            .error(
-                ErrorKind::MissingRequiredArgument,
-                "`--print` needs a prompt argument or text on stdin",
-            )
-            .exit()
-    };
-    Ok(prompt)
 }
 
 /// Runs the TUI until the user quits or a shutdown signal arrives, which then sets the exit status.
@@ -453,14 +451,14 @@ mod tests {
         }
 
         #[test]
-        fn prompt_rejects_a_blank_value() {
-            for args in [&["ox", ""][..], &["ox", "-p", " \n"]] {
+        fn prompt_and_session_reject_a_blank_value() {
+            for args in [&["ox", ""][..], &["ox", "-p", " \n"], &["ox", "-r", " "]] {
                 let error = Cli::try_parse_from(args)
                     .err()
-                    .expect("a blank prompt fails");
+                    .expect("a blank value fails");
 
                 assert_eq!(error.kind(), ErrorKind::ValueValidation, "{args:?}");
-                assert!(error.to_string().contains("the prompt is empty"), "{error}");
+                assert!(error.to_string().contains("the value is empty"), "{error}");
             }
         }
 
@@ -535,15 +533,39 @@ mod tests {
         }
 
         #[test]
-        fn list_only_flags_fail_beside_print() {
-            let kinds = [
-                &["ox", "--archived", "-p", "hello"][..],
-                &["ox", "--limit", "3", "-p", "hello"],
-                &["ox", "--list", "-p", "hello"],
-            ]
-            .map(parse_error);
+        fn list_flags_conflict_with_every_session_flag() {
+            let session_flags: [&[&str]; 5] = [
+                &["-c"],
+                &["-r"],
+                &["-r", "a1b2"],
+                &["hello"],
+                &["-p", "hello"],
+            ];
+            let list_flags: [&[&str]; 3] =
+                [&["--list"], &["--list", "--archived"], &["--limit", "3"]];
 
-            assert_eq!(kinds, [Some(ErrorKind::ArgumentConflict); 3]);
+            for list in list_flags {
+                for session in session_flags {
+                    let args = [&["ox"][..], list, session].concat();
+
+                    assert_eq!(
+                        parse_error(&args),
+                        Some(ErrorKind::ArgumentConflict),
+                        "{args:?}",
+                    );
+                }
+            }
+        }
+
+        #[test]
+        fn archived_and_limit_need_list() {
+            for args in [&["ox", "--archived"][..], &["ox", "--limit", "3"]] {
+                assert_eq!(
+                    parse_error(args),
+                    Some(ErrorKind::MissingRequiredArgument),
+                    "{args:?}"
+                );
+            }
         }
 
         #[test]
@@ -562,21 +584,24 @@ mod tests {
             );
         }
 
-        #[test]
-        fn continue_and_a_named_resume_combine_with_print() {
-            for args in [
-                &["ox", "-c", "-p", "next step"][..],
-                &["ox", "-r", "a1b2", "-p", "next step"],
-            ] {
-                let cli = Cli::try_parse_from(args).unwrap();
-
-                assert!(cli.print, "{args:?}");
-                assert_eq!(cli.validate().err().map(|error| error.kind()), None);
-            }
-        }
-
         mod validate {
             use super::*;
+
+            #[test]
+            fn accepts_continue_a_named_resume_or_no_tui_beside_print() {
+                for args in [
+                    &["ox", "-c", "-p", "next step"][..],
+                    &["ox", "-r", "a1b2", "-p", "next step"],
+                    &["ox", "--no-tui", "-p", "next step"],
+                ] {
+                    let cli = Cli::try_parse_from(args).unwrap();
+
+                    let validated = cli.validate();
+
+                    assert!(cli.print, "{args:?}");
+                    assert_eq!(validated.err().map(|error| error.kind()), None, "{args:?}");
+                }
+            }
 
             #[test]
             fn rejects_the_picker_beside_print_no_tui_or_a_prompt() {

@@ -9,7 +9,7 @@ After `/effort`, `/init`, `/mode`, `/model`, or `/theme`, type a space to switch
 | Command                                     | Description                                                                                                                                   |
 | ------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------- |
 | `/archive [<id-prefix>]`                    | Archive this session and start a fresh one, or archive a saved session by ID prefix.                                                          |
-| `/clear` (aliases `/new`, `/reset`)         | Start a fresh session. The previous one stays resumable with `ox -c`.                                                                         |
+| `/clear` (aliases `/new`, `/reset`)         | Start a fresh session. The previous one stays resumable with `/resume` or `ox -r <id-prefix>`.                                                |
 | `/compact [<instructions>]`                 | Compress the conversation into a summary. Trailing text steers the focus.                                                                     |
 | `/config`                                   | Open the resolved configuration, where each value came from, and the loaded config files.                                                     |
 | `/delete <id-prefix>`                       | Delete a saved session by ID prefix, after a Y / N confirmation.                                                                              |

@@ -355,6 +355,39 @@ async fn headless_attaches_piped_stdin_and_continues_its_session() {
 }
 
 #[tokio::test]
+async fn headless_continue_reports_files_changed_since_the_session_read_them() {
+    let server = MockServer::start().await;
+    let dir = tempfile::tempdir().unwrap();
+    let notes = dir.path().join("notes.txt");
+    std::fs::write(&notes, "v1\n").unwrap();
+    let input = serde_json::json!({ "file_path": notes }).to_string();
+    mount_tool_call_once(&server, "toolu_1", "read", &input).await;
+    mount_reply(&server, "Done.").await;
+    let run = |prompt: &[&str]| {
+        let mut command = tokio::process::Command::from(ox(dir.path()));
+        command
+            .args(prompt)
+            .current_dir(dir.path())
+            .env("ANTHROPIC_API_KEY", "test-key")
+            .env("ANTHROPIC_BASE_URL", server.uri())
+            .stdin(Stdio::null());
+        command
+    };
+    let first = run(&["-p", "Read the notes"]).output().await.unwrap();
+    assert!(first.status.success(), "{first:?}");
+    std::fs::write(&notes, "v2\n").unwrap();
+
+    let next = run(&["-c", "-p", "Next step"]).output().await.unwrap();
+
+    assert!(next.status.success(), "{next:?}");
+    let stderr = String::from_utf8(next.stderr).unwrap();
+    assert!(
+        stderr.contains("1 tracked file changed on disk since the resumed session read it"),
+        "{stderr}"
+    );
+}
+
+#[tokio::test]
 async fn headless_without_a_prompt_or_with_a_list_flag_fails_with_a_usage_error() {
     let server = MockServer::start().await;
     let dir = tempfile::tempdir().unwrap();

@@ -10,7 +10,7 @@ ox -p "Fix the failing test" --output stream-json   # Stream every event as a JS
 ox -c -p "Run the tests again"                      # Continue the latest session
 ```
 
-- **Input**: When stdin is not a terminal, `ox -p` reads it to the end and attaches it after the prompt in a `<stdin>` block, so the model can tell your instruction from the data. Piped stdin without a prompt, as in `ox -p < task.md`, is the prompt itself, and a run with neither fails with status `2`. To keep a script's stdin away from `ox`, redirect it from `/dev/null`.
+- **Input**: When stdin is not a terminal, `ox -p` reads it to the end and attaches it after the prompt in a `<stdin>` block, so the model can tell your instruction from the data. Piped stdin without a prompt, as in `ox -p < task.md`, is the prompt itself, and a run with neither fails with status `2`. A script or program that runs `ox` with an open stdin it never closes, such as a pipe it never writes to, leaves `ox` waiting, and after 3 seconds `ox` says so on stderr. Redirect stdin from `/dev/null` to keep it away from `ox`.
 - **Sessions**: Each run starts and saves a new session, unless `-c` continues the latest one or `-r <id-prefix>` names one. Resume a run's session later with `ox -r <id-prefix>`, in the TUI or with another `-p`.
 - **Approvals**: No one can respond to approval prompts during a headless run, so calls that require approval are denied. The denial tells the model which allow pattern would permit the call, or which rule holds it. Add `allow` patterns for the calls your script needs, as described in [Tool approval](configuration.md#permission-tool-approval). Pass `--mode plan` to keep a run read-only, or `--mode yolo` to run tool calls without asking unless a rule denies or asks.
 

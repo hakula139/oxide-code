@@ -62,7 +62,7 @@ ox -c --all        # Latest unarchived session across all projects
 ox -r a1b2 -a      # Prefix match across all projects
 ```
 
-A prompt after either flag continues the session with that prompt, in the TUI or, with `-p`, as a [headless run](headless.md):
+A prompt after `-c` or after `-r <id-prefix>` continues the session with that prompt, in the TUI or, with `-p`, as a [headless run](headless.md):
 
 ```bash
 ox -c "Run the tests again"
@@ -95,7 +95,7 @@ Inside the `/resume` picker, **Ctrl+D** on the cursor row opens a Y/N confirm mo
 
 ### Archiving a Session
 
-Archiving hides a session from `ox --list`, the `/resume` picker, and bare `ox -c`, while leaving its file in place.
+Archiving hides a session from `ox --list`, the `/resume` picker, and `ox -c`, while leaving its file in place.
 
 - `/archive` archives the live session and starts a fresh one, as `/clear` does. A note in the new chat names the archived session.
 - `/archive <id-prefix>` archives another saved session. If the prefix matches only the live session, the command is refused and points to bare `/archive`.

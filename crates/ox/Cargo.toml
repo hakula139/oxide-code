@@ -29,4 +29,5 @@ insta.workspace = true
 ox-core = { workspace = true, features = ["testing"] }
 temp-env.workspace = true
 tempfile.workspace = true
+tokio = { workspace = true, features = ["test-util"] }
 wiremock.workspace = true
