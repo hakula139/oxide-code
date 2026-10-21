@@ -45,11 +45,11 @@ impl SlashCommand for RenameCmd {
     }
 
     fn echoes_input(&self, args: &str) -> bool {
-        !args.trim().is_empty()
+        !args.is_empty()
     }
 
     fn execute(&self, args: &str, ctx: &SlashContext<'_>) -> Result<SlashOutcome, String> {
-        if args.trim().is_empty() {
+        if args.is_empty() {
             return Ok(SlashOutcome::Modal(Box::new(RenameModal::new(ctx.title))));
         }
         Ok(SlashOutcome::Forward(Action::Op(command::rename(args)?)))
@@ -151,7 +151,6 @@ mod tests {
         #[test]
         fn only_for_typed_arg_form() {
             assert!(!RenameCmd.echoes_input(""));
-            assert!(!RenameCmd.echoes_input("   "));
             assert!(RenameCmd.echoes_input("New Title"));
         }
     }

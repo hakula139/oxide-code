@@ -35,8 +35,7 @@ impl SlashCommand for ArchiveCmd {
         Some("[<id-prefix>]")
     }
 
-    fn execute(&self, args: &str, ctx: &SlashContext<'_>) -> Result<SlashOutcome, String> {
-        let prefix = args.trim();
+    fn execute(&self, prefix: &str, ctx: &SlashContext<'_>) -> Result<SlashOutcome, String> {
         if prefix.is_empty() {
             return Ok(SlashOutcome::Forward(Action::Op(Op::Archive)));
         }
@@ -65,15 +64,14 @@ impl SlashCommand for UnarchiveCmd {
     }
 
     fn echoes_input(&self, args: &str) -> bool {
-        !args.trim().is_empty()
+        !args.is_empty()
     }
 
     fn usage(&self) -> Option<&'static str> {
         Some("<id-prefix>")
     }
 
-    fn execute(&self, args: &str, ctx: &SlashContext<'_>) -> Result<SlashOutcome, String> {
-        let prefix = args.trim();
+    fn execute(&self, prefix: &str, ctx: &SlashContext<'_>) -> Result<SlashOutcome, String> {
         if prefix.is_empty() {
             return Err(command::missing(
                 "session ID",
@@ -276,7 +274,6 @@ mod tests {
 
             #[test]
             fn only_with_a_prefix() {
-                assert!(!UnarchiveCmd.echoes_input("  "), "bare form stands alone");
                 assert!(UnarchiveCmd.echoes_input("ab"));
             }
         }

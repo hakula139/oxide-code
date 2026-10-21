@@ -23,7 +23,11 @@ pub const NAMES: [&str; 8] = [
 ];
 
 /// Each command's aliases, keyed by its canonical name.
-const ALIASES: [(&str, &[&str]); 2] = [("clear", &["new", "reset"]), ("resume", &["continue"])];
+const ALIASES: [(&str, &[&str]); 3] = [
+    ("clear", &["new", "reset"]),
+    ("exit", &["quit"]),
+    ("resume", &["continue"]),
+];
 
 /// The op the typed form of `parsed` runs at `project_root`, with an alias resolved to its command
 /// and an error prefixed by the name the user typed. `None` when the command has no typed form.
@@ -251,7 +255,12 @@ mod tests {
 
         #[test]
         fn resolves_each_alias_to_its_command() {
-            for (alias, name) in [("new", "clear"), ("reset", "clear"), ("continue", "resume")] {
+            for (alias, name) in [
+                ("new", "clear"),
+                ("reset", "clear"),
+                ("quit", "exit"),
+                ("continue", "resume"),
+            ] {
                 assert_eq!(canonical(alias), name, "{alias}");
             }
         }

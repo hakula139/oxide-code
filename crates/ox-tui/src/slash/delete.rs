@@ -35,15 +35,14 @@ impl SlashCommand for DeleteCmd {
     }
 
     fn echoes_input(&self, args: &str) -> bool {
-        !args.trim().is_empty()
+        !args.is_empty()
     }
 
     fn usage(&self) -> Option<&'static str> {
         Some("<id-prefix>")
     }
 
-    fn execute(&self, args: &str, ctx: &SlashContext<'_>) -> Result<SlashOutcome, String> {
-        let arg = args.trim();
+    fn execute(&self, arg: &str, ctx: &SlashContext<'_>) -> Result<SlashOutcome, String> {
         if arg.is_empty() {
             return Err(command::missing(
                 "session ID",
@@ -125,7 +124,6 @@ mod tests {
             // The bare form's error block stands alone, while the typed form keeps its line above
             // the confirm modal so the user can re-read the target.
             assert!(!DeleteCmd.echoes_input(""));
-            assert!(!DeleteCmd.echoes_input("   "), "whitespace counts as bare");
             assert!(DeleteCmd.echoes_input("abcd"));
         }
     }

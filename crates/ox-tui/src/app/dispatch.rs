@@ -378,13 +378,13 @@ impl App {
             return;
         }
         match slash::classify(&parsed) {
-            SlashKind::ReadOnly | SlashKind::Unknown => _ = self.run_slash(&parsed),
-            SlashKind::Steering => {
+            None | Some(SlashKind::ReadOnly) => _ = self.run_slash(&parsed),
+            Some(SlashKind::Steering) => {
                 if let Some(action) = self.run_slash(&parsed) {
                     self.dispatch_action(action);
                 }
             }
-            SlashKind::Mutating => {
+            Some(SlashKind::Mutating) => {
                 self.chat.push_system_message(format!(
                     "/{} runs only when idle. Try again after the turn finishes.",
                     parsed.name,
@@ -1255,11 +1255,11 @@ mod tests {
             assert_eq!(
                 app.chat.last_error_text(),
                 Some(
-                    "Unknown command: /no-such. \
+                    "Unknown command: `/no-such`. \
                      Available: /archive, /clear, /compact, /config, /delete, /diff, \
-                     /effort, /help, /init, /login, /logout, /mode, /model, /rename, \
+                     /effort, /exit, /help, /init, /login, /logout, /mode, /model, /rename, \
                      /resume, /status, /theme, /unarchive. \
-                     Use //no-such to send the literal text."
+                     Use `//no-such` to send the literal text."
                 ),
             );
             assert_eq!(rx.try_recv(), Err(TryRecvError::Empty));
@@ -1585,11 +1585,11 @@ mod tests {
             assert_eq!(
                 app.chat.last_error_text(),
                 Some(
-                    "Unknown command: /nope. \
+                    "Unknown command: `/nope`. \
                      Available: /archive, /clear, /compact, /config, /delete, /diff, \
-                     /effort, /help, /init, /login, /logout, /mode, /model, /rename, \
+                     /effort, /exit, /help, /init, /login, /logout, /mode, /model, /rename, \
                      /resume, /status, /theme, /unarchive. \
-                     Use //nope to send the literal text."
+                     Use `//nope` to send the literal text."
                 ),
             );
         }
