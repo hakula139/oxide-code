@@ -133,6 +133,7 @@ enum Entry<'a> {
     Ellipsis { hidden: usize },
 }
 
+/// Lays out both sides within `budget` rows, which must be at least 2 so each side keeps a row.
 fn entries<'a>(
     old_lines: &'a [DiffLine],
     new_lines: &'a [DiffLine],
@@ -170,21 +171,14 @@ fn emit_side<'a>(out: &mut Vec<Entry<'a>>, side: Side, lines: &'a [DiffLine], bu
         }
         return;
     }
-    if budget == 0 {
-        out.push(Entry::Ellipsis {
-            hidden: lines.len(),
-        });
-        return;
-    }
     let head = budget - 1;
     let tail = 1;
-    let hidden = lines.len() - head - tail;
     for line in &lines[..head] {
         out.push(Entry::Line { side, line });
     }
-    if hidden > 0 {
-        out.push(Entry::Ellipsis { hidden });
-    }
+    out.push(Entry::Ellipsis {
+        hidden: lines.len() - budget,
+    });
     for line in &lines[lines.len() - tail..] {
         out.push(Entry::Line { side, line });
     }
@@ -560,14 +554,6 @@ mod tests {
                 render_entries(&entries),
                 vec!["- a0", "- a1", "... +2", "- a4", "+ b0", "... +3", "+ b4"],
             );
-        }
-
-        #[test]
-        fn zero_budget_collapses_each_side_to_ellipsis() {
-            let old = line_numbered(&["a", "b"]);
-            let new = line_numbered(&["x"]);
-            let entries = entries(&old, &new, 0);
-            assert_eq!(render_entries(&entries), vec!["... +2", "... +1"]);
         }
 
         #[test]

@@ -35,10 +35,9 @@ pub(super) fn render(
 }
 
 fn context_label(path: &str, lines: &[ReadExcerptLine], total_lines: usize) -> String {
-    let Some(first) = lines.first() else {
+    let (Some(first), Some(last)) = (lines.first(), lines.last()) else {
         return format!("{path} (empty file)");
     };
-    let last = lines.last().unwrap_or(first);
     let range = if first.number == last.number {
         first.number.to_string()
     } else {

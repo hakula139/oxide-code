@@ -54,11 +54,7 @@ mod tests {
             out.lines
                 .iter()
                 .map(|line| {
-                    let text = line
-                        .spans
-                        .iter()
-                        .map(|span| span.content.as_ref())
-                        .collect::<String>();
+                    let text = line.to_string();
                     let style = line
                         .spans
                         .last()
