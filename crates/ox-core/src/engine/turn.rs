@@ -402,8 +402,7 @@ async fn stream_response(
     sink: &dyn EventSink,
     usage: &mut Option<TokenUsage>,
 ) -> Result<Response> {
-    let section_refs: Vec<&str> = prompt.system_sections.iter().map(String::as_str).collect();
-    let rx = client.stream_message(messages, &section_refs, Some(&prompt.user_context), tools)?;
+    let rx = client.stream_message(messages, &prompt.system, Some(&prompt.user_context), tools)?;
     collect_response(rx, sink, usage).await
 }
 
@@ -457,6 +456,7 @@ mod tests {
     use crate::engine::testing::MODEL;
     use crate::message::{Replay, Role};
     use crate::model::ResolvedModelId;
+    use crate::prompt::SystemPrompt;
     use crate::protocol::testing::CapturingSink;
     use crate::protocol::{ConfigPick, Decision, ResumeTarget, ToolCall, ToolResult};
     use crate::tool::{
@@ -559,7 +559,7 @@ mod tests {
             fn stream_message(
                 &self,
                 _messages: &[Message],
-                _system_sections: &[&str],
+                _system: &SystemPrompt,
                 _user_context: Option<&str>,
                 _tools: &[ToolDefinition],
             ) -> Result<mpsc::Receiver<Result<ResponseEvent>>> {

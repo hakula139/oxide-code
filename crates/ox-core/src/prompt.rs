@@ -16,17 +16,12 @@ use sections::{
     CAUTION, INTRO, OUTPUT_EFFICIENCY, STYLE, SYSTEM_SECTION, TASK_GUIDANCE, TOOL_GUIDANCE,
 };
 
-/// Marker between cacheable static and per-session dynamic sections.
-pub(crate) const SYSTEM_PROMPT_DYNAMIC_BOUNDARY: &str = "__SYSTEM_PROMPT_DYNAMIC_BOUNDARY__";
-
 /// Output of [`build_prompt`] or [`restore_prompt`], held for a whole session so every request
 /// shares a byte-identical prefix.
 #[cfg_attr(test, derive(Default))]
 pub(crate) struct PromptParts {
     environment: Environment,
-    /// The static sections, [`SYSTEM_PROMPT_DYNAMIC_BOUNDARY`] as its own element, then the
-    /// per-session sections. The client applies `cache_control` to the prefix before the marker.
-    pub(crate) system_sections: Vec<String>,
+    pub(crate) system: SystemPrompt,
     /// The instruction files, date, and model identity reminder, sent as the first user message so
     /// a `/model` swap leaves the system prompt byte-identical.
     pub(crate) user_context: String,
@@ -60,11 +55,15 @@ impl PromptParts {
             seen: self.seen.clone(),
         }
     }
+}
 
-    #[cfg(test)]
-    fn system_joined(&self) -> String {
-        self.system_sections.join("\n\n")
-    }
+/// The system prompt, split where its per-session text begins.
+#[cfg_attr(test, derive(Default))]
+pub(crate) struct SystemPrompt {
+    /// Text identical in every session, which a wire may cache across sessions.
+    pub(crate) cacheable: String,
+    /// Text that varies by session, such as the environment. Empty when there is none.
+    pub(crate) dynamic: String,
 }
 
 /// The parts of the user context that change over a session.
@@ -130,7 +129,7 @@ pub(crate) async fn restore_prompt(stored: SessionContext, cwd: &Path) -> Prompt
     }
 
     PromptParts {
-        system_sections: system_sections(&environment),
+        system: system_prompt(&environment),
         environment,
         user_context,
         seen,
@@ -146,7 +145,7 @@ async fn assemble(
     let (context, warnings) = UserContext::load_with_root(cwd, git_root, model).await;
 
     let parts = PromptParts {
-        system_sections: system_sections(&environment),
+        system: system_prompt(&environment),
         environment,
         user_context: render_user_context(&context),
         seen: context,
@@ -154,22 +153,20 @@ async fn assemble(
     (parts, warnings)
 }
 
-fn system_sections(environment: &Environment) -> Vec<String> {
-    let env_section = environment.render();
-    [
-        INTRO,
-        SYSTEM_SECTION,
-        TASK_GUIDANCE,
-        CAUTION,
-        TOOL_GUIDANCE,
-        STYLE,
-        OUTPUT_EFFICIENCY,
-        SYSTEM_PROMPT_DYNAMIC_BOUNDARY,
-        &env_section,
-    ]
-    .into_iter()
-    .map(String::from)
-    .collect()
+fn system_prompt(environment: &Environment) -> SystemPrompt {
+    SystemPrompt {
+        cacheable: [
+            INTRO,
+            SYSTEM_SECTION,
+            TASK_GUIDANCE,
+            CAUTION,
+            TOOL_GUIDANCE,
+            STYLE,
+            OUTPUT_EFFICIENCY,
+        ]
+        .join("\n\n"),
+        dynamic: environment.render(),
+    }
 }
 
 fn render_user_context(context: &UserContext) -> String {
@@ -371,7 +368,8 @@ mod tests {
                 parts.user_context,
             );
             assert_eq!(parts.seen.model, identity);
-            assert!(!parts.system_joined().contains("claude-opus-5-5"));
+            assert!(!parts.system.cacheable.contains("claude-opus-5-5"));
+            assert!(!parts.system.dynamic.contains("claude-opus-5-5"));
         }
     }
 
@@ -404,8 +402,8 @@ mod tests {
 
             let parts = restore_prompt(recorded_context(tmp.path()), tmp.path()).await;
 
-            let joined = parts.system_joined();
-            assert!(joined.contains("- Platform: plan9"), "{joined}");
+            let dynamic = &parts.system.dynamic;
+            assert!(dynamic.contains("- Platform: plan9"), "{dynamic}");
             assert_eq!(parts.user_context, "recorded context");
             assert_eq!(parts.seen, context("Recorded rules.", "2026-04-12"));
         }
@@ -418,9 +416,9 @@ mod tests {
             let parts =
                 restore_prompt(recorded_context(recorded_in.path()), resumed_in.path()).await;
 
-            let joined = parts.system_joined();
-            assert!(!joined.contains("plan9"), "{joined}");
-            assert!(joined.contains(&format!(
+            let dynamic = &parts.system.dynamic;
+            assert!(!dynamic.contains("plan9"), "{dynamic}");
+            assert!(dynamic.contains(&format!(
                 "Primary working directory: {}",
                 resumed_in.path().display()
             )));
@@ -449,7 +447,7 @@ mod tests {
 
             let (parts, _) = assemble(&spec("test-model"), tmp.path(), Some(tmp.path())).await;
 
-            let expected_system_sections = [
+            let expected_cacheable_sections = [
                 "You are an interactive agent",
                 "# System",
                 "# Doing tasks",
@@ -457,13 +455,12 @@ mod tests {
                 "# Using your tools",
                 "# Tone and style",
                 "# Output efficiency",
-                "# Environment",
             ];
-            let joined = parts.system_joined();
-            assert!(joined.starts_with(INTRO));
+            let SystemPrompt { cacheable, dynamic } = &parts.system;
+            assert!(cacheable.starts_with(INTRO));
             let mut prev_pos = 0;
-            for header in &expected_system_sections {
-                let pos = joined
+            for header in &expected_cacheable_sections {
+                let pos = cacheable
                     .find(header)
                     .unwrap_or_else(|| panic!("missing section: {header}"));
                 assert!(
@@ -473,21 +470,15 @@ mod tests {
                 prev_pos = pos;
             }
 
-            assert!(joined.contains(&format!(
+            assert!(dynamic.starts_with("# Environment"), "{dynamic}");
+            assert!(dynamic.contains(&format!(
                 "Primary working directory: {}",
                 tmp.path().display()
             )));
-            assert!(joined.contains("Is a git repository: true"));
+            assert!(dynamic.contains("Is a git repository: true"));
 
-            assert!(
-                parts
-                    .system_sections
-                    .iter()
-                    .any(|s| s == SYSTEM_PROMPT_DYNAMIC_BOUNDARY),
-                "system_sections should contain the boundary marker"
-            );
-
-            assert!(!joined.contains("Test project rules."));
+            assert!(!cacheable.contains("Test project rules."));
+            assert!(!dynamic.contains("Test project rules."));
 
             let ctx = &parts.user_context;
             assert!(ctx.contains("Test project rules."));

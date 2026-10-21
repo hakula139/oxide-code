@@ -35,13 +35,13 @@ use crate::config::gateway::GatewayCompat;
 use crate::config::{Config, Effort, PromptCacheTtl, is_first_party_base_url};
 use crate::message::{ContentBlock, Message, Role};
 use crate::model::ModelSpec;
-use crate::prompt::SYSTEM_PROMPT_DYNAMIC_BOUNDARY;
+use crate::prompt::SystemPrompt;
 use crate::tool::ToolDefinition;
 use crate::util::tls::Trust;
 
 use betas::{compute_betas, conversation_cache_control, static_prefix_cache_control};
 use sse::forward_sse;
-use transport::messages_url;
+use transport::{MessagesRequest, messages_url};
 use wire::{
     CacheControl, ContextManagement, CreateMessageRequest, OutputConfig, RequestMessages,
     RequestMetadata, SystemBlock,
@@ -205,78 +205,42 @@ impl Client {
         self.reloads.wait().await;
     }
 
-    /// Streams one request. The receiver closes when the stream ends, the receiver is dropped, or
-    /// an unrecoverable error is forwarded as a final `Err`.
+    /// Streams one conversation request. The receiver closes when the stream ends, the receiver
+    /// is dropped, or an unrecoverable error is forwarded as a final `Err`.
     ///
-    /// The static `system` prefix up to [`SYSTEM_PROMPT_DYNAMIC_BOUNDARY`] always carries a
-    /// `cache_control` breakpoint, shared across sessions. `breakpoint` marks the last content
-    /// block of the final message. `user_context` rides as a synthetic leading user message to
-    /// keep dynamic content such as CLAUDE.md out of the `system` parameter.
+    /// The cacheable `system` text always carries a `cache_control` breakpoint, shared across
+    /// sessions. `breakpoint` marks the last content block of the final message. `user_context`
+    /// rides as a synthetic leading user message to keep dynamic content such as CLAUDE.md out of
+    /// the `system` parameter.
     fn stream(
         &self,
         messages: &[Message],
-        system_sections: &[&str],
+        system: &SystemPrompt,
         user_context: Option<&str>,
         tools: &[ToolDefinition],
         breakpoint: Option<CacheControl>,
     ) -> Result<mpsc::Receiver<Result<ResponseEvent>>> {
-        let auth = self.auth()?;
-
-        // The fingerprint skips the user context, which Claude Code marks as a meta message.
-        let attribution = self
-            .gateway
-            .attribution
-            .then(|| attribution_text(first_user_text(messages), self.is_first_party));
-
-        let (static_sections, dynamic_sections) = split_at_boundary(system_sections);
-        let static_joined = static_sections.join("\n\n");
-        let dynamic_joined = dynamic_sections.join("\n\n");
-
-        let static_cache_control =
-            static_prefix_cache_control(self.is_first_party, self.prompt_cache_ttl);
-        let system_blocks = build_system_blocks(
-            attribution.as_deref(),
-            &[
-                (static_joined.as_str(), Some(static_cache_control)),
-                (dynamic_joined.as_str(), None),
-            ],
-        );
-
-        let model = &self.model;
-        let thinking = model.thinking(self.show_thinking);
-        let mut body = serde_json::to_string(&CreateMessageRequest {
-            model: model.id(),
+        let cacheable = static_prefix_cache_control(self.is_first_party, self.prompt_cache_ttl);
+        let request = self.prepare(RequestSpec {
+            kind: RequestKind::Agentic,
+            model: &self.model,
             max_tokens: self.max_tokens(),
-            stream: true,
-            metadata: build_metadata(&self.device_id, &self.session_id),
-            system: system_blocks,
+            system: &[
+                (&system.cacheable, Some(cacheable)),
+                (&system.dynamic, None),
+            ],
             tools: (!tools.is_empty()).then_some(tools),
-            thinking: thinking.as_ref(),
             output_config: OutputConfig::new(None, self.effort),
-            // Body must accompany the beta header, which `compute_betas` gates the same way.
-            context_management: model
-                .info()
-                .map(|_| ContextManagement::clear_thinking_keep_all()),
             messages: RequestMessages {
                 user_context,
                 messages,
                 breakpoint,
             },
-        })
-        .context("failed to serialize request")?;
-
-        if attribution.as_deref().is_some_and(billing::is_hashed) {
-            body = billing::inject_cch(&body)?;
-        }
-
-        debug!(body_len = body.len(), "sending API request");
+        })?;
 
         let (tx, rx) = mpsc::channel(64);
         let http = self.http.clone();
-        let betas = compute_betas(model, thinking.as_ref(), auth.kind(), true).join(",");
-        let request = self.messages_request(betas, body, auth);
-        tokio::spawn(forward_sse(http, request, model.id().to_owned(), tx));
-
+        tokio::spawn(forward_sse(http, request, self.model.id().to_owned(), tx));
         Ok(rx)
     }
 }
@@ -287,28 +251,22 @@ impl Wire for Client {
     fn stream_message(
         &self,
         messages: &[Message],
-        system_sections: &[&str],
+        system: &SystemPrompt,
         user_context: Option<&str>,
         tools: &[ToolDefinition],
     ) -> Result<mpsc::Receiver<Result<ResponseEvent>>> {
         let breakpoint = conversation_cache_control(self.prompt_cache_ttl);
-        self.stream(
-            messages,
-            system_sections,
-            user_context,
-            tools,
-            Some(breakpoint),
-        )
+        self.stream(messages, system, user_context, tools, Some(breakpoint))
     }
 
     fn stream_one_shot(
         &self,
         messages: &[Message],
-        system_sections: &[&str],
+        system: &SystemPrompt,
         user_context: Option<&str>,
         tools: &[ToolDefinition],
     ) -> Result<mpsc::Receiver<Result<ResponseEvent>>> {
-        self.stream(messages, system_sections, user_context, tools, None)
+        self.stream(messages, system, user_context, tools, None)
     }
 }
 
@@ -374,12 +332,91 @@ fn build_http(gateway: &GatewayCompat, trust: &dyn Trust) -> Result<reqwest::Cli
 
 // ── Request Building ──
 
+/// What a request serves, which decides its betas and the body fields beyond the caller's.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RequestKind {
+    /// A conversation turn, streamed with thinking, `context_management`, and the agentic betas.
+    Agentic,
+    /// A side request such as a session title, sent without streaming, thinking, or agentic betas.
+    SideQuery,
+}
+
+/// What a caller of [`Client::prepare`] sets in a request body.
+struct RequestSpec<'a> {
+    kind: RequestKind,
+    model: &'a ModelSpec,
+    max_tokens: u32,
+    /// The text after the identity block, each with its `cache_control`. Empty text is left out.
+    system: &'a [(&'a str, Option<CacheControl>)],
+    tools: Option<&'a [ToolDefinition]>,
+    output_config: Option<OutputConfig<'a>>,
+    messages: RequestMessages<'a>,
+}
+
+impl Client {
+    /// Builds the `/v1/messages` call `spec` describes. The body gains the attribution and
+    /// identity blocks ahead of `spec.system`, the metadata, and on first-party requests the `cch`
+    /// hash. The kind decides streaming, thinking, `context_management`, and the betas, which
+    /// derive from the body so the two always agree.
+    fn prepare(&self, spec: RequestSpec<'_>) -> Result<MessagesRequest> {
+        let RequestSpec {
+            kind,
+            model,
+            max_tokens,
+            system,
+            tools,
+            output_config,
+            messages,
+        } = spec;
+        let auth = self.auth()?;
+        let agentic = kind == RequestKind::Agentic;
+
+        // The fingerprint skips the user context, which Claude Code marks as a meta message.
+        let attribution = self
+            .gateway
+            .attribution
+            .then(|| attribution_text(first_user_text(messages.messages), self.is_first_party));
+        let thinking = model.thinking(self.show_thinking).filter(|_| agentic);
+        let mut body = serde_json::to_string(&CreateMessageRequest {
+            model: model.id(),
+            max_tokens,
+            stream: agentic,
+            metadata: build_metadata(&self.device_id, &self.session_id),
+            system: build_system_blocks(attribution.as_deref(), system),
+            tools,
+            thinking: thinking.as_ref(),
+            output_config,
+            context_management: (agentic && model.info().is_some())
+                .then(ContextManagement::clear_thinking_keep_all),
+            messages,
+        })
+        .context("failed to serialize request")?;
+        if attribution.is_some() && self.is_first_party {
+            body = billing::inject_cch(&body)?;
+        }
+
+        debug!(?kind, body_len = body.len(), "sending API request");
+        let betas = compute_betas(model, thinking.as_ref(), auth.kind(), kind).join(",");
+        Ok(self.messages_request(betas, body, auth))
+    }
+}
+
 /// The `system[0]` attribution text. First-party requests carry a `cch` placeholder that
 /// [`billing::inject_cch`] fills once the body is serialized. Like Claude Code since 2.1.181,
 /// other base URLs get a stable block without it, so gateways that cache on the body still hit.
 fn attribution_text(first_user_text: &str, is_first_party: bool) -> String {
     let fingerprint = billing::compute_fingerprint(first_user_text, CLAUDE_CLI_VERSION);
     billing::build_billing_header(CLAUDE_CLI_VERSION, &fingerprint, is_first_party)
+}
+
+fn first_user_text(messages: &[Message]) -> &str {
+    messages
+        .iter()
+        .find(|m| m.role == Role::User)
+        .into_iter()
+        .flat_map(|m| &m.content)
+        .find_map(ContentBlock::as_text)
+        .unwrap_or("")
 }
 
 /// Some relay gateways admit a request without the billing block only when `user_id` holds a
@@ -459,45 +496,6 @@ fn normalize_arch(arch: &str) -> &'static str {
     }
 }
 
-// ── System Prompt Helpers ──
-
-/// Splits at the boundary marker, dropping the marker itself.
-fn split_at_boundary<'a>(sections: &[&'a str]) -> (Vec<&'a str>, Vec<&'a str>) {
-    let boundary_pos = sections
-        .iter()
-        .position(|&s| s == SYSTEM_PROMPT_DYNAMIC_BOUNDARY);
-
-    if let Some(pos) = boundary_pos {
-        let static_part = sections[..pos]
-            .iter()
-            .filter(|s| !s.is_empty())
-            .copied()
-            .collect();
-        let dynamic_part = sections[pos + 1..]
-            .iter()
-            .filter(|s| !s.is_empty())
-            .copied()
-            .collect();
-        (static_part, dynamic_part)
-    } else {
-        let all = sections.iter().filter(|s| !s.is_empty()).copied().collect();
-        (all, Vec::new())
-    }
-}
-
-fn first_user_text(messages: &[Message]) -> &str {
-    messages
-        .iter()
-        .find(|m| m.role == Role::User)
-        .into_iter()
-        .flat_map(|m| &m.content)
-        .find_map(|b| match b {
-            ContentBlock::Text { text } => Some(text.as_str()),
-            _ => None,
-        })
-        .unwrap_or("")
-}
-
 #[cfg(test)]
 mod tests {
     use std::fmt::Write as _;
@@ -527,6 +525,13 @@ mod tests {
 
         const TEST_MODEL: &str = "claude-sonnet-5-5";
 
+        fn system_prompt(cacheable: &str, dynamic: &str) -> SystemPrompt {
+            SystemPrompt {
+                cacheable: cacheable.to_owned(),
+                dynamic: dynamic.to_owned(),
+            }
+        }
+
         async fn collect_events(
             mut rx: mpsc::Receiver<Result<ResponseEvent>>,
         ) -> Result<Vec<ResponseEvent>> {
@@ -553,7 +558,7 @@ mod tests {
             client.messages_url = messages_url(&server.uri());
             collect_events(
                 client
-                    .stream_message(&[Message::user("hi")], &[], None, &[])
+                    .stream_message(&[Message::user("hi")], &SystemPrompt::default(), None, &[])
                     .unwrap(),
             )
             .await
@@ -681,7 +686,7 @@ mod tests {
                 let client = test_client(base_url, api_key(), TEST_MODEL);
 
                 let rx = client
-                    .stream_message(&[Message::user("hi")], &[], None, &[])
+                    .stream_message(&[Message::user("hi")], &SystemPrompt::default(), None, &[])
                     .unwrap();
                 collect_events(rx).await.unwrap();
             }
@@ -762,7 +767,7 @@ mod tests {
                 client.set_session_id("sid-rolled".to_owned());
                 collect_events(
                     client
-                        .stream_message(&[Message::user("hi")], &[], None, &[])
+                        .stream_message(&[Message::user("hi")], &SystemPrompt::default(), None, &[])
                         .unwrap(),
                 )
                 .await
@@ -897,7 +902,7 @@ mod tests {
                 let request = capture_stream_request(client.clone()).await;
                 client.set_auth(None);
                 let signed_out = client
-                    .stream_message(&[Message::user("hi")], &[], None, &[])
+                    .stream_message(&[Message::user("hi")], &SystemPrompt::default(), None, &[])
                     .expect_err("a signed-out client must not send");
 
                 assert_eq!(
@@ -991,7 +996,12 @@ mod tests {
 
                 let client = test_client(server.uri(), api_key(), TEST_MODEL);
                 let rx = client
-                    .stream_message(&[Message::user("hello")], &[], None, &[])
+                    .stream_message(
+                        &[Message::user("hello")],
+                        &SystemPrompt::default(),
+                        None,
+                        &[],
+                    )
                     .unwrap();
                 let events = collect_events(rx).await.unwrap();
 
@@ -1041,7 +1051,7 @@ mod tests {
                 let client = test_client(server.uri(), api_key(), TEST_MODEL);
                 let events = collect_events(
                     client
-                        .stream_message(&[Message::user("hi")], &[], None, &[])
+                        .stream_message(&[Message::user("hi")], &SystemPrompt::default(), None, &[])
                         .unwrap(),
                 )
                 .await
@@ -1186,7 +1196,12 @@ mod tests {
                 let client = test_client(server.uri(), api_key(), TEST_MODEL);
                 collect_events(
                     client
-                        .stream_message(&[Message::user(prompt)], &[], Some(context), &[])
+                        .stream_message(
+                            &[Message::user(prompt)],
+                            &SystemPrompt::default(),
+                            Some(context),
+                            &[],
+                        )
                         .unwrap(),
                 )
                 .await
@@ -1243,7 +1258,7 @@ mod tests {
                     client
                         .stream_message(
                             &[Message::user("hi")],
-                            &["static-a", "static-b"],
+                            &system_prompt("static", ""),
                             None,
                             &[],
                         )
@@ -1314,7 +1329,7 @@ mod tests {
                     client
                         .stream_message(
                             &messages,
-                            &["static", SYSTEM_PROMPT_DYNAMIC_BOUNDARY, "dynamic"],
+                            &system_prompt("static", "dynamic"),
                             Some("<system-reminder>context</system-reminder>"),
                             &[],
                         )
@@ -1328,6 +1343,10 @@ mod tests {
                 assert_eq!(
                     v["system"][2]["cache_control"],
                     serde_json::json!({"type": "ephemeral", "scope": "global", "ttl": "1h"}),
+                );
+                assert_eq!(
+                    v["system"][3],
+                    serde_json::json!({"type": "text", "text": "dynamic"}),
                 );
                 let sent = v["messages"].as_array().expect("messages array");
                 assert_eq!(sent.len(), 4, "user context leads the transcript: {body}");
@@ -1370,7 +1389,7 @@ mod tests {
                 let client = test_client(server.uri(), api_key(), TEST_MODEL);
                 let events = collect_events(
                     client
-                        .stream_message(&[Message::user("hi")], &[], None, &[])
+                        .stream_message(&[Message::user("hi")], &SystemPrompt::default(), None, &[])
                         .unwrap(),
                 )
                 .await
@@ -1402,7 +1421,7 @@ mod tests {
                 let client = test_client(server.uri(), api_key(), TEST_MODEL);
                 let err = collect_events(
                     client
-                        .stream_message(&[Message::user("hi")], &[], None, &[])
+                        .stream_message(&[Message::user("hi")], &SystemPrompt::default(), None, &[])
                         .unwrap(),
                 )
                 .await
@@ -1439,7 +1458,7 @@ mod tests {
 
                 let client = test_client(server.uri(), api_key(), TEST_MODEL);
                 let rx = client
-                    .stream_message(&[Message::user("hi")], &[], None, &[])
+                    .stream_message(&[Message::user("hi")], &SystemPrompt::default(), None, &[])
                     .unwrap();
                 let err = collect_events(rx).await.expect_err("redirect must fail");
 
@@ -1483,7 +1502,7 @@ mod tests {
 
                     let client = test_client(server.uri(), api_key(), TEST_MODEL);
                     let rx = client
-                        .stream_message(&[Message::user("hi")], &[], None, &[])
+                        .stream_message(&[Message::user("hi")], &SystemPrompt::default(), None, &[])
                         .unwrap();
                     let err = collect_events(rx).await.expect_err("expected HTTP error");
 
@@ -1507,7 +1526,7 @@ mod tests {
                     TEST_MODEL,
                 );
                 let rx = client
-                    .stream_message(&[Message::user("hi")], &[], None, &[])
+                    .stream_message(&[Message::user("hi")], &SystemPrompt::default(), None, &[])
                     .unwrap();
                 let err = collect_events(rx).await.expect_err("expected 401");
 
@@ -1536,7 +1555,7 @@ mod tests {
 
                 let client = test_client(server.uri(), api_key(), TEST_MODEL);
                 let rx = client
-                    .stream_message(&[Message::user("hi")], &[], None, &[])
+                    .stream_message(&[Message::user("hi")], &SystemPrompt::default(), None, &[])
                     .unwrap();
                 let err = collect_events(rx).await.expect_err("expected 429");
 
@@ -1558,7 +1577,7 @@ mod tests {
                     let client = test_client(OFFLINE_URL, auth, TEST_MODEL);
 
                     let rx = client
-                        .stream_message(&[Message::user("hi")], &[], None, &[])
+                        .stream_message(&[Message::user("hi")], &SystemPrompt::default(), None, &[])
                         .unwrap();
                     let err = collect_events(rx).await.unwrap_err();
 
@@ -1614,7 +1633,7 @@ mod tests {
                 );
 
                 let rx = client
-                    .stream_message(&[Message::user("hi")], &[], None, &[])
+                    .stream_message(&[Message::user("hi")], &SystemPrompt::default(), None, &[])
                     .unwrap();
                 collect_events(rx).await.unwrap();
                 let stored: serde_json::Value =
@@ -1714,6 +1733,64 @@ mod tests {
                 }
             }
         }
+
+        mod prepare {
+            use super::*;
+
+            #[test]
+            fn side_query_sends_no_stream_thinking_or_context_management() {
+                let client = test_client(OFFLINE_URL, api_key(), TEST_MODEL);
+                let messages = [Message::user("hi")];
+
+                let request = client
+                    .prepare(RequestSpec {
+                        kind: RequestKind::SideQuery,
+                        model: client.model(),
+                        max_tokens: 40,
+                        system: &[("sys", None)],
+                        tools: None,
+                        output_config: None,
+                        messages: RequestMessages {
+                            user_context: None,
+                            messages: &messages,
+                            breakpoint: None,
+                        },
+                    })
+                    .unwrap();
+
+                let body: serde_json::Value = serde_json::from_slice(&request.body).unwrap();
+                assert_eq!(body["stream"], false);
+                for field in ["tools", "thinking", "output_config", "context_management"] {
+                    assert!(body.get(field).is_none(), "{field}: {body}");
+                }
+                assert_eq!(request.betas, "claude-code-20250219");
+            }
+        }
+    }
+
+    mod first_user_text {
+        use super::*;
+
+        #[test]
+        fn extracts_from_first_user_message() {
+            let messages = vec![Message::user("hello world"), Message::assistant("hi")];
+            assert_eq!(first_user_text(&messages), "hello world");
+        }
+
+        #[test]
+        fn is_empty_when_absent() {
+            assert_eq!(first_user_text(&[]), "");
+            assert_eq!(first_user_text(&[Message::assistant("hi")]), "");
+            let tool_only = vec![Message {
+                role: Role::User,
+                content: vec![ContentBlock::ToolResult {
+                    tool_use_id: "id".to_owned(),
+                    content: "result".to_owned(),
+                    is_error: false,
+                }],
+            }];
+            assert_eq!(first_user_text(&tool_only), "");
+        }
     }
 
     mod build_metadata {
@@ -1810,71 +1887,6 @@ mod tests {
             ] {
                 assert_eq!(normalize_arch(input), expected, "input={input}");
             }
-        }
-    }
-
-    mod split_at_boundary {
-        use super::*;
-
-        #[test]
-        fn separates_static_and_dynamic() {
-            let sections = &["intro", "tasks", SYSTEM_PROMPT_DYNAMIC_BOUNDARY, "env"];
-            let (statics, dynamic) = split_at_boundary(sections);
-            assert_eq!(statics, vec!["intro", "tasks"]);
-            assert_eq!(dynamic, vec!["env"]);
-        }
-
-        #[test]
-        fn without_marker_treats_all_as_static() {
-            let (statics, dynamic) = split_at_boundary(&["intro", "tasks", "env"]);
-            assert_eq!(statics, vec!["intro", "tasks", "env"]);
-            assert_eq!(dynamic, [] as [&str; 0]);
-        }
-
-        #[test]
-        fn filters_empty_sections() {
-            let sections = &["intro", "", SYSTEM_PROMPT_DYNAMIC_BOUNDARY, "", "env"];
-            let (statics, dynamic) = split_at_boundary(sections);
-            assert_eq!(statics, vec!["intro"]);
-            assert_eq!(dynamic, vec!["env"]);
-        }
-
-        #[test]
-        fn at_extremes_yields_empty_side() {
-            let (statics, dynamic) =
-                split_at_boundary(&[SYSTEM_PROMPT_DYNAMIC_BOUNDARY, "env", "lang"]);
-            assert_eq!(statics, [] as [&str; 0]);
-            assert_eq!(dynamic, vec!["env", "lang"]);
-
-            let (statics, dynamic) =
-                split_at_boundary(&["intro", "tasks", SYSTEM_PROMPT_DYNAMIC_BOUNDARY]);
-            assert_eq!(statics, vec!["intro", "tasks"]);
-            assert_eq!(dynamic, [] as [&str; 0]);
-        }
-    }
-
-    mod first_user_text {
-        use super::*;
-
-        #[test]
-        fn extracts_from_first_user_message() {
-            let messages = vec![Message::user("hello world"), Message::assistant("hi")];
-            assert_eq!(first_user_text(&messages), "hello world");
-        }
-
-        #[test]
-        fn is_empty_when_absent() {
-            assert_eq!(first_user_text(&[]), "");
-            assert_eq!(first_user_text(&[Message::assistant("hi")]), "");
-            let tool_only = vec![Message {
-                role: Role::User,
-                content: vec![ContentBlock::ToolResult {
-                    tool_use_id: "id".to_owned(),
-                    content: "result".to_owned(),
-                    is_error: false,
-                }],
-            }];
-            assert_eq!(first_user_text(&tool_only), "");
         }
     }
 }

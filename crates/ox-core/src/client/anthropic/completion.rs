@@ -3,15 +3,10 @@
 
 use anyhow::{Context, Result};
 use serde::Deserialize;
-use tracing::debug;
 
-use super::betas::compute_betas;
 use super::transport::{post_messages, with_retry};
-use super::wire::{
-    ContentBlockInfo, CreateMessageRequest, OutputConfig, OutputFormat, RequestMessages,
-    RequestMetadata,
-};
-use super::{Client, attribution_text, billing, build_metadata, build_system_blocks};
+use super::wire::{ContentBlockInfo, OutputConfig, OutputFormat, RequestMessages};
+use super::{Client, RequestKind, RequestSpec};
 use crate::config::Effort;
 use crate::message::Message;
 use crate::model::{ModelSpec, TokenUsage};
@@ -32,32 +27,23 @@ impl Client {
         effort: Option<Effort>,
         output_format: Option<&OutputFormat>,
     ) -> Result<(String, Option<TokenUsage>)> {
-        let auth = self.auth()?;
-        let attribution = self
-            .gateway
-            .attribution
-            .then(|| attribution_text(user, self.is_first_party));
-        let body = build_completion_body(
-            model.id(),
-            system,
-            user,
+        let messages = [Message::user(user)];
+        let request = &self.prepare(RequestSpec {
+            kind: RequestKind::SideQuery,
+            model,
             max_tokens,
-            attribution.as_deref(),
-            build_metadata(&self.device_id, &self.session_id),
-            OutputConfig::new(
+            system: &[(system, None)],
+            tools: None,
+            output_config: OutputConfig::new(
                 output_format.filter(|_| self.gateway.structured_outputs),
                 effort,
             ),
-        )?;
-
-        debug!(
-            model = model.id(),
-            body_len = body.len(),
-            "sending completion request"
-        );
-
-        let betas = compute_betas(model, None, auth.kind(), false).join(",");
-        let request = &self.messages_request(betas, body, auth);
+            messages: RequestMessages {
+                user_context: None,
+                messages: &messages,
+                breakpoint: None,
+            },
+        })?;
         let CompletionResponse { content, usage } = with_retry(
             |retry| async move {
                 let response = post_messages(&self.http, request, retry).await?;
@@ -71,46 +57,6 @@ impl Client {
         .await?;
         Ok((join_text_blocks(content), usage))
     }
-}
-
-// ── Body Builder ──
-
-/// System block order: `attribution` (when set) → identity prefix → caller system.
-fn build_completion_body(
-    model: &str,
-    system: &str,
-    user: &str,
-    max_tokens: u32,
-    attribution: Option<&str>,
-    metadata: RequestMetadata,
-    output_config: Option<OutputConfig<'_>>,
-) -> Result<String> {
-    let messages = [Message::user(user)];
-
-    let system_blocks = build_system_blocks(attribution, &[(system, None)]);
-
-    let mut body = serde_json::to_string(&CreateMessageRequest {
-        model,
-        max_tokens,
-        stream: false,
-        metadata,
-        system: system_blocks,
-        tools: None,
-        thinking: None,
-        output_config,
-        context_management: None,
-        messages: RequestMessages {
-            user_context: None,
-            messages: &messages,
-            breakpoint: None,
-        },
-    })
-    .context("failed to serialize request")?;
-
-    if attribution.is_some_and(billing::is_hashed) {
-        body = billing::inject_cch(&body)?;
-    }
-    Ok(body)
 }
 
 // ── Response Handling ──
@@ -143,7 +89,7 @@ mod tests {
     use super::super::testing::{DEVICE_ID, api_key, test_config};
     use super::*;
     use crate::client::anthropic::local_testing::{COMPLETION_USAGE, completion_body};
-    use crate::client::anthropic::{CLAUDE_CLI_VERSION, SYSTEM_PROMPT_PREFIX};
+    use crate::client::anthropic::{SYSTEM_PROMPT_PREFIX, attribution_text};
     use crate::util::tls::testing::NoRoots;
 
     mod client {
@@ -421,180 +367,6 @@ mod tests {
                     );
                 }
             }
-
-            #[tokio::test]
-            async fn does_not_emit_context_management_edits() {
-                // `complete` omits agentic-only `context_management.edits`, even on known models.
-                let server = MockServer::start().await;
-                let sink: Captured<String> = captured();
-                let sink_clone = std::sync::Arc::clone(&sink);
-                Mock::given(method("POST"))
-                    .and(path("/v1/messages"))
-                    .respond_with(move |req: &Request| {
-                        *sink_clone.lock().unwrap() =
-                            Some(String::from_utf8_lossy(&req.body).into_owned());
-                        ResponseTemplate::new(200).set_body_string(completion_body("ok"))
-                    })
-                    .mount(&server)
-                    .await;
-
-                let client = test_client(server.uri(), api_key(), "claude-haiku-5-5");
-                _ = client
-                    .complete(&haiku(), "sys", "hi", 40, None, None)
-                    .await
-                    .unwrap();
-
-                let body = sink.lock().unwrap().clone().expect("body captured");
-                let v: serde_json::Value = serde_json::from_str(&body).unwrap();
-                assert!(
-                    v.get("context_management").is_none(),
-                    "context_management absent on one-shot path: {body}",
-                );
-            }
-        }
-    }
-
-    mod build_completion_body {
-        use super::*;
-
-        fn parse_body(body: &str) -> serde_json::Value {
-            serde_json::from_str(body).expect("serialized body must be valid JSON")
-        }
-
-        #[test]
-        fn omits_tools_thinking_and_output_config_by_default() {
-            let body = build_completion_body(
-                "claude-haiku-5-5",
-                "sys",
-                "hi",
-                40,
-                None,
-                build_metadata("did", "sid"),
-                OutputConfig::new(None, None),
-            )
-            .unwrap();
-            let v = parse_body(&body);
-            assert_eq!(v["model"], "claude-haiku-5-5");
-            assert_eq!(v["max_tokens"], 40);
-            assert_eq!(v["stream"], false);
-            assert!(v.get("tools").is_none(), "tools omitted: {v}");
-            assert!(v.get("thinking").is_none(), "thinking omitted: {v}");
-            assert!(
-                v.get("output_config").is_none(),
-                "output_config omitted: {v}"
-            );
-            assert_eq!(v["messages"][0]["role"], "user");
-            assert_eq!(v["messages"][0]["content"][0]["text"], "hi");
-        }
-
-        #[test]
-        fn attribution_prepends_attested_billing_block() {
-            let plain_body = build_completion_body(
-                "claude-haiku-5-5",
-                "sys-prompt",
-                "hi",
-                40,
-                None,
-                build_metadata("did", "sid"),
-                OutputConfig::new(None, None),
-            )
-            .unwrap();
-            let plain = parse_body(&plain_body);
-            let plain_system = plain["system"].as_array().unwrap();
-            assert_eq!(plain_system.len(), 2);
-            assert_eq!(plain_system[0]["text"], SYSTEM_PROMPT_PREFIX);
-            assert_eq!(plain_system[1]["text"], "sys-prompt");
-            assert!(!plain_body.contains("x-anthropic-billing-header:"));
-
-            let attributed_body = build_completion_body(
-                "claude-haiku-5-5",
-                "sys-prompt",
-                "Fix login",
-                40,
-                Some(&attribution_text("Fix login", true)),
-                build_metadata("did", "sid"),
-                OutputConfig::new(None, None),
-            )
-            .unwrap();
-            let attributed = parse_body(&attributed_body);
-            let attributed_system = attributed["system"].as_array().unwrap();
-            assert_eq!(attributed_system.len(), 3);
-            let first = attributed_system[0]["text"].as_str().unwrap();
-            assert!(first.starts_with("x-anthropic-billing-header:"));
-            assert!(first.contains(&format!("cc_version={CLAUDE_CLI_VERSION}")));
-            assert_eq!(attributed_system[1]["text"], SYSTEM_PROMPT_PREFIX);
-            assert_eq!(attributed_system[2]["text"], "sys-prompt");
-            assert!(!attributed_body.contains("cch=00000"));
-        }
-
-        #[test]
-        fn empty_system_keeps_identity_prefix_alone() {
-            // Non-Haiku OAuth requires the identity prefix in block 0 even with no caller system.
-            let body = build_completion_body(
-                "claude-haiku-5-5",
-                "",
-                "hi",
-                40,
-                None,
-                build_metadata("did", "sid"),
-                OutputConfig::new(None, None),
-            )
-            .unwrap();
-            let v = parse_body(&body);
-            let system = v["system"].as_array().unwrap();
-            assert_eq!(system.len(), 1);
-            assert_eq!(system[0]["text"], SYSTEM_PROMPT_PREFIX);
-        }
-
-        #[test]
-        fn with_effort_or_format_emits_output_config() {
-            let fmt = OutputFormat::json_schema(serde_json::json!({"type": "object"}));
-            for (effort, format, expected) in [
-                (
-                    Some(Effort::Low),
-                    None,
-                    serde_json::json!({"effort": "low"}),
-                ),
-                (
-                    None,
-                    Some(&fmt),
-                    serde_json::json!({"format": {"type": "json_schema", "schema": {"type": "object"}}}),
-                ),
-            ] {
-                let body = build_completion_body(
-                    "claude-haiku-5-5",
-                    "sys",
-                    "hi",
-                    40,
-                    None,
-                    build_metadata("did", "sid"),
-                    OutputConfig::new(format, effort),
-                )
-                .unwrap();
-                assert_eq!(parse_body(&body)["output_config"], expected);
-            }
-        }
-
-        #[test]
-        fn routes_device_and_session_ids_into_metadata() {
-            let body = build_completion_body(
-                "claude-haiku-5-5",
-                "",
-                "hi",
-                40,
-                None,
-                build_metadata("did-456", "sid-789"),
-                OutputConfig::new(None, None),
-            )
-            .unwrap();
-            assert!(
-                body.contains("sid-789"),
-                "session_id threads into metadata.user_id: {body}",
-            );
-            assert!(
-                body.contains("did-456"),
-                "device_id threads into metadata.user_id: {body}",
-            );
         }
     }
 
