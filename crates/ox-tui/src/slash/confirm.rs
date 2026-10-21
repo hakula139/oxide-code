@@ -15,7 +15,7 @@ use ox_core::util::text::truncate_to_width;
 use super::sessions::{CLEAR_THEN_DELETE_HINT, saved_error_message};
 use crate::glyphs::MODAL_ERROR_PREFIX;
 use crate::modal::chrome::{FOOTER_HEIGHT, Header, render_footer};
-use crate::modal::{Modal, ModalAction, ModalKey, is_plain_char};
+use crate::modal::{Modal, ModalAction, ModalKey};
 use crate::theme::Theme;
 
 // ── Constants ──
@@ -111,9 +111,9 @@ impl Modal for ConfirmDeleteSessionModal {
     fn handle_key(&mut self, event: &KeyEvent) -> ModalKey {
         // The modal stack handles Esc and Ctrl+C.
         match event.code {
-            KeyCode::Char('y' | 'Y') if is_plain_char(event) => self.confirm(),
+            KeyCode::Char('y' | 'Y') => self.confirm(),
             KeyCode::Enter if event.modifiers.is_empty() => self.confirm(),
-            KeyCode::Char('n' | 'N') if is_plain_char(event) => ModalKey::Cancelled,
+            KeyCode::Char('n' | 'N') => ModalKey::Cancelled,
             _ => ModalKey::Consumed,
         }
     }
@@ -130,6 +130,7 @@ mod tests {
     use ox_core::session::store::testing::{isolated_store, seed_test_session};
 
     use super::*;
+    use crate::modal::ModalStack;
     use crate::modal::testing::render_rows;
     use crate::slash::testing::stamped_id;
 
@@ -278,17 +279,17 @@ mod tests {
         #[test]
         fn modified_confirmation_keys_do_not_delete() {
             let (_dir, store) = isolated_store();
-            let mut modal = seed_modal(&store, 0xab, "Fix auth");
+            let modal = seed_modal(&store, 0xab, "Fix auth");
+
+            let mut stack = ModalStack::default();
+            stack.push(Box::new(modal));
 
             for event in [
                 KeyEvent::new(KeyCode::Char('y'), KeyModifiers::CONTROL),
                 KeyEvent::new(KeyCode::Enter, KeyModifiers::CONTROL),
                 KeyEvent::new(KeyCode::Enter, KeyModifiers::SHIFT),
             ] {
-                assert!(
-                    matches!(modal.handle_key(&event), ModalKey::Consumed),
-                    "{event:?}"
-                );
+                assert!(stack.handle_key(&event).is_none(), "{event:?}");
             }
 
             assert!(

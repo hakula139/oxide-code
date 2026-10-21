@@ -115,6 +115,12 @@ impl LineEditor {
         stops.char(stops.at_char(char)) == char
     }
 
+    /// Returns whether the editor takes `event`, a modified key: every one but a line break or an
+    /// indent, which the textarea maps to its own edits or ignores.
+    pub(crate) fn binds_modified_key(event: &KeyEvent) -> bool {
+        !is_blocked_key(event)
+    }
+
     /// Inserts pasted `text` at the cursor as one line, with each run of control characters such
     /// as a line break collapsed to a space. Keeps what fits under the cap and returns whether
     /// the text changed.

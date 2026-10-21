@@ -108,6 +108,10 @@ impl Modal for RenameModal {
     fn handle_paste(&mut self, text: &str) {
         self.editor.paste(text);
     }
+
+    fn binds_modified_key(&self, event: &KeyEvent) -> bool {
+        LineEditor::binds_modified_key(event)
+    }
 }
 
 #[cfg(test)]
@@ -119,6 +123,7 @@ mod tests {
     use ox_core::protocol::Op;
 
     use super::*;
+    use crate::modal::ModalStack;
     use crate::modal::testing::render_rows;
     use crate::slash::registry::testing::run_execute;
     use crate::slash::testing::test_session_info;
@@ -290,6 +295,20 @@ mod tests {
 
         mod handle_key {
             use super::*;
+
+            #[test]
+            fn ctrl_w_through_the_stack_deletes_the_last_word() {
+                let mut stack = ModalStack::default();
+                stack.push(Box::new(RenameModal::new(Some("Fix auth"))));
+
+                stack.handle_key(&KeyEvent::new(KeyCode::Char('w'), KeyModifiers::CONTROL));
+                let outcome = stack.handle_key(&KeyEvent::from(KeyCode::Enter));
+
+                let Some(ModalAction::Dispatch(Action::Op(Op::Rename { title }))) = outcome else {
+                    panic!("expected a rename, got {outcome:?}");
+                };
+                assert_eq!(title, "Fix");
+            }
 
             #[test]
             fn typing_appends_to_buffer_and_enter_submits_trimmed_title() {
