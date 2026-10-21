@@ -241,6 +241,10 @@ pub enum Event {
     /// An [`Op::Login`] stored a new oxide-code login. `auth` is the credential requests now use,
     /// which stays an env var or `client.api_key` when one outranks the login.
     SignedIn { auth: AuthSource },
+    /// A prompt or compaction in a session that a transient failure signed out
+    /// loaded the stored login, which requests now use as `auth`.
+    /// The prompt or compaction goes on.
+    LoginRestored { auth: AuthSource },
     /// An [`Op::Logout`] finished. `removed` reports whether an oxide-code login was stored, and
     /// `auth` is the credential requests now use, `None` when none is left. `fallback_error` says
     /// why a stored Claude Code login could not take over.
@@ -706,6 +710,7 @@ mod tests {
                 Event::ModeChanged(_) => "mode_changed",
                 Event::LoginStarted { .. } => "login_started",
                 Event::SignedIn { .. } => "signed_in",
+                Event::LoginRestored { .. } => "login_restored",
                 Event::SignedOut { .. } => "signed_out",
                 Event::Notice(_) => "notice",
                 Event::Error(_) => "error",
@@ -802,6 +807,9 @@ mod tests {
                 },
                 Event::SignedIn {
                     auth: AuthSource::OxLogin,
+                },
+                Event::LoginRestored {
+                    auth: AuthSource::ClaudeCodeLogin,
                 },
                 Event::SignedOut {
                     removed: true,
