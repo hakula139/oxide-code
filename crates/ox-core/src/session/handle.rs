@@ -12,6 +12,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use anyhow::{Result, bail};
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
+use uuid::Uuid;
 
 use super::actor::{self, SessionCmd};
 use super::entry::{CompactInfo, UsageRecord};
@@ -96,8 +97,18 @@ fn surface_once(surfaced: &AtomicBool) -> bool {
     !surfaced.swap(true, Ordering::AcqRel)
 }
 
+/// A point in the active branch that [`SessionHandle::rewind`] can move the tip back to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Checkpoint {
+    /// The message the next one chains from, `None` before the first.
+    pub(super) tip: Option<Uuid>,
+    pub(super) message_count: u32,
+}
+
 /// Ack from [`SessionHandle::record_message`].
 pub(crate) struct RecordOutcome {
+    /// The branch point the message chained from, `None` when the actor is gone.
+    pub(crate) checkpoint: Option<Checkpoint>,
     /// `Some` only on the first user-text message of a fresh session.
     pub(crate) ai_title_seed: Option<String>,
     /// A write failure, reported only the first time each kind of failure occurs.
@@ -148,9 +159,17 @@ impl SessionHandle {
         self.request(SessionCmd::Record { msg, context, ack }, rx)
             .await
             .unwrap_or_else(|| RecordOutcome {
+                checkpoint: None,
                 ai_title_seed: None,
                 failure: self.actor_gone_failure(),
             })
+    }
+
+    /// Moves the session's tip back to `checkpoint`, abandoning the messages recorded after it.
+    pub(crate) async fn rewind(&self, checkpoint: Checkpoint) -> Outcome {
+        let (ack, rx) = oneshot::channel();
+        self.dispatch_outcome(SessionCmd::Rewind { checkpoint, ack }, rx)
+            .await
     }
 
     /// Records sidecar metadata for a tool round in one cmd. Default-metadata items are skipped.
@@ -2055,6 +2074,10 @@ mod tests {
                 .await;
             record_tool_turns(&session).await;
             session.record_message(Message::assistant("Done.")).await;
+            let refused = session.record_message(Message::user("Delete f.rs")).await;
+            session
+                .rewind(refused.checkpoint.expect("the actor is running"))
+                .await;
             session
                 .record_usage(vec![usage("1h", 3), usage("1h", 4)])
                 .await;

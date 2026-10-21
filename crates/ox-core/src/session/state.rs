@@ -10,6 +10,7 @@ use uuid::Uuid;
 
 use super::display::fit_title;
 use super::entry::{CURRENT_VERSION, Entry, TitleSource};
+use super::handle::Checkpoint;
 use super::store::{SessionStore, SessionWriter, artifact_dir, encode_lines};
 use crate::file_tracker::FileSnapshot;
 use crate::message::{ContentBlock, Message, Role};
@@ -152,6 +153,24 @@ impl SessionState {
         self.message_count = self.message_count.saturating_add(1);
 
         (entries, ai_title_seed)
+    }
+
+    /// The branch point the next message chains from.
+    pub(super) fn checkpoint(&self) -> Checkpoint {
+        Checkpoint {
+            tip: self.last_message_uuid,
+            message_count: self.message_count,
+        }
+    }
+
+    /// Moves the chain anchor back to `checkpoint`, returning the entry that records the move.
+    pub(super) fn rewind_entry(&mut self, checkpoint: Checkpoint, now: OffsetDateTime) -> Entry {
+        self.last_message_uuid = checkpoint.tip;
+        self.message_count = checkpoint.message_count;
+        Entry::Rewind {
+            tip: checkpoint.tip,
+            timestamp: now,
+        }
     }
 
     /// Builds the compaction boundary and the synthetic post-compact root message.
@@ -457,6 +476,31 @@ mod tests {
             assert_eq!(entries.len(), 1);
             assert!(seed.is_none());
             assert!(!state.first_user_prompt_seen);
+        }
+    }
+
+    mod rewind_entry {
+        use super::*;
+
+        #[test]
+        fn chains_the_next_message_to_the_checkpoint_tip() {
+            let dir = tempfile::tempdir().unwrap();
+            let mut state = SessionState::fresh(test_store(dir.path()), "m", None);
+            let now = OffsetDateTime::now_utc();
+            _ = state.queue_message_entries(&Message::user("first"), now, false);
+            let checkpoint = state.checkpoint();
+            _ = state.queue_message_entries(&Message::user("refused"), now, false);
+
+            let entry = state.rewind_entry(checkpoint, now);
+            let (entries, _) = state.queue_message_entries(&Message::user("next"), now, false);
+
+            let first = checkpoint.tip.expect("the first message is the tip");
+            assert!(matches!(entry, Entry::Rewind { tip: Some(tip), .. } if tip == first));
+            assert!(matches!(
+                &entries[..],
+                [Entry::Message { parent_uuid: Some(parent), .. }] if *parent == first,
+            ));
+            assert_eq!(state.message_count, 2);
         }
     }
 

@@ -166,6 +166,15 @@ impl FileTracker {
             .collect()
     }
 
+    /// Replaces the tracked state with `snapshots`, as [`Self::snapshot_all`] took them, without
+    /// checking them against disk.
+    pub(crate) fn reset_to(&self, snapshots: Vec<FileSnapshot>) {
+        *self.lock() = snapshots
+            .into_iter()
+            .map(|FileSnapshot { path, state }| (path, state))
+            .collect();
+    }
+
     pub(crate) fn clear(&self) {
         self.lock().clear();
     }
@@ -730,6 +739,23 @@ mod tests {
         fn empty_tracker_is_empty() {
             let snaps = FileTracker::default().snapshot_all();
             assert_eq!(snaps, []);
+        }
+    }
+
+    mod reset_to {
+        use super::*;
+
+        #[test]
+        fn returns_to_the_snapshot_dropping_later_reads_and_changes() {
+            let tracker = FileTracker::default();
+            _ = tracker.record_read(Path::new("/tmp/a"), b"a", LastView::Full, "toolu_1");
+            let checkpoint = tracker.snapshot_all();
+            _ = tracker.record_read(Path::new("/tmp/a"), b"changed", LastView::Full, "toolu_2");
+            _ = tracker.record_read(Path::new("/tmp/b"), b"b", LastView::Full, "toolu_2");
+
+            tracker.reset_to(checkpoint.clone());
+
+            assert_eq!(tracker.snapshot_all(), checkpoint);
         }
     }
 

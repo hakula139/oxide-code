@@ -31,7 +31,7 @@ use crate::config::auth::{self, Auth, AuthSource};
 use crate::config::compaction::CompactionConfig;
 use crate::config::login::PendingLogin;
 use crate::config::oauth::{self, ClaudeCodeKeychain};
-use crate::file_tracker::FileTracker;
+use crate::file_tracker::{FileSnapshot, FileTracker};
 use crate::message::{ContentBlock, Message};
 use crate::model::{self, ModelSpec, TokenUsage};
 use crate::permission::{Mode, Policy, Workspace};
@@ -42,7 +42,7 @@ use crate::protocol::{
 };
 use crate::session::display::id_prefix;
 use crate::session::entry::{CompactInfo, UsageRecord};
-use crate::session::handle::{self, LoadedTranscript, RollIntoOutcome, SessionHandle};
+use crate::session::handle::{self, Checkpoint, LoadedTranscript, RollIntoOutcome, SessionHandle};
 use crate::session::history;
 use crate::session::resolver::resolve_saved_prefix;
 use crate::session::store::SessionStore;
@@ -302,7 +302,8 @@ impl Engine {
         self.finalize().await
     }
 
-    /// Runs `text` through auto-compaction and one agent turn, reporting how it ended on `sink`.
+    /// Runs `text` through auto-compaction and one agent turn, which a refusal rolls back, reporting
+    /// how it ended on `sink`.
     async fn submit_prompt<S>(
         &mut self,
         text: &str,
@@ -322,6 +323,7 @@ impl Engine {
             return report_abort(sink, abort, "auto-compact-failed");
         }
 
+        let start = self.turn_start();
         let mut user_msg = Message::user(text);
         let fresh = self.load_user_context(sink).await;
         if let Some(reminder) = self.prompt.catch_up(fresh) {
@@ -378,9 +380,14 @@ impl Engine {
         )
         .await;
         self.adopt_mode(&mut inbox);
-        self.account_usage(sink, &report).await;
-        if let Some(tasks) = report.tasks.take() {
-            self.tasks = tasks;
+        if let Err(TurnAbort::Refused(_)) = result {
+            self.roll_back(sink, start, outcome.checkpoint, &report)
+                .await;
+        } else {
+            self.account_usage(sink, &report).await;
+            if let Some(tasks) = report.tasks.take() {
+                self.tasks = tasks;
+            }
         }
         match result {
             Ok(()) => {
@@ -389,6 +396,43 @@ impl Engine {
             }
             Err(abort) => report_abort(sink, abort, "turn-failed"),
         }
+    }
+
+    /// What [`Self::roll_back`] returns to if the model refuses the turn about to start.
+    fn turn_start(&self) -> TurnStart {
+        TurnStart {
+            message_count: self.messages.len(),
+            seen: self.prompt.seen.clone(),
+            prompt_unrecorded: self.prompt_unrecorded,
+            files: self.file_tracker.snapshot_all(),
+        }
+    }
+
+    /// Returns to `start` after the model refused the turn `report` describes, since the API keeps
+    /// refusing while the refused turn stays in the conversation. Moves the session's tip back to
+    /// `checkpoint`, the branch point of the turn's prompt, and resends the task list when the turn
+    /// changed it. Bills the turn's requests but keeps the context usage from before it, since the
+    /// transcript they measured is gone.
+    async fn roll_back(
+        &mut self,
+        sink: &dyn EventSink,
+        start: TurnStart,
+        checkpoint: Option<Checkpoint>,
+        report: &TurnReport,
+    ) {
+        self.bill(sink, &report.billable_rounds).await;
+        self.messages.truncate(start.message_count);
+        self.prompt.seen = start.seen;
+        self.prompt_unrecorded = start.prompt_unrecorded;
+        self.file_tracker.reset_to(start.files);
+        if let Some(checkpoint) = checkpoint {
+            let outcome = self.session.rewind(checkpoint).await;
+            sink.session_write_error(outcome.failure.as_deref());
+        }
+        if report.tasks.is_some() {
+            sink.emit(Event::TasksUpdated(self.tasks.clone()), "tasks-rolled-back");
+        }
+        self.emit_usage_update(sink);
     }
 
     async fn auto_compact(
@@ -873,6 +917,15 @@ impl Engine {
     }
 }
 
+/// The engine state before a turn's prompt: the transcript length, what the model had seen of the
+/// user context and whether the prompt context awaits recording, and the tracked files.
+struct TurnStart {
+    message_count: usize,
+    seen: UserContext,
+    prompt_unrecorded: bool,
+    files: Vec<FileSnapshot>,
+}
+
 /// Replays the prompt a session recorded, or builds a fresh one for a session without one. Also
 /// returns the warnings about instruction files a fresh build could not read.
 async fn session_prompt(
@@ -941,6 +994,10 @@ fn report_abort(sink: &dyn EventSink, abort: TurnAbort, label: &'static str) -> 
             TurnEnd::Cancelled
         }
         TurnAbort::Shutdown => TurnEnd::Shutdown,
+        TurnAbort::Refused(notice) => {
+            sink.emit(Event::TurnFailed(notice), label);
+            TurnEnd::Failed
+        }
         TurnAbort::Failed(e) => {
             sink.emit(Event::TurnFailed(format!("{e:#}")), label);
             TurnEnd::Failed
@@ -1042,6 +1099,7 @@ mod tests {
     use crate::tool::bash::background::local_testing::start_shell;
     use crate::tool::bash::background::testing::shell;
     use crate::tool::local_testing::{canonical_tempdir, ctx};
+    use crate::tool::read::ReadTool;
     use crate::tool::tasks::TasksTool;
     use crate::tool::tasks::testing::plan;
     use crate::util::git::local_testing::init_fixture_repo;
@@ -2686,6 +2744,78 @@ mod tests {
 
                 assert_eq!(end, TurnEnd::Failed);
                 assert_eq!(engine.tasks, plan());
+            })
+            .await;
+        }
+
+        #[tokio::test]
+        async fn rolls_back_a_refused_turn_so_the_next_prompt_is_sent_without_it() {
+            with_pinned_home(async {
+                let server = MockServer::start().await;
+                let dir = canonical_tempdir();
+                let notes = dir.path().join("notes.txt");
+                std::fs::write(&notes, "notes").unwrap();
+                let tasks = serde_json::json!({ "tasks": plan() }).to_string();
+                let read = serde_json::json!({ "file_path": notes }).to_string();
+                mount_tool_call_once(&server, "call-1", "tasks", &tasks).await;
+                mount_tool_call_once(&server, "call-2", "read", &read).await;
+                Mock::given(method("POST"))
+                    .and(path("/v1/messages"))
+                    .respond_with(sse_response(sse_body(&[
+                        serde_json::json!({"type": "message_start", "message": {"id": "msg_1", "model": MODEL, "usage": {"input_tokens": 1_000, "output_tokens": 0}}}),
+                        serde_json::json!({"type": "message_delta", "delta": {"stop_reason": "refusal"}, "usage": {"output_tokens": 1}}),
+                        serde_json::json!({"type": "message_stop"}),
+                    ])))
+                    .up_to_n_times(1)
+                    .mount(&server)
+                    .await;
+                mount_reply(&server, "reply").await;
+                let store = test_store(dir.path());
+                let mut engine = engine(server.uri(), &store, dir.path())
+                    .await
+                    .with_tools(ToolRegistry::new(vec![
+                        Box::new(TasksTool),
+                        Box::new(ReadTool),
+                    ]));
+                let sink = CapturingSink::default();
+                let mut ops = inert_ops();
+
+                let refused = engine.submit_prompt("refused prompt", &sink, &mut ops).await;
+                let refused_events = sink.events();
+                let tracked_after_refusal = engine.file_tracker.snapshot_all();
+                let rephrased = engine.submit_prompt("rephrased", &sink, &mut ops).await;
+
+                assert_eq!(refused, TurnEnd::Failed);
+                let [.., rolled_back, Event::UsageUpdated(usage), failed] = &refused_events[..] else {
+                    panic!("{refused_events:?}");
+                };
+                assert_eq!(*rolled_back, Event::TasksUpdated(Vec::new()));
+                assert_eq!(usage.context_tokens, None, "the context usage stays as it was before the turn");
+                assert_eq!(
+                    *failed,
+                    Event::TurnFailed(
+                        "The model declined this request. \
+                         The request was removed from the conversation, \
+                         so rephrase it to try again."
+                            .to_owned()
+                    ),
+                );
+                assert_eq!(tracked_after_refusal, []);
+                assert_eq!(rephrased, TurnEnd::Completed);
+                assert_eq!(engine.tasks, []);
+                let turns = request_bodies(&server).await;
+                assert_eq!(turns.len(), 4);
+                assert_eq!(texts(&turns[3]), [SESSION_CONTEXT, "rephrased"]);
+
+                let id = engine.session.session_id().to_owned();
+                let expected = engine.prompt.session_context();
+                engine.finalize().await;
+                let data = store.load_session_data(&id).unwrap();
+                assert_eq!(
+                    data.messages,
+                    [Message::user("rephrased"), Message::assistant("reply")],
+                );
+                assert_eq!(data.context, Some(expected));
             })
             .await;
         }

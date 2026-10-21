@@ -35,11 +35,13 @@ pub(crate) fn acks_then_drops(session_id: &str, succeed: usize) -> SessionHandle
             match cmd {
                 SessionCmd::Record { ack, .. } => {
                     _ = ack.send(RecordOutcome {
+                        checkpoint: None,
                         ai_title_seed: None,
                         failure: None,
                     });
                 }
-                SessionCmd::ToolMetadata { ack, .. }
+                SessionCmd::Rewind { ack, .. }
+                | SessionCmd::ToolMetadata { ack, .. }
                 | SessionCmd::Usage { ack, .. }
                 | SessionCmd::AppendAiTitle { ack, .. }
                 | SessionCmd::SetManualTitle { ack, .. }

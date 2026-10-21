@@ -24,9 +24,11 @@ expression: write_every_entry(dir.path()).await
 {"type":"tool_result_metadata","tool_use_id":"t3","metadata":{"title":"Found 250 matches","truncated_total":250},"timestamp":"<TS-17>"}
 {"type":"tool_result_metadata","tool_use_id":"t4","metadata":{"truncated_bytes":4096},"timestamp":"<TS-17>"}
 {"type":"message","uuid":"<UUID-12>","parent_uuid":"<UUID-11>","message":{"role":"assistant","content":[{"type":"text","text":"Done."}]},"timestamp":"<TS-18>"}
-{"type":"usage","uuid":"<UUID-13>","model":"claude-sonnet-5-5","cache_ttl":"1h","input_tokens":3,"cache_creation_input_tokens":30,"cache_read_input_tokens":300,"output_tokens":3000,"timestamp":"<TS-19>"}
-{"type":"usage","uuid":"<UUID-14>","model":"claude-sonnet-5-5","cache_ttl":"1h","input_tokens":4,"cache_creation_input_tokens":40,"cache_read_input_tokens":400,"output_tokens":4000,"timestamp":"<TS-19>"}
-{"type":"archive","archived":true,"at":"<TS-20>"}
+{"type":"message","uuid":"<UUID-13>","parent_uuid":"<UUID-12>","message":{"role":"user","content":[{"type":"text","text":"Delete f.rs"}]},"timestamp":"<TS-19>"}
+{"type":"rewind","tip":"<UUID-12>","timestamp":"<TS-20>"}
+{"type":"usage","uuid":"<UUID-14>","model":"claude-sonnet-5-5","cache_ttl":"1h","input_tokens":3,"cache_creation_input_tokens":30,"cache_read_input_tokens":300,"output_tokens":3000,"timestamp":"<TS-21>"}
+{"type":"usage","uuid":"<UUID-15>","model":"claude-sonnet-5-5","cache_ttl":"1h","input_tokens":4,"cache_creation_input_tokens":40,"cache_read_input_tokens":400,"output_tokens":4000,"timestamp":"<TS-21>"}
+{"type":"archive","archived":true,"at":"<TS-22>"}
 {"type":"file_snapshot","path":"/repo/f.rs","content_hash":42,"last_view":{"kind":"full"},"recorded_at":"<TS-1>","tool_use_id":"t1"}
 {"type":"file_snapshot","path":"/repo/g.rs","content_hash":43,"last_view":{"kind":"partial","ranges":[[1,20]],"total_lines":40},"recorded_at":"<TS-2>","tool_use_id":"t2"}
-{"type":"summary","message_count":7,"updated_at":"<TS-21>"}
+{"type":"summary","message_count":7,"updated_at":"<TS-23>"}
