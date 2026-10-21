@@ -2,13 +2,14 @@
 //! because `EnterAlternateScreen` swaps only stdout, so stderr output would paint over the frame.
 
 use std::fs::{self, File};
-use std::io::{self, Write};
+use std::io::{self, IsTerminal, Write};
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 use tracing_appender::non_blocking::{NonBlocking, WorkerGuard};
 use tracing_subscriber::EnvFilter;
 
+use crate::util::env;
 use crate::util::fs::{create_private_dir_all, open_private_append};
 use crate::util::path::{XdgBase, app_dir};
 
@@ -35,6 +36,8 @@ pub fn init_tracing(tui_mode: bool) -> Result<Option<WorkerGuard>> {
         tracing_subscriber::fmt()
             .with_env_filter(filter)
             .with_writer(io::stderr)
+            // `with_ansi` overrides the subscriber's own `NO_COLOR` check.
+            .with_ansi(io::stderr().is_terminal() && env::string("NO_COLOR").is_none())
             .init();
         Ok(None)
     }

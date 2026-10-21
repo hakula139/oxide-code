@@ -136,6 +136,8 @@ pub struct Engine {
     /// Whether `prompt` changed since the session last recorded it, so the next user message
     /// records it.
     prompt_unrecorded: bool,
+    /// The config's startup notices, which [`Self::spawn`] shows once.
+    startup_notices: Vec<String>,
     /// Warnings about the instruction files the latest user context load could not read.
     instruction_warnings: Vec<String>,
     file_tracker: Arc<FileTracker>,
@@ -213,6 +215,7 @@ impl Engine {
             tasks,
             prompt,
             prompt_unrecorded,
+            startup_notices: config.notices(),
             instruction_warnings,
             file_tracker,
             shells,
@@ -251,13 +254,17 @@ impl Engine {
         )
     }
 
-    /// Starts the engine task, which first emits what [`Self::emit_session_start`] shows. `drifted`
-    /// lists the tracked files that changed on disk since the resumed session read them.
+    /// Starts the engine task, which first emits the config's startup notices, then what
+    /// [`Self::emit_session_start`] shows. `drifted` lists the tracked files that changed on disk
+    /// since the resumed session read them.
     pub fn spawn(mut self, drifted: &[PathBuf]) -> EngineHandle {
         let (ops, op_rx) = mpsc::channel(OP_CHANNEL_CAP);
         // Unbounded, so the engine never waits on or drops events for a frontend that falls behind.
         let (sink, events) = mpsc::unbounded_channel();
         self.shells.attach(Arc::new(sink.clone()));
+        for notice in std::mem::take(&mut self.startup_notices) {
+            sink.emit(Event::Notice(notice), "startup-notice");
+        }
         self.emit_session_start(&sink, drifted);
         let task = EngineTask(tokio::spawn(self.run(sink, op_rx)));
         EngineHandle { ops, events, task }
@@ -1074,12 +1081,11 @@ mod tests {
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
     use super::local_testing::{
-        EchoTool, inert_ops, mount_stalled_reply_once, service_log, system_prompt,
-        tool_heavy_transcript, until_requested,
+        EchoTool, inert_ops, service_log, system_prompt, tool_heavy_transcript,
     };
     use super::testing::{
-        MODEL, SESSION_CONTEXT, engine, mount_reply, mount_tool_call_once, panic_message,
-        request_bodies, with_pinned_home,
+        MODEL, SESSION_CONTEXT, engine, mount_reply, mount_stalled_reply_once,
+        mount_tool_call_once, panic_message, request_bodies, until_requested, with_pinned_home,
     };
     use super::*;
     use crate::client::anthropic::local_testing::{COMPLETION_USAGE, client_for, completion_body};
@@ -1540,6 +1546,8 @@ mod tests {
                 config.compaction = CompactionConfig::with_threshold_for_test(50_000);
                 config.permission.set_mode(Mode::Plan);
                 config.workspace = Workspace::new(dir.path());
+                config.signed_out_notice =
+                    Some("Not signed in. Run `/login` to sign in.".to_owned());
 
                 let engine = Engine::new(
                     &config,
@@ -1560,6 +1568,10 @@ mod tests {
                 assert_eq!(engine.max_tool_rounds, Some(3));
                 assert_eq!(engine.compaction, config.compaction);
                 assert_eq!(engine.policy.mode(), Mode::Plan);
+                assert_eq!(
+                    engine.startup_notices,
+                    ["Not signed in. Run `/login` to sign in."],
+                );
                 assert_eq!(engine.client.session_id(), session.session_id());
             })
             .await;
@@ -1624,12 +1636,13 @@ mod tests {
         use super::*;
 
         #[tokio::test]
-        async fn reports_the_resumed_cost_tasks_warnings_drift_and_an_interrupted_transcript() {
+        async fn reports_the_startup_notices_resumed_cost_tasks_warnings_drift_and_interruption() {
             with_pinned_home(async {
                 let server = MockServer::start().await;
                 let dir = tempfile::tempdir().unwrap();
                 let warning = write_unreadable_instructions(dir.path());
                 let mut engine = engine(server.uri(), &test_store(dir.path()), dir.path()).await;
+                engine.startup_notices = vec!["Not signed in. Run `/login` to sign in.".to_owned()];
                 engine.messages = vec![
                     Message::user("hi"),
                     Message {
@@ -1644,6 +1657,7 @@ mod tests {
                 engine.tasks = plan();
 
                 let mut handle = engine.spawn(&[PathBuf::from("a.rs")]);
+                let notice = handle.events.recv().await.unwrap();
                 let cost = handle.events.recv().await.unwrap();
                 let tasks = handle.events.recv().await.unwrap();
                 let instructions = handle.events.recv().await.unwrap();
@@ -1651,6 +1665,10 @@ mod tests {
                 let interrupted = handle.events.recv().await.unwrap();
                 let failure = handle.shutdown().await.unwrap();
 
+                assert_eq!(
+                    notice,
+                    Event::Notice("Not signed in. Run `/login` to sign in.".to_owned()),
+                );
                 assert!(
                     matches!(
                         &cost,

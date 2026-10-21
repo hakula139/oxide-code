@@ -59,8 +59,8 @@ pub struct Startup {
 }
 
 /// Runs the TUI until the user quits or `shutdown` resolves, then waits for the engine to finalize
-/// the live session. Shows the notices of `theme` after the config notices. Returns what
-/// `shutdown` resolved to, or `None` when the user quit. An engine panic is returned after the
+/// the live session. Shows the notices of `theme` in the chat. Returns what `shutdown` resolved
+/// to, or `None` when the user quit. An engine panic is returned after the
 /// terminal is restored, which prints the deferred panic report.
 pub async fn run<S: Debug>(
     mut engine: Engine,
@@ -73,7 +73,6 @@ pub async fn run<S: Debug>(
     terminal::install_panic_hook();
 
     let cwd = engine.cwd();
-    let notices = config.notices();
     let session_info = LiveSessionInfo {
         cwd: tildify(cwd),
         working_dir: Some(cwd.to_owned()),
@@ -107,7 +106,7 @@ pub async fn run<S: Debug>(
             unarchived: startup.unarchived,
         },
     );
-    for notice in notices.into_iter().chain(theme_notices) {
+    for notice in theme_notices {
         app.push_system_message(notice);
     }
     if let Some(picker) = startup.picker {
