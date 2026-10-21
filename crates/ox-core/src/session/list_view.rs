@@ -69,16 +69,11 @@ fn render_sessions(
     } else {
         Vec::new()
     };
-    let project_col_width = if all {
-        projects
-            .iter()
-            .map(|project| project.width())
-            .max()
-            .unwrap_or(0)
-            .clamp(PROJECT_COL_MIN, PROJECT_COL_MAX)
-    } else {
-        0
-    };
+    let project_col_width = projects
+        .iter()
+        .map(|project| project.width())
+        .max()
+        .map_or(0, |widest| widest.clamp(PROJECT_COL_MIN, PROJECT_COL_MAX));
 
     let prefix_width = FIXED_PREFIX_WIDTH + if all { project_col_width + 1 } else { 0 };
     let title_budget = term_width.and_then(|w| {
@@ -118,8 +113,8 @@ fn render_sessions(
             None => raw_title,
         };
         let mut row = format!("{id:<ID_COL$} {last_active:<LAST_ACTIVE_COL$} {msgs:<MSGS_COL$} ");
-        if all {
-            _ = write!(row, "{} ", pad_to_width(&projects[i], project_col_width));
+        if let Some(project) = projects.get(i) {
+            _ = write!(row, "{} ", pad_to_width(project, project_col_width));
         }
         writeln!(out, "{row}{title}").context("write list row")?;
     }
@@ -393,6 +388,7 @@ mod tests {
             wide.cwd = "/work/项目代码".to_owned();
             let mut ascii = session("bbbbbbbbbbbb", datetime!(2026-04-18 09:05:00 UTC));
             ascii.cwd = "/work/abcdefghij".to_owned();
+            let widest = ascii.cwd.width();
 
             let out = render_to_string(&[wide, ascii], true);
 
@@ -403,7 +399,22 @@ mod tests {
                     line[..start.expect("every line has a title cell")].width()
                 })
                 .collect();
-            assert_eq!(title_cols, [FIXED_PREFIX_WIDTH + 17; 3], "{out}");
+            assert_eq!(title_cols, [FIXED_PREFIX_WIDTH + widest + 1; 3], "{out}");
+        }
+
+        #[test]
+        fn project_col_width_respects_minimum() {
+            let mut s = session("cccccccccccc", datetime!(2026-04-18 09:00:00 UTC));
+            s.cwd = "/a".to_owned();
+
+            let out = render_to_string(&[s], true);
+
+            let mut lines = out.lines();
+            let header = lines.next().unwrap();
+            let row = lines.next().unwrap();
+            let title_col = FIXED_PREFIX_WIDTH + PROJECT_COL_MIN + 1;
+            assert_eq!(header.find("Title"), Some(title_col), "{header:?}");
+            assert_eq!(row.find("(untitled)"), Some(title_col), "{row:?}");
         }
 
         #[test]
@@ -414,6 +425,7 @@ mod tests {
                 .collect();
             let mut s = session("cccccccccccc", datetime!(2026-04-18 09:00:00 UTC));
             s.cwd = long_cwd.clone();
+
             let out = render_to_string(&[s], true);
 
             let mut lines = out.lines();

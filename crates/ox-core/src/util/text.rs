@@ -86,20 +86,6 @@ pub fn center_truncate_to_width(s: &str, max_width: usize) -> String {
     format!("{head}{ELLIPSIS}{tail}")
 }
 
-/// `s` followed by spaces up to `width` display columns, unchanged when already that wide.
-pub fn pad_to_width(s: &str, width: usize) -> String {
-    format!("{s}{}", fill(s, width))
-}
-
-/// `s` preceded by spaces up to `width` display columns, unchanged when already that wide.
-pub fn pad_start_to_width(s: &str, width: usize) -> String {
-    format!("{}{s}", fill(s, width))
-}
-
-fn fill(s: &str, width: usize) -> String {
-    " ".repeat(width.saturating_sub(s.width()))
-}
-
 /// The longest prefix of `s` that fits `budget` display columns, cut between grapheme clusters.
 pub fn take_head(s: &str, budget: usize) -> String {
     let mut used = 0;
@@ -123,6 +109,20 @@ fn take_tail(s: &str, budget: usize) -> String {
         .map(str::len)
         .sum();
     s[s.len() - len..].to_owned()
+}
+
+/// `s` followed by spaces up to `width` display columns, unchanged when at least that wide.
+pub fn pad_to_width(s: &str, width: usize) -> String {
+    format!("{s}{}", fill(s, width))
+}
+
+/// `s` preceded by spaces up to `width` display columns, unchanged when at least that wide.
+pub fn pad_start_to_width(s: &str, width: usize) -> String {
+    format!("{}{s}", fill(s, width))
+}
+
+fn fill(s: &str, width: usize) -> String {
+    " ".repeat(width.saturating_sub(s.width()))
 }
 
 /// Returns whether a terminal paints `c` as no visible cell: a control or zero-width character.
@@ -150,23 +150,19 @@ pub fn escape_controls(text: &str) -> String {
 /// `text` with every control character escaped by [`char::escape_default`], tabs and line breaks
 /// included, so it prints on one row of a table and cannot change the terminal's state.
 pub fn escape_line(text: &str) -> String {
-    let mut out = String::with_capacity(text.len());
-    for c in text.chars() {
-        if c.is_control() {
-            out.extend(c.escape_default());
-        } else {
-            out.push(c);
-        }
-    }
-    out
+    escape_where(text, char::is_control)
 }
 
 /// `text` with each [hidden](is_hidden) character other than a tab escaped by
 /// [`char::escape_default`], line breaks included, so no part of it can hide from a reader.
 pub fn escape_hidden(text: &str) -> String {
+    escape_where(text, |c| c != '\t' && is_hidden(c))
+}
+
+fn escape_where(text: &str, escape: impl Fn(char) -> bool) -> String {
     let mut out = String::with_capacity(text.len());
     for c in text.chars() {
-        if c != '\t' && is_hidden(c) {
+        if escape(c) {
             out.extend(c.escape_default());
         } else {
             out.push(c);

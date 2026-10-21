@@ -513,6 +513,12 @@ mod tests {
                     title: format!("{}...", "a".repeat(MAX_TITLE_WIDTH - 3)),
                 }),
             );
+            assert_eq!(
+                rename("Fix auth flow\nDetails below"),
+                Ok(Op::Rename {
+                    title: "Fix auth flow".to_owned(),
+                }),
+            );
         }
     }
 

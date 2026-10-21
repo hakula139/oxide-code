@@ -28,7 +28,7 @@ use ox_core::session::store::SessionStore;
 use ox_core::session::store::listing::{ListScope, SessionWalk};
 use ox_core::util::path::tildify;
 use ox_core::util::text::{
-    center_truncate_to_width, compact_count, pad_start_to_width, pad_to_width, plural,
+    center_truncate_to_width, compact_count, escape_line, pad_start_to_width, pad_to_width, plural,
     truncate_to_width,
 };
 use ox_core::util::time::local_offset;
@@ -169,8 +169,8 @@ fn fixed_width(columns: &[Column]) -> usize {
 
 impl SessionRow {
     fn from_info(info: SessionInfo, local_offset: UtcOffset, show_project: bool) -> Self {
-        let title = display_title(&info);
-        let project_path = tildify(Path::new(&info.cwd));
+        let title = escape_line(&display_title(&info));
+        let project_path = escape_line(&tildify(Path::new(&info.cwd)));
         // The project is searchable only when shown, since every scoped row shares it.
         let haystack = if show_project {
             format!("{} {} {}", info.session_id, title, project_path)

@@ -212,7 +212,6 @@ mod tests {
     use crate::config::auth::{Auth, AuthSource};
     use crate::message::Message;
     use crate::protocol::testing::CapturingSink;
-    use crate::session::display::MAX_TITLE_WIDTH;
     use crate::session::handle::testing::dead;
     use crate::session::store::testing::test_store;
 
@@ -583,13 +582,13 @@ mod tests {
 
         #[test]
         fn keeps_one_line_of_at_most_max_title_width() {
-            let long = "word ".repeat(30);
-            let raw = serde_json::json!({ "title": format!("\n{long}\nsecond line") }).to_string();
+            let envelope = |title: String| serde_json::json!({ "title": title }).to_string();
 
-            let out = parse_title(&raw).unwrap();
+            let short = parse_title(&envelope("\nFix auth flow\nDetails below".to_owned()));
+            let long = parse_title(&envelope("word ".repeat(30)));
 
-            assert_eq!(out, fit_title(&long));
-            assert_eq!(out.width(), MAX_TITLE_WIDTH);
+            assert_eq!(short.unwrap(), "Fix auth flow");
+            assert_eq!(long.unwrap(), format!("{}wo...", "word ".repeat(15)));
         }
 
         #[test]
