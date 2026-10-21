@@ -91,6 +91,9 @@ impl ResponseAccumulator {
             BlockAccumulator::Text(text) if !text.is_empty() => {
                 Some(ResponseEvent::Text(text.clone()))
             }
+            BlockAccumulator::Thinking { thinking, .. } if !thinking.is_empty() => {
+                Some(ResponseEvent::Thinking(thinking.clone()))
+            }
             BlockAccumulator::ToolUse { .. } => {
                 let thinking = self.blocks.iter().map(BlockAccumulator::thinking_text);
                 progress_note(thinking).map(|note| ResponseEvent::Progress(note.to_owned()))
@@ -187,13 +190,11 @@ impl BlockAccumulator {
             },
             ContentBlockInfo::RedactedThinking { data } => Self::RedactedThinking { data },
             ContentBlockInfo::McpToolResult {} => {
-                warn!("skipping MCP connector result at index {index}");
+                warn!(index, "skipping MCP connector result");
                 Self::Skipped
             }
             ContentBlockInfo::Unknown { r#type: kind } => {
-                warn!(
-                    "skipping unknown or malformed content block of type {kind} at index {index}"
-                );
+                warn!(index, %kind, "skipping unknown or malformed content block");
                 Self::Skipped
             }
         }
@@ -314,19 +315,15 @@ impl BlockAccumulator {
 /// Returns an empty object and the parse error on failure. An empty buffer is a call that
 /// streamed no input, which reads as `{}`.
 fn parse_tool_json(json_buf: &str) -> (serde_json::Value, Option<String>) {
-    if json_buf.is_empty() {
-        return (serde_json::Value::Object(serde_json::Map::new()), None);
-    }
-    match serde_json::from_str(json_buf) {
-        Ok(value) => (value, None),
+    let error = match serde_json::from_str(json_buf) {
+        Ok(value) => return (value, None),
+        Err(_) if json_buf.is_empty() => None,
         Err(e) => {
-            warn!("malformed tool input JSON: {e}");
-            (
-                serde_json::Value::Object(serde_json::Map::new()),
-                Some(e.to_string()),
-            )
+            warn!(error = %e, "malformed tool input JSON");
+            Some(e.to_string())
         }
-    }
+    };
+    (serde_json::Value::Object(serde_json::Map::new()), error)
 }
 
 #[cfg(test)]
@@ -438,16 +435,21 @@ mod tests {
         }
 
         #[test]
-        fn streams_text_from_block_starts_and_deltas() {
+        fn streams_text_and_thinking_from_block_starts_and_deltas() {
             let mut reply = ResponseAccumulator::new(MODEL);
 
             let forwarded = fold(
                 &mut reply,
                 vec![
-                    block_start(0, &json!({"type": "text", "text": "Hello "})),
-                    block_delta(0, &json!({"type": "text_delta", "text": "there"})),
-                    block_start(1, &json!({"type": "text", "text": ""})),
-                    block_delta(1, &json!({"type": "text_delta", "text": "!"})),
+                    block_start(
+                        0,
+                        &json!({"type": "thinking", "thinking": "Let me ", "signature": "sig"}),
+                    ),
+                    block_delta(0, &json!({"type": "thinking_delta", "thinking": "think"})),
+                    block_start(1, &json!({"type": "text", "text": "Hello "})),
+                    block_delta(1, &json!({"type": "text_delta", "text": "there"})),
+                    block_start(2, &json!({"type": "text", "text": ""})),
+                    block_delta(2, &json!({"type": "text_delta", "text": "!"})),
                     json!({"type": "message_stop"}),
                 ],
             );
@@ -455,11 +457,17 @@ mod tests {
             assert_eq!(
                 forwarded,
                 [
+                    ResponseEvent::Thinking("Let me ".to_owned()),
+                    ResponseEvent::Thinking("think".to_owned()),
                     ResponseEvent::Text("Hello ".to_owned()),
                     ResponseEvent::Text("there".to_owned()),
                     ResponseEvent::Text("!".to_owned()),
                     ResponseEvent::Completed(Response {
                         content: vec![
+                            ContentBlock::Thinking {
+                                thinking: "Let me think".to_owned(),
+                                replay: Replay::with_model(MODEL, "sig"),
+                            },
                             ContentBlock::Text {
                                 text: "Hello there".to_owned(),
                             },

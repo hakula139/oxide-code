@@ -4,6 +4,8 @@ use anyhow::{Result, bail};
 use sha2::{Digest, Sha256};
 use xxhash_rust::xxh64;
 
+// ── Constants ──
+
 /// Claude Code's salt for the `cc_version` fingerprint.
 const FINGERPRINT_SALT: &str = "59cf53e54c78";
 const FINGERPRINT_INDICES: [usize; 3] = [4, 7, 20];
@@ -11,7 +13,7 @@ const FINGERPRINT_INDICES: [usize; 3] = [4, 7, 20];
 const CCH_SEED: u64 = 0x6E52_736A_C806_831E;
 const CCH_PLACEHOLDER: &str = "cch=00000";
 
-// ── Public API ──
+// ── Attestation ──
 
 /// 3-char hex suffix for `cc_version`: first 3 hex of `SHA-256(salt + chars_at_indices + version)`.
 /// Indices count UTF-16 code units, as Claude Code's JavaScript string indexing does.

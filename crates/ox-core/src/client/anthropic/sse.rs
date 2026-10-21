@@ -1,5 +1,7 @@
 //! SSE streaming pump and frame parser for the Anthropic Messages API.
 
+use std::borrow::Cow;
+
 use anyhow::{Context, Result, anyhow, bail};
 use futures::StreamExt;
 use tokio::sync::mpsc;
@@ -200,7 +202,7 @@ impl FrameDecoder {
 /// no `data:` line (comments, heartbeats). Per the SSE spec, multiple `data:` lines concatenate
 /// with `\n`. Both `data: payload` and `data:payload` (no leading space) are accepted because some
 /// gateways drop the space.
-pub(super) fn parse_sse_frame(frame: &str) -> Result<Option<StreamEvent>> {
+fn parse_sse_frame(frame: &str) -> Result<Option<StreamEvent>> {
     let mut data_lines: Vec<&str> = Vec::new();
 
     for line in frame.lines() {
@@ -212,10 +214,10 @@ pub(super) fn parse_sse_frame(frame: &str) -> Result<Option<StreamEvent>> {
         }
     }
 
-    let data: std::borrow::Cow<'_, str> = match data_lines.as_slice() {
+    let data: Cow<'_, str> = match data_lines.as_slice() {
         [] => return Ok(None),
-        [one] => std::borrow::Cow::Borrowed(*one),
-        _ => std::borrow::Cow::Owned(data_lines.join("\n")),
+        [one] => Cow::Borrowed(*one),
+        _ => Cow::Owned(data_lines.join("\n")),
     };
 
     let event: StreamEvent =

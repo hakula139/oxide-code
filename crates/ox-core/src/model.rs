@@ -8,7 +8,7 @@
 mod pricing;
 mod usage;
 
-use std::fmt::Write;
+use std::fmt::Write as _;
 
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 

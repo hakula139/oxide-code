@@ -24,6 +24,7 @@ use std::time::Duration;
 
 use anyhow::{Context, Result};
 use reqwest::header::{CONTENT_TYPE, HeaderMap, HeaderValue, USER_AGENT};
+use serde::Serialize;
 use tokio::sync::mpsc;
 use tokio_util::task::TaskTracker;
 use tracing::debug;
@@ -38,7 +39,6 @@ use crate::model::ModelSpec;
 use crate::prompt::SystemPrompt;
 use crate::tool::ToolDefinition;
 use crate::util::tls::Trust;
-
 use betas::{compute_betas, conversation_cache_control, static_prefix_cache_control};
 use sse::forward_sse;
 use transport::{MessagesRequest, messages_url};
@@ -61,6 +61,10 @@ const STAINLESS_TIMEOUT_SECS: &str = "600";
 /// Required as its own text block because non-Haiku OAuth requests 429 without it.
 const SYSTEM_PROMPT_PREFIX: &str = "You are Claude Code, Anthropic's official CLI for Claude.";
 
+/// Events a stream may queue ahead of its consumer. The SSE pump waits while the queue is full,
+/// but drops a retry notice so the retry never waits on the consumer.
+const STREAM_BUFFER: usize = 64;
+
 // ── Client ──
 
 /// Shareable HTTP client for the Anthropic Messages API, holding the endpoint and what each
@@ -70,17 +74,20 @@ const SYSTEM_PROMPT_PREFIX: &str = "You are Claude Code, Anthropic's official CL
 #[derive(Clone)]
 pub(crate) struct Client {
     http: reqwest::Client,
-    model: ModelSpec,
-    /// `None` for models outside the catalog.
-    effort: Option<Effort>,
-    /// `None` while signed out.
-    auth: Option<Auth>,
     /// The `/v1/messages` endpoint under the configured base URL.
     messages_url: String,
+    /// Whether the client talks to the Anthropic API, which alone gets `scope: "global"` and
+    /// `cch`, as in Claude Code.
+    is_first_party: bool,
+    gateway: GatewayCompat,
+    /// `None` while signed out.
+    auth: Option<Auth>,
     trust: Arc<dyn Trust>,
     /// Stored-login reloads that outlive their requests, which the session waits for at exit.
     reloads: TaskTracker,
-    gateway: GatewayCompat,
+    model: ModelSpec,
+    /// `None` for models outside the catalog.
+    effort: Option<Effort>,
     /// User-set output cap. `None` defers to [`ModelSpec::resolve_max_tokens`].
     max_tokens: Option<u32>,
     prompt_cache_ttl: PromptCacheTtl,
@@ -88,9 +95,6 @@ pub(crate) struct Client {
     show_thinking: bool,
     session_id: String,
     device_id: String,
-    /// Whether the client talks to the Anthropic API, which alone gets `scope: "global"` and
-    /// `cch`, as in Claude Code.
-    is_first_party: bool,
 }
 
 impl Client {
@@ -103,11 +107,11 @@ impl Client {
         device_id: String,
     ) -> Result<Self> {
         let Config {
-            model,
-            effort,
-            auth,
             base_url,
             gateway,
+            auth,
+            model,
+            effort,
             max_tokens,
             prompt_cache_ttl,
             show_thinking,
@@ -115,19 +119,19 @@ impl Client {
         } = config;
         Ok(Self {
             http: build_http(gateway, &trust)?,
-            model: model.clone(),
-            effort: *effort,
-            auth: auth.clone(),
             messages_url: messages_url(base_url),
+            is_first_party: is_first_party_base_url(base_url),
+            gateway: gateway.clone(),
+            auth: auth.clone(),
             trust: Arc::new(trust),
             reloads: TaskTracker::new(),
-            gateway: gateway.clone(),
+            model: model.clone(),
+            effort: *effort,
             max_tokens: *max_tokens,
             prompt_cache_ttl: *prompt_cache_ttl,
             show_thinking: *show_thinking,
             session_id: session_id.unwrap_or_else(|| Uuid::new_v4().to_string()),
             device_id,
-            is_first_party: is_first_party_base_url(base_url),
         })
     }
 
@@ -238,7 +242,7 @@ impl Client {
             },
         })?;
 
-        let (tx, rx) = mpsc::channel(64);
+        let (tx, rx) = mpsc::channel(STREAM_BUFFER);
         let http = self.http.clone();
         tokio::spawn(forward_sse(http, request, self.model.id().to_owned(), tx));
         Ok(rx)
@@ -328,6 +332,33 @@ fn build_http(gateway: &GatewayCompat, trust: &dyn Trust) -> Result<reqwest::Cli
         .apply(builder)?
         .build()
         .context("failed to build HTTP client")
+}
+
+// ── Platform Normalization ──
+
+/// Maps `std::env::consts::OS` to the Stainless SDK's `normalizePlatform` names.
+fn normalize_platform(os: &str) -> &'static str {
+    match os {
+        "macos" => "MacOS",
+        "linux" => "Linux",
+        "windows" => "Windows",
+        "freebsd" => "FreeBSD",
+        "openbsd" => "OpenBSD",
+        "ios" => "iOS",
+        "android" => "Android",
+        _ => "Unknown",
+    }
+}
+
+/// Maps `std::env::consts::ARCH` to the Stainless SDK's `normalizeArch` names.
+fn normalize_arch(arch: &str) -> &'static str {
+    match arch {
+        "x86" => "x32",
+        "x86_64" => "x64",
+        "arm" => "arm",
+        "aarch64" => "arm64",
+        _ => "unknown",
+    }
 }
 
 // ── Request Building ──
@@ -428,7 +459,7 @@ fn first_user_text(messages: &[Message]) -> &str {
 /// Some relay gateways admit a request without the billing block only when `user_id` holds a
 /// JSON object with `session_id`.
 fn build_metadata(device_id: &str, session_id: &str) -> RequestMetadata {
-    #[derive(serde::Serialize)]
+    #[derive(Serialize)]
     struct UserId<'a> {
         device_id: &'a str,
         account_uuid: &'a str,
@@ -440,7 +471,7 @@ fn build_metadata(device_id: &str, session_id: &str) -> RequestMetadata {
         account_uuid: "",
         session_id,
     })
-    .expect("UserId fields are owned `str`s with no serialization failure modes");
+    .expect("UserId has only string fields, which always serialize");
     RequestMetadata { user_id }
 }
 
@@ -453,53 +484,23 @@ fn build_system_blocks<'a>(
     let mut blocks = Vec::with_capacity(2 + extras.len());
     if let Some(text) = attribution {
         blocks.push(SystemBlock {
-            r#type: "text",
             text,
             cache_control: None,
         });
     }
     blocks.push(SystemBlock {
-        r#type: "text",
         text: SYSTEM_PROMPT_PREFIX,
         cache_control: None,
     });
     for &(text, cache_control) in extras {
         if !text.is_empty() {
             blocks.push(SystemBlock {
-                r#type: "text",
                 text,
                 cache_control,
             });
         }
     }
     blocks
-}
-
-// ── Platform Normalization ──
-
-/// Maps `std::env::consts::OS` to the Stainless SDK's `normalizePlatform` names.
-fn normalize_platform(os: &str) -> &'static str {
-    match os {
-        "macos" => "MacOS",
-        "linux" => "Linux",
-        "windows" => "Windows",
-        "freebsd" => "FreeBSD",
-        "openbsd" => "OpenBSD",
-        "ios" => "iOS",
-        "android" => "Android",
-        _ => "Unknown",
-    }
-}
-
-/// Maps `std::env::consts::ARCH` to the Stainless SDK's `normalizeArch` names.
-fn normalize_arch(arch: &str) -> &'static str {
-    match arch {
-        "x86" => "x32",
-        "x86_64" => "x64",
-        "arm" => "arm",
-        "aarch64" => "arm64",
-        _ => "unknown",
-    }
 }
 
 #[cfg(test)]
@@ -1418,7 +1419,7 @@ mod tests {
 
                 assert_eq!(
                     format!("{err:#}"),
-                    "API error (invalid_request_error): Bad block"
+                    "Anthropic API error (invalid_request_error): Bad block"
                 );
                 assert_eq!(
                     server.received_requests().await.unwrap().len(),
@@ -1767,6 +1768,43 @@ mod tests {
         }
     }
 
+    mod normalize_platform {
+        use super::*;
+
+        #[test]
+        fn maps_known_and_falls_back_to_unknown() {
+            for (input, expected) in [
+                ("macos", "MacOS"),
+                ("linux", "Linux"),
+                ("windows", "Windows"),
+                ("freebsd", "FreeBSD"),
+                ("openbsd", "OpenBSD"),
+                ("ios", "iOS"),
+                ("android", "Android"),
+                ("haiku", "Unknown"),
+            ] {
+                assert_eq!(normalize_platform(input), expected, "input={input}");
+            }
+        }
+    }
+
+    mod normalize_arch {
+        use super::*;
+
+        #[test]
+        fn maps_known_and_falls_back_to_unknown() {
+            for (input, expected) in [
+                ("x86", "x32"),
+                ("x86_64", "x64"),
+                ("arm", "arm"),
+                ("aarch64", "arm64"),
+                ("riscv64gc", "unknown"),
+            ] {
+                assert_eq!(normalize_arch(input), expected, "input={input}");
+            }
+        }
+    }
+
     mod first_user_text {
         use super::*;
 
@@ -1813,7 +1851,6 @@ mod tests {
         #[test]
         fn orders_billing_then_identity_then_extras() {
             let cache = CacheControl {
-                r#type: "ephemeral",
                 scope: Some("global"),
                 ttl: Some("1h"),
             };
@@ -1849,43 +1886,6 @@ mod tests {
                     {"type": "text", "text": "only-content"},
                 ]),
             );
-        }
-    }
-
-    mod normalize_platform {
-        use super::*;
-
-        #[test]
-        fn maps_known_and_falls_back_to_unknown() {
-            for (input, expected) in [
-                ("macos", "MacOS"),
-                ("linux", "Linux"),
-                ("windows", "Windows"),
-                ("freebsd", "FreeBSD"),
-                ("openbsd", "OpenBSD"),
-                ("ios", "iOS"),
-                ("android", "Android"),
-                ("haiku", "Unknown"),
-            ] {
-                assert_eq!(normalize_platform(input), expected, "input={input}");
-            }
-        }
-    }
-
-    mod normalize_arch {
-        use super::*;
-
-        #[test]
-        fn maps_known_and_falls_back_to_unknown() {
-            for (input, expected) in [
-                ("x86", "x32"),
-                ("x86_64", "x64"),
-                ("arm", "arm"),
-                ("aarch64", "arm64"),
-                ("riscv64gc", "unknown"),
-            ] {
-                assert_eq!(normalize_arch(input), expected, "input={input}");
-            }
         }
     }
 }

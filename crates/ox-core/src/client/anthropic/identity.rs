@@ -74,7 +74,7 @@ fn generate() -> String {
     getrandom::fill(&mut bytes).expect("the OS random source is readable");
     let mut id = String::with_capacity(ID_LEN);
     for byte in bytes {
-        write!(&mut id, "{byte:02x}").expect("writing to a String never fails");
+        _ = write!(&mut id, "{byte:02x}");
     }
     id
 }

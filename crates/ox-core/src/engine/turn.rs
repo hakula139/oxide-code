@@ -432,7 +432,6 @@ pub(super) async fn collect_response(
 
 #[cfg(test)]
 mod tests {
-    use std::future::Future;
     use std::path::Path;
     use std::pin::Pin;
     use std::sync::Arc;

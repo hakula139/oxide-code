@@ -394,9 +394,15 @@ mod tests {
                 let (stdout, stderr) = printed(printer);
                 let result = result_data(&stdout);
                 assert_eq!(result["stop_reason"], "failed");
-                assert_eq!(result["error"], "API error (HTTP 400 Bad Request)");
+                assert_eq!(
+                    result["error"],
+                    "Anthropic API error (HTTP 400 Bad Request)"
+                );
                 assert_eq!(result["message"], serde_json::Value::Null);
-                assert_eq!(stderr, "Error: API error (HTTP 400 Bad Request)\n");
+                assert_eq!(
+                    stderr,
+                    "Error: Anthropic API error (HTTP 400 Bad Request)\n"
+                );
             })
             .await;
         }
