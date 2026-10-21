@@ -72,15 +72,7 @@ impl SlashCommand for ThemeCmd {
 /// an edit to `config.toml`, so file paths are rejected.
 fn resolve_theme_arg(arg: &str) -> Result<&'static BuiltinTheme, String> {
     builtin::find(&arg.to_ascii_lowercase())
-        .ok_or_else(|| format!("Unknown theme: `{arg}`. Valid: {}.", valid_names()))
-}
-
-fn valid_names() -> String {
-    BUILT_IN
-        .iter()
-        .map(|theme| theme.name)
-        .collect::<Vec<_>>()
-        .join(", ")
+        .ok_or_else(|| format!("Unknown theme: `{arg}`. Valid: {}.", builtin::names()))
 }
 
 // ── PickerItem ──

@@ -169,6 +169,10 @@ impl InputArea {
             prompt_area,
         );
 
+        // A textarea drawn with no rows scrolls one past its cursor, which has no cell to sit in.
+        if textarea_area.is_empty() {
+            return;
+        }
         frame.render_widget(&self.textarea, textarea_area);
         if self.rendered_width.replace(textarea_area.width) != textarea_area.width {
             self.visual_lines.set(None);
@@ -817,6 +821,20 @@ mod tests {
 
     mod render {
         use super::*;
+
+        #[test]
+        fn paints_nothing_into_a_zero_height_area() {
+            let mut input = test_input();
+            type_text(&mut input, "draft");
+            let mut terminal = Terminal::new(TestBackend::new(10, 2)).unwrap();
+
+            terminal
+                .draw(|frame| input.render(frame, Rect::new(0, 0, 10, 0)))
+                .unwrap();
+
+            let buffer = terminal.backend().buffer();
+            assert!(buffer.content.iter().all(|cell| cell.symbol() == " "));
+        }
 
         #[test]
         fn empty_buffer_shows_only_prompt_marker_and_borders() {

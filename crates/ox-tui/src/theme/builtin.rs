@@ -13,8 +13,8 @@ pub(crate) struct BuiltinTheme {
 }
 
 impl BuiltinTheme {
-    /// Parses the vendored palette. Panics if it fails to parse, which `parse_theme::all_builtins`
-    /// rules out.
+    /// Parses the vendored palette. Panics on a parse failure, which the loader test
+    /// `parse_theme::parses_every_builtin` rules out.
     pub(crate) fn load(&self) -> Theme {
         loader::parse_theme(self.body).expect("vendored builtin theme TOML must parse")
     }
@@ -52,6 +52,15 @@ pub(crate) const BUILT_IN: &[BuiltinTheme] = &[
 
 pub(crate) fn find(name: &str) -> Option<&'static BuiltinTheme> {
     BUILT_IN.iter().find(|theme| theme.name == name)
+}
+
+/// The built-in names in [`BUILT_IN`] order, joined with commas for messages.
+pub(crate) fn names() -> String {
+    BUILT_IN
+        .iter()
+        .map(|theme| theme.name)
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 #[cfg(test)]

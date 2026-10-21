@@ -11,7 +11,7 @@ use tracing::warn;
 use uuid::Uuid;
 
 use super::entry::{Entry, TitleSource, UsageRecord};
-use super::handle::{CompactOutcome, Outcome, RecordOutcome, SharedState};
+use super::handle::{Checkpoint, CompactOutcome, Outcome, RecordOutcome, SharedState};
 use super::state::SessionState;
 use crate::file_tracker::FileSnapshot;
 use crate::message::Message;
@@ -26,6 +26,11 @@ pub(super) enum SessionCmd {
         /// Written ahead of `msg`, so prompt state only lands alongside the message carrying it.
         context: Option<SessionContext>,
         ack: oneshot::Sender<RecordOutcome>,
+    },
+    /// Moves the chain anchor back to `checkpoint` and records the move.
+    Rewind {
+        checkpoint: Checkpoint,
+        ack: oneshot::Sender<Outcome>,
     },
     /// Tool-result sidecars from one agent turn.
     ToolMetadata {
@@ -74,6 +79,7 @@ pub(super) enum SessionCmd {
 enum PendingAck {
     Record {
         ack: oneshot::Sender<RecordOutcome>,
+        checkpoint: Checkpoint,
         ai_title_seed: Option<String>,
     },
     Outcome(oneshot::Sender<Outcome>),
@@ -140,16 +146,13 @@ impl Batch {
         let now = OffsetDateTime::now_utc();
         match cmd {
             SessionCmd::Record { msg, context, ack } => {
-                let (msg_entries, ai_title_seed) =
-                    state.queue_message_entries(&msg, now, shared.manual_title_set());
-                if let Some(context) = context {
-                    self.entries.push(Entry::Context {
-                        context: Box::new(context),
-                        timestamp: now,
-                    });
-                }
-                self.entries.extend(msg_entries);
-                self.acks.push(PendingAck::Record { ack, ai_title_seed });
+                let manual_title_set = shared.manual_title_set();
+                self.absorb_record(&msg, context, ack, state, manual_title_set, now);
+                BatchFlow::Continue
+            }
+            SessionCmd::Rewind { checkpoint, ack } => {
+                self.entries.push(state.rewind_entry(checkpoint, now));
+                self.acks.push(PendingAck::Outcome(ack));
                 BatchFlow::Continue
             }
             SessionCmd::ToolMetadata { items, ack } => {
@@ -234,6 +237,32 @@ impl Batch {
         }
     }
 
+    /// Queues `msg` behind the prompt `context` it is the first to carry, if any.
+    fn absorb_record(
+        &mut self,
+        msg: &Message,
+        context: Option<SessionContext>,
+        ack: oneshot::Sender<RecordOutcome>,
+        state: &mut SessionState,
+        manual_title_set: bool,
+        now: OffsetDateTime,
+    ) {
+        let checkpoint = state.checkpoint();
+        let (msg_entries, ai_title_seed) = state.queue_message_entries(msg, now, manual_title_set);
+        if let Some(context) = context {
+            self.entries.push(Entry::Context {
+                context: Box::new(context),
+                timestamp: now,
+            });
+        }
+        self.entries.extend(msg_entries);
+        self.acks.push(PendingAck::Record {
+            ack,
+            checkpoint,
+            ai_title_seed,
+        });
+    }
+
     /// Queues one sidecar per item, skipping default metadata since it adds no display fields.
     /// Acks at once when nothing needs a flush.
     fn absorb_tool_metadata(
@@ -273,8 +302,13 @@ fn settle_acks(
     let stopped = state.persistence_stopped();
     for pending in acks {
         match pending {
-            PendingAck::Record { ack, ai_title_seed } => {
+            PendingAck::Record {
+                ack,
+                checkpoint,
+                ai_title_seed,
+            } => {
                 _ = ack.send(RecordOutcome {
+                    checkpoint: Some(checkpoint),
                     ai_title_seed,
                     failure: surface_failure(failure, stopped, shared),
                 });

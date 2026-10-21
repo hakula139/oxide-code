@@ -456,6 +456,7 @@ mod tests {
     use ratatui::style::Color;
     use tokio::sync::mpsc::error::TryRecvError;
 
+    use ox_core::config::provenance::Source;
     use ox_core::config::{Effort, ThemeConfig};
     use ox_core::model::ResolvedModelId;
     use ox_core::permission::defaults::Shipped;
@@ -488,6 +489,7 @@ mod tests {
     fn red_text_overrides() -> ThemeOverrides {
         let config = ThemeConfig {
             base: "mocha".to_owned(),
+            base_source: Source::Default,
             overrides: r##"text = "#ff0000""##.parse().unwrap(),
         };
         resolve_theme(&config).unwrap().overrides

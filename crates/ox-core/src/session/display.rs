@@ -14,8 +14,8 @@ pub const UNTITLED_MARKER: &str = "(untitled)";
 /// Widest [`format_short_relative_time`] output, an ISO date.
 pub const SHORT_RELATIVE_TIME_WIDTH: usize = "2026-01-01".len();
 
-/// Column cap on first-prompt and manual titles, leaving room in a 120-column `--list` row after
-/// the fixed `ID / Last Active / Msgs` prefix.
+/// Column cap on every title, leaving room in a 120-column `--list` row after the fixed
+/// `ID / Last Active / Msgs` prefix.
 pub const MAX_TITLE_WIDTH: usize = 80;
 
 /// First [`ID_PREFIX_WIDTH`] bytes of `session_id`, or the full ID when shorter.

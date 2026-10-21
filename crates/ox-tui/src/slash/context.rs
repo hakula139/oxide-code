@@ -72,7 +72,6 @@ pub(crate) mod testing {
             background_shells: Vec::new(),
             config: ConfigSnapshot {
                 auth: Some(AuthSource::ApiKeyEnv),
-                signed_out_notice: None,
                 base_url: "https://api.test.invalid".to_owned(),
                 extra_ca_certs: None,
                 gateway: GatewaySnapshot {

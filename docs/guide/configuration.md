@@ -5,7 +5,7 @@ oxide-code loads configuration from multiple sources, merged in order of increas
 1. **Built-in defaults.**
 2. **User config file**: `~/.config/ox/config.toml` (or `$XDG_CONFIG_HOME/ox/config.toml`).
 3. **User drop-ins**: `*.toml` files in `~/.config/ox/config.d/` (or `$XDG_CONFIG_HOME/ox/config.d/`), in file-name order.
-4. **Project config file**: `.ox/config.toml` in the nearest directory at or above the current one that has one.
+4. **Project config file**: `.ox/config.toml` in the nearest directory from the working directory up to the project root that has one. The project root is the nearest directory at or above the working directory that holds a `.git` directory or file, or the working directory outside a repository.
 5. **Environment variables**: always win.
 
 Run `/config` to see each resolved value next to the layer that set it: `default`, `user`, `config.d/<name>`, `project`, an environment variable such as `$ANTHROPIC_MODEL`, `--mode` for the permission mode set by that flag, or `session` after a `/model`, `/effort`, or `/mode` change or a **Shift+Tab** mode switch.
@@ -28,7 +28,9 @@ Drop-ins share the `config.toml` schema and count as user config. An invalid dro
 
 ### Project Config
 
-A project file comes from the checkout, so it cannot set `client.api_key`, `client.base_url`, `client.extra_ca_certs`, or any `[permission]` key other than `deny` and `ask`. Setting one fails the config load. This keeps a repository from redirecting your credentials or widening what runs without asking.
+A project file comes from the checkout, so it cannot set `client.api_key`, `client.base_url`, `client.extra_ca_certs`, or any `[permission]` key other than `deny` and `ask`. Setting one fails the config load. This keeps a repository from redirecting your credentials or widening what runs without asking. A project file may set `tui.theme.base` only to a built-in theme name, and the TUI refuses to start when it names a file. A TOML error in a project file gives only its line, column, and key, since the parser's message can quote a value.
+
+The project file must also resolve inside the project root. A `.ox/config.toml` that resolves outside it, through a symlinked file or `.ox` directory, fails the config load with an error that names only the link. A link to a file inside the repository, such as a config shared across a monorepo, still works, unless the project root is your home directory or one of its ancestors, as with a dotfiles repository at `~`. There, a project file reached through any symlink fails the load.
 
 ## Config File
 
@@ -193,10 +195,10 @@ When the row is too narrow to fit every configured segment, low-utility ones dro
 
 ### `[tui.theme]`: Terminal Theme
 
-| Key         | Type   | Default   | Description                                      |
-| ----------- | ------ | --------- | ------------------------------------------------ |
-| `base`      | string | `"mocha"` | Built-in theme name or filesystem path to a TOML |
-| `overrides` | table  | -         | Per-slot patches applied on top of the base      |
+| Key         | Type   | Default   | Description                                                   |
+| ----------- | ------ | --------- | ------------------------------------------------------------- |
+| `base`      | string | `"mocha"` | Built-in theme name, or a TOML theme file path in user config |
+| `overrides` | table  | -         | Per-slot patches applied on top of the base                   |
 
 ```toml
 [tui.theme]
@@ -256,11 +258,11 @@ Deny wins over ask, and ask wins over allow, the working-directory allow, and se
 
 An `exec` pattern is one command, matched word by word after quotes are removed and `$'...'` escapes are decoded. A `*` standing alone as a word is the only wildcard. In an allow pattern, it matches exactly one word before the end of the pattern, or any number of words at the end, so `cargo test *` covers `cargo test` and `cargo test --all`, and `git * --force` covers `git push --force` but misses `git push origin --force`. Quote a word to match it as written, as in `'*'`. A glob inside a word, as in `mkfs*`, fails to load, so write a pattern for each command it should cover, such as `mkfs.ext4 *`.
 
-A pattern matches one simple command after wrappers such as `env`, `nice`, and `timeout` and redirections are set aside, so `cargo test *` covers `nice cargo test 2>&1`. A wrapper spelled with a directory, such as `./nice`, may be any program, so it stays part of the command. A leading `VAR=value` assignment is set aside too when it only changes output, as `RUST_LOG`, `LANG`, and `NO_COLOR` do. Any other assignment stays part of the command, so `CARGO_TARGET_DIR=/tmp cargo test` needs a pattern that names it.
+A pattern matches one simple command after wrappers such as `env`, `nice`, and `timeout` and redirections are set aside, so `cargo test *` covers `nice cargo test 2>&1`. A wrapper that changes who runs the command or which arguments it gets, which `sudo`, `doas`, `pkexec`, `busybox`, and `xargs` do, stays part of the command for allow patterns, so `rm *` does not allow `sudo rm x`. A wrapper spelled with a directory, such as `./nice`, may be any program, so it stays part of the command as well. A leading `VAR=value` assignment is set aside too when it only changes output, as `RUST_LOG`, `LANG`, and `NO_COLOR` do. Any other assignment stays part of the command, so `CARGO_TARGET_DIR=/tmp cargo test` needs a pattern that names it.
 
-A command chained with `;`, `&&`, `||`, or `|` is allowed only when every part is, and writing a file with `>` also needs that file to be inside the working directory or an extra root, or allowed by an `edit` pattern. A deny or ask pattern matches when any part matches, including a quoted, full-path, or differently cased command name such as `/bin/rm` or `RM`. Its words after the first need only appear in order, with any words between them, so `ask.exec = ["git push *"]` also asks for `git -c a=b push`. A word that expands or globs, such as `$X`, `${X:-push}`, or `pu*`, matches any word of a deny or ask pattern, since it may become that word when the command runs. A command that hides what it runs, such as `$(...)`, `eval`, or `sh -c`, is never allowed by a pattern, so it asks in `manual` unless a deny pattern matches. Read-only commands such as `ls`, `cat`, `grep`, `find` without `-exec` or `-delete`, and `sed` without `-i` run without asking.
+A command chained with `;`, `&&`, `||`, or `|` is allowed only when every part is, and writing a file with `>` also needs that file to be inside the working directory or an extra root, or allowed by an `edit` pattern. A deny or ask pattern matches when any part matches, including a quoted, full-path, or differently cased command name such as `/bin/rm` or `RM`, and the command a wrapper runs, so `deny.exec = ["rm *"]` denies `sudo rm x`, `xargs rm`, and `find . -exec rm {} +` in every mode. Its words after the first need only appear in order, with any words between them, so `ask.exec = ["git push *"]` also asks for `git -c a=b push`. A word that expands or globs, such as `$X`, `${X:-push}`, or `pu*`, matches any word of a deny or ask pattern, since it may become that word when the command runs. A command that hides what it runs, such as `$(...)`, `eval`, or `sh -c`, is never allowed by a pattern, so it asks in `manual` unless a deny pattern matches. Deny and ask patterns see inside the wrappers above, `find -exec` and its variants, and a literal `sh -c` or `eval` script, but not inside other programs that run a command, such as `watch`, `fd -x`, `make`, or `python3 -c`. In `yolo`, such a command runs unless a pattern names the runner itself. Read-only commands such as `ls`, `cat`, `grep`, `find` without `-exec` or `-delete`, and `sed` without `-i` run without asking.
 
-`read` patterns reach a `bash` command in two places. A file read through `<` faces them like a read tool's file, so `deny.read = ["/**/.env"]` denies `sort < .env`. A file reader (`cat`, `find`, `grep`, `head`, `ls`, `sed`, `tail`, or `wc`) asks when a deny or ask `read` pattern matches one of its file arguments or a file one of its globs matches when the call is checked, so `cat ~/.ss*/id_rsa` asks even under `allow.exec = ["cat *"]`. An argument that expands a variable, as in `cat $F`, may name any file, so it asks whenever a deny or ask `read` pattern exists, and the built-in `ssh` rule is one. Any other program can open whatever files it likes once it runs, so an `exec` allow pattern such as `python3 *` can run its command on files the `read` patterns hold. Deny such commands with an `exec` pattern too.
+`read` patterns reach a `bash` command in two places. A file read through `<` faces them like a read tool's file, so `deny.read = ["/**/.env"]` denies `sort < .env`. A file reader (`cat`, `find`, `grep`, `head`, `ls`, `sed`, `tail`, or `wc`) asks when a deny or ask `read` pattern matches one of its file arguments or a file one of its globs matches when the call is checked, so `cat ~/.ss*/id_rsa` asks even under `allow.exec = ["cat *"]`. An argument that expands a variable, as in `cat $F`, may name any file, as may the input words of `xargs cat` and the paths of `find . -exec cat {} +`, so it asks whenever a deny or ask `read` pattern exists, and the built-in `ssh` rule is one. Any other program can open whatever files it likes once it runs, so an `exec` allow pattern such as `python3 *` can run its command on files the `read` patterns hold. Deny such commands with an `exec` pattern too.
 
 #### Path Patterns
 
@@ -276,19 +278,20 @@ A `net` pattern is a host glob such as `*.example.com`, and an `mcp` pattern is 
 
 oxide-code ships the rules below. The ones that ask about edits protect their paths: such an edit asks even when an allow pattern, the working-directory allow, or `yolo` would run it. Protected file names match the way deny patterns do, ignoring case, Unicode normalization, invisible characters, and trailing dots, and a symlinked protected name in the launch directory or an extra root protects its target as well.
 
-| Name          | Rule                                                                                                                                              |
-| ------------- | ------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `git`         | Edits to `.git`, `.githooks`, and `.husky` at any depth, to `.gitconfig` and `.gitmodules` anywhere, and to `~/.config/git/config` ask            |
-| `direnv`      | Edits to `.envrc` anywhere ask                                                                                                                    |
-| `editors`     | Edits to `.vscode`, `.idea`, and `.devcontainer` at any depth ask                                                                                 |
-| `cargo`       | Edits to `.cargo/config`, `.cargo/config.toml`, `rust-toolchain`, and `rust-toolchain.toml` ask                                                   |
-| `shell`       | Edits to shell startup files such as `.bashrc` and `.zshrc` ask                                                                                   |
-| `agents`      | Edits to `.codex` at any depth, `.claude/settings.json`, `.claude/settings.local.json`, and `.claude/hooks` ask                                   |
-| `ox`          | Edits to `.ox` at any depth and oxide-code's own config, data, and state directories ask                                                          |
-| `devices`     | Edits under `/dev` ask on Unix, as does a `bash` redirection to any device there except `/dev/null`, `/dev/stdout`, `/dev/stderr`, and `/dev/tty` |
-| `rm`          | An `rm` with both its recursive and force options asks in any spelling, such as `rm -rf x`, `rm -r --force x`, and `rm x -Rf`                     |
-| `ssh`         | Reads of `~/.ssh` and everything in it are denied, and edits to `~/.ssh/config` and `~/.ssh/authorized_keys` ask                                  |
-| `credentials` | Reads of oxide-code's `credentials.json` and Claude Code's `~/.claude/.credentials.json` are denied                                               |
+| Name          | Rule                                                                                                                                                                                     |
+| ------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `git`         | Edits to `.git`, `.githooks`, and `.husky` at any depth, to `.gitconfig` and `.gitmodules` anywhere, and to the XDG git directory, such as `~/.config/git`, and `~/.git-credentials` ask |
+| `direnv`      | Edits to `.envrc` anywhere ask                                                                                                                                                           |
+| `editors`     | Edits to `.vscode`, `.idea`, and `.devcontainer` at any depth ask                                                                                                                        |
+| `cargo`       | Edits to `.cargo/config`, `.cargo/config.toml`, `rust-toolchain`, and `rust-toolchain.toml` ask                                                                                          |
+| `shell`       | Edits to shell startup and logout files such as `.bashrc`, `.zshrc`, and `.bash_logout`, and to fish's `config.fish`, `conf.d`, and `functions`, ask                                     |
+| `agents`      | Edits to `.codex` at any depth, `.claude/settings.json`, `.claude/settings.local.json`, `.claude/hooks`, `.claude.json`, and `.mcp.json` ask                                             |
+| `ox`          | Edits to `.ox` at any depth and oxide-code's own config, data, and state directories ask                                                                                                 |
+| `devices`     | Edits under `/dev` ask on Unix, as does a `bash` redirection to any device there except `/dev/null`, `/dev/stdout`, `/dev/stderr`, and `/dev/tty`                                        |
+| `rm`          | An `rm` with both its recursive and force options asks in any spelling, such as `rm -rf x`, `rm -r --force x`, `rm x -Rf`, and `sudo rm -rf x`                                           |
+| `ssh`         | Reads of `~/.ssh` and everything in it are denied, and edits to anything in it ask                                                                                                       |
+| `cloud`       | Edits to `~/.aws`, `~/.azure`, `~/.config/gcloud`, `~/.docker`, and `~/.kube` ask                                                                                                        |
+| `credentials` | Reads of oxide-code's `credentials.json`, Claude Code's `~/.claude/.credentials.json`, and git's `~/.git-credentials` and `~/.config/git/credentials` are denied                         |
 
 Built-in rules sit in the deny and ask tiers, so an allow pattern cannot override one. To turn one off, set its name to `false` under `[permission.defaults]` in user config. A later layer can set it back to `true`.
 

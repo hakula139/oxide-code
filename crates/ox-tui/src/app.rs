@@ -79,16 +79,31 @@ pub(crate) struct App {
     /// Prompt already painted for the in-flight turn, kept as typed. Replayed if auto-compaction
     /// clears chat, and handed back if auto-compaction fails before the prompt is sent.
     active_prompt: Option<String>,
-    /// Whether an automatic compaction runs ahead of the active prompt, so a failure means the
-    /// engine never sent it.
-    auto_compacting: bool,
+    /// What a failure of the active prompt hands back to the user.
+    hand_back: HandBack,
     /// FIFO of prompts submitted mid-turn, kept as typed so Esc restores a `//` escape. Each stays
     /// with the TUI until the engine confirms it with `PromptDrained` or it starts its own turn.
     pending_prompts: VecDeque<String>,
     /// How many leading `pending_prompts` the in-flight turn already holds.
     forwarded_prompts: usize,
+    /// Queued prompts the in-flight turn took in, kept as typed so a rolled-back turn hands them
+    /// back.
+    drained_prompts: Vec<String>,
     should_quit: bool,
     dirty: bool,
+}
+
+/// What a failure of the active prompt hands back to the user.
+#[derive(Clone, Copy, Default)]
+enum HandBack {
+    /// Nothing, since the prompt ran and the queue goes on.
+    #[default]
+    Nothing,
+    /// The prompt, since an automatic compaction runs ahead of it and a failure means the engine
+    /// never sent it.
+    UnsentPrompt,
+    /// The prompt and the queued prompts its turn took in, since the engine rolled the turn back.
+    RolledBackTurn,
 }
 
 /// Outcome of the last copy, shown over the chat until `until`.
@@ -165,9 +180,10 @@ impl App {
             copy_notice: None,
             slash_tasks: JoinSet::new(),
             active_prompt: None,
-            auto_compacting: false,
+            hand_back: HandBack::Nothing,
             pending_prompts: VecDeque::new(),
             forwarded_prompts: 0,
+            drained_prompts: Vec::new(),
             should_quit: false,
             dirty: true,
         }

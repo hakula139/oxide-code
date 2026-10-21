@@ -68,7 +68,7 @@ where
             }
         },
         signal = shutdown_signal() => {
-            eprintln!();
+            _ = writeln!(io::stderr());
             (TurnEnd::Shutdown, Exit::Signal(signal))
         }
     };
@@ -78,7 +78,7 @@ where
         printer.session_write_error(failure.as_deref());
     }
     if let Err(e) = printer.finish(end) {
-        eprintln!("Error: failed to print the result: {e:#}");
+        _ = writeln!(io::stderr(), "Error: failed to print the result: {e:#}");
         if !matches!(exit, Exit::Signal(_)) {
             exit = Exit::Failure;
         }
@@ -144,12 +144,12 @@ impl<O: Write, E: Write> Printer<O, E> {
         }
     }
 
-    /// Prints the result that ends a JSON-format run.
+    /// Prints the result that ends a JSON-format run, or ends the reply line a text run left open.
     fn finish(&self, stop_reason: TurnEnd) -> Result<()> {
-        if self.format == OutputFormat::Text {
-            return Ok(());
-        }
         let mut output = self.lock();
+        if self.format == OutputFormat::Text {
+            return Ok(self.stdio.end_line(&mut output.stdout)?);
+        }
         let Output {
             stdout,
             message,
@@ -248,21 +248,9 @@ mod tests {
     use ox_core::tool::{Prepared, Tool, ToolCtx, ToolOutput, ToolSpec};
 
     use super::*;
+    use crate::driver::testing::ClosedPipe;
 
     const SESSION_ID: &str = "session-1";
-
-    /// A stdout whose reader went away.
-    struct ClosedPipe;
-
-    impl Write for ClosedPipe {
-        fn write(&mut self, _buf: &[u8]) -> io::Result<usize> {
-            Err(io::ErrorKind::BrokenPipe.into())
-        }
-
-        fn flush(&mut self) -> io::Result<()> {
-            Ok(())
-        }
-    }
 
     fn printer(format: OutputFormat) -> Printer<Vec<u8>, Vec<u8>> {
         Printer::new(format, false, SESSION_ID.to_owned(), Vec::new(), Vec::new())
@@ -394,9 +382,15 @@ mod tests {
                 let (stdout, stderr) = printed(printer);
                 let result = result_data(&stdout);
                 assert_eq!(result["stop_reason"], "failed");
-                assert_eq!(result["error"], "API error (HTTP 400 Bad Request)");
+                assert_eq!(
+                    result["error"],
+                    "Anthropic API error (HTTP 400 Bad Request)"
+                );
                 assert_eq!(result["message"], serde_json::Value::Null);
-                assert_eq!(stderr, "Error: API error (HTTP 400 Bad Request)\n");
+                assert_eq!(
+                    stderr,
+                    "Error: Anthropic API error (HTTP 400 Bad Request)\n"
+                );
             })
             .await;
         }
@@ -494,15 +488,19 @@ mod tests {
             }
 
             #[test]
-            fn prints_nothing_in_the_text_format() {
+            fn ends_the_open_reply_line_in_the_text_format() {
                 let printer = printer(OutputFormat::Text);
                 printer
-                    .send(Event::StreamToken("reply".to_owned()))
+                    .send(Event::StreamToken("partial reply".to_owned()))
                     .unwrap();
 
-                printer.finish(TurnEnd::Completed).unwrap();
+                printer.finish(TurnEnd::Shutdown).unwrap();
+                printer.finish(TurnEnd::Shutdown).unwrap();
 
-                assert_eq!(printed(printer), (b"reply".to_vec(), String::new()));
+                assert_eq!(
+                    printed(printer),
+                    (b"partial reply\n".to_vec(), String::new()),
+                );
             }
         }
 
