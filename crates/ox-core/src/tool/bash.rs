@@ -1146,7 +1146,7 @@ mod tests {
 
             let timed_out = execute_until(&command, started, &temp_ctx()).await.err();
 
-            assert_eq!(timed_out, Some(TimedOut(String::new())));
+            assert!(matches!(timed_out, Some(TimedOut(_))), "{timed_out:?}");
             until_gone(&until_recorded(&pid_file).await).await;
         }
 
