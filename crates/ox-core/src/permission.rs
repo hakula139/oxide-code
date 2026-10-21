@@ -3057,6 +3057,10 @@ mod tests {
                     "echo rm x | xargs sudo",
                     r"find . -execdir sudo rm {} +",
                     "sudo --unknown value rm x",
+                    "sudo FOO=1 -u root rm x",
+                    "runuser -u nobody rm x",
+                    "su --command='rm x' root",
+                    "busybox hush -c 'rm x'",
                 ] {
                     assert_eq!(decide(&p, EXEC, &command(case)), Decision::Deny, "{case}");
                 }
