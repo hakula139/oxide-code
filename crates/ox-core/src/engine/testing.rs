@@ -107,15 +107,20 @@ pub fn panic_message(panic: EnginePanic) -> &'static str {
         .expect("the panic message is a literal")
 }
 
-/// Runs `test` with the home directory pinned to an empty one and `XDG_CONFIG_HOME` unset, so
-/// context loads find no user instructions even while parallel tests swap either. Boxed, since a
-/// whole test body is too large a future to hold on the stack.
+/// Runs `test` with the home directory pinned to an empty one and `XDG_CONFIG_HOME` and
+/// `CLAUDE_CONFIG_DIR` unset, so context loads find no user instructions or Claude Code login even
+/// while parallel tests swap them. Boxed, since a whole test body is too large a future to hold on
+/// the stack.
 pub fn with_pinned_home<'a>(
     test: impl Future<Output = ()> + 'a,
 ) -> Pin<Box<dyn Future<Output = ()> + 'a>> {
     Box::pin(async {
         let home = tempfile::tempdir().expect("the temp home is created");
-        let vars = [(HOME_VAR, Some(home.path())), ("XDG_CONFIG_HOME", None)];
+        let vars = [
+            (HOME_VAR, Some(home.path())),
+            ("XDG_CONFIG_HOME", None),
+            ("CLAUDE_CONFIG_DIR", None),
+        ];
         temp_env::async_with_vars(vars, test).await;
     })
 }

@@ -960,6 +960,7 @@ mod tests {
             "ANTHROPIC_AUTH_TOKEN",
             "ANTHROPIC_API_KEY",
             "CLAUDE_CODE_OAUTH_TOKEN",
+            "CLAUDE_CONFIG_DIR",
             "ANTHROPIC_CUSTOM_HEADERS",
             "CLAUDE_CODE_ATTRIBUTION_HEADER",
             "CLAUDE_CODE_DISABLE_STRUCTURED_OUTPUTS",
