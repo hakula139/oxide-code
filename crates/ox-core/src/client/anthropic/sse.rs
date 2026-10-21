@@ -1,5 +1,7 @@
 //! SSE streaming pump and frame parser for the Anthropic Messages API.
 
+use std::borrow::Cow;
+
 use anyhow::{Context, Result, anyhow, bail};
 use futures::StreamExt;
 use tokio::sync::mpsc;
@@ -12,12 +14,28 @@ use super::transport::{
 use super::wire::{ApiError, StreamEvent};
 use crate::client::ResponseEvent;
 
+/// Events a stream may queue ahead of its consumer. The SSE pump waits while the queue is full,
+/// but drops a retry notice so the retry never waits on the consumer.
+const STREAM_BUFFER: usize = 64;
+
 /// A misbehaving upstream that never ends a frame would otherwise grow until OOM.
 const MAX_SSE_FRAME_BYTES: usize = 8 * 1024 * 1024;
 
+/// Sends `request` on a background task and returns the receiver for its [`ResponseEvent`]s. A
+/// failure arrives as the last item, and dropping the receiver cancels the request.
+pub(super) fn spawn_stream(
+    http: reqwest::Client,
+    request: MessagesRequest,
+    model: String,
+) -> mpsc::Receiver<Result<ResponseEvent>> {
+    let (tx, rx) = mpsc::channel(STREAM_BUFFER);
+    tokio::spawn(forward_sse(http, request, model, tx));
+    rx
+}
+
 /// Runs [`stream_sse`] until it ends or the receiver drops, then forwards any failure on `tx`.
 /// Racing `closed` stops an in-flight request or retry backoff once the consumer is gone.
-pub(super) async fn forward_sse(
+async fn forward_sse(
     http: reqwest::Client,
     request: MessagesRequest,
     model: String,
@@ -89,15 +107,15 @@ async fn pump_events(
 
     while let Some(chunk) = stream.next().await {
         let chunk = chunk
-            .context("API stream failed")
-            .map_err(|e| fail("API stream failed", e, !reply.content_started()))?;
+            .context("Anthropic API stream failed")
+            .map_err(|e| fail("Anthropic API stream failed", e, !reply.content_started()))?;
         frames.push(&chunk);
 
-        while let Some(frame) = frames.next_frame().context("API stream failed")? {
+        while let Some(frame) = frames.next_frame().context("Anthropic API stream failed")? {
             let frame = match std::str::from_utf8(&frame) {
                 Ok(s) => s,
                 Err(e) => {
-                    debug!("skipping invalid UTF-8 SSE frame: {e}");
+                    debug!(error = %e, "skipping invalid UTF-8 SSE frame");
                     continue;
                 }
             };
@@ -105,7 +123,7 @@ async fn pump_events(
                 Ok(Some(event)) => event,
                 Ok(None) => continue,
                 Err(e) => {
-                    debug!("skipping malformed SSE frame: {e:#}");
+                    debug!(error = %format_args!("{e:#}"), "skipping malformed SSE frame");
                     continue;
                 }
             };
@@ -115,7 +133,7 @@ async fn pump_events(
                 Ok(None) => continue,
                 Err(error) => {
                     return Err(fail(
-                        &format!("API stream {}", error.error_type),
+                        &format!("Anthropic API stream {}", error.error_type),
                         anyhow!(format_stream_error(&error.error_type, &error.message)),
                         !reply.content_started() && is_transient(&error),
                     ));
@@ -129,8 +147,8 @@ async fn pump_events(
     }
 
     Err(fail(
-        "API stream ended early",
-        anyhow!("API stream ended before message_stop"),
+        "Anthropic API stream ended early",
+        anyhow!("Anthropic API stream ended before message_stop"),
         !reply.content_started(),
     ))
 }
@@ -200,7 +218,7 @@ impl FrameDecoder {
 /// no `data:` line (comments, heartbeats). Per the SSE spec, multiple `data:` lines concatenate
 /// with `\n`. Both `data: payload` and `data:payload` (no leading space) are accepted because some
 /// gateways drop the space.
-pub(super) fn parse_sse_frame(frame: &str) -> Result<Option<StreamEvent>> {
+fn parse_sse_frame(frame: &str) -> Result<Option<StreamEvent>> {
     let mut data_lines: Vec<&str> = Vec::new();
 
     for line in frame.lines() {
@@ -212,10 +230,10 @@ pub(super) fn parse_sse_frame(frame: &str) -> Result<Option<StreamEvent>> {
         }
     }
 
-    let data: std::borrow::Cow<'_, str> = match data_lines.as_slice() {
+    let data: Cow<'_, str> = match data_lines.as_slice() {
         [] => return Ok(None),
-        [one] => std::borrow::Cow::Borrowed(*one),
-        _ => std::borrow::Cow::Owned(data_lines.join("\n")),
+        [one] => Cow::Borrowed(*one),
+        _ => Cow::Owned(data_lines.join("\n")),
     };
 
     let event: StreamEvent =
@@ -295,7 +313,7 @@ mod tests {
         #[tokio::test(start_paused = true)]
         async fn ends_a_stalled_stream_once_the_receiver_drops() {
             let request = messages_request(format!("{}/v1/messages", serve_stalled(MESSAGE_START)));
-            let (tx, mut rx) = mpsc::channel(64);
+            let (tx, mut rx) = mpsc::channel(STREAM_BUFFER);
             let forwarding = tokio::spawn(forward_sse(
                 plain_http(),
                 request,
@@ -387,7 +405,7 @@ mod tests {
         /// Streams one request, returning its result and every forwarded event.
         async fn run_stream(base_url: &str) -> (Result<()>, Vec<ResponseEvent>) {
             let request = messages_request(format!("{base_url}/v1/messages"));
-            let (tx, mut rx) = mpsc::channel(64);
+            let (tx, mut rx) = mpsc::channel(STREAM_BUFFER);
             let result = stream_sse(&plain_http(), &request, "claude-opus-5-5", &tx).await;
             drop(tx);
             let mut events = Vec::new();
@@ -462,11 +480,13 @@ mod tests {
                 [
                     START_USAGE,
                     ResponseEvent::Retrying(
-                        "API stream overloaded_error. Retrying in 2 s (retry 1 of 5).".to_owned()
+                        "Anthropic API stream overloaded_error. Retrying in 2 s (retry 1 of 5)."
+                            .to_owned()
                     ),
                     START_USAGE,
                     ResponseEvent::Retrying(
-                        "API stream ended early. Retrying in 3 s (retry 2 of 5).".to_owned()
+                        "Anthropic API stream ended early. Retrying in 3 s (retry 2 of 5)."
+                            .to_owned()
                     ),
                     START_USAGE,
                     ResponseEvent::Text("Hi".to_owned()),
@@ -499,7 +519,7 @@ mod tests {
                 ),
                 (
                     [MESSAGE_START, TEXT_DELTA].concat(),
-                    "API stream ended before message_stop",
+                    "Anthropic API stream ended before message_stop",
                 ),
             ] {
                 let server = serve(vec![sse_response(body)]).await;
@@ -530,7 +550,7 @@ mod tests {
                 [
                     START_USAGE,
                     ResponseEvent::Retrying(
-                        "API stream failed. Retrying in 2 s (retry 1 of 5).".to_owned()
+                        "Anthropic API stream failed. Retrying in 2 s (retry 1 of 5).".to_owned()
                     ),
                     START_USAGE,
                     ResponseEvent::Text("Hi".to_owned()),
@@ -544,7 +564,7 @@ mod tests {
 
             let err = result.expect_err("a failed read after content ends the call");
             assert!(
-                format!("{err:#}").starts_with("API stream failed: "),
+                format!("{err:#}").starts_with("Anthropic API stream failed: "),
                 "{err:#}"
             );
             assert_eq!(events, [START_USAGE, ResponseEvent::Text("Hi".to_owned())]);
@@ -557,7 +577,10 @@ mod tests {
             let (result, _) = run_stream(&server.uri()).await;
 
             let err = result.expect_err("every attempt is cut");
-            assert_eq!(format!("{err:#}"), "API stream ended before message_stop");
+            assert_eq!(
+                format!("{err:#}"),
+                "Anthropic API stream ended before message_stop"
+            );
             assert!(request_count(&server).await > 1, "pre-content cuts retry");
         }
 
@@ -573,7 +596,7 @@ mod tests {
             assert_eq!(
                 format!("{err:#}"),
                 format!(
-                    "API stream failed: unterminated SSE frame exceeded {MAX_SSE_FRAME_BYTES} bytes"
+                    "Anthropic API stream failed: unterminated SSE frame exceeded {MAX_SSE_FRAME_BYTES} bytes"
                 ),
             );
             assert_eq!(request_count(&server).await, 1);

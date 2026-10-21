@@ -5,11 +5,17 @@ use std::path::Path;
 use indoc::formatdoc;
 use platform_info::{PlatformInfo, PlatformInfoAPI, UNameAPI};
 use serde::{Deserialize, Serialize};
+use time::macros::format_description;
+use time::{OffsetDateTime, UtcOffset};
 
 use crate::model::ModelSpec;
 use crate::util::env;
 use crate::util::time::local_offset;
 
+// ── Environment ──
+
+/// The machine and directory a session runs in, which the system prompt's environment section
+/// describes. Sessions record it so a resumed prompt keeps its prefix.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(test, derive(Default))]
 pub(super) struct Environment {
@@ -104,13 +110,13 @@ fn detect_os_version() -> String {
 // ── Date Detection ──
 
 pub(super) fn current_date() -> String {
-    format_local_date(time::OffsetDateTime::now_utc(), local_offset())
+    format_local_date(OffsetDateTime::now_utc(), local_offset())
 }
 
-fn format_local_date(now: time::OffsetDateTime, offset: time::UtcOffset) -> String {
+fn format_local_date(now: OffsetDateTime, offset: UtcOffset) -> String {
     now.to_offset(offset)
         .date()
-        .format(time::macros::format_description!("[year]-[month]-[day]"))
+        .format(format_description!("[year]-[month]-[day]"))
         .expect("static `[year]-[month]-[day]` description never fails on a valid date")
 }
 
@@ -133,6 +139,7 @@ pub(super) fn model_identity(model: &ModelSpec) -> String {
 #[cfg(test)]
 mod tests {
     use indoc::indoc;
+    use time::macros::{datetime, offset};
 
     use super::*;
 
@@ -254,16 +261,10 @@ mod tests {
 
         #[test]
         fn applies_offset_across_midnight() {
-            let now = time::macros::datetime!(2026-04-12 20:30:00 UTC);
-            assert_eq!(
-                format_local_date(now, time::macros::offset!(+8)),
-                "2026-04-13"
-            );
-            assert_eq!(
-                format_local_date(now, time::macros::offset!(-5)),
-                "2026-04-12"
-            );
-            assert_eq!(format_local_date(now, time::UtcOffset::UTC), "2026-04-12");
+            let now = datetime!(2026-04-12 20:30:00 UTC);
+            assert_eq!(format_local_date(now, offset!(+8)), "2026-04-13");
+            assert_eq!(format_local_date(now, offset!(-5)), "2026-04-12");
+            assert_eq!(format_local_date(now, UtcOffset::UTC), "2026-04-12");
         }
     }
 
