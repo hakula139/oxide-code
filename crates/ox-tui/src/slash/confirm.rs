@@ -72,7 +72,7 @@ impl ConfirmDeleteSessionModal {
                 self.display_title,
             ))),
             Err(err) => {
-                self.error = Some(saved_error_message(err, CLEAR_THEN_DELETE_HINT));
+                self.error = Some(saved_error_message(err, Some(CLEAR_THEN_DELETE_HINT)));
                 ModalKey::Consumed
             }
         }

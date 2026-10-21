@@ -632,7 +632,10 @@ impl ResumePicker {
                 self.list.retain_items(|row| row.session_id != id);
                 (text, false)
             }
-            Err(err) => (saved_error_message(err, BARE_ARCHIVE_HINT), true),
+            Err(err) => (
+                saved_error_message(err, archived.then_some(BARE_ARCHIVE_HINT)),
+                true,
+            ),
         };
         self.notice = Some(Notice {
             text,
@@ -2122,7 +2125,7 @@ mod tests {
             std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o444)).unwrap();
             let failure = saved_error_message(
                 saved::set_archived(&path, &id, true, "live-session-id").unwrap_err(),
-                BARE_ARCHIVE_HINT,
+                Some(BARE_ARCHIVE_HINT),
             );
             let mut picker = opened(ResumePicker::new(store, "live-session-id".to_owned()));
 

@@ -300,8 +300,8 @@ fn settle_acks(
                 synthetic_uuid,
             } => {
                 let committed = failure.is_none() || stopped;
-                // Every failure that leaves the compact uncommitted reaches the agent, which keeps
-                // its old transcript only when told the write failed.
+                // Every failure that leaves the compact uncommitted reaches the agent, so each
+                // discarded summary shows its cause.
                 let failure = if committed {
                     state.commit_compact(synthetic_uuid);
                     surface_failure(failure, stopped, shared)

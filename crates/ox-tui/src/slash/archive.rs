@@ -114,7 +114,7 @@ fn apply_archived(
         )));
     }
     saved::set_archived(&info.path, &info.session_id, archived, live_id)
-        .map_err(|e| saved_error_message(e, BARE_ARCHIVE_HINT))?;
+        .map_err(|e| saved_error_message(e, archived.then_some(BARE_ARCHIVE_HINT)))?;
     Ok(SlashOutcome::SystemMessage(archive_notice(
         &info.session_id,
         archived,
@@ -324,17 +324,6 @@ mod tests {
             }
 
             #[test]
-            fn unknown_prefix_reports_no_match() {
-                with_isolated_xdg(|_| {
-                    let info = test_session_info();
-                    let err = UnarchiveCmd
-                        .execute("zzzz", &SlashContext::new(&info, None))
-                        .unwrap_err();
-                    assert_eq!(err, "No session matching `zzzz`");
-                });
-            }
-
-            #[test]
             fn live_session_prefix_is_a_no_op_note() {
                 with_isolated_xdg(|_| {
                     let info = test_session_info();
@@ -345,6 +334,17 @@ mod tests {
                         note.into_system_message(),
                         "The live session is not archived"
                     );
+                });
+            }
+
+            #[test]
+            fn unknown_prefix_reports_no_match() {
+                with_isolated_xdg(|_| {
+                    let info = test_session_info();
+                    let err = UnarchiveCmd
+                        .execute("zzzz", &SlashContext::new(&info, None))
+                        .unwrap_err();
+                    assert_eq!(err, "No session matching `zzzz`");
                 });
             }
         }

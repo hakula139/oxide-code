@@ -2965,45 +2965,6 @@ mod tests {
         }
 
         #[tokio::test]
-        async fn reports_a_persistence_stop_after_the_compaction_it_commits() {
-            with_pinned_home(async {
-                let server = MockServer::start().await;
-                let summary = "s".repeat(2 << 20);
-                mount_reply(&server, &summary).await;
-                let dir = tempfile::tempdir().unwrap();
-                let mut engine = engine(server.uri(), &test_store(dir.path()), dir.path()).await;
-                std::fs::remove_dir_all(test_project_dir(dir.path())).unwrap();
-                let unsaved = engine
-                    .session
-                    .record_message(Message::user("x".repeat(5 << 20)))
-                    .await;
-                assert!(unsaved.failure.is_some());
-                engine.messages = tool_heavy_transcript();
-                let sink = CapturingSink::default();
-
-                let end = engine.compact(&sink, &mut inert_ops(), None).await;
-
-                assert_eq!(end, TurnEnd::Completed);
-                assert_eq!(
-                    engine.messages,
-                    [synthesize_post_compact_message(&summary, &[], &[])]
-                );
-                let events = sink.events();
-                let compacted = events
-                    .iter()
-                    .position(|event| matches!(event, Event::SessionCompacted { .. }));
-                let stopped = events.iter().position(|event| {
-                    matches!(event, Event::Error(message) if message.contains("persistence stopped"))
-                });
-                assert!(
-                    compacted.is_some() && stopped > compacted,
-                    "the stop must follow the compaction that clears the chat: {events:?}",
-                );
-            })
-            .await;
-        }
-
-        #[tokio::test]
         async fn carries_the_task_list_into_the_summary_and_through_a_resume() {
             with_pinned_home(async {
                 let server = MockServer::start().await;

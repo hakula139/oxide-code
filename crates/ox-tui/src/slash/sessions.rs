@@ -41,9 +41,16 @@ pub(super) fn resolve_error_message(error: ResolveError, live_recovery: Option<&
     }
 }
 
-pub(super) fn saved_error_message(error: SavedError, live_recovery: &str) -> String {
+/// Phrases `error` as a sentence, ending a live-session refusal with `live_recovery` when given.
+pub(super) fn saved_error_message(error: SavedError, live_recovery: Option<&str>) -> String {
     match error {
-        SavedError::Live { id } => format!("Session {id} is the live session. {live_recovery}"),
+        SavedError::Live { id } => {
+            let live = format!("Session {id} is the live session");
+            match live_recovery {
+                Some(recovery) => format!("{live}. {recovery}"),
+                None => live,
+            }
+        }
         SavedError::Failed { action, id, cause } => {
             format!("Failed to {action} session {id}: {cause:#}")
         }
@@ -131,13 +138,17 @@ mod tests {
 
         #[test]
         fn ends_a_live_refusal_with_the_recovery_and_capitalizes_a_failure() {
-            let live = SavedError::Live {
+            let live = || SavedError::Live {
                 id: "abababab".to_owned(),
             };
             assert_eq!(
-                saved_error_message(live, BARE_ARCHIVE_HINT),
+                saved_error_message(live(), Some(BARE_ARCHIVE_HINT)),
                 "Session abababab is the live session. \
                  Use bare `/archive` to archive it and start a new one.",
+            );
+            assert_eq!(
+                saved_error_message(live(), None),
+                "Session abababab is the live session",
             );
 
             let failed = SavedError::Failed {
@@ -146,7 +157,7 @@ mod tests {
                 cause: anyhow::anyhow!("disk unavailable"),
             };
             assert_eq!(
-                saved_error_message(failed, BARE_ARCHIVE_HINT),
+                saved_error_message(failed, None),
                 "Failed to unarchive session abababab: disk unavailable",
             );
         }
