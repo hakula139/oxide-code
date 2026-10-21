@@ -170,7 +170,7 @@ fn collect_session_paths(dir: &Path) -> Result<Vec<(PathBuf, OffsetDateTime)>> {
 
 /// The entries of `dir`, warn-skipping any the OS fails to read.
 fn read_dir_entries(dir: &Path) -> Result<impl Iterator<Item = fs::DirEntry>> {
-    let entries = fs::read_dir(dir).with_context(|| format!("cannot read {}", dir.display()))?;
+    let entries = fs::read_dir(dir).with_context(|| format!("failed to read {}", dir.display()))?;
     Ok(entries.filter_map(|entry| {
         entry
             .inspect_err(|e| warn!("skipping directory entry: {e}"))
@@ -552,7 +552,7 @@ mod tests {
             let error = store.list().unwrap_err();
             assert_eq!(
                 error.to_string(),
-                format!("cannot read {}", project_dir.display())
+                format!("failed to read {}", project_dir.display())
             );
             assert_eq!(
                 error.downcast_ref::<std::io::Error>().unwrap().kind(),

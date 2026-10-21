@@ -96,7 +96,7 @@ pub fn expand_user(raw: &str) -> Result<PathBuf> {
         return Ok(PathBuf::from(raw));
     }
     let home = std::env::home_dir()
-        .ok_or_else(|| anyhow!("cannot expand `~` in {raw:?}: no home directory"))?;
+        .ok_or_else(|| anyhow!("failed to expand `~` in {raw:?}: no home directory"))?;
     if tail.is_empty() {
         return Ok(home);
     }
