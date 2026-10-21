@@ -1,4 +1,4 @@
-//! Text rendering for `ox --list`, of either active or archived sessions.
+//! `ox --list`: a table of the active or archived sessions.
 
 use std::fmt::Write as _;
 use std::io::Write;
@@ -8,11 +8,14 @@ use anyhow::{Context, Result};
 use time::UtcOffset;
 use unicode_width::UnicodeWidthStr;
 
-use super::display::{UNTITLED_MARKER, id_prefix};
-use super::store::SessionStore;
-use super::store::listing::{ListPage, ListScope};
-use crate::util::path::tildify;
-use crate::util::text::{escape_line, pad_to_width, truncate_to_width};
+use ox_core::session::display::{UNTITLED_MARKER, id_prefix};
+use ox_core::session::entry::SessionInfo;
+use ox_core::session::store::SessionStore;
+use ox_core::session::store::listing::ListScope;
+use ox_core::util;
+use ox_core::util::path::tildify;
+use ox_core::util::text::{escape_line, pad_to_width, truncate_to_width};
+use ox_tui::terminal;
 
 const ID_COL: usize = 10;
 const LAST_ACTIVE_COL: usize = 19;
@@ -28,32 +31,39 @@ const PROJECT_COL_MIN: usize = "Project".len() + 1;
 /// keeps its width in every other row.
 const PROJECT_COL_MAX: usize = 40;
 
-/// Renders `--list` output to `out`. `scope.all` spans every project, and `scope.archived`
-/// selects archived sessions. A `term_width` of `None` skips title truncation for piped output.
-/// `limit` caps the rows printed, unbounded for `None`.
-pub fn render_list(
-    out: &mut dyn Write,
-    store: &SessionStore,
+/// Writes the sessions of the project at `cwd`, or of every project when `scope.all` is set, to
+/// `out`. `limit` caps the rows, where `0` lists them all. Titles are cut to the width of a
+/// terminal on stdout.
+pub(crate) fn write(
+    out: &mut impl Write,
+    cwd: &Path,
     scope: ListScope,
-    local_offset: UtcOffset,
-    term_width: Option<usize>,
-    limit: Option<usize>,
+    limit: usize,
 ) -> Result<()> {
-    let page = store.list_paged(limit, scope)?;
-    render_sessions(out, &page, scope, local_offset, term_width)
+    let store = SessionStore::open(cwd)?;
+    let page = store.list_paged((limit > 0).then_some(limit), scope)?;
+    let table = render(
+        page.sessions(),
+        page.has_more(),
+        scope,
+        util::time::local_offset(),
+        terminal::stdout_width(),
+    );
+    out.write_all(table.as_bytes())
+        .context("failed to write the session list")
 }
 
-/// Writes `page` as `--list` rows, with a `Project` column when `scope.all` is set and a
-/// `... more` footer when sessions follow the page.
-fn render_sessions(
-    out: &mut dyn Write,
-    page: &ListPage,
+/// The `--list` table of `sessions`, with a `Project` column when `scope.all` is set and a
+/// `... more` footer when `more` sessions follow. A `term_width` of `None` skips title truncation
+/// for piped output.
+fn render(
+    sessions: &[SessionInfo],
+    more: bool,
     scope: ListScope,
     local_offset: UtcOffset,
     term_width: Option<usize>,
-) -> Result<()> {
+) -> String {
     let ListScope { all, archived } = scope;
-    let sessions = page.sessions();
     if sessions.is_empty() {
         let kind = if archived { "archived " } else { "" };
         let scope = if all {
@@ -61,8 +71,7 @@ fn render_sessions(
         } else {
             " in this project (use --all to search every project)"
         };
-        writeln!(out, "No {kind}sessions found{scope}").context("write list output")?;
-        return Ok(());
+        return format!("No {kind}sessions found{scope}\n");
     }
 
     let projects: Vec<String> = if all {
@@ -85,14 +94,14 @@ fn render_sessions(
         (budget >= MIN_TITLE_BUDGET).then_some(budget)
     });
 
-    let mut header = format!(
+    let mut table = format!(
         "{:<ID_COL$} {:<LAST_ACTIVE_COL$} {:<MSGS_COL$} ",
         "ID", "Last Active", "Msgs"
     );
     if all {
-        _ = write!(header, "{:<project_col_width$} ", "Project");
+        _ = write!(table, "{:<project_col_width$} ", "Project");
     }
-    writeln!(out, "{header}Title").context("write list header")?;
+    table.push_str("Title\n");
 
     for (i, s) in sessions.iter().enumerate() {
         let id = id_prefix(&s.session_id);
@@ -116,166 +125,99 @@ fn render_sessions(
             Some(budget) => truncate_to_width(&raw_title, budget),
             None => raw_title,
         };
-        let mut row = format!("{id:<ID_COL$} {last_active:<LAST_ACTIVE_COL$} {msgs:<MSGS_COL$} ");
+        _ = write!(
+            table,
+            "{id:<ID_COL$} {last_active:<LAST_ACTIVE_COL$} {msgs:<MSGS_COL$} "
+        );
         if let Some(project) = projects.get(i) {
-            _ = write!(row, "{} ", pad_to_width(project, project_col_width));
+            _ = write!(table, "{} ", pad_to_width(project, project_col_width));
         }
-        writeln!(out, "{row}{title}").context("write list row")?;
+        _ = writeln!(table, "{title}");
     }
-    if page.has_more() {
-        writeln!(
-            out,
-            "... more (use `--limit N` to raise the cap or `--limit 0` to list all)"
-        )
-        .context("write list footer")?;
+    if more {
+        table.push_str("... more (use `--limit N` to raise the cap or `--limit 0` to list all)\n");
     }
-    Ok(())
+    table
 }
 
 #[cfg(test)]
 mod tests {
     use time::macros::datetime;
 
-    use super::*;
-    use crate::session::entry::{ExitInfo, SessionInfo, TitleInfo};
-    use crate::session::store::set_archived_at;
-    use crate::session::store::testing::{seed_test_session, test_store};
+    use ox_core::session::entry::{ExitInfo, TitleInfo};
+    use ox_core::session::store::testing::{archive_test_session, seed_test_session};
 
-    mod render_list {
+    use super::*;
+
+    mod write {
         use super::*;
 
-        #[test]
-        fn empty_store_shows_no_sessions_notice() {
-            let dir = tempfile::tempdir().unwrap();
-            let store = test_store(dir.path());
-            let mut buf = Vec::new();
-            render_list(
-                &mut buf,
-                &store,
-                ListScope::default(),
-                UtcOffset::UTC,
-                None,
-                None,
-            )
-            .unwrap();
-            assert_eq!(
-                String::from_utf8(buf).unwrap(),
-                "No sessions found in this project (use --all to search every project)\n",
-            );
-
-            let mut buf = Vec::new();
-            render_list(
-                &mut buf,
-                &store,
-                ListScope {
-                    all: true,
-                    ..ListScope::default()
-                },
-                UtcOffset::UTC,
-                None,
-                None,
-            )
-            .unwrap();
-            assert_eq!(String::from_utf8(buf).unwrap(), "No sessions found\n",);
-
-            let mut buf = Vec::new();
-            render_list(
-                &mut buf,
-                &store,
-                ListScope {
-                    archived: true,
-                    ..ListScope::default()
-                },
-                UtcOffset::UTC,
-                None,
-                None,
-            )
-            .unwrap();
-            assert_eq!(
-                String::from_utf8(buf).unwrap(),
-                "No archived sessions found in this project (use --all to search every project)\n",
-            );
+        /// The list `write` prints for `scope` and `limit` from the project at `cwd`.
+        fn listed(cwd: &Path, scope: ListScope, limit: usize) -> String {
+            let mut out = Vec::new();
+            write(&mut out, cwd, scope, limit).unwrap();
+            String::from_utf8(out).unwrap()
         }
 
         #[test]
-        fn archived_lists_only_archived_sessions() {
+        fn lists_by_scope_limit_and_archive_state() {
             let dir = tempfile::tempdir().unwrap();
-            let store = test_store(dir.path());
-            for id in ["aaaa1111", "bbbb2222"] {
+            let cwd = Path::new("/work/local");
+            let every = ListScope {
+                all: true,
+                ..ListScope::default()
+            };
+            temp_env::with_var("XDG_DATA_HOME", Some(dir.path()), || {
+                let store = SessionStore::open(cwd).unwrap();
                 seed_test_session(
                     &store,
-                    id,
-                    Some(id),
-                    Some(1),
-                    datetime!(2026-04-18 09:00:00 UTC),
+                    "local-session",
+                    Some("Local session"),
+                    Some(2),
+                    datetime!(2026-01-01 00:00 UTC),
                 );
-            }
-            let archived = store.find_session_path("bbbb2222").unwrap();
-            set_archived_at(&archived, true).unwrap();
-            let render = |archived: bool| {
-                let mut buf = Vec::new();
-                render_list(
-                    &mut buf,
-                    &store,
+                let other = SessionStore::open_at(dir.path().join("ox/sessions"), "other").unwrap();
+                seed_test_session(
+                    &other,
+                    "other-session",
+                    Some("Other session"),
+                    Some(3),
+                    datetime!(2026-01-02 00:00 UTC),
+                );
+
+                let local = listed(cwd, ListScope::default(), 0);
+                let all = listed(cwd, every, 0);
+                let capped = listed(cwd, every, 1);
+                archive_test_session(&other, "other-session");
+                let archived = listed(
+                    cwd,
                     ListScope {
-                        archived,
-                        ..ListScope::default()
+                        archived: true,
+                        ..every
                     },
-                    UtcOffset::UTC,
-                    None,
-                    None,
-                )
-                .unwrap();
-                String::from_utf8(buf).unwrap()
-            };
-
-            let active = render(false);
-            assert!(active.contains("aaaa1111"), "{active}");
-            assert!(!active.contains("bbbb2222"), "{active}");
-            let archived = render(true);
-            assert!(archived.contains("bbbb2222"), "{archived}");
-            assert!(!archived.contains("aaaa1111"), "{archived}");
-        }
-
-        #[test]
-        fn appends_more_footer_only_when_capped() {
-            let dir = tempfile::tempdir().unwrap();
-            let store = test_store(dir.path());
-            for id in ["aaaa1111", "bbbb2222"] {
-                seed_test_session(
-                    &store,
-                    id,
-                    Some(id),
-                    Some(1),
-                    datetime!(2026-04-18 09:00:00 UTC),
+                    0,
                 );
-            }
-            let render = |limit: usize| {
-                let mut buf = Vec::new();
-                render_list(
-                    &mut buf,
-                    &store,
-                    ListScope::default(),
-                    UtcOffset::UTC,
-                    None,
-                    Some(limit),
-                )
-                .unwrap();
-                String::from_utf8(buf).unwrap()
-            };
 
-            let capped = render(1);
-            assert_eq!(
-                capped.lines().last(),
-                Some("... more (use `--limit N` to raise the cap or `--limit 0` to list all)"),
-                "{capped}",
-            );
-            let full = render(2);
-            assert!(!full.contains("... more"), "{full}");
+                assert!(local.contains("Local session"), "{local}");
+                assert!(!local.contains("Other session"), "{local}");
+                assert!(!local.contains("Project"), "{local}");
+                assert!(all.contains("Local session"), "{all}");
+                assert!(all.contains("Other session"), "{all}");
+                assert!(all.contains("Project"), "{all}");
+                assert!(!all.contains("... more"), "{all}");
+                assert!(capped.contains("Other session"), "{capped}");
+                assert!(!capped.contains("Local session"), "{capped}");
+                assert_eq!(
+                    capped.lines().last(),
+                    Some("... more (use `--limit N` to raise the cap or `--limit 0` to list all)"),
+                );
+                assert!(archived.contains("Other session"), "{archived}");
+                assert!(!archived.contains("Local session"), "{archived}");
+            });
         }
     }
 
-    mod render_sessions {
+    mod render {
         use super::*;
 
         fn session(session_id: &str, last_active_at: time::OffsetDateTime) -> SessionInfo {
@@ -300,10 +242,9 @@ mod tests {
             all: bool,
             term_width: Option<usize>,
         ) -> String {
-            let mut buf = Vec::new();
-            render_sessions(
-                &mut buf,
-                &ListPage::new(sessions.to_vec(), false),
+            render(
+                sessions,
+                false,
                 ListScope {
                     all,
                     ..ListScope::default()
@@ -311,14 +252,14 @@ mod tests {
                 UtcOffset::UTC,
                 term_width,
             )
-            .unwrap();
-            String::from_utf8(buf).unwrap()
         }
 
         #[test]
         fn populated_row_has_header_prefix_and_title_defaults() {
             let s = session("0123456789abcdef", datetime!(2026-04-18 13:45:00 UTC));
+
             let out = render_to_string(&[s], false);
+
             let mut lines = out.lines();
             assert_eq!(
                 lines.next().unwrap(),
@@ -342,7 +283,9 @@ mod tests {
                 message_count: 42,
                 updated_at: datetime!(2026-04-18 09:30:00 UTC),
             });
+
             let out = render_to_string(&[s], false);
+
             let row = out.lines().nth(1).unwrap();
             assert!(row.contains(" 42     "), "got: {row:?}");
             assert!(row.ends_with("Fix auth bug"), "got: {row:?}");
@@ -354,6 +297,7 @@ mod tests {
             short.cwd = "/a".to_owned();
             let mut longer = session("bbbbbbbbbbbb", datetime!(2026-04-18 09:05:00 UTC));
             longer.cwd = "/work/oxide-code".to_owned();
+
             let out = render_to_string(&[short, longer], true);
 
             let mut lines = out.lines();
@@ -370,7 +314,6 @@ mod tests {
                 "row 1 missing cwd: {:?}",
                 rows[1],
             );
-
             let header_title_col = header.find("Title").expect("header must contain Title");
             let row_title_cols: Vec<usize> = rows
                 .iter()
@@ -472,8 +415,10 @@ mod tests {
                 title: "A very long session title that will not fit".to_owned(),
                 updated_at: datetime!(2026-04-18 09:05:00 UTC),
             });
+
             // Prefix = 38, term_width = 60 → title budget = 22 (fits ~19 chars + `...`).
             let out = render_with_width(&[s], false, Some(60));
+
             let row = out.lines().nth(1).unwrap();
             let title = row
                 .split_once("-      ")
@@ -495,7 +440,9 @@ mod tests {
                 title: full_title.to_owned(),
                 updated_at: datetime!(2026-04-18 09:05:00 UTC),
             });
+
             let out = render_with_width(&[s], false, None);
+
             assert!(
                 out.contains(full_title),
                 "full title should render when term_width is None: {out}",
@@ -510,8 +457,10 @@ mod tests {
                 title: full_title.to_owned(),
                 updated_at: datetime!(2026-04-18 09:05:00 UTC),
             });
+
             // term_width 45 < prefix 38 + MIN_TITLE_BUDGET 12 → untruncated, so the terminal wraps.
             let out = render_with_width(&[s], false, Some(45));
+
             assert!(
                 out.contains(full_title),
                 "full title should render when budget too small: {out}",
@@ -519,18 +468,26 @@ mod tests {
         }
 
         #[test]
-        fn empty_project_scope_mentions_project() {
-            let out = render_to_string(&[], false);
+        fn names_the_scope_and_archive_state_when_empty() {
+            let empty = |all, archived| {
+                render(
+                    &[],
+                    false,
+                    ListScope { all, archived },
+                    UtcOffset::UTC,
+                    None,
+                )
+            };
+
             assert_eq!(
-                out,
+                empty(false, false),
                 "No sessions found in this project (use --all to search every project)\n"
             );
-        }
-
-        #[test]
-        fn empty_all_scope_omits_project_qualifier() {
-            let out = render_to_string(&[], true);
-            assert_eq!(out, "No sessions found\n");
+            assert_eq!(empty(true, false), "No sessions found\n");
+            assert_eq!(
+                empty(false, true),
+                "No archived sessions found in this project (use --all to search every project)\n"
+            );
         }
     }
 }
