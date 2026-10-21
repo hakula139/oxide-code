@@ -2313,13 +2313,20 @@ mod tests {
             #[test]
             fn shipped_defaults_each_hold_a_call_they_name_until_disabled() {
                 let (_dir, root) = temp_cwd();
-                let (cwd, home, data) = (root.join("repo"), root.join("home"), root.join("data"));
+                let (cwd, home, data, config) = (
+                    root.join("repo"),
+                    root.join("home"),
+                    root.join("data"),
+                    root.join("config"),
+                );
                 for dir in [&cwd, &home, &data] {
                     std::fs::create_dir(dir).unwrap();
                 }
                 let ssh_key = slash_separated(&home.join(".ssh/id_ed25519"));
                 let credentials = slash_separated(&data.join("ox/credentials.json"));
                 let claude = slash_separated(&home.join(".claude/.credentials.json"));
+                let git_store = slash_separated(&home.join(".git-credentials"));
+                let xdg_git_store = slash_separated(&config.join("git/credentials"));
                 let mut cases = vec![
                     (Shipped::Rm, EXEC, command("rm -rf target"), Decision::Ask),
                     (Shipped::Rm, EXEC, command("rm -fr /tmp/x"), Decision::Ask),
@@ -2331,6 +2338,18 @@ mod tests {
                         Decision::Deny,
                     ),
                     (Shipped::Credentials, READ, outside(&claude), Decision::Deny),
+                    (
+                        Shipped::Credentials,
+                        READ,
+                        outside(&git_store),
+                        Decision::Deny,
+                    ),
+                    (
+                        Shipped::Credentials,
+                        READ,
+                        outside(&xdg_git_store),
+                        Decision::Deny,
+                    ),
                 ];
                 if cfg!(unix) {
                     cases.push((
@@ -2342,7 +2361,11 @@ mod tests {
                 }
 
                 temp_env::with_vars(
-                    [(HOME_VAR, Some(&home)), ("XDG_DATA_HOME", Some(&data))],
+                    [
+                        (HOME_VAR, Some(&home)),
+                        ("XDG_DATA_HOME", Some(&data)),
+                        ("XDG_CONFIG_HOME", Some(&config)),
+                    ],
                     || {
                         let workspace = Workspace::new(&cwd);
                         let allow_all = rules(&[(READ, "*"), (EDIT, "*"), (EXEC, "*")]);
@@ -2370,7 +2393,7 @@ mod tests {
             }
 
             #[test]
-            fn protects_the_user_git_and_ssh_config_until_disabled() {
+            fn protects_the_user_git_ssh_and_cloud_config_until_disabled() {
                 let (_dir, root) = temp_cwd();
                 let (cwd, home, config) =
                     (root.join("repo"), root.join("home"), root.join("config"));
@@ -2395,8 +2418,21 @@ mod tests {
 
                         for (path, group) in [
                             (config.join("git/config"), Shipped::Git),
+                            (config.join("git/credentials"), Shipped::Git),
+                            (home.join(".git-credentials"), Shipped::Git),
                             (home.join(".ssh/config"), Shipped::Ssh),
                             (home.join(".ssh/authorized_keys"), Shipped::Ssh),
+                            (home.join(".ssh/authorized_keys2"), Shipped::Ssh),
+                            (home.join(".ssh/rc"), Shipped::Ssh),
+                            (home.join(".ssh/environment"), Shipped::Ssh),
+                            (home.join(".aws/config"), Shipped::Cloud),
+                            (home.join(".azure/config"), Shipped::Cloud),
+                            (
+                                home.join(".config/gcloud/configurations/config_default"),
+                                Shipped::Cloud,
+                            ),
+                            (home.join(".docker/config.json"), Shipped::Cloud),
+                            (home.join(".kube/config"), Shipped::Cloud),
                         ] {
                             let target = edit(path.clone());
                             assert_eq!(
@@ -2410,8 +2446,16 @@ mod tests {
                                 "{path:?} with {group} off"
                             );
                         }
-                        let known_hosts = edit(home.join(".ssh/known_hosts"));
-                        assert_eq!(decide(&resolve(&[]), EDIT, &known_hosts), Decision::Allow);
+                        let append = Access::for_command(
+                            &format!(
+                                "echo key >> {}",
+                                slash_separated(&home.join(".ssh/authorized_keys2"))
+                            ),
+                            &workspace,
+                        );
+                        assert_eq!(decide(&resolve(&[]), EXEC, &append), Decision::Ask);
+                        let notes = edit(home.join("notes.txt"));
+                        assert_eq!(decide(&resolve(&[]), EDIT, &notes), Decision::Allow);
                     },
                 );
             }

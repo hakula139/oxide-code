@@ -17,6 +17,7 @@ Clawd
 clippy
 cmark
 creds
+cshrc
 CTYPE
 DECRC
 DECSC
@@ -53,11 +54,13 @@ keepalives
 killpg
 Kobalte
 Konsole
+kshrc
 LSCOLORS
 macchiato
 misparse
 mkfifo
 mksh
+mkshrc
 MMIX
 mojibake
 mplan
@@ -118,6 +121,7 @@ SYSPROMPT
 taiki
 taplo
 tcsh
+tcshrc
 tengu
 termio
 tildified
