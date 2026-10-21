@@ -269,7 +269,7 @@ mod tests {
     use ox_core::permission::{Basis, Mode};
     use ox_core::protocol::{Decision, Event, Op, ToolCall, ToolResult};
     use ox_core::tool::tasks::testing::plan;
-    use ox_core::tool::{ApprovalBody, ApprovalPreview, ToolResultView};
+    use ox_core::tool::view::{ApprovalBody, ApprovalPreview, ToolResultView};
     use ox_core::util::git::PullRequest;
 
     use super::*;

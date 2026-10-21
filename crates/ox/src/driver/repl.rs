@@ -11,7 +11,7 @@ use ox_core::engine::{Engine, EngineHandle, TurnEnd};
 use ox_core::permission::rule::Rule;
 use ox_core::permission::{Basis, SessionGrant};
 use ox_core::protocol::{Decision, Event, EventSink, Op};
-use ox_core::tool::{ApprovalBody, ApprovalPreview};
+use ox_core::tool::view::{ApprovalBody, ApprovalPreview};
 use ox_core::util::git;
 use ox_core::util::text::escape_hidden;
 
@@ -274,7 +274,7 @@ mod tests {
     use ox_core::protocol::testing::CapturingSink;
     use ox_core::session::store::testing::{saved_message_count, test_store};
     use ox_core::tool::testing::{bash_preview, bash_registry};
-    use ox_core::tool::{DiffChunk, DiffLine};
+    use ox_core::tool::view::{DiffChunk, DiffLine};
 
     use super::*;
 

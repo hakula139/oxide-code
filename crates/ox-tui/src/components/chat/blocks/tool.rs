@@ -13,7 +13,7 @@ mod text;
 use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 
-use ox_core::tool::ToolResultView;
+use ox_core::tool::view::ToolResultView;
 
 use super::rows::{body_row, wrapped_row};
 use super::{BlockRows, ChatBlock, RenderCtx};
@@ -210,7 +210,7 @@ fn overflow_footer(
 mod tests {
     use ox_core::tool::tasks::TaskStatus;
     use ox_core::tool::tasks::testing::task;
-    use ox_core::tool::{
+    use ox_core::tool::view::{
         DiffChunk, DiffLine, EditDiff, GrepFileGroup, GrepMatchLine, ReadExcerptLine,
     };
 

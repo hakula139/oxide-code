@@ -7,9 +7,10 @@ use std::pin::Pin;
 
 use serde::Deserialize;
 
+use super::view::{ReadExcerptLine, ToolResultView};
 use super::{
-    Prepared, ReadExcerptLine, Tool, ToolCtx, ToolMetadata, ToolOutput, ToolResultView, ToolSpec,
-    display_path, extract_input_field, summarize_path_call,
+    Prepared, Tool, ToolCtx, ToolMetadata, ToolOutput, ToolSpec, display_path, extract_input_field,
+    summarize_path_call,
 };
 use crate::file_tracker::{CACHE_HIT_STUB, LastView, RecordRead};
 use crate::permission::PermissionClass;
@@ -18,7 +19,7 @@ const DEFAULT_LINE_LIMIT: usize = 2000;
 const MAX_LINE_CHARS: usize = 2000;
 
 /// Excerpt bytes one Read emits, leaving room under the dispatcher cap for the footer.
-const OUTPUT_BUDGET: usize = super::MAX_OUTPUT_BYTES - 128;
+const OUTPUT_BUDGET: usize = super::spill::MAX_OUTPUT_BYTES - 128;
 
 const EMPTY_FILE_MARKER: &str = "(empty file)";
 
@@ -129,18 +130,18 @@ async fn read_file(
     ctx: &ToolCtx,
 ) -> Result<String, String> {
     let file_path = ctx.cwd().join(path);
-    let (_, bytes) = super::read_validated(&file_path, path, |metadata| {
-        super::validate_file_target(path, metadata, "read")
+    let (_, bytes) = super::file::read_validated(&file_path, path, |metadata| {
+        super::file::validate_file_target(path, metadata, "read")
     })
     .await?;
 
-    if super::is_binary(&bytes) {
+    if super::file::is_binary(&bytes) {
         return Err(
             "File appears to be binary. Use the bash tool to inspect binary files.".to_owned(),
         );
     }
 
-    let key = super::tracker_key(&file_path).await;
+    let key = super::file::tracker_key(&file_path).await;
 
     let text = String::from_utf8_lossy(&bytes);
     let text = strip_bom(&text);
@@ -262,8 +263,8 @@ mod tests {
 
     use super::*;
     use crate::file_tracker::{GateError, GatePurpose, MAX_TRACKED_FILE_SIZE};
-    use crate::tool::MAX_OUTPUT_BYTES;
     use crate::tool::local_testing::{canonical_tempdir, ctx, temp_ctx};
+    use crate::tool::spill::MAX_OUTPUT_BYTES;
     use crate::util::fs::testing::symlink_file;
 
     mod result_view {

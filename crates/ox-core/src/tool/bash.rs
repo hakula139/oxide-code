@@ -22,10 +22,9 @@ use tokio::process::{ChildStderr, ChildStdout};
 use tracing::warn;
 
 use self::background::{BackgroundShells, ShellState};
-use super::{
-    ApprovalBody, ApprovalPreview, Prepared, Spill, Tool, ToolCtx, ToolOutput, ToolSpec,
-    extract_input_field, omission_marker, pascal_case,
-};
+use super::spill::{Spill, omission_marker};
+use super::view::{ApprovalBody, ApprovalPreview};
+use super::{Prepared, Tool, ToolCtx, ToolOutput, ToolSpec, extract_input_field, pascal_case};
 use crate::config::auth::secret_env_vars;
 use crate::permission::{Access, PermissionClass};
 
@@ -48,7 +47,7 @@ const EDITOR_VARS: [&str; 3] = ["EDITOR", "GIT_EDITOR", "VISUAL"];
 /// Bytes of pipe output one call renders, less the spill paths its omission markers name. The
 /// reserve below the dispatcher cap holds the rest of the markers, the stream separator, and the
 /// footer, so the dispatcher never re-truncates bash output.
-const OUTPUT_BUDGET: usize = super::MAX_OUTPUT_BYTES - 512;
+const OUTPUT_BUDGET: usize = super::spill::MAX_OUTPUT_BYTES - 512;
 const PIPE_HEAD_BYTES: usize = OUTPUT_BUDGET / 2;
 const PIPE_TAIL_BYTES: usize = OUTPUT_BUDGET - PIPE_HEAD_BYTES;
 const PIPE_READ_CHUNK_BYTES: usize = 8 * 1024;
@@ -752,10 +751,10 @@ mod tests {
 
     use super::testing::{record_pid, until_gone, until_recorded};
     use super::*;
-    use crate::tool::MAX_OUTPUT_BYTES;
     #[cfg(unix)]
     use crate::tool::local_testing::canonical_tempdir;
     use crate::tool::local_testing::{self, ctx, spill_path, temp_ctx};
+    use crate::tool::spill::MAX_OUTPUT_BYTES;
     use crate::tool::testing::bash_preview;
 
     /// An empty capture of the stdout of call `toolu_test` in `dir`.

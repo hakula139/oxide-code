@@ -4,7 +4,7 @@ Two-layer truncation combines per-tool view-shape caps with a centralized byte-b
 
 ## Implementation
 
-### Centralized Dispatcher Cap (`tool.rs`)
+### Centralized Dispatcher Cap (`tool/spill.rs`)
 
 - `MAX_OUTPUT_BYTES = 128 KB`: enforced on every tool output via `cap_output()`.
 - `cap_output(content, spill) -> String`: for content over the cap, writes the whole content to the call's spill file, then keeps equal parts of the head and tail around a `... [N bytes omitted, full output saved to <path>] ...` marker, preserving setup context and the final outcome. Because the marker counts against the cap, a long spill path or a failure note leaves less room for the head and tail and never pushes the result past `MAX_OUTPUT_BYTES`. `run_capped` calls it on the blocking thread pool because it writes the whole content at once.
@@ -40,9 +40,11 @@ Two-layer truncation combines per-tool view-shape caps with a centralized byte-b
 - `crates/ox-core/src/file_tracker.rs`: `MAX_TRACKED_FILE_SIZE`.
 - `crates/ox-core/src/session/handle.rs`: `SessionHandle::artifact_dir`.
 - `crates/ox-core/src/session/store.rs`: `artifact_dir`, `SessionStore::session_file`, `delete_at`.
-- `crates/ox-core/src/tool.rs`: `run_capped`, `cap_output()`, `MAX_OUTPUT_BYTES`, `Spill`, `MAX_SPILL_BYTES`, `SPILL_DIR`, `truncate_line()`, `MAX_NOTE_PATHS`, `push_path_note()`.
+- `crates/ox-core/src/tool.rs`: `truncate_line()`.
 - `crates/ox-core/src/tool/bash.rs`: `OUTPUT_BUDGET`, `PipeCapture`, `render_pipe()`.
 - `crates/ox-core/src/tool/bash/background.rs`: `ShellOutput::take`, the per-read capture of a background shell.
 - `crates/ox-core/src/tool/glob.rs`: `MAX_RESULTS`, `truncated_total` setter.
 - `crates/ox-core/src/tool/grep.rs`: `DEFAULT_HEAD_LIMIT`, `MAX_LINE_CHARS`, `MAX_WALK_FILE_SIZE`, and `Rows`, the content-mode row and byte cap.
 - `crates/ox-core/src/tool/read.rs`: `DEFAULT_LINE_LIMIT`, `MAX_LINE_CHARS`, `OUTPUT_BUDGET`.
+- `crates/ox-core/src/tool/search.rs`: `MAX_NOTE_PATHS`, `push_path_note()`.
+- `crates/ox-core/src/tool/spill.rs`: `run_capped`, `cap_output()`, `MAX_OUTPUT_BYTES`, `Spill`, `MAX_SPILL_BYTES`, `SPILL_DIR`.

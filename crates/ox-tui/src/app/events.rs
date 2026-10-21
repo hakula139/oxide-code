@@ -14,7 +14,7 @@ use ox_core::model::ModelSpec;
 use ox_core::permission::{Basis, Mode, SessionGrant};
 use ox_core::protocol::{ConfigPick, Event, Interaction, Op};
 use ox_core::session::display::archive_notice;
-use ox_core::tool::ApprovalPreview;
+use ox_core::tool::view::ApprovalPreview;
 use ox_core::util::text::plural;
 
 use super::{App, CopyNotice};
@@ -503,7 +503,7 @@ mod tests {
     use ox_core::tool::bash::background::testing::{shell, shells_in_each_state};
     use ox_core::tool::tasks::TaskStatus;
     use ox_core::tool::tasks::testing::{plan, task};
-    use ox_core::tool::{ApprovalBody, ToolResultView};
+    use ox_core::tool::view::{ApprovalBody, ToolResultView};
     use ox_core::util::git::PullRequest;
 
     use super::*;

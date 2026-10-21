@@ -11,7 +11,8 @@ use super::post_compact::strip_synthetic_post_compact_prefix;
 use crate::message::{ContentBlock, INTERRUPTION_MARKER, Message, Role, progress_update_before};
 use crate::prompt::is_system_reminder;
 use crate::protocol::{Interaction, ToolCall, ToolResult};
-use crate::tool::{ToolMetadata, ToolRegistry, ToolResultView};
+use crate::tool::view::ToolResultView;
+use crate::tool::{ToolMetadata, ToolRegistry};
 
 /// Projects a resumed transcript for display, opening with its compaction boundary when `compact`
 /// is set. `tool_metadata` holds the per-call metadata the session persisted, keyed by tool-use ID,
@@ -201,10 +202,11 @@ mod tests {
     use crate::message::Replay;
     use crate::protocol::testing;
     use crate::session::post_compact::synthesize_post_compact_message;
+    use crate::tool::DEFAULT_TOOL_ICON;
     use crate::tool::bash::BashTool;
     use crate::tool::edit::EditTool;
     use crate::tool::tasks::testing::plan;
-    use crate::tool::{DEFAULT_TOOL_ICON, DiffChunk, DiffLine, EditDiff};
+    use crate::tool::view::{DiffChunk, DiffLine, EditDiff};
 
     fn tools() -> ToolRegistry {
         ToolRegistry::new(vec![Box::new(BashTool::default()), Box::new(EditTool)])

@@ -12,10 +12,10 @@ use indoc::formatdoc;
 use serde::Deserialize;
 use tokio_util::sync::CancellationToken;
 
-use super::{
-    GrepFileGroup, GrepMatchLine, NO_FILES_FOUND, Prepared, SearchRoot, Tool, ToolCtx,
-    ToolMetadata, ToolOutput, ToolResultView, ToolSpec, Unreadable, extract_input_field,
-};
+use super::search::{NO_FILES_FOUND, SearchRoot, Unreadable};
+use super::spill::MAX_SPILL_BYTES;
+use super::view::{GrepFileGroup, GrepMatchLine, ToolResultView};
+use super::{Prepared, Tool, ToolCtx, ToolMetadata, ToolOutput, ToolSpec, extract_input_field};
 use crate::file_tracker::MAX_TRACKED_FILE_SIZE;
 use crate::permission::{PermissionClass, ReadFilter, WalkFilter};
 use crate::util::text::plural;
@@ -54,7 +54,7 @@ impl Tool for GrepTool {
     }
 
     fn prepare(&self, input: serde_json::Value, ctx: &ToolCtx) -> Prepared {
-        super::prepare_search_root(input, ctx)
+        super::search::prepare_search_root(input, ctx)
     }
 
     fn icon(&self) -> &'static str {
@@ -196,7 +196,7 @@ async fn run(prepared: Prepared, ctx: &ToolCtx, read_filter: ReadFilter) -> Tool
     .await
     {
         Ok(content) => {
-            let title = grep_title(super::strip_search_notes(&content));
+            let title = grep_title(super::search::strip_search_notes(&content));
             ToolOutput::success(content).with_title(title)
         }
         Err(msg) => ToolOutput::error(msg),
@@ -284,8 +284,8 @@ fn grep_files(params: &GrepParams<'_>) -> Result<String, String> {
     };
 
     push_skipped_note(&mut result, &skipped_large, size_limit, cwd);
-    super::push_unreadable_note(&mut result, &unreadable, cwd);
-    super::push_withheld_note(&mut result, withheld);
+    super::search::push_unreadable_note(&mut result, &unreadable, cwd);
+    super::search::push_withheld_note(&mut result, withheld);
 
     Ok(result)
 }
@@ -331,7 +331,7 @@ fn collect_files(
     let mut skipped_large = Vec::new();
     let mut unreadable = Vec::new();
     let mut withheld = 0;
-    let entries = super::walk_files(base, cancel, &mut unreadable)
+    let entries = super::search::walk_files(base, cancel, &mut unreadable)
         .filter(|entry| {
             include_matcher.is_none_or(|m| {
                 let name = entry.file_name().to_string_lossy();
@@ -352,11 +352,11 @@ fn collect_files(
             }
             true
         });
-    let files = super::newest_first(entries)
+    let files = super::search::newest_first(entries)
         .into_iter()
         .map(ignore::DirEntry::into_path)
         .collect();
-    withheld += super::withhold_unreadable(&mut unreadable, read_filter);
+    withheld += super::search::withhold_unreadable(&mut unreadable, read_filter);
 
     CollectedFiles {
         files,
@@ -396,7 +396,7 @@ fn texts<'a>(
 fn read_text(path: &Path, size_limit: u64) -> io::Result<Option<String>> {
     let mut options = OpenOptions::new();
     options.read(true);
-    let mut file = super::open_no_follow_blocking(path, options)?;
+    let mut file = super::file::open_no_follow_blocking(path, options)?;
     let metadata = file.metadata()?;
     if !metadata.is_file() {
         return Err(io::Error::other("not a regular file"));
@@ -410,7 +410,7 @@ fn read_text(path: &Path, size_limit: u64) -> io::Result<Option<String>> {
 
     let mut bytes = Vec::new();
     file.read_to_end(&mut bytes)?;
-    if super::is_binary(&bytes) {
+    if super::file::is_binary(&bytes) {
         return Ok(None);
     }
     Ok(Some(String::from_utf8_lossy(&bytes).into_owned()))
@@ -421,12 +421,12 @@ fn push_skipped_note(output: &mut String, skipped: &[(PathBuf, u64)], limit: u64
     let lines: Vec<String> = skipped
         .iter()
         .map(|(path, size)| {
-            let mb = super::bytes_to_mb(*size);
+            let mb = super::file::bytes_to_mb(*size);
             format!("{} ({mb:.1} MB)", super::display_path(path, cwd))
         })
         .collect();
     let header = format!("Skipped (exceeds {limit_mb} MB size limit):");
-    super::push_path_note(output, &header, &lines);
+    super::search::push_path_note(output, &header, &lines);
 }
 
 // ── Content Mode ──
@@ -458,9 +458,8 @@ fn format_content<'a>(
 }
 
 /// The content rows a search keeps: one past `head_limit`, which proves more output exists, so the
-/// footer appears only when a row was dropped, and at most about [`super::MAX_SPILL_BYTES`], the
-/// most the dispatcher keeps of a result, so `head_limit: 0` cannot hold every match of a large
-/// tree in memory.
+/// footer appears only when a row was dropped, and at most about [`MAX_SPILL_BYTES`], the most
+/// the dispatcher keeps of a result, so `head_limit: 0` cannot buffer every match of a large tree.
 struct Rows {
     kept: Vec<String>,
     bytes: u64,
@@ -478,7 +477,7 @@ impl Rows {
 
     /// Returns whether the search can stop, since another row would be dropped.
     fn full(&self) -> bool {
-        self.kept.len() > self.head_limit || self.bytes >= super::MAX_SPILL_BYTES
+        self.kept.len() > self.head_limit || self.bytes >= MAX_SPILL_BYTES
     }
 
     fn push(&mut self, row: String) {
@@ -495,8 +494,8 @@ impl Rows {
         let footer = if self.kept.len() > self.head_limit {
             self.kept.truncate(self.head_limit);
             Some(format!("{} lines", self.head_limit))
-        } else if self.bytes >= super::MAX_SPILL_BYTES {
-            Some(format!("{} MiB of output", super::MAX_SPILL_BYTES >> 20))
+        } else if self.bytes >= MAX_SPILL_BYTES {
+            Some(format!("{} MiB of output", MAX_SPILL_BYTES >> 20))
         } else {
             None
         };
@@ -1275,7 +1274,7 @@ mod tests {
                 }
             );
             assert_eq!(
-                grep_title(crate::tool::strip_search_notes(&result)),
+                grep_title(crate::tool::search::strip_search_notes(&result)),
                 "1 match"
             );
             let view = GrepTool::default().result_view(
@@ -1357,7 +1356,7 @@ mod tests {
                     (1 file withheld by read deny or ask rules)"
                 }
             );
-            let title = grep_title(crate::tool::strip_search_notes(&result));
+            let title = grep_title(crate::tool::search::strip_search_notes(&result));
             assert_eq!(title, "No matches found");
             // The structured view would drop the note, so the text view shows it.
             let input = serde_json::json!({"pattern": "secret"});

@@ -274,11 +274,14 @@ The stdio sink escapes control characters other than tabs and line breaks in mod
 - `crates/ox-core/src/permission/rule.rs`: `Rule`, the exec, path, net, and MCP patterns, `MatchDiscipline`, and `Rule::for_call`.
 - `crates/ox-core/src/permission/shell.rs`: `CommandTarget::parse`, wrapper stripping, named and program words, opaque forms, redirection reads and writes, known-safe commands, reader glob expansion, and the forced recursive `rm` check.
 - `crates/ox-core/src/protocol.rs`: `Event::ApprovalRequested`, `Event::SessionRulesUpdated`, `Event::ModeChanged`, `Op::Resolve`, `Op::SetMode`, `Decision`.
-- `crates/ox-core/src/tool.rs`: `Tool` trait (`spec`, `path_field`, `prepare`, `approval_preview`, `run`), `ToolSpec`, `ToolCtx`, `Prepared`, `SearchRoot`, `ApprovalPreview`, `read_validated`, `write_no_follow`, `open_no_follow`, `push_withheld_note`.
+- `crates/ox-core/src/tool.rs`: `Tool` trait (`spec`, `path_field`, `prepare`, `approval_preview`, `run`), `ToolSpec`, `ToolCtx`, `Prepared`.
 - `crates/ox-core/src/tool/bash.rs`: unbounded execution surface.
 - `crates/ox-core/src/tool/edit.rs`: read-before-edit gate, `synthesize_chunk` preview.
+- `crates/ox-core/src/tool/file.rs`: `read_validated`, `write_no_follow`, `open_no_follow`.
 - `crates/ox-core/src/tool/glob.rs`: read filter on each match.
 - `crates/ox-core/src/tool/grep.rs`: read filter in `collect_files`.
+- `crates/ox-core/src/tool/search.rs`: `SearchRoot`, `push_withheld_note`.
+- `crates/ox-core/src/tool/view.rs`: `ApprovalPreview`.
 - `crates/ox-core/src/tool/write.rs`: new-file creation, symlink refusal, current-content preview.
 - `crates/ox-core/src/util/text.rs`: `is_hidden`, shared by both frontends, plus the stdio sink's `escape_controls` and the REPL preview's `escape_hidden`.
 - `crates/ox-tui/src/app/dispatch.rs`: `App::cycle_mode`, the Shift+Tab cycle.

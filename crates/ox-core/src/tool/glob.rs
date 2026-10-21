@@ -9,10 +9,9 @@ use std::sync::Arc;
 use serde::Deserialize;
 use tokio_util::sync::CancellationToken;
 
-use super::{
-    NO_FILES_FOUND, Prepared, SearchRoot, Tool, ToolCtx, ToolMetadata, ToolOutput, ToolResultView,
-    ToolSpec, extract_input_field,
-};
+use super::search::{NO_FILES_FOUND, SearchRoot};
+use super::view::ToolResultView;
+use super::{Prepared, Tool, ToolCtx, ToolMetadata, ToolOutput, ToolSpec, extract_input_field};
 use crate::permission::{PermissionClass, ReadFilter};
 use crate::util::text::plural;
 
@@ -46,7 +45,7 @@ impl Tool for GlobTool {
     }
 
     fn prepare(&self, input: serde_json::Value, ctx: &ToolCtx) -> Prepared {
-        super::prepare_search_root(input, ctx)
+        super::search::prepare_search_root(input, ctx)
     }
 
     fn icon(&self) -> &'static str {
@@ -127,7 +126,7 @@ async fn run(prepared: Prepared, ctx: &ToolCtx, read_filter: ReadFilter) -> Tool
             content,
             truncated_total,
         }) => {
-            let title = glob_title(super::strip_search_notes(&content));
+            let title = glob_title(super::search::strip_search_notes(&content));
             let output = ToolOutput::success(content).with_title(title);
             match truncated_total {
                 Some(total) => output.with_truncated_total(total),
@@ -182,7 +181,7 @@ fn glob_files(
     let read_filter = read_filter.walk(base, spelled, workspace);
     let mut unreadable = Vec::new();
     let mut withheld = 0;
-    let entries = super::walk_files(base, cancel, &mut unreadable)
+    let entries = super::search::walk_files(base, cancel, &mut unreadable)
         .filter(|entry| {
             let rel = entry.path().strip_prefix(base).unwrap_or(entry.path());
             glob.is_match(rel)
@@ -192,11 +191,11 @@ fn glob_files(
             withheld += usize::from(held);
             !held
         });
-    let mut matches: Vec<String> = super::newest_first(entries)
+    let mut matches: Vec<String> = super::search::newest_first(entries)
         .iter()
         .map(|entry| super::display_path(entry.path(), cwd))
         .collect();
-    withheld += super::withhold_unreadable(&mut unreadable, &read_filter);
+    withheld += super::search::withhold_unreadable(&mut unreadable, &read_filter);
 
     let total = matches.len();
     let truncated = total > MAX_RESULTS;
@@ -213,8 +212,8 @@ fn glob_files(
             "\n\n{SHOWING_PREFIX}{MAX_RESULTS} of {total} matches. Use a more specific pattern.)"
         );
     }
-    super::push_unreadable_note(&mut content, &unreadable, cwd);
-    super::push_withheld_note(&mut content, withheld);
+    super::search::push_unreadable_note(&mut content, &unreadable, cwd);
+    super::search::push_withheld_note(&mut content, withheld);
 
     Ok(GlobOutput {
         content,
@@ -817,7 +816,7 @@ mod tests {
             );
             assert_eq!(result.truncated_total, None);
             assert_eq!(
-                glob_title(crate::tool::strip_search_notes(&result.content)),
+                glob_title(crate::tool::search::strip_search_notes(&result.content)),
                 "Found 1 file"
             );
             // The structured view would drop the note, so the text view shows it.
@@ -862,7 +861,7 @@ mod tests {
                 }
             );
             assert_eq!(
-                glob_title(crate::tool::strip_search_notes(&result.content)),
+                glob_title(crate::tool::search::strip_search_notes(&result.content)),
                 "Found 1 file"
             );
             let view = GlobTool::default().result_view(

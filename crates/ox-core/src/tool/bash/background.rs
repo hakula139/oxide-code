@@ -19,8 +19,9 @@ use super::{
 };
 use crate::permission::PermissionClass;
 use crate::protocol::{Event, EventSink};
+use crate::tool::spill::Spills;
 use crate::tool::{
-    Prepared, Spills, Tool, ToolCtx, ToolOutput, ToolSpec, extract_input_field, parse_input,
+    Prepared, Tool, ToolCtx, ToolOutput, ToolSpec, extract_input_field, parse_input,
 };
 use crate::util::sync::lock_or_recover;
 use crate::util::text::ELLIPSIS;
@@ -704,10 +705,10 @@ mod tests {
     use super::testing::shell;
     use super::*;
     use crate::protocol::testing::CapturingSink;
-    use crate::tool::MAX_OUTPUT_BYTES;
     use crate::tool::bash::BashTool;
     use crate::tool::bash::testing::{record_pid, until_gone, until_recorded};
     use crate::tool::local_testing::{self, ctx, spill_path, temp_ctx};
+    use crate::tool::spill::MAX_OUTPUT_BYTES;
 
     /// A registry that reports its list to the returned sink.
     fn shells() -> (Arc<BackgroundShells>, CapturingSink) {

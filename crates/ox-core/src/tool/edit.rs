@@ -7,9 +7,10 @@ use std::pin::Pin;
 
 use serde::Deserialize;
 
+use super::file::WriteMode;
+use super::view::{ApprovalBody, ApprovalPreview, DiffChunk, DiffLine, EditDiff, ToolResultView};
 use super::{
-    ApprovalBody, ApprovalPreview, DiffChunk, DiffLine, EditDiff, Prepared, Tool, ToolCtx,
-    ToolMetadata, ToolOutput, ToolResultView, ToolSpec, WriteMode, extract_input_field,
+    Prepared, Tool, ToolCtx, ToolMetadata, ToolOutput, ToolSpec, extract_input_field,
     summarize_path_call,
 };
 use crate::file_tracker::GatePurpose;
@@ -178,11 +179,11 @@ async fn edit_file(
     }
 
     let file_path = ctx.cwd().join(path);
-    let (_, content_bytes) = super::read_validated(&file_path, path, |metadata| {
-        super::validate_file_target(path, metadata, "edit")
+    let (_, content_bytes) = super::file::read_validated(&file_path, path, |metadata| {
+        super::file::validate_file_target(path, metadata, "edit")
     })
     .await?;
-    let key = super::tracker_key(&file_path).await;
+    let key = super::file::tracker_key(&file_path).await;
     ctx.tracker
         .verify_current_content(&key, &content_bytes, GatePurpose::Edit)
         .map_err(|e| e.to_string())?;
@@ -195,7 +196,7 @@ async fn edit_file(
     };
     let (updated, edited) = super::run_blocking(move || replacement.apply(content_bytes)).await?;
 
-    super::write_tracked(ctx, &file_path, updated.into_bytes(), WriteMode::Overwrite)
+    super::file::write_tracked(ctx, &file_path, updated.into_bytes(), WriteMode::Overwrite)
         .await
         .map_err(|e| format!("Failed to write {path}: {e}"))?;
     Ok(edited)

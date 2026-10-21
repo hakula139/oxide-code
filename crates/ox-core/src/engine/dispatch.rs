@@ -18,10 +18,9 @@ use crate::message::ContentBlock;
 use crate::permission::rule::Rule;
 use crate::permission::{Policy, SessionGrant, Workspace};
 use crate::protocol::{Decision, Event, EventSink, Op, ToolCall, ToolResult};
+use crate::tool::spill::run_capped;
 use crate::tool::tasks::Task;
-use crate::tool::{
-    Prepared, Tool, ToolCtx, ToolMetadata, ToolOutput, ToolRegistry, ToolSpec, run_capped,
-};
+use crate::tool::{Prepared, Tool, ToolCtx, ToolMetadata, ToolOutput, ToolRegistry, ToolSpec};
 
 /// What each call of a round runs against: the policy that gates it, which gains the session allow
 /// rules the user grants, and the session-wide parts of its [`ToolCtx`].

@@ -8,9 +8,8 @@ use std::pin::Pin;
 
 use serde::{Deserialize, Serialize};
 
-use super::{
-    Prepared, Tool, ToolCtx, ToolMetadata, ToolOutput, ToolResultView, ToolSpec, invalid_input,
-};
+use super::view::ToolResultView;
+use super::{Prepared, Tool, ToolCtx, ToolMetadata, ToolOutput, ToolSpec, invalid_input};
 use crate::message::{ContentBlock, Message};
 use crate::permission::PermissionClass;
 use crate::util::text::plural;

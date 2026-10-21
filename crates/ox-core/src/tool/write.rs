@@ -6,9 +6,10 @@ use std::pin::Pin;
 
 use serde::Deserialize;
 
+use super::file::WriteMode;
+use super::view::{ApprovalBody, ApprovalPreview};
 use super::{
-    ApprovalBody, ApprovalPreview, Prepared, Tool, ToolCtx, ToolOutput, ToolSpec, WriteMode,
-    extract_input_field, summarize_path_call,
+    Prepared, Tool, ToolCtx, ToolOutput, ToolSpec, extract_input_field, summarize_path_call,
 };
 use crate::file_tracker::{FileTracker, GatePurpose};
 use crate::permission::PermissionClass;
@@ -156,7 +157,7 @@ async fn write_file(path: &str, content: &str, ctx: &ToolCtx) -> Result<WriteMod
     } else {
         WriteMode::CreateNew
     };
-    super::write_tracked(ctx, &file_path, content.as_bytes().to_vec(), mode)
+    super::file::write_tracked(ctx, &file_path, content.as_bytes().to_vec(), mode)
         .await
         .map_err(|e| format!("Failed to write {path}: {e}"))?;
     Ok(mode)
@@ -170,20 +171,24 @@ fn validate_write_target(path: &str, metadata: &std::fs::Metadata) -> Result<(),
             "{path} is a symlink. Refusing to write through it."
         ));
     }
-    super::validate_file_target(path, metadata, "write")
+    super::file::validate_file_target(path, metadata, "write")
 }
 
 async fn check_gate(path: &Path, shown: &str, tracker: &FileTracker) -> Result<(), String> {
     let bytes = read_target(path, shown).await?;
     tracker
-        .verify_current_content(&super::tracker_key(path).await, &bytes, GatePurpose::Write)
+        .verify_current_content(
+            &super::file::tracker_key(path).await,
+            &bytes,
+            GatePurpose::Write,
+        )
         .map_err(|e| e.to_string())
 }
 
 /// Reads the existing target `path`, spelled `shown`. The no-follow open refuses a symlink, and
 /// [`validate_write_target`] refuses a non-regular or oversized file.
 async fn read_target(path: &Path, shown: &str) -> Result<Vec<u8>, String> {
-    let (_, bytes) = super::read_validated(path, shown, |metadata| {
+    let (_, bytes) = super::file::read_validated(path, shown, |metadata| {
         validate_write_target(shown, metadata)
     })
     .await?;
@@ -197,7 +202,7 @@ mod tests {
     use crate::file_tracker::testing::seed_full_read;
     use crate::tool::local_testing::{self, canonical_tempdir, ctx, temp_ctx};
     use crate::tool::read::ReadTool;
-    use crate::tool::{DiffChunk, DiffLine};
+    use crate::tool::view::{DiffChunk, DiffLine};
     use crate::util::fs::testing::symlink_file;
 
     mod approval_preview {

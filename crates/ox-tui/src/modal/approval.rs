@@ -16,7 +16,7 @@ use ratatui::widgets::Paragraph;
 
 use ox_core::permission::SessionGrant;
 use ox_core::protocol::{Decision, Op};
-use ox_core::tool::{ApprovalBody, ApprovalPreview, DiffChunk};
+use ox_core::tool::view::{ApprovalBody, ApprovalPreview, DiffChunk};
 use ox_core::util::text::{is_hidden, truncate_to_width};
 
 use super::line_editor::LineEditor;
@@ -634,7 +634,7 @@ mod tests {
     use ox_core::permission::PermissionClass;
     use ox_core::permission::rule::Rule;
     use ox_core::permission::testing::exec_grant;
-    use ox_core::tool::DiffLine;
+    use ox_core::tool::view::DiffLine;
 
     use super::*;
     use crate::modal::ModalStack;
