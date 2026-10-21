@@ -537,7 +537,7 @@ impl Palette {
     }
 }
 
-/// Flattens an [`ApprovalBody`] into preview rows: a command's lines verbatim, or a diff's hunks as
+/// Flattens an [`ApprovalBody`] into preview rows: a command's lines verbatim, or a diff's hunk as
 /// `-` / `+` rows.
 fn flatten_body(body: &ApprovalBody) -> Vec<BodyLine> {
     match body {

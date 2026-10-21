@@ -1,4 +1,4 @@
-//! The [`Tool`] trait, the [`ToolRegistry`] that dispatches calls, and helpers shared by the
+//! The [`Tool`] trait, the [`ToolRegistry`] that looks tools up by name, and helpers shared by the
 //! built-in tools.
 
 pub mod bash;
@@ -443,7 +443,7 @@ fn truncate_line(line: &str, max_chars: usize) -> Cow<'_, str> {
 
 #[cfg(test)]
 pub(crate) mod local_testing {
-    use std::fs::{self, File, Permissions};
+    use std::fs::{self, File};
     use std::path::{Path, PathBuf};
     use std::sync::Arc;
     use std::time::{Duration, SystemTime};
@@ -528,7 +528,7 @@ pub(crate) mod local_testing {
         }
 
         /// The registered tools with their specs, in registration order.
-        pub(crate) fn iter(&self) -> impl Iterator<Item = (&ToolSpec, &dyn Tool)> {
+        pub(super) fn iter(&self) -> impl Iterator<Item = (&ToolSpec, &dyn Tool)> {
             self.tools.iter().map(|(spec, tool)| (spec, tool.as_ref()))
         }
     }
@@ -566,7 +566,7 @@ pub(crate) mod local_testing {
             use std::os::unix::fs::PermissionsExt as _;
 
             let mode = fs::metadata(path).unwrap().permissions().mode();
-            fs::set_permissions(path, Permissions::from_mode(0o000)).unwrap();
+            fs::set_permissions(path, fs::Permissions::from_mode(0o000)).unwrap();
             mode
         };
         // `(RD)` is the right to read a file's data or list a directory.
@@ -600,7 +600,7 @@ pub(crate) mod local_testing {
             {
                 use std::os::unix::fs::PermissionsExt as _;
 
-                fs::set_permissions(&self.path, Permissions::from_mode(self.mode)).unwrap();
+                fs::set_permissions(&self.path, fs::Permissions::from_mode(self.mode)).unwrap();
             }
             #[cfg(windows)]
             icacls(&self.path, &["/remove:d", EVERYONE]);
@@ -923,123 +923,6 @@ mod tests {
         }
     }
 
-    mod icon {
-        use super::*;
-
-        #[test]
-        fn catalog_icons_match_the_published_prefix_set() {
-            let expected = [
-                ("bash", "$"),
-                ("bash_output", "»"),
-                ("bash_stop", "■"),
-                ("edit", "✎"),
-                ("glob", "✱"),
-                ("grep", "⌕"),
-                ("read", "→"),
-                ("tasks", "≡"),
-                ("write", "←"),
-            ];
-            let tools = built_in();
-            for (name, icon) in expected {
-                assert_eq!(tools.icon(name), icon, "tool {name}");
-            }
-        }
-    }
-
-    mod summarize_call {
-        use super::*;
-
-        #[test]
-        fn wraps_arg_in_the_tool_label() {
-            let cases = [
-                ("bash", serde_json::json!({"command": "ls"}), "ls"),
-                (
-                    "bash_output",
-                    serde_json::json!({"shell_id": "shell-2"}),
-                    "BashOutput(shell-2)",
-                ),
-                (
-                    "bash_stop",
-                    serde_json::json!({"shell_id": "shell-2"}),
-                    "BashStop(shell-2)",
-                ),
-                (
-                    "edit",
-                    serde_json::json!({
-                        "file_path": "/a/b.rs",
-                        "old_string": "x",
-                        "new_string": "y",
-                    }),
-                    "Edit(/a/b.rs)",
-                ),
-                (
-                    "glob",
-                    serde_json::json!({"pattern": "**/*.rs"}),
-                    "Glob(**/*.rs)",
-                ),
-                ("grep", serde_json::json!({"pattern": "fn "}), "Grep(fn )"),
-                (
-                    "read",
-                    serde_json::json!({"file_path": "/a/b.rs"}),
-                    "Read(/a/b.rs)",
-                ),
-                (
-                    "write",
-                    serde_json::json!({"file_path": "/a/b.rs", "content": "x"}),
-                    "Write(/a/b.rs)",
-                ),
-            ];
-            let tools = built_in();
-            for (name, input, expected) in &cases {
-                assert_eq!(
-                    tools.label(name, input, Path::new("/repo")),
-                    *expected,
-                    "tool {name}",
-                );
-            }
-        }
-
-        #[test]
-        fn falls_back_to_bare_name_when_arg_missing() {
-            let tools = built_in();
-            for (spec, _) in tools.iter() {
-                let name = &spec.name;
-                let got = tools.label(name, &serde_json::json!({}), Path::new("/repo"));
-                assert_eq!(got, pascal_case(name), "tool {name}");
-            }
-        }
-
-        #[test]
-        fn shortens_file_paths_inside_cwd() {
-            let path = "/repo/crates/ox-core/src/tool/read.rs";
-            let cases = [
-                (
-                    "edit",
-                    serde_json::json!({"file_path": path, "old_string": "x", "new_string": "y"}),
-                    "Edit(crates/ox-core/src/tool/read.rs)",
-                ),
-                (
-                    "read",
-                    serde_json::json!({"file_path": path}),
-                    "Read(crates/ox-core/src/tool/read.rs)",
-                ),
-                (
-                    "write",
-                    serde_json::json!({"file_path": path, "content": "x"}),
-                    "Write(crates/ox-core/src/tool/read.rs)",
-                ),
-            ];
-            let tools = built_in();
-            for (name, input, expected) in &cases {
-                assert_eq!(
-                    tools.label(name, input, Path::new("/repo")),
-                    *expected,
-                    "tool {name}",
-                );
-            }
-        }
-    }
-
     mod approval_preview {
         use super::*;
 
@@ -1211,6 +1094,25 @@ mod tests {
             use super::*;
 
             #[test]
+            fn catalog_icons_match_the_published_prefix_set() {
+                let expected = [
+                    ("bash", "$"),
+                    ("bash_output", "»"),
+                    ("bash_stop", "■"),
+                    ("edit", "✎"),
+                    ("glob", "✱"),
+                    ("grep", "⌕"),
+                    ("read", "→"),
+                    ("tasks", "≡"),
+                    ("write", "←"),
+                ];
+                let tools = built_in();
+                for (name, icon) in expected {
+                    assert_eq!(tools.icon(name), icon, "tool {name}");
+                }
+            }
+
+            #[test]
             fn unknown_tool_falls_back_to_default() {
                 let registry = bash_registry(Vec::new());
                 assert_eq!(registry.icon("nonexistent"), DEFAULT_TOOL_ICON);
@@ -1219,6 +1121,96 @@ mod tests {
 
         mod label {
             use super::*;
+
+            #[test]
+            fn wraps_arg_in_the_tool_label() {
+                let cases = [
+                    ("bash", serde_json::json!({"command": "ls"}), "ls"),
+                    (
+                        "bash_output",
+                        serde_json::json!({"shell_id": "shell-2"}),
+                        "BashOutput(shell-2)",
+                    ),
+                    (
+                        "bash_stop",
+                        serde_json::json!({"shell_id": "shell-2"}),
+                        "BashStop(shell-2)",
+                    ),
+                    (
+                        "edit",
+                        serde_json::json!({
+                            "file_path": "/a/b.rs",
+                            "old_string": "x",
+                            "new_string": "y",
+                        }),
+                        "Edit(/a/b.rs)",
+                    ),
+                    (
+                        "glob",
+                        serde_json::json!({"pattern": "**/*.rs"}),
+                        "Glob(**/*.rs)",
+                    ),
+                    ("grep", serde_json::json!({"pattern": "fn "}), "Grep(fn )"),
+                    (
+                        "read",
+                        serde_json::json!({"file_path": "/a/b.rs"}),
+                        "Read(/a/b.rs)",
+                    ),
+                    (
+                        "write",
+                        serde_json::json!({"file_path": "/a/b.rs", "content": "x"}),
+                        "Write(/a/b.rs)",
+                    ),
+                ];
+                let tools = built_in();
+                for (name, input, expected) in &cases {
+                    assert_eq!(
+                        tools.label(name, input, Path::new("/repo")),
+                        *expected,
+                        "tool {name}",
+                    );
+                }
+            }
+
+            #[test]
+            fn falls_back_to_bare_name_when_arg_missing() {
+                let tools = built_in();
+                for (spec, _) in tools.iter() {
+                    let name = &spec.name;
+                    let got = tools.label(name, &serde_json::json!({}), Path::new("/repo"));
+                    assert_eq!(got, pascal_case(name), "tool {name}");
+                }
+            }
+
+            #[test]
+            fn shortens_file_paths_inside_cwd() {
+                let path = "/repo/crates/ox-core/src/tool/read.rs";
+                let cases = [
+                    (
+                        "edit",
+                        serde_json::json!({"file_path": path, "old_string": "x", "new_string": "y"}),
+                        "Edit(crates/ox-core/src/tool/read.rs)",
+                    ),
+                    (
+                        "read",
+                        serde_json::json!({"file_path": path}),
+                        "Read(crates/ox-core/src/tool/read.rs)",
+                    ),
+                    (
+                        "write",
+                        serde_json::json!({"file_path": path, "content": "x"}),
+                        "Write(crates/ox-core/src/tool/read.rs)",
+                    ),
+                ];
+                let tools = built_in();
+                for (name, input, expected) in &cases {
+                    assert_eq!(
+                        tools.label(name, input, Path::new("/repo")),
+                        *expected,
+                        "tool {name}",
+                    );
+                }
+            }
 
             #[test]
             fn unknown_tool_falls_back_to_raw_name() {

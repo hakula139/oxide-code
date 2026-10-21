@@ -302,6 +302,11 @@ mod tests {
     };
     use crate::util::path::slash_separated;
 
+    /// A `glob` tool without read rules.
+    fn glob_tool() -> GlobTool {
+        GlobTool::new(ReadFilter::default())
+    }
+
     mod prepare {
         use super::*;
 
@@ -310,8 +315,8 @@ mod tests {
             // A deny scoped to the project root must apply when `path` is omitted.
             let dir = canonical_tempdir();
 
-            let prepared = GlobTool::new(ReadFilter::default())
-                .prepare(serde_json::json!({"pattern": "*.rs"}), &ctx(dir.path()));
+            let prepared =
+                glob_tool().prepare(serde_json::json!({"pattern": "*.rs"}), &ctx(dir.path()));
 
             let Access::Path {
                 canonical,
@@ -331,7 +336,7 @@ mod tests {
 
         #[test]
         fn builds_glob_files() {
-            let view = GlobTool::new(ReadFilter::default())
+            let view = glob_tool()
                 .result_view(
                     &serde_json::json!({"pattern": "*.rs"}),
                     indoc! {"
@@ -366,7 +371,7 @@ mod tests {
                 truncated_total: Some(1234),
                 ..ToolMetadata::default()
             };
-            let view = GlobTool::new(ReadFilter::default())
+            let view = glob_tool()
                 .result_view(
                     &serde_json::json!({"pattern": "**/*.rs"}),
                     &content,
@@ -387,7 +392,7 @@ mod tests {
 
         #[test]
         fn handles_no_files_found() {
-            let view = GlobTool::new(ReadFilter::default())
+            let view = glob_tool()
                 .result_view(
                     &serde_json::json!({"pattern": "*.nope"}),
                     "No files found",
@@ -408,7 +413,7 @@ mod tests {
 
         #[test]
         fn falls_back_for_empty_content() {
-            let view = GlobTool::new(ReadFilter::default()).result_view(
+            let view = glob_tool().result_view(
                 &serde_json::json!({"pattern": "*.rs"}),
                 "",
                 &ToolMetadata::default(),
@@ -419,7 +424,7 @@ mod tests {
 
         #[test]
         fn falls_back_when_input_has_no_pattern() {
-            let view = GlobTool::new(ReadFilter::default()).result_view(
+            let view = glob_tool().result_view(
                 &serde_json::json!({}),
                 "src/main.rs",
                 &ToolMetadata::default(),
@@ -430,7 +435,7 @@ mod tests {
 
         #[test]
         fn single_file_no_footer() {
-            let view = GlobTool::new(ReadFilter::default())
+            let view = glob_tool()
                 .result_view(
                     &serde_json::json!({"pattern": "*.rs"}),
                     "src/only.rs",
@@ -450,7 +455,7 @@ mod tests {
 
         #[test]
         fn normalizes_trailing_newline() {
-            let view = GlobTool::new(ReadFilter::default())
+            let view = glob_tool()
                 .result_view(
                     &serde_json::json!({"pattern": "*.rs"}),
                     "a.rs\nb.rs\n",
@@ -474,7 +479,7 @@ mod tests {
                 truncated_total: Some(2),
                 ..ToolMetadata::default()
             };
-            let view = GlobTool::new(ReadFilter::default())
+            let view = glob_tool()
                 .result_view(
                     &serde_json::json!({"pattern": "*.rs"}),
                     "a.rs\nb.rs",
@@ -513,7 +518,7 @@ mod tests {
                 truncated_total: Some(1),
                 ..ToolMetadata::default()
             };
-            let view = GlobTool::new(ReadFilter::default()).result_view(
+            let view = glob_tool().result_view(
                 &serde_json::json!({"pattern": "*.rs"}),
                 "a.rs\nb.rs",
                 &metadata,
@@ -524,7 +529,7 @@ mod tests {
 
         #[test]
         fn falls_back_for_unrecognized_trailing_prose() {
-            let view = GlobTool::new(ReadFilter::default()).result_view(
+            let view = glob_tool().result_view(
                 &serde_json::json!({"pattern": "*.rs"}),
                 indoc! {"
                     src/main.rs
@@ -552,8 +557,7 @@ mod tests {
                 "path": dir.path().to_str().unwrap()
             });
 
-            let output =
-                local_testing::run(&GlobTool::new(ReadFilter::default()), input, &temp_ctx()).await;
+            let output = local_testing::run(&glob_tool(), input, &temp_ctx()).await;
 
             assert!(!output.is_error);
             assert!(output.content.contains("a.txt"));
@@ -563,12 +567,7 @@ mod tests {
 
         #[tokio::test]
         async fn missing_pattern_reports_input_error() {
-            let output = local_testing::run(
-                &GlobTool::new(ReadFilter::default()),
-                serde_json::json!({}),
-                &temp_ctx(),
-            )
-            .await;
+            let output = local_testing::run(&glob_tool(), serde_json::json!({}), &temp_ctx()).await;
             assert!(output.is_error);
             assert!(output.content.contains("Invalid input"));
         }
@@ -577,8 +576,7 @@ mod tests {
         async fn invalid_pattern_omits_title() {
             let input = serde_json::json!({"pattern": "[unclosed"});
 
-            let output =
-                local_testing::run(&GlobTool::new(ReadFilter::default()), input, &temp_ctx()).await;
+            let output = local_testing::run(&glob_tool(), input, &temp_ctx()).await;
             assert!(output.is_error);
             assert!(
                 output.content.contains("Invalid glob pattern"),
@@ -598,12 +596,7 @@ mod tests {
 
             let input = serde_json::json!({"pattern": "*.txt"});
 
-            let output = local_testing::run(
-                &GlobTool::new(ReadFilter::default()),
-                input,
-                &ctx(dir.path()),
-            )
-            .await;
+            let output = local_testing::run(&glob_tool(), input, &ctx(dir.path())).await;
 
             assert!(!output.is_error);
             assert_eq!(output.metadata.truncated_total, Some(total));
@@ -831,7 +824,7 @@ mod tests {
                 "Found 1 file"
             );
             // The structured view would drop the note, so the text view shows it.
-            let view = GlobTool::new(ReadFilter::default()).result_view(
+            let view = glob_tool().result_view(
                 &serde_json::json!({"pattern": "*.toml"}),
                 &result.content,
                 &ToolMetadata::default(),
@@ -875,7 +868,7 @@ mod tests {
                 glob_title(crate::tool::search::strip_search_notes(&result.content)),
                 "Found 1 file"
             );
-            let view = GlobTool::new(ReadFilter::default()).result_view(
+            let view = glob_tool().result_view(
                 &serde_json::json!({"pattern": "*.rs"}),
                 &result.content,
                 &ToolMetadata::default(),

@@ -6,7 +6,7 @@ use std::pin::Pin;
 
 use serde::Deserialize;
 
-use super::file::WriteMode;
+use super::file::{FileVerb, WriteMode};
 use super::view::{ApprovalBody, ApprovalPreview, DiffChunk, DiffLine, EditDiff, ToolResultView};
 use super::{Prepared, Tool, ToolCtx, ToolMetadata, ToolOutput, ToolSpec, extract_input_field};
 use crate::file_tracker::GatePurpose;
@@ -168,7 +168,7 @@ async fn edit_file(
 
     let file_path = ctx.cwd().join(path);
     let (_, content_bytes) = super::file::read_validated(&file_path, path, |metadata| {
-        super::file::validate_file_target(path, metadata, "edit")
+        super::file::validate_file_target(path, metadata, FileVerb::Edit)
     })
     .await?;
     let key = super::file::tracker_key(&file_path).await;
@@ -934,7 +934,7 @@ mod tests {
         async fn rejects_too_large_file() {
             let dir = canonical_tempdir();
             let path = dir.path().join("huge.txt");
-            let f = std::fs::File::create(&path).unwrap();
+            let f = fs::File::create(&path).unwrap();
             f.set_len(MAX_TRACKED_FILE_SIZE + 1).unwrap();
 
             let err = edit_file(path.to_str().unwrap(), "a", "b", false, &temp_ctx())

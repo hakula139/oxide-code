@@ -2,7 +2,6 @@
 //! non-2xx classification, and bounded retry with exponential backoff.
 
 use std::fmt;
-use std::future::Future;
 use std::sync::{Arc, LazyLock};
 use std::time::Duration;
 

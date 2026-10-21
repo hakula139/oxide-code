@@ -5,7 +5,7 @@ use std::pin::Pin;
 
 use serde::Deserialize;
 
-use super::file::WriteMode;
+use super::file::{FileVerb, WriteMode};
 use super::view::{ApprovalBody, ApprovalPreview};
 use super::{Prepared, Tool, ToolCtx, ToolOutput, ToolSpec, extract_input_field};
 use crate::file_tracker::{FileTracker, GatePurpose};
@@ -160,7 +160,7 @@ fn validate_write_target(path: &str, metadata: &std::fs::Metadata) -> Result<(),
             "{path} is a symlink. Refusing to write through it."
         ));
     }
-    super::file::validate_file_target(path, metadata, "write")
+    super::file::validate_file_target(path, metadata, FileVerb::Write)
 }
 
 async fn check_gate(path: &Path, shown: &str, tracker: &FileTracker) -> Result<(), String> {
@@ -186,7 +186,7 @@ async fn read_target(path: &Path, shown: &str) -> Result<Vec<u8>, String> {
 
 #[cfg(test)]
 mod tests {
-    use std::fs::{self, Permissions};
+    use std::fs;
 
     use super::*;
     use crate::file_tracker::MAX_TRACKED_FILE_SIZE;
@@ -543,7 +543,7 @@ mod tests {
         async fn rejects_oversized_file_before_gate() {
             let dir = canonical_tempdir();
             let path = dir.path().join("huge.txt");
-            let f = std::fs::File::create(&path).unwrap();
+            let f = fs::File::create(&path).unwrap();
             f.set_len(MAX_TRACKED_FILE_SIZE + 1).unwrap();
 
             let err = write_file(path.to_str().unwrap(), "content", &temp_ctx())
@@ -619,16 +619,13 @@ mod tests {
             fs::write(&path, "original").unwrap();
             let ctx = temp_ctx();
             seed_full_read(&ctx.tracker, &path);
-            fs::set_permissions(&path, Permissions::from_mode(0o444)).unwrap();
+            fs::set_permissions(&path, fs::Permissions::from_mode(0o444)).unwrap();
 
             let err = write_file(path.to_str().unwrap(), "overwrite", &ctx)
                 .await
                 .unwrap_err();
 
-            let cause = std::fs::OpenOptions::new()
-                .write(true)
-                .open(&path)
-                .unwrap_err();
+            let cause = fs::OpenOptions::new().write(true).open(&path).unwrap_err();
             assert_eq!(err, format!("Failed to write {}: {cause}", path.display()));
             assert_eq!(fs::read_to_string(&path).unwrap(), "original");
         }
@@ -644,7 +641,7 @@ mod tests {
             let readonly = dir.path().join("readonly");
             fs::create_dir(&readonly).unwrap();
             let path = readonly.join("nested").join("file.txt");
-            fs::set_permissions(&readonly, Permissions::from_mode(0o555)).unwrap();
+            fs::set_permissions(&readonly, fs::Permissions::from_mode(0o555)).unwrap();
 
             let err = write_file(path.to_str().unwrap(), "content", &temp_ctx())
                 .await

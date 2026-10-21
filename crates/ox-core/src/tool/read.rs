@@ -6,6 +6,7 @@ use std::pin::Pin;
 
 use serde::Deserialize;
 
+use super::file::FileVerb;
 use super::view::{ReadExcerptLine, ToolResultView};
 use super::{
     Prepared, Tool, ToolCtx, ToolMetadata, ToolOutput, ToolSpec, display_path, extract_input_field,
@@ -121,7 +122,7 @@ async fn read_file(
 ) -> Result<String, String> {
     let file_path = ctx.cwd().join(path);
     let (_, bytes) = super::file::read_validated(&file_path, path, |metadata| {
-        super::file::validate_file_target(path, metadata, "read")
+        super::file::validate_file_target(path, metadata, FileVerb::Read)
     })
     .await?;
 
@@ -725,7 +726,7 @@ mod tests {
         async fn oversized_file_reports_error() {
             let dir = canonical_tempdir();
             let path = dir.path().join("huge.txt");
-            let f = std::fs::File::create(&path).unwrap();
+            let f = fs::File::create(&path).unwrap();
             f.set_len(MAX_TRACKED_FILE_SIZE + 1).unwrap();
 
             let err = read_file(path.to_str().unwrap(), None, None, &temp_ctx())

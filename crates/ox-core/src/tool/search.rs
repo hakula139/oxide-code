@@ -254,94 +254,89 @@ mod tests {
         canonical_tempdir, create_modified_at, deny_read_access, deny_reads, search_root,
     };
 
-    mod search_root {
+    mod new {
         use super::*;
 
-        mod new {
-            use super::*;
+        #[test]
+        fn resolves_relative_and_absolute_paths_and_keeps_their_spelling() {
+            let dir = canonical_tempdir();
+            fs::create_dir(dir.path().join("src")).unwrap();
+            fs::create_dir(dir.path().join("lib")).unwrap();
+            let lib = dir.path().join("lib");
 
-            #[test]
-            fn resolves_relative_and_absolute_paths_and_keeps_their_spelling() {
-                let dir = canonical_tempdir();
-                fs::create_dir(dir.path().join("src")).unwrap();
-                fs::create_dir(dir.path().join("lib")).unwrap();
-                let lib = dir.path().join("lib");
+            let relative = search_root(dir.path(), Some("./src/../lib")).unwrap();
+            let absolute = search_root(Path::new("/"), Some(lib.to_str().unwrap())).unwrap();
 
-                let relative = search_root(dir.path(), Some("./src/../lib")).unwrap();
-                let absolute = search_root(Path::new("/"), Some(lib.to_str().unwrap())).unwrap();
+            assert_eq!(
+                (relative.base, relative.spelled, relative.cwd),
+                (
+                    lib.clone(),
+                    PathBuf::from("./src/../lib"),
+                    dir.path().to_owned()
+                ),
+            );
+            assert_eq!(absolute.base, lib);
+        }
 
-                assert_eq!(
-                    (relative.base, relative.spelled, relative.cwd),
-                    (
-                        lib.clone(),
-                        PathBuf::from("./src/../lib"),
-                        dir.path().to_owned()
-                    ),
-                );
-                assert_eq!(absolute.base, lib);
-            }
+        #[test]
+        fn defaults_to_the_cwd_without_a_path() {
+            let dir = canonical_tempdir();
 
-            #[test]
-            fn defaults_to_the_cwd_without_a_path() {
-                let dir = canonical_tempdir();
+            let root = search_root(dir.path(), None).unwrap();
 
-                let root = search_root(dir.path(), None).unwrap();
+            assert_eq!(
+                (root.base, root.spelled),
+                (dir.path().to_owned(), PathBuf::from(".")),
+            );
+        }
 
-                assert_eq!(
-                    (root.base, root.spelled),
-                    (dir.path().to_owned(), PathBuf::from(".")),
-                );
-            }
+        #[test]
+        fn missing_path_is_named_relative_to_cwd() {
+            let dir = canonical_tempdir();
 
-            #[test]
-            fn missing_path_is_named_relative_to_cwd() {
-                let dir = canonical_tempdir();
+            let err = search_root(dir.path(), Some("missing")).err().unwrap();
 
-                let err = search_root(dir.path(), Some("missing")).err().unwrap();
+            let cause = fs::metadata(dir.path().join("missing")).unwrap_err();
+            assert_eq!(err, format!("Failed to access missing: {cause}"));
+        }
 
-                let cause = fs::metadata(dir.path().join("missing")).unwrap_err();
-                assert_eq!(err, format!("Failed to access missing: {cause}"));
-            }
+        #[test]
+        fn refuses_an_access_that_is_not_a_path() {
+            let workspace = Arc::new(Workspace::new(Path::new("/repo")));
+            let err = SearchRoot::new(&Access::None, Some("src"), workspace)
+                .err()
+                .unwrap();
+            assert_eq!(
+                err,
+                "Failed to access src: the search root was not resolved."
+            );
+        }
 
-            #[test]
-            fn refuses_an_access_that_is_not_a_path() {
-                let workspace = Arc::new(Workspace::new(Path::new("/repo")));
-                let err = SearchRoot::new(&Access::None, Some("src"), workspace)
-                    .err()
-                    .unwrap();
-                assert_eq!(
-                    err,
-                    "Failed to access src: the search root was not resolved."
-                );
-            }
+        #[cfg(unix)]
+        #[test]
+        fn resolves_dot_dot_after_a_symlink_physically() {
+            let dir = canonical_tempdir();
+            fs::create_dir_all(dir.path().join("real/target")).unwrap();
+            let cwd = dir.path().join("cwd");
+            fs::create_dir(&cwd).unwrap();
+            std::os::unix::fs::symlink(dir.path().join("real/target"), cwd.join("link")).unwrap();
 
-            #[cfg(unix)]
-            #[test]
-            fn resolves_dot_dot_after_a_symlink_physically() {
-                let dir = canonical_tempdir();
-                fs::create_dir_all(dir.path().join("real/target")).unwrap();
-                let cwd = dir.path().join("cwd");
-                fs::create_dir(&cwd).unwrap();
-                std::os::unix::fs::symlink(dir.path().join("real/target"), cwd.join("link"))
-                    .unwrap();
+            let root = search_root(&cwd, Some("link/..")).unwrap();
 
-                let root = search_root(&cwd, Some("link/..")).unwrap();
+            assert_eq!(root.base, dir.path().join("real"));
+        }
 
-                assert_eq!(root.base, dir.path().join("real"));
-            }
+        #[cfg(target_os = "linux")]
+        #[test]
+        fn walks_from_a_root_whose_name_is_not_utf8() {
+            use std::os::unix::ffi::OsStrExt as _;
+            let dir = canonical_tempdir();
+            let cwd = dir.path().join(std::ffi::OsStr::from_bytes(b"caf\xe9"));
+            fs::create_dir(&cwd).unwrap();
 
-            #[cfg(target_os = "linux")]
-            #[test]
-            fn walks_from_a_root_whose_name_is_not_utf8() {
-                use std::os::unix::ffi::OsStrExt as _;
-                let dir = canonical_tempdir();
-                let cwd = dir.path().join(std::ffi::OsStr::from_bytes(b"caf\xe9"));
-                fs::create_dir(&cwd).unwrap();
+            let root = search_root(&cwd, None).unwrap();
 
-                let root = search_root(&cwd, None).unwrap();
-
-                assert_eq!(root.base, cwd);
-            }
+            assert_eq!(root.base, cwd);
         }
     }
 

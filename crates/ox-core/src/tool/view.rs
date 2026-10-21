@@ -93,7 +93,7 @@ pub struct ApprovalPreview {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", content = "data", rename_all = "snake_case")]
 pub enum ApprovalBody {
-    /// A one-line call label, which for `bash` is the command.
+    /// The call's label, which for `bash` is the whole command and may span lines.
     Command(String),
     /// The change an `edit` or `write` would make, in the chat's `+` / `-` chunk shape.
     Diff(DiffChunk),

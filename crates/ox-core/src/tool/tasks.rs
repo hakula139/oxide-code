@@ -1,7 +1,5 @@
 //! Session task list: the `tasks` tool the model tracks multi-step work with, and the list a
 //! transcript leaves behind.
-//!
-//! Design: `docs/design/tools/tasks.md`.
 
 use std::collections::HashMap;
 use std::path::Path;

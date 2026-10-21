@@ -1,9 +1,7 @@
 //! The dispatcher's output cap and the spill files that keep the full output a cut drops.
-//!
-//! Design: `docs/design/tools/truncation.md`.
 
 use std::fmt::Write as _;
-use std::fs::File;
+use std::fs::{File, OpenOptions};
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
 
@@ -205,7 +203,7 @@ fn create_spill_file(path: &Path) -> Result<File, String> {
         .parent()
         .expect("a spill file sits in the spill directory");
     create_private_dir_all(dir).map_err(|e| e.root_cause().to_string())?;
-    let mut options = std::fs::OpenOptions::new();
+    let mut options = OpenOptions::new();
     options.write(true).create_new(true);
     #[cfg(unix)]
     {
@@ -222,8 +220,7 @@ mod tests {
     use std::pin::Pin;
 
     use super::*;
-    use crate::permission::PermissionClass;
-    use crate::permission::ReadFilter;
+    use crate::permission::{PermissionClass, ReadFilter};
     use crate::tool::grep::GrepTool;
     use crate::tool::local_testing::{ctx, spill_path};
     use crate::tool::testing::bash_registry;
@@ -443,57 +440,53 @@ mod tests {
         }
     }
 
-    mod spill {
+    mod write {
         use super::*;
 
-        mod write {
-            use super::*;
+        #[test]
+        fn keeps_at_most_the_size_cap_and_says_so() {
+            let dir = tempfile::tempdir().unwrap();
+            let mut spill = ctx(dir.path()).spills().file(".stdout.txt");
+            let chunk = vec![b'a'; 1 << 20];
 
-            #[test]
-            fn keeps_at_most_the_size_cap_and_says_so() {
-                let dir = tempfile::tempdir().unwrap();
-                let mut spill = ctx(dir.path()).spills().file(".stdout.txt");
-                let chunk = vec![b'a'; 1 << 20];
-
-                for _ in 0..=MAX_SPILL_BYTES >> 20 {
-                    spill.write(&chunk);
-                }
-
-                let path = spill_path(dir.path(), ".stdout.txt");
-                let spilled = fs::metadata(&path).unwrap().len();
-                assert_eq!(spilled, MAX_SPILL_BYTES);
-                assert_eq!(
-                    spill.note("stdout"),
-                    format!("first 10 MiB of stdout saved to {}", path.display()),
-                );
+            for _ in 0..=MAX_SPILL_BYTES >> 20 {
+                spill.write(&chunk);
             }
 
-            #[test]
-            fn names_the_error_of_a_write_the_file_refuses() {
-                let dir = tempfile::tempdir().unwrap();
-                let path = dir.path().join("toolu_test.stdout.txt");
-                fs::write(&path, "").unwrap();
-                let read_only = || File::open(&path).unwrap();
-                let mut spill = Spill {
-                    path: path.clone(),
-                    state: SpillState::Open {
-                        file: read_only(),
-                        written: 0,
-                        full: false,
-                    },
-                };
+            let path = spill_path(dir.path(), ".stdout.txt");
+            let spilled = fs::metadata(&path).unwrap().len();
+            assert_eq!(spilled, MAX_SPILL_BYTES);
+            assert_eq!(
+                spill.note("stdout"),
+                format!("first 10 MiB of stdout saved to {}", path.display()),
+            );
+        }
 
-                spill.write(b"x");
+        #[test]
+        fn names_the_error_of_a_write_the_file_refuses() {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("toolu_test.stdout.txt");
+            fs::write(&path, "").unwrap();
+            let read_only = || File::open(&path).unwrap();
+            let mut spill = Spill {
+                path: path.clone(),
+                state: SpillState::Open {
+                    file: read_only(),
+                    written: 0,
+                    full: false,
+                },
+            };
 
-                let error = read_only().write_all(b"x").unwrap_err();
-                assert_eq!(
-                    spill.note("stdout"),
-                    format!(
-                        "saving the full stdout to {} failed: {error}",
-                        path.display()
-                    ),
-                );
-            }
+            spill.write(b"x");
+
+            let error = read_only().write_all(b"x").unwrap_err();
+            assert_eq!(
+                spill.note("stdout"),
+                format!(
+                    "saving the full stdout to {} failed: {error}",
+                    path.display()
+                ),
+            );
         }
     }
 

@@ -1,7 +1,5 @@
 //! Background shells: `bash` commands that keep running after their call, and the `bash_output`
 //! and `bash_stop` tools that read and end them.
-//!
-//! Design: `docs/design/tools/background-shells.md`.
 
 use std::io;
 use std::pin::Pin;

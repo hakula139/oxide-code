@@ -745,6 +745,11 @@ mod tests {
     use crate::util::fs::testing::symlink_file;
     use crate::util::path::slash_separated;
 
+    /// A `grep` tool without read rules.
+    fn grep_tool() -> GrepTool {
+        GrepTool::new(ReadFilter::default())
+    }
+
     /// Content-mode params searching all of `cwd`, so result paths render relative to it.
     fn params<'a>(pattern: &'a str, cwd: &Path) -> GrepParams<'a> {
         GrepParams {
@@ -768,8 +773,8 @@ mod tests {
             // A deny scoped to the project root must apply when `path` is omitted.
             let dir = canonical_tempdir();
 
-            let prepared = GrepTool::new(ReadFilter::default())
-                .prepare(serde_json::json!({"pattern": "x"}), &ctx(dir.path()));
+            let prepared =
+                grep_tool().prepare(serde_json::json!({"pattern": "x"}), &ctx(dir.path()));
 
             let Access::Path {
                 canonical,
@@ -805,7 +810,7 @@ mod tests {
                 serde_json::json!({"pattern": "fn"}),
                 serde_json::json!({"pattern": "fn", "output_mode": "content"}),
             ] {
-                let view = GrepTool::new(ReadFilter::default()).result_view(
+                let view = grep_tool().result_view(
                     &input,
                     "src/main.rs:10:fn main()",
                     &ToolMetadata::default(),
@@ -820,7 +825,7 @@ mod tests {
         fn non_content_mode_falls_back_to_text() {
             for mode in ["files_with_matches", "count"] {
                 let input = serde_json::json!({"pattern": "fn", "output_mode": mode});
-                let view = GrepTool::new(ReadFilter::default()).result_view(
+                let view = grep_tool().result_view(
                     &input,
                     "irrelevant",
                     &ToolMetadata::default(),
@@ -848,12 +853,7 @@ mod tests {
 
             let input = serde_json::json!({"pattern": "fn main"});
 
-            let output = local_testing::run(
-                &GrepTool::new(ReadFilter::default()),
-                input,
-                &ctx(dir.path()),
-            )
-            .await;
+            let output = local_testing::run(&grep_tool(), input, &ctx(dir.path())).await;
 
             assert!(!output.is_error, "{}", output.content);
             assert_eq!(output.content, "test.rs:1:fn main() {}");
@@ -861,12 +861,7 @@ mod tests {
 
         #[tokio::test]
         async fn missing_pattern_reports_input_error() {
-            let output = local_testing::run(
-                &GrepTool::new(ReadFilter::default()),
-                serde_json::json!({}),
-                &temp_ctx(),
-            )
-            .await;
+            let output = local_testing::run(&grep_tool(), serde_json::json!({}), &temp_ctx()).await;
             assert!(output.is_error);
             assert!(output.content.contains("Invalid input"));
         }
@@ -875,8 +870,7 @@ mod tests {
         async fn invalid_regex_omits_title() {
             let input = serde_json::json!({"pattern": "(unclosed"});
 
-            let output =
-                local_testing::run(&GrepTool::new(ReadFilter::default()), input, &temp_ctx()).await;
+            let output = local_testing::run(&grep_tool(), input, &temp_ctx()).await;
             assert!(output.is_error);
             assert!(
                 output.content.contains("Invalid regex"),
@@ -1287,7 +1281,7 @@ mod tests {
                 grep_title(crate::tool::search::strip_search_notes(&result)),
                 "1 match"
             );
-            let view = GrepTool::new(ReadFilter::default()).result_view(
+            let view = grep_tool().result_view(
                 &serde_json::json!({"pattern": "hit"}),
                 &result,
                 &ToolMetadata::default(),
@@ -1370,7 +1364,7 @@ mod tests {
             assert_eq!(title, "No matches found");
             // The structured view would drop the note, so the text view shows it.
             let input = serde_json::json!({"pattern": "secret"});
-            let view = GrepTool::new(ReadFilter::default()).result_view(
+            let view = grep_tool().result_view(
                 &input,
                 &result,
                 &ToolMetadata::default(),

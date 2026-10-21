@@ -24,30 +24,51 @@ pub(super) async fn tracker_key(path: &Path) -> PathBuf {
 
 // ── File Target Validation ──
 
+/// What a file tool does with its target, which its refusals name.
+#[derive(Debug, Clone, Copy)]
+pub(super) enum FileVerb {
+    Read,
+    Edit,
+    Write,
+}
+
+impl FileVerb {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::Read => "read",
+            Self::Edit => "edit",
+            Self::Write => "write",
+        }
+    }
+}
+
 /// Rejects targets the [`FileTracker`](crate::file_tracker::FileTracker) cannot gate, phrasing each
-/// refusal for `verb` (`read`, `edit`, `write`).
+/// refusal for `verb`.
 pub(super) fn validate_file_target(
     path: &str,
     metadata: &Metadata,
-    verb: &str,
+    verb: FileVerb,
 ) -> Result<(), String> {
+    let verb_name = verb.as_str();
     match validate_trackable_file(metadata) {
         Ok(()) => Ok(()),
-        Err(TrackableFileError::Directory) if verb == "read" => Err(format!(
-            "{path} is a directory. Use the glob tool to list directory contents."
-        )),
-        Err(TrackableFileError::Directory) => {
-            Err(format!("{path} is a directory. Refusing to {verb}."))
-        }
+        Err(TrackableFileError::Directory) => Err(match verb {
+            FileVerb::Read => {
+                format!("{path} is a directory. Use the glob tool to list directory contents.")
+            }
+            FileVerb::Edit | FileVerb::Write => {
+                format!("{path} is a directory. Refusing to {verb_name}.")
+            }
+        }),
         Err(TrackableFileError::NonRegular) => Err(format!(
-            "{path} is not a regular file (fifo, socket, or device). Refusing to {verb}.",
+            "{path} is not a regular file (fifo, socket, or device). Refusing to {verb_name}.",
         )),
         Err(TrackableFileError::TooLarge { size, max }) => {
             let mb = bytes_to_mb(size);
             let limit_mb = max / (1024 * 1024);
             Err(format!(
                 "File is too large ({mb:.1} MB, max {limit_mb} MB). \
-                 Use the bash tool to {verb} large files.",
+                 Use the bash tool to {verb_name} large files.",
             ))
         }
     }

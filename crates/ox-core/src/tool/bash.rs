@@ -1,6 +1,4 @@
 //! Shell command execution tool with timeout.
-//!
-//! Design: `docs/design/tools/bash.md`.
 
 pub mod background;
 
