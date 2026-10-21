@@ -36,10 +36,8 @@ use crate::message::{ContentBlock, Message};
 use crate::model::{self, ModelSpec, TokenUsage};
 use crate::permission::{Mode, Policy, Workspace};
 use crate::prompt::{self, PromptParts, SessionContext, UserContext};
-use crate::protocol::{
-    ConfigPick, Event, EventSink, Interaction, Op, ResumeTarget, UsageSnapshot,
-    session_write_failed,
-};
+use crate::protocol::notice::{self, ConfigSettings, session_write_failed};
+use crate::protocol::{ConfigPick, Event, EventSink, Interaction, Op, ResumeTarget, UsageSnapshot};
 use crate::session::display::id_prefix;
 use crate::session::entry::{CompactInfo, UsageRecord};
 use crate::session::handle::{self, Checkpoint, LoadedTranscript, RollIntoOutcome, SessionHandle};
@@ -721,6 +719,12 @@ impl Engine {
 
     /// Applies a model and / or effort pick. The model goes first because it re-resolves effort.
     fn set_model(&mut self, sink: &dyn EventSink, pick: ConfigPick) {
+        let before_model = self.client.model().clone();
+        let before = ConfigSettings {
+            model: &before_model,
+            effort: self.client.effort(),
+            auto_compaction: self.compaction.auto,
+        };
         if let ConfigPick::Model { id, .. } = &pick {
             self.client.set_model(id.clone().into_inner());
             self.compaction = self
@@ -733,12 +737,20 @@ impl Engine {
         };
         self.auto_compaction_failures.reset(sink);
         self.emit_usage_update(sink);
+        let model = self.client.model().clone();
+        let after = ConfigSettings {
+            model: &model,
+            effort: resolved,
+            auto_compaction: self.compaction.auto,
+        };
+        let notice = notice::config_changed(&before, &after, &pick);
         sink.emit(
             Event::ConfigChanged {
-                model: self.client.model().clone(),
+                model,
                 effort: resolved,
                 requested: pick,
                 auto_compaction: self.compaction.auto,
+                notice,
             },
             "config-changed",
         );
@@ -3927,6 +3939,40 @@ mod tests {
         }
 
         #[tokio::test]
+        async fn notices_the_change_against_the_settings_before_it() {
+            with_pinned_home(async {
+                let server = MockServer::start().await;
+                let dir = tempfile::tempdir().unwrap();
+                let mut engine = engine(server.uri(), &test_store(dir.path()), dir.path()).await;
+                let sink = CapturingSink::default();
+
+                engine.set_model(&sink, sonnet_pick());
+                engine.set_model(&sink, sonnet_pick());
+
+                let notices: Vec<String> = sink
+                    .events()
+                    .into_iter()
+                    .filter_map(|event| match event {
+                        Event::ConfigChanged { notice, .. } => Some(notice),
+                        _ => None,
+                    })
+                    .collect();
+                let [switched, kept] = notices.as_slice() else {
+                    panic!("{notices:?}");
+                };
+                assert!(
+                    switched.starts_with("Switched to Claude Sonnet 5.5 (claude-sonnet-5-5)"),
+                    "{switched}"
+                );
+                assert!(
+                    kept.starts_with("Using Claude Sonnet 5.5 (claude-sonnet-5-5)"),
+                    "{kept}"
+                );
+            })
+            .await;
+        }
+
+        #[tokio::test]
         async fn swap_keeps_the_system_prompt_and_names_the_model_next_turn() {
             with_pinned_home(async {
                 let server = MockServer::start().await;
@@ -4887,6 +4933,7 @@ mod tests {
                             effort: Some(Effort::Low),
                             requested: ConfigPick::Effort(Effort::Low),
                             auto_compaction: CompactionConfig::with_threshold_for_test(50_000).auto,
+                            notice: String::new(),
                         },
                         Some(TurnEnd::Completed),
                     ),
@@ -4897,6 +4944,7 @@ mod tests {
                             effort: None,
                             requested: ConfigPick::Effort(Effort::Low),
                             auto_compaction: CompactionConfig::with_threshold_for_test(50_000).auto,
+                            notice: String::new(),
                         },
                         Some(TurnEnd::Failed),
                     ),

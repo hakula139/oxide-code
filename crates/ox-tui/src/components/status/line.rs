@@ -165,7 +165,7 @@ impl StatusLine {
             }),
             StatusLineSegment::TaskProgress => state.task_progress.map(|progress| {
                 Span::styled(
-                    format!("Tasks: {}/{}", progress.completed, progress.total),
+                    format!("Tasks: {progress}"),
                     SegmentStyle::Muted.style(theme),
                 )
             }),

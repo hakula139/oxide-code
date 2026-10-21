@@ -50,7 +50,7 @@ See [`effort`](configuration.md#effort-intelligence-tier) for each model's defau
 
 ## Compaction
 
-`/compact` summarizes the visible conversation in a single `Compacted N messages → 1 summary` block. The next prompt continues from that summary. Text after the command adds focus instructions, as in `/compact focus on the build error and how we fixed it`. This helps when only part of the work matters going forward.
+`/compact` summarizes the visible conversation in a single `Compacted N messages into a summary` block. The next prompt continues from that summary. Text after the command adds focus instructions, as in `/compact focus on the build error and how we fixed it`. This helps when only part of the work matters going forward.
 
 After compaction:
 

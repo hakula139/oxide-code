@@ -82,7 +82,7 @@ While the summary streams, the TUI shows it below the chat under a `Summarizing 
 
 - **`Event::SummaryToken(text)`**, **`Event::SummaryDiscarded`**: The summary in flight and its discard. Manual and automatic compaction emit both, and the TUI renders the stream below the chat with `CompactedBlock::render_streaming`.
 
-- **`Event::SessionCompacted { summary, pre_count, instructions, automatic }`**: Emitted post-success. `summary` is the rendered body, `pre_count` is for the count header, `instructions` becomes the header's `(focus: ...)` suffix, and `automatic` is false for `/compact` and true for auto-compaction. The TUI repaints from it, and `StdioSink` prints a `Compacted N messages into summary` line to stderr (`Auto-compacted` when automatic).
+- **`Event::SessionCompacted { summary, pre_count, instructions, automatic }`**: Emitted post-success. `summary` is the rendered body, `pre_count` is for the count header, `instructions` becomes the header's `(focus: ...)` suffix, and `automatic` is false for `/compact` and true for auto-compaction. The TUI repaints from it, and `StdioSink` prints the same header to stderr, which `protocol::notice::compacted` words for both.
 
 - **`engine::compaction::compact_session`**: Async fn taking the client, the conversation's `PromptParts` and tool definitions, the transcript, optional instructions, the event sink the summary streams to, and a `&mut Vec<TokenUsage>` that receives the usage of every request it sends, even when the summary fails or the caller drops the future. Returns the trimmed summary or an error.
 
@@ -90,7 +90,7 @@ While the summary streams, the TUI shows it below the chat under a `Summarizing 
 
 - **`Entry::Compact`**: Variant on the internally tagged `Entry` enum, tagged `"type": "compact"`. Fields: `summary: String`, `pre_message_count: u32`, `instructions: Option<String>`, `tasks: Vec<Task>` (omitted when empty), and `timestamp: OffsetDateTime`.
 
-- **`CompactedBlock`**: Chat block with an accent-bar surface, a `Compacted N messages → 1 summary` header (with a `(focus: ...)` suffix when instructions were given), and the summary body rendered as Markdown, with no footer. `CompactedBlock::render_streaming` renders the summary in flight under a `Summarizing the conversation...` header.
+- **`CompactedBlock`**: Chat block with an accent-bar surface, a `Compacted N messages into a summary` header (with a `(focus: ...)` suffix when instructions were given), and the summary body rendered as Markdown, with no footer. `CompactedBlock::render_streaming` renders the summary in flight under a `Summarizing the conversation...` header.
 
 - **`ChainBuilder::resolve`**: Needs no compaction-specific logic. The store loader starts a fresh `ChainBuilder` at the compact boundary, and the walk back from the latest tail leaf stops at the post-compact head because its `parent_uuid` is `None`.
 

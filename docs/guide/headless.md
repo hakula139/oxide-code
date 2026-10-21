@@ -22,7 +22,7 @@ ox -c -p "Run the tests again"                      # Continue the latest sessio
 | ---------------- | ----------------------------------------------------------------------------- |
 | `text` (default) | The reply as it streams, plus dimmed thinking when `tui.show_thinking` is set |
 | `json`           | One [result](#result) line once the run ends                                  |
-| `stream-json`    | One JSON line per [engine event](#events), then the [result](#result)         |
+| `stream-json`    | One JSON line per [event](#events), then the [result](#result)                |
 
 Every format also writes tool calls, the task list, retries, notices, and errors as text to stderr, plus the model's progress notes unless a `text` run shows thinking on stdout because `tui.show_thinking` is set. When parsing JSON, read stdout alone.
 

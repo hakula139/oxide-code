@@ -74,7 +74,7 @@ mod tests {
     use super::*;
     use crate::file_tracker::LastView;
     use crate::message::{ContentBlock, Message};
-    use crate::protocol::session_write_failed;
+    use crate::protocol::notice::session_write_failed;
     use crate::protocol::testing::{CapturingSink, FailingSink};
     use crate::session::handle;
     use crate::session::store::testing::{test_project_dir, test_store};
