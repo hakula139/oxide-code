@@ -78,7 +78,8 @@ impl SlashOutcome {
 pub(crate) enum SlashKind {
     /// Pure local read (chat output / modal open).
     ReadOnly,
-    /// Forwards an op the engine applies to the in-flight turn, such as a permission mode switch.
+    /// Forwards an action that applies mid-turn: a TUI-only change, such as a theme swap, or an op
+    /// the engine applies to the in-flight turn, such as a permission mode switch.
     Steering,
     /// Touches session state or forwards an op that races the in-flight client.
     Mutating,
@@ -409,7 +410,9 @@ mod tests {
                     .chain(completions);
                 for args in forms.filter(|args| cmd.classify(args) == SlashKind::Steering) {
                     match cmd.execute(&args, &ctx) {
-                        Ok(SlashOutcome::Forward(Action::Op(Op::Queue(_) | Op::SetMode(_))))
+                        Ok(SlashOutcome::Forward(
+                            Action::SwapTheme(_) | Action::Op(Op::Queue(_) | Op::SetMode(_)),
+                        ))
                         | Err(_) => {}
                         other => panic!("/{} {args} forwards {other:?}", cmd.name()),
                     }

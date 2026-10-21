@@ -1,12 +1,22 @@
 //! Built-in theme catalog. TOML bodies are embedded via `include_str!` so the binary stays
 //! self-contained and the vendored files in `crates/ox-tui/themes/` double as user examples.
 
+use super::{Theme, loader};
+
 pub(super) const MOCHA: &str = include_str!("../../themes/mocha.toml");
 
+#[derive(Debug, PartialEq, Eq)]
 pub(crate) struct BuiltinTheme {
     pub(crate) name: &'static str,
     pub(crate) description: &'static str,
     pub(super) body: &'static str,
+}
+
+impl BuiltinTheme {
+    /// Parses the vendored palette, which `parse_theme::all_builtins` checks parses.
+    pub(crate) fn load(&self) -> Theme {
+        loader::parse_theme(self.body).expect("vendored builtin theme TOML must parse")
+    }
 }
 
 /// Catppuccin variants listed dark → light, then non-Catppuccin palettes. `/theme` lists them in
@@ -39,11 +49,8 @@ pub(crate) const BUILT_IN: &[BuiltinTheme] = &[
     },
 ];
 
-pub(super) fn lookup(name: &str) -> Option<&'static str> {
-    BUILT_IN
-        .iter()
-        .find(|theme| theme.name == name)
-        .map(|theme| theme.body)
+pub(crate) fn find(name: &str) -> Option<&'static BuiltinTheme> {
+    BUILT_IN.iter().find(|theme| theme.name == name)
 }
 
 #[cfg(test)]
@@ -51,24 +58,22 @@ mod tests {
     use ratatui::style::Color;
 
     use super::*;
-    use crate::theme::{Slot, Theme, load_builtin};
+    use crate::theme::Slot;
 
-    mod lookup {
+    mod find {
         use super::*;
 
         #[test]
         fn finds_each_builtin_by_name() {
-            for BuiltinTheme { name, body, .. } in BUILT_IN {
-                let resolved =
-                    lookup(name).unwrap_or_else(|| panic!("lookup({name:?}) returned None"));
-                assert_eq!(resolved, *body, "wrong body for {name:?}");
+            for theme in BUILT_IN {
+                assert_eq!(find(theme.name), Some(theme));
             }
         }
 
         #[test]
         fn unknown_name_is_absent() {
-            assert!(lookup("solarized").is_none());
-            assert!(lookup("").is_none());
+            assert_eq!(find("solarized"), None);
+            assert_eq!(find(""), None);
         }
     }
 
@@ -86,12 +91,13 @@ mod tests {
 
         /// Every built-in with its parsed palette and base.
         fn palettes() -> impl Iterator<Item = (&'static str, Theme, Color)> {
-            BUILT_IN.iter().map(|&BuiltinTheme { name, .. }| {
+            BUILT_IN.iter().map(|theme| {
+                let name = theme.name;
                 let base = BASES
                     .iter()
                     .find_map(|&(base_name, base)| (base_name == name).then_some(base))
                     .unwrap_or_else(|| panic!("add the {name:?} base color to BASES"));
-                (name, load_builtin(name).unwrap(), base)
+                (name, theme.load(), base)
             })
         }
 

@@ -35,7 +35,7 @@ use crate::modal::{Modal, ModalStack};
 use crate::now;
 use crate::slash::LiveSessionInfo;
 use crate::terminal::{Tui, TuiBackend};
-use crate::theme::Theme;
+use crate::theme::{Theme, ThemeOverrides};
 
 /// Tick interval for animation frames and render coalescing (~60 FPS).
 const TICK_INTERVAL: Duration = Duration::from_millis(16);
@@ -45,6 +45,8 @@ const EXIT_WINDOW: Duration = Duration::from_secs(1);
 
 pub(crate) struct App {
     theme: Theme,
+    /// The configured `[tui.theme.overrides]`, which every `/theme` preview and swap reapplies.
+    theme_overrides: ThemeOverrides,
     /// Theme saved when a `/theme` picker opens. Restored if the modal cancels.
     preview_theme_snapshot: Option<Theme>,
     status_bar: StatusBar,
@@ -102,21 +104,21 @@ pub(crate) struct AppHistory {
 impl App {
     /// Builds the app with `git_branch` as the status bar's branch until the first git probe.
     pub(crate) fn new(
-        theme: &Theme,
+        theme: Theme,
+        theme_overrides: ThemeOverrides,
         session_info: LiveSessionInfo,
         git_branch: Option<String>,
-        show_thinking: bool,
         events: mpsc::UnboundedReceiver<Event>,
         ops: mpsc::Sender<Op>,
         history: AppHistory,
     ) -> Self {
-        let mut chat = ChatView::new(theme, show_thinking);
+        let mut chat = ChatView::new(&theme, session_info.config.show_thinking);
         chat.load_history(history.interactions);
         if history.unarchived {
             chat.push_system_message(archive_notice(&session_info.session_id, false));
         }
         let mut status_bar = StatusBar::new(
-            theme,
+            &theme,
             StatusBarInit {
                 segments: session_info.config.status_line.clone(),
                 model: session_info.config.model.short_display_name().to_owned(),
@@ -136,14 +138,16 @@ impl App {
             Mode::Yolo => &[Mode::Manual, Mode::Plan, Mode::Yolo][..],
             Mode::Manual | Mode::Plan => &[Mode::Manual, Mode::Plan][..],
         };
+        let input = InputArea::new(&theme);
         Self {
-            theme: theme.clone(),
+            theme,
+            theme_overrides,
             preview_theme_snapshot: None,
             status_bar,
             git_probes,
             chat,
             tasks: TaskPanel::default(),
-            input: InputArea::new(theme),
+            input,
             modals: ModalStack::default(),
             session_info,
             mode_cycle,
@@ -283,10 +287,10 @@ mod tests {
             let (_event_tx, events) = mpsc::unbounded_channel::<Event>();
             let (ops, _op_rx) = mpsc::channel::<Op>(1);
             let mut app = App::new(
-                &Theme::default(),
+                Theme::default(),
+                ThemeOverrides::default(),
                 test_session_info(),
                 None,
-                false,
                 events,
                 ops,
                 AppHistory {

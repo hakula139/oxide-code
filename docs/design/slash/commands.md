@@ -41,7 +41,7 @@ Client-side command surface: `/help`, `/clear`, `/model`, `/status`, and friends
 
 10. **Built-in commands only.** `BUILT_INS` is the entire registry, with no discovery of user-defined commands. Skills as commands are tracked in [#163](https://github.com/hakula139/oxide-code/issues/163).
 
-11. **Read-only commands fast-path the busy turn.** `classify` defaults to `SlashKind::ReadOnly`, and the dispatcher runs them client-side even when input is disabled, discarding any action they forward. State-mutating commands override to `SlashKind::Mutating` and refuse mid-turn. `SlashKind::Steering` marks a form whose forwarded op the engine applies to the turn in flight, so the dispatcher sends it mid-turn too. `/mode <mode>` is the only one.
+11. **Read-only commands fast-path the busy turn.** `classify` defaults to `SlashKind::ReadOnly`, and the dispatcher runs them client-side even when input is disabled, discarding any action they forward. State-mutating commands override to `SlashKind::Mutating` and refuse mid-turn. `SlashKind::Steering` marks a form whose forwarded action applies mid-turn, either a TUI-only change or an op the engine applies to the turn in flight, so the dispatcher forwards it mid-turn too. `/mode <mode>` and `/theme <name>` are the two.
 
 12. **One trait return carries every effect: `SlashOutcome`.** `Forward(Action)` hands a state-mutating action back to the App, which applies a TUI-only action locally and sends an op to the engine. `Modal(_)` opens a modal, and `SystemMessage` / `GitDiff` print into chat. A failure returns `Err(String)`, which the dispatcher prefixes with the typed command name.
 

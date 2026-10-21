@@ -252,6 +252,8 @@ Modifier flags use **three-state semantics**:
 
 So `accent = { bold = false }` removes bold from the base accent without disturbing its color, and `accent = { italic = true }` adds italic without removing the base bold. An entirely empty patch (`accent = {}`) warns and falls back to the base, since rewriting the base with itself is almost always a typo.
 
+Overrides also apply to every built-in that [`/theme`](slash-commands.md#theme) previews or switches to, so they last for the whole session.
+
 Overrides from every [config layer](configuration.md#layers) merge by slot name, so a project can patch `error` while your user config patches `accent`. When two layers patch the same slot with inline tables, their fields combine and the later layer wins each field. Otherwise the later layer's patch replaces the earlier one.
 
 ## Errors

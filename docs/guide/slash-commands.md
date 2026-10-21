@@ -33,7 +33,7 @@ Model, effort, permission mode, and theme choices last for the session. No slash
 
 ## When Commands Run
 
-- **During a turn**, only `/config`, `/diff`, `/help`, `/mode`, `/status`, and the bare `/theme` picker run. A mode switch applies from the turn's next tool call. Retry other commands after the turn finishes.
+- **During a turn**, only `/config`, `/diff`, `/help`, `/mode`, `/status`, and `/theme` run. A mode switch applies from the turn's next tool call. Retry other commands after the turn finishes.
 - **In the bare REPL** (`--no-tui`), only `/clear`, `/compact`, `/effort <level>`, `/init [<file>]`, `/mode <mode>`, `/model <id>`, `/rename <title>`, and `/resume <id-prefix>` run, along with their aliases. `/init` starts a turn like a prompt, and the others print a confirmation to stderr. The REPL has no picker, so a project without an instruction file needs `/init AGENTS.md` or `/init CLAUDE.md`. The REPL rejects other commands, and a rejected or failed command makes it exit with a failure status at the end of input.
 
 ## Model and Effort
