@@ -459,14 +459,17 @@ impl Engine {
         )
         .await;
         self.adopt_mode(&mut inbox);
-        self.bill(sink, &spent).await;
         let summary = match summary {
             Ok(Ok(summary)) => summary,
             Ok(Err(e)) => {
+                self.bill(sink, &spent).await;
                 let abort = TurnAbort::Failed(e.context("Compaction failed"));
                 return self.fail_compact(sink, abort);
             }
-            Err(abort) => return self.fail_compact(sink, abort),
+            Err(abort) => {
+                self.bill(sink, &spent).await;
+                return self.fail_compact(sink, abort);
+            }
         };
         let compacted = compact_boundary::replace_session_with_summary(
             &self.session,
@@ -482,6 +485,9 @@ impl Engine {
             },
         )
         .await;
+        // Bills after the boundary, as auto-compaction does, so a write error it surfaces follows
+        // the compaction event that clears the TUI's chat.
+        self.bill(sink, &spent).await;
         if !compacted {
             let abort = TurnAbort::Failed(anyhow!(
                 "Compaction was not saved, so the transcript is unchanged"
@@ -604,9 +610,7 @@ impl Engine {
         let path = match target {
             ResumeTarget::Path(path) => path,
             ResumeTarget::Prefix(prefix) => {
-                resolve_saved_prefix(&self.store, &prefix, self.session.session_id())?
-                    .ok_or_else(|| anyhow!("session prefix `{prefix}` matches the live session"))?
-                    .path
+                resolve_saved_prefix(&self.store, &prefix, self.session.session_id())?.path
             }
         };
         handle::roll_into(&mut self.session, &self.store, &self.file_tracker, &path).await
@@ -3068,7 +3072,6 @@ mod tests {
                             Event::TurnFailed(short),
                             Event::Cancelled,
                             Event::SummaryToken(_),
-                            Event::Error(usage_write),
                             Event::SummaryDiscarded,
                             Event::Error(boundary_write),
                             Event::UsageUpdated(UsageSnapshot {
@@ -3079,9 +3082,9 @@ mod tests {
                             Event::TurnFailed(unsaved),
                         ] if short == "Compaction failed: the conversation has about 15 tokens, \
                                        below the 1000-token minimum"
-                            && usage_write.starts_with("Session write failed")
                             && boundary_write == "Session write failed: \
-                                                  session writer task has stopped"
+                                                  session writer task has stopped. \
+                                                  Conversation history may be incomplete."
                             && (cost - 0.006).abs() < 1e-12
                             && unsaved == "Compaction was not saved, so the transcript is unchanged"
                     ),
@@ -3494,7 +3497,7 @@ mod tests {
                 let beside_file = other_path.with_file_name(&other_id);
                 assert_eq!(spill_names(&beside_file), ["call-1.txt"]);
                 engine.clear(&CapturingSink::default()).await;
-                delete_at(&other_path, engine.session_id()).unwrap();
+                delete_at(&other_path).unwrap();
 
                 assert!(!beside_file.exists(), "delete removes the spills");
                 assert!(!test_project_dir(dir.path()).join(&other_id).exists());
@@ -3574,7 +3577,7 @@ mod tests {
                     sink.events(),
                     [Event::TurnFailed(format!(
                         "Resume failed (still on session {}): \
-                         session not found: missing-target.jsonl: {}",
+                         failed to open missing-target.jsonl: {}",
                         id_prefix(&original_id),
                         std::fs::metadata("missing-target.jsonl").unwrap_err(),
                     ))]

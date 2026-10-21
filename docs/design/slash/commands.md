@@ -81,7 +81,7 @@ Client-side command surface: `/help`, `/clear`, `/model`, `/status`, and friends
 
 - **`/resume`** (alias `/continue`): Bare opens a searchable session picker ([modals.md](modals.md)), which forwards `Op::Resume` with the chosen session file. `/resume <id-prefix>` forwards the prefix, which the engine resolves through a current-project-first lookup that widens to all projects on a miss. Both forms refuse mid-turn. Full design: [resume.md](resume.md).
 
-- **`/delete`**: Typed-arg only, and bare explains the missing argument. The picker entry is Ctrl+D inside `/resume`. Both push `ConfirmDeleteSessionModal` ([modals.md](modals.md)), which runs `session::saved::delete` on the session's file on Y / Enter and emits a `Deleted session {id}: {title}` line in chat. Live-session refusal is layered across the picker filter, the resolver, and the store-layer bail.
+- **`/delete`**: Typed-arg only, and bare explains the missing argument. The picker entry is Ctrl+D inside `/resume`. Both push `ConfirmDeleteSessionModal` ([modals.md](modals.md)), which runs `session::saved::delete` on the session's file on Y / Enter and emits a `Deleted session {id}: {title}` line in chat. Live-session refusal is layered across the picker filter, the resolver, and `session::saved::delete`.
 
 - **`/archive`** / **`/unarchive`**: Bare `/archive` forwards `Op::Archive`. The engine appends an `Archive` entry to the live session, then rolls like `/clear` and emits `SessionRolled { archived: true }`, which the chat answers with a note naming the archived session. A session without messages has no file, so archiving one reports an error and stays put. The typed forms resolve a saved session other than the live one and call `session::saved::set_archived` on its file synchronously, the same operation as the `/resume` picker's Ctrl+X, printing a confirmation, or a note when the session already has that state. `/archive <prefix>` refuses a prefix that matches only the live session and points at bare `/archive`, while `/unarchive` on the live session prints a no-op note. Both are `Mutating`. `/unarchive` is typed-arg only, and its bare form points at the picker's Ctrl+A view, where Ctrl+X unarchives the highlighted session.
 
@@ -92,9 +92,9 @@ Client-side command surface: `/help`, `/clear`, `/model`, `/status`, and friends
 - `crates/ox-core/src/command/parser.rs`: `parse_slash`, which parses a typed line into a command name and its arguments, `split_slash`, the borrowed split it shares with the popup, and `unescape_literal` for the `//` escape.
 - `crates/ox-core/src/engine.rs`: `Engine::run` arms for `Op::Clear`, `Op::SetModel`, and `Op::SetMode`, `Engine::set_model`, which re-resolves the compaction threshold for the new model, `Engine::archive`, which waits for the archive entry to reach disk before rolling the session, and `TurnEnd::of`.
 - `crates/ox-core/src/session/display.rs`: shared `id_prefix`, `display_title`, and `format_metadata_line` for the picker row and delete confirm modal, `archive_notice`, and the `MAX_TITLE_WIDTH` cap that `fit_title` applies to first-prompt and `/rename` titles.
-- `crates/ox-core/src/session/resolver.rs`: `resolve_prefix_to_info` checks the current project first, widens the search on a miss, and returns a typed `ResolveError` that the CLI prints as is and slash commands rephrase. `resolve_saved_prefix` distinguishes live-only matches for `/archive`, `/unarchive`, and `/delete`.
-- `crates/ox-core/src/session/saved.rs`: `set_archived` and `delete`, shared by the typed commands and the `/resume` picker, which refuse the live session and word each failure for the user.
-- `crates/ox-core/src/session/store.rs`: `delete_at`, which refuses to delete the live session at the filesystem boundary, and `set_archived_at`.
+- `crates/ox-core/src/session/resolver.rs`: `resolve_prefix_to_info` checks the current project first, widens the search on a miss, and returns a typed `ResolveError` that the CLI prints as is and slash commands rephrase. `resolve_saved_prefix` reports a live-only match as `ResolveError::Live` for `/archive`, `/unarchive`, `/delete`, and the engine's prefix resume.
+- `crates/ox-core/src/session/saved.rs`: `set_archived` and `delete`, shared by the typed commands and the `/resume` picker, which refuse the live session and return a typed `SavedError`.
+- `crates/ox-core/src/session/store.rs`: `delete_at` and `set_archived_at`, the file operations behind `saved`.
 - `crates/ox-tui/src/action.rs`: `Action`, which slash commands forward.
 - `crates/ox-tui/src/app/dispatch.rs`: `dispatch_action`, `dispatch_op`, `run_slash`, `apply_slash_outcome`, modal gate, echo gate.
 - `crates/ox-tui/src/components/input/popup.rs`: `popup_state`, which reads the typed line as a command name or an argument, and `SlashPopup`, which lists the matching commands or the typed command's arg completions for Tab and Enter to complete.
@@ -121,7 +121,7 @@ Client-side command surface: `/help`, `/clear`, `/model`, `/status`, and friends
 - `crates/ox-tui/src/slash/registry.rs`: `BUILT_INS`, `SlashKind`, `SlashOutcome`, and the `SlashCommand` trait, whose aliases default to `command::aliases`.
 - `crates/ox-tui/src/slash/rename.rs`: `RenameCmd` plus `RenameModal` editor.
 - `crates/ox-tui/src/slash/resume.rs`: `ResumeCmd` plus `ResumePicker` (see `resume.md`).
-- `crates/ox-tui/src/slash/sessions.rs`: `open_store` and `resolve_error_message`, shared by the session commands.
+- `crates/ox-tui/src/slash/sessions.rs`: `open_store`, `resolve_error_message`, `saved_error_message`, and the live-session recovery hints, shared by the session commands.
 - `crates/ox-tui/src/slash/status.rs`: `/status` row builder plus `KvOverview` constructor.
 - `crates/ox-tui/src/slash/theme.rs`: `ThemeCmd`, picker open plus typed-arg validator.
 - `crates/ox/src/driver/repl.rs`: `command_op`, which runs typed slash commands in the bare REPL.

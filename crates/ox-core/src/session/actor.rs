@@ -102,8 +102,8 @@ pub(super) async fn run(
     while let Some(first) = rx.recv().await {
         let mut batch = Batch::default();
         let mut flow = batch.absorb(first, &mut state, &shared);
-        // A failed compact or archive leaves its entries at the queue tail for `settle_barriers`
-        // to drop, which works only because each one ends its batch.
+        // A failed compact or archive leaves its entries at the queue tail for `settle_acks` to
+        // drop, which works only because each one ends its batch.
         while matches!(flow, BatchFlow::Continue)
             && let Ok(next) = rx.try_recv()
         {
@@ -118,13 +118,7 @@ pub(super) async fn run(
             }
             Ok(()) => None,
         };
-        settle_barriers(&batch.acks, &mut state, failure.is_none());
-        deliver_acks(
-            batch.acks,
-            failure.as_deref(),
-            state.persistence_stopped(),
-            &shared,
-        );
+        settle_acks(batch.acks, &mut state, failure.as_deref(), &shared);
         if batch.should_exit {
             break;
         }
@@ -269,22 +263,16 @@ impl Batch {
     }
 }
 
-/// Commits a flushed compact, or abandons a failed compact or archive, matching what its ack tells
-/// the caller.
-fn settle_barriers(acks: &[PendingAck], state: &mut SessionState, flushed: bool) {
-    for pending in acks {
-        match pending {
-            PendingAck::Compact { synthetic_uuid, .. } if flushed => {
-                state.commit_compact(*synthetic_uuid);
-            }
-            PendingAck::Compact { .. } => state.abandon_compact(),
-            PendingAck::Archive(_) if !flushed => state.abandon_archive(),
-            _ => {}
-        }
-    }
-}
-
-fn deliver_acks(acks: Vec<PendingAck>, failure: Option<&str>, stopped: bool, shared: &SharedState) {
+/// Acks each absorbed cmd once its batch flush returns `failure`. A compact commits when its batch
+/// flushed or persistence has stopped, which leaves no file to keep it consistent with. Any other
+/// failed compact and every failed archive are unqueued, matching what their acks tell the caller.
+fn settle_acks(
+    acks: Vec<PendingAck>,
+    state: &mut SessionState,
+    failure: Option<&str>,
+    shared: &SharedState,
+) {
+    let stopped = state.persistence_stopped();
     for pending in acks {
         match pending {
             PendingAck::Record { ack, ai_title_seed } => {
@@ -299,16 +287,32 @@ fn deliver_acks(acks: Vec<PendingAck>, failure: Option<&str>, stopped: bool, sha
                 });
             }
             PendingAck::Archive(ack) => {
+                if failure.is_some() {
+                    state.abandon_archive();
+                }
                 _ = ack.send(Outcome {
                     failure: failure.map(str::to_owned),
                 });
             }
-            PendingAck::Compact { ack, pre_count, .. } => {
-                // Every compact failure reaches the agent, which keeps its old transcript only when
-                // told the write failed.
+            PendingAck::Compact {
+                ack,
+                pre_count,
+                synthetic_uuid,
+            } => {
+                let committed = failure.is_none() || stopped;
+                // Every failure that leaves the compact uncommitted reaches the agent, so each
+                // discarded summary shows its cause.
+                let failure = if committed {
+                    state.commit_compact(synthetic_uuid);
+                    surface_failure(failure, stopped, shared)
+                } else {
+                    state.abandon_compact();
+                    failure.map(str::to_owned)
+                };
                 _ = ack.send(CompactOutcome {
                     pre_count,
-                    failure: failure.map(str::to_owned),
+                    committed,
+                    failure,
                 });
             }
             PendingAck::Shutdown(ack) => _ = ack.send(()),
@@ -865,8 +869,10 @@ mod tests {
             })
             .await
             .unwrap();
+            let outcome = compact_rx.await.unwrap();
+            assert!(!outcome.committed);
             assert!(
-                compact_rx.await.unwrap().failure.is_some(),
+                outcome.failure.is_some(),
                 "the agent must see every compact failure, even after one was already surfaced",
             );
 
@@ -885,6 +891,52 @@ mod tests {
                     Message::user("before compact"),
                     Message::user("after compact")
                 ]
+            );
+        }
+
+        #[tokio::test]
+        async fn compact_after_persistence_stopped_commits_in_memory() {
+            async fn compact(tx: &mpsc::Sender<SessionCmd>) -> CompactOutcome {
+                let (ack, rx) = oneshot::channel();
+                tx.send(SessionCmd::Compact {
+                    summary: "s".to_owned(),
+                    instructions: None,
+                    tasks: Vec::new(),
+                    synthetic_message: Message::user("synthetic summary"),
+                    ack,
+                })
+                .await
+                .unwrap();
+                rx.await.unwrap()
+            }
+
+            let dir = tempdir().unwrap();
+            let state = SessionState::fresh(test_store(dir.path()), "m", None);
+            let (tx, rx) = mpsc::channel(1);
+            let actor = tokio::spawn(run(state, rx, Arc::new(SharedState::default())));
+            std::fs::remove_dir_all(test_project_dir(dir.path())).unwrap();
+            for text in ["small".to_owned(), "x".repeat(MAX_UNWRITTEN_BYTES)] {
+                let (rec, rec_rx) = record_cmd(&text);
+                tx.send(rec).await.unwrap();
+                assert!(rec_rx.await.unwrap().failure.is_some());
+            }
+
+            let first = compact(&tx).await;
+            let (rec, rec_rx) = record_cmd("after compact");
+            tx.send(rec).await.unwrap();
+            assert!(rec_rx.await.unwrap().failure.is_none());
+            let second = compact(&tx).await;
+            drop(tx);
+            actor.await.unwrap();
+
+            assert!(first.committed);
+            assert_eq!(first.failure, None, "the stop already surfaced");
+            assert_eq!(first.pre_count, 2);
+            assert!(second.committed);
+            assert_eq!(second.failure, None);
+            assert_eq!(
+                second.pre_count, 2,
+                "the chain restarts at the synthetic root"
             );
         }
 

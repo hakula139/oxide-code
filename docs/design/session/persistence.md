@@ -77,7 +77,7 @@ The on-disk file is owned by a single `tokio::spawn`-ed actor task. The rest of 
 - A failed append drops the writer's file handle, and the next append reopens the same path, including for sessions resumed from an explicit path.
 - A failed flush with more than 8 MiB to write drops the queue and stops persistence for the rest of the session.
 
-Every append first terminates a torn last line, so a crash mid-write loses only the batch it interrupted, none of which was acknowledged. A failed append truncates the bytes it wrote unless another process has appended since. When it cannot truncate, the retry repeats the lines that landed, and the loader keeps one copy of each message and `usage` entry by its `uuid`. A compact whose write fails is unqueued and never committed, matching the agent, which keeps its pre-compact transcript. The loader applies a compact boundary only once its post-compact root follows, so a boundary whose root never landed leaves the old chain in place.
+Every append first terminates a torn last line, so a crash mid-write loses only the batch it interrupted, none of which was acknowledged. A failed append truncates the bytes it wrote unless another process has appended since. When it cannot truncate, the retry repeats the lines that landed, and the loader keeps one copy of each message and `usage` entry by its `uuid`. Until persistence stops, a compact whose write fails is unqueued and never committed, matching the agent, which keeps its pre-compact transcript. The loader applies a compact boundary only once its post-compact root follows, so a boundary whose root never landed leaves the old chain in place.
 
 ### Lazy Materialization
 
@@ -123,9 +123,10 @@ On resume, the loader collects every `usage` entry in the file, including those 
 Write failures surface through the session handle:
 
 - First failure populates the handle's `RecordOutcome::failure` slot so the agent loop emits a one-shot `Event::Error`.
-- Compact and archive acknowledgments include every failure.
-- The agent swaps in the summary only after the boundary reaches disk, and bare `/archive` rolls to a fresh session only after the archive entry is written.
+- Archive acknowledgments include every failure, and compact acknowledgments do until persistence stops.
+- Until persistence stops, the agent swaps in the summary only after the boundary reaches disk. Bare `/archive` always rolls to a fresh session only after the archive entry is written.
 - Failed compact and archive operations are also removed from the retry queue, so a later flush cannot persist them.
+- Once persistence stops, the file receives no further lines, so a compaction commits in memory alone, and its acknowledgment reports the stop only when no earlier write reported it. Bare `/archive` keeps failing, since its whole effect is the entry on disk. The engine reports a committed compaction's write error after `SessionCompacted`, which clears the TUI's chat, so the notice stays visible.
 - Three independent sticky-once flags (`flush_failure_surfaced`, `persistence_stop_surfaced`, `actor_gone_surfaced`) keep different failure kinds from masking each other, so stopping persistence surfaces even after an earlier flush failure.
 
 ## Listing

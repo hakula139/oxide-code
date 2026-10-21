@@ -16,6 +16,7 @@ use tokio::task::JoinHandle;
 use super::actor::{self, SessionCmd};
 use super::entry::{CompactInfo, UsageRecord};
 use super::sanitize::{retain_visible_file_snapshots, sanitize_resumed_messages};
+use super::saved::SavedError;
 use super::state::{SessionState, extract_user_text};
 use super::store::{
     SessionData, SessionStore, SessionWriter, load_session_data_from_path, open_append_at,
@@ -114,6 +115,10 @@ pub(crate) struct Outcome {
 /// the actor.
 pub(crate) struct CompactOutcome {
     pub(crate) pre_count: u32,
+    /// Whether the boundary took effect: on disk, or in memory alone once persistence stopped.
+    pub(crate) committed: bool,
+    /// Every failure that leaves the boundary uncommitted, or else a write failure reported only
+    /// the first time each kind occurs.
     pub(crate) failure: Option<String>,
 }
 
@@ -191,8 +196,8 @@ impl SessionHandle {
     }
 
     /// Writes the compaction boundary and the synthetic post-compact message, then resets the chain
-    /// anchor. `tasks` is the task list the summarized transcript leaves. Reports every write
-    /// failure, since the caller swaps in the summary only once the boundary is on disk.
+    /// anchor. `tasks` is the task list the summarized transcript leaves. The caller swaps in the
+    /// summary only once [`CompactOutcome::committed`] says the boundary took effect.
     pub(crate) async fn compact(
         &self,
         summary: String,
@@ -212,6 +217,7 @@ impl SessionHandle {
             .await
             .unwrap_or_else(|| CompactOutcome {
                 pre_count: 0,
+                committed: false,
                 failure: Some(self.actor_stopped_failure()),
             })
     }
@@ -408,7 +414,7 @@ pub(crate) async fn roll_into(
     target: &Path,
 ) -> Result<RollIntoOutcome> {
     if read_session_id_from_path(target)? == session.session_id() {
-        bail!("already resumed: target ID matches the live session");
+        return Err(SavedError::live(session.session_id()).into());
     }
     let ResumedSession {
         handle: target_handle,
@@ -1084,6 +1090,7 @@ mod tests {
                 .await;
 
             assert_eq!(outcome.pre_count, 2, "pre_count snapshots before reset");
+            assert!(outcome.committed);
             assert!(outcome.failure.is_none(), "healthy actor acks cleanly");
             handle.finish(Vec::new()).await;
             drop(handle);
@@ -1111,6 +1118,7 @@ mod tests {
             for _ in 0..2 {
                 let outcome = compact(&dead).await;
                 assert_eq!(outcome.pre_count, 0, "no actor means no pre-count signal");
+                assert!(!outcome.committed);
                 assert!(
                     outcome.failure.is_some(),
                     "a later failure must not read as success once actor-gone was surfaced",
@@ -1118,9 +1126,11 @@ mod tests {
             }
 
             let stalled = testing::acks_then_drops("stalled", 1);
-            assert!(compact(&stalled).await.failure.is_none());
+            assert!(compact(&stalled).await.committed);
+            let dropped = compact(&stalled).await;
+            assert!(!dropped.committed);
             assert!(
-                compact(&stalled).await.failure.is_some(),
+                dropped.failure.is_some(),
                 "a dropped ack must surface as a failure",
             );
             stalled.shutdown().await;
@@ -1633,9 +1643,9 @@ mod tests {
             let err = roll_into(&mut session, &store, &tracker, &live_path)
                 .await
                 .expect_err("self-resume must be rejected");
-            assert!(
-                err.to_string().contains("already resumed"),
-                "error must mention same-id, got: {err:#}",
+            assert_eq!(
+                err.to_string(),
+                format!("session {} is the live session", &live_id[..8])
             );
             assert_eq!(session.session_id(), live_id, "live session unchanged");
         }

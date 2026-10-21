@@ -34,7 +34,7 @@ use ox_core::util::time::local_offset;
 use super::confirm::ConfirmDeleteSessionModal;
 use super::context::SlashContext;
 use super::registry::{SlashCommand, SlashKind, SlashOutcome};
-use super::sessions::open_store;
+use super::sessions::{BARE_ARCHIVE_HINT, open_store, saved_error_message};
 use crate::action::Action;
 use crate::glyphs::MODAL_ERROR_PREFIX;
 use crate::keymap::{KeyAction, KeyChord, Keymap};
@@ -632,7 +632,10 @@ impl ResumePicker {
                 self.list.retain_items(|row| row.session_id != id);
                 (text, false)
             }
-            Err(err) => (err, true),
+            Err(err) => (
+                saved_error_message(err, archived.then_some(BARE_ARCHIVE_HINT)),
+                true,
+            ),
         };
         self.notice = Some(Notice {
             text,
@@ -2120,7 +2123,10 @@ mod tests {
             );
             let path = store.find_session_path(&id).unwrap();
             std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o444)).unwrap();
-            let failure = saved::set_archived(&path, &id, true, "live-session-id").unwrap_err();
+            let failure = saved_error_message(
+                saved::set_archived(&path, &id, true, "live-session-id").unwrap_err(),
+                Some(BARE_ARCHIVE_HINT),
+            );
             let mut picker = opened(ResumePicker::new(store, "live-session-id".to_owned()));
 
             picker.handle_key(&KeyEvent::new(KeyCode::Char('x'), KeyModifiers::CONTROL));

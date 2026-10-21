@@ -22,7 +22,8 @@ pub(super) struct Boundary {
 }
 
 /// Persists a compact boundary and swaps the live transcript to the synthetic summary root. A
-/// failed write discards the streamed summary and leaves the transcript unchanged.
+/// failed write discards the streamed summary and leaves the transcript unchanged, unless
+/// persistence has stopped, when the swap happens in memory alone.
 pub(super) async fn replace_session_with_summary(
     session: &SessionHandle,
     file_tracker: &FileTracker,
@@ -46,9 +47,9 @@ pub(super) async fn replace_session_with_summary(
             synthetic.clone(),
         )
         .await;
-    if let Some(failure) = outcome.failure.as_deref() {
+    if !outcome.committed {
         sink.emit(Event::SummaryDiscarded, "summary-discarded");
-        sink.session_write_error(Some(failure));
+        sink.session_write_error(outcome.failure.as_deref());
         return false;
     }
 
@@ -63,6 +64,8 @@ pub(super) async fn replace_session_with_summary(
         },
         "session-compacted",
     );
+    // Reports the write error after the compaction event, which clears the TUI's chat.
+    sink.session_write_error(outcome.failure.as_deref());
     true
 }
 
@@ -71,9 +74,10 @@ mod tests {
     use super::*;
     use crate::file_tracker::LastView;
     use crate::message::{ContentBlock, Message};
+    use crate::protocol::session_write_failed;
     use crate::protocol::testing::{CapturingSink, FailingSink};
     use crate::session::handle;
-    use crate::session::store::testing::test_store;
+    use crate::session::store::testing::{test_project_dir, test_store};
     use crate::tool::tasks::testing::plan;
 
     mod replace_session_with_summary {
@@ -177,6 +181,51 @@ mod tests {
                 ),
                 "the unsaved summary is discarded before the write error: {events:?}",
             );
+        }
+
+        #[tokio::test]
+        async fn swaps_in_memory_once_its_write_stops_persistence() {
+            let dir = tempfile::tempdir().unwrap();
+            let session = handle::start(&test_store(dir.path()), "claude-sonnet-5-5", None);
+            std::fs::remove_dir_all(test_project_dir(dir.path())).unwrap();
+            let unsaved = session
+                .record_message(Message::user("x".repeat(5 << 20)))
+                .await;
+            assert!(unsaved.failure.is_some());
+            let mut messages = fake_transcript();
+            let sink = CapturingSink::default();
+            let summary = "s".repeat(2 << 20);
+            let mut large = boundary(Vec::new());
+            large.summary.clone_from(&summary);
+
+            let compacted = replace_session_with_summary(
+                &session,
+                &FileTracker::default(),
+                &mut messages,
+                &sink,
+                large,
+            )
+            .await;
+
+            assert!(compacted);
+            assert_eq!(
+                messages,
+                [synthesize_post_compact_message(&summary, &[], &[])]
+            );
+            let stop = session_write_failed(
+                "session persistence stopped after more than 8 MiB of entries failed to write: \
+                 failed to create ",
+            );
+            let events = sink.events();
+            assert!(
+                matches!(
+                    events.as_slice(),
+                    [Event::SessionCompacted { .. }, Event::Error(message)]
+                        if message.starts_with(&stop)
+                ),
+                "expected the compaction, then the stop: {events:?}",
+            );
+            session.shutdown().await;
         }
 
         #[tokio::test]

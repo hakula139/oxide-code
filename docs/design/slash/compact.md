@@ -27,7 +27,7 @@ Companions: [commands.md](commands.md), [session/persistence.md](../session/pers
 `Engine::compact` in `engine.rs` coordinates compaction:
 
 - On success, it hands the summary and the session's task list to `engine/compact_boundary`'s `replace_session_with_summary`, which calls `session.compact(...)`, clears the file tracker, replaces the in-memory `Vec<Message>` with the synthetic continuation, and emits `Event::SessionCompacted { summary, pre_count, instructions, automatic }` with `automatic: false`. The engine then shows any instruction warning the rebuilt prompt newly raises, and ends the compaction with `SessionReady`.
-- Failure paths (stream error, unfinished or empty summary, too-short guard) emit `Event::TurnFailed` and leave the transcript unchanged. A summary whose boundary write fails is discarded before the failure is reported.
+- Failure paths (stream error, unfinished or empty summary, too-short guard) emit `Event::TurnFailed` and leave the transcript unchanged. A summary whose boundary write fails is discarded before the failure is reported. Once session persistence has stopped, the summary still replaces the transcript, and the stop is reported after `SessionCompacted`.
 - Cancellation emits `Event::Cancelled` like a regular turn, and a quit ends the compaction without a terminal event. Dropping the summarization future discards the streamed summary first.
 - Each summary request is recorded as a `usage` entry, and its estimated cost joins the session total whether the summary succeeds, fails, or is cancelled. An `Event::UsageUpdated` then shows the new total, between `SessionCompacted` and `SessionReady` on success and before the terminal event otherwise.
 

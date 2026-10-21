@@ -121,7 +121,8 @@ pub(super) struct AutoCompact<'a> {
 
 /// Compacts `messages` when the usage in `auto` crosses the threshold, returning whether it did.
 /// Skips while [`AutoCompactFailures`] has paused auto-compaction or the transcript is too short to
-/// shrink. A failed summary or boundary write counts as a failure and fails the unsent prompt.
+/// shrink. A failed summary or an uncommitted boundary counts as a failure and fails the unsent
+/// prompt.
 pub(super) async fn auto_compact_if_needed(
     client: &dyn Wire,
     session: &SessionHandle,
