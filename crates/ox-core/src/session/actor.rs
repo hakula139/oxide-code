@@ -10,14 +10,13 @@ use tokio::sync::{mpsc, oneshot};
 use tracing::warn;
 use uuid::Uuid;
 
-use super::entry::{Entry, TitleSource, UsageRecord};
+use super::entry::{CompactBoundary, Entry, TitleSource, UsageRecord};
 use super::handle::{Checkpoint, CompactOutcome, Outcome, RecordOutcome, SharedState};
 use super::state::SessionState;
 use crate::file_tracker::FileSnapshot;
 use crate::message::Message;
 use crate::prompt::SessionContext;
 use crate::tool::ToolMetadata;
-use crate::tool::tasks::Task;
 
 // ── SessionCmd ──
 
@@ -63,9 +62,7 @@ pub(super) enum SessionCmd {
     /// Writes a compaction boundary and the synthetic post-compact message, ends its batch, and
     /// acks the pre-compact message count.
     Compact {
-        summary: String,
-        instructions: Option<String>,
-        tasks: Vec<Task>,
+        boundary: CompactBoundary,
         synthetic_message: Message,
         ack: oneshot::Sender<CompactOutcome>,
     },
@@ -211,15 +208,13 @@ impl Batch {
                 BatchFlow::Continue
             }
             SessionCmd::Compact {
-                summary,
-                instructions,
-                tasks,
+                boundary,
                 synthetic_message,
                 ack,
             } => {
                 let pre_count = state.message_count();
                 let (compact_entries, synthetic_uuid) =
-                    state.compact_entries(&summary, instructions, tasks, synthetic_message, now);
+                    state.compact_entries(boundary, synthetic_message, now);
                 self.entries.extend(compact_entries);
                 self.acks.push(PendingAck::Compact {
                     ack,
@@ -369,6 +364,7 @@ mod tests {
 
     use super::*;
     use crate::session::entry::TitleSource;
+    use crate::session::handle::testing::boundary;
     use crate::session::state::MAX_UNWRITTEN_BYTES;
     use crate::session::store::SessionWriter;
     use crate::session::store::local_testing::{saved_entries, saved_titles, test_session_file};
@@ -741,9 +737,10 @@ mod tests {
             let (rec_b, _) = record_cmd("user two");
             let (compact_ack, _compact_rx) = oneshot::channel();
             let compact_cmd = SessionCmd::Compact {
-                summary: "synth summary".to_owned(),
-                instructions: Some("focus on auth".to_owned()),
-                tasks: Vec::new(),
+                boundary: CompactBoundary {
+                    instructions: Some("focus on auth".to_owned()),
+                    ..boundary("synth summary")
+                },
                 synthetic_message: Message::user("post"),
                 ack: compact_ack,
             };
@@ -788,9 +785,7 @@ mod tests {
             let (rec_b, _) = record_cmd("two");
             let (compact_ack, compact_rx) = oneshot::channel();
             let compact_cmd = SessionCmd::Compact {
-                summary: "s".to_owned(),
-                instructions: None,
-                tasks: Vec::new(),
+                boundary: boundary("s"),
                 synthetic_message: Message::user("synth"),
                 ack: compact_ack,
             };
@@ -814,9 +809,7 @@ mod tests {
             let (rec_before, _) = record_cmd("before compact");
             let (compact_ack, _compact_rx) = oneshot::channel();
             let compact_cmd = SessionCmd::Compact {
-                summary: "s".to_owned(),
-                instructions: None,
-                tasks: Vec::new(),
+                boundary: boundary("s"),
                 synthetic_message: Message::user("synthetic summary"),
                 ack: compact_ack,
             };
@@ -852,9 +845,7 @@ mod tests {
             assert!(rec_rx.await.unwrap().failure.is_some());
             let (compact_ack, compact_rx) = oneshot::channel();
             tx.send(SessionCmd::Compact {
-                summary: "s".to_owned(),
-                instructions: None,
-                tasks: Vec::new(),
+                boundary: boundary("s"),
                 synthetic_message: Message::user("synthetic summary"),
                 ack: compact_ack,
             })
@@ -890,9 +881,7 @@ mod tests {
             async fn compact(tx: &mpsc::Sender<SessionCmd>) -> CompactOutcome {
                 let (ack, rx) = oneshot::channel();
                 tx.send(SessionCmd::Compact {
-                    summary: "s".to_owned(),
-                    instructions: None,
-                    tasks: Vec::new(),
+                    boundary: boundary("s"),
                     synthetic_message: Message::user("synthetic summary"),
                     ack,
                 })

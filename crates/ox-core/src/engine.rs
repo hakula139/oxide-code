@@ -22,7 +22,6 @@ use tokio::sync::{mpsc, oneshot};
 use tokio::task::{JoinError, JoinHandle};
 
 use self::abort::{AbortResult, Inbox, TurnAbort};
-use self::compact_boundary::Boundary;
 use self::compaction::{AutoCompact, AutoCompactFailures};
 use self::turn::{TurnContext, TurnOutcome, TurnReport};
 use crate::client::anthropic::Client;
@@ -37,9 +36,11 @@ use crate::model::{self, ModelSpec, TokenUsage};
 use crate::permission::{Mode, Policy, Workspace};
 use crate::prompt::{self, PromptParts, SessionContext, UserContext};
 use crate::protocol::notice::{self, ConfigSettings};
-use crate::protocol::{ConfigPick, Event, EventSink, Interaction, Op, ResumeTarget, UsageSnapshot};
+use crate::protocol::{
+    CompactTrigger, ConfigPick, Event, EventSink, Interaction, Op, ResumeTarget, UsageSnapshot,
+};
 use crate::session::display::id_prefix;
-use crate::session::entry::{CompactInfo, UsageRecord};
+use crate::session::entry::{CompactBoundary, CompactInfo, UsageRecord};
 use crate::session::handle::{self, Checkpoint, LoadedTranscript, RollIntoOutcome, SessionHandle};
 use crate::session::history;
 use crate::session::resolver::resolve_saved_prefix;
@@ -542,13 +543,13 @@ impl Engine {
             &self.file_tracker,
             &mut self.messages,
             sink,
-            Boundary {
+            CompactBoundary {
                 summary,
                 instructions,
                 tasks: self.tasks.clone(),
-                shells: self.shells.list(),
-                automatic: false,
+                trigger: CompactTrigger::Manual,
             },
+            &self.shells.list(),
         )
         .await;
         // Bills after the boundary, as auto-compaction does, so a write error it surfaces follows
@@ -2094,16 +2095,19 @@ mod tests {
                     Event::SessionCompacted {
                         pre_count,
                         instructions,
-                        automatic,
+                        trigger,
                         ..
-                    } => Some((pre_count, instructions, automatic)),
+                    } => Some((pre_count, instructions, trigger)),
                     _ => None,
                 })
                 .await;
                 submit(&mut handle, "after").await;
                 handle.shutdown().await.unwrap();
 
-                assert_eq!(compacted, (4, Some("focus".to_owned()), false));
+                assert_eq!(
+                    compacted,
+                    (4, Some("focus".to_owned()), CompactTrigger::Manual)
+                );
                 let requests = request_bodies(&server).await;
                 let after = texts(&requests[3]);
                 assert_eq!(after.len(), 3, "{after:?}");
@@ -3096,7 +3100,7 @@ mod tests {
                         matches!(
                             event,
                             Event::SessionCompacted {
-                                automatic: true,
+                                trigger: CompactTrigger::Auto,
                                 ..
                             }
                         )
@@ -3288,7 +3292,7 @@ mod tests {
                 let [
                     Event::SummaryToken(streamed),
                     Event::SessionCompacted {
-                        automatic: false,
+                        trigger: CompactTrigger::Manual,
                         instructions: Some(focus),
                         ..
                     },
@@ -5005,11 +5009,11 @@ mod tests {
                 };
                 let set_model = Op::SetModel(ConfigPick::Effort(Effort::Low));
                 let set_mode = Op::SetMode(Mode::Plan);
-                let compacted = |automatic| Event::SessionCompacted {
+                let compacted = |trigger| Event::SessionCompacted {
                     summary: "summary".to_owned(),
                     pre_count: 4,
                     instructions: None,
-                    automatic,
+                    trigger,
                 };
                 let rolled = Event::SessionRolled {
                     id: "new".to_owned(),
@@ -5022,9 +5026,9 @@ mod tests {
                     (&prompt, Event::TurnComplete, Some(TurnEnd::Completed)),
                     (&prompt, Event::Cancelled, Some(TurnEnd::Cancelled)),
                     (&prompt, failed.clone(), Some(TurnEnd::Failed)),
-                    (&prompt, compacted(true), None),
+                    (&prompt, compacted(CompactTrigger::Auto), None),
                     (&prompt, notice.clone(), None),
-                    (&compact, compacted(false), None),
+                    (&compact, compacted(CompactTrigger::Manual), None),
                     (&compact, Event::SessionReady, Some(TurnEnd::Completed)),
                     (&compact, Event::Cancelled, Some(TurnEnd::Cancelled)),
                     (&compact, Event::TurnComplete, None),

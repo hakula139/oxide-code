@@ -215,14 +215,14 @@ pub enum Event {
         history: Vec<Interaction>,
     },
     /// A compaction finished. The in-memory transcript has already been swapped to the synthetic
-    /// continuation, so the frontend clears its chat and replays a single boundary block.
-    /// `automatic` is true when the compaction ran ahead of a submitted prompt, in which case the
-    /// frontend stays busy since the next turn starts immediately.
+    /// continuation, so the frontend clears its chat and replays a single boundary block. After an
+    /// [`CompactTrigger::Auto`] compaction the frontend stays busy, since the prompt it ran ahead
+    /// of goes out next.
     SessionCompacted {
         summary: String,
         pre_count: u32,
         instructions: Option<String>,
-        automatic: bool,
+        trigger: CompactTrigger,
     },
     /// Ends an [`Op::Clear`], [`Op::Archive`], [`Op::Resume`], or [`Op::Compact`] that replaced the
     /// transcript. Follows every event that reports the new transcript's state, such as its usage
@@ -284,6 +284,16 @@ pub enum Event {
     BackgroundShellsUpdated(Vec<BackgroundShell>),
 }
 
+/// What started a compaction.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CompactTrigger {
+    /// The user ran `/compact`.
+    Manual,
+    /// The context neared the threshold ahead of a submitted prompt.
+    Auto,
+}
+
 // ── Tool Calls ──
 
 /// A tool call as the row a frontend shows for it, live in [`Event::ToolCallStart`] and resumed in
@@ -317,11 +327,13 @@ pub struct ToolResult {
 #[serde(tag = "type", content = "data", rename_all = "snake_case")]
 pub enum Interaction {
     /// The boundary a compaction left, which the rest of the transcript continues from. Renders
-    /// like a live [`Event::SessionCompacted`].
+    /// like a live [`Event::SessionCompacted`]. `trigger` is `None` for a boundary written before
+    /// sessions recorded it.
     Compacted {
         summary: String,
         pre_count: u32,
         instructions: Option<String>,
+        trigger: Option<CompactTrigger>,
     },
     UserText(String),
     AssistantText(String),
@@ -661,6 +673,7 @@ mod tests {
                     summary: "Summary.".to_owned(),
                     pre_count: 4,
                     instructions: Some("focus".to_owned()),
+                    trigger: Some(CompactTrigger::Manual),
                 },
                 Interaction::UserText("ask".to_owned()),
                 Interaction::AssistantThinking("thinking".to_owned()),
@@ -788,7 +801,7 @@ mod tests {
                     summary: "Summary.".to_owned(),
                     pre_count: 4,
                     instructions: Some("focus".to_owned()),
-                    automatic: true,
+                    trigger: CompactTrigger::Auto,
                 },
                 Event::SessionReady,
                 Event::ConfigChanged {

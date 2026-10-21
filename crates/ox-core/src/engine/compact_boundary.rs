@@ -3,50 +3,27 @@
 use crate::file_tracker::FileTracker;
 use crate::message::Message;
 use crate::protocol::{Event, EventSink};
+use crate::session::entry::CompactBoundary;
 use crate::session::handle::SessionHandle;
 use crate::session::post_compact::synthesize_post_compact_message;
 use crate::tool::bash::background::BackgroundShell;
-use crate::tool::tasks::Task;
 
-/// A finished summary and what the boundary records beside it.
-pub(super) struct Boundary {
-    pub(super) summary: String,
-    /// The `/compact` focus the summary followed.
-    pub(super) instructions: Option<String>,
-    /// The task list the summarized transcript left, which the summary message carries over.
-    pub(super) tasks: Vec<Task>,
-    /// The open background shells, which the summary message lists.
-    pub(super) shells: Vec<BackgroundShell>,
-    /// Whether the compaction ran on its own, ahead of a prompt.
-    pub(super) automatic: bool,
-}
-
-/// Persists a compact boundary and swaps the live transcript to the synthetic summary root. A
-/// failed write discards the streamed summary and leaves the transcript unchanged, unless
-/// persistence has stopped, when the swap happens in memory alone.
+/// Persists a compact boundary and swaps the live transcript to the synthetic summary root, which
+/// lists the open `shells`. A failed write discards the streamed summary and leaves the transcript
+/// unchanged, unless persistence has stopped, when the swap happens in memory alone.
 pub(super) async fn replace_session_with_summary(
     session: &SessionHandle,
     file_tracker: &FileTracker,
     messages: &mut Vec<Message>,
     sink: &dyn EventSink,
-    boundary: Boundary,
+    boundary: CompactBoundary,
+    shells: &[BackgroundShell],
 ) -> bool {
-    let Boundary {
-        summary,
-        instructions,
-        tasks,
-        shells,
-        automatic,
-    } = boundary;
-    let synthetic = synthesize_post_compact_message(&summary, &tasks, &shells);
-    let outcome = session
-        .compact(
-            summary.clone(),
-            instructions.clone(),
-            tasks,
-            synthetic.clone(),
-        )
-        .await;
+    let synthetic = synthesize_post_compact_message(&boundary.summary, &boundary.tasks, shells);
+    let summary = boundary.summary.clone();
+    let instructions = boundary.instructions.clone();
+    let trigger = boundary.trigger;
+    let outcome = session.compact(boundary, synthetic.clone()).await;
     if !outcome.committed {
         sink.emit(Event::SummaryDiscarded, "summary-discarded");
         sink.session_write_error(outcome.failure.as_deref());
@@ -60,7 +37,7 @@ pub(super) async fn replace_session_with_summary(
             summary,
             pre_count: outcome.pre_count,
             instructions,
-            automatic,
+            trigger,
         },
         "session-compacted",
     );
@@ -74,22 +51,23 @@ mod tests {
     use super::*;
     use crate::file_tracker::LastView;
     use crate::message::{ContentBlock, Message};
+    use crate::protocol::CompactTrigger;
     use crate::protocol::notice::session_write_failed;
     use crate::protocol::testing::{CapturingSink, FailingSink};
     use crate::session::handle;
     use crate::session::store::testing::{isolated_store, test_project_dir, test_store};
+    use crate::tool::tasks::Task;
     use crate::tool::tasks::testing::plan;
 
     mod replace_session_with_summary {
         use super::*;
 
-        fn boundary(tasks: Vec<Task>) -> Boundary {
-            Boundary {
+        fn boundary(tasks: Vec<Task>) -> CompactBoundary {
+            CompactBoundary {
                 summary: "fixed login bug".to_owned(),
                 instructions: None,
                 tasks,
-                shells: Vec::new(),
-                automatic: true,
+                trigger: CompactTrigger::Auto,
             }
         }
 
@@ -123,6 +101,7 @@ mod tests {
                 &mut messages,
                 &sink,
                 boundary(plan()),
+                &[],
             )
             .await;
 
@@ -158,6 +137,7 @@ mod tests {
                 &mut messages,
                 &sink,
                 boundary(Vec::new()),
+                &[],
             )
             .await;
 
@@ -203,6 +183,7 @@ mod tests {
                 &mut messages,
                 &sink,
                 large,
+                &[],
             )
             .await;
 
@@ -246,6 +227,7 @@ mod tests {
                 &mut messages,
                 &FailingSink,
                 boundary(Vec::new()),
+                &[],
             )
             .await;
 

@@ -18,7 +18,7 @@ Every session is a single append-only `.jsonl` file with one JSON object per lin
 | `file_snapshot`        | Sidecar        | File-tracker state restored on resume when disk state still matches                                         |
 | `usage`                | After request  | One billed request's token usage, model, and prompt-cache TTL                                               |
 | `context`              | Before message | Prompt context of that message. Latest on the resolved chain wins                                           |
-| `compact`              | Boundary       | Summary, pre-compact count, and optional instructions and tasks                                             |
+| `compact`              | Boundary       | Summary, pre-compact count, trigger, and optional instructions and tasks                                    |
 | `archive`              | Re-appended    | Archive state: `archived` + `at`. Latest wins                                                               |
 | `summary`              | Last line      | Exit marker: `message_count` + `updated_at`. Latest wins                                                    |
 
@@ -105,7 +105,7 @@ A session records its prompt context: the environment section, the first message
 
 ### Task List
 
-The session's [task list](../tools/tasks.md) needs no entry of its own. On resume, the loader takes it from the last successful `tasks` call on the resolved chain, or else from the `tasks` field of the last `compact` entry, which records the list the summarized transcript left. The field is omitted when the list was empty.
+The session's [task list](../tools/tasks.md) needs no entry of its own. On resume, the loader takes it from the last successful `tasks` call on the resolved chain, or else from the `tasks` field of the last `compact` entry, which records the list the summarized transcript left. The field is omitted when the list was empty. The entry's `trigger` (`"manual"` or `"auto"`) records what started the compaction, and boundaries that 0.1.0-alpha.5 and earlier wrote lack it.
 
 ### Archiving
 

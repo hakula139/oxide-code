@@ -12,7 +12,7 @@ use tokio::sync::mpsc;
 use tracing::warn;
 
 use super::abort::{AbortResult, Inbox, TurnAbort, await_unless_aborted};
-use super::compact_boundary::{self, Boundary};
+use super::compact_boundary;
 use super::turn::collect_response;
 use crate::client::{PromptTooLong, Response, ResponseEvent, StopReason, Wire};
 use crate::config::compaction::AutoCompactionConfig;
@@ -20,7 +20,8 @@ use crate::file_tracker::FileTracker;
 use crate::message::{ContentBlock, Message, Role};
 use crate::model::TokenUsage;
 use crate::prompt::PromptParts;
-use crate::protocol::{Event, EventSink, Op};
+use crate::protocol::{CompactTrigger, Event, EventSink, Op};
+use crate::session::entry::CompactBoundary;
 use crate::session::handle::SessionHandle;
 use crate::tool::ToolDefinition;
 use crate::tool::bash::background::BackgroundShells;
@@ -168,13 +169,13 @@ pub(super) async fn auto_compact_if_needed(
         auto.file_tracker,
         messages,
         sink,
-        Boundary {
+        CompactBoundary {
             summary,
             instructions: None,
             tasks: auto.tasks.to_vec(),
-            shells: auto.shells.list(),
-            automatic: true,
+            trigger: CompactTrigger::Auto,
         },
+        &auto.shells.list(),
     )
     .await;
     if !compacted {
@@ -889,7 +890,7 @@ mod tests {
             assert!(sink.events().iter().any(|event| matches!(
                 event,
                 Event::SessionCompacted {
-                    automatic: true,
+                    trigger: CompactTrigger::Auto,
                     ..
                 }
             )));
@@ -957,7 +958,7 @@ mod tests {
                         Event::SummaryToken(overflowed),
                         Event::SummaryDiscarded,
                         Event::SummaryToken(retried),
-                        Event::SessionCompacted { automatic: true, .. },
+                        Event::SessionCompacted { trigger: CompactTrigger::Auto, .. },
                     ] if overflowed == "partial" && retried == "auto summary"
                 ),
                 "the overflowed summary is discarded before the retry streams: {events:?}",

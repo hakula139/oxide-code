@@ -14,7 +14,7 @@ use ox_core::config::auth::AuthSource;
 use ox_core::config::compaction::AutoCompactionConfig;
 use ox_core::model::ModelSpec;
 use ox_core::permission::{Basis, Mode, SessionGrant};
-use ox_core::protocol::{Event, Interaction, Op, notice};
+use ox_core::protocol::{CompactTrigger, Event, Interaction, Op, notice};
 use ox_core::session::display::archive_notice;
 use ox_core::session::entry::ArchiveState;
 use ox_core::tool::view::ApprovalPreview;
@@ -85,13 +85,10 @@ impl App {
                 summary,
                 pre_count,
                 instructions,
-                automatic,
-            } => self.apply_session_compacted(
-                &summary,
-                pre_count,
-                instructions.as_deref(),
-                automatic,
-            ),
+                trigger,
+            } => {
+                self.apply_session_compacted(&summary, pre_count, instructions.as_deref(), trigger);
+            }
             Event::SessionReady => self.apply_session_ready(),
             Event::ConfigChanged {
                 model,
@@ -240,14 +237,16 @@ impl App {
         summary: &str,
         pre_count: u32,
         instructions: Option<&str>,
-        automatic: bool,
+        trigger: CompactTrigger,
     ) {
         self.chat.clear_history();
         self.status_bar.set_usage(None);
         self.chat
             .push_compacted_block(pre_count, instructions, summary.to_owned());
         self.queue.mark_sent();
-        if automatic && let Some(prompt) = self.queue.active() {
+        if trigger == CompactTrigger::Auto
+            && let Some(prompt) = self.queue.active()
+        {
             self.chat
                 .push_user_message(command::unescape_literal(prompt).to_owned());
         }
@@ -911,7 +910,7 @@ mod tests {
                 summary: "auto summary".to_owned(),
                 pre_count: 4,
                 instructions: None,
-                automatic: true,
+                trigger: CompactTrigger::Auto,
             });
             app.queue.push("queued".to_owned());
 
@@ -1310,6 +1309,7 @@ mod tests {
                         summary: "Compact summary".to_owned(),
                         pre_count: 4,
                         instructions: None,
+                        trigger: None,
                     },
                     Interaction::AssistantText("post-compact reply".to_owned()),
                 ],
@@ -1368,7 +1368,7 @@ mod tests {
                 summary: "## Recap\n\nDid the thing.".to_owned(),
                 pre_count: 4,
                 instructions: Some("focus on auth".to_owned()),
-                automatic: false,
+                trigger: CompactTrigger::Manual,
             });
 
             assert_eq!(
@@ -1400,7 +1400,7 @@ mod tests {
                 summary: "summary only".to_owned(),
                 pre_count: 2,
                 instructions: None,
-                automatic: false,
+                trigger: CompactTrigger::Manual,
             });
             assert_eq!(app.chat.entry_count(), 1, "exactly one boundary block");
         }
@@ -1415,7 +1415,7 @@ mod tests {
                 summary: "auto summary".to_owned(),
                 pre_count: 4,
                 instructions: None,
-                automatic: true,
+                trigger: CompactTrigger::Auto,
             });
 
             assert_eq!(app.chat.entry_count(), 1);
@@ -1441,7 +1441,7 @@ mod tests {
                 summary: "auto summary".to_owned(),
                 pre_count: 4,
                 instructions: None,
-                automatic: true,
+                trigger: CompactTrigger::Auto,
             });
 
             assert_eq!(app.chat.entry_count(), 2);
@@ -1482,7 +1482,7 @@ mod tests {
                 summary: "s".to_owned(),
                 pre_count: 2,
                 instructions: None,
-                automatic: false,
+                trigger: CompactTrigger::Manual,
             });
             app.handle_engine_event(Event::Notice(
                 "Skipped instruction file CLAUDE.md".to_owned(),
@@ -1515,7 +1515,7 @@ mod tests {
                 summary: "s".to_owned(),
                 pre_count: 2,
                 instructions: None,
-                automatic: false,
+                trigger: CompactTrigger::Manual,
             });
             app.handle_engine_event(Event::SessionReady);
 

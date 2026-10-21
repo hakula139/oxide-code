@@ -11,7 +11,7 @@ expression: write_every_entry(dir.path()).await
 {"type":"title","title":"Edit f.rs","source":"ai_generated","updated_at":"<TS-7>"}
 {"type":"title","title":"Fix f.rs","source":"user_provided","updated_at":"<TS-8>"}
 {"type":"usage","uuid":"<UUID-5>","model":"claude-sonnet-5-5","cache_ttl":"1h","input_tokens":2,"cache_creation_input_tokens":20,"cache_read_input_tokens":200,"output_tokens":2000,"timestamp":"<TS-9>"}
-{"type":"compact","summary":"Asked to edit f.rs.","pre_message_count":2,"instructions":"focus on f.rs","tasks":[{"content":"Read the config loader","status":"completed"},{"content":"Add the entry type","status":"in_progress"},{"content":"Write the tests","status":"pending"}],"timestamp":"<TS-10>"}
+{"type":"compact","summary":"Asked to edit f.rs.","pre_message_count":2,"instructions":"focus on f.rs","tasks":[{"content":"Read the config loader","status":"completed"},{"content":"Add the entry type","status":"in_progress"},{"content":"Write the tests","status":"pending"}],"trigger":"manual","timestamp":"<TS-10>"}
 {"type":"message","uuid":"<UUID-6>","message":{"role":"user","content":[{"type":"text","text":"Summary: asked to edit f.rs."}]},"timestamp":"<TS-10>"}
 {"type":"context","environment":{"cwd":"<CWD>","is_git":false,"platform":"","shell":"","os_version":""},"user_context":"","seen":{"instructions":"","date":"2026-01-02","model":""},"timestamp":"<TS-11>"}
 {"type":"message","uuid":"<UUID-7>","parent_uuid":"<UUID-6>","message":{"role":"user","content":[{"type":"text","text":"Rename main in f.rs"}]},"timestamp":"<TS-11>"}
