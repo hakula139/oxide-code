@@ -4,13 +4,16 @@
 /target/
 
 # Dependencies
-node_modules/
+/node_modules/
 
 # Nix
-.direnv/
-.pre-commit-config.yaml
+/.direnv/
+/.pre-commit-config.yaml
+# `nix build` links its output from whichever directory it runs in, while a real `result/` directory
+# stays tracked.
 result
 result-*
+!result/
 
 # Snapshot review
 *.snap.new
