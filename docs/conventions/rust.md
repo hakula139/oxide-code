@@ -33,15 +33,12 @@ Conventions for Rust code under `crates/`. Tooling enforces some style rules, so
 
 ### Error Messages
 
-`anyhow` formats a chain as `headline: cause` with `{:#}` and puts the outermost headline first in a startup error, so each message in the chain should read as one clause of that sentence.
+`anyhow` formats a chain as `headline: cause` with `{:#}` and puts the outermost headline first in a startup error, so each message in the chain should read as one clause of that sentence. [Writing](writing.md#prose) owns the wording, casing, and punctuation of messages, and these rules cover how they compose.
 
-- Start with a headline that says what failed and identifies the variable, key, file, or value involved, as in `invalid OX_MAX_TOKENS "32k": expected a whole number from 1 to 4294967295`. Quote user-supplied text with `{:?}`.
-- A message that composes into a chain is a fragment of that sentence, as the example above is. [Writing](writing.md#prose) owns the casing and punctuation of fragments and of messages shown on their own.
+- Start with a headline that says what failed and identifies the variable, key, file, or value involved. A failed operation reads `failed to <verb> ...`, as in `failed to read the current working directory`, and rejected input names the problem first, as in `invalid OX_MAX_TOKENS "32k": expected a whole number from 1 to 4294967295`. Quote user-supplied text with `{:?}`.
+- A message that composes into a chain is a lowercase fragment of that sentence, as the examples above are.
 - Where a surface shows a chain on its own, give it a capitalized headline at the display site, as in `Rule rejected: {e:#}`, so the fragments inside stay lowercase. `main` prints a startup chain after `Error:`, so its outermost headline is lowercase too.
-- Explain what is accepted or what went wrong in the user's terms. A raw library message such as `invalid digit found in string` does not explain the accepted range.
-- If the user can fix the problem, end the message with a separate sentence giving the recovery step, as in ``Not signed in. Run `/login` to sign in.`` In a chain, that sentence follows the innermost cause, which renders last, as in `invalid OX_STATUS_LINE "a,,b": empty segment between commas. Remove the stray comma.` A short hint may qualify a fragment in parentheses, as in `no sessions to resume in this project (use --all to search every project)`. When such an error wraps a cause, format the cause into the headline so the recovery step stays last.
-- Include units with numbers, as in `Retrying in 1 s`.
-- Name the variable or store that holds a secret, never its value.
+- In a chain, the recovery step follows the innermost cause, which renders last, as in `invalid OX_STATUS_LINE "a,,b": empty segment between commas. Remove the stray comma.` When such an error wraps a cause, format the cause into the headline so the recovery step stays last.
 
 ## Visibility
 
@@ -53,11 +50,13 @@ Conventions for Rust code under `crates/`. Tooling enforces some style rules, so
 - Keep each file focused on one primary type or concern. Split it when it starts mixing several.
 - Avoid `pub use` re-exports that obscure where items are defined. If a module re-exports some items, re-export all related items so callers can use consistent paths.
 - Put helper functions after their callers within each section so the file reads from top to bottom.
-- Place new struct fields and enum variants where they fit best semantically.
 - Keep `#[cfg(unix)]`, `#[cfg(windows)]`, and `#[cfg(target_os = "macos")]` variants together in the modules they belong to, rather than splitting them into per-platform files.
 
 ## Layout
 
+- Open a module with its `//!` doc, then its `mod` declarations, its `pub use` re-exports, and its `use` groups.
+- Order entries such as struct fields, enum variants, match arms, and list items by meaning: the general case before its exceptions, related entries together, and dependencies before their dependents. Use alphabetical order only when no stronger relationship applies.
+- List derives in the order `Debug`, `Clone`, `Copy`, `Default`, `PartialEq`, `Eq`, `PartialOrd`, `Ord`, `Hash`, followed by derives from other crates, such as `Serialize`, `Deserialize`, and `thiserror::Error`. Give parallel types the same set.
 - Separate distinct groups of items with `// ── Section Name ──` banners using U+2500. Tests group by function in child modules, as described in [Testing](testing.md#grouping-and-naming).
 - Leave one blank line between top-level items. Closely related one-line `const` or `static` items may be grouped when they share a theme, such as the OAuth client constants. Leave one blank line after the group before unrelated items.
 - Leave one blank line before and after each banner.
@@ -77,10 +76,9 @@ Conventions for Rust code under `crates/`. Tooling enforces some style rules, so
 - Build an interpolated list or section without a trailing newline, joining its items with `join`, so the template that interpolates it owns the line breaks around it.
 - Build a shared envelope, such as the `<system-reminder>` block, through one owning helper that wraps each body, so its delimiters are spelled out in one place.
 - Convert a literal to a `String` with `.to_owned()` and keep the layout rustfmt gives it. Don't wrap the literal in `String::from` or bind it to a local only to change that layout.
-- Keep each clap flag's `///` help to one sentence, since clap drops the final period of a flag's help.
 
 ## Dependencies
 
 - Pin each dependency version in the root `Cargo.toml` under `[workspace.dependencies]`, then reference it from member crates with `dep.workspace = true`.
 - Add dependencies to the workspace only when a change first requires them, and prefer crates with few transitive dependencies.
-- Declare platform-specific dependencies in the crate's `Cargo.toml` under `[target.'cfg(unix)'.dependencies]` or `[target.'cfg(target_os = "macos")'.dependencies]`.
+- Declare platform-specific dependencies in the crate's `Cargo.toml` under `[target.'cfg(unix)'.dependencies]`, `[target.'cfg(windows)'.dependencies]`, or `[target.'cfg(target_os = "macos")'.dependencies]`.

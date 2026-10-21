@@ -50,7 +50,9 @@ The [live tests](#live-tests) are the sole exception because they send paid requ
 
 ## Assertions
 
+- Structure each test as arrange, act, and assert, with a blank line between the steps. Keep a check that the act succeeded, such as an assertion on a command's exit status, directly after the act.
 - Each assertion should fail when the code under test has a plausible bug. Avoid patterns that cannot reveal one, such as checking uniform data with `starts_with`, using wildcard `..` matches or loose bounds, or calling `is_err()` without checking the error when it matters.
+- Assert an empty collection with `assert_eq!(x, [])`, which prints the unexpected items when it fails. Write `[] as [T; 0]` where the element type does not infer.
 - Aim for a concise suite with full coverage, merging tests that cover the same path.
 
 ## Snapshots

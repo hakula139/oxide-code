@@ -1,8 +1,6 @@
 //! Conversation compaction: the auto-compaction trigger and the summarization request, which forks
 //! the live conversation to read its prompt cache. `compact_session` leaves the session untouched,
 //! and its callers swap in the summary through `compact_boundary` once it succeeds.
-//!
-//! Design: `docs/design/slash/compact.md`.
 
 use std::collections::HashSet;
 use std::iter;

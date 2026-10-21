@@ -1,6 +1,4 @@
 //! Modal stack that routes keys to the top overlay and renders it between chat and input.
-//!
-//! Design: `docs/design/slash/modals.md`.
 
 pub(crate) mod approval;
 pub(crate) mod chrome;

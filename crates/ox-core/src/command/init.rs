@@ -1,7 +1,5 @@
 //! `/init`'s typed form, which finds the project's instruction files and builds the prompt asking
 //! the model to create one or to propose changes to the existing ones as a diff.
-//!
-//! Design: `docs/design/slash/init.md`.
 
 use std::path::{Path, PathBuf};
 

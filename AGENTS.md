@@ -4,52 +4,23 @@ oxide-code is a terminal-based AI coding assistant written in Rust, inspired by 
 
 This file holds the rules for every change and points to the conventions for each area. `README.md` covers features and scope for users, [`docs/`](docs/) holds the user guides, conventions, design specs, and research notes, and open GitHub issues track planned work.
 
-```bash
-ox                                          # Start an interactive TUI session
-ox --no-tui                                 # Bare REPL on stdin and stdout
-ox -p "<prompt>"                            # Headless: run one turn and print the reply
-```
-
 ## Project Layout
+
+The tree omits the root config files, which follow their tools' conventions.
 
 ```text
 .
 ├── .agents/                                # Agent skills for the release procedure
-├── .cargo/                                 # Cargo rustdoc flags and cargo-mutants settings
 ├── .claude/                                # Link to the agent skills for Claude Code
-├── .cspell/                                # Project spelling dictionary
-├── .envrc                                  # Loads the dev shell through direnv
-├── .github/                                # CI and release workflows, the shared Nix setup action, issue forms, PR template, and Renovate and Dependabot configs
-├── .gitignore                              # Build output and local tool state kept out of Git
-├── .markdownlint-cli2.jsonc                # Markdown lint rules
-├── .prettierignore                         # The pnpm lockfile, which Prettier skips
-├── .prettierrc                             # Prettier settings for JSON, Markdown, and YAML
-├── .taplo.toml                             # TOML formatter settings
-├── .vscode/                                # Shared VS Code settings
-├── .worktreeinclude                        # Gitignored agent memory that Claude Code copies into new worktrees
 ├── about.hbs                               # Plain-text third-party notice template
 ├── about.toml                              # Release dependency license selection
-├── Cargo.toml                              # Workspace manifest for the MSRV, lints, shared dependencies, and build profiles
-├── CHANGELOG.md                            # Release notes drafted by git-cliff and curated for each release
-├── cliff.toml                              # Changelog configuration for git-cliff
-├── clippy.toml                             # Clippy settings
-├── codecov.yml                             # Codecov coverage targets
 ├── crates/ox/                              # The `ox` binary crate with the CLI and the stdio frontends, mapped in docs/design/architecture.md
 ├── crates/ox-core/                         # The `ox-core` library crate with the agent core, mapped in docs/design/architecture.md
 ├── crates/ox-tui/                          # The `ox-tui` library crate with the terminal UI, mapped in docs/design/architecture.md
-├── cspell.json                             # Spell checker settings
-├── deny.toml                               # Dependency license, advisory, source, and ban policy
 ├── docs/                                   # User guides, conventions, design specs, and research notes
-├── flake.nix                               # Nix flake for the dev shell, pre-commit hooks, checks, and packages
 ├── Formula/                                # Homebrew formula, served from this repo as a tap
 ├── licenses/                               # Licenses for bundled syntax definitions and themes
-├── package.json                            # Node formatters, linters, and spell checker run through pnpm
-├── package.nix                             # Nix package for `ox`
-├── pnpm-workspace.yaml                     # Dependency overrides for pnpm
-├── RELEASING.md                            # Release procedure, versioning, and stability surface
-├── rust-toolchain.toml                     # Pinned Rust release
-├── scripts/                                # Homebrew formula updater run by the Release workflow
-└── SECURITY.md                             # Vulnerability reporting and trust model
+└── scripts/                                # Homebrew formula updater run by the Release workflow
 ```
 
 ## Read Before You Edit

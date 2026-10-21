@@ -160,3 +160,16 @@ Listings sort rows and render them as follows:
 10. **Listing scan with message pre-filter, mtime sort.** Titles and summaries can appear anywhere in the file, so the scan reads every line and the prefix check keeps message lines out of JSON parsing.
 11. **Actor-owned writes, receive-and-drain batching.** One task owns the writer, and `tokio::join!` coalesces a tool round's records into one append.
 12. **Archive state as an appended entry.** A session keeps the same path whether it is archived or active. Because filtering listings by archive state requires parsing files, listings indicate whether more sessions follow the current page without counting them.
+
+## Sources
+
+- `crates/ox-core/src/session/actor.rs`: the actor that owns the writer and appends each wakeup's commands in one write.
+- `crates/ox-core/src/session/chain.rs`: message chain reconstruction from the `parent_uuid` DAG.
+- `crates/ox-core/src/session/entry.rs`: the JSONL entry schema and its header `version`.
+- `crates/ox-core/src/session/handle.rs`: `SessionHandle`, the public API that sends each write to the actor.
+- `crates/ox-core/src/session/path.rs`: the sanitized per-project subdirectory names.
+- `crates/ox-core/src/session/sanitize.rs`: resume-time transcript repair.
+- `crates/ox-core/src/session/state.rs`: the in-memory session state the actor owns.
+- `crates/ox-core/src/session/store.rs`: session file I/O and the `{epoch}-{uuid}.jsonl` file names.
+- `crates/ox-core/src/session/store/listing.rs`: stat-only listing walks and metadata parsing.
+- `crates/ox-core/src/session/title_generator.rs`: the background AI title generator.
