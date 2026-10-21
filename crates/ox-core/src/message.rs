@@ -60,6 +60,16 @@ pub(crate) enum ContentBlock {
     },
 }
 
+impl ContentBlock {
+    /// The text of a [`ContentBlock::Text`] block, `None` for any other block.
+    pub(crate) fn as_text(&self) -> Option<&str> {
+        match self {
+            Self::Text { text } => Some(text),
+            _ => None,
+        }
+    }
+}
+
 // ── Replay ──
 
 /// The provider wire a content block came from.
@@ -316,6 +326,32 @@ mod tests {
                 }),
             );
             assert_eq!(serde_json::from_value::<ContentBlock>(json).unwrap(), block);
+        }
+
+        mod as_text {
+            use super::*;
+
+            #[test]
+            fn yields_a_text_blocks_text_and_skips_every_other_block() {
+                let blocks = [
+                    ContentBlock::Text {
+                        text: "hello".to_owned(),
+                    },
+                    ContentBlock::Thinking {
+                        thinking: "reasoning".to_owned(),
+                        replay: Replay::with_model(MODEL, "sig"),
+                    },
+                    ContentBlock::ToolResult {
+                        tool_use_id: "id".to_owned(),
+                        content: "out".to_owned(),
+                        is_error: false,
+                    },
+                ];
+
+                let texts: Vec<Option<&str>> = blocks.iter().map(ContentBlock::as_text).collect();
+
+                assert_eq!(texts, [Some("hello"), None, None]);
+            }
         }
     }
 

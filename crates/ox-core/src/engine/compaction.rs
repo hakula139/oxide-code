@@ -240,12 +240,11 @@ pub(super) async fn compact_session(
         );
     }
 
-    let sections: Vec<&str> = prompt.system_sections.iter().map(String::as_str).collect();
     let user_context = Some(prompt.user_context.as_str());
     let rubric = Message::user(build_user_message(instructions));
     let request: Vec<Message> = transcript.iter().chain([&rubric]).cloned().collect();
     let stream = SummaryStream::new(sink);
-    let mut rx = client.stream_message(&request, &sections, user_context, tools)?;
+    let mut rx = client.stream_message(&request, &prompt.system, user_context, tools)?;
     let mut kept = transcript.to_vec();
     let mut retries = 0;
     let response = loop {
@@ -265,7 +264,7 @@ pub(super) async fn compact_session(
         kept = smaller;
         stream.discard();
         let request = retry_request(&kept, &rubric);
-        rx = client.stream_one_shot(&request, &sections, user_context, tools)?;
+        rx = client.stream_one_shot(&request, &prompt.system, user_context, tools)?;
     };
     match response.stop_reason {
         None | Some(StopReason::EndTurn | StopReason::StopSequence) => {}
@@ -285,10 +284,7 @@ pub(super) async fn compact_session(
     let summary: String = response
         .content
         .iter()
-        .filter_map(|b| match b {
-            ContentBlock::Text { text } => Some(text.as_str()),
-            _ => None,
-        })
+        .filter_map(ContentBlock::as_text)
         .collect();
     let trimmed = summary.trim();
     if trimmed.is_empty() {
@@ -520,6 +516,7 @@ mod tests {
     };
     use crate::engine::testing::MODEL;
     use crate::message::Replay;
+    use crate::prompt::SystemPrompt;
     use crate::protocol::testing::CapturingSink;
     use crate::session::post_compact::synthesize_post_compact_message;
     use crate::tool::tasks::testing::plan;
@@ -601,7 +598,7 @@ mod tests {
             fn stream_message(
                 &self,
                 _messages: &[Message],
-                _system_sections: &[&str],
+                _system: &SystemPrompt,
                 _user_context: Option<&str>,
                 _tools: &[ToolDefinition],
             ) -> Result<mpsc::Receiver<Result<ResponseEvent>>> {
@@ -619,7 +616,7 @@ mod tests {
             fn stream_message(
                 &self,
                 _messages: &[Message],
-                _system_sections: &[&str],
+                _system: &SystemPrompt,
                 _user_context: Option<&str>,
                 _tools: &[ToolDefinition],
             ) -> Result<mpsc::Receiver<Result<ResponseEvent>>> {
@@ -1041,7 +1038,7 @@ mod tests {
 
         fn parent_prompt() -> PromptParts {
             let mut prompt = PromptParts::default();
-            prompt.system_sections = vec!["You are the parent conversation.".to_owned()];
+            prompt.system.stable = "You are the parent conversation.".to_owned();
             "Project instructions.".clone_into(&mut prompt.user_context);
             prompt
         }
@@ -1180,7 +1177,7 @@ mod tests {
             fn stream_message(
                 &self,
                 _messages: &[Message],
-                _system_sections: &[&str],
+                _system: &SystemPrompt,
                 _user_context: Option<&str>,
                 _tools: &[ToolDefinition],
             ) -> Result<mpsc::Receiver<Result<ResponseEvent>>> {
@@ -1270,9 +1267,13 @@ mod tests {
             }];
             let transcript = tool_heavy_transcript();
 
-            let sections: Vec<&str> = prompt.system_sections.iter().map(String::as_str).collect();
             let mut rx = client
-                .stream_message(&transcript, &sections, Some(&prompt.user_context), &tools)
+                .stream_message(
+                    &transcript,
+                    &prompt.system,
+                    Some(&prompt.user_context),
+                    &tools,
+                )
                 .unwrap();
             while rx.recv().await.is_some() {}
             compact_session(

@@ -21,7 +21,7 @@ use crate::file_tracker::FileTracker;
 use crate::message::{ContentBlock, Message, Replay, Role};
 use crate::permission::rule::Rule;
 use crate::permission::{Mode, PermissionClass, Policy, Workspace};
-use crate::prompt::PromptParts;
+use crate::prompt::{PromptParts, SystemPrompt};
 use crate::protocol::Op;
 use crate::session::handle::{self, SessionHandle};
 use crate::session::store::testing::test_store;
@@ -103,7 +103,7 @@ impl Wire for FakeClient {
     fn stream_message(
         &self,
         messages: &[Message],
-        _system_sections: &[&str],
+        _system: &SystemPrompt,
         _user_context: Option<&str>,
         _tools: &[ToolDefinition],
     ) -> Result<mpsc::Receiver<Result<ResponseEvent>>> {

@@ -4,6 +4,7 @@ use crate::config::PromptCacheTtl;
 use crate::config::auth::AuthKind;
 use crate::model::{Family, ModelSpec, ThinkingConfig, ThinkingDisplay};
 
+use super::RequestKind;
 use super::wire::CacheControl;
 
 const ADVISOR_TOOL_BETA_HEADER: &str = "advisor-tool-2026-03-01";
@@ -24,14 +25,14 @@ const THINKING_TOKEN_COUNT_BETA_HEADER: &str = "thinking-token-count-2026-05-13"
 /// Agentic turns on catalog models send the sequence Claude Code [`super::CLAUDE_CLI_VERSION`]
 /// sends for them, captured from `claude -p` with an API key, so it includes betas for features
 /// this client leaves unused. Fable 5.1, which that capture lacks, sends the Opus 5.5 sequence.
-/// `oauth` takes the slot Claude Code's `getAllModelBetas` gives it. One-shots carry at most the
+/// `oauth` takes the slot Claude Code's `getAllModelBetas` gives it. Side queries carry at most the
 /// claude-code tag and the auth extension. The thinking betas derive from the request body's
 /// `thinking` field, so they always match it.
 pub(super) fn compute_betas(
     model: &ModelSpec,
     thinking: Option<&ThinkingConfig>,
     auth: AuthKind,
-    is_agentic: bool,
+    kind: RequestKind,
 ) -> Vec<&'static str> {
     let is_haiku = model
         .info()
@@ -45,7 +46,7 @@ pub(super) fn compute_betas(
     if auth == AuthKind::OAuth {
         out.push(OAUTH_BETA_HEADER);
     }
-    if is_agentic {
+    if kind == RequestKind::Agentic {
         if model.info().is_some() {
             out.extend([
                 INTERLEAVED_THINKING_BETA_HEADER,
@@ -101,6 +102,7 @@ pub(super) fn conversation_cache_control(ttl: PromptCacheTtl) -> CacheControl {
 #[cfg(test)]
 mod tests {
     use super::super::CLAUDE_CLI_VERSION;
+    use super::RequestKind::{Agentic, SideQuery};
     use super::*;
 
     mod compute_betas {
@@ -149,7 +151,7 @@ mod tests {
                         &model,
                         model.thinking(true).as_ref(),
                         AuthKind::ApiKey,
-                        true
+                        Agentic
                     )
                     .join(","),
                     format!("{captured},thinking-binding-controls-2026-08-01"),
@@ -161,7 +163,7 @@ mod tests {
         #[test]
         fn oauth_slots_auth_header_after_claude_code_tag() {
             assert_eq!(
-                compute_betas(&spec("claude-opus-5-5"), None, AuthKind::OAuth, true)[..3],
+                compute_betas(&spec("claude-opus-5-5"), None, AuthKind::OAuth, Agentic)[..3],
                 [
                     CLAUDE_CODE_BETA_HEADER,
                     OAUTH_BETA_HEADER,
@@ -170,24 +172,29 @@ mod tests {
             );
             // Haiku's agentic claude-code tag comes later, so the auth header leads.
             assert_eq!(
-                compute_betas(&spec("claude-haiku-5-5"), None, AuthKind::OAuth, true)[..2],
+                compute_betas(&spec("claude-haiku-5-5"), None, AuthKind::OAuth, Agentic)[..2],
                 [OAUTH_BETA_HEADER, INTERLEAVED_THINKING_BETA_HEADER],
             );
             // A gateway auth token keeps API-key betas, since the OAuth beta is subscription-only.
             let opus = spec("claude-opus-5-5");
             assert_eq!(
-                compute_betas(&opus, None, AuthKind::AuthToken, true),
-                compute_betas(&opus, None, AuthKind::ApiKey, true),
+                compute_betas(&opus, None, AuthKind::AuthToken, Agentic),
+                compute_betas(&opus, None, AuthKind::ApiKey, Agentic),
             );
             assert!(
-                !compute_betas(&opus, None, AuthKind::ApiKey, true).contains(&OAUTH_BETA_HEADER)
+                !compute_betas(&opus, None, AuthKind::ApiKey, Agentic).contains(&OAUTH_BETA_HEADER)
             );
         }
 
         #[test]
         fn updates_display_appends_its_beta_last() {
             let opus = spec("claude-opus-5-5");
-            let betas = compute_betas(&opus, opus.thinking(false).as_ref(), AuthKind::ApiKey, true);
+            let betas = compute_betas(
+                &opus,
+                opus.thinking(false).as_ref(),
+                AuthKind::ApiKey,
+                Agentic,
+            );
             assert_eq!(
                 betas[betas.len() - 3..],
                 [
@@ -203,7 +210,7 @@ mod tests {
                     &haiku,
                     haiku.thinking(false).as_ref(),
                     AuthKind::ApiKey,
-                    true
+                    Agentic
                 )
                 .contains(&THINKING_DISPLAY_UPDATES_BETA_HEADER),
             );
@@ -212,32 +219,32 @@ mod tests {
         #[test]
         fn agentic_unknown_model_sends_only_tag_and_cache_scope() {
             assert_eq!(
-                compute_betas(&spec("custom-model"), None, AuthKind::ApiKey, true),
+                compute_betas(&spec("custom-model"), None, AuthKind::ApiKey, Agentic),
                 vec![CLAUDE_CODE_BETA_HEADER, PROMPT_CACHING_SCOPE_BETA_HEADER],
             );
         }
 
         #[test]
-        fn haiku_non_agentic_minimal() {
+        fn side_query_on_haiku_sends_only_the_auth_beta() {
             assert_eq!(
-                compute_betas(&spec("claude-haiku-5-5"), None, AuthKind::ApiKey, false),
+                compute_betas(&spec("claude-haiku-5-5"), None, AuthKind::ApiKey, SideQuery),
                 Vec::<&str>::new(),
             );
             assert_eq!(
-                compute_betas(&spec("claude-haiku-5-5"), None, AuthKind::OAuth, false),
+                compute_betas(&spec("claude-haiku-5-5"), None, AuthKind::OAuth, SideQuery),
                 vec![OAUTH_BETA_HEADER],
             );
         }
 
         #[test]
-        fn non_haiku_non_agentic_keeps_claude_code_tag() {
+        fn side_query_off_haiku_keeps_the_claude_code_tag() {
             assert_eq!(
-                compute_betas(&spec("claude-sonnet-5-5"), None, AuthKind::OAuth, false),
+                compute_betas(&spec("claude-sonnet-5-5"), None, AuthKind::OAuth, SideQuery),
                 vec![CLAUDE_CODE_BETA_HEADER, OAUTH_BETA_HEADER],
             );
             // Family comes from the catalog row, so an unknown id naming Haiku keeps the tag.
             assert_eq!(
-                compute_betas(&spec("my-haiku-gateway"), None, AuthKind::ApiKey, false),
+                compute_betas(&spec("my-haiku-gateway"), None, AuthKind::ApiKey, SideQuery),
                 vec![CLAUDE_CODE_BETA_HEADER],
             );
         }

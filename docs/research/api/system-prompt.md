@@ -149,7 +149,7 @@ oxide-code ships `scope: "global"` only when the configured base URL points at t
 
 ## System Block Layout
 
-The flat sections array gets transformed into the block layout actually sent to the API. The boundary marker is consumed and never appears in the request. Agentic streaming emits the same 4-block shape (billing / attribution + identity + static + dynamic). The billing block ships on every base URL, and only the `cache_control` on the static block varies by base URL.
+Claude Code transforms its flat sections array into the block layout actually sent to the API, consuming the boundary marker so it never appears in the request (`splitSysPromptPrefix` in `src/utils/api.ts` of the frozen 2.1.87 source, checked 2026-10-21). oxide-code builds the static and dynamic text as the two fields of `prompt::SystemPrompt`, so it needs no marker. Agentic streaming emits the same 4-block shape (billing / attribution + identity + static + dynamic). The billing block ships on every base URL, and only the `cache_control` on the static block varies by base URL.
 
 **First-party base URL** (`api.anthropic.com`), global cache active:
 

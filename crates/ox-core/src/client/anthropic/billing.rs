@@ -44,11 +44,6 @@ pub(super) fn build_billing_header(version: &str, fingerprint: &str, hashed: boo
     }
 }
 
-/// Returns whether `attribution` carries the placeholder [`inject_cch`] fills.
-pub(super) fn is_hashed(attribution: &str) -> bool {
-    attribution.contains(CCH_PLACEHOLDER)
-}
-
 /// Replaces the first `cch=00000` with `cch={5-hex of xxHash64(body)}`. Errors if absent.
 pub(super) fn inject_cch(body: &str) -> Result<String> {
     if !body.contains(CCH_PLACEHOLDER) {
@@ -126,14 +121,12 @@ mod tests {
                 hashed,
                 "x-anthropic-billing-header: cc_version=2.1.87.abc; cc_entrypoint=cli; cch=00000;"
             );
-            assert!(is_hashed(&hashed));
 
             let stable = build_billing_header("2.1.87", "abc", false);
             assert_eq!(
                 stable,
                 "x-anthropic-billing-header: cc_version=2.1.87.abc; cc_entrypoint=cli;"
             );
-            assert!(!is_hashed(&stable));
         }
     }
 

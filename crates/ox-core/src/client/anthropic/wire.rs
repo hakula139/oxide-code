@@ -25,7 +25,7 @@ pub(super) struct CreateMessageRequest<'a> {
     pub(super) tools: Option<&'a [ToolDefinition]>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(super) thinking: Option<&'a ThinkingConfig>,
-    /// The one-shot JSON-schema `format` and the `effort`.
+    /// A side query's JSON-schema `format` and the `effort`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(super) output_config: Option<OutputConfig<'a>>,
     /// Partners the `context-management-2025-06-27` beta on streaming requests for known models.

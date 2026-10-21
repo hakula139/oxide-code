@@ -11,6 +11,7 @@ use tokio::sync::mpsc;
 
 use crate::message::{ContentBlock, Message};
 use crate::model::TokenUsage;
+use crate::prompt::SystemPrompt;
 use crate::tool::ToolDefinition;
 
 // ── Wire ──
@@ -23,7 +24,7 @@ pub(crate) trait Wire: Send + Sync {
     fn stream_message(
         &self,
         messages: &[Message],
-        system_sections: &[&str],
+        system: &SystemPrompt,
         user_context: Option<&str>,
         tools: &[ToolDefinition],
     ) -> Result<mpsc::Receiver<Result<ResponseEvent>>>;
@@ -33,11 +34,11 @@ pub(crate) trait Wire: Send + Sync {
     fn stream_one_shot(
         &self,
         messages: &[Message],
-        system_sections: &[&str],
+        system: &SystemPrompt,
         user_context: Option<&str>,
         tools: &[ToolDefinition],
     ) -> Result<mpsc::Receiver<Result<ResponseEvent>>> {
-        self.stream_message(messages, system_sections, user_context, tools)
+        self.stream_message(messages, system, user_context, tools)
     }
 }
 
