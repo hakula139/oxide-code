@@ -116,8 +116,8 @@ impl ChatBlock for AssistantThinking {
         out
     }
 
-    fn visible(&self, ctx: &RenderCtx<'_>) -> bool {
-        ctx.show_thinking
+    fn visible(&self, show_thinking: bool) -> bool {
+        show_thinking
     }
 }
 
@@ -150,8 +150,8 @@ impl ChatBlock for ProgressUpdate {
         with_assistant_gutter(text.lines, ctx, true)
     }
 
-    fn visible(&self, ctx: &RenderCtx<'_>) -> bool {
-        !ctx.show_thinking
+    fn visible(&self, show_thinking: bool) -> bool {
+        !show_thinking
     }
 }
 
@@ -163,20 +163,10 @@ mod tests {
     use super::*;
     use crate::theme::Theme;
 
-    fn ctx_at(width: u16, theme: &Theme) -> RenderCtx<'_> {
-        RenderCtx {
-            width,
-            theme,
-            show_thinking: true,
-            expanded: false,
-            expand_hint: None,
-        }
-    }
-
     fn expanded_at(width: u16, theme: &Theme) -> RenderCtx<'_> {
         RenderCtx {
             expanded: true,
-            ..ctx_at(width, theme)
+            ..RenderCtx::new(width, theme)
         }
     }
 
@@ -196,7 +186,7 @@ mod tests {
                     let x = 1;
                     ```
                 "});
-                let ctx = ctx_at(60, &theme);
+                let ctx = RenderCtx::new(60, &theme);
                 let lines = block.render(&ctx);
                 let fence_line = lines
                     .iter()
@@ -215,7 +205,7 @@ mod tests {
             let theme = Theme::default();
             let style = theme.thinking();
 
-            for ctx in [ctx_at(60, &theme), expanded_at(60, &theme)] {
+            for ctx in [RenderCtx::new(60, &theme), expanded_at(60, &theme)] {
                 let lines = AssistantThinking::render_streaming("hello", '⣷', &ctx);
 
                 assert_eq!(
@@ -244,7 +234,7 @@ mod tests {
             let theme = Theme::default();
             let ctx = RenderCtx {
                 expand_hint: Some("Ctrl+O to expand"),
-                ..ctx_at(60, &theme)
+                ..RenderCtx::new(60, &theme)
             };
             let block = AssistantThinking::new("hello");
 
@@ -266,7 +256,7 @@ mod tests {
             let theme = Theme::default();
             let ctx = RenderCtx {
                 expand_hint: Some("Ctrl+O to expand"),
-                ..ctx_at(60, &theme)
+                ..RenderCtx::new(60, &theme)
             };
             let block = AssistantThinking::new("   \n  ");
 
@@ -338,24 +328,14 @@ mod tests {
         #[test]
         fn shows_as_assistant_text_only_while_thinking_is_hidden() {
             let theme = Theme::default();
+            let ctx = RenderCtx::new(60, &theme);
             let block = ProgressUpdate::new("Found the loader.");
-            let hidden = RenderCtx {
-                show_thinking: false,
-                ..ctx_at(60, &theme)
-            };
 
-            let visible = [ctx_at(60, &theme), expanded_at(60, &theme), hidden]
-                .map(|ctx| block.visible(&ctx));
+            let visible = [true, false].map(|show_thinking| block.visible(show_thinking));
+            let rows = block.render(&ctx);
 
-            assert_eq!(
-                visible,
-                [false, false, true],
-                "the thinking block holds the text in either view"
-            );
-            assert_eq!(
-                block.render(&hidden),
-                AssistantText::new("Found the loader.").render(&hidden),
-            );
+            assert_eq!(visible, [false, true], "the thinking block holds the text");
+            assert_eq!(rows, AssistantText::new("Found the loader.").render(&ctx));
         }
     }
 }

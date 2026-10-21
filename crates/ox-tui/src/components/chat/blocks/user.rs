@@ -47,20 +47,10 @@ mod tests {
     mod render {
         use super::*;
 
-        fn ctx_at(width: u16, theme: &Theme) -> RenderCtx<'_> {
-            RenderCtx {
-                width,
-                theme,
-                show_thinking: false,
-                expanded: false,
-                expand_hint: None,
-            }
-        }
-
         #[test]
         fn expands_tabs_to_stops() {
             let theme = Theme::default();
-            let lines = UserMessage::new("a\tb\n\tc").render(&ctx_at(40, &theme));
+            let lines = UserMessage::new("a\tb\n\tc").render(&RenderCtx::new(40, &theme));
             let rows: Vec<String> = lines.iter().map(ToString::to_string).collect();
             assert_eq!(rows, ["❯ a   b", "      c"]);
         }
@@ -70,7 +60,7 @@ mod tests {
             let theme = Theme::default();
 
             let lines = UserMessage::new("\n    fn main() {\n        body\n    }\n\n")
-                .render(&ctx_at(40, &theme));
+                .render(&RenderCtx::new(40, &theme));
 
             let rows: Vec<String> = lines.iter().map(ToString::to_string).collect();
             assert_eq!(rows, ["❯     fn main() {", "          body", "      }"]);

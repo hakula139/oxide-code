@@ -289,13 +289,7 @@ mod tests {
         #[test]
         fn puts_each_view_under_a_status_line_colored_by_outcome() {
             let theme = Theme::default();
-            let ctx = RenderCtx {
-                width: 80,
-                theme: &theme,
-                show_thinking: false,
-                expanded: false,
-                expand_hint: None,
-            };
+            let ctx = RenderCtx::new(80, &theme);
             let outcomes = [
                 (false, theme.tool_border(), TOOL_SUCCESS, theme.success()),
                 (true, theme.error(), TOOL_ERROR, theme.error()),
@@ -329,11 +323,8 @@ mod tests {
         fn marks_the_overflow_footer_below_the_status_line_as_the_row_that_expands_it() {
             let theme = Theme::default();
             let ctx = RenderCtx {
-                width: 80,
-                theme: &theme,
-                show_thinking: false,
-                expanded: false,
                 expand_hint: Some("Ctrl+O to expand"),
+                ..RenderCtx::new(80, &theme)
             };
             let content = (1..=MAX_TOOL_OUTPUT_LINES + 2)
                 .map(|n| format!("line {n}"))
@@ -371,11 +362,8 @@ mod tests {
         fn footer(hidden: usize, limit_reached: bool, hint: Option<&str>) -> BlockRows {
             let theme = Theme::default();
             let ctx = RenderCtx {
-                width: 80,
-                theme: &theme,
-                show_thinking: false,
-                expanded: false,
                 expand_hint: hint,
+                ..RenderCtx::new(80, &theme)
             };
             let mut out = BlockRows::default();
             overflow_footer(

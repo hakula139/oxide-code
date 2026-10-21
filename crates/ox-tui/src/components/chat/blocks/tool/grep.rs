@@ -91,13 +91,7 @@ mod tests {
 
         fn render_rows(groups: &[GrepFileGroup], truncated: bool) -> Vec<String> {
             let theme = Theme::default();
-            let ctx = RenderCtx {
-                width: 80,
-                theme: &theme,
-                show_thinking: true,
-                expanded: false,
-                expand_hint: None,
-            };
+            let ctx = RenderCtx::new(80, &theme);
             let mut out = BlockRows::default();
             render(&mut out, &ctx, theme.tool_border(), groups, truncated);
             out.lines.iter().map(ToString::to_string).collect()
@@ -106,13 +100,7 @@ mod tests {
         #[test]
         fn groups_numbered_rows_under_each_path() {
             let theme = Theme::default();
-            let ctx = RenderCtx {
-                width: 80,
-                theme: &theme,
-                show_thinking: true,
-                expanded: false,
-                expand_hint: None,
-            };
+            let ctx = RenderCtx::new(80, &theme);
             let groups = [
                 group(
                     "src/main.rs",

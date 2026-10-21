@@ -28,13 +28,7 @@ mod tests {
         #[test]
         fn emits_one_dim_italic_marker_row() {
             let theme = Theme::default();
-            let ctx = RenderCtx {
-                width: 80,
-                theme: &theme,
-                show_thinking: false,
-                expanded: false,
-                expand_hint: None,
-            };
+            let ctx = RenderCtx::new(80, &theme);
 
             let lines = InterruptedMarker.render(&ctx);
 

@@ -28,9 +28,9 @@ impl StreamingAssistant {
         self.buffer.push_str(token);
     }
 
-    pub(crate) fn take_buffer(&mut self) -> String {
-        self.invalidate_cache();
-        std::mem::take(&mut self.buffer)
+    /// The streamed text, ending the turn's buffering.
+    pub(crate) fn into_buffer(self) -> String {
+        self.buffer
     }
 
     pub(crate) fn invalidate_cache_for_width(&mut self, width: u16) {
@@ -112,16 +112,6 @@ mod tests {
     use crate::components::chat::blocks::{AssistantText, ChatBlock};
     use crate::theme::Theme;
 
-    fn ctx_at(width: u16, theme: &Theme) -> RenderCtx<'_> {
-        RenderCtx {
-            width,
-            theme,
-            show_thinking: false,
-            expanded: false,
-            expand_hint: None,
-        }
-    }
-
     /// Streams `tokens` into a new turn, advancing the cache after each one as the chat does.
     fn streamed(tokens: &[&str], ctx: &RenderCtx<'_>) -> StreamingAssistant {
         let mut streaming = StreamingAssistant::default();
@@ -136,30 +126,13 @@ mod tests {
         lines.iter().map(ToString::to_string).collect()
     }
 
-    mod take_buffer {
-        use super::*;
-
-        #[test]
-        fn returns_the_text_and_drops_the_cache() {
-            let theme = Theme::default();
-            let ctx = ctx_at(80, &theme);
-            let mut streaming = streamed(&["para1\n\npara2\n"], &ctx);
-
-            let text = streaming.take_buffer();
-
-            assert_eq!(text, "para1\n\npara2\n");
-            assert_eq!(rows(streaming.rendered()), [] as [String; 0]);
-            assert_eq!(rows(&streaming.render_tail(&ctx, false)), [] as [String; 0]);
-        }
-    }
-
     mod invalidate_cache_for_width {
         use super::*;
 
         #[test]
         fn drops_the_cache_only_when_the_width_changes() {
             let theme = Theme::default();
-            let ctx = ctx_at(80, &theme);
+            let ctx = RenderCtx::new(80, &theme);
             for (width, cached) in [(80, &["◉ para1"][..]), (40, &[])] {
                 let mut streaming = streamed(&["para1\n\npara2\n"], &ctx);
 
@@ -176,7 +149,7 @@ mod tests {
         #[test]
         fn leaves_the_whole_buffer_to_the_tail() {
             let theme = Theme::default();
-            let ctx = ctx_at(80, &theme);
+            let ctx = RenderCtx::new(80, &theme);
             let mut streaming = streamed(&["para1\n\npara2\n"], &ctx);
 
             streaming.invalidate_cache();
@@ -196,7 +169,7 @@ mod tests {
         fn waits_for_a_measured_width() {
             let theme = Theme::default();
 
-            let streaming = streamed(&["first paragraph\n\nsecond\n"], &ctx_at(0, &theme));
+            let streaming = streamed(&["first paragraph\n\nsecond\n"], &RenderCtx::new(0, &theme));
 
             assert_eq!(streaming.rendered_boundary, 0);
             assert_eq!(streaming.cached_width, 0);
@@ -205,7 +178,7 @@ mod tests {
         #[test]
         fn caches_only_the_blocks_a_finished_line_closes() {
             let theme = Theme::default();
-            let ctx = ctx_at(80, &theme);
+            let ctx = RenderCtx::new(80, &theme);
             for (buffer, cached) in [
                 ("no newline here", ""),
                 ("first line\nsecond line", ""),
@@ -233,7 +206,10 @@ mod tests {
         fn separates_each_cached_block_from_the_next() {
             let theme = Theme::default();
 
-            let streaming = streamed(&["para1\n\npara2\n", "\npara3\n"], &ctx_at(80, &theme));
+            let streaming = streamed(
+                &["para1\n\npara2\n", "\npara3\n"],
+                &RenderCtx::new(80, &theme),
+            );
 
             assert_eq!(rows(streaming.rendered()), ["◉ para1", "  ", "  para2"]);
             assert_eq!(streaming.cached_width, 80);
@@ -278,7 +254,7 @@ mod tests {
                 Done.
             "};
             let theme = Theme::default();
-            let ctx = ctx_at(80, &theme);
+            let ctx = RenderCtx::new(80, &theme);
             let mut streaming = StreamingAssistant::default();
             for (i, ch) in body.char_indices() {
                 streaming.append(&ch.to_string());

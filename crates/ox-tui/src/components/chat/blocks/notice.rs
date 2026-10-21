@@ -37,13 +37,7 @@ mod tests {
             let text = "HTTP 529 overloaded_error. Retrying in 4 s (retry 2 of 5).";
             let block = NoticeBlock::new(text);
 
-            let lines = block.render(&RenderCtx {
-                width: 30,
-                theme: &theme,
-                show_thinking: false,
-                expanded: false,
-                expand_hint: None,
-            });
+            let lines = block.render(&RenderCtx::new(30, &theme));
 
             assert!(
                 lines.len() > 1,

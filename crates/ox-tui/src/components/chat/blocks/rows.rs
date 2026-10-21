@@ -185,21 +185,20 @@ impl<'a> NumberedRows<'a> {
     }
 }
 
-/// Builds the wrapped-line continuation prefix (bar area stays transparent, text area gets bg).
+/// The continuation prefix of a wrapped numbered row: the body bar, then a pad under the number and
+/// separator that carries the row bg.
 fn make_cont_spans(
     border_style: Style,
     number_width: usize,
     separator_width: usize,
     row_bg: Option<Style>,
 ) -> Vec<Span<'static>> {
-    let bar_prefix_padding = TOOL_BORDER_CONT.width().saturating_sub(BAR.width());
-    let text_col_padding = number_width + separator_width;
-    let bg = row_bg.unwrap_or_default();
-    vec![
-        Span::styled(BAR, border_style),
-        Span::raw(" ".repeat(bar_prefix_padding)),
-        Span::styled(" ".repeat(text_col_padding), bg),
-    ]
+    let mut spans = continuation_spans(TOOL_BORDER_CONT, border_style);
+    spans.push(Span::styled(
+        " ".repeat(number_width + separator_width),
+        row_bg.unwrap_or_default(),
+    ));
+    spans
 }
 
 fn pad_to_width(line: &mut Line<'static>, target_width: usize, bg: Style) {
@@ -237,13 +236,7 @@ mod tests {
         #[test]
         fn emits_the_prefix_and_text_on_one_row() {
             let theme = Theme::default();
-            let ctx = RenderCtx {
-                width: 80,
-                theme: &theme,
-                show_thinking: true,
-                expanded: false,
-                expand_hint: None,
-            };
+            let ctx = RenderCtx::new(80, &theme);
             let mut out = Vec::new();
 
             prefixed_row(
@@ -267,13 +260,7 @@ mod tests {
         #[test]
         fn wraps_long_text_under_the_bar_in_the_text_style() {
             let theme = Theme::default();
-            let ctx = RenderCtx {
-                width: 12,
-                theme: &theme,
-                show_thinking: true,
-                expanded: false,
-                expand_hint: None,
-            };
+            let ctx = RenderCtx::new(12, &theme);
             let mut out = Vec::new();
 
             prefixed_row(
@@ -309,13 +296,7 @@ mod tests {
         #[test]
         fn wraps_under_the_indent_of_an_icon_prefix() {
             let theme = Theme::default();
-            let ctx = RenderCtx {
-                width: 16,
-                theme: &theme,
-                show_thinking: true,
-                expanded: false,
-                expand_hint: None,
-            };
+            let ctx = RenderCtx::new(16, &theme);
             let mut out = Vec::new();
 
             prefixed_row(
@@ -345,13 +326,7 @@ mod tests {
         #[test]
         fn wraps_by_display_width() {
             let theme = Theme::default();
-            let ctx = RenderCtx {
-                width: 12,
-                theme: &theme,
-                show_thinking: true,
-                expanded: false,
-                expand_hint: None,
-            };
+            let ctx = RenderCtx::new(12, &theme);
             let mut out = Vec::new();
 
             prefixed_row(
@@ -392,13 +367,7 @@ mod tests {
             // On the diff path the separator carries the `- ` or `+ ` sign, and the text stays a
             // separate span so the sign can take its own color.
             let theme = Theme::default();
-            let ctx = RenderCtx {
-                width: 30,
-                theme: &theme,
-                show_thinking: true,
-                expanded: false,
-                expand_hint: None,
-            };
+            let ctx = RenderCtx::new(30, &theme);
             let renderer = NumberedRows::with_style(
                 &ctx,
                 theme.tool_border(),
@@ -430,13 +399,7 @@ mod tests {
             // The bar prefix stays transparent while the number, separator, and text inherit the
             // row bg, so the chrome column never tints and the band has no holes.
             let theme = Theme::default();
-            let ctx = RenderCtx {
-                width: 80,
-                theme: &theme,
-                show_thinking: true,
-                expanded: false,
-                expand_hint: None,
-            };
+            let ctx = RenderCtx::new(80, &theme);
             let renderer = NumberedRows::with_style(
                 &ctx,
                 theme.tool_border(),
@@ -459,13 +422,7 @@ mod tests {
         fn pads_to_full_width_with_row_bg() {
             // Trailing pad fills remaining columns so the bg tint reaches `ctx.width`.
             let theme = Theme::default();
-            let ctx = RenderCtx {
-                width: 40,
-                theme: &theme,
-                show_thinking: true,
-                expanded: false,
-                expand_hint: None,
-            };
+            let ctx = RenderCtx::new(40, &theme);
             let renderer = NumberedRows::with_style(
                 &ctx,
                 theme.tool_border(),
@@ -494,13 +451,7 @@ mod tests {
             // Every wrapped line pads to `ctx.width` so the bg stays contiguous, and the bar prefix
             // on continuations stays transparent like the header line.
             let theme = Theme::default();
-            let ctx = RenderCtx {
-                width: 20,
-                theme: &theme,
-                show_thinking: true,
-                expanded: false,
-                expand_hint: None,
-            };
+            let ctx = RenderCtx::new(20, &theme);
             let renderer = NumberedRows::with_style(
                 &ctx,
                 theme.tool_border(),
@@ -539,13 +490,7 @@ mod tests {
         #[test]
         fn emits_bar_number_separator_and_text() {
             let theme = Theme::default();
-            let ctx = RenderCtx {
-                width: 80,
-                theme: &theme,
-                show_thinking: true,
-                expanded: false,
-                expand_hint: None,
-            };
+            let ctx = RenderCtx::new(80, &theme);
             let renderer = NumberedRows::new(&ctx, theme.error(), 100);
             let mut out = Vec::new();
             renderer.render(&mut out, 7, "hello", theme.text());
@@ -567,11 +512,8 @@ mod tests {
             let long = "a".repeat(MAX_ROW_BYTES + 50);
             let text_in = |expanded| {
                 let ctx = RenderCtx {
-                    width: 4096,
-                    theme: &theme,
-                    show_thinking: true,
                     expanded,
-                    expand_hint: None,
+                    ..RenderCtx::new(4096, &theme)
                 };
                 let mut out = Vec::new();
                 NumberedRows::new(&ctx, theme.tool_border(), 1).render(
@@ -593,13 +535,7 @@ mod tests {
         fn wraps_with_aligned_continuation_prefix() {
             // Continuation lines carry the bar plus padding aligned under the text column.
             let theme = Theme::default();
-            let ctx = RenderCtx {
-                width: 14,
-                theme: &theme,
-                show_thinking: true,
-                expanded: false,
-                expand_hint: None,
-            };
+            let ctx = RenderCtx::new(14, &theme);
             let renderer = NumberedRows::new(&ctx, theme.tool_border(), 10);
             let mut out = Vec::new();
             renderer.render(&mut out, 1, "alpha ab cde", theme.text());
