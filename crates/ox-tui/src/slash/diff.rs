@@ -61,6 +61,7 @@ async fn collect_diff(dir: &Path) -> Result<WorkingTreeDiff> {
             "--others",
             "--exclude-standard",
             "--directory",
+            "--no-empty-directory",
         ],
     );
     if has_head(root).await {
@@ -290,6 +291,9 @@ mod tests {
             git_setup(&repo, &["add", "a.txt"]);
             std::fs::write(repo.join("a.txt"), "staged\nunstaged\n").unwrap();
             std::fs::write(repo.join("new.txt"), "u\n").unwrap();
+            std::fs::create_dir_all(repo.join("empty")).unwrap();
+            std::fs::create_dir_all(repo.join("vendor/pkg")).unwrap();
+            std::fs::write(repo.join("vendor/pkg/lib.js"), "v\n").unwrap();
 
             let diff = collect(&repo).await.unwrap();
 
@@ -302,7 +306,7 @@ mod tests {
                 })
                 .collect();
             assert_eq!(added, [(1, "staged"), (2, "unstaged")]);
-            assert_eq!(diff.untracked, ["new.txt"]);
+            assert_eq!(diff.untracked, ["new.txt", "vendor/"]);
             assert_eq!(diff.truncation, None);
         }
 
