@@ -1,9 +1,14 @@
 //! Session-store access shared by the commands that act on saved sessions.
 
 use ox_core::session::resolver::ResolveError;
+use ox_core::session::saved::SavedError;
 use ox_core::session::store::SessionStore;
 
 use super::context::LiveSessionInfo;
+
+pub(super) const BARE_ARCHIVE_HINT: &str = "Use bare `/archive` to archive it and start a new one.";
+
+pub(super) const CLEAR_THEN_DELETE_HINT: &str = "Run `/clear` to start a new one, then delete it.";
 
 /// Opens the store scoped to the session's working directory.
 pub(super) fn open_store(info: &LiveSessionInfo) -> Result<SessionStore, String> {
@@ -23,7 +28,16 @@ pub(super) fn resolve_error_message(error: ResolveError) -> String {
             preview,
         } => format!("Ambiguous prefix `{prefix}` matches {count} sessions: {preview}"),
         ResolveError::List { scope, cause } => {
-            format!("Failed to list sessions ({scope}): {cause:#}")
+            format!("Failed to list sessions in {scope}: {cause:#}")
+        }
+    }
+}
+
+pub(super) fn saved_error_message(error: SavedError, live_recovery: &str) -> String {
+    match error {
+        SavedError::Live { id } => format!("Session {id} is the live session. {live_recovery}"),
+        SavedError::Failed { action, id, cause } => {
+            format!("Failed to {action} session {id}: {cause:#}")
         }
     }
 }
@@ -83,7 +97,33 @@ mod tests {
             };
             assert_eq!(
                 resolve_error_message(list),
-                "Failed to list sessions (all projects): disk unavailable",
+                "Failed to list sessions in all projects: disk unavailable",
+            );
+        }
+    }
+
+    mod saved_error_message {
+        use super::*;
+
+        #[test]
+        fn ends_a_live_refusal_with_the_recovery_and_capitalizes_a_failure() {
+            let live = SavedError::Live {
+                id: "abababab".to_owned(),
+            };
+            assert_eq!(
+                saved_error_message(live, BARE_ARCHIVE_HINT),
+                "Session abababab is the live session. \
+                 Use bare `/archive` to archive it and start a new one.",
+            );
+
+            let failed = SavedError::Failed {
+                action: "unarchive",
+                id: "abababab".to_owned(),
+                cause: anyhow::anyhow!("disk unavailable"),
+            };
+            assert_eq!(
+                saved_error_message(failed, BARE_ARCHIVE_HINT),
+                "Failed to unarchive session abababab: disk unavailable",
             );
         }
     }

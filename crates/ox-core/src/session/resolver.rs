@@ -56,7 +56,7 @@ pub fn resolve_session(
         }
         ResumeMode::Prefix(prefix) => {
             match_in_scope(store, prefix, None, all)?
-                .with_context(|| format!("no session matching prefix `{prefix}`{scope_hint}"))?
+                .with_context(|| format!("no session matching `{prefix}`{scope_hint}"))?
                 .path
         }
     };
@@ -109,7 +109,8 @@ pub enum ResolveError {
         count: usize,
         preview: String,
     },
-    #[error("list sessions ({scope}): {cause:#}")]
+    /// `scope` names where the listing looked: `this project` or `all projects`.
+    #[error("failed to list sessions in {scope}: {cause:#}")]
     List {
         scope: &'static str,
         cause: anyhow::Error,
@@ -153,11 +154,7 @@ fn match_in_scope(
     live_id: Option<&str>,
     all: bool,
 ) -> Result<Option<SessionInfo>, ResolveError> {
-    let scope = if all {
-        "all projects"
-    } else {
-        "current project"
-    };
+    let scope = if all { "all projects" } else { "this project" };
     let mut matches = store
         .list_matching(prefix, all)
         .map_err(|cause| ResolveError::List { scope, cause })?;
@@ -278,7 +275,7 @@ mod tests {
             assert_eq!(
                 err,
                 format!(
-                    "no session matching prefix `{}` in this project \
+                    "no session matching `{}` in this project \
                      (use --all to search every project)",
                     &full_id[..10],
                 ),
@@ -295,7 +292,7 @@ mod tests {
                 .unwrap()
                 .to_string();
             assert_eq!(
-                err, "no session matching prefix `zzzz`",
+                err, "no session matching `zzzz`",
                 "the hint drops --all once it is set",
             );
         }
@@ -393,7 +390,7 @@ mod tests {
                 .to_string();
             assert_eq!(
                 err,
-                "no session matching prefix `zzzz` in this project \
+                "no session matching `zzzz` in this project \
                  (use --all to search every project)",
             );
         }
@@ -436,7 +433,10 @@ mod tests {
                 .err()
                 .unwrap()
                 .to_string();
-            assert_eq!(err, format!("list sessions (current project): {cause:#}"));
+            assert_eq!(
+                err,
+                format!("failed to list sessions in this project: {cause:#}")
+            );
         }
 
         #[tokio::test]
@@ -446,9 +446,12 @@ mod tests {
             let arg = Some("/does/not/exist.jsonl".to_owned());
             let err = resolve_session(&store, "m", None, Some(&arg), false)
                 .err()
-                .unwrap()
-                .to_string();
-            assert_eq!(err, "session not found: /does/not/exist.jsonl");
+                .unwrap();
+            let cause = std::fs::metadata("/does/not/exist.jsonl").unwrap_err();
+            assert_eq!(
+                format!("{err:#}"),
+                format!("failed to open /does/not/exist.jsonl: {cause}")
+            );
         }
     }
 

@@ -3494,7 +3494,7 @@ mod tests {
                 let beside_file = other_path.with_file_name(&other_id);
                 assert_eq!(spill_names(&beside_file), ["call-1.txt"]);
                 engine.clear(&CapturingSink::default()).await;
-                delete_at(&other_path, engine.session_id()).unwrap();
+                delete_at(&other_path).unwrap();
 
                 assert!(!beside_file.exists(), "delete removes the spills");
                 assert!(!test_project_dir(dir.path()).join(&other_id).exists());
@@ -3574,7 +3574,7 @@ mod tests {
                     sink.events(),
                     [Event::TurnFailed(format!(
                         "Resume failed (still on session {}): \
-                         session not found: missing-target.jsonl: {}",
+                         failed to open missing-target.jsonl: {}",
                         id_prefix(&original_id),
                         std::fs::metadata("missing-target.jsonl").unwrap_err(),
                     ))]

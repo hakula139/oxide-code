@@ -211,7 +211,7 @@ const SUMMARY_LINE_PREFIX: &str = r#"{"type":"summary""#;
 /// Reads the header, the latest title and summary, and the archive state. `last_active_at` is the
 /// mtime the walk sorted by, so the listed time matches the order.
 fn read_session_info(path: &Path, last_active_at: OffsetDateTime) -> Result<SessionInfo> {
-    let file = File::open(path).with_context(|| format!("cannot open {}", path.display()))?;
+    let file = File::open(path).with_context(|| format!("failed to open {}", path.display()))?;
     let mut lines = JsonlLines::new(BufReader::new(&file));
     let HeaderInfo {
         session_id,

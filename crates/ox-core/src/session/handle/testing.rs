@@ -50,6 +50,7 @@ pub(crate) fn acks_then_drops(session_id: &str, succeed: usize) -> SessionHandle
                 SessionCmd::Compact { ack, .. } => {
                     _ = ack.send(CompactOutcome {
                         pre_count: 0,
+                        committed: true,
                         failure: None,
                     });
                 }

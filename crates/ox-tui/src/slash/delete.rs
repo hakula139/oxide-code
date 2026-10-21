@@ -14,7 +14,7 @@ use ox_core::util::time::local_offset;
 use super::confirm::ConfirmDeleteSessionModal;
 use super::context::SlashContext;
 use super::registry::{SlashCommand, SlashKind, SlashOutcome};
-use super::sessions::{open_store, resolve_error_message};
+use super::sessions::{CLEAR_THEN_DELETE_HINT, open_store, resolve_error_message};
 
 // ── DeleteCmd ──
 
@@ -56,10 +56,7 @@ impl SlashCommand for DeleteCmd {
         let info = resolve_saved_prefix(&store, arg, live_id)
             .map_err(resolve_error_message)?
             .ok_or_else(|| {
-                format!(
-                    "Session prefix `{arg}` matches the live session. \
-                     Run `/clear` to start a new one, then delete it."
-                )
+                format!("Session prefix `{arg}` matches the live session. {CLEAR_THEN_DELETE_HINT}")
             })?;
         Ok(SlashOutcome::Modal(Box::new(
             ConfirmDeleteSessionModal::new(

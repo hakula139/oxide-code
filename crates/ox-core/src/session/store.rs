@@ -108,8 +108,7 @@ pub(crate) fn open_append_at(path: &Path) -> Result<SessionWriter> {
 
 /// Loads session data from an explicit path with DAG-based chain resolution.
 pub(crate) fn load_session_data_from_path(path: &Path) -> Result<SessionData> {
-    let file =
-        File::open(path).with_context(|| format!("session not found: {}", path.display()))?;
+    let file = File::open(path).with_context(|| format!("failed to open {}", path.display()))?;
     let mut lines = JsonlLines::new(BufReader::new(file));
     let mut builder = SessionDataBuilder::new();
 
@@ -310,8 +309,7 @@ impl SessionDataBuilder {
 
 /// Reads just the `session_id` from a session file's header line.
 pub(crate) fn read_session_id_from_path(path: &Path) -> Result<String> {
-    let file =
-        File::open(path).with_context(|| format!("session not found: {}", path.display()))?;
+    let file = File::open(path).with_context(|| format!("failed to open {}", path.display()))?;
     let header = read_header(&mut JsonlLines::new(BufReader::new(file)), path)?;
     Ok(header.session_id)
 }
@@ -324,13 +322,9 @@ pub(crate) fn artifact_dir(session_file: &Path, session_id: &str) -> PathBuf {
 }
 
 /// Removes the session file at `path` and the session's [`artifact_dir`], the directory first so a
-/// failure leaves the session listed for another try. Refuses the live session's file, which
-/// callers already filter out, so a bug upstream cannot unlink the file under its open writer.
-pub(crate) fn delete_at(path: &Path, live_id: &str) -> Result<()> {
+/// failure leaves the session listed for another try.
+pub(crate) fn delete_at(path: &Path) -> Result<()> {
     let session_id = read_session_id_from_path(path)?;
-    if session_id == live_id {
-        bail!("refusing to delete the live session: {session_id}");
-    }
     let artifact_dir = artifact_dir(path, &session_id);
     if let Err(e) = fs::remove_dir_all(&artifact_dir)
         && e.kind() != io::ErrorKind::NotFound
@@ -374,7 +368,7 @@ fn validate_session_id(session_id: &str) -> Result<()> {
             .bytes()
             .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_');
     if !ok {
-        bail!("invalid session ID: {session_id}");
+        bail!("invalid session ID {session_id:?}");
     }
     Ok(())
 }
@@ -494,7 +488,7 @@ fn create_written(path: &Path, write: impl FnOnce(&File) -> io::Result<()>) -> R
 fn open_append_file(path: &Path) -> Result<File> {
     append_options()
         .open(path)
-        .with_context(|| format!("session not found: {}", path.display()))
+        .with_context(|| format!("failed to open {}", path.display()))
 }
 
 /// Writes at the end of a file opened by [`append_options`], atomically with other appenders.
@@ -662,6 +656,12 @@ mod tests {
 
     fn test_project_path(dir: &Path, filename: &str) -> PathBuf {
         dir.join(TEST_PROJECT).join(filename)
+    }
+
+    /// The error chain for a missing `path`, naming the I/O cause.
+    fn open_failure(path: &Path) -> String {
+        let cause = fs::metadata(path).unwrap_err();
+        format!("failed to open {}: {cause}", path.display())
     }
 
     mod open {
@@ -859,10 +859,11 @@ mod tests {
         #[test]
         fn fails_for_a_missing_file() {
             let dir = tempfile::tempdir().unwrap();
-            let err = open_append_at(&dir.path().join("ghost.jsonl"))
-                .unwrap_err()
-                .to_string();
-            assert!(err.contains("session not found"), "got: {err}");
+            let path = dir.path().join("ghost.jsonl");
+
+            let err = open_append_at(&path).unwrap_err();
+
+            assert_eq!(format!("{err:#}"), open_failure(&path));
         }
 
         #[test]
@@ -1538,12 +1539,13 @@ mod tests {
         }
 
         #[test]
-        fn nonexistent_session_errors() {
+        fn names_the_file_and_the_cause_when_it_cannot_open() {
             let dir = tempfile::tempdir().unwrap();
-            let err = load_session_data_from_path(&dir.path().join("ghost.jsonl"))
-                .unwrap_err()
-                .to_string();
-            assert!(err.contains("session not found"), "got: {err}");
+            let path = dir.path().join("ghost.jsonl");
+
+            let err = load_session_data_from_path(&path).unwrap_err();
+
+            assert_eq!(format!("{err:#}"), open_failure(&path));
         }
 
         #[tokio::test]
@@ -1743,10 +1745,11 @@ mod tests {
         #[test]
         fn errors_when_file_missing() {
             let dir = tempfile::tempdir().unwrap();
-            let err = read_session_id_from_path(&dir.path().join("ghost.jsonl"))
-                .unwrap_err()
-                .to_string();
-            assert!(err.contains("session not found"), "got: {err}");
+            let path = dir.path().join("ghost.jsonl");
+
+            let err = read_session_id_from_path(&path).unwrap_err();
+
+            assert_eq!(format!("{err:#}"), open_failure(&path));
         }
     }
 
@@ -1764,7 +1767,7 @@ mod tests {
             fs::create_dir_all(spill.parent().unwrap()).unwrap();
             fs::write(&spill, "output").unwrap();
 
-            delete_at(&path, "live-session-id").unwrap();
+            delete_at(&path).unwrap();
 
             assert!(!path.exists(), "delete must unlink the file: {path:?}");
             assert!(
@@ -1778,31 +1781,13 @@ mod tests {
         }
 
         #[test]
-        fn refuses_the_live_session_file() {
-            let dir = tempfile::tempdir().unwrap();
-            let store = test_store(dir.path());
-            let _writer = store.create(&sample_header("live-id"), &[]).unwrap();
-            let path = test_session_file(dir.path(), "live-id");
-
-            let err = delete_at(&path, "live-id").expect_err("self-delete must be rejected");
-
-            assert!(
-                err.to_string()
-                    .contains("refusing to delete the live session"),
-                "error must explain the refusal: {err:#}",
-            );
-            assert!(path.exists(), "file untouched");
-        }
-
-        #[test]
         fn errors_when_the_file_is_missing() {
             let dir = tempfile::tempdir().unwrap();
-            let err = delete_at(&dir.path().join("ghost.jsonl"), "live-id")
-                .expect_err("missing session must error");
-            assert!(
-                err.to_string().contains("session not found"),
-                "got: {err:#}"
-            );
+            let path = dir.path().join("ghost.jsonl");
+
+            let err = delete_at(&path).expect_err("missing session must error");
+
+            assert_eq!(format!("{err:#}"), open_failure(&path));
         }
 
         #[test]
@@ -1813,7 +1798,7 @@ mod tests {
             let path = test_session_file(dir.path(), "stuck");
             fs::write(test_project_path(dir.path(), "stuck"), "not a directory").unwrap();
 
-            let err = delete_at(&path, "live-session-id").expect_err("the directory must go first");
+            let err = delete_at(&path).expect_err("the directory must go first");
 
             assert!(
                 err.to_string()
@@ -1861,10 +1846,8 @@ mod tests {
             let dir = tempfile::tempdir().unwrap();
             let path = dir.path().join("ghost.jsonl");
             let err = set_archived_at(&path, true).expect_err("missing session must error");
-            assert!(
-                err.to_string().contains("session not found"),
-                "got: {err:#}"
-            );
+
+            assert_eq!(format!("{err:#}"), open_failure(&path));
             assert!(!path.exists());
         }
     }

@@ -269,12 +269,15 @@ impl Batch {
     }
 }
 
-/// Commits a flushed compact, or abandons a failed compact or archive, matching what its ack tells
-/// the caller.
+/// Commits a flushed compact, or one past a persistence stop, which leaves no file to keep it
+/// consistent with. Abandons any other failed compact and every failed archive, matching what
+/// their acks tell the caller.
 fn settle_barriers(acks: &[PendingAck], state: &mut SessionState, flushed: bool) {
     for pending in acks {
         match pending {
-            PendingAck::Compact { synthetic_uuid, .. } if flushed => {
+            PendingAck::Compact { synthetic_uuid, .. }
+                if flushed || state.persistence_stopped() =>
+            {
                 state.commit_compact(*synthetic_uuid);
             }
             PendingAck::Compact { .. } => state.abandon_compact(),
@@ -304,11 +307,18 @@ fn deliver_acks(acks: Vec<PendingAck>, failure: Option<&str>, stopped: bool, sha
                 });
             }
             PendingAck::Compact { ack, pre_count, .. } => {
-                // Every compact failure reaches the agent, which keeps its old transcript only when
-                // told the write failed.
+                // A stopped session commits the compact in memory, so its failure surfaces like any
+                // other write's. Otherwise every failure reaches the agent, which keeps its old
+                // transcript only when told the write failed.
+                let (committed, failure) = if stopped {
+                    (true, surface_failure(failure, stopped, shared))
+                } else {
+                    (failure.is_none(), failure.map(str::to_owned))
+                };
                 _ = ack.send(CompactOutcome {
                     pre_count,
-                    failure: failure.map(str::to_owned),
+                    committed,
+                    failure,
                 });
             }
             PendingAck::Shutdown(ack) => _ = ack.send(()),
@@ -885,6 +895,52 @@ mod tests {
                     Message::user("before compact"),
                     Message::user("after compact")
                 ]
+            );
+        }
+
+        #[tokio::test]
+        async fn compact_after_persistence_stopped_commits_in_memory() {
+            async fn compact(tx: &mpsc::Sender<SessionCmd>) -> CompactOutcome {
+                let (ack, rx) = oneshot::channel();
+                tx.send(SessionCmd::Compact {
+                    summary: "s".to_owned(),
+                    instructions: None,
+                    tasks: Vec::new(),
+                    synthetic_message: Message::user("synthetic summary"),
+                    ack,
+                })
+                .await
+                .unwrap();
+                rx.await.unwrap()
+            }
+
+            let dir = tempdir().unwrap();
+            let state = SessionState::fresh(test_store(dir.path()), "m", None);
+            let (tx, rx) = mpsc::channel(1);
+            let actor = tokio::spawn(run(state, rx, Arc::new(SharedState::default())));
+            std::fs::remove_dir_all(test_project_dir(dir.path())).unwrap();
+            for text in ["small".to_owned(), "x".repeat(MAX_UNWRITTEN_BYTES)] {
+                let (rec, rec_rx) = record_cmd(&text);
+                tx.send(rec).await.unwrap();
+                assert!(rec_rx.await.unwrap().failure.is_some());
+            }
+
+            let first = compact(&tx).await;
+            let (rec, rec_rx) = record_cmd("after compact");
+            tx.send(rec).await.unwrap();
+            assert!(rec_rx.await.unwrap().failure.is_none());
+            let second = compact(&tx).await;
+            drop(tx);
+            actor.await.unwrap();
+
+            assert!(first.committed);
+            assert_eq!(first.failure, None, "the stop already surfaced");
+            assert_eq!(first.pre_count, 2);
+            assert!(second.committed);
+            assert_eq!(
+                second.pre_count, 2,
+                "the chain restarts at the synthetic root: {:?}",
+                second.failure,
             );
         }
 

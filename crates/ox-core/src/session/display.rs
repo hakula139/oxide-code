@@ -39,10 +39,7 @@ pub(crate) fn fit_title(text: &str) -> String {
 /// Compact "N units ago", or the ISO date past 30 days. A future `ts` reads as 0 seconds ago.
 fn format_relative_time(ts: OffsetDateTime, now: OffsetDateTime) -> String {
     match elapsed(ts, now) {
-        Some((n, unit)) => {
-            let suffix = plural(n, "", "s");
-            format!("{n} {unit}{suffix} ago")
-        }
+        Some((n, (unit, units))) => format!("{n} {} ago", plural(n, unit, units)),
         None => format_date(ts),
     }
 }
@@ -56,23 +53,23 @@ pub fn format_short_relative_time(ts: OffsetDateTime, local_offset: UtcOffset) -
 
 fn short_relative_time(ts: OffsetDateTime, now: OffsetDateTime) -> String {
     match elapsed(ts, now) {
-        Some((n, unit)) => format!("{n}{} ago", &unit[..1]),
+        Some((n, (unit, _))) => format!("{n}{} ago", &unit[..1]),
         None => format_date(ts),
     }
 }
 
-/// The time from `ts` to `now` in whole units of the largest unit that fits, or `None` past 30
-/// days. A future `ts` reads as 0 seconds.
-fn elapsed(ts: OffsetDateTime, now: OffsetDateTime) -> Option<(i64, &'static str)> {
+/// The time from `ts` to `now` in whole units of the largest unit that fits, with the unit's
+/// singular and plural names, or `None` past 30 days. A future `ts` reads as 0 seconds.
+fn elapsed(ts: OffsetDateTime, now: OffsetDateTime) -> Option<(i64, (&'static str, &'static str))> {
     let secs = (now - ts).whole_seconds().max(0);
     Some(if secs < 60 {
-        (secs, "second")
+        (secs, ("second", "seconds"))
     } else if secs < 3600 {
-        (secs / 60, "minute")
+        (secs / 60, ("minute", "minutes"))
     } else if secs < 86_400 {
-        (secs / 3600, "hour")
+        (secs / 3600, ("hour", "hours"))
     } else if secs < 30 * 86_400 {
-        (secs / 86_400, "day")
+        (secs / 86_400, ("day", "days"))
     } else {
         return None;
     })
@@ -117,7 +114,8 @@ pub fn archive_notice(session_id: &str, archived: bool) -> String {
     let id = id_prefix(session_id);
     if archived {
         format!(
-            "Archived session {id}. Press Ctrl+A in the /resume picker to list archived sessions."
+            "Archived session {id}. \
+             Press Ctrl+A in the `/resume` picker to list archived sessions."
         )
     } else {
         format!("Unarchived session {id}")
@@ -337,7 +335,7 @@ mod tests {
             assert_eq!(
                 archive_notice("abcdefghij", true),
                 "Archived session abcdefgh. \
-                 Press Ctrl+A in the /resume picker to list archived sessions.",
+                 Press Ctrl+A in the `/resume` picker to list archived sessions.",
             );
             assert_eq!(
                 archive_notice("abcdefghij", false),

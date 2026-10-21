@@ -12,6 +12,7 @@ use ox_core::session::display::id_prefix;
 use ox_core::session::saved;
 use ox_core::util::text::truncate_to_width;
 
+use super::sessions::{CLEAR_THEN_DELETE_HINT, saved_error_message};
 use crate::glyphs::MODAL_ERROR_PREFIX;
 use crate::modal::chrome::{FOOTER_HEIGHT, Header, render_footer};
 use crate::modal::{Modal, ModalAction, ModalKey, is_plain_char};
@@ -71,7 +72,7 @@ impl ConfirmDeleteSessionModal {
                 self.display_title,
             ))),
             Err(err) => {
-                self.error = Some(err);
+                self.error = Some(saved_error_message(err, CLEAR_THEN_DELETE_HINT));
                 ModalKey::Consumed
             }
         }
@@ -326,11 +327,8 @@ mod tests {
             assert_eq!(
                 modal.error.as_deref(),
                 Some(
-                    format!(
-                        "Failed to delete session abcd1234: \
-                         refusing to delete the live session: {live_id}"
-                    )
-                    .as_str()
+                    "Session abcd1234 is the live session. \
+                     Run `/clear` to start a new one, then delete it."
                 ),
             );
 

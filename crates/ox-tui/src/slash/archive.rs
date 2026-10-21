@@ -7,11 +7,11 @@ use ox_core::protocol::Op;
 use ox_core::session::display::{archive_notice, id_prefix};
 use ox_core::session::entry::SessionInfo;
 use ox_core::session::resolver::resolve_saved_prefix;
-use ox_core::session::saved::{self, BARE_ARCHIVE_HINT};
+use ox_core::session::saved;
 
 use super::context::{LiveSessionInfo, SlashContext};
 use super::registry::{SlashCommand, SlashKind, SlashOutcome};
-use super::sessions::{open_store, resolve_error_message};
+use super::sessions::{BARE_ARCHIVE_HINT, open_store, resolve_error_message, saved_error_message};
 use crate::action::Action;
 
 // ── ArchiveCmd ──
@@ -41,7 +41,7 @@ impl SlashCommand for ArchiveCmd {
             return Ok(SlashOutcome::Forward(Action::Op(Op::Archive)));
         }
         match resolve_saved(prefix, ctx.info)? {
-            Some(info) => set_archived(&info, true, &ctx.info.session_id),
+            Some(info) => apply_archived(&info, true, &ctx.info.session_id),
             None => Err(format!(
                 "Session prefix `{prefix}` matches the live session. {BARE_ARCHIVE_HINT}"
             )),
@@ -87,7 +87,7 @@ impl SlashCommand for UnarchiveCmd {
             ));
         }
         match resolve_saved(prefix, ctx.info)? {
-            Some(info) => set_archived(&info, false, &ctx.info.session_id),
+            Some(info) => apply_archived(&info, false, &ctx.info.session_id),
             None => Ok(SlashOutcome::SystemMessage(
                 "The live session is not archived".to_owned(),
             )),
@@ -102,7 +102,11 @@ fn resolve_saved(prefix: &str, info: &LiveSessionInfo) -> Result<Option<SessionI
     resolve_saved_prefix(&store, prefix, &info.session_id).map_err(resolve_error_message)
 }
 
-fn set_archived(info: &SessionInfo, archived: bool, live_id: &str) -> Result<SlashOutcome, String> {
+fn apply_archived(
+    info: &SessionInfo,
+    archived: bool,
+    live_id: &str,
+) -> Result<SlashOutcome, String> {
     if info.archived == archived {
         let state = if archived {
             "already archived"
@@ -114,7 +118,8 @@ fn set_archived(info: &SessionInfo, archived: bool, live_id: &str) -> Result<Sla
             id_prefix(&info.session_id),
         )));
     }
-    saved::set_archived(&info.path, &info.session_id, archived, live_id)?;
+    saved::set_archived(&info.path, &info.session_id, archived, live_id)
+        .map_err(|e| saved_error_message(e, BARE_ARCHIVE_HINT))?;
     Ok(SlashOutcome::SystemMessage(archive_notice(
         &info.session_id,
         archived,
@@ -232,8 +237,10 @@ mod tests {
                 let path = store.find_session_path(&target_id).unwrap();
                 std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o444)).unwrap();
                 let info = test_session_info();
-                let failure =
-                    saved::set_archived(&path, &target_id, true, &info.session_id).unwrap_err();
+                let failure = saved_error_message(
+                    saved::set_archived(&path, &target_id, true, &info.session_id).unwrap_err(),
+                    BARE_ARCHIVE_HINT,
+                );
 
                 let err = ArchiveCmd
                     .execute(&target_id[..4], &SlashContext::new(&info, None))

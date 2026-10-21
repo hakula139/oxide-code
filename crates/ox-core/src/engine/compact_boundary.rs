@@ -22,7 +22,8 @@ pub(super) struct Boundary {
 }
 
 /// Persists a compact boundary and swaps the live transcript to the synthetic summary root. A
-/// failed write discards the streamed summary and leaves the transcript unchanged.
+/// failed write discards the streamed summary and leaves the transcript unchanged, unless
+/// persistence has stopped, when the swap happens in memory alone.
 pub(super) async fn replace_session_with_summary(
     session: &SessionHandle,
     file_tracker: &FileTracker,
@@ -46,11 +47,12 @@ pub(super) async fn replace_session_with_summary(
             synthetic.clone(),
         )
         .await;
-    if let Some(failure) = outcome.failure.as_deref() {
+    if !outcome.committed {
         sink.emit(Event::SummaryDiscarded, "summary-discarded");
-        sink.session_write_error(Some(failure));
+        sink.session_write_error(outcome.failure.as_deref());
         return false;
     }
+    sink.session_write_error(outcome.failure.as_deref());
 
     file_tracker.clear();
     *messages = vec![synthetic];
@@ -73,7 +75,7 @@ mod tests {
     use crate::message::{ContentBlock, Message};
     use crate::protocol::testing::{CapturingSink, FailingSink};
     use crate::session::handle;
-    use crate::session::store::testing::test_store;
+    use crate::session::store::testing::{test_project_dir, test_store};
     use crate::tool::tasks::testing::plan;
 
     mod replace_session_with_summary {
@@ -177,6 +179,43 @@ mod tests {
                 ),
                 "the unsaved summary is discarded before the write error: {events:?}",
             );
+        }
+
+        #[tokio::test]
+        async fn swaps_in_memory_once_its_write_stops_persistence() {
+            let dir = tempfile::tempdir().unwrap();
+            let session = handle::start(&test_store(dir.path()), "claude-sonnet-5-5", None);
+            std::fs::remove_dir_all(test_project_dir(dir.path())).unwrap();
+            let unsaved = session
+                .record_message(Message::user("x".repeat(5 << 20)))
+                .await;
+            assert!(unsaved.failure.is_some());
+            let mut messages = fake_transcript();
+            let sink = CapturingSink::default();
+            let mut large = boundary(Vec::new());
+            large.summary = "s".repeat(2 << 20);
+
+            let compacted = replace_session_with_summary(
+                &session,
+                &FileTracker::default(),
+                &mut messages,
+                &sink,
+                large,
+            )
+            .await;
+
+            assert!(compacted);
+            assert_eq!(messages.len(), 1);
+            let events = sink.events();
+            assert!(
+                matches!(
+                    events.as_slice(),
+                    [Event::Error(message), Event::SessionCompacted { .. }]
+                        if message.contains("session persistence stopped")
+                ),
+                "{events:?}",
+            );
+            session.shutdown().await;
         }
 
         #[tokio::test]
