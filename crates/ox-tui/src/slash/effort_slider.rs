@@ -161,17 +161,32 @@ impl Modal for EffortSlider {
         match event.code {
             KeyCode::Enter => self.submit(),
             KeyCode::Right | KeyCode::Char('l') => {
-                if self.selected + 1 < Effort::ALL.len() {
-                    self.selected += 1;
-                }
+                self.selected = step_level(self.selected, Direction::Forward);
                 ModalKey::Consumed
             }
             KeyCode::Left | KeyCode::Char('h') => {
-                self.selected = self.selected.saturating_sub(1);
+                self.selected = step_level(self.selected, Direction::Backward);
                 ModalKey::Consumed
             }
             _ => ModalKey::Consumed,
         }
+    }
+}
+
+// ── Effort Ladder ──
+
+#[derive(Debug, Clone, Copy)]
+pub(super) enum Direction {
+    Forward,
+    Backward,
+}
+
+/// The index one level from `idx` along [`Effort::ALL`], stopping at either end so a held key
+/// cannot overshoot onto the opposite end.
+pub(super) fn step_level(idx: usize, direction: Direction) -> usize {
+    match direction {
+        Direction::Forward => (idx + 1).min(Effort::ALL.len() - 1),
+        Direction::Backward => idx.saturating_sub(1),
     }
 }
 
@@ -188,7 +203,7 @@ mod tests {
 
     fn slider_for(model_id: &str, effort: Option<Effort>) -> EffortSlider {
         let mut info = test_session_info();
-        info.config.model = ModelSpec::resolve(model_id.to_owned());
+        info.config.model = ModelSpec::resolve(model_id);
         info.config.effort = effort;
         EffortSlider::new(&info).expect("model accepts effort")
     }
@@ -203,7 +218,7 @@ mod tests {
         #[test]
         fn rejects_an_unknown_model() {
             let mut info = test_session_info();
-            info.config.model = ModelSpec::resolve("custom-model".to_owned());
+            info.config.model = ModelSpec::resolve("custom-model");
             info.config.effort = None;
             assert!(EffortSlider::new(&info).is_none());
         }

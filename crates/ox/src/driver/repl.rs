@@ -1,7 +1,7 @@
 //! Bare REPL driver for `--no-tui`: prompts and slash commands from stdin, replies on stdout.
 
 use std::io::{self, IsTerminal, Write};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::pin::pin;
 
 use anyhow::{Result, bail};
@@ -11,8 +11,9 @@ use ox_core::command::{self, Parsed};
 use ox_core::engine::{Engine, EngineHandle, TurnEnd};
 use ox_core::permission::rule::Rule;
 use ox_core::permission::{Basis, SessionGrant};
+use ox_core::protocol::notice::ENGINE_STOPPED;
 use ox_core::protocol::{Decision, Event, EventSink, Op};
-use ox_core::tool::{ApprovalBody, ApprovalPreview};
+use ox_core::tool::view::{ApprovalBody, ApprovalPreview};
 use ox_core::util::git;
 use ox_core::util::text::escape_hidden;
 
@@ -27,14 +28,13 @@ use super::{Exit, Shutdown, shutdown_signal};
 pub(crate) async fn run(
     engine: Engine,
     show_thinking: bool,
-    drifted: &[PathBuf],
     first: Option<String>,
 ) -> Result<Exit> {
     let sink = StdioSink::new(show_thinking);
     let attended = io::stdin().is_terminal();
     let stdin = BufReader::new(tokio::io::stdin());
     let project_root = git::project_root(engine.cwd());
-    let handle = engine.spawn(drifted);
+    let handle = engine.spawn();
     let signal = async || {
         let caught = shutdown_signal().await;
         _ = sink.break_line(&mut io::stdout(), &mut io::stderr());
@@ -131,7 +131,7 @@ where
             match end {
                 Some(TurnEnd::Failed) => failed = true,
                 Some(_) => {}
-                None => bail!("the engine stopped"),
+                None => bail!(ENGINE_STOPPED),
             }
         }
         Ok(())
@@ -270,14 +270,12 @@ fn write_preview(out: &mut impl Write, preview: &ApprovalPreview, basis: &Basis)
                 writeln!(out, "  {}", escape_hidden(line))?;
             }
         }
-        ApprovalBody::Diff(chunks) => {
-            for chunk in chunks {
-                for line in &chunk.old {
-                    writeln!(out, "  - {}", escape_hidden(&line.text))?;
-                }
-                for line in &chunk.new {
-                    writeln!(out, "  + {}", escape_hidden(&line.text))?;
-                }
+        ApprovalBody::Diff(chunk) => {
+            for line in &chunk.old {
+                writeln!(out, "  - {}", escape_hidden(&line.text))?;
+            }
+            for line in &chunk.new {
+                writeln!(out, "  + {}", escape_hidden(&line.text))?;
             }
         }
     }
@@ -305,7 +303,7 @@ mod tests {
     use ox_core::protocol::testing::CapturingSink;
     use ox_core::session::store::testing::{saved_message_count, test_store};
     use ox_core::tool::testing::{bash_preview, bash_registry};
-    use ox_core::tool::{DiffChunk, DiffLine};
+    use ox_core::tool::view::{DiffChunk, NumberedLine};
 
     use super::*;
 
@@ -327,7 +325,7 @@ mod tests {
                 let input: &[u8] = b"\n   \nhello\n";
 
                 let exit = Box::pin(drive(
-                    engine.spawn(&[]),
+                    engine.spawn(),
                     dir.path(),
                     &sink,
                     None,
@@ -358,7 +356,7 @@ mod tests {
                 let input: &[u8] = b"second\n";
 
                 let exit = Box::pin(drive(
-                    engine.spawn(&[]),
+                    engine.spawn(),
                     dir.path(),
                     &CapturingSink::default(),
                     first,
@@ -395,6 +393,8 @@ mod tests {
                     .await;
                 mount_reply(&server, "reply").await;
                 let dir = tempfile::tempdir().unwrap();
+                let instructions = dir.path().join("CLAUDE.md");
+                fs::write(&instructions, b"\xff\xfe").unwrap();
                 let store = test_store(dir.path());
                 let engine = engine(server.uri(), &store, dir.path()).await;
                 let session_id = engine.session_id().to_owned();
@@ -406,7 +406,7 @@ mod tests {
                 "};
 
                 let exit = Box::pin(drive(
-                    engine.spawn(&[PathBuf::from("drifted.rs")]),
+                    engine.spawn(),
                     dir.path(),
                     &sink,
                     None,
@@ -433,7 +433,13 @@ mod tests {
                     })
                     .collect();
                 assert_eq!(reports.len(), 3, "{reports:?}");
-                assert!(reports[0].ends_with(": drifted.rs"), "{reports:?}");
+                assert_eq!(
+                    reports[0],
+                    format!(
+                        "Skipped instruction file {}: stream did not contain valid UTF-8",
+                        instructions.display(),
+                    ),
+                );
                 assert!(reports[1].contains("HTTP 400"), "{reports:?}");
                 assert_eq!(
                     reports[2],
@@ -478,7 +484,7 @@ mod tests {
                 "};
 
                 let exit = Box::pin(drive(
-                    engine.spawn(&[]),
+                    engine.spawn(),
                     dir.path(),
                     &sink,
                     None,
@@ -511,9 +517,7 @@ mod tests {
                         Event::SessionTitleUpdated { title, .. } => {
                             Some(format!("renamed to {title}"))
                         }
-                        Event::ConfigChanged { model, effort, .. } => {
-                            Some(format!("using {} at {effort:?}", model.id()))
-                        }
+                        Event::ConfigChanged { notice, .. } => Some(notice),
                         Event::SessionRolled { .. } => Some("rolled".to_owned()),
                         Event::SessionResumed { id, title, .. } => {
                             Some(format!("resumed {id} titled {title:?}"))
@@ -527,8 +531,9 @@ mod tests {
                     [
                         "compacted with Some(\"focus on login\")",
                         "renamed to Fix login",
-                        "using claude-sonnet-5-5 at Some(High)",
-                        "using claude-sonnet-5-5 at Some(Low)",
+                        "Switched to Claude Sonnet 5.5 (claude-sonnet-5-5) · \
+                         effort high (model default)",
+                        "Effort set to low",
                         "rolled",
                         resumed.as_str(),
                     ],
@@ -548,7 +553,7 @@ mod tests {
                 let input: &[u8] = b"/init\n";
 
                 let exit = Box::pin(drive(
-                    engine.spawn(&[]),
+                    engine.spawn(),
                     dir.path(),
                     &CapturingSink::default(),
                     None,
@@ -560,7 +565,7 @@ mod tests {
                 .unwrap();
 
                 assert_eq!(exit, Exit::Success);
-                let Some(Ok(Op::Prompt(prompt))) = command::parse("init", "", dir.path()) else {
+                let Ok(Some(Op::Prompt(prompt))) = command::init::resolve("", dir.path()) else {
                     panic!("bare /init must resolve once AGENTS.md exists");
                 };
                 let requests = request_bodies(&server).await;
@@ -585,7 +590,7 @@ mod tests {
                 "};
 
                 let exit = Box::pin(drive(
-                    engine.spawn(&[]),
+                    engine.spawn(),
                     dir.path(),
                     &sink,
                     None,
@@ -635,7 +640,7 @@ mod tests {
                 "};
 
                 let exit = Box::pin(drive(
-                    engine.spawn(&[]),
+                    engine.spawn(),
                     dir.path(),
                     &sink,
                     None,
@@ -692,7 +697,7 @@ mod tests {
                 "};
 
                 let exit = Box::pin(drive(
-                    engine.spawn(&[]),
+                    engine.spawn(),
                     dir.path(),
                     &CapturingSink::default(),
                     None,
@@ -732,7 +737,7 @@ mod tests {
                 "};
 
                 let exit = Box::pin(drive(
-                    engine.spawn(&[]),
+                    engine.spawn(),
                     dir.path(),
                     &CapturingSink::default(),
                     None,
@@ -785,7 +790,7 @@ mod tests {
                 };
 
                 let exit = Box::pin(drive(
-                    engine.spawn(&[]),
+                    engine.spawn(),
                     dir.path(),
                     &sink,
                     None,
@@ -832,7 +837,7 @@ mod tests {
                 };
 
                 let exit = Box::pin(drive(
-                    engine.spawn(&[]),
+                    engine.spawn(),
                     dir.path(),
                     &CapturingSink::default(),
                     None,
@@ -871,7 +876,7 @@ mod tests {
                 };
 
                 let exit = Box::pin(drive(
-                    engine.spawn(&[]),
+                    engine.spawn(),
                     dir.path(),
                     &CapturingSink::default(),
                     None,
@@ -1052,16 +1057,16 @@ mod tests {
                 &mut out,
                 &ApprovalPreview {
                     title: "Edit(src/a.rs)".to_owned(),
-                    body: ApprovalBody::Diff(vec![DiffChunk {
-                        old: vec![DiffLine {
+                    body: ApprovalBody::Diff(DiffChunk {
+                        old: vec![NumberedLine {
                             number: 3,
                             text: "let a = 1;".to_owned(),
                         }],
-                        new: vec![DiffLine {
+                        new: vec![NumberedLine {
                             number: 3,
                             text: "let a = 2;\u{1b}[2K\u{200b}".to_owned(),
                         }],
-                    }]),
+                    }),
                 },
                 &basis,
             )

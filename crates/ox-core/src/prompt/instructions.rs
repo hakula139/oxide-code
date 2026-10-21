@@ -230,7 +230,7 @@ mod tests {
     use super::*;
     use crate::util::fs::testing::{symlink_dir, symlink_file};
     use crate::util::path::local_testing::abs;
-    use crate::util::path::testing::HOME_VAR;
+    use crate::util::path::testing::{HOME_VAR, pinned_home};
 
     fn skipped(path: &Path, reason: &str) -> String {
         format!("Skipped instruction file {}: {reason}", path.display())
@@ -238,16 +238,6 @@ mod tests {
 
     mod load {
         use super::*;
-
-        /// The variables [`user_candidates`] reads, pinned to `home` with `XDG_CONFIG_HOME` and
-        /// `CLAUDE_CONFIG_DIR` unset.
-        fn pinned_home(home: &Path) -> [(&'static str, Option<&Path>); 3] {
-            [
-                (HOME_VAR, Some(home)),
-                ("XDG_CONFIG_HOME", None),
-                ("CLAUDE_CONFIG_DIR", None),
-            ]
-        }
 
         #[tokio::test]
         async fn reads_project_instructions_at_the_root() {

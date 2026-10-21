@@ -24,6 +24,20 @@ pub(crate) const CONFIRM_HINTS: [&str; 2] = ["Enter to confirm", "Esc to cancel"
 /// Rows [`render_footer`] occupies: a blank gap above the hint line.
 pub(crate) const FOOTER_HEIGHT: u16 = 2;
 
+/// The height of a body sized by `body` within the rows `max_height` leaves above `below` fixed
+/// rows, plus those rows, within `max_height`.
+pub(crate) fn height_above(max_height: u16, below: u16, body: impl FnOnce(u16) -> u16) -> u16 {
+    (body(max_height.saturating_sub(below)) + below).min(max_height)
+}
+
+/// `area` without its bottom `below` rows.
+pub(crate) fn above(area: Rect, below: u16) -> Rect {
+    Rect {
+        height: area.height.saturating_sub(below),
+        ..area
+    }
+}
+
 /// Blank columns between two text columns of a modal row.
 pub(crate) const COLUMN_GAP: usize = 2;
 

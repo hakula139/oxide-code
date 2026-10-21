@@ -96,7 +96,7 @@ pub fn expand_user(raw: &str) -> Result<PathBuf> {
         return Ok(PathBuf::from(raw));
     }
     let home = std::env::home_dir()
-        .ok_or_else(|| anyhow!("cannot expand `~` in {raw:?}: no home directory"))?;
+        .ok_or_else(|| anyhow!("failed to expand `~` in {raw:?}: no home directory"))?;
     if tail.is_empty() {
         return Ok(home);
     }
@@ -145,8 +145,21 @@ pub(crate) mod local_testing {
 
 #[cfg(any(test, feature = "testing"))]
 pub mod testing {
+    use std::path::Path;
+
     /// The variable [`std::env::home_dir`] reads first, so tests can point it at a fixture.
     pub const HOME_VAR: &str = if cfg!(windows) { "USERPROFILE" } else { "HOME" };
+
+    /// Variables for `temp_env` that point the home directory at `home` and unset
+    /// `XDG_CONFIG_HOME` and `CLAUDE_CONFIG_DIR`, so user-level config and instructions resolve
+    /// under `home` alone.
+    pub fn pinned_home(home: &Path) -> [(&'static str, Option<&Path>); 3] {
+        [
+            (HOME_VAR, Some(home)),
+            ("XDG_CONFIG_HOME", None),
+            ("CLAUDE_CONFIG_DIR", None),
+        ]
+    }
 }
 
 #[cfg(test)]

@@ -4,8 +4,8 @@
 use std::time::Instant;
 
 use crossterm::event::{
-    Event as CrosstermEvent, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton,
-    MouseEvent, MouseEventKind,
+    Event as CrosstermEvent, KeyCode, KeyEvent, KeyEventKind, MouseButton, MouseEvent,
+    MouseEventKind,
 };
 use ratatui::layout::Position;
 use tokio::sync::mpsc::error::TrySendError;
@@ -13,11 +13,13 @@ use tracing::debug;
 
 use ox_core::command::{self, Parsed};
 use ox_core::protocol::Op;
+use ox_core::protocol::notice::ENGINE_STOPPED;
 
 use super::{App, EXIT_WINDOW};
 use crate::action::{APP_KEYMAP, Action, AppAction};
 use crate::components::input::InputOutcome;
 use crate::components::status::Status;
+use crate::keymap::CTRL_C;
 use crate::modal::ModalAction;
 use crate::now;
 use crate::slash::{self, SlashContext, SlashKind, SlashOutcome};
@@ -151,7 +153,7 @@ impl App {
             return false;
         }
         self.dirty = true;
-        let ctrl_c = key.code == KeyCode::Char('c') && key.modifiers == KeyModifiers::CONTROL;
+        let ctrl_c = CTRL_C.matches(key);
         let Some(text) = self.chat.take_selection().filter(|_| ctrl_c) else {
             return false;
         };
@@ -260,7 +262,7 @@ impl App {
         match e {
             TrySendError::Closed(_) => {
                 self.chat
-                    .push_error("The engine stopped unexpectedly. Restart `ox` to recover.");
+                    .push_error(&format!("{ENGINE_STOPPED}. Restart it to recover."));
                 self.input.set_enabled(false);
                 self.should_quit = true;
             }
@@ -273,7 +275,7 @@ impl App {
             }
             TrySendError::Full(_) => {
                 self.chat
-                    .push_error("The engine is busy, so the request was dropped. Try again.");
+                    .push_error("ox is busy, so the request was dropped. Try again.");
             }
         }
     }
@@ -451,6 +453,7 @@ mod tests {
     use std::time::Duration;
 
     use base64::Engine as _;
+    use crossterm::event::KeyModifiers;
     use ratatui::buffer::CellWidth;
     use ratatui::layout::Rect;
     use ratatui::style::Color;
@@ -462,7 +465,7 @@ mod tests {
     use ox_core::permission::defaults::Shipped;
     use ox_core::permission::{Basis, Mode};
     use ox_core::protocol::{ConfigPick, Decision, Event, ResumeTarget, ToolResult};
-    use ox_core::tool::{ApprovalBody, ApprovalPreview, ToolResultView};
+    use ox_core::tool::view::{ApprovalBody, ApprovalPreview, ToolResultView};
 
     use super::*;
     use crate::app::testing::{
@@ -1273,7 +1276,7 @@ mod tests {
             assert_eq!(app.chat.entry_count(), 2);
             assert_eq!(
                 app.chat.last_error_text(),
-                Some("The engine stopped unexpectedly. Restart `ox` to recover."),
+                Some("ox stopped unexpectedly. Restart it to recover."),
             );
         }
 
@@ -1296,7 +1299,7 @@ mod tests {
             );
             assert_eq!(
                 app.chat.last_error_text(),
-                Some("The engine is busy, so the request was dropped. Try again."),
+                Some("ox is busy, so the request was dropped. Try again."),
             );
         }
 
@@ -1691,7 +1694,7 @@ mod tests {
             // A modal-emitted `SetModel` must reach the engine so it can emit `ConfigChanged`.
             for op in [
                 Op::SetModel(ConfigPick::Model {
-                    id: ResolvedModelId::new("claude-opus-5-5".to_owned()),
+                    id: ResolvedModelId::new("claude-opus-5-5"),
                     effort: None,
                 }),
                 Op::SetModel(ConfigPick::Effort(Effort::High)),
@@ -1923,7 +1926,7 @@ mod tests {
             assert_eq!(
                 forwarded,
                 Op::SetModel(ConfigPick::Model {
-                    id: ResolvedModelId::new("claude-haiku-5-5".to_owned()),
+                    id: ResolvedModelId::new("claude-haiku-5-5"),
                     effort: None,
                 }),
             );
@@ -2044,7 +2047,7 @@ mod tests {
             assert_eq!(app.chat.entry_count(), entries_before + 1);
             assert_eq!(
                 app.chat.last_error_text(),
-                Some("The engine stopped unexpectedly. Restart `ox` to recover."),
+                Some("ox stopped unexpectedly. Restart it to recover."),
             );
             assert!(app.should_quit);
             assert_eq!(app.forwarded_prompts, 0);

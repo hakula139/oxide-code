@@ -235,7 +235,7 @@ impl InlinePatch {
 }
 
 /// A slot patch with its colors parsed, so applying it cannot fail.
-#[derive(Debug, Default, Clone, Copy)]
+#[derive(Debug, Clone, Copy, Default)]
 struct Patch {
     fg: Option<Color>,
     bg: Option<Color>,

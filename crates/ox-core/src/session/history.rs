@@ -11,7 +11,8 @@ use super::post_compact::strip_synthetic_post_compact_prefix;
 use crate::message::{ContentBlock, INTERRUPTION_MARKER, Message, Role, progress_update_before};
 use crate::prompt::is_system_reminder;
 use crate::protocol::{Interaction, ToolCall, ToolResult};
-use crate::tool::{ToolMetadata, ToolRegistry, ToolResultView};
+use crate::tool::view::ToolResultView;
+use crate::tool::{ToolMetadata, ToolRegistry};
 
 /// Projects a resumed transcript for display, opening with its compaction boundary when `compact`
 /// is set. `tool_metadata` holds the per-call metadata the session persisted, keyed by tool-use ID,
@@ -201,13 +202,14 @@ mod tests {
     use crate::message::Replay;
     use crate::protocol::testing;
     use crate::session::post_compact::synthesize_post_compact_message;
-    use crate::tool::bash::BashTool;
+    use crate::tool::DEFAULT_TOOL_ICON;
     use crate::tool::edit::EditTool;
     use crate::tool::tasks::testing::plan;
-    use crate::tool::{DEFAULT_TOOL_ICON, DiffChunk, DiffLine, EditDiff};
+    use crate::tool::testing::bash_registry;
+    use crate::tool::view::{DiffChunk, EditDiff, NumberedLine};
 
     fn tools() -> ToolRegistry {
-        ToolRegistry::new(vec![Box::new(BashTool::default()), Box::new(EditTool)])
+        bash_registry(vec![Box::new(EditTool)])
     }
 
     mod interactions {
@@ -526,11 +528,11 @@ mod tests {
         fn resolves_a_result_through_its_tool_with_persisted_metadata() {
             let diff = EditDiff {
                 chunk: DiffChunk {
-                    old: vec![DiffLine {
+                    old: vec![NumberedLine {
                         number: 10,
                         text: "a".to_owned(),
                     }],
-                    new: vec![DiffLine {
+                    new: vec![NumberedLine {
                         number: 10,
                         text: "b".to_owned(),
                     }],

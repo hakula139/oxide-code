@@ -1,7 +1,6 @@
 //! Headless driver for `--print`: one turn, printed to stdout as text or JSON.
 
 use std::io::{self, IsTerminal, Write};
-use std::path::PathBuf;
 use std::pin::pin;
 use std::sync::{Mutex, MutexGuard};
 use std::time::Duration;
@@ -14,6 +13,7 @@ use tokio::io::{AsyncRead, AsyncReadExt};
 
 use ox_core::command;
 use ox_core::engine::{Engine, EngineHandle, EnginePanic, TurnEnd};
+use ox_core::protocol::notice::ENGINE_STOPPED;
 use ox_core::protocol::{Event, EventSink, Op, UsageSnapshot};
 use ox_core::util::sync::lock_or_recover;
 
@@ -29,7 +29,6 @@ const STDIN_NOTICE_DELAY: Duration = Duration::from_secs(3);
 pub(crate) async fn run(
     engine: Engine,
     show_thinking: bool,
-    drifted: &[PathBuf],
     prompt: &str,
     format: OutputFormat,
 ) -> Result<Exit, EnginePanic> {
@@ -41,7 +40,7 @@ pub(crate) async fn run(
         io::stdout(),
         io::stderr(),
     );
-    drive(engine.spawn(drifted), &printer, prompt).await
+    drive(engine.spawn(), &printer, prompt).await
 }
 
 /// The prompt a `--print` run answers: `prompt` with stdin attached when stdin is not a terminal,
@@ -127,7 +126,7 @@ where
             Some(end) => (end, Exit::Failure),
             None => {
                 printer.emit(
-                    Event::TurnFailed("The engine stopped before the turn ended".to_owned()),
+                    Event::TurnFailed(ENGINE_STOPPED.to_owned()),
                     "engine-stopped",
                 );
                 (TurnEnd::Failed, Exit::Failure)
@@ -162,7 +161,7 @@ pub(crate) enum OutputFormat {
     Text,
     /// One JSON result once the run ends.
     Json,
-    /// Each engine event as a line of JSON, then the result.
+    /// Each event as a JSON line, then the result.
     StreamJson,
 }
 
@@ -460,7 +459,7 @@ mod tests {
                     let printer =
                         Printer::new(format, false, session_id.clone(), Vec::new(), Vec::new());
 
-                    let exit = Box::pin(drive(engine.spawn(&[]), &printer, "Look around."))
+                    let exit = Box::pin(drive(engine.spawn(), &printer, "Look around."))
                         .await
                         .unwrap();
 
@@ -488,7 +487,7 @@ mod tests {
                 let engine = engine(server.uri(), &test_store(dir.path()), dir.path()).await;
                 let printer = printer(OutputFormat::Json);
 
-                let exit = Box::pin(drive(engine.spawn(&[]), &printer, "//hello"))
+                let exit = Box::pin(drive(engine.spawn(), &printer, "//hello"))
                     .await
                     .unwrap();
 
@@ -518,7 +517,7 @@ mod tests {
                 let engine = engine(server.uri(), &test_store(dir.path()), dir.path()).await;
                 let printer = printer(OutputFormat::Json);
 
-                let exit = Box::pin(drive(engine.spawn(&[]), &printer, "hello"))
+                let exit = Box::pin(drive(engine.spawn(), &printer, "hello"))
                     .await
                     .unwrap();
 
@@ -552,11 +551,11 @@ mod tests {
             assert_eq!(
                 String::from_utf8(stdout).unwrap(),
                 indoc! {r#"
-                    {"type":"turn_failed","data":"The engine stopped before the turn ended"}
-                    {"type":"result","data":{"stop_reason":"failed","error":"The engine stopped before the turn ended","message":null,"usage":null,"session_id":"session-1"}}
+                    {"type":"turn_failed","data":"ox stopped unexpectedly"}
+                    {"type":"result","data":{"stop_reason":"failed","error":"ox stopped unexpectedly","message":null,"usage":null,"session_id":"session-1"}}
                 "#},
             );
-            assert_eq!(stderr, "Error: The engine stopped before the turn ended\n");
+            assert_eq!(stderr, "Error: ox stopped unexpectedly\n");
         }
 
         #[tokio::test]
@@ -574,7 +573,7 @@ mod tests {
                     Vec::new(),
                 );
 
-                let exit = Box::pin(drive(engine.spawn(&[]), &printer, "hello"))
+                let exit = Box::pin(drive(engine.spawn(), &printer, "hello"))
                     .await
                     .unwrap();
 

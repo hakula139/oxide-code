@@ -87,13 +87,13 @@ pub(crate) async fn shutdown_signal() -> Shutdown {
 // ── Testing ──
 
 #[cfg(test)]
-mod testing {
+pub(crate) mod testing {
     use std::cell::RefCell;
     use std::io::{self, Write};
     use std::rc::Rc;
 
     /// A stdout whose reader went away.
-    pub(super) struct ClosedPipe;
+    pub(crate) struct ClosedPipe;
 
     impl Write for ClosedPipe {
         fn write(&mut self, _buf: &[u8]) -> io::Result<usize> {

@@ -11,15 +11,13 @@ use anyhow::Result;
 use tokio::sync::mpsc;
 use tracing::debug;
 
-use ox_core::config::Effort;
 use ox_core::engine::TurnEnd;
-use ox_core::model::ModelSpec;
 use ox_core::permission::defaults::ShippedTier;
 use ox_core::permission::{Basis, SessionGrant};
-use ox_core::protocol::{Decision, Event, EventSink, Op, ToolCall, ToolResult};
+use ox_core::protocol::{Decision, Event, EventSink, Op, ToolCall, ToolResult, notice};
 use ox_core::session::display::{UNTITLED_MARKER, archive_notice, id_prefix};
-use ox_core::tool::ApprovalPreview;
 use ox_core::tool::tasks::{Progress, Task};
+use ox_core::tool::view::ApprovalPreview;
 use ox_core::util::sync::lock_or_recover;
 use ox_core::util::text::{escape_controls, escape_line};
 use ox_tui::glyphs::{INTERRUPTED_MARKER, task_marker};
@@ -226,17 +224,16 @@ impl StdioSink {
             }
             Event::ToolCallEnd(result) => self.render_result(result, stderr)?,
             Event::TasksUpdated(tasks) => write!(stderr, "{}", task_lines(&tasks))?,
+            Event::AutoCompactionStarted => {
+                self.end_reply_then(stdout, stderr, notice::AUTO_COMPACTING)?;
+            }
             Event::SessionCompacted {
                 pre_count,
-                automatic,
+                instructions,
                 ..
             } => {
-                let label = if automatic {
-                    "Auto-compacted"
-                } else {
-                    "Compacted"
-                };
-                writeln!(stderr, "{label} {pre_count} messages into summary")?;
+                let notice = notice::compacted(pre_count, instructions.as_deref());
+                writeln!(stderr, "{}", escape_controls(&notice))?;
             }
             Event::SessionTitleUpdated { title, .. } => {
                 let title = escape_line(&title);
@@ -254,22 +251,13 @@ impl StdioSink {
                 let notice = resumed_notice(&id, title.as_deref(), unarchived);
                 writeln!(stderr, "{notice}")?;
             }
-            Event::ConfigChanged {
-                model,
-                effort,
-                requested,
-                ..
-            } => {
-                let notice = config_change(&model, effort, requested.effort());
-                writeln!(stderr, "{notice}")?;
-            }
-            Event::ModeChanged(mode) => writeln!(stderr, "Using {mode} mode")?,
+            Event::ConfigChanged { notice, .. } => writeln!(stderr, "{notice}")?,
+            Event::ModeChanged(mode) => writeln!(stderr, "{}", notice::mode_changed(mode))?,
             // TUI-only events and the `SessionReady` marker have no stdio surface to update.
             Event::PromptDrained(_)
             | Event::TurnRolledBack
             | Event::UsageUpdated(_)
             | Event::RateLimitsUpdated(_)
-            | Event::AutoCompactionStarted
             | Event::AutoCompactionPaused { .. }
             | Event::AutoCompactionResumed
             | Event::SummaryToken(_)
@@ -400,10 +388,10 @@ impl EventSink for StdioSink {
 /// A progress header, one marked line per task, and a closing blank line, or nothing for a
 /// cleared list.
 fn task_lines(tasks: &[Task]) -> String {
-    let Some(Progress { completed, total }) = Progress::of(tasks) else {
+    let Some(progress) = Progress::of(tasks) else {
         return String::new();
     };
-    let mut lines = format!("Tasks: {completed}/{total}\n");
+    let mut lines = format!("Tasks: {progress}\n");
     for task in tasks {
         let content = escape_controls(&task.content);
         _ = writeln!(lines, "  {} {content}", task_marker(task.status));
@@ -422,26 +410,16 @@ fn resumed_notice(id: &str, title: Option<&str>, unarchived: bool) -> String {
     resumed
 }
 
-/// The model and effort an [`Event::ConfigChanged`] leaves in use, noting a requested effort that
-/// `model` has no tier for.
-fn config_change(model: &ModelSpec, effort: Option<Effort>, requested: Option<Effort>) -> String {
-    let model = format!("{} ({})", model.display_name(), model.id());
-    match (effort, requested) {
-        (Some(effort), _) => format!("Using {model} at {effort} effort"),
-        (None, Some(requested)) => format!("Using {model}. {}.", requested.unapplied_notice()),
-        (None, None) => format!("Using {model}"),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use indoc::indoc;
     use wiremock::MockServer;
 
     use ox_core::client::{RateLimitWindow, RateLimits};
+    use ox_core::config::Effort;
     use ox_core::config::compaction::AutoCompactionConfig;
     use ox_core::engine::testing::{engine, with_pinned_home};
-    use ox_core::model::ResolvedModelId;
+    use ox_core::model::ModelSpec;
     use ox_core::permission::defaults::Shipped;
     use ox_core::permission::rule::Rule;
     use ox_core::permission::testing::exec_grant;
@@ -673,7 +651,7 @@ mod tests {
                 let engine = engine(server.uri(), &test_store(dir.path()), dir.path()).await;
                 let instructions = dir.path().join("CLAUDE.md");
                 std::fs::write(&instructions, b"\xff\xfe").unwrap();
-                let mut handle = engine.spawn(&[]);
+                let mut handle = engine.spawn();
                 handle.ops.send(Op::Clear).await.unwrap();
                 let sink = CapturingSink::default();
                 let mut approver = fixed(Decision::Deny);
@@ -1012,28 +990,33 @@ mod tests {
             }
 
             #[test]
-            fn session_compacted_writes_stderr_boundary() {
-                let (_, stderr) = render_one(
+            fn auto_compaction_started_explains_the_pause_before_the_prompt() {
+                let (stdout, stderr) = render_one(&test_sink(false), Event::AutoCompactionStarted);
+
+                assert_eq!(stdout, "");
+                assert_eq!(
+                    stderr,
+                    "Compacting the conversation before sending the prompt\n"
+                );
+            }
+
+            #[test]
+            fn session_compacted_writes_the_boundary_with_its_focus_escaped() {
+                let (stdout, stderr) = render_one(
                     &test_sink(false),
                     Event::SessionCompacted {
                         summary: "summary".to_owned(),
                         pre_count: 4,
-                        instructions: None,
+                        instructions: Some("login\u{1b}[2J".to_owned()),
                         automatic: false,
                     },
                 );
-                assert_eq!(stderr, "Compacted 4 messages into summary\n");
 
-                let (_, stderr) = render_one(
-                    &test_sink(false),
-                    Event::SessionCompacted {
-                        summary: "summary".to_owned(),
-                        pre_count: 4,
-                        instructions: None,
-                        automatic: true,
-                    },
+                assert_eq!(stdout, "");
+                assert_eq!(
+                    stderr,
+                    "Compacted 4 messages into a summary (focus: login\\u{1b}[2J)\n"
                 );
-                assert_eq!(stderr, "Auto-compacted 4 messages into summary\n");
             }
 
             #[test]
@@ -1082,43 +1065,19 @@ mod tests {
             }
 
             #[test]
-            fn config_changed_names_the_model_and_the_effort_in_use() {
-                let config_changed = |id: &str, effort, requested| Event::ConfigChanged {
-                    model: ModelSpec::resolve(id.to_owned()),
-                    effort,
-                    requested,
+            fn config_changed_writes_its_notice_to_stderr() {
+                let event = Event::ConfigChanged {
+                    model: ModelSpec::resolve("claude-opus-5-5"),
+                    effort: Some(Effort::Low),
+                    requested: ConfigPick::Effort(Effort::Low),
                     auto_compaction: AutoCompactionConfig::disabled(),
+                    notice: "Effort set to low".to_owned(),
                 };
-                let custom_model = || ConfigPick::Model {
-                    id: ResolvedModelId::new("custom-model".to_owned()),
-                    effort: None,
-                };
-                let cases = [
-                    (
-                        config_changed(
-                            "claude-opus-5-5",
-                            Some(Effort::Low),
-                            ConfigPick::Effort(Effort::Low),
-                        ),
-                        "Using Claude Opus 5.5 (claude-opus-5-5) at low effort\n",
-                    ),
-                    (
-                        config_changed("custom-model", None, ConfigPick::Effort(Effort::High)),
-                        "Using custom-model (custom-model). \
-                         Effort unchanged (model has no effort tier, asked for high).\n",
-                    ),
-                    (
-                        config_changed("custom-model", None, custom_model()),
-                        "Using custom-model (custom-model)\n",
-                    ),
-                ];
 
-                for (event, expected) in cases {
-                    let (stdout, stderr) = render_one(&test_sink(false), event);
+                let (stdout, stderr) = render_one(&test_sink(false), event);
 
-                    assert!(stdout.is_empty(), "stdout must stay empty: {stdout:?}");
-                    assert_eq!(stderr, expected);
-                }
+                assert_eq!(stdout, "");
+                assert_eq!(stderr, "Effort set to low\n");
             }
 
             #[test]
@@ -1126,8 +1085,8 @@ mod tests {
                 let (stdout, stderr) =
                     render_one(&test_sink(false), Event::ModeChanged(Mode::Plan));
 
-                assert!(stdout.is_empty(), "stdout must stay empty: {stdout:?}");
-                assert_eq!(stderr, "Using plan mode\n");
+                assert_eq!(stdout, "");
+                assert_eq!(stderr, "Switched to plan mode\n");
             }
 
             #[test]
@@ -1141,7 +1100,6 @@ mod tests {
                             resets_at: 1_760_000_000,
                         }),
                     }),
-                    Event::AutoCompactionStarted,
                     Event::AutoCompactionPaused { failures: 3 },
                     Event::AutoCompactionResumed,
                     Event::SummaryToken("Recap".to_owned()),

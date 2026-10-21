@@ -103,7 +103,7 @@ Dedicated `compaction` agent, anchored re-summarization via `<previous-summary>`
 
 7. **Refuse mid-turn.** All three CLIs treat manual compaction as a between-turns operation. This is encoded by oxide-code's `Mutating` classification.
 
-8. **Surface a post-compact boundary block.** oxide-code's dedicated `CompactedBlock` fits a `Compacted X messages → 1 summary` header plus rendered summary markdown.
+8. **Surface a post-compact boundary block.** oxide-code's dedicated `CompactedBlock` fits a header that counts the compacted messages, plus rendered summary markdown.
 
 ## Patterns Not Adopted
 

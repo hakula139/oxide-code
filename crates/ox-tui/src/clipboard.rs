@@ -30,7 +30,7 @@ const SCREEN_CHUNK_BYTES: usize = 76;
 const COPY_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// The terminal running the session, as far as its OSC 52 support goes.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Terminal {
     /// Terminal.app, which ignores OSC 52.
     Apple,
@@ -58,7 +58,7 @@ impl Terminal {
 }
 
 /// Session facts that pick the clipboard routes.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct Environment {
     /// Whether the session runs on the machine whose clipboard the user pastes from.
     pub(crate) local: bool,

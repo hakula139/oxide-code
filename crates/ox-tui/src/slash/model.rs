@@ -127,7 +127,7 @@ mod tests {
             assert_eq!(
                 run_execute(&ModelCmd, "sonnet").unwrap().into_forward(),
                 Action::Op(Op::SetModel(ConfigPick::Model {
-                    id: ResolvedModelId::new("claude-sonnet-5-5".to_owned()),
+                    id: ResolvedModelId::new("claude-sonnet-5-5"),
                     effort: None,
                 })),
             );

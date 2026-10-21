@@ -9,7 +9,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 use unicode_width::UnicodeWidthStr;
 
-use ox_core::util::text::pad_to_width;
+use ox_core::util::text::{center_truncate_to_width, pad_to_width};
 
 use super::chrome::{COLUMN_GAP, FOOTER_HEIGHT, Header, KEY_UP_DOWN, render_footer};
 use super::{Modal, ModalKey};
@@ -35,17 +35,32 @@ struct KvRow {
 }
 
 impl KvRow {
-    /// The row with its label padded to `label_width` and any note aligned after `value_width`.
-    fn line(&self, label_width: usize, value_width: usize, theme: &Theme) -> Line<'static> {
+    /// The row with its label padded to `label_width` and any note aligned after `value_width`,
+    /// fitted to `width`. A note shows whole, or not at all once the value would keep less than
+    /// half its room, and the value truncates in its middle, keeping the ends that tell paths apart.
+    fn line(
+        &self,
+        label_width: usize,
+        value_width: usize,
+        width: usize,
+        theme: &Theme,
+    ) -> Line<'static> {
+        let room = width.saturating_sub(label_width + COLUMN_GAP);
+        let note = self.note.as_deref().filter(|note| {
+            let claim = COLUMN_GAP + note.width();
+            self.value.width() + claim <= room || claim <= room / 2
+        });
+        let value_room = note.map_or(room, |note| room - COLUMN_GAP - note.width());
+        let value = center_truncate_to_width(&self.value, value_room);
+        let pad = value_width.saturating_sub(value.width());
         let mut spans = vec![
             Span::styled(pad_to_width(&self.label, label_width), theme.dim()),
             Span::styled(" ".repeat(COLUMN_GAP), theme.surface()),
-            Span::styled(self.value.clone(), theme.text()),
+            Span::styled(value, theme.text()),
         ];
-        if let Some(note) = &self.note {
-            let pad = value_width.saturating_sub(self.value.width());
+        if let Some(note) = note {
             spans.push(Span::styled(" ".repeat(pad + COLUMN_GAP), theme.surface()));
-            spans.push(Span::styled(note.clone(), theme.dim()));
+            spans.push(Span::styled(note.to_owned(), theme.dim()));
         }
         Line::from(spans)
     }
@@ -152,7 +167,7 @@ impl KvOverview {
                     theme.text().add_modifier(Modifier::BOLD),
                 )),
                 BodyRow::Entry { section, row } => {
-                    row.line(label_width, value_widths[section], theme)
+                    row.line(label_width, value_widths[section], width, theme)
                 }
             })
             .collect()
@@ -299,7 +314,8 @@ mod tests {
         use super::*;
 
         #[test]
-        fn aligns_cjk_labels_values_and_notes_by_display_width() {
+        fn aligns_cjk_labels_values_and_notes_by_display_width_and_drops_a_note_that_does_not_fit()
+        {
             let theme = Theme::default();
             let m = KvOverview::new(
                 "Config",
@@ -316,7 +332,25 @@ mod tests {
             };
 
             assert_eq!(text(15), ["中文  值   说明", "a     abc  note"]);
-            assert_eq!(text(14), ["中文  值  说明", "a     abc  note"]);
+            assert_eq!(text(14), ["中文  值  说明", "a     abc"]);
+        }
+
+        #[test]
+        fn truncates_a_wide_value_in_its_middle_and_drops_a_note_without_room() {
+            let theme = Theme::default();
+            let m = KvOverview::new(
+                "Config",
+                vec![KvSection::annotated(vec![(
+                    "CA".to_owned(),
+                    "/etc/ssl/certs/corporate/ca-chain.pem".to_owned(),
+                    "user".to_owned(),
+                )])],
+            );
+
+            let text = |width| m.body_lines(&theme, width)[0].to_string();
+
+            assert_eq!(text(30), "CA  /etc/ssl...chain.pem  user");
+            assert_eq!(text(12), "CA  /e...pem");
         }
     }
 

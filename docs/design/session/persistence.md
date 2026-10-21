@@ -177,7 +177,6 @@ Listings sort rows and render them as follows:
 - `crates/ox-core/src/session/display.rs`: the title and metadata formatting that listings use.
 - `crates/ox-core/src/session/entry.rs`: the JSONL entry schema and its header `version`.
 - `crates/ox-core/src/session/handle.rs`: `SessionHandle`, the public API that sends each write to the actor and surfaces the first write failure of each kind.
-- `crates/ox-core/src/session/list_view.rs`: the `ox --list` table.
 - `crates/ox-core/src/session/path.rs`: the sanitized per-project subdirectory names.
 - `crates/ox-core/src/session/resolver.rs`: the `--continue` argument and session-ID prefix resolution.
 - `crates/ox-core/src/session/sanitize.rs`: resume-time transcript repair.
@@ -186,3 +185,4 @@ Listings sort rows and render them as follows:
 - `crates/ox-core/src/session/store.rs`: session file I/O and the `{epoch}-{uuid}.jsonl` file names.
 - `crates/ox-core/src/session/store/listing.rs`: stat-only listing walks and metadata parsing.
 - `crates/ox-core/src/session/title_generator.rs`: the background AI title generator.
+- `crates/ox/src/session_list.rs`: the `ox --list` table.
