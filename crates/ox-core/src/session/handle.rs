@@ -561,7 +561,7 @@ mod tests {
     use crate::session::store::local_testing::test_session_file;
     use crate::session::store::testing::{seed_test_session, test_project_dir, test_store};
     use crate::tool::tasks::testing::plan;
-    use crate::tool::{DiffChunk, DiffLine, EditDiff};
+    use crate::tool::view::{DiffChunk, DiffLine, EditDiff};
 
     /// Resumes the session whose file name carries `session_id`.
     fn resume_id(store: &SessionStore, session_id: &str) -> Result<ResumedSession> {
@@ -926,7 +926,7 @@ mod tests {
             use wiremock::{Mock, MockServer, ResponseTemplate};
 
             use crate::client::anthropic::local_testing::{completion_body, test_client};
-            use crate::config::auth::{Auth, AuthSource};
+            use crate::client::anthropic::testing::api_key;
             use crate::protocol::{Event, EventSink};
             use crate::session::title_generator;
 
@@ -957,11 +957,7 @@ mod tests {
             session.cmd_tx = cmd_tx;
             let (tx, mut events) = tokio::sync::mpsc::unbounded_channel();
             title_generator::spawn(
-                test_client(
-                    server.uri(),
-                    Auth::new(AuthSource::ApiKeyEnv, "sk"),
-                    "claude-haiku-5-5",
-                ),
+                test_client(server.uri(), api_key(), "claude-haiku-5-5"),
                 session.clone(),
                 TitleSink(tx),
                 "prompt".to_owned(),
@@ -1063,7 +1059,7 @@ mod tests {
             use wiremock::{Mock, MockServer, ResponseTemplate};
 
             use crate::client::anthropic::local_testing::{completion_body, test_client};
-            use crate::config::auth::{Auth, AuthSource};
+            use crate::client::anthropic::testing::api_key;
             use crate::protocol::testing::CapturingSink;
             use crate::session::title_generator;
 
@@ -1084,11 +1080,7 @@ mod tests {
             let (cmd_tx, mut commands) = mpsc::channel(8);
             session.cmd_tx = cmd_tx;
             let usage = title_generator::spawn(
-                test_client(
-                    server.uri(),
-                    Auth::new(AuthSource::ApiKeyEnv, "sk"),
-                    "claude-haiku-5-5",
-                ),
+                test_client(server.uri(), api_key(), "claude-haiku-5-5"),
                 session.clone(),
                 CapturingSink::default(),
                 "prompt".to_owned(),

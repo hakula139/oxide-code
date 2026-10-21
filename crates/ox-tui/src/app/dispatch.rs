@@ -208,7 +208,7 @@ impl App {
 
     /// Routes an input, slash-command, or modal action. TUI-only actions apply here, and an op goes
     /// through [`Self::dispatch_op`].
-    pub(super) fn dispatch_action(&mut self, action: Action) {
+    pub(crate) fn dispatch_action(&mut self, action: Action) {
         match action {
             Action::Submit(text) => self.handle_submit_prompt(&text),
             Action::Op(op) => self.dispatch_op(op),
@@ -462,7 +462,7 @@ mod tests {
     use ox_core::permission::defaults::Shipped;
     use ox_core::permission::{Basis, Mode};
     use ox_core::protocol::{ConfigPick, Decision, Event, ResumeTarget, ToolResult};
-    use ox_core::tool::{ApprovalBody, ApprovalPreview, ToolResultView};
+    use ox_core::tool::view::{ApprovalBody, ApprovalPreview, ToolResultView};
 
     use super::*;
     use crate::app::testing::{

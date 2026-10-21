@@ -56,7 +56,11 @@ fn render_sessions(
     let sessions = page.sessions();
     if sessions.is_empty() {
         let kind = if archived { "archived " } else { "" };
-        let scope = if all { "" } else { " in this project" };
+        let scope = if all {
+            ""
+        } else {
+            " in this project (use --all to search every project)"
+        };
         writeln!(out, "No {kind}sessions found{scope}").context("write list output")?;
         return Ok(());
     }
@@ -156,7 +160,7 @@ mod tests {
             .unwrap();
             assert_eq!(
                 String::from_utf8(buf).unwrap(),
-                "No sessions found in this project\n",
+                "No sessions found in this project (use --all to search every project)\n",
             );
 
             let mut buf = Vec::new();
@@ -189,7 +193,7 @@ mod tests {
             .unwrap();
             assert_eq!(
                 String::from_utf8(buf).unwrap(),
-                "No archived sessions found in this project\n",
+                "No archived sessions found in this project (use --all to search every project)\n",
             );
         }
 
@@ -517,7 +521,10 @@ mod tests {
         #[test]
         fn empty_project_scope_mentions_project() {
             let out = render_to_string(&[], false);
-            assert_eq!(out, "No sessions found in this project\n");
+            assert_eq!(
+                out,
+                "No sessions found in this project (use --all to search every project)\n"
+            );
         }
 
         #[test]

@@ -16,7 +16,7 @@ use ox_core::model::ModelSpec;
 use ox_core::permission::{Basis, Mode, SessionGrant};
 use ox_core::protocol::{ConfigPick, Event, Interaction, Op};
 use ox_core::session::display::archive_notice;
-use ox_core::tool::ApprovalPreview;
+use ox_core::tool::view::ApprovalPreview;
 use ox_core::util::text::plural;
 
 use super::{App, CopyNotice, HandBack};
@@ -103,6 +103,7 @@ impl App {
             Event::ModeChanged(mode) => self.apply_mode_changed(mode),
             Event::LoginStarted { url } => self.open_sign_in_url(&url),
             Event::SignedIn { auth } => self.apply_signed_in(auth),
+            Event::LoginRestored { auth } => self.apply_login_restored(auth),
             Event::SignedOut {
                 removed,
                 auth,
@@ -375,6 +376,13 @@ impl App {
         self.finish_turn();
     }
 
+    fn apply_login_restored(&mut self, auth: AuthSource) {
+        self.session_info.config.auth = Some(auth);
+        self.status_bar.set_rate_limits(None);
+        self.chat
+            .push_system_message(format!("Signed in. Requests now use {auth}."));
+    }
+
     fn apply_signed_out(
         &mut self,
         removed: bool,
@@ -553,7 +561,7 @@ mod tests {
     use ox_core::tool::bash::background::testing::{shell, shells_in_each_state};
     use ox_core::tool::tasks::TaskStatus;
     use ox_core::tool::tasks::testing::{plan, task};
-    use ox_core::tool::{ApprovalBody, ToolResultView};
+    use ox_core::tool::view::{ApprovalBody, ToolResultView};
     use ox_core::util::git::PullRequest;
 
     use super::*;
@@ -1864,6 +1872,27 @@ mod tests {
         }
 
         #[test]
+        fn login_restored_names_the_credential_and_keeps_the_turn_running() {
+            let (mut app, _rx, _event_tx) = test_app(None);
+            app.session_info.config.auth = None;
+            app.status_bar.set_status(Status::Streaming);
+
+            app.handle_engine_event(Event::LoginRestored {
+                auth: AuthSource::ClaudeCodeLogin,
+            });
+
+            assert_eq!(
+                app.session_info.config.auth,
+                Some(AuthSource::ClaudeCodeLogin)
+            );
+            assert_eq!(
+                app.chat.last_system_text(),
+                Some("Signed in. Requests now use OAuth (Claude Code login).")
+            );
+            assert_eq!(app.status_bar.status(), &Status::Streaming);
+        }
+
+        #[test]
         fn signed_out_reports_the_removal_and_the_credential_requests_use() {
             for (removed, auth, fallback_error, expected) in [
                 (
@@ -1908,10 +1937,13 @@ mod tests {
         }
 
         #[test]
-        fn signed_in_or_out_drops_the_previous_accounts_usage_limits() {
+        fn credential_changes_drop_the_previous_accounts_usage_limits() {
             for event in [
                 Event::SignedIn {
                     auth: AuthSource::OxLogin,
+                },
+                Event::LoginRestored {
+                    auth: AuthSource::ClaudeCodeLogin,
                 },
                 Event::SignedOut {
                     removed: true,

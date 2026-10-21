@@ -12,7 +12,7 @@ The welcome answers three questions:
 
 ## Implementation
 
-`ox_tui::components::welcome` is a stateless renderer (`paint`) plus a small data snapshot (`WelcomeSnapshot`) derived from `&LiveSessionInfo`. Painted by `App::draw_frame` into the chat region when:
+`ox_tui::components::welcome` is a stateless renderer, `paint`, that reads `&LiveSessionInfo`. `App::draw_frame` paints it into the chat region when:
 
 - `chat.is_empty()` (no blocks, no streaming, no thinking buffer, no compaction summary), and
 - `session_info.config.show_welcome` resolves to true (default: true).
@@ -26,19 +26,19 @@ At 80 cols and 14 rows with the test fixture (`claude-opus-5-5`, `xhigh` effort,
 ```text
                            ━━━━ oxide-code v0.1.0 ━━━━
 
-               Claude Opus 5.5 · xhigh effort · OAuth
-               ~/github/oxide-code
+                     Claude Opus 5.5 · xhigh effort · OAuth
+                     ~/github/oxide-code
 
-               Try one of:
+                     Try one of:
 
-                 /init      create or update AGENTS.md / CLAUDE.md
-                 /config    inspect resolved config
-                 /theme     switch theme
+                       /resume    Resume a previous session
+                       /mode      Switch the permission mode
+                       /model     Switch the model
 
-               Tip — click #NN in the status bar to open the PR
+                     Tip — drag chat text to select it
 ```
 
-Starter rows and the tip are sampled per session from `STARTER_POOL` and `TIP_POOL`, so a different launch shows different picks.
+The starter rows sample the built-in commands a new session can run bare and show each one's registry description, and the tip samples `TIP_POOL`. Both draws seed `fastrand` with the xxh64 hash of the session ID, so a session keeps its picks while each new session draws again.
 
 Sections: identity ribbon above a body column (env, cwd, starter list, trailer). Body lines pad to one shared width so they keep one left edge under `Paragraph::alignment(Center)`. Without that pad, each line floats to its own visual center and the welcome reads as a "ransom note" stack. The ribbon centers as its own unit, and the body column centers on the same axis because every padded line has the same width.
 
@@ -61,9 +61,9 @@ Below 25 cols nothing paints, since the terminal is too narrow to read the welco
 
 1. **Empty-chat predicate in `ChatView`, welcome rendering in App.** `ChatView::is_empty()` remains the predicate, and `App::draw_frame` decides which renderer to invoke. The welcome is an ephemeral placeholder in the chat region. Pushing it into `ChatView::blocks` would mix onboarding UI with persisted transcript content and break the `is_empty` check.
 2. **Stateless `paint(frame, area, theme, snapshot)` function.** The welcome owns no state across frames because it's a pure projection of `LiveSessionInfo`, and a struct would only invite caches and lifecycle hooks the welcome doesn't need.
-3. **`WelcomeSnapshot` projects only what the welcome needs.** Model display, effort, auth label, cwd, version, and starter rows. Keeping the shape narrow makes snapshot-test fixtures cheap and decouples the welcome from `LiveSessionInfo` evolution.
-4. **Starter rows sample 3 from a curated pool, plus a randomized tip.** Advertising every slash command defeats the point of "try one of". The curated `STARTER_POOL` and `TIP_POOL` add variety without becoming a dashboard, and every entry is an action a user can take next. Picks are seeded from `session_id`, so a session is stable while `/clear` yields a fresh pick.
-5. **Curated rows live alongside the welcome.** Adding `is_starter() -> bool` to `SlashCommand` would push welcome-specific curation into every command.
+3. **`paint` reads `LiveSessionInfo` directly.** The picks are a pure function of the session ID, so the welcome keeps nothing across frames, and a model, effort, or sign-in change shows on the next frame with no cached copy to refresh.
+4. **Starter rows sample 3 runnable commands, plus a randomized tip.** Advertising every slash command defeats the point of "try one of". Sampled starters and the curated `TIP_POOL` add variety without becoming a dashboard, and every entry is an action a user can take next. Picks are seeded from `session_id`, so a session is stable while `/clear` yields a fresh pick.
+5. **Starters come from the slash registry.** Every built-in a new session can run bare is a starter, shown with its registry description, so a new command joins the pool with no second description to drift. `NOT_STARTERS` in the welcome names the exceptions, since an `is_starter() -> bool` on `SlashCommand` would push welcome-specific curation into every command.
 6. **Editorial ribbon `━━━━ oxide-code v{ver} ━━━━` with no ASCII mark and no animation.** A four-side box reads as generic CLI chrome, and an ASCII mascot (Claude Code) or animation (Codex) is outsized for the value. The ribbon is a single line that anchors horizontally without surrounding the wordmark, giving the welcome a typographic identity. The wordmark uses the project name `oxide-code`, the brand a migrator searches for, while `ox` stays the binary name.
 7. **Coarse three-tier width ladder (full / collapsed / suppressed).** Codex and Claude Code lean on truncate-and-reflow, while opencode uses flex-shrink. For fixed content, a coarse ladder is simpler than per-element shrink rules.
 8. **Body lines pad to one shared column width, while the ribbon centers independently.** `Paragraph::alignment(Center)` centers each line separately, so padding env / cwd / starters / trailer to one width is what gives the body a shared left edge.
@@ -85,5 +85,6 @@ Below 25 cols nothing paints, since the terminal is too narrow to read the welco
 - `crates/ox-core/src/util/path.rs`: `tildify` (cwd display).
 - `crates/ox-tui/src/app/render.rs`: `draw_frame` empty-chat branch, `show_welcome` gate.
 - `crates/ox-tui/src/components/chat.rs`: `is_empty()` predicate.
-- `crates/ox-tui/src/components/welcome.rs`: `paint`, `WelcomeSnapshot`, starter rows.
+- `crates/ox-tui/src/components/welcome.rs`: `paint`, `Picks`, `NOT_STARTERS`, starter rows.
+- `crates/ox-tui/src/slash/registry.rs`: `BUILT_INS`, the commands and descriptions the starters sample.
 - `crates/ox-tui/src/slash/context.rs`: `LiveSessionInfo` (snapshot input).

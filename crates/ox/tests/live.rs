@@ -170,7 +170,7 @@ fn continue_answers_from_the_resumed_transcript_and_cache() {
         .unwrap()
         .to_owned();
     let mut repl = live.repl(&env_or("OX_LIVE_MODEL", DEFAULT_MODEL));
-    repl.args(["--continue", &session_id]);
+    repl.args(["--resume", &session_id]);
     let output = live.send(
         repl,
         &["What code word did I ask you to remember? Reply with only the word."],

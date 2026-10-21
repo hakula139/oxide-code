@@ -121,6 +121,9 @@ pub struct Engine {
     oauth_token_url: String,
     /// The Keychain `/logout` checks for the Claude Code login before its file, none in tests.
     claude_code_keychain: ClaudeCodeKeychain,
+    /// Whether the next prompt or compaction loads the stored login again,
+    /// since a transient failure signed the session out.
+    retry_login: bool,
     tools: Arc<ToolRegistry>,
     store: SessionStore,
     session: SessionHandle,
@@ -206,6 +209,10 @@ impl Engine {
             client,
             oauth_token_url: oauth::OAUTH_TOKEN_URL.to_owned(),
             claude_code_keychain: ClaudeCodeKeychain::SYSTEM,
+            retry_login: config
+                .signed_out
+                .as_ref()
+                .is_some_and(|signed_out| signed_out.retry),
             tools,
             store,
             session,
@@ -321,10 +328,11 @@ impl Engine {
     where
         S: EventSink + Clone + 'static,
     {
-        if self.client.auth_source().is_none() {
-            return report_abort(sink, signed_out(), "turn-failed");
-        }
         let mut inbox = Inbox::default();
+        if let Err(abort) = self.ensure_signed_in(sink, ops, &mut inbox).await {
+            self.adopt_mode(&mut inbox);
+            return report_abort(sink, abort, "turn-failed");
+        }
         let compacted = self.auto_compact(sink, ops, &mut inbox).await;
         self.adopt_mode(&mut inbox);
         if let Err(abort) = compacted {
@@ -488,12 +496,13 @@ impl Engine {
         ops: &mut mpsc::Receiver<Op>,
         instructions: Option<String>,
     ) -> TurnEnd {
-        if self.client.auth_source().is_none() {
-            return report_abort(sink, signed_out(), "compact-failed");
+        let mut inbox = Inbox::default();
+        if let Err(abort) = self.ensure_signed_in(sink, ops, &mut inbox).await {
+            self.adopt_mode(&mut inbox);
+            return report_abort(sink, abort, "compact-failed");
         }
         let tools = self.tools.definitions();
         let mut spent = Vec::new();
-        let mut inbox = Inbox::default();
         let summary = abort::await_unless_aborted(
             compaction::compact_session(
                 &self.client,
@@ -748,6 +757,43 @@ impl Engine {
         }
     }
 
+    /// Fails while signed out.
+    /// A session that a transient failure signed out first loads the stored login again,
+    /// and keeps doing so on later prompts and compactions while the failure stays transient.
+    /// An interrupt or a closed channel stops only the wait.
+    async fn ensure_signed_in(
+        &mut self,
+        sink: &dyn EventSink,
+        ops: &mut mpsc::Receiver<Op>,
+        inbox: &mut Inbox,
+    ) -> Result<(), TurnAbort> {
+        if self.client.auth_source().is_some() {
+            return Ok(());
+        }
+        if !self.retry_login {
+            return Err(signed_out());
+        }
+        let retry = self.client.retry_stored_login(self.claude_code_keychain);
+        match abort::await_unless_aborted(retry, ops, inbox, sink).await? {
+            Ok(auth) => {
+                let source = auth.source();
+                self.set_stored_login(Some(auth), false);
+                sink.emit(Event::LoginRestored { auth: source }, "login-restored");
+                Ok(())
+            }
+            Err(unavailable) => {
+                self.retry_login = unavailable.retry;
+                Err(TurnAbort::Failed(anyhow!(unavailable.notice)))
+            }
+        }
+    }
+
+    /// `retry` says whether the next prompt or compaction loads the stored login again.
+    fn set_stored_login(&mut self, auth: Option<Auth>, retry: bool) {
+        self.client.set_auth(auth);
+        self.retry_login = retry;
+    }
+
     /// Signs in through the browser and stores the new oxide-code login.
     async fn login(&mut self, sink: &dyn EventSink, ops: &mut mpsc::Receiver<Op>) -> TurnEnd {
         let pending = match PendingLogin::start().await {
@@ -780,7 +826,7 @@ impl Engine {
         let active = match self.client.auth_source() {
             Some(source) if !source.is_stored_login() => source,
             _ => {
-                self.client.set_auth(Some(auth));
+                self.set_stored_login(Some(auth), false);
                 AuthSource::OxLogin
             }
         };
@@ -806,13 +852,15 @@ impl Engine {
             .auth_source()
             .is_none_or(|source| source == AuthSource::OxLogin)
         {
+            let mut retry = false;
             let fallback = auth::claude_code_login(self.claude_code_keychain, self.client.trust())
                 .await
                 .unwrap_or_else(|e| {
+                    retry = auth::is_transient(&e);
                     fallback_error = Some(format!("{e:#}"));
                     None
                 });
-            self.client.set_auth(fallback);
+            self.set_stored_login(fallback, retry);
         }
         sink.emit(
             Event::SignedOut {
@@ -1092,8 +1140,10 @@ mod tests {
     use crate::client::anthropic::testing::{
         DEVICE_ID, api_key, sse_body, sse_response, test_config, text_stream_body,
     };
+    use crate::config::auth::LoginUnavailable;
     use crate::config::compaction::CompactionConfig;
     use crate::config::compaction::testing::WINDOW_1M_THRESHOLD;
+    use crate::config::oauth::testing::write_creds;
     use crate::config::{Effort, PromptCacheTtl};
     use crate::file_tracker::testing::seed_full_read;
     use crate::message::{Replay, Role};
@@ -1249,6 +1299,14 @@ mod tests {
             .collect();
         names.sort();
         names
+    }
+
+    /// Stores an oxide-code login under `data`, standing in for `$XDG_DATA_HOME`.
+    fn store_ox_login(data: &Path) -> PathBuf {
+        let file = data.join("ox").join("credentials.json");
+        std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+        write_creds(&file, "ox-token", None, 9_999_999_999_999);
+        file
     }
 
     #[tokio::test]
@@ -1546,8 +1604,10 @@ mod tests {
                 config.compaction = CompactionConfig::with_threshold_for_test(50_000);
                 config.permission.set_mode(Mode::Plan);
                 config.workspace = Workspace::new(dir.path());
-                config.signed_out_notice =
-                    Some("Not signed in. Run `/login` to sign in.".to_owned());
+                config.signed_out = Some(LoginUnavailable {
+                    notice: "Not signed in. Run `/login` to sign in.".to_owned(),
+                    retry: true,
+                });
 
                 let engine = Engine::new(
                     &config,
@@ -1572,6 +1632,7 @@ mod tests {
                     engine.startup_notices,
                     ["Not signed in. Run `/login` to sign in."],
                 );
+                assert!(engine.retry_login);
                 assert_eq!(engine.client.session_id(), session.session_id());
             })
             .await;
@@ -4087,6 +4148,260 @@ mod tests {
         }
     }
 
+    mod ensure_signed_in {
+        use super::*;
+
+        /// The authorization header of the first Messages request `server` received.
+        async fn sent_authorization(server: &MockServer) -> String {
+            let requests = server.received_requests().await.unwrap();
+            let request = requests
+                .iter()
+                .find(|request| request.url.path() == "/v1/messages")
+                .expect("a request reaches the API");
+            request.headers["authorization"]
+                .to_str()
+                .unwrap()
+                .to_owned()
+        }
+
+        /// Stores an expired, refreshable oxide-code login under `data` and holds its lock,
+        /// so loading it fails transiently after the lock wait.
+        fn hold_expired_ox_login(data: &Path) {
+            let file = store_ox_login(data);
+            write_creds(&file, "dead", Some("refresh"), 0);
+            std::fs::create_dir(data.join("ox").join("credentials.lock")).unwrap();
+        }
+
+        #[tokio::test]
+        async fn restores_the_stored_login_and_goes_on_with_the_prompt() {
+            with_pinned_home(async {
+                let server = MockServer::start().await;
+                mount_reply(&server, "reply").await;
+                let dir = tempfile::tempdir().unwrap();
+                let data = tempfile::tempdir().unwrap();
+                store_ox_login(data.path());
+                temp_env::async_with_vars([("XDG_DATA_HOME", Some(data.path()))], async {
+                    let mut engine =
+                        engine(server.uri(), &test_store(dir.path()), dir.path()).await;
+                    engine.client.set_auth(None);
+                    engine.retry_login = true;
+                    let sink = CapturingSink::default();
+                    let mut ops = inert_ops();
+
+                    let end = engine.submit_prompt("hi", &sink, &mut ops).await;
+
+                    assert_eq!(end, TurnEnd::Completed);
+                    assert!(!engine.retry_login);
+                    let events = sink.events();
+                    assert!(
+                        matches!(
+                            events.first(),
+                            Some(Event::LoginRestored {
+                                auth: AuthSource::OxLogin
+                            })
+                        ),
+                        "{events:?}"
+                    );
+                    assert!(
+                        matches!(events.last(), Some(Event::TurnComplete)),
+                        "{events:?}"
+                    );
+                    assert_eq!(sent_authorization(&server).await, "Bearer ox-token");
+                })
+                .await;
+            })
+            .await;
+        }
+
+        #[tokio::test]
+        async fn restores_the_stored_login_and_goes_on_with_the_compaction() {
+            with_pinned_home(async {
+                let server = MockServer::start().await;
+                mount_reply(&server, "summary").await;
+                let dir = tempfile::tempdir().unwrap();
+                let data = tempfile::tempdir().unwrap();
+                store_ox_login(data.path());
+                temp_env::async_with_vars([("XDG_DATA_HOME", Some(data.path()))], async {
+                    let mut engine =
+                        engine(server.uri(), &test_store(dir.path()), dir.path()).await;
+                    engine.messages = tool_heavy_transcript();
+                    engine.client.set_auth(None);
+                    engine.retry_login = true;
+                    let sink = CapturingSink::default();
+                    let mut ops = inert_ops();
+
+                    let end = engine.compact(&sink, &mut ops, None).await;
+
+                    let events = sink.events();
+                    assert_eq!(end, TurnEnd::Completed, "{events:?}");
+                    assert!(
+                        matches!(
+                            events.first(),
+                            Some(Event::LoginRestored {
+                                auth: AuthSource::OxLogin
+                            })
+                        ),
+                        "{events:?}"
+                    );
+                    assert!(
+                        events
+                            .iter()
+                            .any(|event| matches!(event, Event::SessionCompacted { .. })),
+                        "{events:?}"
+                    );
+                    assert_eq!(sent_authorization(&server).await, "Bearer ox-token");
+                })
+                .await;
+            })
+            .await;
+        }
+
+        #[tokio::test(start_paused = true)]
+        async fn keeps_retrying_while_the_failure_stays_transient() {
+            with_pinned_home(async {
+                let dir = tempfile::tempdir().unwrap();
+                let data = tempfile::tempdir().unwrap();
+                hold_expired_ox_login(data.path());
+                temp_env::async_with_vars([("XDG_DATA_HOME", Some(data.path()))], async {
+                    let mut engine = engine(
+                        "http://127.0.0.1:9".to_owned(),
+                        &test_store(dir.path()),
+                        dir.path(),
+                    )
+                    .await;
+                    engine.client.set_auth(None);
+                    engine.retry_login = true;
+                    let sink = CapturingSink::default();
+                    let mut ops = inert_ops();
+
+                    let end = engine.submit_prompt("hi", &sink, &mut ops).await;
+
+                    assert_eq!(end, TurnEnd::Failed);
+                    assert!(engine.retry_login);
+                    let events = sink.events();
+                    assert!(
+                        matches!(
+                            events.as_slice(),
+                            [Event::TurnFailed(notice)]
+                                if notice.ends_with("The next prompt tries the stored login again.")
+                        ),
+                        "{events:?}"
+                    );
+                })
+                .await;
+            })
+            .await;
+        }
+
+        #[tokio::test(start_paused = true)]
+        async fn an_interrupt_ends_the_wait_and_the_reload_still_finishes() {
+            with_pinned_home(async {
+                let dir = tempfile::tempdir().unwrap();
+                let data = tempfile::tempdir().unwrap();
+                hold_expired_ox_login(data.path());
+                temp_env::async_with_vars([("XDG_DATA_HOME", Some(data.path()))], async {
+                    let mut engine = engine(
+                        "http://127.0.0.1:9".to_owned(),
+                        &test_store(dir.path()),
+                        dir.path(),
+                    )
+                    .await;
+                    engine.client.set_auth(None);
+                    engine.retry_login = true;
+                    let sink = CapturingSink::default();
+                    let (tx, mut ops) = mpsc::channel(1);
+                    tx.try_send(Op::Interrupt).unwrap();
+                    let start = tokio::time::Instant::now();
+
+                    let end = engine.submit_prompt("hi", &sink, &mut ops).await;
+                    let waited = start.elapsed();
+                    engine.client.finish_reloads().await;
+
+                    assert_eq!(end, TurnEnd::Cancelled);
+                    assert!(waited < Duration::from_secs(1), "{waited:?}");
+                    assert!(engine.retry_login);
+                    assert_eq!(engine.client.auth_source(), None);
+                    assert!(matches!(sink.events().as_slice(), [Event::Cancelled]));
+                })
+                .await;
+            })
+            .await;
+        }
+
+        #[tokio::test]
+        async fn stops_retrying_once_the_failure_is_not_transient() {
+            with_pinned_home(async {
+                let dir = tempfile::tempdir().unwrap();
+                let data = tempfile::tempdir().unwrap();
+                temp_env::async_with_vars([("XDG_DATA_HOME", Some(data.path()))], async {
+                    let mut engine = engine(
+                        "http://127.0.0.1:9".to_owned(),
+                        &test_store(dir.path()),
+                        dir.path(),
+                    )
+                    .await;
+                    engine.client.set_auth(None);
+                    engine.retry_login = true;
+                    let sink = CapturingSink::default();
+                    let mut ops = inert_ops();
+
+                    let end = engine.submit_prompt("hi", &sink, &mut ops).await;
+
+                    assert_eq!(end, TurnEnd::Failed);
+                    assert!(!engine.retry_login);
+                    assert_eq!(engine.client.auth_source(), None);
+                    assert!(
+                        matches!(
+                            sink.events().as_slice(),
+                            [Event::TurnFailed(notice)]
+                                if notice == "Not signed in. Run `/login` to sign in."
+                        ),
+                        "{:?}",
+                        sink.events()
+                    );
+                })
+                .await;
+            })
+            .await;
+        }
+
+        #[tokio::test]
+        async fn reads_no_store_without_a_transient_sign_out() {
+            with_pinned_home(async {
+                let dir = tempfile::tempdir().unwrap();
+                let data = tempfile::tempdir().unwrap();
+                store_ox_login(data.path());
+                temp_env::async_with_vars([("XDG_DATA_HOME", Some(data.path()))], async {
+                    let mut engine = engine(
+                        "http://127.0.0.1:9".to_owned(),
+                        &test_store(dir.path()),
+                        dir.path(),
+                    )
+                    .await;
+                    engine.client.set_auth(None);
+                    let sink = CapturingSink::default();
+                    let mut ops = inert_ops();
+
+                    let end = engine.submit_prompt("hi", &sink, &mut ops).await;
+
+                    assert_eq!(end, TurnEnd::Failed);
+                    assert_eq!(engine.client.auth_source(), None);
+                    assert!(
+                        matches!(
+                            sink.events().as_slice(),
+                            [Event::TurnFailed(notice)]
+                                if notice == "Not signed in. Run `/login` to sign in."
+                        ),
+                        "{:?}",
+                        sink.events()
+                    );
+                })
+                .await;
+            })
+            .await;
+        }
+    }
+
     mod login {
         use super::*;
 
@@ -4243,8 +4558,10 @@ mod tests {
                     Some(Auth::new(AuthSource::ClaudeCodeLogin, "claude-code-token")),
                 ] {
                     engine.client.set_auth(before);
+                    engine.retry_login = true;
                     engine.adopt_login(&sink, ox_login());
                     assert_eq!(engine.client.auth().unwrap().secret(), "ox-token");
+                    assert!(!engine.retry_login);
                 }
 
                 let events = sink.events();
@@ -4272,24 +4589,6 @@ mod tests {
 
     mod logout {
         use super::*;
-
-        /// Stores an oxide-code login under `data`, standing in for `$XDG_DATA_HOME`.
-        fn store_ox_login(data: &Path) -> PathBuf {
-            let file = data.join("ox").join("credentials.json");
-            std::fs::create_dir_all(file.parent().unwrap()).unwrap();
-            std::fs::write(&file, credentials_json("ox-token")).unwrap();
-            file
-        }
-
-        fn credentials_json(access_token: &str) -> String {
-            serde_json::json!({
-                "claudeAiOauth": {
-                    "accessToken": access_token,
-                    "expiresAt": 9_999_999_999_999_u64,
-                },
-            })
-            .to_string()
-        }
 
         #[tokio::test]
         async fn removes_the_oxide_code_login_and_keeps_an_explicit_credential() {
@@ -4348,8 +4647,12 @@ mod tests {
                     std::fs::create_dir(claude_code_file.parent().unwrap()).unwrap();
                     std::fs::write(&claude_code_file, "not json").unwrap();
                     engine.logout(&sink).await;
-                    std::fs::write(&claude_code_file, credentials_json("claude-code-token"))
-                        .unwrap();
+                    write_creds(
+                        &claude_code_file,
+                        "claude-code-token",
+                        None,
+                        9_999_999_999_999,
+                    );
                     engine.logout(&sink).await;
 
                     assert_eq!(engine.client.auth().unwrap().secret(), "claude-code-token");
@@ -4404,6 +4707,69 @@ mod tests {
                             events.as_slice(),
                             [Event::Error(msg)]
                                 if msg.starts_with("Sign-out failed: failed to remove ")
+                        ),
+                        "{events:?}"
+                    );
+                })
+                .await;
+            })
+            .await;
+        }
+
+        #[tokio::test(start_paused = true)]
+        async fn retries_a_claude_code_login_a_transient_failure_kept_from_taking_over() {
+            with_pinned_home(async {
+                let dir = tempfile::tempdir().unwrap();
+                let data = tempfile::tempdir().unwrap();
+                store_ox_login(data.path());
+                let home = std::env::home_dir().unwrap();
+                let claude_code_file = home.join(".claude").join(".credentials.json");
+                std::fs::create_dir(home.join(".claude")).unwrap();
+                write_creds(&claude_code_file, "dead", Some("refresh"), 0);
+                let lock = home.join(".claude.lock");
+                std::fs::create_dir(&lock).unwrap();
+                temp_env::async_with_vars([("XDG_DATA_HOME", Some(data.path()))], async {
+                    let mut engine = engine(
+                        "http://127.0.0.1:9".to_owned(),
+                        &test_store(dir.path()),
+                        dir.path(),
+                    )
+                    .await;
+                    engine
+                        .client
+                        .set_auth(Some(Auth::new(AuthSource::OxLogin, "ox-token")));
+                    let sink = CapturingSink::default();
+
+                    engine.logout(&sink).await;
+                    let retrying = engine.retry_login;
+                    std::fs::remove_dir(&lock).unwrap();
+                    write_creds(
+                        &claude_code_file,
+                        "claude-code-token",
+                        None,
+                        9_999_999_999_999,
+                    );
+                    let restored = engine
+                        .ensure_signed_in(&sink, &mut inert_ops(), &mut Inbox::default())
+                        .await;
+
+                    assert!(retrying);
+                    assert!(restored.is_ok(), "the next prompt loads the login again");
+                    assert_eq!(engine.client.auth().unwrap().secret(), "claude-code-token");
+                    let events = sink.events();
+                    assert!(
+                        matches!(
+                            events.as_slice(),
+                            [
+                                Event::SignedOut {
+                                    removed: true,
+                                    auth: None,
+                                    fallback_error: Some(error),
+                                },
+                                Event::LoginRestored {
+                                    auth: AuthSource::ClaudeCodeLogin
+                                },
+                            ] if error.ends_with("Try again in a moment.")
                         ),
                         "{events:?}"
                     );

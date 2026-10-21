@@ -14,7 +14,7 @@ use ox_core::util::text::{center_truncate_to_width, truncate_to_width};
 use super::App;
 use crate::components::overflow_count;
 use crate::components::status::StatusBar;
-use crate::components::welcome::{self, WelcomeSnapshot};
+use crate::components::welcome;
 use crate::glyphs::{NEWLINE_GLYPH, USER_PROMPT_PREFIX, USER_PROMPT_PREFIX_WIDTH};
 use crate::saturating_u16;
 use crate::terminal::{TuiBackend, synchronized_update, write_status_hyperlinks};
@@ -105,8 +105,7 @@ impl App {
             .set_permission_mode(self.session_info.config.permission_mode);
         self.status_bar.render(frame, status);
         if self.chat.is_empty() && self.session_info.config.show_welcome {
-            let snap = WelcomeSnapshot::from_live(&self.session_info);
-            welcome::paint(frame, chat, &self.theme, &snap);
+            welcome::paint(frame, chat, &self.theme, &self.session_info);
         } else {
             self.chat.set_spinner(self.status_bar.spinner());
             self.chat.render(frame, chat);
@@ -269,7 +268,7 @@ mod tests {
     use ox_core::permission::{Basis, Mode};
     use ox_core::protocol::{Decision, Event, Op, ToolCall, ToolResult};
     use ox_core::tool::tasks::testing::plan;
-    use ox_core::tool::{ApprovalBody, ApprovalPreview, ToolResultView};
+    use ox_core::tool::view::{ApprovalBody, ApprovalPreview, ToolResultView};
     use ox_core::util::git::PullRequest;
 
     use super::*;

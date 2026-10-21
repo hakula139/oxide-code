@@ -16,7 +16,7 @@ Client-side command surface: `/help`, `/clear`, `/model`, `/status`, and friends
 - `/rename` sets the session title manually and locks out the AI title generator. Bare opens a single-line editor pre-filled with the current title.
 - `/resume` swaps to a different session in place. Bare opens a searchable picker, while typed-arg jumps directly. Full design: [resume.md](resume.md).
 - `/delete <id-prefix>` removes a saved session's JSONL and its artifact directory after a Y/N confirmation. The `/resume` picker offers the same gesture via Ctrl+D on the cursor row.
-- `/archive` and `/unarchive` set whether a session shows in default listings and bare `ox -c`. Bare `/archive` archives the live session and rolls like `/clear`.
+- `/archive` and `/unarchive` set whether a session shows in default listings and `ox -c`. Bare `/archive` archives the live session and rolls like `/clear`.
 - `/config`, `/help`, and `/status` open a read-only [`KvOverview`](modals.md) modal. `/diff` is the lone printer because its output can run to hundreds of lines, where scrollback value beats modal cropping.
 
 ## Design Decisions
@@ -107,7 +107,7 @@ Client-side command surface: `/help`, `/clear`, `/model`, `/status`, and friends
 - `crates/ox-tui/src/slash/archive.rs`: `ArchiveCmd` and `UnarchiveCmd`.
 - `crates/ox-tui/src/slash/clear.rs`: `ClearCmd` sends first.
 - `crates/ox-tui/src/slash/config.rs`: `/config` row builder plus sectioned `KvOverview` constructor.
-- `crates/ox-tui/src/slash/confirm.rs`: `ConfirmDeleteSessionModal` (destructive-action gate, sticky inline error cleared only on deliberate Y / N).
+- `crates/ox-tui/src/slash/confirm.rs`: `ConfirmDeleteSessionModal` (destructive-action gate, inline error kept until a retry or close).
 - `crates/ox-tui/src/slash/context.rs`: `SlashContext` (`LiveSessionInfo` plus the live title).
 - `crates/ox-tui/src/slash/delete.rs`: `DeleteCmd` refuses prefixes that match only the live session.
 - `crates/ox-tui/src/slash/diff.rs`: `DiffCmd` and the git calls it makes from the project root.

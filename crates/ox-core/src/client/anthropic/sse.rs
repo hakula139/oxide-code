@@ -249,11 +249,13 @@ mod tests {
     use std::time::Duration;
 
     use indoc::{formatdoc, indoc};
-    use wiremock::matchers::{method, path};
-    use wiremock::{Mock, MockServer, ResponseTemplate};
+    use wiremock::ResponseTemplate;
 
     use super::*;
-    use crate::client::anthropic::local_testing::{messages_request, plain_http};
+    use crate::client::anthropic::local_testing::{
+        messages_request, plain_http, request_count, retry_counts, serve,
+    };
+    use crate::client::anthropic::testing::sse_response;
     use crate::client::anthropic::wire::{Delta, MessageResponse};
     use crate::client::{RateLimitWindow, RateLimits, Response};
     use crate::message::ContentBlock;
@@ -356,35 +358,11 @@ mod tests {
 
         "#};
 
-        fn sse_response(body: impl Into<Vec<u8>>) -> ResponseTemplate {
-            ResponseTemplate::new(200)
-                .insert_header("content-type", "text/event-stream")
-                .set_body_bytes(body)
-        }
-
         /// `response` with a subscription's five-hour usage window.
         fn rate_limited(response: ResponseTemplate) -> ResponseTemplate {
             response
                 .insert_header("anthropic-ratelimit-unified-5h-utilization", "0.42")
                 .insert_header("anthropic-ratelimit-unified-5h-reset", "1760000000")
-        }
-
-        /// Serves `responses` in order, one request each, repeating the last one after that.
-        async fn serve(responses: Vec<ResponseTemplate>) -> MockServer {
-            let server = MockServer::start().await;
-            let last = responses.len() - 1;
-            for (i, response) in responses.into_iter().enumerate() {
-                let mock = Mock::given(method("POST"))
-                    .and(path("/v1/messages"))
-                    .respond_with(response);
-                let mock = if i == last {
-                    mock
-                } else {
-                    mock.up_to_n_times(1)
-                };
-                mock.mount(&server).await;
-            }
-            server
         }
 
         /// Answers one connection per response, in order, closing each once its response is sent.
@@ -413,10 +391,6 @@ mod tests {
                 events.push(event.expect("stream_sse forwards only Ok events"));
             }
             (result, events)
-        }
-
-        async fn request_count(server: &MockServer) -> usize {
-            server.received_requests().await.unwrap().len()
         }
 
         fn texts(events: &[ResponseEvent]) -> Vec<&str> {
@@ -474,7 +448,6 @@ mod tests {
             let (result, events) = run_stream(&server.uri()).await;
 
             result.expect("third attempt succeeds");
-            assert_eq!(request_count(&server).await, 3);
             assert_eq!(
                 events,
                 [
@@ -493,18 +466,7 @@ mod tests {
                     hi_reply(),
                 ],
             );
-            let counts: Vec<String> = server
-                .received_requests()
-                .await
-                .unwrap()
-                .iter()
-                .map(|r| {
-                    r.headers["x-stainless-retry-count"]
-                        .to_str()
-                        .unwrap()
-                        .to_owned()
-                })
-                .collect();
+            let counts = retry_counts(&server).await;
             assert_eq!(counts, ["0", "1", "2"]);
         }
 
@@ -581,7 +543,7 @@ mod tests {
                 format!("{err:#}"),
                 "Anthropic API stream ended before message_stop"
             );
-            assert!(request_count(&server).await > 1, "pre-content cuts retry");
+            assert_eq!(retry_counts(&server).await, ["0", "1", "2", "3", "4", "5"]);
         }
 
         #[tokio::test]
@@ -808,17 +770,6 @@ mod tests {
         }
 
         #[test]
-        fn skips_a_frame_without_a_data_line() {
-            assert!(parse_sse_frame("").unwrap().is_none());
-            assert!(parse_sse_frame(": comment line").unwrap().is_none());
-        }
-
-        #[test]
-        fn invalid_json_errors() {
-            assert!(parse_sse_frame("data: {not valid json}").is_err());
-        }
-
-        #[test]
         fn concatenates_multiple_data_lines_with_newline() {
             // `data:` lines join with `\n`, which JSON reads as whitespace, so this round-trips.
             let frame = indoc! {r#"
@@ -842,6 +793,22 @@ mod tests {
             let event = parse_sse_frame(frame).unwrap().unwrap();
 
             assert_eq!(event, StreamEvent::Ping);
+        }
+
+        #[test]
+        fn skips_a_frame_without_a_data_line() {
+            assert!(parse_sse_frame("").unwrap().is_none());
+            assert!(parse_sse_frame(": comment line").unwrap().is_none());
+        }
+
+        #[test]
+        fn invalid_json_errors() {
+            let err = parse_sse_frame("data: {not valid json}").unwrap_err();
+
+            assert_eq!(
+                err.to_string(),
+                "failed to parse SSE data: {not valid json}"
+            );
         }
     }
 }
