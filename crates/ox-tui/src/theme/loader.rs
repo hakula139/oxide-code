@@ -330,7 +330,6 @@ mod tests {
 
     use super::*;
     use crate::theme::SLOT_NAMES;
-
     use crate::theme::color::COLOR_FORMATS_HINT;
 
     mod resolve_theme {
