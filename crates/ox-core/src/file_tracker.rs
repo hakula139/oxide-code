@@ -7,7 +7,7 @@ use std::sync::{Arc, Mutex, MutexGuard};
 
 use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;
-use tracing::warn;
+use tracing::debug;
 use xxhash_rust::xxh64::xxh64;
 
 use crate::util::sync::lock_or_recover;
@@ -198,7 +198,7 @@ impl FileTracker {
 
         for (path, state) in latest {
             if let Err(reason) = verify_on_disk(&path, state.content_hash) {
-                warn!(
+                debug!(
                     "dropping tracked file {} ({reason}, will require fresh Read)",
                     path.display()
                 );

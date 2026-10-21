@@ -12,7 +12,7 @@ use regex::Regex;
 use reqwest::StatusCode;
 use reqwest::header::HeaderMap;
 use tokio_util::task::TaskTracker;
-use tracing::{debug, warn};
+use tracing::debug;
 
 use super::Client;
 use super::wire::{ApiError, ErrorResponse};
@@ -205,7 +205,7 @@ where
             return Err(error);
         };
         retry += 1;
-        warn!(?delay, retry, error = %format_args!("{error:#}"), "retrying Anthropic request");
+        debug!(?delay, retry, error = %format_args!("{error:#}"), "retrying Anthropic request");
         on_retry(&RetryNotice {
             delay,
             retry,
