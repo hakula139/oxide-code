@@ -1,5 +1,5 @@
 //! Anthropic Messages API client, which implements the [`Wire`] the agent loop streams through.
-//! [`Client::complete`] handles one-shots such as title generation.
+//! [`Client::complete`] handles side queries such as title generation.
 //!
 //! The wire shape mirrors the official `claude-code` CLI: pinned User-Agent and Stainless SDK
 //! header set, billing attestation in `system[0]`, and per-request beta headers gated on model /
@@ -208,7 +208,7 @@ impl Client {
     /// Streams one conversation request. The receiver closes when the stream ends, the receiver
     /// is dropped, or an unrecoverable error is forwarded as a final `Err`.
     ///
-    /// The cacheable `system` text always carries a `cache_control` breakpoint, shared across
+    /// The stable `system` text always carries a `cache_control` breakpoint, shared across
     /// sessions. `breakpoint` marks the last content block of the final message. `user_context`
     /// rides as a synthetic leading user message to keep dynamic content such as CLAUDE.md out of
     /// the `system` parameter.
@@ -220,13 +220,13 @@ impl Client {
         tools: &[ToolDefinition],
         breakpoint: Option<CacheControl>,
     ) -> Result<mpsc::Receiver<Result<ResponseEvent>>> {
-        let cacheable = static_prefix_cache_control(self.is_first_party, self.prompt_cache_ttl);
+        let prefix_cache = static_prefix_cache_control(self.is_first_party, self.prompt_cache_ttl);
         let request = self.prepare(RequestSpec {
             kind: RequestKind::Agentic,
             model: &self.model,
             max_tokens: self.max_tokens(),
             system: &[
-                (&system.cacheable, Some(cacheable)),
+                (&system.stable, Some(prefix_cache)),
                 (&system.dynamic, None),
             ],
             tools: (!tools.is_empty()).then_some(tools),
@@ -356,8 +356,8 @@ struct RequestSpec<'a> {
 impl Client {
     /// Builds the `/v1/messages` call `spec` describes. The body gains the attribution and
     /// identity blocks ahead of `spec.system`, the metadata, and on first-party requests the `cch`
-    /// hash. The kind decides streaming, thinking, `context_management`, and the betas, which
-    /// derive from the body so the two always agree.
+    /// hash. The kind decides streaming, thinking, `context_management`, and the betas, and the
+    /// thinking betas derive from the body's `thinking`.
     fn prepare(&self, spec: RequestSpec<'_>) -> Result<MessagesRequest> {
         let RequestSpec {
             kind,
@@ -386,6 +386,7 @@ impl Client {
             tools,
             thinking: thinking.as_ref(),
             output_config,
+            // Accompanies the context-management beta, which `compute_betas` gates the same way.
             context_management: (agentic && model.info().is_some())
                 .then(ContextManagement::clear_thinking_keep_all),
             messages,
@@ -395,7 +396,12 @@ impl Client {
             body = billing::inject_cch(&body)?;
         }
 
-        debug!(?kind, body_len = body.len(), "sending API request");
+        debug!(
+            ?kind,
+            model = model.id(),
+            body_len = body.len(),
+            "sending API request"
+        );
         let betas = compute_betas(model, thinking.as_ref(), auth.kind(), kind).join(",");
         Ok(self.messages_request(betas, body, auth))
     }
@@ -524,13 +530,6 @@ mod tests {
         const OFFLINE_URL: &str = "https://example.invalid";
 
         const TEST_MODEL: &str = "claude-sonnet-5-5";
-
-        fn system_prompt(cacheable: &str, dynamic: &str) -> SystemPrompt {
-            SystemPrompt {
-                cacheable: cacheable.to_owned(),
-                dynamic: dynamic.to_owned(),
-            }
-        }
 
         async fn collect_events(
             mut rx: mpsc::Receiver<Result<ResponseEvent>>,
@@ -961,6 +960,13 @@ mod tests {
         mod stream_message {
             use super::*;
 
+            fn system_prompt(stable: &str, dynamic: &str) -> SystemPrompt {
+                SystemPrompt {
+                    stable: stable.to_owned(),
+                    dynamic: dynamic.to_owned(),
+                }
+            }
+
             fn sse_body(frames: &[(&str, &str)]) -> String {
                 let mut body = String::new();
                 for (event, data) in frames {
@@ -1143,23 +1149,6 @@ mod tests {
                     Some("Bearer gateway-jwt")
                 );
                 assert_eq!(request_header(&request, "x-api-key"), Some("k"));
-            }
-
-            #[tokio::test]
-            async fn billing_block_hashes_only_first_party_requests() {
-                for is_first_party in [true, false] {
-                    let mut client = test_client(OFFLINE_URL, api_key(), TEST_MODEL);
-                    client.is_first_party = is_first_party;
-                    let (body, _) = capture_stream_turn(client).await;
-                    let block = body["system"][0]["text"].as_str().unwrap();
-                    let (prefix, cch) = block.split_once(" cch=").unwrap_or((block, ""));
-                    assert!(prefix.ends_with("; cc_entrypoint=cli;"), "{block}");
-                    let hash = cch.strip_suffix(';').unwrap_or(cch);
-                    let hashed =
-                        hash.len() == 5 && hash != "00000" && u32::from_str_radix(hash, 16).is_ok();
-                    assert_eq!(hashed, is_first_party, "{block}");
-                    assert_eq!(cch.is_empty(), !is_first_party, "{block}");
-                }
             }
 
             #[tokio::test]
@@ -1738,32 +1727,42 @@ mod tests {
             use super::*;
 
             #[test]
-            fn side_query_sends_no_stream_thinking_or_context_management() {
-                let client = test_client(OFFLINE_URL, api_key(), TEST_MODEL);
+            fn hashes_the_billing_block_only_on_first_party_requests() {
                 let messages = [Message::user("hi")];
+                for kind in [RequestKind::Agentic, RequestKind::SideQuery] {
+                    for is_first_party in [true, false] {
+                        let mut client = test_client(OFFLINE_URL, api_key(), TEST_MODEL);
+                        client.is_first_party = is_first_party;
 
-                let request = client
-                    .prepare(RequestSpec {
-                        kind: RequestKind::SideQuery,
-                        model: client.model(),
-                        max_tokens: 40,
-                        system: &[("sys", None)],
-                        tools: None,
-                        output_config: None,
-                        messages: RequestMessages {
-                            user_context: None,
-                            messages: &messages,
-                            breakpoint: None,
-                        },
-                    })
-                    .unwrap();
+                        let request = client
+                            .prepare(RequestSpec {
+                                kind,
+                                model: client.model(),
+                                max_tokens: 40,
+                                system: &[],
+                                tools: None,
+                                output_config: None,
+                                messages: RequestMessages {
+                                    user_context: None,
+                                    messages: &messages,
+                                    breakpoint: None,
+                                },
+                            })
+                            .unwrap();
 
-                let body: serde_json::Value = serde_json::from_slice(&request.body).unwrap();
-                assert_eq!(body["stream"], false);
-                for field in ["tools", "thinking", "output_config", "context_management"] {
-                    assert!(body.get(field).is_none(), "{field}: {body}");
+                        let body: serde_json::Value =
+                            serde_json::from_slice(&request.body).unwrap();
+                        let block = body["system"][0]["text"].as_str().unwrap();
+                        let (prefix, cch) = block.split_once(" cch=").unwrap_or((block, ""));
+                        assert!(prefix.ends_with("; cc_entrypoint=cli;"), "{block}");
+                        let hash = cch.strip_suffix(';').unwrap_or(cch);
+                        let hashed = hash.len() == 5
+                            && hash != "00000"
+                            && u32::from_str_radix(hash, 16).is_ok();
+                        assert_eq!(hashed, is_first_party, "{kind:?} {block}");
+                        assert_eq!(cch.is_empty(), !is_first_party, "{kind:?} {block}");
+                    }
                 }
-                assert_eq!(request.betas, "claude-code-20250219");
             }
         }
     }

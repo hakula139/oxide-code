@@ -19,7 +19,7 @@ Layers run from the foundation to the frontends.
 | `ox-core` | Domain     | `model`         | Supported-model catalog, per-model request capabilities, token usage, and pricing                                                               |
 | `ox-core` | Domain     | `permission`    | Tool permission gate: modes, deny / ask / allow rules, shipped defaults, path resolution, and shell-command parsing                             |
 | `ox-core` | Domain     | `prompt`        | System prompt assembly, environment detection, and instruction-file discovery                                                                   |
-| `ox-core` | Services   | `client`        | The `Wire` streaming contract and the Anthropic Messages API client: request bodies and headers, a retrying transport, SSE, and one-shots       |
+| `ox-core` | Services   | `client`        | The `Wire` streaming contract and the Anthropic Messages API client: request bodies and headers, a retrying transport, SSE, and side queries    |
 | `ox-core` | Services   | `command`       | The slash-command line parser, the command aliases, and the typed forms parsed into the `Op` each one runs, shared by the TUI and the bare REPL |
 | `ox-core` | Services   | `protocol`      | The serializable `Op` / `Event` contract between the engine and its frontends, its payloads, and the `EventSink` trait                          |
 | `ox-core` | Services   | `session`       | JSONL session persistence behind an actor task, plus listing, archiving, resume, transcript repair, and AI titles                               |

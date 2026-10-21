@@ -1,4 +1,4 @@
-//! Non-streaming `/v1/messages` one-shot path. Returns flattened assistant text and the response's
+//! Non-streaming `/v1/messages` side-query path. Returns flattened assistant text and the response's
 //! usage.
 
 use anyhow::{Context, Result};
@@ -89,7 +89,7 @@ mod tests {
     use super::super::testing::{DEVICE_ID, api_key, test_config};
     use super::*;
     use crate::client::anthropic::local_testing::{COMPLETION_USAGE, completion_body};
-    use crate::client::anthropic::{SYSTEM_PROMPT_PREFIX, attribution_text};
+    use crate::client::anthropic::{SYSTEM_PROMPT_PREFIX, attribution_text, build_metadata};
     use crate::util::tls::testing::NoRoots;
 
     mod client {
@@ -145,6 +145,43 @@ mod tests {
                     .unwrap();
                 assert_eq!(text, "Fix login bug");
                 assert_eq!(usage, Some(COMPLETION_USAGE));
+            }
+
+            #[tokio::test]
+            async fn sends_the_caller_system_and_prompt_as_a_side_query() {
+                let server = MockServer::start().await;
+                Mock::given(method("POST"))
+                    .and(path("/v1/messages"))
+                    .respond_with(ResponseTemplate::new(200).set_body_string(completion_body("ok")))
+                    .mount(&server)
+                    .await;
+                let mut config = test_config(server.uri(), api_key(), "claude-haiku-5-5");
+                config.gateway.attribution = false;
+                let client = client_for(&config);
+
+                client
+                    .complete(&haiku(), "sys", "Fix login", 40, None, None)
+                    .await
+                    .unwrap();
+
+                let received = server.received_requests().await.expect("recorded requests");
+                let body: serde_json::Value = serde_json::from_slice(&received[0].body).unwrap();
+                assert_eq!(
+                    body,
+                    serde_json::json!({
+                        "model": "claude-haiku-5-5",
+                        "max_tokens": 40,
+                        "stream": false,
+                        "metadata": {"user_id": build_metadata(DEVICE_ID, "sid").user_id},
+                        "system": [
+                            {"type": "text", "text": SYSTEM_PROMPT_PREFIX},
+                            {"type": "text", "text": "sys"},
+                        ],
+                        "messages": [
+                            {"role": "user", "content": [{"type": "text", "text": "Fix login"}]},
+                        ],
+                    }),
+                );
             }
 
             #[tokio::test]

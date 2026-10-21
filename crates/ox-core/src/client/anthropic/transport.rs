@@ -1,4 +1,4 @@
-//! Shared `POST /v1/messages` plumbing for the streaming and one-shot paths: per-request headers,
+//! Shared `POST /v1/messages` plumbing for the streaming and side-query paths: per-request headers,
 //! non-2xx classification, and bounded retry with exponential backoff.
 
 use std::fmt;

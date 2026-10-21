@@ -102,8 +102,8 @@ pub(super) fn conversation_cache_control(ttl: PromptCacheTtl) -> CacheControl {
 #[cfg(test)]
 mod tests {
     use super::super::CLAUDE_CLI_VERSION;
+    use super::RequestKind::{Agentic, SideQuery};
     use super::*;
-    use RequestKind::{Agentic, SideQuery};
 
     mod compute_betas {
         use super::*;

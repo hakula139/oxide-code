@@ -1,4 +1,4 @@
-//! System prompt assembly: cacheable static sections plus a per-session user-context reminder.
+//! System prompt assembly: stable static sections plus a per-session user-context reminder.
 
 pub(crate) mod environment;
 pub(crate) mod instructions;
@@ -61,7 +61,7 @@ impl PromptParts {
 #[cfg_attr(test, derive(Default))]
 pub(crate) struct SystemPrompt {
     /// Text identical in every session, which a wire may cache across sessions.
-    pub(crate) cacheable: String,
+    pub(crate) stable: String,
     /// Text that varies by session, such as the environment. Empty when there is none.
     pub(crate) dynamic: String,
 }
@@ -155,7 +155,7 @@ async fn assemble(
 
 fn system_prompt(environment: &Environment) -> SystemPrompt {
     SystemPrompt {
-        cacheable: [
+        stable: [
             INTRO,
             SYSTEM_SECTION,
             TASK_GUIDANCE,
@@ -368,7 +368,7 @@ mod tests {
                 parts.user_context,
             );
             assert_eq!(parts.seen.model, identity);
-            assert!(!parts.system.cacheable.contains("claude-opus-5-5"));
+            assert!(!parts.system.stable.contains("claude-opus-5-5"));
             assert!(!parts.system.dynamic.contains("claude-opus-5-5"));
         }
     }
@@ -447,7 +447,7 @@ mod tests {
 
             let (parts, _) = assemble(&spec("test-model"), tmp.path(), Some(tmp.path())).await;
 
-            let expected_cacheable_sections = [
+            let expected_stable_sections = [
                 "You are an interactive agent",
                 "# System",
                 "# Doing tasks",
@@ -456,11 +456,11 @@ mod tests {
                 "# Tone and style",
                 "# Output efficiency",
             ];
-            let SystemPrompt { cacheable, dynamic } = &parts.system;
-            assert!(cacheable.starts_with(INTRO));
+            let SystemPrompt { stable, dynamic } = &parts.system;
+            assert!(stable.starts_with(INTRO));
             let mut prev_pos = 0;
-            for header in &expected_cacheable_sections {
-                let pos = cacheable
+            for header in &expected_stable_sections {
+                let pos = stable
                     .find(header)
                     .unwrap_or_else(|| panic!("missing section: {header}"));
                 assert!(
@@ -477,7 +477,7 @@ mod tests {
             )));
             assert!(dynamic.contains("Is a git repository: true"));
 
-            assert!(!cacheable.contains("Test project rules."));
+            assert!(!stable.contains("Test project rules."));
             assert!(!dynamic.contains("Test project rules."));
 
             let ctx = &parts.user_context;
@@ -508,6 +508,37 @@ mod tests {
                 root_pos < sub_pos,
                 "root instructions should appear before subdirectory"
             );
+        }
+    }
+
+    mod system_prompt {
+        use super::*;
+
+        #[test]
+        fn joins_the_stable_sections_with_blank_lines_and_keeps_the_environment_apart() {
+            let environment = Environment::default();
+
+            let system = system_prompt(&environment);
+
+            assert_eq!(
+                system.stable,
+                formatdoc! {"
+                    {INTRO}
+
+                    {SYSTEM_SECTION}
+
+                    {TASK_GUIDANCE}
+
+                    {CAUTION}
+
+                    {TOOL_GUIDANCE}
+
+                    {STYLE}
+
+                    {OUTPUT_EFFICIENCY}"
+                },
+            );
+            assert_eq!(system.dynamic, environment.render());
         }
     }
 

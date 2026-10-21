@@ -317,10 +317,11 @@ pub(super) fn extract_user_text(message: &Message) -> Option<&str> {
     if message.role != Role::User {
         return None;
     }
-    message.content.iter().find_map(|b| match b {
-        ContentBlock::Text { text } if !text.trim().is_empty() => Some(text.as_str()),
-        _ => None,
-    })
+    message
+        .content
+        .iter()
+        .filter_map(ContentBlock::as_text)
+        .find(|text| !text.trim().is_empty())
 }
 
 #[cfg(test)]

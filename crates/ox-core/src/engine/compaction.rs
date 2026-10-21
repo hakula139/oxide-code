@@ -1037,7 +1037,7 @@ mod tests {
 
         fn parent_prompt() -> PromptParts {
             let mut prompt = PromptParts::default();
-            prompt.system.cacheable = "You are the parent conversation.".to_owned();
+            prompt.system.stable = "You are the parent conversation.".to_owned();
             "Project instructions.".clone_into(&mut prompt.user_context);
             prompt
         }
