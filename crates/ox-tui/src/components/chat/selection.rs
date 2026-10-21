@@ -29,6 +29,8 @@ const WORD_DELIMITERS: &[&str] = &[
     "\"", "'", "`", "(", ")", "[", "]", "{", "}", "<", ">", ",", ";", "│", "▎",
 ];
 
+// ── Selection ──
+
 /// What one press selects, by how many quick presses landed on the same cell.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Unit {
@@ -110,6 +112,8 @@ impl Selection {
     }
 }
 
+// ── ClickCounter ──
+
 /// Counts quick presses on one cell to pick what a press selects.
 #[derive(Default)]
 pub(super) struct ClickCounter {
@@ -133,6 +137,8 @@ impl ClickCounter {
         }
     }
 }
+
+// ── ChatView ──
 
 impl ChatView {
     /// Starts, extends, or ends a left-button selection. A release returns the selected text,
@@ -378,6 +384,8 @@ impl ChatView {
     }
 }
 
+// ── Cells ──
+
 /// The text of the cells of `line` that overlap `cols`, with trailing whitespace trimmed.
 fn row_text(line: &Line<'_>, cols: Range<u16>) -> String {
     let mut text = String::new();
@@ -448,7 +456,7 @@ fn cells<'a>(line: &'a Line<'_>) -> impl Iterator<Item = (u16, u16, &'a str)> {
 
 #[cfg(test)]
 mod tests {
-    use crossterm::event::KeyModifiers;
+    use crossterm::event::{Event, KeyModifiers};
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
     use ratatui::layout::Rect;
@@ -570,7 +578,7 @@ mod tests {
             hold(&mut chat, (0, 2), (0, 5), now);
 
             assert!(!chat.tick_selection(now), "already at the bottom");
-            chat.handle_event(&crossterm::event::Event::Mouse(MouseEvent {
+            chat.handle_event(&Event::Mouse(MouseEvent {
                 kind: MouseEventKind::ScrollDown,
                 column: 0,
                 row: 2,

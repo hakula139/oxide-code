@@ -10,6 +10,7 @@ use ratatui::layout::Rect;
 use ratatui::style::Style;
 use ratatui::text::Span;
 use ratatui::widgets::{Block, Borders, Paragraph};
+use time::OffsetDateTime;
 
 use ox_core::client::RateLimits;
 use ox_core::config::{Effort, StatusLineSegment};
@@ -17,13 +18,15 @@ use ox_core::permission::Mode;
 use ox_core::protocol::UsageSnapshot;
 use ox_core::tool::tasks::Progress;
 use ox_core::util::git;
-use ox_core::util::time::local_offset;
+use ox_core::util::time::now_local;
 
 use self::line::{RenderedStatusLine, StatusLine, StatusLineState};
 use crate::glyphs::SPINNER_FRAMES;
 use crate::theme::Theme;
 
 pub(crate) const TICKS_PER_FRAME: usize = 5;
+
+// ── Hyperlinks ──
 
 /// A status-bar segment that should be re-emitted as an OSC 8 hyperlink.
 #[derive(Debug, Clone)]
@@ -39,41 +42,7 @@ pub(crate) struct HyperlinkCell {
     pub(crate) style: Style,
 }
 
-/// Status bar at the top of the TUI.
-pub(crate) struct StatusBar {
-    theme: Theme,
-    line: StatusLine,
-    current_time_minute: Option<u16>,
-    model: String,
-    effort: Option<Effort>,
-    title: Option<String>,
-    usage: Option<UsageSnapshot>,
-    cwd: String,
-    git_branch: Option<String>,
-    pull_request: Option<git::PullRequest>,
-    rate_limits: Option<RateLimits>,
-    permission_mode: Mode,
-    queued_prompts: usize,
-    task_progress: Option<Progress>,
-    session_id: String,
-    theme_name: String,
-    status: Status,
-    spinner_frame: usize,
-    tick_counter: usize,
-    /// Hyperlink cells captured during the most recent render.
-    pending_hyperlinks: Vec<StatusHyperlink>,
-}
-
-/// The segments a [`StatusBar`] shows and the session values it starts with.
-pub(crate) struct StatusBarInit {
-    pub(crate) segments: Vec<StatusLineSegment>,
-    /// Display label, such as `Opus 5.5`.
-    pub(crate) model: String,
-    pub(crate) effort: Option<Effort>,
-    /// Already shortened with `~` by `tildify`.
-    pub(crate) cwd: String,
-    pub(crate) git_branch: Option<String>,
-}
+// ── Status ──
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum Status {
@@ -115,6 +84,46 @@ impl Status {
     }
 }
 
+// ── StatusBar ──
+
+/// Status bar at the top of the TUI.
+pub(crate) struct StatusBar {
+    theme: Theme,
+    line: StatusLine,
+    /// Minute of the local day the current-time segment shows, or `None` when the line has no
+    /// such segment.
+    current_minute: Option<u16>,
+    model: String,
+    effort: Option<Effort>,
+    title: Option<String>,
+    usage: Option<UsageSnapshot>,
+    cwd: String,
+    git_branch: Option<String>,
+    pull_request: Option<git::PullRequest>,
+    rate_limits: Option<RateLimits>,
+    permission_mode: Mode,
+    queued_prompts: usize,
+    task_progress: Option<Progress>,
+    session_id: String,
+    theme_name: String,
+    status: Status,
+    spinner_frame: usize,
+    tick_counter: usize,
+    /// Hyperlink cells captured during the most recent render.
+    pending_hyperlinks: Vec<StatusHyperlink>,
+}
+
+/// The segments a [`StatusBar`] shows and the session values it starts with.
+pub(crate) struct StatusBarInit {
+    pub(crate) segments: Vec<StatusLineSegment>,
+    /// Display label, such as `Opus 5.5`.
+    pub(crate) model: String,
+    pub(crate) effort: Option<Effort>,
+    /// Already shortened with `~` by `tildify`.
+    pub(crate) cwd: String,
+    pub(crate) git_branch: Option<String>,
+}
+
 impl StatusBar {
     /// Rows the bar fills: the status line and the border under it.
     pub(crate) const HEIGHT: u16 = 2;
@@ -127,13 +136,13 @@ impl StatusBar {
             cwd,
             git_branch,
         } = init;
-        let current_time_minute = segments
+        let current_minute = segments
             .contains(&StatusLineSegment::CurrentTime)
-            .then(current_time_minute);
+            .then(local_minute);
         Self {
             theme: theme.clone(),
             line: StatusLine::new(segments),
-            current_time_minute,
+            current_minute,
             model,
             effort,
             title: None,
@@ -279,14 +288,14 @@ impl StatusBar {
     }
 
     fn refresh_current_time(&mut self) -> bool {
-        let Some(previous) = self.current_time_minute else {
+        let Some(shown) = self.current_minute else {
             return false;
         };
-        let current = current_time_minute();
-        if current == previous {
+        let current = local_minute();
+        if current == shown {
             return false;
         }
-        self.current_time_minute = Some(current);
+        self.current_minute = Some(current);
         true
     }
 
@@ -296,7 +305,7 @@ impl StatusBar {
         let Some(limits) = &mut self.rate_limits else {
             return false;
         };
-        let now = time::OffsetDateTime::now_utc().unix_timestamp();
+        let now = OffsetDateTime::now_utc().unix_timestamp();
         let mut expired = false;
         for window in [&mut limits.five_hour, &mut limits.seven_day] {
             expired |= window.take_if(|window| window.resets_at <= now).is_some();
@@ -312,20 +321,12 @@ impl StatusBar {
             .border_style(self.theme.border_unfocused())
             .style(self.theme.surface());
         let rendered = self.render_line(area.width);
-        self.pending_hyperlinks.clear();
-        let mut hyperlink_rects = Vec::with_capacity(rendered.hyperlinks.len());
-        for link in &rendered.hyperlinks {
-            let link_x = area.x.saturating_add(link.col);
-            let width = link.width.min(area.right().saturating_sub(link_x));
-            if width == 0 {
-                continue;
-            }
-            hyperlink_rects.push((Rect::new(link_x, area.y, width, 1), link.url.clone()));
-        }
         frame.render_widget(Paragraph::new(rendered.line).block(block), area);
         // Snapshot link cells after the paint so emit_status_hyperlinks can replay them.
+        self.pending_hyperlinks.clear();
         let buf = frame.buffer_mut();
-        for (rect, url) in hyperlink_rects {
+        for link in rendered.hyperlinks {
+            let rect = Rect::new(area.x.saturating_add(link.col), area.y, link.width, 1);
             let mut cells = Vec::with_capacity(usize::from(rect.width));
             for x in rect.x..rect.x.saturating_add(rect.width) {
                 if let Some(cell) = buf.cell((x, rect.y)) {
@@ -335,8 +336,11 @@ impl StatusBar {
                     });
                 }
             }
-            self.pending_hyperlinks
-                .push(StatusHyperlink { rect, url, cells });
+            self.pending_hyperlinks.push(StatusHyperlink {
+                rect,
+                url: link.url,
+                cells,
+            });
         }
     }
 
@@ -381,16 +385,19 @@ impl StatusBar {
                 task_progress: self.task_progress,
                 session_id: &self.session_id,
                 theme_name: &self.theme_name,
+                current_minute: self.current_minute,
             },
             width,
         )
     }
 }
 
-fn current_time_minute() -> u16 {
-    let now = time::OffsetDateTime::now_utc().to_offset(local_offset());
+fn local_minute() -> u16 {
+    let now = now_local();
     u16::from(now.hour()) * 60 + u16::from(now.minute())
 }
+
+// ── Testing ──
 
 #[cfg(test)]
 pub(crate) mod testing {
@@ -410,6 +417,8 @@ pub(crate) mod testing {
 
 #[cfg(test)]
 mod tests {
+    use std::time::Duration;
+
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
 
@@ -632,9 +641,9 @@ mod tests {
                 status_bar_init(vec![StatusLineSegment::Model, StatusLineSegment::RunState]),
             );
 
-            assert_eq!(bar.current_time_minute, None);
+            assert_eq!(bar.current_minute, None);
             assert!(!bar.tick());
-            assert_eq!(bar.current_time_minute, None);
+            assert_eq!(bar.current_minute, None);
         }
 
         #[test]
@@ -643,11 +652,11 @@ mod tests {
                 &Theme::default(),
                 status_bar_init(vec![StatusLineSegment::CurrentTime]),
             );
-            let current = current_time_minute();
-            bar.current_time_minute = Some((current + 1) % 1440);
+            let current = local_minute();
+            bar.current_minute = Some((current + 1) % 1440);
 
             assert!(bar.tick());
-            assert_eq!(bar.current_time_minute, Some(current));
+            assert_eq!(bar.current_minute, Some(current));
             assert!(!bar.tick());
             assert_eq!(bar.spinner_frame, 0);
         }
@@ -833,7 +842,7 @@ mod tests {
         fn exit_armed_shows_static_hint_without_spinner() {
             let mut bar = bar_idle(None, "~/projects/demo");
             bar.set_status(Status::ExitArmed {
-                until: Instant::now() + std::time::Duration::from_secs(1),
+                until: Instant::now() + Duration::from_secs(1),
             });
             insta::assert_snapshot!(render_status(&mut bar, 80));
         }
@@ -1065,7 +1074,7 @@ mod tests {
         }
 
         #[test]
-        fn drops_hyperlink_when_segment_clipped_to_zero_width() {
+        fn drops_the_hyperlink_when_the_bar_is_too_narrow_for_its_segment() {
             let mut bar = pr_bar();
             bar.pull_request = Some(pr_state(86));
             render_status(&mut bar, 10);

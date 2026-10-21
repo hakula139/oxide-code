@@ -4,7 +4,6 @@ use std::path::Path;
 
 use ratatui::style::Style;
 use ratatui::text::{Line, Span};
-use time::OffsetDateTime;
 use unicode_width::UnicodeWidthStr;
 
 use ox_core::client::{RateLimitWindow, RateLimits};
@@ -15,7 +14,6 @@ use ox_core::session::display::id_prefix;
 use ox_core::tool::tasks::Progress;
 use ox_core::util::git::{Checks, PullRequest, ReviewDecision};
 use ox_core::util::text::{compact_count, truncate_to_width};
-use ox_core::util::time::local_offset;
 
 use crate::components::LEFT_MARGIN;
 use crate::saturating_u16;
@@ -29,6 +27,8 @@ const MAX_TITLE_WIDTH: usize = 40;
 const USAGE_WARNING_PERCENT: f64 = 70.0;
 /// Shown percent from which the context and usage-limit segments take the error style.
 const USAGE_ERROR_PERCENT: f64 = 90.0;
+
+// ── StatusLine ──
 
 /// Ordered segment roster for one status-line render.
 #[derive(Debug, Clone)]
@@ -183,10 +183,12 @@ impl StatusLine {
             }),
             StatusLineSegment::Theme => theme_label(state.theme_name)
                 .map(|label| Span::styled(label, SegmentStyle::Muted.style(theme))),
-            StatusLineSegment::CurrentTime => Some(Span::styled(
-                current_time_label(),
-                SegmentStyle::Dim.style(theme),
-            )),
+            StatusLineSegment::CurrentTime => state.current_minute.map(|minute| {
+                Span::styled(
+                    format!("{:02}:{:02}", minute / 60, minute % 60),
+                    SegmentStyle::Dim.style(theme),
+                )
+            }),
         }?;
         Some(RenderedSegment::new(segment, span, hyperlink))
     }
@@ -211,7 +213,11 @@ pub(super) struct StatusLineState<'a> {
     pub(super) session_id: &'a str,
     /// Built-in theme name or theme file path.
     pub(super) theme_name: &'a str,
+    /// Minute of the local day, or `None` unless the line shows the current time.
+    pub(super) current_minute: Option<u16>,
 }
+
+// ── Segments ──
 
 #[derive(Debug, Clone, Copy)]
 enum SegmentStyle {
@@ -262,10 +268,7 @@ impl RenderedSegment {
 
 fn fit_segments(segments: &mut Vec<RenderedSegment>, max_width: usize, sep_width: usize) {
     while segments.len() > 1 && total_width(segments, sep_width) > max_width {
-        let Some(index) = lowest_priority_index(segments) else {
-            break;
-        };
-        segments.remove(index);
+        segments.remove(lowest_priority_index(segments));
     }
 
     if total_width(segments, sep_width) <= max_width {
@@ -284,12 +287,14 @@ fn total_width(segments: &[RenderedSegment], sep_width: usize) -> usize {
         + sep_width.saturating_mul(segments.len().saturating_sub(1))
 }
 
-fn lowest_priority_index(segments: &[RenderedSegment]) -> Option<usize> {
-    segments
+/// Index of the segment to drop first. `segments` must not be empty.
+fn lowest_priority_index(segments: &[RenderedSegment]) -> usize {
+    let (index, _) = segments
         .iter()
         .enumerate()
         .min_by_key(|(_, segment)| segment_utility(segment.segment))
-        .map(|(index, _)| index)
+        .expect("fit_segments drops only while two or more segments remain");
+    index
 }
 
 /// Per-segment narrow-width rank. Lower numbers drop earlier.
@@ -317,7 +322,9 @@ fn segment_utility(segment: StatusLineSegment) -> u8 {
     }
 }
 
-fn non_empty_span(label: String, style: ratatui::style::Style) -> Option<Span<'static>> {
+// ── Labels ──
+
+fn non_empty_span(label: String, style: Style) -> Option<Span<'static>> {
     (!label.is_empty()).then(|| Span::styled(label, style))
 }
 
@@ -400,11 +407,6 @@ fn theme_label(theme_name: &str) -> Option<String> {
     Some(format!("Theme: {name}"))
 }
 
-fn current_time_label() -> String {
-    let now = OffsetDateTime::now_utc().to_offset(local_offset());
-    format!("{:02}:{:02}", now.hour(), now.minute())
-}
-
 fn format_cost(cost: f64) -> String {
     // Two decimals take over once `{cost:.2}` rounds up to `$1.00`, so `$0.9999` reads `$1.00`.
     if cost >= 0.995 {
@@ -441,6 +443,7 @@ mod tests {
                 task_progress: None,
                 session_id: "",
                 theme_name: "",
+                current_minute: None,
             }
         }
 
@@ -474,21 +477,12 @@ mod tests {
                     }),
                     git_branch: Some("main"),
                     pull_request: Some(&pr),
+                    current_minute: Some(9 * 60 + 5),
                     ..bare_state()
                 },
                 width,
             );
             text_of(&rendered)
-        }
-
-        fn is_hh_mm(label: &str) -> bool {
-            let bytes = label.as_bytes();
-            bytes.len() == 5
-                && bytes[0].is_ascii_digit()
-                && bytes[1].is_ascii_digit()
-                && bytes[2] == b':'
-                && bytes[3].is_ascii_digit()
-                && bytes[4].is_ascii_digit()
         }
 
         fn pr_state(number: u64) -> PullRequest {
@@ -891,9 +885,10 @@ mod tests {
         }
 
         #[test]
-        fn current_time_uses_clock_label() {
+        fn current_time_shows_the_minute_as_hours_and_minutes() {
             let text = render_text(vec![StatusLineSegment::CurrentTime], 20);
-            assert!(is_hh_mm(text.trim()), "expected HH:MM label: {text:?}");
+
+            assert_eq!(text, "  09:05");
         }
 
         #[test]

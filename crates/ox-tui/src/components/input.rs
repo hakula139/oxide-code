@@ -17,6 +17,7 @@ use ox_core::util::text::trim_blank_edges;
 
 use self::popup::{PopupState, SlashPopup, popup_state};
 use crate::action::Action;
+use crate::cursor::place_clamped;
 use crate::glyphs::{USER_PROMPT_PREFIX, USER_PROMPT_PREFIX_WIDTH};
 use crate::saturating_u16;
 use crate::slash::arg_placeholder_for;
@@ -193,7 +194,7 @@ impl InputArea {
             }
         }
 
-        crate::cursor::place_clamped(frame, raw_cursor_x, cursor_y, textarea_area);
+        place_clamped(frame, raw_cursor_x, cursor_y, textarea_area);
     }
 }
 
