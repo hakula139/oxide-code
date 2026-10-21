@@ -40,7 +40,9 @@ use super::sessions::{BARE_ARCHIVE_HINT, open_store, saved_error_message};
 use crate::action::Action;
 use crate::glyphs::MODAL_ERROR_PREFIX;
 use crate::keymap::{KeyAction, KeyChord, Keymap, is_unmodified};
-use crate::modal::chrome::{COLUMN_GAP, FOOTER_HEIGHT, render_footer, render_footer_text};
+use crate::modal::chrome::{
+    COLUMN_GAP, FOOTER_HEIGHT, above, height_above, render_footer, render_footer_text,
+};
 use crate::modal::line_editor::LineEditor;
 use crate::modal::searchable_list::{SearchableItem, SearchableList};
 use crate::modal::{Modal, ModalAction, ModalKey};
@@ -696,16 +698,13 @@ impl ResumePicker {
 
 impl Modal for ResumePicker {
     fn height(&self, width: u16, max_height: u16) -> u16 {
-        let list_max = max_height.saturating_sub(FOOTER_HEIGHT);
-        self.list.height(width, list_max) + FOOTER_HEIGHT
+        height_above(max_height, FOOTER_HEIGHT, |room| {
+            self.list.height(width, room)
+        })
     }
 
     fn render(&self, frame: &mut Frame<'_>, area: Rect, theme: &Theme) {
-        let list_area = Rect {
-            height: area.height.saturating_sub(FOOTER_HEIGHT),
-            ..area
-        };
-        self.list.render(frame, list_area, theme);
+        self.list.render(frame, above(area, FOOTER_HEIGHT), theme);
 
         if let Some(err) = &self.load_error {
             let text = format!("{MODAL_ERROR_PREFIX}{err}");
