@@ -971,6 +971,32 @@ mod tests {
             }
         }
 
+        /// A boundary compacting one message, with no focus instructions or tasks.
+        fn sample_compact(timestamp: OffsetDateTime) -> Entry {
+            Entry::Compact {
+                summary: "summary".to_owned(),
+                pre_message_count: 1,
+                instructions: None,
+                tasks: Vec::new(),
+                timestamp,
+            }
+        }
+
+        fn sample_tool_metadata(
+            tool_use_id: &str,
+            title: &str,
+            timestamp: OffsetDateTime,
+        ) -> Entry {
+            Entry::ToolResultMetadata {
+                tool_use_id: tool_use_id.to_owned(),
+                metadata: ToolMetadata {
+                    title: Some(title.to_owned()),
+                    ..ToolMetadata::default()
+                },
+                timestamp,
+            }
+        }
+
         #[test]
         fn includes_only_messages_with_last_uuid() {
             let (_dir, store) = isolated_store();
@@ -1030,24 +1056,15 @@ mod tests {
                 )])
                 .unwrap();
             writer
-                .append(&[Entry::ToolResultMetadata {
-                    tool_use_id: "pre-tool".to_owned(),
-                    metadata: ToolMetadata {
-                        title: Some("pre metadata".to_owned()),
-                        ..ToolMetadata::default()
-                    },
-                    timestamp: datetime!(2026-04-16 12:00:02 UTC),
-                }])
+                .append(&[sample_tool_metadata(
+                    "pre-tool",
+                    "pre metadata",
+                    datetime!(2026-04-16 12:00:02 UTC),
+                )])
                 .unwrap();
             writer.append(&[sample_snapshot("pre.txt")]).unwrap();
             writer
-                .append(&[Entry::Compact {
-                    summary: "summary".to_owned(),
-                    pre_message_count: 1,
-                    instructions: None,
-                    tasks: Vec::new(),
-                    timestamp: datetime!(2026-04-16 12:00:03 UTC),
-                }])
+                .append(&[sample_compact(datetime!(2026-04-16 12:00:03 UTC))])
                 .unwrap();
 
             let post = Uuid::new_v4();
@@ -1060,14 +1077,11 @@ mod tests {
                 )])
                 .unwrap();
             writer
-                .append(&[Entry::ToolResultMetadata {
-                    tool_use_id: "post-tool".to_owned(),
-                    metadata: ToolMetadata {
-                        title: Some("post metadata".to_owned()),
-                        ..ToolMetadata::default()
-                    },
-                    timestamp: datetime!(2026-04-16 12:00:05 UTC),
-                }])
+                .append(&[sample_tool_metadata(
+                    "post-tool",
+                    "post metadata",
+                    datetime!(2026-04-16 12:00:05 UTC),
+                )])
                 .unwrap();
             writer.append(&[sample_snapshot("post.txt")]).unwrap();
             drop(writer);
@@ -1117,13 +1131,7 @@ mod tests {
             assert_eq!(load(), Some(session_context("2026-04-17")));
 
             writer
-                .append(&[Entry::Compact {
-                    summary: "summary".to_owned(),
-                    pre_message_count: 1,
-                    instructions: None,
-                    tasks: Vec::new(),
-                    timestamp: datetime!(2026-04-17 12:00:00 UTC),
-                }])
+                .append(&[sample_compact(datetime!(2026-04-17 12:00:00 UTC))])
                 .unwrap();
             assert_eq!(
                 load(),
@@ -1201,13 +1209,7 @@ mod tests {
             writer
                 .append(&[
                     sample_message_at(pre, None, datetime!(2026-04-16 12:00:01 UTC), "pre"),
-                    Entry::Compact {
-                        summary: "summary".to_owned(),
-                        pre_message_count: 1,
-                        instructions: None,
-                        tasks: Vec::new(),
-                        timestamp: datetime!(2026-04-16 12:00:02 UTC),
-                    },
+                    sample_compact(datetime!(2026-04-16 12:00:02 UTC)),
                     sample_message_at(
                         synthetic,
                         None,
@@ -1373,14 +1375,8 @@ mod tests {
                     "pre-compact",
                 )])
                 .unwrap();
-            let mut torn = encode_lines(&[Entry::Compact {
-                summary: "summary".to_owned(),
-                pre_message_count: 1,
-                instructions: None,
-                tasks: Vec::new(),
-                timestamp: datetime!(2026-04-16 12:00:02 UTC),
-            }])
-            .unwrap();
+            let mut torn =
+                encode_lines(&[sample_compact(datetime!(2026-04-16 12:00:02 UTC))]).unwrap();
             torn.extend_from_slice(br#"{"type":"message","uuid":"#);
             writer.append_lines(&torn).unwrap();
 
@@ -1417,13 +1413,7 @@ mod tests {
                 )])
                 .unwrap();
             writer
-                .append(&[Entry::Compact {
-                    summary: "summary".to_owned(),
-                    pre_message_count: 1,
-                    instructions: None,
-                    tasks: Vec::new(),
-                    timestamp: datetime!(2026-04-16 12:00:02 UTC),
-                }])
+                .append(&[sample_compact(datetime!(2026-04-16 12:00:02 UTC))])
                 .unwrap();
 
             let synthetic = Uuid::new_v4();
@@ -1444,14 +1434,11 @@ mod tests {
                 )])
                 .unwrap();
             writer
-                .append(&[Entry::ToolResultMetadata {
-                    tool_use_id: "stale-tool".to_owned(),
-                    metadata: ToolMetadata {
-                        title: Some("stale metadata".to_owned()),
-                        ..ToolMetadata::default()
-                    },
-                    timestamp: datetime!(2026-04-16 12:00:05 UTC),
-                }])
+                .append(&[sample_tool_metadata(
+                    "stale-tool",
+                    "stale metadata",
+                    datetime!(2026-04-16 12:00:05 UTC),
+                )])
                 .unwrap();
             writer.append(&[sample_snapshot("stale.txt")]).unwrap();
 
@@ -1465,14 +1452,11 @@ mod tests {
                 )])
                 .unwrap();
             writer
-                .append(&[Entry::ToolResultMetadata {
-                    tool_use_id: "valid-tool".to_owned(),
-                    metadata: ToolMetadata {
-                        title: Some("valid metadata".to_owned()),
-                        ..ToolMetadata::default()
-                    },
-                    timestamp: datetime!(2026-04-16 12:00:08 UTC),
-                }])
+                .append(&[sample_tool_metadata(
+                    "valid-tool",
+                    "valid metadata",
+                    datetime!(2026-04-16 12:00:08 UTC),
+                )])
                 .unwrap();
             writer.append(&[sample_snapshot("valid.txt")]).unwrap();
             drop(writer);
