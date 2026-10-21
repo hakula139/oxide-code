@@ -259,11 +259,11 @@ mod tests {
         #[test]
         fn re_resolves_a_percent_threshold_against_the_new_window() {
             let policy = AutoCompactionPolicy::Percent(ThresholdPercent(40));
-            let unknown = ModelSpec::resolve("custom-model".to_owned());
+            let unknown = ModelSpec::resolve("custom-model");
             let compaction = resolve_policy(policy, &unknown, 16_000);
             assert!(!compaction.auto.enabled, "precondition: no window");
 
-            let known = ModelSpec::resolve("claude-opus-5-5".to_owned());
+            let known = ModelSpec::resolve("claude-opus-5-5");
             let swapped = compaction.for_model(&known, 64_000);
 
             assert_eq!(
@@ -334,7 +334,7 @@ mod tests {
                     None,
                 ),
             ] {
-                let model = ModelSpec::resolve(id.to_owned());
+                let model = ModelSpec::resolve(id);
                 assert_eq!(
                     resolve_policy(policy, &model, 64_000).auto,
                     AutoCompactionConfig {
@@ -353,7 +353,7 @@ mod tests {
         #[test]
         fn pins_default_auto_threshold_per_window() {
             for info in MODELS {
-                let model = ModelSpec::resolve(info.id.to_owned());
+                let model = ModelSpec::resolve(info.id);
                 assert_eq!(
                     default_auto_threshold(&model, 64_000),
                     Some(WINDOW_1M_THRESHOLD),
@@ -361,7 +361,7 @@ mod tests {
                     info.id,
                 );
             }
-            let unknown = ModelSpec::resolve("custom-model".to_owned());
+            let unknown = ModelSpec::resolve("custom-model");
             assert_eq!(default_auto_threshold(&unknown, 64_000), None);
         }
     }

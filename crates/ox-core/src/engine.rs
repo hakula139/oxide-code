@@ -3936,7 +3936,7 @@ mod tests {
 
         fn sonnet_pick() -> ConfigPick {
             ConfigPick::Model {
-                id: ResolvedModelId::new("claude-sonnet-5-5".to_owned()),
+                id: ResolvedModelId::new("claude-sonnet-5-5"),
                 effort: None,
             }
         }
@@ -3948,14 +3948,14 @@ mod tests {
                 let dir = tempfile::tempdir().unwrap();
                 let mut engine = engine(server.uri(), &test_store(dir.path()), dir.path()).await;
                 engine.client.set_effort(Effort::High);
-                let opus = ModelSpec::resolve(MODEL.to_owned());
+                let opus = ModelSpec::resolve(MODEL);
                 engine.compaction =
                     CompactionConfig::default_for_test(&opus, engine.client.max_tokens());
                 let opus_compaction = display_auto_compaction(engine.compaction.auto);
                 let sink = CapturingSink::default();
 
                 for id in ["custom-model", MODEL] {
-                    let id = ResolvedModelId::new(id.to_owned());
+                    let id = ResolvedModelId::new(id);
                     engine.set_model(&sink, ConfigPick::Model { id, effort: None });
                 }
 
@@ -4942,7 +4942,7 @@ mod tests {
                     (
                         &set_model,
                         Event::ConfigChanged {
-                            model: ModelSpec::resolve(MODEL.to_owned()),
+                            model: ModelSpec::resolve(MODEL),
                             effort: Some(Effort::Low),
                             requested: ConfigPick::Effort(Effort::Low),
                             auto_compaction: CompactionConfig::with_threshold_for_test(50_000).auto,
@@ -4953,7 +4953,7 @@ mod tests {
                     (
                         &set_model,
                         Event::ConfigChanged {
-                            model: ModelSpec::resolve("custom-model".to_owned()),
+                            model: ModelSpec::resolve("custom-model"),
                             effort: None,
                             requested: ConfigPick::Effort(Effort::Low),
                             auto_compaction: CompactionConfig::with_threshold_for_test(50_000).auto,

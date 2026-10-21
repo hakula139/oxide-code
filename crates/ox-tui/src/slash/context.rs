@@ -79,7 +79,7 @@ pub(crate) mod testing {
                     attribution: true,
                     structured_outputs: true,
                 },
-                model: ModelSpec::resolve("claude-opus-5-5".to_owned()),
+                model: ModelSpec::resolve("claude-opus-5-5"),
                 effort: Some(Effort::High),
                 max_tokens: None,
                 max_tool_rounds: None,

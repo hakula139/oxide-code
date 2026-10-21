@@ -1251,7 +1251,7 @@ mod tests {
                     decision: Decision::Approve,
                 },
                 Op::SetModel(ConfigPick::Model {
-                    id: ResolvedModelId::new("claude-opus-5-5".to_owned()),
+                    id: ResolvedModelId::new("claude-opus-5-5"),
                     effort: Some(Effort::High),
                 }),
                 Op::Compact { instructions: None },

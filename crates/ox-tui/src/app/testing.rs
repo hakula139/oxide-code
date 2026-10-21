@@ -70,7 +70,7 @@ pub(super) fn test_app_with(
 /// id, keeping insta snapshots stable.
 pub(super) fn test_session_info() -> LiveSessionInfo {
     let mut info = slash::testing::test_session_info();
-    info.config.model = ModelSpec::resolve("test-model".to_owned());
+    info.config.model = ModelSpec::resolve("test-model");
     info
 }
 
