@@ -499,7 +499,6 @@ mod tests {
 
         #[test]
         fn when_not_at_top_moves_up_one_row() {
-            // Pins the decrement branch, since select_prev() from row 0 takes the wrap branch.
             let mut popup = name_popup("");
             popup.select_next();
             popup.select_next();
@@ -654,97 +653,42 @@ mod tests {
             use super::*;
 
             #[test]
-            fn is_zero_when_total_fits_window() {
-                let mut p = long_popup(5);
-                p.select_next();
-                p.select_next();
-                assert_eq!(list(&p).scroll_offset(), 0);
-            }
+            fn centers_the_selection_until_the_window_reaches_an_end() {
+                let cases = [
+                    (5, vec![0; 5]),
+                    (MAX_VISIBLE_ROWS, vec![0; MAX_VISIBLE_ROWS]),
+                    (
+                        MAX_VISIBLE_ROWS + 4,
+                        vec![0, 0, 0, 0, 0, 1, 2, 3, 4, 4, 4, 4],
+                    ),
+                ];
+                for (total, expected) in cases {
+                    let mut p = long_popup(total);
 
-            #[test]
-            fn at_exactly_cap_does_not_scroll_last_row() {
-                // Boundary: total == MAX_VISIBLE_ROWS hits the `<=` early-return. Tightening the
-                // boundary pins the invariant for the only case where the edge matters.
-                let mut p = long_popup(MAX_VISIBLE_ROWS);
-                while list(&p).selected < MAX_VISIBLE_ROWS - 1 {
-                    p.select_next();
+                    let offsets: Vec<usize> = (0..total)
+                        .map(|_| {
+                            let offset = list(&p).scroll_offset();
+                            p.select_next();
+                            offset
+                        })
+                        .collect();
+
+                    assert_eq!(offsets, expected, "{total} rows");
+                    assert_eq!(
+                        (list(&p).selected, list(&p).scroll_offset()),
+                        (0, 0),
+                        "{total} rows wrap back to the top window"
+                    );
                 }
-                assert_eq!(list(&p).scroll_offset(), 0);
             }
 
             #[test]
-            fn anchors_at_top_while_cursor_in_first_half() {
-                let mut p = long_popup(MAX_VISIBLE_ROWS + 4);
-                for _ in 0..MAX_VISIBLE_ROWS / 2 {
-                    assert_eq!(list(&p).scroll_offset(), 0);
-                    p.select_next();
-                }
-            }
-
-            #[test]
-            fn centers_cursor_past_first_half() {
-                // pad = MAX_VISIBLE_ROWS / 2 = 4 for the default cap. At selected = pad + k the
-                // offset is k, keeping the cursor visually at row `pad`.
-                let mut p = long_popup(MAX_VISIBLE_ROWS + 4);
-                for _ in 0..=(MAX_VISIBLE_ROWS / 2) {
-                    p.select_next();
-                }
-                assert_eq!(
-                    list(&p).scroll_offset(),
-                    1,
-                    "cursor at pad + 1 → offset = 1"
-                );
-            }
-
-            #[test]
-            fn keeps_visible_row_at_pad_for_mid_list_selection() {
-                // Pin the centering invariant: the visible row of the cursor (selected - offset)
-                // equals `pad` whenever the selection is past the top half but not yet near the
-                // bottom. Mutating the divisor (e.g. `/3`) or the formula would shift this row.
+            fn shows_the_bottom_window_after_wrapping_up_from_the_top() {
                 let total = MAX_VISIBLE_ROWS + 4;
                 let mut p = long_popup(total);
-                let pad = MAX_VISIBLE_ROWS / 2;
-                for _ in 0..=(pad + 1) {
-                    p.select_next();
-                }
-                let visible_row = list(&p).selected - list(&p).scroll_offset();
-                assert_eq!(visible_row, pad, "cursor must sit at the visual middle row");
-            }
 
-            #[test]
-            fn anchors_at_bottom_near_end() {
-                // Once selected nears the end, the offset clamps to `len - MAX_VISIBLE_ROWS` so the
-                // last row stays visible while the cursor advances in the bottom-anchored window.
-                let total = MAX_VISIBLE_ROWS + 4;
-                let mut p = long_popup(total);
-                while list(&p).selected < total - 1 {
-                    p.select_next();
-                }
-                assert_eq!(list(&p).scroll_offset(), total - MAX_VISIBLE_ROWS);
-            }
-
-            #[test]
-            fn resets_on_wrap_to_first_row() {
-                let total = MAX_VISIBLE_ROWS + 4;
-                let mut p = long_popup(total);
-                for _ in 0..total {
-                    p.select_next();
-                }
-                assert_eq!(list(&p).selected, 0, "wrap to row 0");
-                assert_eq!(
-                    list(&p).scroll_offset(),
-                    0,
-                    "wrap snaps the window back to top"
-                );
-            }
-
-            #[test]
-            fn select_prev_from_top_anchors_at_bottom_window() {
-                // Up from row 0 wraps to the last row, and the bottom-anchored window clamps to
-                // `len - MAX_VISIBLE_ROWS`, mirroring the wrap-to-top test above.
-                let total = MAX_VISIBLE_ROWS + 4;
-                let mut p = long_popup(total);
                 p.select_prev();
+
                 assert_eq!(list(&p).selected, total - 1, "wrap to last row");
                 assert_eq!(list(&p).scroll_offset(), total - MAX_VISIBLE_ROWS);
             }

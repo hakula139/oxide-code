@@ -39,22 +39,22 @@ mod tests {
 
             let lines = block.render(&RenderCtx::new(30, &theme));
 
-            assert!(
-                lines.len() > 1,
-                "a narrow width wraps the notice: {lines:?}"
+            let rows: Vec<String> = lines.iter().map(ToString::to_string).collect();
+            assert_eq!(
+                rows,
+                [
+                    "HTTP 529 overloaded_error. ",
+                    "Retrying in 4 s (retry 2 of ",
+                    "5)."
+                ]
             );
-            let spans: Vec<&Span<'_>> = lines.iter().flat_map(|line| &line.spans).collect();
             assert!(
-                spans
+                lines
                     .iter()
+                    .flat_map(|line| &line.spans)
                     .all(|span| span.style == theme.dim() || span.content.trim().is_empty()),
-                "{spans:?}",
+                "{lines:?}",
             );
-            let words: Vec<&str> = spans
-                .iter()
-                .flat_map(|span| span.content.split_whitespace())
-                .collect();
-            assert_eq!(words, text.split_whitespace().collect::<Vec<_>>());
         }
     }
 }

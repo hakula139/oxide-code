@@ -298,7 +298,9 @@ mod tests {
                 +++ counter
                  outro
             "});
+
             let lines = block.render(&RenderCtx::new(80, &theme));
+
             assert_eq!(
                 body_rows(&lines[2..]),
                 [
@@ -331,7 +333,9 @@ mod tests {
                 -x
                 +y
             "#});
+
             let lines = block.render(&RenderCtx::new(80, &theme));
+
             assert_eq!(
                 body_rows(&lines),
                 [
@@ -489,28 +493,7 @@ mod tests {
         }
 
         #[test]
-        fn add_row_carries_diff_add_row_bg() {
-            // Pin: dropping or swapping `diff_add_row` in the renderer construction trips here.
-            let theme = Theme::default();
-            let block = GitDiffBlock::new(indoc! {"
-                diff --git a/x b/x
-                @@ -1 +1 @@
-                +only added
-            "});
-            let lines = block.render(&RenderCtx::new(80, &theme));
-            // Layout: [path header, hunk header, add row]. The number, separator, and text spans
-            // carry the bg, while the bar stays clear.
-            let add_row = lines.last().expect("at least one row");
-            let bgs: Vec<_> = add_row.spans.iter().map(|s| s.style.bg).collect();
-            assert_eq!(bgs[0], None, "bar prefix must stay clear");
-            assert!(
-                bgs.iter().skip(1).any(|bg| *bg == theme.diff_add_row().bg),
-                "expected diff_add_row bg on inner spans, got {bgs:?}",
-            );
-        }
-
-        #[test]
-        fn del_row_carries_diff_del_row_bg() {
+        fn tints_removed_and_added_rows_with_their_row_styles() {
             let theme = Theme::default();
             let block = GitDiffBlock::new(indoc! {"
                 diff --git a/x b/x
@@ -518,15 +501,16 @@ mod tests {
                 -only removed
                 +replacement
             "});
+
             let lines = block.render(&RenderCtx::new(80, &theme));
-            let del_row = lines
+
+            let number_bgs: Vec<_> = lines[2..]
                 .iter()
-                .find(|line| line.spans.iter().any(|s| s.content.as_ref() == " - "))
-                .expect("del row present");
-            let bgs: Vec<_> = del_row.spans.iter().map(|s| s.style.bg).collect();
-            assert!(
-                bgs.iter().skip(1).any(|bg| *bg == theme.diff_del_row().bg),
-                "expected diff_del_row bg on inner spans, got {bgs:?}",
+                .map(|line| line.spans[1].style.bg)
+                .collect();
+            assert_eq!(
+                number_bgs,
+                [theme.diff_del_row().bg, theme.diff_add_row().bg]
             );
         }
 
@@ -593,7 +577,9 @@ mod tests {
                 +gamma
                 +delta
             "});
+
             let lines = block.render(&RenderCtx::new(80, &theme));
+
             let body = &lines[2..]; // skip path + hunk headers
             let numbers: Vec<String> = body
                 .iter()
@@ -615,7 +601,9 @@ mod tests {
                 +third
                 -fourth
             "});
+
             let lines = block.render(&RenderCtx::new(80, &theme));
+
             let body = &lines[2..];
             let numbers: Vec<String> = body
                 .iter()
@@ -636,16 +624,14 @@ mod tests {
                 corrupt-no-marker
                 +second add
             "});
+
             let lines = block.render(&RenderCtx::new(80, &theme));
+
             let body = &lines[2..];
             assert_eq!(body.len(), 3, "{body:#?}");
 
             let corrupt_row = &body[1];
-            let body_text: String = corrupt_row
-                .spans
-                .iter()
-                .map(|s| s.content.as_ref())
-                .collect();
+            let body_text = corrupt_row.to_string();
             assert!(body_text.contains("corrupt-no-marker"), "{body_text:?}");
             for span in &corrupt_row.spans {
                 assert!(
@@ -742,7 +728,6 @@ mod tests {
 
         #[test]
         fn uses_largest_hunk_extent() {
-            // Asymmetric extents: dropping `.max()` would collapse to the narrower side.
             assert_eq!(max_line_number("@@ -1,1 +1,10 @@"), 10);
             assert_eq!(max_line_number("@@ -100,5 +1,1 @@"), 104);
         }
