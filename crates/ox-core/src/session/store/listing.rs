@@ -505,8 +505,8 @@ mod tests {
     mod list {
         use super::*;
 
-        #[tokio::test]
-        async fn orders_sessions_by_mtime_newest_first() {
+        #[test]
+        fn orders_sessions_by_mtime_newest_first() {
             let (_dir, store) = isolated_store();
 
             let mut wa = store
@@ -537,8 +537,8 @@ mod tests {
             assert_eq!(sessions[1].session_id, "aaa");
         }
 
-        #[tokio::test]
-        async fn mtime_overrides_header_created_at_order() {
+        #[test]
+        fn mtime_overrides_header_created_at_order() {
             let (_dir, store) = isolated_store();
 
             let mut w_old = store
@@ -572,8 +572,8 @@ mod tests {
             assert_eq!(sessions[1].session_id, "zzz-new-header");
         }
 
-        #[tokio::test]
-        async fn picks_latest_title_when_re_appended() {
+        #[test]
+        fn picks_latest_title_when_re_appended() {
             let (_dir, store) = isolated_store();
             let mut writer = store.create(&sample_header("retitled"), &[]).unwrap();
             writer
@@ -615,8 +615,8 @@ mod tests {
             assert_eq!(sessions[0].exit.as_ref().unwrap().message_count, 4);
         }
 
-        #[tokio::test]
-        async fn finds_ai_title_buried_between_head_and_tail() {
+        #[test]
+        fn finds_ai_title_buried_between_head_and_tail() {
             let (_dir, store) = isolated_store();
             let mut writer = store.create(&sample_header("buried"), &[]).unwrap();
             writer
@@ -649,8 +649,8 @@ mod tests {
             assert_eq!(exit.message_count, 2);
         }
 
-        #[tokio::test]
-        async fn leaves_absent_title_and_exit_fields_unset() {
+        #[test]
+        fn leaves_absent_title_and_exit_fields_unset() {
             let (_dir, store) = isolated_store();
             let _writer = store.create(&sample_header("bare"), &[]).unwrap();
 
@@ -675,8 +675,8 @@ mod tests {
             assert!(store.list().unwrap().is_empty());
         }
 
-        #[tokio::test]
-        async fn is_scoped_to_current_project() {
+        #[test]
+        fn is_scoped_to_current_project() {
             let dir = tempfile::tempdir().unwrap();
             let store = test_store(dir.path());
             let _own = store.create(&sample_header("own"), &[]).unwrap();
@@ -722,8 +722,8 @@ mod tests {
     mod list_paged {
         use super::*;
 
-        #[tokio::test]
-        async fn caps_at_limit_keeping_most_recent() {
+        #[test]
+        fn caps_at_limit_keeping_most_recent() {
             let (_dir, store) = isolated_store();
             seed_n_sessions(&store, 10);
 
@@ -734,8 +734,8 @@ mod tests {
             assert_eq!(page.sessions()[2].session_id, "session-0007");
         }
 
-        #[tokio::test]
-        async fn unbounded_includes_every_session_without_more() {
+        #[test]
+        fn unbounded_includes_every_session_without_more() {
             let (_dir, store) = isolated_store();
             seed_n_sessions(&store, 4);
 
@@ -744,8 +744,8 @@ mod tests {
             assert!(!page.has_more());
         }
 
-        #[tokio::test]
-        async fn all_spans_every_project_subdirectory() {
+        #[test]
+        fn all_spans_every_project_subdirectory() {
             let dir = tempfile::tempdir().unwrap();
             let store = test_store(dir.path());
             let _own = store.create(&sample_header("own"), &[]).unwrap();
@@ -863,8 +863,8 @@ mod tests {
             );
         }
 
-        #[tokio::test]
-        async fn zero_limit_yields_no_rows_but_flags_more() {
+        #[test]
+        fn zero_limit_yields_no_rows_but_flags_more() {
             // The CLI maps `--limit 0` to `None`, so `Some(0)` reaching the store means zero rows.
             let (_dir, store) = isolated_store();
             seed_n_sessions(&store, 3);

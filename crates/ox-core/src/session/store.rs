@@ -701,23 +701,22 @@ mod tests {
     mod open {
         use super::*;
 
-        async fn open_in_isolated_env(xdg: &Path) -> SessionStore {
+        fn open_in_isolated_env(xdg: &Path) -> SessionStore {
             let home = tempfile::tempdir().unwrap();
-            temp_env::async_with_vars(
+            temp_env::with_vars(
                 [
                     ("XDG_DATA_HOME", Some(xdg.to_string_lossy().into_owned())),
                     (HOME_VAR, Some(home.path().to_string_lossy().into_owned())),
                 ],
-                async { SessionStore::open(Path::new("/work/proj"), Path::new("/work/proj")) },
+                || SessionStore::open(Path::new("/work/proj"), Path::new("/work/proj")),
             )
-            .await
             .unwrap()
         }
 
-        #[tokio::test]
-        async fn uses_xdg_data_home_when_set() {
+        #[test]
+        fn uses_xdg_data_home_when_set() {
             let xdg = tempfile::tempdir().unwrap();
-            let store = open_in_isolated_env(xdg.path()).await;
+            let store = open_in_isolated_env(xdg.path());
             let sessions = xdg.path().join("ox").join(SESSIONS_DIR);
             assert_eq!(store.sessions_dir, sessions);
             assert_eq!(
@@ -727,17 +726,16 @@ mod tests {
             assert!(store.project_dir.is_dir(), "project dir created");
         }
 
-        #[tokio::test]
-        async fn falls_back_to_home_local_share_when_xdg_unset() {
+        #[test]
+        fn falls_back_to_home_local_share_when_xdg_unset() {
             let home = tempfile::tempdir().unwrap();
-            let store = temp_env::async_with_vars(
+            let store = temp_env::with_vars(
                 [
                     ("XDG_DATA_HOME", None),
                     (HOME_VAR, Some(home.path().to_string_lossy().into_owned())),
                 ],
-                async { SessionStore::open(Path::new("/work/proj"), Path::new("/work/proj")) },
+                || SessionStore::open(Path::new("/work/proj"), Path::new("/work/proj")),
             )
-            .await
             .unwrap();
             let expected = home
                 .path()
@@ -748,12 +746,12 @@ mod tests {
         }
 
         #[cfg(unix)]
-        #[tokio::test]
-        async fn creates_private_dirs_with_mode_0o700_on_unix() {
+        #[test]
+        fn creates_private_dirs_with_mode_0o700_on_unix() {
             use std::os::unix::fs::PermissionsExt;
 
             let xdg = tempfile::tempdir().unwrap();
-            let store = open_in_isolated_env(xdg.path()).await;
+            let store = open_in_isolated_env(xdg.path());
             for dir in [&store.sessions_dir, &store.project_dir] {
                 let mode = fs::metadata(dir).unwrap().permissions().mode() & 0o777;
                 assert_eq!(mode, 0o700, "{dir:?} must be 0o700, got {mode:o}");
@@ -764,8 +762,8 @@ mod tests {
     mod create {
         use super::*;
 
-        #[tokio::test]
-        async fn writes_the_header_then_the_given_lines() {
+        #[test]
+        fn writes_the_header_then_the_given_lines() {
             let dir = tempfile::tempdir().unwrap();
             let store = test_store(dir.path());
             let uuid = Uuid::new_v4();
@@ -790,8 +788,8 @@ mod tests {
             );
         }
 
-        #[tokio::test]
-        async fn fails_when_file_already_exists() {
+        #[test]
+        fn fails_when_file_already_exists() {
             let dir = tempfile::tempdir().unwrap();
             let store = test_store(dir.path());
             let header = sample_header("existing");
@@ -813,8 +811,8 @@ mod tests {
         }
 
         #[cfg(unix)]
-        #[tokio::test]
-        async fn sets_user_only_file_permissions_on_unix() {
+        #[test]
+        fn sets_user_only_file_permissions_on_unix() {
             use std::os::unix::fs::PermissionsExt;
 
             let dir = tempfile::tempdir().unwrap();
@@ -829,8 +827,8 @@ mod tests {
     mod open_append_at {
         use super::*;
 
-        #[tokio::test]
-        async fn writes_to_existing_file() {
+        #[test]
+        fn writes_to_existing_file() {
             let dir = tempfile::tempdir().unwrap();
             let store = test_store(dir.path());
             let mut writer = store.create(&sample_header("append-test"), &[]).unwrap();
@@ -973,8 +971,8 @@ mod tests {
             }
         }
 
-        #[tokio::test]
-        async fn includes_only_messages_with_last_uuid() {
+        #[test]
+        fn includes_only_messages_with_last_uuid() {
             let (_dir, store) = isolated_store();
             let mut writer = store.create(&sample_header("load-test"), &[]).unwrap();
 
@@ -1573,8 +1571,8 @@ mod tests {
             assert_eq!(format!("{err:#}"), open_failure(&path));
         }
 
-        #[tokio::test]
-        async fn resolves_transcript_through_newest_chain_leaf() {
+        #[test]
+        fn resolves_transcript_through_newest_chain_leaf() {
             let (_dir, store) = isolated_store();
             let mut writer = store.create(&sample_header("fork"), &[]).unwrap();
 
@@ -1929,8 +1927,8 @@ mod tests {
         mod append_lines {
             use super::*;
 
-            #[tokio::test]
-            async fn writes_multiple_entries() {
+            #[test]
+            fn writes_multiple_entries() {
                 let dir = tempfile::tempdir().unwrap();
                 let store = test_store(dir.path());
                 let mut writer = store.create(&sample_header("multi"), &[]).unwrap();
