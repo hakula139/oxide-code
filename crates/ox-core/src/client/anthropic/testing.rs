@@ -21,8 +21,7 @@ pub(crate) const DEVICE_ID: &str = "did";
 pub(crate) fn test_config(base_url: impl Into<String>, auth: Auth, model: &str) -> Config {
     Config {
         auth: Some(auth),
-        signed_out_notice: None,
-        retry_login: false,
+        signed_out: None,
         base_url: base_url.into(),
         extra_ca_certs: None,
         gateway: GatewayCompat {

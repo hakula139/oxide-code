@@ -319,38 +319,39 @@ fn signed_out_error(e: &LoginError) -> String {
 /// What a session shows on a request while signed out, and at startup when no login is stored.
 pub(crate) const SIGNED_OUT: &str = "Not signed in. Run `/login` to sign in.";
 
-/// The step a session can take after a transient failure signs it out, since its next prompt
-/// loads the stored login again.
 const RETRY_STEP: &str = "The next prompt tries the stored login again.";
 
-/// What a TUI session shows while signed out because of `e`, at startup and on each prompt.
-pub(super) fn signed_out_notice(e: &LoginError) -> String {
-    match e {
-        LoginError::Missing => SIGNED_OUT.to_owned(),
-        e if e.is_transient() => join_sentences(&format!("Not signed in: {e}"), RETRY_STEP),
-        e => format!("Not signed in: {e}"),
-    }
+/// Why a TUI session has no stored login to send.
+#[derive(Debug, Clone)]
+pub(crate) struct LoginUnavailable {
+    /// What the session shows at startup or when a retry fails.
+    pub(crate) notice: String,
+    /// Whether a later attempt may load the login, so the next prompt or compaction tries it.
+    pub(crate) retry: bool,
 }
 
-/// Why [`retry_stored_login`] supplied no token.
-pub(crate) struct LoginRetryFailed {
-    /// The signed-out notice to show.
-    pub(crate) notice: String,
-    /// Whether a later attempt may load the login.
-    pub(crate) transient: bool,
+impl LoginUnavailable {
+    pub(super) fn new(e: &LoginError) -> Self {
+        let notice = match e {
+            LoginError::Missing => SIGNED_OUT.to_owned(),
+            e if e.is_transient() => join_sentences(&format!("Not signed in: {e}"), RETRY_STEP),
+            e => format!("Not signed in: {e}"),
+        };
+        Self {
+            notice,
+            retry: e.is_transient(),
+        }
+    }
 }
 
 /// Loads the first stored login again for a session that a transient failure signed out.
 pub(crate) async fn retry_stored_login(
     keychain: ClaudeCodeKeychain,
     trust: &dyn Trust,
-) -> Result<Auth, LoginRetryFailed> {
+) -> Result<Auth, LoginUnavailable> {
     stored_login(keychain, trust)
         .await
-        .map_err(|e| LoginRetryFailed {
-            notice: signed_out_notice(&e),
-            transient: e.is_transient(),
-        })
+        .map_err(|e| LoginUnavailable::new(&e))
 }
 
 /// Explicit credentials in precedence order: env and config values, before the stored logins.
@@ -650,44 +651,53 @@ mod tests {
         }
     }
 
-    mod signed_out_notice {
+    mod login_unavailable {
         use super::*;
 
         #[test]
-        fn names_the_step_that_signs_in() {
-            assert_eq!(
-                signed_out_notice(&LoginError::Missing),
-                "Not signed in. Run `/login` to sign in.",
-            );
-            assert_eq!(
-                signed_out_notice(&LoginError::Expired(Login::Ox)),
-                "Not signed in: oxide-code login has expired. Run `/login` to sign in again.",
-            );
-            assert_eq!(
-                signed_out_notice(&LoginError::Unreadable(
-                    Login::ClaudeCode,
-                    anyhow::anyhow!("failed to parse the credentials in the macOS Keychain"),
-                )),
-                "Not signed in: failed to load the Claude Code login: \
-                 failed to parse the credentials in the macOS Keychain. \
-                 Run `claude` to sign in again.",
-            );
+        fn names_the_step_that_signs_in_and_retries_no_lasting_failure() {
+            for (e, notice) in [
+                (
+                    LoginError::Missing,
+                    "Not signed in. Run `/login` to sign in.",
+                ),
+                (
+                    LoginError::Expired(Login::Ox),
+                    "Not signed in: oxide-code login has expired. Run `/login` to sign in again.",
+                ),
+                (
+                    LoginError::Unreadable(
+                        Login::ClaudeCode,
+                        anyhow::anyhow!("failed to parse the credentials in the macOS Keychain"),
+                    ),
+                    "Not signed in: failed to load the Claude Code login: \
+                     failed to parse the credentials in the macOS Keychain. \
+                     Run `claude` to sign in again.",
+                ),
+            ] {
+                let unavailable = LoginUnavailable::new(&e);
+
+                assert_eq!(unavailable.notice, notice);
+                assert!(!unavailable.retry, "{notice}");
+            }
         }
 
         #[test]
-        fn says_the_next_prompt_retries_a_transient_failure() {
-            let notice = signed_out_notice(&LoginError::RefreshFailed {
+        fn retries_a_transient_failure_and_says_so() {
+            let unavailable = LoginUnavailable::new(&LoginError::RefreshFailed {
                 login: Login::Ox,
                 error: anyhow::anyhow!("token endpoint returned 503"),
                 transient: true,
             });
 
             assert_eq!(
-                notice,
+                unavailable.notice,
                 "Not signed in: failed to refresh the expired oxide-code login: \
-                 token endpoint returned 503. Run `/login` to sign in again. \
+                 token endpoint returned 503. \
+                 Run `/login` to sign in again. \
                  The next prompt tries the stored login again.",
             );
+            assert!(unavailable.retry);
         }
     }
 

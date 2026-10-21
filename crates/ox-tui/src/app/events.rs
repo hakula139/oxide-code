@@ -1855,6 +1855,27 @@ mod tests {
         }
 
         #[test]
+        fn login_restored_names_the_credential_and_keeps_the_turn_running() {
+            let (mut app, _rx, _event_tx) = test_app(None);
+            app.session_info.config.auth = None;
+            app.status_bar.set_status(Status::Streaming);
+
+            app.handle_engine_event(Event::LoginRestored {
+                auth: AuthSource::ClaudeCodeLogin,
+            });
+
+            assert_eq!(
+                app.session_info.config.auth,
+                Some(AuthSource::ClaudeCodeLogin)
+            );
+            assert_eq!(
+                app.chat.last_system_text(),
+                Some("Signed in. Requests now use OAuth (Claude Code login).")
+            );
+            assert_eq!(app.status_bar.status(), &Status::Streaming);
+        }
+
+        #[test]
         fn signed_out_reports_the_removal_and_the_credential_requests_use() {
             for (removed, auth, fallback_error, expected) in [
                 (
@@ -1899,39 +1920,18 @@ mod tests {
         }
 
         #[test]
-        fn login_restored_names_the_credential_and_keeps_the_turn_running() {
-            let (mut app, _rx, _event_tx) = test_app(None);
-            app.session_info.config.auth = None;
-            app.status_bar.set_status(Status::Streaming);
-
-            app.handle_engine_event(Event::LoginRestored {
-                auth: AuthSource::ClaudeCodeLogin,
-            });
-
-            assert_eq!(
-                app.session_info.config.auth,
-                Some(AuthSource::ClaudeCodeLogin)
-            );
-            assert_eq!(
-                app.chat.last_system_text(),
-                Some("Signed in. Requests now use OAuth (Claude Code login).")
-            );
-            assert_eq!(app.status_bar.status(), &Status::Streaming);
-        }
-
-        #[test]
-        fn signed_in_or_out_drops_the_previous_accounts_usage_limits() {
+        fn credential_changes_drop_the_previous_accounts_usage_limits() {
             for event in [
                 Event::SignedIn {
                     auth: AuthSource::OxLogin,
+                },
+                Event::LoginRestored {
+                    auth: AuthSource::ClaudeCodeLogin,
                 },
                 Event::SignedOut {
                     removed: true,
                     auth: Some(AuthSource::ApiKeyEnv),
                     fallback_error: None,
-                },
-                Event::LoginRestored {
-                    auth: AuthSource::ClaudeCodeLogin,
                 },
             ] {
                 let (mut app, _rx, _event_tx) = test_app(None);

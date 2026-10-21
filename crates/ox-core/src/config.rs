@@ -23,7 +23,7 @@ use anyhow::{Context, Result, anyhow, bail};
 use serde::{Deserialize, Serialize};
 use tracing::warn;
 
-use self::auth::{Auth, AuthSource, ResolveError};
+use self::auth::{Auth, AuthSource, LoginUnavailable, ResolveError};
 use self::compaction::{AutoCompactionConfig, CompactionConfig};
 use self::gateway::{GatewayCompat, GatewaySnapshot};
 use self::load::Loaded;
@@ -321,10 +321,7 @@ pub struct Config {
     /// sign it in.
     pub(crate) auth: Option<Auth>,
     /// Why the session started signed out.
-    pub(crate) signed_out_notice: Option<String>,
-    /// Whether a later attempt may recover from the failure that signed the session out, so its
-    /// next prompt loads the stored login again.
-    pub(crate) retry_login: bool,
+    pub(crate) signed_out: Option<LoginUnavailable>,
     pub(crate) base_url: String,
     /// Resolved path to a PEM bundle appended to reqwest's trust anchors. `None` means the
     /// client trusts only the platform roots.
@@ -451,8 +448,7 @@ impl Config {
             model,
             effort: effort.value,
             auth: credential.auth,
-            signed_out_notice: credential.signed_out_notice,
-            retry_login: credential.retry_login,
+            signed_out: credential.signed_out,
             base_url: base_url.value,
             extra_ca_certs: extra_ca_certs.value,
             gateway,
@@ -475,7 +471,11 @@ impl Config {
         self.model
             .unsupported_notice()
             .into_iter()
-            .chain(self.signed_out_notice.clone())
+            .chain(
+                self.signed_out
+                    .as_ref()
+                    .map(|signed_out| signed_out.notice.clone()),
+            )
             .collect()
     }
 
@@ -537,8 +537,7 @@ fn resolve_extra_ca_certs(file: Option<Sourced<String>>) -> Result<Sourced<Optio
 struct ResolvedAuth {
     auth: Option<Auth>,
     source: Source,
-    signed_out_notice: Option<String>,
-    retry_login: bool,
+    signed_out: Option<LoginUnavailable>,
 }
 
 /// Resolves the credential and its source, rejecting a custom header that would replace the
@@ -558,11 +557,9 @@ async fn resolve_auth(
         auth::stored_login(ClaudeCodeKeychain::SYSTEM, trust),
     )
     .await;
-    let (auth, signed_out_notice, retry_login) = match resolved {
-        Ok(auth) => (Some(auth), None, false),
-        Err(ResolveError::SignedOut(e)) if interactive => {
-            (None, Some(auth::signed_out_notice(&e)), e.is_transient())
-        }
+    let (auth, signed_out) = match resolved {
+        Ok(auth) => (Some(auth), None),
+        Err(ResolveError::SignedOut(e)) if interactive => (None, Some(LoginUnavailable::new(&e))),
         Err(e) => return Err(e.into()),
     };
     let source = auth.as_ref().map_or(AuthSource::OxLogin, Auth::source);
@@ -575,8 +572,7 @@ async fn resolve_auth(
     Ok(ResolvedAuth {
         auth,
         source,
-        signed_out_notice,
-        retry_login,
+        signed_out,
     })
 }
 
@@ -764,6 +760,8 @@ mod tests {
     use tempfile::TempDir;
 
     use super::compaction::testing::WINDOW_1M_THRESHOLD;
+    use super::oauth::LoginError;
+    use super::oauth::testing::write_creds;
     use super::provenance::Layer;
     use super::*;
     use crate::permission::{Access, Decision, PermissionClass};
@@ -776,8 +774,7 @@ mod tests {
                 AuthSource::ClaudeCodeLogin,
                 "token-must-not-leak",
             )),
-            signed_out_notice: None,
-            retry_login: false,
+            signed_out: None,
             base_url: "https://api.example.test".to_owned(),
             extra_ca_certs: Some(PathBuf::from("/etc/ssl/corp-ca.pem")),
             gateway: GatewayCompat {
@@ -1532,7 +1529,7 @@ mod tests {
                 .unwrap();
             assert_auth(&config, AuthSource::OxLogin, "ox-token");
             assert_eq!(config.provenance.auth, Source::Default);
-            assert_eq!(config.signed_out_notice, None);
+            assert!(config.signed_out.is_none());
         }
 
         #[tokio::test]
@@ -1549,10 +1546,12 @@ mod tests {
 
             let interactive = interactive.unwrap();
             assert!(interactive.auth.is_none());
+            let signed_out = interactive.signed_out.expect("signed out");
             assert_eq!(
-                interactive.signed_out_notice.as_deref(),
-                Some("Not signed in: oxide-code login has expired. Run `/login` to sign in again."),
+                signed_out.notice,
+                "Not signed in: oxide-code login has expired. Run `/login` to sign in again.",
             );
+            assert!(!signed_out.retry, "an expired login needs a new sign-in");
             assert_eq!(
                 format!(
                     "{:#}",
@@ -1560,6 +1559,32 @@ mod tests {
                 ),
                 "oxide-code login has expired. Run `/login` to sign in again.",
             );
+        }
+
+        #[tokio::test(start_paused = true)]
+        async fn retries_a_stored_login_a_held_lock_kept_out() {
+            let (dir, data) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+            let vars = ox_login_env(&dir, &data, 0);
+            let store = data.path().join("ox");
+            write_creds(&store.join("credentials.json"), "dead", Some("refresh"), 0);
+            std::fs::create_dir(store.join("credentials.lock")).unwrap();
+
+            let config = temp_env::async_with_vars(vars, Config::load(dir.path(), true))
+                .await
+                .unwrap();
+
+            let signed_out = config.signed_out.expect("signed out");
+            assert_eq!(
+                signed_out.notice,
+                format!(
+                    "Not signed in: failed to refresh the expired oxide-code login: \
+                     another process held {} for over 20 s. \
+                     Try again in a moment. \
+                     The next prompt tries the stored login again.",
+                    store.join("credentials.lock").display(),
+                ),
+            );
+            assert!(signed_out.retry);
         }
 
         #[tokio::test]
@@ -2225,7 +2250,7 @@ mod tests {
         fn list_an_unsupported_model_then_why_the_session_is_signed_out() {
             let mut cfg = sample_config();
             cfg.auth = None;
-            cfg.signed_out_notice = Some("Not signed in. Run `/login` to sign in.".to_owned());
+            cfg.signed_out = Some(LoginUnavailable::new(&LoginError::Missing));
 
             let notices = cfg.notices();
 
