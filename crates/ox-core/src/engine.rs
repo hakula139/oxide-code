@@ -288,16 +288,11 @@ impl Engine {
         mut ops: mpsc::Receiver<Op>,
     ) -> Option<String> {
         while let Some(op) = ops.recv().await {
+            let mut end = None;
             match op {
-                Op::Prompt(text) => {
-                    if self.submit_prompt(&text, &sink, &mut ops).await == TurnEnd::Shutdown {
-                        break;
-                    }
-                }
+                Op::Prompt(text) => end = Some(self.submit_prompt(&text, &sink, &mut ops).await),
                 Op::Compact { instructions } => {
-                    if self.compact(&sink, &mut ops, instructions).await == TurnEnd::Shutdown {
-                        break;
-                    }
+                    end = Some(self.compact(&sink, &mut ops, instructions).await);
                 }
                 Op::Clear => self.clear(&sink).await,
                 Op::Archive => self.archive(&sink).await,
@@ -305,16 +300,15 @@ impl Engine {
                 Op::Rename { title } => self.rename(&sink, title).await,
                 Op::SetModel(pick) => self.set_model(&sink, pick),
                 Op::SetMode(mode) => self.set_mode(&sink, mode),
-                Op::Login => {
-                    if self.login(&sink, &mut ops).await == TurnEnd::Shutdown {
-                        break;
-                    }
-                }
+                Op::Login => end = Some(self.login(&sink, &mut ops).await),
                 Op::Logout => self.logout(&sink).await,
                 // A `Queue` here arrived after its turn ended, and the frontend still submits it.
                 // An interrupt or approval only matters mid-turn, where `agent_turn` consumes it.
                 Op::Queue(_) | Op::Interrupt | Op::Resolve { .. } => {}
                 Op::Shutdown => break,
+            }
+            if end == Some(TurnEnd::Shutdown) {
+                break;
             }
         }
 
@@ -476,14 +470,16 @@ impl Engine {
     async fn archive(&mut self, sink: &dyn EventSink) {
         if self.messages.is_empty() {
             sink.emit(
-                Event::Error("Nothing to archive: this session has no messages yet".to_owned()),
+                Event::TurnFailed(
+                    "Nothing to archive: this session has no messages yet".to_owned(),
+                ),
                 "archive-empty",
             );
             return;
         }
         if let Some(failure) = self.session.archive().await.failure {
             sink.emit(
-                Event::Error(format!("Archive failed: {failure}")),
+                Event::TurnFailed(format!("Archive failed: {failure}")),
                 "archive-failed",
             );
             return;
@@ -742,7 +738,7 @@ impl Engine {
             Ok(removed) => removed,
             Err(e) => {
                 sink.emit(
-                    Event::Error(format!("Sign-out failed: {e:#}")),
+                    Event::TurnFailed(format!("Sign-out failed: {e:#}")),
                     "logout-failed",
                 );
                 return;
@@ -775,14 +771,13 @@ impl Engine {
     }
 
     async fn account_usage(&mut self, sink: &dyn EventSink, report: &TurnReport) {
-        self.last_usage = report.usage;
-        if let Some(usage) = report.usage {
-            self.displayed_usage = Some(usage);
+        self.last_usage = report.usage();
+        if self.last_usage.is_none() {
+            return;
         }
+        self.displayed_usage = self.last_usage;
         self.bill(sink, &report.billable_rounds).await;
-        if report.usage.is_some() || !report.billable_rounds.is_empty() {
-            self.emit_usage_update(sink);
-        }
+        self.emit_usage_update(sink);
     }
 
     /// Records each request in `requests` and adds its estimated cost to the session total.
@@ -3647,10 +3642,11 @@ mod tests {
                 assert!(
                     matches!(
                         events.as_slice(),
-                        [Event::Error(empty), Event::Error(first), Event::Error(again)]
-                            if empty.starts_with("Nothing to archive")
-                                && first.starts_with("Archive failed: ")
-                                && again.starts_with("Archive failed: ")
+                        [Event::TurnFailed(empty), Event::TurnFailed(first), Event::TurnFailed(again)]
+                            if empty == "Nothing to archive: this session has no messages yet"
+                                && first == "Archive failed: session writer task has stopped. \
+                                             Conversation history may be incomplete."
+                                && again == "Archive failed: session writer task has stopped"
                     ),
                     "{events:?}",
                 );
@@ -4760,7 +4756,7 @@ mod tests {
                     assert!(
                         matches!(
                             events.as_slice(),
-                            [Event::Error(msg)]
+                            [Event::TurnFailed(msg)]
                                 if msg.starts_with("Sign-out failed: failed to remove ")
                         ),
                         "{events:?}"
@@ -5013,7 +5009,7 @@ mod tests {
             let abort = sign_in_failed(&cause);
 
             assert_eq!(
-                abort.to_string(),
+                abort.into_failure().to_string(),
                 "Sign-in failed: token exchange failed with 400 Bad Request: Code expired. \
                  Run `/login` to try again.",
             );

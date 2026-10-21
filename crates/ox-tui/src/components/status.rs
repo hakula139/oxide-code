@@ -51,7 +51,9 @@ pub(crate) enum Status {
     ToolRunning { name: String },
     Compacting,
     SigningIn,
+    SigningOut,
     Resuming,
+    Archiving,
     Cancelling,
     ExitArmed { until: Instant },
 }
@@ -70,7 +72,9 @@ impl Status {
                 | Self::ToolRunning { .. }
                 | Self::Compacting
                 | Self::SigningIn
+                | Self::SigningOut
                 | Self::Resuming
+                | Self::Archiving
                 | Self::Cancelling,
         )
     }
@@ -82,7 +86,9 @@ impl Status {
             Self::ToolRunning { name } => format!("Running {name} · Esc to interrupt").into(),
             Self::Compacting => "Compacting · Esc to interrupt".into(),
             Self::SigningIn => "Signing in · Esc to cancel".into(),
+            Self::SigningOut => "Signing out".into(),
             Self::Resuming => "Resuming".into(),
+            Self::Archiving => "Archiving".into(),
             Self::Cancelling => "Cancelling".into(),
             Self::ExitArmed { .. } => "Press Ctrl+C again to exit".into(),
         }
@@ -1047,7 +1053,9 @@ mod tests {
                 ),
                 (Status::Compacting, "Compacting · Esc to interrupt"),
                 (Status::SigningIn, "Signing in · Esc to cancel"),
+                (Status::SigningOut, "Signing out"),
                 (Status::Resuming, "Resuming"),
+                (Status::Archiving, "Archiving"),
                 (Status::Cancelling, "Cancelling"),
             ];
             for (status, label) in cases {

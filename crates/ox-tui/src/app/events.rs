@@ -151,18 +151,21 @@ impl App {
 
     fn finish_turn(&mut self) {
         self.chat.commit_streaming();
-        // A cancel that lost the race to the turn's end, or a failed resume, still leaves the next
-        // step to the user.
-        if matches!(&self.status, Status::Cancelling | Status::Resuming) {
+        // A cancel that lost the race to the turn's end, or a failed resume or archive, still leaves
+        // the next step to the user.
+        if matches!(
+            &self.status,
+            Status::Cancelling | Status::Resuming | Status::Archiving
+        ) {
             self.enter_idle();
         } else {
             self.finalize_idle();
         }
     }
 
-    /// Ends a failed turn. A turn that never reached the model, or that the engine rolled back,
-    /// goes idle without starting the queue and hands its prompts back, one into the empty input
-    /// for another try.
+    /// Ends a failed operation. A turn that never reached the model, or that the engine rolled
+    /// back, goes idle without starting the queue and hands its prompts back, one into the empty
+    /// input for another try.
     fn apply_turn_failed(&mut self, msg: &str) {
         self.chat.push_error(msg);
         match self.queue.fail_turn(self.input.is_empty()) {
@@ -253,12 +256,12 @@ impl App {
         self.clear_modals();
     }
 
-    /// Ends a `/compact` or `/resume` once the new transcript has reported its state. A cancel that
-    /// lost the race to the swap leaves the queue to the user, and a roll never leaves idle, so its
-    /// `SessionReady` changes nothing.
+    /// Ends a `/compact`, `/resume`, or `/archive` once the new transcript has reported its state.
+    /// A cancel that lost the race to the swap leaves the queue to the user, and `/clear` never
+    /// leaves idle, so its `SessionReady` changes nothing.
     fn apply_session_ready(&mut self) {
         match &self.status {
-            Status::Compacting | Status::Resuming => self.finalize_idle(),
+            Status::Compacting | Status::Resuming | Status::Archiving => self.finalize_idle(),
             Status::Cancelling => self.enter_idle(),
             _ => {}
         }
@@ -355,6 +358,7 @@ impl App {
             (None, None) => "No credential is active. Run `/login` to sign in.".to_owned(),
         };
         self.chat.push_system_message(format!("{outcome} {active}"));
+        self.finish_turn();
     }
 
     /// Goes idle, then submits the next queued prompt.
@@ -771,6 +775,26 @@ mod tests {
 
             assert_eq!(app.chat.last_error_text(), Some("API blew up"));
             assert_eq!(app.status, Status::Idle);
+        }
+
+        #[tokio::test]
+        async fn turn_failed_ends_an_archive_and_holds_the_prompts_queued_during_it() {
+            let (mut app, mut rx, _event_tx) = test_app(None);
+            app.dispatch_op(Op::Archive);
+            assert_eq!(rx.recv().await, Some(Op::Archive));
+            app.dispatch_action(Action::Submit("typed meanwhile".to_owned()));
+            let during = rx.try_recv();
+
+            app.handle_engine_event(Event::TurnFailed("Archive failed: disk full".to_owned()));
+
+            assert_eq!(during, Err(TryRecvError::Empty));
+            assert_eq!(
+                app.chat.last_error_text(),
+                Some("Archive failed: disk full")
+            );
+            assert_eq!(app.status, Status::Idle);
+            assert_eq!(*app.queue.pending(), ["typed meanwhile"]);
+            assert_eq!(rx.try_recv(), Err(TryRecvError::Empty));
         }
 
         #[tokio::test]
@@ -1546,6 +1570,27 @@ mod tests {
             assert_eq!(app.status, Status::Idle);
         }
 
+        #[tokio::test]
+        async fn session_ready_ends_an_archive_and_starts_the_prompt_queued_during_it() {
+            let (mut app, mut rx, _event_tx) = test_app(None);
+            app.dispatch_op(Op::Archive);
+            assert_eq!(rx.recv().await, Some(Op::Archive));
+            app.dispatch_action(Action::Submit("next".to_owned()));
+            let during = rx.try_recv();
+
+            app.handle_engine_event(Event::SessionRolled {
+                id: "rolled-session".to_owned(),
+                archived: true,
+            });
+            let at_roll = app.status.clone();
+            app.handle_engine_event(Event::SessionReady);
+
+            assert_eq!(during, Err(TryRecvError::Empty));
+            assert_eq!(at_roll, Status::Archiving);
+            assert_eq!(rx.recv().await, Some(Op::Prompt("next".to_owned())));
+            assert_eq!(app.status, Status::Streaming);
+        }
+
         #[test]
         fn config_changed_model_swap_refreshes_status_and_chat() {
             // Three surfaces refresh in one shot: status-bar label, `session_info` (backs `/status`
@@ -1776,6 +1821,25 @@ mod tests {
                 assert_eq!(app.session_info.config.auth, auth);
                 assert_eq!(app.chat.last_system_text(), Some(expected));
             }
+        }
+
+        #[tokio::test]
+        async fn signed_out_ends_a_logout_and_starts_the_prompt_queued_during_it() {
+            let (mut app, mut rx, _event_tx) = test_app(None);
+            app.dispatch_op(Op::Logout);
+            assert_eq!(rx.recv().await, Some(Op::Logout));
+            app.dispatch_action(Action::Submit("next".to_owned()));
+            let during = (app.status.clone(), rx.try_recv());
+
+            app.handle_engine_event(Event::SignedOut {
+                removed: true,
+                auth: Some(AuthSource::ApiKeyEnv),
+                fallback_error: None,
+            });
+
+            assert_eq!(during, (Status::SigningOut, Err(TryRecvError::Empty)));
+            assert_eq!(rx.recv().await, Some(Op::Prompt("next".to_owned())));
+            assert_eq!(app.status, Status::Streaming);
         }
 
         #[test]

@@ -52,7 +52,8 @@ pub enum Op {
     Compact { instructions: Option<String> },
     /// Finalizes the live session and continues in a fresh, empty one.
     Clear,
-    /// Archives the live session, then continues in a fresh one like [`Self::Clear`].
+    /// Archives the live session, then continues in a fresh one like [`Self::Clear`]. Reports a
+    /// session it cannot archive with [`Event::TurnFailed`].
     Archive,
     /// Finalizes the live session and continues `target`'s saved session in place. Confirms with
     /// [`Event::SessionResumed`], or reports a target it cannot load with [`Event::TurnFailed`].
@@ -64,7 +65,7 @@ pub enum Op {
     /// like a turn, and [`Self::Interrupt`] cancels it.
     Login,
     /// Removes the oxide-code login and confirms with [`Event::SignedOut`], or reports a login it
-    /// cannot remove with [`Event::Error`].
+    /// cannot remove with [`Event::TurnFailed`].
     Logout,
     /// Ends any running operation without a terminal event, finalizes the live session, and stops
     /// the engine. Closing the op channel does the same.
@@ -172,8 +173,8 @@ pub enum Event {
     /// with its prompt and the [`Self::PromptDrained`] prompts it took in, and a
     /// [`Self::TurnFailed`] follows. The frontend hands those prompts back to the user.
     TurnRolledBack,
-    /// The in-flight prompt, compaction, resume, or sign-in failed. Like [`Self::TurnComplete`]
-    /// and [`Self::Cancelled`], it ends the operation.
+    /// The in-flight prompt, compaction, resume, archive, sign-in, or sign-out failed. Like
+    /// [`Self::TurnComplete`] and [`Self::Cancelled`], it ends the operation.
     TurnFailed(String),
     /// Live usage and estimated cost snapshot for the current process.
     UsageUpdated(UsageSnapshot),
