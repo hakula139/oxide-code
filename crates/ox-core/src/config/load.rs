@@ -3,7 +3,7 @@
 
 use std::path::{Path, PathBuf};
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result, anyhow, bail};
 use toml::{Table, Value};
 use tracing::debug;
 
@@ -13,6 +13,7 @@ use super::schema::FileConfig;
 use crate::permission::project::{ProjectFileError, resolve_project_file};
 use crate::permission::{Tier, extra_root};
 use crate::util::path::{XdgBase, app_dir};
+use crate::util::toml::{describe_error, locate_error};
 
 const CONFIG_FILE: &str = "config.toml";
 const DROP_IN_DIR: &str = "config.d";
@@ -161,11 +162,24 @@ fn read_layer(layer: &Layer) -> Result<Option<Table>> {
     // The typed parse reports unknown keys and bad values with their line and column, and the
     // rules and roots resolve here so a malformed one names its file before the lists concatenate.
     let invalid = || format!("invalid config at {}", path.display());
-    let table: Table = content.parse().with_context(invalid)?;
+    // A project file can link to another file in the checkout, and a parser message can quote one
+    // of its values, as in `invalid type: string "..."`, so a project error gives only where it is.
+    let invalid_toml = |e: toml::de::Error| {
+        let detail = if layer.is_project() {
+            locate_error(&content, &e)
+        } else {
+            Some(describe_error(&content, &e))
+        };
+        detail.map_or_else(
+            || anyhow!(invalid()),
+            |detail| anyhow!("{}: {detail}", invalid()),
+        )
+    };
+    let table: Table = content.parse().map_err(invalid_toml)?;
     if layer.is_project() {
         reject_project_permissions(&table, path)?;
     }
-    let config: FileConfig = toml::from_str(&content).with_context(invalid)?;
+    let config: FileConfig = toml::from_str(&content).map_err(invalid_toml)?;
     let permission = &config.permission;
     for (tier, table) in [
         (Tier::Deny, &permission.deny),
@@ -242,7 +256,7 @@ fn reject_project_keys(path: &Path, blocked: &[&str], fix: &str) -> Result<()> {
 }
 
 /// The user config path a fix points to, as written in the docs when no config directory resolves.
-fn user_config_hint() -> String {
+pub fn user_config_hint() -> String {
     user_config_path().map_or_else(
         || "~/.config/ox/config.toml".to_owned(),
         |path| path.display().to_string(),
@@ -791,12 +805,50 @@ mod tests {
         }
 
         #[test]
-        fn rejects_invalid_toml() {
+        fn rejects_invalid_toml_without_quoting_it() {
             let dir = tempfile::tempdir().unwrap();
-            let path = write(&dir.path().join("config.toml"), "[invalid");
+            let path = write(
+                &dir.path().join("config.toml"),
+                "https://user:secret-marker@git.example.com",
+            );
 
-            let err = read_layer(&Layer::User(path)).expect_err("malformed TOML should fail");
-            assert!(format!("{err:#}").contains("invalid config at"), "{err:#}");
+            let err =
+                read_layer(&Layer::User(path.clone())).expect_err("malformed TOML should fail");
+            assert_eq!(
+                format!("{err:#}"),
+                format!(
+                    "invalid config at {}: line 1, column 43: key with no value, expected `=`",
+                    path.display()
+                ),
+            );
+        }
+
+        #[test]
+        fn project_error_gives_only_its_location() {
+            let dir = tempfile::tempdir().unwrap();
+            let path = write(
+                &dir.path().join("config.toml"),
+                indoc! {r#"
+                    [client]
+                    effort = "secret-marker"
+                "#},
+            );
+
+            let user = read_layer(&Layer::User(path.clone())).expect_err("an unknown effort fails");
+            let project =
+                read_layer(&Layer::Project(path.clone())).expect_err("an unknown effort fails");
+
+            assert!(
+                format!("{user:#}").contains("unknown variant `secret-marker`"),
+                "{user:#}"
+            );
+            assert_eq!(
+                format!("{project:#}"),
+                format!(
+                    "invalid config at {}: line 2, column 10, in `client.effort`",
+                    path.display()
+                ),
+            );
         }
 
         #[test]

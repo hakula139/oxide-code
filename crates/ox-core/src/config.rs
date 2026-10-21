@@ -303,6 +303,8 @@ impl FromStr for StatusLineSegment {
 pub struct ThemeConfig {
     /// Built-in catalog key, such as `"mocha"`, or filesystem path, [`DEFAULT_THEME`] when unset.
     pub base: String,
+    /// Where `base` came from. A project file may only name a built-in theme.
+    pub base_source: Source,
     /// `[tui.theme.overrides]` slot patches, still raw TOML.
     pub overrides: toml::Table,
 }
@@ -420,6 +422,7 @@ impl Config {
 
         let theme = ThemeConfig {
             base: tui.theme.base.unwrap_or_else(|| DEFAULT_THEME.to_owned()),
+            base_source: origins.source("tui.theme.base"),
             overrides: tui.theme.overrides,
         };
 
@@ -789,6 +792,7 @@ mod tests {
             ],
             theme: ThemeConfig {
                 base: "macchiato".to_owned(),
+                base_source: Source::Default,
                 overrides: toml::Table::new(),
             },
             provenance: Provenance {
@@ -1107,7 +1111,7 @@ mod tests {
         #[tokio::test]
         async fn theme_passes_base_and_raw_overrides_through() {
             let dir = tempfile::tempdir().unwrap();
-            write_user_config(
+            let layer = write_user_config(
                 dir.path(),
                 indoc! {r##"
                     [tui.theme]
@@ -1120,6 +1124,7 @@ mod tests {
             );
             let config = load_with(&dir, &[]).await.unwrap();
             assert_eq!(config.theme.base, "latte");
+            assert_eq!(config.theme.base_source, Source::File(layer));
             assert_eq!(
                 config.theme.overrides,
                 indoc! {r##"
