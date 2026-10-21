@@ -56,7 +56,7 @@ pub(crate) mod testing {
             config: ConfigSnapshot {
                 effort: Some(Effort::High),
                 max_tokens: None,
-                compaction: CompactionConfig::with_threshold_for_test(155_000),
+                compaction: CompactionConfig::with_threshold(155_000),
                 ..test_snapshot()
             },
         }

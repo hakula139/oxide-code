@@ -2490,12 +2490,12 @@ mod tests {
         use super::*;
 
         #[test]
-        fn far_future_is_not_near() {
+        fn counts_a_far_future_expiry_as_not_near() {
             assert!(!is_near_expiry(u64::MAX));
         }
 
         #[test]
-        fn zero_is_expired() {
+        fn counts_an_expiry_in_the_past_as_near() {
             assert!(is_near_expiry(0));
         }
     }

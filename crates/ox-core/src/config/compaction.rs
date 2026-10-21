@@ -29,11 +29,6 @@ impl CompactionConfig {
     pub(crate) fn for_model(self, model: &ModelSpec, max_tokens: u32) -> Self {
         resolve_policy(self.policy, model, max_tokens)
     }
-
-    #[cfg(test)]
-    pub(crate) fn default_for_test(model: &ModelSpec, max_tokens: u32) -> Self {
-        resolve_policy(AutoCompactionPolicy::Default, model, max_tokens)
-    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -219,6 +214,19 @@ fn default_auto_threshold_for_window(context_window: u32, max_tokens: u32) -> Op
 
 // ── Testing ──
 
+#[cfg(test)]
+pub(crate) mod local_testing {
+    use super::{AutoCompactionPolicy, CompactionConfig, resolve_policy};
+    use crate::model::ModelSpec;
+
+    impl CompactionConfig {
+        /// The default policy resolved for `model` with `max_tokens` of output.
+        pub(crate) fn with_default_policy(model: &ModelSpec, max_tokens: u32) -> Self {
+            resolve_policy(AutoCompactionPolicy::Default, model, max_tokens)
+        }
+    }
+}
+
 #[cfg(any(test, feature = "testing"))]
 pub mod testing {
     use super::{AutoCompactionConfig, AutoCompactionPolicy, CompactionConfig};
@@ -235,7 +243,7 @@ pub mod testing {
             }
         }
 
-        pub const fn with_threshold_for_test(tokens: u32) -> Self {
+        pub const fn with_threshold(tokens: u32) -> Self {
             Self {
                 auto: AutoCompactionConfig {
                     enabled: true,
@@ -347,7 +355,7 @@ mod tests {
         }
     }
 
-    mod window_1m {
+    mod window_1m_threshold {
         use super::*;
 
         #[test]

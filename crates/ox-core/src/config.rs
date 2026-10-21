@@ -790,7 +790,7 @@ mod tests {
             max_tokens: None,
             max_tool_rounds: Some(100),
             prompt_cache_ttl: PromptCacheTtl::FiveMin,
-            compaction: CompactionConfig::with_threshold_for_test(42),
+            compaction: CompactionConfig::with_threshold(42),
             permission: Policy::new(Mode::Plan, Vec::new(), Vec::new(), Vec::new()),
             show_thinking: true,
             show_welcome: false,
@@ -2400,6 +2400,16 @@ mod tests {
         fn names_the_two_flag_states() {
             assert_eq!(display_bool(true), "on");
             assert_eq!(display_bool(false), "off");
+        }
+    }
+
+    mod display_max_tool_rounds {
+        use super::*;
+
+        #[test]
+        fn names_the_cap_or_its_absence() {
+            assert_eq!(display_max_tool_rounds(Some(100)), "100");
+            assert_eq!(display_max_tool_rounds(None), "unbounded");
         }
     }
 

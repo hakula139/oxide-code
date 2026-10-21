@@ -461,6 +461,7 @@ mod tests {
     use super::*;
     use crate::config::oauth::testing::{ox_login_in, write_creds};
     use crate::util::path::local_testing::abs;
+    use crate::util::path::testing::HOME_VAR;
     use crate::util::tls::local_testing::no_roots;
     use crate::util::tls::testing::NoRoots;
 
@@ -976,10 +977,7 @@ mod tests {
             let file = home.path().join(".claude").join(".credentials.json");
 
             let (missing, unreadable, auth) = temp_env::async_with_vars(
-                [
-                    (crate::util::path::testing::HOME_VAR, Some(home.path())),
-                    ("CLAUDE_CONFIG_DIR", None),
-                ],
+                [(HOME_VAR, Some(home.path())), ("CLAUDE_CONFIG_DIR", None)],
                 async {
                     let missing = claude_code_login(ClaudeCodeKeychain::NONE, &NoRoots).await;
                     std::fs::create_dir(file.parent().unwrap()).unwrap();
