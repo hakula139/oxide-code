@@ -87,12 +87,11 @@ On `SessionResumed`, `apply_session_resumed` rebuilds the chat, clears the modal
 - `crates/ox-core/src/command.rs`: `resume`, the typed form shared with the bare REPL.
 - `crates/ox-core/src/engine.rs`: `Engine::resume`, `Engine::roll_into`, `Engine::take_history`, `format_drift_warning`.
 - `crates/ox-core/src/protocol.rs`: `Op::Resume`, `ResumeTarget`, `Event::SessionResumed`, `Interaction`.
-- `crates/ox-core/src/session/display.rs`: `format_short_relative_time` for the picker row's time column, and `format_metadata_line` for the delete confirmation.
 - `crates/ox-core/src/session/handle.rs`: `roll_into`, `RollIntoOutcome`, `LoadedTranscript`.
 - `crates/ox-core/src/session/history.rs`: `interactions`, the display projection `SessionResumed` carries.
 - `crates/ox-core/src/session/resolver.rs`: `resolve_saved_prefix`, shared by `Engine::roll_into`, `/archive`, `/unarchive`, and `/delete`, and the `resolve_prefix_to_info` lookup it wraps.
 - `crates/ox-core/src/session/saved.rs`: `set_archived` behind Ctrl+X, and `delete` behind the confirm-delete modal.
-- `crates/ox-core/src/session/store/listing.rs`: `walk`, `SessionWalk`, `list_paged`, `latest`, `list_matching`, `ListPage`, `ListScope`.
+- `crates/ox-core/src/session/store/listing.rs`: `walk`, `SessionWalk`, `list_paged`, `latest`, `list_matching`, `ListPage`, `ListScope`, `ProjectScope`.
 - `crates/ox-core/src/util/text.rs`: `compact_count`, which abbreviates the message count, shared with the status line's token counts.
 - `crates/ox-tui/src/app.rs`: `push_modal`.
 - `crates/ox-tui/src/app/events.rs`: `apply_session_resumed`.
@@ -103,6 +102,7 @@ On `SessionResumed`, `apply_session_resumed` rebuilds the chat, clears the modal
 - `crates/ox-tui/src/slash/confirm.rs`: `ConfirmDeleteSessionModal` pushed by Ctrl+D.
 - `crates/ox-tui/src/slash/registry.rs`: `BUILT_INS` entry `&ResumeCmd`.
 - `crates/ox-tui/src/slash/resume.rs`: `ResumeCmd`, `ResumePicker` and its `at_startup` variant, `PickerAction` and its `ACTIONS` keymap, `Pages`, and `SessionRow` with its `Column` layout.
+- `crates/ox-tui/src/slash/sessions.rs`: `format_short_relative_time` for the picker row's time column, and `format_metadata_line` for the delete confirmation.
 - `crates/ox/src/driver/stdio.rs`: `StdioSink`, which confirms a resume on stderr.
 - `crates/ox/src/main.rs`: `Cli::archived`, `Cli::limit`, `Cli::resume`.
 - `crates/ox/src/session_list.rs`: the `ox --list` table over `list_paged`.
