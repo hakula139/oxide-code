@@ -9,7 +9,8 @@ Conventions for comments, docstrings, documentation, commit and PR text, and str
 - Explain cryptic flags, literals, and API quirks, and label what a non-obvious regex matches.
 - When editing, delete comments that repeat the code and correct any that have become misleading. Before deleting a comment that records a constraint, check whether the constraint still applies.
 - Delete commented-out code because version control preserves it.
-- Write comments and docstrings as prose, and wrap them by hand within 100 columns to match rustfmt's `max_width`, since rustfmt does not wrap them. Break each line at a sentence, clause, or parenthetical boundary without filling it to the limit, so an edit reflows only the lines it touches, and reword when the last line would hold one short word. Comments in shell, Nix, YAML, and TOML files follow the same rule.
+- Write `//` comments as prose. A docstring may use a Markdown list for parallel options or a sequence.
+- Wrap comments, docstrings, and prose literals continued across lines by hand within 100 columns, matching rustfmt's `max_width`, since rustfmt wraps none of them. Start each sentence on a new line, and break a sentence that does not fit at its strongest clause, parenthetical, or phrase boundary without filling lines to the limit, so an edit reflows only the lines it touches. Reword when the last line would hold one short word. Comments in shell, Nix, YAML, and TOML files follow the same rule.
 
 ## Docstrings
 
@@ -22,23 +23,28 @@ Conventions for comments, docstrings, documentation, commit and PR text, and str
 These rules apply to comments, docs, commit messages, PR and issue text, `#[expect]` reasons, and strings shown to users or the model.
 
 - State conclusions directly and match each claim's strength to its evidence. Describe what you checked, and avoid absolute claims such as "bug-free" or "guaranteed".
-- Say each thing once, using the fewest words that preserve its meaning. Give messages of the same kind a consistent shape, such as stating the cause followed by the step that fixes it.
-- Explain what went wrong or what is accepted in the user's terms. A raw library message such as `invalid digit found in string` does not explain the accepted range.
-- When the user can fix the problem, end the message with a separate sentence giving the recovery step, as in ``Not signed in. Run `/login` to sign in.`` A short hint may instead qualify a fragment in parentheses, as in `no sessions to resume in this project (use --all to search every project)`.
+- Say each thing once, using the fewest words that preserve its meaning. Give messages of the same kind a consistent shape.
 - Include units with numbers, as in `Retrying in 1 s`. Write 1024-based sizes in KiB and MiB, as in `64 KiB`, and keep KB and MB for 1000-based ones.
-- Name the variable or store that holds a secret, never its value.
 - Connect related thoughts with a period or a linking word such as `since`, `because`, `while`, `so`, or `but`. Use an em-dash only as a paired parenthetical or to separate a list label from its gloss.
 - Avoid semicolons in prose. They are fine in code and literal syntax, and between list items that contain commas.
 - Define things by what they are. Add a contrast with what they are not only when omitting it could lead to a materially wrong reading.
 - Avoid lists of three or more similarly structured phrases when they add rhythm without supporting the argument.
 - Use American spelling in prose and identifiers, such as `behavior`, `catalog`, and `recognize`. Keep the double l in `cancelled` and `cancelling` to match ecosystem names such as tokio-util's `is_cancelled` and `cancelled()`, and GitHub's `CANCELLED` check state.
-- In strings shown to users and in `#[expect]` reasons, terminal punctuation separates sentences. One-sentence text, such as a status line, label, notice, or error, takes no final period, whether or not it is grammatically complete, and a question keeps its `?`. Text with two or more sentences ends each sentence with terminal punctuation, including the last. Text the model reads, such as prompts, tool descriptions and schemas, tool results, and transcript markers, keeps its punctuation.
-- Text composed around variable external content, such as an API payload, an `{e:#}` cause, or a refusal explanation, keeps the inserted text as it arrives and adapts the separator after it to how that text ends, so each sentence ends once. An API error reads `{headline}: {details}. {advice}`, and when the details already end in `.`, `?`, `!`, `...`, the single-character ellipsis U+2026, or a fullwidth `。`, `？`, or `！`, a space alone separates them from the advice. `util::text::join_sentences` applies this separator. Our own literals still carry their punctuation.
-- Begin standalone text, such as a notice or slash-command error, with a capital letter. Begin a fragment that forms part of an error chain with a lowercase letter because it continues the headline before its colon. Keep identifiers and proper nouns in their original case wherever they appear, as in a message that starts with `macOS` or `old_string`.
 - Place commas and periods outside closing quotation marks.
 - Use straight quotes. Arrows and comparison operators (`→`, `≤`, `≠`) are welcome.
 - Put spaces around `/` and arrows when they separate words or phrases, as in `Read / Write` and `low → high`. Keep compound terms such as `I/O` tight.
 - Close a delimited block the same way it opens. If an opening tag or fence, such as `<system-reminder>`, appears on its own line, put its closing counterpart on its own line too.
+
+## Messages
+
+These rules apply to errors, warnings, notices, and other strings shown to users. [Rust](rust.md#error-messages) adds how an `anyhow` chain composes them.
+
+- Explain what went wrong or what is accepted in the user's terms. A raw library message such as `invalid digit found in string` does not explain the accepted range.
+- When the user can fix the problem, end the message with a separate sentence giving the recovery step, as in ``Not signed in. Run `/login` to sign in.`` A short hint may instead qualify a fragment in parentheses, as in `no sessions to resume in this project (use --all to search every project)`.
+- Name the variable or store that holds a secret, never its value.
+- In strings shown to users and in `#[expect]` reasons, terminal punctuation separates sentences. One-sentence text, such as a status line, label, notice, or error, takes no final period, whether or not it is grammatically complete, and a question keeps its `?`. Text with two or more sentences ends each sentence with terminal punctuation, including the last. Text the model reads, such as prompts, tool descriptions and schemas, tool results, and transcript markers, keeps its punctuation.
+- Text composed around variable external content, such as an API payload, an `{e:#}` cause, or a refusal explanation, keeps the inserted text as it arrives and adapts the separator after it to how that text ends, so each sentence ends once. An API error reads `{headline}: {details}. {advice}`, and when the details already end in `.`, `?`, `!`, `...`, the single-character ellipsis U+2026, or a fullwidth `。`, `？`, or `！`, a space alone separates them from the advice. `util::text::join_sentences` applies this separator. Our own literals still carry their punctuation.
+- Begin standalone text, such as a notice or slash-command error, with a capital letter. Begin a fragment that forms part of an error chain with a lowercase letter because it continues the headline before its colon. Keep identifiers and proper nouns in their original case wherever they appear, as in a message that starts with `macOS` or `old_string`.
 
 ## Markdown
 
@@ -57,7 +63,7 @@ These rules apply to comments, docs, commit messages, PR and issue text, `#[expe
 - Organize each page around the questions its readers bring. Keep each paragraph focused on one idea, and verify every claim against the code before citing it.
 - When you add or edit a claim in a research note, record when you verified it and which version you checked. Delete the claim if a newer test contradicts it or you can no longer verify it.
 - Cite Claude Code, [Codex](https://github.com/openai/codex), [pi](https://github.com/badlogic/pi-mono), and [oh-my-pi](https://github.com/can1357/oh-my-pi) as reference implementations in new research and design notes. Existing notes may retain their opencode citations.
-- Open a design doc with a sentence saying what the feature does, then describe its mechanism in sections named for their topics. Follow with `## Design Decisions`, a numbered list of the choices that need a rationale, each giving its reason, and with `## Out of Scope`, linking the issues that track deferred work, when there is any. End every design doc with `## Sources`.
+- Open a feature's design doc with a sentence saying what the feature does, then describe its mechanism in sections named for their topics. Follow with `## Design Decisions`, a numbered list of the choices that need a rationale, each giving its reason, and with `## Out of Scope`, linking the issues that track deferred work, when there is any. End each one with `## Sources`.
 - In a design doc's `## Sources` section, list each source file it describes by full path, in alphabetical order, with a one-clause annotation and no line numbers:
 
   ```markdown

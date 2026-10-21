@@ -163,12 +163,18 @@ Listings sort rows and render them as follows:
 
 ## Sources
 
+- `crates/ox-core/src/engine.rs`: the session cost summed from the resumed `usage` entries.
+- `crates/ox-core/src/engine/turn.rs`: the joined writes that put a tool round's records in one batch.
 - `crates/ox-core/src/session/actor.rs`: the actor that owns the writer and appends each wakeup's commands in one write.
 - `crates/ox-core/src/session/chain.rs`: message chain reconstruction from the `parent_uuid` DAG.
+- `crates/ox-core/src/session/display.rs`: the title and metadata formatting that listings use.
 - `crates/ox-core/src/session/entry.rs`: the JSONL entry schema and its header `version`.
-- `crates/ox-core/src/session/handle.rs`: `SessionHandle`, the public API that sends each write to the actor.
+- `crates/ox-core/src/session/handle.rs`: `SessionHandle`, the public API that sends each write to the actor and surfaces the first write failure of each kind.
+- `crates/ox-core/src/session/list_view.rs`: the `ox --list` table.
 - `crates/ox-core/src/session/path.rs`: the sanitized per-project subdirectory names.
+- `crates/ox-core/src/session/resolver.rs`: the `--continue` argument and session-ID prefix resolution.
 - `crates/ox-core/src/session/sanitize.rs`: resume-time transcript repair.
+- `crates/ox-core/src/session/saved.rs`: archiving and deleting saved sessions.
 - `crates/ox-core/src/session/state.rs`: the in-memory session state the actor owns.
 - `crates/ox-core/src/session/store.rs`: session file I/O and the `{epoch}-{uuid}.jsonl` file names.
 - `crates/ox-core/src/session/store/listing.rs`: stat-only listing walks and metadata parsing.

@@ -6,7 +6,7 @@ This file holds the rules for every change and points to the conventions for eac
 
 ## Project Layout
 
-The tree omits the root config files, which follow their tools' conventions.
+The tree lists only the top-level entries whose names leave their purpose unclear.
 
 ```text
 .
@@ -39,7 +39,7 @@ The tree omits the root config files, which follow their tools' conventions.
 - Run the pre-commit hooks on every commit. In each new checkout or worktree, run `nix develop -c true` and `pnpm install` once to provide the generated config and Node tools the hooks need. Never bypass the hooks with `--no-verify` or `PRE_COMMIT_ALLOW_NO_CONFIG`.
 - Run the [verification](#verification) block before review.
 - Add new words to `.cspell/words.txt` in alphabetical order. `cspell` scans Rust sources too, so a new word in a doc comment fails the same way as one in `README.md`.
-- Update whatever the change makes stale: the `README.md` Features and Scope sections, the user guides, design docs and the module map, research notes whose follow-ups it resolves, and open issues it resolves or invalidates.
+- Update whatever the change makes stale: the `README.md` Features and Scope sections, the trust model in `SECURITY.md`, the user guides, design docs and the module map, research notes whose follow-ups it resolves, and open issues it resolves or invalidates.
 - Design each change to hold up long term. Survey the reference implementations that [Writing](docs/conventions/writing.md#documentation) lists, reason from first principles toward a design better than any of them, and land any refactor the design needs first. Fix a problem in the layer that owns it, so when `ox` misbehaves in some environment, fix `ox` and leave the environment alone. Never ship a stopgap labeled temporary.
 - When a change or review exposes a gap or inconsistency in the conventions, settle the standard from first principles, record it in the convention doc that owns the area, and bring existing code and docs up to it in a scoped refactor PR.
 - Issues, PRs, and their comments link only public material. Never reference gitignored or local material, such as working notes, local paths, or private repositories.
