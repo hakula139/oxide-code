@@ -6,6 +6,7 @@
 //! oxide-code has no sandbox, so this gate is the whole safety boundary around a tool call.
 
 pub mod defaults;
+pub(crate) mod project;
 pub mod rule;
 pub(crate) mod shell;
 
@@ -56,9 +57,9 @@ impl Mode {
 
     pub const fn description(self) -> &'static str {
         match self {
-            Self::Manual => "Ask about calls no rule settles",
+            Self::Manual => "Ask before tool calls that no permission rule allows or denies",
             Self::Plan => "Read-only: deny edits and commands",
-            Self::Yolo => "Run calls no rule settles",
+            Self::Yolo => "Run tool calls without asking unless a rule denies or asks",
         }
     }
 }
@@ -2363,6 +2364,7 @@ mod tests {
                         (HOME_VAR, Some(&home)),
                         ("XDG_DATA_HOME", Some(&data)),
                         ("XDG_CONFIG_HOME", Some(&config)),
+                        ("CLAUDE_CONFIG_DIR", None),
                     ],
                     || {
                         let workspace = Workspace::new(&cwd);
@@ -2391,13 +2393,21 @@ mod tests {
             }
 
             #[test]
-            fn protects_the_user_git_ssh_and_cloud_config_until_disabled() {
+            fn protects_the_user_git_ssh_cloud_and_claude_code_config_until_disabled() {
                 let (_dir, root) = temp_cwd();
-                let (cwd, home, config) =
-                    (root.join("repo"), root.join("home"), root.join("config"));
+                let (cwd, home, config, claude) = (
+                    root.join("repo"),
+                    root.join("home"),
+                    root.join("config"),
+                    root.join("claude-work"),
+                );
                 std::fs::create_dir(&cwd).unwrap();
                 temp_env::with_vars(
-                    [(HOME_VAR, Some(&home)), ("XDG_CONFIG_HOME", Some(&config))],
+                    [
+                        (HOME_VAR, Some(&home)),
+                        ("XDG_CONFIG_HOME", Some(&config)),
+                        ("CLAUDE_CONFIG_DIR", Some(&claude)),
+                    ],
                     || {
                         let workspace = Workspace::new(&cwd);
                         let resolve = |disabled: &[Shipped]| {
@@ -2431,6 +2441,8 @@ mod tests {
                             ),
                             (home.join(".docker/config.json"), Shipped::Cloud),
                             (home.join(".kube/config"), Shipped::Cloud),
+                            (claude.join("settings.json"), Shipped::Agents),
+                            (claude.join("hooks/pre.sh"), Shipped::Agents),
                         ] {
                             let target = edit(path.clone());
                             assert_eq!(
@@ -3007,6 +3019,11 @@ mod tests {
                         "rm $'-rf' /",
                         "$'rm' -rf /",
                         "ls && /bin/rm --rec --f x",
+                        "sudo -u root rm -rf /",
+                        "busybox rm -rf x",
+                        "echo / | xargs rm -rf",
+                        "echo -rf / | xargs rm",
+                        r"find . -exec rm -rf {} \;",
                     ] {
                         assert_eq!(
                             decide(&p, EXEC, &command(case)),
@@ -3037,6 +3054,45 @@ mod tests {
                     "command rm -rf /",
                 ] {
                     assert_eq!(decide(&p, EXEC, &command(case)), Decision::Deny, "{case}");
+                }
+            }
+
+            #[test]
+            fn command_deny_holds_what_a_followed_runner_runs_even_in_yolo() {
+                let p = policy(Mode::Yolo, &[(EXEC, "rm *")], &[], &[]);
+                for case in [
+                    "sudo rm x",
+                    "doas -u root rm x",
+                    "pkexec rm x",
+                    "busybox rm x",
+                    "echo x | xargs rm",
+                    "echo rm x | xargs sudo",
+                    r"find . -execdir sudo rm {} +",
+                    "sudo --unknown value rm x",
+                    "sudo FOO=1 -u root rm x",
+                    "runuser -u nobody rm x",
+                    "su --command='rm x' root",
+                    "busybox hush -c 'rm x'",
+                ] {
+                    assert_eq!(decide(&p, EXEC, &command(case)), Decision::Deny, "{case}");
+                }
+                assert_eq!(
+                    decide(&p, EXEC, &command("echo x | xargs")),
+                    Decision::Allow
+                );
+            }
+
+            #[test]
+            fn command_allow_sees_through_only_wrappers_that_keep_who_runs_it_and_its_arguments() {
+                let p = policy(Mode::Manual, &[], &[], &[(EXEC, "cat *"), (EXEC, "find *")]);
+                for (case, expected) in [
+                    ("nice timeout 5 cat a", Decision::Allow),
+                    ("sudo cat a", Decision::Ask),
+                    ("echo a | xargs cat", Decision::Ask),
+                    (r"find . -exec cat {} +", Decision::Allow),
+                    (r"find . -exec wc {} +", Decision::Ask),
+                ] {
+                    assert_eq!(decide(&p, EXEC, &command(case)), expected, "{case}");
                 }
             }
 

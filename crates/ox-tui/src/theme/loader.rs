@@ -18,7 +18,10 @@ use serde::Deserialize;
 use syntect::highlighting::{Theme as SyntaxTheme, ThemeSet};
 
 use ox_core::config::ThemeConfig;
+use ox_core::config::load::user_config_hint;
+use ox_core::config::provenance::{Layer, Source};
 use ox_core::util::path::expand_user;
+use ox_core::util::toml::describe_error;
 
 use super::{Slot, Theme, builtin, color::parse_color};
 
@@ -34,10 +37,23 @@ pub struct ResolvedTheme {
 }
 
 /// Resolves the `[tui.theme]` base and applies its per-slot overrides. An unknown or unreadable
-/// base is an error, while a bad override, including a malformed patch, keeps the base value and
-/// adds a notice for the caller to report, so the TUI still launches.
+/// base is an error, as is a file base from a project file, while a bad override, including a
+/// malformed patch, keeps the base value and adds a notice for the caller to report, so the TUI
+/// still launches.
 pub fn resolve_theme(config: &ThemeConfig) -> Result<ResolvedTheme> {
     let base_name = config.base.as_str();
+    if let Source::File(Layer::Project(path)) = &config.base_source
+        && builtin::find(base_name).is_none()
+    {
+        bail!(
+            "{} cannot set tui.theme.base to {base_name:?}. \
+             A project file may only name a built-in theme ({}). \
+             Set a theme file in {} or a config.d drop-in.",
+            path.display(),
+            builtin::names(),
+            user_config_hint(),
+        );
+    }
     let body = load_base_body(base_name)?;
     let mut theme =
         parse_theme(&body).with_context(|| format!("failed to parse base theme {base_name:?}"))?;
@@ -83,7 +99,7 @@ fn load_base_body(name: &str) -> Result<String> {
         )
     };
 
-    // A project config can name any path, so a device or FIFO must fail before the read blocks.
+    // A mistyped path can name a device or FIFO, which must fail before the read blocks.
     let meta = std::fs::metadata(&path).with_context(|| neither("readable file"))?;
     if !meta.is_file() {
         bail!(neither("regular file"));
@@ -256,7 +272,7 @@ pub(super) fn parse_theme(content: &str) -> Result<Theme> {
                     mocha_line(slot),
                 );
             }
-            return Err(e).context("invalid theme TOML");
+            bail!("invalid theme TOML: {}", describe_error(content, &e));
         }
     };
     file.into_theme()
@@ -325,6 +341,8 @@ fn syntax_theme(name: Option<&str>) -> Result<&'static SyntaxTheme> {
 
 #[cfg(test)]
 mod tests {
+    use std::path::Path;
+
     use indoc::{formatdoc, indoc};
     use ratatui::style::Color;
 
@@ -338,7 +356,16 @@ mod tests {
         fn config(base: &str, overrides: &str) -> ThemeConfig {
             ThemeConfig {
                 base: base.to_owned(),
+                base_source: Source::Default,
                 overrides: overrides.parse().unwrap(),
+            }
+        }
+
+        /// [`config`] with `base` set by the project file `path`.
+        fn project_config(base: &str, path: &Path) -> ThemeConfig {
+            ThemeConfig {
+                base_source: Source::File(Layer::Project(path.to_path_buf())),
+                ..config(base, "")
             }
         }
 
@@ -406,6 +433,58 @@ mod tests {
 
             let t = resolved(&config(&path.to_string_lossy(), ""));
             assert_eq!(t.error.fg, Some(Color::Rgb(0xff, 0x00, 0x00)));
+        }
+
+        #[test]
+        fn file_path_with_invalid_toml_omits_the_file_contents() {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("credentials");
+            std::fs::write(&path, "https://user:secret-marker@git.example.com\n").unwrap();
+            let path_str = path.to_string_lossy().into_owned();
+
+            let err =
+                resolve_theme(&config(&path_str, "")).expect_err("a credential file is no theme");
+
+            assert_eq!(
+                format!("{err:#}"),
+                format!(
+                    "failed to parse base theme {path_str:?}: invalid theme TOML: line 1, column 43: \
+                     key with no value, expected `=`"
+                ),
+            );
+        }
+
+        #[test]
+        fn rejects_a_file_base_set_by_a_project() {
+            let dir = tempfile::tempdir().unwrap();
+            let theme = dir.path().join("custom.toml");
+            std::fs::write(&theme, builtin::MOCHA).unwrap();
+            let theme_str = theme.to_string_lossy().into_owned();
+            let project = dir.path().join(".ox").join("config.toml");
+            let config_home = dir.path().join("config-home");
+
+            let err = temp_env::with_var("XDG_CONFIG_HOME", Some(&config_home), || {
+                resolve_theme(&project_config(&theme_str, &project))
+                    .expect_err("a project file may not name a theme file")
+            });
+
+            assert_eq!(
+                format!("{err:#}"),
+                format!(
+                    "{} cannot set tui.theme.base to {theme_str:?}. \
+                     A project file may only name a built-in theme \
+                     (mocha, macchiato, frappe, latte, material). \
+                     Set a theme file in {} or a config.d drop-in.",
+                    project.display(),
+                    config_home.join("ox").join("config.toml").display(),
+                ),
+            );
+        }
+
+        #[test]
+        fn accepts_a_built_in_base_set_by_a_project() {
+            let t = resolved(&project_config("latte", Path::new("/repo/.ox/config.toml")));
+            assert_eq!(t.text.fg, Some(Color::Rgb(0x4c, 0x4f, 0x69)));
         }
 
         #[test]
@@ -812,10 +891,16 @@ mod tests {
                 r##"accent = { fg = "#89b4fa", sparkle = true }"##,
             );
             let err = parse_theme(&body).expect_err("unknown modifier rejected");
-            let msg = format!("{err:#}");
-            // The untagged enum reports a generic "did not match any variant" error, but the
-            // rendered TOML context still quotes the offending line.
-            assert!(msg.contains("sparkle"), "{msg}");
+            // The untagged enum reports a generic "did not match any variant" error, so only the
+            // position and the slot point at `sparkle`.
+            let line = body.lines().position(|l| l.starts_with("accent")).unwrap() + 1;
+            assert_eq!(
+                format!("{err:#}"),
+                format!(
+                    "invalid theme TOML: line {line}, column 10, in `accent`: \
+                     data did not match any variant of untagged enum SlotPatch"
+                ),
+            );
         }
 
         #[test]
