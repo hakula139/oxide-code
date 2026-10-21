@@ -19,6 +19,8 @@ use crate::prompt::SessionContext;
 use crate::tool::ToolMetadata;
 use crate::tool::tasks::Task;
 
+// ── SessionCmd ──
+
 /// Cross-task protocol for [`super::handle::SessionHandle`]. Acks fire after the batch flush.
 pub(super) enum SessionCmd {
     Record {
@@ -71,6 +73,8 @@ pub(super) enum SessionCmd {
     /// waiting for orphaned clones to drop.
     Shutdown { ack: oneshot::Sender<()> },
 }
+
+// ── Actor Loop ──
 
 /// Pending ack for one absorbed cmd, fired once the batch flush returns.
 enum PendingAck {

@@ -13,6 +13,8 @@ use tracing::debug;
 
 use crate::util::text::truncate_to_width;
 
+// ── Repository ──
+
 /// Probes the current branch via `git branch --show-current`, returning `None` on a detached HEAD.
 /// Dropping the future kills the child process.
 pub async fn current_branch(cwd: &Path) -> Option<String> {
@@ -59,6 +61,8 @@ fn stdout_line(stdout: &[u8]) -> Option<String> {
         Some(line.to_owned())
     }
 }
+
+// ── Pull Request ──
 
 /// Open pull request for the current branch.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -212,6 +216,8 @@ fn summarize_checks(mut checks: Vec<CheckView>) -> Option<Checks> {
         Checks::Passing
     })
 }
+
+// ── Probes ──
 
 /// Runs `program` with `args` in `cwd` on the tokio runtime and returns the output of a
 /// successful run, logging any other outcome under the `name` probe.

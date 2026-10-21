@@ -49,6 +49,8 @@ pub(crate) enum Entry {
         #[serde(with = "time::serde::rfc3339")]
         timestamp: OffsetDateTime,
     },
+    /// A transcript message, linked through `parent_uuid` to the message it follows.
+    /// Resume rebuilds the transcript along that chain.
     Message {
         uuid: Uuid,
         #[serde(skip_serializing_if = "Option::is_none")]
@@ -66,6 +68,8 @@ pub(crate) enum Entry {
         #[serde(with = "time::serde::rfc3339")]
         timestamp: OffsetDateTime,
     },
+    /// The session's display title.
+    /// The newest `updated_at` wins.
     Title {
         title: String,
         source: TitleSource,
@@ -79,6 +83,8 @@ pub(crate) enum Entry {
         #[serde(with = "time::serde::rfc3339")]
         at: OffsetDateTime,
     },
+    /// Written when a session that gained messages finishes, with the count listings show.
+    /// The newest `updated_at` wins.
     Summary {
         message_count: u32,
         #[serde(with = "time::serde::rfc3339")]
@@ -100,6 +106,7 @@ pub(crate) enum Entry {
         #[serde(with = "time::serde::rfc3339")]
         timestamp: OffsetDateTime,
     },
+    /// A tracked file's state, written at finish just ahead of the summary.
     FileSnapshot {
         #[serde(flatten)]
         snapshot: FileSnapshot,
