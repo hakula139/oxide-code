@@ -95,6 +95,6 @@ The assistant chooses tools based on your request, so specific requests work bes
 
 ## Customize Behavior
 
-Add a `CLAUDE.md` or `AGENTS.md` file to your project root with project-specific instructions, such as coding conventions and commands to run after a change. Run `/init` to have the assistant draft one based on the codebase.
+Add an `AGENTS.md` file to your project root with project-specific instructions, such as coding conventions and commands to run after a change. An existing `CLAUDE.md` works too. Run `/init` to have the assistant draft one based on the codebase.
 
 See [Instruction Files](instructions.md) for where these files can live and how they combine.

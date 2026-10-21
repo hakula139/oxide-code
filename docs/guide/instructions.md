@@ -4,24 +4,25 @@ Instruction files are Markdown files that provide persistent, project-specific c
 
 ## Supported Filenames
 
-At each location, oxide-code loads `CLAUDE.md`, or `AGENTS.md` if `CLAUDE.md` is missing, empty, or unreadable. A file that exists but cannot be read, such as one without read permission or one that is not UTF-8 text, is skipped with a notice. Choose the filename your project prefers. Each file is read as written, without expanding Claude Code's `@path` imports.
+oxide-code reads `AGENTS.md`, the file Codex and other agents read too, and falls back to Claude Code's `CLAUDE.md`, so existing Claude Code instructions work unchanged. Each location loads at most one file: the first in the table below that has content. A file that exists but cannot be read, such as one without read permission or one that is not UTF-8 text, is skipped with a notice, and the next file is tried. Each file is read as written, without expanding Claude Code's `@path` imports.
 
 ## Where Instruction Files Can Live
 
-Instruction files are loaded from three scopes:
+Instruction files are loaded from two scopes:
 
-| Scope            | Path                                                                                   | Purpose                                    |
-| ---------------- | -------------------------------------------------------------------------------------- | ------------------------------------------ |
-| User global      | `~/.claude/CLAUDE.md`                                                                  | Personal preferences that apply everywhere |
-| Project          | `<dir>/CLAUDE.md`, every directory from the project root down to the working directory | Team-shared conventions                    |
-| Project (hidden) | `<dir>/.claude/CLAUDE.md`, same walk inside `.claude/`                                 | Same as above, but out of the project root |
+| Scope   | Files, in the order tried                                                                                                                   | Purpose                                    |
+| ------- | ------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------ |
+| User    | `~/.config/ox/AGENTS.md` (or `$XDG_CONFIG_HOME/ox/AGENTS.md`), then `~/.claude/CLAUDE.md`                                                   | Personal preferences that apply everywhere |
+| Project | `<dir>/AGENTS.md`, `<dir>/CLAUDE.md`, then `<dir>/.claude/CLAUDE.md`, in each directory from the project root down to the working directory | Team-shared conventions                    |
 
 The project root is the Git repository root, or the working directory if it is outside a repository. Files closer to the working directory appear later in the prompt and conventionally take precedence. For a working directory of `/repo/crates/core`, files load in this order:
 
-1. `~/.claude/`
-2. `/repo/`, then `/repo/.claude/`
-3. `/repo/crates/`, then `/repo/crates/.claude/`
-4. `/repo/crates/core/`, then `/repo/crates/core/.claude/`
+1. The user file
+2. `/repo/`
+3. `/repo/crates/`
+4. `/repo/crates/core/`
+
+A file loads once, at the first location that resolves to it. A `CLAUDE.md` symlink to `AGENTS.md` therefore adds nothing, and neither does `~/.claude/CLAUDE.md` as a project file when the working directory is your home directory. A directory whose first file with content was already loaded, such as a subdirectory `AGENTS.md` that links to the root's, loads nothing further.
 
 ## When Changes Take Effect
 
@@ -34,7 +35,7 @@ The project root is the Git repository root, or the working directory if it is o
 A typical file lists coding conventions and project-specific rules:
 
 ```markdown
-# CLAUDE.md
+# AGENTS.md
 
 ## Coding conventions
 

@@ -26,7 +26,7 @@ Early development. What works today:
 - **Turn control**: interrupt with **Esc** or **Ctrl+C**, queue follow-up prompts that join the running turn between tool calls, and confirm exit with a second **Ctrl+C**
 - **[Slash commands](docs/guide/slash-commands.md)**: commands for sessions, models and effort, permission modes, compaction, sign-in, themes, `/init`, and status and config views, with autocomplete
 - **Context compaction**: manual `/compact` and default-on auto-compaction
-- **[Instruction files](docs/guide/instructions.md)**: `CLAUDE.md` / `AGENTS.md` discovery
+- **[Instruction files](docs/guide/instructions.md)**: `AGENTS.md` / `CLAUDE.md` discovery
 - **[Sessions](docs/guide/sessions.md)**: JSONL logs with AI-generated titles, listing, archiving, and resume
 - **File-change tracking**: a Read-before-Edit gate and on-disk drift detection
 - **[Authentication](docs/guide/configuration.md#authentication)**: an Anthropic API key, browser sign-in with `/login`, the Claude Code login or a long-lived OAuth token, or an LLM gateway bearer token with custom headers
