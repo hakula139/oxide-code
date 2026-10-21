@@ -121,7 +121,9 @@ GNU tools accept long options by any valid prefix, so `sed --in` is refused as `
 
 ## Patterns
 
-Each class has its own pattern grammar, which the [configuration guide](../../guide/configuration.md#exec-patterns) specifies. Allow rules widen what can run without asking, so they match conservatively: a call matches only as it resolves, with names exactly as written in the pattern. Deny and ask rules hold calls back, so they match aggressively across every spelling a call can have. `MatchDiscipline` brings these two approaches together, and the ask tier uses the deny approach.
+[Permissions](../../guide/permissions.md#rules) gives the user-facing grammar with examples, and this section covers how matching works.
+
+Each class has its own pattern grammar. Allow rules widen what can run without asking, so they match conservatively: a call matches only as it resolves, with names exactly as written in the pattern. Deny and ask rules hold calls back, so they match aggressively across every spelling a call can have. `MatchDiscipline` brings these two approaches together, and the ask tier uses the deny approach.
 
 ### Exec Patterns
 
