@@ -1,5 +1,5 @@
-//! Text helpers: display-width-aware truncation, count-based pluralization and abbreviation,
-//! sentence joining, blank-edge trimming, and escaping for terminal output.
+//! Text helpers: display-width-aware truncation and padding, count-based pluralization and
+//! abbreviation, sentence joining, blank-edge trimming, and escaping for terminal output.
 
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
@@ -86,6 +86,20 @@ pub fn center_truncate_to_width(s: &str, max_width: usize) -> String {
     format!("{head}{ELLIPSIS}{tail}")
 }
 
+/// `s` followed by spaces up to `width` display columns, unchanged when already that wide.
+pub fn pad_to_width(s: &str, width: usize) -> String {
+    format!("{s}{}", fill(s, width))
+}
+
+/// `s` preceded by spaces up to `width` display columns, unchanged when already that wide.
+pub fn pad_start_to_width(s: &str, width: usize) -> String {
+    format!("{}{s}", fill(s, width))
+}
+
+fn fill(s: &str, width: usize) -> String {
+    " ".repeat(width.saturating_sub(s.width()))
+}
+
 /// The longest prefix of `s` that fits `budget` display columns, cut between grapheme clusters.
 pub fn take_head(s: &str, budget: usize) -> String {
     let mut used = 0;
@@ -125,6 +139,20 @@ pub fn escape_controls(text: &str) -> String {
     while let Some(c) = chars.next() {
         let line_break = c == '\n' || (c == '\r' && chars.peek() == Some(&'\n'));
         if c.is_control() && c != '\t' && !line_break {
+            out.extend(c.escape_default());
+        } else {
+            out.push(c);
+        }
+    }
+    out
+}
+
+/// `text` with every control character escaped by [`char::escape_default`], tabs and line breaks
+/// included, so it prints on one row of a table and cannot change the terminal's state.
+pub fn escape_line(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    for c in text.chars() {
+        if c.is_control() {
             out.extend(c.escape_default());
         } else {
             out.push(c);
@@ -306,6 +334,26 @@ mod tests {
         }
     }
 
+    mod pad_to_width {
+        use super::*;
+
+        #[test]
+        fn fills_display_columns_after_wide_characters() {
+            assert_eq!(pad_to_width("项目", 6), "项目  ");
+            assert_eq!(pad_to_width("abc", 2), "abc");
+        }
+    }
+
+    mod pad_start_to_width {
+        use super::*;
+
+        #[test]
+        fn fills_display_columns_before_wide_characters() {
+            assert_eq!(pad_start_to_width("项目", 6), "  项目");
+            assert_eq!(pad_start_to_width("abc", 2), "abc");
+        }
+    }
+
     mod is_hidden {
         use super::*;
 
@@ -328,6 +376,18 @@ mod tests {
             assert_eq!(
                 escape_controls("a\tb\r\nc\n\u{1b}[2K\rd\u{7}\u{200b}"),
                 "a\tb\r\nc\n\\u{1b}[2K\\rd\\u{7}\u{200b}",
+            );
+        }
+    }
+
+    mod escape_line {
+        use super::*;
+
+        #[test]
+        fn escapes_every_control_character_but_keeps_zwj_emoji() {
+            assert_eq!(
+                escape_line("a\tb\nc\r\n\u{1b}]52;c;eA==\u{7}👩\u{200d}💻"),
+                "a\\tb\\nc\\r\\n\\u{1b}]52;c;eA==\\u{7}👩\u{200d}💻",
             );
         }
     }

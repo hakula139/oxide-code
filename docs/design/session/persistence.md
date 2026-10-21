@@ -146,6 +146,7 @@ Listings sort rows and render them as follows:
 - Sort by file mtime, with the file name breaking ties.
 - Under `--all`, a `Project` column shows the tildified stored `cwd`.
 - Titles truncated to terminal width with trailing `...`.
+- Control characters in titles and project paths, line breaks included, are escaped, so a row stays on one line and cannot change the terminal's state.
 
 ## Design Decisions
 

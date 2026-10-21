@@ -12,7 +12,7 @@ use super::display::{UNTITLED_MARKER, id_prefix};
 use super::store::SessionStore;
 use super::store::listing::{ListPage, ListScope};
 use crate::util::path::tildify;
-use crate::util::text::truncate_to_width;
+use crate::util::text::{escape_line, pad_to_width, truncate_to_width};
 
 const ID_COL: usize = 10;
 const LAST_ACTIVE_COL: usize = 19;
@@ -61,10 +61,18 @@ fn render_sessions(
         return Ok(());
     }
 
-    let project_col_width = if all {
+    let projects: Vec<String> = if all {
         sessions
             .iter()
-            .map(|s| tildify(Path::new(&s.cwd)).width())
+            .map(|s| escape_line(&tildify(Path::new(&s.cwd))))
+            .collect()
+    } else {
+        Vec::new()
+    };
+    let project_col_width = if all {
+        projects
+            .iter()
+            .map(|project| project.width())
             .max()
             .unwrap_or(0)
             .clamp(PROJECT_COL_MIN, PROJECT_COL_MAX)
@@ -87,7 +95,7 @@ fn render_sessions(
     }
     writeln!(out, "{header}Title").context("write list header")?;
 
-    for s in sessions {
+    for (i, s) in sessions.iter().enumerate() {
         let id = id_prefix(&s.session_id);
         let last_active = s
             .last_active_at
@@ -100,18 +108,18 @@ fn render_sessions(
             .exit
             .as_ref()
             .map_or("-".to_owned(), |e| e.message_count.to_string());
-        let raw_title = s
-            .title
-            .as_ref()
-            .map_or(UNTITLED_MARKER, |t| t.title.as_str());
+        let raw_title = escape_line(
+            s.title
+                .as_ref()
+                .map_or(UNTITLED_MARKER, |t| t.title.as_str()),
+        );
         let title = match title_budget {
-            Some(budget) => truncate_to_width(raw_title, budget),
-            None => raw_title.to_owned(),
+            Some(budget) => truncate_to_width(&raw_title, budget),
+            None => raw_title,
         };
         let mut row = format!("{id:<ID_COL$} {last_active:<LAST_ACTIVE_COL$} {msgs:<MSGS_COL$} ");
         if all {
-            let project = tildify(Path::new(&s.cwd));
-            _ = write!(row, "{project:<project_col_width$} ");
+            _ = write!(row, "{} ", pad_to_width(&projects[i], project_col_width));
         }
         writeln!(out, "{row}{title}").context("write list row")?;
     }
@@ -380,6 +388,25 @@ mod tests {
         }
 
         #[test]
+        fn pads_wide_character_projects_by_display_width() {
+            let mut wide = session("aaaaaaaaaaaa", datetime!(2026-04-18 09:00:00 UTC));
+            wide.cwd = "/work/项目代码".to_owned();
+            let mut ascii = session("bbbbbbbbbbbb", datetime!(2026-04-18 09:05:00 UTC));
+            ascii.cwd = "/work/abcdefghij".to_owned();
+
+            let out = render_to_string(&[wide, ascii], true);
+
+            let title_cols: Vec<usize> = out
+                .lines()
+                .map(|line| {
+                    let start = line.rfind("Title").or_else(|| line.rfind("(untitled)"));
+                    line[..start.expect("every line has a title cell")].width()
+                })
+                .collect();
+            assert_eq!(title_cols, [FIXED_PREFIX_WIDTH + 17; 3], "{out}");
+        }
+
+        #[test]
         fn project_col_width_respects_maximum() {
             let long_cwd: String = "/deep/"
                 .chars()
@@ -389,14 +416,37 @@ mod tests {
             s.cwd = long_cwd.clone();
             let out = render_to_string(&[s], true);
 
-            let row = out.lines().nth(1).unwrap();
-            let title_pos = row
-                .rfind("(untitled)")
-                .expect("row must render the default title");
-            // The cwd exceeds the 40-col cap, so the title slips past the header column, but the
-            // row must still render the full cwd.
-            assert!(row.contains(&long_cwd), "cwd missing from row: {row:?}");
-            assert!(title_pos > 0);
+            let mut lines = out.lines();
+            let header = lines.next().unwrap();
+            assert_eq!(
+                header.find("Title"),
+                Some(FIXED_PREFIX_WIDTH + PROJECT_COL_MAX + 1),
+                "{header:?}",
+            );
+            let row = lines.next().unwrap();
+            assert!(
+                row.ends_with(&format!("{long_cwd} (untitled)")),
+                "an overlong cwd overflows its column in full: {row:?}",
+            );
+        }
+
+        #[test]
+        fn escapes_control_characters_in_titles_and_projects() {
+            let mut s = session("dddddddddddd", datetime!(2026-04-18 09:00:00 UTC));
+            s.cwd = "/work/a\nb".to_owned();
+            s.title = Some(TitleInfo {
+                title: "Fix\u{1b}]52;c;eA==\u{7} it\nnow".to_owned(),
+                updated_at: datetime!(2026-04-18 09:05:00 UTC),
+            });
+
+            let out = render_to_string(&[s], true);
+
+            let rows: Vec<&str> = out.lines().collect();
+            assert_eq!(rows.len(), 2, "{out}");
+            assert_eq!(
+                rows[1].split_once(" -      ").map(|(_, cells)| cells),
+                Some("/work/a\\nb Fix\\u{1b}]52;c;eA==\\u{7} it\\nnow"),
+            );
         }
 
         #[test]

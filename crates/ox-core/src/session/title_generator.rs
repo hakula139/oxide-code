@@ -7,6 +7,7 @@ use tokio::sync::oneshot;
 use tracing::warn;
 use unicode_width::UnicodeWidthStr;
 
+use super::display::fit_title;
 use super::entry::UsageRecord;
 use super::handle::SessionHandle;
 use crate::client::anthropic::Client;
@@ -157,11 +158,11 @@ fn parse_title(response: &str) -> Result<String> {
             truncate_for_log(unwrapped)
         )
     })?;
-    let cleaned = title.trim();
-    if cleaned.is_empty() {
+    let title = fit_title(&title);
+    if title.is_empty() {
         bail!("title envelope had an empty title field");
     }
-    Ok(cleaned.to_owned())
+    Ok(title)
 }
 
 /// Caps `s` for log and error messages, so a long Haiku refusal stays readable.
@@ -211,6 +212,7 @@ mod tests {
     use crate::config::auth::{Auth, AuthSource};
     use crate::message::Message;
     use crate::protocol::testing::CapturingSink;
+    use crate::session::display::MAX_TITLE_WIDTH;
     use crate::session::handle::testing::dead;
     use crate::session::store::testing::test_store;
 
@@ -577,6 +579,17 @@ mod tests {
         fn trims_whitespace_inside_json_envelope() {
             let out = parse_title(r#"{"title": "  padded  "}"#).unwrap();
             assert_eq!(out, "padded");
+        }
+
+        #[test]
+        fn keeps_one_line_of_at_most_max_title_width() {
+            let long = "word ".repeat(30);
+            let raw = serde_json::json!({ "title": format!("\n{long}\nsecond line") }).to_string();
+
+            let out = parse_title(&raw).unwrap();
+
+            assert_eq!(out, fit_title(&long));
+            assert_eq!(out.width(), MAX_TITLE_WIDTH);
         }
 
         #[test]
