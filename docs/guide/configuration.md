@@ -259,7 +259,7 @@ export NODE_EXTRA_CA_CERTS=~/.config/ox/corp-cachain.pem
 
 oxide-code is stricter than Claude Code in three ways. It never sends a stored login to a custom base URL, it sends one credential even when several are set, and it rejects malformed `ANTHROPIC_CUSTOM_HEADERS` lines where Claude Code skips them.
 
-A gateway that does not serve the configured model may return HTTP 404 with a plain-text `404 page not found` response. The gateway may list the models it serves at `GET /v1/models`.
+A gateway that does not serve the configured model may return HTTP 404 with a plain-text `404 page not found` response, which `ox` reports as `Anthropic API endpoint not found`. The gateway may list the models it serves at `GET /v1/models`.
 
 ## Environment Variables
 

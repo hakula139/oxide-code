@@ -386,6 +386,21 @@ fn format_api_error(
             "Anthropic API rejected credentials (HTTP 401)".to_owned(),
             Some(auth.rejection_hint().to_owned()),
         ),
+        403 => (
+            format!(
+                "Anthropic API refused the request ({})",
+                http_status(status)
+            ),
+            Some("Check that the credential may use this model and endpoint.".to_owned()),
+        ),
+        404 => (
+            format!("Anthropic API endpoint not found ({})", http_status(status)),
+            Some(
+                "Check that the base URL and `client.model` name an endpoint and a model \
+                 this server serves."
+                    .to_owned(),
+            ),
+        ),
         429 => (
             "Anthropic API rate limited (HTTP 429)".to_owned(),
             Some(match retry_after {
@@ -1086,6 +1101,19 @@ mod tests {
                     400,
                     secs,
                     "Anthropic API error (HTTP 400 Bad Request): boom",
+                ),
+                (
+                    403,
+                    None,
+                    "Anthropic API refused the request (HTTP 403 Forbidden): boom. \
+                     Check that the credential may use this model and endpoint.",
+                ),
+                (
+                    404,
+                    None,
+                    "Anthropic API endpoint not found (HTTP 404 Not Found): boom. \
+                     Check that the base URL and `client.model` name an endpoint and a model \
+                     this server serves.",
                 ),
             ] {
                 let status = StatusCode::from_u16(status).unwrap();
