@@ -500,7 +500,7 @@ mod tests {
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
     use super::*;
-    use crate::client::anthropic::local_testing::{messages_request, plain_http};
+    use crate::client::anthropic::local_testing::{messages_request, plain_http, retry_counts};
     use crate::config::oauth::testing::{ok_refresh_body, ox_login_in, write_creds};
 
     mod post_messages {
@@ -589,12 +589,14 @@ mod tests {
         async fn connection_failure_is_retryable() {
             // Port 9 (discard) is closed on test hosts, so the connect fails fast.
             let req = messages_request("http://127.0.0.1:9/v1/messages");
+
             let err = post_messages(&plain_http(), &req, 0)
                 .await
                 .expect_err("nothing listens on the discard port");
             let AttemptError::Retryable { error, cause, .. } = &err else {
                 panic!("expected a retryable error, got {err:?}");
             };
+
             assert_eq!(cause, "Anthropic API connection failed");
             assert!(
                 format!("{error:#}").starts_with("Anthropic API connection failed: "),
@@ -908,18 +910,7 @@ mod tests {
             .unwrap();
 
             assert_eq!(body, "ok");
-            let counts: Vec<String> = server
-                .received_requests()
-                .await
-                .unwrap()
-                .iter()
-                .map(|r| {
-                    r.headers["x-stainless-retry-count"]
-                        .to_str()
-                        .unwrap()
-                        .to_owned()
-                })
-                .collect();
+            let counts = retry_counts(&server).await;
             assert_eq!(counts, ["0", "1"]);
         }
     }
@@ -1030,10 +1021,12 @@ mod tests {
                 retry: 2,
                 cause: "HTTP 529 overloaded_error".to_owned(),
             };
+
             assert_eq!(
                 notice(Duration::from_millis(3200)).to_string(),
                 "HTTP 529 overloaded_error. Retrying in 4 s (retry 2 of 5).",
             );
+
             assert_eq!(
                 notice(Duration::from_secs(8)).to_string(),
                 "HTTP 529 overloaded_error. Retrying in 8 s (retry 2 of 5).",
@@ -1212,6 +1205,7 @@ mod tests {
         fn on_3xx_names_the_redirect_host() {
             let redirected = "Anthropic API endpoint redirected (HTTP 307 Temporary Redirect)";
             let advice = "Redirects are not followed, so point the base URL at the final endpoint.";
+
             for (location, target) in [
                 (
                     Some("https://other.example.com/v1/messages"),
@@ -1291,10 +1285,12 @@ mod tests {
                 <body><center><h1>502 Bad Gateway</h1></center></body>
                 </html>
             "};
+
             assert_eq!(
                 body_details(nginx, None).as_deref(),
                 Some("502 Bad Gateway")
             );
+
             assert_eq!(body_details("<html><body>busy</body></html>", None), None);
         }
 

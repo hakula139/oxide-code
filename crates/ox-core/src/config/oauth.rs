@@ -1048,8 +1048,8 @@ mod tests {
     use crate::util::path::local_testing::abs;
     use crate::util::path::testing::HOME_VAR;
     use crate::util::tls::PlatformTrust;
-    use crate::util::tls::local_testing::{TEST_CA_PEM, no_roots};
-    use crate::util::tls::testing::NoRoots;
+    use crate::util::tls::local_testing::no_roots;
+    use crate::util::tls::testing::{NoRoots, TEST_CA_PATH};
 
     fn store<'a>(keychain: Option<&'a dyn Keychain>, file: &Path, lock: &Path) -> Store<'a> {
         Store {
@@ -2323,13 +2323,10 @@ mod tests {
                 .mount(&server)
                 .await;
 
-            let pem = tempfile::NamedTempFile::new().unwrap();
-            std::io::Write::write_all(&mut pem.as_file(), TEST_CA_PEM.as_bytes()).unwrap();
-
             let response = refresh_oauth_token(
                 &server.uri(),
                 "refresh",
-                &PlatformTrust(Some(pem.path().to_path_buf())),
+                &PlatformTrust(Some(TEST_CA_PATH.into())),
             )
             .await
             .expect("valid PEM must build a client and produce a response");

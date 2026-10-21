@@ -1,9 +1,10 @@
 //! Test fixtures for the Anthropic client that only this crate's tests use.
 
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use bytes::Bytes;
 use tokio_util::task::TaskTracker;
+use wiremock::MockServer;
 
 use super::Client;
 use super::testing::{DEVICE_ID, api_key, test_config};
@@ -53,6 +54,22 @@ pub(super) fn messages_request(url: impl Into<String>) -> MessagesRequest {
     }
 }
 
+/// The `x-stainless-retry-count` of each request `server` received, in order.
+pub(super) async fn retry_counts(server: &MockServer) -> Vec<String> {
+    server
+        .received_requests()
+        .await
+        .expect("the server records requests")
+        .iter()
+        .map(|request| {
+            request.headers["x-stainless-retry-count"]
+                .to_str()
+                .expect("the retry count is ASCII")
+                .to_owned()
+        })
+        .collect()
+}
+
 /// Usage that [`completion_body`] reports.
 pub(crate) const COMPLETION_USAGE: TokenUsage = TokenUsage::new(5, 3);
 
@@ -77,12 +94,4 @@ pub(super) fn auth_token() -> Auth {
 
 pub(super) fn oauth() -> Auth {
     Auth::new(AuthSource::ClaudeCodeLogin, "t")
-}
-
-/// Slot for data captured by a wiremock responder. Capturing it in an `Fn` and inspecting it
-/// across awaits takes the full `Arc<Mutex<Option<T>>>`.
-pub(super) type Captured<T> = Arc<Mutex<Option<T>>>;
-
-pub(super) fn captured<T>() -> Captured<T> {
-    Arc::new(Mutex::new(None))
 }

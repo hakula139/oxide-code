@@ -253,7 +253,8 @@ mod tests {
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
     use super::*;
-    use crate::client::anthropic::local_testing::{messages_request, plain_http};
+    use crate::client::anthropic::local_testing::{messages_request, plain_http, retry_counts};
+    use crate::client::anthropic::testing::sse_response;
     use crate::client::anthropic::wire::{Delta, MessageResponse};
     use crate::client::{RateLimitWindow, RateLimits, Response};
     use crate::message::ContentBlock;
@@ -355,12 +356,6 @@ mod tests {
             data: {"type":"message_stop"}
 
         "#};
-
-        fn sse_response(body: impl Into<Vec<u8>>) -> ResponseTemplate {
-            ResponseTemplate::new(200)
-                .insert_header("content-type", "text/event-stream")
-                .set_body_bytes(body)
-        }
 
         /// `response` with a subscription's five-hour usage window.
         fn rate_limited(response: ResponseTemplate) -> ResponseTemplate {
@@ -493,18 +488,7 @@ mod tests {
                     hi_reply(),
                 ],
             );
-            let counts: Vec<String> = server
-                .received_requests()
-                .await
-                .unwrap()
-                .iter()
-                .map(|r| {
-                    r.headers["x-stainless-retry-count"]
-                        .to_str()
-                        .unwrap()
-                        .to_owned()
-                })
-                .collect();
+            let counts = retry_counts(&server).await;
             assert_eq!(counts, ["0", "1", "2"]);
         }
 
@@ -815,7 +799,12 @@ mod tests {
 
         #[test]
         fn invalid_json_errors() {
-            assert!(parse_sse_frame("data: {not valid json}").is_err());
+            let err = parse_sse_frame("data: {not valid json}").unwrap_err();
+
+            assert_eq!(
+                err.to_string(),
+                "failed to parse SSE data: {not valid json}"
+            );
         }
 
         #[test]

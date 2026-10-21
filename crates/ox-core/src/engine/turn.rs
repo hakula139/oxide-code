@@ -447,6 +447,7 @@ mod tests {
 
     use super::*;
     use crate::client::anthropic::local_testing::test_client;
+    use crate::client::anthropic::testing::sse_response;
     use crate::client::testing::five_hour_limit;
     use crate::config::Effort;
     use crate::config::auth::{Auth, AuthSource};
@@ -689,12 +690,6 @@ mod tests {
             data: {"type":"message_stop"}
 
         "#};
-
-        fn sse(body: &'static str) -> ResponseTemplate {
-            ResponseTemplate::new(200)
-                .insert_header("content-type", "text/event-stream")
-                .set_body_string(body)
-        }
 
         /// Drives one turn through the real `<Client as Wire>` path. The server answers with
         /// `responses` in order, one request each, and repeats the last one.
@@ -1912,7 +1907,7 @@ mod tests {
         #[tokio::test]
         async fn drives_real_client_over_wiremock() {
             let (outcome, messages, _) =
-                real_client_turn(vec![sse(HELLO_SSE)], &ToolRegistry::new(vec![])).await;
+                real_client_turn(vec![sse_response(HELLO_SSE)], &ToolRegistry::new(vec![])).await;
 
             outcome.into_result().unwrap();
             assert_eq!(messages.len(), 2);
@@ -1927,7 +1922,7 @@ mod tests {
                 vec![
                     ResponseTemplate::new(529).insert_header("retry-after", "0"),
                     ResponseTemplate::new(503).insert_header("retry-after", "0"),
-                    sse(HELLO_SSE),
+                    sse_response(HELLO_SSE),
                 ],
                 &ToolRegistry::new(vec![]),
             )
@@ -1993,9 +1988,11 @@ mod tests {
 
             "#};
 
-            let (outcome, _, _) =
-                real_client_turn(vec![sse(failed), sse(answered)], &ToolRegistry::new(vec![]))
-                    .await;
+            let (outcome, _, _) = real_client_turn(
+                vec![sse_response(failed), sse_response(answered)],
+                &ToolRegistry::new(vec![]),
+            )
+            .await;
 
             assert_eq!(
                 outcome.report.usage,
@@ -2033,7 +2030,7 @@ mod tests {
             "#};
 
             let (outcome, messages, sink) = real_client_turn(
-                vec![sse(body)],
+                vec![sse_response(body)],
                 &ToolRegistry::new(vec![Box::new(EchoTool)]),
             )
             .await;
