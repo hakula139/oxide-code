@@ -8,8 +8,9 @@ use std::pin::Pin;
 use serde::Deserialize;
 
 use super::{
-    ApprovalBody, ApprovalPreview, DiffChunk, DiffLine, Prepared, Tool, ToolCtx, ToolMetadata,
-    ToolOutput, ToolResultView, ToolSpec, WriteMode, extract_input_field, summarize_path_call,
+    ApprovalBody, ApprovalPreview, DiffChunk, DiffLine, EditDiff, Prepared, Tool, ToolCtx,
+    ToolMetadata, ToolOutput, ToolResultView, ToolSpec, WriteMode, extract_input_field,
+    summarize_path_call,
 };
 use crate::file_tracker::GatePurpose;
 use crate::permission::PermissionClass;
@@ -56,23 +57,12 @@ impl Tool for EditTool {
         metadata: &ToolMetadata,
         _cwd: &Path,
     ) -> Option<ToolResultView> {
+        if let Some(diff) = &metadata.diff {
+            return Some(ToolResultView::Diff(diff.clone()));
+        }
         let old = input.get("old_string")?.as_str()?;
         let new = input.get("new_string")?.as_str()?;
-        let replace_all = input
-            .get("replace_all")
-            .and_then(serde_json::Value::as_bool)
-            .unwrap_or(false);
-        let chunks = metadata
-            .diff_chunks
-            .clone()
-            .filter(|c| !c.is_empty())
-            .unwrap_or_else(|| vec![synthesize_chunk(old, new)]);
-        let replacements = chunks.len();
-        Some(ToolResultView::Diff {
-            chunks,
-            replace_all,
-            replacements,
-        })
+        Some(ToolResultView::Diff(synthesize_diff(old, new)))
     }
 
     fn approval_preview<'a>(
@@ -153,21 +143,20 @@ async fn run(raw: serde_json::Value, ctx: &ToolCtx) -> ToolOutput {
     )
     .await
     {
-        Ok(chunks) => {
-            let content = match chunks.len() {
+        Ok(Edited { replacements, diff }) => {
+            let content = match replacements {
                 1 => format!("Successfully edited {path}."),
                 n => format!("Replaced {n} occurrences in {path}."),
             };
             ToolOutput::success(content)
                 .with_title(format!("Edited {}", super::file_name(path)))
-                .with_diff_chunks(chunks)
+                .with_diff(diff)
         }
         Err(msg) => ToolOutput::error(msg),
     }
 }
 
-/// Replaces `old_string` in the file at `path`, resolved against the context's cwd, and returns one
-/// diff chunk per replacement, numbered by post-edit lines.
+/// Replaces `old_string` in the file at `path`, resolved against the context's cwd.
 ///
 /// - `old_string` must occur verbatim, and exactly once without `replace_all`, so the model cannot
 ///   edit the wrong site.
@@ -179,7 +168,7 @@ async fn edit_file(
     new_string: &str,
     replace_all: bool,
     ctx: &ToolCtx,
-) -> Result<Vec<DiffChunk>, String> {
+) -> Result<Edited, String> {
     if old_string.is_empty() {
         return Err("old_string must not be empty.".to_owned());
     }
@@ -197,88 +186,122 @@ async fn edit_file(
     ctx.tracker
         .verify_current_content(&key, &content_bytes, GatePurpose::Edit)
         .map_err(|e| e.to_string())?;
-    let content =
-        String::from_utf8(content_bytes).map_err(|e| format!("Failed to read {path}: {e}"))?;
 
-    let eol = dominant_eol(&content);
-    let content = normalize_eol(&content);
-    let old_string = normalize_eol(old_string);
-    let new_string = normalize_eol(new_string);
-
-    let match_count = content.matches(old_string.as_ref()).count();
-    if match_count == 0 {
-        return Err(format!(
-            "Found no occurrence of old_string in {path}. \
-             Copy it exactly from the file, including whitespace and indentation."
-        ));
-    }
-
-    if match_count > 1 && !replace_all {
-        return Err(format!(
-            "Found {match_count} occurrences of old_string in {path}. \
-             Set replace_all to true to replace them all, or add context to make old_string unique."
-        ));
-    }
-
-    let chunks_take = if replace_all { usize::MAX } else { 1 };
-    let chunks = build_diff_chunks(
-        &content,
-        old_string.as_ref(),
-        new_string.as_ref(),
-        chunks_take,
-    );
-
-    let updated = if replace_all {
-        content.replace(old_string.as_ref(), new_string.as_ref())
-    } else {
-        content.replacen(old_string.as_ref(), new_string.as_ref(), 1)
+    let replacement = Replacement {
+        path: path.to_owned(),
+        old_string: old_string.to_owned(),
+        new_string: new_string.to_owned(),
+        replace_all,
     };
-    let updated = apply_eol(updated, eol);
+    let (updated, edited) = super::run_blocking(move || replacement.apply(content_bytes)).await?;
 
     super::write_tracked(ctx, &file_path, updated.into_bytes(), WriteMode::Overwrite)
         .await
         .map_err(|e| format!("Failed to write {path}: {e}"))?;
-    Ok(chunks)
+    Ok(edited)
+}
+
+/// What [`edit_file`] changed.
+#[derive(Debug)]
+struct Edited {
+    replacements: usize,
+    diff: EditDiff,
+}
+
+/// One edit call's replacement, which runs on the blocking pool since a `replace_all` over a large
+/// file is CPU-bound.
+struct Replacement {
+    /// The path as the call gave it, for error messages.
+    path: String,
+    old_string: String,
+    new_string: String,
+    replace_all: bool,
+}
+
+impl Replacement {
+    /// The file's updated text and what changed, given its current `content`.
+    fn apply(&self, content: Vec<u8>) -> Result<(String, Edited), String> {
+        let path = &self.path;
+        let content =
+            String::from_utf8(content).map_err(|e| format!("Failed to read {path}: {e}"))?;
+
+        let eol = dominant_eol(&content);
+        let content = normalize_eol(&content);
+        let old_string = normalize_eol(&self.old_string);
+        let new_string = normalize_eol(&self.new_string);
+
+        let replacements = content.matches(old_string.as_ref()).count();
+        if replacements == 0 {
+            return Err(format!(
+                "Found no occurrence of old_string in {path}. \
+                 Copy it exactly from the file, including whitespace and indentation."
+            ));
+        }
+
+        if replacements > 1 && !self.replace_all {
+            return Err(format!(
+                "Found {replacements} occurrences of old_string in {path}. \
+                 Set replace_all to true to replace them all, \
+                 or add context to make old_string unique."
+            ));
+        }
+
+        let diff = build_diff(&content, &old_string, &new_string);
+        let updated = content.replace(old_string.as_ref(), new_string.as_ref());
+        Ok((apply_eol(updated, eol), Edited { replacements, diff }))
+    }
 }
 
 // ── Diff Production ──
 
-fn build_diff_chunks(
-    original: &str,
-    old_string: &str,
-    new_string: &str,
-    take: usize,
-) -> Vec<DiffChunk> {
-    let positions = original
-        .match_indices(old_string)
-        .map(|(i, _)| i)
-        .take(take);
-    let shift_per_match = new_string.matches('\n').count().cast_signed()
-        - old_string.matches('\n').count().cast_signed();
+/// The diff of replacing every `old_string` in `original` with `new_string`, counted in one pass
+/// over `original`. Old-side numbers count lines of `original`, and new-side numbers count lines
+/// of the edited text.
+fn build_diff(original: &str, old_string: &str, new_string: &str) -> EditDiff {
+    let hunk = synthesize_chunk(old_string, new_string);
+    let old_breaks = old_string.matches('\n').count();
+    let new_breaks = new_string.matches('\n').count();
 
-    positions
-        .enumerate()
-        .map(|(idx, byte_pos)| {
-            let original_line = line_at_byte(original, byte_pos);
-            let cumulative_shift = idx
-                .cast_signed()
-                .checked_mul(shift_per_match)
-                .expect("cumulative line-shift fits in isize for tracked-size inputs");
-            let new_line = original_line
-                .checked_add_signed(cumulative_shift)
-                .expect("post-edit line number stays positive for real match positions");
-            let mut chunk = DiffChunk {
-                old: split_into_diff_lines(old_string, original_line),
-                new: split_into_diff_lines(new_string, new_line),
-            };
-            trim_chunk(&mut chunk);
-            chunk
-        })
-        .collect()
+    let mut first = None;
+    let mut locations = Vec::new();
+    let (mut old_line, mut new_line, mut scanned) = (1, 1, 0);
+    for (pos, _) in original.match_indices(old_string) {
+        let breaks = original[scanned..pos].matches('\n').count();
+        old_line += breaks;
+        new_line += breaks;
+
+        first.get_or_insert((old_line, new_line));
+        locations.extend(anchor_line(&hunk, old_line, new_line));
+
+        old_line += old_breaks;
+        new_line += new_breaks;
+        scanned = pos + old_string.len();
+    }
+
+    let (old_line, new_line) = first.unwrap_or((1, 1));
+    EditDiff {
+        chunk: shift_chunk(hunk, old_line, new_line),
+        locations,
+    }
 }
 
-fn line_at_byte(content: &str, offset: usize) -> usize {
-    1 + content[..offset].matches('\n').count()
+/// The line a replacement whose text starts at `old_line` before the edit and at `new_line` after
+/// it applied at, given its `hunk` numbered from line 1: the first removed line, or for a pure
+/// insertion the first added one. `None` when the hunk trims to nothing.
+fn anchor_line(hunk: &DiffChunk, old_line: usize, new_line: usize) -> Option<usize> {
+    let old = hunk.old.first().map(|line| line.number + old_line - 1);
+    old.or_else(|| hunk.new.first().map(|line| line.number + new_line - 1))
+}
+
+/// `hunk`, numbered from line 1 on both sides, renumbered to start at `old_line` and `new_line`.
+fn shift_chunk(mut hunk: DiffChunk, old_line: usize, new_line: usize) -> DiffChunk {
+    for line in &mut hunk.old {
+        line.number += old_line - 1;
+    }
+    for line in &mut hunk.new {
+        line.number += new_line - 1;
+    }
+    hunk
 }
 
 fn split_into_diff_lines(s: &str, start_line: usize) -> Vec<DiffLine> {
@@ -340,7 +363,15 @@ fn apply_eol(content: String, eol: &str) -> String {
 
 // ── Result View ──
 
-pub(crate) fn synthesize_chunk(old: &str, new: &str) -> DiffChunk {
+/// The diff of replacing `old` with `new`, numbered from line 1, for a call that recorded none.
+pub(super) fn synthesize_diff(old: &str, new: &str) -> EditDiff {
+    let chunk = synthesize_chunk(old, new);
+    let locations = anchor_line(&chunk, 1, 1).into_iter().collect();
+    EditDiff { chunk, locations }
+}
+
+/// The boundary-trimmed hunk of replacing `old` with `new`, numbered from line 1 on both sides.
+pub(super) fn synthesize_chunk(old: &str, new: &str) -> DiffChunk {
     let mut chunk = DiffChunk {
         old: split_into_diff_lines(old, 1),
         new: split_into_diff_lines(new, 1),
@@ -363,88 +394,70 @@ mod tests {
         ctx_with(&std::env::temp_dir(), tracker_seeded(path))
     }
 
+    fn line(number: usize, text: &str) -> DiffLine {
+        DiffLine {
+            number,
+            text: text.to_owned(),
+        }
+    }
+
     mod result_view {
         use super::*;
 
         #[test]
-        fn prefers_structured_chunks_from_metadata_on_live_path() {
+        fn prefers_the_recorded_diff() {
             let input = serde_json::json!({
                 "file_path": "/tmp/f.rs",
                 "old_string": "a",
                 "new_string": "b",
                 "replace_all": true,
             });
-            let chunks = vec![
-                DiffChunk {
-                    old: vec![DiffLine {
-                        number: 12,
-                        text: "a".to_owned(),
-                    }],
-                    new: vec![DiffLine {
-                        number: 12,
-                        text: "b".to_owned(),
-                    }],
+            let diff = EditDiff {
+                chunk: DiffChunk {
+                    old: vec![line(12, "a")],
+                    new: vec![line(12, "b")],
                 },
-                DiffChunk {
-                    old: vec![DiffLine {
-                        number: 47,
-                        text: "a".to_owned(),
-                    }],
-                    new: vec![DiffLine {
-                        number: 47,
-                        text: "b".to_owned(),
-                    }],
-                },
-            ];
+                locations: vec![12, 47],
+            };
             let metadata = ToolMetadata {
-                diff_chunks: Some(chunks.clone()),
+                diff: Some(diff.clone()),
                 ..ToolMetadata::default()
             };
+
             let view = EditTool.result_view(
                 &input,
                 "Replaced 2 occurrences in /tmp/f.rs.",
                 &metadata,
                 Path::new("/repo"),
             );
-            assert_eq!(
-                view,
-                Some(ToolResultView::Diff {
-                    chunks,
-                    replace_all: true,
-                    replacements: 2,
-                }),
-            );
+
+            assert_eq!(view, Some(ToolResultView::Diff(diff)));
         }
 
         #[test]
-        fn synthesizes_chunk_when_metadata_lacks_diff_chunks() {
+        fn without_a_recorded_diff_synthesizes_one_from_the_input() {
             let input = serde_json::json!({
                 "file_path": "/tmp/f.rs",
                 "old_string": "fn foo()",
                 "new_string": "fn bar()",
             });
+
             let view = EditTool.result_view(
                 &input,
                 "Successfully edited /tmp/f.rs.",
                 &ToolMetadata::default(),
                 Path::new("/repo"),
             );
+
             assert_eq!(
                 view,
-                Some(ToolResultView::Diff {
-                    chunks: vec![DiffChunk {
-                        old: vec![DiffLine {
-                            number: 1,
-                            text: "fn foo()".to_owned()
-                        }],
-                        new: vec![DiffLine {
-                            number: 1,
-                            text: "fn bar()".to_owned()
-                        }],
-                    }],
-                    replace_all: false,
-                    replacements: 1,
-                }),
+                Some(ToolResultView::Diff(EditDiff {
+                    chunk: DiffChunk {
+                        old: vec![line(1, "fn foo()")],
+                        new: vec![line(1, "fn bar()")],
+                    },
+                    locations: vec![1],
+                })),
             );
         }
 
@@ -942,57 +955,7 @@ mod tests {
         }
 
         #[tokio::test]
-        async fn chunks_carry_real_file_line_numbers_for_replace_all() {
-            let dir = canonical_tempdir();
-            let path = dir.path().join("multi.txt");
-            std::fs::write(
-                &path,
-                indoc! {"
-                    A
-                    B
-                    C
-                    B
-                "},
-            )
-            .unwrap();
-
-            let chunks = edit_file(path.to_str().unwrap(), "B", "X", true, &seeded_ctx(&path))
-                .await
-                .unwrap();
-
-            assert_eq!(chunks.len(), 2);
-            assert_eq!(
-                chunks[0].old,
-                vec![DiffLine {
-                    number: 2,
-                    text: "B".to_owned()
-                }]
-            );
-            assert_eq!(
-                chunks[0].new,
-                vec![DiffLine {
-                    number: 2,
-                    text: "X".to_owned()
-                }]
-            );
-            assert_eq!(
-                chunks[1].old,
-                vec![DiffLine {
-                    number: 4,
-                    text: "B".to_owned()
-                }]
-            );
-            assert_eq!(
-                chunks[1].new,
-                vec![DiffLine {
-                    number: 4,
-                    text: "X".to_owned()
-                }]
-            );
-        }
-
-        #[tokio::test]
-        async fn chunks_shift_new_side_for_growing_replace_all() {
+        async fn replace_all_numbers_the_first_hunk_and_lists_every_location() {
             let dir = canonical_tempdir();
             let path = dir.path().join("grow.txt");
             std::fs::write(
@@ -1006,7 +969,7 @@ mod tests {
             )
             .unwrap();
 
-            let chunks = edit_file(
+            let edited = edit_file(
                 path.to_str().unwrap(),
                 "B",
                 "X\nY",
@@ -1016,74 +979,28 @@ mod tests {
             .await
             .unwrap();
 
-            assert_eq!(chunks.len(), 2);
-            assert_eq!(chunks[0].old[0].number, 2);
+            assert_eq!(edited.replacements, 2);
             assert_eq!(
-                chunks[0].new,
-                vec![
-                    DiffLine {
-                        number: 2,
-                        text: "X".to_owned()
+                edited.diff,
+                EditDiff {
+                    chunk: DiffChunk {
+                        old: vec![line(2, "B")],
+                        new: vec![line(2, "X"), line(3, "Y")],
                     },
-                    DiffLine {
-                        number: 3,
-                        text: "Y".to_owned()
-                    },
-                ],
+                    locations: vec![2, 4],
+                },
             );
-            assert_eq!(chunks[1].old[0].number, 4);
             assert_eq!(
-                chunks[1].new,
-                vec![
-                    DiffLine {
-                        number: 5,
-                        text: "X".to_owned()
-                    },
-                    DiffLine {
-                        number: 6,
-                        text: "Y".to_owned()
-                    },
-                ],
-            );
-        }
-
-        #[tokio::test]
-        async fn chunks_shift_new_side_for_shrinking_replace_all() {
-            let dir = canonical_tempdir();
-            let path = dir.path().join("shrink.txt");
-            std::fs::write(
-                &path,
+                std::fs::read_to_string(&path).unwrap(),
                 indoc! {"
-                    X
-                    Y
                     A
                     X
                     Y
-                    B
+                    C
                     X
                     Y
-                    C
                 "},
-            )
-            .unwrap();
-
-            let chunks = edit_file(
-                path.to_str().unwrap(),
-                "X\nY",
-                "Z",
-                true,
-                &seeded_ctx(&path),
-            )
-            .await
-            .unwrap();
-
-            assert_eq!(chunks.len(), 3);
-            assert_eq!(chunks[0].old[0].number, 1);
-            assert_eq!(chunks[0].new[0].number, 1);
-            assert_eq!(chunks[1].old[0].number, 4);
-            assert_eq!(chunks[1].new[0].number, 3);
-            assert_eq!(chunks[2].old[0].number, 7);
-            assert_eq!(chunks[2].new[0].number, 5);
+            );
         }
 
         #[cfg(unix)]
@@ -1146,88 +1063,104 @@ mod tests {
         }
     }
 
-    mod build_diff_chunks {
+    mod build_diff {
         use super::*;
 
         #[test]
-        fn single_match_carries_real_position() {
-            let chunks = build_diff_chunks("A\nB\nC\n", "B", "X", 1);
-            assert_eq!(chunks.len(), 1);
+        fn numbers_the_hunk_by_its_lines_in_the_file() {
+            let diff = build_diff("A\nB\nC\n", "B", "X");
+
             assert_eq!(
-                chunks[0].old,
-                vec![DiffLine {
-                    number: 2,
-                    text: "B".to_owned()
-                }]
-            );
-            assert_eq!(
-                chunks[0].new,
-                vec![DiffLine {
-                    number: 2,
-                    text: "X".to_owned()
-                }]
+                diff,
+                EditDiff {
+                    chunk: DiffChunk {
+                        old: vec![line(2, "B")],
+                        new: vec![line(2, "X")],
+                    },
+                    locations: vec![2],
+                },
             );
         }
 
         #[test]
-        fn take_one_caps_at_first_match() {
-            let chunks = build_diff_chunks("B\nB\nB\n", "B", "X", 1);
-            assert_eq!(chunks.len(), 1);
-            assert_eq!(chunks[0].old[0].number, 1);
+        fn locates_each_replacement_by_its_first_removed_line() {
+            let diff = build_diff("X\nY\nA\nX\nY\nB\nX\nY\nC\n", "X\nY", "Z");
+
+            assert_eq!(
+                diff,
+                EditDiff {
+                    chunk: DiffChunk {
+                        old: vec![line(1, "X"), line(2, "Y")],
+                        new: vec![line(1, "Z")],
+                    },
+                    locations: vec![1, 4, 7],
+                },
+            );
         }
 
         #[test]
-        fn applies_per_chunk_trim() {
-            let chunks = build_diff_chunks(
-                indoc! {"
-                    x
-                    x
-                    x
-                    x
-                    fn foo()
-                "},
-                "fn foo()",
-                "fn foo()\n    return 42;",
-                1,
-            );
-            assert_eq!(chunks.len(), 1);
-            assert_eq!(chunks[0].old, []);
+        fn locates_each_insertion_by_its_line_after_the_earlier_ones() {
+            let diff = build_diff("fn foo()\nx\nfn foo()\n", "fn foo()", "fn foo()\n    body");
+
             assert_eq!(
-                chunks[0].new,
-                vec![DiffLine {
-                    number: 6,
-                    text: "    return 42;".to_owned()
-                }],
+                diff,
+                EditDiff {
+                    chunk: DiffChunk {
+                        old: vec![],
+                        new: vec![line(2, "    body")],
+                    },
+                    locations: vec![2, 5],
+                },
+            );
+        }
+
+        #[test]
+        fn a_hunk_that_trims_to_nothing_has_no_locations() {
+            let diff = build_diff("a b\n", "a", "a\n");
+
+            assert_eq!(
+                diff,
+                EditDiff {
+                    chunk: DiffChunk {
+                        old: vec![],
+                        new: vec![],
+                    },
+                    locations: vec![],
+                },
             );
         }
     }
 
-    mod line_at_byte {
+    mod anchor_line {
         use super::*;
 
         #[test]
-        fn first_line_is_one() {
-            assert_eq!(line_at_byte("A\nB\n", 0), 1);
+        fn takes_the_first_removed_line() {
+            let hunk = DiffChunk {
+                old: vec![line(2, "a"), line(3, "b")],
+                new: vec![line(2, "X")],
+            };
+            assert_eq!(anchor_line(&hunk, 10, 20), Some(11));
         }
 
         #[test]
-        fn after_newline_increments() {
-            assert_eq!(line_at_byte("A\nB\nC\n", 2), 2);
-            assert_eq!(line_at_byte("A\nB\nC\n", 4), 3);
+        fn takes_the_first_added_line_of_a_pure_insertion() {
+            let hunk = DiffChunk {
+                old: vec![],
+                new: vec![line(2, "added")],
+            };
+            assert_eq!(anchor_line(&hunk, 10, 20), Some(21));
         }
 
         #[test]
-        fn end_of_file_after_trailing_newline() {
-            assert_eq!(line_at_byte("A\n", 2), 2);
-        }
-
-        #[test]
-        fn end_of_file_without_trailing_newline() {
-            assert_eq!(line_at_byte("AB", 2), 1);
-            assert_eq!(line_at_byte("A\nB", 3), 2);
+        fn leaves_an_empty_hunk_unanchored() {
+            let hunk = DiffChunk {
+                old: vec![],
+                new: vec![],
+            };
+            assert_eq!(anchor_line(&hunk, 10, 20), None);
         }
     }
-
     mod split_into_diff_lines {
         use super::*;
 

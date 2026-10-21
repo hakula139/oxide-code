@@ -90,14 +90,14 @@ Each `stream-json` line is an object with a `type` and, for most types, a `data`
 
 The `view` in `tool_call_end` is the structured result, an object with its own `type` and `data`:
 
-| `view` type    | `data`                                                                                                              |
-| -------------- | ------------------------------------------------------------------------------------------------------------------- |
-| `text`         | `content`, the result text                                                                                          |
-| `read_excerpt` | The file `path`, its numbered `lines` (`number`, `text`), and `total_lines`                                         |
-| `diff`         | `chunks` containing numbered `old` and `new` lines, `replace_all`, and the number of `replacements`                 |
-| `grep_matches` | Per-file `groups` (`path`, `lines` with `number`, `text`, and `is_match`), and whether the matches were `truncated` |
-| `glob_files`   | The `pattern`, the matched `files`, and their `total` count                                                         |
-| `tasks`        | The `tasks` the call sent, each with its `content` and `status`                                                     |
+| `view` type    | `data`                                                                                                                      |
+| -------------- | --------------------------------------------------------------------------------------------------------------------------- |
+| `text`         | `content`, the result text                                                                                                  |
+| `read_excerpt` | The file `path`, its numbered `lines` (`number`, `text`), and `total_lines`                                                 |
+| `diff`         | The first replacement's `chunk`, with numbered `old` and `new` lines, and `locations`, the line each replacement applied at |
+| `grep_matches` | Per-file `groups` (`path`, `lines` with `number`, `text`, and `is_match`), and whether the matches were `truncated`         |
+| `glob_files`   | The `pattern`, the matched `files`, and their `total` count                                                                 |
+| `tasks`        | The `tasks` the call sent, each with its `content` and `status`                                                             |
 
 ### Example
 

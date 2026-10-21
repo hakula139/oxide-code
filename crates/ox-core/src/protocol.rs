@@ -446,7 +446,7 @@ mod tests {
     use crate::tool::tasks::testing::plan;
     use crate::tool::testing::bash_preview;
     use crate::tool::{
-        ApprovalBody, DiffChunk, DiffLine, GrepFileGroup, GrepMatchLine, ReadExcerptLine,
+        ApprovalBody, DiffChunk, DiffLine, EditDiff, GrepFileGroup, GrepMatchLine, ReadExcerptLine,
     };
 
     mod op {
@@ -585,8 +585,8 @@ mod tests {
     mod event {
         use super::*;
 
-        fn diff_chunks() -> Vec<DiffChunk> {
-            vec![DiffChunk {
+        fn diff_chunk() -> DiffChunk {
+            DiffChunk {
                 old: vec![DiffLine {
                     number: 3,
                     text: "old".to_owned(),
@@ -595,7 +595,14 @@ mod tests {
                     number: 3,
                     text: "new".to_owned(),
                 }],
-            }]
+            }
+        }
+
+        fn edit_diff() -> EditDiff {
+            EditDiff {
+                chunk: diff_chunk(),
+                locations: vec![3],
+            }
         }
 
         fn ls_result(view: ToolResultView) -> ToolResult {
@@ -623,11 +630,7 @@ mod tests {
                     }],
                     total_lines: 1,
                 },
-                ToolResultView::Diff {
-                    chunks: diff_chunks(),
-                    replace_all: false,
-                    replacements: 1,
-                },
+                ToolResultView::Diff(edit_diff()),
                 ToolResultView::GrepMatches {
                     groups: vec![GrepFileGroup {
                         path: "src/lib.rs".to_owned(),
@@ -715,7 +718,7 @@ mod tests {
                     id: "t2".to_owned(),
                     preview: ApprovalPreview {
                         title: "Edit".to_owned(),
-                        body: ApprovalBody::Diff(diff_chunks()),
+                        body: ApprovalBody::Diff(vec![diff_chunk()]),
                     },
                     basis: Basis::Mode(Mode::Manual),
                     grant: None,
@@ -832,11 +835,7 @@ mod tests {
                 content: "Edited.".to_owned(),
                 is_error: false,
                 title: Some("Edited f.rs".to_owned()),
-                view: ToolResultView::Diff {
-                    chunks: diff_chunks(),
-                    replace_all: false,
-                    replacements: 1,
-                },
+                view: ToolResultView::Diff(edit_diff()),
             });
             assert_eq!(
                 serde_json::to_value(event).unwrap(),
@@ -850,12 +849,11 @@ mod tests {
                         "view": {
                             "type": "diff",
                             "data": {
-                                "chunks": [{
+                                "chunk": {
                                     "old": [{"number": 3, "text": "old"}],
                                     "new": [{"number": 3, "text": "new"}],
-                                }],
-                                "replace_all": false,
-                                "replacements": 1,
+                                },
+                                "locations": [3],
                             },
                         },
                     },

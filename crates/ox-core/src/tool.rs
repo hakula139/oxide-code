@@ -132,8 +132,9 @@ pub struct ToolOutput {
 pub struct ToolMetadata {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) title: Option<String>,
+    /// What a successful `edit` changed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub(crate) diff_chunks: Option<Vec<DiffChunk>>,
+    pub(crate) diff: Option<EditDiff>,
     /// Unbounded match count when a tool capped returned rows.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) truncated_total: Option<usize>,
@@ -166,8 +167,8 @@ impl ToolOutput {
         self
     }
 
-    fn with_diff_chunks(mut self, chunks: Vec<DiffChunk>) -> Self {
-        self.metadata.diff_chunks = Some(chunks);
+    fn with_diff(mut self, diff: EditDiff) -> Self {
+        self.metadata.diff = Some(diff);
         self
     }
 
@@ -196,11 +197,7 @@ pub enum ToolResultView {
         lines: Vec<ReadExcerptLine>,
         total_lines: usize,
     },
-    Diff {
-        chunks: Vec<DiffChunk>,
-        replace_all: bool,
-        replacements: usize,
-    },
+    Diff(EditDiff),
     GrepMatches {
         groups: Vec<GrepFileGroup>,
         truncated: bool,
@@ -235,6 +232,15 @@ pub struct DiffLine {
 pub struct DiffChunk {
     pub old: Vec<DiffLine>,
     pub new: Vec<DiffLine>,
+}
+
+/// What an edit changed. Every replacement swaps the same text, so the first one's hunk stands for
+/// them all, and `locations` lists the line each one applied at: its first removed line, or for a
+/// pure insertion its first added line. Both are empty when the hunk trims to nothing.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EditDiff {
+    pub chunk: DiffChunk,
+    pub locations: Vec<usize>,
 }
 
 /// One file's match block in a grep result view.
@@ -1336,8 +1342,8 @@ pub(crate) mod local_testing {
 #[cfg(any(test, feature = "testing"))]
 pub mod testing {
     use super::bash::BashTool;
-    use super::edit::synthesize_chunk;
-    use super::{ApprovalBody, ApprovalPreview, DiffChunk, Tool, ToolRegistry};
+    use super::edit::synthesize_diff;
+    use super::{ApprovalBody, ApprovalPreview, EditDiff, Tool, ToolRegistry};
 
     /// The approval preview of a foreground `bash` call that runs `command`.
     pub fn bash_preview(command: &str) -> ApprovalPreview {
@@ -1353,9 +1359,9 @@ pub mod testing {
         ToolRegistry::new(tools)
     }
 
-    /// The diff chunk the `edit` tool shows for replacing `old` with `new`, numbered from line 1.
-    pub fn diff_chunk(old: &str, new: &str) -> DiffChunk {
-        synthesize_chunk(old, new)
+    /// The diff the `edit` tool shows for replacing `old` with `new`, numbered from line 1.
+    pub fn edit_diff(old: &str, new: &str) -> EditDiff {
+        synthesize_diff(old, new)
     }
 }
 
@@ -2065,8 +2071,8 @@ mod tests {
                 );
                 assert_eq!(
                     view,
-                    ToolResultView::Diff {
-                        chunks: vec![DiffChunk {
+                    ToolResultView::Diff(EditDiff {
+                        chunk: DiffChunk {
                             old: vec![DiffLine {
                                 number: 1,
                                 text: "a".to_owned()
@@ -2075,10 +2081,9 @@ mod tests {
                                 number: 1,
                                 text: "b".to_owned()
                             }],
-                        }],
-                        replace_all: false,
-                        replacements: 1,
-                    },
+                        },
+                        locations: vec![1],
+                    }),
                 );
             }
 

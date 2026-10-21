@@ -235,8 +235,8 @@ expression: recovered
   "title": "Fix f.rs",
   "tool_metadata": {
     "t1": {
-      "diff_chunks": [
-        {
+      "diff": {
+        "chunk": {
           "new": [
             {
               "number": 1,
@@ -249,8 +249,11 @@ expression: recovered
               "text": "fn main() {}"
             }
           ]
-        }
-      ],
+        },
+        "locations": [
+          1
+        ]
+      },
       "title": "Edited f.rs"
     },
     "t2": {
