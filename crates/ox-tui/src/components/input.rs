@@ -19,7 +19,7 @@ use self::popup::{PopupState, SlashPopup, popup_state};
 use crate::action::Action;
 use crate::cursor::place_clamped;
 use crate::glyphs::{USER_PROMPT_PREFIX, USER_PROMPT_PREFIX_WIDTH};
-use crate::keymap::CTRL_C;
+use crate::keymap::{CTRL_C, CTRL_D};
 use crate::saturating_u16;
 use crate::slash::arg_placeholder_for;
 use crate::theme::Theme;
@@ -217,14 +217,14 @@ impl InputArea {
                 Action::Op(Op::Interrupt)
             });
         }
+        if CTRL_D.matches(key) {
+            return if self.enabled && self.is_empty() {
+                InputOutcome::Action(Action::Op(Op::Shutdown))
+            } else {
+                InputOutcome::Consumed
+            };
+        }
         match (key.code, key.modifiers) {
-            (KeyCode::Char('d'), KeyModifiers::CONTROL) => {
-                return if self.enabled && self.is_empty() {
-                    InputOutcome::Action(Action::Op(Op::Shutdown))
-                } else {
-                    InputOutcome::Consumed
-                };
-            }
             (KeyCode::BackTab, _) => return InputOutcome::Action(Action::CycleMode),
             (KeyCode::PageUp | KeyCode::PageDown, _)
             | (KeyCode::Home | KeyCode::End, KeyModifiers::CONTROL) => {

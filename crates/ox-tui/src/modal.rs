@@ -10,7 +10,7 @@ pub(crate) mod searchable_list;
 use std::fmt;
 use std::time::Instant;
 
-use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use crossterm::event::{KeyCode, KeyEvent};
 use ratatui::Frame;
 use ratatui::layout::Rect;
 use ratatui::text::{Line, Span};
@@ -18,7 +18,7 @@ use ratatui::widgets::Paragraph;
 
 use crate::action::Action;
 use crate::glyphs::HORIZONTAL_RULE;
-use crate::keymap::CTRL_C;
+use crate::keymap::{CTRL_C, KeyChord, is_unmodified};
 use crate::theme::Theme;
 
 const TOP_BORDER_HEIGHT: u16 = 1;
@@ -185,17 +185,17 @@ impl ModalStack {
         top.render(frame, body_area, theme);
     }
 
-    /// Routes `event` to the top modal. Returns `None` when the key was consumed or the stack is
-    /// empty, `Some(ModalAction::Cancelled)` for a silent close, and `Some(action)` for a Submit or
-    /// Preview. Esc and Ctrl+C short-circuit before delegation as a universal cancel, so
+    /// Routes `event` to the top modal. Returns `None` when the key was consumed, dropped, or the
+    /// stack is empty, `Some(ModalAction::Cancelled)` for a silent close, and `Some(action)` for a
+    /// Submit or Preview. Esc and Ctrl+C short-circuit before delegation as a universal cancel, so
     /// individual modals don't reimplement the gesture, except that Esc reaches a modal whose
-    /// [`Modal::captures_esc`] is set.
+    /// [`Modal::captures_esc`] is set. A modified key the modal does not bind is dropped.
     pub(crate) fn handle_key(&mut self, event: &KeyEvent) -> Option<ModalAction> {
         let top = self.stack.last_mut()?;
         if is_universal_cancel(event) && !(event.code == KeyCode::Esc && top.captures_esc()) {
             return Some(self.pop_cancelled());
         }
-        if !is_plain_char(event) && !top.binds_modified_key(event) {
+        if !is_unmodified(event) && !top.binds_modified_key(event) {
             return None;
         }
         let outcome = top.handle_key(event);
@@ -247,13 +247,9 @@ impl ModalStack {
     }
 }
 
-/// Returns whether the key has no modifier but Shift, which terminals report on uppercase letters.
-pub(crate) fn is_plain_char(event: &KeyEvent) -> bool {
-    event.modifiers.is_empty() || event.modifiers == KeyModifiers::SHIFT
-}
-
+/// Plain Esc or Ctrl+C. A modified Esc is an ordinary modified key, which a modal may bind.
 fn is_universal_cancel(event: &KeyEvent) -> bool {
-    event.code == KeyCode::Esc || CTRL_C.matches(event)
+    KeyChord::plain(KeyCode::Esc).matches(event) || CTRL_C.matches(event)
 }
 
 // ── Testing ──
@@ -397,6 +393,8 @@ mod tests {
     use std::sync::Arc;
     use std::sync::atomic::Ordering;
 
+    use crossterm::event::KeyModifiers;
+
     use ox_core::protocol::Op;
 
     use super::testing::{ScriptedModal, render_rows_with};
@@ -442,6 +440,20 @@ mod tests {
                     "{outcome:?}"
                 );
                 assert!(!stack.is_active());
+            }
+        }
+
+        mod binds_modified_key {
+            use super::*;
+
+            #[test]
+            fn default_binds_no_modified_key() {
+                for event in [
+                    KeyEvent::new(KeyCode::Char('j'), KeyModifiers::ALT),
+                    KeyEvent::new(KeyCode::Char('1'), KeyModifiers::CONTROL),
+                ] {
+                    assert!(!BareModal.binds_modified_key(&event), "{event:?}");
+                }
             }
         }
     }
@@ -675,7 +687,7 @@ mod tests {
         }
 
         #[test]
-        fn drops_ctrl_and_alt_keys_the_modal_does_not_bind() {
+        fn drops_modified_keys_the_modal_does_not_bind() {
             let mut stack = ModalStack::default();
             stack.push(Box::new(ScriptedModal::new(ModalAction::Cancelled)));
 
@@ -692,6 +704,17 @@ mod tests {
                 stack.is_active(),
                 "no modified key reached the submit binding"
             );
+        }
+
+        #[test]
+        fn treats_a_modified_esc_as_an_ordinary_modified_key() {
+            let mut stack = ModalStack::default();
+            stack.push(Box::new(ScriptedModal::new(ModalAction::Cancelled)));
+
+            let outcome = stack.handle_key(&KeyEvent::new(KeyCode::Esc, KeyModifiers::ALT));
+
+            assert!(outcome.is_none());
+            assert!(stack.is_active(), "only a plain Esc cancels");
         }
 
         #[test]

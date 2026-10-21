@@ -39,7 +39,7 @@ use super::registry::{SlashCommand, SlashKind, SlashOutcome};
 use super::sessions::{BARE_ARCHIVE_HINT, open_store, saved_error_message};
 use crate::action::Action;
 use crate::glyphs::MODAL_ERROR_PREFIX;
-use crate::keymap::{KeyAction, KeyChord, Keymap};
+use crate::keymap::{KeyAction, KeyChord, Keymap, is_unmodified};
 use crate::modal::chrome::{COLUMN_GAP, FOOTER_HEIGHT, render_footer, render_footer_text};
 use crate::modal::line_editor::LineEditor;
 use crate::modal::searchable_list::{SearchableItem, SearchableList};
@@ -728,10 +728,10 @@ impl Modal for ResumePicker {
             self.run(action)
         } else {
             match event.code {
-                KeyCode::Up => self.list.select_prev(),
-                KeyCode::Down => self.list.select_next(),
-                KeyCode::PageUp => self.list.page_up(),
-                KeyCode::PageDown => self.list.page_down(),
+                KeyCode::Up if is_unmodified(event) => self.list.select_prev(),
+                KeyCode::Down if is_unmodified(event) => self.list.select_next(),
+                KeyCode::PageUp if is_unmodified(event) => self.list.page_up(),
+                KeyCode::PageDown if is_unmodified(event) => self.list.page_down(),
                 _ => self.list.edit_query(event),
             }
             ModalKey::Consumed
@@ -787,7 +787,7 @@ impl Modal for ResumePicker {
     }
 
     fn binds_modified_key(&self, event: &KeyEvent) -> bool {
-        ACTIONS.action_for(event).is_some() || LineEditor::binds_modified_key(event)
+        LineEditor::binds_modified_key(event)
     }
 }
 

@@ -52,13 +52,13 @@ impl KvRow {
         });
         let value_room = note.map_or(room, |note| room - COLUMN_GAP - note.width());
         let value = center_truncate_to_width(&self.value, value_room);
+        let pad = value_width.saturating_sub(value.width());
         let mut spans = vec![
             Span::styled(pad_to_width(&self.label, label_width), theme.dim()),
             Span::styled(" ".repeat(COLUMN_GAP), theme.surface()),
-            Span::styled(value.clone(), theme.text()),
+            Span::styled(value, theme.text()),
         ];
         if let Some(note) = note {
-            let pad = value_width.saturating_sub(value.width());
             spans.push(Span::styled(" ".repeat(pad + COLUMN_GAP), theme.surface()));
             spans.push(Span::styled(note.to_owned(), theme.dim()));
         }
@@ -314,7 +314,8 @@ mod tests {
         use super::*;
 
         #[test]
-        fn aligns_and_truncates_cjk_labels_values_and_notes_by_display_width() {
+        fn aligns_cjk_labels_values_and_notes_by_display_width_and_drops_a_note_that_does_not_fit()
+        {
             let theme = Theme::default();
             let m = KvOverview::new(
                 "Config",

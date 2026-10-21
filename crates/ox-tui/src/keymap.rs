@@ -10,6 +10,15 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 /// Ctrl+C, shared so the modal stack, selection copy, and input agree on which keys count.
 pub(crate) const CTRL_C: KeyChord = KeyChord::ctrl('c');
 
+/// Ctrl+D, which quits from an empty input.
+pub(crate) const CTRL_D: KeyChord = KeyChord::ctrl('d');
+
+/// Returns whether `event` holds no modifier but Shift, which terminals report on uppercase
+/// letters.
+pub(crate) fn is_unmodified(event: &KeyEvent) -> bool {
+    (event.modifiers - KeyModifiers::SHIFT).is_empty()
+}
+
 /// A key, optionally held with Ctrl.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct KeyChord {
@@ -30,14 +39,17 @@ impl KeyChord {
     }
 
     /// Returns whether `event` presses this key with Ctrl held exactly when the chord holds it and
-    /// no other modifier but Shift, which terminals report on uppercase letters.
+    /// no other modifier but Shift. A Ctrl letter matches in either case, since Windows reports
+    /// Ctrl+C as `C` while Caps Lock or Shift is on.
     pub(crate) fn matches(self, event: &KeyEvent) -> bool {
-        let held = if self.ctrl {
-            KeyModifiers::CONTROL
-        } else {
-            KeyModifiers::NONE
+        if !self.ctrl {
+            return event.code == self.code && is_unmodified(event);
+        }
+        let same_key = match (event.code, self.code) {
+            (KeyCode::Char(pressed), KeyCode::Char(bound)) => pressed.eq_ignore_ascii_case(&bound),
+            (pressed, bound) => pressed == bound,
         };
-        event.code == self.code && event.modifiers - KeyModifiers::SHIFT == held
+        same_key && event.modifiers - KeyModifiers::SHIFT == KeyModifiers::CONTROL
     }
 }
 
@@ -161,13 +173,18 @@ mod tests {
         use super::*;
 
         #[test]
-        fn matches_ctrl_and_alt_exactly_while_ignoring_shift() {
+        fn matches_ctrl_and_alt_exactly_while_ignoring_shift_and_case() {
             let keymap = keymap();
             let press = |code, modifiers| keymap.action_for(&KeyEvent::new(code, modifiers));
 
             assert_eq!(
                 press(KeyCode::Char('x'), KeyModifiers::CONTROL),
                 Some(TestAction::Toggle),
+            );
+            assert_eq!(
+                press(KeyCode::Char('X'), KeyModifiers::CONTROL),
+                Some(TestAction::Toggle),
+                "Windows reports Ctrl+X as X under Caps Lock",
             );
             assert_eq!(press(KeyCode::Char('x'), KeyModifiers::NONE), None);
             assert_eq!(

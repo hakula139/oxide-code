@@ -470,8 +470,10 @@ impl Modal for ApprovalModal {
         self.edit.is_some()
     }
 
+    /// Takes every key while the type-ahead guard is armed, so a modified key typed into the input
+    /// restarts it too.
     fn binds_modified_key(&self, event: &KeyEvent) -> bool {
-        self.edit.is_some() && LineEditor::binds_modified_key(event)
+        now() < self.guard_until || self.edit.is_some() && LineEditor::binds_modified_key(event)
     }
 }
 
@@ -1133,6 +1135,42 @@ mod tests {
                 ModalKey::Consumed
             ));
             assert_eq!(modal.scroll, 0);
+        }
+
+        #[tokio::test(start_paused = true)]
+        async fn a_modified_key_inside_the_guard_restarts_it() {
+            let mut stack = ModalStack::default();
+            let modal = fresh_command_modal("ls");
+            render_to_string(&modal, 40, modal.height(40, 40));
+            stack.push(Box::new(modal));
+            let half = TYPE_AHEAD_GUARD / 2 + Duration::from_millis(50);
+
+            tokio::time::advance(half).await;
+            stack.handle_key(&KeyEvent::new(KeyCode::Char('w'), KeyModifiers::CONTROL));
+            tokio::time::advance(half).await;
+            let outcome = stack.handle_key(&KeyEvent::from(KeyCode::Char('y')));
+
+            assert!(outcome.is_none(), "{outcome:?}");
+            assert!(stack.is_active());
+        }
+
+        #[test]
+        fn shift_y_through_the_stack_approves() {
+            let mut stack = ModalStack::default();
+            stack.push(Box::new(shown_modal("ls")));
+
+            let outcome = stack.handle_key(&KeyEvent::new(KeyCode::Char('Y'), KeyModifiers::SHIFT));
+
+            assert!(
+                matches!(
+                    outcome,
+                    Some(ModalAction::Dispatch(Action::Op(Op::Resolve {
+                        decision: Decision::Approve,
+                        ..
+                    })))
+                ),
+                "{outcome:?}"
+            );
         }
 
         #[test]

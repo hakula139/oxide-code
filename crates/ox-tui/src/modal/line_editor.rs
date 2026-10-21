@@ -115,7 +115,8 @@ impl LineEditor {
         stops.char(stops.at_char(char)) == char
     }
 
-    /// Returns whether the editor binds `event`, a modified key, as a readline-style editing key.
+    /// Returns whether the editor takes `event`, a modified key: every one but a line break or an
+    /// indent, which the textarea maps to its own edits or ignores.
     pub(crate) fn binds_modified_key(event: &KeyEvent) -> bool {
         !is_blocked_key(event)
     }

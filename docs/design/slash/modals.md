@@ -32,7 +32,11 @@ Dispatched actions flow through the same channel as keyboard input, so the modal
 
 Bracketed pastes reach `Modal::handle_paste`, which defaults to a no-op. Text fields such as `/rename`, the picker search, and the approval prompt's editors accept them, and a paste never answers a confirm or approval prompt.
 
-`Modal::on_cancel` fires whenever a modal leaves the stack without submitting: the stack-level Esc / Ctrl+C cancel, a `Cancelled` outcome, or `ModalStack::clear` on resume or compaction. A modal whose `Modal::captures_esc` returns true takes Esc itself, while Ctrl+C still cancels. The stack also drops every key held with Ctrl, Alt, or another modifier but Shift unless `Modal::binds_modified_key` claims it, so a picker's `j` or Enter never fires as Alt+J or Ctrl+Enter. A modal with a text field claims the field's readline keys through `LineEditor::binds_modified_key`, and the `/resume` picker also claims its Ctrl keymap. The approval prompt's rule and feedback editors take it to step back to the choice, and the `/resume` picker takes it so dismissal runs through its keymap. `on_cancel` returns an optional `ModalAction` that the App dispatches in place of the silent close. The default returns `None`. `ApprovalModal` overrides it to emit an abort decision so the blocked agent always gets an answer. The `ox --resume` picker overrides it to emit `Op::Shutdown` because dismissing the picker quits `ox`.
+`Modal::on_cancel` fires whenever a modal leaves the stack without submitting: the stack-level Esc / Ctrl+C cancel, a `Cancelled` outcome, or `ModalStack::clear` on resume or compaction. A modal whose `Modal::captures_esc` returns true takes Esc itself, while Ctrl+C still cancels. The approval prompt's rule and feedback editors take Esc to step back to the choice, and the `/resume` picker takes it so dismissal runs through its keymap.
+
+Only a plain Esc cancels. The stack drops every other key held with Ctrl, Alt, or another modifier but Shift unless `Modal::binds_modified_key` claims it, so a picker's `j` or Enter never fires as Alt+J or Ctrl+Enter. A modal with a text field claims every modified key but a line break or an indent through `LineEditor::binds_modified_key`, which covers the `/resume` picker's Ctrl keymap, and that picker moves its cursor only on unmodified arrows. The approval prompt claims every key while its type-ahead guard is armed, so any key restarts the guard.
+
+`on_cancel` returns an optional `ModalAction` that the App dispatches in place of the silent close. The default returns `None`. `ApprovalModal` overrides it to emit an abort decision so the blocked agent always gets an answer. The `ox --resume` picker overrides it to emit `Op::Shutdown` because dismissing the picker quits `ox`.
 
 ## Implementation
 
@@ -57,7 +61,7 @@ The modals embed these primitives:
 - **Approval modal**: Approve-or-deny gate the App pushes when the agent asks to run a gated tool call.
 - **`/status`, `/config`, `/help`**: Read-only overviews that each command file assembles from `KvSection`s and shows in a `KvOverview`.
 
-App owns `ModalStack` and runs the key gate first inside `handle_crossterm_event`, so an active modal sees every key before any other component. `apply_modal_action` applies the result. A `ModalAction::Dispatch` follows the same `App::dispatch_action` path as a keyboard action.
+App owns `ModalStack` and runs the key gate first inside `handle_crossterm_event`, so an active modal takes every key before any other component sees it, though the stack drops the modified keys the modal does not bind. `apply_modal_action` applies the result. A `ModalAction::Dispatch` follows the same `App::dispatch_action` path as a keyboard action.
 
 ## Design Decisions
 
@@ -128,7 +132,7 @@ App owns `ModalStack` and runs the key gate first inside `handle_crossterm_event
 - `crates/ox-tui/src/app/events.rs`: `push_approval_modal`.
 - `crates/ox-tui/src/app/render.rs`: `draw_frame` modal layout band.
 - `crates/ox-tui/src/keymap.rs`: `Keymap`, `KeyAction`, and `KeyChord`.
-- `crates/ox-tui/src/modal.rs`: `Modal` (including the `on_cancel`, `captures_esc`, and `tick` hooks), `ModalKey`, `ModalAction`, `ModalStack`.
+- `crates/ox-tui/src/modal.rs`: `Modal` (including the `on_cancel`, `captures_esc`, `binds_modified_key`, and `tick` hooks), `ModalKey`, `ModalAction`, `ModalStack`.
 - `crates/ox-tui/src/modal/approval.rs`: `ApprovalModal` approve-or-deny gate for agent tool calls, plus the rule and feedback editors.
 - `crates/ox-tui/src/modal/chrome.rs`: shared `Header`, `render_footer`, and the hint fragments.
 - `crates/ox-tui/src/modal/kv_overview.rs`: generic `KvOverview` plus `KvSection`.
