@@ -13,6 +13,8 @@ mod merge;
 pub(crate) mod oauth;
 pub mod provenance;
 mod schema;
+#[cfg(any(test, feature = "testing"))]
+pub mod testing;
 
 use std::fmt;
 use std::net::IpAddr;
@@ -761,7 +763,6 @@ pub fn display_auto_compaction(auto: AutoCompactionConfig) -> String {
 #[cfg(test)]
 mod tests {
     use std::collections::HashSet;
-    use std::path::Path;
 
     use indoc::{formatdoc, indoc};
     use tempfile::TempDir;
@@ -770,6 +771,7 @@ mod tests {
     use super::oauth::LoginError;
     use super::oauth::testing::write_creds;
     use super::provenance::Layer;
+    use super::testing::test_config;
     use super::*;
     use crate::permission::{Access, Decision, PermissionClass};
     use crate::util::path::testing::HOME_VAR;
@@ -778,26 +780,18 @@ mod tests {
 
     fn sample_config() -> Config {
         Config {
-            auth: Some(Auth::new(
-                AuthSource::ClaudeCodeLogin,
-                "token-must-not-leak",
-            )),
-            signed_out: None,
-            base_url: "https://api.example.test".to_owned(),
             extra_ca_certs: Some(PathBuf::from("/etc/ssl/corp-ca.pem")),
             gateway: GatewayCompat {
                 custom_headers: gateway::parse_headers("x-team: secret-team").unwrap(),
                 attribution: false,
                 structured_outputs: true,
             },
-            model: ModelSpec::resolve("claude-test-1-0"),
             effort: Some(Effort::Xhigh),
             max_tokens: None,
             max_tool_rounds: Some(100),
             prompt_cache_ttl: PromptCacheTtl::FiveMin,
             compaction: CompactionConfig::with_threshold_for_test(42),
             permission: Policy::new(Mode::Plan, Vec::new(), Vec::new(), Vec::new()),
-            workspace: Workspace::new(Path::new("/repo")),
             show_thinking: true,
             show_welcome: false,
             status_line: vec![
@@ -814,6 +808,11 @@ mod tests {
                 effort: Source::Env("OX_EFFORT"),
                 ..Provenance::default()
             },
+            ..test_config(
+                "https://api.example.test",
+                Auth::new(AuthSource::ClaudeCodeLogin, "token-must-not-leak"),
+                "claude-test-1-0",
+            )
         }
     }
 

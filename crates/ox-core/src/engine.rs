@@ -687,11 +687,12 @@ mod tests {
     use super::*;
     use crate::client::anthropic::local_testing::{COMPLETION_USAGE, client_for};
     use crate::client::anthropic::testing::{
-        DEVICE_ID, api_key, sse_body, sse_response, test_config, text_stream_body,
+        DEVICE_ID, api_key, sse_body, sse_response, text_stream_body,
     };
     use crate::config::auth::{AuthSource, LoginUnavailable};
     use crate::config::compaction::CompactionConfig;
     use crate::config::compaction::testing::WINDOW_1M_THRESHOLD;
+    use crate::config::testing::test_config;
     use crate::config::{Effort, PromptCacheTtl, display_auto_compaction};
     use crate::file_tracker::testing::{record_tracked_file, seed_full_read};
     use crate::message::{Replay, Role};

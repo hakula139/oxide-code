@@ -12,9 +12,10 @@ use wiremock::{Mock, MockServer};
 
 use super::{Engine, EngineHandle, EnginePanic, EngineTask, SessionParts};
 use crate::client::anthropic::testing::{
-    DEVICE_ID, api_key, sse_response, test_config, text_stream_body, tool_use_stream_body,
+    DEVICE_ID, api_key, sse_response, text_stream_body, tool_use_stream_body,
 };
 use crate::config::oauth::ClaudeCodeKeychain;
+use crate::config::testing::test_config;
 use crate::permission::Workspace;
 use crate::session::handle::{self, LoadedTranscript};
 use crate::session::store::SessionStore;
