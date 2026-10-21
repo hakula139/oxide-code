@@ -156,7 +156,7 @@ enum SlotPatch {
 }
 
 /// Inline TOML patch with every field optional. `Option<bool>` distinguishes "no change" / "set" /
-/// "clear". [`patch_slot`] rejects an empty override (`error = {}`), so the slot warns and keeps
+/// "clear". [`parse_override`] rejects an empty override (`error = {}`), so the slot warns and keeps
 /// its base value. Serde's untagged enum dispatcher would swallow a `Deserialize`-time message,
 /// so that check runs after deserialization.
 #[derive(Debug, Default, Deserialize)]
