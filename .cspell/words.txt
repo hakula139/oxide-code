@@ -28,6 +28,7 @@ disambiguable
 doas
 EACCES
 ELOOP
+ENOENT
 ENOTDIR
 envrc
 EPERM

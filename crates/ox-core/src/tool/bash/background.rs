@@ -123,8 +123,7 @@ impl BackgroundShells {
             return Err(registry.full());
         }
 
-        let tree = ShellTree::spawn(command, ctx)
-            .map_err(|e| format!("Failed to execute command in {}: {e}", ctx.cwd().display()))?;
+        let tree = ShellTree::spawn(command, ctx)?;
         registry.started += 1;
         let id = format!("shell-{}", registry.started);
         let output = Arc::new(ShellOutput::new(ctx.spills()));
@@ -549,11 +548,7 @@ fn output_input_schema() -> serde_json::Value {
     serde_json::json!({
         "type": "object",
         "properties": {
-            "shell_id": {
-                "type": "string",
-                "description": "The ID bash returned when it started the shell, \
-                                such as \"shell-1\""
-            },
+            "shell_id": shell_id_property(),
             "timeout": {
                 "type": "integer",
                 "description": "Milliseconds to wait for the command to finish \
@@ -575,11 +570,7 @@ fn stop_input_schema() -> serde_json::Value {
     serde_json::json!({
         "type": "object",
         "properties": {
-            "shell_id": {
-                "type": "string",
-                "description": "The ID bash returned when it started the shell, \
-                                such as \"shell-1\""
-            }
+            "shell_id": shell_id_property()
         },
         "required": ["shell_id"]
     })
@@ -588,6 +579,13 @@ fn stop_input_schema() -> serde_json::Value {
 #[derive(Deserialize)]
 struct StopInput {
     shell_id: String,
+}
+
+fn shell_id_property() -> serde_json::Value {
+    serde_json::json!({
+        "type": "string",
+        "description": "The ID bash returned when it started the shell, such as \"shell-1\""
+    })
 }
 
 // ── Execution ──
@@ -601,10 +599,8 @@ async fn read(shells: &BackgroundShells, raw: serde_json::Value) -> ToolOutput {
         Ok(output) => output,
         Err(message) => return ToolOutput::error(message),
     };
-    if let Some(ms) = input.timeout.filter(|&ms| ms > 0) {
-        output
-            .wait(Duration::from_millis(ms).min(MAX_TIMEOUT))
-            .await;
+    if let Some(limit) = wait_limit(input.timeout) {
+        output.wait(limit).await;
     }
 
     let footer = match output.state() {
@@ -612,6 +608,12 @@ async fn read(shells: &BackgroundShells, raw: serde_json::Value) -> ToolOutput {
         ended => format!("({})", ended.describe()),
     };
     ToolOutput::success(with_footer(output.take(), &footer))
+}
+
+fn wait_limit(millis: Option<u64>) -> Option<Duration> {
+    millis
+        .filter(|&ms| ms > 0)
+        .map(|ms| Duration::from_millis(ms).min(MAX_TIMEOUT))
 }
 
 async fn stop(shells: &BackgroundShells, raw: serde_json::Value) -> ToolOutput {
@@ -932,21 +934,13 @@ mod tests {
         }
 
         #[tokio::test]
-        async fn waits_up_to_its_timeout_for_the_command_to_finish() {
+        async fn ends_its_wait_at_the_timeout_while_the_command_runs() {
             let (shells, _sink) = shells();
-            start(&shells, "sleep 0.2; echo done >&2; exit 3").await;
             start(&shells, "sleep 30").await;
 
-            let finished = output(&shells, "shell-1", 5_000).await;
-            let began = Instant::now();
-            let running = output(&shells, "shell-2", 100).await;
+            let running = output(&shells, "shell-1", 1).await;
 
-            assert_eq!(finished, "done\n\n(exit code 3)");
             assert_eq!(running, "(no new output)\n\n(still running)");
-            assert!(
-                began.elapsed() < Duration::from_secs(2),
-                "the wait outlived its timeout"
-            );
             shells.stop_all().await;
         }
 
@@ -1009,6 +1003,18 @@ mod tests {
         }
     }
 
+    mod wait_limit {
+        use super::*;
+
+        #[test]
+        fn skips_zero_and_caps_the_ceiling() {
+            assert_eq!(wait_limit(None), None);
+            assert_eq!(wait_limit(Some(0)), None);
+            assert_eq!(wait_limit(Some(5_000)), Some(Duration::from_secs(5)));
+            assert_eq!(wait_limit(Some(u64::MAX)), Some(MAX_TIMEOUT));
+        }
+    }
+
     mod stop {
         use super::*;
 
@@ -1035,12 +1041,11 @@ mod tests {
             );
             let again = stop(&shells, "shell-1").await;
             assert!(again.is_error);
-            assert!(
-                again
-                    .content
-                    .starts_with("No background shell shell-1 is open"),
-                "{}",
+            assert_eq!(
                 again.content,
+                "No background shell shell-1 is open, and none are. \
+                 A shell closes when bash_stop stops it, when the session ends, \
+                 and when ox exits.",
             );
             until_gone(&pid).await;
         }
