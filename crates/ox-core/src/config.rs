@@ -727,8 +727,11 @@ pub(crate) fn is_first_party_base_url(base_url: &str) -> bool {
 
 // ── Display ──
 
+/// Auth label for a session without credentials.
+pub const NOT_SIGNED_IN: &str = "Not signed in";
+
 pub fn display_auth(auth: Option<AuthSource>) -> String {
-    auth.map_or_else(|| "Not signed in".to_owned(), |source| source.to_string())
+    auth.map_or_else(|| NOT_SIGNED_IN.to_owned(), |source| source.to_string())
 }
 
 pub fn display_effort(effort: Option<Effort>) -> String {
