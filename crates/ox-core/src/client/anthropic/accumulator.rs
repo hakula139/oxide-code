@@ -450,6 +450,11 @@ mod tests {
                     block_delta(1, &json!({"type": "text_delta", "text": "there"})),
                     block_start(2, &json!({"type": "text", "text": ""})),
                     block_delta(2, &json!({"type": "text_delta", "text": "!"})),
+                    block_start(
+                        3,
+                        &json!({"type": "thinking", "thinking": "", "signature": "sig2"}),
+                    ),
+                    block_delta(3, &json!({"type": "thinking_delta", "thinking": "Done"})),
                     json!({"type": "message_stop"}),
                 ],
             );
@@ -462,6 +467,7 @@ mod tests {
                     ResponseEvent::Text("Hello ".to_owned()),
                     ResponseEvent::Text("there".to_owned()),
                     ResponseEvent::Text("!".to_owned()),
+                    ResponseEvent::Thinking("Done".to_owned()),
                     ResponseEvent::Completed(Response {
                         content: vec![
                             ContentBlock::Thinking {
@@ -473,6 +479,10 @@ mod tests {
                             },
                             ContentBlock::Text {
                                 text: "!".to_owned(),
+                            },
+                            ContentBlock::Thinking {
+                                thinking: "Done".to_owned(),
+                                replay: Replay::with_model(MODEL, "sig2"),
                             },
                         ],
                         ..Response::default()

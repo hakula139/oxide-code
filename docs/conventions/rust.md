@@ -43,6 +43,10 @@ Conventions for Rust code under `crates/`. Tooling enforces some style rules, so
 - Include units with numbers, as in `Retrying in 1 s`.
 - Name the variable or store that holds a secret, never its value.
 
+### Log Events
+
+Keep each `tracing` message a constant phrase and pass variable data as fields, so that log filters and readers can match one event across occurrences. Record an error chain as `error = %format_args!("{e:#}")` and a `Display` value as `name = %value`, as in `warn!(?delay, retry, error = %format_args!("{error:#}"), "retrying Anthropic request")`.
+
 ## Visibility
 
 - Use the narrowest visibility that works: private first, then `pub(super)` within the parent module, then `pub(crate)`, then `pub`. In a direct child of a crate root, where `pub(super)` already reaches the whole crate, write `pub(crate)`. Make an item `pub` only when another workspace crate uses it or a `pub` signature names it, and make every module on its path `pub` too, so `pub(crate)` means the item serves its own crate alone. The compiler never reports an unused `pub` item in a library, so a change that removes the last use from another crate also narrows or deletes the item. The binary crate `ox` has no `pub` items.

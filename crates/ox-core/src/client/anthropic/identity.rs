@@ -24,7 +24,10 @@ fn fallback_to_ephemeral(result: Result<String>) -> String {
     match result {
         Ok(id) => id,
         Err(e) => {
-            warn!("device-id storage unavailable, using ephemeral id: {e:#}");
+            warn!(
+                error = %format_args!("{e:#}"),
+                "device-id storage unavailable, using ephemeral id"
+            );
             generate()
         }
     }

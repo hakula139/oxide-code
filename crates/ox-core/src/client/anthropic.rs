@@ -40,7 +40,7 @@ use crate::prompt::SystemPrompt;
 use crate::tool::ToolDefinition;
 use crate::util::tls::Trust;
 use betas::{compute_betas, conversation_cache_control, static_prefix_cache_control};
-use sse::forward_sse;
+use sse::spawn_stream;
 use transport::{MessagesRequest, messages_url};
 use wire::{
     CacheControl, ContextManagement, CreateMessageRequest, OutputConfig, RequestMessages,
@@ -60,10 +60,6 @@ const STAINLESS_TIMEOUT_SECS: &str = "600";
 
 /// Required as its own text block because non-Haiku OAuth requests 429 without it.
 const SYSTEM_PROMPT_PREFIX: &str = "You are Claude Code, Anthropic's official CLI for Claude.";
-
-/// Events a stream may queue ahead of its consumer. The SSE pump waits while the queue is full,
-/// but drops a retry notice so the retry never waits on the consumer.
-const STREAM_BUFFER: usize = 64;
 
 // ── Client ──
 
@@ -242,10 +238,11 @@ impl Client {
             },
         })?;
 
-        let (tx, rx) = mpsc::channel(STREAM_BUFFER);
-        let http = self.http.clone();
-        tokio::spawn(forward_sse(http, request, self.model.id().to_owned(), tx));
-        Ok(rx)
+        Ok(spawn_stream(
+            self.http.clone(),
+            request,
+            self.model.id().to_owned(),
+        ))
     }
 }
 

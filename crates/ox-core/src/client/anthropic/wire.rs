@@ -394,8 +394,8 @@ pub(super) struct ErrorResponse {
 mod tests {
     use serde_json::json;
 
-    use super::super::betas::conversation_cache_control;
     use super::*;
+    use crate::client::anthropic::betas::conversation_cache_control;
     use crate::config::PromptCacheTtl;
     use crate::message::Replay;
 

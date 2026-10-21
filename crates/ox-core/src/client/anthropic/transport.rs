@@ -143,8 +143,8 @@ async fn send(
                 AttemptError::Fatal(e.into())
             } else {
                 AttemptError::retryable(
-                    "API connection failed",
-                    anyhow::Error::new(e).context("API connection failed"),
+                    "Anthropic API connection failed",
+                    anyhow::Error::new(e).context("Anthropic API connection failed"),
                 )
             }
         })
@@ -274,7 +274,7 @@ async fn error_for_status(
     let location = header("location");
     let should_retry = header("x-should-retry");
     let body = response.text().await.unwrap_or_default();
-    debug!(status = status.as_u16(), body, "API error response");
+    debug!(status = status.as_u16(), body, "Anthropic API error");
     let api_error = serde_json::from_str::<ErrorResponse>(&body)
         .ok()
         .map(|response| response.error);
@@ -360,6 +360,8 @@ fn http_status(status: StatusCode) -> String {
 fn parse_retry_after(value: &str) -> Option<Duration> {
     value.trim().parse().ok().map(Duration::from_secs)
 }
+
+// ── Diagnostics ──
 
 /// Renders a user-facing diagnostic for a non-2xx Anthropic response: a per-status headline, the
 /// body's `details` after a colon, then a per-status hint.
@@ -593,9 +595,9 @@ mod tests {
             let AttemptError::Retryable { error, cause, .. } = &err else {
                 panic!("expected a retryable error, got {err:?}");
             };
-            assert_eq!(cause, "API connection failed");
+            assert_eq!(cause, "Anthropic API connection failed");
             assert!(
-                format!("{error:#}").starts_with("API connection failed: "),
+                format!("{error:#}").starts_with("Anthropic API connection failed: "),
                 "{error:#}"
             );
         }
@@ -1193,7 +1195,8 @@ mod tests {
                 (
                     StatusCode::BAD_REQUEST,
                     "messages.0: The block is empty. Remove it.",
-                    "Anthropic API error (HTTP 400 Bad Request): messages.0: The block is empty. Remove it."
+                    "Anthropic API error (HTTP 400 Bad Request): \
+                     messages.0: The block is empty. Remove it."
                         .to_owned(),
                 ),
             ] {
