@@ -21,11 +21,11 @@ impl Tool for WriteTool {
             name: "write".to_owned(),
             description: "Write content to a file, \
                           creating it if it does not exist or overwriting it if it does. \
-                          Before overwriting an existing file, Read all of it in this session, \
-                          in one Read or by paging with offset and limit. \
-                          The Read-before-Edit gate shared with the Edit tool also refuses files \
-                          that changed externally since the last Read. \
-                          Creating a new file skips the gate."
+                          Before overwriting an existing file, read all of it with the `read` tool \
+                          in this session, in one call or by paging with offset and limit. \
+                          As with the `edit` tool, a write also fails for a file \
+                          that changed externally since the last `read`. \
+                          Creating a new file needs no prior `read`."
                 .to_owned(),
             input_schema: input_schema(),
             class: PermissionClass::Edit,
