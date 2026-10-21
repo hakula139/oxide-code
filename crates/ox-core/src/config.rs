@@ -439,7 +439,7 @@ impl Config {
             auth: credential.source,
             base_url: base_url.source,
             extra_ca_certs: extra_ca_certs.source,
-            custom_headers: Source::env_if_set("ANTHROPIC_CUSTOM_HEADERS"),
+            custom_headers: Source::env_if_set(gateway::CUSTOM_HEADERS_VAR),
             attribution: Source::env_if_set("CLAUDE_CODE_ATTRIBUTION_HEADER"),
             structured_outputs: Source::env_if_set("CLAUDE_CODE_DISABLE_STRUCTURED_OUTPUTS"),
             max_tokens: max_tokens.source,

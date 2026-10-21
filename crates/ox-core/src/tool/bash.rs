@@ -26,6 +26,7 @@ use super::{
     ApprovalBody, ApprovalPreview, Prepared, Spill, Tool, ToolCtx, ToolOutput, ToolSpec,
     extract_input_field, omission_marker, pascal_case,
 };
+use crate::config::auth::secret_env_vars;
 use crate::permission::{Access, PermissionClass};
 
 const DEFAULT_TIMEOUT: Duration = Duration::from_mins(2);
@@ -199,8 +200,8 @@ fn resolve_timeout(millis: Option<u64>) -> Duration {
     }
 }
 
-/// Runs `command` in the context's cwd, with [`SESSION_ID_VAR`] set to its session ID and each of
-/// the [`EDITOR_VARS`] to `true`.
+/// Runs `command` in the context's cwd, with [`SESSION_ID_VAR`] set to its session ID, each of the
+/// [`EDITOR_VARS`] set to `true`, and none of ox's [`secret_env_vars`].
 async fn execute(command: &str, timeout: Duration, ctx: &ToolCtx) -> ToolOutput {
     match execute_until(command, tokio::time::sleep(timeout), ctx).await {
         Ok(output) => output,
@@ -580,6 +581,9 @@ impl ShellTree {
                 .stdin(Stdio::null())
                 .stdout(Stdio::piped())
                 .stderr(Stdio::piped());
+            for var in secret_env_vars() {
+                cmd.env_remove(var);
+            }
         });
         #[cfg(unix)]
         cmd.wrap(process_wrap::tokio::ProcessSession);
@@ -1440,10 +1444,38 @@ mod tests {
     mod shell_tree {
         use super::*;
 
-        #[cfg(unix)]
         mod spawn {
             use super::*;
 
+            #[tokio::test]
+            async fn withholds_the_secrets_ox_authenticates_with() {
+                let names: Vec<_> = secret_env_vars().chain(["OX_TEST_INHERITED"]).collect();
+                let vars: Vec<_> = names.iter().map(|&var| (var, Some("secret"))).collect();
+                let command = names
+                    .iter()
+                    .map(|var| format!("echo {var}=${{{var}-unset}}"))
+                    .collect::<Vec<_>>()
+                    .join("; ");
+
+                let mut tree =
+                    temp_env::with_vars(vars, || ShellTree::spawn(&command, &temp_ctx()).unwrap());
+                let (mut stdout, _) = tree.take_pipes();
+                let mut output = String::new();
+                stdout.read_to_string(&mut output).await.unwrap();
+
+                assert_eq!(
+                    output,
+                    indoc! {"
+                        ANTHROPIC_AUTH_TOKEN=unset
+                        ANTHROPIC_API_KEY=unset
+                        CLAUDE_CODE_OAUTH_TOKEN=unset
+                        ANTHROPIC_CUSTOM_HEADERS=unset
+                        OX_TEST_INHERITED=secret
+                    "},
+                );
+            }
+
+            #[cfg(unix)]
             #[tokio::test]
             async fn leads_a_new_session_and_process_group() {
                 let tree = ShellTree::spawn("sleep 30", &temp_ctx()).unwrap();
