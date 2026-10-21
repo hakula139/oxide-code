@@ -1935,7 +1935,7 @@ mod tests {
                     ("sudo -nE --user=root FOO=1 rm -rf x", "rm -rf x"),
                     ("sudo -- cat a", "cat a"),
                     ("doas -n -u root cat a", "cat a"),
-                    ("pkexec --user root cat /etc/hosts", "cat /etc/hosts"),
+                    ("pkexec --user root echo hi", "echo hi"),
                     ("busybox rm -rf x", "rm -rf x"),
                     ("nice sudo nohup cat a", "cat a"),
                 ] {
