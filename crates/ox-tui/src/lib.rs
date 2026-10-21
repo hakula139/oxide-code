@@ -79,7 +79,7 @@ pub async fn run<S: Debug>(
     let session_info = LiveSessionInfo {
         cwd: tildify(cwd),
         working_dir: Some(cwd.to_owned()),
-        project_root: git::project_root(cwd).await,
+        project_root: git::project_root(cwd),
         version: env!("CARGO_PKG_VERSION"),
         session_id: engine.session_id().to_owned(),
         session_allow: Vec::new(),

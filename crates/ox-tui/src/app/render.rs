@@ -434,6 +434,80 @@ mod tests {
         }
 
         #[test]
+        fn paints_every_surface_into_a_terminal_too_small_to_hold_it() {
+            type Arrange = fn(&mut App);
+            let states: [(&str, Arrange); 7] = [
+                ("welcome", |_| {}),
+                ("busy chat", |app| {
+                    push_ls_call(app);
+                    app.chat.push_user_message("one\ntwo".to_owned());
+                    app.chat.append_thinking_token("thinking");
+                    app.chat.append_stream_token("partial reply\n\nmore");
+                    app.pending_prompts.push_back("queued".to_owned());
+                    app.handle_engine_event(Event::TasksUpdated(plan()));
+                    app.input.set_text("line one\nline two\nline three");
+                }),
+                ("slash popup", |app| {
+                    for c in "/mo".chars() {
+                        app.input
+                            .handle_event(&key_event(KeyCode::Char(c), KeyModifiers::NONE));
+                    }
+                }),
+                ("approval", |app| {
+                    push_answerable_approval(app, "cargo test --all");
+                }),
+                ("picker", |app| {
+                    app.dispatch_action(Action::Submit("/theme".to_owned()));
+                }),
+                ("line editor", |app| {
+                    app.dispatch_action(Action::Submit("/rename".to_owned()));
+                }),
+                ("scrolled up", |app| {
+                    app.chat.push_system_message(long_chat_block());
+                    app.chat
+                        .handle_event(&key_event(KeyCode::PageUp, KeyModifiers::NONE));
+                    app.copy_notice = Some(CopyNotice {
+                        text: "Copied 5 characters".to_owned(),
+                        failed: false,
+                        until: now(),
+                    });
+                }),
+            ];
+            let sizes = [
+                (0, 0),
+                (80, 0),
+                (0, 24),
+                (1, 1),
+                (80, 1),
+                (1, 24),
+                (80, 2),
+                (3, 3),
+            ];
+            for (state, arrange) in states {
+                for (width, height) in sizes {
+                    let (mut app, _rx, _event_tx) = test_app(Some("title"));
+                    arrange(&mut app);
+                    let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+
+                    for _ in 0..2 {
+                        terminal.draw(|frame| app.draw_frame(frame)).unwrap();
+                    }
+
+                    let surface = app.theme.surface().bg;
+                    assert!(
+                        terminal
+                            .backend()
+                            .buffer()
+                            .content
+                            .iter()
+                            .all(|cell| Some(cell.bg) == surface),
+                        "{state} at {width}x{height}"
+                    );
+                }
+            }
+        }
+
+        #[test]
         fn lays_out_status_chat_and_input_in_order() {
             let (mut app, _rx, _event_tx) = test_app(Some("Session title"));
             insta::assert_snapshot!(render_app(&mut app, 80, 10));

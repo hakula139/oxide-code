@@ -10,7 +10,7 @@ use indoc::formatdoc;
 use serde::{Deserialize, Serialize};
 
 use crate::model::ModelSpec;
-use crate::util::git::repo_root;
+use crate::util::git::{project_root, repo_root};
 use environment::Environment;
 use sections::{
     CAUTION, INTRO, OUTPUT_EFFICIENCY, STYLE, SYSTEM_SECTION, TASK_GUIDANCE, TOOL_GUIDANCE,
@@ -79,18 +79,9 @@ pub(crate) struct UserContext {
 
 impl UserContext {
     /// Reads the instruction files that apply in `cwd`, plus today's date and `model`'s identity.
-    /// Also returns a warning for each instruction file that exists but cannot be read.
+    /// Also returns a warning for each instruction file that exists but cannot or may not be read.
     pub(crate) async fn load(cwd: &Path, model: &ModelSpec) -> (Self, Vec<String>) {
-        let git_root = repo_root(cwd).await;
-        Self::load_with_root(cwd, git_root.as_deref(), model).await
-    }
-
-    async fn load_with_root(
-        cwd: &Path,
-        git_root: Option<&Path>,
-        model: &ModelSpec,
-    ) -> (Self, Vec<String>) {
-        let (instructions, warnings) = instructions::load(cwd, git_root).await;
+        let (instructions, warnings) = instructions::load(cwd, &project_root(cwd)).await;
         let context = Self {
             instructions,
             date: environment::current_date(),
@@ -142,7 +133,7 @@ async fn assemble(
     git_root: Option<&Path>,
 ) -> (PromptParts, Vec<String>) {
     let environment = Environment::detect(cwd, git_root);
-    let (context, warnings) = UserContext::load_with_root(cwd, git_root, model).await;
+    let (context, warnings) = UserContext::load(cwd, model).await;
 
     let parts = PromptParts {
         system: system_prompt(&environment),

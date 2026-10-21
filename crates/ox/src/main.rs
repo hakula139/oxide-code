@@ -265,7 +265,11 @@ impl TypedValueParser for ModeParser {
 
 fn main() -> ExitCode {
     try_main().unwrap_or_else(|e| {
-        _ = writeln!(io::stderr(), "Error: {e:#}");
+        _ = writeln!(
+            io::stderr(),
+            "Error: {}",
+            util::text::escape_controls(&format!("{e:#}"))
+        );
         ExitCode::FAILURE
     })
 }

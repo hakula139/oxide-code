@@ -63,14 +63,16 @@ fn file_choice(arg: &str) -> Result<&'static str, String> {
         })
 }
 
-/// The files at `root` that hold instructions, as root-relative paths in the order loading tries
-/// them. Paths that resolve to the same file are listed once, under a path that is not a
-/// symlink when one exists.
+/// The files at `root` that hold instructions loading would read, as root-relative paths in the
+/// order loading tries them. Paths that resolve to the same file are listed once, under a path
+/// that is not a symlink when one exists.
 fn existing_instruction_files(root: &Path) -> Vec<PathBuf> {
     let mut files: Vec<(PathBuf, PathBuf)> = Vec::new();
     for path in instructions::project_candidates(Path::new("")) {
         let full = root.join(&path);
-        let Ok(Some(instructions::Found { canonical, .. })) = instructions::read(&full) else {
+        let Ok(Some(instructions::Found { canonical, .. })) =
+            instructions::read_project(&full, root)
+        else {
             continue;
         };
         match files.iter_mut().find(|(_, seen)| *seen == canonical) {
@@ -303,6 +305,30 @@ mod tests {
             symlink("CLAUDE.md", root.path().join("AGENTS.md")).unwrap();
             fs::create_dir(root.path().join(".claude")).unwrap();
             symlink("../CLAUDE.md", root.path().join(".claude/CLAUDE.md")).unwrap();
+
+            assert_eq!(
+                existing_instruction_files(root.path()),
+                [PathBuf::from("CLAUDE.md")],
+            );
+        }
+
+        #[cfg(unix)]
+        #[test]
+        fn leaves_out_files_instruction_loading_skips() {
+            use std::os::unix::fs::symlink;
+
+            let outside = tempfile::tempdir().unwrap();
+            fs::write(outside.path().join("notes.md"), "Outside rules.").unwrap();
+            let root = tempfile::tempdir().unwrap();
+            fs::write(root.path().join(".env"), "TOKEN=x").unwrap();
+            symlink(
+                outside.path().join("notes.md"),
+                root.path().join("AGENTS.md"),
+            )
+            .unwrap();
+            fs::write(root.path().join("CLAUDE.md"), "Rules.").unwrap();
+            fs::create_dir(root.path().join(".claude")).unwrap();
+            symlink("../.env", root.path().join(".claude/CLAUDE.md")).unwrap();
 
             assert_eq!(
                 existing_instruction_files(root.path()),

@@ -21,7 +21,7 @@ pub(crate) const DEVICE_ID: &str = "did";
 pub(crate) fn test_config(base_url: impl Into<String>, auth: Auth, model: &str) -> Config {
     Config {
         auth: Some(auth),
-        signed_out_notice: None,
+        signed_out: None,
         base_url: base_url.into(),
         extra_ca_certs: None,
         gateway: GatewayCompat {
@@ -42,6 +42,7 @@ pub(crate) fn test_config(base_url: impl Into<String>, auth: Auth, model: &str) 
         status_line: StatusLineSegment::DEFAULT.to_vec(),
         theme: ThemeConfig {
             base: DEFAULT_THEME.to_owned(),
+            base_source: crate::config::provenance::Source::Default,
             overrides: toml::Table::new(),
         },
         provenance: Provenance::default(),
