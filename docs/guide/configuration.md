@@ -111,7 +111,7 @@ When unset, `max_tokens` is `64000` on the supported models, half their 128K out
 
 #### `max_tool_rounds`: Agent-Loop Safety Cap
 
-When unset, the agent loop has no per-turn round cap. Setting `max_tool_rounds = N` (or `OX_MAX_TOOL_ROUNDS=N`) bails the turn after `N` rounds with a runaway-loop error. The cap is a guard against tools stuck in a retry loop, since normal agent sessions routinely run hundreds of rounds.
+When unset, the agent loop has no per-turn round cap. Setting `max_tool_rounds = N` (or `OX_MAX_TOOL_ROUNDS=N`) ends the turn after `N` rounds with a runaway-loop error. The cap is a guard against tools stuck in a retry loop, since normal agent sessions routinely run hundreds of rounds.
 
 #### `base_url`: Endpoint
 
@@ -139,11 +139,11 @@ Accepted values: `"5m"` (matches the server default as of 2026-03-06) and `"1h"`
 
 Auto-compaction is enabled by default for the supported models. The default trigger leaves room for the next response and a safety buffer. Set one threshold override when you want compaction to happen earlier:
 
-| Key                      | Type    | Default       | Description                                               |
-| ------------------------ | ------- | ------------- | --------------------------------------------------------- |
-| `auto_enabled`           | boolean | `true`        | Enable automatic context compaction                       |
-| `auto_threshold_tokens`  | integer | model-derived | Absolute trigger, snapped into `50000`-safe-trigger range |
-| `auto_threshold_percent` | integer | model-derived | Percent of context, snapped into the same range           |
+| Key                      | Type    | Default       | Description                                                                                |
+| ------------------------ | ------- | ------------- | ------------------------------------------------------------------------------------------ |
+| `auto_enabled`           | boolean | `true`        | Enable automatic context compaction                                                        |
+| `auto_threshold_tokens`  | integer | model-derived | Token count that triggers compaction, clamped between `50000` and the model's safe trigger |
+| `auto_threshold_percent` | integer | model-derived | Share of the context window that triggers compaction, clamped the same way                 |
 
 `auto_threshold_tokens` and `auto_threshold_percent` are mutually exclusive. Percent must be between `1` and `100`. Either form resolves to a token count clamped into the usable range: values below `50000` tokens snap up to that floor, and values above the model-derived safe trigger snap down. The model-derived ceiling shifts with `/model`, so a global threshold sized for a larger context window keeps working after a swap.
 
@@ -163,7 +163,7 @@ If automatic compaction fails, oxide-code does not send the prompt, and the TUI 
 
 `show_welcome = false` blanks the chat region until you submit a prompt, which is useful when piping or screen-recording.
 
-`status_line` lists segments from the table below in display order and must contain at least one. Segments with no data, such as a missing git branch, an unopened pull request, context usage before the first completed turn, or usage limits under an API key, are omitted. The three pull request segments shell out to `gh pr view` so they require the GitHub CLI on PATH. Click one of them to open the PR, its checks, or its changed files. Terminals that open links on **Ctrl+click** or **Cmd+click** do the same. `pull-request-review` shows only on repositories whose branch protection requires a review, since GitHub reports no review decision otherwise. The separator takes its style from the active theme's `separator` slot and has no setting of its own.
+`status_line` lists segments from the table below in display order and must contain at least one. When unset, it is the list in the example above: `current-dir`, `git-branch`, `pull-request`, `model-with-effort`, `context-used`, `session-cost`, `permission-mode`, `run-state`, and `thread-title`. Segments with no data, such as a missing git branch, an unopened pull request, context usage before the first completed turn, or usage limits under an API key, are omitted. The three pull request segments shell out to `gh pr view` so they require the GitHub CLI on PATH. Click one of them to open the PR, its checks, or its changed files. Terminals that open links on **Ctrl+click** or **Cmd+click** do the same. `pull-request-review` shows only on repositories whose branch protection requires a review, since GitHub reports no review decision otherwise. The separator takes its style from the active theme's `separator` slot and has no setting of its own.
 
 | Segment               | Renders                                                       | Refresh         |
 | --------------------- | ------------------------------------------------------------- | --------------- |
