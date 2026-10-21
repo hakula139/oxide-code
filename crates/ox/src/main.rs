@@ -31,6 +31,7 @@ use ox_core::util;
 use ox_core::util::tls::PlatformTrust;
 use ox_tui::Startup;
 use ox_tui::slash::ResumePicker;
+use ox_tui::terminal;
 use ox_tui::theme::resolve_theme;
 
 use driver::Exit;
@@ -302,14 +303,16 @@ async fn async_main(offset_error: Option<IndeterminateOffset>) -> Result<Exit> {
     let cwd = env::current_dir().context("failed to read the current working directory")?;
 
     if cli.list {
+        let store = SessionStore::open(&cwd)?;
         session_list::write(
             &mut io::stdout().lock(),
-            &cwd,
+            &store,
             ListScope {
                 all: cli.all,
                 archived: cli.archived,
             },
             cli.limit,
+            terminal::stdout_width(),
         )?;
         return Ok(Exit::Success);
     }

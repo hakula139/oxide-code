@@ -8,14 +8,13 @@ use anyhow::{Context, Result};
 use time::UtcOffset;
 use unicode_width::UnicodeWidthStr;
 
-use ox_core::session::display::{UNTITLED_MARKER, id_prefix};
+use ox_core::session::display::{display_title, id_prefix};
 use ox_core::session::entry::SessionInfo;
 use ox_core::session::store::SessionStore;
 use ox_core::session::store::listing::ListScope;
 use ox_core::util;
 use ox_core::util::path::tildify;
 use ox_core::util::text::{escape_line, pad_to_width, truncate_to_width};
-use ox_tui::terminal;
 
 const ID_COL: usize = 10;
 const LAST_ACTIVE_COL: usize = 19;
@@ -31,30 +30,30 @@ const PROJECT_COL_MIN: usize = "Project".len() + 1;
 /// keeps its width in every other row.
 const PROJECT_COL_MAX: usize = 40;
 
-/// Writes the sessions of the project at `cwd`, or of every project when `scope.all` is set, to
-/// `out`. `limit` caps the rows, where `0` lists them all. Titles are cut to the width of a
-/// terminal on stdout.
+/// Writes the sessions of `store`'s project, or of every project when `scope.all` is set, to
+/// `out`. `limit` caps the rows, where `0` lists them all. Titles are cut to `term_width`, the
+/// width of a terminal on stdout, or left whole without one.
 pub(crate) fn write(
     out: &mut impl Write,
-    cwd: &Path,
+    store: &SessionStore,
     scope: ListScope,
     limit: usize,
+    term_width: Option<usize>,
 ) -> Result<()> {
-    let store = SessionStore::open(cwd)?;
     let page = store.list_paged((limit > 0).then_some(limit), scope)?;
     let table = render(
         page.sessions(),
         page.has_more(),
         scope,
         util::time::local_offset(),
-        terminal::stdout_width(),
+        term_width,
     );
     out.write_all(table.as_bytes())
         .context("failed to write the session list")
 }
 
 /// The `--list` table of `sessions`, with a `Project` column when `scope.all` is set and a
-/// `... more` footer when `more` sessions follow. A `term_width` of `None` skips title truncation
+/// `... more` footer when `more` is set. A `term_width` of `None` skips title truncation
 /// for piped output.
 fn render(
     sessions: &[SessionInfo],
@@ -116,11 +115,7 @@ fn render(
             .exit
             .as_ref()
             .map_or("-".to_owned(), |e| e.message_count.to_string());
-        let raw_title = escape_line(
-            s.title
-                .as_ref()
-                .map_or(UNTITLED_MARKER, |t| t.title.as_str()),
-        );
+        let raw_title = escape_line(&display_title(s));
         let title = match title_budget {
             Some(budget) => truncate_to_width(&raw_title, budget),
             None => raw_title,
@@ -151,69 +146,90 @@ mod tests {
 
     mod write {
         use super::*;
+        use crate::driver::testing::ClosedPipe;
 
-        /// The list `write` prints for `scope` and `limit` from the project at `cwd`.
-        fn listed(cwd: &Path, scope: ListScope, limit: usize) -> String {
+        /// The list `write` prints for `scope` and `limit` from `store`'s project.
+        fn listed(store: &SessionStore, scope: ListScope, limit: usize) -> String {
             let mut out = Vec::new();
-            write(&mut out, cwd, scope, limit).unwrap();
+            write(&mut out, store, scope, limit, None).unwrap();
             String::from_utf8(out).unwrap()
         }
 
         #[test]
         fn lists_by_scope_limit_and_archive_state() {
             let dir = tempfile::tempdir().unwrap();
-            let cwd = Path::new("/work/local");
+            let local = SessionStore::open_at(dir.path().to_path_buf(), "local").unwrap();
+            seed_test_session(
+                &local,
+                "local-session",
+                Some("Local session"),
+                Some(2),
+                datetime!(2026-01-01 00:00 UTC),
+            );
+            let other = SessionStore::open_at(dir.path().to_path_buf(), "other").unwrap();
+            seed_test_session(
+                &other,
+                "other-session",
+                Some("Other session"),
+                Some(3),
+                datetime!(2026-01-02 00:00 UTC),
+            );
+            seed_test_session(
+                &other,
+                "archived-session",
+                Some("Archived session"),
+                Some(4),
+                datetime!(2026-01-03 00:00 UTC),
+            );
+            archive_test_session(&other, "archived-session");
             let every = ListScope {
                 all: true,
                 ..ListScope::default()
             };
-            temp_env::with_var("XDG_DATA_HOME", Some(dir.path()), || {
-                let store = SessionStore::open(cwd).unwrap();
-                seed_test_session(
-                    &store,
-                    "local-session",
-                    Some("Local session"),
-                    Some(2),
-                    datetime!(2026-01-01 00:00 UTC),
-                );
-                let other = SessionStore::open_at(dir.path().join("ox/sessions"), "other").unwrap();
-                seed_test_session(
-                    &other,
-                    "other-session",
-                    Some("Other session"),
-                    Some(3),
-                    datetime!(2026-01-02 00:00 UTC),
-                );
 
-                let local = listed(cwd, ListScope::default(), 0);
-                let all = listed(cwd, every, 0);
-                let capped = listed(cwd, every, 1);
-                archive_test_session(&other, "other-session");
-                let archived = listed(
-                    cwd,
-                    ListScope {
-                        archived: true,
-                        ..every
-                    },
-                    0,
-                );
+            let local_list = listed(&local, ListScope::default(), 0);
+            let all = listed(&local, every, 0);
+            let capped = listed(&local, every, 1);
+            let archived = listed(
+                &local,
+                ListScope {
+                    archived: true,
+                    ..every
+                },
+                0,
+            );
 
-                assert!(local.contains("Local session"), "{local}");
-                assert!(!local.contains("Other session"), "{local}");
-                assert!(!local.contains("Project"), "{local}");
-                assert!(all.contains("Local session"), "{all}");
-                assert!(all.contains("Other session"), "{all}");
-                assert!(all.contains("Project"), "{all}");
-                assert!(!all.contains("... more"), "{all}");
-                assert!(capped.contains("Other session"), "{capped}");
-                assert!(!capped.contains("Local session"), "{capped}");
-                assert_eq!(
-                    capped.lines().last(),
-                    Some("... more (use `--limit N` to raise the cap or `--limit 0` to list all)"),
-                );
-                assert!(archived.contains("Other session"), "{archived}");
-                assert!(!archived.contains("Local session"), "{archived}");
-            });
+            assert!(local_list.contains("Local session"), "{local_list}");
+            assert!(!local_list.contains("Other session"), "{local_list}");
+            assert!(!local_list.contains("Project"), "{local_list}");
+            assert!(all.contains("Local session"), "{all}");
+            assert!(all.contains("Other session"), "{all}");
+            assert!(!all.contains("Archived session"), "{all}");
+            assert!(all.contains("Project"), "{all}");
+            assert!(!all.contains("... more"), "{all}");
+            assert!(capped.contains("Other session"), "{capped}");
+            assert!(!capped.contains("Local session"), "{capped}");
+            assert_eq!(
+                capped.lines().last(),
+                Some("... more (use `--limit N` to raise the cap or `--limit 0` to list all)"),
+            );
+            assert!(archived.contains("Archived session"), "{archived}");
+            assert!(!archived.contains("Local session"), "{archived}");
+            assert!(!archived.contains("Other session"), "{archived}");
+        }
+
+        #[test]
+        fn names_the_failed_write() {
+            let dir = tempfile::tempdir().unwrap();
+            let store = SessionStore::open_at(dir.path().to_path_buf(), "local").unwrap();
+
+            let error = write(&mut ClosedPipe, &store, ListScope::default(), 0, None).unwrap_err();
+
+            let message = format!("{error:#}");
+            assert!(
+                message.starts_with("failed to write the session list: "),
+                "{message}"
+            );
         }
     }
 
@@ -233,15 +249,7 @@ mod tests {
             }
         }
 
-        fn render_to_string(sessions: &[SessionInfo], all: bool) -> String {
-            render_with_width(sessions, all, None)
-        }
-
-        fn render_with_width(
-            sessions: &[SessionInfo],
-            all: bool,
-            term_width: Option<usize>,
-        ) -> String {
+        fn rendered(sessions: &[SessionInfo], all: bool, term_width: Option<usize>) -> String {
             render(
                 sessions,
                 false,
@@ -258,7 +266,7 @@ mod tests {
         fn populated_row_has_header_prefix_and_title_defaults() {
             let s = session("0123456789abcdef", datetime!(2026-04-18 13:45:00 UTC));
 
-            let out = render_to_string(&[s], false);
+            let out = rendered(&[s], false, None);
 
             let mut lines = out.lines();
             assert_eq!(
@@ -284,7 +292,7 @@ mod tests {
                 updated_at: datetime!(2026-04-18 09:30:00 UTC),
             });
 
-            let out = render_to_string(&[s], false);
+            let out = rendered(&[s], false, None);
 
             let row = out.lines().nth(1).unwrap();
             assert!(row.contains(" 42     "), "got: {row:?}");
@@ -298,7 +306,7 @@ mod tests {
             let mut longer = session("bbbbbbbbbbbb", datetime!(2026-04-18 09:05:00 UTC));
             longer.cwd = "/work/oxide-code".to_owned();
 
-            let out = render_to_string(&[short, longer], true);
+            let out = rendered(&[short, longer], true, None);
 
             let mut lines = out.lines();
             let header = lines.next().unwrap();
@@ -337,7 +345,7 @@ mod tests {
             ascii.cwd = "/work/abcdefghij".to_owned();
             let widest = ascii.cwd.width();
 
-            let out = render_to_string(&[wide, ascii], true);
+            let out = rendered(&[wide, ascii], true, None);
 
             let title_cols: Vec<usize> = out
                 .lines()
@@ -354,14 +362,15 @@ mod tests {
             let mut s = session("cccccccccccc", datetime!(2026-04-18 09:00:00 UTC));
             s.cwd = "/a".to_owned();
 
-            let out = render_to_string(&[s], true);
+            let out = rendered(&[s], true, None);
 
             let mut lines = out.lines();
-            let header = lines.next().unwrap();
+            assert_eq!(
+                lines.next(),
+                Some("ID         Last Active         Msgs   Project  Title"),
+            );
             let row = lines.next().unwrap();
-            let title_col = FIXED_PREFIX_WIDTH + PROJECT_COL_MIN + 1;
-            assert_eq!(header.find("Title"), Some(title_col), "{header:?}");
-            assert_eq!(row.find("(untitled)"), Some(title_col), "{row:?}");
+            assert!(row.ends_with(" /a       (untitled)"), "{row:?}");
         }
 
         #[test]
@@ -373,7 +382,7 @@ mod tests {
             let mut s = session("cccccccccccc", datetime!(2026-04-18 09:00:00 UTC));
             s.cwd = long_cwd.clone();
 
-            let out = render_to_string(&[s], true);
+            let out = rendered(&[s], true, None);
 
             let mut lines = out.lines();
             let header = lines.next().unwrap();
@@ -398,7 +407,7 @@ mod tests {
                 updated_at: datetime!(2026-04-18 09:05:00 UTC),
             });
 
-            let out = render_to_string(&[s], true);
+            let out = rendered(&[s], true, None);
 
             let rows: Vec<&str> = out.lines().collect();
             assert_eq!(rows.len(), 2, "{out}");
@@ -417,19 +426,27 @@ mod tests {
             });
 
             // Prefix = 38, term_width = 60 → title budget = 22 (fits ~19 chars + `...`).
-            let out = render_with_width(&[s], false, Some(60));
+            let out = rendered(&[s], false, Some(60));
 
             let row = out.lines().nth(1).unwrap();
-            let title = row
-                .split_once("-      ")
-                .map(|(_, t)| t)
-                .expect("row must have the Msgs cell");
-            assert!(title.ends_with("..."), "expected ellipsis, got: {title:?}");
-            assert!(
-                title.width() <= 22,
-                "title width {} exceeds budget for {title:?}",
-                title.width(),
-            );
+            assert!(row.ends_with("..."), "expected ellipsis, got: {row:?}");
+            assert_eq!(row.width(), 60, "{row:?}");
+        }
+
+        #[test]
+        fn title_budget_leaves_room_for_the_project_column() {
+            let mut s = session("0123456789ab", datetime!(2026-04-18 09:00:00 UTC));
+            s.title = Some(TitleInfo {
+                title: "A very long session title that will not fit".to_owned(),
+                updated_at: datetime!(2026-04-18 09:05:00 UTC),
+            });
+
+            // Prefix = 38 + `/work/project` (13) + 1 = 52, term_width = 70 → title budget = 18.
+            let out = rendered(&[s], true, Some(70));
+
+            let row = out.lines().nth(1).unwrap();
+            assert!(row.ends_with("..."), "expected ellipsis, got: {row:?}");
+            assert_eq!(row.width(), 70, "{row:?}");
         }
 
         #[test]
@@ -441,7 +458,7 @@ mod tests {
                 updated_at: datetime!(2026-04-18 09:05:00 UTC),
             });
 
-            let out = render_with_width(&[s], false, None);
+            let out = rendered(&[s], false, None);
 
             assert!(
                 out.contains(full_title),
@@ -459,7 +476,7 @@ mod tests {
             });
 
             // term_width 45 < prefix 38 + MIN_TITLE_BUDGET 12 → untruncated, so the terminal wraps.
-            let out = render_with_width(&[s], false, Some(45));
+            let out = rendered(&[s], false, Some(45));
 
             assert!(
                 out.contains(full_title),

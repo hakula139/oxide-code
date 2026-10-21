@@ -26,7 +26,7 @@ pub struct ListScope {
 // ── ListPage ──
 
 /// One page of sessions, and whether more matching sessions follow it.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct ListPage {
     sessions: Vec<SessionInfo>,
     more: bool,
