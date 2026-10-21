@@ -380,8 +380,9 @@ mod tests {
     use super::*;
     use crate::file_tracker::testing::tracker_seeded;
     use crate::file_tracker::{LastView, MAX_TRACKED_FILE_SIZE};
-    use crate::tool::local_testing::{self, canonical_tempdir, ctx_with, temp_ctx};
+    use crate::tool::local_testing::{self, ctx_with, temp_ctx};
     use crate::tool::read::ReadTool;
+    use crate::util::path::local_testing::canonical_tempdir;
 
     fn seeded_ctx(path: &Path) -> ToolCtx {
         ctx_with(&std::env::temp_dir(), tracker_seeded(path))

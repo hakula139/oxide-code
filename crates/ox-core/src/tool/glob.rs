@@ -293,9 +293,8 @@ mod tests {
 
     use super::*;
     use crate::permission::Access;
-    use crate::tool::local_testing::{
-        self, canonical_tempdir, ctx, deny_reads, search_root, temp_ctx,
-    };
+    use crate::tool::local_testing::{self, ctx, deny_reads, search_root, temp_ctx};
+    use crate::util::path::local_testing::canonical_tempdir;
     use crate::util::path::slash_separated;
 
     /// A `glob` tool without read rules.

@@ -135,6 +135,27 @@ pub(crate) fn slash_separated(path: &Path) -> String {
 
 #[cfg(test)]
 pub(crate) mod local_testing {
+    use std::path::{Path, PathBuf};
+
+    /// A temp dir with a canonical path, the form a resolved workspace path takes. macOS puts temp
+    /// dirs behind the `/var` → `/private/var` symlink, so a raw temp path never compares equal.
+    pub(crate) struct CanonicalTempDir {
+        _dir: tempfile::TempDir,
+        path: PathBuf,
+    }
+
+    impl CanonicalTempDir {
+        pub(crate) fn path(&self) -> &Path {
+            &self.path
+        }
+    }
+
+    pub(crate) fn canonical_tempdir() -> CanonicalTempDir {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dunce::canonicalize(dir.path()).unwrap();
+        CanonicalTempDir { _dir: dir, path }
+    }
+
     /// A rooted Unix fixture path made absolute for the host. Windows needs a drive, so the path
     /// moves onto `C:` there.
     pub(crate) fn abs(path: &str) -> String {

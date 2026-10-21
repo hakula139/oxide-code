@@ -1368,7 +1368,7 @@ mod tests {
     use crate::session::store::local_testing::sample_header;
     use crate::session::store::{SessionStore, artifact_dir};
     use crate::util::fs::testing::{symlink_dir, symlink_file};
-    use crate::util::path::local_testing::abs;
+    use crate::util::path::local_testing::{abs, canonical_tempdir};
     use crate::util::path::slash_separated;
     use crate::util::path::testing::HOME_VAR;
 
@@ -1453,14 +1453,6 @@ mod tests {
         )
     }
 
-    /// A canonicalized tempdir to use as cwd, so assertions compare resolved paths (macOS puts
-    /// tempdirs behind the `/var` → `/private/var` symlink).
-    fn temp_cwd() -> (tempfile::TempDir, PathBuf) {
-        let dir = tempfile::tempdir().unwrap();
-        let cwd = dunce::canonicalize(dir.path()).unwrap();
-        (dir, cwd)
-    }
-
     /// The canonical and relative spellings as paths, which compare equal across separators.
     fn resolved(target: &Access) -> (&Path, Option<&Path>, Zone) {
         let Access::Path {
@@ -1518,7 +1510,8 @@ mod tests {
 
             #[test]
             fn adds_each_extra_root_once_after_the_cwd() {
-                let (_dir, base) = temp_cwd();
+                let base_dir = canonical_tempdir();
+                let base = base_dir.path();
                 let (repo, shared, home) =
                     (base.join("repo"), base.join("shared"), base.join("home"));
                 for dir in [&repo, &shared, &home] {
@@ -1548,7 +1541,8 @@ mod tests {
 
             #[test]
             fn rejects_a_relative_or_too_broad_extra_root() {
-                let (_dir, base) = temp_cwd();
+                let base_dir = canonical_tempdir();
+                let base = base_dir.path();
                 let (repo, home) = (base.join("repo"), base.join("home"));
                 std::fs::create_dir(&repo).unwrap();
                 std::fs::create_dir(&home).unwrap();
@@ -1559,7 +1553,7 @@ mod tests {
                     )
                 };
                 let fs_root = slash_separated(base.ancestors().last().unwrap());
-                let base_raw = slash_separated(&base);
+                let base_raw = slash_separated(base);
 
                 temp_env::with_var(HOME_VAR, Some(&home), || {
                     for (raw, expected) in [
@@ -1580,12 +1574,13 @@ mod tests {
 
             #[test]
             fn rejects_an_extra_root_through_a_symlink_loop() {
-                let (_dir, base) = temp_cwd();
+                let base_dir = canonical_tempdir();
+                let base = base_dir.path();
                 let looped = base.join("loop");
                 symlink_file(&looped, &looped);
                 let raw = format!("{}/inner", looped.display());
 
-                let err = Workspace::resolve(&base, std::slice::from_ref(&raw)).unwrap_err();
+                let err = Workspace::resolve(base, std::slice::from_ref(&raw)).unwrap_err();
 
                 assert_eq!(
                     err.to_string(),
@@ -1598,12 +1593,13 @@ mod tests {
 
             #[test]
             fn rejects_an_extra_root_under_a_file() {
-                let (_dir, base) = temp_cwd();
+                let base_dir = canonical_tempdir();
+                let base = base_dir.path();
                 let notes = base.join("notes");
                 std::fs::write(&notes, "").unwrap();
                 let raw = notes.join("inner").display().to_string();
 
-                let err = Workspace::resolve(&base, std::slice::from_ref(&raw)).unwrap_err();
+                let err = Workspace::resolve(base, std::slice::from_ref(&raw)).unwrap_err();
 
                 assert_eq!(
                     err.to_string(),
@@ -1618,7 +1614,8 @@ mod tests {
             fn has_no_roots_when_launched_from_home() {
                 // A launch from `$HOME` drops every root, so a configured extra root cannot
                 // auto-allow edits outside any project. Each extra root must still be valid.
-                let (_dir, base) = temp_cwd();
+                let base_dir = canonical_tempdir();
+                let base = base_dir.path();
                 let (home, shared) = (base.join("home"), base.join("shared"));
                 std::fs::create_dir(&home).unwrap();
                 std::fs::create_dir(&shared).unwrap();
@@ -1643,12 +1640,13 @@ mod tests {
             fn rejects_home_and_its_parent_under_another_name() {
                 // A symlink to `$HOME` resolves to it. An alias `resolve` keeps, such as `up` here,
                 // still reaches `$HOME` through the trailing names, so it is caught too.
-                let (_dir, base) = temp_cwd();
+                let base_dir = canonical_tempdir();
+                let base = base_dir.path();
                 let (repo, home) = (base.join("repo"), base.join("home"));
                 std::fs::create_dir(&repo).unwrap();
                 std::fs::create_dir(&home).unwrap();
                 symlink_dir(&home, &base.join("home-link"));
-                symlink_dir(&base, &base.join("up"));
+                symlink_dir(base, &base.join("up"));
                 let link = slash_separated(&base.join("home-link"));
 
                 temp_env::with_var(HOME_VAR, Some(&home), || {
@@ -1708,7 +1706,8 @@ mod tests {
 
             #[test]
             fn inside_an_extra_root_is_a_workspace_target_rooted_there() {
-                let (_dir, base) = temp_cwd();
+                let base_dir = canonical_tempdir();
+                let base = base_dir.path();
                 let (repo, shared) = (base.join("repo"), base.join("shared"));
                 std::fs::create_dir(&repo).unwrap();
                 std::fs::create_dir(&shared).unwrap();
@@ -1741,10 +1740,11 @@ mod tests {
 
             #[test]
             fn inside_cwd_is_a_workspace_target() {
-                let (_dir, cwd) = temp_cwd();
+                let cwd_dir = canonical_tempdir();
+                let cwd = cwd_dir.path();
                 std::fs::write(cwd.join("a.rs"), "x").unwrap();
 
-                let target = Access::for_path("a.rs", &Workspace::new(&cwd));
+                let target = Access::for_path("a.rs", &Workspace::new(cwd));
                 let (canonical, relative, zone) = resolved(&target);
                 assert_eq!(canonical, cwd.join("a.rs"));
                 assert_eq!(relative, Some(Path::new("a.rs")));
@@ -1755,8 +1755,9 @@ mod tests {
             #[test]
             fn brand_new_file_is_still_a_workspace_target() {
                 // A new file cannot canonicalize, but its missing tail still lands inside cwd.
-                let (_dir, cwd) = temp_cwd();
-                let target = Access::for_path("new/file.rs", &Workspace::new(&cwd));
+                let cwd_dir = canonical_tempdir();
+                let cwd = cwd_dir.path();
+                let target = Access::for_path("new/file.rs", &Workspace::new(cwd));
                 assert_eq!(
                     resolved(&target),
                     (
@@ -1769,8 +1770,9 @@ mod tests {
 
             #[test]
             fn outside_cwd_has_no_relative_component() {
-                let (_dir, cwd) = temp_cwd();
-                let target = Access::for_path("/etc/hosts", &Workspace::new(&cwd));
+                let cwd_dir = canonical_tempdir();
+                let cwd = cwd_dir.path();
+                let target = Access::for_path("/etc/hosts", &Workspace::new(cwd));
                 let (_, relative, zone) = resolved(&target);
                 assert_eq!((relative, zone), (None, Zone::Outside));
             }
@@ -1779,7 +1781,8 @@ mod tests {
             fn parent_traversal_is_resolved_before_the_cwd_test() {
                 // Both shapes must leave cwd. In the second, `create_dir_all` builds `missing` and
                 // then steps back out through it.
-                let (_dir, root) = temp_cwd();
+                let root_dir = canonical_tempdir();
+                let root = root_dir.path();
                 let cwd = root.join("repo");
                 std::fs::create_dir(&cwd).unwrap();
 
@@ -1795,8 +1798,9 @@ mod tests {
 
             #[test]
             fn records_the_group_of_a_protected_name_inside_cwd() {
-                let (_dir, cwd) = temp_cwd();
-                let target = Access::for_path(".vscode/tasks.json", &Workspace::new(&cwd));
+                let cwd_dir = canonical_tempdir();
+                let cwd = cwd_dir.path();
+                let target = Access::for_path(".vscode/tasks.json", &Workspace::new(cwd));
                 let (_, relative, zone) = resolved(&target);
                 assert_eq!(relative, Some(Path::new(".vscode/tasks.json")));
                 assert_eq!(zone, Zone::Workspace);
@@ -1805,7 +1809,8 @@ mod tests {
 
             #[test]
             fn app_dirs_belong_to_the_ox_group() {
-                let (_dir, root) = temp_cwd();
+                let root_dir = canonical_tempdir();
+                let root = root_dir.path();
                 temp_env::with_vars(
                     [
                         ("XDG_CONFIG_HOME", Some(root.join("config"))),
@@ -1818,11 +1823,11 @@ mod tests {
                             "data/ox/sessions/s.jsonl",
                             "state/ox/log/oxide-code.log",
                         ] {
-                            let target = Access::for_path(raw, &Workspace::new(&root));
+                            let target = Access::for_path(raw, &Workspace::new(root));
                             assert_eq!(protected(&target), [Shipped::Ox], "{raw}");
                         }
                         let sibling =
-                            Access::for_path("config/other/x.toml", &Workspace::new(&root));
+                            Access::for_path("config/other/x.toml", &Workspace::new(root));
                         assert_eq!(protected(&sibling), []);
                     },
                 );
@@ -1832,13 +1837,14 @@ mod tests {
             fn cwd_containing_home_is_not_a_workspace() {
                 // Launched from `$HOME` or any ancestor of it, "inside cwd" spans every dotfile, so
                 // edits there must not auto-allow. Anchored patterns still see the path.
-                let (_dir, root) = temp_cwd();
+                let root_dir = canonical_tempdir();
+                let root = root_dir.path();
                 let home = root.join("home");
                 std::fs::create_dir(&home).unwrap();
                 let fs_root = root.ancestors().last().unwrap();
 
                 temp_env::with_var(HOME_VAR, Some(&home), || {
-                    for cwd in [home.as_path(), root.as_path(), fs_root] {
+                    for cwd in [home.as_path(), root, fs_root] {
                         let target = Access::for_path("notes.md", &Workspace::new(cwd));
                         let (_, relative, zone) = resolved(&target);
                         assert_eq!(relative, Some(Path::new("notes.md")), "{cwd:?}");
@@ -1893,7 +1899,8 @@ mod tests {
             #[test]
             fn deep_existing_file_stays_a_workspace_target() {
                 // Windows canonicalizes a path past 260 chars to a `\\?\` spelling the cwd lacks.
-                let (_dir, cwd) = temp_cwd();
+                let cwd_dir = canonical_tempdir();
+                let cwd = cwd_dir.path();
                 let deep: PathBuf = std::iter::repeat_n("d".repeat(50), 6).collect();
                 std::fs::create_dir_all(cwd.join(&deep)).unwrap();
                 let file = deep.join("a.rs");
@@ -1902,7 +1909,7 @@ mod tests {
                 assert_eq!(
                     resolved(&Access::for_path(
                         file.to_str().unwrap(),
-                        &Workspace::new(&cwd)
+                        &Workspace::new(cwd)
                     )),
                     (&*cwd.join(&file), Some(&*file), Zone::Workspace),
                 );
@@ -1911,14 +1918,16 @@ mod tests {
             #[test]
             fn hard_linked_file_is_not_a_workspace_target() {
                 // The second link sits outside cwd, so an edit through `a.rs` would change it too.
-                let (_dir, cwd) = temp_cwd();
-                let (_outside_dir, outside) = temp_cwd();
+                let cwd_dir = canonical_tempdir();
+                let cwd = cwd_dir.path();
+                let outside_dir = canonical_tempdir();
+                let outside = outside_dir.path();
                 std::fs::write(outside.join("a.rs"), "x").unwrap();
                 std::fs::hard_link(outside.join("a.rs"), cwd.join("a.rs")).unwrap();
                 std::fs::write(cwd.join("b.rs"), "x").unwrap();
 
                 assert_eq!(
-                    resolved(&Access::for_path("a.rs", &Workspace::new(&cwd))),
+                    resolved(&Access::for_path("a.rs", &Workspace::new(cwd))),
                     (
                         cwd.join("a.rs").as_path(),
                         Some(Path::new("a.rs")),
@@ -1926,18 +1935,20 @@ mod tests {
                     ),
                 );
                 assert_eq!(
-                    resolved(&Access::for_path("b.rs", &Workspace::new(&cwd))).2,
+                    resolved(&Access::for_path("b.rs", &Workspace::new(cwd))).2,
                     Zone::Workspace
                 );
             }
 
             #[test]
             fn new_file_under_a_symlinked_parent_resolves_through_the_link() {
-                let (_dir, cwd) = temp_cwd();
-                let (_outside_dir, outside) = temp_cwd();
-                symlink_dir(&outside, &cwd.join("link"));
+                let cwd_dir = canonical_tempdir();
+                let cwd = cwd_dir.path();
+                let outside_dir = canonical_tempdir();
+                let outside = outside_dir.path();
+                symlink_dir(outside, &cwd.join("link"));
 
-                let target = Access::for_path("link/new.rs", &Workspace::new(&cwd));
+                let target = Access::for_path("link/new.rs", &Workspace::new(cwd));
                 assert_eq!(
                     resolved(&target),
                     (outside.join("new.rs").as_path(), None, Zone::Outside),
@@ -1948,7 +1959,8 @@ mod tests {
             fn dangling_symlink_resolves_to_its_missing_target() {
                 // `canonicalize` fails on the dangling `notes.md -> ../escape.txt`, yet `fs::write`
                 // follows it, so the gate must follow it too.
-                let (_dir, root) = temp_cwd();
+                let root_dir = canonical_tempdir();
+                let root = root_dir.path();
                 let cwd = root.join("repo");
                 std::fs::create_dir(&cwd).unwrap();
                 symlink_file(Path::new("../escape.txt"), &cwd.join("notes.md"));
@@ -1964,7 +1976,8 @@ mod tests {
             fn dangling_symlink_chain_through_a_directory_is_followed() {
                 // A dangling link mid-path (`out/new.rs` with `out -> ../gone/dir`) and a second
                 // hop (`gone -> elsewhere`) must both resolve, each splice re-entering the walk.
-                let (_dir, root) = temp_cwd();
+                let root_dir = canonical_tempdir();
+                let root = root_dir.path();
                 let cwd = root.join("repo");
                 std::fs::create_dir(&cwd).unwrap();
                 std::fs::create_dir(root.join("elsewhere")).unwrap();
@@ -1986,19 +1999,21 @@ mod tests {
             fn follows_a_symlink_reached_by_stepping_out_of_a_missing_dir() {
                 // `missing/..` must not hide the later `link` from the walk: the write lands where
                 // the link points, and through `tools -> .git/hooks` that would be a hook.
-                let (_dir, cwd) = temp_cwd();
-                let (_outside_dir, outside) = temp_cwd();
-                symlink_dir(&outside, &cwd.join("link"));
+                let cwd_dir = canonical_tempdir();
+                let cwd = cwd_dir.path();
+                let outside_dir = canonical_tempdir();
+                let outside = outside_dir.path();
+                symlink_dir(outside, &cwd.join("link"));
                 std::fs::create_dir_all(cwd.join(".git/hooks")).unwrap();
                 symlink_dir(&cwd.join(".git/hooks"), &cwd.join("tools"));
 
-                let target = Access::for_path("missing/../link/x", &Workspace::new(&cwd));
+                let target = Access::for_path("missing/../link/x", &Workspace::new(cwd));
                 assert_eq!(
                     resolved(&target),
                     (outside.join("x").as_path(), None, Zone::Outside),
                 );
 
-                let target = Access::for_path("x/../tools/pre-commit", &Workspace::new(&cwd));
+                let target = Access::for_path("x/../tools/pre-commit", &Workspace::new(cwd));
                 assert_eq!(protected(&target), [Shipped::Git]);
                 let p = resolved_policy(
                     Mode::Manual,
@@ -2006,19 +2021,21 @@ mod tests {
                     &[],
                     &[(EDIT, "*")],
                     &[],
-                    &Workspace::new(&cwd),
+                    &Workspace::new(cwd),
                 );
                 assert_eq!(decide(&p, EDIT, &target), Decision::Ask);
             }
 
             #[test]
             fn dangling_symlink_target_with_a_missing_dot_dot_is_walked_component_by_component() {
-                let (_dir, cwd) = temp_cwd();
-                let (_outside_dir, outside) = temp_cwd();
-                symlink_dir(&outside, &cwd.join("out"));
+                let cwd_dir = canonical_tempdir();
+                let cwd = cwd_dir.path();
+                let outside_dir = canonical_tempdir();
+                let outside = outside_dir.path();
+                symlink_dir(outside, &cwd.join("out"));
                 symlink_file(Path::new("missing/../out/new"), &cwd.join("notes.md"));
 
-                let target = Access::for_path("notes.md", &Workspace::new(&cwd));
+                let target = Access::for_path("notes.md", &Workspace::new(cwd));
                 assert_eq!(
                     resolved(&target),
                     (outside.join("new").as_path(), None, Zone::Outside),
@@ -2029,7 +2046,8 @@ mod tests {
             fn symlinked_protected_name_protects_both_spellings() {
                 // `.vscode -> tools/vscode` at the top and `sub/.idea -> ../tools/idea` deeper: the
                 // link target named directly and the nested link named as spelled must both ask.
-                let (_dir, cwd) = temp_cwd();
+                let cwd_dir = canonical_tempdir();
+                let cwd = cwd_dir.path();
                 std::fs::create_dir_all(cwd.join("tools/vscode")).unwrap();
                 std::fs::create_dir_all(cwd.join("tools/idea")).unwrap();
                 std::fs::create_dir(cwd.join("sub")).unwrap();
@@ -2041,16 +2059,17 @@ mod tests {
                     "tools/vscode/tasks.json",
                     "sub/.idea/workspace.xml",
                 ] {
-                    let target = Access::for_path(raw, &Workspace::new(&cwd));
+                    let target = Access::for_path(raw, &Workspace::new(cwd));
                     assert_eq!(protected(&target), [Shipped::Editors], "{raw}");
                 }
-                let sibling = Access::for_path("tools/other.rs", &Workspace::new(&cwd));
+                let sibling = Access::for_path("tools/other.rs", &Workspace::new(cwd));
                 assert_eq!(protected(&sibling), []);
             }
 
             #[test]
             fn symlinked_protected_name_in_an_extra_root_protects_its_target() {
-                let (_dir, base) = temp_cwd();
+                let base_dir = canonical_tempdir();
+                let base = base_dir.path();
                 let (repo, shared) = (base.join("repo"), base.join("shared"));
                 std::fs::create_dir(&repo).unwrap();
                 std::fs::create_dir_all(shared.join("tools/vscode")).unwrap();
@@ -2069,25 +2088,27 @@ mod tests {
 
             #[test]
             fn symlink_loop_never_auto_allows() {
-                let (_dir, cwd) = temp_cwd();
+                let cwd_dir = canonical_tempdir();
+                let cwd = cwd_dir.path();
                 symlink_file(Path::new("b"), &cwd.join("a"));
                 symlink_file(Path::new("a"), &cwd.join("b"));
 
-                let target = Access::for_path("a/new.rs", &Workspace::new(&cwd));
+                let target = Access::for_path("a/new.rs", &Workspace::new(cwd));
                 let (_, relative, zone) = resolved(&target);
                 assert_eq!((relative, zone), (None, Zone::Outside));
             }
 
             #[test]
             fn past_a_file_or_an_overlong_name_keeps_the_joined_spelling() {
-                let (_dir, cwd) = temp_cwd();
+                let cwd_dir = canonical_tempdir();
+                let cwd = cwd_dir.path();
                 std::fs::write(cwd.join("notes"), "").unwrap();
 
                 for path in [
                     Path::new("notes").join("sub"),
                     PathBuf::from("a".repeat(256)),
                 ] {
-                    let target = Access::for_path(path.to_str().unwrap(), &Workspace::new(&cwd));
+                    let target = Access::for_path(path.to_str().unwrap(), &Workspace::new(cwd));
 
                     assert_eq!(
                         resolved(&target),
@@ -2102,7 +2123,8 @@ mod tests {
             #[test]
             fn resolving_to_a_name_that_is_not_utf8_never_auto_allows() {
                 use std::os::unix::ffi::OsStrExt as _;
-                let (_dir, base) = temp_cwd();
+                let base_dir = canonical_tempdir();
+                let base = base_dir.path();
                 let cwd = base.join(OsStr::from_bytes(b"caf\xe9"));
 
                 let target = Access::for_path("notes.md", &Workspace::new(&cwd));
@@ -2122,13 +2144,15 @@ mod tests {
             fn dot_dot_past_a_file_is_not_resolved_lexically() {
                 // The kernel cannot step back out of the file `notes`, so the target keeps its
                 // spelling and never auto-allows as `x` or `link/x`.
-                let (_dir, cwd) = temp_cwd();
-                let (_outside_dir, outside) = temp_cwd();
-                symlink_dir(&outside, &cwd.join("link"));
+                let cwd_dir = canonical_tempdir();
+                let cwd = cwd_dir.path();
+                let outside_dir = canonical_tempdir();
+                let outside = outside_dir.path();
+                symlink_dir(outside, &cwd.join("link"));
                 std::fs::write(cwd.join("notes"), "").unwrap();
 
                 for path in ["notes/../x", "notes/sub/../../link/x"] {
-                    let target = Access::for_path(path, &Workspace::new(&cwd));
+                    let target = Access::for_path(path, &Workspace::new(cwd));
 
                     assert_eq!(
                         resolved(&target),
@@ -2141,7 +2165,8 @@ mod tests {
             #[cfg(windows)]
             #[test]
             fn stream_suffixes_compare_as_the_names_they_open_as() {
-                let (_dir, cwd) = temp_cwd();
+                let cwd_dir = canonical_tempdir();
+                let cwd = cwd_dir.path();
                 std::fs::create_dir(cwd.join(".git")).unwrap();
                 std::fs::write(cwd.join(r".git\config"), "").unwrap();
                 std::fs::create_dir(cwd.join("secrets-store")).unwrap();
@@ -2204,7 +2229,8 @@ mod tests {
 
         #[test]
         fn preserves_directory_constraints() {
-            let (_dir, cwd) = temp_cwd();
+            let cwd_dir = canonical_tempdir();
+            let cwd = cwd_dir.path();
             std::fs::write(cwd.join("notes"), "original").unwrap();
             std::fs::create_dir(cwd.join("folder")).unwrap();
 
@@ -2223,7 +2249,8 @@ mod tests {
 
         #[test]
         fn preserves_directory_constraints_in_symlink_targets() {
-            let (_dir, cwd) = temp_cwd();
+            let cwd_dir = canonical_tempdir();
+            let cwd = cwd_dir.path();
             std::fs::write(cwd.join("notes"), "original").unwrap();
             symlink_file(Path::new("notes/"), &cwd.join("file-link"));
             symlink_dir(Path::new("missing/"), &cwd.join("missing-link"));
@@ -2240,7 +2267,8 @@ mod tests {
         #[cfg(windows)]
         #[test]
         fn preserves_directory_constraints_on_verbatim_paths() {
-            let (_dir, cwd) = temp_cwd();
+            let cwd_dir = canonical_tempdir();
+            let cwd = cwd_dir.path();
             std::fs::write(cwd.join("notes"), "original").unwrap();
             let verbatim = std::fs::canonicalize(&cwd).unwrap();
 
@@ -2411,7 +2439,8 @@ mod tests {
 
             #[test]
             fn shipped_defaults_each_hold_a_call_they_name_until_disabled() {
-                let (_dir, root) = temp_cwd();
+                let root_dir = canonical_tempdir();
+                let root = root_dir.path();
                 let (cwd, home, data, config) = (
                     root.join("repo"),
                     root.join("home"),
@@ -2493,7 +2522,8 @@ mod tests {
 
             #[test]
             fn protects_the_user_git_ssh_cloud_and_claude_code_config_until_disabled() {
-                let (_dir, root) = temp_cwd();
+                let root_dir = canonical_tempdir();
+                let root = root_dir.path();
                 let (cwd, home, config, claude) = (
                     root.join("repo"),
                     root.join("home"),
@@ -2570,8 +2600,9 @@ mod tests {
 
             #[test]
             fn disables_one_protected_group_and_keeps_the_rest() {
-                let (_dir, cwd) = temp_cwd();
-                let workspace = Workspace::new(&cwd);
+                let cwd_dir = canonical_tempdir();
+                let cwd = cwd_dir.path();
+                let workspace = Workspace::new(cwd);
                 let p = resolved_policy(Mode::Manual, &[], &[], &[], &[Shipped::Cargo], &workspace);
 
                 let cargo = Access::for_path(".cargo/config.toml", &workspace);
@@ -2592,7 +2623,8 @@ mod tests {
             fn deny_and_ask_rules_also_cover_where_their_literal_prefix_resolves() {
                 // `secrets -> ../vault` and `alias -> real`: naming the link targets directly must
                 // still hold the call back, for an anchored rule and an absolute one alike.
-                let (_dir, root) = temp_cwd();
+                let root_dir = canonical_tempdir();
+                let root = root_dir.path();
                 let cwd = root.join("repo");
                 std::fs::create_dir(&cwd).unwrap();
                 std::fs::create_dir(root.join("vault")).unwrap();
@@ -2713,11 +2745,12 @@ mod tests {
 
             #[test]
             fn declines_a_call_that_no_allow_rule_can_let_through() {
-                let (_dir, cwd) = temp_cwd();
+                let cwd_dir = canonical_tempdir();
+                let cwd = cwd_dir.path();
                 std::fs::create_dir(cwd.join(".git")).unwrap();
                 let p = policy(Mode::Manual, &[], &[(EXEC, "git push *")], &[]);
 
-                let protected = Access::for_path(".git/config", &Workspace::new(&cwd));
+                let protected = Access::for_path(".git/config", &Workspace::new(cwd));
                 assert!(p.session_grant(EDIT, &protected).is_none());
                 assert!(p.session_grant(EXEC, &command("git push origin")).is_none());
                 assert!(p.session_grant(EXEC, &command("ls *.rs")).is_none());
@@ -2729,7 +2762,8 @@ mod tests {
 
             #[test]
             fn withholds_exactly_the_files_the_gate_holds_back() {
-                let (_dir, cwd) = temp_cwd();
+                let cwd_dir = canonical_tempdir();
+                let cwd = cwd_dir.path();
                 let secrets = slash_separated(&cwd.join("secrets"));
                 let p = resolved_policy(
                     Mode::Manual,
@@ -2737,11 +2771,11 @@ mod tests {
                     &[(READ, &secrets)],
                     &[],
                     &[],
-                    &Workspace::new(&cwd),
+                    &Workspace::new(cwd),
                 );
                 let filter = p.read_filter();
-                let workspace = Workspace::new(&cwd);
-                let walk = filter.walk(&cwd, Path::new("."), &workspace);
+                let workspace = Workspace::new(cwd);
+                let walk = filter.walk(cwd, Path::new("."), &workspace);
 
                 for (name, held) in [
                     (".env", Some(Decision::Deny)),
@@ -2761,7 +2795,7 @@ mod tests {
                 let empty = ReadFilter::default();
                 assert!(
                     !empty
-                        .walk(&cwd, Path::new("."), &workspace)
+                        .walk(cwd, Path::new("."), &workspace)
                         .withholds(&cwd.join(".env"))
                 );
             }
@@ -2876,7 +2910,8 @@ mod tests {
 
             #[test]
             fn spilled_tool_output_reads_without_a_prompt_and_asks_to_be_edited() {
-                let (_dir, root) = temp_cwd();
+                let root_dir = canonical_tempdir();
+                let root = root_dir.path();
                 let (cwd, home, data) = (root.join("repo"), root.join("home"), root.join("data"));
                 std::fs::create_dir(&cwd).unwrap();
                 temp_env::with_vars(
@@ -2938,7 +2973,8 @@ mod tests {
 
             #[test]
             fn anchored_patterns_apply_below_each_extra_root() {
-                let (_dir, base) = temp_cwd();
+                let base_dir = canonical_tempdir();
+                let base = base_dir.path();
                 let (repo, shared) = (base.join("repo"), base.join("shared"));
                 std::fs::create_dir(&repo).unwrap();
                 std::fs::create_dir(&shared).unwrap();
@@ -2966,7 +3002,8 @@ mod tests {
             fn deny_matches_case_normalization_and_ignorable_variants_of_a_name() {
                 // A case-insensitive or normalizing file system opens each spelling as the denied
                 // file, and an uppercased cwd prefix still names the same directory there.
-                let (_dir, cwd) = temp_cwd();
+                let cwd_dir = canonical_tempdir();
+                let cwd = cwd_dir.path();
                 let p = policy(
                     Mode::Manual,
                     &[(READ, ".env"), (READ, "caf\u{e9}.txt")],
@@ -2982,7 +3019,7 @@ mod tests {
                     "CAF\u{c9}.TXT",
                     &upper_cwd,
                 ] {
-                    let target = Access::for_path(raw, &Workspace::new(&cwd));
+                    let target = Access::for_path(raw, &Workspace::new(cwd));
                     assert_eq!(decide(&p, READ, &target), Decision::Deny, "{raw}");
                 }
             }
@@ -2991,7 +3028,8 @@ mod tests {
             fn deny_matches_a_symlinked_path_as_spelled_even_in_yolo() {
                 // `.env -> ../shared/.env` resolves outside cwd and `secrets -> ../vault` away from
                 // the absolute glob, yet both deny rules must fire on the path the call names.
-                let (_dir, root) = temp_cwd();
+                let root_dir = canonical_tempdir();
+                let root = root_dir.path();
                 let cwd = root.join("repo");
                 std::fs::create_dir_all(root.join("shared")).unwrap();
                 std::fs::create_dir_all(root.join("vault")).unwrap();
@@ -3452,7 +3490,8 @@ mod tests {
 
             #[test]
             fn command_weighs_each_redirection_target_as_an_edit() {
-                let (_dir, cwd) = temp_cwd();
+                let cwd_dir = canonical_tempdir();
+                let cwd = cwd_dir.path();
                 std::fs::create_dir(cwd.join(".git")).unwrap();
                 let outside = abs("/etc/hosts");
                 let p = resolved_policy(
@@ -3461,9 +3500,9 @@ mod tests {
                     &[(EDIT, "*.lock")],
                     &[],
                     &[],
-                    &Workspace::new(&cwd),
+                    &Workspace::new(cwd),
                 );
-                let workspace = Workspace::new(&cwd);
+                let workspace = Workspace::new(cwd);
                 let decide = |case: &str| decide_command(&p, case, &workspace);
                 assert_eq!(decide("echo hi > out.txt 2>&1"), Decision::Allow);
                 assert_eq!(decide("echo hi > .envrc"), Decision::Ask);
@@ -3473,7 +3512,9 @@ mod tests {
                 assert_eq!(decide(&format!("echo hi >> {outside}")), Decision::Ask);
                 assert_eq!(decide("echo hi > secret.txt"), Decision::Deny);
 
-                let (_elsewhere_dir, elsewhere) = temp_cwd();
+                let elsewhere_dir = canonical_tempdir();
+
+                let elsewhere = elsewhere_dir.path();
                 let notes = slash_separated(&elsewhere.join("notes.txt"));
                 let allowed = resolved_policy(
                     Mode::Manual,
@@ -3481,7 +3522,7 @@ mod tests {
                     &[],
                     &[(EDIT, &notes)],
                     &[],
-                    &Workspace::new(&cwd),
+                    &Workspace::new(cwd),
                 );
                 assert_eq!(
                     decide_command(&allowed, &format!("echo hi >> {notes}"), &workspace),
@@ -3491,14 +3532,15 @@ mod tests {
 
             #[test]
             fn command_asks_for_a_known_safe_read_of_a_denied_or_asked_file() {
-                let (_dir, cwd) = temp_cwd();
+                let cwd_dir = canonical_tempdir();
+                let cwd = cwd_dir.path();
                 let p = policy(
                     Mode::Manual,
                     &[(READ, ".env")],
                     &[(READ, "secrets")],
                     &[(EXEC, "cat *")],
                 );
-                let workspace = Workspace::new(&cwd);
+                let workspace = Workspace::new(cwd);
                 let decide = |case: &str| decide_command(&p, case, &workspace);
                 assert_eq!(decide("cat README.md"), Decision::Allow);
                 assert_eq!(decide("cat .env"), Decision::Ask);
@@ -3508,7 +3550,8 @@ mod tests {
 
             #[test]
             fn command_asks_for_a_reader_glob_or_variable_that_may_name_a_denied_file() {
-                let (_dir, root) = temp_cwd();
+                let root_dir = canonical_tempdir();
+                let root = root_dir.path();
                 let (cwd, home) = (root.join("repo"), root.join("home"));
                 std::fs::create_dir_all(cwd.join("src")).unwrap();
                 std::fs::create_dir_all(home.join(".ssh")).unwrap();
@@ -3550,14 +3593,15 @@ mod tests {
 
             #[test]
             fn command_weighs_each_input_redirection_as_a_read() {
-                let (_dir, cwd) = temp_cwd();
+                let cwd_dir = canonical_tempdir();
+                let cwd = cwd_dir.path();
                 let p = policy(
                     Mode::Yolo,
                     &[(READ, ".env")],
                     &[(READ, "secrets")],
                     &[(EXEC, "*")],
                 );
-                let workspace = Workspace::new(&cwd);
+                let workspace = Workspace::new(cwd);
                 let decide = |case: &str| decide_command(&p, case, &workspace);
                 for (case, expected) in [
                     ("cat < README.md", Decision::Allow),
@@ -3571,11 +3615,12 @@ mod tests {
 
             #[test]
             fn command_denies_an_input_redirection_from_a_shipped_read_deny() {
-                let (_dir, base) = temp_cwd();
+                let base_dir = canonical_tempdir();
+                let base = base_dir.path();
                 let home = base.join("home");
                 let key = slash_separated(&home.join(".ssh/id_ed25519"));
                 temp_env::with_var(HOME_VAR, Some(&home), || {
-                    let workspace = Workspace::new(&base);
+                    let workspace = Workspace::new(base);
                     let p = resolved_policy(Mode::Manual, &[], &[], &[], &[], &workspace);
 
                     assert_eq!(
@@ -3712,11 +3757,12 @@ mod tests {
 
             #[test]
             fn credits_a_shipped_pattern_to_its_built_in_group() {
-                let (_dir, base) = temp_cwd();
+                let base_dir = canonical_tempdir();
+                let base = base_dir.path();
                 let home = base.join("home");
                 let key = slash_separated(&home.join(".ssh/id_ed25519"));
                 temp_env::with_var(HOME_VAR, Some(&home), || {
-                    let workspace = Workspace::new(&base);
+                    let workspace = Workspace::new(base);
                     let p = resolved_policy(Mode::Yolo, &[], &[], &[], &[], &workspace);
                     let settle =
                         |case: &str| verdict(&p, EXEC, &Access::for_command(case, &workspace));
@@ -3780,7 +3826,8 @@ mod tests {
 
         #[test]
         fn round_trips_through_json_and_still_admits_the_call() {
-            let (_dir, root) = temp_cwd();
+            let root_dir = canonical_tempdir();
+            let root = root_dir.path();
             let cwd = root.join("cwd");
             std::fs::create_dir(&cwd).unwrap();
             let target = Access::for_path("../notes.md", &Workspace::new(&cwd));
@@ -3809,9 +3856,10 @@ mod tests {
 
             #[test]
             fn parent_traversal_matches_the_gate_decision() {
-                let (_dir, cwd) = temp_cwd();
+                let cwd_dir = canonical_tempdir();
+                let cwd = cwd_dir.path();
                 let root = cwd.ancestors().last().unwrap();
-                let absolute_rule = slash_separated(&cwd);
+                let absolute_rule = slash_separated(cwd);
                 let policy = policy(Mode::Manual, &[(READ, &absolute_rule)], &[], &[]);
                 let filter = policy.read_filter();
                 let file = cwd.join("secret.txt");
@@ -3826,7 +3874,8 @@ mod tests {
 
             #[test]
             fn a_file_by_the_spelling_the_call_used() {
-                let (_dir, root) = temp_cwd();
+                let root_dir = canonical_tempdir();
+                let root = root_dir.path();
                 let (cwd, outside) = (root.join("cwd"), root.join("outside"));
                 std::fs::create_dir(&cwd).unwrap();
                 std::fs::create_dir(&outside).unwrap();
@@ -3857,7 +3906,8 @@ mod tests {
 
             #[test]
             fn where_a_rule_prefix_resolves_through_a_symlink() {
-                let (_dir, root) = temp_cwd();
+                let root_dir = canonical_tempdir();
+                let root = root_dir.path();
                 let (cwd, outside) = (root.join("cwd"), root.join("outside"));
                 std::fs::create_dir(&cwd).unwrap();
                 std::fs::create_dir(&outside).unwrap();

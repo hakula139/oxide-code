@@ -2286,15 +2286,9 @@ mod tests {
     use indoc::indoc;
 
     use super::*;
-    use crate::util::path::local_testing::abs;
+    use crate::util::path::local_testing::{abs, canonical_tempdir};
     use crate::util::path::slash_separated;
     use crate::util::path::testing::HOME_VAR;
-
-    fn temp_cwd() -> (tempfile::TempDir, PathBuf) {
-        let dir = tempfile::tempdir().unwrap();
-        let cwd = dunce::canonicalize(dir.path()).unwrap();
-        (dir, cwd)
-    }
 
     fn parse(command: &str) -> CommandTarget {
         CommandTarget::parse(command, &Workspace::new(Path::new("/repo")))
@@ -3196,26 +3190,28 @@ mod tests {
 
             #[test]
             fn counts_each_file_an_output_redirection_writes() {
-                let (_dir, cwd) = temp_cwd();
+                let cwd_dir = canonical_tempdir();
+                let cwd = cwd_dir.path();
                 assert_eq!(
-                    writes("echo a > out.txt 2>> log &> all >| clobber >& both", &cwd),
+                    writes("echo a > out.txt 2>> log &> all >| clobber >& both", cwd),
                     ["out.txt", "log", "all", "clobber", "both"]
                 );
                 let outside = abs("/etc/hosts");
                 assert_eq!(
-                    CommandTarget::parse(&format!("echo a > {outside}"), &Workspace::new(&cwd))
+                    CommandTarget::parse(&format!("echo a > {outside}"), &Workspace::new(cwd))
                         .writes,
-                    [Access::for_path(&outside, &Workspace::new(&cwd))]
+                    [Access::for_path(&outside, &Workspace::new(cwd))]
                 );
             }
 
             #[test]
             fn counts_each_file_an_input_redirection_reads() {
-                let (_dir, cwd) = temp_cwd();
+                let cwd_dir = canonical_tempdir();
+                let cwd = cwd_dir.path();
 
                 let target = CommandTarget::parse(
                     "sort < in.txt 3< more.txt > out.txt",
-                    &Workspace::new(&cwd),
+                    &Workspace::new(cwd),
                 );
 
                 assert_eq!(spelled(target.reads.clone()), ["in.txt", "more.txt"]);
@@ -3229,7 +3225,8 @@ mod tests {
 
             #[test]
             fn skips_heredocs_descriptors_and_devices() {
-                let (_dir, cwd) = temp_cwd();
+                let cwd_dir = canonical_tempdir();
+                let cwd = cwd_dir.path();
                 for command in [
                     "cat <<< x",
                     "cat <<EOF\nx\nEOF",
@@ -3238,10 +3235,10 @@ mod tests {
                     "make <&3",
                     "make > /dev/null 2> /dev/stderr < /dev/null",
                 ] {
-                    assert!(writes(command, &cwd).is_empty(), "{command:?}");
-                    assert!(reads(command, &cwd).is_empty(), "{command:?}");
+                    assert!(writes(command, cwd).is_empty(), "{command:?}");
+                    assert!(reads(command, cwd).is_empty(), "{command:?}");
                     assert!(
-                        !CommandTarget::parse(command, &Workspace::new(&cwd)).is_opaque(),
+                        !CommandTarget::parse(command, &Workspace::new(cwd)).is_opaque(),
                         "{command:?}"
                     );
                 }
@@ -3480,10 +3477,11 @@ mod tests {
 
         #[test]
         fn read_each_literal_operand_and_each_file_a_glob_matches() {
-            let (_dir, cwd) = temp_cwd();
+            let cwd_dir = canonical_tempdir();
+            let cwd = cwd_dir.path();
             std::fs::create_dir(cwd.join("src")).unwrap();
             std::fs::write(cwd.join("src/main.rs"), "").unwrap();
-            let workspace = Workspace::new(&cwd);
+            let workspace = Workspace::new(cwd);
 
             let command = CommandTarget::parse("grep -r x src/*.rs docs", &workspace);
 
@@ -3508,7 +3506,8 @@ mod tests {
 
         #[test]
         fn lists_what_bash_would_and_skips_dot_names_unless_a_name_asks_for_them() {
-            let (_dir, cwd) = temp_cwd();
+            let cwd_dir = canonical_tempdir();
+            let cwd = cwd_dir.path();
             for dir in ["src/sub", ".ssh", "docs"] {
                 std::fs::create_dir_all(cwd.join(dir)).unwrap();
             }
@@ -3525,7 +3524,7 @@ mod tests {
                 std::fs::write(cwd.join(file), "").unwrap();
             }
             let expand = |pattern: &str| {
-                let mut paths: Vec<String> = expand_glob(pattern, &cwd)
+                let mut paths: Vec<String> = expand_glob(pattern, cwd)
                     .unwrap()
                     .iter()
                     .map(|path| slash_separated(Path::new(path)))
@@ -3533,7 +3532,7 @@ mod tests {
                 paths.sort();
                 paths
             };
-            let root = slash_separated(&cwd);
+            let root = slash_separated(cwd);
 
             assert_eq!(expand("src/*.rs"), ["src/a.rs", "src/b.rs"]);
             assert_eq!(expand("./src/*/*.rs"), ["./src/sub/d.rs"]);
@@ -3553,19 +3552,20 @@ mod tests {
 
         #[test]
         fn gives_up_past_the_match_cap_or_on_a_pattern_globset_rejects() {
-            let (_dir, cwd) = temp_cwd();
+            let cwd_dir = canonical_tempdir();
+            let cwd = cwd_dir.path();
             for i in 0..MAX_GLOB_MATCHES {
                 std::fs::write(cwd.join(format!("{i}.txt")), "").unwrap();
             }
             assert_eq!(
-                expand_glob("*.txt", &cwd).map(|paths| paths.len()),
+                expand_glob("*.txt", cwd).map(|paths| paths.len()),
                 Some(MAX_GLOB_MATCHES)
             );
 
             std::fs::write(cwd.join("last.txt"), "").unwrap();
 
-            assert_eq!(expand_glob("*.txt", &cwd), None);
-            assert_eq!(expand_glob("[", &cwd), None);
+            assert_eq!(expand_glob("*.txt", cwd), None);
+            assert_eq!(expand_glob("[", cwd), None);
         }
 
         #[cfg(target_os = "linux")]
@@ -3573,7 +3573,9 @@ mod tests {
         fn gives_up_on_a_file_name_that_is_not_utf8() {
             use std::os::unix::ffi::OsStrExt as _;
 
-            let (_dir, cwd) = temp_cwd();
+            let cwd_dir = canonical_tempdir();
+
+            let cwd = cwd_dir.path();
             std::fs::write(cwd.join(std::ffi::OsStr::from_bytes(b"a\xff")), "").unwrap();
 
             assert_eq!(expand_glob("*", &cwd), None);

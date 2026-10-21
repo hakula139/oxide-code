@@ -191,10 +191,11 @@ mod tests {
     use super::*;
     use crate::file_tracker::MAX_TRACKED_FILE_SIZE;
     use crate::file_tracker::testing::seed_full_read;
-    use crate::tool::local_testing::{self, canonical_tempdir, ctx, temp_ctx};
+    use crate::tool::local_testing::{self, ctx, temp_ctx};
     use crate::tool::read::ReadTool;
     use crate::tool::view::{DiffChunk, NumberedLine};
     use crate::util::fs::testing::symlink_file;
+    use crate::util::path::local_testing::canonical_tempdir;
 
     mod approval_preview {
         use super::*;

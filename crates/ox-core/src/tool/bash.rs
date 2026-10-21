@@ -749,11 +749,11 @@ mod tests {
 
     use super::testing::{record_pid, until_gone, until_recorded};
     use super::*;
-    #[cfg(unix)]
-    use crate::tool::local_testing::canonical_tempdir;
     use crate::tool::local_testing::{self, ctx, spill_path, temp_ctx};
     use crate::tool::spill::MAX_OUTPUT_BYTES;
     use crate::tool::testing::bash_preview;
+    #[cfg(unix)]
+    use crate::util::path::local_testing::canonical_tempdir;
 
     /// An empty capture of the stdout of call `toolu_test` in `dir`.
     fn empty_capture(dir: &Path) -> PipeCapture {

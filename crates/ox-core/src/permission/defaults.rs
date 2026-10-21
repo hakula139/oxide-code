@@ -385,7 +385,7 @@ pub(super) fn protected_by(paths: &[&Path], roots: &[(Shipped, PathBuf)]) -> Vec
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::util::path::local_testing::abs;
+    use crate::util::path::local_testing::{abs, canonical_tempdir};
     use crate::util::path::slash_separated;
     use crate::util::path::testing::HOME_VAR;
 
@@ -543,8 +543,8 @@ mod tests {
 
         #[test]
         fn tags_where_each_symlinked_name_resolves_with_its_group() {
-            let dir = tempfile::tempdir().unwrap();
-            let cwd = dunce::canonicalize(dir.path()).unwrap();
+            let dir = canonical_tempdir();
+            let cwd = dir.path().to_path_buf();
             std::fs::create_dir_all(cwd.join("tools/vscode")).unwrap();
             std::os::unix::fs::symlink("tools/vscode", cwd.join(".vscode")).unwrap();
 

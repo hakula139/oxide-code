@@ -516,7 +516,7 @@ fn tool_glob(raw: &str) -> Result<GlobMatcher> {
 mod tests {
     use super::*;
     use crate::permission::{Access, Workspace, Zone};
-    use crate::util::path::local_testing::abs;
+    use crate::util::path::local_testing::{abs, canonical_tempdir};
     use crate::util::path::testing::HOME_VAR;
 
     fn rule(class: PermissionClass, pattern: &str) -> Rule {
@@ -1211,8 +1211,8 @@ mod tests {
 
         #[test]
         fn also_matches_where_a_literal_prefix_resolves() {
-            let dir = tempfile::tempdir().unwrap();
-            let root = dunce::canonicalize(dir.path()).unwrap();
+            let dir = canonical_tempdir();
+            let root = dir.path().to_path_buf();
             std::fs::create_dir(root.join("real")).unwrap();
             #[cfg(unix)]
             std::os::unix::fs::symlink("real", root.join("alias")).unwrap();

@@ -1235,7 +1235,7 @@ mod tests {
     use super::testing::{HeldRefresh, creds_json, ok_refresh_body, write_creds};
     use super::*;
     use crate::util::fs::testing::symlink_dir;
-    use crate::util::path::local_testing::abs;
+    use crate::util::path::local_testing::{abs, canonical_tempdir};
     use crate::util::path::testing::HOME_VAR;
     use crate::util::tls::PlatformTrust;
     use crate::util::tls::local_testing::no_roots;
@@ -1400,8 +1400,8 @@ mod tests {
 
             #[test]
             fn keeps_the_claude_code_login_in_claude_config_dir_and_locks_beside_its_real_path() {
-                let root = tempfile::tempdir().unwrap();
-                let root = dunce::canonicalize(root.path()).unwrap();
+                let root = canonical_tempdir();
+                let root = root.path();
                 std::fs::create_dir(root.join("other")).unwrap();
                 std::fs::create_dir(root.join("claude-work")).unwrap();
                 let spelled = root.join("other").join("..").join("claude-work");
@@ -1421,16 +1421,13 @@ mod tests {
 
             #[test]
             fn locks_where_a_symlinked_claude_directory_resolves() {
-                let home = tempfile::tempdir().unwrap();
-                let home = dunce::canonicalize(home.path()).unwrap();
+                let home = canonical_tempdir();
+                let home = home.path();
                 std::fs::create_dir(home.join("dotfiles")).unwrap();
                 symlink_dir(&home.join("dotfiles"), &home.join(".claude"));
 
                 let store = temp_env::with_vars(
-                    [
-                        (HOME_VAR, Some(home.as_path())),
-                        ("CLAUDE_CONFIG_DIR", None),
-                    ],
+                    [(HOME_VAR, Some(home)), ("CLAUDE_CONFIG_DIR", None)],
                     || Store::locate(Login::ClaudeCode, None).unwrap(),
                 );
 

@@ -548,6 +548,7 @@ mod tests {
     use crate::tool::testing::bash_registry;
     #[cfg(unix)]
     use crate::tool::write::WriteTool;
+    use crate::util::path::local_testing::canonical_tempdir;
 
     fn approval_ids(sink: &CapturingSink) -> Vec<String> {
         sink.events()

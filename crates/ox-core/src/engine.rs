@@ -708,10 +708,13 @@ mod tests {
     use crate::tool::bash::background::ShellState;
     use crate::tool::bash::background::local_testing::start_shell;
     use crate::tool::bash::background::testing::shell;
-    use crate::tool::local_testing::{canonical_tempdir, ctx};
+    use crate::tool::local_testing::ctx;
     use crate::tool::read::ReadTool;
     use crate::tool::tasks::TasksTool;
     use crate::tool::tasks::testing::plan;
+    use crate::util::git::local_testing::init_fixture_repo;
+    use crate::util::git::testing::with_isolated_git_env_async;
+    use crate::util::path::local_testing::canonical_tempdir;
     use crate::util::tls::testing::NoRoots;
 
     /// What each reply from [`mount_reply`] bills, as [`text_stream_body`] reports it.

@@ -538,6 +538,7 @@ mod tests {
         DEFAULT_TOOL_ICON, Prepared, Tool, ToolCtx, ToolMetadata, ToolOutput, ToolRegistry,
         ToolSpec,
     };
+    use crate::util::path::local_testing::canonical_tempdir;
 
     fn text_block(text: &str) -> ContentBlock {
         ContentBlock::Text {
