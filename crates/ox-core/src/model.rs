@@ -11,12 +11,12 @@ mod usage;
 
 pub(crate) use usage::TokenUsage;
 
-use std::fmt::{self, Write as _};
-use std::str::FromStr;
+use std::fmt::Write as _;
 
-use anyhow::{Result, bail};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
+use strum::{Display, EnumString, IntoStaticStr, VariantArray};
 
+use crate::util::variant;
 use pricing::{FABLE_5_1_RATES, HAIKU_5_5_RATES, OPUS_5_5_RATES, SONNET_5_5_RATES, TokenCostRates};
 
 // ── ModelInfo ──
@@ -263,8 +263,25 @@ impl ResolvedModelId {
 // ── Effort ──
 
 /// Effort level sent as `output_config.effort`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Serialize,
+    Deserialize,
+    Display,
+    EnumString,
+    IntoStaticStr,
+    VariantArray,
+)]
 #[serde(rename_all = "lowercase")]
+#[strum(
+    serialize_all = "lowercase",
+    parse_err_ty = anyhow::Error,
+    parse_err_fn = variant::unknown::<Self>
+)]
 pub enum Effort {
     Low,
     Medium,
@@ -274,17 +291,8 @@ pub enum Effort {
 }
 
 impl Effort {
-    pub const ALL: [Self; 5] = [Self::Low, Self::Medium, Self::High, Self::Xhigh, Self::Max];
-    pub(crate) const VALID_VALUES: &str = "low, medium, high, xhigh, max";
-
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::Low => "low",
-            Self::Medium => "medium",
-            Self::High => "high",
-            Self::Xhigh => "xhigh",
-            Self::Max => "max",
-        }
+    pub fn as_str(self) -> &'static str {
+        self.into()
     }
 
     /// One-line UX hint for the typed-arg popup.
@@ -299,63 +307,30 @@ impl Effort {
     }
 }
 
-impl fmt::Display for Effort {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(self.as_str())
-    }
-}
-
-impl FromStr for Effort {
-    type Err = anyhow::Error;
-
-    fn from_str(s: &str) -> Result<Self> {
-        match s {
-            "low" => Ok(Self::Low),
-            "medium" => Ok(Self::Medium),
-            "high" => Ok(Self::High),
-            "xhigh" => Ok(Self::Xhigh),
-            "max" => Ok(Self::Max),
-            _ => bail!("expected one of {}", Self::VALID_VALUES),
-        }
-    }
-}
-
 // ── PromptCacheTtl ──
 
 /// Sent as `cache_control.ttl`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Serialize,
+    Deserialize,
+    Display,
+    EnumString,
+    IntoStaticStr,
+    VariantArray,
+)]
+#[strum(parse_err_ty = anyhow::Error, parse_err_fn = variant::unknown::<Self>)]
 pub enum PromptCacheTtl {
     #[serde(rename = "5m")]
+    #[strum(serialize = "5m")]
     FiveMin,
     #[serde(rename = "1h")]
+    #[strum(serialize = "1h")]
     OneHour,
-}
-
-impl PromptCacheTtl {
-    const fn as_str(self) -> &'static str {
-        match self {
-            Self::FiveMin => "5m",
-            Self::OneHour => "1h",
-        }
-    }
-}
-
-impl fmt::Display for PromptCacheTtl {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(self.as_str())
-    }
-}
-
-impl FromStr for PromptCacheTtl {
-    type Err = anyhow::Error;
-
-    fn from_str(s: &str) -> Result<Self> {
-        match s {
-            "5m" => Ok(Self::FiveMin),
-            "1h" => Ok(Self::OneHour),
-            _ => bail!("expected one of 5m, 1h"),
-        }
-    }
 }
 
 #[cfg(test)]
@@ -477,7 +452,7 @@ mod tests {
         #[test]
         fn passes_every_pick_through_on_supported_models() {
             for info in MODELS {
-                for level in Effort::ALL {
+                for &level in Effort::VARIANTS {
                     assert_eq!(
                         ModelSpec::resolve(info.id).resolve_effort(Some(level)),
                         Some(level),
@@ -632,8 +607,8 @@ mod tests {
 
         #[test]
         fn round_trips_through_serde_and_fromstr() {
-            for (variant, token) in Effort::ALL
-                .into_iter()
+            for (&variant, token) in Effort::VARIANTS
+                .iter()
                 .zip(["low", "medium", "high", "xhigh", "max"])
             {
                 assert_eq!(serde_json::to_value(variant).unwrap(), token);

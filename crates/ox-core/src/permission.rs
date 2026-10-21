@@ -14,25 +14,44 @@ use std::ffi::{OsStr, OsString};
 use std::fmt;
 use std::io;
 use std::path::{Component, Path, PathBuf};
-use std::str::FromStr;
 use std::sync::{Arc, LazyLock};
 
 use anyhow::{Result, bail, ensure};
 use caseless::Caseless as _;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
+use strum::{Display, EnumString, IntoStaticStr, VariantArray};
 use unicode_normalization::UnicodeNormalization as _;
 
 use self::defaults::{Shipped, ShippedTier, protected_by, protected_roots};
 use self::rule::{MatchDiscipline, Rule};
 use self::shell::{CommandTarget, Segment};
 use crate::util::path::{expand_user, lexical_normalize};
+use crate::util::variant;
 
 // ── Mode ──
 
 /// The standing permission posture, which settles the calls no rule does.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    Serialize,
+    Deserialize,
+    Display,
+    EnumString,
+    IntoStaticStr,
+    VariantArray,
+)]
 #[serde(rename_all = "lowercase")]
+#[strum(
+    serialize_all = "lowercase",
+    parse_err_ty = anyhow::Error,
+    parse_err_fn = variant::unknown::<Self>
+)]
 pub enum Mode {
     /// Asks about every call the rules leave open.
     #[default]
@@ -44,15 +63,8 @@ pub enum Mode {
 }
 
 impl Mode {
-    pub const ALL: [Self; 3] = [Self::Manual, Self::Plan, Self::Yolo];
-    pub(crate) const VALID_VALUES: &str = "manual, plan, yolo";
-
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::Manual => "manual",
-            Self::Plan => "plan",
-            Self::Yolo => "yolo",
-        }
+    pub fn as_str(self) -> &'static str {
+        self.into()
     }
 
     pub const fn description(self) -> &'static str {
@@ -60,25 +72,6 @@ impl Mode {
             Self::Manual => "Ask before tool calls that no permission rule allows or denies",
             Self::Plan => "Read-only: deny edits and commands",
             Self::Yolo => "Run tool calls without asking unless a rule denies or asks",
-        }
-    }
-}
-
-impl fmt::Display for Mode {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(self.as_str())
-    }
-}
-
-impl FromStr for Mode {
-    type Err = anyhow::Error;
-
-    fn from_str(s: &str) -> Result<Self> {
-        match s {
-            "manual" => Ok(Self::Manual),
-            "plan" => Ok(Self::Plan),
-            "yolo" => Ok(Self::Yolo),
-            _ => bail!("expected one of {}", Self::VALID_VALUES),
         }
     }
 }
@@ -1529,7 +1522,7 @@ mod tests {
 
             #[test]
             fn parses_every_valid_value_and_names_them_for_any_other() {
-                for mode in Mode::ALL {
+                for &mode in Mode::VARIANTS {
                     assert_eq!(mode.as_str().parse::<Mode>().unwrap(), mode);
                 }
                 let err = "bypass".parse::<Mode>().unwrap_err().to_string();
@@ -2936,7 +2929,7 @@ mod tests {
 
             #[test]
             fn deny_beats_ask_and_ask_beats_allow_in_every_mode() {
-                for mode in Mode::ALL {
+                for &mode in Mode::VARIANTS {
                     let p = policy(
                         mode,
                         &[(READ, "secret.txt")],

@@ -3,6 +3,8 @@
 
 use std::borrow::Cow;
 
+use strum::VariantArray as _;
+
 use ox_core::command;
 use ox_core::model::{Effort, ModelSpec};
 
@@ -34,7 +36,7 @@ impl SlashCommand for EffortCmd {
     }
 
     fn complete_arg(&self, prefix: &str) -> Vec<ArgCompletion> {
-        rank_by_prefix(&Effort::ALL, prefix, |level| level.as_str())
+        rank_by_prefix(Effort::VARIANTS, prefix, |level| level.as_str())
             .into_iter()
             .map(|level| ArgCompletion {
                 value: Cow::Borrowed(level.as_str()),

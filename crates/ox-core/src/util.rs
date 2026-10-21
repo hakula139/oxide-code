@@ -13,3 +13,4 @@ pub mod text;
 pub mod time;
 pub mod tls;
 pub mod toml;
+pub(crate) mod variant;
