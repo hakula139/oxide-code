@@ -10,9 +10,11 @@ on:
 permissions:
   contents: read
 
+# A literal prefix, since a called workflow's `github.workflow` names its caller, so a Release run
+# would otherwise wait on its own group.
 concurrency:
-  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.run_id }}
-  cancel-in-progress: true
+  group: ci-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
   CARGO_TERM_COLOR: always

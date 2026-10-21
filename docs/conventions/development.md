@@ -77,6 +77,8 @@ CI runs on pushes to `main`, pull requests, and manual dispatch, and the release
 
 Branch protection requires only the CI Result job and Codecov's `codecov/patch` status. CI Result fails when any job in its `needs` fails or is cancelled, so list each new job there.
 
+A push to a pull request cancels that pull request's running CI. On `main` and other refs, the running CI finishes and only the newest queued run waits behind it, so a burst of merges runs CI twice.
+
 Each job sets `timeout-minutes` to several times its usual duration, so a hung test stops its job at that limit, where it would otherwise hold the runner for GitHub's six-hour default. GitHub reports such a job as cancelled, with an annotation saying it exceeded the maximum execution time, and CI Result counts it as a failure. Give each new job a limit the same way. libtest names any test still running after 60 seconds, so the log of a timed-out job shows which test hung.
 
 No job runs a plain `cargo build`, so run it locally for a quick compile check. See [RELEASING.md](../../RELEASING.md) for the release workflow.
