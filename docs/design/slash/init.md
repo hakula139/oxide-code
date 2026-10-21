@@ -4,7 +4,7 @@
 
 ## Implementation
 
-`/init` looks for `AGENTS.md` and `CLAUDE.md` at the project root and in its `.claude/` directory, the two locations checked when loading root-level instructions. Paths that resolve to the same file, such as a `CLAUDE.md` symlink to `AGENTS.md`, count once, under the path that is not a symlink. The project root is the Git repository root, or the working directory when outside a repository. At startup, the TUI and the `--no-tui` REPL each resolve it once through `util::git::project_root`, which builds on `util::git::repo_root`, the same lookup prompt assembly uses. The working directory stays fixed for the session, so the root cannot change.
+`/init` looks for the files that loading tries at the project root, in the same order: `AGENTS.md`, `CLAUDE.md`, and `.claude/CLAUDE.md`. As when loading, only a file with content counts, so an empty `CLAUDE.md` leaves the project without an instruction file. Paths that resolve to the same file, such as a `CLAUDE.md` symlink to `AGENTS.md`, count once, under the path that is not a symlink. The project root is the Git repository root, or the working directory when outside a repository. At startup, the TUI and the `--no-tui` REPL each resolve it once through `util::git::project_root`, which builds on `util::git::repo_root`, the same lookup prompt assembly uses. The working directory stays fixed for the session, so the root cannot change.
 
 - **A file exists.** Bare `/init` asks no questions. It forwards a prompt that names each existing file and asks the model to read it, explore the codebase, show proposed changes as a unified diff with a reason for each, and end the turn. The model edits the file only after the user confirms in a later prompt.
 - **No file exists.** `/init AGENTS.md` or `/init CLAUDE.md` forwards a prompt that names the file to create, matching the name ignoring case. Besides oxide-code, Codex and other agents that follow the `AGENTS.md` convention read `AGENTS.md`, and Claude Code reads `CLAUDE.md`. Bare `/init` needs that choice first. In the TUI, it opens a picker whose choice forwards the same prompt. Pressing Esc closes the picker without starting a turn, and the `/init` line stays in the chat, as the command line does when the `/model` or `/theme` picker is cancelled. If auto-compaction clears the chat during a turn started from the picker, the `/init` line is not replayed above the summary. The REPL has no picker, so it rejects bare `/init` with an error naming both commands.
@@ -18,7 +18,7 @@ Both prompts share one rubric: include only information an agent would otherwise
 
 1. **Ask only for the file name.** The model can learn the commands, conventions, and architecture by reading the repository. If neither file exists, the repository cannot determine which name to use: either works, and the choice depends on which other tools the team runs. If a file already exists, updating it in place is the only reasonable choice, so there is nothing to ask. Naming that file runs the same update, while naming the other one is an error, since creating it would add the second file decision 2 rules out.
 
-2. **No option to create both.** oxide-code loads the first file with content at each location, checking `CLAUDE.md` before `AGENTS.md`, and does not resolve `@` imports. A second file beside the first would never reach an oxide-code session and would drift out of sync.
+2. **No option to create both.** oxide-code loads one file per directory, the first with content among `AGENTS.md`, `CLAUDE.md`, and `.claude/CLAUDE.md`, and does not resolve `@` imports. A second file beside the first would never reach an oxide-code session and would drift out of sync.
 
 3. **The diff is a prompt contract.** In `manual` mode, edits inside the workspace run without approval, so the permission gate could let the model overwrite an existing instruction file without showing anything. The update prompt therefore asks the model to show the diff and stop the turn before editing, and Claude Code's newer `/init` likewise asks for diffs on an existing `CLAUDE.md`. This depends on the model following the prompt. Protecting instruction files would enforce the contract, but would require approval for every edit to them in every session, and headless runs could edit them only with that protection turned off.
 
@@ -32,7 +32,7 @@ Both prompts share one rubric: include only information an agent would otherwise
 
 - `crates/ox-core/src/command.rs`: `parse`, which routes `/init` to `command::init`.
 - `crates/ox-core/src/command/init.rs`: `FILE_CHOICES`, `resolve`, the instruction-file discovery, and the create and update prompts.
-- `crates/ox-core/src/prompt/instructions.rs`: `INSTRUCTION_FILENAMES` and `INSTRUCTION_DIRS`, the files and directories checked by `/init`.
+- `crates/ox-core/src/prompt/instructions.rs`: `project_candidates` and `read`, the files `/init` checks and the rule for which of them count.
 - `crates/ox-core/src/util/git.rs`: `project_root` and `repo_root`, the async lookups for the project and repository roots.
 - `crates/ox-tui/src/lib.rs`: `run`, which resolves the project root and stores it in `LiveSessionInfo`.
 - `crates/ox-tui/src/slash/context.rs`: `LiveSessionInfo::project_root`.

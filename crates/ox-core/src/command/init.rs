@@ -4,17 +4,16 @@
 //! Design: `docs/design/slash/init.md`.
 
 use std::path::{Path, PathBuf};
-use std::{fs, iter};
 
 use indoc::{formatdoc, indoc};
 
-use crate::prompt::instructions::{INSTRUCTION_DIRS, INSTRUCTION_FILENAMES};
+use crate::prompt::instructions::{self, AGENTS_MD, CLAUDE_MD};
 use crate::protocol::Op;
 
 /// Each file `/init` can create, with the tools besides oxide-code that read it.
 pub const FILE_CHOICES: [(&str, &str); 2] = [
-    ("AGENTS.md", "Also read by Codex and other agents"),
-    ("CLAUDE.md", "Also read by Claude Code"),
+    (AGENTS_MD, "Also read by Codex and other agents"),
+    (CLAUDE_MD, "Also read by Claude Code"),
 ];
 
 /// The sentence saying the project has none of the [`FILE_CHOICES`].
@@ -66,26 +65,16 @@ fn file_choice(arg: &str) -> Result<&'static str, String> {
         })
 }
 
-/// The instruction files at `root` and in its instruction directories, as root-relative paths.
-/// Paths that resolve to the same file are listed once, under a path that is not a symlink when
-/// one exists.
+/// The instruction files with instructions at `root`, as root-relative paths in the order loading
+/// tries them. Paths that resolve to the same file are listed once, under a path that is not a
+/// symlink when one exists.
 fn existing_instruction_files(root: &Path) -> Vec<PathBuf> {
-    let candidates = iter::once("")
-        .chain(INSTRUCTION_DIRS.iter().copied())
-        .flat_map(|dir| {
-            INSTRUCTION_FILENAMES
-                .iter()
-                .map(move |name| Path::new(dir).join(name))
-        });
     let mut files: Vec<(PathBuf, PathBuf)> = Vec::new();
-    for path in candidates {
+    for path in instructions::project_candidates(Path::new("")) {
         let full = root.join(&path);
-        let Ok(canonical) = fs::canonicalize(&full) else {
+        let Ok(Some(instructions::Found { canonical, .. })) = instructions::read(&full) else {
             continue;
         };
-        if !canonical.is_file() {
-            continue;
-        }
         match files.iter_mut().find(|(_, seen)| *seen == canonical) {
             None => files.push((path, canonical)),
             Some((kept, _)) if root.join(&*kept).is_symlink() && !full.is_symlink() => *kept = path,
@@ -171,6 +160,8 @@ fn update_prompt(root: &Path, existing: &[PathBuf]) -> String {
 
 #[cfg(test)]
 mod tests {
+    use std::fs;
+
     use super::*;
 
     mod parse {
@@ -210,7 +201,7 @@ mod tests {
         fn file_name_of_an_existing_file_asks_for_the_update() {
             let root = tempfile::tempdir().unwrap();
             fs::create_dir(root.path().join(".claude")).unwrap();
-            fs::write(root.path().join(".claude/CLAUDE.md"), "").unwrap();
+            fs::write(root.path().join(".claude/CLAUDE.md"), "# CLAUDE.md\n").unwrap();
 
             assert_eq!(
                 resolve("Claude.md", root.path()),
@@ -224,6 +215,7 @@ mod tests {
         #[test]
         fn file_name_without_an_instruction_file_asks_to_create_it() {
             let root = tempfile::tempdir().unwrap();
+            fs::write(root.path().join("CLAUDE.md"), "\n").unwrap();
 
             for (arg, file) in [("AGENTS.md", "AGENTS.md"), (" claude.md ", "CLAUDE.md")] {
                 assert_eq!(
@@ -245,7 +237,7 @@ mod tests {
         fn file_name_beside_other_instruction_files_names_them() {
             let root = tempfile::tempdir().unwrap();
             fs::create_dir(root.path().join(".claude")).unwrap();
-            fs::write(root.path().join(".claude/CLAUDE.md"), "").unwrap();
+            fs::write(root.path().join(".claude/CLAUDE.md"), "# CLAUDE.md\n").unwrap();
             let nested = Path::new(".claude").join("CLAUDE.md");
             let nested = nested.display();
 
@@ -257,7 +249,7 @@ mod tests {
                 )),
             );
 
-            fs::write(root.path().join("CLAUDE.md"), "").unwrap();
+            fs::write(root.path().join("CLAUDE.md"), "# CLAUDE.md\n").unwrap();
             assert_eq!(
                 resolve("AGENTS.md", root.path()),
                 Err(format!(
@@ -286,18 +278,19 @@ mod tests {
         use super::*;
 
         #[test]
-        fn finds_root_and_instruction_dir_files() {
+        fn lists_files_with_instructions_in_loading_order() {
             let root = tempfile::tempdir().unwrap();
             fs::create_dir(root.path().join(".claude")).unwrap();
-            fs::write(root.path().join("CLAUDE.md"), "").unwrap();
-            fs::write(root.path().join(".claude/AGENTS.md"), "").unwrap();
-            fs::create_dir(root.path().join("AGENTS.md")).unwrap();
+            fs::write(root.path().join(".claude/CLAUDE.md"), "Nested rules.").unwrap();
+            fs::write(root.path().join(".claude/AGENTS.md"), "Unread rules.").unwrap();
+            fs::write(root.path().join("CLAUDE.md"), "  \n").unwrap();
+            fs::write(root.path().join("AGENTS.md"), "Rules.").unwrap();
 
             assert_eq!(
                 existing_instruction_files(root.path()),
                 [
-                    PathBuf::from("CLAUDE.md"),
-                    Path::new(".claude").join("AGENTS.md")
+                    PathBuf::from("AGENTS.md"),
+                    Path::new(".claude").join("CLAUDE.md")
                 ],
             );
         }
@@ -308,14 +301,14 @@ mod tests {
             use std::os::unix::fs::symlink;
 
             let root = tempfile::tempdir().unwrap();
-            fs::write(root.path().join("AGENTS.md"), "").unwrap();
-            symlink("AGENTS.md", root.path().join("CLAUDE.md")).unwrap();
+            fs::write(root.path().join("CLAUDE.md"), "Rules.").unwrap();
+            symlink("CLAUDE.md", root.path().join("AGENTS.md")).unwrap();
             fs::create_dir(root.path().join(".claude")).unwrap();
-            symlink("../AGENTS.md", root.path().join(".claude/CLAUDE.md")).unwrap();
+            symlink("../CLAUDE.md", root.path().join(".claude/CLAUDE.md")).unwrap();
 
             assert_eq!(
                 existing_instruction_files(root.path()),
-                [PathBuf::from("AGENTS.md")],
+                [PathBuf::from("CLAUDE.md")],
             );
         }
     }
