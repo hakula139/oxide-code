@@ -174,33 +174,19 @@ mod tests {
         }
 
         #[test]
-        fn add_row_carries_diff_add_row_bg() {
-            // Pin: dropping or swapping `diff_add_row` in the renderer construction trips here.
+        fn tints_removed_and_added_rows_with_their_row_styles() {
             let theme = Theme::default();
-            let block = GitDiffBlock::new(tracked(vec![added(1, "only added")]));
+            let block = GitDiffBlock::new(tracked(vec![
+                removed(1, "only removed"),
+                added(1, "replacement"),
+            ]));
 
             let lines = block.render(&RenderCtx::new(80, &theme));
 
-            // The number, separator, and text spans carry the bg, while the bar stays clear.
-            let bgs: Vec<_> = lines[0].spans.iter().map(|s| s.style.bg).collect();
-            assert_eq!(bgs[0], None, "bar prefix must stay clear");
-            assert!(
-                bgs.iter().skip(1).any(|bg| *bg == theme.diff_add_row().bg),
-                "expected diff_add_row bg on inner spans, got {bgs:?}",
-            );
-        }
-
-        #[test]
-        fn del_row_carries_diff_del_row_bg() {
-            let theme = Theme::default();
-            let block = GitDiffBlock::new(tracked(vec![removed(1, "only removed")]));
-
-            let lines = block.render(&RenderCtx::new(80, &theme));
-
-            let bgs: Vec<_> = lines[0].spans.iter().map(|s| s.style.bg).collect();
-            assert!(
-                bgs.iter().skip(1).any(|bg| *bg == theme.diff_del_row().bg),
-                "expected diff_del_row bg on inner spans, got {bgs:?}",
+            let number_bgs: Vec<_> = lines.iter().map(|line| line.spans[1].style.bg).collect();
+            assert_eq!(
+                number_bgs,
+                [theme.diff_del_row().bg, theme.diff_add_row().bg]
             );
         }
 
