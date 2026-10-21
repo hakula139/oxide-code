@@ -41,6 +41,7 @@ use crate::action::Action;
 use crate::glyphs::MODAL_ERROR_PREFIX;
 use crate::keymap::{KeyAction, KeyChord, Keymap};
 use crate::modal::chrome::{COLUMN_GAP, FOOTER_HEIGHT, render_footer, render_footer_text};
+use crate::modal::line_editor::LineEditor;
 use crate::modal::searchable_list::{SearchableItem, SearchableList};
 use crate::modal::{Modal, ModalAction, ModalKey};
 use crate::theme::Theme;
@@ -52,7 +53,7 @@ const PICKER_TITLE: &str = "Resume session";
 const PICKER_DESCRIPTION: &str = "Pick a session to resume in place";
 const ARCHIVED_PICKER_TITLE: &str = "Resume archived session";
 const ARCHIVED_PICKER_DESCRIPTION: &str = "Pick a session to unarchive and resume in place";
-const EMPTY_TEXT: &str = "no sessions found";
+const EMPTY_TEXT: &str = "No sessions found";
 const VIEWPORT_HEIGHT: u16 = 12;
 /// Sessions a worker reads per page.
 const PAGE_SIZE: usize = 30;
@@ -784,6 +785,10 @@ impl Modal for ResumePicker {
     fn captures_esc(&self) -> bool {
         true
     }
+
+    fn binds_modified_key(&self, event: &KeyEvent) -> bool {
+        ACTIONS.action_for(event).is_some() || LineEditor::binds_modified_key(event)
+    }
 }
 
 #[cfg(test)]
@@ -1371,16 +1376,19 @@ mod tests {
             );
             let expected = store.find_session_path(&stamped_id(0x11)).unwrap();
             let mut picker = opened(ResumePicker::new(store, "live-session-id".to_owned()));
-            for modifiers in [KeyModifiers::NONE, KeyModifiers::CONTROL] {
-                let outcome = picker.handle_key(&KeyEvent::new(KeyCode::Enter, modifiers));
-                let ModalKey::Submitted(ModalAction::Dispatch(Action::Op(Op::Resume {
-                    target: ResumeTarget::Path(path),
-                }))) = outcome
-                else {
-                    panic!("expected Submitted(Resume) for {modifiers:?}, got {outcome:?}");
-                };
-                assert_eq!(path, expected);
-            }
+
+            let ctrl_enter =
+                picker.handle_key(&KeyEvent::new(KeyCode::Enter, KeyModifiers::CONTROL));
+            let outcome = picker.handle_key(&KeyEvent::from(KeyCode::Enter));
+
+            assert!(matches!(ctrl_enter, ModalKey::Consumed), "{ctrl_enter:?}");
+            let ModalKey::Submitted(ModalAction::Dispatch(Action::Op(Op::Resume {
+                target: ResumeTarget::Path(path),
+            }))) = outcome
+            else {
+                panic!("expected Submitted(Resume), got {outcome:?}");
+            };
+            assert_eq!(path, expected);
         }
 
         #[test]

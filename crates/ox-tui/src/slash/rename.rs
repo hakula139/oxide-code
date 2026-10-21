@@ -108,6 +108,10 @@ impl Modal for RenameModal {
     fn handle_paste(&mut self, text: &str) {
         self.editor.paste(text);
     }
+
+    fn binds_modified_key(&self, event: &KeyEvent) -> bool {
+        LineEditor::binds_modified_key(event)
+    }
 }
 
 #[cfg(test)]

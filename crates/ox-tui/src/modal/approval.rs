@@ -5,7 +5,7 @@
 use std::cell::{Cell, RefCell};
 use std::time::{Duration, Instant};
 
-use crossterm::event::{KeyCode, KeyEvent, KeyEventKind};
+use crossterm::event::{KeyCode, KeyEvent};
 use ratatui::Frame;
 use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
@@ -18,7 +18,7 @@ use ox_core::tool::view::{ApprovalBody, ApprovalPreview, DiffChunk};
 use ox_core::util::text::{is_hidden, truncate_to_width};
 
 use super::line_editor::LineEditor;
-use super::{Modal, ModalAction, ModalKey, is_plain_char};
+use super::{Modal, ModalAction, ModalKey};
 use crate::action::Action;
 use crate::theme::Theme;
 use crate::wrap::{expand_tabs, wrap_line};
@@ -423,9 +423,6 @@ impl Modal for ApprovalModal {
     }
 
     fn handle_key(&mut self, event: &KeyEvent) -> ModalKey {
-        if event.kind != KeyEventKind::Press {
-            return ModalKey::Consumed;
-        }
         if let Some(outcome) = self.handle_edit_key(event) {
             return outcome;
         }
@@ -439,24 +436,18 @@ impl Modal for ApprovalModal {
         }
         // Esc and Ctrl+C are intercepted at the stack level and resolve through `on_cancel`.
         match event.code {
-            KeyCode::Char('y' | 'Y') if is_plain_char(event) && self.body_visible() => {
+            KeyCode::Char('y' | 'Y') if self.body_visible() => {
                 ModalKey::Submitted(self.decision(Decision::Approve))
             }
-            KeyCode::Char('a' | 'A') if is_plain_char(event) && self.body_visible() => {
-                match self.grant.take() {
-                    Some(offer) => {
-                        let pattern = offer.suggested().pattern().to_owned();
-                        self.start_edit(Purpose::Rule(offer), &pattern)
-                    }
-                    None => ModalKey::Consumed,
+            KeyCode::Char('a' | 'A') if self.body_visible() => match self.grant.take() {
+                Some(offer) => {
+                    let pattern = offer.suggested().pattern().to_owned();
+                    self.start_edit(Purpose::Rule(offer), &pattern)
                 }
-            }
-            KeyCode::Char('n' | 'N') if is_plain_char(event) => {
-                ModalKey::Submitted(self.decision(Decision::Deny))
-            }
-            KeyCode::Char('f' | 'F') if is_plain_char(event) => {
-                self.start_edit(Purpose::Feedback, "")
-            }
+                None => ModalKey::Consumed,
+            },
+            KeyCode::Char('n' | 'N') => ModalKey::Submitted(self.decision(Decision::Deny)),
+            KeyCode::Char('f' | 'F') => self.start_edit(Purpose::Feedback, ""),
             KeyCode::Home => self.scroll_by(isize::MIN),
             KeyCode::End => self.scroll_by(isize::MAX),
             _ => ModalKey::Consumed,
@@ -477,6 +468,10 @@ impl Modal for ApprovalModal {
 
     fn captures_esc(&self) -> bool {
         self.edit.is_some()
+    }
+
+    fn binds_modified_key(&self, event: &KeyEvent) -> bool {
+        self.edit.is_some() && LineEditor::binds_modified_key(event)
     }
 }
 
@@ -539,8 +534,9 @@ impl Palette {
 /// `-` / `+` rows.
 fn flatten_body(body: &ApprovalBody) -> Vec<BodyLine> {
     match body {
+        // Not `lines`, which would drop a `\r` before each `\n` that the preview must reveal.
         ApprovalBody::Command(command) => command
-            .lines()
+            .split_terminator('\n')
             .map(|line| BodyLine {
                 kind: BodyKind::Command,
                 text: line.to_owned(),
@@ -912,20 +908,6 @@ mod tests {
         }
 
         #[test]
-        fn non_press_key_events_are_ignored() {
-            // Windows reports a release for every key, and a held key repeats, so neither approves.
-            let mut modal = shown_modal("ls");
-            for kind in [KeyEventKind::Release, KeyEventKind::Repeat] {
-                let mut event = KeyEvent::from(KeyCode::Char('y'));
-                event.kind = kind;
-                assert!(
-                    matches!(modal.handle_key(&event), ModalKey::Consumed),
-                    "{kind:?}"
-                );
-            }
-        }
-
-        #[test]
         fn enter_keeps_editing_and_says_why_when_the_rule_no_longer_covers_the_call() {
             let mut modal = granted_modal("cargo test");
             modal.handle_key(&KeyEvent::from(KeyCode::Char('a')));
@@ -1171,16 +1153,32 @@ mod tests {
         }
 
         #[test]
-        fn enter_and_modified_y_do_not_approve() {
+        fn enter_and_modified_answer_keys_do_nothing() {
             // Enter is the likeliest key to arrive mid-typing, so approving takes an explicit `y`.
-            let mut modal = shown_modal("ls");
-            for event in [
-                KeyEvent::from(KeyCode::Enter),
-                KeyEvent::new(KeyCode::Char('y'), KeyModifiers::CONTROL),
-                KeyEvent::new(KeyCode::Enter, KeyModifiers::CONTROL),
-            ] {
-                assert!(matches!(modal.handle_key(&event), ModalKey::Consumed));
+            let mut stack = ModalStack::default();
+            stack.push(Box::new(granted_modal("cargo test")));
+            let modified = ['y', 'n', 'a', 'f'].into_iter().flat_map(|c| {
+                [KeyModifiers::CONTROL, KeyModifiers::ALT]
+                    .map(|modifiers| KeyEvent::new(KeyCode::Char(c), modifiers))
+            });
+            let enters = [KeyModifiers::NONE, KeyModifiers::CONTROL]
+                .map(|modifiers| KeyEvent::new(KeyCode::Enter, modifiers));
+
+            for event in enters.into_iter().chain(modified) {
+                assert!(stack.handle_key(&event).is_none(), "{event:?}");
             }
+
+            let approved = stack.handle_key(&KeyEvent::from(KeyCode::Char('y')));
+            assert!(
+                matches!(
+                    approved,
+                    Some(ModalAction::Dispatch(Action::Op(Op::Resolve {
+                        decision: Decision::Approve,
+                        ..
+                    })))
+                ),
+                "no modified key opened an editor or answered: {approved:?}",
+            );
         }
 
         #[test]
@@ -1198,7 +1196,8 @@ mod tests {
                 "body clipped"
             );
 
-            render_to_string(&modal, 40, 3);
+            let shown = render_to_string(&modal, 40, 3);
+            assert!(shown.contains("one"), "{shown}");
             assert!(matches!(modal.handle_key(&y), ModalKey::Submitted(_)));
 
             let mut empty = command_modal("");
@@ -1341,6 +1340,14 @@ mod tests {
 
     mod flatten_body {
         use super::*;
+
+        #[test]
+        fn keeps_a_carriage_return_before_a_line_break_in_its_row() {
+            let rows = flatten_body(&ApprovalBody::Command("echo a\r\nls\n".to_owned()));
+
+            let texts: Vec<&str> = rows.iter().map(|row| row.text.as_str()).collect();
+            assert_eq!(texts, ["echo a\r", "ls"]);
+        }
 
         #[test]
         fn expands_diff_tabs() {

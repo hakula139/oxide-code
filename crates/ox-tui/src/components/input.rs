@@ -19,6 +19,7 @@ use self::popup::{PopupState, SlashPopup, popup_state};
 use crate::action::Action;
 use crate::cursor::place_clamped;
 use crate::glyphs::{USER_PROMPT_PREFIX, USER_PROMPT_PREFIX_WIDTH};
+use crate::keymap::CTRL_C;
 use crate::saturating_u16;
 use crate::slash::arg_placeholder_for;
 use crate::theme::Theme;
@@ -209,6 +210,13 @@ impl InputArea {
     // ── Key Routing ──
 
     fn handle_key(&mut self, key: &KeyEvent) -> InputOutcome {
+        if CTRL_C.matches(key) {
+            return InputOutcome::Action(if self.enabled {
+                Action::ConfirmExit
+            } else {
+                Action::Op(Op::Interrupt)
+            });
+        }
         match (key.code, key.modifiers) {
             (KeyCode::Char('d'), KeyModifiers::CONTROL) => {
                 return if self.enabled && self.is_empty() {
@@ -216,13 +224,6 @@ impl InputArea {
                 } else {
                     InputOutcome::Consumed
                 };
-            }
-            (KeyCode::Char('c'), KeyModifiers::CONTROL) => {
-                return InputOutcome::Action(if self.enabled {
-                    Action::ConfirmExit
-                } else {
-                    Action::Op(Op::Interrupt)
-                });
             }
             (KeyCode::BackTab, _) => return InputOutcome::Action(Action::CycleMode),
             (KeyCode::PageUp | KeyCode::PageDown, _)

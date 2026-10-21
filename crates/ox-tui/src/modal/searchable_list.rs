@@ -300,8 +300,8 @@ impl<T: SearchableItem> SearchableList<T> {
     fn empty_note(&self) -> Option<String> {
         let query = self.query.text();
         match (self.is_filtered(), self.has_more) {
-            (true, true) => Some(format!("searching for `{query}`...")),
-            (true, false) => Some(format!("no matches for `{query}`")),
+            (true, true) => Some(format!("Searching for `{query}`...")),
+            (true, false) => Some(format!("No matches for `{query}`")),
             (false, true) => None,
             (false, false) => self.empty_text.clone(),
         }
@@ -851,7 +851,7 @@ mod tests {
                     "",
                     "/ zzz",
                     "",
-                    "  no matches for `zzz`",
+                    "  No matches for `zzz`",
                     "",
                     "",
                     "",
@@ -878,7 +878,7 @@ mod tests {
             l.set_query("zzz");
             l.set_has_more(true);
 
-            assert_eq!(first_row(&l), "  searching for `zzz`...");
+            assert_eq!(first_row(&l), "  Searching for `zzz`...");
         }
 
         #[test]

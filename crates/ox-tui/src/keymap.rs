@@ -7,6 +7,9 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 // ── KeyChord ──
 
+/// Ctrl+C, shared so the modal stack, selection copy, and input agree on which keys count.
+pub(crate) const CTRL_C: KeyChord = KeyChord::ctrl('c');
+
 /// A key, optionally held with Ctrl.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct KeyChord {
@@ -26,12 +29,15 @@ impl KeyChord {
         }
     }
 
-    /// Returns whether `event` presses this key. A character needs Ctrl held exactly when the chord
-    /// does, while any other key matches whatever modifiers are held.
-    fn matches(self, event: &KeyEvent) -> bool {
-        event.code == self.code
-            && (!matches!(self.code, KeyCode::Char(_))
-                || event.modifiers.contains(KeyModifiers::CONTROL) == self.ctrl)
+    /// Returns whether `event` presses this key with Ctrl held exactly when the chord holds it and
+    /// no other modifier but Shift, which terminals report on uppercase letters.
+    pub(crate) fn matches(self, event: &KeyEvent) -> bool {
+        let held = if self.ctrl {
+            KeyModifiers::CONTROL
+        } else {
+            KeyModifiers::NONE
+        };
+        event.code == self.code && event.modifiers - KeyModifiers::SHIFT == held
     }
 }
 
@@ -155,7 +161,7 @@ mod tests {
         use super::*;
 
         #[test]
-        fn matches_ctrl_exactly_on_characters_and_ignores_it_on_other_keys() {
+        fn matches_ctrl_and_alt_exactly_while_ignoring_shift() {
             let keymap = keymap();
             let press = |code, modifiers| keymap.action_for(&KeyEvent::new(code, modifiers));
 
@@ -169,17 +175,26 @@ mod tests {
                 Some(TestAction::Confirm),
             );
             assert_eq!(press(KeyCode::Char('y'), KeyModifiers::CONTROL), None);
-            for modifiers in [
-                KeyModifiers::NONE,
-                KeyModifiers::SHIFT,
-                KeyModifiers::CONTROL,
-            ] {
-                assert_eq!(
-                    press(KeyCode::Enter, modifiers),
-                    Some(TestAction::Reset),
-                    "{modifiers:?}",
-                );
-            }
+            assert_eq!(
+                press(
+                    KeyCode::Char('x'),
+                    KeyModifiers::CONTROL | KeyModifiers::SHIFT
+                ),
+                Some(TestAction::Toggle),
+            );
+            assert_eq!(
+                press(
+                    KeyCode::Char('x'),
+                    KeyModifiers::CONTROL | KeyModifiers::ALT
+                ),
+                None,
+            );
+            assert_eq!(
+                press(KeyCode::Enter, KeyModifiers::SHIFT),
+                Some(TestAction::Reset),
+            );
+            assert_eq!(press(KeyCode::Enter, KeyModifiers::CONTROL), None);
+            assert_eq!(press(KeyCode::Enter, KeyModifiers::ALT), None);
             assert_eq!(press(KeyCode::Tab, KeyModifiers::NONE), None);
         }
     }

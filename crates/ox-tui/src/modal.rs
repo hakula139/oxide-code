@@ -18,6 +18,7 @@ use ratatui::widgets::Paragraph;
 
 use crate::action::Action;
 use crate::glyphs::HORIZONTAL_RULE;
+use crate::keymap::CTRL_C;
 use crate::theme::Theme;
 
 const TOP_BORDER_HEIGHT: u16 = 1;
@@ -63,6 +64,13 @@ pub(crate) trait Modal: Send {
     /// modal that handles Esc itself, either backing out of its current step or dismissing through
     /// its own key table. Ctrl+C still cancels. Default false.
     fn captures_esc(&self) -> bool {
+        false
+    }
+
+    /// Returns whether `event`, a key held with Ctrl, Alt, or another modifier but Shift, is one of
+    /// the modal's bindings, such as a text field's editing keys. The stack drops every other
+    /// modified key, so a plain binding such as `j` never fires as Alt+J. Default false.
+    fn binds_modified_key(&self, _event: &KeyEvent) -> bool {
         false
     }
 }
@@ -187,6 +195,9 @@ impl ModalStack {
         if is_universal_cancel(event) && !(event.code == KeyCode::Esc && top.captures_esc()) {
             return Some(self.pop_cancelled());
         }
+        if !is_plain_char(event) && !top.binds_modified_key(event) {
+            return None;
+        }
         let outcome = top.handle_key(event);
         match outcome {
             ModalKey::Consumed => None,
@@ -242,8 +253,7 @@ pub(crate) fn is_plain_char(event: &KeyEvent) -> bool {
 }
 
 fn is_universal_cancel(event: &KeyEvent) -> bool {
-    event.code == KeyCode::Esc
-        || (event.code == KeyCode::Char('c') && event.modifiers.contains(KeyModifiers::CONTROL))
+    event.code == KeyCode::Esc || CTRL_C.matches(event)
 }
 
 // ── Testing ──
@@ -303,6 +313,8 @@ pub(crate) mod testing {
         pub(crate) push_child: Option<Box<dyn Modal>>,
         /// Whether the modal claims Esc through [`Modal::captures_esc`].
         pub(crate) captures_esc: bool,
+        /// Whether [`Modal::binds_modified_key`] claims every Ctrl- or Alt-modified key.
+        pub(crate) binds_modified_keys: bool,
         pub(crate) declared_height: u16,
         /// Shared so a test can read the count after the modal moves into the stack.
         pub(crate) focus_regained_count: Arc<AtomicU32>,
@@ -322,6 +334,7 @@ pub(crate) mod testing {
                 cancel_action: None,
                 push_child: None,
                 captures_esc: false,
+                binds_modified_keys: false,
                 declared_height: 3,
                 focus_regained_count: Arc::new(AtomicU32::new(0)),
                 tick_count: Arc::new(AtomicU32::new(0)),
@@ -371,6 +384,10 @@ pub(crate) mod testing {
 
         fn captures_esc(&self) -> bool {
             self.captures_esc
+        }
+
+        fn binds_modified_key(&self, _event: &KeyEvent) -> bool {
+            self.binds_modified_keys
         }
     }
 }
@@ -637,6 +654,9 @@ mod tests {
         fn esc_reaches_a_modal_that_captures_it_while_ctrl_c_still_cancels() {
             let mut stack = ModalStack::default();
             let mut modal = ScriptedModal::new(ModalAction::Cancelled);
+            // Moves the cancel sentinel off `c`, so a Ctrl+C the modal saw would be consumed.
+            modal.on_cancel_key = 'x';
+            modal.binds_modified_keys = true;
             modal.cancel_action = Some(ModalAction::Dispatch(Action::Op(Op::Interrupt)));
             modal.captures_esc = true;
             stack.push(Box::new(modal));
@@ -652,6 +672,41 @@ mod tests {
                 Some(ModalAction::Dispatch(Action::Op(Op::Interrupt)))
             ));
             assert!(!stack.is_active());
+        }
+
+        #[test]
+        fn drops_ctrl_and_alt_keys_the_modal_does_not_bind() {
+            let mut stack = ModalStack::default();
+            stack.push(Box::new(ScriptedModal::new(ModalAction::Cancelled)));
+
+            for modifiers in [
+                KeyModifiers::CONTROL,
+                KeyModifiers::ALT,
+                KeyModifiers::SUPER,
+            ] {
+                let outcome = stack.handle_key(&KeyEvent::new(KeyCode::Char('s'), modifiers));
+
+                assert!(outcome.is_none(), "{modifiers:?}");
+            }
+            assert!(
+                stack.is_active(),
+                "no modified key reached the submit binding"
+            );
+        }
+
+        #[test]
+        fn delivers_the_modified_keys_a_modal_binds() {
+            let mut stack = ModalStack::default();
+            let mut modal = ScriptedModal::new(ModalAction::Dispatch(Action::Op(Op::Interrupt)));
+            modal.binds_modified_keys = true;
+            stack.push(Box::new(modal));
+
+            let outcome = stack.handle_key(&KeyEvent::new(KeyCode::Char('s'), KeyModifiers::ALT));
+
+            assert!(matches!(
+                outcome,
+                Some(ModalAction::Dispatch(Action::Op(Op::Interrupt)))
+            ));
         }
 
         #[test]
