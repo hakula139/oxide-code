@@ -70,8 +70,8 @@ impl App {
             Event::AutoCompactionResumed => self.session_info.auto_compaction_paused_after = None,
             Event::SummaryToken(token) => self.chat.append_summary_token(&token),
             Event::SummaryDiscarded => self.chat.discard_summary(),
-            Event::SessionTitleUpdated { session_id, title } => {
-                if session_id == self.session_info.session_id {
+            Event::SessionTitleUpdated { id, title } => {
+                if id == self.session_info.session_id {
                     self.status_bar.set_title(Some(title));
                 }
             }
@@ -1179,7 +1179,7 @@ mod tests {
         fn session_title_updated_overwrites_existing_title_for_current_session() {
             let (mut app, _rx, _event_tx) = test_app(Some("First prompt"));
             app.handle_engine_event(Event::SessionTitleUpdated {
-                session_id: app.session_info.session_id.clone(),
+                id: app.session_info.session_id.clone(),
                 title: "AI-generated".to_owned(),
             });
             assert_eq!(app.status_bar.title(), Some("AI-generated"));
@@ -1192,7 +1192,7 @@ mod tests {
             // paint the old session's title onto the current one.
             let (mut app, _rx, _event_tx) = test_app(Some("First prompt"));
             app.handle_engine_event(Event::SessionTitleUpdated {
-                session_id: "different-session".to_owned(),
+                id: "different-session".to_owned(),
                 title: "Stale title".to_owned(),
             });
             assert_eq!(

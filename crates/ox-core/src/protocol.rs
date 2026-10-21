@@ -2,7 +2,7 @@
 //! the engine emits, and the [`EventSink`] that delivers them. Ops, events, and their payloads
 //! serialize to JSON, with each enum tagged by `type` and its payload under `data`, so they can
 //! cross a process boundary. Headless `stream-json` output prints events in this form, so renaming
-//! a tag or field breaks the release stability surface.
+//! a tag or field in an event listed in `docs/guide/headless.md` breaks the stability surface.
 
 pub mod notice;
 
@@ -41,7 +41,10 @@ pub enum Op {
     Interrupt,
     /// Answers the outstanding [`Event::ApprovalRequested`]. The `id` is matched against the
     /// blocked call so a decision for an already-dropped call is ignored.
-    Resolve { id: String, decision: Decision },
+    Resolve {
+        id: String,
+        decision: ApprovalDecision,
+    },
     /// Swaps the model, the effort, or both for later turns.
     SetModel(ConfigPick),
     /// Switches the permission mode. Mid-turn, the switch applies from the next tool call the gate
@@ -80,10 +83,10 @@ pub enum ResumeTarget {
     Prefix(String),
 }
 
-/// The user's verdict on a pending approval, carried back on [`Op::Resolve`].
+/// The user's answer to an [`Event::ApprovalRequested`], carried back on [`Op::Resolve`].
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", content = "data", rename_all = "snake_case")]
-pub enum Decision {
+pub enum ApprovalDecision {
     Approve,
     /// Approve, and allow every later call `rule` matches for the rest of the session. The engine
     /// admits `rule` against its own grant for the call and denies the call when it fails.
@@ -219,8 +222,9 @@ pub enum Event {
     /// The summary streamed so far was dropped, because a retry starts it over or the compaction
     /// failed or was cancelled. Precedes the event that reports the failure or cancellation.
     SummaryDiscarded,
-    /// The session title changed, from the background generator or an [`Op::Rename`].
-    SessionTitleUpdated { session_id: String, title: String },
+    /// The title of session `id` changed, from the background generator or an [`Op::Rename`]. A
+    /// generated title can arrive after a roll, so frontends ignore one whose `id` is not live.
+    SessionTitleUpdated { id: String, title: String },
     /// An [`Op::Rename`] could not record its title, so the title stays. Ends the rename as
     /// [`Self::SessionTitleUpdated`] does.
     RenameFailed(String),
@@ -526,27 +530,27 @@ mod tests {
                 Op::Interrupt,
                 Op::Resolve {
                     id: "t1".to_owned(),
-                    decision: Decision::Approve,
+                    decision: ApprovalDecision::Approve,
                 },
                 Op::Resolve {
                     id: "t1".to_owned(),
-                    decision: Decision::AllowForSession {
+                    decision: ApprovalDecision::AllowForSession {
                         rule: Box::new(Rule::parse(PermissionClass::Exec, "cargo test *").unwrap()),
                     },
                 },
                 Op::Resolve {
                     id: "t1".to_owned(),
-                    decision: Decision::Deny,
+                    decision: ApprovalDecision::Deny,
                 },
                 Op::Resolve {
                     id: "t1".to_owned(),
-                    decision: Decision::DenyWithFeedback {
+                    decision: ApprovalDecision::DenyWithFeedback {
                         feedback: "Use rg instead.".to_owned(),
                     },
                 },
                 Op::Resolve {
                     id: "t1".to_owned(),
-                    decision: Decision::Abort,
+                    decision: ApprovalDecision::Abort,
                 },
                 Op::SetModel(ConfigPick::Model {
                     id: ResolvedModelId::new("claude-opus-5-5"),
@@ -592,13 +596,13 @@ mod tests {
             assert_eq!(
                 serde_json::to_value(Op::Resolve {
                     id: "t1".to_owned(),
-                    decision: Decision::Deny,
+                    decision: ApprovalDecision::Deny,
                 })
                 .unwrap(),
                 json!({"type": "resolve", "data": {"id": "t1", "decision": {"type": "deny"}}}),
             );
             assert_eq!(
-                serde_json::to_value(Decision::AllowForSession {
+                serde_json::to_value(ApprovalDecision::AllowForSession {
                     rule: Box::new(Rule::parse(PermissionClass::Exec, "cargo test *").unwrap()),
                 })
                 .unwrap(),
@@ -608,7 +612,7 @@ mod tests {
                 }),
             );
             assert_eq!(
-                serde_json::to_value(Decision::DenyWithFeedback {
+                serde_json::to_value(ApprovalDecision::DenyWithFeedback {
                     feedback: "Use rg instead.".to_owned(),
                 })
                 .unwrap(),
@@ -812,7 +816,7 @@ mod tests {
                 Event::SummaryToken("Recap".to_owned()),
                 Event::SummaryDiscarded,
                 Event::SessionTitleUpdated {
-                    session_id: "s1".to_owned(),
+                    id: "s1".to_owned(),
                     title: "Title".to_owned(),
                 },
                 Event::RenameFailed("Session write failed: disk full".to_owned()),

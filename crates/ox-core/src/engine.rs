@@ -1153,9 +1153,7 @@ mod tests {
                 handle.shutdown().await.unwrap();
 
                 let titled = first.iter().find_map(|event| match event {
-                    Event::SessionTitleUpdated { session_id, title } => {
-                        Some((session_id.as_str(), title.as_str()))
-                    }
+                    Event::SessionTitleUpdated { id, title } => Some((id.as_str(), title.as_str())),
                     _ => None,
                 });
                 assert_eq!(titled, Some((live_id.as_str(), "Greeting")));
@@ -1573,13 +1571,13 @@ mod tests {
                     matches!(
                         seen.as_slice(),
                         [
-                            Event::SessionTitleUpdated { session_id, title },
+                            Event::SessionTitleUpdated { id, title },
                             Event::ConfigChanged {
                                 requested: ConfigPick::Effort(Effort::Low),
                                 ..
                             },
                             Event::ModeChanged(Mode::Plan),
-                        ] if *session_id == live_id && title == "Fix login"
+                        ] if *id == live_id && title == "Fix login"
                     ),
                     "{seen:?}"
                 );
@@ -3133,7 +3131,7 @@ mod tests {
                     (
                         &rename,
                         Event::SessionTitleUpdated {
-                            session_id: "live".to_owned(),
+                            id: "live".to_owned(),
                             title: "Fix login".to_owned(),
                         },
                         Some(TurnEnd::Completed),

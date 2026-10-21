@@ -120,7 +120,7 @@ async fn generate_and_record(
 
     sink.emit(
         Event::SessionTitleUpdated {
-            session_id: session.session_id().to_owned(),
+            id: session.session_id().to_owned(),
             title,
         },
         "session-title-updated",
@@ -260,7 +260,7 @@ mod tests {
             assert_eq!(
                 rx.recv().await,
                 Some(Event::SessionTitleUpdated {
-                    session_id,
+                    id: session_id,
                     title: "Fix auth".to_owned(),
                 }),
             );
@@ -431,7 +431,7 @@ mod tests {
             assert_eq!(
                 sink.events(),
                 [Event::SessionTitleUpdated {
-                    session_id: session.session_id().to_owned(),
+                    id: session.session_id().to_owned(),
                     title: "Fix auth".to_owned(),
                 }],
             );
@@ -513,7 +513,7 @@ mod tests {
                             .to_owned(),
                     ),
                     Event::SessionTitleUpdated {
-                        session_id: "dead-session".to_owned(),
+                        id: "dead-session".to_owned(),
                         title: "Fix auth".to_owned(),
                     },
                 ],

@@ -150,7 +150,7 @@ impl Engine {
         }
         sink.emit(
             Event::SessionTitleUpdated {
-                session_id: self.session.session_id().to_owned(),
+                id: self.session.session_id().to_owned(),
                 title,
             },
             "session-title-updated",
@@ -957,9 +957,9 @@ mod tests {
                     matches!(
                         events.as_slice(),
                         [
-                            Event::SessionTitleUpdated { session_id, title },
+                            Event::SessionTitleUpdated { id, title },
                             Event::RenameFailed(write),
-                        ] if *session_id == live_id && title == "Fix login"
+                        ] if *id == live_id && title == "Fix login"
                             && write == "Session write failed: session writer task has stopped. \
                                          Conversation history may be incomplete."
                     ),

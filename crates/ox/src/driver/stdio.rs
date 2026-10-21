@@ -14,7 +14,7 @@ use tracing::debug;
 use ox_core::engine::TurnEnd;
 use ox_core::permission::defaults::ShippedTier;
 use ox_core::permission::{Basis, SessionGrant};
-use ox_core::protocol::{Decision, Event, EventSink, Op, ToolCall, ToolResult, notice};
+use ox_core::protocol::{ApprovalDecision, Event, EventSink, Op, ToolCall, ToolResult, notice};
 use ox_core::session::display::{UNTITLED_MARKER, archive_notice, id_prefix};
 use ox_core::session::entry::ArchiveState;
 use ox_core::tool::tasks::{Progress, Task};
@@ -89,7 +89,7 @@ pub(super) trait Approver {
         preview: &ApprovalPreview,
         basis: &Basis,
         grant: Option<&SessionGrant>,
-    ) -> impl Future<Output = Decision>;
+    ) -> impl Future<Output = ApprovalDecision>;
 }
 
 /// Renders the events already queued, such as the engine's startup warnings.
@@ -118,7 +118,7 @@ impl Approver for Unattended {
         _: &ApprovalPreview,
         basis: &Basis,
         grant: Option<&SessionGrant>,
-    ) -> impl Future<Output = Decision> {
+    ) -> impl Future<Output = ApprovalDecision> {
         let feedback = match (grant, basis) {
             (Some(grant), _) => {
                 let rule = grant.suggested();
@@ -154,7 +154,7 @@ impl Approver for Unattended {
                  Approve it in an interactive session."
             ),
         };
-        std::future::ready(Decision::DenyWithFeedback { feedback })
+        std::future::ready(ApprovalDecision::DenyWithFeedback { feedback })
     }
 }
 
@@ -449,7 +449,7 @@ mod tests {
 
         /// Answers every approval with its decision, recording what each request offered.
         struct Fixed {
-            decision: Decision,
+            decision: ApprovalDecision,
             offered: Vec<(String, Option<String>)>,
         }
 
@@ -459,14 +459,14 @@ mod tests {
                 preview: &ApprovalPreview,
                 _: &Basis,
                 grant: Option<&SessionGrant>,
-            ) -> impl Future<Output = Decision> {
+            ) -> impl Future<Output = ApprovalDecision> {
                 let rule = grant.map(|grant| grant.suggested().pattern().to_owned());
                 self.offered.push((preview.title.clone(), rule));
                 std::future::ready(self.decision.clone())
             }
         }
 
-        fn fixed(decision: Decision) -> Fixed {
+        fn fixed(decision: ApprovalDecision) -> Fixed {
             Fixed {
                 decision,
                 offered: Vec::new(),
@@ -491,7 +491,7 @@ mod tests {
             }
             let (ops_tx, mut ops) = mpsc::channel(1);
             let sink = CapturingSink::default();
-            let mut approver = fixed(Decision::Deny);
+            let mut approver = fixed(ApprovalDecision::Deny);
 
             let end = render_op(&mut events, &sink, &ops_tx, &prompt(), &mut approver).await;
 
@@ -504,7 +504,7 @@ mod tests {
                 ops.try_recv().ok(),
                 Some(Op::Resolve {
                     id: "t1".to_owned(),
-                    decision: Decision::Deny,
+                    decision: ApprovalDecision::Deny,
                 }),
             );
             assert_eq!(sink.events(), [Event::TurnComplete]);
@@ -521,7 +521,7 @@ mod tests {
                     _: &ApprovalPreview,
                     _: &Basis,
                     _: Option<&SessionGrant>,
-                ) -> impl Future<Output = Decision> {
+                ) -> impl Future<Output = ApprovalDecision> {
                     std::future::pending()
                 }
             }
@@ -567,10 +567,10 @@ mod tests {
                     _: &ApprovalPreview,
                     _: &Basis,
                     _: Option<&SessionGrant>,
-                ) -> Decision {
+                ) -> ApprovalDecision {
                     tokio::task::yield_now().await;
                     self.rendered = Some(self.sink.events());
-                    Decision::Deny
+                    ApprovalDecision::Deny
                 }
             }
 
@@ -616,7 +616,7 @@ mod tests {
             }
 
             let (ops, _) = mpsc::channel(1);
-            let mut approver = fixed(Decision::Deny);
+            let mut approver = fixed(ApprovalDecision::Deny);
             let end = render_op(&mut events, &FailingSink, &ops, &prompt(), &mut approver).await;
 
             assert_eq!(end, Some(TurnEnd::Cancelled));
@@ -644,7 +644,7 @@ mod tests {
             let sink = CapturingSink::default();
 
             let (ops, _) = mpsc::channel(1);
-            let mut approver = fixed(Decision::Deny);
+            let mut approver = fixed(ApprovalDecision::Deny);
             let end = render_op(&mut events, &sink, &ops, &Op::Clear, &mut approver).await;
 
             assert_eq!(end, Some(TurnEnd::Completed));
@@ -663,7 +663,7 @@ mod tests {
                 let mut handle = engine.spawn();
                 handle.ops.send(Op::Clear).await.unwrap();
                 let sink = CapturingSink::default();
-                let mut approver = fixed(Decision::Deny);
+                let mut approver = fixed(ApprovalDecision::Deny);
 
                 let end = render_op(
                     &mut handle.events,
@@ -704,7 +704,7 @@ mod tests {
             let sink = CapturingSink::default();
 
             let (ops, _) = mpsc::channel(1);
-            let mut approver = fixed(Decision::Deny);
+            let mut approver = fixed(ApprovalDecision::Deny);
             let end = render_op(&mut events, &sink, &ops, &prompt(), &mut approver).await;
 
             assert_eq!(end, None);
@@ -783,7 +783,7 @@ mod tests {
 
                     assert_eq!(
                         decision,
-                        Decision::DenyWithFeedback {
+                        ApprovalDecision::DenyWithFeedback {
                             feedback: expected.to_owned()
                         },
                         "{basis:?}"
@@ -1038,7 +1038,7 @@ mod tests {
                 let cases = [
                     (
                         Event::SessionTitleUpdated {
-                            session_id: "sid".to_owned(),
+                            id: "sid".to_owned(),
                             title: "Fix login\u{1b}[2J".to_owned(),
                         },
                         "Renamed the session to Fix login\\u{1b}[2J\n",

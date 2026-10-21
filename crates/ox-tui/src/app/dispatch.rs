@@ -471,7 +471,7 @@ mod tests {
     use ox_core::permission::defaults::Shipped;
     use ox_core::permission::{Basis, Mode};
     use ox_core::protocol::testing::text_result;
-    use ox_core::protocol::{ConfigPick, Decision, Event, ResumeTarget};
+    use ox_core::protocol::{ApprovalDecision, ConfigPick, Event, ResumeTarget};
     use ox_core::tool::view::{ApprovalBody, ApprovalPreview};
 
     use super::*;
@@ -1113,7 +1113,7 @@ mod tests {
                 forwarded,
                 Op::Resolve {
                     id,
-                    decision: Decision::Abort,
+                    decision: ApprovalDecision::Abort,
                 } if id == "call-1"
             ));
         }
@@ -1321,7 +1321,7 @@ mod tests {
 
             app.dispatch_action(Action::Op(Op::Resolve {
                 id: "call-1".to_owned(),
-                decision: Decision::Approve,
+                decision: ApprovalDecision::Approve,
             }));
 
             assert!(!app.should_quit, "Full is not fatal");
