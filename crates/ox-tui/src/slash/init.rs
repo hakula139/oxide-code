@@ -285,21 +285,12 @@ mod tests {
                     Some(create_action(root, "AGENTS.md"))
                 );
 
-                for code in [
-                    KeyCode::Down,
-                    KeyCode::Char('j'),
-                    KeyCode::Up,
-                    KeyCode::Char('k'),
-                    KeyCode::Char('2'),
-                ] {
-                    let mut picker = InitPicker::new(root);
-                    assert_eq!(press(&mut picker, code), None, "{code:?} moves the cursor");
-                    assert_eq!(
-                        press(&mut picker, KeyCode::Enter),
-                        Some(create_action(root, "CLAUDE.md")),
-                        "{code:?} from the first row lands on the second",
-                    );
-                }
+                let mut picker = InitPicker::new(root);
+                assert_eq!(press(&mut picker, KeyCode::Down), None);
+                assert_eq!(
+                    press(&mut picker, KeyCode::Enter),
+                    Some(create_action(root, "CLAUDE.md")),
+                );
             }
 
             #[test]

@@ -77,9 +77,9 @@ App owns `ModalStack` and runs the key gate first inside `handle_crossterm_event
 
 6. **Commands return modals as `SlashOutcome::Modal`.** `execute` reads a borrowed `SlashContext` and hands every effect back as a value, so the App pushes the modal in the same place it prints chat output, and commands never touch the modal stack or `ChatView`.
 
-7. **Bare `/model` and bare `/effort` open separate modals.** Threading both bare forms through one modal would force a single-axis decision through a two-axis interface. `/model` keeps the multi-axis combined picker (model and effort cycle together), while `/effort` gets its own single-axis slider. Typed-arg `/model <id>` and `/effort <level>` keep direct-switch behavior for scripting and power users.
+7. **Bare `/model` and bare `/effort` open separate modals.** Threading both bare forms through one modal would force a single-axis decision through a two-axis interface. `/model` keeps the multi-axis combined picker (one modal sets both axes), while `/effort` gets its own single-axis slider. Typed-arg `/model <id>` and `/effort <level>` keep direct-switch behavior for scripting and power users.
 
-8. **`ListPicker` handles state and rendering.** Concrete pickers embed it and forward keys to it. This keeps list selection apart from what Enter dispatches, with no callbacks. `/model + /effort`, `/mode`, `/theme`, and `/init` build on it.
+8. **`ListPicker` handles state, navigation, and rendering.** Concrete pickers embed it, handle Enter and any keys of their own, and pass the rest to `ListPicker::navigate`, which steps on Up / `k` and Down / `j` and jumps on a row's digit. This keeps list selection apart from what Enter dispatches, with no callbacks. Each `ListPicker` roster is fixed, so `ListPicker::new` rejects an empty one and `selected` always returns a row. `/mode`, `/theme`, and `/init` draw through `ListPicker::render_with_footer`, while `/model + /effort` pins an effort row above its footer.
 
 9. **Read-only kv overviews share `KvOverview`.** `/status`, `/config`, and `/help` all build the same shape of a title, sectioned rows, and a footer, so the layout, key handling, and dismiss live in one place. Per-command files supply only the sections, with their rows and headings, and a thin constructor, so a new overview is a `Vec<KvSection>` away.
 
@@ -88,8 +88,6 @@ App owns `ModalStack` and runs the key gate first inside `handle_crossterm_event
 11. **Nested modals use `ModalKey::Push`.** A push outcome keeps `handle_key` returning one value and avoids threading a stack borrow through every modal. `Debug for ModalKey` is hand-rolled because `Box<dyn Modal>` cannot derive it.
 
 12. **Parents refresh through `Modal::on_focus_regained`.** A picker whose sub-modal mutates shared state overrides the no-op default to refresh on pop, as the `/resume` picker does after a delete.
-
-13. **List pickers share navigation and layout.** `ListPicker::navigate` steps the cursor on Up / `k` and Down / `j` and jumps on a row's digit, and `ListPicker::render_with_footer` draws the confirm footer below the list, so each picker writes only what Enter does. Every picker lists a fixed roster, so `ListPicker::new` rejects an empty one and `selected` always returns a row.
 
 ## Per-Modal Notes
 

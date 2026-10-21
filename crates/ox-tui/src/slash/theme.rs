@@ -350,40 +350,21 @@ mod tests {
             use super::*;
 
             #[test]
-            fn down_and_j_emit_preview_for_next_row_without_popping() {
-                for code in [KeyCode::Down, KeyCode::Char('j')] {
+            fn arrows_preview_the_row_they_land_on_without_popping() {
+                for (code, expected) in [
+                    (KeyCode::Down, "macchiato"),
+                    (KeyCode::Up, BUILT_IN.last().unwrap().name),
+                ] {
                     let mut p = picker_with_active("mocha");
-                    let outcome = p.handle_key(&KeyEvent::from(code));
-                    match outcome {
-                        ModalKey::Preview(ModalAction::Dispatch(Action::PreviewTheme(theme))) => {
-                            assert_eq!(
-                                theme.name, "macchiato",
-                                "{code:?} from mocha lands on macchiato"
-                            );
-                        }
-                        other => {
-                            panic!("expected Preview(PreviewTheme) for {code:?}, got {other:?}")
-                        }
-                    }
-                }
-            }
 
-            #[test]
-            fn up_and_k_emit_preview_for_prev_row_without_popping() {
-                // From the first row they wrap to the last via `select_prev`.
-                for code in [KeyCode::Up, KeyCode::Char('k')] {
-                    let mut p = picker_with_active("mocha");
                     let outcome = p.handle_key(&KeyEvent::from(code));
-                    match outcome {
-                        ModalKey::Preview(ModalAction::Dispatch(Action::PreviewTheme(theme))) => {
-                            assert_eq!(
-                                theme.name,
-                                BUILT_IN.last().unwrap().name,
-                                "{code:?} from first row wraps to last",
-                            );
-                        }
-                        other => panic!("expected Preview for {code:?}, got {other:?}"),
-                    }
+
+                    let ModalKey::Preview(ModalAction::Dispatch(Action::PreviewTheme(theme))) =
+                        outcome
+                    else {
+                        panic!("expected a preview for {code:?}, got {outcome:?}");
+                    };
+                    assert_eq!(theme.name, expected, "{code:?} from mocha");
                 }
             }
 

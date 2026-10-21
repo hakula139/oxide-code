@@ -10,7 +10,7 @@ use unicode_width::UnicodeWidthStr;
 
 use ox_core::util::text::truncate_to_width;
 
-use super::chrome::{COLUMN_GAP, FOOTER_HEIGHT, Header, render_footer};
+use super::chrome::{COLUMN_GAP, FOOTER_HEIGHT, Header, above, height_above, render_footer};
 use crate::glyphs::{ACTIVE_MARKER, cursor_gutter};
 use crate::saturating_u16;
 use crate::theme::Theme;
@@ -49,7 +49,8 @@ pub(crate) fn numeric_hint(index: usize) -> Option<char> {
 /// Columns kept clear between a description and the right edge of its row.
 const RIGHT_MARGIN: usize = 2;
 
-/// Selectable list with a cursor and an active-row marker. Rows past the granted height scroll.
+/// Selectable list with a cursor and an active-row marker.
+/// Rows past the granted height scroll.
 /// Every picker lists a fixed roster, so the list is never empty and always has a selected row.
 pub(crate) struct ListPicker<T: PickerItem> {
     header: Header,
@@ -91,9 +92,10 @@ impl<T: PickerItem> ListPicker<T> {
         self.cursor
     }
 
-    /// Moves the cursor for a navigation key: Up / `k` and Down / `j` step with wrap, and a digit
-    /// jumps to the row it labels. Returns whether the cursor landed on a row, which a key
-    /// outside these or a digit past the roster does not.
+    /// Moves the cursor for a navigation key: Up / `k` and Down / `j` step with wrap,
+    /// and a digit jumps to the row it labels.
+    /// Returns whether the cursor landed on a row,
+    /// which a key outside these or a digit past the roster does not.
     pub(crate) fn navigate(&mut self, event: &KeyEvent) -> bool {
         match event.code {
             KeyCode::Up | KeyCode::Char('k') => self.select_prev(),
@@ -127,9 +129,9 @@ impl<T: PickerItem> ListPicker<T> {
         self.header.height().saturating_add(rows).min(max_height)
     }
 
-    /// [`Self::height`] plus a footer row of key hints, within `max_height`.
+    /// [`Self::height`] plus the [`FOOTER_HEIGHT`] footer rows, within `max_height`.
     pub(crate) fn height_with_footer(&self, width: u16, max_height: u16) -> u16 {
-        self.height(width, max_height.saturating_sub(FOOTER_HEIGHT)) + FOOTER_HEIGHT
+        height_above(max_height, FOOTER_HEIGHT, |room| self.height(width, room))
     }
 
     /// Renders the list above a footer of `hints` at the bottom of `area`.
@@ -140,11 +142,7 @@ impl<T: PickerItem> ListPicker<T> {
         hints: &[&str],
         theme: &Theme,
     ) {
-        let list_area = Rect {
-            height: area.height.saturating_sub(FOOTER_HEIGHT),
-            ..area
-        };
-        self.render(frame, list_area, theme);
+        self.render(frame, above(area, FOOTER_HEIGHT), theme);
         render_footer(frame, area, hints, theme);
     }
 
@@ -362,6 +360,7 @@ mod tests {
             for code in [KeyCode::Char('9'), KeyCode::Char('x'), KeyCode::Enter] {
                 assert!(!press(&mut p, code), "{code:?}");
             }
+
             assert_eq!(p.cursor_index(), 0);
         }
     }
@@ -390,6 +389,45 @@ mod tests {
             let items = (0..20).map(|_| FakeItem::new("x")).collect();
 
             assert_eq!(picker(items).height(80, 7), 7);
+        }
+    }
+
+    mod height_with_footer {
+        use super::*;
+
+        #[test]
+        fn adds_the_footer_rows_within_the_max() {
+            let short = picker(vec![FakeItem::new("a"), FakeItem::new("b")]);
+            let long = picker((0..20).map(|_| FakeItem::new("x")).collect());
+
+            assert_eq!(short.height_with_footer(80, 40), 4 + FOOTER_HEIGHT);
+            assert_eq!(long.height_with_footer(80, 7), 7);
+            assert_eq!(long.height_with_footer(80, 1), 1);
+        }
+    }
+
+    mod render_with_footer {
+        use super::*;
+
+        #[test]
+        fn keeps_the_cursor_row_above_the_footer_when_the_list_scrolls() {
+            let mut p = picker(
+                ["a", "b", "c", "d", "e"]
+                    .into_iter()
+                    .map(FakeItem::new)
+                    .collect(),
+            );
+            p.navigate(&KeyEvent::from(KeyCode::Up));
+            let height = 2 + 2 + FOOTER_HEIGHT;
+
+            let rows = render_rows_with(40, height, |frame, area, theme| {
+                p.render_with_footer(frame, area, &["Enter to confirm"], theme);
+            });
+
+            assert!(rows[3].trim_start().starts_with('>'), "{rows:#?}");
+            assert!(rows[3].contains('e'), "{rows:#?}");
+            assert!(rows[4].trim().is_empty(), "{rows:#?}");
+            assert!(rows[5].contains("Enter to confirm"), "{rows:#?}");
         }
     }
 

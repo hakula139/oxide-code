@@ -12,10 +12,12 @@ use ox_core::model::{MODELS, ModelInfo, ResolvedModelId};
 use ox_core::protocol::{ConfigPick, Op};
 
 use super::context::LiveSessionInfo;
-use super::effort_slider::tier_color;
+use super::effort_slider::{Direction, step_level, tier_color};
 use crate::action::Action;
 use crate::glyphs::RADIO_SELECTED;
-use crate::modal::chrome::{CONFIRM_HINTS, FOOTER_HEIGHT, KEY_LEFT_RIGHT, render_footer};
+use crate::modal::chrome::{
+    CONFIRM_HINTS, FOOTER_HEIGHT, KEY_LEFT_RIGHT, above, height_above, render_footer,
+};
 use crate::modal::list_picker::{ListPicker, PickerItem, numeric_hint};
 use crate::modal::{Modal, ModalAction, ModalKey};
 use crate::theme::Theme;
@@ -106,18 +108,14 @@ impl ModelEffortPicker {
             .unwrap_or(self.list.selected().info.default_effort)
     }
 
-    /// Steps the effort one level, stopping at either end of the ladder as the `/effort` slider
-    /// does, so holding a key cannot overshoot onto the opposite end.
+    /// Steps the effort one level as the `/effort` slider does.
     fn step_effort(&mut self, direction: Direction) {
+        let current = self.shown_effort();
         let idx = Effort::ALL
             .iter()
-            .position(|level| *level == self.shown_effort())
+            .position(|level| *level == current)
             .expect("Effort::ALL lists every level");
-        let next = match direction {
-            Direction::Forward => (idx + 1).min(Effort::ALL.len() - 1),
-            Direction::Backward => idx.saturating_sub(1),
-        };
-        self.picked_effort = Some(Effort::ALL[next]);
+        self.picked_effort = Some(Effort::ALL[step_level(idx, direction)]);
     }
 
     /// Commits both axes through one atomic `SetModel`, picking only the axes that differ from the
@@ -160,23 +158,16 @@ impl ModelEffortPicker {
 
 impl Modal for ModelEffortPicker {
     fn height(&self, width: u16, max_height: u16) -> u16 {
-        self.list
-            .height(width, max_height.saturating_sub(BELOW_LIST_HEIGHT))
-            + BELOW_LIST_HEIGHT
+        height_above(max_height, BELOW_LIST_HEIGHT, |room| {
+            self.list.height(width, room)
+        })
     }
 
     fn render(&self, frame: &mut Frame<'_>, area: Rect, theme: &Theme) {
-        let list_h = area.height.saturating_sub(BELOW_LIST_HEIGHT);
-        self.list.render(
-            frame,
-            Rect {
-                height: list_h,
-                ..area
-            },
-            theme,
-        );
+        let list_area = above(area, BELOW_LIST_HEIGHT);
+        self.list.render(frame, list_area, theme);
 
-        let effort_y = area.y + list_h + 1;
+        let effort_y = list_area.bottom() + 1;
         if effort_y < area.bottom() {
             let row = Rect {
                 y: effort_y,
@@ -201,12 +192,6 @@ impl Modal for ModelEffortPicker {
 }
 
 // ── Direction ──
-
-#[derive(Debug, Clone, Copy)]
-enum Direction {
-    Forward,
-    Backward,
-}
 
 #[cfg(test)]
 mod tests {
