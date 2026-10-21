@@ -8,7 +8,8 @@ use ratatui::Frame;
 use ratatui::layout::Rect;
 use ratatui::text::{Line, Span};
 use ratatui_textarea::{CursorMove, TextArea};
-use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
+use unicode_segmentation::UnicodeSegmentation;
+use unicode_width::UnicodeWidthStr;
 
 use ox_core::util::text::take_head;
 
@@ -24,7 +25,8 @@ pub(crate) struct LineEditor {
     textarea: TextArea<'static>,
     max_width: usize,
     placeholder: Option<&'static str>,
-    /// First char shown when the text overflows its row. `Cell` because it settles at render.
+    /// First grapheme cluster shown when the text overflows its row. `Cell` because it settles
+    /// at render.
     scroll: Cell<usize>,
 }
 
@@ -65,9 +67,39 @@ impl LineEditor {
         self.textarea.move_cursor(CursorMove::End);
     }
 
-    /// Applies one editing key and returns whether the text changed.
+    /// Applies one editing key and returns whether the text changed. Cursor moves and single
+    /// deletions step over whole grapheme clusters.
     pub(crate) fn handle_key(&mut self, event: &KeyEvent) -> bool {
-        if is_blocked_key(event) || !self.textarea.input(*event) {
+        if is_blocked_key(event) {
+            return false;
+        }
+        let stops = GraphemeStops::new(self.text());
+        let at = stops.at_char(self.textarea.cursor().1);
+
+        let mut changed = self.textarea.input(*event);
+        // ratatui-textarea steps by char, so finish a deletion or move that stopped mid-cluster.
+        match char_deletion(event) {
+            Some(Side::Before) if at > 0 => {
+                for _ in 1..stops.char(at) - stops.char(at - 1) {
+                    self.textarea.delete_char();
+                }
+            }
+            Some(Side::After) if at < stops.len() => {
+                for _ in 1..stops.char(at + 1) - stops.char(at) {
+                    self.textarea.delete_next_char();
+                }
+            }
+            _ => {}
+        }
+        while !self.cursor_on_boundary() {
+            let before = self.textarea.cursor();
+            changed |= self.textarea.input(*event);
+            if self.textarea.cursor() == before {
+                break;
+            }
+        }
+
+        if !changed {
             return false;
         }
         if self.text().width() > self.max_width {
@@ -75,6 +107,12 @@ impl LineEditor {
             return false;
         }
         true
+    }
+
+    fn cursor_on_boundary(&self) -> bool {
+        let char = self.textarea.cursor().1;
+        let stops = GraphemeStops::new(self.text());
+        stops.char(stops.at_char(char)) == char
     }
 
     /// Inserts pasted `text` at the cursor as one line, with each run of control characters such
@@ -112,17 +150,10 @@ impl LineEditor {
     fn visible(&self, width: u16) -> (String, usize) {
         let budget = usize::from(width.saturating_sub(PROMPT_WIDTH + 1));
         let text = self.text();
-        // The byte offset and starting column of each char, then of the end of the text.
-        let mut stops = Vec::with_capacity(text.len() + 1);
-        let mut column = 0;
-        for (byte, c) in text.char_indices() {
-            stops.push((byte, column));
-            column += c.width().unwrap_or(0);
-        }
-        stops.push((text.len(), column));
-        let span = |from: usize, to: usize| stops[to].1 - stops[from].1;
-        let len = stops.len() - 1;
-        let cursor = self.textarea.cursor().1;
+        let stops = GraphemeStops::new(text);
+        let span = |from: usize, to: usize| stops.column(to) - stops.column(from);
+        let len = stops.len();
+        let cursor = stops.at_char(self.textarea.cursor().1);
 
         let mut start = self.scroll.get().min(cursor);
         while span(start, cursor) > budget {
@@ -138,9 +169,70 @@ impl LineEditor {
             end += 1;
         }
         (
-            text[stops[start].0..stops[end].0].to_owned(),
+            text[stops.byte(start)..stops.byte(end)].to_owned(),
             span(start, cursor),
         )
+    }
+}
+
+/// The boundary before each grapheme cluster of a text, then its end, with the byte offset, char
+/// index, and display column of each. Columns sum grapheme widths, as ratatui paints them.
+struct GraphemeStops(Vec<(usize, usize, usize)>);
+
+impl GraphemeStops {
+    fn new(text: &str) -> Self {
+        let mut stops = Vec::new();
+        let (mut chars, mut column) = (0, 0);
+        for (byte, grapheme) in text.grapheme_indices(true) {
+            stops.push((byte, chars, column));
+            chars += grapheme.chars().count();
+            column += grapheme.width();
+        }
+        stops.push((text.len(), chars, column));
+        Self(stops)
+    }
+
+    /// The number of grapheme clusters, which is also the index of the end stop.
+    fn len(&self) -> usize {
+        self.0.len() - 1
+    }
+
+    fn byte(&self, stop: usize) -> usize {
+        self.0[stop].0
+    }
+
+    fn char(&self, stop: usize) -> usize {
+        self.0[stop].1
+    }
+
+    fn column(&self, stop: usize) -> usize {
+        self.0[stop].2
+    }
+
+    /// The first stop at or after char index `char`.
+    fn at_char(&self, char: usize) -> usize {
+        self.0.partition_point(|&(_, start, _)| start < char)
+    }
+}
+
+/// Which side of the cursor a deletion removes from.
+enum Side {
+    Before,
+    After,
+}
+
+/// The side of the cursor from which the textarea deletes one char for the key, mirroring
+/// `TextArea::input`'s Backspace / Ctrl+H and Delete / Ctrl+D bindings.
+fn char_deletion(event: &KeyEvent) -> Option<Side> {
+    let modifiers = event.modifiers - KeyModifiers::SHIFT;
+    match (event.code, modifiers) {
+        (KeyCode::Backspace, KeyModifiers::NONE) | (KeyCode::Char('h'), KeyModifiers::CONTROL) => {
+            Some(Side::Before)
+        }
+        (KeyCode::Delete, KeyModifiers::NONE) | (KeyCode::Char('d'), KeyModifiers::CONTROL) => {
+            Some(Side::After)
+        }
+        _ => None,
     }
 }
 
@@ -278,6 +370,43 @@ mod tests {
 
             assert_eq!(editor.text(), "ab");
         }
+
+        #[test]
+        fn steps_over_and_deletes_the_grapheme_cluster_before_the_cursor() {
+            let mut editor = LineEditor::new("a👨‍👩‍👧b");
+
+            editor.handle_key(&KeyEvent::from(KeyCode::Left));
+            editor.handle_key(&KeyEvent::from(KeyCode::Left));
+            type_str(&mut editor, "<");
+            editor.handle_key(&KeyEvent::from(KeyCode::Right));
+            let deleted = editor.handle_key(&KeyEvent::from(KeyCode::Backspace));
+
+            assert!(deleted);
+            assert_eq!(editor.text(), "a<b");
+        }
+
+        #[test]
+        fn deletes_the_whole_grapheme_cluster_after_the_cursor() {
+            let mut editor = LineEditor::new("❤️x");
+            editor.handle_key(&KeyEvent::new(KeyCode::Char('a'), KeyModifiers::CONTROL));
+
+            let deleted = editor.handle_key(&KeyEvent::from(KeyCode::Delete));
+
+            assert!(deleted);
+            assert_eq!(editor.text(), "x");
+        }
+
+        #[test]
+        fn undo_restores_only_the_last_edit_inside_a_cluster() {
+            let mut editor = LineEditor::new("❤");
+            type_str(&mut editor, "\u{fe0f}");
+
+            let undone =
+                editor.handle_key(&KeyEvent::new(KeyCode::Char('u'), KeyModifiers::CONTROL));
+
+            assert!(undone);
+            assert_eq!(editor.text(), "❤");
+        }
     }
 
     mod paste {
@@ -384,6 +513,15 @@ mod tests {
 
             assert_eq!(row, ("/ テキスト".to_owned(), 10));
         }
+
+        #[test]
+        fn slices_emoji_sequences_as_whole_clusters() {
+            let hearts = LineEditor::new(&"❤️".repeat(12));
+            let family = LineEditor::new("👨‍👩‍👧x");
+
+            assert_eq!(shown(&hearts), (format!("/ {}", "❤️".repeat(4)), 10));
+            assert_eq!(shown(&family), ("/ 👨‍👩‍👧x".to_owned(), 5));
+        }
     }
 
     mod place_cursor {
@@ -400,6 +538,26 @@ mod tests {
 
             editor.handle_key(&KeyEvent::from(KeyCode::Left));
             assert_eq!(cursor_x(&editor, 20), PROMPT_WIDTH + 2);
+        }
+
+        #[test]
+        fn measures_emoji_sequences_as_ratatui_paints_them() {
+            let mut editor = LineEditor::new("❤️x");
+            assert_eq!(cursor_x(&editor, 20), PROMPT_WIDTH + 3);
+
+            editor.handle_key(&KeyEvent::from(KeyCode::Left));
+            assert_eq!(
+                cursor_x(&editor, 20),
+                PROMPT_WIDTH + 2,
+                "the cursor sits on the x"
+            );
+
+            editor.handle_key(&KeyEvent::from(KeyCode::Left));
+            assert_eq!(
+                cursor_x(&editor, 20),
+                PROMPT_WIDTH,
+                "Left steps over the whole emoji"
+            );
         }
     }
 
