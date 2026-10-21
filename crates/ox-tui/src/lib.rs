@@ -38,7 +38,7 @@ use ox_core::util::path::tildify;
 
 use app::{App, AppHistory};
 use slash::{LiveSessionInfo, ResumePicker};
-use theme::Theme;
+use theme::ResolvedTheme;
 
 // ── Constants ──
 
@@ -53,21 +53,19 @@ pub struct Startup {
     pub git_branch: Option<String>,
     /// The `ox --resume` session picker, opened over the first frame.
     pub picker: Option<ResumePicker>,
-    /// One notice per `[tui.theme]` override the theme ignored, shown after the config notices.
-    pub theme_notices: Vec<String>,
     pub title: Option<String>,
     /// Whether resuming the session unarchived it.
     pub unarchived: bool,
 }
 
 /// Runs the TUI until the user quits or `shutdown` resolves, then waits for the engine to finalize
-/// the live session. Returns what `shutdown` resolved to, or `None` when the user quit. An engine
-/// panic is returned after the terminal is restored, which prints the deferred panic report.
+/// the live session. Shows the notices of `theme` after the config notices. Returns what
+/// `shutdown` resolved to, or `None` when the user quit. An engine panic is returned after the
+/// terminal is restored, which prints the deferred panic report.
 pub async fn run<S: Debug>(
     mut engine: Engine,
-    theme: &Theme,
+    theme: ResolvedTheme,
     config: ConfigSnapshot,
-    show_thinking: bool,
     startup: Startup,
     drifted: &[PathBuf],
     shutdown: impl Future<Output = S>,
@@ -91,11 +89,16 @@ pub async fn run<S: Debug>(
 
     let mut tui = terminal::init()?;
     let EngineHandle { ops, events, task } = engine.spawn(drifted);
+    let ResolvedTheme {
+        theme,
+        overrides,
+        notices: theme_notices,
+    } = theme;
     let mut app = App::new(
         theme,
+        overrides,
         session_info,
         startup.git_branch,
-        show_thinking,
         events,
         ops,
         AppHistory {
@@ -104,7 +107,7 @@ pub async fn run<S: Debug>(
             unarchived: startup.unarchived,
         },
     );
-    for notice in notices.into_iter().chain(startup.theme_notices) {
+    for notice in notices.into_iter().chain(theme_notices) {
         app.push_system_message(notice);
     }
     if let Some(picker) = startup.picker {

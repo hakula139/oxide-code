@@ -30,7 +30,7 @@ use ox_core::util::tls::PlatformTrust;
 use ox_tui::Startup;
 use ox_tui::slash::ResumePicker;
 use ox_tui::terminal;
-use ox_tui::theme::{Theme, resolve_theme};
+use ox_tui::theme::{ResolvedTheme, resolve_theme};
 
 use driver::Exit;
 use driver::headless::OutputFormat;
@@ -241,28 +241,18 @@ async fn async_main(offset_error: Option<IndeterminateOffset>) -> Result<Exit> {
     let startup = Startup {
         git_branch,
         picker,
-        theme_notices: theme.notices,
         title,
         unarchived,
     };
     // Boxed, since on Windows this future passes clippy's 16 KiB `large_futures` threshold.
-    Box::pin(run_tui(
-        engine,
-        &theme.theme,
-        snapshot,
-        show_thinking,
-        startup,
-        &drifted,
-    ))
-    .await
+    Box::pin(run_tui(engine, theme, snapshot, startup, &drifted)).await
 }
 
 /// Runs the TUI until the user quits or a shutdown signal arrives, which then sets the exit status.
 async fn run_tui(
     engine: Engine,
-    theme: &Theme,
+    theme: ResolvedTheme,
     snapshot: ConfigSnapshot,
-    show_thinking: bool,
     startup: Startup,
     drifted: &[PathBuf],
 ) -> Result<Exit> {
@@ -270,7 +260,6 @@ async fn run_tui(
         engine,
         theme,
         snapshot,
-        show_thinking,
         startup,
         drifted,
         driver::shutdown_signal(),

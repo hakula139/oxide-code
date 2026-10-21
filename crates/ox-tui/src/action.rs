@@ -4,6 +4,7 @@
 use ox_core::protocol::Op;
 
 use crate::keymap::{KeyAction, KeyChord, Keymap};
+use crate::theme::builtin::BuiltinTheme;
 
 /// A request from a TUI surface. [`Self::Op`] reaches the engine after the app applies its local
 /// state change. The other variants act on TUI state alone.
@@ -19,13 +20,9 @@ pub(crate) enum Action {
     CycleMode,
     /// A preview of the picker's highlighted theme, without committing it. Cursor moves in the
     /// `/theme` modal emit this, and cancelling the modal restores the open-time snapshot.
-    PreviewTheme {
-        name: String,
-    },
+    PreviewTheme(&'static BuiltinTheme),
     /// A theme swap for the rest of the session. A restart returns to the configured theme.
-    SwapTheme {
-        name: String,
-    },
+    SwapTheme(&'static BuiltinTheme),
 }
 
 // ── App Keymap ──

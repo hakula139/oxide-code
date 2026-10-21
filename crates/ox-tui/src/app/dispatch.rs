@@ -9,7 +9,7 @@ use crossterm::event::{
 };
 use ratatui::layout::Position;
 use tokio::sync::mpsc::error::TrySendError;
-use tracing::{debug, warn};
+use tracing::debug;
 
 use ox_core::command::{self, Parsed};
 use ox_core::protocol::Op;
@@ -21,7 +21,8 @@ use crate::components::status::Status;
 use crate::modal::ModalAction;
 use crate::now;
 use crate::slash::{self, SlashContext, SlashKind, SlashOutcome};
-use crate::theme::{self, Theme};
+use crate::theme::Theme;
+use crate::theme::builtin::BuiltinTheme;
 use crate::viewport::wrap_next;
 
 impl App {
@@ -213,8 +214,8 @@ impl App {
             Action::Op(op) => self.dispatch_op(op),
             Action::ConfirmExit => self.confirm_exit(),
             Action::CycleMode => self.cycle_mode(),
-            Action::PreviewTheme { name } => self.preview_theme(&name),
-            Action::SwapTheme { name } => self.swap_theme(&name),
+            Action::PreviewTheme(theme) => self.preview_theme(theme),
+            Action::SwapTheme(theme) => self.swap_theme(theme),
         }
     }
 
@@ -313,33 +314,29 @@ impl App {
         false
     }
 
-    fn preview_theme(&mut self, name: &str) {
-        if let Some(preview) = theme::load_builtin(name) {
-            if self.preview_theme_snapshot.is_none() {
-                self.preview_theme_snapshot = Some(self.theme.clone());
-            }
-            self.apply_theme(&preview);
-        } else {
-            warn!(
-                name,
-                "PreviewTheme: unknown built-in, so the picker roster drifted"
-            );
-        }
+    fn preview_theme(&mut self, builtin: &BuiltinTheme) {
+        let preview = self.with_overrides(builtin);
+        self.preview_theme_snapshot
+            .get_or_insert_with(|| self.theme.clone());
+        self.apply_theme(&preview);
     }
 
-    fn swap_theme(&mut self, name: &str) {
+    fn swap_theme(&mut self, builtin: &BuiltinTheme) {
         self.preview_theme_snapshot = None;
-        if let Some(theme) = theme::load_builtin(name) {
-            name.clone_into(&mut self.session_info.config.theme_name);
-            self.apply_theme(&theme);
-            self.chat
-                .push_system_message(format!("Theme set to {name}"));
-        } else {
-            warn!(
-                name,
-                "SwapTheme: unknown built-in, so the picker roster drifted"
-            );
-        }
+        let theme = self.with_overrides(builtin);
+        builtin
+            .name
+            .clone_into(&mut self.session_info.config.theme_name);
+        self.apply_theme(&theme);
+        self.chat
+            .push_system_message(format!("Theme set to {}", builtin.name));
+    }
+
+    /// `builtin`'s palette with the configured `[tui.theme.overrides]` applied, as at startup.
+    fn with_overrides(&self, builtin: &BuiltinTheme) -> Theme {
+        let mut theme = builtin.load();
+        self.theme_overrides.apply(&mut theme);
+        theme
     }
 
     /// Queues the prompt, then starts a turn with the queue head when idle. Slash commands forward
@@ -456,9 +453,10 @@ mod tests {
     use indoc::indoc;
     use ratatui::buffer::CellWidth;
     use ratatui::layout::Rect;
+    use ratatui::style::Color;
     use tokio::sync::mpsc::error::TryRecvError;
 
-    use ox_core::config::Effort;
+    use ox_core::config::{Effort, ThemeConfig};
     use ox_core::model::ResolvedModelId;
     use ox_core::permission::defaults::Shipped;
     use ox_core::permission::{Basis, Mode};
@@ -473,6 +471,26 @@ mod tests {
     use crate::components::status::StatusHyperlink;
     use crate::modal::testing::ScriptedModal;
     use crate::testing::{key_event, mouse_event, mouse_event_at};
+    use crate::theme::{ThemeOverrides, builtin, resolve_theme};
+
+    const RED: Color = Color::Rgb(0xff, 0x00, 0x00);
+
+    fn built_in_theme(name: &str) -> &'static BuiltinTheme {
+        builtin::find(name).expect("a built-in theme")
+    }
+
+    fn latte() -> &'static BuiltinTheme {
+        built_in_theme("latte")
+    }
+
+    /// The parsed `[tui.theme.overrides]` entry `text = "#ff0000"`.
+    fn red_text_overrides() -> ThemeOverrides {
+        let config = ThemeConfig {
+            base: "mocha".to_owned(),
+            overrides: r##"text = "#ff0000""##.parse().unwrap(),
+        };
+        resolve_theme(&config).unwrap().overrides
+    }
 
     mod handle_crossterm_event {
         use super::*;
@@ -1070,9 +1088,7 @@ mod tests {
             let (mut app, _rx, _event_tx) = test_app(None);
             let original = app.theme.clone();
             app.push_modal(Box::new(ScriptedModal::new(ModalAction::Cancelled)));
-            app.dispatch_action(Action::PreviewTheme {
-                name: "latte".to_owned(),
-            });
+            app.dispatch_action(Action::PreviewTheme(latte()));
 
             app.clear_modals();
 
@@ -1774,27 +1790,30 @@ mod tests {
         fn repaints_components_and_caches_original() {
             let (mut app, _rx, _event_tx) = test_app(None);
             let original = app.theme.clone();
-            app.dispatch_action(Action::PreviewTheme {
-                name: "latte".to_owned(),
-            });
+
+            app.dispatch_action(Action::PreviewTheme(latte()));
+
             assert!(
                 app.preview_theme_snapshot.is_some(),
                 "first PreviewTheme must cache the original",
             );
             assert_ne!(app.theme.text, original.text, "live theme must change");
-            // preview leaves session_info.config.theme_name as-is until commit.
-            assert_eq!(app.session_info.config.theme_name, "mocha");
+            assert_eq!(
+                app.session_info.config.theme_name, "mocha",
+                "a preview keeps the theme name until commit",
+            );
         }
 
         #[test]
-        fn then_modal_cancel_restores_original() {
+        fn then_modal_cancel_restores_the_theme_from_before_the_first_preview() {
             // Esc / Ctrl+C surface as ModalAction::Cancelled, so the snapshot must roll back.
             let (mut app, _rx, _event_tx) = test_app(None);
             let original = app.theme.clone();
-            app.dispatch_action(Action::PreviewTheme {
-                name: "latte".to_owned(),
-            });
+            app.dispatch_action(Action::PreviewTheme(latte()));
+            app.dispatch_action(Action::PreviewTheme(built_in_theme("frappe")));
+
             app.apply_modal_action(ModalAction::Cancelled);
+
             assert!(
                 app.preview_theme_snapshot.is_none(),
                 "snapshot consumed on cancel",
@@ -1803,26 +1822,14 @@ mod tests {
         }
 
         #[test]
-        fn with_unknown_name_does_nothing_and_keeps_active_theme() {
-            // Drift between the slash and built-in rosters only logs, so user state stays put.
+        fn keeps_the_configured_overrides() {
             let (mut app, _rx, _event_tx) = test_app(None);
-            let original_text = app.theme.text;
-            let entries_before = app.chat.entry_count();
+            app.theme_overrides = red_text_overrides();
 
-            app.dispatch_action(Action::PreviewTheme {
-                name: "nonexistent".to_owned(),
-            });
+            app.dispatch_action(Action::PreviewTheme(latte()));
 
-            assert!(
-                app.preview_theme_snapshot.is_none(),
-                "no snapshot when load_builtin returns None",
-            );
-            assert_eq!(app.theme.text, original_text, "theme stays put on drift");
-            assert_eq!(
-                app.chat.entry_count(),
-                entries_before,
-                "preview must never push a chat block",
-            );
+            assert_eq!(app.theme.text.fg, Some(RED));
+            assert_ne!(app.theme.accent, Theme::default().accent, "latte applies");
         }
     }
 
@@ -1832,17 +1839,14 @@ mod tests {
         #[test]
         fn commits_and_clears_snapshot() {
             let (mut app, _rx, _event_tx) = test_app(None);
-            app.dispatch_action(Action::PreviewTheme {
-                name: "latte".to_owned(),
-            });
+            app.dispatch_action(Action::PreviewTheme(latte()));
             let previewed = app.theme.clone();
-            app.dispatch_action(Action::SwapTheme {
-                name: "latte".to_owned(),
-            });
+
+            app.dispatch_action(Action::SwapTheme(latte()));
+
             assert!(app.preview_theme_snapshot.is_none());
             assert_eq!(app.session_info.config.theme_name, "latte");
             assert_eq!(app.theme.text, previewed.text);
-
             app.apply_modal_action(ModalAction::Cancelled);
             assert_eq!(
                 app.session_info.config.theme_name, "latte",
@@ -1851,22 +1855,17 @@ mod tests {
         }
 
         #[test]
-        fn with_unknown_name_is_a_silent_noop() {
-            // Only a dev bug names an unknown built-in, so log via tracing and leave the UI alone.
+        fn keeps_the_configured_overrides_away_and_back() {
             let (mut app, _rx, _event_tx) = test_app(None);
-            let original = app.session_info.config.theme_name.clone();
-            let entries_before = app.chat.entry_count();
+            app.theme_overrides = red_text_overrides();
 
-            app.dispatch_action(Action::SwapTheme {
-                name: "nonexistent".to_owned(),
-            });
+            app.dispatch_action(Action::SwapTheme(latte()));
+            let away = app.theme.text.fg;
+            app.dispatch_action(Action::SwapTheme(built_in_theme("mocha")));
 
-            assert_eq!(app.session_info.config.theme_name, original);
-            assert_eq!(
-                app.chat.entry_count(),
-                entries_before,
-                "dev-only drift adds no chat block",
-            );
+            assert_eq!(away, Some(RED));
+            assert_eq!(app.theme.text.fg, Some(RED));
+            assert_eq!(app.theme.accent, Theme::default().accent, "mocha applies");
         }
     }
 
@@ -1898,6 +1897,18 @@ mod tests {
                 Err(TryRecvError::Empty),
                 "TUI-only theme swap must not leak to the engine"
             );
+        }
+
+        #[tokio::test]
+        async fn slash_typed_theme_swaps_mid_turn() {
+            let (mut app, mut rx, _event_tx) = test_app(None);
+            app.dispatch_action(Action::Submit("active".to_owned()));
+            rx.recv().await.expect("active submit forwarded");
+
+            app.dispatch_action(Action::Submit("/theme latte".to_owned()));
+
+            assert_eq!(app.session_info.config.theme_name, "latte");
+            assert_eq!(rx.try_recv(), Err(TryRecvError::Empty));
         }
 
         #[tokio::test]

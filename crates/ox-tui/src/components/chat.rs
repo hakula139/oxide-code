@@ -760,7 +760,7 @@ mod tests {
         ASSISTANT_PREFIX, BAR, INTERRUPTED_MARKER, TOOL_BORDER_CONT, TOOL_BORDER_PREFIX,
         TOOL_ERROR, TOOL_SUCCESS,
     };
-    use crate::theme::load_builtin;
+    use crate::theme::builtin::find;
 
     fn test_chat() -> ChatView {
         ChatView::new(&Theme::default(), true)
@@ -887,7 +887,7 @@ mod tests {
             // Bare `/theme` opens its picker mid-stream. Without dropping the cache, committed
             // prefix tokens would keep the previous palette until `commit_streaming`.
             let reply = "a complete paragraph\n\nnext\n";
-            let latte = load_builtin("latte").expect("latte is built in");
+            let latte = find("latte").expect("latte is built in").load();
             let mut chat = test_chat();
             chat.set_viewport(Rect::new(0, 0, 80, 24));
             chat.append_stream_token(reply);
@@ -2231,7 +2231,7 @@ mod tests {
 
         #[test]
         fn after_set_theme_repaints_cached_blocks_in_new_palette() {
-            let latte = load_builtin("latte").unwrap();
+            let latte = find("latte").unwrap().load();
             let mocha = Theme::default();
             assert_ne!(latte.user().fg, mocha.user().fg);
 
@@ -2448,7 +2448,7 @@ mod tests {
                     .collect::<Vec<_>>()
             };
             let (wide_tail, narrow_tail) = (tail(wide), tail(narrow));
-            let latte = load_builtin("latte").expect("latte is built in");
+            let latte = find("latte").expect("latte is built in").load();
             let mut chat = test_chat();
             chat.load_history(long_transcript(4));
 

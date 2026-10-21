@@ -22,7 +22,7 @@ use crate::modal::approval::ApprovalModal;
 use crate::modal::{Modal, ModalKey};
 use crate::slash::{self, LiveSessionInfo};
 use crate::testing::buffer_rows;
-use crate::theme::Theme;
+use crate::theme::{Theme, ThemeOverrides};
 
 /// How many unread ops [`test_app`]'s channel holds before `try_send` reports it full.
 pub(super) const OP_CHANNEL_CAPACITY: usize = 8;
@@ -42,10 +42,10 @@ pub(super) fn test_app_with(
     let (event_tx, events) = mpsc::unbounded_channel::<Event>();
     let (ops, op_rx) = mpsc::channel::<Op>(OP_CHANNEL_CAPACITY);
     let mut app = App::new(
-        &Theme::default(),
+        Theme::default(),
+        ThemeOverrides::default(),
         session_info,
         Some("main".to_owned()),
-        false,
         events,
         ops,
         AppHistory {
