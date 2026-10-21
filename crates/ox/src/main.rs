@@ -645,5 +645,38 @@ mod tests {
                 assert_eq!(parse(&["ox"]).session_target(), None);
             }
         }
+
+        mod projects {
+            use super::*;
+
+            #[test]
+            fn all_widens_lookups_to_every_project() {
+                let parse = |args: &[&str]| Cli::try_parse_from(args).unwrap();
+
+                assert_eq!(parse(&["ox", "-c"]).projects(), ProjectScope::Current);
+                assert_eq!(parse(&["ox", "-c", "-a"]).projects(), ProjectScope::Every);
+                assert_eq!(
+                    parse(&["ox", "-r", "--all"]).projects(),
+                    ProjectScope::Every
+                );
+            }
+        }
+
+        mod list_scope {
+            use super::*;
+
+            #[test]
+            fn archived_lists_the_archive_in_the_current_project() {
+                let cli = Cli::try_parse_from(["ox", "--list", "--archived"]).unwrap();
+
+                assert_eq!(
+                    cli.list_scope(),
+                    ListScope {
+                        projects: ProjectScope::Current,
+                        archive: ArchiveState::Archived,
+                    },
+                );
+            }
+        }
     }
 }
