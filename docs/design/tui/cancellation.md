@@ -1,6 +1,6 @@
 # Cancellation and Queued Input
 
-Esc / Ctrl+C cancellation, dual-press Ctrl+C exit from idle, and mid-turn queued user prompts.
+How the TUI cancels work on Esc or Ctrl+C, exits on a second Ctrl+C from idle, and queues the prompts typed while a turn runs.
 
 ## Implementation
 
@@ -10,7 +10,7 @@ The TUI exposes these controls and behaviors:
 - **Queue input.** Enter while busy appends to `App::pending_prompts: VecDeque<String>`, rendered as a dim preview above the input, and forwards the prompt as `Op::Queue`.
 - **Drain input.** `agent_turn` splices each forwarded prompt into `messages` as a trailing User message at its next round boundary and confirms it with `Event::PromptDrained`, so the model sees new instructions in the next API request without aborting in-flight work. A turn that ends first drops the prompts it still holds, and once it completes or fails the TUI submits the queue head as the next turn. A prompt whose automatic compaction failed was never sent, so the TUI hands it back to the user and leaves the queue waiting.
 - **Interrupt work.** Cancellation drops the `agent_turn` future: reqwest closes the SSE stream, the bash tool kills the command's process tree, and a dim italic `(interrupted)` marker lands in chat. The transcript then ends on a `[Request interrupted by user]` user message, so the model knows the user abandoned that prompt.
-- **Show status.** The status bar colocates the active-key hint with the spinner: `Streaming · Esc to interrupt` / `Running {tool} · Esc to interrupt` / `Cancelling` / `Press Ctrl+C again to exit`.
+- **Show status.** The status bar puts the key that stops the work beside the spinner: `Streaming · Esc to interrupt`, `Running {tool} · Esc to interrupt`, `Compacting · Esc to interrupt`, `Signing in · Esc to cancel`, `Resuming`, and `Cancelling`. An armed exit shows `Press Ctrl+C again to exit`.
 
 ## Design Decisions
 

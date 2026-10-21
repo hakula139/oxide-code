@@ -1,19 +1,8 @@
 # Mouse Interactions
 
-Design policy for mouse behavior in the TUI.
+The TUI captures the mouse so the wheel scrolls the chat in a bare terminal and inside tmux. Capture takes drags away from the terminal, so `ox` selects and copies chat text itself, in any terminal the user runs it in (iTerm2, WezTerm, kitty, Alacritty, Terminal.app, GNOME Terminal, Konsole, Ghostty, Windows Terminal, and the integrated terminals of VS Code and Cursor). A plain click expands a collapsed block, on its overflow footer or its `Thought` header, and opens the pull request page a status-bar segment links. The links are also OSC 8 hyperlinks, which terminals open on Ctrl / Cmd+click.
 
-## Goal
-
-Four user-visible features:
-
-1. **Scroll the chat with the mouse wheel**, in a bare terminal and inside tmux.
-2. **Click `#NN` in the status bar to open the pull request in the browser**, with a plain click or the terminal's own Ctrl / Cmd+click.
-3. **Select chat content with the mouse and paste it elsewhere**, in any terminal the user runs `ox` in (iTerm2, WezTerm, kitty, Alacritty, Terminal.app, GNOME Terminal, Konsole, Ghostty, Windows Terminal, VS Code's integrated terminal, Cursor's integrated terminal).
-4. **Click a collapsed block to expand it**, on its overflow footer or its `Thought` header.
-
-The TUI captures the mouse so wheel events reach it everywhere, and selects and copies chat text itself, since capture takes drags away from the terminal. The status-bar PR segments are wrapped in an OSC 8 hyperlink envelope, which terminals open on Ctrl / Cmd+click, and `ox` opens them itself on a plain click.
-
-## Decision
+## Setup and Event Routing
 
 `init` enables raw mode, then `enter_tui_mode` enables the alternate screen, bracketed paste, and, outside Windows, Kitty keyboard disambiguation and crossterm's `EnableMouseCapture`. crossterm captures the Windows mouse through the console API, so `init` enables it there after `enter_tui_mode` and also requests SGR mouse reports (`?1006h`), which some Windows terminals need before ConPTY delivers mouse records. Pairs unwind on `leave_tui_mode`, or in `restore` for the Windows mouse.
 
@@ -85,19 +74,14 @@ URLs are sanitized: every control char is filtered out before the envelope is bu
 
 - OSC 8 hyperlinks inside markdown body text (would require threading URLs through the markdown renderer).
 - Selecting text outside the chat, such as in the input or a modal.
-- Copying source text without gutters or soft-wrap breaks, which would require each block to map rendered rows back to its source.
+- Copying source text without gutters or soft-wrap breaks, which would require each block to map rendered rows back to its source ([#300](https://github.com/hakula139/oxide-code/issues/300)).
 
-## Verification
+## Sources
 
-Manual verification across terminals:
-
-1. Start `ox` and generate enough chat content to scroll.
-2. Page up. Confirm the jump-to-bottom pill appears.
-3. Press Ctrl+End. Confirm chat snaps to bottom and re-arms auto-scroll.
-4. Drag-select a chat region in a bare terminal, inside tmux, and over SSH. Confirm the highlight and the copy notice, then paste somewhere external and confirm the bytes round-trip. Double-click a word and triple-click a row. Hold a drag past the top edge and confirm the chat scrolls. Press Ctrl+C and confirm it copies without interrupting. Then hold the bypass modifier and confirm native selection still works.
-5. With the `pull-request`, `pull-request-checks`, and `pull-request-review` status segments configured, click each, then Ctrl+click each (Cmd+click on iTerm2 / Terminal.app). Confirm the browser opens the PR, its checks page, and its changed-files page once per click.
-6. Wheel scroll, both in a bare terminal and inside tmux with `mouse on`. Confirm chat scrolls and tmux stays out of copy mode.
-7. Click a tool result's `... +N lines` footer and a `Thought` header. Confirm each expands only its block and the rows above it stay put.
-8. Quit. Confirm alt-screen restored.
-
-Automated coverage pins the mouse-capture enter / leave bytes, the Windows SGR request bytes, wheel scroll steps, wheel routing to modals and the slash popup, plain-click link opening, footer-click expansion, ignored mouse events, selection units, anchoring across inserted and streamed blocks, edge auto-scroll and its stops, the highlight, keystrokes that clear or copy the selection, copy routing, the tmux retry and timeout, the OSC 52 write, the notice truncation, OSC 8 replay bytes, URL sanitization, the unwrapped envelope inside tmux, and status-bar hyperlink capture.
+- `crates/ox-tui/src/app/dispatch.rs`: `App::handle_crossterm_event`, which routes wheel and button events, and `open_status_link`.
+- `crates/ox-tui/src/app/render.rs`: `App::emit_status_hyperlinks`, which replays the link cells inside OSC 8 and keeps their rects for clicks.
+- `crates/ox-tui/src/clipboard.rs`: `Clipboard`, its copy routes, and `osc52_sequence`.
+- `crates/ox-tui/src/components/chat.rs`: `ChatView::handle_event`, the wheel scroll, and `expand_at`, the click expansion.
+- `crates/ox-tui/src/components/chat/selection.rs`: `ChatView::handle_mouse`, the selection units, anchors, edge auto-scroll, and copied text.
+- `crates/ox-tui/src/components/status.rs`: `StatusBar::render`, which captures each hyperlink's cells after the paint.
+- `crates/ox-tui/src/terminal.rs`: `init`, `enter_tui_mode`, and `leave_tui_mode`, which enable and release mouse capture, and `write_status_hyperlinks`.

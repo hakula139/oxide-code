@@ -1,40 +1,10 @@
 # Status Line
 
-Design for a configurable TUI status line.
-
-## Scope
-
-The TUI status line renders a user-ordered roster of built-in segments. Most segments read in-process state, `git-branch` and the pull request segments probe `git` and the GitHub CLI, the context and session-cost segments count prompt-cache tokens, and the usage-limit segments read response headers.
-
-Implemented segments:
-
-| Segment                | Config value          |
-| ---------------------- | --------------------- |
-| current directory      | `current-dir`         |
-| git branch             | `git-branch`          |
-| pull request           | `pull-request`        |
-| pull request checks    | `pull-request-checks` |
-| pull request review    | `pull-request-review` |
-| model                  | `model`               |
-| model with effort      | `model-with-effort`   |
-| context used           | `context-used`        |
-| estimated session cost | `session-cost`        |
-| five-hour usage limit  | `five-hour-limit`     |
-| weekly usage limit     | `weekly-limit`        |
-| permission mode        | `permission-mode`     |
-| run state              | `run-state`           |
-| queued prompt count    | `queued-prompts`      |
-| task progress          | `task-progress`       |
-| thread title           | `thread-title`        |
-| session ID prefix      | `session-id`          |
-| active theme           | `theme`               |
-| current time           | `current-time`        |
-
-Segments outside the [default order](#default-order) are opt-in.
+The status line is the TUI's top row, a user-ordered roster of built-in segments. Most segments read in-process state, `git-branch` and the pull request segments probe `git` and the GitHub CLI, the context and session-cost segments count prompt-cache tokens, and the usage-limit segments read response headers. The [`[tui]` section of the configuration guide](../../guide/configuration.md#tui-terminal-ui) lists each segment, what it renders, and how often it refreshes, and segments outside the [default order](#default-order) are opt-in. The [status line research](../../research/tui/status-line.md) compares how other agents build theirs.
 
 ## Implementation
 
-`StatusLineSegment` in `config.rs` defines the roster above. `[tui] status_line = [...]` controls the order. `OX_STATUS_LINE` accepts the same comma-separated names. Segment colors and the separator glyph come from the active theme.
+`StatusLineSegment` in `config.rs` defines the roster. `[tui] status_line = [...]` controls the order. `OX_STATUS_LINE` accepts the same comma-separated names. Segment colors and the separator glyph come from the active theme.
 
 `StatusBar` keeps component state and delegates segment formatting to `ox_tui::components::status::line`. `App` copies the queued prompt count, the task list's progress, the session ID, the theme name, and the permission mode into it before each frame, since it owns all five.
 
@@ -101,8 +71,7 @@ The default order tracks reading flow: location and branch orient the user, mode
 6. **Checks like `gh pr checks`.** The checks segment buckets each check's state the way the GitHub CLI does and counts only the latest run of a re-run check, so a passing re-run clears an earlier failure. Cancelled checks get their own bucket, below failing and pending. A workflow that failed to start counts as failing, where `gh` leaves it pending even though it will never run.
 7. **Usage limits from response headers.** Every response already reports the account's utilization, so the segments add no extra request and refresh with each turn.
 8. **Show the mode only when it departs from the default.** `manual` is what a user expects, so the segment stays hidden there and appears for the two modes that change what runs. Its utility ranks just below run state and above the model, since a narrow row should still warn that `yolo` is on. `yolo` takes the `error` slot, as Claude Code colors its bypass mode, and `plan` takes `accent`, since it only restricts.
-
-9. **Escalate usage by the percent shown.** The context and limit segments use the same pair of thresholds and compare the floored percent in their labels, keeping each label's color aligned with its number. The 70% warning matches Claude Code's `WARNING_THRESHOLD` in `src/services/rateLimitMessages.ts`. Below that threshold, Claude Code shows no usage-limit warning. Default auto-compaction begins near 97% of the window, which puts context at 90% about as close to its end as a limit at 90%. oh-my-pi changes its context color at 50%, 70%, and 90%, as well as at 150k, 270k, and 500k tokens. On a 1M window, those token thresholds would flag most of a long session. Its quota windows change color at 50% and 80%.
+9. **Escalate usage by the percent shown.** The context and limit segments use the same pair of thresholds and compare the floored percent in their labels, keeping each label's color aligned with its number. The 70% warning matches Claude Code's `WARNING_THRESHOLD` in `src/services/rateLimitMessages.ts`. Below that threshold, Claude Code shows no usage-limit warning. Default [auto-compaction](../agent/auto-compaction.md) begins near 97% of the window, which puts context at 90% about as close to its end as a limit at 90%. oh-my-pi changes its context color at 50%, 70%, and 90%, as well as at 150k, 270k, and 500k tokens. On a 1M window, those token thresholds would flag most of a long session. Its quota windows change color at 50% and 80%.
 
 ## Related Issues
 
@@ -110,8 +79,6 @@ A user-command segment is [#166](https://github.com/hakula139/oxide-code/issues/
 
 ## Sources
 
-- [Status line research](../../research/tui/status-line.md)
-- [Auto-compaction design](../agent/auto-compaction.md)
 - `crates/ox-core/src/client.rs`: `ResponseEvent::RateLimits` and the `RateLimits` windows.
 - `crates/ox-core/src/client/anthropic/sse.rs`: `pump_events`, which forwards each response's limits.
 - `crates/ox-core/src/client/anthropic/transport.rs`: `rate_limits`, the unified rate-limit header parser.
