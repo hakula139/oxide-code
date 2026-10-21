@@ -26,6 +26,7 @@ desync
 direnv
 disambiguable
 doas
+EACCES
 ELOOP
 ENOTDIR
 envrc

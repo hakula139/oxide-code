@@ -825,7 +825,7 @@ mod tests {
         use super::*;
 
         #[tokio::test]
-        async fn valid_command_executes_successfully() {
+        async fn returns_the_output_of_a_command_that_succeeds() {
             let output = run(
                 &Arc::default(),
                 serde_json::json!({"command": "echo hello"}),
@@ -839,8 +839,9 @@ mod tests {
         #[tokio::test]
         async fn missing_command_field_reports_input_error() {
             let output = run(&Arc::default(), serde_json::json!({}), &temp_ctx()).await;
+
             assert!(output.is_error);
-            assert!(output.content.contains("Invalid input"));
+            assert_eq!(output.content, "Invalid input: missing field `command`");
         }
 
         #[tokio::test]
