@@ -319,31 +319,11 @@ impl<'a> Stack<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::components::chat::testing::FixedBlock;
     use crate::theme::Theme;
 
     fn texts(lines: &[Line<'_>]) -> Vec<String> {
         lines.iter().map(ToString::to_string).collect()
-    }
-
-    /// Renders fixed rows.
-    struct FixedBlock {
-        rows: Vec<&'static str>,
-        standalone: bool,
-        hidden: bool,
-    }
-
-    impl ChatBlock for FixedBlock {
-        fn render(&self, _ctx: &RenderCtx<'_>) -> Vec<Line<'static>> {
-            self.rows.iter().map(|row| Line::raw(*row)).collect()
-        }
-
-        fn standalone(&self) -> bool {
-            self.standalone
-        }
-
-        fn visible(&self, _ctx: &RenderCtx<'_>) -> bool {
-            !self.hidden
-        }
     }
 
     /// Renders a head row over two body rows, which the compact view folds into a footer that
@@ -392,30 +372,16 @@ mod tests {
         with_ctx(40, |ctx| CachedBlock::new(Box::new(block), ctx))
     }
 
-    /// A block separated from its neighbors by blank rows.
     fn standalone(rows: &[&'static str]) -> CachedBlock {
-        cached(FixedBlock {
-            rows: rows.to_vec(),
-            standalone: true,
-            hidden: false,
-        })
+        cached(FixedBlock::standalone(rows))
     }
 
-    /// A block that stacks flush against its neighbors, like a tool row.
     fn flush(rows: &[&'static str]) -> CachedBlock {
-        cached(FixedBlock {
-            rows: rows.to_vec(),
-            standalone: false,
-            hidden: false,
-        })
+        cached(FixedBlock::flush(rows))
     }
 
     fn hidden(rows: &[&'static str]) -> CachedBlock {
-        cached(FixedBlock {
-            rows: rows.to_vec(),
-            standalone: true,
-            hidden: true,
-        })
+        cached(FixedBlock::hidden(rows))
     }
 
     fn folding() -> CachedBlock {

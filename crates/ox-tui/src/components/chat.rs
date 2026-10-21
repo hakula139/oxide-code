@@ -167,7 +167,7 @@ impl ChatView {
         for block in &mut self.blocks {
             block.reset_view();
         }
-        self.selection = None;
+        self.drop_selection();
         self.expansion_changed = true;
     }
 
@@ -370,7 +370,7 @@ impl ChatView {
         self.rearm_auto_scroll();
         self.painted = SlotTops::default();
         self.painted_rows.clear();
-        self.selection = None;
+        self.drop_selection();
         self.pending_calls.clear();
     }
 
@@ -512,7 +512,7 @@ impl ChatView {
     /// whose columns no longer match the rewrapped rows.
     fn set_viewport(&mut self, area: Rect) {
         if area.width != self.viewport.width {
-            self.selection = None;
+            self.drop_selection();
         }
         self.viewport = area;
         if let Some(s) = &mut self.streaming {
@@ -674,6 +674,63 @@ impl ChatView {
 
 fn rows_between(slot: &Range<usize>, row: usize) -> usize {
     slot.start.saturating_sub(row) + (row + 1).saturating_sub(slot.end)
+}
+
+// ── Testing ──
+
+#[cfg(test)]
+mod testing {
+    use ratatui::text::Line;
+
+    use super::blocks::{ChatBlock, RenderCtx};
+
+    /// Renders fixed rows.
+    pub(super) struct FixedBlock {
+        rows: Vec<&'static str>,
+        standalone: bool,
+        hidden: bool,
+    }
+
+    impl FixedBlock {
+        /// Rows that stack flush against their neighbors, like a tool row.
+        pub(super) fn flush(rows: &[&'static str]) -> Self {
+            Self {
+                rows: rows.to_vec(),
+                standalone: false,
+                hidden: false,
+            }
+        }
+
+        /// Rows that blank rows separate from their neighbors.
+        pub(super) fn standalone(rows: &[&'static str]) -> Self {
+            Self {
+                standalone: true,
+                ..Self::flush(rows)
+            }
+        }
+
+        /// Standalone rows the chat never shows.
+        pub(super) fn hidden(rows: &[&'static str]) -> Self {
+            Self {
+                hidden: true,
+                ..Self::standalone(rows)
+            }
+        }
+    }
+
+    impl ChatBlock for FixedBlock {
+        fn render(&self, _ctx: &RenderCtx<'_>) -> Vec<Line<'static>> {
+            self.rows.iter().map(|row| Line::raw(*row)).collect()
+        }
+
+        fn standalone(&self) -> bool {
+            self.standalone
+        }
+
+        fn visible(&self, _ctx: &RenderCtx<'_>) -> bool {
+            !self.hidden
+        }
+    }
 }
 
 #[cfg(test)]
@@ -968,7 +1025,7 @@ mod tests {
         }
 
         #[test]
-        fn drops_a_held_selection() {
+        fn drops_a_held_selection_and_follows_the_tail_again() {
             let mut chat = test_chat();
             chat.load_history(long_results(1, 12));
             render_chat(&mut chat, 60, 8);
@@ -989,6 +1046,7 @@ mod tests {
 
             let copied = mouse(&mut chat, MouseEventKind::Up(MouseButton::Left), 4);
             assert_eq!(copied, None);
+            assert!(!chat.is_scrolled_up());
         }
     }
 
