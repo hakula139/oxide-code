@@ -99,9 +99,9 @@ pub(super) fn conversation_cache_control(ttl: PromptCacheTtl) -> CacheControl {
 
 #[cfg(test)]
 mod tests {
-    use super::super::CLAUDE_CLI_VERSION;
     use super::RequestKind::{Agentic, SideQuery};
     use super::*;
+    use crate::client::anthropic::CLAUDE_CLI_VERSION;
 
     mod compute_betas {
         use super::*;
@@ -187,12 +187,14 @@ mod tests {
         #[test]
         fn updates_display_appends_its_beta_last() {
             let opus = spec("claude-opus-5-5");
+
             let betas = compute_betas(
                 &opus,
                 opus.thinking(false).as_ref(),
                 AuthKind::ApiKey,
                 Agentic,
             );
+
             assert_eq!(
                 betas[betas.len() - 3..],
                 [
