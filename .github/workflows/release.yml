@@ -144,7 +144,8 @@ jobs:
         run: |
           floor=$(sed -nE 's/^- \*\*macOS\*\*: ([0-9.]+) or later.*/\1/p' docs/guide/install.md)
           minos=$(otool -l smoke/ox | awk '$1 == "minos" { print $2 }')
-          test -n "$floor" && test -n "$minos"
+          test -n "$floor"
+          test -n "$minos"
           echo "ox targets macOS $minos, and docs/guide/install.md promises $floor"
           if [[ "${minos%.0}" != "${floor%.0}" ]]; then
             echo "::error::ox targets macOS $minos." \
@@ -206,28 +207,6 @@ jobs:
           fi
 
           gh release create "$GITHUB_REF_NAME" release-assets/* "${options[@]}"
-
-  notes:
-    name: Republish Release Notes
-    if: inputs.notes
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    permissions:
-      contents: write
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v7
-
-      - name: Install changelog parser
-        uses: taiki-e/install-action@parse-changelog
-
-      - name: Republish notes
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          TAG: ${{ inputs.notes }}
-        run: |
-          parse-changelog CHANGELOG.md "${TAG#v}" > release-notes.md
-          gh release edit "$TAG" --notes-file release-notes.md
 
   homebrew:
     name: Update Homebrew Formula
@@ -312,3 +291,25 @@ jobs:
             exit 1
           fi
           echo "Dispatched CI: $run_url"
+
+  notes:
+    name: Republish Release Notes
+    if: inputs.notes
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Install changelog parser
+        uses: taiki-e/install-action@parse-changelog
+
+      - name: Republish notes
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ inputs.notes }}
+        run: |
+          parse-changelog CHANGELOG.md "${TAG#v}" > release-notes.md
+          gh release edit "$TAG" --notes-file release-notes.md

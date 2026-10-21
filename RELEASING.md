@@ -27,7 +27,11 @@ Before 0.1.0, config, environment variable, and session format changes may freel
 
 ## Changelog
 
-[git-cliff](https://git-cliff.org) drafts each release's `CHANGELOG.md` section from `cliff.toml`, and the release PR curates the draft into the published notes. Curate a section only in its release PR after git-cliff drafts it, and never regenerate an older section. The GitHub Release keeps its own copy of the notes, so once a PR that corrects a published section merges, run the [Release workflow](https://github.com/hakula139/oxide-code/actions/workflows/release.yml) on `main` from the Actions tab with the tag in its `notes` input. That run republishes the tag's section from `main`'s `CHANGELOG.md` and builds nothing.
+[git-cliff](https://git-cliff.org) drafts each release's `CHANGELOG.md` section from `cliff.toml`, and the release PR curates the draft into the published notes. Curate a section only in its release PR after git-cliff drafts it, and never regenerate an older section. The GitHub Release keeps its own copy of the notes, so once a PR that corrects a published section merges, run the Release workflow on `main` with the tag in its `notes` input, which republishes the tag's section from `main`'s `CHANGELOG.md` and builds nothing:
+
+```bash
+gh workflow run release.yml --ref main -f notes=vX.Y.Z
+```
 
 - Each squash-merged PR title becomes one draft entry.
 - `feat`, `fix`, `perf`, and `revert` titles appear under Added, Fixed, Changed, and Removed, respectively. Titles with `!` appear under Breaking changes. All other types are skipped, including routine `chore(deps)` and `chore(flake)` bumps. Use `fix(deps): ...` for a bump that fixes an advisory or changes behavior in the shipped `ox`. `.github/dependabot.yml` applies this title to every Cargo security update. npm packages are development tools that never ship in `ox`, so their bumps remain `chore`, including advisory fixes.
@@ -37,7 +41,7 @@ Before 0.1.0, config, environment variable, and session format changes may freel
 
 ### Curate the Section
 
-The draft lists PR titles, which are short and written for reviewers at merge time. Before opening the release PR, rewrite the draft for users, reading a PR's description wherever its title leaves the effect unclear. Follow these rules:
+The draft lists PR titles, which are too short to explain each change to users. Before opening the release PR, rewrite the draft for users, reading a PR's description wherever its title leaves the effect unclear. Follow these rules:
 
 - For a stable section, start from the curated sections of the prereleases it rolls up and carry over every entry. The draft rebuilds entries from PR titles, so it drops the curated wording and omits PRs whose titles it skips, such as advisory bumps merged as `chore(deps)`. Then add the draft entries for changes since the last prerelease, and apply the rules below to the whole section.
 - Describe what users can now do, what no longer breaks, and what now works differently, such as a check that now fails or a value that is now rejected. Omit implementation details.
@@ -156,5 +160,5 @@ The `v0.1.0` release PR also switches the install snippets to `releases/latest/d
 
 The build matrix in `release.yml` lists the targets. Each release attaches one archive per target with a `.sha256` sidecar and a build provenance attestation, and release asset names belong to the [stability surface](#stability-surface).
 
-- The platform floors in `docs/guide/install.md` bind the build. The Linux job fails when the binary needs a newer glibc than the guide promises, reading the floor from the phrase `Linux with glibc <version> or later`, so keep that wording when editing it. If a runner image update trips the check, either pin the Linux build to the previous image or raise the floor in the guide. The macOS job fails when the binary's minimum macOS version differs from the guide's `**macOS**: <version> or later` floor. Raising that floor also means changing `MACOSX_DEPLOYMENT_TARGET` in `release.yml` and the formula's `depends_on macos:` in `scripts/update-homebrew-formula.sh`.
+- The platform floors in `docs/guide/install.md` bind the build. The Linux job fails when the binary needs a newer glibc than the guide promises, reading the floor from the phrase `Linux with glibc <version> or later`, so keep that wording when editing it. If a runner image update trips the check, either pin the Linux build to the previous image or raise the floor in the guide. The macOS job fails when the binary's minimum macOS version differs from the guide's `**macOS**: <version> or later` floor, so keep that wording too. Raising that floor also means changing `MACOSX_DEPLOYMENT_TARGET` in `release.yml` and the formula's `depends_on macos:` in `scripts/update-homebrew-formula.sh`.
 - Add a target by extending the matrix. Each target needs a runner that executes its binary, since every build job checks its archive there.
