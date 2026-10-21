@@ -1228,7 +1228,6 @@ mod tests {
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::{Arc, Mutex};
 
-    use indoc::indoc;
     use wiremock::matchers::{body_partial_json, method, path as wm_path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
@@ -2543,7 +2542,7 @@ mod tests {
             );
 
             let received = server.received_requests().await.unwrap();
-            let body: serde_json::Value = serde_json::from_slice(&received[0].body).unwrap();
+            let body: serde_json::Value = received[0].body_json().unwrap();
             assert_eq!(
                 body,
                 serde_json::json!({
@@ -2599,7 +2598,10 @@ mod tests {
             let err = refresh_oauth_token(&server.uri(), "tok", &NoRoots)
                 .await
                 .expect_err("expected parse error");
-            assert!(format!("{:#}", err.error).contains("parse"));
+            assert_eq!(
+                err.error.to_string(),
+                "failed to parse token refresh response"
+            );
             assert!(!err.transient, "a malformed reply is not retried");
         }
 
@@ -2677,22 +2679,11 @@ mod tests {
             let dir = tempfile::tempdir().unwrap();
             let path = dir.path().join("credentials.json");
 
-            std::fs::write(
-                &path,
-                indoc! {r#"
-                    {
-                        "claudeAiOauth": {
-                            "accessToken": "old-access",
-                            "refreshToken": "old-refresh",
-                            "expiresAt": 1000,
-                            "scopes": ["user:profile"],
-                            "subscriptionType": "pro",
-                            "rateLimitTier": "default"
-                        }
-                    }
-                "#},
-            )
-            .unwrap();
+            let mut creds = creds_json("old-access", Some("old-refresh"), 1000);
+            creds["claudeAiOauth"]["scopes"] = serde_json::json!(["user:profile"]);
+            creds["claudeAiOauth"]["subscriptionType"] = "pro".into();
+            creds["claudeAiOauth"]["rateLimitTier"] = "default".into();
+            std::fs::write(&path, creds.to_string()).unwrap();
 
             let response = TokenResponse {
                 access_token: "new-access".to_owned(),
@@ -2728,20 +2719,9 @@ mod tests {
             let dir = tempfile::tempdir().unwrap();
             let path = dir.path().join("credentials.json");
 
-            std::fs::write(
-                &path,
-                indoc! {r#"
-                    {
-                        "claudeAiOauth": {
-                            "accessToken": "t",
-                            "refreshToken": "r",
-                            "expiresAt": 1000,
-                            "scopes": []
-                        }
-                    }
-                "#},
-            )
-            .unwrap();
+            let mut creds = creds_json("t", Some("r"), 1000);
+            creds["claudeAiOauth"]["scopes"] = serde_json::json!([]);
+            std::fs::write(&path, creds.to_string()).unwrap();
 
             let response = TokenResponse {
                 access_token: "t2".to_owned(),
@@ -2770,20 +2750,9 @@ mod tests {
             let dir = tempfile::tempdir().unwrap();
             let path = dir.path().join("credentials.json");
 
-            std::fs::write(
-                &path,
-                indoc! {r#"
-                    {
-                        "claudeAiOauth": {
-                            "accessToken": "old",
-                            "refreshToken": "old",
-                            "expiresAt": 1000,
-                            "scopes": ["user:profile"]
-                        }
-                    }
-                "#},
-            )
-            .unwrap();
+            let mut creds = creds_json("old", Some("old"), 1000);
+            creds["claudeAiOauth"]["scopes"] = serde_json::json!(["user:profile"]);
+            std::fs::write(&path, creds.to_string()).unwrap();
 
             let response = TokenResponse {
                 access_token: "new".to_owned(),
