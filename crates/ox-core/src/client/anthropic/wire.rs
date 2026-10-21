@@ -1,6 +1,6 @@
 //! Serde types for Anthropic Messages API requests, streamed response frames, and error bodies.
 
-use serde::ser::SerializeSeq;
+use serde::ser::SerializeSeq as _;
 use serde::{Deserialize, Serialize, Serializer};
 
 use crate::client::{StopDetails, StopReason};

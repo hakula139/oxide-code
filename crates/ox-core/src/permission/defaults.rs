@@ -5,11 +5,11 @@
 use std::fmt;
 use std::path::{Path, PathBuf};
 
-use anyhow::{Context, Result};
+use anyhow::{Context as _, Result};
 use serde::{Deserialize, Serialize};
 
-use crate::permission::rule::{Rule, escaped};
-use crate::permission::{PermissionClass, folded_names, resolve};
+use super::rule::{Rule, escaped};
+use super::{PermissionClass, folded_names, resolve};
 use crate::util::path::{
     CLAUDE_CREDENTIALS, XdgBase, app_dir, claude_dir, lexical_normalize, xdg_dir,
 };

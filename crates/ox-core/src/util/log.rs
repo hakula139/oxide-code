@@ -2,16 +2,16 @@
 //! because `EnterAlternateScreen` swaps only stdout, so stderr output would paint over the frame.
 
 use std::fs::{self, File};
-use std::io::{self, IsTerminal, Write};
+use std::io::{self, IsTerminal as _, Write};
 use std::path::{Path, PathBuf};
 
-use anyhow::{Context, Result};
+use anyhow::{Context as _, Result};
 use tracing_appender::non_blocking::{NonBlocking, WorkerGuard};
 use tracing_subscriber::EnvFilter;
 
-use crate::util::env;
-use crate::util::fs::{create_private_dir_all, open_private_append};
-use crate::util::path::{XdgBase, app_dir};
+use super::env;
+use super::fs::{create_private_dir_all, open_private_append};
+use super::path::{XdgBase, app_dir};
 
 const LOG_SUBDIR: &str = "log";
 const LOG_FILE: &str = "oxide-code.log";
@@ -122,7 +122,7 @@ mod tests {
 
     #[cfg(unix)]
     fn mode(path: &Path) -> u32 {
-        use std::os::unix::fs::PermissionsExt;
+        use std::os::unix::fs::PermissionsExt as _;
 
         fs::metadata(path).unwrap().permissions().mode() & 0o777
     }

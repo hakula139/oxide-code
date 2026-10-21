@@ -5,7 +5,7 @@ use std::fmt;
 use std::path::Path;
 use std::sync::Arc;
 
-use anyhow::Context;
+use anyhow::Context as _;
 use futures::StreamExt as _;
 use futures::stream::FuturesUnordered;
 use tokio::sync::mpsc;

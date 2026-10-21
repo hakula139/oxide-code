@@ -19,9 +19,9 @@ mod testing;
 use std::io;
 use std::time::{Duration, Instant};
 
-use anyhow::{Context, Result};
+use anyhow::{Context as _, Result};
 use crossterm::event::{Event as CrosstermEvent, EventStream};
-use futures::{Stream, StreamExt};
+use futures::{Stream, StreamExt as _};
 use ratatui::Terminal;
 use tokio::sync::mpsc;
 use tokio::task::JoinSet;

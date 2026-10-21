@@ -18,14 +18,14 @@ use std::str::FromStr;
 use std::sync::{Arc, LazyLock};
 
 use anyhow::{Result, bail, ensure};
-use caseless::Caseless;
+use caseless::Caseless as _;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
-use unicode_normalization::UnicodeNormalization;
+use unicode_normalization::UnicodeNormalization as _;
 
-use crate::permission::defaults::{Shipped, ShippedTier, protected_by, protected_roots};
-use crate::permission::rule::{MatchDiscipline, Rule};
-use crate::permission::shell::{CommandTarget, Segment};
+use self::defaults::{Shipped, ShippedTier, protected_by, protected_roots};
+use self::rule::{MatchDiscipline, Rule};
+use self::shell::{CommandTarget, Segment};
 use crate::util::path::{expand_user, lexical_normalize};
 
 // ── Mode ──

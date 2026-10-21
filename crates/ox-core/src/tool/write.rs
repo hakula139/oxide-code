@@ -649,7 +649,7 @@ mod tests {
         #[cfg(unix)]
         #[tokio::test]
         async fn fails_on_read_only_file() {
-            use std::os::unix::fs::PermissionsExt;
+            use std::os::unix::fs::PermissionsExt as _;
 
             let dir = canonical_tempdir();
             let path = dir.path().join("locked.txt");
@@ -672,7 +672,7 @@ mod tests {
         async fn fails_when_parent_creation_is_denied() {
             // The missing target passes the stat, so the read-only ancestor denies
             // `create_dir_all`. It stays empty, so the temp dir still cleans up.
-            use std::os::unix::fs::PermissionsExt;
+            use std::os::unix::fs::PermissionsExt as _;
 
             let dir = canonical_tempdir();
             let readonly = dir.path().join("readonly");

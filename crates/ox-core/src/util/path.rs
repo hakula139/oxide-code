@@ -6,7 +6,7 @@ use std::path::{Component, Path, PathBuf};
 use anyhow::{Result, anyhow};
 use unicode_normalization::UnicodeNormalization as _;
 
-use crate::util::env;
+use super::env;
 
 /// The directory oxide-code keeps under each XDG base directory.
 const APP_DIR: &str = "ox";

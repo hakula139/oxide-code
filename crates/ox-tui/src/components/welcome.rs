@@ -8,7 +8,7 @@ use ratatui::layout::{Alignment, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
-use unicode_width::UnicodeWidthStr;
+use unicode_width::UnicodeWidthStr as _;
 use xxhash_rust::xxh64::xxh64;
 
 use ox_core::config::{NOT_SIGNED_IN, StatusLineSegment};

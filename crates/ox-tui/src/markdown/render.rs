@@ -9,7 +9,7 @@ use pulldown_cmark::{
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use tracing::debug;
-use unicode_width::UnicodeWidthStr;
+use unicode_width::UnicodeWidthStr as _;
 
 use super::highlight::highlight_code;
 use crate::glyphs::{
@@ -943,7 +943,7 @@ fn joined_cell_spans(cell: &[Line<'static>]) -> Vec<Span<'static>> {
 #[cfg(test)]
 mod tests {
     use indoc::indoc;
-    use ratatui::style::{Color, Stylize};
+    use ratatui::style::{Color, Stylize as _};
 
     use super::*;
     use crate::markdown::{render_markdown, render_markdown_on};

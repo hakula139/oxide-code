@@ -1,15 +1,15 @@
 //! Headless driver for `--print`: one turn, printed to stdout as text or JSON.
 
-use std::io::{self, IsTerminal, Write};
+use std::io::{self, IsTerminal as _, Write};
 use std::pin::pin;
 use std::sync::{Mutex, MutexGuard};
 use std::time::Duration;
 
-use anyhow::{Context, Result};
+use anyhow::{Context as _, Result};
 use clap::ValueEnum;
 use indoc::formatdoc;
 use serde::Serialize;
-use tokio::io::{AsyncRead, AsyncReadExt};
+use tokio::io::{AsyncRead, AsyncReadExt as _};
 
 use ox_core::command;
 use ox_core::engine::{Engine, EngineHandle, EnginePanic, TurnEnd};

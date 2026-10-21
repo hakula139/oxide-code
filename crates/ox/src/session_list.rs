@@ -4,9 +4,9 @@ use std::fmt::Write as _;
 use std::io::Write;
 use std::path::Path;
 
-use anyhow::{Context, Result};
+use anyhow::{Context as _, Result};
 use time::UtcOffset;
-use unicode_width::UnicodeWidthStr;
+use unicode_width::UnicodeWidthStr as _;
 
 use ox_core::session::display::{display_title, id_prefix};
 use ox_core::session::entry::{ArchiveState, SessionInfo};

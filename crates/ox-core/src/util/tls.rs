@@ -5,10 +5,10 @@ use std::path::{Path, PathBuf};
 #[cfg(target_os = "macos")]
 use std::{cell::Cell, collections::HashSet, fmt, sync::Arc};
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context as _, Result, bail};
 use reqwest::ClientBuilder;
 use rustls::pki_types::CertificateDer;
-use rustls::pki_types::pem::PemObject;
+use rustls::pki_types::pem::PemObject as _;
 #[cfg(target_os = "macos")]
 use {
     core_foundation::date::CFDate,
@@ -535,7 +535,7 @@ pub mod testing {
 
 #[cfg(test)]
 mod tests {
-    use std::io::{BufRead, BufReader, Write};
+    use std::io::{BufRead as _, BufReader, Write as _};
     use std::net::{SocketAddr, TcpListener};
     use std::sync::Arc;
     #[cfg(target_os = "macos")]

@@ -8,8 +8,8 @@ use ratatui::Frame;
 use ratatui::layout::Rect;
 use ratatui::text::{Line, Span};
 use ratatui_textarea::{CursorMove, TextArea};
-use unicode_segmentation::UnicodeSegmentation;
-use unicode_width::UnicodeWidthStr;
+use unicode_segmentation::UnicodeSegmentation as _;
+use unicode_width::UnicodeWidthStr as _;
 
 use ox_core::util::text::take_head;
 
@@ -257,7 +257,6 @@ mod tests {
     // cspell:ignore bcdefghij cdefg mnopqrstu rstuvwxyz
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
-    use unicode_width::UnicodeWidthStr;
 
     use super::*;
 

@@ -5,7 +5,7 @@ use std::io::BufReader;
 use std::path::{Path, PathBuf};
 use std::vec;
 
-use anyhow::{Context, Result};
+use anyhow::{Context as _, Result};
 use time::OffsetDateTime;
 use tracing::warn;
 
@@ -871,7 +871,7 @@ mod tests {
         #[cfg(unix)]
         #[test]
         fn all_skips_stray_files_and_unreadable_project_dirs() {
-            use std::os::unix::fs::PermissionsExt;
+            use std::os::unix::fs::PermissionsExt as _;
 
             let dir = tempfile::tempdir().unwrap();
             let store = test_store(dir.path());

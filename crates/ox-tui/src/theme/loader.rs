@@ -12,7 +12,7 @@
 
 use std::sync::LazyLock;
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context as _, Result, bail};
 use ratatui::style::{Color, Modifier};
 use serde::Deserialize;
 use syntect::highlighting::{Theme as SyntaxTheme, ThemeSet};

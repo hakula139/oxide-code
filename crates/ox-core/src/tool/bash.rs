@@ -15,7 +15,7 @@ use std::time::Instant;
 use indoc::formatdoc;
 use process_wrap::tokio::{ChildWrapper, CommandWrap};
 use serde::Deserialize;
-use tokio::io::{AsyncRead, AsyncReadExt};
+use tokio::io::{AsyncRead, AsyncReadExt as _};
 use tokio::process::{ChildStderr, ChildStdout};
 #[cfg(all(unix, not(target_os = "linux")))]
 use tracing::warn;

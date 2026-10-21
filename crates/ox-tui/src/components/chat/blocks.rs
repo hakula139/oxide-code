@@ -27,7 +27,7 @@ use std::ops::Range;
 
 use ratatui::style::Style;
 use ratatui::text::{Line, Span};
-use unicode_width::UnicodeWidthStr;
+use unicode_width::UnicodeWidthStr as _;
 
 use self::rows::{MAX_ROW_BYTES, prefixed_row, truncate_to_bytes};
 use crate::glyphs::INLINE_SEPARATOR;

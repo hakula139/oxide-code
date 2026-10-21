@@ -12,12 +12,12 @@
 
 use std::path::{Path, PathBuf};
 
-use anyhow::{Context, Result, anyhow, bail, ensure};
+use anyhow::{Context as _, Result, bail, ensure};
 use globset::{Glob, GlobBuilder, GlobMatcher, GlobSet, GlobSetBuilder};
 use serde::{Deserialize, Serialize};
 
-use crate::permission::shell::{PatternWord, Segment, ShellWord, bare_program, pattern_words};
-use crate::permission::{PermissionClass, Target, fold_name, resolve};
+use super::shell::{PatternWord, Segment, ShellWord, bare_program, pattern_words};
+use super::{PermissionClass, Target, fold_name, resolve};
 use crate::util::path::{lexical_normalize, slash_separated};
 use crate::util::text::is_hidden;
 
@@ -500,17 +500,16 @@ fn host_glob(raw: &str) -> Result<GlobMatcher> {
 
 /// A `server/tool` glob, where `*` stays within the server or the tool name.
 fn tool_glob(raw: &str) -> Result<GlobMatcher> {
-    let named = raw.split_once('/').is_some_and(|(server, tool)| {
-        !server.is_empty() && !tool.is_empty() && !tool.contains('/')
-    });
-    if !named {
-        bail!("expected `server/tool`, such as `github/get_*`");
-    }
-    GlobBuilder::new(raw)
+    ensure!(
+        raw.split_once('/').is_some_and(|(server, tool)| {
+            !server.is_empty() && !tool.is_empty() && !tool.contains('/')
+        }),
+        "expected `server/tool`, such as `github/get_*`"
+    );
+    Ok(GlobBuilder::new(raw)
         .literal_separator(true)
-        .build()
-        .map(|glob| glob.compile_matcher())
-        .map_err(|e| anyhow!(e))
+        .build()?
+        .compile_matcher())
 }
 
 #[cfg(test)]

@@ -1052,7 +1052,7 @@ mod tests {
         #[cfg(unix)]
         #[tokio::test]
         async fn fails_if_write_is_rejected() {
-            use std::os::unix::fs::PermissionsExt;
+            use std::os::unix::fs::PermissionsExt as _;
 
             let dir = canonical_tempdir();
             let path = dir.path().join("readonly.txt");

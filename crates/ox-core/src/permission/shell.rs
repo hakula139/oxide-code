@@ -13,7 +13,7 @@ use regex::Regex;
 use serde::{Deserialize, Serialize};
 use tree_sitter::{Node, Parser, Tree};
 
-use crate::permission::{Access, Workspace, fold_name};
+use super::{Access, Workspace, fold_name};
 use crate::util::path::expand_user;
 
 /// Shells and the commands that start one as another user, whose `-c` script, script file, or
@@ -1318,7 +1318,7 @@ fn parse_tree(source: &str) -> Tree {
 }
 
 /// The last component of a command path, so `/bin/sh` counts as `sh`.
-pub(super) fn basename(name: &str) -> &str {
+fn basename(name: &str) -> &str {
     name.rsplit(['/', '\\']).next().unwrap_or(name)
 }
 

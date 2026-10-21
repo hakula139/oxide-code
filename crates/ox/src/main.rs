@@ -5,13 +5,13 @@ mod session_list;
 
 use std::env;
 use std::ffi::OsStr;
-use std::io::{self, IsTerminal, Write};
+use std::io::{self, IsTerminal as _, Write};
 use std::process::ExitCode;
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context as _, Result, bail};
 use clap::builder::{PossibleValue, PossibleValuesParser, TypedValueParser};
 use clap::error::ErrorKind;
-use clap::{Arg, ArgGroup, Command, CommandFactory, Parser};
+use clap::{Arg, ArgGroup, Command, CommandFactory as _, Parser};
 use indoc::indoc;
 use time::error::IndeterminateOffset;
 use tracing::warn;

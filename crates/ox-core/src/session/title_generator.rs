@@ -1,11 +1,11 @@
 //! Background AI title generator, which asks Haiku to title a fresh session after its first prompt.
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context as _, Result, bail};
 use indoc::{formatdoc, indoc};
 use serde::Deserialize;
 use tokio::sync::oneshot;
 use tracing::warn;
-use unicode_width::UnicodeWidthStr;
+use unicode_width::UnicodeWidthStr as _;
 
 use super::display::fit_title;
 use super::entry::UsageRecord;

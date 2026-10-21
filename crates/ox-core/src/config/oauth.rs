@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
-use anyhow::{Context, Result, anyhow, bail};
+use anyhow::{Context as _, Result, anyhow, bail};
 use serde::{Deserialize, Serialize};
 use tokio::sync::{Mutex, OwnedMutexGuard};
 use tokio_util::task::TaskTracker;
@@ -612,7 +612,7 @@ fn read_credentials(path: &Path) -> Result<Option<StoredCredentials<'_>>> {
 
 #[cfg(unix)]
 fn enforce_private_mode(path: &Path) {
-    use std::os::unix::fs::PermissionsExt;
+    use std::os::unix::fs::PermissionsExt as _;
 
     if let Err(e) = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)) {
         debug!("failed to reassert 0o600 on {}: {e}", path.display());
@@ -718,7 +718,7 @@ fn keychain_account() -> Result<String> {
 /// hex digits of the SHA-256 of the variable's value, so each config directory keeps its own login.
 #[cfg(any(target_os = "macos", test))]
 fn keychain_service() -> String {
-    use sha2::{Digest, Sha256};
+    use sha2::{Digest as _, Sha256};
 
     claude_config_var().map_or_else(
         || KEYCHAIN_SERVICE.to_owned(),

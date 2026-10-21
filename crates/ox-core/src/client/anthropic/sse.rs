@@ -2,8 +2,8 @@
 
 use std::borrow::Cow;
 
-use anyhow::{Context, Result, anyhow, bail};
-use futures::StreamExt;
+use anyhow::{Context as _, Result, anyhow, bail};
+use futures::StreamExt as _;
 use tokio::sync::mpsc;
 use tracing::debug;
 
@@ -243,7 +243,7 @@ fn parse_sse_frame(frame: &str) -> Result<Option<StreamEvent>> {
 
 #[cfg(test)]
 mod tests {
-    use std::io::{Read, Write};
+    use std::io::{Read as _, Write as _};
     use std::net::{TcpListener, TcpStream};
     use std::time::Duration;
 

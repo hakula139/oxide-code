@@ -1,11 +1,11 @@
 //! Bare REPL driver for `--no-tui`: prompts and slash commands from stdin, replies on stdout.
 
-use std::io::{self, IsTerminal, Write};
+use std::io::{self, IsTerminal as _, Write};
 use std::path::Path;
 use std::pin::pin;
 
 use anyhow::{Result, bail};
-use tokio::io::{AsyncBufRead, AsyncBufReadExt, BufReader, Lines};
+use tokio::io::{AsyncBufRead, AsyncBufReadExt as _, BufReader, Lines};
 
 use ox_core::command::{self, Parsed};
 use ox_core::engine::{Engine, EngineHandle, TurnEnd};

@@ -6,7 +6,7 @@ use std::fs;
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 
-use anyhow::{Context, Result};
+use anyhow::{Context as _, Result};
 use tracing::warn;
 
 use crate::util::fs::{atomic_write_private, create_private_dir_all};

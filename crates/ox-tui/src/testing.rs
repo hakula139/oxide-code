@@ -1,7 +1,7 @@
 //! Test-only input and render fixtures shared across the TUI's test modules.
 
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers, MouseEvent, MouseEventKind};
-use ratatui::buffer::{Buffer, CellWidth};
+use ratatui::buffer::{Buffer, CellWidth as _};
 
 /// Returns the crossterm `Event` the event loop receives for `code` pressed with `modifiers`.
 pub(crate) fn key_event(code: KeyCode, modifiers: KeyModifiers) -> Event {

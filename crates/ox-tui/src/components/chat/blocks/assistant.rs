@@ -1,7 +1,7 @@
 //! Assistant text, thinking, and progress-update blocks.
 
 use ratatui::text::Line;
-use unicode_width::UnicodeWidthStr;
+use unicode_width::UnicodeWidthStr as _;
 
 use super::rows::prefixed_row;
 use super::{BlockRows, ChatBlock, RenderCtx, SectionStyles, bar_section, prepend_markdown_prefix};

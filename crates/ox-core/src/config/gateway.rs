@@ -1,6 +1,6 @@
 //! Request-shape settings for LLM gateways, read from the env vars Claude Code uses.
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context as _, Result, bail};
 use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
 
 use super::auth::AuthSource;
