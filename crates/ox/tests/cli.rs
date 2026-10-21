@@ -55,7 +55,6 @@ async fn headless_prints_a_startup_error_as_one_line_even_with_backtraces_on() {
 
 #[tokio::test]
 async fn headless_reports_startup_notices_and_retries_once_as_plain_text() {
-    let mut notices = Vec::new();
     for format in ["text", "stream-json"] {
         let server = MockServer::start().await;
         Mock::given(method("POST"))
@@ -82,24 +81,25 @@ async fn headless_reports_startup_notices_and_retries_once_as_plain_text() {
         let stderr = String::from_utf8(output.stderr).unwrap();
         let lines: Vec<&str> = stderr.lines().collect();
         assert_eq!(lines.len(), 2, "{stderr}");
-        assert!(lines[0].starts_with("`claude-nonexistent-9` is not a supported model"));
+        assert!(
+            lines[0].starts_with("`claude-nonexistent-9` is not a supported model"),
+            "{stderr}"
+        );
         assert!(
             lines[1].contains("Retrying in 0 s (retry 1 of "),
             "{stderr}"
         );
         assert!(!stderr.contains('\x1b'), "{stderr:?}");
-        notices.push(lines[0].to_owned());
         if format == "stream-json" {
             let stdout = String::from_utf8(output.stdout).unwrap();
             let first: serde_json::Value =
                 serde_json::from_str(stdout.lines().next().unwrap()).unwrap();
             assert_eq!(
                 first,
-                serde_json::json!({"type": "notice", "data": notices[0]}),
+                serde_json::json!({"type": "notice", "data": lines[0]})
             );
         }
     }
-    assert_eq!(notices[0], notices[1]);
 }
 
 #[test]
@@ -356,6 +356,7 @@ async fn interrupted_run(args: &[&str], signal: &str) -> (Option<i32>, String) {
         .expect("start ox");
     let mut stdin = child.stdin.take().expect("stdin is piped");
     stdin.write_all(b"hello\n").await.expect("write the prompt");
+    drop(stdin);
 
     tokio::time::timeout(Duration::from_secs(60), until_requested(&server, 1))
         .await
@@ -366,9 +367,11 @@ async fn interrupted_run(args: &[&str], signal: &str) -> (Option<i32>, String) {
         .status()
         .expect("run kill");
     assert!(killed.success());
-    let output = child.wait_with_output().await.expect("wait for ox");
+    let output = tokio::time::timeout(Duration::from_secs(60), child.wait_with_output())
+        .await
+        .expect("ox exits after the signal")
+        .expect("wait for ox");
 
-    drop(stdin);
     let stdout = String::from_utf8(output.stdout).expect("stdout is UTF-8");
     (output.status.code(), stdout)
 }

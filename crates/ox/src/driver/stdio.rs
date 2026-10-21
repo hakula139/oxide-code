@@ -162,13 +162,15 @@ const NORMAL_INTENSITY: &str = "\x1b[22m";
 /// [`EventSink`] for the `--no-tui` REPL: assistant tokens stream to stdout and everything else to
 /// stderr, so piped output stays clean. Headless runs reuse [`Self::render`] for their text output.
 /// Model and tool text passes through [`escape_controls`], so it cannot redraw the terminal around
-/// a REPL approval prompt. An open reply line on stdout ends before a tool call starts and when the
-/// operation ends.
+/// a REPL approval prompt. An open reply line on stdout ends before a tool call starts, before the
+/// reply that follows shown thinking, and when the operation ends.
 pub(super) struct StdioSink {
     show_thinking: bool,
     calls: Mutex<StartedCalls>,
     /// Whether the last text written to stdout left the current line open.
     line_open: AtomicBool,
+    /// Whether the last text written to stdout was thinking.
+    thinking: AtomicBool,
 }
 
 /// The started calls awaiting a result, so a result printed after another call's header can repeat
@@ -185,6 +187,7 @@ impl StdioSink {
             show_thinking,
             calls: Mutex::default(),
             line_open: AtomicBool::new(false),
+            thinking: AtomicBool::new(false),
         }
     }
 
@@ -197,12 +200,16 @@ impl StdioSink {
     ) -> Result<()> {
         match event {
             Event::StreamToken(text) => {
+                if self.thinking.swap(false, Ordering::Relaxed) {
+                    self.end_line(stdout)?;
+                }
                 self.write_reply(stdout, &escape_controls(&text), "", "")?;
             }
             Event::ThinkingToken(text) => {
                 if self.show_thinking {
                     let text = escape_controls(&text);
                     self.write_reply(stdout, &text, DIM, NORMAL_INTENSITY)?;
+                    self.thinking.store(true, Ordering::Relaxed);
                 }
             }
             Event::ProgressUpdate(text) => {
@@ -297,6 +304,20 @@ impl StdioSink {
             stdout.flush()?;
         }
         Ok(())
+    }
+
+    /// Moves to a new line after a signal, past the `^C` a terminal echoes, by ending the open
+    /// reply line on `stdout` or else writing a newline to `stderr`.
+    pub(super) fn break_line(
+        &self,
+        stdout: &mut impl Write,
+        stderr: &mut impl Write,
+    ) -> io::Result<()> {
+        if self.line_open.load(Ordering::Relaxed) {
+            return self.end_line(stdout);
+        }
+        writeln!(stderr)?;
+        stderr.flush()
     }
 
     /// Writes reply or thinking `text` to `stdout` between `start` and `end` styles, noting
@@ -433,7 +454,7 @@ mod tests {
     use ox_core::tool::testing::bash_preview;
 
     use super::*;
-    use crate::driver::testing::ClosedPipe;
+    use crate::driver::testing::{ClosedPipe, Screen};
 
     mod render_op {
         use super::*;
@@ -541,6 +562,58 @@ mod tests {
                 [Event::ModeChanged(Mode::Plan), Event::Cancelled],
             );
             assert_eq!(ops.try_recv().ok(), None);
+        }
+
+        #[tokio::test]
+        async fn holds_events_that_arrive_during_an_approval_until_it_is_answered() {
+            /// Answers once the events sent with the request have arrived, recording what had
+            /// rendered by then.
+            struct Watching<'a> {
+                sink: &'a CapturingSink,
+                rendered: Option<Vec<Event>>,
+            }
+
+            impl Approver for Watching<'_> {
+                async fn decide(
+                    &mut self,
+                    _: &ApprovalPreview,
+                    _: &Basis,
+                    _: Option<&SessionGrant>,
+                ) -> Decision {
+                    tokio::task::yield_now().await;
+                    self.rendered = Some(self.sink.events());
+                    Decision::Deny
+                }
+            }
+
+            let (tx, mut events) = mpsc::unbounded_channel();
+            for event in [
+                Event::ApprovalRequested {
+                    id: "t1".to_owned(),
+                    preview: bash_preview("ls"),
+                    basis: Basis::Mode(Mode::Manual),
+                    grant: None,
+                },
+                Event::ModeChanged(Mode::Plan),
+                Event::TurnComplete,
+            ] {
+                tx.send(event).unwrap();
+            }
+            let (ops, _ops_rx) = mpsc::channel(1);
+            let sink = CapturingSink::default();
+            let mut approver = Watching {
+                sink: &sink,
+                rendered: None,
+            };
+
+            let end = render_op(&mut events, &sink, &ops, &prompt(), &mut approver).await;
+
+            assert_eq!(end, Some(TurnEnd::Completed));
+            assert_eq!(approver.rendered, Some(Vec::new()));
+            assert_eq!(
+                sink.events(),
+                [Event::ModeChanged(Mode::Plan), Event::TurnComplete],
+            );
         }
 
         #[tokio::test]
@@ -745,6 +818,17 @@ mod tests {
                 )
             }
 
+            /// Renders `events` with stdout and stderr sharing one screen, as on a terminal.
+            fn render_on_screen(events: impl IntoIterator<Item = Event>) -> String {
+                let sink = test_sink(false);
+                let screen = Screen::default();
+                for event in events {
+                    sink.render(event, &mut screen.clone(), &mut screen.clone())
+                        .expect("render returns Ok");
+                }
+                screen.text()
+            }
+
             #[test]
             fn stream_token_writes_text_verbatim_to_stdout() {
                 let (stdout, stderr) =
@@ -792,6 +876,17 @@ mod tests {
             }
 
             #[test]
+            fn reply_after_shown_thinking_starts_on_its_own_line() {
+                let sink = test_sink(true);
+                render_one(&sink, Event::ThinkingToken("plan".to_owned()));
+
+                let (first, _) = render_one(&sink, Event::StreamToken("Done".to_owned()));
+                let (next, _) = render_one(&sink, Event::StreamToken(".".to_owned()));
+
+                assert_eq!((first.as_str(), next.as_str()), ("\nDone", "."));
+            }
+
+            #[test]
             fn thinking_token_swallowed_when_disabled() {
                 let (stdout, stderr) =
                     render_one(&test_sink(false), Event::ThinkingToken("plan".to_owned()));
@@ -823,13 +918,12 @@ mod tests {
 
             #[test]
             fn tool_call_start_ends_the_reply_line_before_its_header() {
-                let sink = test_sink(false);
-                render_one(&sink, Event::StreamToken("Let me look.".to_owned()));
+                let screen = render_on_screen([
+                    Event::StreamToken("Let me look.".to_owned()),
+                    Event::ToolCallStart(ls_call()),
+                ]);
 
-                let (stdout, stderr) = render_one(&sink, Event::ToolCallStart(ls_call()));
-
-                assert_eq!(stdout, "\n");
-                assert_eq!(stderr, "$ ls\n");
+                assert_eq!(screen, "Let me look.\n$ ls\n");
             }
 
             #[test]
@@ -1075,6 +1169,7 @@ mod tests {
             fn turn_complete_leaves_a_closed_reply_line_alone() {
                 let sink = test_sink(false);
                 render_one(&sink, Event::StreamToken("Done.\n".to_owned()));
+                render_one(&sink, Event::StreamToken(String::new()));
 
                 assert_eq!(
                     render_one(&sink, Event::TurnComplete),
@@ -1083,14 +1178,11 @@ mod tests {
             }
 
             #[test]
-            fn cancelled_ends_the_reply_line_then_writes_the_marker_to_stderr() {
-                let sink = test_sink(false);
-                render_one(&sink, Event::StreamToken("partial".to_owned()));
+            fn cancelled_ends_the_reply_line_before_the_marker() {
+                let screen =
+                    render_on_screen([Event::StreamToken("partial".to_owned()), Event::Cancelled]);
 
-                let (stdout, stderr) = render_one(&sink, Event::Cancelled);
-
-                assert_eq!(stdout, "\n");
-                assert_eq!(stderr, format!("{INTERRUPTED_MARKER}\n"));
+                assert_eq!(screen, format!("partial\n{INTERRUPTED_MARKER}\n"));
             }
 
             #[test]
@@ -1110,14 +1202,13 @@ mod tests {
             }
 
             #[test]
-            fn turn_failed_ends_a_partial_reply_even_when_stderr_is_written_first() {
-                let sink = test_sink(false);
-                render_one(&sink, Event::StreamToken("partial reply".to_owned()));
+            fn turn_failed_ends_the_reply_line_before_the_error() {
+                let screen = render_on_screen([
+                    Event::StreamToken("partial reply".to_owned()),
+                    Event::TurnFailed("boom".to_owned()),
+                ]);
 
-                let (stdout, stderr) = render_one(&sink, Event::TurnFailed("boom".to_owned()));
-
-                assert_eq!(stdout, "\n");
-                assert_eq!(stderr, "Error: boom\n");
+                assert_eq!(screen, "partial reply\nError: boom\n");
             }
 
             #[test]
@@ -1137,15 +1228,46 @@ mod tests {
             }
 
             #[test]
-            fn errors_and_failures_prefix_with_error_label() {
+            fn errors_prefix_with_error_label() {
                 let (_, stderr) = render_one(&test_sink(false), Event::Error("boom".to_owned()));
                 assert_eq!(stderr, "Error: boom\n");
                 let (_, stderr) =
-                    render_one(&test_sink(false), Event::TurnFailed("bust".to_owned()));
-                assert_eq!(stderr, "Error: bust\n");
-                let (_, stderr) =
                     render_one(&test_sink(false), Event::RenameFailed("lost".to_owned()));
                 assert_eq!(stderr, "Error: lost\n");
+            }
+        }
+
+        mod break_line {
+            use super::*;
+
+            #[test]
+            fn ends_the_open_reply_line_past_the_echoed_signal() {
+                let sink = StdioSink::new(false);
+                let screen = Screen::default();
+                sink.render(
+                    Event::StreamToken("partial".to_owned()),
+                    &mut screen.clone(),
+                    &mut screen.clone(),
+                )
+                .expect("render returns Ok");
+
+                sink.break_line(&mut screen.clone(), &mut screen.clone())
+                    .expect("break_line returns Ok");
+                sink.render(Event::Cancelled, &mut screen.clone(), &mut screen.clone())
+                    .expect("render returns Ok");
+
+                assert_eq!(screen.text(), format!("partial\n{INTERRUPTED_MARKER}\n"));
+            }
+
+            #[test]
+            fn writes_a_newline_to_stderr_when_no_reply_line_is_open() {
+                let (mut stdout, mut stderr) = (Vec::new(), Vec::new());
+
+                StdioSink::new(false)
+                    .break_line(&mut stdout, &mut stderr)
+                    .expect("break_line returns Ok");
+
+                assert_eq!((stdout, stderr), (Vec::new(), b"\n".to_vec()));
             }
         }
     }

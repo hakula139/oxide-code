@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::sync::Arc;
 
-use anyhow::{Context, Result, anyhow, bail};
+use anyhow::{Context, Result, bail};
 use clap::builder::{PossibleValue, PossibleValuesParser, TypedValueParser};
 use clap::{Arg, ArgGroup, Command, Parser};
 use time::error::IndeterminateOffset;
@@ -139,32 +139,29 @@ impl TypedValueParser for ModeParser {
 }
 
 fn main() -> ExitCode {
+    try_main().unwrap_or_else(|e| {
+        _ = writeln!(io::stderr(), "Error: {e:#}");
+        ExitCode::FAILURE
+    })
+}
+
+fn try_main() -> Result<ExitCode> {
     let offset_error = util::time::init_local_offset().err();
-    let runtime = match tokio::runtime::Builder::new_multi_thread()
+    let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
-    {
-        Ok(runtime) => runtime,
-        Err(e) => return report_error(&anyhow!(e).context("failed to start the async runtime")),
-    };
-    let exit = match runtime.block_on(async_main(offset_error)) {
-        Ok(exit) => exit,
-        Err(e) => match e.downcast::<EnginePanic>() {
+        .context("failed to start the async runtime")?;
+    let exit = runtime.block_on(async_main(offset_error)).map_err(|e| {
+        match e.downcast::<EnginePanic>() {
             Ok(panic) => panic.resume(),
-            Err(e) => return report_error(&e),
-        },
-    };
+            Err(e) => e,
+        }
+    })?;
     if matches!(exit, Exit::Signal(_)) {
         // tokio's stdin reader can stay blocked in `read`, and a regular drop waits for it.
         runtime.shutdown_background();
     }
-    exit.code()
-}
-
-/// Prints `e` as one `Error:` line with its cause chain and returns the failure status.
-fn report_error(e: &anyhow::Error) -> ExitCode {
-    _ = writeln!(io::stderr(), "Error: {e:#}");
-    ExitCode::FAILURE
+    Ok(exit.code())
 }
 
 async fn async_main(offset_error: Option<IndeterminateOffset>) -> Result<Exit> {
@@ -199,7 +196,6 @@ async fn async_main(offset_error: Option<IndeterminateOffset>) -> Result<Exit> {
     }
     let show_thinking = config.show_thinking;
     let theme = tui_mode.then(|| resolve_theme(&config.theme)).transpose()?;
-    let snapshot = config.snapshot();
 
     let store = SessionStore::open(&cwd)?;
     let file_tracker = Arc::new(FileTracker::default());
@@ -258,7 +254,7 @@ async fn async_main(offset_error: Option<IndeterminateOffset>) -> Result<Exit> {
         unarchived,
     };
     // Boxed, since on Windows this future passes clippy's 16 KiB `large_futures` threshold.
-    Box::pin(run_tui(engine, theme, snapshot, startup, &drifted)).await
+    Box::pin(run_tui(engine, theme, config.snapshot(), startup, &drifted)).await
 }
 
 /// Runs the TUI until the user quits or a shutdown signal arrives, which then sets the exit status.

@@ -21,7 +21,7 @@ ox -p "Fix the failing test" --output stream-json   # Stream every event as a JS
 | `json`           | One [result](#result) line once the run ends                                  |
 | `stream-json`    | One JSON line per [engine event](#events), then the [result](#result)         |
 
-Every format also writes tool calls, the task list, the model's progress notes, retries, notices, and errors as text to stderr. When parsing JSON, read stdout alone.
+Every format also writes tool calls, the task list, retries, notices, and errors as text to stderr, plus the model's progress notes when `tui.show_thinking` is off. When parsing JSON, read stdout alone.
 
 ## Exit Status
 
@@ -126,8 +126,8 @@ Display text can change in any release. This includes a tool call's `icon`, `lab
 
 `ox --no-tui` reads prompts from stdin and keeps them in one session. It prints each reply to stdout in the `text` format, while its `>` prompt and all other output go to stderr. Use it when the TUI cannot run or to pipe a series of prompts into one session.
 
-- **Input**: Each line is a prompt, so pasting several lines starts one turn per line. Blank lines are skipped. The end of input exits the program, as does **Ctrl+D** in a terminal.
+- **Input**: Each line is a prompt, except while an approval waits for its answer, so pasting several lines starts one turn per line. Blank lines are skipped. The end of input exits the program, as does **Ctrl+D** in a terminal.
 - **Commands**: A subset of the slash commands runs, as listed in [When Commands Run](slash-commands.md#when-commands-run).
-- **Approvals**: In a terminal, a call that needs approval prints its command or diff and the rule that prompted the request, then waits for a letter: `y` approves, `a` allows matching calls for the rest of the session when the call offers that, `n` denies, `f` denies with feedback for the model, and `x` aborts the turn. With piped input, no approval is requested, and those calls are denied as in a `-p` run.
-- **Interrupting**: In a terminal, **Ctrl+C** during a turn stops it and returns to the prompt. At the prompt, **Ctrl+C** exits. With piped input, **Ctrl+C** ends the run.
+- **Approvals**: In a terminal, a call that needs approval prints its command or diff, and the rule that holds it when one does, then waits for a letter: `y` approves, `a` allows matching calls for the rest of the session when the call offers that, `n` denies, `f` denies with feedback for the model, and `x` aborts the turn. With piped input, no approval is requested, and those calls are denied as in a `-p` run.
+- **Interrupting**: In a terminal, **Ctrl+C** during a turn stops it and returns to the prompt, and at the prompt it discards the line, as in a shell. With piped input, **Ctrl+C** ends the run.
 - **Exit status**: The end of input exits with `1` if a prompt failed or a command was rejected, and with `0` otherwise. A signal that ends the run exits with the status listed in the [table](#exit-status).

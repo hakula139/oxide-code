@@ -11,7 +11,8 @@ The TUI exposes these controls and behaviors:
 - **Drain input.** `agent_turn` splices each forwarded prompt into `messages` as a trailing User message at its next round boundary and confirms it with `Event::PromptDrained`, so the model sees new instructions in the next API request without aborting in-flight work. A turn that ends first drops the prompts it still holds, and once it completes or fails the TUI submits the queue head as the next turn. A prompt whose automatic compaction failed was never sent, so the TUI hands it back to the user and leaves the queue waiting. A refused turn that the engine rolled back (`TurnRolledBack`) hands back its prompt and the queued prompts it took in the same way.
 - **Interrupt work.** Cancellation drops the `agent_turn` future: reqwest closes the SSE stream, the bash tool kills the command's process tree, and a dim italic `(interrupted)` marker lands in chat. The transcript then ends on a `[Request interrupted by user]` user message, so the model knows the user abandoned that prompt.
 - **Show status.** The status bar puts the key that stops the work beside the spinner: `Streaming · Esc to interrupt`, `Running {tool} · Esc to interrupt`, `Compacting · Esc to interrupt`, `Signing in · Esc to cancel`, `Resuming`, and `Cancelling`. An armed exit shows `Press Ctrl+C again to exit`.
-- **Bare REPL.** When stdin is a terminal, SIGINT during an operation sends `Op::Interrupt`. Once cancellation ends the operation, `render_op` drops any approval question still awaiting an answer. At the prompt, SIGINT ends the run, as it does whenever stdin is piped. This matches shell and Python REPL behavior at the prompt, where SIGINT, SIGTERM, and SIGHUP end the run.
+
+The bare REPL maps SIGINT the way a shell does when stdin is a terminal. During an operation, it sends `Op::Interrupt`, and once cancellation ends the operation, `render_op` drops any approval question still awaiting an answer. At the prompt, SIGINT discards the line and prompts again, so only the end of input exits. With piped stdin, SIGINT ends the run, as SIGTERM and SIGHUP always do.
 
 ## Design Decisions
 
@@ -56,5 +57,5 @@ The picks lean toward the Codex precedent on most surfaces, since it is the one 
 - `crates/ox-tui/src/components/input.rs`: Ctrl+D POSIX gate, plus `set_text` and `is_empty`, which the idle Esc recall uses.
 - `crates/ox-tui/src/components/status.rs`: `Status` variants, busy hints, spinner.
 - `crates/ox-tui/src/glyphs.rs`: `INTERRUPTED_MARKER`.
-- `crates/ox/src/driver/repl.rs`: `drive`, which turns SIGINT during an operation into `Op::Interrupt` when stdin is a terminal.
+- `crates/ox/src/driver/repl.rs`: `drive`, which turns SIGINT during an operation into `Op::Interrupt` and SIGINT at the prompt into a fresh prompt when stdin is a terminal.
 - `crates/ox/src/driver/stdio.rs`: `StdioSink::render`, and `render_op`, which renders until the op it sent ends.

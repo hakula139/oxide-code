@@ -462,7 +462,7 @@ impl Config {
     }
 
     /// Startup notices: an unsupported model, then why the session is signed out.
-    pub fn notices(&self) -> Vec<String> {
+    pub(crate) fn notices(&self) -> Vec<String> {
         self.model
             .unsupported_notice()
             .into_iter()

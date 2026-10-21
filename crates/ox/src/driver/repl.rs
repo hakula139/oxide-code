@@ -21,23 +21,21 @@ use super::{Exit, Shutdown, shutdown_signal};
 
 /// Reads prompts and slash commands until EOF or a signal, then finalizes the session. EOF after
 /// an operation failed or a command was rejected exits with failure. Only a terminal on stdin
-/// answers approvals, so a piped line is never taken as an answer. With a terminal, SIGINT during
-/// an operation interrupts it. Every other signal ends the run.
+/// answers approvals, so a piped line is never taken as an answer. With a terminal, SIGINT
+/// interrupts the running operation or discards the line at the prompt, as shells do. Every other
+/// signal ends the run.
 pub(crate) async fn run(engine: Engine, show_thinking: bool, drifted: &[PathBuf]) -> Result<Exit> {
     let sink = StdioSink::new(show_thinking);
     let attended = io::stdin().is_terminal();
     let stdin = BufReader::new(tokio::io::stdin());
     let project_root = git::project_root(engine.cwd()).await;
     let handle = engine.spawn(drifted);
-    drive(
-        handle,
-        &project_root,
-        &sink,
-        stdin,
-        attended,
-        shutdown_signal,
-    )
-    .await
+    let signal = async || {
+        let caught = shutdown_signal().await;
+        _ = sink.break_line(&mut io::stdout(), &mut io::stderr());
+        caught
+    };
+    drive(handle, &project_root, &sink, stdin, attended, signal).await
 }
 
 /// Runs the REPL over `input`, where each `signal` call waits for the next signal.
@@ -57,7 +55,7 @@ where
     let mut failed = false;
 
     let result: Result<()> = async {
-        loop {
+        'repl: loop {
             render_queued(&mut handle.events, sink);
             _ = write!(io::stderr(), "> ");
             _ = io::stderr().flush();
@@ -65,7 +63,9 @@ where
             let line = tokio::select! {
                 line = lines.next_line() => line?,
                 caught = signal() => {
-                    _ = writeln!(io::stderr());
+                    if attended && caught == Shutdown::Interrupt {
+                        continue;
+                    }
                     stopped = Some(caught);
                     break;
                 }
@@ -108,10 +108,9 @@ where
                 tokio::select! {
                     end = &mut rendered => break end,
                     caught = signal() => {
-                        _ = writeln!(io::stderr());
                         if !(attended && caught == Shutdown::Interrupt) {
                             stopped = Some(caught);
-                            break None;
+                            break 'repl;
                         }
                         // A send fails only once the engine has stopped, which `rendered` reports.
                         _ = handle.ops.send(Op::Interrupt).await;
@@ -121,7 +120,6 @@ where
             match end {
                 Some(TurnEnd::Failed) => failed = true,
                 Some(_) => {}
-                None if stopped.is_some() => break,
                 None => bail!("the engine stopped"),
             }
         }
@@ -759,37 +757,75 @@ mod tests {
         }
 
         #[tokio::test]
-        async fn ends_the_run_on_sigint_with_piped_input_or_at_the_prompt() {
+        async fn sigint_at_a_terminal_prompt_keeps_reading() {
             with_pinned_home(async {
-                for (attended, input) in [(false, &b"first\n"[..]), (true, &b""[..])] {
-                    let server = MockServer::start().await;
-                    mount_stalled_reply_once(&server).await;
-                    let dir = tempfile::tempdir().unwrap();
-                    let engine = engine(server.uri(), &test_store(dir.path()), dir.path()).await;
-                    let (mut writer, reader) = tokio::io::duplex(64);
-                    tokio::io::AsyncWriteExt::write_all(&mut writer, input)
+                let server = MockServer::start().await;
+                mount_reply(&server, "reply").await;
+                let dir = tempfile::tempdir().unwrap();
+                let engine = engine(server.uri(), &test_store(dir.path()), dir.path()).await;
+                let (writer, reader) = tokio::io::duplex(64);
+                let mut writer = Some(writer);
+                let signal = async || {
+                    let Some(mut writer) = writer.take() else {
+                        return std::future::pending().await;
+                    };
+                    tokio::io::AsyncWriteExt::write_all(&mut writer, b"hello\n")
                         .await
                         .unwrap();
-                    let requests = usize::from(!input.is_empty());
-                    let signal = async || {
-                        until_requested(&server, requests).await;
-                        Shutdown::Interrupt
-                    };
+                    Shutdown::Interrupt
+                };
 
-                    let exit = Box::pin(drive(
-                        engine.spawn(&[]),
-                        dir.path(),
-                        &CapturingSink::default(),
-                        BufReader::new(reader),
-                        attended,
-                        signal,
-                    ))
-                    .await
-                    .unwrap();
+                let exit = Box::pin(drive(
+                    engine.spawn(&[]),
+                    dir.path(),
+                    &CapturingSink::default(),
+                    BufReader::new(reader),
+                    true,
+                    signal,
+                ))
+                .await
+                .unwrap();
 
-                    assert_eq!(exit, Exit::Signal(Shutdown::Interrupt), "{attended}");
-                    assert_eq!(request_bodies(&server).await.len(), requests);
-                }
+                assert_eq!(exit, Exit::Success);
+                let requests = request_bodies(&server).await;
+                assert_eq!(requests.len(), 1, "{requests:?}");
+                let last = requests[0]["messages"].as_array().unwrap().last().unwrap();
+                assert_eq!(last["content"][0]["text"], "hello");
+            })
+            .await;
+        }
+
+        #[tokio::test]
+        async fn sigint_with_piped_input_ends_the_run() {
+            with_pinned_home(async {
+                let server = MockServer::start().await;
+                mount_stalled_reply_once(&server).await;
+                let dir = tempfile::tempdir().unwrap();
+                let engine = engine(server.uri(), &test_store(dir.path()), dir.path()).await;
+                let input: &[u8] = b"first\n";
+                let mut interrupted = false;
+                let signal = async || {
+                    if interrupted {
+                        return std::future::pending().await;
+                    }
+                    until_requested(&server, 1).await;
+                    interrupted = true;
+                    Shutdown::Interrupt
+                };
+
+                let exit = Box::pin(drive(
+                    engine.spawn(&[]),
+                    dir.path(),
+                    &CapturingSink::default(),
+                    input,
+                    false,
+                    signal,
+                ))
+                .await
+                .unwrap();
+
+                assert_eq!(exit, Exit::Signal(Shutdown::Interrupt));
+                assert_eq!(request_bodies(&server).await.len(), 1);
             })
             .await;
         }

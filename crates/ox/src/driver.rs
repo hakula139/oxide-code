@@ -88,7 +88,9 @@ pub(crate) async fn shutdown_signal() -> Shutdown {
 
 #[cfg(test)]
 mod testing {
+    use std::cell::RefCell;
     use std::io::{self, Write};
+    use std::rc::Rc;
 
     /// A stdout whose reader went away.
     pub(super) struct ClosedPipe;
@@ -96,6 +98,27 @@ mod testing {
     impl Write for ClosedPipe {
         fn write(&mut self, _buf: &[u8]) -> io::Result<usize> {
             Err(io::ErrorKind::BrokenPipe.into())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    /// A terminal that stdout and stderr both write to, so a test sees the order of their lines.
+    #[derive(Clone, Default)]
+    pub(super) struct Screen(Rc<RefCell<Vec<u8>>>);
+
+    impl Screen {
+        pub(super) fn text(&self) -> String {
+            String::from_utf8(self.0.borrow().clone()).expect("the screen is UTF-8")
+        }
+    }
+
+    impl Write for Screen {
+        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+            self.0.borrow_mut().extend_from_slice(buf);
+            Ok(buf.len())
         }
 
         fn flush(&mut self) -> io::Result<()> {
