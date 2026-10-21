@@ -50,7 +50,7 @@ fn make_filter() -> EnvFilter {
 fn log_dir() -> Result<PathBuf> {
     app_dir(XdgBase::State)
         .map(|dir| dir.join(LOG_SUBDIR))
-        .context("cannot determine log directory")
+        .context("failed to determine the log directory")
 }
 
 fn open_file_appender(dir: &Path) -> Result<(NonBlocking, WorkerGuard)> {

@@ -365,7 +365,7 @@ impl PathGlob {
         );
         let mut pattern = slash_separated(Path::new(raw));
         if pattern == "~" || pattern.starts_with("~/") {
-            let home = std::env::home_dir().context("cannot expand `~`: no home directory")?;
+            let home = std::env::home_dir().context("failed to expand `~`: no home directory")?;
             let home = escaped(&lexical_normalize(&home));
             pattern = format!(
                 "{}/{}",

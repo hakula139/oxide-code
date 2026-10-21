@@ -43,7 +43,7 @@ impl SessionStore {
     pub fn open(cwd: &Path) -> Result<Self> {
         let sessions_dir = app_dir(XdgBase::Data)
             .map(|dir| dir.join(SESSIONS_DIR))
-            .context("cannot determine session storage directory")?;
+            .context("failed to determine the session storage directory")?;
 
         create_private_dir_all(&sessions_dir)?;
 
@@ -347,7 +347,7 @@ pub(crate) fn set_archived_at(path: &Path, archived: bool) -> Result<()> {
     let mut writer = open_append_at(path)?;
     let modified = fs::metadata(path)
         .and_then(|meta| meta.modified())
-        .with_context(|| format!("cannot stat {}", path.display()))?;
+        .with_context(|| format!("failed to stat {}", path.display()))?;
     writer.set_archived(archived)?;
     if let Some(file) = &writer.file
         && let Err(e) = file.set_modified(modified)
