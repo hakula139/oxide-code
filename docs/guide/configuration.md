@@ -113,7 +113,7 @@ When unset, the agent loop has no per-turn round cap. Setting `max_tool_rounds =
 
 #### `base_url`: Endpoint
 
-Set `base_url` in user config or `ANTHROPIC_BASE_URL`. A project config cannot set it, because project files are loaded from the checkout and should not be able to redirect credentials. The URL must use HTTPS unless it points at localhost for a local proxy.
+Set `base_url` in user config or `ANTHROPIC_BASE_URL`. A project config cannot set it, because project files are loaded from the checkout and should not be able to redirect credentials. The URL must use HTTPS unless it points at localhost for a local proxy. Requests go to `/v1/messages` under it, so leave `/v1` off the URL. A trailing slash makes no difference.
 
 #### `extra_ca_certs`: Corporate Trust Anchors
 

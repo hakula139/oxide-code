@@ -49,6 +49,12 @@ pub(super) struct MessagesRequest {
     pub(super) reloads: TaskTracker,
 }
 
+/// The `/v1/messages` endpoint under `base_url`, dropping a trailing slash as the Anthropic SDKs
+/// do, since routers that keep empty path segments answer `//v1/messages` with a 404.
+pub(super) fn messages_url(base_url: &str) -> String {
+    format!("{}/v1/messages?beta=true", base_url.trim_end_matches('/'))
+}
+
 impl Client {
     pub(super) fn messages_request(
         &self,
@@ -57,7 +63,7 @@ impl Client {
         auth: &Auth,
     ) -> MessagesRequest {
         MessagesRequest {
-            url: format!("{}/v1/messages?beta=true", self.base_url),
+            url: self.messages_url.clone(),
             betas,
             session_id: self.session_id.clone(),
             body: body.into(),
