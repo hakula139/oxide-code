@@ -108,22 +108,8 @@ mod tests {
 
     use super::*;
     use crate::glyphs::TOOL_BORDER_CONT;
+    use crate::slash::testing::{added, context, removed};
     use crate::theme::Theme;
-
-    fn removed(number: usize, text: &str) -> DiffRow {
-        let text = text.to_owned();
-        DiffRow::Removed { number, text }
-    }
-
-    fn added(number: usize, text: &str) -> DiffRow {
-        let text = text.to_owned();
-        DiffRow::Added { number, text }
-    }
-
-    fn context(number: usize, text: &str) -> DiffRow {
-        let text = text.to_owned();
-        DiffRow::Context { number, text }
-    }
 
     fn tracked(rows: Vec<DiffRow>) -> WorkingTreeDiff {
         WorkingTreeDiff {

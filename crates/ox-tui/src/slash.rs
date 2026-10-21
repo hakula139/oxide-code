@@ -119,6 +119,7 @@ pub(crate) mod testing {
     use std::path::Path;
 
     pub(crate) use super::context::testing::test_session_info;
+    pub(crate) use super::diff::testing::{added, context, removed};
 
     /// Session ID with every byte set to `byte`, in the hyphenated UUID form real session IDs use.
     pub(super) fn stamped_id(byte: u8) -> String {
@@ -137,8 +138,6 @@ pub(crate) mod testing {
 
 #[cfg(test)]
 mod tests {
-    use ox_core::util::git::testing::with_isolated_git_env_async;
-
     use super::testing::test_session_info;
     use super::*;
     use crate::slash::registry::testing::FakeCmd;
@@ -191,23 +190,6 @@ mod tests {
             run_dispatch("help").unwrap().into_modal();
         }
 
-        #[tokio::test]
-        async fn background_failure_prefixes_the_command_name() {
-            let dir = tempfile::tempdir().unwrap();
-            let mut info = test_session_info();
-            info.project_root = dir.path().to_owned();
-
-            let task = dispatch(&parsed("diff", ""), &SlashContext::new(&info, None))
-                .unwrap()
-                .into_background();
-            let msg = with_isolated_git_env_async(task).await.unwrap_err();
-
-            assert!(
-                msg.starts_with("/diff: Failed to collect working-tree changes: "),
-                "{msg}",
-            );
-        }
-
         #[test]
         fn unknown_command_lists_every_built_in() {
             let msg = run_dispatch("etc").expect_err("unknown command must error");
@@ -246,6 +228,28 @@ mod tests {
         fn alias_routes_to_canonical_impl() {
             // Error must echo the alias the user typed.
             assert_eq!(dispatch_fake("boom"), "/boom: Explicit failure.");
+        }
+
+        #[tokio::test]
+        async fn background_failure_prefixes_the_name_the_user_typed() {
+            let info = test_session_info();
+            let cmd = FakeCmd {
+                name: "failing",
+                aliases: &["boom"],
+                background: true,
+                ..FakeCmd::DEFAULT
+            };
+
+            for (typed, expected) in [
+                ("failing", "/failing: Explicit failure."),
+                ("boom", "/boom: Explicit failure."),
+            ] {
+                let ctx = SlashContext::new(&info, None);
+                let task = dispatch_with(&[&cmd], &parsed(typed, ""), &ctx)
+                    .unwrap()
+                    .into_background();
+                assert_eq!(task.await.unwrap_err(), expected);
+            }
         }
 
         #[test]

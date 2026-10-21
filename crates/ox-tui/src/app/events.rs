@@ -406,21 +406,6 @@ impl App {
         }
     }
 
-    /// Prints what a background slash command resolved to. A panicked task only logs, since the
-    /// panic hook already reports the panic.
-    pub(super) fn apply_slash_task(
-        &mut self,
-        finished: Result<Result<ChatOutput, String>, JoinError>,
-    ) {
-        match finished {
-            Ok(Ok(ChatOutput::SystemMessage(text))) => self.chat.push_system_message(text),
-            Ok(Ok(ChatOutput::GitDiff(diff))) => self.chat.push_git_diff(diff),
-            Ok(Err(msg)) => self.chat.push_error(&msg),
-            Err(e) => warn!("background slash command failed: {e}"),
-        }
-        self.dirty = true;
-    }
-
     pub(super) fn apply_git_update(&mut self, update: GitUpdate) {
         let changed = match update {
             GitUpdate::Branch(branch) => self.status_bar.set_git_branch(branch),
@@ -448,6 +433,21 @@ impl App {
         self.copy_notice
             .take_if(|notice| now >= notice.until)
             .is_some()
+    }
+
+    /// Prints what a background slash command resolved to. A panicked task only logs, since the
+    /// panic hook already reports the panic.
+    pub(super) fn apply_slash_task(
+        &mut self,
+        finished: Result<Result<ChatOutput, String>, JoinError>,
+    ) {
+        match finished {
+            Ok(Ok(ChatOutput::SystemMessage(text))) => self.chat.push_system_message(text),
+            Ok(Ok(ChatOutput::GitDiff(diff))) => self.chat.push_git_diff(diff),
+            Ok(Err(msg)) => self.chat.push_error(&msg),
+            Err(e) => warn!("background slash command failed: {e}"),
+        }
+        self.dirty = true;
     }
 }
 
@@ -1963,48 +1963,6 @@ mod tests {
         }
     }
 
-    mod apply_slash_task {
-        use super::*;
-
-        async fn finish(
-            output: Result<ChatOutput, String>,
-        ) -> Result<Result<ChatOutput, String>, JoinError> {
-            tokio::spawn(async { output }).await
-        }
-
-        #[tokio::test]
-        async fn prints_the_message_diff_or_error_the_task_resolved_to() {
-            let (mut app, _rx, _event_tx) = test_app(None);
-            let diff = WorkingTreeDiff {
-                untracked: vec!["new.txt".to_owned()],
-                ..WorkingTreeDiff::default()
-            };
-
-            app.apply_slash_task(finish(Ok(ChatOutput::SystemMessage("clean".to_owned()))).await);
-            assert_eq!(app.chat.last_system_text(), Some("clean"));
-
-            app.dirty = false;
-            app.apply_slash_task(finish(Ok(ChatOutput::GitDiff(diff))).await);
-            assert!(app.dirty);
-            assert!(rendered_text(&mut app, 60, 24).contains("  new.txt"));
-
-            app.apply_slash_task(finish(Err("/diff: boom".to_owned())).await);
-            assert_eq!(app.chat.last_error_text(), Some("/diff: boom"));
-        }
-
-        #[tokio::test]
-        async fn a_panicked_task_prints_nothing() {
-            let (mut app, _rx, _event_tx) = test_app(None);
-            let mut tasks = JoinSet::<Result<ChatOutput, String>>::new();
-            tasks.spawn(async { panic!("task bug") });
-            let finished = tasks.join_next().await.expect("one task spawned");
-
-            app.apply_slash_task(finished);
-
-            assert_eq!(app.chat.entry_count(), 0);
-        }
-    }
-
     mod apply_git_update {
         use super::*;
 
@@ -2053,6 +2011,48 @@ mod tests {
                 (failed.text.as_str(), failed.failed),
                 ("Not copied: the clipboard did not answer within 2 s", true),
             );
+        }
+    }
+
+    mod apply_slash_task {
+        use super::*;
+
+        async fn finish(
+            output: Result<ChatOutput, String>,
+        ) -> Result<Result<ChatOutput, String>, JoinError> {
+            tokio::spawn(async { output }).await
+        }
+
+        #[tokio::test]
+        async fn prints_the_message_diff_or_error_the_task_resolved_to() {
+            let (mut app, _rx, _event_tx) = test_app(None);
+            let diff = WorkingTreeDiff {
+                untracked: vec!["new.txt".to_owned()],
+                ..WorkingTreeDiff::default()
+            };
+
+            app.apply_slash_task(finish(Ok(ChatOutput::SystemMessage("clean".to_owned()))).await);
+            assert_eq!(app.chat.last_system_text(), Some("clean"));
+
+            app.dirty = false;
+            app.apply_slash_task(finish(Ok(ChatOutput::GitDiff(diff))).await);
+            assert!(app.dirty);
+            assert!(rendered_text(&mut app, 60, 24).contains("  new.txt"));
+
+            app.apply_slash_task(finish(Err("/diff: boom".to_owned())).await);
+            assert_eq!(app.chat.last_error_text(), Some("/diff: boom"));
+        }
+
+        #[tokio::test]
+        async fn a_panicked_task_prints_nothing() {
+            let (mut app, _rx, _event_tx) = test_app(None);
+            let mut tasks = JoinSet::<Result<ChatOutput, String>>::new();
+            tasks.spawn(async { panic!("task bug") });
+            let finished = tasks.join_next().await.expect("one task spawned");
+
+            app.apply_slash_task(finished);
+
+            assert_eq!(app.chat.entry_count(), 0);
         }
     }
 

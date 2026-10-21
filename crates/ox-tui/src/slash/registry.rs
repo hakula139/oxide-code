@@ -197,6 +197,8 @@ pub(super) mod testing {
         pub(crate) aliases: &'static [&'static str],
         pub(crate) description: &'static str,
         pub(crate) error: &'static str,
+        /// Whether `execute` fails from a [`SlashOutcome::Background`] task.
+        pub(crate) background: bool,
     }
 
     impl FakeCmd {
@@ -205,6 +207,7 @@ pub(super) mod testing {
             aliases: &[],
             description: "fake",
             error: "Explicit failure.",
+            background: false,
         };
     }
 
@@ -219,7 +222,12 @@ pub(super) mod testing {
             self.description
         }
         fn execute(&self, _: &str, _: &SlashContext<'_>) -> Result<SlashOutcome, String> {
-            Err(self.error.to_owned())
+            let error = self.error.to_owned();
+            if self.background {
+                Ok(SlashOutcome::Background(Box::pin(async { Err(error) })))
+            } else {
+                Err(error)
+            }
         }
     }
 }

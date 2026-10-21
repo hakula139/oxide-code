@@ -4,13 +4,16 @@
 
 mod view;
 
-use std::path::Path;
+#[cfg(test)]
+pub(crate) use view::testing;
+pub(crate) use view::{DiffRow, WorkingTreeDiff};
+
+use std::path::{Path, PathBuf};
 use std::process::{Output, Stdio};
 
 use anyhow::{Result, anyhow, bail};
 use tokio::process::Command;
 
-pub(crate) use self::view::{DiffRow, WorkingTreeDiff};
 use super::context::SlashContext;
 use super::registry::{ChatOutput, SlashCommand, SlashOutcome};
 
@@ -28,9 +31,9 @@ impl SlashCommand for DiffCmd {
     }
 
     fn execute(&self, _args: &str, ctx: &SlashContext<'_>) -> Result<SlashOutcome, String> {
-        let root = ctx.info.project_root.clone();
+        let dir = ctx.info.project_root.clone();
         Ok(SlashOutcome::Background(Box::pin(async move {
-            let diff = collect_diff(&root)
+            let diff = collect_diff(&dir)
                 .await
                 .map_err(|e| format!("Failed to collect working-tree changes: {e:#}"))?;
             Ok(if diff.is_empty() {
@@ -44,12 +47,22 @@ impl SlashCommand for DiffCmd {
 
 // ── Execution ──
 
-/// The tracked diff and the untracked paths of the work tree at `root`. Running from the root
-/// keeps `ls-files` from narrowing to a subdirectory, since it lists only paths under its cwd.
-async fn collect_diff(root: &Path) -> Result<WorkingTreeDiff> {
-    ensure_work_tree(root).await?;
+/// The tracked diff and the untracked paths of the work tree containing `dir`. Every call after
+/// the first runs from the work tree's root, since `ls-files` lists only the paths under its cwd.
+async fn collect_diff(dir: &Path) -> Result<WorkingTreeDiff> {
+    let root = work_tree_root(dir).await?;
+    let root = root.as_path();
 
-    let untracked = run_git_in(root, &["ls-files", "-z", "--others", "--exclude-standard"]);
+    let untracked = run_git_in(
+        root,
+        &[
+            "ls-files",
+            "-z",
+            "--others",
+            "--exclude-standard",
+            "--directory",
+        ],
+    );
     if has_head(root).await {
         let (head, untracked) = tokio::try_join!(run_git_diff_in(root, &["HEAD"]), untracked)?;
         Ok(WorkingTreeDiff::new(
@@ -73,17 +86,12 @@ async fn collect_diff(root: &Path) -> Result<WorkingTreeDiff> {
 
 // ── Git Helpers ──
 
-/// Fails outside a work tree with git's own message, which names the fix when git refuses a
-/// repository the user is in, as for dubious ownership.
-async fn ensure_work_tree(root: &Path) -> Result<()> {
-    if run_git_in(root, &["rev-parse", "--is-inside-work-tree"])
-        .await?
-        .trim()
-        != "true"
-    {
-        bail!("not inside a git work tree");
-    }
-    Ok(())
+/// The root of the work tree containing `dir`, resolved on each run so a repository git refused
+/// at startup is found once the user applies the fix git names, as for dubious ownership. Fails
+/// outside a work tree with git's own message.
+async fn work_tree_root(dir: &Path) -> Result<PathBuf> {
+    let out = run_git_in(dir, &["rev-parse", "--show-toplevel"]).await?;
+    Ok(PathBuf::from(out.trim_end_matches(['\n', '\r'])))
 }
 
 async fn has_head(root: &Path) -> bool {
@@ -92,8 +100,7 @@ async fn has_head(root: &Path) -> bool {
         .is_ok()
 }
 
-/// Runs `git diff` with the output shape [`WorkingTreeDiff`] parses, whatever the user's git
-/// config.
+/// Runs `git diff` with the output shape [`WorkingTreeDiff`] parses, whatever the user config.
 async fn run_git_diff_in(root: &Path, extra: &[&str]) -> Result<String> {
     let mut args = vec![
         "-c",
@@ -205,7 +212,6 @@ mod tests {
 
         async fn execute_at(project_root: &Path) -> Result<ChatOutput, String> {
             let mut info = test_session_info();
-            info.working_dir = Some(project_root.join("sub"));
             info.project_root = project_root.to_owned();
             let task = DiffCmd
                 .execute("", &SlashContext::new(&info, None))
@@ -227,15 +233,20 @@ mod tests {
         }
 
         #[tokio::test]
-        async fn lists_the_whole_repository_from_a_subdirectory_session() {
+        async fn lists_the_whole_repository_when_the_project_root_is_a_subdirectory() {
+            // The startup probe falls back to the working directory when git refused the
+            // repository then, so the project root can be a subdirectory.
             let (_dir, repo) = fresh_repo();
+            std::fs::create_dir(repo.join("sub")).unwrap();
+            commit_file(&repo, "sub/kept.txt", "k\n");
             commit_file(&repo, "top.txt", "old\n");
             std::fs::write(repo.join("top.txt"), "new\n").unwrap();
-            std::fs::create_dir(repo.join("sub")).unwrap();
             std::fs::write(repo.join("sub/here.txt"), "h\n").unwrap();
             std::fs::write(repo.join("outside.txt"), "o\n").unwrap();
 
-            let output = execute_at(&repo).await.expect("dirty repo is Ok");
+            let output = execute_at(&repo.join("sub"))
+                .await
+                .expect("dirty repo is Ok");
 
             assert!(
                 matches!(&output, ChatOutput::GitDiff(diff)
@@ -278,6 +289,7 @@ mod tests {
             std::fs::write(repo.join("a.txt"), "staged\n").unwrap();
             git_setup(&repo, &["add", "a.txt"]);
             std::fs::write(repo.join("a.txt"), "staged\nunstaged\n").unwrap();
+            std::fs::write(repo.join("new.txt"), "u\n").unwrap();
 
             let diff = collect(&repo).await.unwrap();
 
@@ -290,10 +302,8 @@ mod tests {
                 })
                 .collect();
             assert_eq!(added, [(1, "staged"), (2, "unstaged")]);
-            assert_eq!(
-                diff.truncation, None,
-                "both sections fit, so nothing is dropped"
-            );
+            assert_eq!(diff.untracked, ["new.txt"]);
+            assert_eq!(diff.truncation, None);
         }
 
         #[tokio::test]
@@ -344,26 +354,40 @@ mod tests {
         }
     }
 
-    mod ensure_work_tree {
+    mod work_tree_root {
         use super::*;
 
         #[tokio::test]
-        async fn accepts_a_work_tree() {
+        async fn finds_the_root_from_a_subdirectory() {
             let (_dir, repo) = fresh_repo();
-            with_isolated_git_env_async(ensure_work_tree(&repo))
+            std::fs::create_dir(repo.join("sub")).unwrap();
+            let expected = isolated_git(&repo)
+                .args(["rev-parse", "--show-toplevel"])
+                .output()
+                .unwrap()
+                .stdout;
+
+            let root = with_isolated_git_env_async(work_tree_root(&repo.join("sub")))
                 .await
                 .unwrap();
+
+            assert_eq!(
+                root,
+                PathBuf::from(String::from_utf8(expected).unwrap().trim_end())
+            );
         }
 
         #[tokio::test]
-        async fn refuses_the_git_directory() {
+        async fn refuses_the_git_directory_with_what_git_says() {
             let (_dir, repo) = fresh_repo();
+            let git_dir = repo.join(".git");
+            let expected = git_stderr(&git_dir, &["rev-parse", "--show-toplevel"]);
 
-            let err = with_isolated_git_env_async(ensure_work_tree(&repo.join(".git")))
+            let err = with_isolated_git_env_async(work_tree_root(&git_dir))
                 .await
                 .unwrap_err();
 
-            assert_eq!(format!("{err:#}"), "not inside a git work tree");
+            assert_eq!(format!("{err:#}"), expected);
         }
     }
 
@@ -419,9 +443,11 @@ mod tests {
             let (_dir, repo) = fresh_repo();
             let content = "one\ntwo\nthree\nfour\nfive\n";
             commit_file(&repo, "a.txt", content);
+            commit_file(&repo, "old.txt", "moved\nlines\nhere\n");
             std::fs::write(repo.join("a.txt"), format!("{content}six\n")).unwrap();
             std::fs::write(repo.join("b.txt"), content).unwrap();
             git_setup(&repo, &["add", "b.txt"]);
+            git_setup(&repo, &["mv", "old.txt", "new.txt"]);
             git_setup(&repo, &["config", "diff.renames", "copies"]);
 
             let body = with_isolated_git_env_async(run_git_diff_in(&repo, &["HEAD"]))
@@ -433,6 +459,10 @@ mod tests {
                 "{body}"
             );
             assert!(!body.contains("copy from"), "{body}");
+            assert!(
+                body.contains("rename from old.txt\nrename to new.txt"),
+                "{body}"
+            );
         }
     }
 

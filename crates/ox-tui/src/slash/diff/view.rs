@@ -35,11 +35,13 @@ pub(crate) enum DiffRow {
         number: usize,
         text: String,
     },
+    /// A line both sides share, numbered on the new side.
     Context {
         number: usize,
         text: String,
     },
-    /// A `\ No newline at end of file` marker, or a hunk line no diff prefix opens.
+    /// A `\ No newline at end of file` marker, a blank line between hunks, or a hunk line no diff
+    /// prefix opens.
     Marker(String),
     /// Any other line outside a hunk, such as a mode change or a binary-file notice.
     Note(String),
@@ -49,14 +51,15 @@ pub(crate) enum DiffRow {
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) struct Truncation {
     dropped_bytes: usize,
-    /// The git commands that print the full output.
+    /// The git commands that print what was cut.
     full_command: &'static str,
 }
 
 impl WorkingTreeDiff {
     /// Parses the `tracked` diff sections and the NUL-separated `untracked` paths in order, until
-    /// the byte budget runs out. `full_command` names the git commands for the truncation note.
-    pub(crate) fn new(tracked: &[&str], untracked: &str, full_command: &'static str) -> Self {
+    /// the byte budget runs out. `diff_command` names the git commands that print the full diff,
+    /// for a truncation note on a cut inside it.
+    pub(crate) fn new(tracked: &[&str], untracked: &str, diff_command: &'static str) -> Self {
         let total = tracked.iter().map(|s| s.len()).sum::<usize>() + untracked.len();
         let mut budget = Budget::default();
         let mut parser = Parser::default();
@@ -69,6 +72,11 @@ impl WorkingTreeDiff {
             }
             parser.end_file();
         }
+        let full_command = if budget.exhausted {
+            diff_command
+        } else {
+            "`git status`"
+        };
         let untracked = untracked
             .split_terminator('\0')
             .take_while(|path| budget.take(path.len() + 1))
@@ -86,7 +94,7 @@ impl WorkingTreeDiff {
     }
 
     /// Returns whether the tree has no change to show.
-    pub(crate) fn is_empty(&self) -> bool {
+    pub(super) fn is_empty(&self) -> bool {
         self.rows.is_empty() && self.untracked.is_empty() && self.truncation.is_none()
     }
 }
@@ -281,25 +289,20 @@ fn header_path(path: &str) -> String {
     }
 }
 
-/// Decodes the C-quoted string that opens `s`, as in `"a\tb"`, and returns it with the text after
-/// its closing quote. Git writes other bytes as `\` and three octal digits, decoded as UTF-8.
+/// Decodes the C-quoted string that opens `s`, as in `"a \"b\""`, and returns it with the text
+/// after its closing quote. Octal escapes of non-ASCII bytes decode as UTF-8, while escapes of
+/// control characters, such as `\t`, stay as written, since the terminal would not draw them.
 fn take_quoted(s: &str) -> Option<(String, &str)> {
     let mut bytes = s.strip_prefix('"')?.bytes().enumerate();
     let mut decoded = Vec::new();
     while let Some((i, byte)) = bytes.next() {
-        let byte = match byte {
+        match byte {
             b'"' => {
                 let decoded = String::from_utf8_lossy(&decoded).into_owned();
                 return Some((decoded, &s[i + 2..]));
             }
             b'\\' => match bytes.next()?.1 {
-                b'a' => 0x07,
-                b'b' => 0x08,
-                b't' => b'\t',
-                b'n' => b'\n',
-                b'v' => 0x0b,
-                b'f' => 0x0c,
-                b'r' => b'\r',
+                escaped @ (b'"' | b'\\') => decoded.push(escaped),
                 digit @ b'0'..=b'3' => {
                     let mut value = digit - b'0';
                     for _ in 0..2 {
@@ -309,13 +312,16 @@ fn take_quoted(s: &str) -> Option<(String, &str)> {
                         }
                         value = value * 8 + (next - b'0');
                     }
-                    value
+                    if value.is_ascii() {
+                        decoded.extend(format!("\\{value:03o}").bytes());
+                    } else {
+                        decoded.push(value);
+                    }
                 }
-                escaped => escaped,
+                escaped => decoded.extend([b'\\', escaped]),
             },
-            byte => byte,
-        };
-        decoded.push(byte);
+            byte => decoded.push(byte),
+        }
     }
     None
 }
@@ -366,10 +372,33 @@ fn format_size(bytes: usize) -> String {
     }
 }
 
+// ── Testing ──
+
+#[cfg(test)]
+pub(crate) mod testing {
+    use super::DiffRow;
+
+    pub(crate) fn removed(number: usize, text: &str) -> DiffRow {
+        let text = text.to_owned();
+        DiffRow::Removed { number, text }
+    }
+
+    pub(crate) fn added(number: usize, text: &str) -> DiffRow {
+        let text = text.to_owned();
+        DiffRow::Added { number, text }
+    }
+
+    pub(crate) fn context(number: usize, text: &str) -> DiffRow {
+        let text = text.to_owned();
+        DiffRow::Context { number, text }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use indoc::indoc;
 
+    use super::testing::{added, context, removed};
     use super::*;
 
     const HINT: &str = "`git diff HEAD`";
@@ -382,298 +411,304 @@ mod tests {
         DiffRow::Hunk(header.to_owned())
     }
 
-    fn removed(number: usize, text: &str) -> DiffRow {
-        let text = text.to_owned();
-        DiffRow::Removed { number, text }
-    }
-
-    fn added(number: usize, text: &str) -> DiffRow {
-        let text = text.to_owned();
-        DiffRow::Added { number, text }
-    }
-
-    fn context(number: usize, text: &str) -> DiffRow {
-        let text = text.to_owned();
-        DiffRow::Context { number, text }
-    }
-
     fn rows_of(diff: &str) -> Vec<DiffRow> {
         WorkingTreeDiff::new(&[diff], "", HINT).rows
     }
 
-    mod new {
+    mod working_tree_diff {
         use super::*;
 
-        #[test]
-        fn reads_files_hunks_and_numbered_lines() {
-            let rows = rows_of(indoc! {"
-                diff --git a/foo.rs b/foo.rs
-                index abc..def 100644
-                --- a/foo.rs
-                +++ b/foo.rs
-                @@ -27,3 +27,3 @@
-                -old line
-                +new line
-                 context
-            "});
+        mod new {
+            use super::*;
 
-            assert_eq!(
-                rows,
-                [
-                    file("foo.rs"),
-                    hunk("@@ -27,3 +27,3 @@"),
-                    removed(27, "old line"),
-                    added(27, "new line"),
-                    context(28, "context"),
-                ]
-            );
+            #[test]
+            fn reads_files_hunks_and_numbered_lines() {
+                let rows = rows_of(indoc! {"
+                    diff --git a/foo.rs b/foo.rs
+                    index abc..def 100644
+                    --- a/foo.rs
+                    +++ b/foo.rs
+                    @@ -27,3 +27,3 @@
+                    -old line
+                    +new line
+                     context
+                "});
+
+                assert_eq!(
+                    rows,
+                    [
+                        file("foo.rs"),
+                        hunk("@@ -27,3 +27,3 @@"),
+                        removed(27, "old line"),
+                        added(27, "new line"),
+                        context(28, "context"),
+                    ]
+                );
+            }
+
+            #[test]
+            fn classifies_hunk_lines_by_their_first_character() {
+                let rows = rows_of(indoc! {"
+                    diff --git a/notes.md b/notes.md
+                    @@ -10,4 +10,3 @@
+                     intro
+                    -- item
+                    --- yaml
+                    +++ counter
+                     outro
+                "});
+
+                assert_eq!(
+                    rows[2..],
+                    [
+                        context(10, "intro"),
+                        removed(11, "- item"),
+                        removed(12, "-- yaml"),
+                        added(11, "++ counter"),
+                        context(12, "outro"),
+                    ]
+                );
+            }
+
+            #[test]
+            fn advances_both_sides_through_context_lines() {
+                let rows = rows_of(indoc! {"
+                    diff --git a/x b/x
+                    @@ -1,3 +1,3 @@
+                    +first
+                     middle
+                    +third
+                    -fourth
+                "});
+
+                assert_eq!(
+                    rows[2..],
+                    [
+                        added(1, "first"),
+                        context(2, "middle"),
+                        added(3, "third"),
+                        removed(2, "fourth"),
+                    ]
+                );
+            }
+
+            #[test]
+            fn reads_an_empty_line_inside_a_hunk_as_a_blank_context_line() {
+                let rows = rows_of(indoc! {"
+                    diff --git a/x b/x
+                    @@ -1,3 +1,3 @@
+                     a
+
+                    -c
+                    +C
+                "});
+
+                assert_eq!(
+                    rows[2..],
+                    [
+                        context(1, "a"),
+                        context(2, ""),
+                        removed(3, "c"),
+                        added(3, "C")
+                    ]
+                );
+            }
+
+            #[test]
+            fn ends_hunks_by_count_so_later_headers_stay_headers() {
+                let rows = rows_of(indoc! {r"
+                    diff --git a/one.rs b/one.rs
+                    @@ -1,2 +1 @@
+                    -a
+                    -b
+                    +c
+                    \ No newline at end of file
+                    diff --git a/two.rs b/two.rs
+                    index 3333333..4444444 100644
+                    --- a/two.rs
+                    +++ b/two.rs
+                    @@ -1 +1 @@
+                    -x
+                    +y
+                "});
+
+                assert_eq!(
+                    rows,
+                    [
+                        file("one.rs"),
+                        hunk("@@ -1,2 +1 @@"),
+                        removed(1, "a"),
+                        removed(2, "b"),
+                        added(1, "c"),
+                        DiffRow::Marker(r"\ No newline at end of file".to_owned()),
+                        file("two.rs"),
+                        hunk("@@ -1 +1 @@"),
+                        removed(1, "x"),
+                        added(1, "y"),
+                    ]
+                );
+            }
+
+            #[test]
+            fn starts_each_file_outside_a_hunk_even_when_the_last_hunk_ran_short() {
+                let rows = rows_of(indoc! {"
+                    diff --git a/x b/x
+                    @@ -1,3 +1,3 @@
+                    -a
+                    +b
+                    diff --git a/y b/y
+                    --- a/y
+                    +++ b/y
+                "});
+
+                assert_eq!(
+                    rows,
+                    [
+                        file("x"),
+                        hunk("@@ -1,3 +1,3 @@"),
+                        removed(1, "a"),
+                        added(1, "b"),
+                        file("y"),
+                    ]
+                );
+            }
+
+            #[test]
+            fn starts_each_section_outside_a_hunk() {
+                let cached = "@@ -0,0 +1,3 @@\n+a\n";
+                let unstaged = "--- a/x\n+++ b/x\n";
+
+                let diff = WorkingTreeDiff::new(&[cached, unstaged], "", HINT);
+
+                assert_eq!(diff.rows, [hunk("@@ -0,0 +1,3 @@"), added(1, "a")]);
+            }
+
+            #[test]
+            fn marks_a_corrupt_hunk_line_without_taking_a_number() {
+                let rows = rows_of(indoc! {"
+                    diff --git a/x b/x
+                    @@ -1,2 +1,2 @@
+                    +real add
+                    corrupt-no-marker
+                    +second add
+                "});
+
+                assert_eq!(
+                    rows[2..],
+                    [
+                        added(1, "real add"),
+                        DiffRow::Marker("corrupt-no-marker".to_owned()),
+                        added(2, "second add"),
+                    ]
+                );
+            }
+
+            #[test]
+            fn names_a_renamed_file_by_both_paths_and_keeps_its_mode_change() {
+                let rows = rows_of(indoc! {r#"
+                    diff --git a/old.sh b/new.sh
+                    old mode 100644
+                    new mode 100755
+                    similarity index 100%
+                    rename from old.sh
+                    rename to "new\tname.sh"
+                "#});
+
+                assert_eq!(
+                    rows,
+                    [
+                        file(r"old.sh → new\tname.sh"),
+                        DiffRow::Note("old mode 100644".to_owned()),
+                        DiffRow::Note("new mode 100755".to_owned()),
+                    ]
+                );
+            }
+
+            #[test]
+            fn decodes_a_quoted_path() {
+                let rows = rows_of(indoc! {r#"
+                    diff --git "a/\346\226\207 \"x\".txt" "b/\346\226\207 \"x\".txt"
+                    new file mode 100644
+                "#});
+
+                assert_eq!(rows, [file(r#"文 "x".txt"#)]);
+            }
+
+            #[test]
+            fn keeps_a_line_ending_carriage_return_out_of_the_text() {
+                let rows = rows_of("@@ -1 +1 @@\r\n-a\r\n+b\r\n");
+                assert_eq!(rows[1..], [removed(1, "a"), added(1, "b")]);
+            }
+
+            #[test]
+            fn splits_untracked_paths_on_nul() {
+                let diff = WorkingTreeDiff::new(&[], "new.txt\0dir/a b.rs\0", HINT);
+                assert_eq!(diff.untracked, ["new.txt", "dir/a b.rs"]);
+                assert_eq!(diff.truncation, None);
+            }
+
+            #[test]
+            fn keeps_output_that_fills_the_budget_exactly() {
+                let header = "@@ -0,0 +1 @@\n";
+                let diff = format!("{header}+{}\n", "a".repeat(MAX_BYTES - header.len() - 2));
+                assert_eq!(diff.len(), MAX_BYTES);
+
+                let view = WorkingTreeDiff::new(&[&diff], "", HINT);
+
+                assert_eq!(view.truncation, None);
+                assert_eq!(view.rows.len(), 2);
+            }
+
+            #[test]
+            fn cuts_at_a_line_and_drops_every_later_piece() {
+                let header = "@@ -0,0 +1,6000 @@\n";
+                let line = "+added line\n";
+                let diff = format!("{header}{}", line.repeat(6000));
+                let (later, untracked) = ("@@ -1 +1 @@\n", "late.txt\0");
+
+                let view = WorkingTreeDiff::new(&[&diff, later], untracked, HINT);
+
+                let kept = (MAX_BYTES - header.len()) / line.len();
+                assert_eq!(view.rows.len(), 1 + kept);
+                assert_eq!(view.rows.last(), Some(&added(kept, "added line")));
+                assert_eq!(view.untracked, Vec::<String>::new());
+                let total = diff.len() + later.len() + untracked.len();
+                assert_eq!(
+                    view.truncation,
+                    Some(Truncation {
+                        dropped_bytes: total - (header.len() + kept * line.len()),
+                        full_command: HINT,
+                    })
+                );
+            }
+
+            #[test]
+            fn names_git_status_when_the_cut_lands_in_the_untracked_paths() {
+                let path = format!("{}\0", "a".repeat(1023));
+                let untracked = path.repeat(65);
+
+                let view = WorkingTreeDiff::new(&["@@ -1 +1 @@\n"], &untracked, HINT);
+
+                assert_eq!(view.untracked.len(), 63);
+                assert_eq!(
+                    view.truncation,
+                    Some(Truncation {
+                        dropped_bytes: 2 * 1024,
+                        full_command: "`git status`",
+                    })
+                );
+            }
         }
 
-        #[test]
-        fn classifies_hunk_lines_by_their_first_character() {
-            let rows = rows_of(indoc! {"
-                diff --git a/notes.md b/notes.md
-                @@ -10,4 +10,3 @@
-                 intro
-                -- item
-                --- yaml
-                +++ counter
-                 outro
-            "});
+        mod is_empty {
+            use super::*;
 
-            assert_eq!(
-                rows[2..],
-                [
-                    context(10, "intro"),
-                    removed(11, "- item"),
-                    removed(12, "-- yaml"),
-                    added(11, "++ counter"),
-                    context(12, "outro"),
-                ]
-            );
-        }
-
-        #[test]
-        fn advances_both_sides_through_context_lines() {
-            let rows = rows_of(indoc! {"
-                diff --git a/x b/x
-                @@ -1,3 +1,3 @@
-                +first
-                 middle
-                +third
-                -fourth
-            "});
-
-            assert_eq!(
-                rows[2..],
-                [
-                    added(1, "first"),
-                    context(2, "middle"),
-                    added(3, "third"),
-                    removed(2, "fourth"),
-                ]
-            );
-        }
-
-        #[test]
-        fn reads_an_empty_line_inside_a_hunk_as_a_blank_context_line() {
-            let rows = rows_of(indoc! {"
-                diff --git a/x b/x
-                @@ -1,3 +1,3 @@
-                 a
-
-                -c
-                +C
-            "});
-
-            assert_eq!(
-                rows[2..],
-                [
-                    context(1, "a"),
-                    context(2, ""),
-                    removed(3, "c"),
-                    added(3, "C")
-                ]
-            );
-        }
-
-        #[test]
-        fn ends_hunks_by_count_so_later_headers_stay_headers() {
-            let rows = rows_of(indoc! {r"
-                diff --git a/one.rs b/one.rs
-                @@ -1,2 +1 @@
-                -a
-                -b
-                +c
-                \ No newline at end of file
-                diff --git a/two.rs b/two.rs
-                index 3333333..4444444 100644
-                --- a/two.rs
-                +++ b/two.rs
-                @@ -1 +1 @@
-                -x
-                +y
-            "});
-
-            assert_eq!(
-                rows,
-                [
-                    file("one.rs"),
-                    hunk("@@ -1,2 +1 @@"),
-                    removed(1, "a"),
-                    removed(2, "b"),
-                    added(1, "c"),
-                    DiffRow::Marker(r"\ No newline at end of file".to_owned()),
-                    file("two.rs"),
-                    hunk("@@ -1 +1 @@"),
-                    removed(1, "x"),
-                    added(1, "y"),
-                ]
-            );
-        }
-
-        #[test]
-        fn starts_each_file_outside_a_hunk_even_when_the_last_hunk_ran_short() {
-            let rows = rows_of(indoc! {"
-                diff --git a/x b/x
-                @@ -1,3 +1,3 @@
-                -a
-                +b
-                diff --git a/y b/y
-                --- a/y
-                +++ b/y
-            "});
-
-            assert_eq!(
-                rows,
-                [
-                    file("x"),
-                    hunk("@@ -1,3 +1,3 @@"),
-                    removed(1, "a"),
-                    added(1, "b"),
-                    file("y"),
-                ]
-            );
-        }
-
-        #[test]
-        fn starts_each_section_outside_a_hunk() {
-            let cached = "@@ -0,0 +1,3 @@\n+a\n";
-            let unstaged = "--- a/x\n+++ b/x\n";
-
-            let diff = WorkingTreeDiff::new(&[cached, unstaged], "", HINT);
-
-            assert_eq!(diff.rows, [hunk("@@ -0,0 +1,3 @@"), added(1, "a")]);
-        }
-
-        #[test]
-        fn marks_a_corrupt_hunk_line_without_taking_a_number() {
-            let rows = rows_of(indoc! {"
-                diff --git a/x b/x
-                @@ -1,2 +1,2 @@
-                +real add
-                corrupt-no-marker
-                +second add
-            "});
-
-            assert_eq!(
-                rows[2..],
-                [
-                    added(1, "real add"),
-                    DiffRow::Marker("corrupt-no-marker".to_owned()),
-                    added(2, "second add"),
-                ]
-            );
-        }
-
-        #[test]
-        fn names_a_renamed_file_by_both_paths_and_keeps_its_mode_change() {
-            let rows = rows_of(indoc! {r#"
-                diff --git a/old.sh b/new.sh
-                old mode 100644
-                new mode 100755
-                similarity index 100%
-                rename from old.sh
-                rename to "new\tname.sh"
-            "#});
-
-            assert_eq!(
-                rows,
-                [
-                    file("old.sh → new\tname.sh"),
-                    DiffRow::Note("old mode 100644".to_owned()),
-                    DiffRow::Note("new mode 100755".to_owned()),
-                ]
-            );
-        }
-
-        #[test]
-        fn decodes_a_quoted_path() {
-            let rows = rows_of(indoc! {r#"
-                diff --git "a/\346\226\207 \"x\".txt" "b/\346\226\207 \"x\".txt"
-                new file mode 100644
-            "#});
-
-            assert_eq!(rows, [file(r#"文 "x".txt"#)]);
-        }
-
-        #[test]
-        fn keeps_a_line_ending_carriage_return_out_of_the_text() {
-            let rows = rows_of("@@ -1 +1 @@\r\n-a\r\n+b\r\n");
-            assert_eq!(rows[1..], [removed(1, "a"), added(1, "b")]);
-        }
-
-        #[test]
-        fn splits_untracked_paths_on_nul() {
-            let diff = WorkingTreeDiff::new(&[], "new.txt\0dir/a b.rs\0", HINT);
-            assert_eq!(diff.untracked, ["new.txt", "dir/a b.rs"]);
-            assert_eq!(diff.truncation, None);
-        }
-
-        #[test]
-        fn keeps_output_that_fills_the_budget_exactly() {
-            let header = "@@ -0,0 +1 @@\n";
-            let diff = format!("{header}+{}\n", "a".repeat(MAX_BYTES - header.len() - 2));
-            assert_eq!(diff.len(), MAX_BYTES);
-
-            let view = WorkingTreeDiff::new(&[&diff], "", HINT);
-
-            assert_eq!(view.truncation, None);
-            assert_eq!(view.rows.len(), 2);
-        }
-
-        #[test]
-        fn cuts_at_a_line_and_drops_every_later_piece() {
-            let header = "@@ -0,0 +1,6000 @@\n";
-            let line = "+added line\n";
-            let diff = format!("{header}{}", line.repeat(6000));
-            let (later, untracked) = ("@@ -1 +1 @@\n", "late.txt\0");
-
-            let view = WorkingTreeDiff::new(&[&diff, later], untracked, HINT);
-
-            let kept = (MAX_BYTES - header.len()) / line.len();
-            assert_eq!(view.rows.len(), 1 + kept);
-            assert_eq!(view.rows.last(), Some(&added(kept, "added line")));
-            assert_eq!(view.untracked, Vec::<String>::new());
-            let total = diff.len() + later.len() + untracked.len();
-            assert_eq!(
-                view.truncation,
-                Some(Truncation {
-                    dropped_bytes: total - (header.len() + kept * line.len()),
-                    full_command: HINT,
-                })
-            );
-        }
-    }
-
-    mod is_empty {
-        use super::*;
-
-        #[test]
-        fn holds_only_without_rows_paths_or_truncation() {
-            assert!(WorkingTreeDiff::new(&["", ""], "", HINT).is_empty());
-            assert!(!WorkingTreeDiff::new(&[], "a\0", HINT).is_empty());
-            assert!(!WorkingTreeDiff::new(&["@@ -1 +1 @@\n"], "", HINT).is_empty());
+            #[test]
+            fn holds_only_without_rows_paths_or_truncation() {
+                assert!(WorkingTreeDiff::new(&["", ""], "", HINT).is_empty());
+                assert!(!WorkingTreeDiff::new(&[], "a\0", HINT).is_empty());
+                assert!(!WorkingTreeDiff::new(&["@@ -1 +1 @@\n"], "", HINT).is_empty());
+            }
         }
     }
 
@@ -716,7 +751,7 @@ mod tests {
         fn decodes_quoted_halves() {
             assert_eq!(
                 parse_diff_git_path(r#"diff --git "a/tab\there" "b/tab\there""#).as_deref(),
-                Some("tab\there"),
+                Some(r"tab\there"),
             );
         }
 
@@ -734,10 +769,10 @@ mod tests {
         use super::*;
 
         #[test]
-        fn decodes_escapes_and_returns_the_rest() {
+        fn decodes_quotes_and_backslashes_and_keeps_control_escapes() {
             assert_eq!(
-                take_quoted(r#""\a\b\t\n\v\f\r\"\\" rest"#),
-                Some(("\x07\x08\t\n\x0b\x0c\r\"\\".to_owned(), " rest")),
+                take_quoted(r#""\a\t\"\\\001\177" rest"#),
+                Some((r#"\a\t"\\001\177"#.to_owned(), " rest")),
             );
         }
 
