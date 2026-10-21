@@ -36,10 +36,8 @@ use crate::message::{ContentBlock, Message};
 use crate::model::{self, ModelSpec, TokenUsage};
 use crate::permission::{Mode, Policy, Workspace};
 use crate::prompt::{self, PromptParts, SessionContext, UserContext};
-use crate::protocol::{
-    ConfigPick, Event, EventSink, Interaction, Op, ResumeTarget, UsageSnapshot,
-    session_write_failed,
-};
+use crate::protocol::notice::{self, ConfigSettings};
+use crate::protocol::{ConfigPick, Event, EventSink, Interaction, Op, ResumeTarget, UsageSnapshot};
 use crate::session::display::id_prefix;
 use crate::session::entry::{CompactInfo, UsageRecord};
 use crate::session::handle::{self, Checkpoint, LoadedTranscript, RollIntoOutcome, SessionHandle};
@@ -705,7 +703,7 @@ impl Engine {
         let outcome = self.session.set_manual_title(title.clone()).await;
         if let Some(failure) = outcome.failure {
             sink.emit(
-                Event::RenameFailed(session_write_failed(&failure)),
+                Event::RenameFailed(notice::session_write_failed(&failure)),
                 "rename-failed",
             );
             return;
@@ -721,6 +719,11 @@ impl Engine {
 
     /// Applies a model and / or effort pick. The model goes first because it re-resolves effort.
     fn set_model(&mut self, sink: &dyn EventSink, pick: ConfigPick) {
+        let before = ConfigSettings {
+            model: self.client.model().clone(),
+            effort: self.client.effort(),
+            auto_compaction: self.compaction.auto,
+        };
         if let ConfigPick::Model { id, .. } = &pick {
             self.client.set_model(id.clone().into_inner());
             self.compaction = self
@@ -733,12 +736,24 @@ impl Engine {
         };
         self.auto_compaction_failures.reset(sink);
         self.emit_usage_update(sink);
+        let after = ConfigSettings {
+            model: self.client.model().clone(),
+            effort: resolved,
+            auto_compaction: self.compaction.auto,
+        };
+        let notice = notice::config_changed(&before, &after, &pick);
+        let ConfigSettings {
+            model,
+            effort,
+            auto_compaction,
+        } = after;
         sink.emit(
             Event::ConfigChanged {
-                model: self.client.model().clone(),
-                effort: resolved,
+                model,
+                effort,
                 requested: pick,
-                auto_compaction: self.compaction.auto,
+                auto_compaction,
+                notice,
             },
             "config-changed",
         );
@@ -1144,7 +1159,7 @@ mod tests {
     use crate::config::compaction::CompactionConfig;
     use crate::config::compaction::testing::WINDOW_1M_THRESHOLD;
     use crate::config::oauth::testing::write_creds;
-    use crate::config::{Effort, PromptCacheTtl};
+    use crate::config::{Effort, PromptCacheTtl, display_auto_compaction};
     use crate::file_tracker::testing::seed_full_read;
     use crate::message::{Replay, Role};
     use crate::model::ResolvedModelId;
@@ -3927,6 +3942,50 @@ mod tests {
         }
 
         #[tokio::test]
+        async fn notices_the_change_against_the_settings_before_it() {
+            with_pinned_home(async {
+                let server = MockServer::start().await;
+                let dir = tempfile::tempdir().unwrap();
+                let mut engine = engine(server.uri(), &test_store(dir.path()), dir.path()).await;
+                engine.client.set_effort(Effort::High);
+                let opus = ModelSpec::resolve(MODEL.to_owned());
+                engine.compaction =
+                    CompactionConfig::default_for_test(&opus, engine.client.max_tokens());
+                let opus_compaction = display_auto_compaction(engine.compaction.auto);
+                let sink = CapturingSink::default();
+
+                for id in ["custom-model", MODEL] {
+                    let id = ResolvedModelId::new(id.to_owned());
+                    engine.set_model(&sink, ConfigPick::Model { id, effort: None });
+                }
+
+                let notices: Vec<String> = sink
+                    .events()
+                    .into_iter()
+                    .filter_map(|event| match event {
+                        Event::ConfigChanged { notice, .. } => Some(notice),
+                        _ => None,
+                    })
+                    .collect();
+                assert_eq!(
+                    notices,
+                    [
+                        "Switched to custom-model (custom-model). \
+                         Effort cleared (model has no effort tier). \
+                         Auto compaction off."
+                            .to_owned(),
+                        format!(
+                            "Switched to Claude Opus 5.5 (claude-opus-5-5) · \
+                             effort medium (model default). \
+                             Auto compaction {opus_compaction}.",
+                        ),
+                    ],
+                );
+            })
+            .await;
+        }
+
+        #[tokio::test]
         async fn swap_keeps_the_system_prompt_and_names_the_model_next_turn() {
             with_pinned_home(async {
                 let server = MockServer::start().await;
@@ -4887,6 +4946,7 @@ mod tests {
                             effort: Some(Effort::Low),
                             requested: ConfigPick::Effort(Effort::Low),
                             auto_compaction: CompactionConfig::with_threshold_for_test(50_000).auto,
+                            notice: String::new(),
                         },
                         Some(TurnEnd::Completed),
                     ),
@@ -4897,6 +4957,7 @@ mod tests {
                             effort: None,
                             requested: ConfigPick::Effort(Effort::Low),
                             auto_compaction: CompactionConfig::with_threshold_for_test(50_000).auto,
+                            notice: String::new(),
                         },
                         Some(TurnEnd::Failed),
                     ),
