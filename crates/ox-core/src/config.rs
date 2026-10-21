@@ -104,7 +104,7 @@ impl ConfigSnapshot {
 // ── Effort ──
 
 /// Effort level sent as `output_config.effort`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Effort {
     Low,

@@ -40,7 +40,7 @@ impl AuthKind {
     }
 
     /// The request header the credential travels in.
-    pub(crate) fn header_name(self) -> HeaderName {
+    pub(super) fn header_name(self) -> HeaderName {
         match self {
             Self::ApiKey => HeaderName::from_static("x-api-key"),
             Self::AuthToken | Self::OAuth => AUTHORIZATION,
