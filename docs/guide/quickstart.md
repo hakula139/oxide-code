@@ -44,8 +44,9 @@ In the chat:
 - **Expand output**: Press **Ctrl+O** to show long tool output and finished thinking in full, and again to collapse them.
 - **Switch modes**: Press **Shift+Tab** to switch to the read-only `plan` [permission mode](permissions.md#modes) and back.
 - **Select and copy**: Drag over chat text to select it, and release to copy it to the clipboard.
+- **Interrupt and exit**: Press **Esc** to stop a running turn, and **Ctrl+C** twice to exit.
 
-[Terminal UI](terminal-ui.md) covers the input keys, queued prompts, interrupting and exiting, and copying over SSH.
+[Terminal UI](terminal-ui.md) covers new lines and the other input keys, queued prompts, and copying over SSH.
 
 ## Approve Tool Calls
 
@@ -66,7 +67,7 @@ The approval prompt takes these keys:
 | **F**   | Deny with a note the model reads                              |
 | **Esc** | Deny and end the turn                                         |
 
-When a pattern can name the call, pressing **A** opens the pattern it will allow, such as `cargo test`, which you can edit before pressing **Enter**, for example to widen it to `cargo test *`. Session rules last until you exit or start another session, and `/status` lists them.
+When the prompt offers **A**, pressing it opens the pattern it will allow, such as `cargo test`, which you can edit before pressing **Enter**, for example to widen it to `cargo test *`. Session rules last until you exit or start another session, and `/status` lists them.
 
 See [Permissions](permissions.md) for the other modes, the rest of the prompt's behavior, and how to write patterns.
 

@@ -1,12 +1,12 @@
 # Permissions
 
-Every tool call passes a permission check before running. Reads anywhere except SSH keys and the credential files that the [built-in rules](#built-in-rules) deny, and edits inside the working directory or an [extra root](#workspace-roots), run without asking. The permission mode and your rules decide every other call.
+Every tool call passes a permission check before running. In the default `manual` mode, reads, read-only commands such as `ls`, and edits inside the working directory or an [extra root](#workspace-roots) run without asking, and every other call asks. Your [rules](#rules) adjust that call by call: a deny rule blocks a call in every mode, an ask rule makes a call ask even when it would otherwise run, and an allow rule lets a call run without asking. The [built-in rules](#built-in-rules) already deny reads of `~/.ssh` and credential files and ask before edits to protected config.
 
 ## Modes
 
-- **`manual`**, the default: Ask before tool calls that no permission rule allows or denies.
-- **`plan`**: Read-only: deny edits and commands. Every edit, `exec`, and `net` call is denied, including read-only commands such as `ls`. Reads behave as in `manual`. The `tasks`, `bash_output`, and `bash_stop` tools count as reads, so they still run.
-- **`yolo`**: Run tool calls without asking unless a rule denies or asks. Deny patterns still deny, and ask patterns and the built-in ask rules still ask, so `yolo` asks before an edit to `.git/hooks` until you set `git = false`. A headless run denies those calls.
+- **`manual`**, the default, asks before tool calls that no permission rule allows or denies.
+- **`plan`** is read-only, so it denies every edit, `exec`, and `net` call, including read-only commands such as `ls`. Reads behave as in `manual`, and the `tasks`, `bash_output`, and `bash_stop` tools count as reads, so they still run.
+- **`yolo`** runs tool calls without asking unless a rule denies or asks. The built-in ask rules count, so `yolo` asks before an edit to `.git/hooks` until you set `git = false` under `[permission.defaults]`. A headless run denies the calls that would ask.
 
 Set the mode with `mode` under `[permission]` in your user config. The environment variable `OX_PERMISSION_MODE` overrides `mode`, and `ox --mode <mode>` overrides both for one run.
 
@@ -14,13 +14,22 @@ During a session, `/mode` opens a picker of the three modes, and `/mode <mode>` 
 
 ## Approval Prompt
 
-When a call asks, the TUI opens an approval prompt. The prompt names the pattern or built-in rule that made the call ask, and a denied call tells the model which rule or mode denied it. Press **Y** to approve, **A** to approve and add a session rule that allows matching calls, **N** to deny, **F** to deny and tell the model why, or **Esc** to deny and end the turn. With **F**, type the feedback and press **Enter**, and the model receives it as the call's result. **Enter** does nothing at the choice, and the prompt ignores keys until you pause typing for 300 ms, so keystrokes or a paste meant for the input box cannot answer it.
+When a call asks, the TUI opens an approval prompt. The prompt names the pattern or built-in rule that made the call ask, and a denied call tells the model which rule or mode denied it. Press **Y** to approve, **A** to approve and add a session rule that allows matching calls, **N** to deny, **F** to deny and tell the model why, or **Esc** to deny and end the turn. With **F**, type the feedback and press **Enter**, and the model receives it as the call's result. **Enter** alone does nothing in the prompt, and the prompt ignores keys until you pause typing for 300 ms, so keystrokes or a paste meant for the input box cannot answer it.
 
 The `--no-tui` REPL asks on stderr with the same choices and reads the answer from the next input line, using `x` to end the turn. It asks only when stdin is a terminal. A REPL reading piped input and a headless run (`-p`) cannot ask, so they deny the call and tell the model which pattern to add to which `[permission.allow]` list, such as `"cargo test"` under `exec`.
 
-The **A** key opens the pattern of the session rule it will add, in the syntax below, so you can widen or narrow it before pressing **Enter**. The pattern must still cover the call being approved. The prompt offers **A** only when such a pattern would let the call run, so a [protected path](#built-in-rules), a call an `ask` pattern matches, a chained command such as `cargo test | tail`, a word that expands or globs, as in `ls *.rs`, or an invisible character offers none. Session rules live in memory until you exit, `/clear`, `/archive`, or `/resume` another session, `/status` lists them, and deny patterns, ask patterns, and protected paths still take precedence over them.
+The **A** key opens the pattern of the session rule it will add, in the syntax below, so you can widen or narrow it before pressing **Enter**. The pattern must still cover the call being approved. In the **A** and **F** editors, **Esc** goes back to the choice. The prompt offers **A** only when such a pattern would let the call run, so these calls offer none:
 
-## Rules
+- An edit to a [protected path](#built-in-rules)
+- A call an `ask` pattern matches
+- A chained command, such as `cargo test | tail`
+- A command with a word that expands or globs, as in `ls *.rs`, or with an invisible character
+
+Session rules live in memory until you exit, `/clear`, `/archive`, or `/resume` another session, and `/status` lists them. Deny patterns, ask patterns, and protected paths still take precedence over them. To keep a session rule, add its pattern to the matching class list under `[permission.allow]` in your user config.
+
+## Settings
+
+Set these keys under `[permission]` in `~/.config/ox/config.toml` or a drop-in. A project's `.ox/config.toml` accepts only `deny` and `ask`, as [Project Config](configuration.md#project-config) explains.
 
 | Key           | Type   | Default    | Description                                                                                          |
 | ------------- | ------ | ---------- | ---------------------------------------------------------------------------------------------------- |
@@ -32,6 +41,11 @@ The **A** key opens the pattern of the session rule it will add, in the syntax b
 | `defaults`    | table  | all on     | Built-in rules to turn off by name, [user config only](configuration.md#project-config)              |
 
 ```toml
+# ~/.config/ox/config.toml
+[permission]
+mode = "manual"
+extra_roots = ["~/src/shared-lib"]
+
 [permission.deny]
 read = ["~/.aws/**", "/**/.env"]
 
@@ -42,6 +56,10 @@ exec = ["git push *"]
 exec = ["cargo test *", "git status"]
 edit = ["~/notes/**"]
 ```
+
+## Rules
+
+Allow patterns match narrowly, as written, while deny and ask patterns match broadly, across every spelling of a call. So `allow.exec = ["git status"]` covers `git status` but not `git status -s`, while `deny.exec = ["rm"]` blocks every `rm` command.
 
 ### Rule Tables
 
@@ -55,13 +73,13 @@ An `exec` pattern is one command, matched word by word after quotes are removed 
 
 A pattern matches one simple command after wrappers such as `env`, `nice`, and `timeout` and redirections are set aside, so `cargo test *` covers `nice cargo test 2>&1`. A wrapper spelled with a directory, such as `./nice`, may be any program, so it stays part of the command. A leading `VAR=value` assignment is set aside too when it only changes output, as `RUST_LOG`, `LANG`, and `NO_COLOR` do. Any other assignment stays part of the command, so `CARGO_TARGET_DIR=/tmp cargo test` needs a pattern that names it.
 
-A command chained with `;`, `&&`, `||`, or `|` is allowed only when every part is, and writing a file with `>` also needs that file to be inside the working directory or an extra root, or allowed by an `edit` pattern. A deny or ask pattern matches when any part matches, including a quoted, full-path, or differently cased command name such as `/bin/rm` or `RM`. Its words after the first need only appear in order, with any words between them, so `ask.exec = ["git push *"]` also asks for `git -c a=b push`. A word that expands or globs, such as `$X`, `${X:-push}`, or `pu*`, matches any word of a deny or ask pattern, since it may become that word when the command runs. A command that hides what it runs, such as `$(...)`, `eval`, or `sh -c`, is never allowed by a pattern, so it asks in `manual` unless a deny pattern matches. Read-only commands such as `ls`, `cat`, `grep`, `find` without `-exec` or `-delete`, and `sed` without `-i` run without asking.
+A command chained with `;`, `&&`, `||`, or `|` is allowed only when every part is, and writing a file with `>` also needs that file to be inside the working directory or an extra root, or allowed by an `edit` pattern. A deny or ask pattern matches when any part matches, including a quoted, full-path, or differently cased command name such as `/bin/rm` or `RM`. Its words after the first need only appear in order, with any words between them, so `ask.exec = ["git push *"]` also asks for `git -c a=b push`. A word that expands or globs, such as `$X`, `${X:-push}`, or `pu*`, matches any word of a deny or ask pattern, since it may become that word when the command runs. A command that hides what it runs, such as `$(...)`, `eval`, or `sh -c`, is never allowed by a pattern, so it asks in `manual` unless a deny pattern matches. Read-only commands such as `ls`, `cat`, `grep`, `find` without `-exec` or `-delete`, and `sed` without `-i` run without asking when the command runs under its bare name and every argument is a literal word, without a glob or variable. A recursive `grep` asks, and so does `cat src/*.rs`, which an allow pattern such as `cat *` covers.
 
 `read` patterns reach a `bash` command in two places. A file read through `<` faces them like a read tool's file, so `deny.read = ["/**/.env"]` denies `sort < .env`. A file reader (`cat`, `find`, `grep`, `head`, `ls`, `sed`, `tail`, or `wc`) asks when a deny or ask `read` pattern matches one of its file arguments or a file one of its globs matches when the call is checked, so `cat ~/.ss*/id_rsa` asks even under `allow.exec = ["cat *"]`. An argument that expands a variable, as in `cat $F`, may name any file, so it asks whenever a deny or ask `read` pattern exists, and the built-in `ssh` rule is one. Any other program can open whatever files it likes once it runs, so an `exec` allow pattern such as `python3 *` can run its command on files the `read` patterns hold. Deny such commands with an `exec` pattern too.
 
 ### Path Patterns
 
-`read` and `edit` patterns are globs in the style of `.gitignore`, except that a leading `/` means the file system root. A pattern with no `/` other than a trailing one, such as `.env`, matches that name at any depth below the working directory and each extra root. A pattern that starts with `./` or has a `/` anywhere except at the end, such as `./secrets` or `src/*.json`, starts at those directories. A pattern that starts with `/` or `~/` is an absolute path, so `/**/.env` matches a `.env` anywhere on disk. `*` and `?` match within one path segment, `**` spans segments, a trailing `/` is ignored, and a pattern also covers everything below a path it matches, so `secrets` covers `secrets/key`. A pattern with a `.` or `..` segment fails to load, so name a path outside these directories from `/` or `~/`.
+`read` and `edit` patterns are globs in the style of `.gitignore`, except that a leading `/` means the file system root. A pattern with no `/` other than a trailing one, such as `.env`, matches that name at any depth below the working directory and each extra root. A pattern that starts with `./` or has a `/` anywhere except at the end, such as `./secrets` or `src/*.json`, starts at those directories. A pattern that starts with `/` or `~/` is an absolute path, so `/**/.env` matches a `.env` anywhere on disk. `*` and `?` match within one path segment, `**` spans segments, a trailing `/` is ignored, and a pattern also covers everything below a path it matches, so `secrets` covers `secrets/key`. A pattern with a `.` or `..` segment fails to load, so name a path outside these directories from `/` or `~/`. A leading `!` fails to load as well, since patterns have no negation.
 
 Allow patterns match a path only as it resolves, with exact case and spelling. Deny and ask patterns also match the path as the call writes it and, when the pattern's literal leading directories run through a symlink at startup, the location they resolve to. They treat names that differ only in case, Unicode normalization, invisible characters, or trailing dots as the same name, so `deny.read = [".env"]` also blocks `.ENV`. A `read` deny or ask pattern also hides the files it matches from a `grep` or `glob` over their directory, and the output counts the hidden files without naming them.
 
@@ -87,7 +105,7 @@ oxide-code ships the rules below. The ones that ask about edits protect their pa
 | `ssh`         | Reads of `~/.ssh` and everything in it are denied, and edits to `~/.ssh/config` and `~/.ssh/authorized_keys` ask                                  |
 | `credentials` | Reads of oxide-code's `credentials.json` and Claude Code's `~/.claude/.credentials.json` are denied                                               |
 
-Built-in rules sit in the deny and ask tiers, so an allow pattern cannot override one. To turn one off, set its name to `false` under `[permission.defaults]` in user config. A later layer can set it back to `true`.
+Built-in rules sit in the deny and ask tiers, so an allow pattern cannot override one. To turn one off, set its name to `false` under `[permission.defaults]` in user config. A later drop-in can set it back to `true`.
 
 ```toml
 [permission.defaults]

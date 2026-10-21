@@ -6,7 +6,7 @@ oxide-code loads configuration from multiple sources, merged in order of increas
 2. **User config file**: `~/.config/ox/config.toml` (or `$XDG_CONFIG_HOME/ox/config.toml`).
 3. **User drop-ins**: `*.toml` files in `~/.config/ox/config.d/` (or `$XDG_CONFIG_HOME/ox/config.d/`), in file-name order.
 4. **Project config file**: `.ox/config.toml` in the nearest directory from the working directory up to the project root that has one. The project root is the nearest directory at or above the working directory that holds a `.git` directory or file, or the working directory outside a repository.
-5. **Environment variables**: always win.
+5. **Environment variables**: override every file. A command-line flag such as `--mode` overrides them in turn.
 
 Run `/config` to see each resolved value next to the layer that set it: `default`, `user`, `config.d/<name>`, `project`, an environment variable such as `$ANTHROPIC_MODEL`, `--mode` for the permission mode set by that flag, or `session` after a `/model`, `/effort`, or `/mode` change or a **Shift+Tab** mode switch.
 
@@ -79,7 +79,7 @@ status_line = [
 
 #### `model`: Supported Models
 
-oxide-code supports `claude-fable-5-1`, `claude-opus-5-5`, `claude-sonnet-5-5`, and `claude-haiku-5-5`. Each has a 1M-token context window and adaptive thinking. Fable 5.1 isn't available to every account, and some third-party gateways serve it. A request through an account or gateway without it fails with HTTP 404 or 400. Any other ID, such as a gateway alias, is sent verbatim without `effort`, `thinking`, or context management. Its `max_tokens` defaults to `16000`, no cost estimate is provided, and automatic compaction stays off unless you set `auto_threshold_tokens`. oxide-code warns about unsupported IDs at startup. For a `claude-*` ID that names a model family or an ID with a `[1m]` suffix, it suggests the matching supported model.
+oxide-code supports `claude-fable-5-1`, `claude-opus-5-5`, `claude-sonnet-5-5`, and `claude-haiku-5-5`. Each has a 1M-token context window and adaptive thinking. Fable 5.1 isn't available to every account, and some third-party gateways serve it. Requests to it fail where your account or gateway does not serve it. Any other ID, such as a gateway alias, is sent verbatim without `effort`, `thinking`, or context management. Its `max_tokens` defaults to `16000`, no cost estimate is provided, and automatic compaction stays off unless you set `auto_threshold_tokens`. oxide-code warns about unsupported IDs at startup. For a `claude-*` ID that names a model family or an ID with a `[1m]` suffix, it suggests the matching supported model.
 
 #### `effort`: Intelligence Tier
 
@@ -183,7 +183,7 @@ If automatic compaction fails, oxide-code does not send the prompt, and the TUI 
 | `queued-prompts`      | `Queued: 2` while prompts wait for the running turn           | On change       |
 | `task-progress`       | `Tasks: 2/5` completed while the session keeps a task list    | On change       |
 | `thread-title`        | Session title, AI-generated or set by `/rename`               | On change       |
-| `session-id`          | `ID: 3f2a9c1e`, the prefix `ox -c` resumes                    | On change       |
+| `session-id`          | `ID: 3f2a9c1e`, the prefix `ox -r` resumes                    | On change       |
 | `theme`               | `Theme: mocha`, or a theme file's name                        | On `/theme`     |
 | `current-time`        | `HH:MM` in the local timezone                                 | Per minute      |
 
