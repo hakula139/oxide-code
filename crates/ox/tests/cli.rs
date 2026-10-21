@@ -54,6 +54,33 @@ async fn headless_prints_a_startup_error_as_one_line_even_with_backtraces_on() {
 }
 
 #[tokio::test]
+async fn startup_error_escapes_control_characters_a_project_file_supplies() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::create_dir(dir.path().join(".ox")).unwrap();
+    std::fs::write(
+        dir.path().join(".ox/config.toml"),
+        "[client]\n\"\\u001b]0;pwned\\u0007\" = 1\n",
+    )
+    .unwrap();
+
+    let output = tokio::process::Command::from(ox(dir.path()))
+        .args(["-p", "hello"])
+        .current_dir(dir.path())
+        .env("ANTHROPIC_API_KEY", "test-key")
+        .output()
+        .await
+        .unwrap();
+
+    assert_eq!(output.status.code(), Some(1), "{output:?}");
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(
+        stderr.contains(r"cannot set client.\u{1b}]0;pwned\u{7}."),
+        "{stderr}"
+    );
+    assert!(!stderr.contains(['\u{1b}', '\u{7}']), "{stderr:?}");
+}
+
+#[tokio::test]
 async fn headless_reports_startup_notices_and_retries_once_as_plain_text() {
     for format in ["text", "stream-json"] {
         let server = MockServer::start().await;
