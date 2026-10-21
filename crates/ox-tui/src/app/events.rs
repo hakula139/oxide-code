@@ -356,10 +356,20 @@ impl App {
     fn apply_signed_in(&mut self, auth: AuthSource) {
         self.session_info.config.auth = Some(auth);
         self.status_bar.set_rate_limits(None);
-        let message = if auth == AuthSource::OxLogin {
-            format!("Signed in. Requests now use {auth}.")
-        } else {
-            format!("Signed in. {auth} takes precedence, so requests keep using it.")
+        let message = match auth {
+            AuthSource::OxLogin | AuthSource::ClaudeCodeLogin => {
+                format!("Signed in. Requests now use {auth}.")
+            }
+            AuthSource::ApiKeyFile => format!(
+                "Signed in. {auth} takes precedence, so requests keep using it. \
+                 Remove `client.api_key` and restart ox to use the new login."
+            ),
+            AuthSource::AuthTokenEnv | AuthSource::ApiKeyEnv | AuthSource::OAuthTokenEnv => {
+                format!(
+                    "Signed in. {auth} takes precedence, so requests keep using it. \
+                 Unset it and restart ox to use the new login."
+                )
+            }
         };
         self.chat.push_system_message(message);
         self.finish_turn();
@@ -1794,7 +1804,14 @@ mod tests {
                 (
                     AuthSource::ApiKeyEnv,
                     "Signed in. \
-                     API key (ANTHROPIC_API_KEY) takes precedence, so requests keep using it.",
+                     API key (ANTHROPIC_API_KEY) takes precedence, so requests keep using it. \
+                     Unset it and restart ox to use the new login.",
+                ),
+                (
+                    AuthSource::ApiKeyFile,
+                    "Signed in. \
+                     API key (client.api_key) takes precedence, so requests keep using it. \
+                     Remove `client.api_key` and restart ox to use the new login.",
                 ),
             ] {
                 let (mut app, _rx, _event_tx) = test_app(None);
