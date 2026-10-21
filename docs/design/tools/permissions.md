@@ -220,7 +220,7 @@ rm = false
 
 The `[permission]` table parses into a `PermissionTable` on `FileConfig`. `deny_unknown_fields` applies at every level, so an unknown class or default name fails to load and lists the accepted names. Every `permission.<tier>.<class>` list and `permission.extra_roots` entry is concatenated across config layers, while a `permission.defaults` key set in a higher layer replaces the lower one. `Config::load` resolves the policy after the compaction block, including each deny and ask pattern's literal prefix. It also resolves the extra roots with `Workspace::resolve`, failing to load if a root is relative, does not resolve, or is `/`, `$HOME`, or an ancestor of `$HOME`. A root that does not resolve runs through a symlink loop, a directory the walk cannot search, or a file that more components follow, and the error names that component.
 
-A checked-in `.ox/config.toml` is untrusted, so `reject_project_client` limits its `[client]` keys to request settings, and a project file may set only `permission.deny` and `permission.ask`. Any other `[permission]` key there, such as `mode`, `allow`, `extra_roots`, or `defaults`, is rejected with a message pointing to user config. The merge appends project rules to the user's rules, allowing a repo to restrict itself or require approval without widening what the user allowed or turning off a default.
+A checked-in `.ox/config.toml` is untrusted, so `reject_project_keys` checks it against allowlists: it may set only the `[client]`, `[permission]`, and `[tui]` tables, only request settings in `[client]`, and only `permission.deny` and `permission.ask` in `[permission]`. Any other `[permission]` key there, such as `mode`, `allow`, `extra_roots`, or `defaults`, is rejected with a message pointing to user config. The merge appends project rules to the user's rules, allowing a repo to restrict itself or require approval without widening what the user allowed or turning off a default.
 
 ## Stdio Frontends
 
@@ -270,7 +270,7 @@ The stdio sink escapes control characters other than tabs and line breaks in mod
 ## Sources
 
 - `crates/ox-core/src/config.rs`: `Config::load`, `resolve_permission`, `OX_PERMISSION_MODE`, `Effort` enum template.
-- `crates/ox-core/src/config/load.rs`: `reject_project_client`, `reject_project_permissions`.
+- `crates/ox-core/src/config/load.rs`: `reject_project_keys` and the project allowlists.
 - `crates/ox-core/src/config/merge.rs`: `APPENDED_TABLES` and `APPENDED` lists, `merge`.
 - `crates/ox-core/src/config/schema.rs`: `PermissionTable`, `TierTable`, the `defaults` map.
 - `crates/ox-core/src/engine.rs`: the live policy, whose session grants reset when the session changes, `Engine::set_mode`, and `Engine::adopt_mode`.
