@@ -42,6 +42,7 @@ pub(crate) fn test_config(base_url: impl Into<String>, auth: Auth, model: &str) 
         status_line: StatusLineSegment::DEFAULT.to_vec(),
         theme: ThemeConfig {
             base: DEFAULT_THEME.to_owned(),
+            base_source: crate::config::provenance::Source::Default,
             overrides: toml::Table::new(),
         },
         provenance: Provenance::default(),

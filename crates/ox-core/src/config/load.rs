@@ -3,15 +3,17 @@
 
 use std::path::{Path, PathBuf};
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result, anyhow, bail};
 use toml::{Table, Value};
 use tracing::debug;
 
 use super::merge::{Origins, merge};
 use super::provenance::Layer;
 use super::schema::FileConfig;
+use crate::permission::project::{ProjectFileError, resolve_project_file};
 use crate::permission::{Tier, extra_root};
 use crate::util::path::{XdgBase, app_dir};
+use crate::util::toml::{describe_error, locate_error};
 
 const CONFIG_FILE: &str = "config.toml";
 const DROP_IN_DIR: &str = "config.d";
@@ -25,10 +27,12 @@ pub(super) struct Loaded {
     pub(super) origins: Origins,
 }
 
-/// Loads the user file, its drop-ins in name order, then the project file nearest `cwd`. Later
-/// layers win per key, and a project file may not set credentials, endpoints, or permission grants.
-pub(super) fn load(cwd: &Path) -> Result<Loaded> {
-    let layers = discover(app_dir(XdgBase::Config).as_deref(), Some(cwd))?;
+/// Loads the user file, its drop-ins in name order, then the project file nearest `cwd` within
+/// `project_root`. Later layers win per key, and a project file may not set credentials,
+/// endpoints, or permission grants.
+pub(super) fn load(cwd: &Path, project_root: &Path) -> Result<Loaded> {
+    let user_dir = app_dir(XdgBase::Config);
+    let layers = discover(user_dir.as_deref(), Some((cwd, project_root)))?;
     load_layers(layers)
 }
 
@@ -49,8 +53,9 @@ fn load_layers(layers: Vec<Layer>) -> Result<Loaded> {
 
 // ── Discovery ──
 
-/// Every config file that may apply, lowest precedence first. The user file may be missing.
-fn discover(user_dir: Option<&Path>, cwd: Option<&Path>) -> Result<Vec<Layer>> {
+/// Every config file that may apply, lowest precedence first. The user file may be missing, and
+/// `project` pairs the working directory with its project root.
+fn discover(user_dir: Option<&Path>, project: Option<(&Path, &Path)>) -> Result<Vec<Layer>> {
     let mut layers = Vec::new();
     if let Some(dir) = user_dir {
         layers.push(Layer::User(dir.join(CONFIG_FILE)));
@@ -60,8 +65,8 @@ fn discover(user_dir: Option<&Path>, cwd: Option<&Path>) -> Result<Vec<Layer>> {
                 .map(Layer::DropIn),
         );
     }
-    if let Some(cwd) = cwd {
-        layers.extend(project_layer(cwd));
+    if let Some((cwd, root)) = project {
+        layers.extend(project_layer(cwd, root)?);
     }
     Ok(layers)
 }
@@ -94,12 +99,43 @@ fn drop_ins(dir: &Path) -> Result<Vec<PathBuf>> {
     Ok(paths)
 }
 
-/// The `.ox/config.toml` in the nearest directory at or above `cwd` that has one.
-fn project_layer(cwd: &Path) -> Option<Layer> {
-    cwd.ancestors()
+/// The `.ox/config.toml` in the nearest directory from `cwd` up to `root` that has one. It must be
+/// a file [`resolve_project_file`] lets the checkout supply.
+fn project_layer(cwd: &Path, root: &Path) -> Result<Option<Layer>> {
+    let Some(path) = cwd
+        .ancestors()
+        .take_while(|dir| dir.starts_with(root))
         .map(|dir| dir.join(PROJECT_DIR).join(CONFIG_FILE))
         .find(|path| path.is_file())
-        .map(Layer::Project)
+    else {
+        return Ok(None);
+    };
+
+    let fix = || {
+        format!(
+            "Replace the link with a regular file, or move personal settings to {}.",
+            user_config_hint()
+        )
+    };
+    match resolve_project_file(&path, root) {
+        Ok(_) => Ok(Some(Layer::Project(path))),
+        Err(ProjectFileError::Io(e)) => {
+            Err(e).with_context(|| format!("failed to resolve config at {}", path.display()))
+        }
+        Err(ProjectFileError::Outside) => bail!(
+            "{} links outside the project root {}. {}",
+            path.display(),
+            root.display(),
+            fix(),
+        ),
+        Err(ProjectFileError::Linked) => bail!(
+            "{} is reached through a symlink, \
+             which is not followed when the project root {} contains the home directory. {}",
+            path.display(),
+            root.display(),
+            fix(),
+        ),
+    }
 }
 
 pub fn user_config_path() -> Option<PathBuf> {
@@ -126,11 +162,24 @@ fn read_layer(layer: &Layer) -> Result<Option<Table>> {
     // The typed parse reports unknown keys and bad values with their line and column, and the
     // rules and roots resolve here so a malformed one names its file before the lists concatenate.
     let invalid = || format!("invalid config at {}", path.display());
-    let table: Table = content.parse().with_context(invalid)?;
+    // A project file can link to another file in the checkout, and a parser message can quote one
+    // of its values, as in `invalid type: string "..."`, so a project error gives only where it is.
+    let invalid_toml = |e: toml::de::Error| {
+        let detail = if layer.is_project() {
+            locate_error(&content, &e)
+        } else {
+            Some(describe_error(&content, &e))
+        };
+        detail.map_or_else(
+            || anyhow!(invalid()),
+            |detail| anyhow!("{}: {detail}", invalid()),
+        )
+    };
+    let table: Table = content.parse().map_err(invalid_toml)?;
     if layer.is_project() {
         reject_project_permissions(&table, path)?;
     }
-    let config: FileConfig = toml::from_str(&content).with_context(invalid)?;
+    let config: FileConfig = toml::from_str(&content).map_err(invalid_toml)?;
     let permission = &config.permission;
     for (tier, table) in [
         (Tier::Deny, &permission.deny),
@@ -207,7 +256,7 @@ fn reject_project_keys(path: &Path, blocked: &[&str], fix: &str) -> Result<()> {
 }
 
 /// The user config path a fix points to, as written in the docs when no config directory resolves.
-fn user_config_hint() -> String {
+pub fn user_config_hint() -> String {
     user_config_path().map_or_else(
         || "~/.config/ox/config.toml".to_owned(),
         |path| path.display().to_string(),
@@ -225,7 +274,9 @@ mod tests {
     use crate::config::{Effort, StatusLineSegment};
     use crate::permission::Mode;
     use crate::permission::defaults::Shipped;
+    use crate::util::fs::testing::{symlink_dir, symlink_file};
     use crate::util::path::local_testing::abs;
+    use crate::util::path::testing::HOME_VAR;
 
     fn write(path: &Path, body: &str) -> PathBuf {
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
@@ -401,10 +452,11 @@ mod tests {
         #[test]
         fn appends_the_project_layer() {
             let dir = tempfile::tempdir().unwrap();
-            let project = write(&dir.path().join("repo/.ox/config.toml"), "");
+            let repo = dir.path().join("repo");
+            let project = write(&repo.join(".ox/config.toml"), "");
 
             assert_eq!(
-                discover(None, Some(&dir.path().join("repo"))).unwrap(),
+                discover(None, Some((&repo, &repo))).unwrap(),
                 [Layer::Project(project)],
             );
         }
@@ -452,7 +504,10 @@ mod tests {
             let child = dir.path().join("sub/deep");
             std::fs::create_dir_all(&child).unwrap();
 
-            assert_eq!(project_layer(&child), Some(Layer::Project(project)));
+            assert_eq!(
+                project_layer(&child, dir.path()).unwrap(),
+                Some(Layer::Project(project))
+            );
         }
 
         #[test]
@@ -462,7 +517,7 @@ mod tests {
             let nested = write(&dir.path().join("sub/.ox/config.toml"), "");
 
             assert_eq!(
-                project_layer(&dir.path().join("sub")),
+                project_layer(&dir.path().join("sub"), dir.path()).unwrap(),
                 Some(Layer::Project(nested))
             );
         }
@@ -474,8 +529,100 @@ mod tests {
             let outer = write(&dir.path().join(".ox/config.toml"), "");
 
             assert_eq!(
-                project_layer(&dir.path().join("sub")),
+                project_layer(&dir.path().join("sub"), dir.path()).unwrap(),
                 Some(Layer::Project(outer))
+            );
+        }
+
+        #[test]
+        fn ignores_config_above_the_project_root() {
+            let dir = tempfile::tempdir().unwrap();
+            write(&dir.path().join(".ox/config.toml"), "");
+            let root = dir.path().join("repo");
+            let cwd = root.join("sub");
+            std::fs::create_dir_all(&cwd).unwrap();
+
+            assert_eq!(project_layer(&cwd, &root).unwrap(), None);
+        }
+
+        #[test]
+        fn follows_a_link_to_a_file_inside_the_root() {
+            let dir = tempfile::tempdir().unwrap();
+            let shared = write(&dir.path().join("shared.toml"), "");
+            let app = dir.path().join("packages/app");
+            std::fs::create_dir_all(app.join(".ox")).unwrap();
+            let path = app.join(".ox/config.toml");
+            symlink_file(&shared, &path);
+
+            assert_eq!(
+                project_layer(&app, dir.path()).unwrap(),
+                Some(Layer::Project(path))
+            );
+        }
+
+        #[test]
+        fn rejects_a_link_outside_the_root_naming_only_the_link() {
+            let outside = tempfile::tempdir().unwrap();
+            let secret = write(
+                &outside.path().join("credentials"),
+                "token = \"secret-marker\"",
+            );
+            write(&outside.path().join("config.toml"), "");
+            let dir = tempfile::tempdir().unwrap();
+            let config_home = dir.path().join("config-home");
+            let (file_link, dir_link) = (dir.path().join("file"), dir.path().join("dir"));
+            std::fs::create_dir_all(file_link.join(".ox")).unwrap();
+            symlink_file(&secret, &file_link.join(".ox/config.toml"));
+            std::fs::create_dir(&dir_link).unwrap();
+            symlink_dir(outside.path(), &dir_link.join(".ox"));
+
+            for root in [file_link, dir_link] {
+                let err = temp_env::with_var("XDG_CONFIG_HOME", Some(&config_home), || {
+                    project_layer(&root, &root).expect_err("an escaping link must fail")
+                });
+
+                assert_eq!(
+                    format!("{err:#}"),
+                    format!(
+                        "{} links outside the project root {}. \
+                         Replace the link with a regular file, \
+                         or move personal settings to {}.",
+                        root.join(".ox").join("config.toml").display(),
+                        root.display(),
+                        config_home.join("ox").join("config.toml").display(),
+                    ),
+                );
+            }
+        }
+
+        #[test]
+        fn rejects_any_link_below_a_root_that_contains_home() {
+            let home = tempfile::tempdir().unwrap();
+            let config_home = home.path().join("config-home");
+            let shared = write(&home.path().join("shared.toml"), "");
+            let project = home.path().join("project");
+            std::fs::create_dir_all(project.join(".ox")).unwrap();
+            let path = project.join(".ox").join("config.toml");
+            symlink_file(&shared, &path);
+
+            let err = temp_env::with_vars(
+                [
+                    (HOME_VAR, Some(home.path())),
+                    ("XDG_CONFIG_HOME", Some(&config_home)),
+                ],
+                || project_layer(&project, home.path()).expect_err("a link below home must fail"),
+            );
+
+            assert_eq!(
+                format!("{err:#}"),
+                format!(
+                    "{} is reached through a symlink, \
+                     which is not followed when the project root {} contains the home directory. \
+                     Replace the link with a regular file, or move personal settings to {}.",
+                    path.display(),
+                    home.path().display(),
+                    config_home.join("ox").join("config.toml").display(),
+                ),
             );
         }
     }
@@ -658,12 +805,50 @@ mod tests {
         }
 
         #[test]
-        fn rejects_invalid_toml() {
+        fn rejects_invalid_toml_without_quoting_it() {
             let dir = tempfile::tempdir().unwrap();
-            let path = write(&dir.path().join("config.toml"), "[invalid");
+            let path = write(
+                &dir.path().join("config.toml"),
+                "https://user:secret-marker@git.example.com",
+            );
 
-            let err = read_layer(&Layer::User(path)).expect_err("malformed TOML should fail");
-            assert!(format!("{err:#}").contains("invalid config at"), "{err:#}");
+            let err =
+                read_layer(&Layer::User(path.clone())).expect_err("malformed TOML should fail");
+            assert_eq!(
+                format!("{err:#}"),
+                format!(
+                    "invalid config at {}: line 1, column 43: key with no value, expected `=`",
+                    path.display()
+                ),
+            );
+        }
+
+        #[test]
+        fn project_error_gives_only_its_location() {
+            let dir = tempfile::tempdir().unwrap();
+            let path = write(
+                &dir.path().join("config.toml"),
+                indoc! {r#"
+                    [client]
+                    effort = "secret-marker"
+                "#},
+            );
+
+            let user = read_layer(&Layer::User(path.clone())).expect_err("an unknown effort fails");
+            let project =
+                read_layer(&Layer::Project(path.clone())).expect_err("an unknown effort fails");
+
+            assert!(
+                format!("{user:#}").contains("unknown variant `secret-marker`"),
+                "{user:#}"
+            );
+            assert_eq!(
+                format!("{project:#}"),
+                format!(
+                    "invalid config at {}: line 2, column 10, in `client.effort`",
+                    path.display()
+                ),
+            );
         }
 
         #[test]

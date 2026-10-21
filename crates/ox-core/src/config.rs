@@ -34,6 +34,7 @@ use self::schema::{FileConfig, PermissionTable, TierTable};
 use crate::model::ModelSpec;
 use crate::permission::{Mode, Policy, Tier, Workspace};
 use crate::util::env;
+use crate::util::git::project_root;
 use crate::util::path::expand_user;
 use crate::util::tls::{PlatformTrust, Trust, load_extra_ca_certs};
 
@@ -302,6 +303,8 @@ impl FromStr for StatusLineSegment {
 pub struct ThemeConfig {
     /// Built-in catalog key, such as `"mocha"`, or filesystem path, [`DEFAULT_THEME`] when unset.
     pub base: String,
+    /// Where `base` came from. A project file may only name a built-in theme.
+    pub base_source: Source,
     /// `[tui.theme.overrides]` slot patches, still raw TOML.
     pub overrides: toml::Table,
 }
@@ -343,11 +346,12 @@ pub struct Config {
 }
 
 impl Config {
-    /// Resolves config from env, the config files [`load::load`] finds from `cwd`, and built-in
-    /// defaults. A TOML or env parse error fails the load. Without a working credential, an
-    /// `interactive` session starts signed out and any other session fails.
+    /// Resolves config from env, the config files [`load::load`] finds from `cwd` within its
+    /// [`project_root`], and built-in defaults. A TOML or env parse error fails the load. Without
+    /// a working credential, an `interactive` session starts signed out and any other session
+    /// fails.
     pub async fn load(cwd: &Path, interactive: bool) -> Result<Self> {
-        let Loaded { config, origins } = load::load(cwd)?;
+        let Loaded { config, origins } = load::load(cwd, &project_root(cwd))?;
         let FileConfig {
             client,
             permission,
@@ -418,6 +422,7 @@ impl Config {
 
         let theme = ThemeConfig {
             base: tui.theme.base.unwrap_or_else(|| DEFAULT_THEME.to_owned()),
+            base_source: origins.source("tui.theme.base"),
             overrides: tui.theme.overrides,
         };
 
@@ -787,6 +792,7 @@ mod tests {
             ],
             theme: ThemeConfig {
                 base: "macchiato".to_owned(),
+                base_source: Source::Default,
                 overrides: toml::Table::new(),
             },
             provenance: Provenance {
@@ -1105,7 +1111,7 @@ mod tests {
         #[tokio::test]
         async fn theme_passes_base_and_raw_overrides_through() {
             let dir = tempfile::tempdir().unwrap();
-            write_user_config(
+            let layer = write_user_config(
                 dir.path(),
                 indoc! {r##"
                     [tui.theme]
@@ -1118,6 +1124,7 @@ mod tests {
             );
             let config = load_with(&dir, &[]).await.unwrap();
             assert_eq!(config.theme.base, "latte");
+            assert_eq!(config.theme.base_source, Source::File(layer));
             assert_eq!(
                 config.theme.overrides,
                 indoc! {r##"

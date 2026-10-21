@@ -28,7 +28,7 @@ pub(crate) async fn run(engine: Engine, show_thinking: bool, drifted: &[PathBuf]
     let sink = StdioSink::new(show_thinking);
     let attended = io::stdin().is_terminal();
     let stdin = BufReader::new(tokio::io::stdin());
-    let project_root = git::project_root(engine.cwd()).await;
+    let project_root = git::project_root(engine.cwd());
     let handle = engine.spawn(drifted);
     let signal = async || {
         let caught = shutdown_signal().await;
