@@ -1,230 +1,121 @@
-//! `/diff` output block, drawn like an Edit-tool diff with a line-number gutter. It parses the
-//! raw text lazily on `render`.
-
-use std::borrow::Cow;
+//! `/diff` output block, drawn like an Edit-tool diff with a line-number gutter, from the rows
+//! `/diff` parsed.
 
 use ratatui::style::{Modifier, Style};
 use ratatui::text::Line;
 
 use super::rows::{NumberedRows, body_row};
 use super::{ChatBlock, RenderCtx};
-use crate::slash::{TRUNCATION_FOOTER, UNTRACKED_HEADING};
+use crate::slash::{DiffRow, WorkingTreeDiff};
+
+/// Heading over the untracked file list.
+const UNTRACKED_HEADING: &str = "Untracked files:";
 
 // ── GitDiffBlock ──
 
-/// Output of `/diff`, kept as raw `git diff` text.
+/// Output of `/diff`.
 pub(crate) struct GitDiffBlock {
-    text: String,
+    diff: WorkingTreeDiff,
 }
 
 impl GitDiffBlock {
-    pub(crate) fn new(text: impl Into<String>) -> Self {
-        Self { text: text.into() }
+    pub(crate) fn new(diff: WorkingTreeDiff) -> Self {
+        Self { diff }
     }
 }
 
 impl ChatBlock for GitDiffBlock {
     fn render(&self, ctx: &RenderCtx<'_>) -> Vec<Line<'static>> {
         let border = ctx.theme.tool_border();
-        let (diff, footer) = split_truncation_footer(&self.text);
-        let max_number = max_line_number(diff);
+        let max_number = max_line_number(&self.diff.rows);
         let context = NumberedRows::new(ctx, border, max_number);
         let removed = NumberedRows::removed(ctx, border, max_number);
         let added = NumberedRows::added(ctx, border, max_number);
 
-        let lines: Vec<&str> = diff.lines().collect();
         let mut out = Vec::new();
-        let mut hunk = HunkCursor::default();
-        for (i, &line) in lines.iter().enumerate() {
-            if line.starts_with("diff ") {
-                hunk = HunkCursor::default();
-                let label = file_label(line, &lines[i + 1..]);
-                let style = ctx.theme.text().add_modifier(Modifier::BOLD);
-                body_row(&mut out, ctx, border, label, style);
-            } else if let Some((old, new)) = parse_hunk_header(line) {
-                hunk = HunkCursor { old, new };
-                body_row(&mut out, ctx, border, line, ctx.theme.dim());
-            } else if !hunk.is_open() {
-                push_outside_hunk(&mut out, ctx, border, line);
-            } else if let Some(text) = line.strip_prefix('+') {
-                added.render(&mut out, hunk.new.advance(), text, ctx.theme.text());
-            } else if let Some(text) = line.strip_prefix('-') {
-                removed.render(&mut out, hunk.old.advance(), text, ctx.theme.text());
-            } else if let Some(text) = context_text(line) {
-                context.render(&mut out, hunk.advance_context(), text, ctx.theme.dim());
-            } else {
-                body_row(&mut out, ctx, border, line, ctx.theme.dim());
+        for row in &self.diff.rows {
+            match row {
+                DiffRow::File(label) => {
+                    let style = ctx.theme.text().add_modifier(Modifier::BOLD);
+                    body_row(&mut out, ctx, border, label.clone(), style);
+                }
+                DiffRow::Hunk(header) => {
+                    body_row(&mut out, ctx, border, header.clone(), ctx.theme.dim());
+                }
+                DiffRow::Removed { number, text } => {
+                    removed.render(&mut out, *number, text, ctx.theme.text());
+                }
+                DiffRow::Added { number, text } => {
+                    added.render(&mut out, *number, text, ctx.theme.text());
+                }
+                DiffRow::Context { number, text } => {
+                    context.render(&mut out, *number, text, ctx.theme.dim());
+                }
+                DiffRow::Marker(text) => {
+                    body_row(&mut out, ctx, border, text.clone(), ctx.theme.dim());
+                }
+                DiffRow::Note(text) => {
+                    body_row(&mut out, ctx, border, text.clone(), ctx.theme.text());
+                }
             }
         }
-        if let Some(footer) = footer {
-            body_row(&mut out, ctx, border, "", ctx.theme.dim());
-            body_row(&mut out, ctx, border, footer, ctx.theme.dim());
+        if !self.diff.untracked.is_empty() {
+            push_separator(&mut out, ctx, border);
+            body_row(&mut out, ctx, border, UNTRACKED_HEADING, ctx.theme.dim());
+            for path in &self.diff.untracked {
+                body_row(&mut out, ctx, border, format!("  {path}"), ctx.theme.text());
+            }
+        }
+        if let Some(truncation) = &self.diff.truncation {
+            push_separator(&mut out, ctx, border);
+            body_row(
+                &mut out,
+                ctx,
+                border,
+                truncation.to_string(),
+                ctx.theme.dim(),
+            );
         }
         out
     }
 }
 
-/// Draws a line between hunks: an untracked heading or path, a blank separator, or a no-newline
-/// marker. Extended file headers are skipped because the path row names the file.
-fn push_outside_hunk(out: &mut Vec<Line<'static>>, ctx: &RenderCtx<'_>, border: Style, line: &str) {
-    if is_file_header(line) {
-        return;
+/// Leaves a blank row between sections, unless the section opens the block.
+fn push_separator(out: &mut Vec<Line<'static>>, ctx: &RenderCtx<'_>, border: Style) {
+    if !out.is_empty() {
+        body_row(out, ctx, border, "", ctx.theme.dim());
     }
-    let style = if line.is_empty() || line == UNTRACKED_HEADING || line.starts_with('\\') {
-        ctx.theme.dim()
-    } else {
-        ctx.theme.text()
-    };
-    body_row(out, ctx, border, line, style);
-}
-
-// ── HunkCursor ──
-
-/// The lines each side of the hunk being drawn has left.
-#[derive(Debug, Default)]
-struct HunkCursor {
-    old: HunkRange,
-    new: HunkRange,
-}
-
-impl HunkCursor {
-    /// Returns whether either side has body lines left, so the next line belongs to the hunk.
-    fn is_open(&self) -> bool {
-        self.old.count > 0 || self.new.count > 0
-    }
-
-    /// Moves both sides past a context line and returns its new-side number.
-    fn advance_context(&mut self) -> usize {
-        self.old.advance();
-        self.new.advance()
-    }
-}
-
-// ── Diff Parsing ──
-
-/// Splits the footer [`TRUNCATION_FOOTER`] opens off the diff above it.
-fn split_truncation_footer(text: &str) -> (&str, Option<&str>) {
-    match text.rfind(TRUNCATION_FOOTER) {
-        Some(at) if text[..at].ends_with('\n') => {
-            (text[..at].trim_end_matches('\n'), Some(&text[at..]))
-        }
-        _ => (text, None),
-    }
-}
-
-/// The file a `diff --git` line names, or `old → new` when its extended header records a rename.
-fn file_label<'a>(line: &'a str, rest: &[&'a str]) -> Cow<'a, str> {
-    let header_len = rest
-        .iter()
-        .position(|line| {
-            !is_file_header(line)
-                && !line.starts_with("old mode ")
-                && !line.starts_with("new mode ")
-        })
-        .unwrap_or(rest.len());
-    let header = &rest[..header_len];
-    let renamed = |prefix: &str| header.iter().find_map(|line| line.strip_prefix(prefix));
-    match (renamed("rename from "), renamed("rename to ")) {
-        (Some(from), Some(to)) => Cow::Owned(format!("{from} → {to}")),
-        _ => Cow::Borrowed(parse_diff_git_path(line).unwrap_or(line)),
-    }
-}
-
-/// Returns whether `line` is an extended header between `diff --git` and the first `@@`, which
-/// the path row covers.
-fn is_file_header(line: &str) -> bool {
-    [
-        "index ",
-        "--- ",
-        "+++ ",
-        "similarity ",
-        "rename ",
-        "new file ",
-        "deleted file ",
-    ]
-    .iter()
-    .any(|prefix| line.starts_with(prefix))
-}
-
-/// The path of a `diff --git a/P b/P` line, whose two halves match unless the file was renamed.
-fn parse_diff_git_path(line: &str) -> Option<&str> {
-    let rest = line.strip_prefix("diff --git a/")?;
-    let (path, new_side) = rest.split_at_checked(rest.len().checked_sub(3)? / 2)?;
-    (new_side.strip_prefix(" b/")? == path).then_some(path)
-}
-
-/// The text of a context line. Under `diff.suppressBlankEmpty`, git writes a blank context line
-/// as an empty line.
-fn context_text(line: &str) -> Option<&str> {
-    if line.is_empty() {
-        Some("")
-    } else {
-        line.strip_prefix(' ')
-    }
-}
-
-/// One side of a hunk: its next line number and how many lines it has left.
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
-struct HunkRange {
-    start: usize,
-    count: usize,
-}
-
-impl HunkRange {
-    /// Last line number in the range, or `start` when the range is empty.
-    fn last(self) -> usize {
-        self.start + self.count.saturating_sub(1)
-    }
-
-    /// Returns the line number of the next line and moves past it.
-    fn advance(&mut self) -> usize {
-        let number = self.start;
-        self.start += 1;
-        self.count = self.count.saturating_sub(1);
-        number
-    }
-}
-
-/// Parses the old and new ranges of an `@@ -a,b +c,d @@` header.
-fn parse_hunk_header(line: &str) -> Option<(HunkRange, HunkRange)> {
-    let rest = line.strip_prefix("@@ -")?;
-    let (old, rest) = rest.split_once(" +")?;
-    let new = rest.split(' ').next()?;
-    Some((parse_hunk_range(old)?, parse_hunk_range(new)?))
-}
-
-/// Parses `start[,count]`, where an omitted count means one line.
-fn parse_hunk_range(s: &str) -> Option<HunkRange> {
-    let (start, count) = match s.split_once(',') {
-        Some((start, count)) => (start.parse().ok()?, count.parse().ok()?),
-        None => (s.parse().ok()?, 1),
-    };
-    Some(HunkRange { start, count })
 }
 
 // ── Gutter Sizing ──
 
-/// The largest line number a hunk header reaches, which sizes the gutter.
-fn max_line_number(text: &str) -> usize {
-    text.lines()
-        .filter_map(parse_hunk_header)
-        .map(|(old, new)| old.last().max(new.last()))
+/// The largest line number the rows show, which sizes the gutter.
+fn max_line_number(rows: &[DiffRow]) -> usize {
+    rows.iter()
+        .filter_map(|row| match row {
+            DiffRow::Removed { number, .. }
+            | DiffRow::Added { number, .. }
+            | DiffRow::Context { number, .. } => Some(*number),
+            _ => None,
+        })
         .max()
         .unwrap_or(0)
 }
 
 #[cfg(test)]
 mod tests {
-    use indoc::{formatdoc, indoc};
     use ratatui::text::Span;
 
     use super::*;
     use crate::glyphs::TOOL_BORDER_CONT;
-    use crate::slash::truncate_for_display;
+    use crate::slash::testing::{added, context, removed};
     use crate::theme::Theme;
 
-    fn range(start: usize, count: usize) -> HunkRange {
-        HunkRange { start, count }
+    fn tracked(rows: Vec<DiffRow>) -> WorkingTreeDiff {
+        WorkingTreeDiff {
+            rows,
+            ..WorkingTreeDiff::default()
+        }
     }
 
     mod render {
@@ -240,19 +131,25 @@ mod tests {
                 .collect()
         }
 
+        fn plain_row(theme: &Theme, text: impl Into<String>, style: Style) -> Line<'static> {
+            Line::from(vec![
+                Span::styled(TOOL_BORDER_CONT, theme.tool_border()),
+                Span::styled(text.into(), style),
+            ])
+        }
+
         #[test]
-        fn emits_path_header_then_hunk_then_body_rows() {
+        fn draws_each_row_kind_in_its_style() {
             let theme = Theme::default();
-            let block = GitDiffBlock::new(indoc! {"
-                diff --git a/foo.rs b/foo.rs
-                index abc..def 100644
-                --- a/foo.rs
-                +++ b/foo.rs
-                @@ -1,3 +1,3 @@
-                -old line
-                +new line
-                 context
-            "});
+            let block = GitDiffBlock::new(tracked(vec![
+                DiffRow::File("foo.rs".to_owned()),
+                DiffRow::Note("old mode 100644".to_owned()),
+                DiffRow::Hunk("@@ -1,3 +1,3 @@".to_owned()),
+                removed(1, "old line"),
+                added(1, "new line"),
+                context(2, "context"),
+                DiffRow::Marker(r"\ No newline at end of file".to_owned()),
+            ]));
 
             let lines = block.render(&RenderCtx::new(80, &theme));
 
@@ -260,254 +157,33 @@ mod tests {
                 body_rows(&lines),
                 [
                     "foo.rs",
+                    "old mode 100644",
                     "@@ -1,3 +1,3 @@",
                     "1 - old line",
                     "1 + new line",
                     "2 │ context",
-                ]
-            );
-        }
-
-        #[test]
-        fn skips_index_and_marker_lines() {
-            // `index`, `--- a/X`, and `+++ b/X` are skipped, since the path header names the file.
-            let theme = Theme::default();
-            let block = GitDiffBlock::new(indoc! {"
-                diff --git a/foo.rs b/foo.rs
-                index abc..def 100644
-                --- a/foo.rs
-                +++ b/foo.rs
-            "});
-
-            let lines = block.render(&RenderCtx::new(80, &theme));
-
-            assert_eq!(body_rows(&lines), ["foo.rs"]);
-        }
-
-        #[test]
-        fn classifies_hunk_lines_by_first_char() {
-            let theme = Theme::default();
-            let block = GitDiffBlock::new(indoc! {"
-                diff --git a/notes.md b/notes.md
-                --- a/notes.md
-                +++ b/notes.md
-                @@ -10,4 +10,3 @@
-                 intro
-                -- item
-                --- yaml
-                +++ counter
-                 outro
-            "});
-
-            let lines = block.render(&RenderCtx::new(80, &theme));
-
-            assert_eq!(
-                body_rows(&lines[2..]),
-                [
-                    "10 │ intro",
-                    "11 - - item",
-                    "12 - -- yaml",
-                    "11 + ++ counter",
-                    "12 │ outro",
-                ],
-            );
-        }
-
-        #[test]
-        fn ends_hunks_by_count_so_unparsed_file_headers_stay_headers() {
-            let theme = Theme::default();
-            let block = GitDiffBlock::new(indoc! {r#"
-                diff --git a/one.rs b/one.rs
-                index 1111111..2222222 100644
-                --- a/one.rs
-                +++ b/one.rs
-                @@ -1 +1 @@
-                -old
-                +new
-                \ No newline at end of file
-                diff --git "a/\346\226\207.txt" "b/\346\226\207.txt"
-                index 3333333..4444444 100644
-                --- "a/\346\226\207.txt"
-                +++ "b/\346\226\207.txt"
-                @@ -1 +1 @@
-                -x
-                +y
-            "#});
-
-            let lines = block.render(&RenderCtx::new(80, &theme));
-
-            assert_eq!(
-                body_rows(&lines),
-                [
-                    "one.rs",
-                    "@@ -1 +1 @@",
-                    "1 - old",
-                    "1 + new",
                     r"\ No newline at end of file",
-                    r#"diff --git "a/\346\226\207.txt" "b/\346\226\207.txt""#,
-                    "@@ -1 +1 @@",
-                    "1 - x",
-                    "1 + y",
-                ],
-            );
-            assert_eq!(lines[4].spans[1].style, theme.dim());
-        }
-
-        #[test]
-        fn names_a_renamed_file_by_both_paths() {
-            let theme = Theme::default();
-            let block = GitDiffBlock::new(indoc! {"
-                diff --git a/old.rs b/new.rs
-                similarity index 90%
-                rename from old.rs
-                rename to new.rs
-                index 1111111..2222222 100644
-                --- a/old.rs
-                +++ b/new.rs
-                @@ -1 +1 @@
-                -a
-                +b
-            "});
-
-            let lines = block.render(&RenderCtx::new(80, &theme));
-
-            assert_eq!(
-                body_rows(&lines),
-                ["old.rs → new.rs", "@@ -1 +1 @@", "1 - a", "1 + b"]
-            );
-        }
-
-        #[test]
-        fn names_a_renamed_file_after_mode_headers_and_keeps_the_modes() {
-            let theme = Theme::default();
-            let block = GitDiffBlock::new(indoc! {"
-                diff --git a/old.sh b/new.sh
-                old mode 100644
-                new mode 100755
-                similarity index 100%
-                rename from old.sh
-                rename to new.sh
-            "});
-
-            let lines = block.render(&RenderCtx::new(80, &theme));
-
-            assert_eq!(
-                body_rows(&lines),
-                ["old.sh → new.sh", "old mode 100644", "new mode 100755"]
-            );
-        }
-
-        #[test]
-        fn reads_an_empty_line_inside_a_hunk_as_a_blank_context_row() {
-            let theme = Theme::default();
-            let block = GitDiffBlock::new(indoc! {"
-                diff --git a/x b/x
-                @@ -1,4 +1,4 @@
-                 a
-
-                 b
-                -c
-                +C
-            "});
-
-            let lines = block.render(&RenderCtx::new(80, &theme));
-
-            assert_eq!(
-                body_rows(&lines),
-                [
-                    "x",
-                    "@@ -1,4 +1,4 @@",
-                    "1 │ a",
-                    "2 │",
-                    "3 │ b",
-                    "4 - c",
-                    "4 + C"
                 ]
             );
-        }
-
-        #[test]
-        fn closes_a_hunk_once_each_side_reaches_its_count() {
-            // Uneven counts: the old side closes after two lines and the new side after one, so the
-            // blank line and the indented path after them sit outside the hunk.
-            let theme = Theme::default();
-            let block = GitDiffBlock::new(formatdoc! {"
-                diff --git a/x b/x
-                @@ -1,2 +1 @@
-                -a
-                -b
-                +c
-
-                {UNTRACKED_HEADING}
-                  new.txt
-            "});
-
-            let lines = block.render(&RenderCtx::new(80, &theme));
-
-            assert_eq!(
-                body_rows(&lines),
-                [
-                    "x",
-                    "@@ -1,2 +1 @@",
-                    "1 - a",
-                    "2 - b",
-                    "1 + c",
-                    "",
-                    UNTRACKED_HEADING,
-                    "  new.txt",
-                ]
-            );
-        }
-
-        #[test]
-        fn starts_each_file_outside_a_hunk_even_when_the_last_hunk_ran_short() {
-            let theme = Theme::default();
-            let block = GitDiffBlock::new(indoc! {"
-                diff --git a/x b/x
-                @@ -1,3 +1,3 @@
-                -a
-                +b
-                diff --git a/y b/y
-                --- a/y
-                +++ b/y
-                @@ -1 +1 @@
-                -c
-                +d
-            "});
-
-            let lines = block.render(&RenderCtx::new(80, &theme));
-
-            assert_eq!(
-                body_rows(&lines),
-                [
-                    "x",
-                    "@@ -1,3 +1,3 @@",
-                    "1 - a",
-                    "1 + b",
-                    "y",
-                    "@@ -1 +1 @@",
-                    "1 - c",
-                    "1 + d",
-                ]
-            );
+            let bold = theme.text().add_modifier(Modifier::BOLD);
+            assert_eq!(lines[0], plain_row(&theme, "foo.rs", bold));
+            assert_eq!(lines[1], plain_row(&theme, "old mode 100644", theme.text()));
+            assert_eq!(lines[2], plain_row(&theme, "@@ -1,3 +1,3 @@", theme.dim()));
+            let marker = r"\ No newline at end of file";
+            assert_eq!(lines[6], plain_row(&theme, marker, theme.dim()));
         }
 
         #[test]
         fn tints_removed_and_added_rows_with_their_row_styles() {
             let theme = Theme::default();
-            let block = GitDiffBlock::new(indoc! {"
-                diff --git a/x b/x
-                @@ -1 +1 @@
-                -only removed
-                +replacement
-            "});
+            let block = GitDiffBlock::new(tracked(vec![
+                removed(1, "only removed"),
+                added(1, "replacement"),
+            ]));
 
             let lines = block.render(&RenderCtx::new(80, &theme));
 
-            let number_bgs: Vec<_> = lines[2..]
-                .iter()
-                .map(|line| line.spans[1].style.bg)
-                .collect();
+            let number_bgs: Vec<_> = lines.iter().map(|line| line.spans[1].style.bg).collect();
             assert_eq!(
                 number_bgs,
                 [theme.diff_del_row().bg, theme.diff_add_row().bg]
@@ -515,211 +191,76 @@ mod tests {
         }
 
         #[test]
-        fn untracked_section_outside_hunks_emits_plain_rows() {
-            // Indented untracked paths look like context rows but must not paint as one.
+        fn pads_every_number_to_the_widest_one() {
             let theme = Theme::default();
-            let block = GitDiffBlock::new(formatdoc! {"
-                {UNTRACKED_HEADING}
-                  new.txt
-                  also-new.rs
-            "});
+            let block = GitDiffBlock::new(tracked(vec![context(9, "nine"), added(10, "ten")]));
 
             let lines = block.render(&RenderCtx::new(80, &theme));
 
-            let row = |text, style| {
-                Line::from(vec![
-                    Span::styled(TOOL_BORDER_CONT, theme.tool_border()),
-                    Span::styled(text, style),
-                ])
-            };
+            assert_eq!(body_rows(&lines), [" 9 │ nine", "10 + ten"]);
+        }
+
+        #[test]
+        fn lists_untracked_paths_under_a_dim_heading_after_a_blank_row() {
+            let theme = Theme::default();
+            let block = GitDiffBlock::new(WorkingTreeDiff {
+                rows: vec![DiffRow::File("x".to_owned())],
+                untracked: vec!["new.txt".to_owned(), "also-new.rs".to_owned()],
+                truncation: None,
+            });
+
+            let lines = block.render(&RenderCtx::new(80, &theme));
+
+            let bold = theme.text().add_modifier(Modifier::BOLD);
             assert_eq!(
                 lines,
                 [
-                    row(UNTRACKED_HEADING, theme.dim()),
-                    row("  new.txt", theme.text()),
-                    row("  also-new.rs", theme.text()),
+                    plain_row(&theme, "x", bold),
+                    plain_row(&theme, "", theme.dim()),
+                    plain_row(&theme, UNTRACKED_HEADING, theme.dim()),
+                    plain_row(&theme, "  new.txt", theme.text()),
+                    plain_row(&theme, "  also-new.rs", theme.text()),
                 ]
             );
         }
 
         #[test]
-        fn dims_the_truncation_footer_of_a_diff_cut_inside_a_hunk() {
+        fn opens_with_the_untracked_heading_when_nothing_is_tracked() {
+            let theme = Theme::default();
+            let block = GitDiffBlock::new(WorkingTreeDiff {
+                untracked: vec!["new.txt".to_owned()],
+                ..WorkingTreeDiff::default()
+            });
+
+            let lines = block.render(&RenderCtx::new(80, &theme));
+
+            assert_eq!(body_rows(&lines), [UNTRACKED_HEADING, "  new.txt"]);
+        }
+
+        #[test]
+        fn dims_the_truncation_note_after_a_blank_row() {
             let theme = Theme::default();
             let diff = format!(
                 "diff --git a/x b/x\n@@ -0,0 +1,6000 @@\n{}",
                 "+added line\n".repeat(6000),
             );
-            let text = truncate_for_display(diff);
-            let footer = text.lines().last().unwrap().to_owned();
-            let block = GitDiffBlock::new(text);
+            let diff = WorkingTreeDiff::new(&[&diff], "", "`git diff HEAD`");
+            let note = diff
+                .truncation
+                .as_ref()
+                .expect("6000 lines overrun")
+                .to_string();
+            let block = GitDiffBlock::new(diff);
 
             let lines = block.render(&RenderCtx::new(80, &theme));
 
-            let row = |text| {
-                Line::from(vec![
-                    Span::styled(TOOL_BORDER_CONT, theme.tool_border()),
-                    Span::styled(text, theme.dim()),
-                ])
-            };
-            assert!(footer.starts_with(TRUNCATION_FOOTER), "{footer:?}");
-            assert_eq!(lines[lines.len() - 2..], [row(String::new()), row(footer)]);
-        }
-
-        #[test]
-        fn walks_line_numbers_per_hunk_starts() {
-            // Line numbers start from the `@@` header's line.
-            let theme = Theme::default();
-            let block = GitDiffBlock::new(indoc! {"
-                diff --git a/x b/x
-                @@ -27,2 +27,2 @@
-                -alpha
-                -beta
-                +gamma
-                +delta
-            "});
-
-            let lines = block.render(&RenderCtx::new(80, &theme));
-
-            let body = &lines[2..]; // skip path + hunk headers
-            let numbers: Vec<String> = body
-                .iter()
-                .map(|line| line.spans[1].content.trim().to_owned())
-                .collect();
-            assert_eq!(numbers, vec!["27", "28", "27", "28"]);
-        }
-
-        #[test]
-        fn advances_line_numbers_through_context_rows() {
-            // One fixture pins both increments: `+third` takes new_ln (bumped 2 → 3 by the context
-            // row), and `-fourth` takes old_ln (1 → 2).
-            let theme = Theme::default();
-            let block = GitDiffBlock::new(indoc! {"
-                diff --git a/x b/x
-                @@ -1,3 +1,3 @@
-                +first
-                 middle
-                +third
-                -fourth
-            "});
-
-            let lines = block.render(&RenderCtx::new(80, &theme));
-
-            let body = &lines[2..];
-            let numbers: Vec<String> = body
-                .iter()
-                .map(|line| line.spans[1].content.trim().to_owned())
-                .collect();
-            assert_eq!(numbers, vec!["1", "2", "3", "2"]);
-        }
-
-        #[test]
-        fn corrupt_hunk_body_falls_through_to_defensive_row() {
-            // A corrupt body line renders as a plain bordered row with no number or bg, and it
-            // bumps no number, so the rest of the hunk keeps its numbering.
-            let theme = Theme::default();
-            let block = GitDiffBlock::new(indoc! {"
-                diff --git a/x b/x
-                @@ -1,2 +1,2 @@
-                +real add
-                corrupt-no-marker
-                +second add
-            "});
-
-            let lines = block.render(&RenderCtx::new(80, &theme));
-
-            let body = &lines[2..];
-            assert_eq!(body.len(), 3, "{body:#?}");
-
-            let corrupt_row = &body[1];
-            let body_text = corrupt_row.to_string();
-            assert!(body_text.contains("corrupt-no-marker"), "{body_text:?}");
-            for span in &corrupt_row.spans {
-                assert!(
-                    span.style.bg != theme.diff_add_row().bg
-                        && span.style.bg != theme.diff_del_row().bg,
-                    "defensive row must not paint diff bgs: {corrupt_row:?}",
-                );
-            }
-
-            // The surrounding `+` rows keep 1 and 2, since the corrupt line takes no number.
-            let plus_numbers: Vec<String> = [&body[0], &body[2]]
-                .iter()
-                .map(|line| line.spans[1].content.trim().to_owned())
-                .collect();
-            assert_eq!(plus_numbers, vec!["1", "2"]);
-        }
-    }
-
-    mod parse_diff_git_path {
-        use super::*;
-
-        #[test]
-        fn extracts_a_path() {
             assert_eq!(
-                parse_diff_git_path("diff --git a/src/main.rs b/src/main.rs"),
-                Some("src/main.rs"),
+                lines[lines.len() - 2..],
+                [
+                    plain_row(&theme, "", theme.dim()),
+                    plain_row(&theme, note, theme.dim()),
+                ]
             );
-        }
-
-        #[test]
-        fn keeps_a_space_and_b_slash_inside_the_path() {
-            assert_eq!(
-                parse_diff_git_path("diff --git a/x b/y.rs b/x b/y.rs"),
-                Some("x b/y.rs"),
-            );
-        }
-
-        #[test]
-        fn rejects_a_line_without_one_path_on_both_sides() {
-            assert_eq!(parse_diff_git_path("@@ -1 +1 @@"), None);
-            assert_eq!(parse_diff_git_path("plain text"), None);
-            assert_eq!(parse_diff_git_path("diff --git a/old.rs b/new.rs"), None);
-        }
-    }
-
-    mod hunk_range {
-        use super::*;
-
-        mod last {
-            use super::*;
-
-            #[test]
-            fn is_start_plus_count_minus_one() {
-                assert_eq!(range(27, 20).last(), 46);
-                assert_eq!(range(27, 1).last(), 27);
-                assert_eq!(range(5, 0).last(), 5);
-            }
-        }
-    }
-
-    mod parse_hunk_header {
-        use super::*;
-
-        #[test]
-        fn with_counts() {
-            assert_eq!(
-                parse_hunk_header("@@ -27,20 +27,20 @@"),
-                Some((range(27, 20), range(27, 20))),
-            );
-            assert_eq!(
-                parse_hunk_header("@@ -10,5 +12,0 @@ fn ctx()"),
-                Some((range(10, 5), range(12, 0))),
-            );
-        }
-
-        #[test]
-        fn omitted_count_spans_one_line() {
-            assert_eq!(
-                parse_hunk_header("@@ -42 +43 @@"),
-                Some((range(42, 1), range(43, 1))),
-            );
-        }
-
-        #[test]
-        fn rejects_lines_that_are_not_hunk_headers() {
-            assert_eq!(parse_hunk_header("+ added line"), None);
-            assert_eq!(parse_hunk_header("@@ -x +1 @@"), None);
-            assert_eq!(parse_hunk_header(""), None);
         }
     }
 
@@ -727,15 +268,14 @@ mod tests {
         use super::*;
 
         #[test]
-        fn uses_largest_hunk_extent() {
-            assert_eq!(max_line_number("@@ -1,1 +1,10 @@"), 10);
-            assert_eq!(max_line_number("@@ -100,5 +1,1 @@"), 104);
+        fn takes_the_largest_number_on_either_side() {
+            let rows = [removed(104, "a"), added(10, "b")];
+            assert_eq!(max_line_number(&rows), 104);
         }
 
         #[test]
-        fn ignores_text_without_hunks() {
-            assert_eq!(max_line_number(""), 0);
-            assert_eq!(max_line_number("Untracked files:\n  foo"), 0);
+        fn is_zero_without_numbered_rows() {
+            assert_eq!(max_line_number(&[DiffRow::File("x".to_owned())]), 0);
         }
     }
 }

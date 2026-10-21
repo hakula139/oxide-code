@@ -1,9 +1,10 @@
 //! Root TUI application.
 //!
 //! [`App`] owns every component, holds the cross-task channels, and runs the `tokio::select!`
-//! loop multiplexing crossterm events, engine events, git probe results, clipboard reports, and a
-//! 60 FPS render tick. A dirty flag coalesces redraws so each state change renders once. Terminal
-//! input, engine events, and drawing live in the `dispatch`, `events`, and `render` submodules.
+//! loop multiplexing crossterm events, engine events, git probe results, clipboard reports,
+//! background slash-command results, and a 60 FPS render tick. A dirty flag coalesces redraws so
+//! each state change renders once. Terminal input, engine events, and drawing live in the
+//! `dispatch`, `events`, and `render` submodules.
 
 mod dispatch;
 mod events;
@@ -20,6 +21,7 @@ use crossterm::event::{Event as CrosstermEvent, EventStream};
 use futures::{Stream, StreamExt};
 use ratatui::Terminal;
 use tokio::sync::mpsc;
+use tokio::task::JoinSet;
 
 use ox_core::permission::Mode;
 use ox_core::protocol::{Event, Interaction, Op};
@@ -33,7 +35,7 @@ use crate::components::tasks::TaskPanel;
 use crate::git_probes::GitProbes;
 use crate::modal::{Modal, ModalStack};
 use crate::now;
-use crate::slash::LiveSessionInfo;
+use crate::slash::{ChatOutput, LiveSessionInfo};
 use crate::terminal::{Tui, TuiBackend};
 use crate::theme::{Theme, ThemeOverrides};
 
@@ -72,6 +74,8 @@ pub(crate) struct App {
     /// OSC 52 sequence the next frame writes to the terminal.
     pending_clipboard: Option<String>,
     copy_notice: Option<CopyNotice>,
+    /// Background slash commands still running for the live session.
+    slash_tasks: JoinSet<Result<ChatOutput, String>>,
     /// Prompt already painted for the in-flight turn, kept as typed. Replayed if auto-compaction
     /// clears chat, and handed back if auto-compaction fails before the prompt is sent.
     active_prompt: Option<String>,
@@ -174,6 +178,7 @@ impl App {
             clipboard: Clipboard::new(Environment::detect()),
             pending_clipboard: None,
             copy_notice: None,
+            slash_tasks: JoinSet::new(),
             active_prompt: None,
             hand_back: HandBack::Nothing,
             pending_prompts: VecDeque::new(),
@@ -215,7 +220,7 @@ impl App {
         self.render(terminal)?;
 
         loop {
-            // Five sources can wake the loop. The tick arm is the only renderer, so handlers only
+            // Six sources can wake the loop. The tick arm is the only renderer, so handlers only
             // mark `dirty` and render work stays paced by the 60 FPS clock.
             tokio::select! {
                 event = crossterm_events.next() => {
@@ -234,6 +239,7 @@ impl App {
                 }
                 Some(update) = self.git_probes.recv() => self.apply_git_update(update),
                 Some(report) = self.clipboard.recv() => self.apply_copy_report(report),
+                Some(finished) = self.slash_tasks.join_next() => self.apply_slash_task(finished),
                 _ = tick.tick() => {
                     let now = now();
                     self.git_probes.poll(now);

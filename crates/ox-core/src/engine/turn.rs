@@ -460,9 +460,10 @@ mod tests {
     use crate::prompt::SystemPrompt;
     use crate::protocol::testing::CapturingSink;
     use crate::protocol::{ConfigPick, Decision, ResumeTarget, ToolCall, ToolResult};
+    use crate::tool::view::{ReadExcerptLine, ToolResultView};
     use crate::tool::{
-        DEFAULT_TOOL_ICON, Prepared, ReadExcerptLine, Tool, ToolCtx, ToolMetadata, ToolOutput,
-        ToolRegistry, ToolResultView, ToolSpec,
+        DEFAULT_TOOL_ICON, Prepared, Tool, ToolCtx, ToolMetadata, ToolOutput, ToolRegistry,
+        ToolSpec,
     };
 
     mod agent_turn {

@@ -19,7 +19,7 @@ use crate::permission::rule::Rule;
 use crate::permission::{Basis, Mode, SessionGrant};
 use crate::tool::bash::background::BackgroundShell;
 use crate::tool::tasks::Task;
-use crate::tool::{ApprovalPreview, ToolResultView};
+use crate::tool::view::{ApprovalPreview, ToolResultView};
 
 // ── Ops ──
 
@@ -241,6 +241,10 @@ pub enum Event {
     /// An [`Op::Login`] stored a new oxide-code login. `auth` is the credential requests now use,
     /// which stays an env var or `client.api_key` when one outranks the login.
     SignedIn { auth: AuthSource },
+    /// A prompt or compaction in a session that a transient failure signed out
+    /// loaded the stored login, which requests now use as `auth`.
+    /// The prompt or compaction goes on.
+    LoginRestored { auth: AuthSource },
     /// An [`Op::Logout`] finished. `removed` reports whether an oxide-code login was stored, and
     /// `auth` is the credential requests now use, `None` when none is left. `fallback_error` says
     /// why a stored Claude Code login could not take over.
@@ -378,7 +382,7 @@ pub mod testing {
     use serde_json::json;
 
     use super::{Event, EventSink, ToolCall, ToolResult};
-    use crate::tool::ToolResultView;
+    use crate::tool::view::ToolResultView;
 
     /// An [`EventSink`] that keeps every event it receives. Clones share one log.
     #[derive(Clone, Default)]
@@ -449,7 +453,7 @@ mod tests {
     use crate::tool::bash::background::testing::shells_in_each_state;
     use crate::tool::tasks::testing::plan;
     use crate::tool::testing::bash_preview;
-    use crate::tool::{
+    use crate::tool::view::{
         ApprovalBody, DiffChunk, DiffLine, EditDiff, GrepFileGroup, GrepMatchLine, ReadExcerptLine,
     };
 
@@ -706,6 +710,7 @@ mod tests {
                 Event::ModeChanged(_) => "mode_changed",
                 Event::LoginStarted { .. } => "login_started",
                 Event::SignedIn { .. } => "signed_in",
+                Event::LoginRestored { .. } => "login_restored",
                 Event::SignedOut { .. } => "signed_out",
                 Event::Notice(_) => "notice",
                 Event::Error(_) => "error",
@@ -723,7 +728,7 @@ mod tests {
                     id: "t2".to_owned(),
                     preview: ApprovalPreview {
                         title: "Edit".to_owned(),
-                        body: ApprovalBody::Diff(vec![diff_chunk()]),
+                        body: ApprovalBody::Diff(diff_chunk()),
                     },
                     basis: Basis::Mode(Mode::Manual),
                     grant: None,
@@ -802,6 +807,9 @@ mod tests {
                 },
                 Event::SignedIn {
                     auth: AuthSource::OxLogin,
+                },
+                Event::LoginRestored {
+                    auth: AuthSource::ClaudeCodeLogin,
                 },
                 Event::SignedOut {
                     removed: true,

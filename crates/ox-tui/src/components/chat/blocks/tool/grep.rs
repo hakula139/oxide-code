@@ -3,7 +3,7 @@
 
 use ratatui::style::Style;
 
-use ox_core::tool::GrepFileGroup;
+use ox_core::tool::view::GrepFileGroup;
 
 use super::{MAX_TOOL_OUTPUT_LINES, overflow_footer};
 use crate::components::chat::blocks::rows::{NumberedRows, body_row};
@@ -66,7 +66,7 @@ pub(super) fn render(
 
 #[cfg(test)]
 mod tests {
-    use ox_core::tool::GrepMatchLine;
+    use ox_core::tool::view::GrepMatchLine;
 
     use super::*;
     use crate::theme::Theme;

@@ -31,8 +31,9 @@ use tracing::debug;
 use uuid::Uuid;
 
 use crate::client::{ResponseEvent, Wire};
-use crate::config::auth::{Auth, AuthSource};
+use crate::config::auth::{self, Auth, AuthSource, LoginUnavailable};
 use crate::config::gateway::GatewayCompat;
+use crate::config::oauth::ClaudeCodeKeychain;
 use crate::config::{Config, Effort, PromptCacheTtl, is_first_party_base_url};
 use crate::message::{ContentBlock, Message, Role};
 use crate::model::ModelSpec;
@@ -196,6 +197,24 @@ impl Client {
     /// first-party base URL.
     pub(crate) fn set_auth(&mut self, auth: Option<Auth>) {
         self.auth = auth;
+    }
+
+    /// Loads the first stored login again on a reload task.
+    /// Dropping the returned future stops only the wait,
+    /// since a refresh must still write the rotated tokens back.
+    pub(crate) fn retry_stored_login(
+        &self,
+        keychain: ClaudeCodeKeychain,
+    ) -> impl Future<Output = Result<Auth, LoginUnavailable>> + use<> {
+        let trust = Arc::clone(&self.trust);
+        let reload = self
+            .reloads
+            .spawn(async move { auth::retry_stored_login(keychain, trust.as_ref()).await });
+        async move {
+            reload
+                .await
+                .unwrap_or_else(|e| std::panic::resume_unwind(e.into_panic()))
+        }
     }
 
     /// Waits for the stored-login reloads in flight from this client or a clone of it, including

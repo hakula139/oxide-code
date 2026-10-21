@@ -11,8 +11,9 @@ use tokio_util::task::TaskTracker;
 use tracing::warn;
 
 use super::gateway::CUSTOM_HEADERS_VAR;
-use super::oauth::{ClaudeCodeKeychain, LOGIN_STORES, Login, LoginError, SessionLogin};
+use super::oauth::{ClaudeCodeKeychain, Login, LoginError, SessionLogin, login_stores};
 use crate::util::env;
+use crate::util::text::join_sentences;
 use crate::util::tls::Trust;
 
 // ── AuthKind ──
@@ -59,8 +60,8 @@ pub enum AuthSource {
     /// oxide-code's stored login from `/login` (`$XDG_DATA_HOME/ox/credentials.json`), refreshed
     /// before a request near its expiry and reloaded after a 401.
     OxLogin,
-    /// Claude Code's stored login (macOS Keychain or `~/.claude/.credentials.json`), refreshed
-    /// before a request near its expiry and reloaded after a 401.
+    /// Claude Code's stored login (macOS Keychain or `.credentials.json` in `~/.claude` or
+    /// `$CLAUDE_CONFIG_DIR`), refreshed before a request near its expiry and reloaded after a 401.
     ClaudeCodeLogin,
 }
 
@@ -306,9 +307,10 @@ fn signed_out_error(e: &LoginError) -> String {
     match e {
         LoginError::Missing => format!(
             "no credentials found: no API key or token is set, no oxide-code login is stored, \
-             and no Claude Code login is in {LOGIN_STORES}. \
+             and no Claude Code login is in {stores}. \
              Set ANTHROPIC_API_KEY or CLAUDE_CODE_OAUTH_TOKEN, \
-             add `api_key` to ~/.config/ox/config.toml, or sign in with `/login` in the `ox` TUI."
+             add `api_key` to ~/.config/ox/config.toml, or sign in with `/login` in the `ox` TUI.",
+            stores = login_stores(),
         ),
         e => e.to_string(),
     }
@@ -317,12 +319,39 @@ fn signed_out_error(e: &LoginError) -> String {
 /// What a session shows on a request while signed out, and at startup when no login is stored.
 pub(crate) const SIGNED_OUT: &str = "Not signed in. Run `/login` to sign in.";
 
-/// The startup notice for a TUI session that starts signed out because of `e`.
-pub(super) fn signed_out_notice(e: &LoginError) -> String {
-    match e {
-        LoginError::Missing => SIGNED_OUT.to_owned(),
-        e => format!("Not signed in: {e}"),
+const RETRY_STEP: &str = "The next prompt tries the stored login again.";
+
+/// Why a TUI session has no stored login to send.
+#[derive(Debug, Clone)]
+pub(crate) struct LoginUnavailable {
+    /// What the session shows at startup or when a retry fails.
+    pub(crate) notice: String,
+    /// Whether a later attempt may load the login, so the next prompt or compaction tries it.
+    pub(crate) retry: bool,
+}
+
+impl LoginUnavailable {
+    pub(super) fn new(e: &LoginError) -> Self {
+        let notice = match e {
+            LoginError::Missing => SIGNED_OUT.to_owned(),
+            e if e.is_transient() => join_sentences(&format!("Not signed in: {e}"), RETRY_STEP),
+            e => format!("Not signed in: {e}"),
+        };
+        Self {
+            notice,
+            retry: e.is_transient(),
+        }
     }
+}
+
+/// Loads the first stored login again for a session that a transient failure signed out.
+pub(crate) async fn retry_stored_login(
+    keychain: ClaudeCodeKeychain,
+    trust: &dyn Trust,
+) -> Result<Auth, LoginUnavailable> {
+    stored_login(keychain, trust)
+        .await
+        .map_err(|e| LoginUnavailable::new(&e))
 }
 
 /// Explicit credentials in precedence order: env and config values, before the stored logins.
@@ -421,6 +450,7 @@ async fn load_login(
 mod tests {
     use super::*;
     use crate::config::oauth::testing::{ox_login_in, write_creds};
+    use crate::util::path::local_testing::abs;
     use crate::util::tls::local_testing::no_roots;
     use crate::util::tls::testing::NoRoots;
 
@@ -621,28 +651,53 @@ mod tests {
         }
     }
 
-    mod signed_out_notice {
+    mod login_unavailable {
         use super::*;
 
         #[test]
-        fn names_the_step_that_signs_in() {
+        fn names_the_step_that_signs_in_and_retries_no_lasting_failure() {
+            for (e, notice) in [
+                (
+                    LoginError::Missing,
+                    "Not signed in. Run `/login` to sign in.",
+                ),
+                (
+                    LoginError::Expired(Login::Ox),
+                    "Not signed in: oxide-code login has expired. Run `/login` to sign in again.",
+                ),
+                (
+                    LoginError::Unreadable(
+                        Login::ClaudeCode,
+                        anyhow::anyhow!("failed to parse the credentials in the macOS Keychain"),
+                    ),
+                    "Not signed in: failed to load the Claude Code login: \
+                     failed to parse the credentials in the macOS Keychain. \
+                     Run `claude` to sign in again.",
+                ),
+            ] {
+                let unavailable = LoginUnavailable::new(&e);
+
+                assert_eq!(unavailable.notice, notice);
+                assert!(!unavailable.retry, "{notice}");
+            }
+        }
+
+        #[test]
+        fn retries_a_transient_failure_and_says_so() {
+            let unavailable = LoginUnavailable::new(&LoginError::RefreshFailed {
+                login: Login::Ox,
+                error: anyhow::anyhow!("token endpoint returned 503"),
+                transient: true,
+            });
+
             assert_eq!(
-                signed_out_notice(&LoginError::Missing),
-                "Not signed in. Run `/login` to sign in.",
+                unavailable.notice,
+                "Not signed in: failed to refresh the expired oxide-code login: \
+                 token endpoint returned 503. \
+                 Run `/login` to sign in again. \
+                 The next prompt tries the stored login again.",
             );
-            assert_eq!(
-                signed_out_notice(&LoginError::Expired(Login::Ox)),
-                "Not signed in: oxide-code login has expired. Run `/login` to sign in again.",
-            );
-            assert_eq!(
-                signed_out_notice(&LoginError::Unreadable(
-                    Login::ClaudeCode,
-                    anyhow::anyhow!("failed to parse the credentials in the macOS Keychain"),
-                )),
-                "Not signed in: failed to load the Claude Code login: \
-                 failed to parse the credentials in the macOS Keychain. \
-                 Run `claude` to sign in again.",
-            );
+            assert!(unavailable.retry);
         }
     }
 
@@ -758,24 +813,44 @@ mod tests {
 
         #[tokio::test]
         async fn missing_login_lists_every_credential_option() {
-            let err = resolve(explicit(&[]), FIRST_PARTY, async {
-                Err(LoginError::Missing)
-            })
-            .await
-            .expect_err("no credential anywhere");
+            let claude_dir = abs("/srv/claude");
+
+            let (err, message) = temp_env::async_with_vars(
+                [("CLAUDE_CONFIG_DIR", Some(claude_dir.as_str()))],
+                async {
+                    let err = resolve(explicit(&[]), FIRST_PARTY, async {
+                        Err(LoginError::Missing)
+                    })
+                    .await
+                    .expect_err("no credential anywhere");
+                    let message = format!("{err:#}");
+                    (err, message)
+                },
+            )
+            .await;
+
             assert!(
                 matches!(err, ResolveError::SignedOut(LoginError::Missing)),
                 "{err:?}"
             );
             assert_eq!(
-                format!("{err:#}"),
+                message,
                 format!(
                     "no credentials found: \
                      no API key or token is set, no oxide-code login is stored, \
-                     and no Claude Code login is in {LOGIN_STORES}. \
+                     and no Claude Code login is in {keychain}{file}. \
                      Set ANTHROPIC_API_KEY or CLAUDE_CODE_OAUTH_TOKEN, \
                      add `api_key` to ~/.config/ox/config.toml, \
-                     or sign in with `/login` in the `ox` TUI."
+                     or sign in with `/login` in the `ox` TUI.",
+                    keychain = if cfg!(target_os = "macos") {
+                        "the macOS Keychain or "
+                    } else {
+                        ""
+                    },
+                    file = std::path::absolute(&claude_dir)
+                        .unwrap()
+                        .join(".credentials.json")
+                        .display(),
                 ),
             );
         }
@@ -878,7 +953,10 @@ mod tests {
             let file = home.path().join(".claude").join(".credentials.json");
 
             let (missing, unreadable, auth) = temp_env::async_with_vars(
-                [(crate::util::path::testing::HOME_VAR, Some(home.path()))],
+                [
+                    (crate::util::path::testing::HOME_VAR, Some(home.path())),
+                    ("CLAUDE_CONFIG_DIR", None),
+                ],
                 async {
                     let missing = claude_code_login(ClaudeCodeKeychain::NONE, &NoRoots).await;
                     std::fs::create_dir(file.parent().unwrap()).unwrap();

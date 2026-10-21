@@ -1,5 +1,5 @@
 //! `/resume` (alias `/continue`) opens a [`SearchableList`] session picker, and
-//! `/resume <id-prefix>` resumes directly. `ox --resume` opens the same picker at startup.
+//! `/resume <id-prefix>` resumes directly. `ox -r` without a session opens the same picker at startup.
 
 use std::borrow::Cow;
 use std::path::{Path, PathBuf};
@@ -508,7 +508,7 @@ impl ResumePicker {
         Self::open(store, live_session_id, false, Dismissal::Cancel)
     }
 
-    /// The `ox --resume` picker, scoped to every project when `all` is set.
+    /// The picker `ox -r` opens without a session, scoped to every project when `all` is set.
     pub fn at_startup(store: SessionStore, live_session_id: String, all: bool) -> Self {
         Self::open(store, live_session_id, all, Dismissal::Quit)
     }
@@ -799,7 +799,8 @@ mod tests {
     use ox_core::session::display::UNTITLED_MARKER;
     use ox_core::session::entry::{ExitInfo, TitleInfo};
     use ox_core::session::store::testing::{
-        archive_test_session, listed_ids, seed_test_session, test_project_dir, test_store,
+        archive_test_session, isolated_store, listed_ids, seed_test_session, test_project_dir,
+        test_store,
     };
 
     use super::Column::{Branch, Id, Msgs, Project, Title, When};
@@ -842,12 +843,6 @@ mod tests {
                 archive_test_session(store, &id);
             }
         }
-    }
-
-    fn isolated_store() -> (tempfile::TempDir, SessionStore) {
-        let dir = tempfile::tempdir().unwrap();
-        let store = test_store(dir.path());
-        (dir, store)
     }
 
     fn footer_row(picker: &ResumePicker, width: u16) -> String {
@@ -1873,7 +1868,8 @@ mod tests {
                 panic!("Ctrl+D must push the confirm modal, got {outcome:?}");
             };
             let rows = render_rows(confirm.as_ref(), 60, confirm.height(60, u16::MAX));
-            assert_eq!(rows[2].trim_end(), "11111111 — Fix auth");
+            assert_eq!(rows[2].trim_end(), "Fix auth");
+            assert_eq!(rows[3].trim_end(), "11111111 · 2026-04-18 · 3 msgs");
         }
 
         #[test]

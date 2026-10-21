@@ -27,8 +27,6 @@ pub(super) struct FileConfig {
 #[derive(Debug, Default, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub(super) struct ClientTable {
-    // Any new field that influences credentials, endpoint identity, or TLS trust must also be
-    // listed in `load::reject_project_secrets` so a checked-in project file cannot set it.
     pub(super) api_key: Option<String>,
     pub(super) base_url: Option<String>,
     pub(super) extra_ca_certs: Option<String>,

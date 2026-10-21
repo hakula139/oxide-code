@@ -1968,6 +1968,7 @@ dependencies = [
  "arboard",
  "base64 0.23.1",
  "crossterm",
+ "fastrand",
  "futures",
  "indoc",
  "insta",
@@ -1988,6 +1989,7 @@ dependencies = [
  "unicode-segmentation",
  "unicode-width",
  "uuid",
+ "xxhash-rust",
 ]
 
 [[package]]

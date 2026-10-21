@@ -10,7 +10,9 @@ use serde::{Deserialize, Serialize};
 
 use crate::permission::rule::{Rule, escaped};
 use crate::permission::{PermissionClass, folded_names, resolve};
-use crate::util::path::{XdgBase, app_dir, lexical_normalize, xdg_dir};
+use crate::util::path::{
+    CLAUDE_CREDENTIALS, XdgBase, app_dir, claude_dir, lexical_normalize, xdg_dir,
+};
 
 // ── Shipped ──
 
@@ -121,7 +123,7 @@ impl Shipped {
                 PermissionClass::Read,
                 [
                     app_dir(XdgBase::Data).map(|dir| dir.join("credentials.json")),
-                    home().map(|home| home.join(".claude").join(".credentials.json")),
+                    claude_dir().map(|dir| dir.join(CLAUDE_CREDENTIALS)),
                     home().map(|home| home.join(".git-credentials")),
                     xdg_dir(XdgBase::Config).map(|dir| dir.join("git").join("credentials")),
                 ]
@@ -311,8 +313,9 @@ pub(super) fn protected_roots(cwd: &Path, workspace_roots: &[PathBuf]) -> Vec<(S
 }
 
 /// oxide-code's own config, data, and state directories, the XDG git directory and the git
-/// credential store, `~/.ssh`, whose `authorized_keys`, `rc`, and `environment` set what a login
-/// runs, and the cloud CLIs' config directories, whose credential helpers run commands. Each comes
+/// credential store, Claude Code's user settings and hooks wherever `CLAUDE_CONFIG_DIR` moves
+/// them, `~/.ssh`, whose `authorized_keys`, `rc`, and `environment` set what a login runs, and
+/// the cloud CLIs' config directories, whose credential helpers run commands. Each comes
 /// with its group, resolved like a target so a symlinked home or XDG base still compares equal.
 fn home_locations() -> Vec<(Shipped, PathBuf)> {
     let app_dirs = XdgBase::ALL
@@ -320,6 +323,9 @@ fn home_locations() -> Vec<(Shipped, PathBuf)> {
         .filter_map(app_dir)
         .map(|dir| (Shipped::Ox, dir));
     let git_dir = xdg_dir(XdgBase::Config).map(|dir| (Shipped::Git, dir.join("git")));
+    let claude_settings = claude_dir()
+        .into_iter()
+        .flat_map(|dir| ["settings.json", "hooks"].map(|name| (Shipped::Agents, dir.join(name))));
     let home = std::env::home_dir();
     let in_home = home.iter().flat_map(|home| {
         [
@@ -335,6 +341,7 @@ fn home_locations() -> Vec<(Shipped, PathBuf)> {
     });
     app_dirs
         .chain(git_dir)
+        .chain(claude_settings)
         .chain(in_home)
         .map(|(group, path)| (group, resolve(&path).unwrap_or(path)))
         .collect()
@@ -381,6 +388,7 @@ mod tests {
                     (HOME_VAR, Some(abs("/home/u"))),
                     ("XDG_DATA_HOME", Some(abs("/data"))),
                     ("XDG_CONFIG_HOME", Some(abs("/config"))),
+                    ("CLAUDE_CONFIG_DIR", None),
                 ],
                 || {
                     let patterns = |group: Shipped| {
@@ -468,6 +476,7 @@ mod tests {
                             (HOME_VAR, Some(spelling.as_str())),
                             ("XDG_DATA_HOME", None),
                             ("XDG_CONFIG_HOME", None),
+                            ("CLAUDE_CONFIG_DIR", None),
                         ],
                         || {
                             [Shipped::Ssh, Shipped::Credentials].map(|group| {
@@ -493,6 +502,18 @@ mod tests {
                         "{spelling}"
                     );
                 }
+            }
+
+            #[test]
+            fn name_claude_codes_login_inside_claude_config_dir() {
+                let dir = abs("/srv/claude");
+
+                let rules = temp_env::with_var("CLAUDE_CONFIG_DIR", Some(dir.as_str()), || {
+                    Shipped::Credentials.rules().unwrap().unwrap()
+                });
+
+                let expected = format!("{}/.credentials.json", slash_separated(Path::new(&dir)));
+                assert_eq!(rules[1].pattern(), expected);
             }
         }
     }

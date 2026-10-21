@@ -1,4 +1,4 @@
-//! Stdio rendering of engine events for the `--no-tui` REPL and `--prompt` headless modes.
+//! Stdio rendering of engine events for the `--no-tui` REPL and `--print` headless modes.
 
 use std::collections::{HashMap, VecDeque};
 use std::fmt::Write as _;
@@ -18,8 +18,8 @@ use ox_core::permission::defaults::ShippedTier;
 use ox_core::permission::{Basis, SessionGrant};
 use ox_core::protocol::{Decision, Event, EventSink, Op, ToolCall, ToolResult};
 use ox_core::session::display::{UNTITLED_MARKER, archive_notice, id_prefix};
-use ox_core::tool::ApprovalPreview;
 use ox_core::tool::tasks::{Progress, Task};
+use ox_core::tool::view::ApprovalPreview;
 use ox_core::util::sync::lock_or_recover;
 use ox_core::util::text::{escape_controls, escape_line};
 use ox_tui::glyphs::{INTERRUPTED_MARKER, task_marker};
@@ -276,6 +276,7 @@ impl StdioSink {
             | Event::SummaryDiscarded
             | Event::LoginStarted { .. }
             | Event::SignedIn { .. }
+            | Event::LoginRestored { .. }
             | Event::SignedOut { .. }
             | Event::ApprovalRequested { .. }
             | Event::SessionRulesUpdated(_)

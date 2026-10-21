@@ -1,9 +1,11 @@
 //! Engine events and background task results: chat and status updates, the turn lifecycle they
-//! drive, session swaps, config changes, sign-in results, git probe updates, and copy reports.
+//! drive, session swaps, config changes, sign-in results, git probe updates, copy reports, and
+//! background slash-command output.
 
 use std::time::Instant;
 
 use indoc::formatdoc;
+use tokio::task::{JoinError, JoinSet};
 use tracing::{debug, warn};
 
 use ox_core::command;
@@ -14,7 +16,7 @@ use ox_core::model::ModelSpec;
 use ox_core::permission::{Basis, Mode, SessionGrant};
 use ox_core::protocol::{ConfigPick, Event, Interaction, Op};
 use ox_core::session::display::archive_notice;
-use ox_core::tool::ApprovalPreview;
+use ox_core::tool::view::ApprovalPreview;
 use ox_core::util::text::plural;
 
 use super::{App, CopyNotice, HandBack};
@@ -22,6 +24,7 @@ use crate::clipboard::{CopyReport, Delivery};
 use crate::components::status::Status;
 use crate::git_probes::GitUpdate;
 use crate::modal::approval::ApprovalModal;
+use crate::slash::ChatOutput;
 use crate::{NOTICE_DURATION, now};
 
 impl App {
@@ -100,6 +103,7 @@ impl App {
             Event::ModeChanged(mode) => self.apply_mode_changed(mode),
             Event::LoginStarted { url } => self.open_sign_in_url(&url),
             Event::SignedIn { auth } => self.apply_signed_in(auth),
+            Event::LoginRestored { auth } => self.apply_login_restored(auth),
             Event::SignedOut {
                 removed,
                 auth,
@@ -245,12 +249,14 @@ impl App {
     }
 
     /// Rebinds to session `id` titled `title`, clearing the previous session's chat, rules,
-    /// background shells, tasks, usage, and in-flight prompt. Returns the previous session's ID.
+    /// background shells, tasks, slash-command tasks, usage, and in-flight prompt. Returns the
+    /// previous session's ID.
     fn rebind_session(&mut self, id: String, title: Option<String>) -> String {
         let old_id = std::mem::replace(&mut self.session_info.session_id, id);
         self.session_info.session_allow.clear();
         self.session_info.background_shells.clear();
         self.tasks.clear();
+        self.slash_tasks = JoinSet::new();
         self.status_bar.set_title(title);
         self.status_bar.set_usage(None);
         self.chat.clear_history();
@@ -360,6 +366,13 @@ impl App {
         self.finish_turn();
     }
 
+    fn apply_login_restored(&mut self, auth: AuthSource) {
+        self.session_info.config.auth = Some(auth);
+        self.status_bar.set_rate_limits(None);
+        self.chat
+            .push_system_message(format!("Signed in. Requests now use {auth}."));
+    }
+
     fn apply_signed_out(
         &mut self,
         removed: bool,
@@ -449,6 +462,21 @@ impl App {
             .take_if(|notice| now >= notice.until)
             .is_some()
     }
+
+    /// Prints what a background slash command resolved to. A panicked task only logs, since the
+    /// panic hook already reports the panic.
+    pub(super) fn apply_slash_task(
+        &mut self,
+        finished: Result<Result<ChatOutput, String>, JoinError>,
+    ) {
+        match finished {
+            Ok(Ok(ChatOutput::SystemMessage(text))) => self.chat.push_system_message(text),
+            Ok(Ok(ChatOutput::GitDiff(diff))) => self.chat.push_git_diff(diff),
+            Ok(Err(msg)) => self.chat.push_error(&msg),
+            Err(e) => warn!("background slash command failed: {e}"),
+        }
+        self.dirty = true;
+    }
 }
 
 /// The settings an `Event::ConfigChanged` confirmation compares, before or after the change.
@@ -523,7 +551,7 @@ mod tests {
     use ox_core::tool::bash::background::testing::{shell, shells_in_each_state};
     use ox_core::tool::tasks::TaskStatus;
     use ox_core::tool::tasks::testing::{plan, task};
-    use ox_core::tool::{ApprovalBody, ToolResultView};
+    use ox_core::tool::view::{ApprovalBody, ToolResultView};
     use ox_core::util::git::PullRequest;
 
     use super::*;
@@ -531,6 +559,7 @@ mod tests {
     use crate::app::testing::{five_hour_limit, rendered_text, test_app};
     use crate::clipboard::CopyError;
     use crate::glyphs::INTERRUPTED_MARKER;
+    use crate::slash::WorkingTreeDiff;
 
     fn bash_call_start(id: &str, command: &str) -> Event {
         Event::ToolCallStart(ToolCall {
@@ -1285,6 +1314,20 @@ mod tests {
             assert!(app.dirty);
         }
 
+        #[tokio::test]
+        async fn session_rolled_drops_the_old_session_slash_tasks() {
+            let (mut app, _rx, _event_tx) = test_app(None);
+            app.slash_tasks
+                .spawn(async { Ok(ChatOutput::SystemMessage("old session's output".to_owned())) });
+
+            app.handle_engine_event(Event::SessionRolled {
+                id: "rolled-session".to_owned(),
+                archived: false,
+            });
+
+            assert!(app.slash_tasks.join_next().await.is_none());
+        }
+
         #[test]
         fn session_rolled_after_archive_names_the_archived_session() {
             let (mut app, _rx, _event_tx) = test_app(None);
@@ -1812,6 +1855,27 @@ mod tests {
         }
 
         #[test]
+        fn login_restored_names_the_credential_and_keeps_the_turn_running() {
+            let (mut app, _rx, _event_tx) = test_app(None);
+            app.session_info.config.auth = None;
+            app.status_bar.set_status(Status::Streaming);
+
+            app.handle_engine_event(Event::LoginRestored {
+                auth: AuthSource::ClaudeCodeLogin,
+            });
+
+            assert_eq!(
+                app.session_info.config.auth,
+                Some(AuthSource::ClaudeCodeLogin)
+            );
+            assert_eq!(
+                app.chat.last_system_text(),
+                Some("Signed in. Requests now use OAuth (Claude Code login).")
+            );
+            assert_eq!(app.status_bar.status(), &Status::Streaming);
+        }
+
+        #[test]
         fn signed_out_reports_the_removal_and_the_credential_requests_use() {
             for (removed, auth, fallback_error, expected) in [
                 (
@@ -1856,10 +1920,13 @@ mod tests {
         }
 
         #[test]
-        fn signed_in_or_out_drops_the_previous_accounts_usage_limits() {
+        fn credential_changes_drop_the_previous_accounts_usage_limits() {
             for event in [
                 Event::SignedIn {
                     auth: AuthSource::OxLogin,
+                },
+                Event::LoginRestored {
+                    auth: AuthSource::ClaudeCodeLogin,
                 },
                 Event::SignedOut {
                     removed: true,
@@ -2025,6 +2092,48 @@ mod tests {
                 (failed.text.as_str(), failed.failed),
                 ("Not copied: the clipboard did not answer within 2 s", true),
             );
+        }
+    }
+
+    mod apply_slash_task {
+        use super::*;
+
+        async fn finish(
+            output: Result<ChatOutput, String>,
+        ) -> Result<Result<ChatOutput, String>, JoinError> {
+            tokio::spawn(async { output }).await
+        }
+
+        #[tokio::test]
+        async fn prints_the_message_diff_or_error_the_task_resolved_to() {
+            let (mut app, _rx, _event_tx) = test_app(None);
+            let diff = WorkingTreeDiff {
+                untracked: vec!["new.txt".to_owned()],
+                ..WorkingTreeDiff::default()
+            };
+
+            app.apply_slash_task(finish(Ok(ChatOutput::SystemMessage("clean".to_owned()))).await);
+            assert_eq!(app.chat.last_system_text(), Some("clean"));
+
+            app.dirty = false;
+            app.apply_slash_task(finish(Ok(ChatOutput::GitDiff(diff))).await);
+            assert!(app.dirty);
+            assert!(rendered_text(&mut app, 60, 24).contains("  new.txt"));
+
+            app.apply_slash_task(finish(Err("/diff: boom".to_owned())).await);
+            assert_eq!(app.chat.last_error_text(), Some("/diff: boom"));
+        }
+
+        #[tokio::test]
+        async fn a_panicked_task_prints_nothing() {
+            let (mut app, _rx, _event_tx) = test_app(None);
+            let mut tasks = JoinSet::<Result<ChatOutput, String>>::new();
+            tasks.spawn(async { panic!("task bug") });
+            let finished = tasks.join_next().await.expect("one task spawned");
+
+            app.apply_slash_task(finished);
+
+            assert_eq!(app.chat.entry_count(), 0);
         }
     }
 
