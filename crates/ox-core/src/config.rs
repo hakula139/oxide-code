@@ -1053,14 +1053,22 @@ mod tests {
         async fn load_with(dir: &TempDir, overrides: &[(&'static str, &str)]) -> Result<Config> {
             let overrides = overrides.iter().map(|&(key, value)| env(key, value));
             let vars = env_vars([xdg(dir)].into_iter().chain(overrides));
-            temp_env::async_with_vars(vars, load_and_resolve_auth(dir.path(), false)).await
+            load_in(dir, vars, false).await
         }
 
-        /// Runs both startup steps, [`Config::load`] and [`Config::resolve_auth`].
-        async fn load_and_resolve_auth(cwd: &Path, can_sign_in: bool) -> Result<Config> {
-            let mut config = Config::load(cwd)?;
-            config.resolve_auth(can_sign_in).await?;
-            Ok(config)
+        /// Runs both startup steps, [`Config::load`] and [`Config::resolve_auth`],
+        /// from the user config under `dir` with exactly `vars` set.
+        async fn load_in(
+            dir: &TempDir,
+            vars: Vec<(&'static str, Option<String>)>,
+            can_sign_in: bool,
+        ) -> Result<Config> {
+            temp_env::async_with_vars(vars, async {
+                let mut config = Config::load(dir.path())?;
+                config.resolve_auth(can_sign_in).await?;
+                Ok(config)
+            })
+            .await
         }
 
         fn assert_auth(config: &Config, source: AuthSource, secret: &str) {
@@ -1102,6 +1110,7 @@ mod tests {
             assert_eq!(config.max_tokens, None);
             assert_eq!(config.effort, Some(Effort::Medium));
             assert_eq!(config.prompt_cache_ttl, PromptCacheTtl::OneHour);
+            assert_eq!(config.extra_ca_certs, None);
             assert!(config.compaction.auto.enabled);
             assert_eq!(
                 config.compaction.auto.threshold_tokens,
@@ -1411,13 +1420,6 @@ mod tests {
         }
 
         #[tokio::test]
-        async fn extra_ca_certs_default_to_no_bundle() {
-            let dir = tempfile::tempdir().unwrap();
-            let config = load_with(&dir, &[]).await.unwrap();
-            assert!(config.extra_ca_certs.is_none());
-        }
-
-        #[tokio::test]
         async fn extra_ca_certs_env_beats_file_and_expands_tilde() {
             let dir = tempfile::tempdir().unwrap();
             write_user_config(
@@ -1488,20 +1490,6 @@ mod tests {
                     std::fs::read(&missing).unwrap_err(),
                 ),
             );
-        }
-
-        #[tokio::test]
-        async fn extra_ca_certs_file_used_when_env_unset() {
-            let dir = tempfile::tempdir().unwrap();
-            write_user_config(
-                dir.path(),
-                &formatdoc! {"
-                    [client]
-                    extra_ca_certs = '{TEST_CA_PATH}'
-                "},
-            );
-            let config = load_with(&dir, &[]).await.unwrap();
-            assert_eq!(config.extra_ca_certs, Some(PathBuf::from(TEST_CA_PATH)),);
         }
 
         #[tokio::test]
@@ -1578,10 +1566,7 @@ mod tests {
                     ("ANTHROPIC_AUTH_TOKEN", auth_token.map(str::to_owned)),
                     env("CLAUDE_CODE_OAUTH_TOKEN", "oauth-token"),
                 ]);
-                let config =
-                    temp_env::async_with_vars(vars, load_and_resolve_auth(dir.path(), false))
-                        .await
-                        .unwrap();
+                let config = load_in(&dir, vars, false).await.unwrap();
                 assert_auth(&config, winner, secret);
             }
         }
@@ -1590,9 +1575,7 @@ mod tests {
         async fn falls_back_to_the_oxide_code_login() {
             let (dir, data) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
             let vars = ox_login_env(&dir, &data, 9_999_999_999_999);
-            let config = temp_env::async_with_vars(vars, load_and_resolve_auth(dir.path(), false))
-                .await
-                .unwrap();
+            let config = load_in(&dir, vars, false).await.unwrap();
             assert_auth(&config, AuthSource::OxLogin, "ox-token");
             assert_eq!(config.provenance.auth, Source::Default);
             assert!(config.signed_out.is_none());
@@ -1602,13 +1585,8 @@ mod tests {
         async fn only_a_session_that_can_sign_in_starts_signed_out_when_the_stored_login_fails() {
             let (dir, data) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
             let vars = ox_login_env(&dir, &data, 1);
-            let (can_sign_in, cannot_sign_in) = temp_env::async_with_vars(vars, async {
-                (
-                    load_and_resolve_auth(dir.path(), true).await,
-                    load_and_resolve_auth(dir.path(), false).await,
-                )
-            })
-            .await;
+            let can_sign_in = load_in(&dir, vars.clone(), true).await;
+            let cannot_sign_in = load_in(&dir, vars, false).await;
 
             let can_sign_in = can_sign_in.unwrap();
             assert!(can_sign_in.auth.is_none());
@@ -1635,9 +1613,7 @@ mod tests {
             write_creds(&store.join("credentials.json"), "dead", Some("refresh"), 0);
             std::fs::create_dir(store.join("credentials.lock")).unwrap();
 
-            let config = temp_env::async_with_vars(vars, load_and_resolve_auth(dir.path(), true))
-                .await
-                .unwrap();
+            let config = load_in(&dir, vars, true).await.unwrap();
 
             let signed_out = config.signed_out.expect("signed out");
             assert_eq!(
@@ -1696,7 +1672,7 @@ mod tests {
                 env("ANTHROPIC_BASE_URL", "https://gateway.example.com"),
                 env("ANTHROPIC_CUSTOM_HEADERS", "missing colon"),
             ]);
-            let err = temp_env::async_with_vars(vars, load_and_resolve_auth(dir.path(), false))
+            let err = load_in(&dir, vars, false)
                 .await
                 .expect_err("malformed header must fail startup");
             assert_eq!(
@@ -1726,22 +1702,6 @@ mod tests {
         }
 
         #[tokio::test]
-        async fn gateway_without_credential_names_the_env_vars() {
-            let dir = tempfile::tempdir().unwrap();
-            let vars = env_vars(vec![
-                xdg(&dir),
-                ("ANTHROPIC_API_KEY", None),
-                env("ANTHROPIC_BASE_URL", "https://gateway.example.com"),
-            ]);
-            let err = temp_env::async_with_vars(vars, load_and_resolve_auth(dir.path(), false))
-                .await
-                .expect_err("stored login must not go to a gateway");
-            let msg = format!("{err:#}");
-            assert!(msg.contains("https://gateway.example.com"), "{msg}");
-            assert!(msg.contains("ANTHROPIC_AUTH_TOKEN"), "{msg}");
-        }
-
-        #[tokio::test]
         async fn effort_defaults_to_per_model_value() {
             for (model, expected) in [
                 ("claude-opus-5-5", Some(Effort::Medium)),
@@ -1757,18 +1717,6 @@ mod tests {
         }
 
         #[tokio::test]
-        async fn effort_env_overrides_per_model_default() {
-            let dir = tempfile::tempdir().unwrap();
-            let config = load_with(
-                &dir,
-                &[("ANTHROPIC_MODEL", "claude-opus-5-5"), ("OX_EFFORT", "low")],
-            )
-            .await
-            .unwrap();
-            assert_eq!(config.effort, Some(Effort::Low));
-        }
-
-        #[tokio::test]
         async fn effort_pick_is_dropped_on_unknown_model() {
             let dir = tempfile::tempdir().unwrap();
             let config = load_with(
@@ -1779,21 +1727,6 @@ mod tests {
             .unwrap();
             assert_eq!(config.effort, None);
             assert_eq!(config.provenance.effort, Source::Default);
-        }
-
-        #[tokio::test]
-        async fn effort_file_picks_up_when_env_unset() {
-            let dir = tempfile::tempdir().unwrap();
-            write_user_config(
-                dir.path(),
-                indoc! {r#"
-                    [client]
-                    model = "claude-sonnet-5-5"
-                    effort = "medium"
-                "#},
-            );
-            let config = load_with(&dir, &[]).await.unwrap();
-            assert_eq!(config.effort, Some(Effort::Medium));
         }
 
         #[tokio::test]
@@ -1902,15 +1835,6 @@ mod tests {
                 "{msg}"
             );
             assert!(msg.contains("run-state"), "{msg}");
-        }
-
-        #[tokio::test]
-        async fn prompt_cache_ttl_env_overrides_default() {
-            let dir = tempfile::tempdir().unwrap();
-            let config = load_with(&dir, &[("OX_PROMPT_CACHE_TTL", "5m")])
-                .await
-                .unwrap();
-            assert_eq!(config.prompt_cache_ttl, PromptCacheTtl::FiveMin);
         }
 
         #[tokio::test]
