@@ -461,7 +461,7 @@ mod tests {
     use crate::prompt::SystemPrompt;
     use crate::protocol::testing::CapturingSink;
     use crate::protocol::{ConfigPick, Decision, ResumeTarget, ToolCall, ToolResult};
-    use crate::tool::view::{ReadExcerptLine, ToolResultView};
+    use crate::tool::view::{NumberedLine, ToolResultView};
     use crate::tool::{
         DEFAULT_TOOL_ICON, Prepared, Tool, ToolCtx, ToolMetadata, ToolOutput, ToolRegistry,
         ToolSpec,
@@ -546,7 +546,7 @@ mod tests {
             ) -> Option<ToolResultView> {
                 Some(ToolResultView::ReadExcerpt {
                     path: input["file_path"].as_str().unwrap_or_default().to_owned(),
-                    lines: vec![ReadExcerptLine {
+                    lines: vec![NumberedLine {
                         number: 1,
                         text: metadata.title.clone().unwrap_or_default(),
                     }],
@@ -978,7 +978,7 @@ mod tests {
                         title: Some("Viewed notes".to_owned()),
                         view: ToolResultView::ReadExcerpt {
                             path: "notes.txt".to_owned(),
-                            lines: vec![ReadExcerptLine {
+                            lines: vec![NumberedLine {
                                 number: 1,
                                 text: "Viewed notes".to_owned(),
                             }],

@@ -32,12 +32,12 @@ The per-line caps below go through `truncate_line(line, max_chars)`, which appen
 1. **Two truncation layers, separated by responsibility.** View-shape stays per-tool because it needs tool-specific knowledge. Byte-budget runs after `Tool::run` as the absolute safety net.
 2. **Head-and-tail strategy.** Keeps the command setup and final outcome, the two slices the model needs most. Tail-only would lose the prompt, and head-only would lose the result.
 3. **Spill the cut output to a session file.** The model gets the head and tail inline, and the marker names a file holding the rest for `read` and `grep` to page through when the middle matters. Keying the directory by session ID beside the session file ties the files to the session, so `/delete` removes them and nothing else needs to clean up. Because `bash` spills as it drains, a command's full output never sits in memory, and a background shell spills each read's window to its own files. Because the cap applies to each file, and so to each call or read, the total is unbounded: a long-running background shell read many times can fill the disk across its files.
-4. **Two distinct metadata fields.** `ToolMetadata::truncated_total` holds the unbounded match count from a per-tool cap, and `ToolMetadata::truncated_bytes` holds the pre-cap byte count from the registry's safety net. Keeping them apart stops the glob view's `<pattern> (X of N)` header from counting bytes when both layers fire.
-5. **Per-tool line caps.** Read allows 2000 characters per line because Edit needs the exact text of the lines it targets. Grep lists many hits per call and stays at 500.
+4. **Per-tool line caps.** Read allows 2000 characters per line because Edit needs the exact text of the lines it targets. Grep lists many hits per call and stays at 500.
 
 ## Sources
 
-- `crates/ox-core/src/engine.rs` and `crates/ox-core/src/engine/dispatch.rs`: `DispatchContext::artifact_dir`, the live session's artifact directory that each dispatch hands to `ToolCtx`.
+- `crates/ox-core/src/engine.rs`: the live session's artifact directory, which fills `DispatchContext::artifact_dir` for each dispatch.
+- `crates/ox-core/src/engine/dispatch.rs`: `DispatchContext::artifact_dir`, which each dispatch hands to `ToolCtx`.
 - `crates/ox-core/src/file_tracker.rs`: `MAX_TRACKED_FILE_SIZE`.
 - `crates/ox-core/src/session/handle.rs`: `SessionHandle::artifact_dir`.
 - `crates/ox-core/src/session/store.rs`: `artifact_dir`, `SessionStore::session_file`, `delete_at`.

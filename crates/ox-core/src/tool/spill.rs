@@ -16,12 +16,10 @@ use crate::util::fs::create_private_dir_all;
 pub(super) const MAX_OUTPUT_BYTES: usize = 128 * 1024;
 
 /// Runs the prepared call on `tool`, applying [`cap_output`] after each tool's row caps, with the
-/// call's `.txt` spill file keeping the full output. Records the original length in
-/// `metadata.truncated_bytes` when truncated.
+/// call's `.txt` spill file keeping the full output.
 pub(crate) async fn run_capped(tool: &dyn Tool, prepared: Prepared, ctx: &ToolCtx) -> ToolOutput {
     let mut output = tool.run(prepared, ctx).await;
-    let original_len = output.content.len();
-    if original_len <= MAX_OUTPUT_BYTES {
+    if output.content.len() <= MAX_OUTPUT_BYTES {
         return output;
     }
 
@@ -31,7 +29,6 @@ pub(crate) async fn run_capped(tool: &dyn Tool, prepared: Prepared, ctx: &ToolCt
         Ok(capped) => output.content = capped,
         Err(e) => return ToolOutput::error(e),
     }
-    output.metadata.truncated_bytes = Some(original_len);
     output
 }
 
@@ -225,7 +222,7 @@ mod tests {
     use crate::tool::local_testing::{ctx, spill_path};
     use crate::tool::testing::bash_registry;
     use crate::tool::view::ToolResultView;
-    use crate::tool::{ToolRegistry, ToolSpec};
+    use crate::tool::{ToolMetadata, ToolRegistry, ToolSpec};
 
     /// Splits output capped by [`cap_output`] into its head, the text inside its omission marker,
     /// and its tail.
@@ -302,7 +299,6 @@ mod tests {
             );
             assert!((MAX_OUTPUT_BYTES - 1..=MAX_OUTPUT_BYTES).contains(&output.content.len()));
             assert_eq!(fs::read_to_string(&path).unwrap(), full);
-            assert_eq!(output.metadata.truncated_bytes, Some(full.len()));
         }
 
         #[tokio::test]
@@ -313,7 +309,7 @@ mod tests {
             let output = run_fixed(&text, &ctx(dir.path())).await;
 
             assert_eq!(output.content, text);
-            assert!(output.metadata.truncated_bytes.is_none());
+            assert_eq!(output.metadata, ToolMetadata::default());
             assert!(!dir.path().join("session").exists());
         }
 
@@ -326,8 +322,7 @@ mod tests {
                 .run_input("grep", input.clone(), &ctx(dir.path()))
                 .await;
 
-            let spilled = fs::read(spill_path(dir.path(), ".txt")).unwrap();
-            assert_eq!(output.metadata.truncated_bytes, Some(spilled.len()));
+            assert!(spill_path(dir.path(), ".txt").exists());
             assert!(output.metadata.truncated_total.is_none());
             let view = registry.result_view(
                 "grep",
@@ -357,7 +352,7 @@ mod tests {
                 .await;
 
             assert!(!output.is_error, "{}", output.content);
-            assert!(output.metadata.truncated_bytes.is_none());
+            assert!(!spill_path(dir.path(), ".txt").exists());
             let stdout = spill_path(dir.path(), ".stdout.txt");
             let note = format!("full stdout saved to {}] ...", stdout.display());
             assert!(output.content.contains(&note));

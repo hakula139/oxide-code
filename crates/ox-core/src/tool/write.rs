@@ -193,7 +193,7 @@ mod tests {
     use crate::file_tracker::testing::seed_full_read;
     use crate::tool::local_testing::{self, canonical_tempdir, ctx, temp_ctx};
     use crate::tool::read::ReadTool;
-    use crate::tool::view::{DiffChunk, DiffLine};
+    use crate::tool::view::{DiffChunk, NumberedLine};
     use crate::util::fs::testing::symlink_file;
 
     mod approval_preview {
@@ -202,7 +202,7 @@ mod tests {
         fn added_line(text: &str) -> ApprovalBody {
             ApprovalBody::Diff(DiffChunk {
                 old: Vec::new(),
-                new: vec![DiffLine {
+                new: vec![NumberedLine {
                     number: 1,
                     text: text.to_owned(),
                 }],
@@ -253,11 +253,11 @@ mod tests {
             assert_eq!(
                 preview.body,
                 ApprovalBody::Diff(DiffChunk {
-                    old: vec![DiffLine {
+                    old: vec![NumberedLine {
                         number: 2,
                         text: "old line".to_owned(),
                     }],
-                    new: vec![DiffLine {
+                    new: vec![NumberedLine {
                         number: 2,
                         text: "new line".to_owned(),
                     }],

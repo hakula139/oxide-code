@@ -206,7 +206,7 @@ mod tests {
     use crate::tool::edit::EditTool;
     use crate::tool::tasks::testing::plan;
     use crate::tool::testing::bash_registry;
-    use crate::tool::view::{DiffChunk, DiffLine, EditDiff};
+    use crate::tool::view::{DiffChunk, EditDiff, NumberedLine};
 
     fn tools() -> ToolRegistry {
         bash_registry(vec![Box::new(EditTool)])
@@ -528,11 +528,11 @@ mod tests {
         fn resolves_a_result_through_its_tool_with_persisted_metadata() {
             let diff = EditDiff {
                 chunk: DiffChunk {
-                    old: vec![DiffLine {
+                    old: vec![NumberedLine {
                         number: 10,
                         text: "a".to_owned(),
                     }],
-                    new: vec![DiffLine {
+                    new: vec![NumberedLine {
                         number: 10,
                         text: "b".to_owned(),
                     }],

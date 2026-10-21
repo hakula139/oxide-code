@@ -264,7 +264,7 @@ expression: recovered
       "truncated_total": 250
     },
     "t4": {
-      "truncated_bytes": 4096
+      "title": "Read notes.md"
     }
   },
   "unarchived": true,

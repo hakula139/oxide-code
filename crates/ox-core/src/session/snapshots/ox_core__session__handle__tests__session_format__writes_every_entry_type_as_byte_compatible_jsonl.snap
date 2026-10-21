@@ -22,7 +22,7 @@ expression: write_every_entry(dir.path()).await
 {"type":"message","uuid":"<UUID-11>","parent_uuid":"<UUID-10>","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"t2","content":"fn main() {}"},{"type":"tool_result","tool_use_id":"t3","content":"g.rs:1: fn main() {}"},{"type":"tool_result","tool_use_id":"t4","content":"test result: FAILED","is_error":true},{"type":"tool_result","tool_use_id":"t5","content":"Updated the task list: 1 of 2 completed."}]},"timestamp":"<TS-16>"}
 {"type":"tool_result_metadata","tool_use_id":"t2","metadata":{"title":"Read g.rs"},"timestamp":"<TS-17>"}
 {"type":"tool_result_metadata","tool_use_id":"t3","metadata":{"title":"Found 250 matches","truncated_total":250},"timestamp":"<TS-17>"}
-{"type":"tool_result_metadata","tool_use_id":"t4","metadata":{"truncated_bytes":4096},"timestamp":"<TS-17>"}
+{"type":"tool_result_metadata","tool_use_id":"t4","metadata":{"title":"Read notes.md"},"timestamp":"<TS-17>"}
 {"type":"message","uuid":"<UUID-12>","parent_uuid":"<UUID-11>","message":{"role":"assistant","content":[{"type":"text","text":"Done."}]},"timestamp":"<TS-18>"}
 {"type":"message","uuid":"<UUID-13>","parent_uuid":"<UUID-12>","message":{"role":"user","content":[{"type":"text","text":"Delete f.rs"}]},"timestamp":"<TS-19>"}
 {"type":"rewind","tip":"<UUID-12>","timestamp":"<TS-20>"}

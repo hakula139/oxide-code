@@ -454,7 +454,7 @@ mod tests {
     use crate::tool::tasks::testing::plan;
     use crate::tool::testing::bash_preview;
     use crate::tool::view::{
-        ApprovalBody, DiffChunk, DiffLine, EditDiff, GrepFileGroup, GrepMatchLine, ReadExcerptLine,
+        ApprovalBody, DiffChunk, EditDiff, GrepFileGroup, GrepMatchLine, NumberedLine,
     };
 
     mod op {
@@ -595,11 +595,11 @@ mod tests {
 
         fn diff_chunk() -> DiffChunk {
             DiffChunk {
-                old: vec![DiffLine {
+                old: vec![NumberedLine {
                     number: 3,
                     text: "old".to_owned(),
                 }],
-                new: vec![DiffLine {
+                new: vec![NumberedLine {
                     number: 3,
                     text: "new".to_owned(),
                 }],
@@ -632,7 +632,7 @@ mod tests {
                 },
                 ToolResultView::ReadExcerpt {
                     path: "src/main.rs".to_owned(),
-                    lines: vec![ReadExcerptLine {
+                    lines: vec![NumberedLine {
                         number: 1,
                         text: "fn main() {}".to_owned(),
                     }],
