@@ -16,6 +16,12 @@ on:
       - rust-toolchain.toml
       - docs/guide/install.md
   workflow_dispatch:
+    inputs:
+      notes:
+        description: >-
+          Tag whose release notes to republish from this ref's CHANGELOG.md, building
+          nothing (leave empty to build and check every target)
+        type: string
 
 permissions:
   contents: read
@@ -32,13 +38,18 @@ jobs:
     name: CI
     # ci.yml already runs on pull requests, where a called run would also share this workflow's
     # concurrency group and wait on it forever.
-    if: github.event_name != 'pull_request'
+    if: github.event_name != 'pull_request' && !inputs.notes
     uses: ./.github/workflows/ci.yml
     secrets: inherit
 
   build:
     name: Build (${{ matrix.target }})
+    if: ${{ !inputs.notes }}
     runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+    env:
+      # The macOS floor in docs/guide/install.md. Other targets ignore it.
+      MACOSX_DEPLOYMENT_TARGET: '12.0'
     strategy:
       fail-fast: false
       matrix:
@@ -54,10 +65,7 @@ jobs:
         uses: actions/checkout@v7
 
       - name: Set up Rust
-        run: rustup toolchain install && rustup target add ${{ matrix.target }}
-
-      - name: Cache dependencies
-        uses: Swatinem/rust-cache@v2
+        run: rustup toolchain install
 
       - name: Install cargo-about
         uses: taiki-e/install-action@cargo-about
@@ -130,6 +138,21 @@ jobs:
             exit 1
           fi
 
+      - name: Check macOS floor
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          floor=$(sed -nE 's/^- \*\*macOS\*\*: ([0-9.]+) or later.*/\1/p' docs/guide/install.md)
+          minos=$(otool -l smoke/ox | awk '$1 == "minos" { print $2 }')
+          test -n "$floor"
+          test -n "$minos"
+          echo "ox targets macOS $minos, and docs/guide/install.md promises $floor"
+          if [[ "${minos%.0}" != "${floor%.0}" ]]; then
+            echo "::error::ox targets macOS $minos." \
+              "Set MACOSX_DEPLOYMENT_TARGET to the floor in docs/guide/install.md."
+            exit 1
+          fi
+
       - name: Upload archive
         uses: actions/upload-artifact@v7
         with:
@@ -146,6 +169,7 @@ jobs:
     if: github.ref_type == 'tag'
     needs: [ci, build]
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     permissions:
       attestations: write
       contents: write
@@ -188,6 +212,7 @@ jobs:
     name: Update Homebrew Formula
     needs: publish
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     permissions:
       actions: write
       contents: write
@@ -266,3 +291,25 @@ jobs:
             exit 1
           fi
           echo "Dispatched CI: $run_url"
+
+  notes:
+    name: Republish Release Notes
+    if: inputs.notes
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Install changelog parser
+        uses: taiki-e/install-action@parse-changelog
+
+      - name: Republish notes
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ inputs.notes }}
+        run: |
+          parse-changelog CHANGELOG.md "${TAG#v}" > release-notes.md
+          gh release edit "$TAG" --notes-file release-notes.md
