@@ -14,8 +14,6 @@ pub(crate) enum Action {
     /// queue while a turn runs.
     Submit(String),
     Op(Op),
-    /// Ctrl+C while idle. A second one inside the exit window quits.
-    ConfirmExit,
     /// Shift+Tab, which switches to the next permission mode.
     CycleMode,
     /// A preview of the picker's highlighted theme, without committing it. Cursor moves in the

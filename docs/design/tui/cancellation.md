@@ -7,7 +7,7 @@ How the TUI cancels work on Esc or Ctrl+C, exits on a second Ctrl+C from idle, a
 The TUI exposes these controls and behaviors:
 
 - **Cancel and exit.** Esc / Ctrl+C cancels active work. Dual-press Ctrl+C exits from idle, and Ctrl+D exits when idle with an empty input buffer.
-- **Queue input.** Enter while busy appends to `App::pending_prompts: VecDeque<String>`, rendered as a dim preview above the input, and forwards the prompt as `Op::Queue`.
+- **Queue input.** Enter while busy appends to the app's `PromptQueue`, rendered as a dim preview above the input, and forwards the prompt as `Op::Queue`.
 - **Drain input.** `agent_turn` splices each forwarded prompt into `messages` as a trailing User message at its next round boundary and confirms it with `Event::PromptDrained`, so the model sees new instructions in the next API request without aborting in-flight work. A turn that ends first drops the prompts it still holds, and once it completes or fails the TUI submits the queue head as the next turn. A prompt whose automatic compaction failed was never sent, so the TUI hands it back to the user and leaves the queue waiting. A refused turn that the engine rolled back (`TurnRolledBack`) hands back its prompt and the queued prompts it took in the same way.
 - **Interrupt work.** Cancellation drops the `agent_turn` future: reqwest closes the SSE stream, the bash tool kills the command's process tree, and a dim italic `(interrupted)` marker lands in chat. The transcript then ends on a `[Request interrupted by user]` user message, so the model knows the user abandoned that prompt.
 - **Show status.** The status bar puts the key that stops the work beside the spinner: `Streaming · Esc to interrupt`, `Running {tool} · Esc to interrupt`, `Compacting · Esc to interrupt`, `Signing in · Esc to cancel`, `Resuming`, and `Cancelling`. An armed exit shows `Press Ctrl+C again to exit`.
@@ -26,11 +26,11 @@ The picks lean toward the Codex precedent on most surfaces, since it is the one 
 
 3. **Mid-turn drain at round boundary, raw consecutive User messages on the wire.** Each queued prompt becomes its own `User` message with one `Text` block. Anthropic accepts consecutive same-role messages. oxide-code deliberately drops the `<system-reminder>` envelope that Claude Code and opencode wrap with, which keeps persistence trivial.
 
-4. **The TUI owns the queue.** A queued prompt leaves `App::pending_prompts` only when a matching `PromptDrained` arrives or when it starts a turn of its own. `App::forwarded_prompts` counts the leading entries the in-flight turn holds, and a drain pops the head only when it names that head. While `Status::Compacting`, `Status::SigningIn`, `Status::Resuming`, or `Status::Cancelling`, no turn may be left to splice prompts in, so the TUI holds new submits and forwards them in order once a turn resumes streaming. The idle engine discards a late `Op::Queue`, since the TUI submits it again.
+4. **The TUI owns the queue.** `PromptQueue` holds the active prompt and the prompts queued behind it, each kept as typed. A queued prompt leaves it only when a matching `PromptDrained` arrives, when it starts a turn of its own, or when Esc recalls it into the input. The queue counts the leading entries the in-flight turn holds, and a drain pops the head only when it names that head. While `Status::Compacting`, `Status::SigningIn`, `Status::Resuming`, or `Status::Cancelling`, no turn may be left to splice prompts in, so the TUI holds new submits and forwards them in order once a turn resumes streaming. The idle engine discards a late `Op::Queue`, since the TUI submits it again.
 
 5. **A cancel leaves the queue to the user.** After a cancel the TUI goes idle without submitting the queue head, even when the turn completed before the cancel landed. Esc on idle pops the most recent queued prompt into the textarea for editing, gated on the buffer being empty so a draft is never silently overwritten. The next submit joins the back of the queue and starts a turn with its head, so prompts keep the order they were typed in.
 
-6. **`Status` is projected from `App` state.** The variants (`Idle | Streaming | ToolRunning { name } | Compacting | SigningIn | Resuming | Cancelling | ExitArmed { until }`) derive from app fields, so `set_active_status` can short-circuit while `Cancelling` / `ExitArmed` without a parallel state to keep in sync.
+6. **`App::status` is the one run state.** The variants (`Idle | Streaming | ToolRunning { name } | Compacting | SigningIn | Resuming | Cancelling | ExitArmed { until }`) live on `App`. `App::set_status` is the only way to change it, and it shows the new status in the status bar. The App itself routes Esc, Ctrl+C, and Ctrl+D, whose meaning depends on the status, and tells the input only whether to draw its busy rules, so no decision reads state back from a view. Stream and tool events go through `set_active_status`, which leaves a pending `Cancelling` in place until the turn's terminal event. `ExitArmed` needs no such guard, since only an idle input arms it and no stream or tool event arrives between turns (decision 8).
 
 7. **Cancellation rides the existing `Event` channel.** `Event::Cancelled` covers both the TUI and `StdioSink`. No new event channel.
 
@@ -50,13 +50,13 @@ The picks lean toward the Codex precedent on most surfaces, since it is the one 
 - `crates/ox-core/src/tool/bash.rs`: `ShellTree`, which kills the shell's process group (Unix) or Job Object (Windows) when a call times out or drops before finishing.
 - `crates/ox-core/src/tool/file.rs`: `write_tracked`.
 - `crates/ox-core/src/tool/search.rs`: `walk_files`.
-- `crates/ox-tui/src/action.rs`: `Action::ConfirmExit`.
-- `crates/ox-tui/src/app.rs`: `App::pending_prompts` / `forwarded_prompts`, and `App::active_prompt` / `auto_compacting`.
-- `crates/ox-tui/src/app/dispatch.rs`: `dispatch_op` / `start_turn` / `forward_queued_prompts`, `handle_esc`, `expire_armed_exit`.
-- `crates/ox-tui/src/app/events.rs`: `finish_turn`, `return_unsent_prompt`, `finalize_idle` / `enter_idle` / `drain_pending_prompt`, `set_active_status`.
+- `crates/ox-tui/src/app.rs`: `App::status` and `App::set_status`.
+- `crates/ox-tui/src/app/dispatch.rs`: `dispatch_op` / `start_turn` / `forward_queued_prompts`, `handle_esc`, `handle_ctrl_c`, the Ctrl+D POSIX gate in `handle_ctrl_d`, and `expire_armed_exit`.
+- `crates/ox-tui/src/app/events.rs`: `finish_turn`, `apply_turn_failed`, `finalize_idle` / `enter_idle` / `drain_pending_prompt`, `set_active_status`.
+- `crates/ox-tui/src/app/queue.rs`: `PromptQueue`, the active prompt, the queued prompts, and what a failed turn hands back.
 - `crates/ox-tui/src/components/chat.rs`: `ChatView::clear_pending_calls`, which evicts orphan tool calls at turn boundaries, and `ChatView::load_history`, which shows a resumed interruption as the `(interrupted)` line.
 - `crates/ox-tui/src/components/chat/blocks/interrupted.rs`: `InterruptedMarker` block.
-- `crates/ox-tui/src/components/input.rs`: Ctrl+D POSIX gate, plus `set_text` and `is_empty`, which the idle Esc recall uses.
+- `crates/ox-tui/src/components/input.rs`: `set_text` and `is_empty`, which the idle Esc recall and the Ctrl+D gate use.
 - `crates/ox-tui/src/components/status.rs`: `Status` variants, busy hints, spinner.
 - `crates/ox-tui/src/glyphs.rs`: `INTERRUPTED_MARKER`.
 - `crates/ox/src/driver/repl.rs`: `drive`, which turns SIGINT during an operation into `Op::Interrupt` and SIGINT at the prompt into a fresh prompt when stdin is a terminal.

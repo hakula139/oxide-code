@@ -57,8 +57,13 @@ pub(crate) enum Status {
 }
 
 impl Status {
+    /// Returns whether no work is in flight, so a submit starts a turn.
+    pub(crate) const fn is_idle(&self) -> bool {
+        !self.is_busy()
+    }
+
     /// Returns whether work is in flight, which the bar marks with an animated spinner.
-    const fn is_busy(&self) -> bool {
+    pub(crate) const fn is_busy(&self) -> bool {
         matches!(
             self,
             Self::Streaming
@@ -236,10 +241,6 @@ impl StatusBar {
             self.tick_counter = 0;
         }
         self.status = status;
-    }
-
-    pub(crate) fn status(&self) -> &Status {
-        &self.status
     }
 
     /// The spinner frame the bar shows while work is in flight.
