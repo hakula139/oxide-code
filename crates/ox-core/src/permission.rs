@@ -6,6 +6,7 @@
 //! oxide-code has no sandbox, so this gate is the whole safety boundary around a tool call.
 
 pub mod defaults;
+pub(crate) mod project;
 pub mod rule;
 pub(crate) mod shell;
 

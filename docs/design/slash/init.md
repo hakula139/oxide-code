@@ -4,7 +4,7 @@
 
 ## Implementation
 
-`/init` looks for the files that loading tries at the project root, in the same order: `AGENTS.md`, `CLAUDE.md`, and `.claude/CLAUDE.md`. As when loading, only a file with content counts, so an empty `CLAUDE.md` leaves the project without an instruction file. Paths that resolve to the same file, such as a `CLAUDE.md` symlink to `AGENTS.md`, count once, under the path that is not a symlink. The project root is the Git repository root, or the working directory when outside a repository. At startup, the TUI and the `--no-tui` REPL each resolve it once through `util::git::project_root`, which builds on `util::git::repo_root`, the same lookup prompt assembly uses. The working directory stays fixed for the session, so the root cannot change.
+`/init` looks for the files that loading tries at the project root, in the same order: `AGENTS.md`, `CLAUDE.md`, and `.claude/CLAUDE.md`. As when loading, only a file with content counts, so an empty `CLAUDE.md` leaves the project without an instruction file. Paths that resolve to the same file, such as a `CLAUDE.md` symlink to `AGENTS.md`, count once, under the path that is not a symlink. The project root is the nearest directory at or above the working directory that holds `.git`, or the working directory when outside a repository. At startup, the TUI and the `--no-tui` REPL each resolve it once through `util::git::project_root`, the same lookup config loading uses. The working directory stays fixed for the session, so the root cannot change.
 
 - **A file exists.** Bare `/init` asks no questions. It forwards a prompt that names each existing file and asks the model to read it, explore the codebase, show proposed changes as a unified diff with a reason for each, and end the turn. The model edits the file only after the user confirms in a later prompt.
 - **No file exists.** `/init AGENTS.md` or `/init CLAUDE.md` forwards a prompt that names the file to create, matching the name ignoring case. Besides oxide-code, Codex and other agents that follow the `AGENTS.md` convention read `AGENTS.md`, and Claude Code reads `CLAUDE.md`. Bare `/init` needs that choice first. In the TUI, it opens a picker whose choice forwards the same prompt. Pressing Esc closes the picker without starting a turn, and the `/init` line stays in the chat, as the command line does when the `/model` or `/theme` picker is cancelled. If auto-compaction clears the chat during a turn started from the picker, the `/init` line is not replayed above the summary. The REPL has no picker, so it rejects bare `/init` with an error naming both commands.
@@ -33,7 +33,7 @@ Both prompts share one rubric: include only information an agent would otherwise
 - `crates/ox-core/src/command.rs`: `parse`, which routes `/init` to `command::init`.
 - `crates/ox-core/src/command/init.rs`: `FILE_CHOICES`, `resolve`, the instruction-file discovery, and the create and update prompts.
 - `crates/ox-core/src/prompt/instructions.rs`: `project_candidates` and `read`, the files `/init` checks and the rule for which of them count.
-- `crates/ox-core/src/util/git.rs`: `project_root` and `repo_root`, the async lookups for the project and repository roots.
+- `crates/ox-core/src/util/git.rs`: `project_root`, the lookup for the project root.
 - `crates/ox-tui/src/lib.rs`: `run`, which resolves the project root and stores it in `LiveSessionInfo`.
 - `crates/ox-tui/src/slash/context.rs`: `LiveSessionInfo::project_root`.
 - `crates/ox-tui/src/slash/init.rs`: `InitCmd` and the file picker.

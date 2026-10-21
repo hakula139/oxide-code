@@ -17,7 +17,7 @@ Layers run from the foundation to the frontends.
 | `ox-core` | Foundation | `util`          | Shared helpers for environment variables, the filesystem, git probes, logging, paths, mutex recovery, text width, local time, and TLS           |
 | `ox-core` | Domain     | `config`        | Layered configuration with per-value provenance, credentials, gateway settings, and stored OAuth logins with browser sign-in                    |
 | `ox-core` | Domain     | `model`         | Supported-model catalog, per-model request capabilities, token usage, and pricing                                                               |
-| `ox-core` | Domain     | `permission`    | Tool permission gate: modes, deny / ask / allow rules, shipped defaults, path resolution, and shell-command parsing                             |
+| `ox-core` | Domain     | `permission`    | Tool permission gate: modes, deny / ask / allow rules, shipped defaults, path resolution, shell-command parsing, and project file containment   |
 | `ox-core` | Domain     | `prompt`        | System prompt assembly, environment detection, and instruction-file discovery                                                                   |
 | `ox-core` | Services   | `client`        | The `Wire` streaming contract and the Anthropic Messages API client: request bodies and headers, a retrying transport, SSE, and side queries    |
 | `ox-core` | Services   | `command`       | The slash-command line parser, the command aliases, and the typed forms parsed into the `Op` each one runs, shared by the TUI and the bare REPL |

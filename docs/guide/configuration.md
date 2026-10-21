@@ -5,7 +5,7 @@ oxide-code loads configuration from multiple sources, merged in order of increas
 1. **Built-in defaults.**
 2. **User config file**: `~/.config/ox/config.toml` (or `$XDG_CONFIG_HOME/ox/config.toml`).
 3. **User drop-ins**: `*.toml` files in `~/.config/ox/config.d/` (or `$XDG_CONFIG_HOME/ox/config.d/`), in file-name order.
-4. **Project config file**: `.ox/config.toml` in the nearest directory at or above the current one that has one.
+4. **Project config file**: `.ox/config.toml` in the nearest directory from the working directory up to the project root that has one. The project root is the nearest directory at or above the working directory that holds a `.git` directory or file, or the working directory outside a repository.
 5. **Environment variables**: always win.
 
 Run `/config` to see each resolved value next to the layer that set it: `default`, `user`, `config.d/<name>`, `project`, an environment variable such as `$ANTHROPIC_MODEL`, `--mode` for the permission mode set by that flag, or `session` after a `/model`, `/effort`, or `/mode` change or a **Shift+Tab** mode switch.
@@ -29,6 +29,8 @@ Drop-ins share the `config.toml` schema and count as user config. An invalid dro
 ### Project Config
 
 A project file comes from the checkout, so it cannot set `client.api_key`, `client.base_url`, `client.extra_ca_certs`, or any `[permission]` key other than `deny` and `ask`. Setting one fails the config load. This keeps a repository from redirecting your credentials or widening what runs without asking.
+
+The project file must also resolve inside the project root. A `.ox/config.toml` that resolves outside it, through a symlinked file or `.ox` directory, fails the config load with an error that names only the link. A link to a file inside the repository, such as a config shared across a monorepo, still works, unless the project root is your home directory or one of its ancestors, as with a dotfiles repository at `~`. There, a project file reached through any symlink fails the load.
 
 ## Config File
 
