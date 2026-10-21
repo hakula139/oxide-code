@@ -32,7 +32,7 @@ tokio::select! {
     Some(update) = self.git_probes.recv()         => { /* branch / PR probe results for the status line */ }
     Some(report) = self.clipboard.recv()          => { /* outcome of a copy, shown as a notice */ }
     Some(finished) = self.slash_tasks.join_next() => { /* output of a background slash command, such as /diff */ }
-    _ = tick.tick()                               => { /* spinner frame, probe scheduling, exit-arm expiry, selection edge scroll, copy-notice expiry, render when dirty */ }
+    _ = tick.tick()                               => { /* spinner frame, probe scheduling, exit-arm expiry, selection edge scroll, copy-notice expiry, modal timers, render when dirty */ }
 }
 ```
 
