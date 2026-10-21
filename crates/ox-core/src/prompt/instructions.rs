@@ -40,9 +40,9 @@ pub(crate) struct Found {
 }
 
 /// Loads the user's file, then one file per directory from the project root (`git_root`, or else
-/// `cwd`) down to `cwd`, so files closer to `cwd` appear later and take precedence. A file loads
-/// once however many locations resolve to it. Also returns a warning for each candidate that
-/// exists but cannot be read.
+/// `cwd`) down to `cwd`, so files closer to `cwd` appear later. A file loads once however many
+/// locations resolve to it. Also returns a warning for each candidate that exists but cannot be
+/// read.
 pub(super) async fn load(cwd: &Path, git_root: Option<&Path>) -> (String, Vec<String>) {
     let slots = candidate_slots(cwd, git_root.unwrap_or(cwd));
     let (files, warnings) = tokio::task::spawn_blocking(|| load_files(slots))
@@ -194,13 +194,13 @@ mod tests {
     use crate::util::path::local_testing::abs;
     use crate::util::path::testing::HOME_VAR;
 
-    /// The variables [`user_candidates`] reads, pinned to `home` with `XDG_CONFIG_HOME` unset.
-    fn pinned_home(home: &Path) -> [(&'static str, Option<&Path>); 2] {
-        [(HOME_VAR, Some(home)), ("XDG_CONFIG_HOME", None)]
-    }
-
     mod load {
         use super::*;
+
+        /// The variables [`user_candidates`] reads, pinned to `home` with `XDG_CONFIG_HOME` unset.
+        fn pinned_home(home: &Path) -> [(&'static str, Option<&Path>); 2] {
+            [(HOME_VAR, Some(home)), ("XDG_CONFIG_HOME", None)]
+        }
 
         #[tokio::test]
         async fn uses_cwd_as_the_project_root_outside_a_git_repo() {

@@ -65,8 +65,8 @@ fn file_choice(arg: &str) -> Result<&'static str, String> {
         })
 }
 
-/// The instruction files with instructions at `root`, as root-relative paths in the order loading
-/// tries them. Paths that resolve to the same file are listed once, under a path that is not a
+/// The files at `root` that hold instructions, as root-relative paths in the order loading tries
+/// them. Paths that resolve to the same file are listed once, under a path that is not a
 /// symlink when one exists.
 fn existing_instruction_files(root: &Path) -> Vec<PathBuf> {
     let mut files: Vec<(PathBuf, PathBuf)> = Vec::new();
