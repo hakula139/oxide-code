@@ -1,10 +1,11 @@
-//! Headless driver for `--prompt`: one turn, printed to stdout as text or JSON.
+//! Headless driver for `--print`: one turn, printed to stdout as text or JSON.
 
 use std::io::{self, Write};
 use std::sync::{Mutex, MutexGuard};
 
 use anyhow::Result;
 use clap::ValueEnum;
+use indoc::formatdoc;
 use serde::Serialize;
 
 use ox_core::command;
@@ -33,6 +34,26 @@ pub(crate) async fn run(
         io::stderr(),
     );
     drive(engine.spawn(&[]), &printer, prompt).await
+}
+
+/// The prompt a headless run sends: `prompt` followed by `stdin` in a `<stdin>` block, or
+/// whichever of the two is given. Blank stdin counts as absent, so `None` means neither holds
+/// text.
+pub(crate) fn compose_prompt(prompt: Option<&str>, stdin: Option<&str>) -> Option<String> {
+    let stdin = stdin
+        .filter(|text| !text.trim().is_empty())
+        .map(|text| text.trim_end_matches(['\r', '\n']));
+    match (prompt, stdin) {
+        (Some(prompt), Some(stdin)) => Some(formatdoc! {"
+            {prompt}
+
+            <stdin>
+            {stdin}
+            </stdin>"
+        }),
+        (Some(text), None) | (None, Some(text)) => Some(text.to_owned()),
+        (None, None) => None,
+    }
 }
 
 async fn drive<O, E>(
@@ -269,6 +290,49 @@ mod tests {
         let mut record: serde_json::Value = serde_json::from_str(line).unwrap();
         assert_eq!(record["type"], "result");
         record["data"].take()
+    }
+
+    mod compose_prompt {
+        use super::*;
+
+        #[test]
+        fn attaches_stdin_after_the_prompt_in_a_tagged_block() {
+            let prompt = compose_prompt(Some("Review this diff."), Some("+fix\n-bug\n"));
+
+            assert_eq!(
+                prompt.as_deref(),
+                Some(indoc! {"
+                    Review this diff.
+
+                    <stdin>
+                    +fix
+                    -bug
+                    </stdin>"
+                }),
+            );
+        }
+
+        #[test]
+        fn sends_either_part_alone() {
+            assert_eq!(
+                compose_prompt(Some("Summarize."), None).as_deref(),
+                Some("Summarize."),
+            );
+            assert_eq!(
+                compose_prompt(None, Some("Explain this log.\n")).as_deref(),
+                Some("Explain this log."),
+            );
+        }
+
+        #[test]
+        fn treats_blank_stdin_as_absent() {
+            assert_eq!(
+                compose_prompt(Some("Summarize."), Some(" \n")).as_deref(),
+                Some("Summarize."),
+            );
+            assert_eq!(compose_prompt(None, Some("\n\n")), None);
+            assert_eq!(compose_prompt(None, None), None);
+        }
     }
 
     mod drive {

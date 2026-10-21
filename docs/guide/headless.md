@@ -1,15 +1,18 @@
 # Headless Mode
 
-`ox -p "<prompt>"` runs a single prompt without the TUI and exits when the turn ends. Use it in scripts, CI jobs, and programs that drive `ox`.
+`ox -p "<prompt>"` (`--print`) answers one prompt without the TUI and exits when the turn ends. Use it in scripts, CI jobs, and programs that drive `ox`.
 
 ```bash
 ox -p "Summarize the TODOs in src/"                 # Print the reply as text
+git diff | ox -p "Review this diff"                 # Attach piped stdin to the prompt
 ox -p "List the public functions" --output json     # Print one JSON result at the end
 ox -p "Fix the failing test" --output stream-json   # Stream every event as a JSON line
+ox -c -p "Run the tests again"                      # Continue the latest session
 ```
 
-- **Sessions**: Each run starts and saves a new session, which you can resume later in the TUI with `ox -c <session_id>`.
-- **Approvals**: No one can respond to approval prompts during a headless run, so calls that require approval are denied. The denial tells the model which allow pattern would permit the call, or which rule holds it. Add `allow` patterns for the calls your script needs, as described in [Tool approval](configuration.md#permission-tool-approval). Pass `--mode plan` to keep a run read-only, or `--mode yolo` to run every call that no rule settles.
+- **Input**: When stdin is not a terminal, `ox -p` reads it to the end and attaches it after the prompt in a `<stdin>` block, so the model can tell your instruction from the data. Piped stdin without a prompt, as in `ox -p < task.md`, is the prompt itself, and a run with neither fails with status `2`. To keep a script's stdin away from `ox`, redirect it from `/dev/null`.
+- **Sessions**: Each run starts and saves a new session, unless `-c` continues the latest one or `-r <id-prefix>` names one. Resume a run's session later with `ox -r <id-prefix>`, in the TUI or with another `-p`.
+- **Approvals**: No one can respond to approval prompts during a headless run, so calls that require approval are denied. The denial tells the model which allow pattern would permit the call, or which rule holds it. Add `allow` patterns for the calls your script needs, as described in [Tool approval](configuration.md#permission-tool-approval). Pass `--mode plan` to keep a run read-only, or `--mode yolo` to run tool calls without asking unless a rule denies or asks.
 
 ## Output Formats
 
@@ -25,13 +28,13 @@ Every format also writes tool calls, the task list, retries, notices, and errors
 
 ## Exit Status
 
-| Status              | Meaning                                                          |
-| ------------------- | ---------------------------------------------------------------- |
-| `0`                 | The turn completed                                               |
-| `1`                 | The turn failed, or `ox` could not start it                      |
-| `2`                 | The command line was invalid, such as an unknown `--output`      |
-| `101`               | `ox` crashed, and the JSON formats still print a `failed` result |
-| `129`, `130`, `143` | SIGHUP, SIGINT, or SIGTERM stopped the run                       |
+| Status              | Meaning                                                                        |
+| ------------------- | ------------------------------------------------------------------------------ |
+| `0`                 | The turn completed                                                             |
+| `1`                 | The turn failed, or `ox` could not start it                                    |
+| `2`                 | The command line was invalid, such as an unknown `--output`, or gave no prompt |
+| `101`               | `ox` crashed, and the JSON formats still print a `failed` result               |
+| `129`, `130`, `143` | SIGHUP, SIGINT, or SIGTERM stopped the run                                     |
 
 If `ox` cannot start a run, for example because of a configuration or credential error, it prints the error to stderr and emits no result.
 
@@ -49,7 +52,7 @@ The result is the line printed by `json` and the final line of `stream-json`:
 | `error`       | Why the turn failed, or `null`                                                                                                       |
 | `message`     | The text the model wrote after its last tool call, or `null` unless the turn completed                                               |
 | `usage`       | The latest usage, or `null` when no request reported any                                                                             |
-| `session_id`  | The run's session, which `ox -c` resumes                                                                                             |
+| `session_id`  | The run's session, which `ox -r <id-prefix>` resumes                                                                                 |
 
 `usage` contains the following fields, each set to `null` when unknown:
 
@@ -126,7 +129,7 @@ Display text can change in any release. This includes a tool call's `icon`, `lab
 
 `ox --no-tui` reads prompts from stdin and keeps them in one session. It prints each reply to stdout in the `text` format, while its `>` prompt and all other output go to stderr. Use it when the TUI cannot run or to pipe a series of prompts into one session.
 
-- **Input**: Each line is a prompt, except while an approval waits for its answer, so pasting several lines starts one turn per line. Blank lines are skipped. The end of input exits the program, as does **Ctrl+D** in a terminal.
+- **Input**: Each line is a prompt, except while an approval waits for its answer, so pasting several lines starts one turn per line. A prompt argument, as in `ox --no-tui "Explain this repo"`, runs before the first line. Blank lines are skipped. The end of input exits the program, as does **Ctrl+D** in a terminal.
 - **Commands**: A subset of the slash commands runs, as listed in [When Commands Run](slash-commands.md#when-commands-run).
 - **Approvals**: In a terminal, a call that needs approval prints its command or diff, and the rule that holds it when one does, then waits for a letter: `y` approves, `a` allows matching calls for the rest of the session when the call offers that, `n` denies, `f` denies with feedback for the model, and `x` aborts the turn. With piped input, no approval is requested, and those calls are denied as in a `-p` run.
 - **Interrupting**: In a terminal, **Ctrl+C** during a turn stops it and returns to the prompt, and at the prompt it discards the line, as in a shell. With piped input, **Ctrl+C** ends the run.

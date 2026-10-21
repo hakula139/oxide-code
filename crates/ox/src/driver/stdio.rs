@@ -1,4 +1,4 @@
-//! Stdio rendering of engine events for the `--no-tui` REPL and `--prompt` headless modes.
+//! Stdio rendering of engine events for the `--no-tui` REPL and `--print` headless modes.
 
 use std::collections::{HashMap, VecDeque};
 use std::fmt::Write as _;

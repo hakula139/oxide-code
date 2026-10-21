@@ -56,9 +56,9 @@ impl Mode {
 
     pub const fn description(self) -> &'static str {
         match self {
-            Self::Manual => "Ask about calls no rule settles",
+            Self::Manual => "Ask before tool calls that no permission rule allows or denies",
             Self::Plan => "Read-only: deny edits and commands",
-            Self::Yolo => "Run calls no rule settles",
+            Self::Yolo => "Run tool calls without asking unless a rule denies or asks",
         }
     }
 }

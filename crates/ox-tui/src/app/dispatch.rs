@@ -208,7 +208,7 @@ impl App {
 
     /// Routes an input, slash-command, or modal action. TUI-only actions apply here, and an op goes
     /// through [`Self::dispatch_op`].
-    pub(super) fn dispatch_action(&mut self, action: Action) {
+    pub(crate) fn dispatch_action(&mut self, action: Action) {
         match action {
             Action::Submit(text) => self.handle_submit_prompt(&text),
             Action::Op(op) => self.dispatch_op(op),

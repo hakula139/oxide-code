@@ -36,6 +36,7 @@ use ox_core::engine::{Engine, EngineHandle};
 use ox_core::util::git;
 use ox_core::util::path::tildify;
 
+use action::Action;
 use app::{App, AppHistory};
 use slash::{LiveSessionInfo, ResumePicker};
 use theme::ResolvedTheme;
@@ -53,6 +54,8 @@ pub struct Startup {
     pub git_branch: Option<String>,
     /// The `ox --resume` session picker, opened over the first frame.
     pub picker: Option<ResumePicker>,
+    /// The `ox <prompt>` text, submitted as if typed once the TUI opens.
+    pub prompt: Option<String>,
     pub title: Option<String>,
     /// Whether resuming the session unarchived it.
     pub unarchived: bool,
@@ -111,6 +114,9 @@ pub async fn run<S: Debug>(
     }
     if let Some(picker) = startup.picker {
         app.push_modal(Box::new(picker));
+    }
+    if let Some(prompt) = startup.prompt {
+        app.dispatch_action(Action::Submit(prompt));
     }
 
     let result = tokio::select! {

@@ -1,4 +1,4 @@
-//! Resolution of the CLI `--continue` argument and of session-ID prefixes.
+//! Resolution of the CLI `--continue` and `--resume` targets and of session-ID prefixes.
 
 use std::path::Path;
 
@@ -10,25 +10,34 @@ use super::entry::SessionInfo;
 use super::handle::{self, LoadedTranscript, ResumedSession};
 use super::store::SessionStore;
 
-/// Normalized form of the CLI `--continue` argument.
-enum ResumeMode<'a> {
-    /// Omitting `--continue` starts a new session.
-    Fresh,
-    /// Bare `--continue` resumes the most recent unarchived session in scope.
+/// The saved session a run continues.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SessionTarget<'a> {
+    /// The most recent unarchived session in scope, as `--continue` picks.
     Latest,
-    /// `--continue <prefix>` resumes the unique session whose ID starts with `prefix`.
+    /// The session an ID prefix or a session file path names, as `--resume <session>` gives.
+    Named(&'a str),
+}
+
+/// Normalized form of the CLI's session target.
+enum ResumeMode<'a> {
+    /// No target starts a new session.
+    Fresh,
+    /// [`SessionTarget::Latest`].
+    Latest,
+    /// The unique session whose ID starts with the prefix.
     Prefix(&'a str),
-    /// `--continue <path.jsonl>` resumes by filesystem path, bypassing the XDG lookup.
+    /// The session file at the path, bypassing the XDG lookup.
     Path(&'a Path),
 }
 
-/// Creates or resumes a session per CLI flags. A fresh session records `git_branch`, and `all`
-/// widens prefix / latest lookup from the current project to every project subdir.
+/// Starts a new session, or resumes the one `target` names. A fresh session records `git_branch`,
+/// and `all` widens prefix / latest lookup from the current project to every project subdir.
 pub fn resolve_session(
     store: &SessionStore,
     model: &str,
     git_branch: Option<String>,
-    resume: Option<&Option<String>>,
+    target: Option<SessionTarget<'_>>,
     all: bool,
 ) -> Result<ResumedSession> {
     let scope_hint = if all {
@@ -37,7 +46,7 @@ pub fn resolve_session(
         " in this project (use --all to search every project)"
     };
 
-    let path = match normalize_resume_arg(resume)? {
+    let path = match normalize_target(target)? {
         ResumeMode::Fresh => {
             return Ok(ResumedSession {
                 handle: handle::start(store, model, git_branch),
@@ -66,16 +75,16 @@ pub fn resolve_session(
     Ok(resumed)
 }
 
-/// Trims and classifies a `--continue` argument into a [`ResumeMode`], rejecting a blank prefix
-/// that would otherwise read as bare `--continue`.
-fn normalize_resume_arg(resume: Option<&Option<String>>) -> Result<ResumeMode<'_>> {
-    match resume {
+/// Trims and classifies `target` into a [`ResumeMode`], rejecting a blank name, which names no
+/// session.
+fn normalize_target(target: Option<SessionTarget<'_>>) -> Result<ResumeMode<'_>> {
+    match target {
         None => Ok(ResumeMode::Fresh),
-        Some(None) => Ok(ResumeMode::Latest),
-        Some(Some(raw)) => {
+        Some(SessionTarget::Latest) => Ok(ResumeMode::Latest),
+        Some(SessionTarget::Named(raw)) => {
             let trimmed = raw.trim();
             if trimmed.is_empty() {
-                bail!("empty session ID prefix (run bare `ox -c` to resume the latest session)");
+                bail!("empty session ID prefix (run `ox -c` to resume the latest session)");
             }
             if looks_like_path(trimmed) {
                 Ok(ResumeMode::Path(Path::new(trimmed)))
@@ -234,8 +243,10 @@ mod tests {
             let external_path = external_dir.path().join("copied.jsonl");
             std::fs::copy(&path, &external_path).unwrap();
 
-            let arg = Some(external_path.to_string_lossy().into_owned());
-            let resumed = resolve_session(&store, "m", None, Some(&arg), false).unwrap();
+            let arg = external_path.to_string_lossy().into_owned();
+            let resumed =
+                resolve_session(&store, "m", None, Some(SessionTarget::Named(&arg)), false)
+                    .unwrap();
             assert_eq!(resumed.handle.session_id(), full_id);
             assert_eq!(resumed.transcript.messages.len(), 1);
             assert_eq!(resumed.title.as_deref(), Some("external path test"));
@@ -252,8 +263,10 @@ mod tests {
             drop(original);
 
             let prefix = full_id[..10].to_owned();
-            let arg = Some(prefix);
-            let resumed = resolve_session(&store, "m", None, Some(&arg), false).unwrap();
+            let arg = prefix;
+            let resumed =
+                resolve_session(&store, "m", None, Some(SessionTarget::Named(&arg)), false)
+                    .unwrap();
             assert_eq!(resumed.handle.session_id(), full_id);
             assert_eq!(resumed.transcript.messages.len(), 1);
             assert_eq!(resumed.title.as_deref(), Some("hello"));
@@ -269,9 +282,9 @@ mod tests {
             original.record_message(Message::user("all scope")).await;
             original.finish(Vec::new()).await;
             drop(original);
-            let arg = Some(full_id[..10].to_owned());
+            let arg = full_id[..10].to_owned();
 
-            let err = resolve_session(&store, "m", None, Some(&arg), false)
+            let err = resolve_session(&store, "m", None, Some(SessionTarget::Named(&arg)), false)
                 .err()
                 .unwrap()
                 .to_string();
@@ -284,16 +297,23 @@ mod tests {
                 ),
             );
 
-            let resumed = resolve_session(&store, "m", None, Some(&arg), true).unwrap();
+            let resumed =
+                resolve_session(&store, "m", None, Some(SessionTarget::Named(&arg)), true).unwrap();
             assert_eq!(resumed.handle.session_id(), full_id);
             assert_eq!(resumed.transcript.messages.len(), 1);
             assert_eq!(resumed.title.as_deref(), Some("all scope"));
 
-            let missing = Some("zzzz".to_owned());
-            let err = resolve_session(&store, "m", None, Some(&missing), true)
-                .err()
-                .unwrap()
-                .to_string();
+            let missing = "zzzz".to_owned();
+            let err = resolve_session(
+                &store,
+                "m",
+                None,
+                Some(SessionTarget::Named(&missing)),
+                true,
+            )
+            .err()
+            .unwrap()
+            .to_string();
             assert_eq!(
                 err, "no session matching `zzzz`",
                 "the hint drops --all once it is set",
@@ -328,7 +348,8 @@ mod tests {
             set_archived_at(&test_session_file(dir.path(), "archived"), true).unwrap();
             write_newest_corrupt_session(dir.path());
 
-            let resumed = resolve_session(&store, "m", None, Some(&None), false).unwrap();
+            let resumed =
+                resolve_session(&store, "m", None, Some(SessionTarget::Latest), false).unwrap();
             assert_eq!(resumed.handle.session_id(), "newer");
             assert_eq!(resumed.title.as_deref(), Some("Newer"));
             assert!(!resumed.unarchived);
@@ -348,8 +369,10 @@ mod tests {
             let path = test_session_file(dir.path(), "archived");
             set_archived_at(&path, true).unwrap();
 
-            let arg = Some("arch".to_owned());
-            let resumed = resolve_session(&store, "m", None, Some(&arg), false).unwrap();
+            let arg = "arch".to_owned();
+            let resumed =
+                resolve_session(&store, "m", None, Some(SessionTarget::Named(&arg)), false)
+                    .unwrap();
             assert_eq!(resumed.handle.session_id(), "archived");
             assert!(resumed.unarchived);
             assert_eq!(
@@ -367,7 +390,7 @@ mod tests {
         async fn bare_continue_errors_without_sessions() {
             let dir = tempfile::tempdir().unwrap();
             let store = test_store(dir.path());
-            let err = resolve_session(&store, "m", None, Some(&None), false)
+            let err = resolve_session(&store, "m", None, Some(SessionTarget::Latest), false)
                 .err()
                 .unwrap()
                 .to_string();
@@ -384,13 +407,19 @@ mod tests {
             let s = handle::start(&store, "m", None);
             s.record_message(Message::user("noop")).await;
             s.finish(Vec::new()).await;
-            let prefix_arg = Some("zzzz".to_owned());
+            let prefix_arg = "zzzz".to_owned();
             drop(s);
 
-            let err = resolve_session(&store, "m", None, Some(&prefix_arg), false)
-                .err()
-                .unwrap()
-                .to_string();
+            let err = resolve_session(
+                &store,
+                "m",
+                None,
+                Some(SessionTarget::Named(&prefix_arg)),
+                false,
+            )
+            .err()
+            .unwrap()
+            .to_string();
             assert_eq!(
                 err,
                 "no session matching `zzzz` in this project \
@@ -412,11 +441,17 @@ mod tests {
                 );
             }
 
-            let prefix_arg = Some("ab".to_owned());
-            let err = resolve_session(&store, "m", None, Some(&prefix_arg), false)
-                .err()
-                .unwrap()
-                .to_string();
+            let prefix_arg = "ab".to_owned();
+            let err = resolve_session(
+                &store,
+                "m",
+                None,
+                Some(SessionTarget::Named(&prefix_arg)),
+                false,
+            )
+            .err()
+            .unwrap()
+            .to_string();
             assert_eq!(
                 err,
                 "ambiguous prefix `ab` matches 7 sessions: \
@@ -431,11 +466,17 @@ mod tests {
             std::fs::remove_dir_all(test_project_dir(dir.path())).unwrap();
             let cause = store.list_matching("ab", false).unwrap_err();
 
-            let prefix_arg = Some("ab".to_owned());
-            let err = resolve_session(&store, "m", None, Some(&prefix_arg), false)
-                .err()
-                .unwrap()
-                .to_string();
+            let prefix_arg = "ab".to_owned();
+            let err = resolve_session(
+                &store,
+                "m",
+                None,
+                Some(SessionTarget::Named(&prefix_arg)),
+                false,
+            )
+            .err()
+            .unwrap()
+            .to_string();
             assert_eq!(
                 err,
                 format!("failed to list sessions in this project: {cause:#}")
@@ -446,8 +487,8 @@ mod tests {
         async fn path_errors_on_missing_file() {
             let dir = tempfile::tempdir().unwrap();
             let store = test_store(dir.path());
-            let arg = Some("/does/not/exist.jsonl".to_owned());
-            let err = resolve_session(&store, "m", None, Some(&arg), false)
+            let arg = "/does/not/exist.jsonl".to_owned();
+            let err = resolve_session(&store, "m", None, Some(SessionTarget::Named(&arg)), false)
                 .err()
                 .unwrap();
             let cause = std::fs::metadata("/does/not/exist.jsonl").unwrap_err();
@@ -458,29 +499,26 @@ mod tests {
         }
     }
 
-    mod normalize_resume_arg {
+    mod normalize_target {
         use super::*;
 
         #[test]
         fn maps_no_flag_to_fresh() {
-            assert!(matches!(
-                normalize_resume_arg(None).unwrap(),
-                ResumeMode::Fresh
-            ));
+            assert!(matches!(normalize_target(None).unwrap(), ResumeMode::Fresh));
         }
 
         #[test]
         fn maps_bare_flag_to_latest() {
             assert!(matches!(
-                normalize_resume_arg(Some(&None)).unwrap(),
+                normalize_target(Some(SessionTarget::Latest)).unwrap(),
                 ResumeMode::Latest
             ));
         }
 
         #[test]
         fn trims_valid_prefix() {
-            let arg = Some("  abc123 ".to_owned());
-            let mode = normalize_resume_arg(Some(&arg)).unwrap();
+            let arg = "  abc123 ".to_owned();
+            let mode = normalize_target(Some(SessionTarget::Named(&arg))).unwrap();
             assert!(matches!(mode, ResumeMode::Prefix("abc123")));
         }
 
@@ -493,8 +531,8 @@ mod tests {
                 "name.jsonl",           // no separator but has .jsonl suffix
                 r"C:\Users\me\s.jsonl", // windows-shaped
             ] {
-                let arg = Some(raw.to_owned());
-                let mode = normalize_resume_arg(Some(&arg)).unwrap();
+                let arg = raw.to_owned();
+                let mode = normalize_target(Some(SessionTarget::Named(&arg))).unwrap();
                 assert!(
                     matches!(mode, ResumeMode::Path(p) if p == Path::new(raw)),
                     "{raw:?} should classify as Path",
@@ -504,18 +542,21 @@ mod tests {
 
         #[test]
         fn keeps_uuid_shaped_prefix_as_prefix() {
-            let arg = Some("a1b2c3d4-e5f6-7890".to_owned());
-            let mode = normalize_resume_arg(Some(&arg)).unwrap();
+            let arg = "a1b2c3d4-e5f6-7890".to_owned();
+            let mode = normalize_target(Some(SessionTarget::Named(&arg))).unwrap();
             assert!(matches!(mode, ResumeMode::Prefix("a1b2c3d4-e5f6-7890")));
         }
 
         #[test]
         fn rejects_empty_and_whitespace_prefix() {
             for raw in ["", "   ", "\t\n"] {
-                let arg = Some(raw.to_owned());
-                let err = normalize_resume_arg(Some(&arg)).err().unwrap().to_string();
+                let arg = raw.to_owned();
+                let err = normalize_target(Some(SessionTarget::Named(&arg)))
+                    .err()
+                    .unwrap()
+                    .to_string();
                 assert_eq!(
-                    err, "empty session ID prefix (run bare `ox -c` to resume the latest session)",
+                    err, "empty session ID prefix (run `ox -c` to resume the latest session)",
                     "{raw:?}",
                 );
             }

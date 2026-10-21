@@ -257,9 +257,9 @@ mod tests {
                         "Select permission mode",
                         "Switch the permission mode for this session. Restarting returns to your config.",
                         "",
-                        "  1. manual    Ask about calls no rule settles",
+                        "  1. manual    Ask before tool calls that no permission rule allows or denies",
                         "> 2. plan    ✓ Read-only: deny edits and commands",
-                        "  3. yolo      Run calls no rule settles",
+                        "  3. yolo      Run tool calls without asking unless a rule denies or asks",
                         "",
                         "Enter to confirm  ·  Esc to cancel",
                     ]

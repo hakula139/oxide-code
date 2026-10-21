@@ -616,8 +616,9 @@ struct HeaderInfo {
 
 /// Parses the first non-empty line as the session header and validates its ID.
 fn read_header<R: BufRead>(lines: &mut JsonlLines<R>, path: &Path) -> Result<HeaderInfo> {
+    let not_a_session = || format!("{} is not an oxide-code session file", path.display());
     let Some((_, line)) = lines.next_line()? else {
-        bail!("{} is empty (no header)", path.display());
+        bail!("{}: it is empty", not_a_session());
     };
     let Entry::Header {
         session_id,
@@ -625,9 +626,13 @@ fn read_header<R: BufRead>(lines: &mut JsonlLines<R>, path: &Path) -> Result<Hea
         git_branch,
         ..
     } = serde_json::from_str(line)
-        .with_context(|| format!("first line of {} is not a valid header", path.display()))?
+        .context("its first line is not a session header")
+        .with_context(not_a_session)?
     else {
-        bail!("{} does not begin with a header", path.display());
+        bail!(
+            "{}: its first line is not a session header",
+            not_a_session()
+        );
     };
     validate_session_id(&session_id)?;
     Ok(HeaderInfo {
@@ -1707,17 +1712,47 @@ mod tests {
 "#,
             )
             .unwrap();
-            let err = read_session_id_from_path(&path).unwrap_err().to_string();
-            assert!(err.contains("does not begin with a header"), "got: {err}");
+            let err = read_session_id_from_path(&path).unwrap_err();
+
+            assert_eq!(
+                format!("{err:#}"),
+                format!(
+                    "{} is not an oxide-code session file: its first line is not a session header",
+                    path.display(),
+                ),
+            );
         }
 
         #[test]
         fn rejects_unparsable_first_line() {
             let dir = tempfile::tempdir().unwrap();
-            let path = dir.path().join("garbage.jsonl");
+            let path = dir.path().join("notes.txt");
             fs::write(&path, "not json\n").unwrap();
-            let err = read_session_id_from_path(&path).unwrap_err().to_string();
-            assert!(err.contains("not a valid header"), "got: {err}");
+
+            let err = read_session_id_from_path(&path).unwrap_err();
+
+            let headline = format!(
+                "{} is not an oxide-code session file: its first line is not a session header: ",
+                path.display(),
+            );
+            assert!(format!("{err:#}").starts_with(&headline), "{err:#}");
+        }
+
+        #[test]
+        fn rejects_an_empty_file() {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("empty.jsonl");
+            fs::write(&path, "").unwrap();
+
+            let err = read_session_id_from_path(&path).unwrap_err();
+
+            assert_eq!(
+                format!("{err:#}"),
+                format!(
+                    "{} is not an oxide-code session file: it is empty",
+                    path.display()
+                ),
+            );
         }
 
         #[test]
@@ -1732,15 +1767,6 @@ mod tests {
             .unwrap();
             let err = read_session_id_from_path(&path).unwrap_err().to_string();
             assert!(err.contains("invalid session ID"), "got: {err}");
-        }
-
-        #[test]
-        fn rejects_an_empty_file() {
-            let dir = tempfile::tempdir().unwrap();
-            let path = dir.path().join("empty.jsonl");
-            fs::write(&path, "").unwrap();
-            let err = read_session_id_from_path(&path).unwrap_err().to_string();
-            assert!(err.contains("is empty"), "got: {err}");
         }
 
         #[test]
