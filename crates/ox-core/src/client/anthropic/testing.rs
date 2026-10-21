@@ -29,7 +29,7 @@ pub(crate) fn test_config(base_url: impl Into<String>, auth: Auth, model: &str) 
             attribution: true,
             structured_outputs: true,
         },
-        model: ModelSpec::resolve(model.to_owned()),
+        model: ModelSpec::resolve(model),
         effort: None,
         max_tokens: Some(128),
         max_tool_rounds: None,

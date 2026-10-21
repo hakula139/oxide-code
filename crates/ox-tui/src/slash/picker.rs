@@ -208,7 +208,7 @@ mod tests {
 
     fn picker_on_unknown_model() -> ModelEffortPicker {
         let mut info = test_session_info();
-        info.config.model = ModelSpec::resolve("custom-model".to_owned());
+        info.config.model = ModelSpec::resolve("custom-model");
         info.config.effort = None;
         ModelEffortPicker::new(&info)
     }
@@ -320,7 +320,7 @@ mod tests {
 
         fn model_only(id: &str) -> ConfigPick {
             ConfigPick::Model {
-                id: ResolvedModelId::new(id.to_owned()),
+                id: ResolvedModelId::new(id),
                 effort: None,
             }
         }
@@ -406,7 +406,7 @@ mod tests {
             assert_eq!(
                 pick,
                 ConfigPick::Model {
-                    id: ResolvedModelId::new("claude-sonnet-5-5".to_owned()),
+                    id: ResolvedModelId::new("claude-sonnet-5-5"),
                     effort: Some(Effort::Xhigh),
                 },
             );

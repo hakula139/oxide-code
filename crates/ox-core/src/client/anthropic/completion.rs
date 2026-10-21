@@ -99,7 +99,7 @@ mod tests {
             const HAIKU: &str = "claude-haiku-5-5";
 
             fn haiku() -> ModelSpec {
-                ModelSpec::resolve(HAIKU.to_owned())
+                ModelSpec::resolve(HAIKU)
             }
 
             async fn complete_err(client: &Client) -> String {

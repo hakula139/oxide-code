@@ -510,7 +510,7 @@ mod tests {
                     decision: Decision::Abort,
                 },
                 Op::SetModel(ConfigPick::Model {
-                    id: ResolvedModelId::new("claude-opus-5-5".to_owned()),
+                    id: ResolvedModelId::new("claude-opus-5-5"),
                     effort: Some(Effort::High),
                 }),
                 Op::SetModel(ConfigPick::Effort(Effort::Low)),
@@ -792,7 +792,7 @@ mod tests {
                 },
                 Event::SessionReady,
                 Event::ConfigChanged {
-                    model: ModelSpec::resolve("claude-opus-5-5".to_owned()),
+                    model: ModelSpec::resolve("claude-opus-5-5"),
                     effort: Some(Effort::High),
                     requested: ConfigPick::Effort(Effort::Max),
                     auto_compaction: AutoCompactionConfig {
@@ -918,10 +918,10 @@ mod tests {
         #[test]
         fn serializes_a_model_as_its_id() {
             let event = Event::ConfigChanged {
-                model: ModelSpec::resolve("claude-opus-5-5".to_owned()),
+                model: ModelSpec::resolve("claude-opus-5-5"),
                 effort: None,
                 requested: ConfigPick::Model {
-                    id: ResolvedModelId::new("claude-opus-5-5".to_owned()),
+                    id: ResolvedModelId::new("claude-opus-5-5"),
                     effort: None,
                 },
                 auto_compaction: AutoCompactionConfig::disabled(),
