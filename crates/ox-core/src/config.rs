@@ -322,6 +322,9 @@ pub struct Config {
     pub(crate) auth: Option<Auth>,
     /// Why the session started signed out.
     pub(crate) signed_out_notice: Option<String>,
+    /// Whether a later attempt may recover from the failure that signed the session out, so its
+    /// next prompt loads the stored login again.
+    pub(crate) retry_login: bool,
     pub(crate) base_url: String,
     /// Resolved path to a PEM bundle appended to reqwest's trust anchors. `None` means the
     /// client trusts only the platform roots.
@@ -449,6 +452,7 @@ impl Config {
             effort: effort.value,
             auth: credential.auth,
             signed_out_notice: credential.signed_out_notice,
+            retry_login: credential.retry_login,
             base_url: base_url.value,
             extra_ca_certs: extra_ca_certs.value,
             gateway,
@@ -534,6 +538,7 @@ struct ResolvedAuth {
     auth: Option<Auth>,
     source: Source,
     signed_out_notice: Option<String>,
+    retry_login: bool,
 }
 
 /// Resolves the credential and its source, rejecting a custom header that would replace the
@@ -553,9 +558,11 @@ async fn resolve_auth(
         auth::stored_login(ClaudeCodeKeychain::SYSTEM, trust),
     )
     .await;
-    let (auth, signed_out_notice) = match resolved {
-        Ok(auth) => (Some(auth), None),
-        Err(ResolveError::SignedOut(e)) if interactive => (None, Some(auth::signed_out_notice(&e))),
+    let (auth, signed_out_notice, retry_login) = match resolved {
+        Ok(auth) => (Some(auth), None, false),
+        Err(ResolveError::SignedOut(e)) if interactive => {
+            (None, Some(auth::signed_out_notice(&e)), e.is_transient())
+        }
         Err(e) => return Err(e.into()),
     };
     let source = auth.as_ref().map_or(AuthSource::OxLogin, Auth::source);
@@ -569,6 +576,7 @@ async fn resolve_auth(
         auth,
         source,
         signed_out_notice,
+        retry_login,
     })
 }
 
@@ -769,6 +777,7 @@ mod tests {
                 "token-must-not-leak",
             )),
             signed_out_notice: None,
+            retry_login: false,
             base_url: "https://api.example.test".to_owned(),
             extra_ca_certs: Some(PathBuf::from("/etc/ssl/corp-ca.pem")),
             gateway: GatewayCompat {

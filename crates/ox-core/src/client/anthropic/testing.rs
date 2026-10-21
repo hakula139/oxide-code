@@ -22,6 +22,7 @@ pub(crate) fn test_config(base_url: impl Into<String>, auth: Auth, model: &str) 
     Config {
         auth: Some(auth),
         signed_out_notice: None,
+        retry_login: false,
         base_url: base_url.into(),
         extra_ca_certs: None,
         gateway: GatewayCompat {

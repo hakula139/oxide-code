@@ -13,6 +13,7 @@ use tracing::warn;
 use super::gateway::CUSTOM_HEADERS_VAR;
 use super::oauth::{ClaudeCodeKeychain, Login, LoginError, SessionLogin, login_stores};
 use crate::util::env;
+use crate::util::text::join_sentences;
 use crate::util::tls::Trust;
 
 // ── AuthKind ──
@@ -318,12 +319,38 @@ fn signed_out_error(e: &LoginError) -> String {
 /// What a session shows on a request while signed out, and at startup when no login is stored.
 pub(crate) const SIGNED_OUT: &str = "Not signed in. Run `/login` to sign in.";
 
-/// The startup notice for a TUI session that starts signed out because of `e`.
+/// The step a session can take after a transient failure signs it out, since its next prompt
+/// loads the stored login again.
+const RETRY_STEP: &str = "The next prompt tries the stored login again.";
+
+/// What a TUI session shows while signed out because of `e`, at startup and on each prompt.
 pub(super) fn signed_out_notice(e: &LoginError) -> String {
     match e {
         LoginError::Missing => SIGNED_OUT.to_owned(),
+        e if e.is_transient() => join_sentences(&format!("Not signed in: {e}"), RETRY_STEP),
         e => format!("Not signed in: {e}"),
     }
+}
+
+/// Why [`retry_stored_login`] supplied no token.
+pub(crate) struct LoginRetryFailed {
+    /// The signed-out notice to show.
+    pub(crate) notice: String,
+    /// Whether a later attempt may load the login.
+    pub(crate) transient: bool,
+}
+
+/// Loads the first stored login again for a session that a transient failure signed out.
+pub(crate) async fn retry_stored_login(
+    keychain: ClaudeCodeKeychain,
+    trust: &dyn Trust,
+) -> Result<Auth, LoginRetryFailed> {
+    stored_login(keychain, trust)
+        .await
+        .map_err(|e| LoginRetryFailed {
+            notice: signed_out_notice(&e),
+            transient: e.is_transient(),
+        })
 }
 
 /// Explicit credentials in precedence order: env and config values, before the stored logins.
@@ -644,6 +671,22 @@ mod tests {
                 "Not signed in: failed to load the Claude Code login: \
                  failed to parse the credentials in the macOS Keychain. \
                  Run `claude` to sign in again.",
+            );
+        }
+
+        #[test]
+        fn says_the_next_prompt_retries_a_transient_failure() {
+            let notice = signed_out_notice(&LoginError::RefreshFailed {
+                login: Login::Ox,
+                error: anyhow::anyhow!("token endpoint returned 503"),
+                transient: true,
+            });
+
+            assert_eq!(
+                notice,
+                "Not signed in: failed to refresh the expired oxide-code login: \
+                 token endpoint returned 503. Run `/login` to sign in again. \
+                 The next prompt tries the stored login again.",
             );
         }
     }

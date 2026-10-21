@@ -103,6 +103,7 @@ impl App {
             Event::ModeChanged(mode) => self.apply_mode_changed(mode),
             Event::LoginStarted { url } => self.open_sign_in_url(&url),
             Event::SignedIn { auth } => self.apply_signed_in(auth),
+            Event::LoginRestored { auth } => self.apply_login_restored(auth),
             Event::SignedOut {
                 removed,
                 auth,
@@ -363,6 +364,13 @@ impl App {
         };
         self.chat.push_system_message(message);
         self.finish_turn();
+    }
+
+    fn apply_login_restored(&mut self, auth: AuthSource) {
+        self.session_info.config.auth = Some(auth);
+        self.status_bar.set_rate_limits(None);
+        self.chat
+            .push_system_message(format!("Signed in. Requests now use {auth}."));
     }
 
     fn apply_signed_out(
@@ -1891,6 +1899,27 @@ mod tests {
         }
 
         #[test]
+        fn login_restored_names_the_credential_and_keeps_the_turn_running() {
+            let (mut app, _rx, _event_tx) = test_app(None);
+            app.session_info.config.auth = None;
+            app.status_bar.set_status(Status::Streaming);
+
+            app.handle_engine_event(Event::LoginRestored {
+                auth: AuthSource::ClaudeCodeLogin,
+            });
+
+            assert_eq!(
+                app.session_info.config.auth,
+                Some(AuthSource::ClaudeCodeLogin)
+            );
+            assert_eq!(
+                app.chat.last_system_text(),
+                Some("Signed in. Requests now use OAuth (Claude Code login).")
+            );
+            assert_eq!(app.status_bar.status(), &Status::Streaming);
+        }
+
+        #[test]
         fn signed_in_or_out_drops_the_previous_accounts_usage_limits() {
             for event in [
                 Event::SignedIn {
@@ -1900,6 +1929,9 @@ mod tests {
                     removed: true,
                     auth: Some(AuthSource::ApiKeyEnv),
                     fallback_error: None,
+                },
+                Event::LoginRestored {
+                    auth: AuthSource::ClaudeCodeLogin,
                 },
             ] {
                 let (mut app, _rx, _event_tx) = test_app(None);

@@ -276,6 +276,7 @@ impl StdioSink {
             | Event::SummaryDiscarded
             | Event::LoginStarted { .. }
             | Event::SignedIn { .. }
+            | Event::LoginRestored { .. }
             | Event::SignedOut { .. }
             | Event::ApprovalRequested { .. }
             | Event::SessionRulesUpdated(_)

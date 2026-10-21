@@ -53,6 +53,7 @@ pub async fn engine(base_url: String, store: &SessionStore, cwd: &Path) -> Engin
         .expect("the test client builds"),
         oauth_token_url: "http://127.0.0.1:9/token".to_owned(),
         claude_code_keychain: ClaudeCodeKeychain::NONE,
+        retry_login: false,
         tools: Arc::new(ToolRegistry::new(Vec::new())),
         store: store.clone(),
         session,
