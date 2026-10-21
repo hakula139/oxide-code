@@ -188,7 +188,7 @@ mod tests {
 
     fn slider_for(model_id: &str, effort: Option<Effort>) -> EffortSlider {
         let mut info = test_session_info();
-        info.config.model = ModelSpec::resolve(model_id.to_owned());
+        info.config.model = ModelSpec::resolve(model_id);
         info.config.effort = effort;
         EffortSlider::new(&info).expect("model accepts effort")
     }
@@ -203,7 +203,7 @@ mod tests {
         #[test]
         fn rejects_an_unknown_model() {
             let mut info = test_session_info();
-            info.config.model = ModelSpec::resolve("custom-model".to_owned());
+            info.config.model = ModelSpec::resolve("custom-model");
             info.config.effort = None;
             assert!(EffortSlider::new(&info).is_none());
         }

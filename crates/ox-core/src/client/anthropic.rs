@@ -1431,7 +1431,7 @@ mod tests {
                 let stored: serde_json::Value =
                     serde_json::from_str(&std::fs::read_to_string(&file).unwrap()).unwrap();
                 std::fs::remove_file(&file).unwrap();
-                let haiku = ModelSpec::resolve("claude-haiku-5-5".to_owned());
+                let haiku = ModelSpec::resolve("claude-haiku-5-5");
                 let (title, _) = client
                     .clone()
                     .complete(&haiku, "", "u", 40, None, None)

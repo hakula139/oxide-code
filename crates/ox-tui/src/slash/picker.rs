@@ -247,7 +247,7 @@ mod tests {
 
     fn picker_on_unknown_model() -> ModelEffortPicker {
         let mut info = test_session_info();
-        info.config.model = ModelSpec::resolve("custom-model".to_owned());
+        info.config.model = ModelSpec::resolve("custom-model");
         info.config.effort = None;
         ModelEffortPicker::new(&info)
     }

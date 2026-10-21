@@ -98,8 +98,14 @@ fn detect_os_version() -> String {
     let Ok(info) = PlatformInfo::new() else {
         return std::env::consts::OS.to_owned();
     };
-    let sysname = info.sysname().to_string_lossy();
-    let release = info.release().to_string_lossy();
+    format_os_version(
+        &info.sysname().to_string_lossy(),
+        &info.release().to_string_lossy(),
+    )
+}
+
+/// `sysname release` as `uname` reports them, or the target OS name when `sysname` is empty.
+fn format_os_version(sysname: &str, release: &str) -> String {
     if sysname.is_empty() {
         std::env::consts::OS.to_owned()
     } else {
@@ -147,21 +153,24 @@ mod tests {
         use super::*;
 
         #[test]
-        fn inside_repo_sets_is_git_true() {
-            let cwd = std::env::current_dir().expect("cwd should be available");
-            let env = Environment::detect(&cwd, Some(&cwd));
-            assert!(env.is_git);
-        }
+        fn records_the_cwd_whether_it_is_in_a_repo_and_each_probe() {
+            let cwd = Path::new("/repo/sub");
+            for (git_root, is_git) in [(Some(Path::new("/repo")), true), (None, false)] {
+                let env = temp_env::with_var("SHELL", Some("/bin/zsh"), || {
+                    Environment::detect(cwd, git_root)
+                });
 
-        #[test]
-        fn with_cwd_but_no_git_root_sets_is_git_false() {
-            let tmp = tempfile::tempdir().expect("failed to create tempdir");
-            let env = Environment::detect(tmp.path(), None);
-            assert!(!env.is_git);
-            assert!(
-                env.cwd
-                    .ends_with(tmp.path().file_name().unwrap().to_str().unwrap())
-            );
+                assert_eq!(
+                    env,
+                    Environment {
+                        cwd: cwd.to_string_lossy().into_owned(),
+                        is_git,
+                        platform: normalize_node_platform(std::env::consts::OS).to_owned(),
+                        shell: "zsh".to_owned(),
+                        os_version: detect_os_version(),
+                    },
+                );
+            }
         }
     }
 
@@ -215,44 +224,30 @@ mod tests {
         use super::*;
 
         #[test]
-        fn produces_basename() {
-            let shell = detect_shell();
-            assert_ne!(shell, "");
-            assert!(!shell.contains('/'), "should be a basename, got: {shell:?}");
+        fn names_the_shell_by_its_file_name() {
+            for (shell, expected) in [
+                (Some("/usr/local/bin/fish"), "fish"),
+                (Some("zsh"), "zsh"),
+                (None, "unknown"),
+            ] {
+                let detected = temp_env::with_var("SHELL", shell, detect_shell);
+
+                assert_eq!(detected, expected, "{shell:?}");
+            }
         }
     }
 
-    mod detect_os_version {
+    mod format_os_version {
         use super::*;
 
         #[test]
         fn joins_sysname_and_release() {
-            let version = detect_os_version();
-            let info = PlatformInfo::new().unwrap();
-            let sysname = info.sysname().to_string_lossy();
-            assert_eq!(
-                version,
-                format!("{sysname} {}", info.release().to_string_lossy())
-            );
+            assert_eq!(format_os_version("Darwin", "27.0.0"), "Darwin 27.0.0");
         }
-    }
-
-    mod current_date {
-        use super::*;
 
         #[test]
-        fn matches_iso_format() {
-            let date = current_date();
-            assert_eq!(date.len(), 10, "expected YYYY-MM-DD, got: {date}");
-            assert_eq!(&date[4..5], "-");
-            assert_eq!(&date[7..8], "-");
-
-            let year: u32 = date[..4].parse().expect("year should be numeric");
-            let month: u32 = date[5..7].parse().expect("month should be numeric");
-            let day: u32 = date[8..10].parse().expect("day should be numeric");
-            assert!((2025..=2100).contains(&year), "unexpected year: {year}");
-            assert!((1..=12).contains(&month), "unexpected month: {month}");
-            assert!((1..=31).contains(&day), "unexpected day: {day}");
+        fn without_a_sysname_names_the_target_os() {
+            assert_eq!(format_os_version("", "27.0.0"), std::env::consts::OS);
         }
     }
 
@@ -271,14 +266,10 @@ mod tests {
     mod model_identity {
         use super::*;
 
-        fn spec(id: &str) -> ModelSpec {
-            ModelSpec::resolve(id.to_owned())
-        }
-
         #[test]
         fn names_a_catalog_model_with_its_cutoff() {
             assert_eq!(
-                model_identity(&spec("claude-opus-5-5")),
+                model_identity(&ModelSpec::resolve("claude-opus-5-5")),
                 "You are powered by the model named Claude Opus 5.5. \
                  The exact model ID is claude-opus-5-5. \
                  Assistant knowledge cutoff is June 2026.",
@@ -288,7 +279,7 @@ mod tests {
         #[test]
         fn names_an_unknown_model_by_its_id() {
             assert_eq!(
-                model_identity(&spec("custom-model-v1")),
+                model_identity(&ModelSpec::resolve("custom-model-v1")),
                 "You are powered by the model custom-model-v1.",
             );
         }

@@ -79,10 +79,11 @@ mod tests {
         }
 
         #[test]
-        fn collapses_inner_whitespace_into_args() {
-            let parsed = parse_slash("/init please write CLAUDE.md").unwrap();
+        fn keeps_everything_after_the_name_as_args() {
+            let parsed = parse_slash("/init please  write CLAUDE.md").unwrap();
+
             assert_eq!(parsed.name, "init");
-            assert_eq!(parsed.args, "please write CLAUDE.md");
+            assert_eq!(parsed.args, "please  write CLAUDE.md");
         }
 
         #[test]

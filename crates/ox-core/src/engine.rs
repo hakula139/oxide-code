@@ -4942,7 +4942,7 @@ mod tests {
                     (
                         &set_model,
                         Event::ConfigChanged {
-                            model: ModelSpec::resolve(MODEL.to_owned()),
+                            model: ModelSpec::resolve(MODEL),
                             effort: Some(Effort::Low),
                             requested: ConfigPick::Effort(Effort::Low),
                             auto_compaction: CompactionConfig::with_threshold_for_test(50_000).auto,
@@ -4953,7 +4953,7 @@ mod tests {
                     (
                         &set_model,
                         Event::ConfigChanged {
-                            model: ModelSpec::resolve("custom-model".to_owned()),
+                            model: ModelSpec::resolve("custom-model"),
                             effort: None,
                             requested: ConfigPick::Effort(Effort::Low),
                             auto_compaction: CompactionConfig::with_threshold_for_test(50_000).auto,

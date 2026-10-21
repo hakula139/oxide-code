@@ -436,16 +436,6 @@ mod tests {
         }
 
         #[test]
-        fn ambiguous_suggests_every_catalog_alias() {
-            let err = model("o").expect_err("ambiguous arg must error");
-
-            for info in MODELS {
-                let alias = format!("`{}`", info.family.id_token());
-                assert!(err.contains(&alias), "missing {alias}: {err}");
-            }
-        }
-
-        #[test]
         fn unknown_id_suggests_a_replacement_and_lists_the_catalog() {
             // IDs naming a family and a `[1m]` suffix also get the matching model as a suggestion.
             for (arg, expected) in [

@@ -520,10 +520,6 @@ mod tests {
         })
     }
 
-    fn spec(id: &str) -> ModelSpec {
-        ModelSpec::resolve(id.to_owned())
-    }
-
     fn model_pick(model: &ModelSpec, effort: Option<Effort>) -> ConfigPick {
         ConfigPick::Model {
             id: ResolvedModelId::new(model.id().to_owned()),
@@ -1298,7 +1294,7 @@ mod tests {
         #[test]
         fn session_resumed_replays_transcript_and_clears_pending() {
             let (mut app, _rx, _event_tx) = test_app(Some("Old"));
-            app.session_info.config.model = spec("claude-opus-5-5");
+            app.session_info.config.model = ModelSpec::resolve("claude-opus-5-5");
             app.chat.push_user_message("live prompt".to_owned());
             app.status_bar.set_usage(Some(usage_snapshot()));
             app.pending_prompts
@@ -1354,7 +1350,7 @@ mod tests {
         #[test]
         fn session_resumed_with_no_queued_prompts_is_silent() {
             let (mut app, _rx, _event_tx) = test_app(None);
-            app.session_info.config.model = spec("claude-opus-5-5");
+            app.session_info.config.model = ModelSpec::resolve("claude-opus-5-5");
             app.handle_engine_event(Event::SessionResumed {
                 id: "resumed".to_owned(),
                 title: None,
@@ -1371,7 +1367,7 @@ mod tests {
         #[test]
         fn session_resumed_after_unarchiving_appends_a_notice() {
             let (mut app, _rx, _event_tx) = test_app(None);
-            app.session_info.config.model = spec("claude-opus-5-5");
+            app.session_info.config.model = ModelSpec::resolve("claude-opus-5-5");
             app.handle_engine_event(Event::SessionResumed {
                 id: "bbbb2222-resumed".to_owned(),
                 title: None,
@@ -1387,7 +1383,7 @@ mod tests {
         #[test]
         fn session_resumed_with_compact_replays_boundary_block() {
             let (mut app, _rx, _event_tx) = test_app(None);
-            app.session_info.config.model = spec("claude-opus-5-5");
+            app.session_info.config.model = ModelSpec::resolve("claude-opus-5-5");
             app.handle_engine_event(Event::SessionResumed {
                 id: "resumed".to_owned(),
                 title: None,
@@ -1412,7 +1408,7 @@ mod tests {
         #[test]
         fn session_resumed_with_no_title_clears_stale_chrome() {
             let (mut app, _rx, _event_tx) = test_app(Some("Stale"));
-            app.session_info.config.model = spec("claude-opus-5-5");
+            app.session_info.config.model = ModelSpec::resolve("claude-opus-5-5");
             app.handle_engine_event(Event::SessionResumed {
                 id: "resumed".to_owned(),
                 title: None,
@@ -1648,9 +1644,9 @@ mod tests {
             // / `/config`), and a chat confirmation block.
             let (mut app, _rx, _event_tx) = test_app(None);
             app.handle_engine_event(Event::ConfigChanged {
-                model: spec("claude-sonnet-5-5"),
+                model: ModelSpec::resolve("claude-sonnet-5-5"),
                 effort: Some(Effort::High),
-                requested: model_pick(&spec("claude-sonnet-5-5"), None),
+                requested: model_pick(&ModelSpec::resolve("claude-sonnet-5-5"), None),
                 auto_compaction: AutoCompactionConfig {
                     enabled: true,
                     threshold_tokens: Some(WINDOW_1M_THRESHOLD),

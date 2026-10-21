@@ -39,7 +39,7 @@ pub(super) const SESSION_CONTEXT: &str = "<system-reminder>session context</syst
 /// reads the developer's instruction files or git state.
 pub async fn engine(base_url: String, store: &SessionStore, cwd: &Path) -> Engine {
     let (mut prompt, instruction_warnings) =
-        prompt::build_prompt(&ModelSpec::resolve(MODEL.to_owned()), cwd).await;
+        prompt::build_prompt(&ModelSpec::resolve(MODEL), cwd).await;
     SESSION_CONTEXT.clone_into(&mut prompt.user_context);
     let config = test_config(base_url, api_key(), MODEL);
     let session = handle::start(store, MODEL, None);
