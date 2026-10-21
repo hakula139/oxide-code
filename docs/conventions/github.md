@@ -34,6 +34,7 @@ Conventions for commits, branches, pull requests, and issues.
 
 - Review each PR once. Fix every finding, including suggestions, verify the fixes with the [verification](../../AGENTS.md#verification) block, and merge without a second review round. After a batch of related PRs merges, make one simplification pass over the merged changes.
 - Agents working for the maintainer merge a reviewed PR without asking for per-PR approval, queuing an auto-merge while checks run. An agent that opens a PR leaves queuing it to the agent that reviews it. Tags and releases still need the approval [RELEASING.md](../../RELEASING.md) describes.
+- Keep each line of work's open PRs in a single stack, with each PR based on the one before it and no more than three unmerged at a time. Land the bottom PR before opening another, since parallel PRs based on `main` multiply the conflicts created by each merge.
 - The repository has no merge queue. After each merge, run `gh pr update-branch` on queued PRs that fell behind, and send conflicting PRs back to their authors to rebase. Land ready PRs in the order that minimizes conflicts, small or foundational ones first.
 
 ## Issues
