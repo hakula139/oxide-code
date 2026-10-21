@@ -25,6 +25,7 @@ deque
 desync
 direnv
 disambiguable
+doas
 ELOOP
 ENOTDIR
 envrc
@@ -88,9 +89,11 @@ onig
 otool
 oxalica
 PKCE
+pkexec
 pkgs
 pname
 popd
+procs
 pushd
 PYTHONDONTWRITEBYTECODE
 PYTHONUNBUFFERED

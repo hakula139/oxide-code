@@ -3007,6 +3007,11 @@ mod tests {
                         "rm $'-rf' /",
                         "$'rm' -rf /",
                         "ls && /bin/rm --rec --f x",
+                        "sudo -u root rm -rf /",
+                        "busybox rm -rf x",
+                        "echo / | xargs rm -rf",
+                        "echo -rf / | xargs rm",
+                        r"find . -exec rm -rf {} \;",
                     ] {
                         assert_eq!(
                             decide(&p, EXEC, &command(case)),
@@ -3037,6 +3042,41 @@ mod tests {
                     "command rm -rf /",
                 ] {
                     assert_eq!(decide(&p, EXEC, &command(case)), Decision::Deny, "{case}");
+                }
+            }
+
+            #[test]
+            fn command_deny_holds_what_a_followed_runner_runs_even_in_yolo() {
+                let p = policy(Mode::Yolo, &[(EXEC, "rm *")], &[], &[]);
+                for case in [
+                    "sudo rm x",
+                    "doas -u root rm x",
+                    "pkexec rm x",
+                    "busybox rm x",
+                    "echo x | xargs rm",
+                    "echo rm x | xargs sudo",
+                    r"find . -execdir sudo rm {} +",
+                    "sudo --unknown value rm x",
+                ] {
+                    assert_eq!(decide(&p, EXEC, &command(case)), Decision::Deny, "{case}");
+                }
+                assert_eq!(
+                    decide(&p, EXEC, &command("echo x | xargs")),
+                    Decision::Allow
+                );
+            }
+
+            #[test]
+            fn command_allow_sees_through_only_wrappers_that_keep_who_runs_it_and_its_arguments() {
+                let p = policy(Mode::Manual, &[], &[], &[(EXEC, "cat *"), (EXEC, "find *")]);
+                for (case, expected) in [
+                    ("nice timeout 5 cat a", Decision::Allow),
+                    ("sudo cat a", Decision::Ask),
+                    ("echo a | xargs cat", Decision::Ask),
+                    (r"find . -exec cat {} +", Decision::Allow),
+                    (r"find . -exec wc {} +", Decision::Ask),
+                ] {
+                    assert_eq!(decide(&p, EXEC, &command(case)), expected, "{case}");
                 }
             }
 
