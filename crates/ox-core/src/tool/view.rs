@@ -15,7 +15,7 @@ pub enum ToolResultView {
     },
     ReadExcerpt {
         path: String,
-        lines: Vec<ReadExcerptLine>,
+        lines: Vec<NumberedLine>,
         total_lines: usize,
     },
     Diff(EditDiff),
@@ -34,16 +34,10 @@ pub enum ToolResultView {
     },
 }
 
-/// One line in a `ReadExcerpt` view.
+/// One line of a file with its 1-based line number,
+/// as a read excerpt or either side of a diff hunk shows it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ReadExcerptLine {
-    pub number: usize,
-    pub text: String,
-}
-
-/// One numbered line on either side of a diff hunk.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct DiffLine {
+pub struct NumberedLine {
     pub number: usize,
     pub text: String,
 }
@@ -51,8 +45,8 @@ pub struct DiffLine {
 /// A single boundary-trimmed edit hunk. Consumers must not re-trim.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DiffChunk {
-    pub old: Vec<DiffLine>,
-    pub new: Vec<DiffLine>,
+    pub old: Vec<NumberedLine>,
+    pub new: Vec<NumberedLine>,
 }
 
 /// What an edit changed. Every replacement swaps the same text, so the first one's hunk stands for

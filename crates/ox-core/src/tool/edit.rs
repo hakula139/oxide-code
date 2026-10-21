@@ -7,7 +7,9 @@ use std::pin::Pin;
 use serde::Deserialize;
 
 use super::file::{FileVerb, WriteMode};
-use super::view::{ApprovalBody, ApprovalPreview, DiffChunk, DiffLine, EditDiff, ToolResultView};
+use super::view::{
+    ApprovalBody, ApprovalPreview, DiffChunk, EditDiff, NumberedLine, ToolResultView,
+};
 use super::{Prepared, Tool, ToolCtx, ToolMetadata, ToolOutput, ToolSpec, extract_input_field};
 use crate::file_tracker::GatePurpose;
 use crate::permission::PermissionClass;
@@ -293,10 +295,10 @@ fn shift_chunk(mut hunk: DiffChunk, old_line: usize, new_line: usize) -> DiffChu
     hunk
 }
 
-fn split_into_diff_lines(s: &str, start_line: usize) -> Vec<DiffLine> {
+fn split_into_diff_lines(s: &str, start_line: usize) -> Vec<NumberedLine> {
     s.lines()
         .enumerate()
-        .map(|(i, text)| DiffLine {
+        .map(|(i, text)| NumberedLine {
             number: start_line + i,
             text: text.to_owned(),
         })
@@ -385,8 +387,8 @@ mod tests {
         ctx_with(&std::env::temp_dir(), tracker_seeded(path))
     }
 
-    fn line(number: usize, text: &str) -> DiffLine {
-        DiffLine {
+    fn line(number: usize, text: &str) -> NumberedLine {
+        NumberedLine {
             number,
             text: text.to_owned(),
         }
@@ -496,11 +498,11 @@ mod tests {
             assert_eq!(
                 preview.body,
                 ApprovalBody::Diff(DiffChunk {
-                    old: vec![DiffLine {
+                    old: vec![NumberedLine {
                         number: 1,
                         text: "let a = 1;".to_owned(),
                     }],
-                    new: vec![DiffLine {
+                    new: vec![NumberedLine {
                         number: 1,
                         text: "let a = 2;".to_owned(),
                     }],
@@ -1158,11 +1160,11 @@ mod tests {
             assert_eq!(
                 split_into_diff_lines("a\nb", 47),
                 vec![
-                    DiffLine {
+                    NumberedLine {
                         number: 47,
                         text: "a".to_owned()
                     },
-                    DiffLine {
+                    NumberedLine {
                         number: 48,
                         text: "b".to_owned()
                     },
@@ -1175,11 +1177,11 @@ mod tests {
             assert_eq!(
                 split_into_diff_lines("a\nb\n", 1),
                 vec![
-                    DiffLine {
+                    NumberedLine {
                         number: 1,
                         text: "a".to_owned()
                     },
-                    DiffLine {
+                    NumberedLine {
                         number: 2,
                         text: "b".to_owned()
                     },
@@ -1200,29 +1202,29 @@ mod tests {
         fn drops_matching_prefix_and_suffix_preserving_numbers() {
             let mut chunk = DiffChunk {
                 old: vec![
-                    DiffLine {
+                    NumberedLine {
                         number: 10,
                         text: "anchor".to_owned(),
                     },
-                    DiffLine {
+                    NumberedLine {
                         number: 11,
                         text: "old".to_owned(),
                     },
-                    DiffLine {
+                    NumberedLine {
                         number: 12,
                         text: "tail".to_owned(),
                     },
                 ],
                 new: vec![
-                    DiffLine {
+                    NumberedLine {
                         number: 10,
                         text: "anchor".to_owned(),
                     },
-                    DiffLine {
+                    NumberedLine {
                         number: 11,
                         text: "new".to_owned(),
                     },
-                    DiffLine {
+                    NumberedLine {
                         number: 12,
                         text: "tail".to_owned(),
                     },
@@ -1231,14 +1233,14 @@ mod tests {
             trim_chunk(&mut chunk);
             assert_eq!(
                 chunk.old,
-                vec![DiffLine {
+                vec![NumberedLine {
                     number: 11,
                     text: "old".to_owned()
                 }]
             );
             assert_eq!(
                 chunk.new,
-                vec![DiffLine {
+                vec![NumberedLine {
                     number: 11,
                     text: "new".to_owned()
                 }]
@@ -1248,16 +1250,16 @@ mod tests {
         #[test]
         fn pure_tail_insertion_strips_anchor() {
             let mut chunk = DiffChunk {
-                old: vec![DiffLine {
+                old: vec![NumberedLine {
                     number: 5,
                     text: "fn foo()".to_owned(),
                 }],
                 new: vec![
-                    DiffLine {
+                    NumberedLine {
                         number: 5,
                         text: "fn foo()".to_owned(),
                     },
-                    DiffLine {
+                    NumberedLine {
                         number: 6,
                         text: "    return 42;".to_owned(),
                     },
@@ -1267,7 +1269,7 @@ mod tests {
             assert_eq!(chunk.old, []);
             assert_eq!(
                 chunk.new,
-                vec![DiffLine {
+                vec![NumberedLine {
                     number: 6,
                     text: "    return 42;".to_owned()
                 }],
@@ -1277,11 +1279,11 @@ mod tests {
         #[test]
         fn fully_identical_collapses_both_sides() {
             let mut chunk = DiffChunk {
-                old: vec![DiffLine {
+                old: vec![NumberedLine {
                     number: 1,
                     text: "a".to_owned(),
                 }],
-                new: vec![DiffLine {
+                new: vec![NumberedLine {
                     number: 1,
                     text: "a".to_owned(),
                 }],

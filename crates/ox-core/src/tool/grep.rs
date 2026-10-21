@@ -193,29 +193,9 @@ async fn run(prepared: Prepared, ctx: &ToolCtx, read_filter: ReadFilter) -> Tool
     })
     .await
     {
-        Ok(content) => {
-            let title = grep_title(super::search::strip_search_notes(&content));
-            ToolOutput::success(content).with_title(title)
-        }
+        Ok(GrepOutput { content, title }) => ToolOutput::success(content).with_title(title),
         Err(msg) => ToolOutput::error(msg),
     }
-}
-
-fn grep_title(output: &str) -> String {
-    if matches!(output, NO_MATCHES_FOUND | NO_FILES_FOUND) {
-        return NO_MATCHES_FOUND.into();
-    }
-    // Count / files-with-matches modes lead with "Found N ...".
-    if let Some(line) = output.lines().find(|l| l.starts_with("Found ")) {
-        return line.to_owned();
-    }
-    let match_count = output
-        .lines()
-        .filter_map(parse_match_line)
-        .filter(|(_, m)| m.is_match)
-        .count();
-    let word = plural(match_count, "match", "matches");
-    format!("{match_count} {word}")
 }
 
 // ── Search ──
@@ -234,7 +214,14 @@ struct GrepParams<'a> {
     cancel: CancellationToken,
 }
 
-fn grep_files(params: &GrepParams<'_>) -> Result<String, String> {
+/// What a search found: the text the model reads and the title the UI shows for it.
+#[derive(Debug)]
+struct GrepOutput {
+    content: String,
+    title: String,
+}
+
+fn grep_files(params: &GrepParams<'_>) -> Result<GrepOutput, String> {
     // Each line is matched alone, so `^` and `$` anchor at line boundaries without the multi-line
     // flag. The size limits keep an adversarial pattern from exhausting memory.
     let re = regex::RegexBuilder::new(params.pattern)
@@ -275,17 +262,17 @@ fn grep_files(params: &GrepParams<'_>) -> Result<String, String> {
 
     let cwd = &root.cwd;
     let texts = texts(&files, size_limit, &params.cancel, &mut unreadable);
-    let mut result = match params.output_mode {
+    let GrepOutput { mut content, title } = match params.output_mode {
         OutputMode::FilesWithMatches => format_files_with_matches(texts, cwd, &re, head_limit),
         OutputMode::Count => format_count(texts, cwd, &re, head_limit),
         OutputMode::Content => format_content(texts, cwd, &re, params.context, head_limit),
     };
 
-    push_skipped_note(&mut result, &skipped_large, size_limit, cwd);
-    super::search::push_unreadable_note(&mut result, &unreadable, cwd);
-    super::search::push_withheld_note(&mut result, withheld);
+    push_skipped_note(&mut content, &skipped_large, size_limit, cwd);
+    super::search::push_unreadable_note(&mut content, &unreadable, cwd);
+    super::search::push_withheld_note(&mut content, withheld);
 
-    Ok(result)
+    Ok(GrepOutput { content, title })
 }
 
 struct CollectedFiles {
@@ -435,7 +422,7 @@ fn format_content<'a>(
     re: &regex::Regex,
     context: usize,
     head_limit: usize,
-) -> String {
+) -> GrepOutput {
     let mut rows = Rows::new(head_limit);
 
     for (path, text) in texts {
@@ -462,6 +449,8 @@ struct Rows {
     kept: Vec<String>,
     bytes: u64,
     head_limit: usize,
+    /// How many of the rows `render` keeps matched the pattern.
+    matches: usize,
 }
 
 impl Rows {
@@ -470,6 +459,7 @@ impl Rows {
             kept: Vec::new(),
             bytes: 0,
             head_limit,
+            matches: 0,
         }
     }
 
@@ -478,15 +468,24 @@ impl Rows {
         self.kept.len() > self.head_limit || self.bytes >= MAX_SPILL_BYTES
     }
 
-    fn push(&mut self, row: String) {
+    /// Keeps `row`, a line that matched the pattern when `is_match`
+    /// and a context line or range separator otherwise.
+    fn push(&mut self, row: String, is_match: bool) {
+        if is_match && self.kept.len() < self.head_limit {
+            self.matches += 1;
+        }
         self.bytes += row.len() as u64 + 1;
         self.kept.push(row);
     }
 
-    /// The kept rows, cut to `head_limit`, with a footer naming the limit that dropped any.
-    fn render(mut self) -> String {
+    /// The kept rows, cut to `head_limit`, with a footer naming the limit that dropped any,
+    /// titled with the match count they show.
+    fn render(mut self) -> GrepOutput {
         if self.kept.is_empty() {
-            return NO_MATCHES_FOUND.into();
+            return GrepOutput {
+                content: NO_MATCHES_FOUND.into(),
+                title: NO_MATCHES_FOUND.into(),
+            };
         }
 
         let footer = if self.kept.len() > self.head_limit {
@@ -498,11 +497,15 @@ impl Rows {
             None
         };
 
-        let mut output = self.kept.join("\n");
+        let mut content = self.kept.join("\n");
         if let Some(footer) = footer {
-            _ = write!(output, "\n\n{RESULTS_LIMIT_PREFIX}{footer})");
+            _ = write!(content, "\n\n{RESULTS_LIMIT_PREFIX}{footer})");
         }
-        output
+        let word = plural(self.matches, "match", "matches");
+        GrepOutput {
+            content,
+            title: format!("{} {word}", self.matches),
+        }
     }
 }
 
@@ -513,7 +516,7 @@ fn search_no_context(text: &str, re: &regex::Regex, display_path: &str, rows: &m
         }
         if re.is_match(line) {
             let truncated = super::truncate_line(line, MAX_LINE_CHARS);
-            rows.push(format!("{display_path}:{}:{truncated}", line_num + 1));
+            rows.push(format!("{display_path}:{}:{truncated}", line_num + 1), true);
         }
     }
 }
@@ -555,19 +558,19 @@ fn search_with_context(
             return;
         }
         if range_idx > 0 {
-            rows.push("--".to_owned());
+            rows.push("--".to_owned(), false);
         }
         for (i, line) in lines.iter().enumerate().take(end + 1).skip(start) {
             if rows.full() {
                 return;
             }
-            let sep = if match_indices.binary_search(&i).is_ok() {
-                ':'
-            } else {
-                '-'
-            };
+            let is_match = match_indices.binary_search(&i).is_ok();
+            let sep = if is_match { ':' } else { '-' };
             let truncated = super::truncate_line(line, MAX_LINE_CHARS);
-            rows.push(format!("{display_path}:{}{sep}{truncated}", i + 1));
+            rows.push(
+                format!("{display_path}:{}{sep}{truncated}", i + 1),
+                is_match,
+            );
         }
     }
 }
@@ -579,7 +582,7 @@ fn format_files_with_matches<'a>(
     cwd: &Path,
     re: &regex::Regex,
     head_limit: usize,
-) -> String {
+) -> GrepOutput {
     let mut matching_files: Vec<String> = Vec::new();
 
     for (path, text) in texts {
@@ -593,7 +596,10 @@ fn format_files_with_matches<'a>(
     }
 
     if matching_files.is_empty() {
-        return NO_FILES_FOUND.into();
+        return GrepOutput {
+            content: NO_FILES_FOUND.into(),
+            title: NO_MATCHES_FOUND.into(),
+        };
     }
 
     let truncated = matching_files.len() > head_limit;
@@ -601,17 +607,18 @@ fn format_files_with_matches<'a>(
     let num_files = matching_files.len();
     let file_word = plural(num_files, "file", "files");
 
+    let title = format!("Found {num_files} {file_word}");
     let files = matching_files.join("\n");
-    let mut output = formatdoc! {"
-        Found {num_files} {file_word}
+    let mut content = formatdoc! {"
+        {title}
         {files}"
     };
 
     if truncated {
-        _ = write!(output, "\n\n{RESULTS_LIMIT_PREFIX}{head_limit} files)");
+        _ = write!(content, "\n\n{RESULTS_LIMIT_PREFIX}{head_limit} files)");
     }
 
-    output
+    GrepOutput { content, title }
 }
 
 // ── Count Mode ──
@@ -621,7 +628,7 @@ fn format_count<'a>(
     cwd: &Path,
     re: &regex::Regex,
     head_limit: usize,
-) -> String {
+) -> GrepOutput {
     let mut counts: Vec<(String, usize)> = Vec::new();
     let mut total_matches: usize = 0;
 
@@ -634,26 +641,30 @@ fn format_count<'a>(
     }
 
     if counts.is_empty() {
-        return NO_MATCHES_FOUND.into();
+        return GrepOutput {
+            content: NO_MATCHES_FOUND.into(),
+            title: NO_MATCHES_FOUND.into(),
+        };
     }
 
     let total_files = counts.len();
     let truncated = total_files > head_limit;
     counts.truncate(head_limit);
 
-    let mut output = format!(
+    let title = format!(
         "Found {total_matches} total {} across {total_files} {}",
         plural(total_matches, "occurrence", "occurrences"),
         plural(total_files, "file", "files"),
     );
+    let mut content = title.clone();
     for (p, c) in &counts {
-        _ = write!(output, "\n{p}:{c}");
+        _ = write!(content, "\n{p}:{c}");
     }
     if truncated {
-        _ = write!(output, "\n\n{RESULTS_LIMIT_PREFIX}{head_limit} files)");
+        _ = write!(content, "\n\n{RESULTS_LIMIT_PREFIX}{head_limit} files)");
     }
 
-    output
+    GrepOutput { content, title }
 }
 
 // ── Result View ──
@@ -881,53 +892,19 @@ mod tests {
         }
     }
 
-    mod grep_title {
-        use super::*;
-
-        #[test]
-        fn with_context_counts_matches_only() {
-            let dir = canonical_tempdir();
-            fs::write(
-                dir.path().join("test.txt"),
-                indoc! {"
-                    a
-                    MATCH
-                    b
-                    c
-                    MATCH
-                    d
-                "},
-            )
-            .unwrap();
-
-            let mut p = params("MATCH", dir.path());
-            p.context = 1;
-            let result = grep_files(&p).unwrap();
-            assert_eq!(grep_title(&result), "2 matches");
-        }
-
-        #[test]
-        fn summary_modes_reuse_the_found_line() {
-            let count = indoc! {"
-                Found 3 total occurrences across 2 files
-                a.rs:2
-                b.rs:1"
-            };
-            assert_eq!(
-                grep_title(count),
-                "Found 3 total occurrences across 2 files"
-            );
-        }
-
-        #[test]
-        fn empty_results_say_no_matches() {
-            assert_eq!(grep_title("No matches found"), "No matches found");
-            assert_eq!(grep_title("No files found"), "No matches found");
-        }
-    }
-
     mod grep_files {
         use super::*;
+
+        #[test]
+        fn titles_a_row_that_starts_like_a_summary_by_its_match_count() {
+            let dir = canonical_tempdir();
+            fs::write(dir.path().join("Found x.rs"), "hit\n").unwrap();
+
+            let result = grep_files(&params("hit", dir.path())).unwrap();
+
+            assert_eq!(result.content, "Found x.rs:1:hit");
+            assert_eq!(result.title, "1 match");
+        }
 
         #[test]
         fn plain_pattern_finds_matching_lines() {
@@ -942,7 +919,7 @@ mod tests {
             .unwrap();
             fs::write(dir.path().join("b.rs"), "fn baz() {}\n").unwrap();
 
-            let result = grep_files(&params("fn foo", dir.path())).unwrap();
+            let result = grep_files(&params("fn foo", dir.path())).unwrap().content;
             assert_eq!(result, "a.rs:1:fn foo() {}");
         }
 
@@ -959,7 +936,9 @@ mod tests {
             )
             .unwrap();
 
-            let result = grep_files(&params(r"hello\d+", dir.path())).unwrap();
+            let result = grep_files(&params(r"hello\d+", dir.path()))
+                .unwrap()
+                .content;
             assert_eq!(result, "test.txt:1:hello123\ntest.txt:3:hello789");
         }
 
@@ -977,7 +956,7 @@ mod tests {
 
             let mut p = params("hello", dir.path());
             p.case_insensitive = true;
-            let result = grep_files(&p).unwrap();
+            let result = grep_files(&p).unwrap().content;
             assert!(result.contains("test.txt:1:Hello World"));
             assert!(result.contains("test.txt:2:hello world"));
         }
@@ -999,7 +978,7 @@ mod tests {
 
             let mut p = params("ccc", dir.path());
             p.context = 1;
-            let result = grep_files(&p).unwrap();
+            let result = grep_files(&p).unwrap().content;
             assert!(result.contains("test.txt:2-bbb"));
             assert!(result.contains("test.txt:3:ccc"));
             assert!(result.contains("test.txt:4-ddd"));
@@ -1027,7 +1006,7 @@ mod tests {
 
             let mut p = params("MATCH", dir.path());
             p.context = 1;
-            let result = grep_files(&p).unwrap();
+            let result = grep_files(&p).unwrap().content;
             // MATCH1 ctx → 2-4 and MATCH2 ctx → 5-7, so lines 4-5 bridge the gap and ranges merge.
             assert!(!result.contains("--"));
             assert!(result.contains("test.txt:2-b"));
@@ -1058,8 +1037,12 @@ mod tests {
 
             let mut p = params("MATCH", dir.path());
             p.context = 1;
-            let result = grep_files(&p).unwrap();
+            let GrepOutput {
+                content: result,
+                title,
+            } = grep_files(&p).unwrap();
             // MATCH1 ctx → 1-2 and MATCH2 ctx → 7-8, so the gap forces a "--" separator.
+            assert_eq!(title, "2 matches");
             assert!(result.contains("--"));
             assert!(result.contains("test.txt:1:MATCH1"));
             assert!(result.contains("test.txt:2-a"));
@@ -1086,7 +1069,7 @@ mod tests {
 
             let mut p = params("xyz", dir.path());
             p.context = 1;
-            let result = grep_files(&p).unwrap();
+            let result = grep_files(&p).unwrap().content;
             assert_eq!(result, "No matches found");
         }
 
@@ -1110,7 +1093,7 @@ mod tests {
             let mut p = params("MATCH", dir.path());
             p.context = 1;
             p.head_limit = Some(3);
-            let result = grep_files(&p).unwrap();
+            let result = grep_files(&p).unwrap().content;
             assert!(result.contains("Results limited to 3 lines"));
             let entry_count = result.lines().filter(|l| l.contains("test.txt:")).count();
             assert_eq!(entry_count, 3);
@@ -1124,7 +1107,7 @@ mod tests {
 
             let mut p = params("fn test", dir.path());
             p.include_glob = Some("*.rs");
-            let result = grep_files(&p).unwrap();
+            let result = grep_files(&p).unwrap().content;
             assert_eq!(result, "code.rs:1:fn test() {}");
         }
 
@@ -1143,7 +1126,7 @@ mod tests {
 
             let mut p = params("beta", dir.path());
             p.root = search_root(dir.path(), Some("test.txt")).unwrap();
-            let result = grep_files(&p).unwrap();
+            let result = grep_files(&p).unwrap().content;
             assert_eq!(result, "test.txt:2:beta");
         }
 
@@ -1163,7 +1146,7 @@ mod tests {
 
             let mut p = params("^error", dir.path());
             p.root = search_root(dir.path(), Some(spill)).unwrap();
-            let result = grep_files(&p).unwrap();
+            let result = grep_files(&p).unwrap().content;
 
             assert_eq!(result, format!("{spill}:{}:error: last line", lines + 1));
         }
@@ -1179,14 +1162,14 @@ mod tests {
 
             let mut p = params("hit", &cwd);
             p.root = search_root(&cwd, Some("src")).unwrap();
-            assert_eq!(grep_files(&p).unwrap(), "src/lib.rs:1:hit");
+            assert_eq!(grep_files(&p).unwrap().content, "src/lib.rs:1:hit");
 
             p.root = search_root(&cwd, Some("src/lib.rs")).unwrap();
-            assert_eq!(grep_files(&p).unwrap(), "src/lib.rs:1:hit");
+            assert_eq!(grep_files(&p).unwrap().content, "src/lib.rs:1:hit");
 
             p.root = search_root(&cwd, Some("../outside.txt")).unwrap();
             assert_eq!(
-                grep_files(&p).unwrap(),
+                grep_files(&p).unwrap().content,
                 format!("{}:1:hit", slash_separated(&outside)),
                 "hits outside cwd fall back to an absolute path",
             );
@@ -1198,7 +1181,7 @@ mod tests {
             fs::write(dir.path().join("binary.bin"), b"match\x00here").unwrap();
             fs::write(dir.path().join("text.txt"), "match here\n").unwrap();
 
-            let result = grep_files(&params("match", dir.path())).unwrap();
+            let result = grep_files(&params("match", dir.path())).unwrap().content;
             assert_eq!(result, "text.txt:1:match here");
         }
 
@@ -1212,7 +1195,7 @@ mod tests {
             fs::create_dir(&git).unwrap();
             fs::write(git.join("config"), "match me\n").unwrap();
 
-            let result = grep_files(&params("match", dir.path())).unwrap();
+            let result = grep_files(&params("match", dir.path())).unwrap().content;
             assert_eq!(result, ".cargo/config.toml:1:match me");
         }
 
@@ -1224,7 +1207,7 @@ mod tests {
             fs::write(dir.path().join("ignored.txt"), "match me\n").unwrap();
             fs::write(dir.path().join("tracked.txt"), "match me\n").unwrap();
 
-            let result = grep_files(&params("match", dir.path())).unwrap();
+            let result = grep_files(&params("match", dir.path())).unwrap().content;
             assert_eq!(result, "tracked.txt:1:match me");
         }
 
@@ -1236,7 +1219,7 @@ mod tests {
             let f = File::create(&large).unwrap();
             f.set_len(MAX_WALK_FILE_SIZE + 1).unwrap();
 
-            let result = grep_files(&params("match", dir.path())).unwrap();
+            let result = grep_files(&params("match", dir.path())).unwrap().content;
 
             assert_eq!(
                 result,
@@ -1263,7 +1246,10 @@ mod tests {
                 local_testing::deny_read_access(&secret),
             ];
 
-            let result = grep_files(&params("hit", dir.path())).unwrap();
+            let GrepOutput {
+                content: result,
+                title,
+            } = grep_files(&params("hit", dir.path())).unwrap();
 
             let dir_cause = fs::read_dir(&locked).unwrap_err();
             let file_cause = fs::read(&secret).unwrap_err();
@@ -1277,10 +1263,7 @@ mod tests {
                       secret.rs: {file_cause}"
                 }
             );
-            assert_eq!(
-                grep_title(crate::tool::search::strip_search_notes(&result)),
-                "1 match"
-            );
+            assert_eq!(title, "1 match");
             let view = grep_tool().result_view(
                 &serde_json::json!({"pattern": "hit"}),
                 &result,
@@ -1300,7 +1283,7 @@ mod tests {
             let mut p = params("hit", dir.path());
             p.read_filter = deny_reads(&["secrets"]);
 
-            let result = grep_files(&p).unwrap();
+            let result = grep_files(&p).unwrap().content;
 
             assert_eq!(
                 result,
@@ -1319,7 +1302,7 @@ mod tests {
             fs::write(&secret, "hit\n").unwrap();
             let _denied = local_testing::deny_read_access(&secret);
 
-            let result = grep_files(&params("hit", dir.path())).unwrap();
+            let result = grep_files(&params("hit", dir.path())).unwrap().content;
 
             let cause = fs::read(&secret).unwrap_err();
             assert_eq!(
@@ -1342,7 +1325,7 @@ mod tests {
             let mut p = params("TOKEN", dir.path());
             p.read_filter = deny_reads(&[".env"]);
             assert_eq!(
-                grep_files(&p).unwrap(),
+                grep_files(&p).unwrap().content,
                 indoc! {"
                     a.rs:1:TOKEN=public
 
@@ -1351,7 +1334,10 @@ mod tests {
             );
 
             p.pattern = "secret";
-            let result = grep_files(&p).unwrap();
+            let GrepOutput {
+                content: result,
+                title,
+            } = grep_files(&p).unwrap();
             assert_eq!(
                 result,
                 indoc! {"
@@ -1360,7 +1346,6 @@ mod tests {
                     (1 file withheld by read deny or ask rules)"
                 }
             );
-            let title = grep_title(crate::tool::search::strip_search_notes(&result));
             assert_eq!(title, "No matches found");
             // The structured view would drop the note, so the text view shows it.
             let input = serde_json::json!({"pattern": "secret"});
@@ -1379,7 +1364,8 @@ mod tests {
             fs::write(dir.path().join("test.txt"), "hello world\n").unwrap();
 
             let result = grep_files(&params("nonexistent", dir.path())).unwrap();
-            assert_eq!(result, "No matches found");
+            assert_eq!(result.content, "No matches found");
+            assert_eq!(result.title, "No matches found");
         }
 
         #[test]
@@ -1406,7 +1392,7 @@ mod tests {
 
             let mut p = params("match", dir.path());
             p.root = search_root(dir.path(), Some("large.txt")).unwrap();
-            let result = grep_files(&p).unwrap();
+            let result = grep_files(&p).unwrap().content;
 
             assert_eq!(
                 result,
@@ -1434,7 +1420,7 @@ mod tests {
             p.read_filter = deny_reads(&["secrets"]);
             let app = outside.join("app.toml").display().to_string();
             assert_eq!(
-                grep_files(&p).unwrap(),
+                grep_files(&p).unwrap().content,
                 formatdoc! {"
                     {app}:1:TOKEN=public
 
@@ -1454,7 +1440,7 @@ mod tests {
 
             let mut p = params("match", dir.path());
             p.head_limit = Some(5);
-            let result = grep_files(&p).unwrap();
+            let result = grep_files(&p).unwrap().content;
             let lines: Vec<&str> = result.lines().collect();
             // 5 match lines + blank + truncation notice
             assert!(result.contains("Results limited to 5 lines"));
@@ -1468,7 +1454,7 @@ mod tests {
 
             let mut p = params("match", dir.path());
             p.head_limit = Some(3);
-            let result = grep_files(&p).unwrap();
+            let result = grep_files(&p).unwrap().content;
             assert_eq!(
                 result,
                 indoc! {"
@@ -1491,7 +1477,7 @@ mod tests {
 
             let mut p = params("match", dir.path());
             p.head_limit = Some(0);
-            let result = grep_files(&p).unwrap();
+            let result = grep_files(&p).unwrap().content;
             assert!(!result.contains("Results limited"));
             assert!(result.contains(&format!("test.txt:{}:", DEFAULT_HEAD_LIMIT + 1)));
         }
@@ -1505,7 +1491,7 @@ mod tests {
 
             let mut p = params("match", dir.path());
             p.head_limit = Some(3);
-            let result = grep_files(&p).unwrap();
+            let result = grep_files(&p).unwrap().content;
             assert!(result.contains("Results limited to 3 lines"));
             let match_lines: Vec<_> = result.lines().filter(|l| l.contains(":match")).collect();
             assert_eq!(match_lines.len(), 3);
@@ -1520,7 +1506,11 @@ mod tests {
 
             let mut p = params("fn", dir.path());
             p.output_mode = OutputMode::FilesWithMatches;
-            let result = grep_files(&p).unwrap();
+            let GrepOutput {
+                content: result,
+                title,
+            } = grep_files(&p).unwrap();
+            assert_eq!(title, "Found 2 files");
             assert!(result.starts_with("Found 2 files\n"));
             assert!(result.lines().any(|l| l == "a.rs"));
             assert!(result.lines().any(|l| l == "b.rs"));
@@ -1537,7 +1527,7 @@ mod tests {
             let mut p = params("match", dir.path());
             p.output_mode = OutputMode::FilesWithMatches;
             p.head_limit = Some(2);
-            let result = grep_files(&p).unwrap();
+            let result = grep_files(&p).unwrap().content;
             assert!(result.starts_with("Found 2 files\n"));
             assert!(result.contains("Results limited to 2 files"));
             let file_count = result.lines().filter(|l| l.contains(".txt")).count();
@@ -1554,7 +1544,7 @@ mod tests {
             let mut p = params("match", dir.path());
             p.output_mode = OutputMode::FilesWithMatches;
             p.head_limit = Some(2);
-            let result = grep_files(&p).unwrap();
+            let result = grep_files(&p).unwrap().content;
             assert!(result.starts_with("Found 2 files\n"));
             assert!(
                 !result.contains("Results limited"),
@@ -1570,7 +1560,8 @@ mod tests {
             let mut p = params("nonexistent", dir.path());
             p.output_mode = OutputMode::FilesWithMatches;
             let result = grep_files(&p).unwrap();
-            assert_eq!(result, "No files found");
+            assert_eq!(result.content, "No files found");
+            assert_eq!(result.title, "No matches found");
         }
 
         #[test]
@@ -1588,7 +1579,7 @@ mod tests {
 
             let mut p = params("aaa", dir.path());
             p.output_mode = OutputMode::Count;
-            let result = grep_files(&p).unwrap();
+            let result = grep_files(&p).unwrap().content;
             assert!(result.contains("\ntest.txt:2"));
             assert!(result.contains("2 total occurrences"));
         }
@@ -1603,7 +1594,7 @@ mod tests {
             let mut p = params("match", dir.path());
             p.output_mode = OutputMode::Count;
             p.head_limit = Some(2);
-            let result = grep_files(&p).unwrap();
+            let result = grep_files(&p).unwrap().content;
             // The summary counts all 5 files even though `head_limit` caps the listing at 2.
             assert!(result.contains("5 total occurrences across 5 files"));
             assert!(result.contains("Results limited to 2 files"));
@@ -1618,7 +1609,7 @@ mod tests {
 
             let mut p = params("match", dir.path());
             p.output_mode = OutputMode::Count;
-            let result = grep_files(&p).unwrap();
+            let result = grep_files(&p).unwrap().content;
             assert!(result.contains("1 total occurrence across 1 file"));
             assert!(!result.contains("occurrences"));
             assert!(!result.contains(" files"));
@@ -1632,7 +1623,11 @@ mod tests {
 
             let mut p = params("match", dir.path());
             p.output_mode = OutputMode::Count;
-            let result = grep_files(&p).unwrap();
+            let GrepOutput {
+                content: result,
+                title,
+            } = grep_files(&p).unwrap();
+            assert_eq!(title, "Found 2 total occurrences across 2 files");
             assert!(
                 result.starts_with("Found 2 total occurrences across 2 files\n"),
                 "summary must lead the body: {result:?}",
@@ -1646,7 +1641,9 @@ mod tests {
 
             let mut p = params("absent", dir.path());
             p.output_mode = OutputMode::Count;
-            assert_eq!(grep_files(&p).unwrap(), "No matches found");
+            let result = grep_files(&p).unwrap();
+            assert_eq!(result.content, "No matches found");
+            assert_eq!(result.title, "No matches found");
         }
     }
 
@@ -1749,7 +1746,7 @@ mod tests {
                 (Path::new("/repo/b.rs"), "m\n".to_owned()),
             ];
 
-            let output = format_content(texts.into_iter(), Path::new("/repo"), &re, 0, 1);
+            let output = format_content(texts.into_iter(), Path::new("/repo"), &re, 0, 1).content;
 
             assert_eq!(
                 output,
@@ -1771,23 +1768,24 @@ mod tests {
             #[test]
             fn keeps_every_row_under_both_limits() {
                 let mut rows = Rows::new(2);
-                rows.push("a".to_owned());
-                rows.push("b".to_owned());
+                rows.push("a".to_owned(), true);
+                rows.push("b".to_owned(), true);
 
                 assert!(!rows.full());
-                assert_eq!(rows.render(), "a\nb");
+                assert_eq!(rows.render().content, "a\nb");
             }
 
             #[test]
             fn cuts_to_the_head_limit_and_names_it() {
                 let mut rows = Rows::new(2);
                 for row in ["a", "b", "c"] {
-                    rows.push(row.to_owned());
+                    rows.push(row.to_owned(), true);
                 }
 
                 assert!(rows.full());
+                let rendered = rows.render();
                 assert_eq!(
-                    rows.render(),
+                    rendered.content,
                     indoc! {"
                         a
                         b
@@ -1795,6 +1793,7 @@ mod tests {
                         (Results limited to 2 lines)"
                     },
                 );
+                assert_eq!(rendered.title, "2 matches");
             }
 
             #[test]
@@ -1803,11 +1802,11 @@ mod tests {
                 let mut rows = Rows::new(usize::MAX);
                 let mut pushed = 0;
                 while !rows.full() {
-                    rows.push(row.clone());
+                    rows.push(row.clone(), true);
                     pushed += 1;
                 }
 
-                let rendered = rows.render();
+                let rendered = rows.render().content;
 
                 assert_eq!(pushed, 10);
                 let kept = vec![row; 10].join("\n");
@@ -1819,7 +1818,7 @@ mod tests {
 
             #[test]
             fn without_rows_reports_no_matches() {
-                assert_eq!(Rows::new(2).render(), "No matches found");
+                assert_eq!(Rows::new(2).render().content, "No matches found");
             }
         }
     }

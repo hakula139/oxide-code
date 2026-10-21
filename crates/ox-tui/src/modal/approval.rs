@@ -629,7 +629,7 @@ mod tests {
     use ox_core::permission::PermissionClass;
     use ox_core::permission::rule::Rule;
     use ox_core::permission::testing::exec_grant;
-    use ox_core::tool::view::DiffLine;
+    use ox_core::tool::view::NumberedLine;
 
     use super::*;
     use crate::modal::ModalStack;
@@ -718,11 +718,11 @@ mod tests {
                 ApprovalPreview {
                     title: "Write(src/main.rs)".to_owned(),
                     body: ApprovalBody::Diff(DiffChunk {
-                        old: vec![DiffLine {
+                        old: vec![NumberedLine {
                             number: 1,
                             text: "old line".to_owned(),
                         }],
-                        new: vec![DiffLine {
+                        new: vec![NumberedLine {
                             number: 1,
                             text: "new line".to_owned(),
                         }],
@@ -1346,7 +1346,7 @@ mod tests {
         fn expands_diff_tabs() {
             let rows = flatten_body(&ApprovalBody::Diff(DiffChunk {
                 old: Vec::new(),
-                new: vec![DiffLine {
+                new: vec![NumberedLine {
                     number: 1,
                     text: "\tfoo()".to_owned(),
                 }],

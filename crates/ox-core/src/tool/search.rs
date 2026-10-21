@@ -203,8 +203,6 @@ pub(super) fn push_path_note(content: &mut String, header: &str, lines: &[String
     }
 }
 
-const UNREADABLE_HEADER: &str = "Could not read:";
-
 /// Appends the note a search tool adds for the paths in `unreadable`, so a search that missed them
 /// does not pass for a complete one. Paths render relative to `cwd`.
 pub(super) fn push_unreadable_note(content: &mut String, unreadable: &[Unreadable], cwd: &Path) {
@@ -215,10 +213,8 @@ pub(super) fn push_unreadable_note(content: &mut String, unreadable: &[Unreadabl
             None => error.clone(),
         })
         .collect();
-    push_path_note(content, UNREADABLE_HEADER, &lines);
+    push_path_note(content, "Could not read:", &lines);
 }
-
-const WITHHELD_NOTE_END: &str = "withheld by read deny or ask rules)";
 
 /// Appends the note a search tool adds when read deny or ask rules withheld `count` of the files
 /// it found. The note counts them without naming any.
@@ -227,20 +223,10 @@ pub(super) fn push_withheld_note(content: &mut String, count: usize) {
         return;
     }
     let word = plural(count, "file", "files");
-    _ = write!(content, "\n\n({count} {word} {WITHHELD_NOTE_END}");
-}
-
-/// `content` without the notes [`push_unreadable_note`] and [`push_withheld_note`] appended, for
-/// parsing the rest.
-pub(super) fn strip_search_notes(content: &str) -> &str {
-    let content = match content.rsplit_once("\n\n") {
-        Some((rest, note)) if note.starts_with('(') && note.ends_with(WITHHELD_NOTE_END) => rest,
-        _ => content,
-    };
-    match content.rsplit_once("\n\n") {
-        Some((rest, note)) if note.starts_with(UNREADABLE_HEADER) => rest,
-        _ => content,
-    }
+    _ = write!(
+        content,
+        "\n\n({count} {word} withheld by read deny or ask rules)"
+    );
 }
 
 #[cfg(test)]
@@ -557,7 +543,6 @@ mod tests {
                       Input/output error (os error 5)"
                 }
             );
-            assert_eq!(strip_search_notes(&content), "a.rs");
         }
     }
 
@@ -565,7 +550,7 @@ mod tests {
         use super::*;
 
         #[test]
-        fn counts_files_and_strips_back_off() {
+        fn counts_the_withheld_files() {
             for (count, note) in [
                 (1, "(1 file withheld by read deny or ask rules)"),
                 (3, "(3 files withheld by read deny or ask rules)"),
@@ -580,49 +565,11 @@ mod tests {
                         {note}"
                     }
                 );
-                assert_eq!(strip_search_notes(&content), "a.rs");
             }
 
             let mut content = "a.rs".to_owned();
             push_withheld_note(&mut content, 0);
             assert_eq!(content, "a.rs");
-        }
-    }
-
-    mod strip_search_notes {
-        use super::*;
-
-        #[test]
-        fn strips_both_notes_and_keeps_other_sections() {
-            let notes = indoc! {"
-                a.rs
-
-                (Showing 100 of 120 matches. Use a more specific pattern.)
-
-                Could not read:
-                  locked: Permission denied (os error 13)
-
-                (1 file withheld by read deny or ask rules)"
-            };
-            assert_eq!(
-                strip_search_notes(notes),
-                indoc! {"
-                    a.rs
-
-                    (Showing 100 of 120 matches. Use a more specific pattern.)"
-                }
-            );
-
-            for content in [
-                "a.rs",
-                indoc! {"
-                    a.rs
-
-                    (Showing 100 of 120 matches. Use a more specific pattern.)"
-                },
-            ] {
-                assert_eq!(strip_search_notes(content), content);
-            }
         }
     }
 }
