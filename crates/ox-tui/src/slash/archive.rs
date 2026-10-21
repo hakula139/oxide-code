@@ -6,10 +6,10 @@ use ox_core::command;
 use ox_core::protocol::Op;
 use ox_core::session::display::{archive_notice, id_prefix};
 use ox_core::session::entry::SessionInfo;
-use ox_core::session::resolver::resolve_saved_prefix;
+use ox_core::session::resolver::{ResolveError, resolve_saved_prefix};
 use ox_core::session::saved;
 
-use super::context::{LiveSessionInfo, SlashContext};
+use super::context::SlashContext;
 use super::registry::{SlashCommand, SlashKind, SlashOutcome};
 use super::sessions::{BARE_ARCHIVE_HINT, open_store, resolve_error_message, saved_error_message};
 use crate::action::Action;
@@ -40,12 +40,10 @@ impl SlashCommand for ArchiveCmd {
         if prefix.is_empty() {
             return Ok(SlashOutcome::Forward(Action::Op(Op::Archive)));
         }
-        match resolve_saved(prefix, ctx.info)? {
-            Some(info) => apply_archived(&info, true, &ctx.info.session_id),
-            None => Err(format!(
-                "Session prefix `{prefix}` matches the live session. {BARE_ARCHIVE_HINT}"
-            )),
-        }
+        let store = open_store(ctx.info)?;
+        let info = resolve_saved_prefix(&store, prefix, &ctx.info.session_id)
+            .map_err(|e| resolve_error_message(e, Some(BARE_ARCHIVE_HINT)))?;
+        apply_archived(&info, true, &ctx.info.session_id)
     }
 }
 
@@ -86,21 +84,18 @@ impl SlashCommand for UnarchiveCmd {
                 ),
             ));
         }
-        match resolve_saved(prefix, ctx.info)? {
-            Some(info) => apply_archived(&info, false, &ctx.info.session_id),
-            None => Ok(SlashOutcome::SystemMessage(
+        let store = open_store(ctx.info)?;
+        match resolve_saved_prefix(&store, prefix, &ctx.info.session_id) {
+            Ok(info) => apply_archived(&info, false, &ctx.info.session_id),
+            Err(ResolveError::Live { .. }) => Ok(SlashOutcome::SystemMessage(
                 "The live session is not archived".to_owned(),
             )),
+            Err(e) => Err(resolve_error_message(e, None)),
         }
     }
 }
 
 // ── Helpers ──
-
-fn resolve_saved(prefix: &str, info: &LiveSessionInfo) -> Result<Option<SessionInfo>, String> {
-    let store = open_store(info)?;
-    resolve_saved_prefix(&store, prefix, &info.session_id).map_err(resolve_error_message)
-}
 
 fn apply_archived(
     info: &SessionInfo,
@@ -236,17 +231,23 @@ mod tests {
                 seed_saved(&store, &target_id);
                 let path = store.find_session_path(&target_id).unwrap();
                 std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o444)).unwrap();
+                let cause = std::fs::OpenOptions::new()
+                    .append(true)
+                    .open(&path)
+                    .unwrap_err();
                 let info = test_session_info();
-                let failure = saved_error_message(
-                    saved::set_archived(&path, &target_id, true, &info.session_id).unwrap_err(),
-                    BARE_ARCHIVE_HINT,
-                );
 
                 let err = ArchiveCmd
                     .execute(&target_id[..4], &SlashContext::new(&info, None))
                     .unwrap_err();
 
-                assert_eq!(err, failure);
+                assert_eq!(
+                    err,
+                    format!(
+                        "Failed to archive session abababab: failed to open {}: {cause}",
+                        path.display()
+                    ),
+                );
             });
         }
     }
@@ -319,6 +320,17 @@ mod tests {
                         again.into_system_message(),
                         "Session abababab is not archived"
                     );
+                });
+            }
+
+            #[test]
+            fn unknown_prefix_reports_no_match() {
+                with_isolated_xdg(|_| {
+                    let info = test_session_info();
+                    let err = UnarchiveCmd
+                        .execute("zzzz", &SlashContext::new(&info, None))
+                        .unwrap_err();
+                    assert_eq!(err, "No session matching `zzzz`");
                 });
             }
 

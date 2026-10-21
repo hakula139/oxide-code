@@ -52,7 +52,6 @@ pub(super) async fn replace_session_with_summary(
         sink.session_write_error(outcome.failure.as_deref());
         return false;
     }
-    sink.session_write_error(outcome.failure.as_deref());
 
     file_tracker.clear();
     *messages = vec![synthetic];
@@ -65,6 +64,8 @@ pub(super) async fn replace_session_with_summary(
         },
         "session-compacted",
     );
+    // Reports the write error after the compaction event, which clears the TUI's chat.
+    sink.session_write_error(outcome.failure.as_deref());
     true
 }
 
@@ -73,6 +74,7 @@ mod tests {
     use super::*;
     use crate::file_tracker::LastView;
     use crate::message::{ContentBlock, Message};
+    use crate::protocol::session_write_failed;
     use crate::protocol::testing::{CapturingSink, FailingSink};
     use crate::session::handle;
     use crate::session::store::testing::{test_project_dir, test_store};
@@ -192,8 +194,9 @@ mod tests {
             assert!(unsaved.failure.is_some());
             let mut messages = fake_transcript();
             let sink = CapturingSink::default();
+            let summary = "s".repeat(2 << 20);
             let mut large = boundary(Vec::new());
-            large.summary = "s".repeat(2 << 20);
+            large.summary.clone_from(&summary);
 
             let compacted = replace_session_with_summary(
                 &session,
@@ -205,15 +208,22 @@ mod tests {
             .await;
 
             assert!(compacted);
-            assert_eq!(messages.len(), 1);
+            assert_eq!(
+                messages,
+                [synthesize_post_compact_message(&summary, &[], &[])]
+            );
+            let stop = session_write_failed(
+                "session persistence stopped after more than 8 MiB of entries failed to write: \
+                 failed to create ",
+            );
             let events = sink.events();
             assert!(
                 matches!(
                     events.as_slice(),
-                    [Event::Error(message), Event::SessionCompacted { .. }]
-                        if message.contains("session persistence stopped")
+                    [Event::SessionCompacted { .. }, Event::Error(message)]
+                        if message.starts_with(&stop)
                 ),
-                "{events:?}",
+                "expected the compaction, then the stop: {events:?}",
             );
             session.shutdown().await;
         }

@@ -459,14 +459,17 @@ impl Engine {
         )
         .await;
         self.adopt_mode(&mut inbox);
-        self.bill(sink, &spent).await;
         let summary = match summary {
             Ok(Ok(summary)) => summary,
             Ok(Err(e)) => {
+                self.bill(sink, &spent).await;
                 let abort = TurnAbort::Failed(e.context("Compaction failed"));
                 return self.fail_compact(sink, abort);
             }
-            Err(abort) => return self.fail_compact(sink, abort),
+            Err(abort) => {
+                self.bill(sink, &spent).await;
+                return self.fail_compact(sink, abort);
+            }
         };
         let compacted = compact_boundary::replace_session_with_summary(
             &self.session,
@@ -482,6 +485,9 @@ impl Engine {
             },
         )
         .await;
+        // Bills after the boundary, as auto-compaction does, so a write error it surfaces follows
+        // the compaction event that clears the TUI's chat.
+        self.bill(sink, &spent).await;
         if !compacted {
             let abort = TurnAbort::Failed(anyhow!(
                 "Compaction was not saved, so the transcript is unchanged"
@@ -604,9 +610,7 @@ impl Engine {
         let path = match target {
             ResumeTarget::Path(path) => path,
             ResumeTarget::Prefix(prefix) => {
-                resolve_saved_prefix(&self.store, &prefix, self.session.session_id())?
-                    .ok_or_else(|| anyhow!("session prefix `{prefix}` matches the live session"))?
-                    .path
+                resolve_saved_prefix(&self.store, &prefix, self.session.session_id())?.path
             }
         };
         handle::roll_into(&mut self.session, &self.store, &self.file_tracker, &path).await
@@ -2961,6 +2965,45 @@ mod tests {
         }
 
         #[tokio::test]
+        async fn reports_a_persistence_stop_after_the_compaction_it_commits() {
+            with_pinned_home(async {
+                let server = MockServer::start().await;
+                let summary = "s".repeat(2 << 20);
+                mount_reply(&server, &summary).await;
+                let dir = tempfile::tempdir().unwrap();
+                let mut engine = engine(server.uri(), &test_store(dir.path()), dir.path()).await;
+                std::fs::remove_dir_all(test_project_dir(dir.path())).unwrap();
+                let unsaved = engine
+                    .session
+                    .record_message(Message::user("x".repeat(5 << 20)))
+                    .await;
+                assert!(unsaved.failure.is_some());
+                engine.messages = tool_heavy_transcript();
+                let sink = CapturingSink::default();
+
+                let end = engine.compact(&sink, &mut inert_ops(), None).await;
+
+                assert_eq!(end, TurnEnd::Completed);
+                assert_eq!(
+                    engine.messages,
+                    [synthesize_post_compact_message(&summary, &[], &[])]
+                );
+                let events = sink.events();
+                let compacted = events
+                    .iter()
+                    .position(|event| matches!(event, Event::SessionCompacted { .. }));
+                let stopped = events.iter().position(|event| {
+                    matches!(event, Event::Error(message) if message.contains("persistence stopped"))
+                });
+                assert!(
+                    compacted.is_some() && stopped > compacted,
+                    "the stop must follow the compaction that clears the chat: {events:?}",
+                );
+            })
+            .await;
+        }
+
+        #[tokio::test]
         async fn carries_the_task_list_into_the_summary_and_through_a_resume() {
             with_pinned_home(async {
                 let server = MockServer::start().await;
@@ -3068,7 +3111,6 @@ mod tests {
                             Event::TurnFailed(short),
                             Event::Cancelled,
                             Event::SummaryToken(_),
-                            Event::Error(usage_write),
                             Event::SummaryDiscarded,
                             Event::Error(boundary_write),
                             Event::UsageUpdated(UsageSnapshot {
@@ -3079,9 +3121,9 @@ mod tests {
                             Event::TurnFailed(unsaved),
                         ] if short == "Compaction failed: the conversation has about 15 tokens, \
                                        below the 1000-token minimum"
-                            && usage_write.starts_with("Session write failed")
                             && boundary_write == "Session write failed: \
-                                                  session writer task has stopped"
+                                                  session writer task has stopped. \
+                                                  Conversation history may be incomplete."
                             && (cost - 0.006).abs() < 1e-12
                             && unsaved == "Compaction was not saved, so the transcript is unchanged"
                     ),

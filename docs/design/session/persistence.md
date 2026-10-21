@@ -124,9 +124,9 @@ Write failures surface through the session handle:
 
 - First failure populates the handle's `RecordOutcome::failure` slot so the agent loop emits a one-shot `Event::Error`.
 - Archive acknowledgments include every failure, and compact acknowledgments do until persistence stops.
-- The agent swaps in the summary only after the boundary reaches disk, and bare `/archive` rolls to a fresh session only after the archive entry is written.
+- Until persistence stops, the agent swaps in the summary only after the boundary reaches disk. Bare `/archive` always rolls to a fresh session only after the archive entry is written.
 - Failed compact and archive operations are also removed from the retry queue, so a later flush cannot persist them.
-- Once persistence stops, the file receives no further lines, so a compaction commits in memory alone, and its acknowledgment reports the stop only when no earlier write reported it. Bare `/archive` keeps failing, since its whole effect is the entry on disk.
+- Once persistence stops, the file receives no further lines, so a compaction commits in memory alone, and its acknowledgment reports the stop only when no earlier write reported it. Bare `/archive` keeps failing, since its whole effect is the entry on disk. The engine reports a committed compaction's write error after `SessionCompacted`, which clears the TUI's chat, so the notice stays visible.
 - Three independent sticky-once flags (`flush_failure_surfaced`, `persistence_stop_surfaced`, `actor_gone_surfaced`) keep different failure kinds from masking each other, so stopping persistence surfaces even after an earlier flush failure.
 
 ## Listing

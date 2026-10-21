@@ -196,8 +196,8 @@ impl SessionHandle {
     }
 
     /// Writes the compaction boundary and the synthetic post-compact message, then resets the chain
-    /// anchor. `tasks` is the task list the summarized transcript leaves. Reports every write
-    /// failure, since the caller swaps in the summary only once the boundary is on disk.
+    /// anchor. `tasks` is the task list the summarized transcript leaves. The caller swaps in the
+    /// summary only once [`CompactOutcome::committed`] says the boundary took effect.
     pub(crate) async fn compact(
         &self,
         summary: String,

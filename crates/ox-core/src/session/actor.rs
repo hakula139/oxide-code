@@ -102,8 +102,8 @@ pub(super) async fn run(
     while let Some(first) = rx.recv().await {
         let mut batch = Batch::default();
         let mut flow = batch.absorb(first, &mut state, &shared);
-        // A failed compact or archive leaves its entries at the queue tail for `settle_barriers`
-        // to drop, which works only because each one ends its batch.
+        // A failed compact or archive leaves its entries at the queue tail for `settle_acks` to
+        // drop, which works only because each one ends its batch.
         while matches!(flow, BatchFlow::Continue)
             && let Ok(next) = rx.try_recv()
         {
@@ -118,13 +118,7 @@ pub(super) async fn run(
             }
             Ok(()) => None,
         };
-        settle_barriers(&batch.acks, &mut state, failure.is_none());
-        deliver_acks(
-            batch.acks,
-            failure.as_deref(),
-            state.persistence_stopped(),
-            &shared,
-        );
+        settle_acks(batch.acks, &mut state, failure.as_deref(), &shared);
         if batch.should_exit {
             break;
         }
@@ -269,25 +263,16 @@ impl Batch {
     }
 }
 
-/// Commits a flushed compact, or one past a persistence stop, which leaves no file to keep it
-/// consistent with. Abandons any other failed compact and every failed archive, matching what
-/// their acks tell the caller.
-fn settle_barriers(acks: &[PendingAck], state: &mut SessionState, flushed: bool) {
-    for pending in acks {
-        match pending {
-            PendingAck::Compact { synthetic_uuid, .. }
-                if flushed || state.persistence_stopped() =>
-            {
-                state.commit_compact(*synthetic_uuid);
-            }
-            PendingAck::Compact { .. } => state.abandon_compact(),
-            PendingAck::Archive(_) if !flushed => state.abandon_archive(),
-            _ => {}
-        }
-    }
-}
-
-fn deliver_acks(acks: Vec<PendingAck>, failure: Option<&str>, stopped: bool, shared: &SharedState) {
+/// Acks each absorbed cmd once its batch flush returns `failure`. A compact commits when its batch
+/// flushed or persistence has stopped, which leaves no file to keep it consistent with. Any other
+/// failed compact and every failed archive are unqueued, matching what their acks tell the caller.
+fn settle_acks(
+    acks: Vec<PendingAck>,
+    state: &mut SessionState,
+    failure: Option<&str>,
+    shared: &SharedState,
+) {
+    let stopped = state.persistence_stopped();
     for pending in acks {
         match pending {
             PendingAck::Record { ack, ai_title_seed } => {
@@ -302,18 +287,27 @@ fn deliver_acks(acks: Vec<PendingAck>, failure: Option<&str>, stopped: bool, sha
                 });
             }
             PendingAck::Archive(ack) => {
+                if failure.is_some() {
+                    state.abandon_archive();
+                }
                 _ = ack.send(Outcome {
                     failure: failure.map(str::to_owned),
                 });
             }
-            PendingAck::Compact { ack, pre_count, .. } => {
-                // A stopped session commits the compact in memory, so its failure surfaces like any
-                // other write's. Otherwise every failure reaches the agent, which keeps its old
-                // transcript only when told the write failed.
-                let (committed, failure) = if stopped {
-                    (true, surface_failure(failure, stopped, shared))
+            PendingAck::Compact {
+                ack,
+                pre_count,
+                synthetic_uuid,
+            } => {
+                let committed = failure.is_none() || stopped;
+                // Every failure that leaves the compact uncommitted reaches the agent, which keeps
+                // its old transcript only when told the write failed.
+                let failure = if committed {
+                    state.commit_compact(synthetic_uuid);
+                    surface_failure(failure, stopped, shared)
                 } else {
-                    (failure.is_none(), failure.map(str::to_owned))
+                    state.abandon_compact();
+                    failure.map(str::to_owned)
                 };
                 _ = ack.send(CompactOutcome {
                     pre_count,
@@ -875,8 +869,10 @@ mod tests {
             })
             .await
             .unwrap();
+            let outcome = compact_rx.await.unwrap();
+            assert!(!outcome.committed);
             assert!(
-                compact_rx.await.unwrap().failure.is_some(),
+                outcome.failure.is_some(),
                 "the agent must see every compact failure, even after one was already surfaced",
             );
 
@@ -937,10 +933,10 @@ mod tests {
             assert_eq!(first.failure, None, "the stop already surfaced");
             assert_eq!(first.pre_count, 2);
             assert!(second.committed);
+            assert_eq!(second.failure, None);
             assert_eq!(
                 second.pre_count, 2,
-                "the chain restarts at the synthetic root: {:?}",
-                second.failure,
+                "the chain restarts at the synthetic root"
             );
         }
 

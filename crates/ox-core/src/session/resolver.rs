@@ -102,6 +102,9 @@ fn looks_like_path(arg: &str) -> bool {
 pub enum ResolveError {
     #[error("no session matching `{prefix}`")]
     NoMatch { prefix: String },
+    /// Only the live session matched, which commands on saved sessions exclude.
+    #[error("session prefix `{prefix}` matches the live session")]
+    Live { prefix: String },
     /// `preview` names the first matching IDs in short form, then how many more matched.
     #[error("ambiguous prefix `{prefix}` matches {count} sessions: {preview}")]
     Ambiguous {
@@ -130,21 +133,21 @@ pub(crate) fn resolve_prefix_to_info(
     match_in_scope(store, prefix, Some(live_id), true)
 }
 
-/// [`resolve_prefix_to_info`] for commands that act on a saved session. `Ok(None)` means only the
-/// live session matched, so the caller can explain why it is excluded.
+/// [`resolve_prefix_to_info`] for commands that act on a saved session, telling a prefix that
+/// matches only the live session from one that matches nothing.
 pub fn resolve_saved_prefix(
     store: &SessionStore,
     prefix: &str,
     live_id: &str,
-) -> Result<Option<SessionInfo>, ResolveError> {
+) -> Result<SessionInfo, ResolveError> {
     if let Some(info) = resolve_prefix_to_info(store, prefix, live_id)? {
-        return Ok(Some(info));
+        return Ok(info);
     }
-    if live_id.starts_with(prefix) {
-        return Ok(None);
-    }
-    Err(ResolveError::NoMatch {
-        prefix: prefix.to_owned(),
+    let prefix = prefix.to_owned();
+    Err(if live_id.starts_with(&prefix) {
+        ResolveError::Live { prefix }
+    } else {
+        ResolveError::NoMatch { prefix }
     })
 }
 
@@ -623,12 +626,11 @@ mod tests {
             );
 
             let saved = resolve_saved_prefix(&store, "abcd", live_id).unwrap();
-            assert_eq!(saved.map(|info| info.session_id).as_deref(), Some(saved_id));
-            assert!(
-                resolve_saved_prefix(&store, "abcd1", live_id)
-                    .unwrap()
-                    .is_none()
-            );
+            assert_eq!(saved.session_id, saved_id);
+            assert!(matches!(
+                resolve_saved_prefix(&store, "abcd1", live_id),
+                Err(ResolveError::Live { prefix }) if prefix == "abcd1",
+            ));
             assert!(matches!(
                 resolve_saved_prefix(&store, "zzz", live_id),
                 Err(ResolveError::NoMatch { prefix }) if prefix == "zzz",

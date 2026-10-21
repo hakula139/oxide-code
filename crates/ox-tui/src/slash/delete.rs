@@ -54,10 +54,7 @@ impl SlashCommand for DeleteCmd {
         let store = open_store(ctx.info)?;
         let live_id = ctx.info.session_id.as_str();
         let info = resolve_saved_prefix(&store, arg, live_id)
-            .map_err(resolve_error_message)?
-            .ok_or_else(|| {
-                format!("Session prefix `{arg}` matches the live session. {CLEAR_THEN_DELETE_HINT}")
-            })?;
+            .map_err(|e| resolve_error_message(e, Some(CLEAR_THEN_DELETE_HINT)))?;
         Ok(SlashOutcome::Modal(Box::new(
             ConfirmDeleteSessionModal::new(
                 info.path.clone(),

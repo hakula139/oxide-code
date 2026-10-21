@@ -8,17 +8,17 @@ use tracing::warn;
 use super::display::id_prefix;
 use super::store::{delete_at, set_archived_at};
 
-/// Why an archive or delete of a saved session failed. `Display` is the lowercase `anyhow`
+/// Why an operation on a saved session failed, where `id` is the session's [`id_prefix`]. Resume
+/// refuses the live session through [`Self::Live`] too. `Display` is the lowercase `anyhow`
 /// headline, which slash commands phrase as a sentence.
 #[derive(Debug, thiserror::Error)]
 pub enum SavedError {
-    /// The session is the live one, which only a roll to a new session can leave. `id` is its
-    /// [`id_prefix`].
+    /// The target is the live session, which only a roll to a new session can leave.
     #[error("session {id} is the live session")]
     Live { id: String },
+    /// The `action` (`archive`, `unarchive`, or `delete`) failed on the session's file.
     #[error("failed to {action} session {id}: {cause:#}")]
     Failed {
-        /// The verb that failed: `archive`, `unarchive`, or `delete`.
         action: &'static str,
         id: String,
         cause: anyhow::Error,
@@ -57,8 +57,9 @@ pub fn set_archived(
     set_archived_at(path, archived).map_err(|e| SavedError::failed(action, session_id, e))
 }
 
-/// Deletes the session file at `path` and the session's artifact directory, refusing the live
-/// session's file so a stale caller cannot unlink the file under its open writer.
+/// Deletes the session file at `path` and the session's artifact directory. Refuses the live
+/// session's file, which callers already filter out, so a bug upstream cannot unlink the file
+/// under its open writer.
 pub fn delete(path: &Path, session_id: &str, live_id: &str) -> Result<(), SavedError> {
     if session_id == live_id {
         return Err(SavedError::live(session_id));
