@@ -2,7 +2,7 @@
 
 use ratatui::style::Style;
 
-use ox_core::tool::view::ReadExcerptLine;
+use ox_core::tool::view::NumberedLine;
 
 use super::{MAX_TOOL_OUTPUT_LINES, overflow_footer};
 use crate::components::chat::blocks::rows::{NumberedRows, body_row};
@@ -13,7 +13,7 @@ pub(super) fn render(
     ctx: &RenderCtx<'_>,
     border_style: Style,
     path: &str,
-    lines: &[ReadExcerptLine],
+    lines: &[NumberedLine],
     total_lines: usize,
 ) {
     let context = context_label(path, lines, total_lines);
@@ -34,7 +34,7 @@ pub(super) fn render(
     overflow_footer(out, ctx, border_style, hidden, "line", "lines", false);
 }
 
-fn context_label(path: &str, lines: &[ReadExcerptLine], total_lines: usize) -> String {
+fn context_label(path: &str, lines: &[NumberedLine], total_lines: usize) -> String {
     let (Some(first), Some(last)) = (lines.first(), lines.last()) else {
         return format!("{path} (empty file)");
     };
@@ -62,7 +62,7 @@ mod tests {
 
         fn render_rows(
             path: &str,
-            lines: &[ReadExcerptLine],
+            lines: &[NumberedLine],
             total_lines: usize,
             expanded: bool,
         ) -> Vec<String> {
@@ -84,9 +84,9 @@ mod tests {
         }
 
         /// Excerpt lines numbered `numbers`, each reading `line {number}`.
-        fn excerpt(numbers: RangeInclusive<usize>) -> Vec<ReadExcerptLine> {
+        fn excerpt(numbers: RangeInclusive<usize>) -> Vec<NumberedLine> {
             numbers
-                .map(|number| ReadExcerptLine {
+                .map(|number| NumberedLine {
                     number,
                     text: format!("line {number}"),
                 })
@@ -146,11 +146,11 @@ mod tests {
         #[test]
         fn full_file_omits_total_suffix() {
             let lines = vec![
-                ReadExcerptLine {
+                NumberedLine {
                     number: 1,
                     text: "alpha".to_owned(),
                 },
-                ReadExcerptLine {
+                NumberedLine {
                     number: 2,
                     text: "beta".to_owned(),
                 },
@@ -164,7 +164,7 @@ mod tests {
 
         #[test]
         fn single_line_uses_single_number() {
-            let lines = vec![ReadExcerptLine {
+            let lines = vec![NumberedLine {
                 number: 4,
                 text: "delta".to_owned(),
             }];

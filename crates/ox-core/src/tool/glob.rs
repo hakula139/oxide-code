@@ -122,9 +122,9 @@ async fn run(prepared: Prepared, ctx: &ToolCtx, read_filter: ReadFilter) -> Tool
     {
         Ok(GlobOutput {
             content,
+            title,
             truncated_total,
         }) => {
-            let title = glob_title(super::search::strip_search_notes(&content));
             let output = ToolOutput::success(content).with_title(title);
             match truncated_total {
                 Some(total) => output.with_truncated_total(total),
@@ -135,19 +135,11 @@ async fn run(prepared: Prepared, ctx: &ToolCtx, read_filter: ReadFilter) -> Tool
     }
 }
 
-fn glob_title(output: &str) -> String {
-    if output == NO_FILES_FOUND {
-        return output.to_owned();
-    }
-    let body = glob_output_body(output).unwrap_or(output.trim_end());
-    let count = body.lines().filter(|l| !l.trim().is_empty()).count();
-    let word = plural(count, "file", "files");
-    format!("Found {count} {word}")
-}
-
 #[derive(Debug)]
 struct GlobOutput {
     content: String,
+    /// A one-line summary of the call, which the UI shows on its result.
+    title: String,
     truncated_total: Option<usize>,
 }
 
@@ -199,10 +191,12 @@ fn glob_files(
     let truncated = total > MAX_RESULTS;
     matches.truncate(MAX_RESULTS);
 
-    let mut content = if matches.is_empty() {
-        NO_FILES_FOUND.to_owned()
+    let (mut content, title) = if matches.is_empty() {
+        (NO_FILES_FOUND.to_owned(), NO_FILES_FOUND.to_owned())
     } else {
-        matches.join("\n")
+        let count = matches.len();
+        let word = plural(count, "file", "files");
+        (matches.join("\n"), format!("Found {count} {word}"))
     };
     if truncated {
         _ = write!(
@@ -215,6 +209,7 @@ fn glob_files(
 
     Ok(GlobOutput {
         content,
+        title,
         truncated_total: truncated.then_some(total),
     })
 }
@@ -603,27 +598,6 @@ mod tests {
         }
     }
 
-    mod glob_title {
-        use super::*;
-
-        #[test]
-        fn counts_paths_without_truncation_footer_separator() {
-            let body = indoc! {"
-                a.txt
-                b.txt
-
-                (Showing 2 of 3 matches. Use a more specific pattern.)"
-            };
-
-            assert_eq!(glob_title(body), "Found 2 files");
-        }
-
-        #[test]
-        fn no_files_found_is_not_a_count() {
-            assert_eq!(glob_title("No files found"), "No files found");
-        }
-    }
-
     mod glob_files {
         use super::*;
 
@@ -741,6 +715,7 @@ mod tests {
 
             let result = glob_in("*.rs", None, dir.path(), &ReadFilter::default()).unwrap();
             assert_eq!(result.content, "No files found");
+            assert_eq!(result.title, "No files found");
             assert!(result.truncated_total.is_none());
         }
 
@@ -799,6 +774,7 @@ mod tests {
                     .contains(&format!("Showing {MAX_RESULTS} of {}", MAX_RESULTS + 10))
             );
             assert_eq!(result.truncated_total, Some(MAX_RESULTS + 10));
+            assert_eq!(result.title, format!("Found {MAX_RESULTS} files"));
         }
 
         #[test]
@@ -819,10 +795,7 @@ mod tests {
                 }
             );
             assert_eq!(result.truncated_total, None);
-            assert_eq!(
-                glob_title(crate::tool::search::strip_search_notes(&result.content)),
-                "Found 1 file"
-            );
+            assert_eq!(result.title, "Found 1 file");
             // The structured view would drop the note, so the text view shows it.
             let view = glob_tool().result_view(
                 &serde_json::json!({"pattern": "*.toml"}),
@@ -864,10 +837,7 @@ mod tests {
                       locked: {cause}"
                 }
             );
-            assert_eq!(
-                glob_title(crate::tool::search::strip_search_notes(&result.content)),
-                "Found 1 file"
-            );
+            assert_eq!(result.title, "Found 1 file");
             let view = glob_tool().result_view(
                 &serde_json::json!({"pattern": "*.rs"}),
                 &result.content,

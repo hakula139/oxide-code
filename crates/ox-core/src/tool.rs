@@ -171,9 +171,6 @@ pub struct ToolMetadata {
     /// Unbounded match count when a tool capped returned rows.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) truncated_total: Option<usize>,
-    /// Pre-cap byte count when the registry byte safety net fired.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub(crate) truncated_bytes: Option<usize>,
 }
 
 // ── Tool Trait ──
@@ -661,7 +658,7 @@ mod tests {
 
     use super::local_testing::{canonical_tempdir, ctx, deny_reads, temp_ctx};
     use super::testing::bash_registry;
-    use super::view::{DiffChunk, DiffLine, GrepFileGroup, GrepMatchLine, ReadExcerptLine};
+    use super::view::{DiffChunk, GrepFileGroup, GrepMatchLine, NumberedLine};
     use super::*;
     use crate::permission::rule::Rule;
     use crate::permission::{Decision, Mode, PermissionClass, Policy, Zone};
@@ -1247,11 +1244,11 @@ mod tests {
                     view,
                     ToolResultView::Diff(EditDiff {
                         chunk: DiffChunk {
-                            old: vec![DiffLine {
+                            old: vec![NumberedLine {
                                 number: 1,
                                 text: "a".to_owned()
                             }],
-                            new: vec![DiffLine {
+                            new: vec![NumberedLine {
                                 number: 1,
                                 text: "b".to_owned()
                             }],
@@ -1308,7 +1305,7 @@ mod tests {
                     view,
                     ToolResultView::ReadExcerpt {
                         path: "/tmp/lib.rs".to_owned(),
-                        lines: vec![ReadExcerptLine {
+                        lines: vec![NumberedLine {
                             number: 1,
                             text: "mod foo;".to_owned(),
                         }],

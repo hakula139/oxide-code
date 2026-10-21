@@ -13,6 +13,7 @@ use tracing::debug;
 
 use ox_core::command::{self, Parsed};
 use ox_core::protocol::Op;
+use ox_core::protocol::notice::ENGINE_STOPPED;
 
 use super::{App, EXIT_WINDOW};
 use crate::action::{APP_KEYMAP, Action, AppAction};
@@ -261,7 +262,7 @@ impl App {
         match e {
             TrySendError::Closed(_) => {
                 self.chat
-                    .push_error("The engine stopped unexpectedly. Restart `ox` to recover.");
+                    .push_error(&format!("{ENGINE_STOPPED}. Restart it to recover."));
                 self.input.set_enabled(false);
                 self.should_quit = true;
             }
@@ -274,7 +275,7 @@ impl App {
             }
             TrySendError::Full(_) => {
                 self.chat
-                    .push_error("The engine is busy, so the request was dropped. Try again.");
+                    .push_error("ox is busy, so the request was dropped. Try again.");
             }
         }
     }
@@ -1275,7 +1276,7 @@ mod tests {
             assert_eq!(app.chat.entry_count(), 2);
             assert_eq!(
                 app.chat.last_error_text(),
-                Some("The engine stopped unexpectedly. Restart `ox` to recover."),
+                Some("ox stopped unexpectedly. Restart it to recover."),
             );
         }
 
@@ -1298,7 +1299,7 @@ mod tests {
             );
             assert_eq!(
                 app.chat.last_error_text(),
-                Some("The engine is busy, so the request was dropped. Try again."),
+                Some("ox is busy, so the request was dropped. Try again."),
             );
         }
 
@@ -2046,7 +2047,7 @@ mod tests {
             assert_eq!(app.chat.entry_count(), entries_before + 1);
             assert_eq!(
                 app.chat.last_error_text(),
-                Some("The engine stopped unexpectedly. Restart `ox` to recover."),
+                Some("ox stopped unexpectedly. Restart it to recover."),
             );
             assert!(app.should_quit);
             assert_eq!(app.forwarded_prompts, 0);

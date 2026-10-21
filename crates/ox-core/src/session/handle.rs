@@ -561,7 +561,7 @@ mod tests {
     use crate::session::store::local_testing::test_session_file;
     use crate::session::store::testing::{seed_test_session, test_project_dir, test_store};
     use crate::tool::tasks::testing::plan;
-    use crate::tool::view::{DiffChunk, DiffLine, EditDiff};
+    use crate::tool::view::{DiffChunk, EditDiff, NumberedLine};
 
     /// Resumes the session whose file name carries `session_id`.
     fn resume_id(store: &SessionStore, session_id: &str) -> Result<ResumedSession> {
@@ -2199,11 +2199,11 @@ mod tests {
                         title: Some("Edited f.rs".to_owned()),
                         diff: Some(EditDiff {
                             chunk: DiffChunk {
-                                old: vec![DiffLine {
+                                old: vec![NumberedLine {
                                     number: 1,
                                     text: "fn main() {}".to_owned(),
                                 }],
-                                new: vec![DiffLine {
+                                new: vec![NumberedLine {
                                     number: 1,
                                     text: "fn run() {}".to_owned(),
                                 }],
@@ -2223,7 +2223,7 @@ mod tests {
                             "read",
                             serde_json::json!({ "file_path": "g.rs", "limit": 20 }),
                         ),
-                        tool_use("t3", "grep", serde_json::json!({ "pattern": "fn " })),
+                        tool_use("t3", "glob", serde_json::json!({ "pattern": "*.rs" })),
                         tool_use("t4", "bash", serde_json::json!({ "command": "cargo test" })),
                         tool_use(
                             "t5",
@@ -2241,7 +2241,7 @@ mod tests {
                     role: Role::User,
                     content: vec![
                         tool_result("t2", "fn main() {}", false),
-                        tool_result("t3", "g.rs:1: fn main() {}", false),
+                        tool_result("t3", "g.rs", false),
                         tool_result("t4", "test result: FAILED", true),
                         tool_result("t5", "Updated the task list: 1 of 2 completed.", false),
                     ],
@@ -2259,15 +2259,8 @@ mod tests {
                     (
                         "t3".to_owned(),
                         ToolMetadata {
-                            title: Some("Found 250 matches".to_owned()),
+                            title: Some("Found 100 files".to_owned()),
                             truncated_total: Some(250),
-                            ..ToolMetadata::default()
-                        },
-                    ),
-                    (
-                        "t4".to_owned(),
-                        ToolMetadata {
-                            truncated_bytes: Some(4096),
                             ..ToolMetadata::default()
                         },
                     ),

@@ -20,7 +20,7 @@ pub(crate) fn is_unmodified(event: &KeyEvent) -> bool {
 }
 
 /// A key, optionally held with Ctrl.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct KeyChord {
     code: KeyCode,
     ctrl: bool,
@@ -126,7 +126,7 @@ impl<A: Copy, V> Keymap<A, V> {
 mod tests {
     use super::*;
 
-    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     enum TestAction {
         Toggle,
         Reset,

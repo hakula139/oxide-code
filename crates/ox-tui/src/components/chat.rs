@@ -752,7 +752,7 @@ mod tests {
 
     use ox_core::protocol::testing::text_result;
     use ox_core::tool::testing::edit_diff;
-    use ox_core::tool::view::{ReadExcerptLine, ToolResultView};
+    use ox_core::tool::view::{NumberedLine, ToolResultView};
 
     use super::*;
     use crate::glyphs::{
@@ -1685,7 +1685,7 @@ mod tests {
         #[test]
         fn renders_a_structured_view_in_place_of_the_content() {
             let mut chat = test_chat();
-            let lines = vec![ReadExcerptLine {
+            let lines = vec![NumberedLine {
                 number: 2,
                 text: "fn main() {".to_owned(),
             }];
@@ -1950,7 +1950,7 @@ mod tests {
                 view: ToolResultView::ReadExcerpt {
                     path: "src/loader.rs".to_owned(),
                     lines: (1..=8)
-                        .map(|number| ReadExcerptLine {
+                        .map(|number| NumberedLine {
                             number,
                             text: format!("let step_{number} = load({number});"),
                         })

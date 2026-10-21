@@ -4,6 +4,8 @@
 //! cross a process boundary. Headless `stream-json` output prints events in this form, so renaming
 //! a tag or field breaks the release stability surface.
 
+pub mod notice;
+
 use std::path::PathBuf;
 
 use anyhow::{Result, anyhow};
@@ -226,13 +228,15 @@ pub enum Event {
     /// transcript. Follows every event that reports the new transcript's state, such as its usage
     /// and notices.
     SessionReady,
-    /// Live config after an [`Op::SetModel`]. `effort` is the resolved value, and `requested` is
-    /// the op's pick, whose effort an unknown model drops.
+    /// Live config after an [`Op::SetModel`]. `effort` is the resolved value, `requested` is the
+    /// op's pick, whose effort an unknown model drops, and `notice` confirms the change against the
+    /// settings before it.
     ConfigChanged {
         model: ModelSpec,
         effort: Option<Effort>,
         requested: ConfigPick,
         auto_compaction: AutoCompactionConfig,
+        notice: String,
     },
     /// The permission mode after an [`Op::SetMode`].
     ModeChanged(Mode),
@@ -352,7 +356,7 @@ pub trait EventSink: Send + Sync {
     fn session_write_error(&self, failure: Option<&str>) {
         if let Some(failure) = failure {
             self.emit(
-                Event::Error(session_write_failed(failure)),
+                Event::Error(notice::session_write_failed(failure)),
                 "session-write-failed",
             );
         }
@@ -365,11 +369,6 @@ impl EventSink for mpsc::UnboundedSender<Event> {
         mpsc::UnboundedSender::send(self, event)
             .map_err(|_| anyhow!("the frontend stopped reading events"))
     }
-}
-
-/// The message that reports a session-writer failure.
-pub(crate) fn session_write_failed(failure: &str) -> String {
-    format!("Session write failed: {failure}")
 }
 
 // ── Testing ──
@@ -454,7 +453,7 @@ mod tests {
     use crate::tool::tasks::testing::plan;
     use crate::tool::testing::bash_preview;
     use crate::tool::view::{
-        ApprovalBody, DiffChunk, DiffLine, EditDiff, GrepFileGroup, GrepMatchLine, ReadExcerptLine,
+        ApprovalBody, DiffChunk, EditDiff, GrepFileGroup, GrepMatchLine, NumberedLine,
     };
 
     mod op {
@@ -595,11 +594,11 @@ mod tests {
 
         fn diff_chunk() -> DiffChunk {
             DiffChunk {
-                old: vec![DiffLine {
+                old: vec![NumberedLine {
                     number: 3,
                     text: "old".to_owned(),
                 }],
-                new: vec![DiffLine {
+                new: vec![NumberedLine {
                     number: 3,
                     text: "new".to_owned(),
                 }],
@@ -632,7 +631,7 @@ mod tests {
                 },
                 ToolResultView::ReadExcerpt {
                     path: "src/main.rs".to_owned(),
-                    lines: vec![ReadExcerptLine {
+                    lines: vec![NumberedLine {
                         number: 1,
                         text: "fn main() {}".to_owned(),
                     }],
@@ -800,6 +799,7 @@ mod tests {
                         enabled: true,
                         threshold_tokens: Some(400_000),
                     },
+                    notice: "Effort set to high".to_owned(),
                 },
                 Event::ModeChanged(Mode::Yolo),
                 Event::LoginStarted {
@@ -920,11 +920,12 @@ mod tests {
             let event = Event::ConfigChanged {
                 model: ModelSpec::resolve("claude-opus-5-5".to_owned()),
                 effort: None,
-                auto_compaction: AutoCompactionConfig::disabled(),
                 requested: ConfigPick::Model {
                     id: ResolvedModelId::new("claude-opus-5-5".to_owned()),
                     effort: None,
                 },
+                auto_compaction: AutoCompactionConfig::disabled(),
+                notice: "Using Claude Opus 5.5 (claude-opus-5-5)".to_owned(),
             };
             let value = serde_json::to_value(&event).unwrap();
             assert_eq!(value["data"]["model"], "claude-opus-5-5");

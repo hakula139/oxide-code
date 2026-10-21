@@ -11,6 +11,7 @@ use ox_core::command::{self, Parsed};
 use ox_core::engine::{Engine, EngineHandle, TurnEnd};
 use ox_core::permission::rule::Rule;
 use ox_core::permission::{Basis, SessionGrant};
+use ox_core::protocol::notice::ENGINE_STOPPED;
 use ox_core::protocol::{Decision, Event, EventSink, Op};
 use ox_core::tool::view::{ApprovalBody, ApprovalPreview};
 use ox_core::util::git;
@@ -131,7 +132,7 @@ where
             match end {
                 Some(TurnEnd::Failed) => failed = true,
                 Some(_) => {}
-                None => bail!("the engine stopped"),
+                None => bail!(ENGINE_STOPPED),
             }
         }
         Ok(())
@@ -303,7 +304,7 @@ mod tests {
     use ox_core::protocol::testing::CapturingSink;
     use ox_core::session::store::testing::{saved_message_count, test_store};
     use ox_core::tool::testing::{bash_preview, bash_registry};
-    use ox_core::tool::view::{DiffChunk, DiffLine};
+    use ox_core::tool::view::{DiffChunk, NumberedLine};
 
     use super::*;
 
@@ -509,9 +510,7 @@ mod tests {
                         Event::SessionTitleUpdated { title, .. } => {
                             Some(format!("renamed to {title}"))
                         }
-                        Event::ConfigChanged { model, effort, .. } => {
-                            Some(format!("using {} at {effort:?}", model.id()))
-                        }
+                        Event::ConfigChanged { notice, .. } => Some(notice),
                         Event::SessionRolled { .. } => Some("rolled".to_owned()),
                         Event::SessionResumed { id, title, .. } => {
                             Some(format!("resumed {id} titled {title:?}"))
@@ -525,8 +524,9 @@ mod tests {
                     [
                         "compacted with Some(\"focus on login\")",
                         "renamed to Fix login",
-                        "using claude-sonnet-5-5 at Some(High)",
-                        "using claude-sonnet-5-5 at Some(Low)",
+                        "Switched to Claude Sonnet 5.5 (claude-sonnet-5-5) · \
+                         effort high (model default)",
+                        "Effort set to low",
                         "rolled",
                         resumed.as_str(),
                     ],
@@ -1051,11 +1051,11 @@ mod tests {
                 &ApprovalPreview {
                     title: "Edit(src/a.rs)".to_owned(),
                     body: ApprovalBody::Diff(DiffChunk {
-                        old: vec![DiffLine {
+                        old: vec![NumberedLine {
                             number: 3,
                             text: "let a = 1;".to_owned(),
                         }],
-                        new: vec![DiffLine {
+                        new: vec![NumberedLine {
                             number: 3,
                             text: "let a = 2;\u{1b}[2K\u{200b}".to_owned(),
                         }],

@@ -2,7 +2,7 @@
 
 use ratatui::style::Style;
 
-use ox_core::tool::view::{DiffChunk, DiffLine, EditDiff};
+use ox_core::tool::view::{DiffChunk, EditDiff, NumberedLine};
 use ox_core::util::text::plural;
 
 use super::overflow_footer;
@@ -114,14 +114,14 @@ enum Side {
 }
 
 enum Entry<'a> {
-    Line { side: Side, line: &'a DiffLine },
+    Line { side: Side, line: &'a NumberedLine },
     Ellipsis { hidden: usize },
 }
 
 /// Lays out both sides within `budget` rows, which must be at least 2 so each side keeps a row.
 fn entries<'a>(
-    old_lines: &'a [DiffLine],
-    new_lines: &'a [DiffLine],
+    old_lines: &'a [NumberedLine],
+    new_lines: &'a [NumberedLine],
     budget: usize,
 ) -> Vec<Entry<'a>> {
     let (old_budget, new_budget) = split_budget(old_lines.len(), new_lines.len(), budget);
@@ -146,7 +146,7 @@ fn split_budget(old_len: usize, new_len: usize, budget: usize) -> (usize, usize)
     (half, budget - half)
 }
 
-fn emit_side<'a>(out: &mut Vec<Entry<'a>>, side: Side, lines: &'a [DiffLine], budget: usize) {
+fn emit_side<'a>(out: &mut Vec<Entry<'a>>, side: Side, lines: &'a [NumberedLine], budget: usize) {
     if lines.is_empty() {
         return;
     }
@@ -176,10 +176,10 @@ mod tests {
     use super::*;
     use crate::theme::Theme;
 
-    fn line_numbered(side: &[&str]) -> Vec<DiffLine> {
+    fn line_numbered(side: &[&str]) -> Vec<NumberedLine> {
         side.iter()
             .enumerate()
-            .map(|(i, t)| DiffLine {
+            .map(|(i, t)| NumberedLine {
                 number: i + 1,
                 text: (*t).to_owned(),
             })
@@ -251,7 +251,7 @@ mod tests {
         #[test]
         fn several_locations_emit_one_body_plus_locations_footer() {
             let theme = Theme::default();
-            let line = |text: &str| DiffLine {
+            let line = |text: &str| NumberedLine {
                 number: 12,
                 text: text.to_owned(),
             };
@@ -453,7 +453,7 @@ mod tests {
         #[test]
         fn pure_deletion_over_budget_truncates_old_side() {
             let old = line_numbered(&["a", "b", "c", "d", "e", "f", "g"]);
-            let new: Vec<DiffLine> = Vec::new();
+            let new: Vec<NumberedLine> = Vec::new();
             let entries = entries(&old, &new, 5);
             assert_eq!(
                 render_entries(&entries),

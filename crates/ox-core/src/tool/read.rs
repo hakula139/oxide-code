@@ -7,7 +7,7 @@ use std::pin::Pin;
 use serde::Deserialize;
 
 use super::file::FileVerb;
-use super::view::{ReadExcerptLine, ToolResultView};
+use super::view::{NumberedLine, ToolResultView};
 use super::{
     Prepared, Tool, ToolCtx, ToolMetadata, ToolOutput, ToolSpec, display_path, extract_input_field,
 };
@@ -235,9 +235,9 @@ fn split_read_footer(content: &str) -> (&str, Option<&str>) {
     }
 }
 
-fn parse_read_line(line: &str) -> Option<ReadExcerptLine> {
+fn parse_read_line(line: &str) -> Option<NumberedLine> {
     let (number, text) = line.split_once('\t')?;
-    Some(ReadExcerptLine {
+    Some(NumberedLine {
         number: number.parse().ok()?,
         text: text.to_owned(),
     })
@@ -280,11 +280,11 @@ mod tests {
                 ToolResultView::ReadExcerpt {
                     path: "example.rs".to_owned(),
                     lines: vec![
-                        ReadExcerptLine {
+                        NumberedLine {
                             number: 10,
                             text: "fn main() {}".to_owned(),
                         },
-                        ReadExcerptLine {
+                        NumberedLine {
                             number: 11,
                             text: "}".to_owned(),
                         },
@@ -316,11 +316,11 @@ mod tests {
                 ToolResultView::ReadExcerpt {
                     path: "/tmp/example.rs".to_owned(),
                     lines: vec![
-                        ReadExcerptLine {
+                        NumberedLine {
                             number: 2,
                             text: "beta".to_owned(),
                         },
-                        ReadExcerptLine {
+                        NumberedLine {
                             number: 3,
                             text: "gamma".to_owned(),
                         },

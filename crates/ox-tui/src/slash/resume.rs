@@ -125,7 +125,7 @@ struct SessionRow {
 }
 
 /// One column of a picker row. The title takes whatever width the other columns leave.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Column {
     Id,
     Title,
@@ -285,7 +285,7 @@ impl SearchableItem for SessionRow {
 
 // ── Actions ──
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum PickerAction {
     Resume,
     Dismiss,
