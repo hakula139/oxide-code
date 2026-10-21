@@ -11,7 +11,7 @@ use tokio_util::task::TaskTracker;
 use tracing::warn;
 
 use super::gateway::CUSTOM_HEADERS_VAR;
-use super::oauth::{ClaudeCodeKeychain, LOGIN_STORES, Login, LoginError, SessionLogin};
+use super::oauth::{ClaudeCodeKeychain, Login, LoginError, SessionLogin, login_stores};
 use crate::util::env;
 use crate::util::tls::Trust;
 
@@ -306,9 +306,10 @@ fn signed_out_error(e: &LoginError) -> String {
     match e {
         LoginError::Missing => format!(
             "no credentials found: no API key or token is set, no oxide-code login is stored, \
-             and no Claude Code login is in {LOGIN_STORES}. \
+             and no Claude Code login is in {stores}. \
              Set ANTHROPIC_API_KEY or CLAUDE_CODE_OAUTH_TOKEN, \
-             add `api_key` to ~/.config/ox/config.toml, or sign in with `/login` in the `ox` TUI."
+             add `api_key` to ~/.config/ox/config.toml, or sign in with `/login` in the `ox` TUI.",
+            stores = login_stores(),
         ),
         e => e.to_string(),
     }
@@ -419,8 +420,11 @@ async fn load_login(
 
 #[cfg(test)]
 mod tests {
+    use std::path::Path;
+
     use super::*;
     use crate::config::oauth::testing::{ox_login_in, write_creds};
+    use crate::util::path::local_testing::abs;
     use crate::util::tls::local_testing::no_roots;
     use crate::util::tls::testing::NoRoots;
 
@@ -758,24 +762,41 @@ mod tests {
 
         #[tokio::test]
         async fn missing_login_lists_every_credential_option() {
-            let err = resolve(explicit(&[]), FIRST_PARTY, async {
-                Err(LoginError::Missing)
-            })
-            .await
-            .expect_err("no credential anywhere");
+            let claude_dir = abs("/srv/claude");
+
+            let (err, message) = temp_env::async_with_vars(
+                [("CLAUDE_CONFIG_DIR", Some(claude_dir.as_str()))],
+                async {
+                    let err = resolve(explicit(&[]), FIRST_PARTY, async {
+                        Err(LoginError::Missing)
+                    })
+                    .await
+                    .expect_err("no credential anywhere");
+                    let message = format!("{err:#}");
+                    (err, message)
+                },
+            )
+            .await;
+
             assert!(
                 matches!(err, ResolveError::SignedOut(LoginError::Missing)),
                 "{err:?}"
             );
             assert_eq!(
-                format!("{err:#}"),
+                message,
                 format!(
                     "no credentials found: \
                      no API key or token is set, no oxide-code login is stored, \
-                     and no Claude Code login is in {LOGIN_STORES}. \
+                     and no Claude Code login is in {keychain}{file}. \
                      Set ANTHROPIC_API_KEY or CLAUDE_CODE_OAUTH_TOKEN, \
                      add `api_key` to ~/.config/ox/config.toml, \
-                     or sign in with `/login` in the `ox` TUI."
+                     or sign in with `/login` in the `ox` TUI.",
+                    keychain = if cfg!(target_os = "macos") {
+                        "the macOS Keychain or "
+                    } else {
+                        ""
+                    },
+                    file = Path::new(&claude_dir).join(".credentials.json").display(),
                 ),
             );
         }
@@ -878,7 +899,10 @@ mod tests {
             let file = home.path().join(".claude").join(".credentials.json");
 
             let (missing, unreadable, auth) = temp_env::async_with_vars(
-                [(crate::util::path::testing::HOME_VAR, Some(home.path()))],
+                [
+                    (crate::util::path::testing::HOME_VAR, Some(home.path())),
+                    ("CLAUDE_CONFIG_DIR", None),
+                ],
                 async {
                     let missing = claude_code_login(ClaudeCodeKeychain::NONE, &NoRoots).await;
                     std::fs::create_dir(file.parent().unwrap()).unwrap();

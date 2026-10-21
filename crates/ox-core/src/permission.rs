@@ -2364,6 +2364,7 @@ mod tests {
                         (HOME_VAR, Some(&home)),
                         ("XDG_DATA_HOME", Some(&data)),
                         ("XDG_CONFIG_HOME", Some(&config)),
+                        ("CLAUDE_CONFIG_DIR", None),
                     ],
                     || {
                         let workspace = Workspace::new(&cwd);

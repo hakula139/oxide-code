@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::permission::rule::{Rule, escaped};
 use crate::permission::{PermissionClass, folded_names, resolve};
-use crate::util::path::{XdgBase, app_dir, lexical_normalize, xdg_dir};
+use crate::util::path::{XdgBase, app_dir, claude_dir, lexical_normalize, xdg_dir};
 
 // ── Shipped ──
 
@@ -121,7 +121,7 @@ impl Shipped {
                 PermissionClass::Read,
                 [
                     app_dir(XdgBase::Data).map(|dir| dir.join("credentials.json")),
-                    home().map(|home| home.join(".claude").join(".credentials.json")),
+                    claude_dir().map(|dir| dir.join(".credentials.json")),
                     home().map(|home| home.join(".git-credentials")),
                     xdg_dir(XdgBase::Config).map(|dir| dir.join("git").join("credentials")),
                 ]
@@ -381,6 +381,7 @@ mod tests {
                     (HOME_VAR, Some(abs("/home/u"))),
                     ("XDG_DATA_HOME", Some(abs("/data"))),
                     ("XDG_CONFIG_HOME", Some(abs("/config"))),
+                    ("CLAUDE_CONFIG_DIR", None),
                 ],
                 || {
                     let patterns = |group: Shipped| {
@@ -468,6 +469,7 @@ mod tests {
                             (HOME_VAR, Some(spelling.as_str())),
                             ("XDG_DATA_HOME", None),
                             ("XDG_CONFIG_HOME", None),
+                            ("CLAUDE_CONFIG_DIR", None),
                         ],
                         || {
                             [Shipped::Ssh, Shipped::Credentials].map(|group| {
@@ -493,6 +495,18 @@ mod tests {
                         "{spelling}"
                     );
                 }
+            }
+
+            #[test]
+            fn name_claude_codes_login_inside_claude_config_dir() {
+                let dir = abs("/srv/claude");
+
+                let rules = temp_env::with_var("CLAUDE_CONFIG_DIR", Some(dir.as_str()), || {
+                    Shipped::Credentials.rules().unwrap().unwrap()
+                });
+
+                let expected = format!("{}/.credentials.json", slash_separated(Path::new(&dir)));
+                assert_eq!(rules[1].pattern(), expected);
             }
         }
     }

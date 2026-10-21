@@ -38,8 +38,10 @@ pub(super) fn is_ox_setting(name: &str) -> bool {
 }
 
 pub(super) fn remove_inherited(command: &mut Command, predicate: impl Fn(&str) -> bool) {
-    // Without USER, ox skips the Claude Code login in the macOS Keychain.
+    // Without USER, ox skips the Claude Code login in the macOS Keychain, and without
+    // CLAUDE_CONFIG_DIR, it looks for Claude Code's login and instructions in the scratch home.
     command.env_remove("USER");
+    command.env_remove("CLAUDE_CONFIG_DIR");
     for (name, _) in std::env::vars_os() {
         let remove = name.to_str().is_some_and(|name| {
             #[cfg(windows)]

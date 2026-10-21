@@ -7,7 +7,7 @@ use std::{fs, io, iter};
 use indoc::{formatdoc, indoc};
 
 use crate::permission::project::{ProjectFileError, resolve_project_file};
-use crate::util::path::{XdgBase, app_dir};
+use crate::util::path::{XdgBase, app_dir, claude_dir};
 
 /// The cross-agent instruction file, which takes precedence wherever it is read.
 pub(crate) const AGENTS_MD: &str = "AGENTS.md";
@@ -15,8 +15,7 @@ pub(crate) const AGENTS_MD: &str = "AGENTS.md";
 /// Claude Code's instruction file, read where no `AGENTS.md` has instructions.
 pub(crate) const CLAUDE_MD: &str = "CLAUDE.md";
 
-/// Claude Code's directory, which holds a `CLAUDE.md` in the home directory and in each project
-/// directory.
+/// The directory in each project directory that may hold its Claude Code `CLAUDE.md`.
 const CLAUDE_DIR: &str = ".claude";
 
 /// Candidates tried in order at a single location.
@@ -130,7 +129,7 @@ fn candidate_slots(cwd: &Path, project_root: &Path) -> Vec<Slot> {
 /// the user writes their own.
 fn user_candidates() -> Vec<PathBuf> {
     let ox = app_dir(XdgBase::Config).map(|dir| dir.join(AGENTS_MD));
-    let claude = std::env::home_dir().map(|home| home.join(CLAUDE_DIR).join(CLAUDE_MD));
+    let claude = claude_dir().map(|dir| dir.join(CLAUDE_MD));
     ox.into_iter().chain(claude).collect()
 }
 
@@ -240,9 +239,14 @@ mod tests {
     mod load {
         use super::*;
 
-        /// The variables [`user_candidates`] reads, pinned to `home` with `XDG_CONFIG_HOME` unset.
-        fn pinned_home(home: &Path) -> [(&'static str, Option<&Path>); 2] {
-            [(HOME_VAR, Some(home)), ("XDG_CONFIG_HOME", None)]
+        /// The variables [`user_candidates`] reads, pinned to `home` with `XDG_CONFIG_HOME` and
+        /// `CLAUDE_CONFIG_DIR` unset.
+        fn pinned_home(home: &Path) -> [(&'static str, Option<&Path>); 3] {
+            [
+                (HOME_VAR, Some(home)),
+                ("XDG_CONFIG_HOME", None),
+                ("CLAUDE_CONFIG_DIR", None),
+            ]
         }
 
         #[tokio::test]
@@ -533,11 +537,16 @@ mod tests {
         #[test]
         fn lists_the_user_files_then_each_directory_from_root_to_cwd() {
             let (home, xdg) = (PathBuf::from(abs("/home/u")), PathBuf::from(abs("/xdg")));
+            let claude = PathBuf::from(abs("/srv/claude"));
             let (root, cwd) = (
                 PathBuf::from(abs("/repo")),
                 PathBuf::from(abs("/repo/crates")),
             );
-            let vars = [(HOME_VAR, Some(&home)), ("XDG_CONFIG_HOME", Some(&xdg))];
+            let vars = [
+                (HOME_VAR, Some(&home)),
+                ("XDG_CONFIG_HOME", Some(&xdg)),
+                ("CLAUDE_CONFIG_DIR", Some(&claude)),
+            ];
 
             let slots = temp_env::with_vars(vars, || candidate_slots(&cwd, &root));
 
@@ -554,10 +563,7 @@ mod tests {
                 [
                     (
                         "user's global instructions",
-                        vec![
-                            xdg.join("ox").join("AGENTS.md"),
-                            home.join(".claude").join("CLAUDE.md"),
-                        ],
+                        vec![xdg.join("ox").join("AGENTS.md"), claude.join("CLAUDE.md"),],
                     ),
                     ("project instructions", project_candidates(&root).into()),
                     ("project instructions", project_candidates(&cwd).into()),

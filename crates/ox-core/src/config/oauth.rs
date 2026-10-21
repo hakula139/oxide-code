@@ -15,7 +15,9 @@ use tracing::{debug, warn};
 #[cfg(target_os = "macos")]
 use crate::util::env;
 use crate::util::fs::{atomic_write_private, create_private_dir_all};
-use crate::util::path::{XdgBase, app_dir};
+#[cfg(any(target_os = "macos", test))]
+use crate::util::path::claude_config_var;
+use crate::util::path::{XdgBase, app_dir, claude_dir, tildify};
 use crate::util::text::join_sentences;
 use crate::util::tls::Trust;
 
@@ -31,18 +33,20 @@ pub(super) const OAUTH_SCOPES: &[&str] = &[
 const TOKEN_EXPIRY_BUFFER_MS: u64 = 5 * 60 * 1000;
 const TOKEN_REQUEST_TIMEOUT: Duration = Duration::from_secs(15);
 
-const LOCK_STALE_THRESHOLD: Duration = Duration::from_secs(30);
-const LOCK_MAX_RETRIES: u32 = 5;
+// Match the `stale` and `update` defaults of `proper-lockfile`, which Claude Code locks its config
+// directory with.
+const LOCK_STALE_THRESHOLD: Duration = Duration::from_secs(10);
+const LOCK_UPDATE_INTERVAL: Duration = Duration::from_secs(5);
+/// How long a process waits for another to finish a refresh, which covers the holder's token
+/// request plus one mtime update.
+const LOCK_WAIT: Duration = TOKEN_REQUEST_TIMEOUT.saturating_add(LOCK_UPDATE_INTERVAL);
 const LOCK_RETRY_INTERVAL: Duration = Duration::from_secs(1);
 
-#[cfg(target_os = "macos")]
-const KEYCHAIN_SERVICE: &str = "Claude Code-credentials";
+/// The file in Claude Code's config directory that holds its login.
+const CREDENTIALS_FILE: &str = ".credentials.json";
 
-/// Where [`SessionLogin::load`] looks for the Claude Code login, as error messages name it.
-#[cfg(target_os = "macos")]
-pub(super) const LOGIN_STORES: &str = "the macOS Keychain or ~/.claude/.credentials.json";
-#[cfg(not(target_os = "macos"))]
-pub(super) const LOGIN_STORES: &str = "~/.claude/.credentials.json";
+#[cfg(any(target_os = "macos", test))]
+const KEYCHAIN_SERVICE: &str = "Claude Code-credentials";
 
 // ── Login ──
 
@@ -98,6 +102,15 @@ pub(super) enum LoginError {
     /// The token expired, and no refresh token is stored.
     #[error("{0} has expired. {step}", step = .0.sign_in_step())]
     Expired(Login),
+    /// The token expired while another process held the store's lock for all of [`LOCK_WAIT`],
+    /// so that process may still be refreshing it.
+    #[error(
+        "failed to refresh the expired {login}: another process held {} for over {} s. \
+         Try again in a moment.",
+        .lock.display(),
+        LOCK_WAIT.as_secs()
+    )]
+    LockHeld { login: Login, lock: PathBuf },
     /// `transient` when the token endpoint sent no response or a server error, so a later attempt
     /// may succeed.
     #[error(
@@ -128,7 +141,7 @@ impl LoginError {
             Self::RefreshFailed {
                 transient: true,
                 ..
-            }
+            } | Self::LockHeld { .. }
         )
     }
 }
@@ -268,7 +281,7 @@ impl<'a> Store<'a> {
         match login {
             Login::Ox => {
                 let dir = app_dir(XdgBase::Data).context(
-                    "could not determine the data directory that holds the oxide-code login",
+                    "failed to determine the data directory that holds the oxide-code login",
                 )?;
                 Ok(Self {
                     login,
@@ -278,14 +291,14 @@ impl<'a> Store<'a> {
                 })
             }
             Login::ClaudeCode => {
-                let home = std::env::home_dir().context(
-                    "could not determine the home directory that holds the Claude Code login",
+                let dir = claude_dir().context(
+                    "failed to determine the directory that holds the Claude Code login",
                 )?;
                 Ok(Self {
                     login,
                     keychain,
-                    file: home.join(".claude").join(".credentials.json"),
-                    lock: home.join(".claude.lock"),
+                    file: dir.join(CREDENTIALS_FILE),
+                    lock: sibling_lock(&dir),
                 })
             }
         }
@@ -345,7 +358,7 @@ pub(super) struct SessionLogin {
 
 impl SessionLogin {
     /// Loads the login, refreshing it near expiry. The Claude Code login reads `keychain` first,
-    /// then `~/.claude/.credentials.json`. The oxide-code login reads
+    /// then `.credentials.json` in [`claude_dir`]. The oxide-code login reads
     /// `$XDG_DATA_HOME/ox/credentials.json`.
     pub(super) async fn load(
         login: Login,
@@ -472,20 +485,35 @@ async fn load_token_from(
         return usable_until_expiry(login, creds.oauth);
     }
 
-    let _lock = match acquire_lock(&store.lock).await {
+    let fresh = || load().is_ok_and(|creds| !is_near_expiry(creds.oauth.expires_at_ms()));
+    let _lock = match wait_for_lock(&store.lock, fresh).await {
         Ok(lock) => lock,
-        Err(error) => {
+        Err(unlocked) => {
             // The lock holder may have written a fresh token before releasing.
             let creds = load()?;
-            if is_expired(creds.oauth.expires_at_ms()) {
-                return Err(LoginError::RefreshFailed {
+            if !is_expired(creds.oauth.expires_at_ms()) {
+                match &unlocked {
+                    Unlocked::Held => {
+                        warn!("skipping OAuth token refresh: another process holds the lock");
+                    }
+                    Unlocked::Failed(e) => {
+                        warn!("skipping OAuth token refresh, using existing: {e:#}");
+                    }
+                    Unlocked::Settled => {}
+                }
+                return Ok(creds.into_token());
+            }
+            return Err(match unlocked {
+                Unlocked::Held | Unlocked::Settled => LoginError::LockHeld {
+                    login,
+                    lock: store.lock.clone(),
+                },
+                Unlocked::Failed(error) => LoginError::RefreshFailed {
                     login,
                     error,
                     transient: false,
-                });
-            }
-            warn!("skipping OAuth token refresh, using existing: {error:#}");
-            return Ok(creds.into_token());
+                },
+            });
         }
     };
 
@@ -616,8 +644,7 @@ const SYSTEM_KEYCHAIN: Option<&dyn Keychain> = Some(&SystemKeychain);
 #[cfg(not(target_os = "macos"))]
 const SYSTEM_KEYCHAIN: Option<&dyn Keychain> = None;
 
-/// Where [`SessionLogin::load`] looks for the Claude Code login before
-/// `~/.claude/.credentials.json`.
+/// Where [`SessionLogin::load`] looks for the Claude Code login before its credentials file.
 #[derive(Clone, Copy)]
 pub(crate) struct ClaudeCodeKeychain(Option<&'static dyn Keychain>);
 
@@ -644,7 +671,8 @@ impl Keychain for SystemKeychain {
                 return Ok(None);
             }
         };
-        let options = PasswordOptions::new_generic_password(KEYCHAIN_SERVICE, &account);
+        let service = keychain_service();
+        let options = PasswordOptions::new_generic_password(&service, &account);
         match generic_password(options) {
             Ok(bytes) => Ok(String::from_utf8(bytes)
                 .inspect_err(|_| debug!("Keychain data is not valid UTF-8"))
@@ -666,14 +694,43 @@ impl Keychain for SystemKeychain {
         use security_framework::passwords::set_generic_password;
 
         let account = keychain_account()?;
-        set_generic_password(KEYCHAIN_SERVICE, &account, json.as_bytes())
-            .context("failed to write to Keychain")
+        set_generic_password(&keychain_service(), &account, json.as_bytes())
+            .context("failed to write to the macOS Keychain")
     }
 }
 
 #[cfg(target_os = "macos")]
 fn keychain_account() -> Result<String> {
-    env::string("USER").context("could not determine OS username")
+    env::string("USER").context("failed to determine the OS username")
+}
+
+/// The Keychain service Claude Code keeps its login under. A `CLAUDE_CONFIG_DIR` adds the first 8
+/// hex digits of the directory's SHA-256, so each config directory keeps its own login.
+#[cfg(any(target_os = "macos", test))]
+fn keychain_service() -> String {
+    use sha2::{Digest, Sha256};
+
+    claude_config_var().map_or_else(
+        || KEYCHAIN_SERVICE.to_owned(),
+        |dir| {
+            let hash = Sha256::digest(dir.as_bytes());
+            let prefix = u32::from_be_bytes([hash[0], hash[1], hash[2], hash[3]]);
+            format!("{KEYCHAIN_SERVICE}-{prefix:08x}")
+        },
+    )
+}
+
+/// Where [`SessionLogin::load`] looks for the Claude Code login, as error messages name it.
+pub(super) fn login_stores() -> String {
+    let file = claude_dir().map_or_else(
+        || format!("~/.claude/{CREDENTIALS_FILE}"),
+        |dir| tildify(&dir.join(CREDENTIALS_FILE)),
+    );
+    if cfg!(target_os = "macos") {
+        format!("the macOS Keychain or {file}")
+    } else {
+        file
+    }
 }
 
 // ── Token Requests ──
@@ -863,32 +920,76 @@ fn now_millis() -> Option<u64> {
 
 // ── File Locking ──
 
+/// A held credentials lock, whose mtime a background task keeps fresh so other processes do not
+/// take it for abandoned. Dropping it stops the task and removes the lock.
 struct LockGuard {
     path: PathBuf,
+    heartbeat: tokio::task::JoinHandle<()>,
+}
+
+impl LockGuard {
+    fn hold(path: &Path) -> Self {
+        let heartbeat = tokio::spawn({
+            let path = path.to_owned();
+            async move {
+                loop {
+                    tokio::time::sleep(LOCK_UPDATE_INTERVAL).await;
+                    if let Err(e) = touch_dir(&path) {
+                        debug!("failed to refresh lock {}: {e}", path.display());
+                    }
+                }
+            }
+        });
+        Self {
+            path: path.to_owned(),
+            heartbeat,
+        }
+    }
 }
 
 impl Drop for LockGuard {
     fn drop(&mut self) {
+        self.heartbeat.abort();
         if let Err(e) = std::fs::remove_dir_all(&self.path) {
             debug!("failed to release lock {}: {e}", self.path.display());
         }
     }
 }
 
+/// Why [`wait_for_lock`] returned without the lock.
+enum Unlocked {
+    /// Another process held the lock for all of [`LOCK_WAIT`].
+    Held,
+    /// The caller no longer needs the lock.
+    Settled,
+    Failed(anyhow::Error),
+}
+
 /// Directory-based advisory lock around credential writes. `mkdir` is the cross-platform atomic
-/// primitive, and the guard `rmdir`s on drop. A lock older than [`LOCK_STALE_THRESHOLD`] is
-/// treated as abandoned by a crashed sibling and cleared on the next retry.
+/// primitive, and the guard `rmdir`s on drop.
 async fn acquire_lock(path: &Path) -> Result<LockGuard> {
-    for attempt in 0..=LOCK_MAX_RETRIES {
-        if attempt > 0 {
-            tokio::time::sleep(LOCK_RETRY_INTERVAL).await;
-        }
+    match wait_for_lock(path, || false).await {
+        Ok(lock) => Ok(lock),
+        Err(Unlocked::Held | Unlocked::Settled) => bail!(
+            "another process held {} for over {} s",
+            path.display(),
+            LOCK_WAIT.as_secs()
+        ),
+        Err(Unlocked::Failed(e)) => Err(e),
+    }
+}
+
+/// Takes the lock at `path`, retrying for up to [`LOCK_WAIT`] while another process holds it, until
+/// `settled` says the caller no longer needs it. A lock whose mtime is older
+/// than [`LOCK_STALE_THRESHOLD`] was abandoned by a crashed process and is cleared.
+async fn wait_for_lock(
+    path: &Path,
+    mut settled: impl FnMut() -> bool,
+) -> Result<LockGuard, Unlocked> {
+    let deadline = tokio::time::Instant::now() + LOCK_WAIT;
+    loop {
         match std::fs::create_dir(path) {
-            Ok(()) => {
-                return Ok(LockGuard {
-                    path: path.to_owned(),
-                });
-            }
+            Ok(()) => return Ok(LockGuard::hold(path)),
             Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
                 if is_stale_lock(path)
                     && let Err(e) = std::fs::remove_dir_all(path)
@@ -897,21 +998,61 @@ async fn acquire_lock(path: &Path) -> Result<LockGuard> {
                 }
             }
             Err(e) => {
-                return Err(e)
-                    .with_context(|| format!("failed to create lock at {}", path.display()));
+                return Err(Unlocked::Failed(
+                    anyhow::Error::new(e)
+                        .context(format!("failed to create lock at {}", path.display())),
+                ));
             }
         }
+        if tokio::time::Instant::now() >= deadline {
+            return Err(Unlocked::Held);
+        }
+        tokio::time::sleep(LOCK_RETRY_INTERVAL).await;
+        if settled() {
+            return Err(Unlocked::Settled);
+        }
     }
-    bail!(
-        "failed to acquire credentials lock after {LOCK_MAX_RETRIES} retries \
-         (another process may be refreshing)"
-    )
 }
 
 fn is_stale_lock(path: &Path) -> bool {
     std::fs::metadata(path)
         .and_then(|m| m.modified())
         .is_ok_and(|t| t.elapsed().unwrap_or_default() > LOCK_STALE_THRESHOLD)
+}
+
+/// Sets the lock directory's mtime to now, as `proper-lockfile` refreshes a held lock.
+fn touch_dir(path: &Path) -> std::io::Result<()> {
+    open_dir(path)?.set_modified(std::time::SystemTime::now())
+}
+
+/// Opens a directory with enough access to set its mtime.
+fn open_dir(path: &Path) -> std::io::Result<std::fs::File> {
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt as _;
+
+        use windows_sys::Win32::Storage::FileSystem::{
+            FILE_FLAG_BACKUP_SEMANTICS, FILE_WRITE_ATTRIBUTES,
+        };
+
+        // Windows opens a directory only with `FILE_FLAG_BACKUP_SEMANTICS`.
+        std::fs::OpenOptions::new()
+            .access_mode(FILE_WRITE_ATTRIBUTES)
+            .custom_flags(FILE_FLAG_BACKUP_SEMANTICS)
+            .open(path)
+    }
+    #[cfg(not(windows))]
+    std::fs::File::open(path)
+}
+
+/// Where Claude Code's `proper-lockfile` locks the directory `dir`: beside its real path, with
+/// `.lock` appended, so a symlinked `~/.claude` locks where its target does.
+fn sibling_lock(dir: &Path) -> PathBuf {
+    let mut lock = dunce::canonicalize(dir)
+        .unwrap_or_else(|_| dir.to_owned())
+        .into_os_string();
+    lock.push(".lock");
+    PathBuf::from(lock)
 }
 
 // ── Testing ──
@@ -1172,13 +1313,14 @@ mod tests {
             use super::*;
 
             #[test]
-            fn keeps_each_login_in_its_own_tool_s_directory() {
+            fn keeps_each_login_in_its_own_tools_directory() {
                 let (home, data) = (abs("/home/user"), abs("/data"));
                 let keychain = FakeKeychain::empty();
                 let (ox, default_ox, claude_code) = temp_env::with_vars(
                     [
                         (HOME_VAR, Some(home.as_str())),
                         ("XDG_DATA_HOME", Some(data.as_str())),
+                        ("CLAUDE_CONFIG_DIR", None),
                     ],
                     || {
                         let ox = Store::locate(Login::Ox, Some(&keychain)).unwrap();
@@ -1205,6 +1347,42 @@ mod tests {
                 );
                 assert_eq!(claude_code.lock, Path::new(&home).join(".claude.lock"));
                 assert!(claude_code.keychain.is_some());
+            }
+
+            #[test]
+            fn keeps_the_claude_code_login_in_claude_config_dir_and_locks_beside_its_real_path() {
+                let root = tempfile::tempdir().unwrap();
+                let real = dunce::canonicalize(root.path())
+                    .unwrap()
+                    .join("claude-work");
+                std::fs::create_dir(&real).unwrap();
+
+                let store = temp_env::with_var("CLAUDE_CONFIG_DIR", Some(&real), || {
+                    Store::locate(Login::ClaudeCode, None).unwrap()
+                });
+
+                assert_eq!(store.file, real.join(".credentials.json"));
+                assert_eq!(store.lock, real.with_file_name("claude-work.lock"));
+            }
+
+            #[cfg(unix)]
+            #[test]
+            fn locks_where_a_symlinked_claude_directory_resolves() {
+                let home = tempfile::tempdir().unwrap();
+                let home = dunce::canonicalize(home.path()).unwrap();
+                std::fs::create_dir(home.join("dotfiles")).unwrap();
+                std::os::unix::fs::symlink("dotfiles", home.join(".claude")).unwrap();
+
+                let store = temp_env::with_vars(
+                    [
+                        (HOME_VAR, Some(home.as_path())),
+                        ("CLAUDE_CONFIG_DIR", None),
+                    ],
+                    || Store::locate(Login::ClaudeCode, None).unwrap(),
+                );
+
+                assert_eq!(store.file, home.join(".claude/.credentials.json"));
+                assert_eq!(store.lock, home.join("dotfiles.lock"));
             }
         }
     }
@@ -1974,8 +2152,36 @@ mod tests {
             );
         }
 
+        #[tokio::test]
+        async fn lock_that_cannot_be_created_fails_if_expired_and_keeps_an_unexpired_token() {
+            let dir = tempfile::tempdir().unwrap();
+            let creds = dir.path().join("creds.json");
+            let lock = dir.path().join("missing").join("lock");
+            let store = store(None, &creds, &lock);
+
+            write_creds(&creds, "dead", Some("ref"), 0);
+            let err = load(&store, "http://should-not-be-called")
+                .await
+                .expect_err("expired + lock failure must bail");
+            write_creds(&creds, "tok", Some("ref"), now_millis().unwrap() + 60_000);
+            let token = load(&store, "http://should-not-be-called").await.unwrap();
+
+            assert!(!err.is_transient(), "{err:?}");
+            let message = format!("{err:#}");
+            let headline = format!(
+                "failed to refresh the expired Claude Code login: failed to create lock at {}: ",
+                lock.display()
+            );
+            assert!(message.starts_with(&headline), "{message}");
+            assert!(
+                message.ends_with(". Run `claude` to sign in again."),
+                "{message}"
+            );
+            assert_eq!(token.access_token, "tok");
+        }
+
         #[tokio::test(start_paused = true)]
-        async fn lock_held_bails_if_expired() {
+        async fn lock_held_past_the_wait_fails_transiently_if_expired() {
             let dir = tempfile::tempdir().unwrap();
             let creds = dir.path().join("creds.json");
             let lock = dir.path().join("lock");
@@ -1985,24 +2191,44 @@ mod tests {
             let err = load(&store(None, &creds, &lock), "http://should-not-be-called")
                 .await
                 .expect_err("expired + lock held must bail");
-            assert!(
-                matches!(
-                    err,
-                    LoginError::RefreshFailed {
-                        login: Login::ClaudeCode,
-                        transient: false,
-                        ..
-                    }
-                ),
-                "{err:?}"
-            );
+
+            assert!(err.is_transient(), "{err:?}");
             assert_eq!(
                 format!("{err:#}"),
-                "failed to refresh the expired Claude Code login: \
-                 failed to acquire credentials lock after 5 retries \
-                 (another process may be refreshing). \
-                 Run `claude` to sign in again.",
+                format!(
+                    "failed to refresh the expired Claude Code login: \
+                     another process held {} for over 20 s. \
+                     Try again in a moment.",
+                    lock.display()
+                ),
             );
+        }
+
+        #[tokio::test(start_paused = true)]
+        async fn lock_held_waits_for_a_holder_as_long_as_its_token_request_may_take() {
+            let dir = tempfile::tempdir().unwrap();
+            let creds = dir.path().join("creds.json");
+            let lock = dir.path().join("lock");
+            write_creds(&creds, "dead", Some("ref"), 0);
+            std::fs::create_dir(&lock).unwrap();
+            let (sibling_creds, sibling_lock) = (creds.clone(), lock.clone());
+            let sibling = tokio::spawn(async move {
+                tokio::time::sleep(TOKEN_REQUEST_TIMEOUT).await;
+                write_creds(
+                    &sibling_creds,
+                    "sibling",
+                    Some("sibling-refresh"),
+                    now_millis().unwrap() + 60 * 60 * 1000,
+                );
+                std::fs::remove_dir(&sibling_lock).unwrap();
+            });
+
+            let token = load(&store(None, &creds, &lock), "http://should-not-be-called")
+                .await
+                .unwrap();
+            sibling.await.unwrap();
+
+            assert_eq!(token.access_token, "sibling");
         }
 
         #[tokio::test(start_paused = true)]
@@ -2490,26 +2716,27 @@ mod tests {
         }
     }
 
-    mod acquire_lock {
+    mod keychain_service {
         use super::*;
 
-        /// Opens a directory with enough access to set its mtime.
-        fn open_dir(path: &Path) -> std::fs::File {
-            #[cfg(windows)]
-            {
-                use std::os::windows::fs::OpenOptionsExt as _;
+        #[test]
+        fn suffixes_a_claude_config_dir_with_its_hash() {
+            let service = |dir| temp_env::with_var("CLAUDE_CONFIG_DIR", dir, keychain_service);
 
-                // `FILE_WRITE_ATTRIBUTES` access, and `FILE_FLAG_BACKUP_SEMANTICS`, without which
-                // Windows refuses to open a directory.
-                std::fs::OpenOptions::new()
-                    .access_mode(0x0100)
-                    .custom_flags(0x0200_0000)
-                    .open(path)
-                    .unwrap()
-            }
-            #[cfg(not(windows))]
-            std::fs::File::open(path).unwrap()
+            assert_eq!(service(None), "Claude Code-credentials");
+            assert_eq!(
+                service(Some("/srv/claude")),
+                "Claude Code-credentials-bc29611f"
+            );
+            assert_eq!(
+                service(Some("/srv/cafe\u{301}")),
+                service(Some("/srv/caf\u{e9}"))
+            );
         }
+    }
+
+    mod acquire_lock {
+        use super::*;
 
         #[tokio::test]
         async fn creates_and_drop_removes() {
@@ -2530,10 +2757,45 @@ mod tests {
             std::fs::create_dir(&lock_path).unwrap();
             let abandoned_at =
                 std::time::SystemTime::now() - LOCK_STALE_THRESHOLD - Duration::from_secs(1);
-            open_dir(&lock_path).set_modified(abandoned_at).unwrap();
+            open_dir(&lock_path)
+                .unwrap()
+                .set_modified(abandoned_at)
+                .unwrap();
 
             let _guard = acquire_lock(&lock_path).await.unwrap();
             assert!(!is_stale_lock(&lock_path));
+        }
+
+        #[tokio::test(start_paused = true)]
+        async fn keeps_a_held_lock_fresh_until_dropped() {
+            let dir = tempfile::tempdir().unwrap();
+            let lock_path = dir.path().join("test.lock");
+            let guard = acquire_lock(&lock_path).await.unwrap();
+            let long_ago = std::time::SystemTime::now() - LOCK_STALE_THRESHOLD * 2;
+            open_dir(&lock_path)
+                .unwrap()
+                .set_modified(long_ago)
+                .unwrap();
+
+            tokio::time::sleep(LOCK_UPDATE_INTERVAL + Duration::from_millis(1)).await;
+
+            assert!(!is_stale_lock(&lock_path));
+            drop(guard);
+            assert!(!lock_path.exists());
+        }
+
+        #[tokio::test(start_paused = true)]
+        async fn reports_a_lock_held_past_the_wait() {
+            let dir = tempfile::tempdir().unwrap();
+            let lock_path = dir.path().join("test.lock");
+            std::fs::create_dir(&lock_path).unwrap();
+
+            let err = acquire_lock(&lock_path).await.err().expect("held lock");
+
+            assert_eq!(
+                format!("{err:#}"),
+                format!("another process held {} for over 20 s", lock_path.display())
+            );
         }
 
         #[tokio::test]
