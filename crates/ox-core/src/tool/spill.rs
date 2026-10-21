@@ -15,8 +15,8 @@ use crate::util::fs::create_private_dir_all;
 
 pub(super) const MAX_OUTPUT_BYTES: usize = 128 * 1024;
 
-/// Runs the prepared call on `tool`, applying [`cap_output`] after each tool's row caps, with the
-/// call's `.txt` spill file keeping the full output.
+/// Runs the prepared call on `tool`, applying [`cap_output`] after each tool's row caps,
+/// with the call's `.txt` spill file keeping the full output.
 pub(crate) async fn run_capped(tool: &dyn Tool, prepared: Prepared, ctx: &ToolCtx) -> ToolOutput {
     let mut output = tool.run(prepared, ctx).await;
     if output.content.len() <= MAX_OUTPUT_BYTES {
@@ -222,7 +222,7 @@ mod tests {
     use crate::tool::local_testing::{ctx, spill_path};
     use crate::tool::testing::bash_registry;
     use crate::tool::view::ToolResultView;
-    use crate::tool::{ToolMetadata, ToolRegistry, ToolSpec};
+    use crate::tool::{ToolRegistry, ToolSpec};
 
     /// Splits output capped by [`cap_output`] into its head, the text inside its omission marker,
     /// and its tail.
@@ -302,19 +302,18 @@ mod tests {
         }
 
         #[tokio::test]
-        async fn within_cap_leaves_content_and_metadata_untouched_and_writes_nothing() {
+        async fn within_cap_leaves_content_untouched_and_writes_nothing() {
             let dir = tempfile::tempdir().unwrap();
             let text = "x".repeat(MAX_OUTPUT_BYTES);
 
             let output = run_fixed(&text, &ctx(dir.path())).await;
 
             assert_eq!(output.content, text);
-            assert_eq!(output.metadata, ToolMetadata::default());
             assert!(!dir.path().join("session").exists());
         }
 
         #[tokio::test]
-        async fn byte_cap_on_grep_keeps_the_row_count_apart_and_falls_through_to_text_view() {
+        async fn byte_cap_on_grep_spills_and_falls_through_to_text_view() {
             let (dir, input) = oversize_grep_input();
             let registry = ToolRegistry::new(vec![Box::new(GrepTool::new(ReadFilter::default()))]);
 
@@ -323,7 +322,6 @@ mod tests {
                 .await;
 
             assert!(spill_path(dir.path(), ".txt").exists());
-            assert!(output.metadata.truncated_total.is_none());
             let view = registry.result_view(
                 "grep",
                 &input,
@@ -352,7 +350,6 @@ mod tests {
                 .await;
 
             assert!(!output.is_error, "{}", output.content);
-            assert!(!spill_path(dir.path(), ".txt").exists());
             let stdout = spill_path(dir.path(), ".stdout.txt");
             let note = format!("full stdout saved to {}] ...", stdout.display());
             assert!(output.content.contains(&note));

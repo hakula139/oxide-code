@@ -138,7 +138,7 @@ async fn run(prepared: Prepared, ctx: &ToolCtx, read_filter: ReadFilter) -> Tool
 #[derive(Debug)]
 struct GlobOutput {
     content: String,
-    /// The number of files the list shows, which the UI shows for the call.
+    /// A one-line summary of the call, which the UI shows on its result.
     title: String,
     truncated_total: Option<usize>,
 }
