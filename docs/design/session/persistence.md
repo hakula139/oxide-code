@@ -12,6 +12,7 @@ Every session is a single append-only `.jsonl` file with one JSON object per lin
 | ---------------------- | -------------- | --------------------------------------------------------------------------------- |
 | `header`               | First line     | Session metadata: ID, working directory, model, created timestamp, format version |
 | `message`              | Middle lines   | Conversation message with `uuid`, optional `parent_uuid`, timestamp               |
+| `rewind`               | After messages | Moves the active branch's tip back to an earlier message, or before the first one |
 | `title`                | Re-appended    | Session title + source. Latest wins                                               |
 | `tool_result_metadata` | Sidecar        | Display metadata for replaying tool results                                       |
 | `file_snapshot`        | Sidecar        | File-tracker state restored on resume when disk state still matches               |
@@ -24,7 +25,7 @@ Every session is a single append-only `.jsonl` file with one JSON object per lin
 ### Schema Invariants
 
 1. **Explicit entry schema.** The loader treats unknown discriminators as malformed lines, so schema compatibility stays explicit.
-2. **`parent_uuid` chain.** Each message links to its predecessor. Concurrent resumes can fork, and the newest-leaf rule resolves the active branch without rewriting history.
+2. **`parent_uuid` chain.** Each message links to its predecessor. Concurrent resumes can fork, and the newest-leaf rule resolves the active branch without rewriting history. A `rewind` entry moves the tip back the same way, by leaving the abandoned messages in place.
 3. **`version` field.** Bump on incompatible changes so older binaries fail fast on session state they cannot read.
 
 ## Compatibility
@@ -37,7 +38,7 @@ Within the stability surface, a newer binary can read an older file as long as e
 - **Removals.** A removed field, since the loader ignores fields it does not know. The data the field held is lost on resume.
 - **Changed shapes with a loader.** Renaming a field or changing its type or meaning requires a loader that still reads the old shape.
 
-An older binary reading a newer file skips entry types it does not know as malformed lines and ignores unknown fields. Bump the header's `version` only when an older binary would misread a newer file, since an older binary refuses any file whose `version` is newer than it supports.
+An older binary reading a newer file skips entry types it does not know as malformed lines and ignores unknown fields. Bump the header's `version` only when an older binary would misread a newer file, since an older binary refuses any file whose `version` is newer than it supports. A prerelease binary that predates `rewind` entries skips them, so until a newer message follows a rewind it resumes the abandoned branch.
 
 A reasoning block stores the `wire` and `model` that produced it alongside a `payload` that only that wire can read, such as the `signature` of an Anthropic `thinking` block or the `data` of a `redacted_thinking` block. The Anthropic wire sends every Anthropic block back unchanged whichever model produced it, as Anthropic's guide to [switching models](https://platform.claude.com/docs/en/build-with-claude/preserved-thinking#switching-models) asks, so the recorded `model` changes no request. Which blocks a model reads depends on the platform, and the API drops or ignores the rest, as the [research note](../../research/api/extended-thinking.md#constraints) details.
 
@@ -85,7 +86,11 @@ Starting a session stages the header in memory. The on-disk file is created by t
 
 ### Resume and Sanitization
 
-`ox -c` reopens the existing session file. The loader walks `Entry::Message` lines into a UUID-indexed DAG, picks the newest-timestamped leaf as the tip, and walks back via `parent_uuid` to produce a linear chain. The sanitization pipeline then drops tool calls without results and results without calls, merges adjacent same-role survivors, and injects head / tail sentinels. A client call pairs with a user `tool_result`, and a server call with the result block in the same or a later reply. A server call that a `pause_turn` left waiting is dropped, because the next prompt closes the turn and the API rejects a call without its result.
+`ox -c` reopens the existing session file. The loader walks `Entry::Message` lines into a UUID-indexed DAG, picks the newest-timestamped leaf as the tip, and walks back via `parent_uuid` to produce a linear chain. A `rewind` entry moves the tip to the message it names and abandons the other leaves, so the newest-leaf rule skips them from then on. Its tip ends the chain until another message line follows it in the file. A rewind naming a message the loader has not read, such as one before the last compaction, is ignored. The sanitization pipeline then drops tool calls without results and results without calls, merges adjacent same-role survivors, and injects head / tail sentinels. A client call pairs with a user `tool_result`, and a server call with the result block in the same or a later reply. A server call that a `pause_turn` left waiting is dropped, because the next prompt closes the turn and the API rejects a call without its result.
+
+### Refused Turns
+
+The API keeps refusing while a refused turn stays in the conversation, so when the model stops with `refusal`, the engine rolls the whole turn back: its prompt, any queued prompts it took in, and its tool rounds. It truncates the live transcript to its length before the prompt, and it restores what the model had seen of the user context and the file tracker. It also appends a `rewind` entry whose tip is the message the prompt chained from, so a resume leaves the turn out too. The next prompt then chains from that message and records the prompt context again if the refused prompt was the first to carry it. A rewind to before the first prompt stops the title request that prompt started, so the next prompt titles the session. The engine emits `TurnRolledBack` ahead of the turn's `TurnFailed`, and the TUI hands the prompts back: the refused one into the empty input for rephrasing, and the queued ones the turn took in to the head of the queue, which waits for the user. The turn's requests stay in the session's cost estimate, and its tool calls' effects remain, such as the files it changed and the background shells it started.
 
 ### Prompt Context
 
@@ -102,15 +107,15 @@ The session's [task list](../tools/tasks.md) needs no entry of its own. On resum
 
 ### Archiving
 
-An `archive` entry sets whether default listings and bare `ox -c` skip the session, and the latest one wins. Bare `/archive` queues one through the actor before the roll that finalizes the session. `/archive <prefix>`, `/unarchive <prefix>`, and Ctrl+X in the `/resume` picker append an entry to another session's file and restore its mtime, so toggling its archive status does not change its position in listings. Resuming an archived session appends an entry that unarchives it. Files never move, so path-based resume and every other reference to a session file keep working.
+An `archive` entry sets whether default listings and `ox -c` skip the session, and the latest one wins. Bare `/archive` queues one through the actor before the roll that finalizes the session. `/archive <prefix>`, `/unarchive <prefix>`, and Ctrl+X in the `/resume` picker append an entry to another session's file and restore its mtime, so toggling its archive status does not change its position in listings. Resuming an archived session appends an entry that unarchives it. Files never move, so path-based resume and every other reference to a session file keep working.
 
 ### Fork-on-Conflict Concurrency
 
-There is no file-level lock: two processes resuming the same session both append, and the newest-leaf rule resolves forks deterministically. Each batch lands in one append write (`O_APPEND` on Unix, an end-of-file-offset write on Windows), so concurrent appends interleave only between batches.
+There is no file-level lock: two processes resuming the same session both append, and the newest-leaf rule resolves forks deterministically. A rewind abandons every leaf it moves away from, including one another process wrote, so that branch ends the chain again only once a newer message extends it. Each batch lands in one append write (`O_APPEND` on Unix, an end-of-file-offset write on Windows), so concurrent appends interleave only between batches.
 
 ### AI-Generated Titles
 
-In the TUI, the first user prompt of a fresh session spawns a tokio task that asks Haiku through `Client::complete` for a 3-7 word sentence-case title, constrained by a structured-outputs JSON schema. The session owns the task, and finalizing the session on a roll or at exit aborts it first, so a late title never writes to or reports on a session that has ended. Once the API answers and reports usage, the task appends the request's `usage` entry before parsing the reply, since a reply without a usable title is billed too. Generation failures only log a warning, while a failed title or usage write surfaces like any other session write error.
+In the TUI, the first user prompt of a fresh session spawns a tokio task that asks Haiku through `Client::complete` for a 3-7 word sentence-case title, constrained by a structured-outputs JSON schema, and keeps the first line of the reply under the same 80-column cap as other titles. The session owns the task, and finalizing the session on a roll or at exit aborts it first, so a late title never writes to or reports on a session that has ended. Once the API answers and reports usage, the task appends the request's `usage` entry before parsing the reply, since a reply without a usable title is billed too. Generation failures only log a warning, while a failed title or usage write surfaces like any other session write error.
 
 ### Session Cost
 
@@ -134,7 +139,7 @@ Write failures surface through the session handle:
 Session listing separates file discovery from metadata parsing:
 
 - **Scope.** `ox --list` walks the current project subdirectory by default, and `--all` widens to every project.
-- **Discovery.** The walk only stats files, so bare `ox -c` parses files only until it finds the newest readable unarchived one, and a prefix lookup parses only files whose name carries a matching ID.
+- **Discovery.** The walk only stats files, so `ox -c` parses files only until it finds the newest readable unarchived one, and a prefix lookup parses only files whose name carries a matching ID.
 - **Metadata.** A parsed file yields its header, the latest `Entry::Title` and `Entry::Summary`, and the archive state. A prefix pre-filter on the `"type"` discriminator keeps message lines off the full-parse hot path.
 - **Archive view.** `--list` and the `/resume` picker show unarchived sessions, or only archived ones with `--list --archived` and the picker's Ctrl+A.
 - **Page budget.** Archive state is stored in each file, so a listing parses sessions in order until it finds one beyond the page, then reports only whether more sessions follow. When few sessions are archived, the archived view parses further.
@@ -146,6 +151,7 @@ Listings sort rows and render them as follows:
 - Sort by file mtime, with the file name breaking ties.
 - Under `--all`, a `Project` column shows the tildified stored `cwd`.
 - Titles truncated to terminal width with trailing `...`.
+- Control characters in titles and project paths, line breaks included, are escaped, so a row stays on one line and cannot change the terminal's state.
 
 ## Design Decisions
 
@@ -161,3 +167,22 @@ Listings sort rows and render them as follows:
 10. **Listing scan with message pre-filter, mtime sort.** Titles and summaries can appear anywhere in the file, so the scan reads every line and the prefix check keeps message lines out of JSON parsing.
 11. **Actor-owned writes, receive-and-drain batching.** One task owns the writer, and `tokio::join!` coalesces a tool round's records into one append.
 12. **Archive state as an appended entry.** A session keeps the same path whether it is archived or active. Because filtering listings by archive state requires parsing files, listings indicate whether more sessions follow the current page without counting them.
+
+## Sources
+
+- `crates/ox-core/src/engine.rs`: the session cost summed from the resumed `usage` entries.
+- `crates/ox-core/src/engine/turn.rs`: the joined writes that put a tool round's records in one batch.
+- `crates/ox-core/src/session/actor.rs`: the actor that owns the writer and appends each wakeup's commands in one write.
+- `crates/ox-core/src/session/chain.rs`: message chain reconstruction from the `parent_uuid` DAG.
+- `crates/ox-core/src/session/display.rs`: the title and metadata formatting that listings use.
+- `crates/ox-core/src/session/entry.rs`: the JSONL entry schema and its header `version`.
+- `crates/ox-core/src/session/handle.rs`: `SessionHandle`, the public API that sends each write to the actor and surfaces the first write failure of each kind.
+- `crates/ox-core/src/session/list_view.rs`: the `ox --list` table.
+- `crates/ox-core/src/session/path.rs`: the sanitized per-project subdirectory names.
+- `crates/ox-core/src/session/resolver.rs`: the `--continue` argument and session-ID prefix resolution.
+- `crates/ox-core/src/session/sanitize.rs`: resume-time transcript repair.
+- `crates/ox-core/src/session/saved.rs`: archiving and deleting saved sessions.
+- `crates/ox-core/src/session/state.rs`: the in-memory session state the actor owns.
+- `crates/ox-core/src/session/store.rs`: session file I/O and the `{epoch}-{uuid}.jsonl` file names.
+- `crates/ox-core/src/session/store/listing.rs`: stat-only listing walks and metadata parsing.
+- `crates/ox-core/src/session/title_generator.rs`: the background AI title generator.

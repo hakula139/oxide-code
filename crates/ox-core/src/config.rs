@@ -23,7 +23,7 @@ use anyhow::{Context, Result, anyhow, bail};
 use serde::{Deserialize, Serialize};
 use tracing::warn;
 
-use self::auth::{Auth, AuthSource, ResolveError};
+use self::auth::{Auth, AuthSource, LoginUnavailable, ResolveError};
 use self::compaction::{AutoCompactionConfig, CompactionConfig};
 use self::gateway::{GatewayCompat, GatewaySnapshot};
 use self::load::Loaded;
@@ -34,6 +34,7 @@ use self::schema::{FileConfig, PermissionTable, TierTable};
 use crate::model::ModelSpec;
 use crate::permission::{Mode, Policy, Tier, Workspace};
 use crate::util::env;
+use crate::util::git::project_root;
 use crate::util::path::expand_user;
 use crate::util::tls::{PlatformTrust, Trust, load_extra_ca_certs};
 
@@ -50,8 +51,6 @@ pub struct ConfigSnapshot {
     pub effort: Option<Effort>,
     /// `None` while signed out.
     pub auth: Option<AuthSource>,
-    /// Why the session started signed out, shown among the startup [`Self::notices`].
-    pub signed_out_notice: Option<String>,
     pub base_url: String,
     /// PEM bundle appended to reqwest's trust anchors.
     pub extra_ca_certs: Option<PathBuf>,
@@ -72,15 +71,6 @@ pub struct ConfigSnapshot {
 }
 
 impl ConfigSnapshot {
-    /// Startup notices: an unsupported model, then why the session is signed out.
-    pub fn notices(&self) -> Vec<String> {
-        self.model
-            .unsupported_notice()
-            .into_iter()
-            .chain(self.signed_out_notice.clone())
-            .collect()
-    }
-
     /// Applies a `/model` or `/effort` swap. A changed model and an honored effort pick become
     /// session-set, while an effort the new model derived on its own reverts to the default source.
     pub fn apply_swap(
@@ -313,6 +303,8 @@ impl FromStr for StatusLineSegment {
 pub struct ThemeConfig {
     /// Built-in catalog key, such as `"mocha"`, or filesystem path, [`DEFAULT_THEME`] when unset.
     pub base: String,
+    /// Where `base` came from. A project file may only name a built-in theme.
+    pub base_source: Source,
     /// `[tui.theme.overrides]` slot patches, still raw TOML.
     pub overrides: toml::Table,
 }
@@ -329,7 +321,7 @@ pub struct Config {
     /// sign it in.
     pub(crate) auth: Option<Auth>,
     /// Why the session started signed out.
-    pub(crate) signed_out_notice: Option<String>,
+    pub(crate) signed_out: Option<LoginUnavailable>,
     pub(crate) base_url: String,
     /// Resolved path to a PEM bundle appended to reqwest's trust anchors. `None` means the
     /// client trusts only the platform roots.
@@ -354,11 +346,12 @@ pub struct Config {
 }
 
 impl Config {
-    /// Resolves config from env, the config files [`load::load`] finds from `cwd`, and built-in
-    /// defaults. A TOML or env parse error fails the load. Without a working credential, an
-    /// `interactive` session starts signed out and any other session fails.
+    /// Resolves config from env, the config files [`load::load`] finds from `cwd` within its
+    /// [`project_root`], and built-in defaults. A TOML or env parse error fails the load. Without
+    /// a working credential, an `interactive` session starts signed out and any other session
+    /// fails.
     pub async fn load(cwd: &Path, interactive: bool) -> Result<Self> {
-        let Loaded { config, origins } = load::load(cwd)?;
+        let Loaded { config, origins } = load::load(cwd, &project_root(cwd))?;
         let FileConfig {
             client,
             permission,
@@ -429,6 +422,7 @@ impl Config {
 
         let theme = ThemeConfig {
             base: tui.theme.base.unwrap_or_else(|| DEFAULT_THEME.to_owned()),
+            base_source: origins.source("tui.theme.base"),
             overrides: tui.theme.overrides,
         };
 
@@ -454,7 +448,7 @@ impl Config {
             model,
             effort: effort.value,
             auth: credential.auth,
-            signed_out_notice: credential.signed_out_notice,
+            signed_out: credential.signed_out,
             base_url: base_url.value,
             extra_ca_certs: extra_ca_certs.value,
             gateway,
@@ -472,6 +466,19 @@ impl Config {
         })
     }
 
+    /// Startup notices: an unsupported model, then why the session is signed out.
+    pub(crate) fn notices(&self) -> Vec<String> {
+        self.model
+            .unsupported_notice()
+            .into_iter()
+            .chain(
+                self.signed_out
+                    .as_ref()
+                    .map(|signed_out| signed_out.notice.clone()),
+            )
+            .collect()
+    }
+
     /// Applies `--mode`, which overrides the config files and `OX_PERMISSION_MODE`.
     pub fn apply_mode_flag(&mut self, mode: Mode) {
         self.permission.set_mode(mode);
@@ -484,7 +491,6 @@ impl Config {
             model: self.model.clone(),
             effort: self.effort,
             auth: self.auth.as_ref().map(Auth::source),
-            signed_out_notice: self.signed_out_notice.clone(),
             base_url: self.base_url.clone(),
             extra_ca_certs: self.extra_ca_certs.clone(),
             gateway: self.gateway.snapshot(),
@@ -531,7 +537,7 @@ fn resolve_extra_ca_certs(file: Option<Sourced<String>>) -> Result<Sourced<Optio
 struct ResolvedAuth {
     auth: Option<Auth>,
     source: Source,
-    signed_out_notice: Option<String>,
+    signed_out: Option<LoginUnavailable>,
 }
 
 /// Resolves the credential and its source, rejecting a custom header that would replace the
@@ -551,9 +557,9 @@ async fn resolve_auth(
         auth::stored_login(ClaudeCodeKeychain::SYSTEM, trust),
     )
     .await;
-    let (auth, signed_out_notice) = match resolved {
+    let (auth, signed_out) = match resolved {
         Ok(auth) => (Some(auth), None),
-        Err(ResolveError::SignedOut(e)) if interactive => (None, Some(auth::signed_out_notice(&e))),
+        Err(ResolveError::SignedOut(e)) if interactive => (None, Some(LoginUnavailable::new(&e))),
         Err(e) => return Err(e.into()),
     };
     let source = auth.as_ref().map_or(AuthSource::OxLogin, Auth::source);
@@ -566,7 +572,7 @@ async fn resolve_auth(
     Ok(ResolvedAuth {
         auth,
         source,
-        signed_out_notice,
+        signed_out,
     })
 }
 
@@ -721,8 +727,11 @@ pub(crate) fn is_first_party_base_url(base_url: &str) -> bool {
 
 // ── Display ──
 
+/// Auth label for a session without credentials.
+pub const NOT_SIGNED_IN: &str = "Not signed in";
+
 pub fn display_auth(auth: Option<AuthSource>) -> String {
-    auth.map_or_else(|| "Not signed in".to_owned(), |source| source.to_string())
+    auth.map_or_else(|| NOT_SIGNED_IN.to_owned(), |source| source.to_string())
 }
 
 pub fn display_effort(effort: Option<Effort>) -> String {
@@ -754,6 +763,8 @@ mod tests {
     use tempfile::TempDir;
 
     use super::compaction::testing::WINDOW_1M_THRESHOLD;
+    use super::oauth::LoginError;
+    use super::oauth::testing::write_creds;
     use super::provenance::Layer;
     use super::*;
     use crate::permission::{Access, Decision, PermissionClass};
@@ -766,7 +777,7 @@ mod tests {
                 AuthSource::ClaudeCodeLogin,
                 "token-must-not-leak",
             )),
-            signed_out_notice: None,
+            signed_out: None,
             base_url: "https://api.example.test".to_owned(),
             extra_ca_certs: Some(PathBuf::from("/etc/ssl/corp-ca.pem")),
             gateway: GatewayCompat {
@@ -790,6 +801,7 @@ mod tests {
             ],
             theme: ThemeConfig {
                 base: "macchiato".to_owned(),
+                base_source: Source::Default,
                 overrides: toml::Table::new(),
             },
             provenance: Provenance {
@@ -802,33 +814,6 @@ mod tests {
 
     mod config_snapshot {
         use super::*;
-
-        mod notices {
-            use super::*;
-
-            #[test]
-            fn list_an_unsupported_model_then_why_the_session_is_signed_out() {
-                let mut cfg = sample_config();
-                cfg.auth = None;
-                cfg.signed_out_notice = Some("Not signed in. Run `/login` to sign in.".to_owned());
-
-                let notices = cfg.snapshot().notices();
-
-                assert_eq!(notices.len(), 2, "{notices:?}");
-                assert!(
-                    notices[0].starts_with("`claude-test-1-0` is not a supported model"),
-                    "{notices:?}"
-                );
-                assert_eq!(notices[1], "Not signed in. Run `/login` to sign in.");
-            }
-
-            #[test]
-            fn are_empty_for_a_current_setup() {
-                let mut cfg = sample_config();
-                cfg.model = ModelSpec::resolve("claude-opus-5-5".to_owned());
-                assert_eq!(cfg.snapshot().notices(), [] as [String; 0]);
-            }
-        }
 
         mod apply_swap {
             use super::*;
@@ -984,6 +969,7 @@ mod tests {
             "ANTHROPIC_AUTH_TOKEN",
             "ANTHROPIC_API_KEY",
             "CLAUDE_CODE_OAUTH_TOKEN",
+            "CLAUDE_CONFIG_DIR",
             "ANTHROPIC_CUSTOM_HEADERS",
             "CLAUDE_CODE_ATTRIBUTION_HEADER",
             "CLAUDE_CODE_DISABLE_STRUCTURED_OUTPUTS",
@@ -1135,7 +1121,7 @@ mod tests {
         #[tokio::test]
         async fn theme_passes_base_and_raw_overrides_through() {
             let dir = tempfile::tempdir().unwrap();
-            write_user_config(
+            let layer = write_user_config(
                 dir.path(),
                 indoc! {r##"
                     [tui.theme]
@@ -1148,6 +1134,7 @@ mod tests {
             );
             let config = load_with(&dir, &[]).await.unwrap();
             assert_eq!(config.theme.base, "latte");
+            assert_eq!(config.theme.base_source, Source::File(layer));
             assert_eq!(
                 config.theme.overrides,
                 indoc! {r##"
@@ -1545,7 +1532,7 @@ mod tests {
                 .unwrap();
             assert_auth(&config, AuthSource::OxLogin, "ox-token");
             assert_eq!(config.provenance.auth, Source::Default);
-            assert_eq!(config.signed_out_notice, None);
+            assert!(config.signed_out.is_none());
         }
 
         #[tokio::test]
@@ -1562,10 +1549,12 @@ mod tests {
 
             let interactive = interactive.unwrap();
             assert!(interactive.auth.is_none());
+            let signed_out = interactive.signed_out.expect("signed out");
             assert_eq!(
-                interactive.signed_out_notice.as_deref(),
-                Some("Not signed in: oxide-code login has expired. Run `/login` to sign in again."),
+                signed_out.notice,
+                "Not signed in: oxide-code login has expired. Run `/login` to sign in again.",
             );
+            assert!(!signed_out.retry, "an expired login needs a new sign-in");
             assert_eq!(
                 format!(
                     "{:#}",
@@ -1573,6 +1562,32 @@ mod tests {
                 ),
                 "oxide-code login has expired. Run `/login` to sign in again.",
             );
+        }
+
+        #[tokio::test(start_paused = true)]
+        async fn retries_a_stored_login_a_held_lock_kept_out() {
+            let (dir, data) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+            let vars = ox_login_env(&dir, &data, 0);
+            let store = data.path().join("ox");
+            write_creds(&store.join("credentials.json"), "dead", Some("refresh"), 0);
+            std::fs::create_dir(store.join("credentials.lock")).unwrap();
+
+            let config = temp_env::async_with_vars(vars, Config::load(dir.path(), true))
+                .await
+                .unwrap();
+
+            let signed_out = config.signed_out.expect("signed out");
+            assert_eq!(
+                signed_out.notice,
+                format!(
+                    "Not signed in: failed to refresh the expired oxide-code login: \
+                     another process held {} for over 20 s. \
+                     Try again in a moment. \
+                     The next prompt tries the stored login again.",
+                    store.join("credentials.lock").display(),
+                ),
+            );
+            assert!(signed_out.retry);
         }
 
         #[tokio::test]
@@ -2228,6 +2243,33 @@ mod tests {
                     ..Provenance::default()
                 },
             );
+        }
+    }
+
+    mod notices {
+        use super::*;
+
+        #[test]
+        fn list_an_unsupported_model_then_why_the_session_is_signed_out() {
+            let mut cfg = sample_config();
+            cfg.auth = None;
+            cfg.signed_out = Some(LoginUnavailable::new(&LoginError::Missing));
+
+            let notices = cfg.notices();
+
+            assert_eq!(notices.len(), 2, "{notices:?}");
+            assert!(
+                notices[0].starts_with("`claude-test-1-0` is not a supported model"),
+                "{notices:?}"
+            );
+            assert_eq!(notices[1], "Not signed in. Run `/login` to sign in.");
+        }
+
+        #[test]
+        fn are_empty_for_a_current_setup() {
+            let mut cfg = sample_config();
+            cfg.model = ModelSpec::resolve("claude-opus-5-5".to_owned());
+            assert_eq!(cfg.notices(), [] as [String; 0]);
         }
     }
 

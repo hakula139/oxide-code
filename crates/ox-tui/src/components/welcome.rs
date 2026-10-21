@@ -1,39 +1,26 @@
 //! Welcome surface painted into the chat region while the chat is empty.
 
+use fastrand::Rng;
 use ratatui::Frame;
 use ratatui::layout::{Alignment, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 use unicode_width::UnicodeWidthStr;
+use xxhash_rust::xxh64::xxh64;
 
-use ox_core::config::display_effort;
-use ox_core::util::text::{center_truncate_to_width, truncate_to_width};
+use ox_core::config::{NOT_SIGNED_IN, display_effort};
+use ox_core::util::text::{center_truncate_to_width, pad_to_width, truncate_to_width};
 
 use crate::glyphs::INLINE_SEPARATOR;
-use crate::slash::LiveSessionInfo;
+use crate::slash::{LiveSessionInfo, MatchedCommand, filter_built_ins};
 use crate::theme::Theme;
 
 // ── Content Pools ──
 
-type Starter = (&'static str, &'static str);
-
-const STARTER_POOL: &[Starter] = &[
-    ("/clear", "reset conversation"),
-    ("/compact", "summarize and trim context"),
-    ("/config", "inspect resolved config"),
-    ("/diff", "show git changes"),
-    ("/effort", "tune Speed ↔ Intelligence"),
-    ("/help", "list commands"),
-    ("/init", "create or update AGENTS.md / CLAUDE.md"),
-    ("/login", "sign in to a Claude account"),
-    ("/mode", "switch permission mode"),
-    ("/model", "switch model"),
-    ("/rename", "set session title"),
-    ("/resume", "switch to another session"),
-    ("/status", "session at a glance"),
-    ("/theme", "switch theme"),
-];
+/// Built-ins a new session cannot run bare: `/delete` and `/unarchive` need an ID, `/archive` has
+/// nothing to archive yet, and `/logout` only undoes a `/login`.
+const NOT_STARTERS: &[&str] = &["archive", "delete", "logout", "unarchive"];
 
 const TIP_POOL: &[&str] = &[
     "click #NN in the status bar to open the PR",
@@ -70,38 +57,24 @@ const NARROW_MIN: u16 = 25;
 /// cwd column centers on its own width.
 const STARTERS_MIN_HEIGHT: u16 = 13;
 
-// ── Snapshot ──
+// ── Picks ──
 
-/// Projection of [`LiveSessionInfo`] for [`paint`], with random picks fixed at construction.
-pub(crate) struct WelcomeSnapshot {
-    version: &'static str,
-    model_label: String,
-    effort_label: String,
-    auth_label: &'static str,
-    cwd: String,
-    starters: [Starter; STARTER_PICK],
+/// The starters and tip a session shows, drawn from a seed of its ID so every frame of a session
+/// paints the same picks while `/clear` and a new launch draw again.
+struct Picks {
+    starters: Vec<MatchedCommand>,
     tip: &'static str,
 }
 
-impl WelcomeSnapshot {
-    pub(crate) fn from_live(info: &LiveSessionInfo) -> Self {
-        // Derive seed from session id: the same welcome paints across re-renders within a session
-        // but `/clear` (which rolls the session) and fresh launches get a new pick.
-        Self::from_live_with_seed(info, hash_seed(&info.session_id))
-    }
-
-    fn from_live_with_seed(info: &LiveSessionInfo, seed: u64) -> Self {
+impl Picks {
+    fn for_session(session_id: &str) -> Self {
+        let mut rng = Rng::with_seed(xxh64(session_id.as_bytes(), 0));
+        let pool = filter_built_ins("")
+            .into_iter()
+            .filter(|cmd| !NOT_STARTERS.contains(&cmd.name));
         Self {
-            version: info.version,
-            model_label: info.config.model.display_name().to_owned(),
-            effort_label: display_effort(info.config.effort),
-            auth_label: info
-                .config
-                .auth
-                .map_or("Not signed in", |source| source.kind().label()),
-            cwd: info.cwd.clone(),
-            starters: pick_starters(seed),
-            tip: pick_tip(seed),
+            starters: rng.choose_multiple(pool, STARTER_PICK),
+            tip: TIP_POOL[rng.usize(..TIP_POOL.len())],
         }
     }
 }
@@ -109,11 +82,12 @@ impl WelcomeSnapshot {
 // ── Paint ──
 
 /// No-op when `area.width < NARROW_MIN` or `area.height == 0`.
-pub(crate) fn paint(frame: &mut Frame<'_>, area: Rect, theme: &Theme, snap: &WelcomeSnapshot) {
+pub(crate) fn paint(frame: &mut Frame<'_>, area: Rect, theme: &Theme, info: &LiveSessionInfo) {
     if area.width < NARROW_MIN || area.height == 0 {
         return;
     }
-    let lines = build_lines(area.width, area.height, theme, snap);
+    let picks = Picks::for_session(&info.session_id);
+    let lines = build_lines(area.width, area.height, theme, info, &picks);
     let paragraph = Paragraph::new(lines)
         .alignment(Alignment::Center)
         .style(theme.surface());
@@ -126,7 +100,8 @@ fn build_lines(
     width: u16,
     height: u16,
     theme: &Theme,
-    snap: &WelcomeSnapshot,
+    info: &LiveSessionInfo,
+    picks: &Picks,
 ) -> Vec<Line<'static>> {
     let max_body = usize::from(width);
     let full = width >= FULL_MIN;
@@ -135,15 +110,15 @@ fn build_lines(
     let mut lines: Vec<Line<'static>> = Vec::new();
 
     lines.push(Line::raw(""));
-    push_identity(&mut lines, theme, snap, full);
+    push_identity(&mut lines, theme, info.version, full);
     lines.push(Line::raw(""));
 
     // A shared column width keeps the centered rows on one left edge. Starter and tip widths count
     // only when that block renders, so a short area reserves no space for rows it drops.
-    let env = truncate_to_width(&environment_text(snap, full, with_starters), max_body);
-    let cwd = cwd_text(max_body, snap, with_starters);
-    let starter_rows = render_starters_block.then(|| starter_rows(&snap.starters));
-    let tip_text = render_starters_block.then(|| format!("{TIP_LABEL}{TIP_SEP}{}", snap.tip));
+    let env = truncate_to_width(&environment_text(info, full, with_starters), max_body);
+    let cwd = cwd_text(max_body, &info.cwd, with_starters);
+    let starter_rows = render_starters_block.then(|| starter_rows(&picks.starters));
+    let tip_text = render_starters_block.then(|| format!("{TIP_LABEL}{TIP_SEP}{}", picks.tip));
     // Clamp to area.width, since wider columns clip on the right under center alignment.
     let column_width =
         column_width(&env, &cwd, starter_rows.as_deref(), tip_text.as_deref()).min(max_body);
@@ -159,20 +134,15 @@ fn build_lines(
             push_starter_row(&mut lines, name, desc, theme, column_width);
         }
         lines.push(Line::raw(""));
-        push_tip(&mut lines, theme, snap.tip, column_width);
+        push_tip(&mut lines, theme, picks.tip, column_width);
     }
     lines
 }
 
-fn push_identity(
-    lines: &mut Vec<Line<'static>>,
-    theme: &Theme,
-    snap: &WelcomeSnapshot,
-    full: bool,
-) {
+fn push_identity(lines: &mut Vec<Line<'static>>, theme: &Theme, version: &str, full: bool) {
     let dim = theme.dim();
     let accent_bold = theme.accent().add_modifier(Modifier::BOLD);
-    let version = format!("v{}", snap.version);
+    let version = format!("v{version}");
     if full {
         lines.push(Line::from(vec![
             Span::styled(RIBBON_FLANK, dim),
@@ -192,40 +162,45 @@ fn push_identity(
     }
 }
 
-fn environment_text(snap: &WelcomeSnapshot, full: bool, with_starters: bool) -> String {
+fn environment_text(info: &LiveSessionInfo, full: bool, with_starters: bool) -> String {
+    let config = &info.config;
     // Drop the " effort" suffix below COLLAPSED_MIN so the line fits at NARROW_MIN.
     let suffix = if with_starters { " effort" } else { "" };
     let mut text = format!(
         "{model}{INLINE_SEPARATOR}{effort}{suffix}",
-        model = snap.model_label,
-        effort = snap.effort_label,
+        model = config.model.display_name(),
+        effort = display_effort(config.effort),
     );
     if full {
         text.push_str(INLINE_SEPARATOR);
-        text.push_str(snap.auth_label);
+        text.push_str(
+            config
+                .auth
+                .map_or(NOT_SIGNED_IN, |source| source.kind().label()),
+        );
     }
     text
 }
 
-fn cwd_text(max_body: usize, snap: &WelcomeSnapshot, with_starters: bool) -> String {
+fn cwd_text(max_body: usize, cwd: &str, with_starters: bool) -> String {
     if with_starters {
-        truncate_to_width(&snap.cwd, max_body)
+        truncate_to_width(cwd, max_body)
     } else {
-        center_truncate_to_width(&snap.cwd, max_body)
+        center_truncate_to_width(cwd, max_body)
     }
 }
 
-fn starter_rows(picked: &[Starter; STARTER_PICK]) -> Vec<(String, String)> {
+fn starter_rows(picked: &[MatchedCommand]) -> Vec<(String, String)> {
     let name_col_width = picked
         .iter()
-        .map(|(name, _)| name.width())
+        .map(|cmd| cmd.name.width() + 1)
         .max()
         .unwrap_or(0);
     picked
         .iter()
-        .map(|(name, desc)| {
-            let pad = " ".repeat(name_col_width.saturating_sub(name.width()));
-            (format!("  {name}{pad}"), (*desc).to_owned())
+        .map(|cmd| {
+            let name = pad_to_width(&format!("/{}", cmd.name), name_col_width);
+            (format!("  {name}"), cmd.description.to_owned())
         })
         .collect()
 }
@@ -295,45 +270,6 @@ fn push_tip(lines: &mut Vec<Line<'static>>, theme: &Theme, tip: &'static str, co
     ]));
 }
 
-// ── Random Picks ──
-
-// Knuth's MMIX LCG constants, which spread the picks enough per session.
-const LCG_MULT: u64 = 6_364_136_223_846_793_005;
-const LCG_INC: u64 = 1_442_695_040_888_963_407;
-
-fn lcg_step(state: u64) -> u64 {
-    state.wrapping_mul(LCG_MULT).wrapping_add(LCG_INC)
-}
-
-fn pick_starters(seed: u64) -> [Starter; STARTER_PICK] {
-    let n = STARTER_POOL.len();
-    debug_assert!(n >= STARTER_PICK);
-    // Partial Fisher-Yates: STARTER_PICK swaps from a length-n deck draws k distinct indices.
-    let mut state = seed | 1;
-    let mut deck: Vec<usize> = (0..n).collect();
-    for i in 0..STARTER_PICK {
-        state = lcg_step(state);
-        let span = u64::try_from(n - i).unwrap_or(u64::MAX);
-        let j = i + usize::try_from((state >> 33) % span).unwrap_or(0);
-        deck.swap(i, j);
-    }
-    std::array::from_fn(|i| STARTER_POOL[deck[i]])
-}
-
-fn pick_tip(seed: u64) -> &'static str {
-    let state = lcg_step(seed | 1);
-    let n = u64::try_from(TIP_POOL.len()).unwrap_or(1);
-    let idx = usize::try_from((state >> 33) % n).unwrap_or(0);
-    TIP_POOL[idx]
-}
-
-fn hash_seed(s: &str) -> u64 {
-    // FNV-1a 64-bit.
-    s.bytes().fold(0xcbf2_9ce4_8422_2325, |h, b| {
-        (h ^ u64::from(b)).wrapping_mul(0x0000_0100_0000_01b3)
-    })
-}
-
 #[cfg(test)]
 mod tests {
     use ratatui::Terminal;
@@ -343,10 +279,7 @@ mod tests {
     use ox_core::config::auth::AuthSource;
 
     use super::*;
-    use crate::slash::filter_built_ins;
     use crate::slash::testing::test_session_info;
-
-    const TEST_SEED: u64 = 0x00C0_FFEE;
 
     fn fixture() -> LiveSessionInfo {
         let mut info = test_session_info();
@@ -357,80 +290,91 @@ mod tests {
         info
     }
 
-    fn snap_for(info: &LiveSessionInfo) -> WelcomeSnapshot {
-        WelcomeSnapshot::from_live_with_seed(info, TEST_SEED)
+    fn starter_names(picks: &Picks) -> Vec<&'static str> {
+        picks.starters.iter().map(|cmd| cmd.name).collect()
     }
 
-    mod from_live {
+    mod picks {
+        use super::*;
+
+        const SESSION_IDS: [&str; 8] = ["a", "b", "c", "d", "e", "f", "g", "h"];
+
+        #[test]
+        fn draws_the_same_picks_on_every_frame_of_a_session() {
+            let first = Picks::for_session("session");
+
+            let again = Picks::for_session("session");
+
+            assert_eq!(starter_names(&again), starter_names(&first));
+            assert_eq!(again.tip, first.tip);
+        }
+
+        #[test]
+        fn draws_distinct_starters_a_new_session_can_run() {
+            for id in SESSION_IDS {
+                let picks = Picks::for_session(id);
+
+                let mut names = starter_names(&picks);
+
+                names.sort_unstable();
+                names.dedup();
+                assert_eq!(names.len(), STARTER_PICK, "{id}: {names:?}");
+                assert!(
+                    names.iter().all(|name| !NOT_STARTERS.contains(name)),
+                    "{id}: {names:?}"
+                );
+            }
+        }
+
+        #[test]
+        fn draws_again_for_another_session() {
+            let draws: Vec<(Vec<&str>, &str)> = SESSION_IDS
+                .iter()
+                .map(|id| Picks::for_session(id))
+                .map(|picks| (starter_names(&picks), picks.tip))
+                .collect();
+
+            assert!(draws.iter().any(|draw| *draw != draws[0]), "{draws:?}");
+        }
+    }
+
+    mod not_starters {
         use super::*;
 
         #[test]
-        fn projects_display_name_and_effort() {
-            let info = fixture();
-            let snap = snap_for(&info);
-            assert_eq!(snap.version, "0.1.0");
-            assert_eq!(snap.model_label, "Claude Opus 5.5");
-            assert_eq!(snap.effort_label, "xhigh");
-            assert_eq!(snap.auth_label, "OAuth");
-            assert_eq!(snap.cwd, "~/github/oxide-code");
+        fn names_only_built_ins() {
+            let built_ins: Vec<&str> = filter_built_ins("").iter().map(|cmd| cmd.name).collect();
+
+            assert!(
+                NOT_STARTERS.iter().all(|name| built_ins.contains(name)),
+                "{built_ins:?}"
+            );
         }
+    }
+
+    mod environment_text {
+        use super::*;
 
         #[test]
         fn labels_a_signed_out_session() {
             let mut info = fixture();
             info.config.auth = None;
-            assert_eq!(snap_for(&info).auth_label, "Not signed in");
-        }
 
-        #[test]
-        fn picks_distinct_starters_from_the_pool() {
-            let info = fixture();
-            let snap = snap_for(&info);
-            let names: Vec<&str> = snap.starters.iter().map(|(n, _)| *n).collect();
-            assert_eq!(names.len(), STARTER_PICK);
-            let mut sorted = names.clone();
-            sorted.sort_unstable();
-            sorted.dedup();
-            assert_eq!(
-                sorted.len(),
-                STARTER_PICK,
-                "picked starters must be distinct"
-            );
-            for picked in &snap.starters {
-                assert!(STARTER_POOL.contains(picked));
-            }
-        }
+            let text = environment_text(&info, true, true);
 
-        #[test]
-        fn picks_tip_from_the_pool() {
-            let info = fixture();
-            let snap = snap_for(&info);
-            assert!(TIP_POOL.contains(&snap.tip));
-        }
-    }
-
-    mod from_live_with_seed {
-        use super::*;
-
-        #[test]
-        fn is_deterministic() {
-            let info = fixture();
-            let a = WelcomeSnapshot::from_live_with_seed(&info, 7);
-            let b = WelcomeSnapshot::from_live_with_seed(&info, 7);
-            assert_eq!(a.starters, b.starters);
-            assert_eq!(a.tip, b.tip);
+            assert_eq!(text, "Claude Opus 5.5 · xhigh effort · Not signed in");
         }
     }
 
     mod paint {
         use super::*;
 
-        fn render(width: u16, height: u16, snap: &WelcomeSnapshot) -> TestBackend {
+        fn render(width: u16, height: u16, info: &LiveSessionInfo) -> TestBackend {
             let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
             let theme = Theme::default();
             terminal
                 .draw(|frame| {
-                    paint(frame, Rect::new(0, 0, width, height), &theme, snap);
+                    paint(frame, Rect::new(0, 0, width, height), &theme, info);
                 })
                 .unwrap();
             terminal.backend().clone()
@@ -438,43 +382,42 @@ mod tests {
 
         #[test]
         fn below_narrow_min_is_a_noop() {
-            let snap = snap_for(&fixture());
-            let backend = render(NARROW_MIN - 1, 12, &snap);
+            let info = fixture();
+            let backend = render(NARROW_MIN - 1, 12, &info);
             for cell in &backend.buffer().content {
                 assert_eq!(cell.symbol(), " ", "every cell must remain blank");
             }
         }
 
         #[test]
-        fn full_width_renders_box_environment_starters_and_trailer() {
-            let snap = snap_for(&fixture());
-            insta::assert_snapshot!(render(80, 14, &snap));
+        fn full_width_flanks_the_wordmark_and_indents_the_body() {
+            let info = fixture();
+            insta::assert_snapshot!(render(80, 14, &info));
         }
 
         #[test]
         fn at_60_col_minimum_full_layout_still_includes_starters() {
-            let snap = snap_for(&fixture());
-            insta::assert_snapshot!(render(60, 14, &snap));
+            let info = fixture();
+            insta::assert_snapshot!(render(60, 14, &info));
         }
 
         #[test]
-        fn collapsed_drops_box_but_keeps_starters() {
-            let snap = snap_for(&fixture());
-            insta::assert_snapshot!(render(50, 14, &snap));
+        fn collapsed_drops_the_ribbon_and_keeps_starters() {
+            let info = fixture();
+            insta::assert_snapshot!(render(50, 14, &info));
         }
 
         #[test]
         fn narrow_drops_starters_and_truncates_cwd_in_the_middle() {
             let mut info = fixture();
             info.cwd = "~/very/long/working/directory/path/oxide-code".to_owned();
-            let snap = snap_for(&info);
-            insta::assert_snapshot!(render(30, 8, &snap));
+            insta::assert_snapshot!(render(30, 8, &info));
         }
 
         #[test]
         fn at_narrow_min_does_not_clip_environment_text() {
-            let snap = snap_for(&fixture());
-            let backend = render(NARROW_MIN, 8, &snap);
+            let info = fixture();
+            let backend = render(NARROW_MIN, 8, &info);
             let row: String = (0..NARROW_MIN)
                 .map(|x| {
                     backend
@@ -488,8 +431,8 @@ mod tests {
 
         #[test]
         fn below_starters_min_height_centers_env_on_its_own_width() {
-            let snap = snap_for(&fixture());
-            let backend = render(80, STARTERS_MIN_HEIGHT - 1, &snap);
+            let info = fixture();
+            let backend = render(80, STARTERS_MIN_HEIGHT - 1, &info);
             let env_row: String = (0..80)
                 .map(|x| {
                     backend
@@ -508,8 +451,8 @@ mod tests {
 
         #[test]
         fn just_below_collapsed_min_drops_starters() {
-            let snap = snap_for(&fixture());
-            let backend = render(COLLAPSED_MIN - 1, 12, &snap);
+            let info = fixture();
+            let backend = render(COLLAPSED_MIN - 1, 12, &info);
             let body: String = backend
                 .buffer()
                 .content
@@ -525,8 +468,8 @@ mod tests {
 
         #[test]
         fn just_below_full_min_drops_ribbon() {
-            let snap = snap_for(&fixture());
-            let backend = render(FULL_MIN - 1, 14, &snap);
+            let info = fixture();
+            let backend = render(FULL_MIN - 1, 14, &info);
             let body: String = backend
                 .buffer()
                 .content
@@ -538,33 +481,16 @@ mod tests {
         }
 
         #[test]
-        fn zero_height_is_a_noop() {
-            let snap = snap_for(&fixture());
-            let backend = render(80, 0, &snap);
-            assert!(
-                backend.buffer().content.is_empty(),
-                "zero-height area paints nothing",
-            );
-        }
-    }
+        fn paints_nothing_into_a_zero_height_area() {
+            let info = fixture();
+            let mut terminal = Terminal::new(TestBackend::new(80, 4)).unwrap();
 
-    mod starter_pool {
-        use super::*;
+            terminal
+                .draw(|frame| paint(frame, Rect::new(0, 2, 80, 0), &Theme::default(), &info))
+                .unwrap();
 
-        #[test]
-        fn lists_every_built_in_that_runs_bare_on_an_empty_session() {
-            // `/delete` and `/unarchive` need an id, `/archive` has nothing to archive yet, and
-            // `/logout` only undoes a `/login`.
-            let mut built_ins: Vec<String> = filter_built_ins("")
-                .into_iter()
-                .map(|cmd| format!("/{}", cmd.name))
-                .filter(|name| {
-                    !["/archive", "/delete", "/logout", "/unarchive"].contains(&name.as_str())
-                })
-                .collect();
-            built_ins.sort_unstable();
-            let starters: Vec<&str> = STARTER_POOL.iter().map(|(name, _)| *name).collect();
-            assert_eq!(starters, built_ins);
+            let buffer = terminal.backend().buffer();
+            assert!(buffer.content.iter().all(|cell| cell.symbol() == " "));
         }
     }
 }

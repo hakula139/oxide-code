@@ -1,9 +1,11 @@
 //! Engine events and background task results: chat and status updates, the turn lifecycle they
-//! drive, session swaps, config changes, sign-in results, git probe updates, and copy reports.
+//! drive, session swaps, config changes, sign-in results, git probe updates, copy reports, and
+//! background slash-command output.
 
 use std::time::Instant;
 
 use indoc::formatdoc;
+use tokio::task::{JoinError, JoinSet};
 use tracing::{debug, warn};
 
 use ox_core::command;
@@ -17,11 +19,12 @@ use ox_core::session::display::archive_notice;
 use ox_core::tool::view::ApprovalPreview;
 use ox_core::util::text::plural;
 
-use super::{App, CopyNotice};
+use super::{App, CopyNotice, HandBack};
 use crate::clipboard::{CopyReport, Delivery};
 use crate::components::status::Status;
 use crate::git_probes::GitUpdate;
 use crate::modal::approval::ApprovalModal;
+use crate::slash::ChatOutput;
 use crate::{NOTICE_DURATION, now};
 
 impl App {
@@ -47,6 +50,7 @@ impl App {
             Event::ToolCallEnd(result) => self.chat.push_tool_result(result),
             Event::PromptDrained(text) => self.apply_prompt_drained(text),
             Event::TurnComplete => self.finish_turn(),
+            Event::TurnRolledBack => self.hand_back = HandBack::RolledBackTurn,
             Event::TurnFailed(msg) => self.apply_turn_failed(&msg),
             Event::UsageUpdated(usage) => self.status_bar.set_usage(Some(usage)),
             Event::RateLimitsUpdated(limits) => self.status_bar.set_rate_limits(Some(limits)),
@@ -56,7 +60,7 @@ impl App {
                 self.enter_idle();
             }
             Event::AutoCompactionStarted => {
-                self.auto_compacting = true;
+                self.hand_back = HandBack::UnsentPrompt;
                 self.set_active_status(Status::Compacting);
                 self.input.set_enabled(false);
             }
@@ -99,6 +103,7 @@ impl App {
             Event::ModeChanged(mode) => self.apply_mode_changed(mode),
             Event::LoginStarted { url } => self.open_sign_in_url(&url),
             Event::SignedIn { auth } => self.apply_signed_in(auth),
+            Event::LoginRestored { auth } => self.apply_login_restored(auth),
             Event::SignedOut {
                 removed,
                 auth,
@@ -126,7 +131,8 @@ impl App {
                 .front()
                 .is_some_and(|queued| command::unescape_literal(queued) == text)
         {
-            self.pending_prompts.pop_front();
+            self.drained_prompts
+                .extend(self.pending_prompts.pop_front());
             self.forwarded_prompts -= 1;
         } else {
             warn!("drained prompt {text:?} does not lead the forwarded queue");
@@ -168,11 +174,28 @@ impl App {
 
     fn apply_turn_failed(&mut self, msg: &str) {
         self.chat.push_error(msg);
-        if self.auto_compacting {
-            self.return_unsent_prompt();
-        } else {
-            self.finish_turn();
+        match self.hand_back {
+            HandBack::Nothing => self.finish_turn(),
+            HandBack::UnsentPrompt => self.return_unsent_prompt(),
+            HandBack::RolledBackTurn => self.return_rolled_back_prompts(),
         }
+    }
+
+    /// Ends a turn the engine rolled back after a refusal. Goes idle without starting the queue,
+    /// and hands the prompts back: the queued ones the turn took in to the queue head, and the
+    /// refused one into the empty input for rephrasing, or else ahead of them.
+    fn return_rolled_back_prompts(&mut self) {
+        for drained in self.drained_prompts.drain(..).rev() {
+            self.pending_prompts.push_front(drained);
+        }
+        if let Some(prompt) = self.active_prompt.take() {
+            if self.input.is_empty() {
+                self.input.set_text(&prompt);
+            } else {
+                self.pending_prompts.push_front(prompt);
+            }
+        }
+        self.enter_idle();
     }
 
     /// Ends a prompt whose automatic compaction failed before it was sent. Goes idle without
@@ -226,12 +249,14 @@ impl App {
     }
 
     /// Rebinds to session `id` titled `title`, clearing the previous session's chat, rules,
-    /// background shells, tasks, usage, and in-flight prompt. Returns the previous session's ID.
+    /// background shells, tasks, slash-command tasks, usage, and in-flight prompt. Returns the
+    /// previous session's ID.
     fn rebind_session(&mut self, id: String, title: Option<String>) -> String {
         let old_id = std::mem::replace(&mut self.session_info.session_id, id);
         self.session_info.session_allow.clear();
         self.session_info.background_shells.clear();
         self.tasks.clear();
+        self.slash_tasks = JoinSet::new();
         self.status_bar.set_title(title);
         self.status_bar.set_usage(None);
         self.chat.clear_history();
@@ -252,7 +277,7 @@ impl App {
         self.status_bar.set_usage(None);
         self.chat
             .push_compacted_block(pre_count, instructions, summary.to_owned());
-        self.auto_compacting = false;
+        self.hand_back = HandBack::Nothing;
         if automatic && let Some(prompt) = &self.active_prompt {
             self.chat
                 .push_user_message(command::unescape_literal(prompt).to_owned());
@@ -341,6 +366,13 @@ impl App {
         self.finish_turn();
     }
 
+    fn apply_login_restored(&mut self, auth: AuthSource) {
+        self.session_info.config.auth = Some(auth);
+        self.status_bar.set_rate_limits(None);
+        self.chat
+            .push_system_message(format!("Signed in. Requests now use {auth}."));
+    }
+
     fn apply_signed_out(
         &mut self,
         removed: bool,
@@ -371,9 +403,10 @@ impl App {
     /// Resets to idle, clears orphan calls, and re-enables input. Queued prompts stay queued, and
     /// the ended turn no longer holds any of them.
     fn enter_idle(&mut self) {
-        self.auto_compacting = false;
+        self.hand_back = HandBack::Nothing;
         self.chat.clear_pending_calls();
         self.forwarded_prompts = 0;
+        self.drained_prompts.clear();
         self.status_bar.set_status(Status::Idle);
         self.input.set_enabled(true);
     }
@@ -428,6 +461,21 @@ impl App {
         self.copy_notice
             .take_if(|notice| now >= notice.until)
             .is_some()
+    }
+
+    /// Prints what a background slash command resolved to. A panicked task only logs, since the
+    /// panic hook already reports the panic.
+    pub(super) fn apply_slash_task(
+        &mut self,
+        finished: Result<Result<ChatOutput, String>, JoinError>,
+    ) {
+        match finished {
+            Ok(Ok(ChatOutput::SystemMessage(text))) => self.chat.push_system_message(text),
+            Ok(Ok(ChatOutput::GitDiff(diff))) => self.chat.push_git_diff(diff),
+            Ok(Err(msg)) => self.chat.push_error(&msg),
+            Err(e) => warn!("background slash command failed: {e}"),
+        }
+        self.dirty = true;
     }
 }
 
@@ -511,6 +559,7 @@ mod tests {
     use crate::app::testing::{five_hour_limit, rendered_text, test_app};
     use crate::clipboard::CopyError;
     use crate::glyphs::INTERRUPTED_MARKER;
+    use crate::slash::WorkingTreeDiff;
 
     fn bash_call_start(id: &str, command: &str) -> Event {
         Event::ToolCallStart(ToolCall {
@@ -909,6 +958,35 @@ mod tests {
         }
 
         #[tokio::test]
+        async fn turn_rolled_back_hands_the_refused_prompt_and_the_drained_ones_back() {
+            let (mut app, mut rx, _event_tx) = test_app(None);
+            app.dispatch_action(Action::Submit("//refused".to_owned()));
+            rx.recv().await.expect("prompt forwarded");
+            app.dispatch_action(Action::Submit("drained".to_owned()));
+            rx.recv().await.expect("queued prompt forwarded");
+            app.handle_engine_event(Event::PromptDrained("drained".to_owned()));
+            app.dispatch_action(Action::Submit("queued".to_owned()));
+            rx.recv().await.expect("queued prompt forwarded");
+
+            app.handle_engine_event(Event::TurnRolledBack);
+            app.handle_engine_event(Event::TurnFailed(
+                "The model declined this request.".to_owned(),
+            ));
+
+            assert_eq!(app.status_bar.status(), &Status::Idle);
+            assert_eq!(app.input.lines(), ["//refused".to_owned()]);
+            assert_eq!(
+                app.pending_prompts.iter().cloned().collect::<Vec<_>>(),
+                ["drained".to_owned(), "queued".to_owned()],
+            );
+            assert_eq!(
+                rx.try_recv(),
+                Err(TryRecvError::Empty),
+                "nothing reaches the engine until the user sends"
+            );
+        }
+
+        #[tokio::test]
         async fn turn_failed_during_auto_compaction_returns_the_prompt_to_the_held_queue_head() {
             let (mut app, mut rx, _event_tx) = test_app(None);
             app.dispatch_action(Action::Submit("active".to_owned()));
@@ -1234,6 +1312,20 @@ mod tests {
                 "clear must drain the chat so the welcome can repaint",
             );
             assert!(app.dirty);
+        }
+
+        #[tokio::test]
+        async fn session_rolled_drops_the_old_session_slash_tasks() {
+            let (mut app, _rx, _event_tx) = test_app(None);
+            app.slash_tasks
+                .spawn(async { Ok(ChatOutput::SystemMessage("old session's output".to_owned())) });
+
+            app.handle_engine_event(Event::SessionRolled {
+                id: "rolled-session".to_owned(),
+                archived: false,
+            });
+
+            assert!(app.slash_tasks.join_next().await.is_none());
         }
 
         #[test]
@@ -1763,6 +1855,27 @@ mod tests {
         }
 
         #[test]
+        fn login_restored_names_the_credential_and_keeps_the_turn_running() {
+            let (mut app, _rx, _event_tx) = test_app(None);
+            app.session_info.config.auth = None;
+            app.status_bar.set_status(Status::Streaming);
+
+            app.handle_engine_event(Event::LoginRestored {
+                auth: AuthSource::ClaudeCodeLogin,
+            });
+
+            assert_eq!(
+                app.session_info.config.auth,
+                Some(AuthSource::ClaudeCodeLogin)
+            );
+            assert_eq!(
+                app.chat.last_system_text(),
+                Some("Signed in. Requests now use OAuth (Claude Code login).")
+            );
+            assert_eq!(app.status_bar.status(), &Status::Streaming);
+        }
+
+        #[test]
         fn signed_out_reports_the_removal_and_the_credential_requests_use() {
             for (removed, auth, fallback_error, expected) in [
                 (
@@ -1807,10 +1920,13 @@ mod tests {
         }
 
         #[test]
-        fn signed_in_or_out_drops_the_previous_accounts_usage_limits() {
+        fn credential_changes_drop_the_previous_accounts_usage_limits() {
             for event in [
                 Event::SignedIn {
                     auth: AuthSource::OxLogin,
+                },
+                Event::LoginRestored {
+                    auth: AuthSource::ClaudeCodeLogin,
                 },
                 Event::SignedOut {
                     removed: true,
@@ -1976,6 +2092,48 @@ mod tests {
                 (failed.text.as_str(), failed.failed),
                 ("Not copied: the clipboard did not answer within 2 s", true),
             );
+        }
+    }
+
+    mod apply_slash_task {
+        use super::*;
+
+        async fn finish(
+            output: Result<ChatOutput, String>,
+        ) -> Result<Result<ChatOutput, String>, JoinError> {
+            tokio::spawn(async { output }).await
+        }
+
+        #[tokio::test]
+        async fn prints_the_message_diff_or_error_the_task_resolved_to() {
+            let (mut app, _rx, _event_tx) = test_app(None);
+            let diff = WorkingTreeDiff {
+                untracked: vec!["new.txt".to_owned()],
+                ..WorkingTreeDiff::default()
+            };
+
+            app.apply_slash_task(finish(Ok(ChatOutput::SystemMessage("clean".to_owned()))).await);
+            assert_eq!(app.chat.last_system_text(), Some("clean"));
+
+            app.dirty = false;
+            app.apply_slash_task(finish(Ok(ChatOutput::GitDiff(diff))).await);
+            assert!(app.dirty);
+            assert!(rendered_text(&mut app, 60, 24).contains("  new.txt"));
+
+            app.apply_slash_task(finish(Err("/diff: boom".to_owned())).await);
+            assert_eq!(app.chat.last_error_text(), Some("/diff: boom"));
+        }
+
+        #[tokio::test]
+        async fn a_panicked_task_prints_nothing() {
+            let (mut app, _rx, _event_tx) = test_app(None);
+            let mut tasks = JoinSet::<Result<ChatOutput, String>>::new();
+            tasks.spawn(async { panic!("task bug") });
+            let finished = tasks.join_next().await.expect("one task spawned");
+
+            app.apply_slash_task(finished);
+
+            assert_eq!(app.chat.entry_count(), 0);
         }
     }
 

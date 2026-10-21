@@ -13,44 +13,71 @@
 use std::sync::LazyLock;
 
 use anyhow::{Context, Result, bail};
-use ratatui::style::Modifier;
+use ratatui::style::{Color, Modifier};
 use serde::Deserialize;
 use syntect::highlighting::{Theme as SyntaxTheme, ThemeSet};
 
 use ox_core::config::ThemeConfig;
+use ox_core::config::load::user_config_hint;
+use ox_core::config::provenance::{Layer, Source};
 use ox_core::util::path::expand_user;
+use ox_core::util::toml::describe_error;
 
 use super::{Slot, Theme, builtin, color::parse_color};
 
 // ── Resolution ──
 
-/// A theme resolved from `[tui.theme]`, with one notice for each override it ignored.
+/// A theme resolved from `[tui.theme]`, with the overrides it applied and one notice for each
+/// override it ignored.
 #[derive(Debug)]
 pub struct ResolvedTheme {
     pub theme: Theme,
+    pub overrides: ThemeOverrides,
     pub notices: Vec<String>,
 }
 
 /// Resolves the `[tui.theme]` base and applies its per-slot overrides. An unknown or unreadable
-/// base is an error, while a bad override, including a malformed patch, keeps the base value and
-/// adds a notice for the caller to report, so the TUI still launches.
+/// base is an error, as is a file base from a project file, while a bad override, including a
+/// malformed patch, keeps the base value and adds a notice for the caller to report, so the TUI
+/// still launches.
 pub fn resolve_theme(config: &ThemeConfig) -> Result<ResolvedTheme> {
     let base_name = config.base.as_str();
+    if let Source::File(Layer::Project(path)) = &config.base_source
+        && builtin::find(base_name).is_none()
+    {
+        bail!(
+            "{} cannot set tui.theme.base to {base_name:?}. \
+             A project file may only name a built-in theme ({}). \
+             Set a theme file in {} or a config.d drop-in.",
+            path.display(),
+            builtin::names(),
+            user_config_hint(),
+        );
+    }
     let body = load_base_body(base_name)?;
     let mut theme =
-        parse_theme(&body).with_context(|| format!("parsing base theme {base_name:?}"))?;
+        parse_theme(&body).with_context(|| format!("failed to parse base theme {base_name:?}"))?;
 
+    let mut overrides = ThemeOverrides::default();
     let mut notices = Vec::new();
     for (slot_name, patch) in &config.overrides {
-        if let Err(e) = patch_slot(&mut theme, slot_name, patch) {
-            let reason = format!("{e:#}");
-            notices.push(format!(
-                "Ignored the `{slot_name}` theme override: {}",
-                reason.trim_end(),
-            ));
+        match parse_override(slot_name, patch) {
+            Ok(entry) => overrides.0.push(entry),
+            Err(e) => {
+                let reason = format!("{e:#}");
+                notices.push(format!(
+                    "Ignored the `{slot_name}` theme override: {}",
+                    reason.trim_end(),
+                ));
+            }
         }
     }
-    Ok(ResolvedTheme { theme, notices })
+    overrides.apply(&mut theme);
+    Ok(ResolvedTheme {
+        theme,
+        overrides,
+        notices,
+    })
 }
 
 /// Theme bodies hold one line per slot, so a larger file is not a theme.
@@ -59,61 +86,77 @@ const MAX_THEME_FILE_BYTES: u64 = 64 * 1024;
 /// Resolves a `base` to a TOML body. Built-in catalog first, then a filesystem path with
 /// `~/` expanded to `$HOME`.
 fn load_base_body(name: &str) -> Result<String> {
-    if let Some(body) = builtin::lookup(name) {
-        return Ok(body.to_owned());
+    if let Some(theme) = builtin::find(name) {
+        return Ok(theme.body.to_owned());
     }
-    let path = expand_user(name).with_context(|| format!("theme {name:?}"))?;
-    let unreadable = || {
+    let invalid = format!("invalid [tui.theme] base {name:?}");
+    let path = expand_user(name).context(invalid.clone())?;
+    let neither = |file: &str| {
         format!(
-            "theme {name:?}: not a built-in name and failed to read as file {}",
+            "{invalid}: neither a built-in theme ({}) nor a {file} at {}",
+            builtin::names(),
             path.display(),
         )
     };
 
-    // A project config can name any path, so a device or FIFO must fail before the read blocks.
-    let meta = std::fs::metadata(&path).with_context(unreadable)?;
+    // A mistyped path can name a device or FIFO, which must fail before the read blocks.
+    let meta = std::fs::metadata(&path).with_context(|| neither("readable file"))?;
     if !meta.is_file() {
-        bail!(
-            "theme {name:?}: not a built-in name, and {} is not a file",
-            path.display(),
-        );
+        bail!(neither("regular file"));
     }
     if meta.len() > MAX_THEME_FILE_BYTES {
         bail!(
-            "theme {name:?}: {} is {} bytes, over the {MAX_THEME_FILE_BYTES}-byte theme file limit",
+            "{invalid}: {} is {} bytes, over the {MAX_THEME_FILE_BYTES}-byte theme file limit",
             path.display(),
             meta.len(),
         );
     }
-    std::fs::read_to_string(&path).with_context(unreadable)
+    std::fs::read_to_string(&path).with_context(|| neither("readable file"))
 }
 
-/// Applies one override patch. Errors on unknown slot name, a malformed patch, or a bad color.
-fn patch_slot(theme: &mut Theme, slot_name: &str, patch: &toml::Value) -> Result<()> {
-    let slot =
-        slot_for_name(theme, slot_name).with_context(|| format!("unknown slot {slot_name:?}"))?;
+/// Parses one override patch. Errors on unknown slot name, a malformed patch, or a bad color.
+fn parse_override(slot_name: &str, patch: &toml::Value) -> Result<(SlotAccessor, Patch)> {
+    let slot = slot_accessor(slot_name).with_context(|| format!("unknown slot {slot_name:?}"))?;
     let patch = SlotPatch::deserialize(patch.clone())
         .context("expected a color string or a table of fg, bg, and modifier flags")?;
     if matches!(&patch, SlotPatch::Inline(inline) if inline.is_empty()) {
         bail!("empty patch (no fg, bg, or modifier flags)");
     }
-    *slot = patch.apply(*slot)?;
-    Ok(())
+    Ok((slot, patch.resolve()?))
 }
 
-/// Generated mutable slot lookup. The mapping can't drift from [`Theme`]'s fields.
-macro_rules! define_slot_for_name {
+/// Borrows one slot of a [`Theme`].
+type SlotAccessor = fn(&mut Theme) -> &mut Slot;
+
+/// Generated slot lookup by name. The mapping can't drift from [`Theme`]'s fields.
+macro_rules! define_slot_accessor {
     ( $( ($name:ident, $doc:literal), )* ) => {
-        fn slot_for_name<'a>(theme: &'a mut Theme, name: &str) -> Option<&'a mut Slot> {
+        fn slot_accessor(name: &str) -> Option<SlotAccessor> {
             match name {
-                $( stringify!($name) => Some(&mut theme.$name), )*
+                $( stringify!($name) => Some(|theme| &mut theme.$name), )*
                 _ => None,
             }
         }
     };
 }
 
-super::for_each_slot!(define_slot_for_name);
+super::for_each_slot!(define_slot_accessor);
+
+// ── ThemeOverrides ──
+
+/// The `[tui.theme.overrides]` patches that parsed, which apply over any base theme, so a theme
+/// swap keeps them.
+#[derive(Debug, Default)]
+pub struct ThemeOverrides(Vec<(SlotAccessor, Patch)>);
+
+impl ThemeOverrides {
+    pub(crate) fn apply(&self, theme: &mut Theme) {
+        for (slot, patch) in &self.0 {
+            let slot = slot(theme);
+            *slot = patch.apply(*slot);
+        }
+    }
+}
 
 // ── SlotPatch ──
 
@@ -128,7 +171,7 @@ enum SlotPatch {
 }
 
 /// Inline TOML patch with every field optional. `Option<bool>` distinguishes "no change" / "set" /
-/// "clear". [`patch_slot`] rejects an empty override (`error = {}`), so the slot warns and keeps
+/// "clear". [`parse_override`] rejects an empty override (`error = {}`), so the slot warns and keeps
 /// its base value. Serde's untagged enum dispatcher would swallow a `Deserialize`-time message,
 /// so that check runs after deserialization.
 #[derive(Debug, Default, Deserialize)]
@@ -144,14 +187,14 @@ struct InlinePatch {
 }
 
 impl SlotPatch {
-    fn apply(&self, base: Slot) -> Result<Slot> {
+    /// Parses the patch's colors. Errors on a bad color, naming the field of an inline patch.
+    fn resolve(&self) -> Result<Patch> {
         match self {
-            Self::Bare(s) => Ok(Slot {
+            Self::Bare(s) => Ok(Patch {
                 fg: Some(parse_color(s)?),
-                bg: base.bg,
-                modifiers: base.modifiers,
+                ..Patch::default()
             }),
-            Self::Inline(p) => p.apply(base),
+            Self::Inline(p) => p.resolve(),
         }
     }
 }
@@ -167,22 +210,13 @@ impl InlinePatch {
             && self.reversed.is_none()
     }
 
-    fn apply(&self, base: Slot) -> Result<Slot> {
-        let fg = self
-            .fg
-            .as_deref()
-            .map(parse_color)
-            .transpose()
-            .context("fg")?
-            .or(base.fg);
-        let bg = self
-            .bg
-            .as_deref()
-            .map(parse_color)
-            .transpose()
-            .context("bg")?
-            .or(base.bg);
-        let mut modifiers = base.modifiers;
+    fn resolve(&self) -> Result<Patch> {
+        let parse = |color: &Option<String>| color.as_deref().map(parse_color).transpose();
+        let mut patch = Patch {
+            fg: parse(&self.fg).context("fg")?,
+            bg: parse(&self.bg).context("bg")?,
+            ..Patch::default()
+        };
         for (flag, modifier) in [
             (self.bold, Modifier::BOLD),
             (self.italic, Modifier::ITALIC),
@@ -190,15 +224,33 @@ impl InlinePatch {
             (self.dim, Modifier::DIM),
             (self.reversed, Modifier::REVERSED),
         ] {
-            if let Some(set) = flag {
-                modifiers = if set {
-                    modifiers | modifier
-                } else {
-                    modifiers & !modifier
-                };
+            match flag {
+                Some(true) => patch.add |= modifier,
+                Some(false) => patch.remove |= modifier,
+                None => {}
             }
         }
-        Ok(Slot { fg, bg, modifiers })
+        Ok(patch)
+    }
+}
+
+/// A slot patch with its colors parsed, so applying it cannot fail.
+#[derive(Debug, Default, Clone, Copy)]
+struct Patch {
+    fg: Option<Color>,
+    bg: Option<Color>,
+    add: Modifier,
+    remove: Modifier,
+}
+
+impl Patch {
+    /// `base` with the colors this patch sets and its modifier flags set or cleared.
+    fn apply(self, base: Slot) -> Slot {
+        Slot {
+            fg: self.fg.or(base.fg),
+            bg: self.bg.or(base.bg),
+            modifiers: base.modifiers.difference(self.remove).union(self.add),
+        }
     }
 }
 
@@ -220,7 +272,7 @@ pub(super) fn parse_theme(content: &str) -> Result<Theme> {
                     mocha_line(slot),
                 );
             }
-            return Err(e).context("invalid theme TOML");
+            bail!("invalid theme TOML: {}", describe_error(content, &e));
         }
     };
     file.into_theme()
@@ -259,9 +311,8 @@ macro_rules! define_theme_file {
         impl ThemeFile {
             fn into_theme(self) -> Result<Theme> {
                 let parse = |patch: SlotPatch, name: &'static str| -> Result<Slot> {
-                    patch
-                        .apply(Slot::default())
-                        .with_context(|| format!("slot {name:?}"))
+                    let patch = patch.resolve().with_context(|| format!("slot {name:?}"))?;
+                    Ok(patch.apply(Slot::default()))
                 };
                 Ok(Theme {
                     $( $name: parse(self.$name, stringify!($name))?, )*
@@ -290,14 +341,14 @@ fn syntax_theme(name: Option<&str>) -> Result<&'static SyntaxTheme> {
 
 #[cfg(test)]
 mod tests {
+    use std::path::Path;
+
     use indoc::{formatdoc, indoc};
     use ratatui::style::Color;
 
     use super::*;
     use crate::theme::SLOT_NAMES;
-
-    const COLOR_FORMATS_HINT: &str = "expected hex (#rrggbb), ANSI name (red, bright_blue, ...), \
-                                      indexed (ansi:0..255), or reset";
+    use crate::theme::color::COLOR_FORMATS_HINT;
 
     mod resolve_theme {
         use super::*;
@@ -305,13 +356,22 @@ mod tests {
         fn config(base: &str, overrides: &str) -> ThemeConfig {
             ThemeConfig {
                 base: base.to_owned(),
+                base_source: Source::Default,
                 overrides: overrides.parse().unwrap(),
+            }
+        }
+
+        /// [`config`] with `base` set by the project file `path`.
+        fn project_config(base: &str, path: &Path) -> ThemeConfig {
+            ThemeConfig {
+                base_source: Source::File(Layer::Project(path.to_path_buf())),
+                ..config(base, "")
             }
         }
 
         /// The theme `config` resolves to, after checking that it ignored no override.
         fn resolved(config: &ThemeConfig) -> Theme {
-            let ResolvedTheme { theme, notices } = resolve_theme(config).unwrap();
+            let ResolvedTheme { theme, notices, .. } = resolve_theme(config).unwrap();
             assert_eq!(notices, [] as [String; 0], "{config:?}");
             theme
         }
@@ -329,7 +389,8 @@ mod tests {
             let msg = format!("{err:#}");
             assert!(
                 msg.starts_with(
-                    r#"theme "solarized": not a built-in name and failed to read as file solarized: "#
+                    "invalid [tui.theme] base \"solarized\": neither a built-in theme \
+                     (mocha, macchiato, frappe, latte, material) nor a readable file at solarized: "
                 ),
                 "{msg}",
             );
@@ -342,7 +403,10 @@ mod tests {
             let err = resolve_theme(&config(&dir_str, "")).expect_err("a directory is not a theme");
             assert_eq!(
                 format!("{err:#}"),
-                format!("theme {dir_str:?}: not a built-in name, and {dir_str} is not a file"),
+                format!(
+                    "invalid [tui.theme] base {dir_str:?}: neither a built-in theme \
+                     (mocha, macchiato, frappe, latte, material) nor a regular file at {dir_str}"
+                ),
             );
 
             let path = dir.path().join("huge.toml");
@@ -354,7 +418,7 @@ mod tests {
             assert_eq!(
                 format!("{err:#}"),
                 format!(
-                    "theme {path_str:?}: {path_str} is {len} bytes, \
+                    "invalid [tui.theme] base {path_str:?}: {path_str} is {len} bytes, \
                      over the {MAX_THEME_FILE_BYTES}-byte theme file limit"
                 ),
             );
@@ -372,6 +436,58 @@ mod tests {
         }
 
         #[test]
+        fn file_path_with_invalid_toml_omits_the_file_contents() {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("credentials");
+            std::fs::write(&path, "https://user:secret-marker@git.example.com\n").unwrap();
+            let path_str = path.to_string_lossy().into_owned();
+
+            let err =
+                resolve_theme(&config(&path_str, "")).expect_err("a credential file is no theme");
+
+            assert_eq!(
+                format!("{err:#}"),
+                format!(
+                    "failed to parse base theme {path_str:?}: invalid theme TOML: line 1, column 43: \
+                     key with no value, expected `=`"
+                ),
+            );
+        }
+
+        #[test]
+        fn rejects_a_file_base_set_by_a_project() {
+            let dir = tempfile::tempdir().unwrap();
+            let theme = dir.path().join("custom.toml");
+            std::fs::write(&theme, builtin::MOCHA).unwrap();
+            let theme_str = theme.to_string_lossy().into_owned();
+            let project = dir.path().join(".ox").join("config.toml");
+            let config_home = dir.path().join("config-home");
+
+            let err = temp_env::with_var("XDG_CONFIG_HOME", Some(&config_home), || {
+                resolve_theme(&project_config(&theme_str, &project))
+                    .expect_err("a project file may not name a theme file")
+            });
+
+            assert_eq!(
+                format!("{err:#}"),
+                format!(
+                    "{} cannot set tui.theme.base to {theme_str:?}. \
+                     A project file may only name a built-in theme \
+                     (mocha, macchiato, frappe, latte, material). \
+                     Set a theme file in {} or a config.d drop-in.",
+                    project.display(),
+                    config_home.join("ox").join("config.toml").display(),
+                ),
+            );
+        }
+
+        #[test]
+        fn accepts_a_built_in_base_set_by_a_project() {
+            let t = resolved(&project_config("latte", Path::new("/repo/.ox/config.toml")));
+            assert_eq!(t.text.fg, Some(Color::Rgb(0x4c, 0x4f, 0x69)));
+        }
+
+        #[test]
         fn file_path_with_bad_body_wraps_with_base_name() {
             let dir = tempfile::tempdir().unwrap();
             let path = dir.path().join("broken.toml");
@@ -382,7 +498,7 @@ mod tests {
             let err = resolve_theme(&config(&path_str, "")).expect_err("bad slot color must error");
             let msg = format!("{err:#}");
             assert!(
-                msg.contains(&format!("parsing base theme {path_str:?}")),
+                msg.contains(&format!("failed to parse base theme {path_str:?}")),
                 "{msg}"
             );
             assert!(msg.contains("orange"), "{msg}");
@@ -429,7 +545,7 @@ mod tests {
 
         #[test]
         fn unknown_slot_override_keeps_the_base_with_a_notice() {
-            let ResolvedTheme { theme, notices } =
+            let ResolvedTheme { theme, notices, .. } =
                 resolve_theme(&config("mocha", r##"purple_thing = "#ff0000""##)).unwrap();
 
             assert_eq!(theme.error.fg, Some(Color::Rgb(0xf3, 0x8b, 0xa8)));
@@ -441,7 +557,7 @@ mod tests {
 
         #[test]
         fn invalid_color_override_keeps_the_base_with_a_notice() {
-            let ResolvedTheme { theme, notices } =
+            let ResolvedTheme { theme, notices, .. } =
                 resolve_theme(&config("mocha", r#"error = "not-a-color""#)).unwrap();
 
             assert_eq!(theme.error.fg, Some(Color::Rgb(0xf3, 0x8b, 0xa8)));
@@ -456,7 +572,7 @@ mod tests {
 
         #[test]
         fn malformed_patches_keep_the_base_with_a_notice_each() {
-            let ResolvedTheme { theme, notices } = resolve_theme(&config(
+            let ResolvedTheme { theme, notices, .. } = resolve_theme(&config(
                 "mocha",
                 indoc! {r##"
                     error = 5
@@ -480,7 +596,7 @@ mod tests {
 
         #[test]
         fn inline_override_with_bad_fg_keeps_the_base_with_a_notice() {
-            let ResolvedTheme { theme, notices } =
+            let ResolvedTheme { theme, notices, .. } =
                 resolve_theme(&config("mocha", r#"accent = { fg = "not-a-color" }"#)).unwrap();
 
             assert_eq!(theme.accent.fg, Some(Color::Rgb(0x89, 0xb4, 0xfa)));
@@ -499,7 +615,7 @@ mod tests {
 
         #[test]
         fn inline_override_with_bad_bg_keeps_the_base_with_a_notice() {
-            let ResolvedTheme { theme, notices } =
+            let ResolvedTheme { theme, notices, .. } =
                 resolve_theme(&config("mocha", r#"diff_add = { bg = "not-a-color" }"#)).unwrap();
 
             assert_eq!(theme.diff_add.bg, Some(Color::Rgb(0x2a, 0x3a, 0x37)));
@@ -513,30 +629,22 @@ mod tests {
         }
     }
 
-    mod patch_slot {
+    mod parse_override {
         use super::*;
 
         #[test]
-        fn empty_table_is_rejected_and_keeps_base() {
-            let mut theme = Theme::default();
-            let accent = theme.accent;
-
-            let err = patch_slot(
-                &mut theme,
-                "accent",
-                &toml::Value::Table(toml::Table::new()),
-            )
-            .unwrap_err();
+        fn rejects_an_empty_table() {
+            let err =
+                parse_override("accent", &toml::Value::Table(toml::Table::new())).unwrap_err();
 
             assert_eq!(
                 format!("{err:#}"),
                 "empty patch (no fg, bg, or modifier flags)"
             );
-            assert_eq!(theme.accent, accent);
         }
     }
 
-    mod slot_for_name {
+    mod slot_accessor {
         use super::*;
 
         #[test]
@@ -549,19 +657,19 @@ mod tests {
             for &target in SLOT_NAMES {
                 let mut patched = Theme::default();
                 let original = patched.clone();
-                *slot_for_name(&mut patched, target)
-                    .unwrap_or_else(|| panic!("unknown slot {target:?}")) = sentinel;
+                let accessor =
+                    slot_accessor(target).unwrap_or_else(|| panic!("unknown slot {target:?}"));
+                *accessor(&mut patched) = sentinel;
                 for &other in SLOT_NAMES {
-                    let mut p = patched.clone();
-                    let mut o = original.clone();
-                    let post = *slot_for_name(&mut p, other).expect("slot must exist");
-                    let pre = *slot_for_name(&mut o, other).expect("slot must exist");
+                    let other_slot = slot_accessor(other).expect("slot must exist");
+                    let post = *other_slot(&mut patched.clone());
+                    let pre = *other_slot(&mut original.clone());
                     if other == target {
                         assert_eq!(post, sentinel, "patched slot {target} should hold sentinel");
                     } else {
                         assert_eq!(
                             post, pre,
-                            "patching {target} must not affect {other} (slot_for_name mis-routing)",
+                            "patching {target} must not affect {other} (slot_accessor mis-routing)",
                         );
                     }
                 }
@@ -569,7 +677,7 @@ mod tests {
         }
     }
 
-    mod slot_patch {
+    mod patch {
         use super::*;
 
         mod apply {
@@ -587,7 +695,7 @@ mod tests {
                     ..InlinePatch::default()
                 });
 
-                let out = patch.apply(base).unwrap();
+                let out = patch.resolve().unwrap().apply(base);
 
                 assert_eq!(
                     out,
@@ -616,7 +724,7 @@ mod tests {
                     ..InlinePatch::default()
                 });
 
-                let out = patch.apply(base).unwrap();
+                let out = patch.resolve().unwrap().apply(base);
 
                 assert_eq!(
                     out,
@@ -639,7 +747,7 @@ mod tests {
                     ..InlinePatch::default()
                 });
 
-                let out = patch.apply(base).unwrap();
+                let out = patch.resolve().unwrap().apply(base);
 
                 assert_eq!(
                     out,
@@ -663,7 +771,7 @@ mod tests {
         }
 
         #[test]
-        fn all_builtins() {
+        fn parses_every_builtin() {
             for builtin::BuiltinTheme { name, body, .. } in builtin::BUILT_IN {
                 parse_theme(body).unwrap_or_else(|e| panic!("built-in {name:?} failed: {e:#}"));
             }
@@ -737,24 +845,12 @@ mod tests {
                 ("macchiato", Color::Rgb(0xca, 0xd3, 0xf5)),
                 ("material", Color::Rgb(0xde, 0xde, 0xde)),
             ] {
-                let body = builtin::lookup(name).unwrap();
+                let body = builtin::find(name).unwrap().body;
 
                 let t = parse_theme(body).unwrap_or_else(|e| panic!("{name} parse: {e:#}"));
 
                 assert_eq!(t.text.fg, Some(expected), "{name} text.fg");
             }
-        }
-
-        #[test]
-        fn mocha_modifiers_match_default() {
-            let t = parse_theme(builtin::MOCHA).unwrap();
-            assert!(t.accent.modifiers.contains(Modifier::BOLD));
-            assert!(t.thinking.modifiers.contains(Modifier::ITALIC));
-            assert!(t.heading_h1.modifiers.contains(Modifier::BOLD));
-            assert!(t.heading_h1.modifiers.contains(Modifier::UNDERLINED));
-            assert!(t.link.modifiers.contains(Modifier::UNDERLINED));
-            assert!(t.success.modifiers.is_empty());
-            assert!(t.error.modifiers.is_empty());
         }
 
         #[test]
@@ -795,10 +891,16 @@ mod tests {
                 r##"accent = { fg = "#89b4fa", sparkle = true }"##,
             );
             let err = parse_theme(&body).expect_err("unknown modifier rejected");
-            let msg = format!("{err:#}");
-            // The untagged enum reports a generic "did not match any variant" error, but the
-            // rendered TOML context still quotes the offending line.
-            assert!(msg.contains("sparkle"), "{msg}");
+            // The untagged enum reports a generic "did not match any variant" error, so only the
+            // position and the slot point at `sparkle`.
+            let line = body.lines().position(|l| l.starts_with("accent")).unwrap() + 1;
+            assert_eq!(
+                format!("{err:#}"),
+                format!(
+                    "invalid theme TOML: line {line}, column 10, in `accent`: \
+                     data did not match any variant of untagged enum SlotPatch"
+                ),
+            );
         }
 
         #[test]
@@ -911,7 +1013,7 @@ mod tests {
                 ("latte", "InspiredGitHub"),
                 ("material", "base16-ocean.dark"),
             ] {
-                let body = builtin::lookup(name).unwrap();
+                let body = builtin::find(name).unwrap().body;
 
                 let t = parse_theme(body).unwrap_or_else(|e| panic!("{name} parse: {e:#}"));
 

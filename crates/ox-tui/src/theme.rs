@@ -4,7 +4,7 @@ pub(crate) mod builtin;
 mod color;
 mod loader;
 
-pub use loader::{ResolvedTheme, resolve_theme};
+pub use loader::{ResolvedTheme, ThemeOverrides, resolve_theme};
 
 use std::sync::LazyLock;
 
@@ -15,13 +15,6 @@ use syntect::highlighting::Theme as SyntaxTheme;
 use ox_core::tool::tasks::TaskStatus;
 
 use crate::glyphs::SEGMENT_SEPARATOR;
-
-/// Parses the built-in theme `name`, such as `mocha` or `latte`. `None` for an unknown name.
-/// Panics if the vendored TOML fails to parse, which `parse_theme_all_builtins` rules out.
-pub(crate) fn load_builtin(name: &str) -> Option<Theme> {
-    let body = builtin::lookup(name)?;
-    Some(loader::parse_theme(body).expect("vendored builtin theme TOML must parse"))
-}
 
 /// One theme slot with optional fg, bg, and modifiers composed into a [`Style`].
 ///
@@ -309,6 +302,13 @@ mod tests {
         fn thinking_is_italic() {
             let t = Theme::default();
             assert!(t.thinking.modifiers.contains(Modifier::ITALIC));
+        }
+
+        #[test]
+        fn status_slots_carry_no_modifiers() {
+            let t = Theme::default();
+            assert_eq!(t.success.modifiers, Modifier::empty());
+            assert_eq!(t.error.modifiers, Modifier::empty());
         }
     }
 

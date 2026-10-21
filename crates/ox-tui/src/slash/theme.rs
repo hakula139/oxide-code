@@ -15,7 +15,7 @@ use crate::modal::chrome::{CONFIRM_HINTS, FOOTER_HEIGHT, render_footer};
 use crate::modal::list_picker::{ListPicker, PickerItem, numeric_hint};
 use crate::modal::{Modal, ModalAction, ModalKey};
 use crate::theme::Theme;
-use crate::theme::builtin::BUILT_IN;
+use crate::theme::builtin::{self, BUILT_IN, BuiltinTheme};
 
 // ── ThemeCmd ──
 
@@ -34,7 +34,7 @@ impl SlashCommand for ThemeCmd {
         if args.trim().is_empty() {
             SlashKind::ReadOnly
         } else {
-            SlashKind::Mutating
+            SlashKind::Steering
         }
     }
 
@@ -63,37 +63,22 @@ impl SlashCommand for ThemeCmd {
                 &ctx.info.config.theme_name,
             ))));
         }
-        let name = resolve_theme_arg(arg)?;
-        Ok(SlashOutcome::Forward(Action::SwapTheme {
-            name: name.to_owned(),
-        }))
+        let theme = resolve_theme_arg(arg)?;
+        Ok(SlashOutcome::Forward(Action::SwapTheme(theme)))
     }
 }
 
 /// Resolves a typed `/theme <name>` argument against the curated catalog. Custom themes require
 /// an edit to `config.toml`, so file paths are rejected.
-fn resolve_theme_arg(arg: &str) -> Result<&'static str, String> {
-    let lower = arg.to_ascii_lowercase();
-    BUILT_IN
-        .iter()
-        .find(|theme| theme.name == lower)
-        .map(|theme| theme.name)
-        .ok_or_else(|| format!("Unknown theme: `{arg}`. Valid: {}.", valid_names()))
-}
-
-fn valid_names() -> String {
-    BUILT_IN
-        .iter()
-        .map(|theme| theme.name)
-        .collect::<Vec<_>>()
-        .join(", ")
+fn resolve_theme_arg(arg: &str) -> Result<&'static BuiltinTheme, String> {
+    builtin::find(&arg.to_ascii_lowercase())
+        .ok_or_else(|| format!("Unknown theme: `{arg}`. Valid: {}.", builtin::names()))
 }
 
 // ── PickerItem ──
 
 struct ThemeRow {
-    name: &'static str,
-    description: &'static str,
+    theme: &'static BuiltinTheme,
     is_active: bool,
     hint: Option<char>,
 }
@@ -104,8 +89,7 @@ impl ThemeRow {
             .iter()
             .enumerate()
             .map(|(idx, theme)| Self {
-                name: theme.name,
-                description: theme.description,
+                theme,
                 is_active: theme.name == active_name,
                 hint: numeric_hint(idx),
             })
@@ -115,10 +99,10 @@ impl ThemeRow {
 
 impl PickerItem for ThemeRow {
     fn label(&self) -> &str {
-        self.name
+        self.theme.name
     }
     fn description(&self) -> Option<&str> {
-        Some(self.description)
+        Some(self.theme.description)
     }
     fn is_active(&self) -> bool {
         self.is_active
@@ -152,9 +136,7 @@ impl ThemePicker {
     /// `Preview` of the row under the cursor, or `Consumed` when the list is empty.
     fn preview_current(&self) -> ModalKey {
         match self.list.selected() {
-            Some(row) => ModalKey::Preview(ModalAction::Dispatch(Action::PreviewTheme {
-                name: row.name.to_owned(),
-            })),
+            Some(row) => ModalKey::Preview(ModalAction::Dispatch(Action::PreviewTheme(row.theme))),
             None => ModalKey::Consumed,
         }
     }
@@ -164,12 +146,10 @@ impl ThemePicker {
         let Some(row) = self.list.selected() else {
             return ModalKey::Cancelled;
         };
-        if row.name == self.original_name {
+        if row.theme.name == self.original_name {
             return ModalKey::Cancelled;
         }
-        ModalKey::Submitted(ModalAction::Dispatch(Action::SwapTheme {
-            name: row.name.to_owned(),
-        }))
+        ModalKey::Submitted(ModalAction::Dispatch(Action::SwapTheme(row.theme)))
     }
 }
 
@@ -231,7 +211,7 @@ mod tests {
         fn splits_on_args() {
             assert_eq!(ThemeCmd.classify(""), SlashKind::ReadOnly);
             assert_eq!(ThemeCmd.classify("   "), SlashKind::ReadOnly);
-            assert_eq!(ThemeCmd.classify("latte"), SlashKind::Mutating);
+            assert_eq!(ThemeCmd.classify("latte"), SlashKind::Steering);
         }
     }
 
@@ -281,9 +261,7 @@ mod tests {
             for theme in BUILT_IN {
                 assert_eq!(
                     run_execute(&ThemeCmd, theme.name).unwrap().into_forward(),
-                    Action::SwapTheme {
-                        name: theme.name.to_owned(),
-                    },
+                    Action::SwapTheme(theme),
                     "`{}` must forward SwapTheme",
                     theme.name,
                 );
@@ -294,9 +272,7 @@ mod tests {
         fn is_case_insensitive() {
             assert_eq!(
                 run_execute(&ThemeCmd, "LATTE").unwrap().into_forward(),
-                Action::SwapTheme {
-                    name: "latte".to_owned(),
-                },
+                Action::SwapTheme(builtin::find("latte").unwrap()),
             );
         }
 
@@ -352,7 +328,7 @@ mod tests {
             fn positions_cursor_on_active_theme() {
                 let p = picker_with_active("latte");
                 let row = p.list.selected().expect("active row");
-                assert_eq!(row.name, "latte");
+                assert_eq!(row.theme.name, "latte");
                 assert!(row.is_active);
             }
 
@@ -361,7 +337,7 @@ mod tests {
                 // A custom path matches no built-in row, so the cursor falls back to the first.
                 let p = picker_with_active("~/themes/custom.toml");
                 let row = p.list.selected().expect("first row");
-                assert_eq!(row.name, "mocha");
+                assert_eq!(row.theme.name, "mocha");
             }
         }
 
@@ -402,8 +378,11 @@ mod tests {
                     let mut p = picker_with_active("mocha");
                     let outcome = p.handle_key(&KeyEvent::from(code));
                     match outcome {
-                        ModalKey::Preview(ModalAction::Dispatch(Action::PreviewTheme { name })) => {
-                            assert_eq!(name, "macchiato", "{code:?} from mocha lands on macchiato");
+                        ModalKey::Preview(ModalAction::Dispatch(Action::PreviewTheme(theme))) => {
+                            assert_eq!(
+                                theme.name, "macchiato",
+                                "{code:?} from mocha lands on macchiato"
+                            );
                         }
                         other => {
                             panic!("expected Preview(PreviewTheme) for {code:?}, got {other:?}")
@@ -419,9 +398,9 @@ mod tests {
                     let mut p = picker_with_active("mocha");
                     let outcome = p.handle_key(&KeyEvent::from(code));
                     match outcome {
-                        ModalKey::Preview(ModalAction::Dispatch(Action::PreviewTheme { name })) => {
+                        ModalKey::Preview(ModalAction::Dispatch(Action::PreviewTheme(theme))) => {
                             assert_eq!(
-                                name,
+                                theme.name,
                                 BUILT_IN.last().unwrap().name,
                                 "{code:?} from first row wraps to last",
                             );
@@ -436,8 +415,8 @@ mod tests {
                 let mut p = picker_with_active("mocha");
                 let outcome = p.handle_key(&KeyEvent::from(KeyCode::Char('4')));
                 match outcome {
-                    ModalKey::Preview(ModalAction::Dispatch(Action::PreviewTheme { name })) => {
-                        assert_eq!(name, "latte", "row 4 is latte");
+                    ModalKey::Preview(ModalAction::Dispatch(Action::PreviewTheme(theme))) => {
+                        assert_eq!(theme.name, "latte", "row 4 is latte");
                     }
                     other => panic!("expected Preview, got {other:?}"),
                 }
@@ -467,8 +446,8 @@ mod tests {
                 p.handle_key(&KeyEvent::from(KeyCode::Down)); // → macchiato
                 let outcome = p.handle_key(&KeyEvent::from(KeyCode::Enter));
                 match outcome {
-                    ModalKey::Submitted(ModalAction::Dispatch(Action::SwapTheme { name })) => {
-                        assert_eq!(name, "macchiato");
+                    ModalKey::Submitted(ModalAction::Dispatch(Action::SwapTheme(theme))) => {
+                        assert_eq!(theme.name, "macchiato");
                     }
                     other => panic!("expected Submitted(SwapTheme), got {other:?}"),
                 }

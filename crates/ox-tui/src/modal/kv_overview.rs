@@ -9,6 +9,8 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 use unicode_width::UnicodeWidthStr;
 
+use ox_core::util::text::pad_to_width;
+
 use super::chrome::{COLUMN_GAP, FOOTER_HEIGHT, Header, KEY_UP_DOWN, render_footer};
 use super::{Modal, ModalKey};
 use crate::saturating_u16;
@@ -36,14 +38,7 @@ impl KvRow {
     /// The row with its label padded to `label_width` and any note aligned after `value_width`.
     fn line(&self, label_width: usize, value_width: usize, theme: &Theme) -> Line<'static> {
         let mut spans = vec![
-            Span::styled(
-                format!(
-                    "{}{}",
-                    self.label,
-                    " ".repeat(label_width - self.label.width())
-                ),
-                theme.dim(),
-            ),
+            Span::styled(pad_to_width(&self.label, label_width), theme.dim()),
             Span::styled(" ".repeat(COLUMN_GAP), theme.surface()),
             Span::styled(self.value.clone(), theme.text()),
         ];

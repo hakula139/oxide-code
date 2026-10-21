@@ -1,8 +1,6 @@
 //! Slash commands: [`parse_slash`](ox_core::command::parse_slash) detects them, and [`dispatch`]
 //! runs them through the registry of [`registry::SlashCommand`] impls. No command writes the
 //! config files, so a setting one changes reverts on restart.
-//!
-//! Design: `docs/design/slash/commands.md`.
 
 mod archive;
 mod clear;
@@ -29,12 +27,12 @@ mod status;
 mod theme;
 
 pub(crate) use context::{LiveSessionInfo, SlashContext};
-#[cfg(test)]
-pub(crate) use diff::truncate_for_display;
-pub(crate) use diff::{TRUNCATION_FOOTER, UNTRACKED_HEADING};
+pub(crate) use diff::{DiffRow, WorkingTreeDiff};
 pub(crate) use matcher::MatchedCommand;
-pub(crate) use registry::{ArgCompletion, SlashKind, SlashOutcome};
+pub(crate) use registry::{ArgCompletion, ChatOutput, SlashKind, SlashOutcome};
 pub use resume::ResumePicker;
+
+use futures::TryFutureExt;
 
 use ox_core::command::Parsed;
 
@@ -64,7 +62,7 @@ pub(crate) fn echoes_input(parsed: &Parsed) -> bool {
 }
 
 /// Resolves and runs `parsed` against the built-in registry. `Err` carries the chat-ready
-/// message for an unknown or failed command.
+/// message for an unknown or failed command, as does a failed [`SlashOutcome::Background`] task.
 pub(crate) fn dispatch(parsed: &Parsed, ctx: &SlashContext<'_>) -> Result<SlashOutcome, String> {
     dispatch_with(registry::BUILT_INS, parsed, ctx)
 }
@@ -83,8 +81,15 @@ fn dispatch_with(
             available = format_available(commands),
         ));
     };
-    cmd.execute(&parsed.args, ctx)
-        .map_err(|msg| parsed.named_error(&msg))
+    match cmd.execute(&parsed.args, ctx) {
+        Ok(SlashOutcome::Background(task)) => {
+            let parsed = parsed.clone();
+            Ok(SlashOutcome::Background(Box::pin(
+                task.map_err(move |msg| parsed.named_error(&msg)),
+            )))
+        }
+        outcome => outcome.map_err(|msg| parsed.named_error(&msg)),
+    }
 }
 
 fn format_available(commands: &[&dyn registry::SlashCommand]) -> String {
@@ -114,6 +119,7 @@ pub(crate) mod testing {
     use std::path::Path;
 
     pub(crate) use super::context::testing::test_session_info;
+    pub(crate) use super::diff::testing::{added, context, removed};
 
     /// Session ID with every byte set to `byte`, in the hyphenated UUID form real session IDs use.
     pub(super) fn stamped_id(byte: u8) -> String {
@@ -222,6 +228,28 @@ mod tests {
         fn alias_routes_to_canonical_impl() {
             // Error must echo the alias the user typed.
             assert_eq!(dispatch_fake("boom"), "/boom: Explicit failure.");
+        }
+
+        #[tokio::test]
+        async fn background_failure_prefixes_the_name_the_user_typed() {
+            let info = test_session_info();
+            let cmd = FakeCmd {
+                name: "failing",
+                aliases: &["boom"],
+                background: true,
+                ..FakeCmd::DEFAULT
+            };
+
+            for (typed, expected) in [
+                ("failing", "/failing: Explicit failure."),
+                ("boom", "/boom: Explicit failure."),
+            ] {
+                let ctx = SlashContext::new(&info, None);
+                let task = dispatch_with(&[&cmd], &parsed(typed, ""), &ctx)
+                    .unwrap()
+                    .into_background();
+                assert_eq!(task.await.unwrap_err(), expected);
+            }
         }
 
         #[test]

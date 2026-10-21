@@ -1,6 +1,6 @@
 # Development
 
-Learn how to set up the development environment, what the pre-commit hooks check, how the toolchain is pinned, how Nix and config files are styled, what debug info dev builds keep, what CI runs, and how to treat a failing check. For other ways to build `ox`, see [Installation](../guide/install.md).
+Conventions for the dev shell, pre-commit hooks, toolchain, Nix and config file style, debug info, CI, and failing checks. For other ways to build `ox`, see [Installation](../guide/install.md).
 
 ## Dev Shell
 
@@ -33,7 +33,7 @@ The Node-based hooks run tools pinned in `node_modules` and fail when that direc
 
 `nixfmt` formats `flake.nix` and `package.nix`, and `statix` and `deadnix` lint them. These rules cover what the tools leave open:
 
-- Keep code and comments within 100 columns, counting the indent. `nixfmt` does not reflow comments, so wrap them by hand.
+- Keep code within 100 columns, counting the indent, and wrap comments as [Writing](writing.md#comments) describes, since `nixfmt` does not reflow them.
 - Mark the file header with `=` banners at column 0, and mark each section with `-` banners indented to match the code around them. Every banner line ends at column 100. A file without banners stays without them:
 
   ```nix
@@ -57,7 +57,7 @@ The Node-based hooks run tools pinned in `node_modules` and fail when that direc
 
 Prettier and Taplo leave long strings alone, and no formatter covers shell code, so wrap YAML, TOML, and shell files by hand:
 
-- Wrap comments at 100 columns, as [Writing](writing.md#comments) requires, and keep other lines within about 100, counting the indent. Leave a line long when it holds an unbreakable token, such as a URL or path, or sits in a heredoc body or literal block whose line breaks are content.
+- Wrap comments as [Writing](writing.md#comments) describes, and keep other lines within about 100 columns, counting the indent. Leave a line long when it holds an unbreakable token, such as a URL or path, or sits in a heredoc body or literal block whose line breaks are content.
 - Wrap a long string only where its value stays the same, and break it where [Rust](rust.md#strings) breaks a continued literal.
 - Split a shell command that runs past the limit at its pipelines and `&&` or `||` lists, and split one in a Markdown code block the same way where that helps readability. If a part is still too long, keep at most what names the operation on its first line, such as the command, its subcommands, and a leading script, pattern, or message, and put each further flag with its value, or each group of related arguments, on a line of its own. Indent continuation lines one level past the first line, and end each line but the last with `\`, unless it ends with `|`, `&&`, or `||`, which already continue the command. In a workflow, write the command in a `run: |` block.
 

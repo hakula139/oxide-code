@@ -417,8 +417,6 @@ pub(crate) mod testing {
 
 #[cfg(test)]
 mod tests {
-    use std::time::Duration;
-
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
 
@@ -795,55 +793,11 @@ mod tests {
         }
 
         #[test]
-        fn streaming_shows_spinner_and_status_label() {
+        fn puts_the_run_state_after_the_model() {
             let mut bar = bar_idle(None, "~/projects/demo");
+
             bar.set_status(Status::Streaming);
-            insta::assert_snapshot!(render_status(&mut bar, 80));
-        }
 
-        #[test]
-        fn tool_running_status() {
-            let mut bar = bar_idle(None, "~/projects/demo");
-            bar.set_status(Status::ToolRunning {
-                name: "bash".to_owned(),
-            });
-            insta::assert_snapshot!(render_status(&mut bar, 80));
-        }
-
-        #[test]
-        fn compacting_shows_spinner_and_status_label() {
-            let mut bar = bar_idle(None, "~/projects/demo");
-            bar.set_status(Status::Compacting);
-            insta::assert_snapshot!(render_status(&mut bar, 80));
-        }
-
-        #[test]
-        fn signing_in_shows_spinner_and_cancel_hint() {
-            let mut bar = bar_idle(None, "~/projects/demo");
-            bar.set_status(Status::SigningIn);
-            insta::assert_snapshot!(render_status(&mut bar, 80));
-        }
-
-        #[test]
-        fn resuming_shows_spinner_and_label() {
-            let mut bar = bar_idle(None, "~/projects/demo");
-            bar.set_status(Status::Resuming);
-            insta::assert_snapshot!(render_status(&mut bar, 80));
-        }
-
-        #[test]
-        fn cancelling_shows_spinner_and_label() {
-            let mut bar = bar_idle(None, "~/projects/demo");
-            bar.set_status(Status::Cancelling);
-            insta::assert_snapshot!(render_status(&mut bar, 80));
-        }
-
-        #[test]
-        fn exit_armed_shows_static_hint_without_spinner() {
-            let mut bar = bar_idle(None, "~/projects/demo");
-            bar.set_status(Status::ExitArmed {
-                until: Instant::now() + Duration::from_secs(1),
-            });
             insta::assert_snapshot!(render_status(&mut bar, 80));
         }
 
@@ -1109,6 +1063,36 @@ mod tests {
                 bar.status_span(),
                 Span::styled("Ready", Theme::default().muted())
             );
+        }
+
+        #[test]
+        fn busy_labels_follow_the_spinner_in_the_info_style() {
+            let cases = [
+                (Status::Streaming, "Streaming · Esc to interrupt"),
+                (
+                    Status::ToolRunning {
+                        name: "bash".to_owned(),
+                    },
+                    "Running bash · Esc to interrupt",
+                ),
+                (Status::Compacting, "Compacting · Esc to interrupt"),
+                (Status::SigningIn, "Signing in · Esc to cancel"),
+                (Status::Resuming, "Resuming"),
+                (Status::Cancelling, "Cancelling"),
+            ];
+            for (status, label) in cases {
+                let mut bar = test_bar();
+
+                bar.set_status(status);
+
+                assert_eq!(
+                    bar.status_span(),
+                    Span::styled(
+                        format!("{} {label}", SPINNER_FRAMES[0]),
+                        Theme::default().info()
+                    )
+                );
+            }
         }
 
         #[test]

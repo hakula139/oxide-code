@@ -455,12 +455,7 @@ mod tests {
         }
 
         fn text_of(rendered: &RenderedStatusLine) -> String {
-            rendered
-                .line
-                .spans
-                .iter()
-                .map(|span| span.content.as_ref())
-                .collect()
+            rendered.line.to_string()
         }
 
         fn render_text(segments: Vec<StatusLineSegment>, width: u16) -> String {

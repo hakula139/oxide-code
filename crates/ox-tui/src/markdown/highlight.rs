@@ -129,7 +129,7 @@ mod tests {
     use indoc::indoc;
 
     use super::*;
-    use crate::theme::load_builtin;
+    use crate::theme::builtin::find;
 
     /// Joins each row's raw span text. `Line::to_string` would drop a line ending left in a span.
     fn all_text(lines: &[Line<'_>]) -> String {
@@ -213,7 +213,7 @@ mod tests {
         #[test]
         fn follows_theme_syntax_palette() {
             let dark = highlight_code("rust", "fn main() {}", &Theme::default());
-            let light = highlight_code("rust", "fn main() {}", &load_builtin("latte").unwrap());
+            let light = highlight_code("rust", "fn main() {}", &find("latte").unwrap().load());
 
             assert_eq!(all_text(&dark), all_text(&light));
             assert_ne!(styled_spans(&dark[0]), styled_spans(&light[0]));
@@ -297,7 +297,7 @@ mod tests {
 
         #[test]
         fn starts_over_for_another_syntax_theme_or_prefix() {
-            let latte = load_builtin("latte").unwrap();
+            let latte = find("latte").unwrap().load();
             let rust_dark = (syntax("rust"), Theme::default().syntax);
 
             for (syntax, theme, code) in [

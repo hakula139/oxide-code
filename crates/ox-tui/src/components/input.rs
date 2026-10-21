@@ -169,6 +169,10 @@ impl InputArea {
             prompt_area,
         );
 
+        // A textarea drawn with no rows scrolls one past its cursor, which has no cell to sit in.
+        if textarea_area.is_empty() {
+            return;
+        }
         frame.render_widget(&self.textarea, textarea_area);
         if self.rendered_width.replace(textarea_area.width) != textarea_area.width {
             self.visual_lines.set(None);
@@ -376,7 +380,6 @@ impl InputArea {
 
 #[cfg(test)]
 mod tests {
-    use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
     use ratatui::Terminal;
     use ratatui::backend::{Backend, TestBackend};
     use ratatui::layout::Position;
@@ -413,7 +416,7 @@ mod tests {
         use super::*;
 
         #[test]
-        fn toggles_state() {
+        fn reports_the_last_state_set() {
             let mut input = test_input();
             assert!(input.is_enabled());
 
@@ -429,33 +432,38 @@ mod tests {
         use super::*;
 
         #[test]
-        fn empty_input_is_three() {
-            let input = test_input();
-            assert_eq!(input.height(), 1 + BORDER_ROWS);
+        fn holds_one_row_inside_the_borders_when_empty() {
+            assert_eq!(test_input().height(), 1 + BORDER_ROWS);
         }
 
         #[test]
-        fn grows_with_content() {
+        fn grows_with_each_logical_line() {
             let mut input = test_input();
+
             input.textarea.insert_newline();
             input.textarea.insert_newline();
+
             assert_eq!(input.height(), 3 + BORDER_ROWS);
         }
 
         #[test]
-        fn accounts_for_visual_wrapping() {
+        fn grows_with_each_wrapped_row() {
             let mut input = test_input();
             type_text(&mut input, "aaaaaa bbbbbb cccccc dddddd");
+
             render_to_backend(&input, 12, 3);
+
             assert_eq!(input.height(), 4 + BORDER_ROWS, "4 word-wrapped rows");
         }
 
         #[test]
-        fn capped_at_max() {
+        fn stops_growing_at_the_visible_line_cap() {
             let mut input = test_input();
+
             for _ in 0..10 {
                 input.textarea.insert_newline();
             }
+
             assert_eq!(input.height(), MAX_VISIBLE_LINES + BORDER_ROWS);
         }
     }
@@ -525,8 +533,10 @@ mod tests {
             // Chat owns these keys, so a draft must neither change nor swallow them.
             let mut input = test_input();
             type_text(&mut input, "draft");
+
             for enabled in [true, false] {
                 input.set_enabled(enabled);
+
                 for event in [
                     key(KeyCode::PageUp, KeyModifiers::NONE),
                     key(KeyCode::PageDown, KeyModifiers::NONE),
@@ -539,6 +549,7 @@ mod tests {
                         "{event:?}"
                     );
                 }
+
                 assert_eq!(input.textarea.lines(), vec!["draft"]);
                 assert_eq!(input.textarea.cursor(), (0, 5));
             }
@@ -810,6 +821,20 @@ mod tests {
 
     mod render {
         use super::*;
+
+        #[test]
+        fn paints_nothing_into_a_zero_height_area() {
+            let mut input = test_input();
+            type_text(&mut input, "draft");
+            let mut terminal = Terminal::new(TestBackend::new(10, 2)).unwrap();
+
+            terminal
+                .draw(|frame| input.render(frame, Rect::new(0, 0, 10, 0)))
+                .unwrap();
+
+            let buffer = terminal.backend().buffer();
+            assert!(buffer.content.iter().all(|cell| cell.symbol() == " "));
+        }
 
         #[test]
         fn empty_buffer_shows_only_prompt_marker_and_borders() {

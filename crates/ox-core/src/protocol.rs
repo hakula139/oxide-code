@@ -166,6 +166,10 @@ pub enum Event {
     PromptDrained(String),
     /// Turn ended cleanly with a final assistant reply (no further tool rounds).
     TurnComplete,
+    /// The model refused the turn in flight, so the engine removed it from the conversation along
+    /// with its prompt and the [`Self::PromptDrained`] prompts it took in, and a
+    /// [`Self::TurnFailed`] follows. The frontend hands those prompts back to the user.
+    TurnRolledBack,
     /// The in-flight prompt, compaction, resume, or sign-in failed. Like [`Self::TurnComplete`]
     /// and [`Self::Cancelled`], it ends the operation.
     TurnFailed(String),
@@ -237,6 +241,10 @@ pub enum Event {
     /// An [`Op::Login`] stored a new oxide-code login. `auth` is the credential requests now use,
     /// which stays an env var or `client.api_key` when one outranks the login.
     SignedIn { auth: AuthSource },
+    /// A prompt or compaction in a session that a transient failure signed out
+    /// loaded the stored login, which requests now use as `auth`.
+    /// The prompt or compaction goes on.
+    LoginRestored { auth: AuthSource },
     /// An [`Op::Logout`] finished. `removed` reports whether an oxide-code login was stored, and
     /// `auth` is the credential requests now use, `None` when none is left. `fallback_error` says
     /// why a stored Claude Code login could not take over.
@@ -682,6 +690,7 @@ mod tests {
                 Event::ToolCallEnd(_) => "tool_call_end",
                 Event::PromptDrained(_) => "prompt_drained",
                 Event::TurnComplete => "turn_complete",
+                Event::TurnRolledBack => "turn_rolled_back",
                 Event::TurnFailed(_) => "turn_failed",
                 Event::UsageUpdated(_) => "usage_updated",
                 Event::RateLimitsUpdated(_) => "rate_limits_updated",
@@ -701,6 +710,7 @@ mod tests {
                 Event::ModeChanged(_) => "mode_changed",
                 Event::LoginStarted { .. } => "login_started",
                 Event::SignedIn { .. } => "signed_in",
+                Event::LoginRestored { .. } => "login_restored",
                 Event::SignedOut { .. } => "signed_out",
                 Event::Notice(_) => "notice",
                 Event::Error(_) => "error",
@@ -746,6 +756,7 @@ mod tests {
                 Event::ToolCallEnd(text_result("t1", "ok", true, None)),
                 Event::PromptDrained("next".to_owned()),
                 Event::TurnComplete,
+                Event::TurnRolledBack,
                 Event::TurnFailed("boom".to_owned()),
                 Event::UsageUpdated(UsageSnapshot {
                     context_tokens: Some(1_200),
@@ -796,6 +807,9 @@ mod tests {
                 },
                 Event::SignedIn {
                     auth: AuthSource::OxLogin,
+                },
+                Event::LoginRestored {
+                    auth: AuthSource::ClaudeCodeLogin,
                 },
                 Event::SignedOut {
                     removed: true,

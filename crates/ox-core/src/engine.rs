@@ -31,7 +31,7 @@ use crate::config::auth::{self, Auth, AuthSource};
 use crate::config::compaction::CompactionConfig;
 use crate::config::login::PendingLogin;
 use crate::config::oauth::{self, ClaudeCodeKeychain};
-use crate::file_tracker::FileTracker;
+use crate::file_tracker::{FileSnapshot, FileTracker};
 use crate::message::{ContentBlock, Message};
 use crate::model::{self, ModelSpec, TokenUsage};
 use crate::permission::{Mode, Policy, Workspace};
@@ -42,7 +42,7 @@ use crate::protocol::{
 };
 use crate::session::display::id_prefix;
 use crate::session::entry::{CompactInfo, UsageRecord};
-use crate::session::handle::{self, LoadedTranscript, RollIntoOutcome, SessionHandle};
+use crate::session::handle::{self, Checkpoint, LoadedTranscript, RollIntoOutcome, SessionHandle};
 use crate::session::history;
 use crate::session::resolver::resolve_saved_prefix;
 use crate::session::store::SessionStore;
@@ -121,6 +121,9 @@ pub struct Engine {
     oauth_token_url: String,
     /// The Keychain `/logout` checks for the Claude Code login before its file, none in tests.
     claude_code_keychain: ClaudeCodeKeychain,
+    /// Whether the next prompt or compaction loads the stored login again,
+    /// since a transient failure signed the session out.
+    retry_login: bool,
     tools: Arc<ToolRegistry>,
     store: SessionStore,
     session: SessionHandle,
@@ -136,6 +139,8 @@ pub struct Engine {
     /// Whether `prompt` changed since the session last recorded it, so the next user message
     /// records it.
     prompt_unrecorded: bool,
+    /// The config's startup notices, which [`Self::spawn`] shows once.
+    startup_notices: Vec<String>,
     /// Warnings about the instruction files the latest user context load could not read.
     instruction_warnings: Vec<String>,
     file_tracker: Arc<FileTracker>,
@@ -152,9 +157,10 @@ pub struct Engine {
     /// Whether a TUI is attached, so titles generate in the background.
     interactive: bool,
     auto_compaction_failures: AutoCompactFailures,
-    /// The latest turn's last round usage, `None` when that turn reported none.
+    /// The last round usage of the latest turn the transcript keeps, `None` when that turn reported
+    /// none.
     last_usage: Option<TokenUsage>,
-    /// The latest usage any turn reported, which the status line shows.
+    /// The latest usage any turn the transcript keeps reported, which the status line shows.
     displayed_usage: Option<TokenUsage>,
     total_estimated_cost_usd: f64,
     /// Delivers the usage of the live session's title request, which joins the session total once
@@ -203,6 +209,10 @@ impl Engine {
             client,
             oauth_token_url: oauth::OAUTH_TOKEN_URL.to_owned(),
             claude_code_keychain: ClaudeCodeKeychain::SYSTEM,
+            retry_login: config
+                .signed_out
+                .as_ref()
+                .is_some_and(|signed_out| signed_out.retry),
             tools,
             store,
             session,
@@ -212,6 +222,7 @@ impl Engine {
             tasks,
             prompt,
             prompt_unrecorded,
+            startup_notices: config.notices(),
             instruction_warnings,
             file_tracker,
             shells,
@@ -250,13 +261,17 @@ impl Engine {
         )
     }
 
-    /// Starts the engine task, which first emits what [`Self::emit_session_start`] shows. `drifted`
-    /// lists the tracked files that changed on disk since the resumed session read them.
+    /// Starts the engine task, which first emits the config's startup notices, then what
+    /// [`Self::emit_session_start`] shows. `drifted` lists the tracked files that changed on disk
+    /// since the resumed session read them.
     pub fn spawn(mut self, drifted: &[PathBuf]) -> EngineHandle {
         let (ops, op_rx) = mpsc::channel(OP_CHANNEL_CAP);
         // Unbounded, so the engine never waits on or drops events for a frontend that falls behind.
         let (sink, events) = mpsc::unbounded_channel();
         self.shells.attach(Arc::new(sink.clone()));
+        for notice in std::mem::take(&mut self.startup_notices) {
+            sink.emit(Event::Notice(notice), "startup-notice");
+        }
         self.emit_session_start(&sink, drifted);
         let task = EngineTask(tokio::spawn(self.run(sink, op_rx)));
         EngineHandle { ops, events, task }
@@ -302,7 +317,8 @@ impl Engine {
         self.finalize().await
     }
 
-    /// Runs `text` through auto-compaction and one agent turn, reporting how it ended on `sink`.
+    /// Runs `text` through auto-compaction and one agent turn, rolling back a refused turn, and
+    /// reports how it ended on `sink`.
     async fn submit_prompt<S>(
         &mut self,
         text: &str,
@@ -312,16 +328,18 @@ impl Engine {
     where
         S: EventSink + Clone + 'static,
     {
-        if self.client.auth_source().is_none() {
-            return report_abort(sink, signed_out(), "turn-failed");
-        }
         let mut inbox = Inbox::default();
+        if let Err(abort) = self.ensure_signed_in(sink, ops, &mut inbox).await {
+            self.adopt_mode(&mut inbox);
+            return report_abort(sink, abort, "turn-failed");
+        }
         let compacted = self.auto_compact(sink, ops, &mut inbox).await;
         self.adopt_mode(&mut inbox);
         if let Err(abort) = compacted {
             return report_abort(sink, abort, "auto-compact-failed");
         }
 
+        let start = self.turn_start();
         let mut user_msg = Message::user(text);
         let fresh = self.load_user_context(sink).await;
         if let Some(reminder) = self.prompt.catch_up(fresh) {
@@ -378,9 +396,14 @@ impl Engine {
         )
         .await;
         self.adopt_mode(&mut inbox);
-        self.account_usage(sink, &report).await;
-        if let Some(tasks) = report.tasks.take() {
-            self.tasks = tasks;
+        if let Err(TurnAbort::Refused(_)) = result {
+            self.roll_back(sink, start, outcome.checkpoint, &report)
+                .await;
+        } else {
+            self.account_usage(sink, &report).await;
+            if let Some(tasks) = report.tasks.take() {
+                self.tasks = tasks;
+            }
         }
         match result {
             Ok(()) => {
@@ -389,6 +412,42 @@ impl Engine {
             }
             Err(abort) => report_abort(sink, abort, "turn-failed"),
         }
+    }
+
+    /// What [`Self::roll_back`] returns to if the model refuses the turn about to start.
+    fn turn_start(&self) -> TurnStart {
+        TurnStart {
+            transcript_len: self.messages.len(),
+            seen: self.prompt.seen.clone(),
+            prompt_unrecorded: self.prompt_unrecorded,
+            files: self.file_tracker.snapshot_all(),
+        }
+    }
+
+    /// Returns the engine and the session to `start` and `checkpoint` after the model refused the
+    /// turn `report` describes. Keeps the context usage from before the turn, since the transcript
+    /// its requests measured is gone.
+    async fn roll_back(
+        &mut self,
+        sink: &dyn EventSink,
+        start: TurnStart,
+        checkpoint: Option<Checkpoint>,
+        report: &TurnReport,
+    ) {
+        self.bill(sink, &report.billable_rounds).await;
+        self.messages.truncate(start.transcript_len);
+        self.prompt.seen = start.seen;
+        self.prompt_unrecorded = start.prompt_unrecorded;
+        self.file_tracker.reset_to(start.files);
+        if let Some(checkpoint) = checkpoint {
+            let outcome = self.session.rewind(checkpoint).await;
+            sink.session_write_error(outcome.failure.as_deref());
+        }
+        if report.tasks.is_some() {
+            sink.emit(Event::TasksUpdated(self.tasks.clone()), "tasks-rolled-back");
+        }
+        self.emit_usage_update(sink);
+        sink.emit(Event::TurnRolledBack, "turn-rolled-back");
     }
 
     async fn auto_compact(
@@ -437,12 +496,13 @@ impl Engine {
         ops: &mut mpsc::Receiver<Op>,
         instructions: Option<String>,
     ) -> TurnEnd {
-        if self.client.auth_source().is_none() {
-            return report_abort(sink, signed_out(), "compact-failed");
+        let mut inbox = Inbox::default();
+        if let Err(abort) = self.ensure_signed_in(sink, ops, &mut inbox).await {
+            self.adopt_mode(&mut inbox);
+            return report_abort(sink, abort, "compact-failed");
         }
         let tools = self.tools.definitions();
         let mut spent = Vec::new();
-        let mut inbox = Inbox::default();
         let summary = abort::await_unless_aborted(
             compaction::compact_session(
                 &self.client,
@@ -697,6 +757,43 @@ impl Engine {
         }
     }
 
+    /// Fails while signed out.
+    /// A session that a transient failure signed out first loads the stored login again,
+    /// and keeps doing so on later prompts and compactions while the failure stays transient.
+    /// An interrupt or a closed channel stops only the wait.
+    async fn ensure_signed_in(
+        &mut self,
+        sink: &dyn EventSink,
+        ops: &mut mpsc::Receiver<Op>,
+        inbox: &mut Inbox,
+    ) -> Result<(), TurnAbort> {
+        if self.client.auth_source().is_some() {
+            return Ok(());
+        }
+        if !self.retry_login {
+            return Err(signed_out());
+        }
+        let retry = self.client.retry_stored_login(self.claude_code_keychain);
+        match abort::await_unless_aborted(retry, ops, inbox, sink).await? {
+            Ok(auth) => {
+                let source = auth.source();
+                self.set_stored_login(Some(auth), false);
+                sink.emit(Event::LoginRestored { auth: source }, "login-restored");
+                Ok(())
+            }
+            Err(unavailable) => {
+                self.retry_login = unavailable.retry;
+                Err(TurnAbort::Failed(anyhow!(unavailable.notice)))
+            }
+        }
+    }
+
+    /// `retry` says whether the next prompt or compaction loads the stored login again.
+    fn set_stored_login(&mut self, auth: Option<Auth>, retry: bool) {
+        self.client.set_auth(auth);
+        self.retry_login = retry;
+    }
+
     /// Signs in through the browser and stores the new oxide-code login.
     async fn login(&mut self, sink: &dyn EventSink, ops: &mut mpsc::Receiver<Op>) -> TurnEnd {
         let pending = match PendingLogin::start().await {
@@ -729,7 +826,7 @@ impl Engine {
         let active = match self.client.auth_source() {
             Some(source) if !source.is_stored_login() => source,
             _ => {
-                self.client.set_auth(Some(auth));
+                self.set_stored_login(Some(auth), false);
                 AuthSource::OxLogin
             }
         };
@@ -755,13 +852,15 @@ impl Engine {
             .auth_source()
             .is_none_or(|source| source == AuthSource::OxLogin)
         {
+            let mut retry = false;
             let fallback = auth::claude_code_login(self.claude_code_keychain, self.client.trust())
                 .await
                 .unwrap_or_else(|e| {
+                    retry = auth::is_transient(&e);
                     fallback_error = Some(format!("{e:#}"));
                     None
                 });
-            self.client.set_auth(fallback);
+            self.set_stored_login(fallback, retry);
         }
         sink.emit(
             Event::SignedOut {
@@ -877,6 +976,15 @@ impl Engine {
     }
 }
 
+/// The engine state before a turn's prompt: the transcript length, what the model had seen of the
+/// user context and whether the prompt context awaits recording, and the tracked files.
+struct TurnStart {
+    transcript_len: usize,
+    seen: UserContext,
+    prompt_unrecorded: bool,
+    files: Vec<FileSnapshot>,
+}
+
 /// Replays the prompt a session recorded, or builds a fresh one for a session without one. Also
 /// returns the warnings about instruction files a fresh build could not read.
 async fn session_prompt(
@@ -945,6 +1053,10 @@ fn report_abort(sink: &dyn EventSink, abort: TurnAbort, label: &'static str) -> 
             TurnEnd::Cancelled
         }
         TurnAbort::Shutdown => TurnEnd::Shutdown,
+        TurnAbort::Refused(notice) => {
+            sink.emit(Event::TurnFailed(notice), label);
+            TurnEnd::Failed
+        }
         TurnAbort::Failed(e) => {
             sink.emit(Event::TurnFailed(format!("{e:#}")), label);
             TurnEnd::Failed
@@ -1017,20 +1129,21 @@ mod tests {
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
     use super::local_testing::{
-        EchoTool, inert_ops, mount_stalled_reply_once, service_log, system_prompt,
-        tool_heavy_transcript, until_requested,
+        EchoTool, inert_ops, service_log, system_prompt, tool_heavy_transcript,
     };
     use super::testing::{
-        MODEL, SESSION_CONTEXT, engine, mount_reply, mount_tool_call_once, panic_message,
-        request_bodies, with_pinned_home,
+        MODEL, SESSION_CONTEXT, engine, mount_reply, mount_stalled_reply_once,
+        mount_tool_call_once, panic_message, request_bodies, until_requested, with_pinned_home,
     };
     use super::*;
     use crate::client::anthropic::local_testing::{COMPLETION_USAGE, client_for, completion_body};
     use crate::client::anthropic::testing::{
         DEVICE_ID, api_key, sse_body, sse_response, test_config, text_stream_body,
     };
+    use crate::config::auth::LoginUnavailable;
     use crate::config::compaction::CompactionConfig;
     use crate::config::compaction::testing::WINDOW_1M_THRESHOLD;
+    use crate::config::oauth::testing::write_creds;
     use crate::config::{Effort, PromptCacheTtl};
     use crate::file_tracker::testing::seed_full_read;
     use crate::message::{Replay, Role};
@@ -1046,6 +1159,7 @@ mod tests {
     use crate::tool::bash::background::local_testing::start_shell;
     use crate::tool::bash::background::testing::shell;
     use crate::tool::local_testing::{canonical_tempdir, ctx};
+    use crate::tool::read::ReadTool;
     use crate::tool::tasks::TasksTool;
     use crate::tool::tasks::testing::plan;
     use crate::util::git::local_testing::init_fixture_repo;
@@ -1185,6 +1299,14 @@ mod tests {
             .collect();
         names.sort();
         names
+    }
+
+    /// Stores an oxide-code login under `data`, standing in for `$XDG_DATA_HOME`.
+    fn store_ox_login(data: &Path) -> PathBuf {
+        let file = data.join("ox").join("credentials.json");
+        std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+        write_creds(&file, "ox-token", None, 9_999_999_999_999);
+        file
     }
 
     #[tokio::test]
@@ -1482,6 +1604,10 @@ mod tests {
                 config.compaction = CompactionConfig::with_threshold_for_test(50_000);
                 config.permission.set_mode(Mode::Plan);
                 config.workspace = Workspace::new(dir.path());
+                config.signed_out = Some(LoginUnavailable {
+                    notice: "Not signed in. Run `/login` to sign in.".to_owned(),
+                    retry: true,
+                });
 
                 let engine = Engine::new(
                     &config,
@@ -1502,6 +1628,11 @@ mod tests {
                 assert_eq!(engine.max_tool_rounds, Some(3));
                 assert_eq!(engine.compaction, config.compaction);
                 assert_eq!(engine.policy.mode(), Mode::Plan);
+                assert_eq!(
+                    engine.startup_notices,
+                    ["Not signed in. Run `/login` to sign in."],
+                );
+                assert!(engine.retry_login);
                 assert_eq!(engine.client.session_id(), session.session_id());
             })
             .await;
@@ -1566,12 +1697,13 @@ mod tests {
         use super::*;
 
         #[tokio::test]
-        async fn reports_the_resumed_cost_tasks_warnings_drift_and_an_interrupted_transcript() {
+        async fn reports_the_startup_notices_resumed_cost_tasks_warnings_drift_and_interruption() {
             with_pinned_home(async {
                 let server = MockServer::start().await;
                 let dir = tempfile::tempdir().unwrap();
                 let warning = write_unreadable_instructions(dir.path());
                 let mut engine = engine(server.uri(), &test_store(dir.path()), dir.path()).await;
+                engine.startup_notices = vec!["Not signed in. Run `/login` to sign in.".to_owned()];
                 engine.messages = vec![
                     Message::user("hi"),
                     Message {
@@ -1586,6 +1718,7 @@ mod tests {
                 engine.tasks = plan();
 
                 let mut handle = engine.spawn(&[PathBuf::from("a.rs")]);
+                let notice = handle.events.recv().await.unwrap();
                 let cost = handle.events.recv().await.unwrap();
                 let tasks = handle.events.recv().await.unwrap();
                 let instructions = handle.events.recv().await.unwrap();
@@ -1593,6 +1726,10 @@ mod tests {
                 let interrupted = handle.events.recv().await.unwrap();
                 let failure = handle.shutdown().await.unwrap();
 
+                assert_eq!(
+                    notice,
+                    Event::Notice("Not signed in. Run `/login` to sign in.".to_owned()),
+                );
                 assert!(
                     matches!(
                         &cost,
@@ -2690,6 +2827,163 @@ mod tests {
 
                 assert_eq!(end, TurnEnd::Failed);
                 assert_eq!(engine.tasks, plan());
+            })
+            .await;
+        }
+
+        /// Answers the next Messages request with `text`.
+        async fn mount_reply_once(server: &MockServer, text: &str) {
+            Mock::given(method("POST"))
+                .and(path("/v1/messages"))
+                .respond_with(sse_response(text_stream_body("", text)))
+                .up_to_n_times(1)
+                .mount(server)
+                .await;
+        }
+
+        /// Answers the next Messages request with a refusal that reports `input_tokens`.
+        async fn mount_refusal_once(server: &MockServer, input_tokens: u64) {
+            let start = serde_json::json!({
+                "type": "message_start",
+                "message": {"id": "msg_1", "model": MODEL, "usage": {"input_tokens": input_tokens}},
+            });
+            let stop = serde_json::json!({
+                "type": "message_delta",
+                "delta": {"stop_reason": "refusal"},
+                "usage": {"output_tokens": 1},
+            });
+            let end = serde_json::json!({"type": "message_stop"});
+            Mock::given(method("POST"))
+                .and(path("/v1/messages"))
+                .respond_with(sse_response(sse_body(&[start, stop, end])))
+                .up_to_n_times(1)
+                .mount(server)
+                .await;
+        }
+
+        #[tokio::test]
+        async fn rolls_back_a_refused_turn_to_the_state_before_it() {
+            with_pinned_home(async {
+                let server = MockServer::start().await;
+                let dir = canonical_tempdir();
+                let notes = dir.path().join("notes.txt");
+                let other = dir.path().join("other.txt");
+                std::fs::write(&notes, "notes").unwrap();
+                std::fs::write(&other, "other").unwrap();
+                let tasks = serde_json::json!({ "tasks": plan() }).to_string();
+                let read = serde_json::json!({ "file_path": notes }).to_string();
+                mount_tool_call_once(&server, "call-1", "tasks", &tasks).await;
+                mount_tool_call_once(&server, "call-2", "read", &read).await;
+                mount_reply_once(&server, "done").await;
+                let refused_tasks = serde_json::json!({ "tasks": [] }).to_string();
+                let refused_read = serde_json::json!({ "file_path": other }).to_string();
+                mount_tool_call_once(&server, "call-3", "tasks", &refused_tasks).await;
+                mount_tool_call_once(&server, "call-4", "read", &refused_read).await;
+                mount_refusal_once(&server, 5_000).await;
+                mount_reply(&server, "reply").await;
+                let store = test_store(dir.path());
+                let mut engine =
+                    engine(server.uri(), &store, dir.path())
+                        .await
+                        .with_tools(ToolRegistry::new(vec![
+                            Box::new(TasksTool),
+                            Box::new(ReadTool),
+                        ]));
+                let today = engine.prompt.seen.date.clone();
+                let sink = CapturingSink::default();
+                let mut ops = inert_ops();
+                let first = engine.submit_prompt("first", &sink, &mut ops).await;
+                assert_eq!(first, TurnEnd::Completed);
+                "2000-01-01".clone_into(&mut engine.prompt.seen.date);
+                let before_refusal = sink.events().len();
+
+                let refused = engine.submit_prompt("refused", &sink, &mut ops).await;
+                let refused_events = sink.events().split_off(before_refusal);
+                let tracked: Vec<_> = engine
+                    .file_tracker
+                    .snapshot_all()
+                    .into_iter()
+                    .map(|snapshot| snapshot.path)
+                    .collect();
+                let tasks = engine.tasks.clone();
+                let rephrased = engine.submit_prompt("rephrased", &sink, &mut ops).await;
+
+                assert_eq!(refused, TurnEnd::Failed);
+                let [
+                    ..,
+                    restored,
+                    Event::UsageUpdated(usage),
+                    rolled_back,
+                    failed,
+                ] = &refused_events[..]
+                else {
+                    panic!("{refused_events:?}");
+                };
+                assert_eq!(*restored, Event::TasksUpdated(plan()));
+                assert_eq!(usage.context_tokens, Some(REPLY_USAGE.context_tokens()));
+                assert_eq!(*rolled_back, Event::TurnRolledBack);
+                assert_eq!(
+                    *failed,
+                    Event::TurnFailed(
+                        "The model declined this request. \
+                         The request was removed from the conversation, \
+                         so rephrase it to try again."
+                            .to_owned()
+                    ),
+                );
+                assert_eq!(tracked, [notes]);
+                assert_eq!(tasks, plan());
+                assert_eq!(rephrased, TurnEnd::Completed);
+                let turns = request_bodies(&server).await;
+                let messages = turns.last().unwrap()["messages"].as_array().unwrap();
+                let [.., done, prompt] = &messages[..] else {
+                    panic!("{messages:?}");
+                };
+                assert_eq!(done["content"][0]["text"], "done");
+                assert_eq!(prompt["content"][0]["text"], "rephrased");
+                let reminder = prompt["content"][1]["text"].as_str().unwrap();
+                assert!(
+                    reminder.contains(&format!("Today's date is {today}.")),
+                    "the rolled-back reminder is sent again: {reminder}"
+                );
+
+                let id = engine.session.session_id().to_owned();
+                let expected = engine.prompt.session_context();
+                engine.finalize().await;
+                let data = store.load_session_data(&id).unwrap();
+                let [.., done, prompt, reply] = &data.messages[..] else {
+                    panic!("{:?}", data.messages);
+                };
+                assert_eq!(*done, Message::assistant("done"));
+                assert!(matches!(
+                    &prompt.content[..],
+                    [ContentBlock::Text { text }, _] if text == "rephrased"
+                ));
+                assert_eq!(*reply, Message::assistant("reply"));
+                assert_eq!(data.context, Some(expected));
+            })
+            .await;
+        }
+
+        #[tokio::test]
+        async fn rolls_back_a_refused_turn_in_memory_when_the_session_is_gone() {
+            with_pinned_home(async {
+                let server = MockServer::start().await;
+                mount_refusal_once(&server, 1_000).await;
+                mount_reply(&server, "reply").await;
+                let dir = tempfile::tempdir().unwrap();
+                let mut engine = engine(server.uri(), &test_store(dir.path()), dir.path()).await;
+                engine.session = handle::testing::dead("dead");
+                let sink = CapturingSink::default();
+                let mut ops = inert_ops();
+
+                let refused = engine.submit_prompt("refused", &sink, &mut ops).await;
+                let rephrased = engine.submit_prompt("rephrased", &sink, &mut ops).await;
+
+                assert_eq!(refused, TurnEnd::Failed);
+                assert_eq!(rephrased, TurnEnd::Completed);
+                let turns = request_bodies(&server).await;
+                assert_eq!(texts(&turns[1]), [SESSION_CONTEXT, "rephrased"]);
             })
             .await;
         }
@@ -3854,6 +4148,260 @@ mod tests {
         }
     }
 
+    mod ensure_signed_in {
+        use super::*;
+
+        /// The authorization header of the first Messages request `server` received.
+        async fn sent_authorization(server: &MockServer) -> String {
+            let requests = server.received_requests().await.unwrap();
+            let request = requests
+                .iter()
+                .find(|request| request.url.path() == "/v1/messages")
+                .expect("a request reaches the API");
+            request.headers["authorization"]
+                .to_str()
+                .unwrap()
+                .to_owned()
+        }
+
+        /// Stores an expired, refreshable oxide-code login under `data` and holds its lock,
+        /// so loading it fails transiently after the lock wait.
+        fn hold_expired_ox_login(data: &Path) {
+            let file = store_ox_login(data);
+            write_creds(&file, "dead", Some("refresh"), 0);
+            std::fs::create_dir(data.join("ox").join("credentials.lock")).unwrap();
+        }
+
+        #[tokio::test]
+        async fn restores_the_stored_login_and_goes_on_with_the_prompt() {
+            with_pinned_home(async {
+                let server = MockServer::start().await;
+                mount_reply(&server, "reply").await;
+                let dir = tempfile::tempdir().unwrap();
+                let data = tempfile::tempdir().unwrap();
+                store_ox_login(data.path());
+                temp_env::async_with_vars([("XDG_DATA_HOME", Some(data.path()))], async {
+                    let mut engine =
+                        engine(server.uri(), &test_store(dir.path()), dir.path()).await;
+                    engine.client.set_auth(None);
+                    engine.retry_login = true;
+                    let sink = CapturingSink::default();
+                    let mut ops = inert_ops();
+
+                    let end = engine.submit_prompt("hi", &sink, &mut ops).await;
+
+                    assert_eq!(end, TurnEnd::Completed);
+                    assert!(!engine.retry_login);
+                    let events = sink.events();
+                    assert!(
+                        matches!(
+                            events.first(),
+                            Some(Event::LoginRestored {
+                                auth: AuthSource::OxLogin
+                            })
+                        ),
+                        "{events:?}"
+                    );
+                    assert!(
+                        matches!(events.last(), Some(Event::TurnComplete)),
+                        "{events:?}"
+                    );
+                    assert_eq!(sent_authorization(&server).await, "Bearer ox-token");
+                })
+                .await;
+            })
+            .await;
+        }
+
+        #[tokio::test]
+        async fn restores_the_stored_login_and_goes_on_with_the_compaction() {
+            with_pinned_home(async {
+                let server = MockServer::start().await;
+                mount_reply(&server, "summary").await;
+                let dir = tempfile::tempdir().unwrap();
+                let data = tempfile::tempdir().unwrap();
+                store_ox_login(data.path());
+                temp_env::async_with_vars([("XDG_DATA_HOME", Some(data.path()))], async {
+                    let mut engine =
+                        engine(server.uri(), &test_store(dir.path()), dir.path()).await;
+                    engine.messages = tool_heavy_transcript();
+                    engine.client.set_auth(None);
+                    engine.retry_login = true;
+                    let sink = CapturingSink::default();
+                    let mut ops = inert_ops();
+
+                    let end = engine.compact(&sink, &mut ops, None).await;
+
+                    let events = sink.events();
+                    assert_eq!(end, TurnEnd::Completed, "{events:?}");
+                    assert!(
+                        matches!(
+                            events.first(),
+                            Some(Event::LoginRestored {
+                                auth: AuthSource::OxLogin
+                            })
+                        ),
+                        "{events:?}"
+                    );
+                    assert!(
+                        events
+                            .iter()
+                            .any(|event| matches!(event, Event::SessionCompacted { .. })),
+                        "{events:?}"
+                    );
+                    assert_eq!(sent_authorization(&server).await, "Bearer ox-token");
+                })
+                .await;
+            })
+            .await;
+        }
+
+        #[tokio::test(start_paused = true)]
+        async fn keeps_retrying_while_the_failure_stays_transient() {
+            with_pinned_home(async {
+                let dir = tempfile::tempdir().unwrap();
+                let data = tempfile::tempdir().unwrap();
+                hold_expired_ox_login(data.path());
+                temp_env::async_with_vars([("XDG_DATA_HOME", Some(data.path()))], async {
+                    let mut engine = engine(
+                        "http://127.0.0.1:9".to_owned(),
+                        &test_store(dir.path()),
+                        dir.path(),
+                    )
+                    .await;
+                    engine.client.set_auth(None);
+                    engine.retry_login = true;
+                    let sink = CapturingSink::default();
+                    let mut ops = inert_ops();
+
+                    let end = engine.submit_prompt("hi", &sink, &mut ops).await;
+
+                    assert_eq!(end, TurnEnd::Failed);
+                    assert!(engine.retry_login);
+                    let events = sink.events();
+                    assert!(
+                        matches!(
+                            events.as_slice(),
+                            [Event::TurnFailed(notice)]
+                                if notice.ends_with("The next prompt tries the stored login again.")
+                        ),
+                        "{events:?}"
+                    );
+                })
+                .await;
+            })
+            .await;
+        }
+
+        #[tokio::test(start_paused = true)]
+        async fn an_interrupt_ends_the_wait_and_the_reload_still_finishes() {
+            with_pinned_home(async {
+                let dir = tempfile::tempdir().unwrap();
+                let data = tempfile::tempdir().unwrap();
+                hold_expired_ox_login(data.path());
+                temp_env::async_with_vars([("XDG_DATA_HOME", Some(data.path()))], async {
+                    let mut engine = engine(
+                        "http://127.0.0.1:9".to_owned(),
+                        &test_store(dir.path()),
+                        dir.path(),
+                    )
+                    .await;
+                    engine.client.set_auth(None);
+                    engine.retry_login = true;
+                    let sink = CapturingSink::default();
+                    let (tx, mut ops) = mpsc::channel(1);
+                    tx.try_send(Op::Interrupt).unwrap();
+                    let start = tokio::time::Instant::now();
+
+                    let end = engine.submit_prompt("hi", &sink, &mut ops).await;
+                    let waited = start.elapsed();
+                    engine.client.finish_reloads().await;
+
+                    assert_eq!(end, TurnEnd::Cancelled);
+                    assert!(waited < Duration::from_secs(1), "{waited:?}");
+                    assert!(engine.retry_login);
+                    assert_eq!(engine.client.auth_source(), None);
+                    assert!(matches!(sink.events().as_slice(), [Event::Cancelled]));
+                })
+                .await;
+            })
+            .await;
+        }
+
+        #[tokio::test]
+        async fn stops_retrying_once_the_failure_is_not_transient() {
+            with_pinned_home(async {
+                let dir = tempfile::tempdir().unwrap();
+                let data = tempfile::tempdir().unwrap();
+                temp_env::async_with_vars([("XDG_DATA_HOME", Some(data.path()))], async {
+                    let mut engine = engine(
+                        "http://127.0.0.1:9".to_owned(),
+                        &test_store(dir.path()),
+                        dir.path(),
+                    )
+                    .await;
+                    engine.client.set_auth(None);
+                    engine.retry_login = true;
+                    let sink = CapturingSink::default();
+                    let mut ops = inert_ops();
+
+                    let end = engine.submit_prompt("hi", &sink, &mut ops).await;
+
+                    assert_eq!(end, TurnEnd::Failed);
+                    assert!(!engine.retry_login);
+                    assert_eq!(engine.client.auth_source(), None);
+                    assert!(
+                        matches!(
+                            sink.events().as_slice(),
+                            [Event::TurnFailed(notice)]
+                                if notice == "Not signed in. Run `/login` to sign in."
+                        ),
+                        "{:?}",
+                        sink.events()
+                    );
+                })
+                .await;
+            })
+            .await;
+        }
+
+        #[tokio::test]
+        async fn reads_no_store_without_a_transient_sign_out() {
+            with_pinned_home(async {
+                let dir = tempfile::tempdir().unwrap();
+                let data = tempfile::tempdir().unwrap();
+                store_ox_login(data.path());
+                temp_env::async_with_vars([("XDG_DATA_HOME", Some(data.path()))], async {
+                    let mut engine = engine(
+                        "http://127.0.0.1:9".to_owned(),
+                        &test_store(dir.path()),
+                        dir.path(),
+                    )
+                    .await;
+                    engine.client.set_auth(None);
+                    let sink = CapturingSink::default();
+                    let mut ops = inert_ops();
+
+                    let end = engine.submit_prompt("hi", &sink, &mut ops).await;
+
+                    assert_eq!(end, TurnEnd::Failed);
+                    assert_eq!(engine.client.auth_source(), None);
+                    assert!(
+                        matches!(
+                            sink.events().as_slice(),
+                            [Event::TurnFailed(notice)]
+                                if notice == "Not signed in. Run `/login` to sign in."
+                        ),
+                        "{:?}",
+                        sink.events()
+                    );
+                })
+                .await;
+            })
+            .await;
+        }
+    }
+
     mod login {
         use super::*;
 
@@ -4010,8 +4558,10 @@ mod tests {
                     Some(Auth::new(AuthSource::ClaudeCodeLogin, "claude-code-token")),
                 ] {
                     engine.client.set_auth(before);
+                    engine.retry_login = true;
                     engine.adopt_login(&sink, ox_login());
                     assert_eq!(engine.client.auth().unwrap().secret(), "ox-token");
+                    assert!(!engine.retry_login);
                 }
 
                 let events = sink.events();
@@ -4039,24 +4589,6 @@ mod tests {
 
     mod logout {
         use super::*;
-
-        /// Stores an oxide-code login under `data`, standing in for `$XDG_DATA_HOME`.
-        fn store_ox_login(data: &Path) -> PathBuf {
-            let file = data.join("ox").join("credentials.json");
-            std::fs::create_dir_all(file.parent().unwrap()).unwrap();
-            std::fs::write(&file, credentials_json("ox-token")).unwrap();
-            file
-        }
-
-        fn credentials_json(access_token: &str) -> String {
-            serde_json::json!({
-                "claudeAiOauth": {
-                    "accessToken": access_token,
-                    "expiresAt": 9_999_999_999_999_u64,
-                },
-            })
-            .to_string()
-        }
 
         #[tokio::test]
         async fn removes_the_oxide_code_login_and_keeps_an_explicit_credential() {
@@ -4115,8 +4647,12 @@ mod tests {
                     std::fs::create_dir(claude_code_file.parent().unwrap()).unwrap();
                     std::fs::write(&claude_code_file, "not json").unwrap();
                     engine.logout(&sink).await;
-                    std::fs::write(&claude_code_file, credentials_json("claude-code-token"))
-                        .unwrap();
+                    write_creds(
+                        &claude_code_file,
+                        "claude-code-token",
+                        None,
+                        9_999_999_999_999,
+                    );
                     engine.logout(&sink).await;
 
                     assert_eq!(engine.client.auth().unwrap().secret(), "claude-code-token");
@@ -4171,6 +4707,69 @@ mod tests {
                             events.as_slice(),
                             [Event::Error(msg)]
                                 if msg.starts_with("Sign-out failed: failed to remove ")
+                        ),
+                        "{events:?}"
+                    );
+                })
+                .await;
+            })
+            .await;
+        }
+
+        #[tokio::test(start_paused = true)]
+        async fn retries_a_claude_code_login_a_transient_failure_kept_from_taking_over() {
+            with_pinned_home(async {
+                let dir = tempfile::tempdir().unwrap();
+                let data = tempfile::tempdir().unwrap();
+                store_ox_login(data.path());
+                let home = std::env::home_dir().unwrap();
+                let claude_code_file = home.join(".claude").join(".credentials.json");
+                std::fs::create_dir(home.join(".claude")).unwrap();
+                write_creds(&claude_code_file, "dead", Some("refresh"), 0);
+                let lock = home.join(".claude.lock");
+                std::fs::create_dir(&lock).unwrap();
+                temp_env::async_with_vars([("XDG_DATA_HOME", Some(data.path()))], async {
+                    let mut engine = engine(
+                        "http://127.0.0.1:9".to_owned(),
+                        &test_store(dir.path()),
+                        dir.path(),
+                    )
+                    .await;
+                    engine
+                        .client
+                        .set_auth(Some(Auth::new(AuthSource::OxLogin, "ox-token")));
+                    let sink = CapturingSink::default();
+
+                    engine.logout(&sink).await;
+                    let retrying = engine.retry_login;
+                    std::fs::remove_dir(&lock).unwrap();
+                    write_creds(
+                        &claude_code_file,
+                        "claude-code-token",
+                        None,
+                        9_999_999_999_999,
+                    );
+                    let restored = engine
+                        .ensure_signed_in(&sink, &mut inert_ops(), &mut Inbox::default())
+                        .await;
+
+                    assert!(retrying);
+                    assert!(restored.is_ok(), "the next prompt loads the login again");
+                    assert_eq!(engine.client.auth().unwrap().secret(), "claude-code-token");
+                    let events = sink.events();
+                    assert!(
+                        matches!(
+                            events.as_slice(),
+                            [
+                                Event::SignedOut {
+                                    removed: true,
+                                    auth: None,
+                                    fallback_error: Some(error),
+                                },
+                                Event::LoginRestored {
+                                    auth: AuthSource::ClaudeCodeLogin
+                                },
+                            ] if error.ends_with("Try again in a moment.")
                         ),
                         "{events:?}"
                     );

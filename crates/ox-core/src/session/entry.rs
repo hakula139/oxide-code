@@ -49,13 +49,22 @@ pub(crate) enum Entry {
         #[serde(with = "time::serde::rfc3339")]
         timestamp: OffsetDateTime,
     },
+    /// Moves the active branch's tip back to the message `tip` names, or to an empty transcript
+    /// when `None`. The messages it abandons stay in the file. Resume follows a rewind until a
+    /// message line follows it in the file.
+    Rewind {
+        #[serde(skip_serializing_if = "Option::is_none")]
+        tip: Option<Uuid>,
+        #[serde(with = "time::serde::rfc3339")]
+        timestamp: OffsetDateTime,
+    },
     Title {
         title: String,
         source: TitleSource,
         #[serde(with = "time::serde::rfc3339")]
         updated_at: OffsetDateTime,
     },
-    /// Sets whether default listings and bare `--continue` skip the session. The last one in the
+    /// Sets whether default listings and `--continue` skip the session. The last one in the
     /// file wins.
     Archive {
         archived: bool,

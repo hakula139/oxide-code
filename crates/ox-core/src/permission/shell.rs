@@ -3,8 +3,6 @@
 //! command on its own. Leading assignments and transparent wrappers are stripped first. A command
 //! the analysis cannot vouch for is opaque: rules may deny it or leave it to ask, but never allow
 //! it. `exec` patterns parse here too, so they read words the way commands do.
-//!
-//! Design: `docs/design/tools/permissions.md`.
 
 use std::path::{Component, Path, PathBuf};
 use std::sync::LazyLock;
@@ -17,9 +15,11 @@ use tree_sitter::{Node, Parser, Tree};
 use crate::permission::{Access, Workspace, fold_name};
 use crate::util::path::expand_user;
 
-/// Shells, whose `-c` script, script file, or stdin is code the analysis does not see.
+/// Shells and the commands that start one as another user, whose `-c` script, script file, or
+/// stdin is code the analysis does not see.
 const SHELLS: &[&str] = &[
-    "ash", "bash", "busybox", "csh", "dash", "fish", "ksh", "mksh", "pwsh", "sh", "tcsh", "zsh",
+    "ash", "bash", "csh", "dash", "fish", "hush", "ksh", "mksh", "pwsh", "runuser", "sh", "su",
+    "tcsh", "zsh",
 ];
 
 /// Builtins that run a string or a file as shell code, or evaluate one as arithmetic, which can
@@ -96,94 +96,237 @@ const WRITE_OPERATORS: &[&str] = &[">", ">>", ">|", "&>", "&>>", ">&"];
 /// Redirection targets that are devices, so redirecting to or from them touches no file.
 const DEVICES: &[&str] = &["/dev/null", "/dev/stderr", "/dev/stdout", "/dev/tty"];
 
-/// Wrappers that run the command after their own options, so rules see through them.
+/// Wrappers that run a command given after their own options, so rules see through them.
 const WRAPPERS: &[Wrapper] = &[
     Wrapper {
         name: "builtin",
-        flags: &[],
-        valued: &[],
-        directory: &[],
-        numeric: false,
-        positionals: 0,
-        assignments: false,
+        ..Wrapper::TRANSPARENT
+    },
+    Wrapper {
+        name: "busybox",
+        ..Wrapper::RUNNER
     },
     Wrapper {
         name: "command",
-        flags: &["-V", "-p", "-v"],
-        valued: &[],
-        directory: &[],
-        numeric: false,
-        positionals: 0,
-        assignments: false,
+        options: &[flag("-V"), flag("-p"), flag("-v")],
+        ..Wrapper::TRANSPARENT
+    },
+    Wrapper {
+        name: "doas",
+        options: &[
+            valued("-a"),
+            flag("-n"),
+            flag("-s").with(Effect::Shell),
+            valued("-u"),
+        ],
+        ..Wrapper::RUNNER
     },
     Wrapper {
         name: "env",
-        flags: &[
-            "-",
-            "-0",
-            "-i",
-            "-v",
-            "--debug",
-            "--ignore-environment",
-            "--null",
+        options: &[
+            flag("-"),
+            flag("-0"),
+            valued("-C").with(Effect::Directory),
+            flag("-i"),
+            valued("-u"),
+            flag("-v"),
+            valued("--chdir").with(Effect::Directory),
+            flag("--debug"),
+            flag("--ignore-environment"),
+            flag("--null"),
+            valued("--unset"),
         ],
-        valued: &["-C", "-u", "--chdir", "--unset"],
-        directory: &["-C", "--chdir"],
-        numeric: false,
-        positionals: 0,
-        assignments: true,
+        assignments: Assignments::After,
+        ..Wrapper::TRANSPARENT
     },
     Wrapper {
         name: "exec",
-        flags: &["-c", "-l"],
-        valued: &["-a"],
-        directory: &[],
-        numeric: false,
-        positionals: 0,
-        assignments: false,
+        options: &[valued("-a"), flag("-c"), flag("-l")],
+        ..Wrapper::TRANSPARENT
     },
     Wrapper {
         name: "nice",
-        flags: &[],
-        valued: &["-n", "--adjustment"],
-        directory: &[],
+        options: &[valued("-n"), valued("--adjustment")],
         numeric: true,
-        positionals: 0,
-        assignments: false,
+        ..Wrapper::TRANSPARENT
     },
     Wrapper {
         name: "nohup",
-        flags: &[],
-        valued: &[],
-        directory: &[],
-        numeric: false,
-        positionals: 0,
-        assignments: false,
+        ..Wrapper::TRANSPARENT
+    },
+    Wrapper {
+        name: "pkexec",
+        options: &[
+            valued("-u"),
+            flag("--disable-internal-agent"),
+            flag("--keep-cwd"),
+            valued("--user"),
+        ],
+        elsewhere: true,
+        ..Wrapper::RUNNER
+    },
+    Wrapper {
+        name: "stdbuf",
+        options: &[
+            valued("-e"),
+            valued("-i"),
+            valued("-o"),
+            valued("--error"),
+            valued("--input"),
+            valued("--output"),
+        ],
+        ..Wrapper::TRANSPARENT
+    },
+    Wrapper {
+        name: "sudo",
+        options: &[
+            flag("-A"),
+            flag("-B"),
+            valued("-C"),
+            valued("-D").with(Effect::Directory),
+            flag("-E"),
+            flag("-H"),
+            flag("-N"),
+            flag("-P"),
+            valued("-R").with(Effect::Directory),
+            flag("-S"),
+            valued("-T"),
+            valued("-a"),
+            flag("-b"),
+            valued("-c"),
+            valued("-g"),
+            flag("-i").with(Effect::Shell),
+            flag("-k"),
+            flag("-n"),
+            valued("-p"),
+            valued("-r"),
+            flag("-s").with(Effect::Shell),
+            valued("-t"),
+            valued("-u"),
+            flag("--askpass"),
+            flag("--background"),
+            flag("--bell"),
+            valued("--chdir").with(Effect::Directory),
+            valued("--chroot").with(Effect::Directory),
+            valued("--close-from"),
+            valued("--command-timeout"),
+            valued("--group"),
+            valued("--login-class"),
+            flag("--login").with(Effect::Shell),
+            flag("--no-update"),
+            flag("--non-interactive"),
+            optional("--preserve-env"),
+            flag("--preserve-groups"),
+            valued("--prompt"),
+            flag("--reset-timestamp"),
+            valued("--role"),
+            flag("--set-home"),
+            flag("--shell").with(Effect::Shell),
+            flag("--stdin"),
+            valued("--type"),
+            valued("--user"),
+        ],
+        assignments: Assignments::Among,
+        ..Wrapper::RUNNER
     },
     Wrapper {
         name: "time",
-        flags: &["-p"],
-        valued: &[],
-        directory: &[],
-        numeric: false,
-        positionals: 0,
-        assignments: false,
+        options: &[flag("-p")],
+        ..Wrapper::TRANSPARENT
     },
     Wrapper {
         name: "timeout",
-        flags: &["-v", "--foreground", "--preserve-status", "--verbose"],
-        valued: &["-k", "-s", "--kill-after", "--signal"],
-        directory: &[],
-        numeric: false,
+        options: &[
+            valued("-k"),
+            valued("-s"),
+            flag("-v"),
+            flag("--foreground"),
+            valued("--kill-after"),
+            flag("--preserve-status"),
+            valued("--signal"),
+            flag("--verbose"),
+        ],
         positionals: 1,
-        assignments: false,
+        ..Wrapper::TRANSPARENT
+    },
+    Wrapper {
+        name: "xargs",
+        options: &[
+            flag("-0"),
+            valued("-E"),
+            valued("-I").with(Effect::Replace),
+            valued("-J").with(Effect::Insert),
+            valued("-L"),
+            valued("-P"),
+            valued("-R"),
+            valued("-S"),
+            valued("-a").with(Effect::Reads),
+            valued("-d"),
+            optional("-e"),
+            optional("-i").with(Effect::Replace),
+            optional("-l"),
+            valued("-n"),
+            flag("-o"),
+            flag("-p"),
+            flag("-r"),
+            valued("-s"),
+            flag("-t"),
+            flag("-x"),
+            valued("--arg-file").with(Effect::Reads),
+            valued("--delimiter"),
+            optional("--eof"),
+            flag("--exit"),
+            flag("--interactive"),
+            valued("--max-args"),
+            valued("--max-chars"),
+            optional("--max-lines"),
+            valued("--max-procs"),
+            flag("--no-run-if-empty"),
+            flag("--null"),
+            flag("--open-tty"),
+            optional("--replace").with(Effect::Replace),
+            flag("--verbose"),
+        ],
+        kind: Kind::Input,
+        ..Wrapper::TRANSPARENT
     },
 ];
+
+/// The placeholder `xargs -i` and `--replace` replace when given no value, and `find` replaces
+/// with each path it finds.
+const DEFAULT_REPLACE: &str = "{}";
+
+/// The word that stands for the arguments `xargs` reads from its input.
+const INPUT_WORD: &str = "<input>";
 
 /// `find` primaries that run a command or write a file.
 const FIND_ACTIONS: &[&str] = &[
     "-delete", "-exec", "-execdir", "-fls", "-fprint", "-fprint0", "-fprintf", "-ok", "-okdir",
 ];
+
+/// `runuser`'s options, which run the command after them directly when `-u` names the user.
+const RUNUSER: Wrapper = Wrapper {
+    name: "runuser",
+    options: &[
+        valued("-G"),
+        flag("-P"),
+        valued("-g"),
+        flag("-m"),
+        flag("-p"),
+        valued("-u"),
+        valued("-w"),
+        valued("--group"),
+        flag("--preserve-environment"),
+        flag("--pty"),
+        valued("--supp-group"),
+        valued("--user"),
+        valued("--whitelist-environment"),
+    ],
+    ..Wrapper::RUNNER
+};
+
+/// `find` primaries that run the command after them.
+const FIND_RUNNERS: &[&str] = &["-exec", "-execdir", "-ok", "-okdir"];
 
 /// A `sed` script of commands that only print, delete, substitute, or move text between buffers.
 /// It leaves out `r`, `w`, and `e`, and the `w` and `e` substitution flags, which read a file,
@@ -258,11 +401,13 @@ impl CommandTarget {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(super) struct Segment {
     /// The words an allow rule must name, without redirections. Leading assignments of
-    /// [`SAFE_VARIABLES`] and transparent wrappers are left out, up to the first assignment of
-    /// another variable, which starts the list and keeps every word after it.
+    /// [`SAFE_VARIABLES`] and wrappers allow rules see through are left out, up to the first
+    /// assignment of another variable or other wrapper, which starts the list and keeps every word
+    /// after it. Ends in [`INPUT_WORD`] when `xargs` appends its input words.
     named: Vec<ShellWord>,
-    /// Where the program that runs starts in `named`, past every assignment and wrapper.
-    program: usize,
+    /// Where the program may start in `named`, first past every assignment and wrapper, then at
+    /// each word past a wrapper option the analysis does not know.
+    programs: Vec<usize>,
     /// The files one of [`READERS`] may read, resolved like a read's path: each literal operand,
     /// and each file a globbing one matches when the analysis runs. Empty for any other command.
     reads: Vec<Access>,
@@ -278,23 +423,9 @@ impl Segment {
         &self.named
     }
 
-    pub(super) fn program(&self) -> &[ShellWord] {
-        &self.named[self.program..]
-    }
-
-    /// The program words with the program's directory dropped, when its name has one, so
-    /// `/bin/rm -rf x` also reads as `rm -rf x`.
-    pub(super) fn bare_program(&self) -> Option<Vec<ShellWord>> {
-        let (name, args) = self.program().split_first()?;
-        let bare = basename(&name.text);
-        (bare != name.text).then(|| {
-            std::iter::once(ShellWord {
-                text: bare.to_owned(),
-                literal: name.literal,
-            })
-            .chain(args.iter().cloned())
-            .collect()
-        })
+    /// The words of each program this may run, with its arguments.
+    pub(super) fn programs(&self) -> impl Iterator<Item = &[ShellWord]> {
+        self.programs.iter().map(|&start| &self.named[start..])
     }
 
     /// The files a known-safe read-only command reads, or `None` for any other command.
@@ -313,33 +444,53 @@ impl Segment {
     /// Returns whether this may run `rm` with both its recursive and force options before any `--`,
     /// in one short cluster or two, such as `-rf` or `-R -f`, or as `--recursive` and `--force` or
     /// a prefix GNU `rm` takes for either. A word that expands, the program name included, may
-    /// become any of them, and GNU `rm` reads options after operands too, so `rm / -rf` counts.
+    /// become any of them, and the input words `xargs` runs as the program may hold them all. GNU
+    /// `rm` reads options after operands too, so `rm / -rf` counts.
     pub(super) fn removes_recursively_by_force(&self) -> bool {
-        let (name, args) = self
-            .program()
-            .split_first()
-            .expect("a simple command runs a program");
-        if name.literal && fold_name(basename(&name.text)) != "rm" {
-            return false;
-        }
-        let (mut recursive, mut force) = (false, false);
-        for arg in args {
-            if !arg.literal {
+        self.programs().any(|program| {
+            let (name, args) = program
+                .split_first()
+                .expect("a simple command runs a program");
+            if name.is_input() {
                 return true;
             }
-            if arg.text == "--" {
-                break;
+            if name.literal && fold_name(basename(&name.text)) != "rm" {
+                return false;
             }
-            if let Some(long) = arg.text.strip_prefix("--") {
-                recursive |= !long.is_empty() && "recursive".starts_with(long);
-                force |= !long.is_empty() && "force".starts_with(long);
-            } else if let Some(cluster) = arg.text.strip_prefix('-') {
-                recursive |= cluster.contains(['r', 'R']);
-                force |= cluster.contains('f');
+            let (mut recursive, mut force) = (false, false);
+            for arg in args {
+                if !arg.literal {
+                    return true;
+                }
+                if arg.text == "--" {
+                    break;
+                }
+                if let Some(long) = arg.text.strip_prefix("--") {
+                    recursive |= !long.is_empty() && "recursive".starts_with(long);
+                    force |= !long.is_empty() && "force".starts_with(long);
+                } else if let Some(cluster) = arg.text.strip_prefix('-') {
+                    recursive |= cluster.contains(['r', 'R']);
+                    force |= cluster.contains('f');
+                }
             }
-        }
-        recursive && force
+            recursive && force
+        })
     }
+}
+
+/// `program` with its name's directory dropped, when the name has one, so `/bin/rm -rf x` also
+/// reads as `rm -rf x`.
+pub(super) fn bare_program(program: &[ShellWord]) -> Option<Vec<ShellWord>> {
+    let (name, args) = program.split_first()?;
+    let bare = basename(&name.text);
+    (bare != name.text).then(|| {
+        std::iter::once(ShellWord {
+            text: bare.to_owned(),
+            literal: name.literal,
+        })
+        .chain(args.iter().cloned())
+        .collect()
+    })
 }
 
 /// One word of a simple command as rules compare it.
@@ -354,6 +505,11 @@ pub(super) struct ShellWord {
 impl ShellWord {
     pub(super) fn text(&self) -> &str {
         &self.text
+    }
+
+    /// Returns whether this stands for the input words `xargs` appends.
+    fn is_input(&self) -> bool {
+        !self.literal && self.text == INPUT_WORD
     }
 
     pub(super) const fn is_literal(&self) -> bool {
@@ -452,112 +608,261 @@ impl Walk<'_> {
             }
         }
 
-        let all = &words;
-        let (words, named) = self.strip_wrappers(all);
-        let Some((first, args)) = words.split_first() else {
+        self.simple_command(&words, assignments, unsafe_assignment, None, src);
+    }
+
+    /// Records the simple command of `all` and the commands it runs through `find`, led by the
+    /// `assignments` before it, of which the one at `unsafe_assignment` is the first to set a
+    /// variable outside [`SAFE_VARIABLES`]. `found` is the placeholder `find` replaces with each
+    /// path it finds, for the command of a `find` action.
+    fn simple_command(
+        &mut self,
+        all: &[Word<'_>],
+        mut assignments: Vec<ShellWord>,
+        unsafe_assignment: Option<usize>,
+        found: Option<Placeholder>,
+        src: &str,
+    ) {
+        if all.is_empty() {
             return;
-        };
-        let name = first.value.as_deref().filter(|_| !first.glob);
-        match name {
-            None => self.opaque = true,
-            Some(name) => {
-                let base = basename(name);
-                let folded = fold_name(base);
-                let runner = [base, folded.as_str()]
-                    .into_iter()
-                    .find(|runner| SHELLS.contains(runner) || CODE_BUILTINS.contains(runner));
-                if let Some(runner) = runner {
-                    self.opaque = true;
-                    self.nested_script(runner, args);
+        }
+        let mut unwrapped = self.unwrap(all);
+        unwrapped
+            .replaces
+            .extend(found.map(|placeholder| (0, placeholder)));
+        let pinned = unsafe_assignment.is_some() || unwrapped.named < unwrapped.starts[0];
+        let safe = all[unwrapped.starts[0]..]
+            .split_first()
+            .filter(|_| !pinned)
+            .and_then(|(first, args)| {
+                safe_operands(first.value.as_deref().filter(|_| !first.glob)?, args)
+            });
+        let mut operands = unwrapped.reads.clone();
+        let mut reads_anything = false;
+        let mut finds = Vec::new();
+        for (i, &start) in unwrapped.starts.iter().enumerate() {
+            let Some((first, args)) = all[start..].split_first() else {
+                self.opaque = true;
+                continue;
+            };
+            let Some(name) = first.value.as_deref().filter(|_| !first.glob) else {
+                self.opaque = true;
+                continue;
+            };
+            self.program(name, args, src);
+            let folded = fold_name(basename(name));
+            if folded == "find" {
+                finds.push(start + 1);
+            }
+            match &safe {
+                Some(files) if i == 0 => operands.extend(files.iter().cloned()),
+                _ if READERS.contains(&folded.as_str()) => {
+                    let (files, anything) = reader_operands(args, self.workspace.cwd());
+                    operands.extend(files);
+                    reads_anything |= anything || unwrapped.passes_input();
                 }
-                self.changes_dir |= DIRECTORY_CHANGERS.contains(&name);
-                // `shopt` can turn on `dotglob` or `globstar`, which change what a glob matches.
-                self.opaque |= name == "shopt";
+                _ => {}
             }
         }
-        let pinned = unsafe_assignment.is_some() || named.len() > words.len();
-        let safe = name
-            .filter(|_| !pinned)
-            .and_then(|name| safe_operands(name, args));
-        let reader = name.is_some_and(|name| READERS.contains(&fold_name(basename(name)).as_str()));
-        let (operands, reads_anything) = match (&safe, reader) {
-            (Some(operands), _) => (operands.clone(), false),
-            (None, true) => reader_operands(args, self.workspace.cwd()),
-            (None, false) => (Vec::new(), false),
-        };
         self.relative_path |= operands.iter().any(|path| Path::new(path).is_relative());
         let reads = operands
             .iter()
             .map(|operand| Access::for_path(operand, self.workspace))
             .collect();
-        let named: Vec<ShellWord> = match unsafe_assignment {
+
+        let mut words: Vec<ShellWord> = all
+            .iter()
+            .enumerate()
+            .map(|(i, word)| {
+                let mut word = word.shell_word(src);
+                word.literal &= !unwrapped.replaced(i, &word.text);
+                word
+            })
+            .collect();
+        let mut named: Vec<ShellWord> = match unsafe_assignment {
             Some(first) => assignments
                 .split_off(first)
                 .into_iter()
-                .chain(all.iter().map(|word| word.shell_word(src)))
+                .chain(words)
                 .collect(),
-            None => named.iter().map(|word| word.shell_word(src)).collect(),
+            None => words.split_off(unwrapped.named),
         };
+        let programs = unwrapped
+            .starts
+            .iter()
+            .map(|start| named.len() + start - all.len())
+            .collect();
+        if unwrapped.appends {
+            named.push(ShellWord {
+                text: INPUT_WORD.to_owned(),
+                literal: false,
+            });
+        }
         self.segments.push(Segment {
-            program: named.len() - words.len(),
             named,
+            programs,
             reads,
             reads_anything,
             safe: safe.is_some(),
         });
+        for args in finds {
+            self.find_actions(&all[args..], src);
+        }
     }
 
-    /// Strips the transparent wrappers that lead `words`, returning the words of the command that
-    /// runs and the words a rule must name. The latter keep every wrapper from the first one that
-    /// sets a variable outside [`SAFE_VARIABLES`] or is spelled with a directory, since
-    /// `./nice` may be any program. A wrapper option the analysis does not know leaves the command
-    /// where it cannot be found, so it turns the command opaque.
-    fn strip_wrappers<'w, 't>(
-        &mut self,
-        words: &'w [Word<'t>],
-    ) -> (&'w [Word<'t>], &'w [Word<'t>]) {
-        let (mut runs, mut named, mut pinned) = (words, words, false);
-        while let Some((name, args)) = runs.split_first()
-            && let Some(name) = name.value.as_deref()
-            && let Some(wrapper) = WRAPPERS.iter().find(|w| w.name == basename(name))
-        {
-            match wrapper.command_start(args) {
-                Start::At(start) => {
-                    let options = &args[..start];
-                    self.changes_dir |= wrapper.changes_dir(options);
-                    let sets_unsafe = options.iter().any(|word| {
-                        word.value.as_deref().is_some_and(|arg| {
-                            is_assignment(arg) && !SAFE_VARIABLES.contains(&assigned(arg))
-                        })
-                    });
-                    runs = &args[start..];
-                    pinned |= sets_unsafe || name != wrapper.name;
-                    if !pinned {
-                        named = runs;
+    /// Weighs the program `name` runs: a shell or builtin that runs code, or a directory change.
+    fn program(&mut self, name: &str, args: &[Word<'_>], src: &str) {
+        let base = basename(name);
+        let folded = fold_name(base);
+        let runner = [base, folded.as_str()]
+            .into_iter()
+            .find(|runner| SHELLS.contains(runner) || CODE_BUILTINS.contains(runner));
+        if let Some(runner) = runner {
+            self.opaque = true;
+            self.nested_script(runner, args, src);
+        }
+        self.changes_dir |= DIRECTORY_CHANGERS.contains(&name);
+        // `shopt` can turn on `dotglob` or `globstar`, which change what a glob matches.
+        self.opaque |= name == "shopt";
+    }
+
+    /// Strips the wrappers that lead `words`. The named words keep every wrapper from the first one
+    /// allow rules do not see through, that sets a variable outside [`SAFE_VARIABLES`], or that is
+    /// spelled with a directory, since `./nice` may be any program. A wrapper option the analysis
+    /// does not know hides where the command starts, so it turns the command opaque, and the
+    /// program may then start at any later word.
+    fn unwrap(&mut self, words: &[Word<'_>]) -> Unwrapped {
+        let mut unwrapped = Unwrapped::default();
+        let mut pending = vec![0];
+        // Every word from here on has been pending, so an unknown option past it adds none.
+        let mut spread = words.len();
+        let mut input_runs = false;
+        while let Some(mut at) = pending.pop() {
+            let primary = unwrapped.starts.is_empty();
+            let mut pinned = false;
+            while let Some((name, args)) = words[at..].split_first()
+                && let Some(name) = name.value.as_deref()
+                && let Some(wrapper) = WRAPPERS.iter().find(|w| w.name == basename(name))
+            {
+                let run = match wrapper.invocation(args) {
+                    Ok(run) => run,
+                    Err(unknown) => {
+                        self.opaque = true;
+                        unwrapped.appends |= wrapper.kind == Kind::Input;
+                        let from = at + 1 + unknown;
+                        if from < spread {
+                            pending.extend((from..spread).rev());
+                            spread = from;
+                        }
+                        break;
                     }
-                }
-                Start::Alone => break,
-                Start::Unknown => {
-                    self.opaque = true;
+                };
+                self.opaque |= run.shell;
+                self.changes_dir |= run.elsewhere;
+                unwrapped.reads.extend(run.reads);
+                if run.start == args.len() {
+                    let input = wrapper.kind == Kind::Input;
+                    input_runs |= unwrapped.appends && !input;
+                    unwrapped.appends |= input && run.replace.is_none();
                     break;
                 }
+                let sets_unsafe = args[..run.start].iter().any(|word| {
+                    word.value.as_deref().is_some_and(|arg| {
+                        is_assignment(arg) && !SAFE_VARIABLES.contains(&assigned(arg))
+                    })
+                });
+                at += 1 + run.start;
+                if wrapper.kind == Kind::Input {
+                    match run.replace {
+                        Some(placeholder)
+                            if !placeholder.whole
+                                || words[at..].iter().any(|word| {
+                                    word.value.as_deref() == Some(placeholder.text.as_str())
+                                }) =>
+                        {
+                            unwrapped.replaces.push((at, placeholder));
+                        }
+                        _ => unwrapped.appends = true,
+                    }
+                }
+                pinned |= sets_unsafe || name != wrapper.name || wrapper.kind != Kind::Transparent;
+                if primary && !pinned {
+                    unwrapped.named = at;
+                }
+            }
+            if !unwrapped.starts.contains(&at) {
+                unwrapped.starts.push(at);
             }
         }
-        (runs, named)
+        if input_runs {
+            unwrapped.starts.push(words.len());
+        }
+        unwrapped
     }
 
-    /// Walks the literal script a shell's `-c` option or `eval` runs, so deny rules see the
-    /// commands inside it.
-    fn nested_script(&mut self, runner: &str, args: &[Word<'_>]) {
+    /// Records the commands `find`'s `-exec`, `-execdir`, `-ok`, and `-okdir` actions run, each up
+    /// to its `;`, or its `+` after `{}`. A word that expands may be such an action, so it turns
+    /// the command opaque.
+    fn find_actions(&mut self, args: &[Word<'_>], src: &str) {
+        self.opaque |= args.iter().any(|word| word.value.is_none());
+        let mut rest = args;
+        while let Some(at) = rest.iter().position(|word| {
+            word.value
+                .as_deref()
+                .is_some_and(|value| FIND_RUNNERS.contains(&value))
+        }) {
+            self.changes_dir |= rest[at]
+                .value
+                .as_deref()
+                .is_some_and(|value| value.ends_with("dir"));
+            let body = &rest[at + 1..];
+            let end = body
+                .iter()
+                .enumerate()
+                .position(|(i, word)| match word.value.as_deref() {
+                    Some(";") => true,
+                    Some("+") => i > 0 && body[i - 1].value.as_deref() == Some("{}"),
+                    _ => false,
+                })
+                .unwrap_or(body.len());
+            let found = Placeholder {
+                text: DEFAULT_REPLACE.to_owned(),
+                whole: false,
+            };
+            self.simple_command(&body[..end], Vec::new(), None, Some(found), src);
+            rest = body.get(end + 1..).unwrap_or_default();
+        }
+    }
+
+    /// Walks the literal script a shell's `-c` or `--command` option or `eval` runs, and the
+    /// command `runuser -u` runs without a shell, so deny rules see the commands inside them.
+    fn nested_script(&mut self, runner: &str, args: &[Word<'_>], src: &str) {
+        if runner == "runuser"
+            && let Ok(run) = RUNUSER.invocation(args)
+            && args[..run.start].iter().any(|word| {
+                word.value
+                    .as_deref()
+                    .is_some_and(|arg| arg == "-u" || arg == "--user" || arg.starts_with("--user="))
+            })
+        {
+            self.simple_command(&args[run.start..], Vec::new(), None, None, src);
+            return;
+        }
         let script = if runner == "eval" {
             args.iter()
                 .map(|word| word.value.as_deref())
                 .collect::<Option<Vec<_>>>()
                 .map(|values| values.join(" "))
         } else if SHELLS.contains(&runner) {
-            args.iter()
-                .position(|word| word.value.as_deref().is_some_and(is_command_option))
-                .and_then(|i| args.get(i + 1)?.value.clone())
+            args.iter().enumerate().find_map(|(i, word)| {
+                let arg = word.value.as_deref()?;
+                if let Some(script) = arg.strip_prefix("--command=") {
+                    return Some(script.to_owned());
+                }
+                (is_command_option(arg) || arg == "--command")
+                    .then(|| args.get(i + 1)?.value.clone())
+                    .flatten()
+            })
         } else {
             None
         };
@@ -647,96 +952,326 @@ fn is_command_option(arg: &str) -> bool {
 
 // ── Wrapper ──
 
-/// A transparent wrapper's option grammar.
+/// A wrapper's option grammar and what running a command through it changes.
 struct Wrapper {
     name: &'static str,
-    flags: &'static [&'static str],
-    /// Options that take a value, either as the next word or attached (`-n5`, `--signal=KILL`).
-    valued: &'static [&'static str],
-    /// Valued options that run the command in another directory.
-    directory: &'static [&'static str],
+    options: &'static [Opt],
     /// Whether `-N` sets a number, as `nice -10` does.
     numeric: bool,
     /// Words after the options that precede the command, such as `timeout`'s duration.
     positionals: usize,
-    /// Whether `NAME=VALUE` words may follow the options, as with `env`.
-    assignments: bool,
-}
-
-/// Where a wrapper's command starts among its arguments.
-enum Start {
-    At(usize),
-    /// No command follows, so the wrapper runs alone.
-    Alone,
-    /// An option the grammar does not know hides where the command starts.
-    Unknown,
+    assignments: Assignments,
+    kind: Kind,
+    /// Whether the command runs in another directory whatever the options say.
+    elsewhere: bool,
 }
 
 impl Wrapper {
-    /// Returns whether `options` run the command in another directory.
-    fn changes_dir(&self, options: &[Word<'_>]) -> bool {
-        options
-            .iter()
-            .filter_map(|word| word.value.as_deref())
-            .any(|arg| {
-                self.directory
-                    .iter()
-                    .any(|option| arg == *option || is_attached(arg, option))
-            })
-    }
+    /// A wrapper allow rules see through, with no options.
+    const TRANSPARENT: Self = Self {
+        name: "",
+        options: &[],
+        numeric: false,
+        positionals: 0,
+        assignments: Assignments::None,
+        kind: Kind::Transparent,
+        elsewhere: false,
+    };
 
-    fn command_start(&self, args: &[Word<'_>]) -> Start {
+    /// A runner allow rules must name, with no options.
+    const RUNNER: Self = Self {
+        kind: Kind::Runner,
+        ..Self::TRANSPARENT
+    };
+
+    /// Parses the options that lead `args`, or returns the index of the first word that hides
+    /// where the command starts: an option the grammar does not know, or one that expands.
+    fn invocation(&self, args: &[Word<'_>]) -> Result<Invocation, usize> {
+        let mut run = Invocation {
+            start: args.len(),
+            elsewhere: self.elsewhere,
+            ..Invocation::default()
+        };
         let mut i = 0;
-        while let Some(arg) = args.get(i) {
-            let Some(arg) = arg.value.as_deref() else {
-                return Start::Unknown;
-            };
+        while let Some(word) = args.get(i) {
+            let at = i;
+            let arg = word.value.as_deref().ok_or(at)?;
             if arg == "--" {
                 i += 1;
                 break;
             }
-            if !arg.starts_with('-') || (arg == "-" && !self.flags.contains(&arg)) {
+            if !arg.starts_with('-') || (arg == "-" && self.option("-").is_none()) {
+                if self.assignments == Assignments::Among && is_sudo_assignment(arg) {
+                    i += 1;
+                    continue;
+                }
                 break;
             }
-            i += if self.flags.contains(&arg) {
-                1
-            } else if self.valued.contains(&arg) {
-                2
-            } else if self.valued.iter().any(|option| is_attached(arg, option))
-                || (self.numeric && arg.len() > 1 && arg[1..].bytes().all(|b| b.is_ascii_digit()))
-            {
-                1
-            } else {
-                return Start::Unknown;
-            };
-        }
-        i += self.positionals;
-        if self.assignments {
-            while args
-                .get(i)
-                .and_then(|arg| arg.value.as_deref())
-                .is_some_and(is_assignment)
-            {
-                i += 1;
+            i += 1;
+            if arg == "-" {
+                continue;
+            }
+            if arg.starts_with("--") {
+                let (name, attached) = arg
+                    .split_once('=')
+                    .map_or((arg, None), |(name, value)| (name, Some(value)));
+                let option = self.option(name).ok_or(at)?;
+                let value = match (option.value, attached) {
+                    (Value::None, Some(_)) => return Err(at),
+                    (Value::Required, None) => {
+                        let Some(next) = args.get(i) else {
+                            return Ok(run);
+                        };
+                        i += 1;
+                        Arg::of(next)
+                    }
+                    (_, Some(value)) => Arg::Literal(value.to_owned()),
+                    (_, None) => Arg::None,
+                };
+                run.apply(option.effect, value).ok_or(at)?;
+                continue;
+            }
+            let cluster = &arg[1..];
+            if self.numeric && cluster.bytes().all(|b| b.is_ascii_digit()) {
+                continue;
+            }
+            for (offset, c) in cluster.char_indices() {
+                let option = self.short(c).ok_or(at)?;
+                let rest = &cluster[offset + c.len_utf8()..];
+                let value = match option.value {
+                    Value::None => Arg::None,
+                    _ if !rest.is_empty() => Arg::Literal(rest.to_owned()),
+                    Value::Optional => Arg::None,
+                    Value::Required => {
+                        let Some(next) = args.get(i) else {
+                            return Ok(run);
+                        };
+                        i += 1;
+                        Arg::of(next)
+                    }
+                };
+                run.apply(option.effect, value).ok_or(at)?;
+                if option.value != Value::None {
+                    break;
+                }
             }
         }
-        if i < args.len() {
-            Start::At(i)
-        } else {
-            Start::Alone
+        i += self.positionals;
+        let assignment = match self.assignments {
+            Assignments::None => |_: &str| false,
+            Assignments::After => is_assignment,
+            Assignments::Among => is_sudo_assignment,
+        };
+        while args
+            .get(i)
+            .and_then(|arg| arg.value.as_deref())
+            .is_some_and(assignment)
+        {
+            i += 1;
         }
+        run.start = i.min(args.len());
+        Ok(run)
+    }
+
+    fn option(&self, name: &str) -> Option<&Opt> {
+        self.options.iter().find(|option| option.name == name)
+    }
+
+    /// The single-letter option `-c`, which may share a cluster with others, as in `-nE`.
+    fn short(&self, c: char) -> Option<&Opt> {
+        self.options.iter().find(|option| {
+            option
+                .name
+                .strip_prefix('-')
+                .is_some_and(|letter| letter.chars().eq([c]))
+        })
     }
 }
 
-/// Returns whether `arg` is `option` with its value attached.
-fn is_attached(arg: &str, option: &str) -> bool {
-    arg.strip_prefix(option).is_some_and(|value| {
-        if option.starts_with("--") {
-            value.starts_with('=')
-        } else {
-            !value.is_empty()
+/// One option of a wrapper.
+#[derive(Clone, Copy)]
+struct Opt {
+    name: &'static str,
+    value: Value,
+    effect: Effect,
+}
+
+impl Opt {
+    const fn with(self, effect: Effect) -> Self {
+        Self { effect, ..self }
+    }
+}
+
+const fn flag(name: &'static str) -> Opt {
+    Opt {
+        name,
+        value: Value::None,
+        effect: Effect::None,
+    }
+}
+
+const fn valued(name: &'static str) -> Opt {
+    Opt {
+        value: Value::Required,
+        ..flag(name)
+    }
+}
+
+const fn optional(name: &'static str) -> Opt {
+    Opt {
+        value: Value::Optional,
+        ..flag(name)
+    }
+}
+
+/// Whether an option takes a value.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Value {
+    None,
+    /// A value as the next word or attached, as in `-n 5`, `-n5`, or `--signal=KILL`.
+    Required,
+    /// A value only when attached, as in `xargs -i{}`.
+    Optional,
+}
+
+/// Where a wrapper takes `NAME=VALUE` words that set the command's environment.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Assignments {
+    None,
+    /// After the options, as `env` takes them.
+    After,
+    /// Before, between, and after the options, as `sudo` takes any word holding a `=` that does
+    /// not start with `/` or `=`.
+    Among,
+}
+
+/// What a wrapper changes about the command it runs.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Kind {
+    /// It changes only how the command runs, so allow rules and known-safe reads see through it.
+    Transparent,
+    /// It changes who runs the command, so it stays in the words an allow rule must name.
+    Runner,
+    /// It appends the words it reads from its input to the command, as `xargs` does, so it stays
+    /// in the words an allow rule must name too.
+    Input,
+}
+
+/// The value an option takes.
+enum Arg {
+    None,
+    Literal(String),
+    /// A value that expands when the command runs.
+    Expands,
+}
+
+impl Arg {
+    fn of(word: &Word<'_>) -> Self {
+        word.value.clone().map_or(Self::Expands, Self::Literal)
+    }
+}
+
+/// What an option changes about the command the wrapper runs.
+#[derive(Clone, Copy)]
+enum Effect {
+    None,
+    /// The command runs in another directory.
+    Directory,
+    /// A shell runs the command, after reading its startup files.
+    Shell,
+    /// The value is a placeholder that each input word replaces, in place of being appended.
+    Replace,
+    /// The value is a placeholder that the input words replace when it stands as a whole word, as
+    /// BSD `xargs -J` takes it, and that leaves them appended otherwise.
+    Insert,
+    /// The value names a file the wrapper reads.
+    Reads,
+}
+
+/// How a wrapper runs its command, from the options before it.
+#[derive(Default)]
+struct Invocation {
+    /// Where the command starts among the wrapper's arguments, which is past them all when it
+    /// runs none.
+    start: usize,
+    elsewhere: bool,
+    shell: bool,
+    /// The placeholder that input words replace, when an option sets one.
+    replace: Option<Placeholder>,
+    /// The files an option names for the wrapper to read.
+    reads: Vec<String>,
+}
+
+impl Invocation {
+    /// Records an option's `effect` with its `value`, or returns `None` when the effect needs a
+    /// value the analysis cannot read.
+    fn apply(&mut self, effect: Effect, value: Arg) -> Option<()> {
+        match effect {
+            Effect::None => {}
+            Effect::Directory => self.elsewhere = true,
+            Effect::Shell => self.shell = true,
+            Effect::Replace | Effect::Insert => {
+                let text = match value {
+                    Arg::None => DEFAULT_REPLACE.to_owned(),
+                    Arg::Literal(value) => value,
+                    Arg::Expands => return None,
+                };
+                self.replace = Some(Placeholder {
+                    text,
+                    whole: matches!(effect, Effect::Insert),
+                });
+            }
+            Effect::Reads => match value {
+                Arg::Literal(path) => self.reads.push(path),
+                Arg::None | Arg::Expands => return None,
+            },
         }
-    })
+        Some(())
+    }
+}
+
+/// A word that input words replace when the command runs.
+struct Placeholder {
+    text: String,
+    /// Whether only a word that is exactly `text` is replaced.
+    whole: bool,
+}
+
+/// What the wrappers leading a simple command leave to run, as indices into its words.
+#[derive(Default)]
+struct Unwrapped {
+    /// Where the words an allow rule must name start.
+    named: usize,
+    /// Where the program may start: first where it does when every wrapper option is known, then
+    /// each word past an option that is not. The word count stands for the input words of an
+    /// `xargs` whose wrapped wrapper takes its command from them.
+    starts: Vec<usize>,
+    /// Whether an `xargs` appends its input words to the command.
+    appends: bool,
+    /// The placeholders `xargs` or `find` replaces with its input words or found paths, each with
+    /// where its command starts.
+    replaces: Vec<(usize, Placeholder)>,
+    /// The files wrapper options read.
+    reads: Vec<String>,
+}
+
+impl Unwrapped {
+    /// Returns whether `xargs` or `find` passes words to the command, which may name any file.
+    fn passes_input(&self) -> bool {
+        self.appends || !self.replaces.is_empty()
+    }
+
+    /// Returns whether input words replace part of `text`, the word at `index`.
+    fn replaced(&self, index: usize, text: &str) -> bool {
+        self.replaces.iter().any(|(start, placeholder)| {
+            index >= *start
+                && if placeholder.whole {
+                    text == placeholder.text
+                } else {
+                    text.contains(placeholder.text.as_str())
+                }
+        })
+    }
 }
 
 /// The variable a `NAME=VALUE`, `NAME+=VALUE`, or `NAME[i]=VALUE` assignment sets.
@@ -744,6 +1279,11 @@ fn assigned(assignment: &str) -> &str {
     assignment
         .find(['=', '+', '['])
         .map_or(assignment, |end| &assignment[..end])
+}
+
+/// Returns whether `sudo` reads `arg` as an environment assignment.
+fn is_sudo_assignment(arg: &str) -> bool {
+    arg.contains('=') && !arg.starts_with(['/', '='])
 }
 
 /// Returns whether `arg` is a `NAME=VALUE` environment assignment.
@@ -1263,19 +1803,24 @@ mod tests {
         parse(command).segments[0].safe_reads().is_some()
     }
 
+    fn joined(words: &[ShellWord]) -> String {
+        words
+            .iter()
+            .map(ShellWord::text)
+            .collect::<Vec<_>>()
+            .join(" ")
+    }
+
+    /// The program `segment` runs when every wrapper option is known.
+    fn program(segment: &Segment) -> &[ShellWord] {
+        segment.programs().next().unwrap()
+    }
+
     mod command_target {
         use super::*;
 
         mod parse {
             use super::*;
-
-            fn joined(words: &[ShellWord]) -> String {
-                words
-                    .iter()
-                    .map(ShellWord::text)
-                    .collect::<Vec<_>>()
-                    .join(" ")
-            }
 
             /// Each simple command's named words, joined on spaces.
             fn texts(command: &str) -> Vec<String> {
@@ -1287,8 +1832,7 @@ mod tests {
             }
 
             fn words(command: &str) -> Vec<String> {
-                parse(command).segments[0]
-                    .program()
+                program(&parse(command).segments[0])
                     .iter()
                     .map(|word| word.text().to_owned())
                     .collect()
@@ -1342,7 +1886,7 @@ mod tests {
                     let command = parse(command);
                     let segment = &command.segments[0];
                     assert_eq!(joined(segment.named()), text, "{command:?}");
-                    assert_eq!(segment.program()[0].text(), name, "{command:?}");
+                    assert_eq!(program(segment)[0].text(), name, "{command:?}");
                     assert!(segment.safe_reads().is_none(), "{command:?}");
                     assert!(!command.is_opaque(), "{command:?}");
                 }
@@ -1416,7 +1960,7 @@ mod tests {
                     ]
                 );
                 assert_eq!(
-                    joined(segment.program()),
+                    joined(program(segment)),
                     format!("cat x* *.rs \"$HOME\" {home}")
                 );
             }
@@ -1425,8 +1969,7 @@ mod tests {
             fn reads_an_ansi_c_string_as_the_literal_word_it_decodes_to() {
                 let command = parse(r"$'rm' pu$'sh' $'\055rf' $'\x80'");
 
-                let program: Vec<(&str, bool)> = command.segments[0]
-                    .program()
+                let program: Vec<(&str, bool)> = program(&command.segments[0])
                     .iter()
                     .map(|word| (word.text(), word.is_literal()))
                     .collect();
@@ -1440,15 +1983,6 @@ mod tests {
                         (r"$'\x80'", false)
                     ]
                 );
-            }
-
-            #[test]
-            fn drops_the_program_directory_for_the_bare_program_only() {
-                let command = parse("FOO=1 /usr/bin/rm -rf x");
-                let segment = &command.segments[0];
-                assert_eq!(joined(&segment.bare_program().unwrap()), "rm -rf x");
-                assert_eq!(joined(segment.named()), "FOO=1 /usr/bin/rm -rf x");
-                assert!(parse("rm -rf x").segments[0].bare_program().is_none());
             }
 
             #[test]
@@ -1469,7 +2003,7 @@ mod tests {
                 ] {
                     let command = parse(command);
                     assert_eq!(
-                        joined(command.segments[0].program()),
+                        joined(program(&command.segments[0])),
                         "rm -rf x",
                         "{command:?}"
                     );
@@ -1484,7 +2018,7 @@ mod tests {
 
             #[test]
             fn keeps_a_wrapper_spelled_with_a_directory_in_the_named_words() {
-                for (command, named, program) in [
+                for (command, named, runs) in [
                     (
                         "/usr/bin/nice nohup -- timeout 5 rm -rf x",
                         "/usr/bin/nice nohup -- timeout 5 rm -rf x",
@@ -1497,8 +2031,231 @@ mod tests {
                     let segment = &command.segments[0];
 
                     assert_eq!(joined(segment.named()), named, "{command:?}");
-                    assert_eq!(joined(segment.program()), program, "{command:?}");
+                    assert_eq!(joined(program(segment)), runs, "{command:?}");
                     assert!(segment.safe_reads().is_none(), "{command:?}");
+                }
+            }
+
+            #[test]
+            fn keeps_a_wrapper_that_changes_who_runs_the_command_in_the_named_words() {
+                for (command, runs) in [
+                    ("sudo -u root rm -rf x", "rm -rf x"),
+                    ("sudo -nE --user=root FOO=1 rm -rf x", "rm -rf x"),
+                    ("sudo FOO=1 -u root BAR=2 -n rm -rf x", "rm -rf x"),
+                    ("sudo 1=x cat a", "cat a"),
+                    ("sudo -- cat a", "cat a"),
+                    ("doas -n -u root cat a", "cat a"),
+                    ("pkexec --user root echo hi", "echo hi"),
+                    ("busybox rm -rf x", "rm -rf x"),
+                    ("nice sudo nohup cat a", "cat a"),
+                ] {
+                    let parsed = parse(command);
+                    let segment = &parsed.segments[0];
+
+                    assert_eq!(joined(program(segment)), runs, "{command:?}");
+                    assert!(
+                        joined(segment.named()).ends_with(&format!(" {runs}")),
+                        "{command:?}"
+                    );
+                    assert!(segment.safe_reads().is_none(), "{command:?}");
+                    assert!(!parsed.is_opaque(), "{command:?}");
+                }
+                assert_eq!(texts("nice sudo nohup cat a"), ["sudo nohup cat a"]);
+            }
+
+            #[test]
+            fn reads_option_clusters_with_a_value_attached_or_in_the_next_word() {
+                for command in [
+                    "env -iu HOME rm -rf x",
+                    "stdbuf -oL -e 0 rm -rf x",
+                    "timeout -vk 5 10 rm -rf x",
+                    "sudo -Eu root rm -rf x",
+                ] {
+                    let parsed = parse(command);
+                    assert_eq!(
+                        joined(program(&parsed.segments[0])),
+                        "rm -rf x",
+                        "{command:?}"
+                    );
+                    assert!(!parsed.is_opaque(), "{command:?}");
+                }
+            }
+
+            #[test]
+            fn reads_a_lone_dash_a_missing_value_and_an_optional_value_left_off() {
+                for (command, runs) in [
+                    ("env - rm -rf x", "rm -rf x"),
+                    ("nice --adjustment", "nice --adjustment"),
+                    ("nice -n", "nice -n"),
+                    ("xargs -i cp {} d", "cp {} d"),
+                ] {
+                    let parsed = parse(command);
+
+                    assert_eq!(joined(program(&parsed.segments[0])), runs, "{command:?}");
+                    assert!(!parsed.is_opaque(), "{command:?}");
+                }
+            }
+
+            #[test]
+            fn turns_a_wrapper_option_value_it_cannot_read_opaque() {
+                for command in [
+                    "sudo --background=x rm",
+                    "xargs -I $P cp $P d",
+                    "xargs -a $F echo",
+                ] {
+                    assert!(parse(command).is_opaque(), "{command:?}");
+                }
+            }
+
+            #[test]
+            fn turns_a_wrapper_that_runs_a_shell_or_moves_the_command_opaque() {
+                for command in [
+                    "sudo -s rm -rf x",
+                    "sudo --login rm -rf x",
+                    "doas -s",
+                    "sudo -D /tmp cat a",
+                    "pkexec cat a",
+                ] {
+                    let parsed = parse(command);
+                    assert!(parsed.is_opaque(), "{command:?}");
+                }
+                assert_eq!(
+                    joined(program(&parse("sudo -i rm -rf x").segments[0])),
+                    "rm -rf x"
+                );
+            }
+
+            #[test]
+            fn adds_the_input_words_xargs_passes_to_its_command() {
+                for (command, named, runs) in [
+                    ("xargs rm -rf", "xargs rm -rf <input>", "rm -rf <input>"),
+                    ("xargs -0 -n1 rm", "xargs -0 -n1 rm <input>", "rm <input>"),
+                    ("xargs", "xargs <input>", "xargs <input>"),
+                    (
+                        "xargs -J % cp a% dst",
+                        "xargs -J % cp a% dst <input>",
+                        "cp a% dst <input>",
+                    ),
+                ] {
+                    let parsed = parse(command);
+                    let segment = &parsed.segments[0];
+
+                    assert_eq!(joined(segment.named()), named, "{command:?}");
+                    assert_eq!(joined(program(segment)), runs, "{command:?}");
+                    assert!(!segment.named().last().unwrap().is_literal(), "{command:?}");
+                    assert!(!parsed.is_opaque(), "{command:?}");
+                }
+            }
+
+            #[test]
+            fn marks_the_words_xargs_replaces_as_not_literal() {
+                for command in [
+                    "xargs -I X cp X dst",
+                    "xargs -iX cp X dst",
+                    "xargs -J X cp X dst",
+                ] {
+                    let parsed = parse(command);
+                    let literal: Vec<(&str, bool)> = program(&parsed.segments[0])
+                        .iter()
+                        .map(|word| (word.text(), word.is_literal()))
+                        .collect();
+
+                    assert_eq!(
+                        literal,
+                        [("cp", true), ("X", false), ("dst", true)],
+                        "{command:?}"
+                    );
+                }
+                assert_eq!(
+                    texts("xargs --replace cp {} dst"),
+                    ["xargs --replace cp {} dst"]
+                );
+            }
+
+            #[test]
+            fn lets_a_reader_xargs_runs_read_any_file() {
+                for command in ["xargs cat", "xargs -I X head X", "xargs -0 cat a"] {
+                    assert!(parse(command).segments[0].reads_anything(), "{command:?}");
+                }
+                assert!(parse("find . -exec cat {} +").segments[1].reads_anything());
+                assert!(!parse("nice cat a").segments[0].reads_anything());
+            }
+
+            #[test]
+            fn reads_the_arguments_file_xargs_names() {
+                let parsed = parse("xargs -a .env echo");
+
+                let Access::Path { requested, .. } = &parsed.segments[0].reads()[0] else {
+                    panic!("expected a path read");
+                };
+                assert_eq!(Path::new(requested), Path::new("/repo/.env"));
+            }
+
+            #[test]
+            fn lets_input_words_run_as_the_command_of_a_wrapper_xargs_runs_alone() {
+                for command in ["xargs sudo", "xargs -0 nice"] {
+                    let parsed = parse(command);
+                    let segment = &parsed.segments[0];
+
+                    let last = segment.programs().last().unwrap();
+                    assert_eq!(joined(last), "<input>", "{command:?}");
+                    assert!(parsed.is_opaque(), "{command:?}");
+                }
+            }
+
+            #[test]
+            fn lets_the_program_start_at_any_word_past_a_wrapper_option_it_does_not_know() {
+                let parsed = parse("sudo --weird value rm -rf x");
+
+                let programs: Vec<String> = parsed.segments[0].programs().map(joined).collect();
+
+                assert_eq!(
+                    programs,
+                    [
+                        "sudo --weird value rm -rf x",
+                        "--weird value rm -rf x",
+                        "value rm -rf x",
+                        "rm -rf x",
+                        "-rf x",
+                        "x",
+                    ]
+                );
+                assert!(parsed.is_opaque());
+                assert_eq!(
+                    parse("sudo --x nice --y rm -rf x").segments[0]
+                        .programs()
+                        .filter(|program| joined(program) == "rm -rf x")
+                        .count(),
+                    1
+                );
+            }
+
+            #[test]
+            fn collects_the_commands_find_runs() {
+                for (command, expected) in [
+                    (
+                        r"find . -name '*.tmp' -exec rm -rf {} \;",
+                        &["find . -name *.tmp -exec rm -rf {} ;", "rm -rf {}"][..],
+                    ),
+                    (
+                        r"find . -exec cat {} + -ok sudo rm {} \; -print",
+                        &[
+                            "find . -exec cat {} + -ok sudo rm {} ; -print",
+                            "cat {}",
+                            "sudo rm {}",
+                        ],
+                    ),
+                    (
+                        "find . -exec echo + x",
+                        &["find . -exec echo + x", "echo + x"],
+                    ),
+                    (r"find . -exec \;", &[r"find . -exec ;"]),
+                ] {
+                    assert_eq!(texts(command), expected, "{command:?}");
+                    assert!(!parse(command).is_opaque(), "{command:?}");
+                }
+                for command in [r"find . -execdir cat x \;", "find . $ACTION rm"] {
+                    assert!(parse(command).is_opaque(), "{command:?}");
                 }
             }
 
@@ -1574,6 +2331,13 @@ mod tests {
                     "bash -lc \"rm -rf /\"",
                     "eval rm -rf /",
                     "exec sh -c 'rm -rf /'",
+                    "busybox sh -c 'rm -rf /'",
+                    "su -c 'rm -rf /' root",
+                    "su --command 'rm -rf /' root",
+                    "su --command='rm -rf /' root",
+                    "busybox hush -c 'rm -rf /'",
+                    "runuser -u nobody rm -rf /",
+                    "runuser --user=nobody -- rm -rf /",
                 ] {
                     assert!(
                         texts(command).contains(&"rm -rf /".to_owned()),
@@ -1608,6 +2372,8 @@ mod tests {
                     "nice -n 5 rm -rf x",
                     "rm $FLAGS x",
                     "$RM -rf x",
+                    "xargs sudo",
+                    "sudo FOO=1 -u root rm -rf x",
                 ] {
                     assert!(
                         parse(command).segments[0].removes_recursively_by_force(),

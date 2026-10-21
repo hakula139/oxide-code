@@ -6,7 +6,8 @@ use std::{fs, io, iter};
 
 use indoc::{formatdoc, indoc};
 
-use crate::util::path::{XdgBase, app_dir};
+use crate::permission::project::{ProjectFileError, resolve_project_file};
+use crate::util::path::{XdgBase, app_dir, claude_dir};
 
 /// The cross-agent instruction file, which takes precedence wherever it is read.
 pub(crate) const AGENTS_MD: &str = "AGENTS.md";
@@ -14,14 +15,16 @@ pub(crate) const AGENTS_MD: &str = "AGENTS.md";
 /// Claude Code's instruction file, read where no `AGENTS.md` has instructions.
 pub(crate) const CLAUDE_MD: &str = "CLAUDE.md";
 
-/// Claude Code's directory, which holds a `CLAUDE.md` in the home directory and in each project
-/// directory.
+/// The directory in each project directory that may hold its Claude Code `CLAUDE.md`.
 const CLAUDE_DIR: &str = ".claude";
 
 /// Candidates tried in order at a single location.
 struct Slot {
     candidates: Vec<PathBuf>,
     label: &'static str,
+    /// The project root a checkout's candidates must resolve inside, or `None` for the user's own
+    /// files, which may link anywhere.
+    root: Option<PathBuf>,
 }
 
 struct InstructionFile {
@@ -39,12 +42,11 @@ pub(crate) struct Found {
     content: String,
 }
 
-/// Loads the user's file, then one file per directory from the project root (`git_root`, or else
-/// `cwd`) down to `cwd`, so files closer to `cwd` appear later. A file loads once however many
-/// locations resolve to it. Also returns a warning for each candidate that exists but cannot be
-/// read.
-pub(super) async fn load(cwd: &Path, git_root: Option<&Path>) -> (String, Vec<String>) {
-    let slots = candidate_slots(cwd, git_root.unwrap_or(cwd));
+/// Loads the user's file, then one file per directory from `project_root` down to `cwd`, so files
+/// closer to `cwd` appear later. A file loads once however many locations resolve to it. Also
+/// returns a warning for each candidate that exists but cannot or may not be read.
+pub(super) async fn load(cwd: &Path, project_root: &Path) -> (String, Vec<String>) {
+    let slots = candidate_slots(cwd, project_root);
     let (files, warnings) = tokio::task::spawn_blocking(|| load_files(slots))
         .await
         .expect("loading instruction files never panics");
@@ -81,18 +83,44 @@ pub(crate) fn read(path: &Path) -> io::Result<Option<Found>> {
     Ok((!content.is_empty()).then_some(Found { canonical, content }))
 }
 
-/// Emits the user slot, then a project slot for each directory from `project_root` to `cwd`.
+/// Reads the project candidate at `path` as [`read`] does, when it resolves to a Markdown file that
+/// [`resolve_project_file`] lets the checkout at `root` supply, so a checked-in symlink cannot pull
+/// in a file outside the root, or one inside it that holds no instructions, such as `.env`. `Err`
+/// gives the reason a file there is skipped.
+pub(crate) fn read_project(path: &Path, root: &Path) -> Result<Option<Found>, String> {
+    let resolved = match resolve_project_file(path, root) {
+        Ok(resolved) => resolved,
+        Err(ProjectFileError::Io(e)) if is_absent(&e) => return Ok(None),
+        Err(e) => return Err(e.to_string()),
+    };
+    if !resolved
+        .extension()
+        .is_some_and(|ext| ext.eq_ignore_ascii_case("md"))
+    {
+        return Err("it links to a file without a .md extension".to_owned());
+    }
+    read(&resolved).map_err(|e| e.to_string())
+}
+
+/// Emits the user slot, then a project slot for each directory from `project_root` to `cwd`. A
+/// project candidate that is also a user candidate, as at `$HOME`, stays in the user slot only.
 fn candidate_slots(cwd: &Path, project_root: &Path) -> Vec<Slot> {
     let user = Slot {
         candidates: user_candidates(),
         label: "user's global instructions",
+        root: None,
     };
     let projects = walk_root_to_cwd(project_root, cwd)
         .into_iter()
         .map(|dir| Slot {
-            candidates: project_candidates(&dir).into(),
+            candidates: project_candidates(&dir)
+                .into_iter()
+                .filter(|path| !user.candidates.contains(path))
+                .collect(),
             label: "project instructions",
-        });
+            root: Some(project_root.to_owned()),
+        })
+        .collect::<Vec<_>>();
 
     iter::once(user).chain(projects).collect()
 }
@@ -101,7 +129,7 @@ fn candidate_slots(cwd: &Path, project_root: &Path) -> Vec<Slot> {
 /// the user writes their own.
 fn user_candidates() -> Vec<PathBuf> {
     let ox = app_dir(XdgBase::Config).map(|dir| dir.join(AGENTS_MD));
-    let claude = std::env::home_dir().map(|home| home.join(CLAUDE_DIR).join(CLAUDE_MD));
+    let claude = claude_dir().map(|dir| dir.join(CLAUDE_MD));
     ox.into_iter().chain(claude).collect()
 }
 
@@ -121,17 +149,26 @@ fn walk_root_to_cwd(root: &Path, cwd: &Path) -> Vec<PathBuf> {
     dirs
 }
 
-/// The first file with instructions in each slot, and a warning for each candidate that cannot be
-/// read. A slot whose candidate cannot be read falls back to the next one, while a slot whose file
-/// an earlier slot loaded contributes nothing.
+/// The first file with instructions in each slot, and a warning for each candidate that cannot or
+/// may not be read. A slot whose candidate is skipped falls back to the next one, while a slot
+/// whose file an earlier slot loaded contributes nothing.
 fn load_files(slots: Vec<Slot>) -> (Vec<InstructionFile>, Vec<String>) {
     let mut files = Vec::new();
     let mut warnings = Vec::new();
     let mut loaded = HashSet::new();
 
-    for Slot { candidates, label } in slots {
+    for Slot {
+        candidates,
+        label,
+        root,
+    } in slots
+    {
         for path in candidates {
-            match read(&path) {
+            let found = match &root {
+                Some(root) => read_project(&path, root),
+                None => read(&path).map_err(|e| e.to_string()),
+            };
+            match found {
                 Ok(None) => {}
                 Ok(Some(Found { canonical, content })) => {
                     if loaded.insert(canonical) {
@@ -191,31 +228,42 @@ fn render(files: &[InstructionFile]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::util::fs::testing::{symlink_dir, symlink_file};
     use crate::util::path::local_testing::abs;
     use crate::util::path::testing::HOME_VAR;
+
+    fn skipped(path: &Path, reason: &str) -> String {
+        format!("Skipped instruction file {}: {reason}", path.display())
+    }
 
     mod load {
         use super::*;
 
-        /// The variables [`user_candidates`] reads, pinned to `home` with `XDG_CONFIG_HOME` unset.
-        fn pinned_home(home: &Path) -> [(&'static str, Option<&Path>); 2] {
-            [(HOME_VAR, Some(home)), ("XDG_CONFIG_HOME", None)]
+        /// The variables [`user_candidates`] reads, pinned to `home` with `XDG_CONFIG_HOME` and
+        /// `CLAUDE_CONFIG_DIR` unset.
+        fn pinned_home(home: &Path) -> [(&'static str, Option<&Path>); 3] {
+            [
+                (HOME_VAR, Some(home)),
+                ("XDG_CONFIG_HOME", None),
+                ("CLAUDE_CONFIG_DIR", None),
+            ]
         }
 
         #[tokio::test]
-        async fn uses_cwd_as_the_project_root_outside_a_git_repo() {
+        async fn reads_project_instructions_at_the_root() {
             let (home, dir) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
-            std::fs::write(dir.path().join("CLAUDE.md"), "Fallback rules.").unwrap();
+            std::fs::write(dir.path().join("CLAUDE.md"), "Root rules.").unwrap();
 
             let (result, warnings) =
-                temp_env::async_with_vars(pinned_home(home.path()), load(dir.path(), None)).await;
+                temp_env::async_with_vars(pinned_home(home.path()), load(dir.path(), dir.path()))
+                    .await;
 
             let path = dir.path().join("CLAUDE.md");
             assert_eq!(
                 result,
                 render(&[InstructionFile {
                     path,
-                    content: "Fallback rules.".to_owned(),
+                    content: "Root rules.".to_owned(),
                     label: "project instructions",
                 }]),
             );
@@ -230,7 +278,8 @@ mod tests {
             std::fs::write(claude_dir.join("CLAUDE.md"), "Global rules.").unwrap();
 
             let (result, _) =
-                temp_env::async_with_vars(pinned_home(home.path()), load(home.path(), None)).await;
+                temp_env::async_with_vars(pinned_home(home.path()), load(home.path(), home.path()))
+                    .await;
 
             assert_eq!(
                 result,
@@ -257,7 +306,7 @@ mod tests {
             std::fs::write(sub.join(".claude/CLAUDE.md"), "Shadowed rules.").unwrap();
 
             let (result, _) =
-                temp_env::async_with_vars(pinned_home(home.path()), load(&sub, Some(root))).await;
+                temp_env::async_with_vars(pinned_home(home.path()), load(&sub, root)).await;
 
             assert_eq!(
                 result,
@@ -267,6 +316,122 @@ mod tests {
                     label: "project instructions",
                 }]),
             );
+        }
+
+        #[tokio::test]
+        async fn skips_project_files_that_resolve_outside_the_root() {
+            let (home, outside) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+            let secret = outside.path().join("secret.md");
+            std::fs::write(&secret, "OUTSIDE-FILE-MARKER").unwrap();
+            std::fs::write(outside.path().join("CLAUDE.md"), "OUTSIDE-DIR-MARKER").unwrap();
+            let project = tempfile::tempdir().unwrap();
+            let sub = project.path().join("sub");
+            std::fs::create_dir(&sub).unwrap();
+            symlink_file(&secret, &project.path().join("AGENTS.md"));
+            std::fs::write(project.path().join("CLAUDE.md"), "Project rules.").unwrap();
+            symlink_dir(outside.path(), &sub.join(".claude"));
+
+            let (result, warnings) =
+                temp_env::async_with_vars(pinned_home(home.path()), load(&sub, project.path()))
+                    .await;
+
+            assert_eq!(
+                result,
+                render(&[InstructionFile {
+                    path: project.path().join("CLAUDE.md"),
+                    content: "Project rules.".to_owned(),
+                    label: "project instructions",
+                }]),
+            );
+            let reason = "it resolves outside the project root";
+            assert_eq!(
+                warnings,
+                [
+                    skipped(&project.path().join("AGENTS.md"), reason),
+                    skipped(&sub.join(".claude").join("CLAUDE.md"), reason),
+                ],
+            );
+        }
+
+        #[tokio::test]
+        async fn skips_a_project_link_to_a_file_that_is_not_markdown() {
+            let (home, project) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+            std::fs::write(project.path().join(".env"), "TOKEN=secret-marker").unwrap();
+            symlink_file(
+                &project.path().join(".env"),
+                &project.path().join("AGENTS.md"),
+            );
+
+            let (result, warnings) = temp_env::async_with_vars(
+                pinned_home(home.path()),
+                load(project.path(), project.path()),
+            )
+            .await;
+
+            assert_eq!(result, "");
+            assert_eq!(
+                warnings,
+                [skipped(
+                    &project.path().join("AGENTS.md"),
+                    "it links to a file without a .md extension",
+                )],
+            );
+        }
+
+        #[tokio::test]
+        async fn skips_any_project_link_when_the_root_contains_home() {
+            let home = tempfile::tempdir().unwrap();
+            let project = home.path().join("project");
+            std::fs::create_dir(&project).unwrap();
+            std::fs::write(project.join("notes.md"), "Linked rules.").unwrap();
+            symlink_file(&project.join("notes.md"), &project.join("AGENTS.md"));
+            std::fs::write(project.join("CLAUDE.md"), "Plain rules.").unwrap();
+
+            let (result, warnings) =
+                temp_env::async_with_vars(pinned_home(home.path()), load(&project, home.path()))
+                    .await;
+
+            assert_eq!(
+                result,
+                render(&[InstructionFile {
+                    path: project.join("CLAUDE.md"),
+                    content: "Plain rules.".to_owned(),
+                    label: "project instructions",
+                }]),
+            );
+            assert_eq!(
+                warnings,
+                [skipped(
+                    &project.join("AGENTS.md"),
+                    "symlinks are not followed when the project root contains the home directory",
+                )],
+            );
+        }
+
+        #[tokio::test]
+        async fn follows_user_file_links_anywhere() {
+            let (home, outside) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+            std::fs::write(outside.path().join("rules.txt"), "Linked global rules.").unwrap();
+            let claude_dir = home.path().join(".claude");
+            std::fs::create_dir(&claude_dir).unwrap();
+            symlink_file(
+                &outside.path().join("rules.txt"),
+                &claude_dir.join("CLAUDE.md"),
+            );
+
+            let (result, warnings) =
+                temp_env::async_with_vars(pinned_home(home.path()), load(home.path(), home.path()))
+                    .await;
+
+            assert_eq!(
+                result,
+                render(&[InstructionFile {
+                    path: claude_dir.join("CLAUDE.md"),
+                    content: "Linked global rules.".to_owned(),
+                    label: "user's global instructions",
+                }]),
+            );
+            assert_eq!(warnings, [] as [String; 0]);
         }
     }
 
@@ -334,33 +499,71 @@ mod tests {
         }
     }
 
+    mod read_project {
+        use super::*;
+
+        #[test]
+        fn follows_a_link_to_markdown_inside_the_root() {
+            let dir = tempfile::tempdir().unwrap();
+            std::fs::create_dir(dir.path().join("docs")).unwrap();
+            std::fs::write(dir.path().join("docs").join("ai.md"), "Rules.").unwrap();
+            symlink_file(
+                &dir.path().join("docs").join("ai.md"),
+                &dir.path().join("AGENTS.md"),
+            );
+
+            let found = read_project(&dir.path().join("AGENTS.md"), dir.path())
+                .unwrap()
+                .unwrap();
+
+            let canonical = std::fs::canonicalize(dir.path()).unwrap();
+            assert_eq!(found.canonical, canonical.join("docs").join("ai.md"));
+            assert_eq!(found.content, "Rules.");
+        }
+
+        #[test]
+        fn absent_file_is_skipped_silently() {
+            let dir = tempfile::tempdir().unwrap();
+
+            let found = read_project(&dir.path().join("AGENTS.md"), dir.path());
+
+            assert!(matches!(found, Ok(None)), "{found:?}");
+        }
+    }
+
     mod candidate_slots {
         use super::*;
 
         #[test]
         fn lists_the_user_files_then_each_directory_from_root_to_cwd() {
             let (home, xdg) = (PathBuf::from(abs("/home/u")), PathBuf::from(abs("/xdg")));
+            let claude = PathBuf::from(abs("/srv/claude"));
             let (root, cwd) = (
                 PathBuf::from(abs("/repo")),
                 PathBuf::from(abs("/repo/crates")),
             );
-            let vars = [(HOME_VAR, Some(&home)), ("XDG_CONFIG_HOME", Some(&xdg))];
+            let vars = [
+                (HOME_VAR, Some(&home)),
+                ("XDG_CONFIG_HOME", Some(&xdg)),
+                ("CLAUDE_CONFIG_DIR", Some(&claude)),
+            ];
 
             let slots = temp_env::with_vars(vars, || candidate_slots(&cwd, &root));
 
             let slots: Vec<_> = slots
                 .into_iter()
-                .map(|Slot { candidates, label }| (label, candidates))
+                .map(
+                    |Slot {
+                         candidates, label, ..
+                     }| (label, candidates),
+                )
                 .collect();
             assert_eq!(
                 slots,
                 [
                     (
                         "user's global instructions",
-                        vec![
-                            xdg.join("ox").join("AGENTS.md"),
-                            home.join(".claude").join("CLAUDE.md"),
-                        ],
+                        vec![xdg.join("ox").join("AGENTS.md"), claude.join("CLAUDE.md"),],
                     ),
                     ("project instructions", project_candidates(&root).into()),
                     ("project instructions", project_candidates(&cwd).into()),
@@ -429,6 +632,7 @@ mod tests {
                     nested,
                 ],
                 label: "test",
+                root: None,
             }];
 
             let (files, warnings) = load_files(slots);
@@ -451,10 +655,12 @@ mod tests {
                 Slot {
                     candidates: vec![a_path.clone()],
                     label: "first",
+                    root: None,
                 },
                 Slot {
                     candidates: vec![b_path.clone()],
                     label: "second",
+                    root: None,
                 },
             ];
 
@@ -480,10 +686,12 @@ mod tests {
                 Slot {
                     candidates: vec![a_path.clone()],
                     label: "first",
+                    root: None,
                 },
                 Slot {
                     candidates: vec![dir.path().join(".").join("a.md"), b_path],
                     label: "second",
+                    root: None,
                 },
             ];
 
@@ -503,6 +711,7 @@ mod tests {
             let slots = vec![Slot {
                 candidates: vec![agents_path.clone(), claude_path.clone()],
                 label: "test",
+                root: None,
             }];
 
             let (files, warnings) = load_files(slots);

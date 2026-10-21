@@ -1,8 +1,6 @@
 //! Conversation compaction: the auto-compaction trigger and the summarization request, which forks
 //! the live conversation to read its prompt cache. `compact_session` leaves the session untouched,
 //! and its callers swap in the summary through `compact_boundary` once it succeeds.
-//!
-//! Design: `docs/design/slash/compact.md`.
 
 use std::collections::HashSet;
 use std::iter;
@@ -1718,7 +1716,7 @@ mod tests {
                 .expect_err("in-band error must propagate");
             assert_eq!(
                 format!("{err:#}"),
-                "API error (invalid_request_error): summary request rejected"
+                "Anthropic API error (invalid_request_error): summary request rejected"
             );
         }
 
@@ -1739,7 +1737,7 @@ mod tests {
                 .expect_err("expected error");
             assert_eq!(
                 format!("{err:#}"),
-                "API error (HTTP 400 Bad Request): summary request rejected"
+                "Anthropic API error (HTTP 400 Bad Request): summary request rejected"
             );
         }
     }

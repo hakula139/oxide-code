@@ -36,9 +36,10 @@ use ox_core::engine::{Engine, EngineHandle};
 use ox_core::util::git;
 use ox_core::util::path::tildify;
 
+use action::Action;
 use app::{App, AppHistory};
 use slash::{LiveSessionInfo, ResumePicker};
-use theme::Theme;
+use theme::ResolvedTheme;
 
 // ── Constants ──
 
@@ -51,23 +52,23 @@ const NOTICE_DURATION: Duration = Duration::from_secs(3);
 pub struct Startup {
     /// The branch checked out at startup, which the status bar shows until its first git probe.
     pub git_branch: Option<String>,
-    /// The `ox --resume` session picker, opened over the first frame.
+    /// The session picker that `--resume` without a session opens over the first frame.
     pub picker: Option<ResumePicker>,
-    /// One notice per `[tui.theme]` override the theme ignored, shown after the config notices.
-    pub theme_notices: Vec<String>,
+    /// The `ox <prompt>` text, submitted as if typed once the TUI opens.
+    pub prompt: Option<String>,
     pub title: Option<String>,
     /// Whether resuming the session unarchived it.
     pub unarchived: bool,
 }
 
 /// Runs the TUI until the user quits or `shutdown` resolves, then waits for the engine to finalize
-/// the live session. Returns what `shutdown` resolved to, or `None` when the user quit. An engine
-/// panic is returned after the terminal is restored, which prints the deferred panic report.
+/// the live session. Shows the notices of `theme` in the chat. Returns what `shutdown` resolved
+/// to, or `None` when the user quit. An engine panic is returned after the
+/// terminal is restored, which prints the deferred panic report.
 pub async fn run<S: Debug>(
     mut engine: Engine,
-    theme: &Theme,
+    theme: ResolvedTheme,
     config: ConfigSnapshot,
-    show_thinking: bool,
     startup: Startup,
     drifted: &[PathBuf],
     shutdown: impl Future<Output = S>,
@@ -75,11 +76,10 @@ pub async fn run<S: Debug>(
     terminal::install_panic_hook();
 
     let cwd = engine.cwd();
-    let notices = config.notices();
     let session_info = LiveSessionInfo {
         cwd: tildify(cwd),
         working_dir: Some(cwd.to_owned()),
-        project_root: git::project_root(cwd).await,
+        project_root: git::project_root(cwd),
         version: env!("CARGO_PKG_VERSION"),
         session_id: engine.session_id().to_owned(),
         session_allow: Vec::new(),
@@ -91,11 +91,16 @@ pub async fn run<S: Debug>(
 
     let mut tui = terminal::init()?;
     let EngineHandle { ops, events, task } = engine.spawn(drifted);
+    let ResolvedTheme {
+        theme,
+        overrides,
+        notices: theme_notices,
+    } = theme;
     let mut app = App::new(
         theme,
+        overrides,
         session_info,
         startup.git_branch,
-        show_thinking,
         events,
         ops,
         AppHistory {
@@ -104,11 +109,14 @@ pub async fn run<S: Debug>(
             unarchived: startup.unarchived,
         },
     );
-    for notice in notices.into_iter().chain(startup.theme_notices) {
+    for notice in theme_notices {
         app.push_system_message(notice);
     }
     if let Some(picker) = startup.picker {
         app.push_modal(Box::new(picker));
+    }
+    if let Some(prompt) = startup.prompt {
+        app.dispatch_action(Action::Submit(prompt));
     }
 
     let result = tokio::select! {

@@ -212,7 +212,7 @@ fn prepend_markdown_prefix(
 
 #[cfg(test)]
 mod tests {
-    use ratatui::style::{Color, Style};
+    use ratatui::style::Color;
 
     use super::*;
 

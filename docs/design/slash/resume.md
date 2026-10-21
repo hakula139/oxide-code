@@ -1,6 +1,6 @@
 # Session Resume
 
-`/resume` (alias `/continue`) opens a searchable session picker when bare, or jumps directly when given a session ID. The picker loads sessions a page at a time as the cursor nears the end of the loaded rows. At startup, `ox --resume` opens the same picker.
+`/resume` (alias `/continue`) opens a searchable session picker when bare, or jumps directly when given a session ID. The picker loads sessions a page at a time as the cursor nears the end of the loaded rows. At startup, `ox --resume` without a session opens the same picker.
 
 Companions: [commands.md](commands.md), [modals.md](modals.md). Underlying research: [research/slash/resume.md](../../research/slash/resume.md).
 
@@ -20,7 +20,7 @@ The picker wraps [`SearchableList`](modals.md) and adds these controls and displ
 - Ctrl+D on the cursor row pushes [`ConfirmDeleteSessionModal`](modals.md). On focus regain the picker drops the rows whose files are gone and re-seeks the cursor to the previously selected row, so cancel-delete keeps the user in place. After a delete, the row that followed takes the highlight.
 - Ctrl+X archives the cursor row, or unarchives it in the archived view, through `session::saved::set_archived`, the operation the typed `/archive` and `/unarchive` forms also run. The picker then drops the row with the cursor index and scroll position kept, so the cursor lands on the row that followed while the visible rows hold still, and the footer names the moved session until the next key or for 3 seconds, the same `NOTICE_DURATION` as the copy notice. A refusal or failed write shows in the footer as an error and leaves the row in place.
 
-`ox --resume` starts the TUI in a fresh session with no file yet, then opens the picker on the first frame. `main.rs` builds it with `ResumePicker::at_startup`, and `ox_tui::run` pushes `Startup::picker` onto the modal stack before the event loop starts. The startup picker carries `Dismissal::Quit`, so Esc / Ctrl+C call `on_cancel`, which resolves to `Op::Shutdown`, and the footer reads `Esc to quit`. Pressing Enter resumes through the same `roll_into` path as `/resume`. A session file is created only with the first message, so neither path leaves an empty session on disk.
+`ox --resume` without a session starts the TUI in a fresh session with no file yet, then opens the picker on the first frame. `main.rs` builds it with `ResumePicker::at_startup`, and `ox_tui::run` pushes `Startup::picker` onto the modal stack before the event loop starts. The startup picker carries `Dismissal::Quit`, so Esc / Ctrl+C call `on_cancel`, which resolves to `Op::Shutdown`, and the footer reads `Esc to quit`. Pressing Enter resumes through the same `roll_into` path as `/resume`. A session file is created only with the first message, so neither path leaves an empty session on disk.
 
 `session/handle` provides `roll_into(...)`, which mirrors `roll(...)`. It loads and sanitizes the target first, so a load failure leaves the live session untouched. Loading an archived target appends an entry unarchiving it, which `RollIntoOutcome::unarchived` reports. It then snapshots and clears the file tracker, restores the target's tracker state through `restore_verified`, swaps the handle in place, and finalizes the old session. `RollIntoOutcome` carries the target's `LoadedTranscript` (messages, recorded prompt context, compact boundary, tool-result metadata, and recorded usage) and title, plus a diagnostic pair (finalize failure of the prior session, drift list from the file tracker).
 
@@ -32,7 +32,7 @@ The picker wraps [`SearchableList`](modals.md) and adds these controls and displ
 
 1. **Bare opens the picker, typed-arg resolves directly.** Same shape as `/model`, `/effort`, `/theme`: bare opens a modal, typed-arg switches directly. Reference CLIs converged on this exploratory-vs-direct split independently (Claude Code's `-r` vs `-c`, Codex's bare `resume` vs `resume <id>`).
 
-2. **Alias `continue`.** Matches the `--continue` / `-c` CLI flag, so both surfaces use the same word.
+2. **Alias `continue`.** Claude Code's `/resume` also takes `continue` as an alias, so users of either tool can type the word they know.
 
 3. **`classify` is always `Mutating`.** Both bare and typed-arg refuse mid-turn, since the picker eventually submits an `Op::Resume`, and allowing it mid-stream would interleave a session swap with an in-flight response, which the read-only fast path exists to rule out.
 
@@ -54,7 +54,7 @@ The picker wraps [`SearchableList`](modals.md) and adds these controls and displ
 
 12. **Load pages in the background as the cursor nears the end.** Loading the next page while a viewport of matching rows remains below the cursor keeps paging out of sight and lets a query reach every session in scope. Parsing reads each transcript in full, and a page can parse far more files than it keeps when most sessions sit in the other archive view, so the reads run on a worker thread. On 1,000 sessions of 650 KB each, a 30-session page took about 10 ms with a warm cache, while a scan that found no match in the requested view took about 250 ms. Listing and sorting the files stays on the UI thread and took a few milliseconds there.
 
-13. **Listing API centralizes pagination in `list_paged(limit, scope)`.** The page, the archive filter, and whether more sessions follow come from one walk that stops one session past the page, so a listing's cost scales with the page. Listings report no exact total, since counting the sessions in one archive state would parse every file in scope. Bare `ox -c` stops at the first unarchived session through `latest`, and a prefix lookup parses only matching files.
+13. **Listing API centralizes pagination in `list_paged(limit, scope)`.** The page, the archive filter, and whether more sessions follow come from one walk that stops one session past the page, so a listing's cost scales with the page. Listings report no exact total, since counting the sessions in one archive state would parse every file in scope. `ox -c` stops at the first unarchived session through `latest`, and a prefix lookup parses only matching files.
 
 14. **`--list --limit 0` opts back into unbounded listing.** Scripts piping output need the full set, so `0` is the explicit unbounded value and no magic large default is needed.
 
@@ -62,9 +62,9 @@ The picker wraps [`SearchableList`](modals.md) and adds these controls and displ
 
 16. **Always show the picker, even with one or zero matches.** Auto-resuming on a single match would surprise users who typed `/resume` just to peek the list, and an empty list with a clear message is better than silently doing nothing.
 
-17. **Ctrl+A switches to the archived view.** Archived sessions stay out of the default rows but remain one key away, and resuming one from that view unarchives it, matching `ox -c <prefix>`. The view composes with Tab, so archived sessions can be listed across every project.
+17. **Ctrl+A switches to the archived view.** Archived sessions stay out of the default rows but remain one key away, and resuming one from that view unarchives it, matching `ox -r <prefix>`. The view composes with Tab, so archived sessions can be listed across every project.
 
-18. **`ox --resume` reuses the in-TUI picker, and dismissing it quits.** Opening the picker over a fresh session lets startup share `/resume`'s modal and its in-process swap, avoiding a separate pre-TUI selection screen. Claude Code's `--resume` and Codex's `resume` subcommand both open a picker at startup. Codex starts a fresh session when you press Esc, but plain `ox` already does that, so Esc quits. Esc always keeps its universal modal meaning, even when you've typed a query, and Ctrl+U clears the query. The picker holds focus until it closes, so resume or compaction can't clear the stack and trigger its quitting `on_cancel` while it's open.
+18. **`ox --resume` without a session reuses the in-TUI picker, and dismissing it quits.** Opening the picker over a fresh session lets startup share `/resume`'s modal and its in-process swap, avoiding a separate pre-TUI selection screen. Claude Code's `--resume` and Codex's `resume` subcommand both open a picker at startup. Codex starts a fresh session when you press Esc, but plain `ox` already does that, so Esc quits. Esc always keeps its universal modal meaning, even when you've typed a query, and Ctrl+U clears the query. The picker holds focus until it closes, so resume or compaction can't clear the stack and trigger its quitting `on_cancel` while it's open.
 
 19. **One keymap drives keys and hints.** Each named action carries its key and a footer label that can depend on the view, so `handle_key` dispatches through the table that renders the footer, and adding a key adds its hint. The picker captures Esc so dismissal is one of those actions. The scope status stays out of the table. [#278](https://github.com/hakula139/oxide-code/issues/278) tracks rebinding these actions, and [#281](https://github.com/hakula139/oxide-code/issues/281) tracks fitting their hints to narrow footers.
 

@@ -12,6 +12,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use anyhow::{Result, bail};
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
+use uuid::Uuid;
 
 use super::actor::{self, SessionCmd};
 use super::entry::{CompactInfo, UsageRecord};
@@ -97,8 +98,20 @@ fn surface_once(surfaced: &AtomicBool) -> bool {
     !surfaced.swap(true, Ordering::AcqRel)
 }
 
+/// A point in the active branch that [`SessionHandle::rewind`] can move the tip back to.
+#[derive(Clone, Copy)]
+pub(crate) struct Checkpoint {
+    /// The message the next one chains from, `None` before the first.
+    pub(super) tip: Option<Uuid>,
+    pub(super) message_count: u32,
+    /// Whether a user prompt before this point titled the session.
+    pub(super) first_user_prompt_seen: bool,
+}
+
 /// Ack from [`SessionHandle::record_message`].
 pub(crate) struct RecordOutcome {
+    /// The branch point the message chained from, `None` when the actor is gone.
+    pub(crate) checkpoint: Option<Checkpoint>,
     /// `Some` only on the first user-text message of a fresh session.
     pub(crate) ai_title_seed: Option<String>,
     /// A write failure, reported only the first time each kind of failure occurs.
@@ -153,9 +166,23 @@ impl SessionHandle {
         self.request(SessionCmd::Record { msg, context, ack }, rx)
             .await
             .unwrap_or_else(|| RecordOutcome {
+                checkpoint: None,
                 ai_title_seed: None,
                 failure: self.actor_gone_failure(),
             })
+    }
+
+    /// Moves the session's tip back to `checkpoint`, abandoning the messages recorded after it.
+    /// `checkpoint` must come from a record since the last compaction, whose boundary the loader
+    /// cannot rewind across. A rewind to before the first user prompt stops the title request that
+    /// prompt started, so the next prompt titles the session.
+    pub(crate) async fn rewind(&self, checkpoint: Checkpoint) -> Outcome {
+        if !checkpoint.first_user_prompt_seen {
+            self.stop_title_task().await;
+        }
+        let (ack, rx) = oneshot::channel();
+        self.dispatch_outcome(SessionCmd::Rewind { checkpoint, ack }, rx)
+            .await
     }
 
     /// Records sidecar metadata for a tool round in one cmd. Default-metadata items are skipped.
@@ -664,6 +691,55 @@ mod tests {
             let resumed = resume_id(&store, &session_id).unwrap().handle;
             let outcome = resumed.record_message(Message::user("more text")).await;
             assert!(outcome.ai_title_seed.is_none());
+        }
+    }
+
+    mod rewind {
+        use super::*;
+
+        #[tokio::test]
+        async fn to_before_the_first_prompt_stops_the_title_request_it_started() {
+            let dir = tempfile::tempdir().unwrap();
+            let handle = start(&test_store(dir.path()), "m", None);
+            let refused = handle.record_message(Message::user("refused")).await;
+            let (started_tx, started) = oneshot::channel();
+            let (alive, mut ended) = oneshot::channel::<()>();
+            handle.set_title_task(tokio::spawn(async move {
+                let _alive = alive;
+                started_tx.send(()).unwrap();
+                std::future::pending::<()>().await;
+            }));
+            started.await.unwrap();
+
+            let outcome = handle
+                .rewind(refused.checkpoint.expect("the actor is running"))
+                .await;
+
+            assert_eq!(outcome.failure, None);
+            assert_eq!(ended.try_recv(), Err(oneshot::error::TryRecvError::Closed));
+        }
+
+        #[tokio::test]
+        async fn to_after_the_first_prompt_keeps_the_title_request() {
+            let dir = tempfile::tempdir().unwrap();
+            let handle = start(&test_store(dir.path()), "m", None);
+            handle.record_message(Message::user("first")).await;
+            let refused = handle.record_message(Message::user("refused")).await;
+            let (started_tx, started) = oneshot::channel();
+            let (alive, mut ended) = oneshot::channel::<()>();
+            handle.set_title_task(tokio::spawn(async move {
+                let _alive = alive;
+                started_tx.send(()).unwrap();
+                std::future::pending::<()>().await;
+            }));
+            started.await.unwrap();
+
+            handle
+                .rewind(refused.checkpoint.expect("the actor is running"))
+                .await;
+
+            assert_eq!(ended.try_recv(), Err(oneshot::error::TryRecvError::Empty));
+            handle.finalize(Vec::new()).await;
         }
     }
 
@@ -2065,6 +2141,10 @@ mod tests {
                 .await;
             record_tool_turns(&session).await;
             session.record_message(Message::assistant("Done.")).await;
+            let refused = session.record_message(Message::user("Delete f.rs")).await;
+            session
+                .rewind(refused.checkpoint.expect("the actor is running"))
+                .await;
             session
                 .record_usage(vec![usage("1h", 3), usage("1h", 4)])
                 .await;

@@ -4,52 +4,23 @@ oxide-code is a terminal-based AI coding assistant written in Rust, inspired by 
 
 This file holds the rules for every change and points to the conventions for each area. `README.md` covers features and scope for users, [`docs/`](docs/) holds the user guides, conventions, design specs, and research notes, and open GitHub issues track planned work.
 
-```bash
-ox                                          # Start an interactive TUI session
-ox --no-tui                                 # Bare REPL on stdin and stdout
-ox -p "<prompt>"                            # Headless: run one turn and print the reply
-```
-
 ## Project Layout
+
+The tree lists only the top-level entries whose names leave their purpose unclear.
 
 ```text
 .
 ├── .agents/                                # Agent skills for the release procedure
-├── .cargo/                                 # Cargo rustdoc flags and cargo-mutants settings
 ├── .claude/                                # Link to the agent skills for Claude Code
-├── .cspell/                                # Project spelling dictionary
-├── .envrc                                  # Loads the dev shell through direnv
-├── .github/                                # CI and release workflows, the shared Nix setup action, issue forms, PR template, and Renovate and Dependabot configs
-├── .gitignore                              # Build output and local tool state kept out of Git
-├── .markdownlint-cli2.jsonc                # Markdown lint rules
-├── .prettierignore                         # The pnpm lockfile, which Prettier skips
-├── .prettierrc                             # Prettier settings for JSON, Markdown, and YAML
-├── .taplo.toml                             # TOML formatter settings
-├── .vscode/                                # Shared VS Code settings
-├── .worktreeinclude                        # Gitignored agent memory that Claude Code copies into new worktrees
 ├── about.hbs                               # Plain-text third-party notice template
 ├── about.toml                              # Release dependency license selection
-├── Cargo.toml                              # Workspace manifest for the MSRV, lints, shared dependencies, and build profiles
-├── CHANGELOG.md                            # Release notes drafted by git-cliff and curated for each release
-├── cliff.toml                              # Changelog configuration for git-cliff
-├── clippy.toml                             # Clippy settings
-├── codecov.yml                             # Codecov coverage targets
 ├── crates/ox/                              # The `ox` binary crate with the CLI and the stdio frontends, mapped in docs/design/architecture.md
 ├── crates/ox-core/                         # The `ox-core` library crate with the agent core, mapped in docs/design/architecture.md
 ├── crates/ox-tui/                          # The `ox-tui` library crate with the terminal UI, mapped in docs/design/architecture.md
-├── cspell.json                             # Spell checker settings
-├── deny.toml                               # Dependency license, advisory, source, and ban policy
 ├── docs/                                   # User guides, conventions, design specs, and research notes
-├── flake.nix                               # Nix flake for the dev shell, pre-commit hooks, checks, and packages
 ├── Formula/                                # Homebrew formula, served from this repo as a tap
 ├── licenses/                               # Licenses for bundled syntax definitions and themes
-├── package.json                            # Node formatters, linters, and spell checker run through pnpm
-├── package.nix                             # Nix package for `ox`
-├── pnpm-workspace.yaml                     # Dependency overrides for pnpm
-├── RELEASING.md                            # Release procedure, versioning, and stability surface
-├── rust-toolchain.toml                     # Pinned Rust release
-├── scripts/                                # Homebrew formula updater run by the Release workflow
-└── SECURITY.md                             # Vulnerability reporting and trust model
+└── scripts/                                # Homebrew formula updater run by the Release workflow
 ```
 
 ## Read Before You Edit
@@ -68,7 +39,7 @@ ox -p "<prompt>"                            # Headless: run one turn and print t
 - Run the pre-commit hooks on every commit. In each new checkout or worktree, run `nix develop -c true` and `pnpm install` once to provide the generated config and Node tools the hooks need. Never bypass the hooks with `--no-verify` or `PRE_COMMIT_ALLOW_NO_CONFIG`.
 - Run the [verification](#verification) block before review.
 - Add new words to `.cspell/words.txt` in alphabetical order. `cspell` scans Rust sources too, so a new word in a doc comment fails the same way as one in `README.md`.
-- Update whatever the change makes stale: the `README.md` Features and Scope sections, the user guides, design docs and the module map, research notes whose follow-ups it resolves, and open issues it resolves or invalidates.
+- Update whatever the change makes stale: the `README.md` Features and Scope sections, the trust model in `SECURITY.md`, the user guides, design docs and the module map, research notes whose follow-ups it resolves, and open issues it resolves or invalidates.
 - Design each change to hold up long term. Survey the reference implementations that [Writing](docs/conventions/writing.md#documentation) lists, reason from first principles toward a design better than any of them, and land any refactor the design needs first. Fix a problem in the layer that owns it, so when `ox` misbehaves in some environment, fix `ox` and leave the environment alone. Never ship a stopgap labeled temporary.
 - When a change or review exposes a gap or inconsistency in the conventions, settle the standard from first principles, record it in the convention doc that owns the area, and bring existing code and docs up to it in a scoped refactor PR.
 - Issues, PRs, and their comments link only public material. Never reference gitignored or local material, such as working notes, local paths, or private repositories.
