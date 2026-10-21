@@ -25,7 +25,6 @@ mod viewport;
 mod wrap;
 
 use std::fmt::Debug;
-use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
@@ -70,7 +69,6 @@ pub async fn run<S: Debug>(
     theme: ResolvedTheme,
     config: ConfigSnapshot,
     startup: Startup,
-    drifted: &[PathBuf],
     shutdown: impl Future<Output = S>,
 ) -> Result<Option<S>> {
     terminal::install_panic_hook();
@@ -90,7 +88,7 @@ pub async fn run<S: Debug>(
     let interactions = engine.take_history();
 
     let mut tui = terminal::init()?;
-    let EngineHandle { ops, events, task } = engine.spawn(drifted);
+    let EngineHandle { ops, events, task } = engine.spawn();
     let ResolvedTheme {
         theme,
         overrides,

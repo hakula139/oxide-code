@@ -7,7 +7,6 @@ use std::env;
 use std::ffi::OsStr;
 use std::io::{self, IsTerminal, Write};
 use std::process::ExitCode;
-use std::sync::Arc;
 
 use anyhow::{Context, Result, bail};
 use clap::builder::{PossibleValue, PossibleValuesParser, TypedValueParser};
@@ -20,7 +19,6 @@ use tracing::warn;
 use ox_core::client::anthropic::identity;
 use ox_core::config::Config;
 use ox_core::engine::{Engine, EnginePanic, SessionParts};
-use ox_core::file_tracker::FileTracker;
 use ox_core::permission::Mode;
 use ox_core::session::display::archive_notice;
 use ox_core::session::handle::ResumedSession;
@@ -327,14 +325,12 @@ async fn async_main(offset_error: Option<IndeterminateOffset>) -> Result<Exit> {
     let theme = tui_mode.then(|| resolve_theme(&config.theme)).transpose()?;
 
     let store = SessionStore::open(&cwd)?;
-    let file_tracker = Arc::new(FileTracker::default());
     let git_branch = util::git::current_branch(&cwd).await;
     let ResumedSession {
         handle,
         transcript,
         title,
         unarchived,
-        file_snapshots,
     } = resolve_session(
         &store,
         config.model.id(),
@@ -349,7 +345,6 @@ async fn async_main(offset_error: Option<IndeterminateOffset>) -> Result<Exit> {
             archive_notice(handle.session_id(), false)
         );
     }
-    let drifted = file_tracker.restore_verified(file_snapshots);
     let picker = cli
         .opens_picker()
         .then(|| ResumePicker::at_startup(store.clone(), handle.session_id().to_owned(), cli.all));
@@ -362,20 +357,17 @@ async fn async_main(offset_error: Option<IndeterminateOffset>) -> Result<Exit> {
             store,
             handle,
             transcript,
-            file_tracker,
         },
         tui_mode,
     )
     .await?;
 
     if let Some(prompt) = headless_prompt {
-        return Ok(
-            driver::headless::run(engine, show_thinking, &drifted, &prompt, cli.output).await?,
-        );
+        return Ok(driver::headless::run(engine, show_thinking, &prompt, cli.output).await?);
     }
 
     let Some(theme) = theme else {
-        return driver::repl::run(engine, show_thinking, &drifted, cli.prompt).await;
+        return driver::repl::run(engine, show_thinking, cli.prompt).await;
     };
 
     let startup = Startup {
@@ -391,7 +383,6 @@ async fn async_main(offset_error: Option<IndeterminateOffset>) -> Result<Exit> {
         theme,
         config.snapshot(),
         startup,
-        &drifted,
         driver::shutdown_signal(),
     ))
     .await?;

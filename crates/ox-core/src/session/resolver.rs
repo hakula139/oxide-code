@@ -53,7 +53,6 @@ pub fn resolve_session(
                 transcript: LoadedTranscript::default(),
                 title: None,
                 unarchived: false,
-                file_snapshots: Vec::new(),
             });
         }
         ResumeMode::Path(path) => path.to_owned(),
