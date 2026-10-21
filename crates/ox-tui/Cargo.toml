@@ -15,6 +15,7 @@ anyhow.workspace = true
 arboard.workspace = true
 base64.workspace = true
 crossterm.workspace = true
+fastrand.workspace = true
 futures.workspace = true
 indoc.workspace = true
 open.workspace = true
@@ -30,6 +31,7 @@ toml.workspace = true
 tracing.workspace = true
 unicode-segmentation.workspace = true
 unicode-width.workspace = true
+xxhash-rust.workspace = true
 
 [dev-dependencies]
 insta.workspace = true

@@ -52,4 +52,4 @@ Organized by topic. Each subdirectory shares its topic with a directory in [`doc
 | [Cancellation and Queued Input](tui/cancellation.md) | Cancel, exit, and mid-turn queued prompts                                   |
 | [Mouse Interactions](tui/mouse-interactions.md)      | Mouse capture for wheel scroll, chat selection and copy, OSC 8 PR hyperlink |
 | [Status Line](tui/status-line.md)                    | Configurable status-line segments and usage display                         |
-| [Welcome Screen](tui/welcome.md)                     | Empty-state renderer, `WelcomeSnapshot`, width ladder                       |
+| [Welcome Screen](tui/welcome.md)                     | Empty-state renderer, session-seeded starter picks, width ladder            |
