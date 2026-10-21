@@ -14,14 +14,11 @@ use ratatui::Frame;
 use ratatui::layout::Rect;
 use ratatui::style::Modifier;
 use ratatui::text::{Line, Span};
-use time::{OffsetDateTime, UtcOffset};
+use time::OffsetDateTime;
 
 use ox_core::command;
 use ox_core::protocol::{Op, ResumeTarget};
-use ox_core::session::display::{
-    ID_PREFIX_WIDTH, SHORT_RELATIVE_TIME_WIDTH, display_title, format_metadata_line,
-    format_short_relative_time, id_prefix,
-};
+use ox_core::session::display::{ID_PREFIX_WIDTH, display_title, id_prefix};
 use ox_core::session::entry::SessionInfo;
 use ox_core::session::saved;
 use ox_core::session::store::SessionStore;
@@ -31,12 +28,15 @@ use ox_core::util::text::{
     center_truncate_to_width, compact_count, escape_line, pad_start_to_width, pad_to_width, plural,
     truncate_to_width,
 };
-use ox_core::util::time::local_offset;
+use ox_core::util::time::now_local;
 
 use super::confirm::ConfirmDeleteSessionModal;
 use super::context::SlashContext;
 use super::registry::{SlashCommand, SlashKind, SlashOutcome};
-use super::sessions::{BARE_ARCHIVE_HINT, open_store, saved_error_message};
+use super::sessions::{
+    BARE_ARCHIVE_HINT, SHORT_RELATIVE_TIME_WIDTH, format_metadata_line, format_short_relative_time,
+    open_store, saved_error_message,
+};
 use crate::action::Action;
 use crate::glyphs::MODAL_ERROR_PREFIX;
 use crate::keymap::{KeyAction, KeyChord, Keymap, is_unmodified};
@@ -116,7 +116,8 @@ struct SessionRow {
     session_id: String,
     path: PathBuf,
     last_active_at: OffsetDateTime,
-    local_offset: UtcOffset,
+    /// When the row was listed, in local time. Its relative times count from here.
+    listed_at: OffsetDateTime,
     title: String,
     /// `0` when no `Summary` line was found, as in a session that never finalized.
     message_count: u32,
@@ -171,8 +172,8 @@ fn fixed_width(columns: &[Column]) -> usize {
 }
 
 impl SessionRow {
-    fn from_info(info: SessionInfo, local_offset: UtcOffset, show_project: bool) -> Self {
-        let title = escape_line(&display_title(&info));
+    fn from_info(info: SessionInfo, listed_at: OffsetDateTime, show_project: bool) -> Self {
+        let title = escape_line(display_title(&info));
         let project_path = escape_line(&tildify(Path::new(info.project())));
         // The project is searchable only when shown, since every scoped row shares it.
         let haystack = if show_project {
@@ -184,7 +185,7 @@ impl SessionRow {
             session_id: info.session_id,
             path: info.path,
             last_active_at: info.last_active_at,
-            local_offset,
+            listed_at,
             title,
             message_count: info.exit.as_ref().map_or(0, |e| e.message_count),
             git_branch: info.git_branch,
@@ -198,7 +199,7 @@ impl SessionRow {
         format_metadata_line(
             &self.session_id,
             self.last_active_at,
-            self.local_offset,
+            self.listed_at,
             self.message_count,
             self.git_branch.as_deref(),
             self.project.as_deref(),
@@ -247,7 +248,7 @@ impl SessionRow {
                 pad_start_to_width(&truncate_to_width(&msgs, width), width)
             }
             Column::When => {
-                let when = format_short_relative_time(self.last_active_at, self.local_offset);
+                let when = format_short_relative_time(self.last_active_at, self.listed_at);
                 pad_start_to_width(&when, width)
             }
         }
@@ -496,7 +497,6 @@ pub struct ResumePicker {
     /// Whether the list shows only archived sessions.
     archived: bool,
     dismissal: Dismissal,
-    local_offset: UtcOffset,
     /// Filtered out of every page so the user can't self-resume onto the open append-writer.
     live_session_id: String,
     pages: Pages,
@@ -525,7 +525,6 @@ impl ResumePicker {
             all,
             archived: false,
             dismissal,
-            local_offset: local_offset(),
             live_session_id,
             pages: Pages::Done,
             load_error: None,
@@ -569,10 +568,11 @@ impl ResumePicker {
     /// Appends a loaded page and asks for the next one when needed.
     fn append_page(&mut self, page: Vec<SessionInfo>) {
         let live_id = self.live_session_id.as_str();
+        let listed_at = now_local();
         let rows = page
             .into_iter()
             .filter(|info| info.session_id != live_id)
-            .map(|info| SessionRow::from_info(info, self.local_offset, self.all))
+            .map(|info| SessionRow::from_info(info, listed_at, self.all))
             .collect();
         self.list.append_items(rows);
         self.load_ahead();
@@ -954,6 +954,9 @@ mod tests {
     mod session_row {
         use super::*;
 
+        /// When the test rows are listed, more than 30 days after they were last active.
+        const LISTED_AT: OffsetDateTime = datetime!(2026-06-01 00:00:00 UTC);
+
         /// A session last active on 2026-04-18, more than 30 days ago, so rows show the date.
         /// `message_count` is `None` for a session that never finalized.
         fn raw_session_info(
@@ -992,7 +995,7 @@ mod tests {
                 Some(14),
                 Some("feat/login"),
             );
-            SessionRow::from_info(info, UtcOffset::UTC, show_project)
+            SessionRow::from_info(info, LISTED_AT, show_project)
         }
 
         mod from_info {
@@ -1001,7 +1004,7 @@ mod tests {
             #[test]
             fn handles_titled_and_untitled_sessions() {
                 let absent = raw_session_info(stamped_id(0xab), "/work/oxide", None, None, None);
-                let row = SessionRow::from_info(absent, UtcOffset::UTC, true);
+                let row = SessionRow::from_info(absent, LISTED_AT, true);
                 assert_eq!(row.title, UNTITLED_MARKER);
                 assert!(row.haystack.contains(&row.session_id));
                 assert!(row.haystack.contains("/work/oxide"));
@@ -1013,7 +1016,7 @@ mod tests {
                     None,
                     None,
                 );
-                let row = SessionRow::from_info(present, UtcOffset::UTC, true);
+                let row = SessionRow::from_info(present, LISTED_AT, true);
                 assert_eq!(row.title, "Fix auth bug");
                 assert!(row.haystack.contains("Fix auth bug"));
             }
@@ -1083,13 +1086,16 @@ mod tests {
                 let unfinished =
                     raw_session_info(stamped_id(0x33), "/work/oxide", None, None, None);
 
+                let recent = SessionRow {
+                    listed_at: datetime!(2026-04-18 12:00:00 UTC),
+                    ..SessionRow::from_info(unfinished.clone(), LISTED_AT, true)
+                };
+
                 let rows = [
                     rendered(&fix_auth_row(true), 120),
-                    rendered(&SessionRow::from_info(one, UtcOffset::UTC, true), 120),
-                    rendered(
-                        &SessionRow::from_info(unfinished, UtcOffset::UTC, true),
-                        120,
-                    ),
+                    rendered(&SessionRow::from_info(one, LISTED_AT, true), 120),
+                    rendered(&SessionRow::from_info(unfinished, LISTED_AT, true), 120),
+                    rendered(&recent, 120),
                 ];
 
                 assert_eq!(
@@ -1098,6 +1104,7 @@ mod tests {
                         "abababab  Fix auth                                         feat/login        /work/oxide             14 msgs  2026-04-18",
                         "22222222  First turn                                                         /work/oxide               1 msg  2026-04-18",
                         "33333333  (untitled)                                                         /work/oxide                      2026-04-18",
+                        "33333333  (untitled)                                                         /work/oxide                          3h ago",
                     ],
                 );
             }
@@ -1112,7 +1119,7 @@ mod tests {
                         Some(count),
                         None,
                     );
-                    rendered(&SessionRow::from_info(info, UtcOffset::UTC, false), 60)
+                    rendered(&SessionRow::from_info(info, LISTED_AT, false), 60)
                 };
 
                 assert_eq!(
@@ -1133,7 +1140,7 @@ mod tests {
                     Some(123_456),
                     Some("feature/an-unusually-long-branch-name"),
                 );
-                let row = SessionRow::from_info(info, UtcOffset::UTC, true);
+                let row = SessionRow::from_info(info, LISTED_AT, true);
 
                 assert_eq!(
                     [rendered(&row, 160), rendered(&row, 80), rendered(&row, 14)],

@@ -95,6 +95,22 @@ pub fn test_project_dir(dir: &Path) -> PathBuf {
     dir.join(TEST_PROJECT)
 }
 
+/// Session `session_id` as a listing reports it: in the [`test_store`] project, last active at
+/// 2026-04-18 09:00 UTC, untitled, unarchived, and never finalized.
+pub fn listed_session(session_id: &str) -> SessionInfo {
+    SessionInfo {
+        session_id: session_id.to_owned(),
+        path: PathBuf::new(),
+        cwd: format!("/work/{TEST_PROJECT}"),
+        project_root: None,
+        last_active_at: time::macros::datetime!(2026-04-18 09:00:00 UTC),
+        title: None,
+        exit: None,
+        git_branch: None,
+        archived: false,
+    }
+}
+
 /// Sets the mtime, which orders listings, of the session file at `path` to `at`.
 pub(super) fn set_modified(path: &Path, at: OffsetDateTime) {
     open_append_file(path)
