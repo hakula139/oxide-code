@@ -1430,15 +1430,9 @@ mod tests {
 
         #[tokio::test]
         async fn actor_panic_completes_without_panicking() {
-            let dir = tempfile::tempdir().unwrap();
-            let store = test_store(dir.path());
-            for handle in [
-                start(&store, "m", None),
-                testing::acks_then_drops("test", 1),
-            ] {
-                handle.cmd_tx.send(SessionCmd::Panic).await.unwrap();
-                handle.shutdown().await;
-            }
+            let handle = testing::panicked("panicked");
+
+            handle.shutdown().await;
         }
 
         #[tokio::test]
