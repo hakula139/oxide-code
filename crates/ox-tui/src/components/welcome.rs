@@ -343,6 +343,7 @@ mod tests {
     use ox_core::config::auth::AuthSource;
 
     use super::*;
+    use crate::slash::filter_built_ins;
     use crate::slash::testing::test_session_info;
 
     const TEST_SEED: u64 = 0x00C0_FFEE;
@@ -554,7 +555,7 @@ mod tests {
         fn lists_every_built_in_that_runs_bare_on_an_empty_session() {
             // `/delete` and `/unarchive` need an id, `/archive` has nothing to archive yet, and
             // `/logout` only undoes a `/login`.
-            let mut built_ins: Vec<String> = crate::slash::filter_built_ins("")
+            let mut built_ins: Vec<String> = filter_built_ins("")
                 .into_iter()
                 .map(|cmd| format!("/{}", cmd.name))
                 .filter(|name| {

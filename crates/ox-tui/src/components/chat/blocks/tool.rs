@@ -23,7 +23,7 @@ use crate::glyphs::{TOOL_BORDER_CONT, TOOL_BORDER_PREFIX, TOOL_ERROR, TOOL_SUCCE
 /// Body rows a tool result shows in the compact view.
 const MAX_TOOL_OUTPUT_LINES: usize = 5;
 
-// ── Tool Call ──
+// ── ToolCallBlock ──
 
 /// One bordered line with the tool icon and input summary.
 pub(crate) struct ToolCallBlock {
@@ -58,7 +58,7 @@ impl ChatBlock for ToolCallBlock {
     }
 }
 
-// ── Tool Result ──
+// ── ToolResultBlock ──
 
 /// Tool-call outcome: a ✓ or ✗ indicator, the label, and the per-view body.
 pub(crate) struct ToolResultBlock {
@@ -152,7 +152,7 @@ impl ToolResultBlock {
     }
 }
 
-// ── Shared Helpers ──
+// ── Helpers ──
 
 /// Emits a tool call or result status line, whose wrapped rows continue under the body text.
 fn status_row(

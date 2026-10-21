@@ -275,6 +275,7 @@ pub(super) fn popup_state(buffer: &str) -> Option<PopupState<'_>> {
 mod tests {
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
+    use ratatui::layout::Position;
 
     use super::*;
 
@@ -577,7 +578,6 @@ mod tests {
         fn selected_row_paints_bold_text_others_dim() {
             // TestBackend snapshots don't capture style, so layout-only snapshots can't tell
             // selected from unselected. Pin the bold-vs-dim contrast on the rendered cells.
-            use ratatui::layout::Position;
             use ratatui::style::Modifier;
 
             let theme = theme();
@@ -629,9 +629,7 @@ mod tests {
             let buf = terminal.backend().buffer();
             for x in 0..width {
                 assert_eq!(
-                    buf.cell(ratatui::layout::Position::new(x, 0))
-                        .unwrap()
-                        .symbol(),
+                    buf.cell(Position::new(x, 0)).unwrap().symbol(),
                     "─",
                     "chrome row must be a continuous border at col {x}",
                 );
@@ -646,7 +644,7 @@ mod tests {
             let buf = backend.buffer();
             for y in 0..buf.area.height {
                 for x in 0..buf.area.width {
-                    let cell = buf.cell(ratatui::layout::Position::new(x, y)).unwrap();
+                    let cell = buf.cell(Position::new(x, y)).unwrap();
                     assert_eq!(cell.symbol(), " ", "hidden popup must paint nothing");
                 }
             }

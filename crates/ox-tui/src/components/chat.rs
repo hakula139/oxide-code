@@ -35,6 +35,8 @@ const WHEEL_SCROLL_ROWS: usize = 3;
 /// Rows a page scroll keeps from the previous page.
 const PAGE_OVERLAP: u16 = 2;
 
+// ── ChatView ──
+
 /// Scrollable chat message list with auto-scroll.
 pub(crate) struct ChatView {
     settings: RenderSettings,
@@ -114,6 +116,8 @@ struct Placement {
     /// From the anchored row to the painted rows, plus a viewport height above and below.
     reach: Range<usize>,
 }
+
+// ── Public API ──
 
 impl ChatView {
     pub(crate) fn new(theme: &Theme, show_thinking: bool) -> Self {
@@ -400,6 +404,8 @@ impl ChatView {
         self.blocks.last().and_then(|b| b.block().system_text())
     }
 }
+
+// ── Event Handling & Rendering ──
 
 impl ChatView {
     pub(crate) fn handle_event(&mut self, event: &Event) {
@@ -2180,7 +2186,7 @@ mod tests {
 
         #[test]
         fn after_set_theme_repaints_cached_blocks_in_new_palette() {
-            let latte = crate::theme::load_builtin("latte").unwrap();
+            let latte = load_builtin("latte").unwrap();
             let mocha = Theme::default();
             assert_ne!(latte.user().fg, mocha.user().fg);
 
