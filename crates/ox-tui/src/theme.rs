@@ -303,6 +303,13 @@ mod tests {
             let t = Theme::default();
             assert!(t.thinking.modifiers.contains(Modifier::ITALIC));
         }
+
+        #[test]
+        fn status_slots_carry_no_modifiers() {
+            let t = Theme::default();
+            assert_eq!(t.success.modifiers, Modifier::empty());
+            assert_eq!(t.error.modifiers, Modifier::empty());
+        }
     }
 
     mod row_style {
