@@ -8,13 +8,14 @@
 mod pricing;
 mod usage;
 
+pub(crate) use usage::TokenUsage;
+
 use std::fmt::Write as _;
 
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 use crate::config::Effort;
 use pricing::{FABLE_5_1_RATES, HAIKU_5_5_RATES, OPUS_5_5_RATES, SONNET_5_5_RATES, TokenCostRates};
-pub(crate) use usage::TokenUsage;
 
 // ── ModelInfo ──
 
@@ -288,8 +289,8 @@ pub(crate) enum BlockBinding {
 pub struct ResolvedModelId(String);
 
 impl ResolvedModelId {
-    pub fn new(id: String) -> Self {
-        Self(id)
+    pub fn new(id: impl Into<String>) -> Self {
+        Self(id.into())
     }
 
     pub(crate) fn into_inner(self) -> String {
@@ -534,10 +535,9 @@ mod tests {
 
         #[test]
         fn unknown_id_falls_through_to_raw() {
-            assert_eq!(
-                ModelSpec::resolve("custom-model").display_name(),
-                "custom-model"
-            );
+            let custom = ModelSpec::resolve("custom-model");
+
+            assert_eq!(custom.display_name(), "custom-model");
         }
     }
 
@@ -562,10 +562,9 @@ mod tests {
 
         #[test]
         fn unknown_id_falls_through_to_raw() {
-            assert_eq!(
-                ModelSpec::resolve("custom-model").short_display_name(),
-                "custom-model"
-            );
+            let custom = ModelSpec::resolve("custom-model");
+
+            assert_eq!(custom.short_display_name(), "custom-model");
         }
     }
 

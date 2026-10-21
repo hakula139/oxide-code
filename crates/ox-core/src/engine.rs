@@ -3936,7 +3936,7 @@ mod tests {
 
         fn sonnet_pick() -> ConfigPick {
             ConfigPick::Model {
-                id: ResolvedModelId::new("claude-sonnet-5-5".to_owned()),
+                id: ResolvedModelId::new("claude-sonnet-5-5"),
                 effort: None,
             }
         }
@@ -3948,14 +3948,14 @@ mod tests {
                 let dir = tempfile::tempdir().unwrap();
                 let mut engine = engine(server.uri(), &test_store(dir.path()), dir.path()).await;
                 engine.client.set_effort(Effort::High);
-                let opus = ModelSpec::resolve(MODEL.to_owned());
+                let opus = ModelSpec::resolve(MODEL);
                 engine.compaction =
                     CompactionConfig::default_for_test(&opus, engine.client.max_tokens());
                 let opus_compaction = display_auto_compaction(engine.compaction.auto);
                 let sink = CapturingSink::default();
 
                 for id in ["custom-model", MODEL] {
-                    let id = ResolvedModelId::new(id.to_owned());
+                    let id = ResolvedModelId::new(id);
                     engine.set_model(&sink, ConfigPick::Model { id, effort: None });
                 }
 

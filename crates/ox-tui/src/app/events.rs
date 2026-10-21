@@ -522,7 +522,7 @@ mod tests {
 
     fn model_pick(model: &ModelSpec, effort: Option<Effort>) -> ConfigPick {
         ConfigPick::Model {
-            id: ResolvedModelId::new(model.id().to_owned()),
+            id: ResolvedModelId::new(model.id()),
             effort,
         }
     }
@@ -1643,10 +1643,11 @@ mod tests {
             // Three surfaces refresh in one shot: status-bar label, `session_info` (backs `/status`
             // / `/config`), and a chat confirmation block.
             let (mut app, _rx, _event_tx) = test_app(None);
+            let sonnet = ModelSpec::resolve("claude-sonnet-5-5");
             app.handle_engine_event(Event::ConfigChanged {
-                model: ModelSpec::resolve("claude-sonnet-5-5"),
+                model: sonnet.clone(),
                 effort: Some(Effort::High),
-                requested: model_pick(&ModelSpec::resolve("claude-sonnet-5-5"), None),
+                requested: model_pick(&sonnet, None),
                 auto_compaction: AutoCompactionConfig {
                     enabled: true,
                     threshold_tokens: Some(WINDOW_1M_THRESHOLD),

@@ -1067,7 +1067,7 @@ mod tests {
             #[test]
             fn config_changed_writes_its_notice_to_stderr() {
                 let event = Event::ConfigChanged {
-                    model: ModelSpec::resolve("claude-opus-5-5".to_owned()),
+                    model: ModelSpec::resolve("claude-opus-5-5"),
                     effort: Some(Effort::Low),
                     requested: ConfigPick::Effort(Effort::Low),
                     auto_compaction: AutoCompactionConfig::disabled(),

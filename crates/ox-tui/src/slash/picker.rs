@@ -361,7 +361,7 @@ mod tests {
 
         fn model_only(id: &str) -> ConfigPick {
             ConfigPick::Model {
-                id: ResolvedModelId::new(id.to_owned()),
+                id: ResolvedModelId::new(id),
                 effort: None,
             }
         }
@@ -441,7 +441,7 @@ mod tests {
             assert_eq!(
                 pick,
                 ConfigPick::Model {
-                    id: ResolvedModelId::new("claude-sonnet-5-5".to_owned()),
+                    id: ResolvedModelId::new("claude-sonnet-5-5"),
                     effort: Some(Effort::Xhigh),
                 },
             );

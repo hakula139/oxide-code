@@ -72,15 +72,8 @@ mod tests {
         }
 
         #[test]
-        fn name_with_args_keeps_remainder_trimmed() {
-            let parsed = parse_slash("/model claude-sonnet-5-5").unwrap();
-            assert_eq!(parsed.name, "model");
-            assert_eq!(parsed.args, "claude-sonnet-5-5");
-        }
-
-        #[test]
-        fn keeps_everything_after_the_name_as_args() {
-            let parsed = parse_slash("/init please  write CLAUDE.md").unwrap();
+        fn name_with_args_keeps_inner_whitespace() {
+            let parsed = parse_slash("/init  please  write CLAUDE.md  ").unwrap();
 
             assert_eq!(parsed.name, "init");
             assert_eq!(parsed.args, "please  write CLAUDE.md");

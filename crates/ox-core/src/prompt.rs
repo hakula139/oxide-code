@@ -246,11 +246,13 @@ pub(crate) fn is_system_reminder(text: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use indoc::indoc;
+    use time::macros::format_description;
+    use time::{Date, OffsetDateTime};
 
     use super::*;
     use crate::util::git::local_testing::init_fixture_repo;
     use crate::util::git::testing::with_isolated_git_env_async;
-    use crate::util::path::testing::HOME_VAR;
+    use crate::util::path::testing::pinned_home;
 
     const IDENTITY: &str = "You are powered by the model test-model.";
 
@@ -340,19 +342,25 @@ mod tests {
         async fn names_the_model_in_user_context_only() {
             let (home, cwd) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
             let model = ModelSpec::resolve("claude-opus-5-5");
-            let vars = [
-                (HOME_VAR, Some(home.path().as_os_str())),
-                ("XDG_CONFIG_HOME", None),
-            ];
 
             let (parts, warnings) = with_isolated_git_env_async(temp_env::async_with_vars(
-                vars,
+                pinned_home(home.path()),
                 build_prompt(&model, cwd.path()),
             ))
             .await;
 
-            assert!(warnings.is_empty(), "{warnings:?}");
+            assert_eq!(warnings, [] as [String; 0]);
             assert_eq!(parts.seen.instructions, "");
+            let date = Date::parse(
+                &parts.seen.date,
+                format_description!("[year]-[month]-[day]"),
+            )
+            .unwrap();
+            let today = OffsetDateTime::now_utc().date();
+            assert!(
+                (today.previous_day().unwrap()..=today.next_day().unwrap()).contains(&date),
+                "{date} is not within a day of {today}",
+            );
             let identity = environment::model_identity(&model);
             assert!(
                 parts.user_context.contains(&formatdoc! {"
@@ -426,9 +434,8 @@ mod tests {
         use super::*;
 
         #[tokio::test]
-        async fn in_git_repo_has_system_and_user_context() {
+        async fn with_a_git_root_has_system_and_user_context() {
             let tmp = tempfile::tempdir().expect("failed to create tempdir");
-            init_fixture_repo(tmp.path());
             std::fs::write(tmp.path().join("CLAUDE.md"), "Test project rules.").unwrap();
 
             let (parts, _) = assemble(

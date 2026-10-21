@@ -1692,7 +1692,7 @@ mod tests {
             // A modal-emitted `SetModel` must reach the engine so it can emit `ConfigChanged`.
             for op in [
                 Op::SetModel(ConfigPick::Model {
-                    id: ResolvedModelId::new("claude-opus-5-5".to_owned()),
+                    id: ResolvedModelId::new("claude-opus-5-5"),
                     effort: None,
                 }),
                 Op::SetModel(ConfigPick::Effort(Effort::High)),
@@ -1924,7 +1924,7 @@ mod tests {
             assert_eq!(
                 forwarded,
                 Op::SetModel(ConfigPick::Model {
-                    id: ResolvedModelId::new("claude-haiku-5-5".to_owned()),
+                    id: ResolvedModelId::new("claude-haiku-5-5"),
                     effort: None,
                 }),
             );

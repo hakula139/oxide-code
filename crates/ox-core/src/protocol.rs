@@ -510,7 +510,7 @@ mod tests {
                     decision: Decision::Abort,
                 },
                 Op::SetModel(ConfigPick::Model {
-                    id: ResolvedModelId::new("claude-opus-5-5".to_owned()),
+                    id: ResolvedModelId::new("claude-opus-5-5"),
                     effort: Some(Effort::High),
                 }),
                 Op::SetModel(ConfigPick::Effort(Effort::Low)),
@@ -921,7 +921,7 @@ mod tests {
                 model: ModelSpec::resolve("claude-opus-5-5"),
                 effort: None,
                 requested: ConfigPick::Model {
-                    id: ResolvedModelId::new("claude-opus-5-5".to_owned()),
+                    id: ResolvedModelId::new("claude-opus-5-5"),
                     effort: None,
                 },
                 auto_compaction: AutoCompactionConfig::disabled(),

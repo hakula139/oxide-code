@@ -2268,7 +2268,7 @@ mod tests {
         #[test]
         fn are_empty_for_a_current_setup() {
             let mut cfg = sample_config();
-            cfg.model = ModelSpec::resolve("claude-opus-5-5".to_owned());
+            cfg.model = ModelSpec::resolve("claude-opus-5-5");
             assert_eq!(cfg.notices(), [] as [String; 0]);
         }
     }

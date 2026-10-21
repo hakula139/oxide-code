@@ -132,7 +132,7 @@ pub fn model(arg: &str) -> Result<Op, String> {
         }
     };
     Ok(Op::SetModel(ConfigPick::Model {
-        id: ResolvedModelId::new(info.id.to_owned()),
+        id: ResolvedModelId::new(info.id),
         effort: None,
     }))
 }
@@ -201,7 +201,7 @@ mod tests {
 
     fn set_model(id: &str) -> Op {
         Op::SetModel(ConfigPick::Model {
-            id: ResolvedModelId::new(id.to_owned()),
+            id: ResolvedModelId::new(id),
             effort: None,
         })
     }

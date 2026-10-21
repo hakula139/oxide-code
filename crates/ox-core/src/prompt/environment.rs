@@ -155,6 +155,7 @@ mod tests {
         #[test]
         fn records_the_cwd_whether_it_is_in_a_repo_and_each_probe() {
             let cwd = Path::new("/repo/sub");
+            let uname = PlatformInfo::new().unwrap();
             for (git_root, is_git) in [(Some(Path::new("/repo")), true), (None, false)] {
                 let env = temp_env::with_var("SHELL", Some("/bin/zsh"), || {
                     Environment::detect(cwd, git_root)
@@ -167,7 +168,10 @@ mod tests {
                         is_git,
                         platform: normalize_node_platform(std::env::consts::OS).to_owned(),
                         shell: "zsh".to_owned(),
-                        os_version: detect_os_version(),
+                        os_version: format_os_version(
+                            &uname.sysname().to_string_lossy(),
+                            &uname.release().to_string_lossy(),
+                        ),
                     },
                 );
             }
@@ -224,7 +228,7 @@ mod tests {
         use super::*;
 
         #[test]
-        fn names_the_shell_by_its_file_name() {
+        fn names_the_shell_by_its_file_name_or_unknown() {
             for (shell, expected) in [
                 (Some("/usr/local/bin/fish"), "fish"),
                 (Some("zsh"), "zsh"),
