@@ -51,8 +51,9 @@ Manual and automatic compaction both pass the engine's list to `replace_session_
 - `crates/ox-core/src/session/entry.rs`: the `tasks` field in `Entry::Compact`.
 - `crates/ox-core/src/session/handle.rs`: `LoadedTranscript::tasks`, the list restored from a resumed transcript.
 - `crates/ox-core/src/session/post_compact.rs`: `synthesize_post_compact_message` and `task_reminder`, the block listing tasks after the summary.
-- `crates/ox-core/src/tool.rs`: `ToolOutput::tasks` and `ToolResultView::Tasks`.
+- `crates/ox-core/src/tool.rs`: `ToolOutput::tasks`.
 - `crates/ox-core/src/tool/tasks.rs`: `TasksTool`, validation, and `latest`.
+- `crates/ox-core/src/tool/view.rs`: `ToolResultView::Tasks`.
 - `crates/ox-tui/src/app/events.rs`: the panel's updates on `TasksUpdated`, `SessionRolled`, and `SessionResumed`.
 - `crates/ox-tui/src/app/render.rs`: `draw_frame`, which sizes the panel after the higher-priority bands.
 - `crates/ox-tui/src/components/chat/blocks/tool/tasks.rs`: the chat block for a `tasks` call.

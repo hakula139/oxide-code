@@ -18,10 +18,9 @@ use crate::message::ContentBlock;
 use crate::permission::rule::Rule;
 use crate::permission::{Policy, SessionGrant, Workspace};
 use crate::protocol::{Decision, Event, EventSink, Op, ToolCall, ToolResult};
+use crate::tool::spill::run_capped;
 use crate::tool::tasks::Task;
-use crate::tool::{
-    Prepared, Tool, ToolCtx, ToolMetadata, ToolOutput, ToolRegistry, ToolSpec, run_capped,
-};
+use crate::tool::{Prepared, Tool, ToolCtx, ToolMetadata, ToolOutput, ToolRegistry, ToolSpec};
 
 /// What each call of a round runs against: the policy that gates it, which gains the session allow
 /// rules the user grants, and the session-wide parts of its [`ToolCtx`].
@@ -478,7 +477,6 @@ async fn await_approval(
 
 #[cfg(test)]
 mod tests {
-    use std::future::Future;
     use std::path::Path;
     use std::pin::Pin;
     use std::time::Duration;
@@ -490,11 +488,11 @@ mod tests {
     use crate::engine::local_testing::{EchoTool, dispatch_with, inert_ops};
     use crate::permission::{Basis, Mode, PermissionClass};
     use crate::protocol::testing::{CapturingSink, FailingSink};
-    use crate::tool::bash::BashTool;
     #[cfg(unix)]
     use crate::tool::read::ReadTool;
     use crate::tool::tasks::TasksTool;
     use crate::tool::tasks::testing::plan;
+    use crate::tool::testing::bash_registry;
     #[cfg(unix)]
     use crate::tool::write::WriteTool;
 
@@ -984,7 +982,7 @@ mod tests {
 
             #[tokio::test]
             async fn allow_for_session_runs_later_calls_the_rule_covers_unasked() {
-                let tools = ToolRegistry::new(vec![Box::new(BashTool::default())]);
+                let tools = bash_registry(Vec::new());
                 let sink = CapturingSink::default();
                 let mut dispatch_ctx = dispatch_with(Mode::Manual, &[], &[], Path::new("/repo"));
                 let rule = Rule::parse(PermissionClass::Exec, "cargo test *").unwrap();
@@ -1045,8 +1043,7 @@ mod tests {
                 // The engine re-checks the frontend's rule against its own grant: a rule that
                 // misses the call, one in another class, and any rule for a call that offered no
                 // grant all deny.
-                let tools =
-                    ToolRegistry::new(vec![Box::new(BashTool::default()), Box::new(EchoTool)]);
+                let tools = bash_registry(vec![Box::new(EchoTool)]);
                 for (name, input, (class, pattern)) in [
                     (
                         "bash",

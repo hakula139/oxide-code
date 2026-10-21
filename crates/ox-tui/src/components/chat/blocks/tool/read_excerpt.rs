@@ -2,7 +2,7 @@
 
 use ratatui::style::Style;
 
-use ox_core::tool::ReadExcerptLine;
+use ox_core::tool::view::ReadExcerptLine;
 
 use super::{MAX_TOOL_OUTPUT_LINES, overflow_footer};
 use crate::components::chat::blocks::rows::{NumberedRows, body_row};

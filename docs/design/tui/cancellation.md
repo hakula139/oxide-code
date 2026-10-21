@@ -46,8 +46,10 @@ The picks lean toward the Codex precedent on most surfaces, since it is the one 
 - `crates/ox-core/src/message.rs`: `Message::interruption`, the marker a user abort records.
 - `crates/ox-core/src/protocol.rs`: `Event::{Cancelled, PromptDrained, TurnFailed}`, `Interaction::Interrupted`, `Op::{Interrupt, Queue, Shutdown}`.
 - `crates/ox-core/src/session/history.rs`: `walk_transcript`, which shows a resumed interruption marker as `Interaction::Interrupted`.
-- `crates/ox-core/src/tool.rs`: `Tool::run` drop contract, `ToolCtx::cancel`, `walk_files`, `write_tracked`.
+- `crates/ox-core/src/tool.rs`: `Tool::run` drop contract, `ToolCtx::cancel`.
 - `crates/ox-core/src/tool/bash.rs`: `ShellTree`, which kills the shell's process group (Unix) or Job Object (Windows) when a call times out or drops before finishing.
+- `crates/ox-core/src/tool/file.rs`: `write_tracked`.
+- `crates/ox-core/src/tool/search.rs`: `walk_files`.
 - `crates/ox-tui/src/action.rs`: `Action::ConfirmExit`.
 - `crates/ox-tui/src/app.rs`: `App::pending_prompts` / `forwarded_prompts`, and `App::active_prompt` / `auto_compacting`.
 - `crates/ox-tui/src/app/dispatch.rs`: `dispatch_op` / `start_turn` / `forward_queued_prompts`, `handle_esc`, `expire_armed_exit`.

@@ -14,7 +14,7 @@ use tokio::sync::mpsc;
 use ox_core::client::{RateLimitWindow, RateLimits};
 use ox_core::model::ModelSpec;
 use ox_core::protocol::{Event, Op};
-use ox_core::tool::{ApprovalBody, ApprovalPreview};
+use ox_core::tool::view::{ApprovalBody, ApprovalPreview};
 
 use super::{App, AppHistory};
 use crate::clipboard::{self, Clipboard, Environment};

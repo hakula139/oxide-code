@@ -136,61 +136,37 @@ mod tests {
         use super::*;
 
         #[test]
-        fn replaces_placeholder() {
+        fn hashes_the_body_into_the_placeholder() {
             let body = r#"{"system":[{"type":"text","text":"cch=00000;"}],"messages":[]}"#;
-            let result = inject_cch(body).unwrap();
 
-            assert!(
-                !result.contains(CCH_PLACEHOLDER),
-                "placeholder should be replaced"
-            );
-
-            let hash = xxh64::xxh64(body.as_bytes(), CCH_SEED);
-            let expected = format!("{:05x}", hash & 0xFFFFF);
-            assert!(
-                result.contains(&format!("cch={expected}")),
-                "result should contain cch={expected}, got: {result}"
-            );
-        }
-
-        #[test]
-        fn is_deterministic() {
-            let body = r#"{"system":[{"type":"text","text":"cch=00000;"}],"messages":[]}"#;
-            assert_eq!(inject_cch(body).unwrap(), inject_cch(body).unwrap());
-        }
-
-        #[test]
-        fn produces_five_hex_chars() {
-            let body = r#"{"system":[{"type":"text","text":"cch=00000;"}]}"#;
-            let result = inject_cch(body).unwrap();
-
-            let cch_start = result.find("cch=").expect("cch= not found") + 4;
-            let cch_value = &result[cch_start..cch_start + 5];
-            assert!(
-                cch_value.chars().all(|c| c.is_ascii_hexdigit()),
-                "cch should be 5 hex chars, got: {cch_value}"
-            );
-        }
-
-        #[test]
-        fn replaces_only_first_occurrence() {
-            // `system` precedes `messages`, as in the request struct's field order.
-            let body = r#"{"system":[{"type":"text","text":"cch=00000;"}],"messages":[{"role":"user","content":[{"type":"text","text":"cch=00000"}]}]}"#;
             let result = inject_cch(body).unwrap();
 
             assert_eq!(
-                result.matches("cch=00000").count(),
-                1,
-                "only the second occurrence (in messages) should remain"
+                result,
+                r#"{"system":[{"type":"text","text":"cch=62b56;"}],"messages":[]}"#,
+            );
+        }
+
+        #[test]
+        fn zero_pads_the_hash_and_replaces_only_the_first_placeholder() {
+            // `system` precedes `messages`, as in the request struct's field order.
+            let body = r#"{"system":[{"type":"text","text":"cch=00000;"}],"messages":[{"role":"user","content":[{"type":"text","text":"cch=00000"}]}]}"#;
+
+            let result = inject_cch(body).unwrap();
+
+            assert_eq!(
+                result,
+                r#"{"system":[{"type":"text","text":"cch=04c72;"}],"messages":[{"role":"user","content":[{"type":"text","text":"cch=00000"}]}]}"#,
             );
         }
 
         #[test]
         fn errors_when_placeholder_missing() {
             let err = inject_cch(r#"{"system":[],"messages":[]}"#).expect_err("must error");
-            assert!(
-                format!("{err:#}").contains(CCH_PLACEHOLDER),
-                "error names placeholder: {err:#}",
+
+            assert_eq!(
+                err.to_string(),
+                "billing header placeholder `cch=00000` missing from request body"
             );
         }
     }

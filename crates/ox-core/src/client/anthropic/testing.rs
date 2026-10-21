@@ -75,10 +75,8 @@ pub(crate) fn tool_use_stream_body(id: &str, name: &str, input_json: &str) -> St
 }
 
 /// Successful response streaming `body` as server-sent events.
-pub(crate) fn sse_response(body: String) -> ResponseTemplate {
-    ResponseTemplate::new(200)
-        .set_body_string(body)
-        .insert_header("content-type", "text/event-stream")
+pub(crate) fn sse_response(body: impl Into<Vec<u8>>) -> ResponseTemplate {
+    ResponseTemplate::new(200).set_body_raw(body.into(), "text/event-stream")
 }
 
 /// Server-sent events body carrying each frame under an event named for its `type`.

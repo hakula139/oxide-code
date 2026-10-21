@@ -4,7 +4,7 @@ expression: "render_app(&mut app, 60, 16)"
 ---
 "  ~/test │ main │ test-model (high) │ Ready                 "
 "────────────────────────────────────────────────────────────"
-"▎ Compacted 3 messages → 1 summary                          "
+"▎ Compacted 3 messages into a summary                       "
 "▎                                                           "
 "▎ ## Recap                                                  "
 "▎                                                           "
