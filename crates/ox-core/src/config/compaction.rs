@@ -1,6 +1,7 @@
 //! Compaction settings: whether auto-compaction runs and the token count that triggers it, derived
 //! from the configured threshold and the model's context window.
 
+use std::fmt;
 use std::ops::RangeInclusive;
 
 use anyhow::{Result, bail};
@@ -55,6 +56,18 @@ impl AutoCompactionConfig {
         match (self.enabled, self.threshold_tokens) {
             (true, Some(threshold)) => context_tokens >= threshold,
             _ => false,
+        }
+    }
+}
+
+/// When compaction triggers, or why it never does, as `/status`, `/config`, and the config-change
+/// notice show it.
+impl fmt::Display for AutoCompactionConfig {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match (self.enabled, self.threshold_tokens) {
+            (true, Some(threshold)) => write!(f, "at {threshold} tokens"),
+            (true, None) => f.write_str("off (no threshold)"),
+            _ => f.write_str("off"),
         }
     }
 }
@@ -300,6 +313,26 @@ mod tests {
                     }
                     .should_trigger(100)
                 );
+            }
+        }
+
+        mod display {
+            use super::*;
+
+            #[test]
+            fn names_the_threshold_or_why_it_is_off() {
+                for (enabled, threshold_tokens, label) in [
+                    (true, Some(400_000), "at 400000 tokens"),
+                    (false, Some(400_000), "off"),
+                    (true, None, "off (no threshold)"),
+                ] {
+                    let auto = AutoCompactionConfig {
+                        enabled,
+                        threshold_tokens,
+                    };
+
+                    assert_eq!(auto.to_string(), label);
+                }
             }
         }
     }

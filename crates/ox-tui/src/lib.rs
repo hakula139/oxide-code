@@ -13,6 +13,7 @@ mod cursor;
 mod git_probes;
 pub mod glyphs;
 mod keymap;
+mod labels;
 mod markdown;
 mod modal;
 mod pending_calls;

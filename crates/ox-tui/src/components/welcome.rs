@@ -11,10 +11,11 @@ use ratatui::widgets::Paragraph;
 use unicode_width::UnicodeWidthStr as _;
 use xxhash_rust::xxh64::xxh64;
 
-use ox_core::config::{NOT_SIGNED_IN, StatusLineSegment};
+use ox_core::config::StatusLineSegment;
 use ox_core::util::text::{center_truncate_to_width, pad_to_width, truncate_to_width};
 
 use crate::glyphs::INLINE_SEPARATOR;
+use crate::labels;
 use crate::session_info::LiveSessionInfo;
 use crate::slash::{MatchedCommand, filter_built_ins};
 use crate::theme::Theme;
@@ -187,7 +188,7 @@ fn environment_text(info: &LiveSessionInfo, full: bool, with_starters: bool) -> 
         text.push_str(
             config
                 .auth
-                .map_or(NOT_SIGNED_IN, |source| source.kind().label()),
+                .map_or(labels::NOT_SIGNED_IN, |source| source.kind().label()),
         );
     }
     text

@@ -696,7 +696,6 @@ mod tests {
     use crate::config::auth::{AuthSource, LoginUnavailable};
     use crate::config::compaction::CompactionConfig;
     use crate::config::compaction::testing::WINDOW_1M_THRESHOLD;
-    use crate::config::display_auto_compaction;
     use crate::config::testing::test_config;
     use crate::file_tracker::testing::{record_tracked_file, seed_full_read};
     use crate::message::{Replay, Role};
@@ -2818,7 +2817,7 @@ mod tests {
                 let opus = ModelSpec::resolve(MODEL);
                 engine.compaction =
                     CompactionConfig::with_default_policy(&opus, engine.client.max_tokens());
-                let opus_compaction = display_auto_compaction(engine.compaction.auto);
+                let opus_compaction = engine.compaction.auto;
                 let sink = CapturingSink::default();
 
                 for id in ["custom-model", MODEL] {

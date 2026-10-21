@@ -1,9 +1,8 @@
 //! `/status` opens a read-only [`KvOverview`] of the live session and its runtime settings.
 
-use ox_core::config::{display_auth, display_auto_compaction, display_bool, display_effort};
-
 use super::context::SlashContext;
 use super::registry::{SlashCommand, SlashOutcome};
+use crate::labels;
 use crate::modal::kv_overview::{KvOverview, KvSection};
 use crate::session_info::LiveSessionInfo;
 
@@ -38,18 +37,18 @@ fn build_modal(info: &LiveSessionInfo) -> KvOverview {
         Some(failures) => {
             format!("paused after {failures} failures in a row (run `/compact` to resume)")
         }
-        None => display_auto_compaction(info.config.compaction.auto),
+        None => info.config.compaction.auto.to_string(),
     };
     let rows = vec![
         ("Model".to_owned(), model),
-        ("Effort".to_owned(), display_effort(info.config.effort)),
+        ("Effort".to_owned(), labels::effort(info.config.effort)),
         (
             "Permission Mode".to_owned(),
             info.config.permission_mode.to_string(),
         ),
         ("Working Directory".to_owned(), info.display_cwd.clone()),
         ("Session".to_owned(), info.session_id.clone()),
-        ("Auth".to_owned(), display_auth(info.config.auth)),
+        ("Auth".to_owned(), labels::auth(info.config.auth)),
         ("Version".to_owned(), info.version.to_owned()),
         (
             "Prompt Cache TTL".to_owned(),
@@ -58,11 +57,11 @@ fn build_modal(info: &LiveSessionInfo) -> KvOverview {
         ("Auto Compaction".to_owned(), auto_compaction),
         (
             "Show Thinking".to_owned(),
-            display_bool(info.config.show_thinking).to_owned(),
+            labels::on_off(info.config.show_thinking).to_owned(),
         ),
         (
             "Show Welcome".to_owned(),
-            display_bool(info.config.show_welcome).to_owned(),
+            labels::on_off(info.config.show_welcome).to_owned(),
         ),
     ];
     let mut sections = vec![KvSection::new(rows)];
