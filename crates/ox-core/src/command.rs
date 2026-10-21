@@ -17,7 +17,7 @@ use crate::permission::Mode;
 use crate::protocol::{ConfigPick, Op, ResumeTarget};
 use crate::session::display::fit_title;
 
-/// Canonical names of the commands [`parse`] knows, without their leading `/`.
+/// Canonical names of the commands [`typed_op`] parses, without their leading `/`.
 pub const NAMES: [&str; 8] = [
     "clear", "compact", "effort", "init", "mode", "model", "rename", "resume",
 ];
@@ -52,7 +52,7 @@ pub fn aliases(name: &str) -> &'static [&'static str] {
 /// runs, where `/init` reads the instruction files at `project_root`. `None` when `name` is not
 /// one of [`NAMES`]. `Err` carries the message for a malformed form, including a bare form only a
 /// picker can complete.
-pub fn parse(name: &str, args: &str, project_root: &Path) -> Option<Result<Op, String>> {
+fn parse(name: &str, args: &str, project_root: &Path) -> Option<Result<Op, String>> {
     Some(match name {
         "clear" => Ok(Op::Clear),
         "compact" => Ok(compact(args)),

@@ -43,6 +43,7 @@ Layers run from the foundation to the frontends.
 | `ox-tui`  | Frontend   | `wrap`          | Word wrap with continuation indent for styled lines                                                                                                  |
 | `ox-tui`  | Frontend   | `lib.rs`        | `run`, which drives the `Engine` through `EngineHandle` in the TUI, and the `Startup` state it opens with                                            |
 | `ox`      | Frontend   | `driver`        | The bare REPL and headless drivers, which drive the `Engine` through `EngineHandle`, plus exit status and shutdown signals                           |
+| `ox`      | Frontend   | `session_list`  | The `ox --list` table of the active or archived sessions in this project or every project                                                            |
 | `ox`      | Frontend   | `main.rs`       | CLI parsing, config and session resolution, and handing a new `Engine` to a driver or the TUI                                                        |
 
 ## Dependency Direction

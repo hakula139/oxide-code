@@ -103,7 +103,6 @@ The picker wraps [`SearchableList`](modals.md) and adds these controls and displ
 - `crates/ox-core/src/session/display.rs`: `format_short_relative_time` for the picker row's time column, and `format_metadata_line` for the delete confirmation.
 - `crates/ox-core/src/session/handle.rs`: `roll_into`, `RollIntoOutcome`, `LoadedTranscript`.
 - `crates/ox-core/src/session/history.rs`: `interactions`, the display projection `SessionResumed` carries.
-- `crates/ox-core/src/session/list_view.rs`: `render_list` over `list_paged`.
 - `crates/ox-core/src/session/resolver.rs`: `resolve_saved_prefix`, shared by `Engine::roll_into`, `/archive`, `/unarchive`, and `/delete`, and the `resolve_prefix_to_info` lookup it wraps.
 - `crates/ox-core/src/session/saved.rs`: `set_archived` behind Ctrl+X, and `delete` behind the confirm-delete modal.
 - `crates/ox-core/src/session/store/listing.rs`: `walk`, `SessionWalk`, `list_paged`, `latest`, `list_matching`, `ListPage`, `ListScope`.
@@ -119,3 +118,4 @@ The picker wraps [`SearchableList`](modals.md) and adds these controls and displ
 - `crates/ox-tui/src/slash/resume.rs`: `ResumeCmd`, `ResumePicker` and its `at_startup` variant, `PickerAction` and its `ACTIONS` keymap, `Pages`, and `SessionRow` with its `Column` layout.
 - `crates/ox/src/driver/stdio.rs`: `StdioSink`, which confirms a resume on stderr.
 - `crates/ox/src/main.rs`: `Cli::archived`, `Cli::limit`, `Cli::resume`.
+- `crates/ox/src/session_list.rs`: the `ox --list` table over `list_paged`.

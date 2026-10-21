@@ -1905,6 +1905,7 @@ dependencies = [
  "tokio",
  "toml",
  "tracing",
+ "unicode-width",
  "wiremock",
 ]
 

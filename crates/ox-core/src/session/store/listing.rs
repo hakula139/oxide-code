@@ -26,18 +26,14 @@ pub struct ListScope {
 // ── ListPage ──
 
 /// One page of sessions, and whether more matching sessions follow it.
-#[derive(Debug, Default)]
-pub(crate) struct ListPage {
+#[derive(Debug)]
+pub struct ListPage {
     sessions: Vec<SessionInfo>,
     more: bool,
 }
 
 impl ListPage {
-    pub(crate) fn new(sessions: Vec<SessionInfo>, more: bool) -> Self {
-        Self { sessions, more }
-    }
-
-    pub(crate) fn sessions(&self) -> &[SessionInfo] {
+    pub fn sessions(&self) -> &[SessionInfo] {
         &self.sessions
     }
 
@@ -46,7 +42,7 @@ impl ListPage {
         self.sessions
     }
 
-    pub(crate) fn has_more(&self) -> bool {
+    pub fn has_more(&self) -> bool {
         self.more
     }
 }
@@ -104,12 +100,12 @@ impl SessionStore {
 
     /// Up to `limit` sessions from the [`walk`](Self::walk) of `scope`, unbounded for `None`.
     /// Archive state lives in each file, so the walk reads on to the next match past the page.
-    pub(crate) fn list_paged(&self, limit: Option<usize>, scope: ListScope) -> Result<ListPage> {
+    pub fn list_paged(&self, limit: Option<usize>, scope: ListScope) -> Result<ListPage> {
         let limit = limit.unwrap_or(usize::MAX);
         let mut sessions: Vec<_> = self.walk(scope)?.take(limit.saturating_add(1)).collect();
         let more = sessions.len() > limit;
         sessions.truncate(limit);
-        Ok(ListPage::new(sessions, more))
+        Ok(ListPage { sessions, more })
     }
 
     /// The most recently active readable unarchived session.
