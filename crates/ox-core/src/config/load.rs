@@ -12,7 +12,7 @@ use super::provenance::Layer;
 use super::schema::FileConfig;
 use crate::permission::project::{ProjectFileError, resolve_project_file};
 use crate::permission::{Tier, extra_root};
-use crate::util::path::{XdgBase, app_dir};
+use crate::util::path::{XdgBase, app_dir, tildify};
 use crate::util::toml::{describe_error, locate_error};
 
 const CONFIG_FILE: &str = "config.toml";
@@ -268,7 +268,7 @@ fn keys_outside(table: &Table, section: &str, allowed: &[&str]) -> Vec<String> {
 pub fn user_config_hint() -> String {
     user_config_path().map_or_else(
         || "~/.config/ox/config.toml".to_owned(),
-        |path| path.display().to_string(),
+        |path| tildify(&path),
     )
 }
 
@@ -627,10 +627,10 @@ mod tests {
                 format!(
                     "{} is reached through a symlink, \
                      which is not followed when the project root {} contains the home directory. \
-                     Replace the link with a regular file, or move personal settings to {}.",
+                     Replace the link with a regular file, \
+                     or move personal settings to ~/config-home/ox/config.toml.",
                     path.display(),
                     home.path().display(),
-                    config_home.join("ox").join("config.toml").display(),
                 ),
             );
         }
