@@ -1393,21 +1393,22 @@ mod tests {
         Policy::new(mode, rules(deny), rules(ask), rules(allow))
     }
 
-    /// [`Policy::resolve`] in `cwd`, with every shipped default on.
+    /// [`Policy::resolve`] in `workspace`, with the shipped defaults in `disabled` off.
     fn resolved_policy(
         mode: Mode,
         deny: &[(PermissionClass, &str)],
         ask: &[(PermissionClass, &str)],
         allow: &[(PermissionClass, &str)],
-        cwd: &Path,
+        disabled: &[Shipped],
+        workspace: &Workspace,
     ) -> Policy {
         Policy::resolve(
             mode,
             rules(deny),
             rules(ask),
             rules(allow),
-            &[],
-            &Workspace::new(cwd),
+            disabled,
+            workspace,
         )
         .unwrap()
     }
@@ -1441,6 +1442,15 @@ mod tests {
 
     fn decide(policy: &Policy, class: PermissionClass, target: &Access) -> Decision {
         policy.decide(class, &target.as_target())
+    }
+
+    /// How `policy` settles running `command` in `workspace`.
+    fn decide_command(policy: &Policy, command: &str, workspace: &Workspace) -> Decision {
+        decide(
+            policy,
+            PermissionClass::Exec,
+            &Access::for_command(command, workspace),
+        )
     }
 
     /// A canonicalized tempdir to use as cwd, so assertions compare resolved paths (macOS puts
@@ -1491,7 +1501,7 @@ mod tests {
 
             #[test]
             fn parses_every_valid_value_and_names_them_for_any_other() {
-                for mode in [Mode::Manual, Mode::Plan, Mode::Yolo] {
+                for mode in Mode::ALL {
                     assert_eq!(mode.as_str().parse::<Mode>().unwrap(), mode);
                 }
                 let err = "bypass".parse::<Mode>().unwrap_err().to_string();
@@ -1990,7 +2000,14 @@ mod tests {
 
                 let target = Access::for_path("x/../tools/pre-commit", &Workspace::new(&cwd));
                 assert_eq!(protected(&target), [Shipped::Git]);
-                let p = resolved_policy(Mode::Manual, &[], &[], &[(EDIT, "*")], &cwd);
+                let p = resolved_policy(
+                    Mode::Manual,
+                    &[],
+                    &[],
+                    &[(EDIT, "*")],
+                    &[],
+                    &Workspace::new(&cwd),
+                );
                 assert_eq!(decide(&p, EDIT, &target), Decision::Ask);
             }
 
@@ -2451,18 +2468,17 @@ mod tests {
                     ],
                     || {
                         let workspace = Workspace::new(&cwd);
-                        let allow_all = rules(&[(READ, "*"), (EDIT, "*"), (EXEC, "*")]);
+                        let allow_all = [(READ, "*"), (EDIT, "*"), (EXEC, "*")];
                         for (group, class, target, held) in &cases {
                             let resolve = |disabled: &[Shipped]| {
-                                Policy::resolve(
+                                resolved_policy(
                                     Mode::Manual,
-                                    Vec::new(),
-                                    Vec::new(),
-                                    allow_all.clone(),
+                                    &[],
+                                    &[],
+                                    &allow_all,
                                     disabled,
                                     &workspace,
                                 )
-                                .unwrap()
                             };
                             assert_eq!(decide(&resolve(&[]), *class, target), *held, "{group:?}");
                             assert_eq!(
@@ -2494,15 +2510,14 @@ mod tests {
                     || {
                         let workspace = Workspace::new(&cwd);
                         let resolve = |disabled: &[Shipped]| {
-                            Policy::resolve(
+                            resolved_policy(
                                 Mode::Yolo,
-                                Vec::new(),
-                                Vec::new(),
-                                rules(&[(EDIT, "*")]),
+                                &[],
+                                &[],
+                                &[(EDIT, "*")],
                                 disabled,
                                 &workspace,
                             )
-                            .unwrap()
                         };
                         let edit =
                             |path: PathBuf| Access::for_path(slash_separated(&path), &workspace);
@@ -2557,15 +2572,7 @@ mod tests {
             fn disables_one_protected_group_and_keeps_the_rest() {
                 let (_dir, cwd) = temp_cwd();
                 let workspace = Workspace::new(&cwd);
-                let p = Policy::resolve(
-                    Mode::Manual,
-                    Vec::new(),
-                    Vec::new(),
-                    Vec::new(),
-                    &[Shipped::Cargo],
-                    &workspace,
-                )
-                .unwrap();
+                let p = resolved_policy(Mode::Manual, &[], &[], &[], &[Shipped::Cargo], &workspace);
 
                 let cargo = Access::for_path(".cargo/config.toml", &workspace);
                 let git = Access::for_path(".git/config", &workspace);
@@ -2599,7 +2606,8 @@ mod tests {
                     &[(READ, "secrets/**")],
                     &[(READ, &alias)],
                     &[],
-                    &cwd,
+                    &[],
+                    &Workspace::new(&cwd),
                 );
                 for (raw, decision) in [
                     ("../vault/key", Decision::Deny),
@@ -2728,7 +2736,8 @@ mod tests {
                     &[(READ, ".env"), (EDIT, "notes.md")],
                     &[(READ, &secrets)],
                     &[],
-                    &cwd,
+                    &[],
+                    &Workspace::new(&cwd),
                 );
                 let filter = p.read_filter();
                 let workspace = Workspace::new(&cwd);
@@ -2763,7 +2772,7 @@ mod tests {
 
             #[test]
             fn deny_beats_ask_and_ask_beats_allow_in_every_mode() {
-                for mode in [Mode::Manual, Mode::Plan, Mode::Yolo] {
+                for mode in Mode::ALL {
                     let p = policy(
                         mode,
                         &[(READ, "secret.txt")],
@@ -2881,15 +2890,8 @@ mod tests {
                         let target = Access::for_path(slash_separated(&spill), &workspace);
 
                         for mode in [Mode::Manual, Mode::Yolo] {
-                            let p = Policy::resolve(
-                                mode,
-                                Vec::new(),
-                                Vec::new(),
-                                rules(&[(EDIT, "*")]),
-                                &[],
-                                &workspace,
-                            )
-                            .unwrap();
+                            let p =
+                                resolved_policy(mode, &[], &[], &[(EDIT, "*")], &[], &workspace);
                             assert_eq!(decide(&p, READ, &target), Decision::Allow, "{mode}");
                             assert_eq!(decide(&p, EDIT, &target), Decision::Ask, "{mode}");
                         }
@@ -3458,14 +3460,11 @@ mod tests {
                     &[(EDIT, "secret.txt")],
                     &[(EDIT, "*.lock")],
                     &[],
-                    &cwd,
+                    &[],
+                    &Workspace::new(&cwd),
                 );
-                let decide = |case: &str| {
-                    p.decide(
-                        EXEC,
-                        &Access::for_command(case, &Workspace::new(&cwd)).as_target(),
-                    )
-                };
+                let workspace = Workspace::new(&cwd);
+                let decide = |case: &str| decide_command(&p, case, &workspace);
                 assert_eq!(decide("echo hi > out.txt 2>&1"), Decision::Allow);
                 assert_eq!(decide("echo hi > .envrc"), Decision::Ask);
                 assert_eq!(decide("echo hi > .git/hooks/pre-commit"), Decision::Ask);
@@ -3476,13 +3475,16 @@ mod tests {
 
                 let (_elsewhere_dir, elsewhere) = temp_cwd();
                 let notes = slash_separated(&elsewhere.join("notes.txt"));
-                let allowed = resolved_policy(Mode::Manual, &[], &[], &[(EDIT, &notes)], &cwd);
+                let allowed = resolved_policy(
+                    Mode::Manual,
+                    &[],
+                    &[],
+                    &[(EDIT, &notes)],
+                    &[],
+                    &Workspace::new(&cwd),
+                );
                 assert_eq!(
-                    allowed.decide(
-                        EXEC,
-                        &Access::for_command(&format!("echo hi >> {notes}"), &Workspace::new(&cwd))
-                            .as_target()
-                    ),
+                    decide_command(&allowed, &format!("echo hi >> {notes}"), &workspace),
                     Decision::Allow
                 );
             }
@@ -3496,12 +3498,8 @@ mod tests {
                     &[(READ, "secrets")],
                     &[(EXEC, "cat *")],
                 );
-                let decide = |case: &str| {
-                    p.decide(
-                        EXEC,
-                        &Access::for_command(case, &Workspace::new(&cwd)).as_target(),
-                    )
-                };
+                let workspace = Workspace::new(&cwd);
+                let decide = |case: &str| decide_command(&p, case, &workspace);
                 assert_eq!(decide("cat README.md"), Decision::Allow);
                 assert_eq!(decide("cat .env"), Decision::Ask);
                 assert_eq!(decide("cat secrets/key"), Decision::Ask);
@@ -3519,18 +3517,14 @@ mod tests {
                 temp_env::with_var(HOME_VAR, Some(&home), || {
                     let workspace = Workspace::new(&cwd);
                     let resolve = |disabled: &[Shipped]| {
-                        Policy::resolve(
+                        resolved_policy(
                             Mode::Manual,
-                            Vec::new(),
-                            Vec::new(),
-                            rules(&[(EXEC, "cat *"), (EXEC, "grep *")]),
+                            &[],
+                            &[],
+                            &[(EXEC, "cat *"), (EXEC, "grep *")],
                             disabled,
                             &workspace,
                         )
-                        .unwrap()
-                    };
-                    let decide = |p: &Policy, case: &str| {
-                        p.decide(EXEC, &Access::for_command(case, &workspace).as_target())
                     };
 
                     let p = resolve(&[]);
@@ -3543,11 +3537,11 @@ mod tests {
                         ("grep -r key ~/.ssh", Decision::Ask),
                         ("cat $HOME/.ssh/id_rsa", Decision::Ask),
                     ] {
-                        assert_eq!(decide(&p, case), expected, "{case}");
+                        assert_eq!(decide_command(&p, case, &workspace), expected, "{case}");
                     }
                     let unguarded = resolve(&[Shipped::Ssh, Shipped::Credentials]);
                     assert_eq!(
-                        decide(&unguarded, "cat $HOME/.ssh/id_rsa"),
+                        decide_command(&unguarded, "cat $HOME/.ssh/id_rsa", &workspace),
                         Decision::Allow,
                         "no read rule is left to hold it"
                     );
@@ -3563,12 +3557,8 @@ mod tests {
                     &[(READ, "secrets")],
                     &[(EXEC, "*")],
                 );
-                let decide = |case: &str| {
-                    p.decide(
-                        EXEC,
-                        &Access::for_command(case, &Workspace::new(&cwd)).as_target(),
-                    )
-                };
+                let workspace = Workspace::new(&cwd);
+                let decide = |case: &str| decide_command(&p, case, &workspace);
                 for (case, expected) in [
                     ("cat < README.md", Decision::Allow),
                     ("cat < .env", Decision::Deny),
@@ -3586,22 +3576,16 @@ mod tests {
                 let key = slash_separated(&home.join(".ssh/id_ed25519"));
                 temp_env::with_var(HOME_VAR, Some(&home), || {
                     let workspace = Workspace::new(&base);
-                    let p = Policy::resolve(
-                        Mode::Manual,
-                        Vec::new(),
-                        Vec::new(),
-                        Vec::new(),
-                        &[],
-                        &workspace,
-                    )
-                    .unwrap();
+                    let p = resolved_policy(Mode::Manual, &[], &[], &[], &[], &workspace);
 
-                    let decide = |case: &str| {
-                        p.decide(EXEC, &Access::for_command(case, &workspace).as_target())
-                    };
-
-                    assert_eq!(decide(&format!("cat < {key}")), Decision::Deny);
-                    assert_eq!(decide(&format!("cat {key}")), Decision::Ask);
+                    assert_eq!(
+                        decide_command(&p, &format!("cat < {key}"), &workspace),
+                        Decision::Deny
+                    );
+                    assert_eq!(
+                        decide_command(&p, &format!("cat {key}"), &workspace),
+                        Decision::Ask
+                    );
                 });
             }
         }
@@ -3733,15 +3717,7 @@ mod tests {
                 let key = slash_separated(&home.join(".ssh/id_ed25519"));
                 temp_env::with_var(HOME_VAR, Some(&home), || {
                     let workspace = Workspace::new(&base);
-                    let p = Policy::resolve(
-                        Mode::Yolo,
-                        Vec::new(),
-                        Vec::new(),
-                        Vec::new(),
-                        &[],
-                        &workspace,
-                    )
-                    .unwrap();
+                    let p = resolved_policy(Mode::Yolo, &[], &[], &[], &[], &workspace);
                     let settle =
                         |case: &str| verdict(&p, EXEC, &Access::for_command(case, &workspace));
 
@@ -3855,7 +3831,14 @@ mod tests {
                 std::fs::create_dir(&cwd).unwrap();
                 std::fs::create_dir(&outside).unwrap();
                 symlink_dir(&outside, &cwd.join("config"));
-                let p = resolved_policy(Mode::Manual, &[(READ, ".env")], &[], &[], &cwd);
+                let p = resolved_policy(
+                    Mode::Manual,
+                    &[(READ, ".env")],
+                    &[],
+                    &[],
+                    &[],
+                    &Workspace::new(&cwd),
+                );
                 let filter = p.read_filter();
                 let env = outside.join(".env");
                 let workspace = Workspace::new(&cwd);
@@ -3879,7 +3862,14 @@ mod tests {
                 std::fs::create_dir(&cwd).unwrap();
                 std::fs::create_dir(&outside).unwrap();
                 symlink_dir(&outside, &cwd.join("link"));
-                let p = resolved_policy(Mode::Manual, &[], &[(READ, "link/**")], &[], &cwd);
+                let p = resolved_policy(
+                    Mode::Manual,
+                    &[],
+                    &[(READ, "link/**")],
+                    &[],
+                    &[],
+                    &Workspace::new(&cwd),
+                );
 
                 let filter = p.read_filter();
                 let walk = filter.walk(&outside, Path::new("../outside"), &Workspace::new(&cwd));
