@@ -561,7 +561,7 @@ mod tests {
     use crate::session::store::local_testing::test_session_file;
     use crate::session::store::testing::{seed_test_session, test_project_dir, test_store};
     use crate::tool::tasks::testing::plan;
-    use crate::tool::{DiffChunk, DiffLine, EditDiff};
+    use crate::tool::view::{DiffChunk, DiffLine, EditDiff};
 
     /// Resumes the session whose file name carries `session_id`.
     fn resume_id(store: &SessionStore, session_id: &str) -> Result<ResumedSession> {

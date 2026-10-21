@@ -12,7 +12,7 @@ use ox_core::engine::{Engine, EngineHandle, TurnEnd};
 use ox_core::permission::rule::Rule;
 use ox_core::permission::{Basis, SessionGrant};
 use ox_core::protocol::{Decision, Event, EventSink, Op};
-use ox_core::tool::{ApprovalBody, ApprovalPreview};
+use ox_core::tool::view::{ApprovalBody, ApprovalPreview};
 use ox_core::util::git;
 use ox_core::util::text::escape_hidden;
 
@@ -270,14 +270,12 @@ fn write_preview(out: &mut impl Write, preview: &ApprovalPreview, basis: &Basis)
                 writeln!(out, "  {}", escape_hidden(line))?;
             }
         }
-        ApprovalBody::Diff(chunks) => {
-            for chunk in chunks {
-                for line in &chunk.old {
-                    writeln!(out, "  - {}", escape_hidden(&line.text))?;
-                }
-                for line in &chunk.new {
-                    writeln!(out, "  + {}", escape_hidden(&line.text))?;
-                }
+        ApprovalBody::Diff(chunk) => {
+            for line in &chunk.old {
+                writeln!(out, "  - {}", escape_hidden(&line.text))?;
+            }
+            for line in &chunk.new {
+                writeln!(out, "  + {}", escape_hidden(&line.text))?;
             }
         }
     }
@@ -305,7 +303,7 @@ mod tests {
     use ox_core::protocol::testing::CapturingSink;
     use ox_core::session::store::testing::{saved_message_count, test_store};
     use ox_core::tool::testing::{bash_preview, bash_registry};
-    use ox_core::tool::{DiffChunk, DiffLine};
+    use ox_core::tool::view::{DiffChunk, DiffLine};
 
     use super::*;
 
@@ -1052,7 +1050,7 @@ mod tests {
                 &mut out,
                 &ApprovalPreview {
                     title: "Edit(src/a.rs)".to_owned(),
-                    body: ApprovalBody::Diff(vec![DiffChunk {
+                    body: ApprovalBody::Diff(DiffChunk {
                         old: vec![DiffLine {
                             number: 3,
                             text: "let a = 1;".to_owned(),
@@ -1061,7 +1059,7 @@ mod tests {
                             number: 3,
                             text: "let a = 2;\u{1b}[2K\u{200b}".to_owned(),
                         }],
-                    }]),
+                    }),
                 },
                 &basis,
             )

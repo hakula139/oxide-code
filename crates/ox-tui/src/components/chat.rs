@@ -752,7 +752,7 @@ mod tests {
 
     use ox_core::protocol::testing::text_result;
     use ox_core::tool::testing::edit_diff;
-    use ox_core::tool::{ReadExcerptLine, ToolResultView};
+    use ox_core::tool::view::{ReadExcerptLine, ToolResultView};
 
     use super::*;
     use crate::glyphs::{

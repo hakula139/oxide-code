@@ -19,7 +19,7 @@ use crate::permission::rule::Rule;
 use crate::permission::{Basis, Mode, SessionGrant};
 use crate::tool::bash::background::BackgroundShell;
 use crate::tool::tasks::Task;
-use crate::tool::{ApprovalPreview, ToolResultView};
+use crate::tool::view::{ApprovalPreview, ToolResultView};
 
 // ── Ops ──
 
@@ -382,7 +382,7 @@ pub mod testing {
     use serde_json::json;
 
     use super::{Event, EventSink, ToolCall, ToolResult};
-    use crate::tool::ToolResultView;
+    use crate::tool::view::ToolResultView;
 
     /// An [`EventSink`] that keeps every event it receives. Clones share one log.
     #[derive(Clone, Default)]
@@ -453,7 +453,7 @@ mod tests {
     use crate::tool::bash::background::testing::shells_in_each_state;
     use crate::tool::tasks::testing::plan;
     use crate::tool::testing::bash_preview;
-    use crate::tool::{
+    use crate::tool::view::{
         ApprovalBody, DiffChunk, DiffLine, EditDiff, GrepFileGroup, GrepMatchLine, ReadExcerptLine,
     };
 
@@ -728,7 +728,7 @@ mod tests {
                     id: "t2".to_owned(),
                     preview: ApprovalPreview {
                         title: "Edit".to_owned(),
-                        body: ApprovalBody::Diff(vec![diff_chunk()]),
+                        body: ApprovalBody::Diff(diff_chunk()),
                     },
                     basis: Basis::Mode(Mode::Manual),
                     grant: None,

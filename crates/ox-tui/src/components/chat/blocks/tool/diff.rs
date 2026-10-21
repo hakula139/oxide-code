@@ -2,7 +2,7 @@
 
 use ratatui::style::Style;
 
-use ox_core::tool::{DiffChunk, DiffLine, EditDiff};
+use ox_core::tool::view::{DiffChunk, DiffLine, EditDiff};
 use ox_core::util::text::plural;
 
 use super::overflow_footer;
