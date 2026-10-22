@@ -576,7 +576,8 @@ struct Walk<'a> {
     opaque: bool,
     /// Whether some segment changes the working directory.
     changes_dir: bool,
-    /// Whether some redirection or known-safe read names a relative path.
+    /// Whether some redirection, known-safe read, or program spelled with a directory names a
+    /// relative path.
     relative_path: bool,
     /// Whether any part of the command expands a variable at run time, wherever the value ends up.
     expands: bool,
@@ -859,8 +860,10 @@ impl Walk<'_> {
         }
     }
 
-    /// Weighs the program `name` runs: a shell or builtin that runs code, or a directory change.
+    /// Weighs the program `name` runs: a shell or builtin that runs code, a directory change, or a
+    /// path relative to the working directory.
     fn program(&mut self, name: &str, args: &[Word], src: &str) {
+        self.relative_path |= is_relative_program(name);
         let base = basename(name);
         let folded = fold_name(base);
         let runner = [base, folded.as_str()]
@@ -904,6 +907,7 @@ impl Walk<'_> {
                 && let Some(name) = name.value.as_deref()
                 && let Some(wrapper) = WRAPPERS.iter().find(|w| w.name == basename(name))
             {
+                self.relative_path |= is_relative_program(name);
                 let run = match wrapper.invocation(args) {
                     Ok(run) => run,
                     Err(unknown) => {
@@ -1320,6 +1324,12 @@ fn parse_tree(source: &str) -> Tree {
 /// The last component of a command path, so `/bin/sh` counts as `sh`.
 fn basename(name: &str) -> &str {
     name.rsplit(['/', '\\']).next().unwrap_or(name)
+}
+
+/// Returns whether bash runs the program `name` from a path relative to the working directory,
+/// as it does for a name with a `/` that does not start at the root, such as `./build.sh`.
+fn is_relative_program(name: &str) -> bool {
+    name.contains('/') && Path::new(name).is_relative()
 }
 
 /// Returns whether a shell option cluster such as `-c` or `-lc` takes the script as the next word.
@@ -3016,6 +3026,11 @@ mod tests {
                     "env -C /etc echo > hosts",
                     "env --chdir=/etc echo > hosts",
                     "cd / && cat etc/shadow",
+                    "cd /tmp/evil && ./build.sh",
+                    "pushd /tmp/evil; bin/build",
+                    "env -C /tmp/evil ./build.sh",
+                    "cd /tmp/evil && ./nice cargo test",
+                    "cd /tmp/evil && echo x | xargs ./build.sh",
                     "{ cat; } <<'EOF' a\nx\nEOF",
                     "exec sh -c 'ls'",
                     "command eval ls",
@@ -3034,6 +3049,8 @@ mod tests {
                     "cd x && echo > /dev/null",
                     "cd x && ls",
                     &format!("cd x && cat {}", abs("/etc/hosts")),
+                    &format!("cd x && {}", abs("/usr/bin/make")),
+                    "./build.sh",
                     "ls $HOME",
                 ] {
                     assert!(!parse(command).is_opaque(), "{command:?}");

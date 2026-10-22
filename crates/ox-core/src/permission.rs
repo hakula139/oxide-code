@@ -3256,6 +3256,24 @@ mod tests {
             }
 
             #[test]
+            fn command_never_allows_a_relative_program_after_a_directory_change() {
+                let p = policy(
+                    Mode::Manual,
+                    &[],
+                    &[],
+                    &[(EXEC, "./build.sh"), (EXEC, "cd *"), (EXEC, "nice *")],
+                );
+                for (case, expected) in [
+                    ("./build.sh", Decision::Allow),
+                    ("cd /tmp/evil && ./build.sh", Decision::Ask),
+                    ("cd $DIR; ./build.sh", Decision::Ask),
+                    ("cd /tmp/evil && nice ./build.sh", Decision::Ask),
+                ] {
+                    assert_eq!(decide(&p, EXEC, &command(case)), expected, "{case}");
+                }
+            }
+
+            #[test]
             fn command_deny_holds_what_a_followed_runner_runs_even_in_yolo() {
                 let p = policy(Mode::Yolo, &[(EXEC, "rm *")], &[], &[]);
                 for case in [
