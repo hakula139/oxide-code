@@ -546,6 +546,7 @@ mod tests {
     use crate::prompt::PromptParts;
     use crate::session::entry::{Entry, SessionInfo};
     use crate::session::handle::testing::record_write_call;
+    use crate::session::store::listing::ProjectScope;
     use crate::session::store::local_testing::test_session_file;
     use crate::session::store::testing::{
         TEST_PROJECT, isolated_store, seed_test_session, test_project_dir, test_store,
@@ -2287,7 +2288,7 @@ mod tests {
             std::fs::write(&path, unmask(fixture)).unwrap();
 
             let [listed]: [SessionInfo; 1] = store
-                .list_matching("", crate::session::store::listing::ProjectScope::Current)
+                .list_matching("", ProjectScope::Current)
                 .unwrap()
                 .try_into()
                 .unwrap();

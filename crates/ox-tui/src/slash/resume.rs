@@ -116,7 +116,8 @@ struct SessionRow {
     session_id: String,
     path: PathBuf,
     last_active_at: OffsetDateTime,
-    /// When the row was listed, in local time. Its relative times count from here.
+    /// When the listing started, in local time.
+    /// The row's relative times count from here.
     listed_at: OffsetDateTime,
     title: String,
     /// `0` when no `Summary` line was found, as in a session that never finalized.
@@ -194,12 +195,12 @@ impl SessionRow {
         }
     }
 
-    /// Single-line metadata summary for the delete-confirm modal.
-    fn metadata_line(&self) -> String {
+    /// Single-line metadata summary for the delete-confirm modal, relative to `now`.
+    fn metadata_line(&self, now: OffsetDateTime) -> String {
         format_metadata_line(
             &self.session_id,
             self.last_active_at,
-            self.listed_at,
+            now,
             self.message_count,
             self.git_branch.as_deref(),
             self.project.as_deref(),
@@ -494,6 +495,8 @@ pub struct ResumePicker {
     /// Filtered out of every page so the user can't self-resume onto the open append-writer.
     live_session_id: String,
     pages: Pages,
+    /// When the last reload started, in local time, which every page's rows count from.
+    listed_at: OffsetDateTime,
     /// Last reload's failure, surfaced inline so failures don't disguise themselves as "no
     /// sessions found". Cleared on the next successful reload.
     load_error: Option<String>,
@@ -537,6 +540,7 @@ impl ResumePicker {
             dismissal,
             live_session_id,
             pages: Pages::Done,
+            listed_at: now_local(),
             load_error: None,
             notice: None,
         };
@@ -547,6 +551,7 @@ impl ResumePicker {
     /// Restarts the listing for the current scope and view, with the cursor and scroll back at
     /// the top. Rows arrive as pages load.
     fn reload(&mut self) {
+        self.listed_at = now_local();
         self.pages = match self.store.walk(self.scope) {
             Ok(walk) => {
                 self.load_error = None;
@@ -574,12 +579,15 @@ impl ResumePicker {
     /// Appends a loaded page and asks for the next one when needed.
     fn append_page(&mut self, page: Vec<SessionInfo>) {
         let live_id = self.live_session_id.as_str();
-        let listed_at = now_local();
         let rows = page
             .into_iter()
             .filter(|info| info.session_id != live_id)
             .map(|info| {
-                SessionRow::from_info(info, listed_at, self.scope.projects == ProjectScope::Every)
+                SessionRow::from_info(
+                    info,
+                    self.listed_at,
+                    self.scope.projects == ProjectScope::Every,
+                )
             })
             .collect();
         self.list.append_items(rows);
@@ -673,7 +681,7 @@ impl ResumePicker {
             row.path.clone(),
             row.session_id.clone(),
             row.title.clone(),
-            row.metadata_line(),
+            row.metadata_line(now_local()),
             self.live_session_id.clone(),
         )))
     }

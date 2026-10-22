@@ -135,7 +135,7 @@ App owns `ModalStack` and runs the key gate first inside `handle_crossterm_event
 - `crates/ox-tui/src/slash/registry.rs`: `SlashOutcome`, including the `Modal` variant.
 - `crates/ox-tui/src/slash/rename.rs`: `RenameCmd` plus `RenameModal` editor.
 - `crates/ox-tui/src/slash/resume.rs`: `ResumeCmd` plus `ResumePicker`.
-- `crates/ox-tui/src/slash/sessions.rs`: the metadata-line formatter shared by the picker row and the confirm-delete modal.
+- `crates/ox-tui/src/slash/sessions.rs`: the metadata-line formatter for the confirm-delete modal.
 - `crates/ox-tui/src/slash/status.rs`: `/status` row builder plus `KvOverview`.
 - `crates/ox-tui/src/slash/theme.rs`: `/theme` live-preview picker (`ThemeCmd` plus `ThemePicker`).
 - `crates/ox-tui/src/viewport.rs`: `Viewport` scroll window plus `wrap_next` / `wrap_prev` cursor steps.

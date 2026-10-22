@@ -17,7 +17,9 @@ use tracing::{debug, warn};
 use uuid::Uuid;
 
 use super::chain::{Chain, ChainBuilder};
-use super::entry::{CURRENT_VERSION, CompactInfo, Entry, Header, TitleInfo, UsageRecord};
+use super::entry::{
+    CURRENT_VERSION, CompactInfo, Entry, Header, TitleInfo, UsageRecord, keep_newer,
+};
 use super::path::project_dir_name;
 use crate::file_tracker::FileSnapshot;
 use crate::message::Message;
@@ -132,20 +134,17 @@ pub(super) fn open_append_at(path: &Path) -> Result<SessionWriter> {
     })
 }
 
-/// Loads session data from an explicit path with DAG-based chain resolution. The file must begin
-/// with a header in a format version this build reads.
+/// Loads session data from an explicit path with DAG-based chain resolution.
+/// The file must begin with a header in a format version this build reads.
 pub(super) fn load_session_data_from_path(path: &Path) -> Result<SessionData> {
     let file = File::open(path).with_context(|| format!("failed to open {}", path.display()))?;
     let mut lines = JsonlLines::new(BufReader::new(file));
-    let Header {
-        session_id,
-        version,
-        ..
-    } = read_header(&mut lines, path)?;
-    if version > CURRENT_VERSION {
+    let header = read_header(&mut lines, path)?;
+    if header.version > CURRENT_VERSION {
         bail!(
-            "session format version {version} is newer than supported ({CURRENT_VERSION}). \
-             Upgrade oxide-code to open it."
+            "session format version {} is newer than supported ({CURRENT_VERSION}). \
+             Upgrade oxide-code to open it.",
+            header.version,
         );
     }
 
@@ -156,7 +155,7 @@ pub(super) fn load_session_data_from_path(path: &Path) -> Result<SessionData> {
             Err(e) => warn!("skipping malformed entry at line {line_no}: {e}"),
         }
     }
-    Ok(builder.finish(session_id))
+    Ok(builder.finish(header.session_id))
 }
 
 /// The messages of a compaction's tail, the chain since its boundary.
@@ -199,7 +198,7 @@ impl SessionDataBuilder {
             Entry::Rewind { tip, .. } => self.chain.rewind(tip),
             Entry::Title {
                 title, updated_at, ..
-            } => TitleInfo::keep_newer(&mut self.latest_title, TitleInfo { title, updated_at }),
+            } => keep_newer(&mut self.latest_title, TitleInfo { title, updated_at }),
             Entry::Archive { archived, .. } => self.archived = archived,
             Entry::ToolResultMetadata {
                 tool_use_id,
@@ -1710,7 +1709,10 @@ mod tests {
             assert_eq!(data.session_id, "headed");
             assert_eq!(
                 err.to_string(),
-                format!("{} does not begin with a header", headless.display()),
+                format!(
+                    "{} is not an oxide-code session file: its first line is not a session header",
+                    headless.display(),
+                ),
             );
         }
     }

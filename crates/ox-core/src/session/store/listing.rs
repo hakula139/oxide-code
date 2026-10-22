@@ -10,7 +10,9 @@ use time::OffsetDateTime;
 use tracing::warn;
 
 use super::{JsonlLines, Project, SessionStore, file_session_id, read_header};
-use crate::session::entry::{ArchiveState, Entry, ExitInfo, Header, SessionInfo, TitleInfo};
+use crate::session::entry::{
+    ArchiveState, Entry, ExitInfo, Header, SessionInfo, TitleInfo, keep_newer,
+};
 
 pub const DEFAULT_SESSION_LIST_LIMIT: usize = 30;
 
@@ -118,8 +120,7 @@ impl Iterator for SessionWalk {
 // ── Listing ──
 
 impl SessionStore {
-    /// Walks the sessions matching `scope`. `scope.all` widens the walk from the home project to
-    /// every project.
+    /// Walks the sessions matching `scope`.
     pub fn walk(&self, scope: ListScope) -> Result<SessionWalk> {
         Ok(SessionWalk {
             paths: self.session_paths(scope.projects)?.into_iter(),
@@ -283,7 +284,7 @@ fn read_session_info(
                 ..
             }) = serde_json::from_str(line)
         {
-            TitleInfo::keep_newer(
+            keep_newer(
                 &mut title,
                 TitleInfo {
                     title: text,
@@ -295,12 +296,14 @@ fn read_session_info(
                 message_count,
                 updated_at,
             }) = serde_json::from_str(line)
-            && exit.as_ref().is_none_or(|cur| updated_at > cur.updated_at)
         {
-            exit = Some(ExitInfo {
-                message_count,
-                updated_at,
-            });
+            keep_newer(
+                &mut exit,
+                ExitInfo {
+                    message_count,
+                    updated_at,
+                },
+            );
         } else if line.starts_with(ARCHIVE_LINE_PREFIX)
             && let Ok(Entry::Archive {
                 archived: state, ..
@@ -591,6 +594,25 @@ mod tests {
             let sessions = store.list().unwrap();
             let title = sessions[0].title.as_ref().unwrap();
             assert_eq!(title.title, "AI generated");
+        }
+
+        #[test]
+        fn keeps_the_newest_summary_whatever_its_place_in_the_file() {
+            let (_dir, store) = isolated_store();
+            let mut writer = store.create(&sample_header("resumed"), &[]).unwrap();
+            writer
+                .append(&[
+                    sample_summary_entry(4),
+                    Entry::Summary {
+                        message_count: 2,
+                        updated_at: datetime!(2026-04-16 12:00:00 UTC),
+                    },
+                ])
+                .unwrap();
+
+            let sessions = store.list().unwrap();
+
+            assert_eq!(sessions[0].exit.as_ref().unwrap().message_count, 4);
         }
 
         #[tokio::test]

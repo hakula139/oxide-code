@@ -134,22 +134,37 @@ pub struct TitleInfo {
     pub updated_at: OffsetDateTime,
 }
 
-impl TitleInfo {
-    /// Puts `title` in `slot` unless the title there is at least as new, so the newest wins.
-    pub(crate) fn keep_newer(slot: &mut Option<Self>, title: Self) {
-        if slot
-            .as_ref()
-            .is_none_or(|current| title.updated_at > current.updated_at)
-        {
-            *slot = Some(title);
-        }
-    }
-}
-
 #[derive(Debug, Clone)]
 pub struct ExitInfo {
     pub message_count: u32,
     pub updated_at: OffsetDateTime,
+}
+
+/// A record a file may repeat, where the newest `updated_at` wins.
+pub(super) trait Updated {
+    fn updated_at(&self) -> OffsetDateTime;
+}
+
+impl Updated for TitleInfo {
+    fn updated_at(&self) -> OffsetDateTime {
+        self.updated_at
+    }
+}
+
+impl Updated for ExitInfo {
+    fn updated_at(&self) -> OffsetDateTime {
+        self.updated_at
+    }
+}
+
+/// Puts `record` in `slot` unless the record there is at least as new.
+pub(super) fn keep_newer<T: Updated>(slot: &mut Option<T>, record: T) {
+    if slot
+        .as_ref()
+        .is_none_or(|current| record.updated_at() > current.updated_at())
+    {
+        *slot = Some(record);
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

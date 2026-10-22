@@ -214,8 +214,8 @@ fn summarize_checks(mut checks: Vec<CheckView>) -> Option<Checks> {
 }
 
 /// Runs `program` with `args` in `cwd` on the tokio runtime and returns the output of a
-/// successful run, logging any other outcome under the `name` probe. Dropping the future kills the
-/// child process.
+/// successful run, logging any other outcome under the `name` probe.
+/// Dropping the future kills the child process.
 async fn probe(name: &str, cwd: &Path, program: &str, args: &[&str]) -> Option<Output> {
     let result = tokio::process::Command::new(program)
         .args(args)
@@ -226,13 +226,13 @@ async fn probe(name: &str, cwd: &Path, program: &str, args: &[&str]) -> Option<O
     check_output(name, cwd, result)
 }
 
-/// Logs a spawn failure or non-zero exit and returns the successful output or `None`. `cwd` rides
-/// along on the log records so a user can pinpoint which worktree the probe failed in.
-fn check_output(probe: &str, cwd: &Path, result: io::Result<Output>) -> Option<Output> {
+/// Logs a spawn failure or non-zero exit and returns the successful output or `None`.
+/// `cwd` rides along on the log records so a user can pinpoint which worktree the probe failed in.
+fn check_output(name: &str, cwd: &Path, result: io::Result<Output>) -> Option<Output> {
     let output = match result {
         Ok(output) => output,
         Err(e) => {
-            debug!(error = %e, ?cwd, "{probe} probe: spawn failed");
+            debug!(error = %e, ?cwd, "{name} probe: spawn failed");
             return None;
         }
     };
@@ -241,7 +241,7 @@ fn check_output(probe: &str, cwd: &Path, result: io::Result<Output>) -> Option<O
             code = output.status.code().unwrap_or(-1),
             stderr = stderr_summary(&output.stderr),
             ?cwd,
-            "{probe} probe: non-zero exit",
+            "{name} probe: non-zero exit",
         );
         return None;
     }

@@ -280,13 +280,12 @@ mod tests {
             original.finish(Vec::new()).await;
             drop(original);
 
-            let prefix = full_id[..10].to_owned();
-            let arg = prefix;
+            let prefix = &full_id[..10];
             let resumed = resolve_session(
                 &store,
                 "m",
                 None,
-                Some(SessionTarget::Named(&arg)),
+                Some(SessionTarget::Named(prefix)),
                 ProjectScope::Current,
             )
             .unwrap();
@@ -387,12 +386,11 @@ mod tests {
             let path = test_session_file(dir.path(), "archived");
             set_archived_at(&path, true).unwrap();
 
-            let arg = "arch".to_owned();
             let resumed = resolve_session(
                 &store,
                 "m",
                 None,
-                Some(SessionTarget::Named(&arg)),
+                Some(SessionTarget::Named("arch")),
                 ProjectScope::Current,
             )
             .unwrap();
@@ -432,14 +430,13 @@ mod tests {
             let s = handle::start(&store, "m", None);
             s.record_message(Message::user("noop")).await;
             s.finish(Vec::new()).await;
-            let prefix_arg = "zzzz".to_owned();
             drop(s);
 
             let err = resolve_session(
                 &store,
                 "m",
                 None,
-                Some(SessionTarget::Named(&prefix_arg)),
+                Some(SessionTarget::Named("zzzz")),
                 ProjectScope::Current,
             )
             .err()
@@ -461,12 +458,11 @@ mod tests {
                 );
             }
 
-            let prefix_arg = "ab".to_owned();
             let err = resolve_session(
                 &store,
                 "m",
                 None,
-                Some(SessionTarget::Named(&prefix_arg)),
+                Some(SessionTarget::Named("ab")),
                 ProjectScope::Current,
             )
             .err()
@@ -483,37 +479,38 @@ mod tests {
         async fn prefix_reports_a_listing_failure() {
             let dir = tempfile::tempdir().unwrap();
             let store = test_store(dir.path());
-            std::fs::remove_dir_all(test_project_dir(dir.path())).unwrap();
-            let cause = store
-                .list_matching("ab", ProjectScope::Current)
-                .unwrap_err();
+            std::fs::remove_dir_all(dir.path()).unwrap();
 
-            let prefix_arg = "ab".to_owned();
-            let err = resolve_session(
-                &store,
-                "m",
-                None,
-                Some(SessionTarget::Named(&prefix_arg)),
-                ProjectScope::Current,
-            )
-            .err()
-            .unwrap()
-            .to_string();
-            assert_eq!(
-                err,
-                format!("failed to list sessions in this project: {cause:#}")
-            );
+            for (projects, label) in [
+                (ProjectScope::Current, "this project"),
+                (ProjectScope::Every, "all projects"),
+            ] {
+                let cause = store.list_matching("ab", projects).unwrap_err();
+                let err = resolve_session(
+                    &store,
+                    "m",
+                    None,
+                    Some(SessionTarget::Named("ab")),
+                    projects,
+                )
+                .err()
+                .unwrap();
+
+                assert_eq!(
+                    err.to_string(),
+                    format!("failed to list sessions in {label}: {cause:#}"),
+                );
+            }
         }
 
         #[tokio::test]
         async fn path_errors_on_missing_file() {
             let (_dir, store) = isolated_store();
-            let arg = "/does/not/exist.jsonl".to_owned();
             let err = resolve_session(
                 &store,
                 "m",
                 None,
-                Some(SessionTarget::Named(&arg)),
+                Some(SessionTarget::Named("/does/not/exist.jsonl")),
                 ProjectScope::Current,
             )
             .err()
@@ -544,8 +541,7 @@ mod tests {
 
         #[test]
         fn trims_valid_prefix() {
-            let arg = "  abc123 ".to_owned();
-            let mode = normalize_target(Some(SessionTarget::Named(&arg))).unwrap();
+            let mode = normalize_target(Some(SessionTarget::Named("  abc123 "))).unwrap();
             assert!(matches!(mode, ResumeMode::Prefix("abc123")));
         }
 
@@ -558,8 +554,7 @@ mod tests {
                 "name.jsonl",           // no separator but has .jsonl suffix
                 r"C:\Users\me\s.jsonl", // windows-shaped
             ] {
-                let arg = raw.to_owned();
-                let mode = normalize_target(Some(SessionTarget::Named(&arg))).unwrap();
+                let mode = normalize_target(Some(SessionTarget::Named(raw))).unwrap();
                 assert!(
                     matches!(mode, ResumeMode::Path(p) if p == Path::new(raw)),
                     "{raw:?} should classify as Path",
@@ -569,16 +564,14 @@ mod tests {
 
         #[test]
         fn keeps_uuid_shaped_prefix_as_prefix() {
-            let arg = "a1b2c3d4-e5f6-7890".to_owned();
-            let mode = normalize_target(Some(SessionTarget::Named(&arg))).unwrap();
+            let mode = normalize_target(Some(SessionTarget::Named("a1b2c3d4-e5f6-7890"))).unwrap();
             assert!(matches!(mode, ResumeMode::Prefix("a1b2c3d4-e5f6-7890")));
         }
 
         #[test]
         fn rejects_empty_and_whitespace_prefix() {
             for raw in ["", "   ", "\t\n"] {
-                let arg = raw.to_owned();
-                let err = normalize_target(Some(SessionTarget::Named(&arg)))
+                let err = normalize_target(Some(SessionTarget::Named(raw)))
                     .err()
                     .unwrap()
                     .to_string();

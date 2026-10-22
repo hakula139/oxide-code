@@ -36,7 +36,7 @@ pub(super) struct ConfirmDeleteSessionModal {
     path: PathBuf,
     session_id: String,
     display_title: String,
-    /// The [`format_metadata_line`](ox_core::session::display::format_metadata_line) row, such as
+    /// The [`format_metadata_line`](crate::slash::sessions::format_metadata_line) row, such as
     /// `abcd1234 · 2 hours ago · 14 msgs`, which carries the ID prefix.
     metadata: String,
     live_session_id: String,
