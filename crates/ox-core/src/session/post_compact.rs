@@ -240,11 +240,11 @@ mod tests {
         fn leaves_non_text_first_block() {
             let mut m = Message {
                 role: Role::User,
-                content: vec![ContentBlock::ToolResult {
-                    tool_use_id: "toolu_1".to_owned(),
-                    content: SUMMARY_PREFIX.trim().to_owned(),
-                    is_error: false,
-                }],
+                content: vec![ContentBlock::tool_result(
+                    "toolu_1",
+                    SUMMARY_PREFIX.trim(),
+                    false,
+                )],
             };
 
             assert!(!strip_synthetic_post_compact_prefix(&mut m));

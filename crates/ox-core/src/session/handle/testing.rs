@@ -25,11 +25,11 @@ pub(crate) async fn record_write_call(
     handle
         .record_message(Message {
             role: Role::Assistant,
-            content: vec![ContentBlock::ToolUse {
-                id: tool_use_id.to_owned(),
-                name: "write".to_owned(),
-                input: serde_json::Value::Null,
-            }],
+            content: vec![ContentBlock::tool_use(
+                tool_use_id,
+                "write",
+                serde_json::Value::Null,
+            )],
         })
         .await;
     record_tracked_file(tracker, path, b"alpha", tool_use_id);
@@ -37,11 +37,7 @@ pub(crate) async fn record_write_call(
         handle
             .record_message(Message {
                 role: Role::User,
-                content: vec![ContentBlock::ToolResult {
-                    tool_use_id: tool_use_id.to_owned(),
-                    content: "wrote".to_owned(),
-                    is_error: false,
-                }],
+                content: vec![ContentBlock::tool_result(tool_use_id, "wrote", false)],
             })
             .await;
     }

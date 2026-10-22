@@ -1808,11 +1808,11 @@ mod tests {
             original
                 .record_message(Message {
                     role: Role::Assistant,
-                    content: vec![ContentBlock::ToolUse {
-                        id: "unresolved".to_owned(),
-                        name: "bash".to_owned(),
-                        input: serde_json::Value::Null,
-                    }],
+                    content: vec![ContentBlock::tool_use(
+                        "unresolved",
+                        "bash",
+                        serde_json::Value::Null,
+                    )],
                 })
                 .await;
             drop(original);
@@ -1836,11 +1836,11 @@ mod tests {
             original
                 .record_message(Message {
                     role: Role::Assistant,
-                    content: vec![ContentBlock::ToolUse {
-                        id: "unresolved".to_owned(),
-                        name: "bash".to_owned(),
-                        input: serde_json::Value::Null,
-                    }],
+                    content: vec![ContentBlock::tool_use(
+                        "unresolved",
+                        "bash",
+                        serde_json::Value::Null,
+                    )],
                 })
                 .await;
             original.shutdown().await;
@@ -2096,43 +2096,32 @@ mod tests {
             session
                 .record_message(Message {
                     role: Role::User,
-                    content: vec![tool_result("t1", "Edited f.rs.", false)],
+                    content: vec![ContentBlock::tool_result("t1", "Edited f.rs.", false)],
                 })
                 .await;
             session
-                .record_tool_metadata_batch(vec![(
-                    "t1".to_owned(),
-                    ToolMetadata {
-                        title: Some("Edited f.rs".to_owned()),
-                        diff: Some(EditDiff {
-                            chunk: DiffChunk {
-                                old: vec![NumberedLine {
-                                    number: 1,
-                                    text: "fn main() {}".to_owned(),
-                                }],
-                                new: vec![NumberedLine {
-                                    number: 1,
-                                    text: "fn run() {}".to_owned(),
-                                }],
-                            },
-                            locations: vec![1],
-                        }),
-                        ..ToolMetadata::default()
-                    },
-                )])
+                .record_tool_metadata_batch(vec![("t1".to_owned(), edit_metadata())])
                 .await;
             session
                 .record_message(Message {
                     role: Role::Assistant,
                     content: vec![
-                        tool_use(
+                        ContentBlock::tool_use(
                             "t2",
                             "read",
                             serde_json::json!({ "file_path": "g.rs", "limit": 20 }),
                         ),
-                        tool_use("t3", "glob", serde_json::json!({ "pattern": "*.rs" })),
-                        tool_use("t4", "bash", serde_json::json!({ "command": "cargo test" })),
-                        tool_use(
+                        ContentBlock::tool_use(
+                            "t3",
+                            "glob",
+                            serde_json::json!({ "pattern": "*.rs" }),
+                        ),
+                        ContentBlock::tool_use(
+                            "t4",
+                            "bash",
+                            serde_json::json!({ "command": "cargo test" }),
+                        ),
+                        ContentBlock::tool_use(
                             "t5",
                             "tasks",
                             serde_json::json!({ "tasks": [
@@ -2147,10 +2136,14 @@ mod tests {
                 .record_message(Message {
                     role: Role::User,
                     content: vec![
-                        tool_result("t2", "fn main() {}", false),
-                        tool_result("t3", "g.rs", false),
-                        tool_result("t4", "test result: FAILED", true),
-                        tool_result("t5", "Updated the task list: 1 of 2 completed.", false),
+                        ContentBlock::tool_result("t2", "fn main() {}", false),
+                        ContentBlock::tool_result("t3", "g.rs", false),
+                        ContentBlock::tool_result("t4", "test result: FAILED", true),
+                        ContentBlock::tool_result(
+                            "t5",
+                            "Updated the task list: 1 of 2 completed.",
+                            false,
+                        ),
                     ],
                 })
                 .await;
@@ -2173,6 +2166,26 @@ mod tests {
                     ),
                 ])
                 .await;
+        }
+
+        fn edit_metadata() -> ToolMetadata {
+            ToolMetadata {
+                title: Some("Edited f.rs".to_owned()),
+                diff: Some(EditDiff {
+                    chunk: DiffChunk {
+                        old: vec![NumberedLine {
+                            number: 1,
+                            text: "fn main() {}".to_owned(),
+                        }],
+                        new: vec![NumberedLine {
+                            number: 1,
+                            text: "fn run() {}".to_owned(),
+                        }],
+                    },
+                    locations: vec![1],
+                }),
+                ..ToolMetadata::default()
+            }
         }
 
         fn assistant_with_every_block() -> Message {
@@ -2206,24 +2219,12 @@ mod tests {
                     ContentBlock::Text {
                         text: "Renaming main.".to_owned(),
                     },
-                    tool_use("t1", "edit", serde_json::json!({ "file_path": "f.rs" })),
+                    ContentBlock::tool_use(
+                        "t1",
+                        "edit",
+                        serde_json::json!({ "file_path": "f.rs" }),
+                    ),
                 ],
-            }
-        }
-
-        fn tool_use(id: &str, name: &str, input: serde_json::Value) -> ContentBlock {
-            ContentBlock::ToolUse {
-                id: id.to_owned(),
-                name: name.to_owned(),
-                input,
-            }
-        }
-
-        fn tool_result(tool_use_id: &str, content: &str, is_error: bool) -> ContentBlock {
-            ContentBlock::ToolResult {
-                tool_use_id: tool_use_id.to_owned(),
-                content: content.to_owned(),
-                is_error,
             }
         }
 

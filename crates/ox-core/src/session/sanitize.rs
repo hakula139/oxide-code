@@ -156,11 +156,7 @@ mod tests {
     use crate::file_tracker::{FileState, LastView};
 
     fn unresolved_tool_use(id: &str) -> ContentBlock {
-        ContentBlock::ToolUse {
-            id: id.to_owned(),
-            name: "bash".to_owned(),
-            input: serde_json::Value::Null,
-        }
+        ContentBlock::tool_use(id, "bash", serde_json::Value::Null)
     }
 
     fn server_tool_use(id: &str) -> ContentBlock {
@@ -176,14 +172,6 @@ mod tests {
             tool_use_id: id.to_owned(),
             kind: "web_search_tool_result".to_owned(),
             fields: serde_json::Map::new(),
-        }
-    }
-
-    fn tool_result(id: &str, content: &str) -> ContentBlock {
-        ContentBlock::ToolResult {
-            tool_use_id: id.to_owned(),
-            content: content.to_owned(),
-            is_error: false,
         }
     }
 
@@ -238,7 +226,7 @@ mod tests {
                 },
                 Message {
                     role: Role::User,
-                    content: vec![tool_result("t1", "ok")],
+                    content: vec![ContentBlock::tool_result("t1", "ok", false)],
                 },
             ];
 
@@ -249,7 +237,7 @@ mod tests {
                 [
                     Message::user("do X"),
                     assistant(vec![text("checking"), unresolved_tool_use("t1")]),
-                    user(vec![tool_result("t1", "ok")]),
+                    user(vec![ContentBlock::tool_result("t1", "ok", false)]),
                     Message::assistant(RESUME_CONTINUATION_SENTINEL),
                 ],
             );
@@ -262,7 +250,10 @@ mod tests {
                 Message::assistant("done, no tool needed"),
                 Message {
                     role: Role::User,
-                    content: vec![tool_result("orphan", "ghost"), text("follow-up")],
+                    content: vec![
+                        ContentBlock::tool_result("orphan", "ghost", false),
+                        text("follow-up"),
+                    ],
                 },
             ];
 
@@ -285,7 +276,7 @@ mod tests {
                 Message::assistant("all clear"),
                 Message {
                     role: Role::User,
-                    content: vec![tool_result("ghost", "nobody asked")],
+                    content: vec![ContentBlock::tool_result("ghost", "nobody asked", false)],
                 },
             ];
 
@@ -320,7 +311,7 @@ mod tests {
                 Message::assistant("first answer"),
                 Message {
                     role: Role::User,
-                    content: vec![tool_result("ghost", "stale")],
+                    content: vec![ContentBlock::tool_result("ghost", "stale", false)],
                 },
                 Message::assistant("second answer"),
             ];
@@ -346,7 +337,7 @@ mod tests {
                 },
                 Message {
                     role: Role::User,
-                    content: vec![tool_result("t2", "stale")],
+                    content: vec![ContentBlock::tool_result("t2", "stale", false)],
                 },
             ];
 
@@ -401,7 +392,7 @@ mod tests {
             let mut messages = vec![
                 Message {
                     role: Role::User,
-                    content: vec![tool_result("ghost", "stale")],
+                    content: vec![ContentBlock::tool_result("ghost", "stale", false)],
                 },
                 Message::assistant("carrying on"),
                 Message::user("next question"),
@@ -445,7 +436,7 @@ mod tests {
                 },
                 Message {
                     role: Role::User,
-                    content: vec![tool_result("seen", "a body")],
+                    content: vec![ContentBlock::tool_result("seen", "a body", false)],
                 },
                 Message::assistant("done"),
             ];
@@ -470,7 +461,7 @@ mod tests {
                 },
                 Message {
                     role: Role::User,
-                    content: vec![tool_result("other", "irrelevant")],
+                    content: vec![ContentBlock::tool_result("other", "irrelevant", false)],
                 },
             ];
 
@@ -494,7 +485,10 @@ mod tests {
                 },
                 Message {
                     role: Role::User,
-                    content: vec![tool_result("t1", "ok"), tool_result("misplaced", "stale")],
+                    content: vec![
+                        ContentBlock::tool_result("t1", "ok", false),
+                        ContentBlock::tool_result("misplaced", "stale", false),
+                    ],
                 },
                 Message {
                     role: Role::Assistant,
@@ -532,7 +526,7 @@ mod tests {
                 },
                 Message {
                     role: Role::User,
-                    content: vec![tool_result("kept", "ok")],
+                    content: vec![ContentBlock::tool_result("kept", "ok", false)],
                 },
             ];
             let before = messages.clone();
@@ -555,13 +549,19 @@ mod tests {
                 },
                 Message {
                     role: Role::User,
-                    content: vec![tool_result("real", "ok"), tool_result("ghost", "stale")],
+                    content: vec![
+                        ContentBlock::tool_result("real", "ok", false),
+                        ContentBlock::tool_result("ghost", "stale", false),
+                    ],
                 },
             ];
 
             drop_orphan_tool_results(&mut messages);
 
-            assert_eq!(messages[1].content, [tool_result("real", "ok")]);
+            assert_eq!(
+                messages[1].content,
+                [ContentBlock::tool_result("real", "ok", false)]
+            );
         }
 
         #[test]
@@ -577,7 +577,7 @@ mod tests {
                 },
                 Message {
                     role: Role::User,
-                    content: vec![tool_result("srv_1", "stale")],
+                    content: vec![ContentBlock::tool_result("srv_1", "stale", false)],
                 },
             ];
 
@@ -598,7 +598,7 @@ mod tests {
                 Message::user("first"),
                 Message {
                     role: Role::User,
-                    content: vec![tool_result("ghost", "stale")],
+                    content: vec![ContentBlock::tool_result("ghost", "stale", false)],
                 },
             ];
 
@@ -672,7 +672,7 @@ mod tests {
                 Message::user("do X"),
                 Message {
                     role: Role::User,
-                    content: vec![tool_result("t1", "ok")],
+                    content: vec![ContentBlock::tool_result("t1", "ok", false)],
                 },
             ];
 
@@ -682,7 +682,7 @@ mod tests {
                 messages,
                 [
                     Message::user("do X"),
-                    user(vec![tool_result("t1", "ok")]),
+                    user(vec![ContentBlock::tool_result("t1", "ok", false)]),
                     Message::assistant(RESUME_CONTINUATION_SENTINEL),
                 ],
             );
@@ -694,7 +694,10 @@ mod tests {
                 Message::user("do X"),
                 Message {
                     role: Role::User,
-                    content: vec![tool_result("t1", "ok"), text("and a question")],
+                    content: vec![
+                        ContentBlock::tool_result("t1", "ok", false),
+                        text("and a question"),
+                    ],
                 },
             ];
             let before = messages.clone();

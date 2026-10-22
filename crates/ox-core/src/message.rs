@@ -70,6 +70,25 @@ impl ContentBlock {
     }
 }
 
+#[cfg(test)]
+impl ContentBlock {
+    pub(crate) fn tool_use(id: &str, name: &str, input: serde_json::Value) -> Self {
+        Self::ToolUse {
+            id: id.to_owned(),
+            name: name.to_owned(),
+            input,
+        }
+    }
+
+    pub(crate) fn tool_result(tool_use_id: &str, content: &str, is_error: bool) -> Self {
+        Self::ToolResult {
+            tool_use_id: tool_use_id.to_owned(),
+            content: content.to_owned(),
+            is_error,
+        }
+    }
+}
+
 // ── Replay ──
 
 /// The provider wire a content block came from.
@@ -400,11 +419,7 @@ mod tests {
         }
 
         fn tool_use() -> ContentBlock {
-            ContentBlock::ToolUse {
-                id: "t1".to_owned(),
-                name: "read".to_owned(),
-                input: serde_json::json!({}),
-            }
+            ContentBlock::tool_use("t1", "read", serde_json::json!({}))
         }
 
         #[test]

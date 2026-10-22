@@ -444,11 +444,7 @@ mod tests {
             let now = OffsetDateTime::now_utc();
             let msg = Message {
                 role: Role::User,
-                content: vec![ContentBlock::ToolResult {
-                    tool_use_id: "t".to_owned(),
-                    content: "out".to_owned(),
-                    is_error: false,
-                }],
+                content: vec![ContentBlock::tool_result("t", "out", false)],
             };
 
             let (entries, seed) = state.queue_message_entries(&msg, now, false);
@@ -880,11 +876,7 @@ mod tests {
 
         #[test]
         fn selects_first_nonempty_user_text() {
-            let tool_result = ContentBlock::ToolResult {
-                tool_use_id: "t1".to_owned(),
-                content: "output".to_owned(),
-                is_error: false,
-            };
+            let tool_result = ContentBlock::tool_result("t1", "output", false);
             let user_with_only_blank = Message {
                 role: Role::User,
                 content: vec![ContentBlock::Text {
