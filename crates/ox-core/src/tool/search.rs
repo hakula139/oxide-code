@@ -9,8 +9,8 @@ use std::time::SystemTime;
 
 use tokio_util::sync::CancellationToken;
 
-use super::{Prepared, ToolCtx, display_path, extract_input_field};
-use crate::permission::{Access, WalkFilter, Workspace, tool_path};
+use super::{Prepared, ToolCtx, display_path, extract_input_field, tool_path};
+use crate::permission::{Access, WalkFilter, Workspace};
 use crate::util::text::{ELLIPSIS, plural};
 
 // ── Search Root ──
@@ -18,9 +18,15 @@ use crate::util::text::{ELLIPSIS, plural};
 /// Prepares a search tool's call, resolving its `path` argument, the cwd by default, as the root
 /// the gate checks and the walk covers.
 pub(super) fn prepare_search_root(input: serde_json::Value, ctx: &ToolCtx) -> Prepared {
-    let path = extract_input_field(&input, "path").unwrap_or(".");
-    let access = Access::for_path(path, &ctx.workspace);
+    let root = search_path(extract_input_field(&input, "path"));
+    let access = Access::for_path(root, &ctx.workspace);
     Prepared { input, access }
+}
+
+/// The root a search call's `path` argument names, the cwd by default, read as [`tool_path`]
+/// reads it. The gate and the walk both take the root from here, so they see one spelling.
+pub(super) fn search_path(path: Option<&str>) -> PathBuf {
+    tool_path(path.unwrap_or("."))
 }
 
 /// Where a search tool's walk starts, which its prepared call resolved.
@@ -45,7 +51,7 @@ impl SearchRoot {
         workspace: Arc<Workspace>,
     ) -> Result<Self, String> {
         let cwd = workspace.cwd();
-        let spelled = tool_path(path.unwrap_or("."));
+        let spelled = search_path(path);
         let Some(base) = access.resolved() else {
             return Err(format!(
                 "Failed to access {}: the search root was not resolved.",

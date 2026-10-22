@@ -242,13 +242,6 @@ impl Workspace {
     }
 }
 
-/// A file tool's path argument with a leading `~` or `~/` expanded to the home directory, as the
-/// shell and config patterns read it. With no home directory, `~` stays literal, so the tool
-/// reports the missing file.
-pub(crate) fn tool_path(raw: &str) -> PathBuf {
-    expand_user(raw).unwrap_or_else(|_| PathBuf::from(raw))
-}
-
 /// Resolves the configured extra root `raw`, which must be absolute or `~/`-rooted, resolvable, and
 /// neither `/`, `$HOME`, nor an ancestor of it.
 pub(crate) fn extra_root(raw: &str) -> Result<PathBuf> {
@@ -346,13 +339,13 @@ impl Access {
         Self::Command(CommandTarget::parse(command, workspace))
     }
 
-    /// Builds a path target for the location the tool will touch, resolving `path`, read as
-    /// [`tool_path`] reads it, against the workspace's cwd with `resolve`. A path `resolve` cannot place keeps its joined spelling with
+    /// Builds a path target for the location the tool will touch, resolving `path` against the
+    /// workspace's cwd with `resolve`. A path `resolve` cannot place keeps its joined spelling with
     /// no rooted forms, so it never auto-allows. The tool follows native filesystem behavior.
     /// A resolved path that is not valid UTF-8 never auto-allows either, since the input a file
     /// tool opens can only pin its lossy spelling.
-    pub(crate) fn for_path(path: &str, workspace: &Workspace) -> Self {
-        let joined = workspace.cwd().join(tool_path(path));
+    pub(crate) fn for_path(path: impl AsRef<Path>, workspace: &Workspace) -> Self {
+        let joined = workspace.cwd().join(path);
         let requested = lexical_normalize(&joined);
         let resolved = resolve(&joined).ok();
         let cwd = workspace.resolved_cwd();
@@ -1642,42 +1635,40 @@ mod tests {
     mod access {
         use super::*;
 
-        mod for_path {
+        mod for_command {
             use super::*;
 
             #[test]
-            fn reads_a_leading_tilde_as_the_home_directory_under_every_rule() {
+            fn reads_a_quoted_tilde_under_the_cwd_as_bash_does() {
                 let (_dir, root) = temp_cwd();
                 let (cwd, home) = (root.join("repo"), root.join("home"));
-                std::fs::create_dir(&cwd).unwrap();
+                std::fs::create_dir_all(cwd.join("~")).unwrap();
                 std::fs::create_dir(&home).unwrap();
+                std::fs::write(cwd.join(".env"), "").unwrap();
 
                 temp_env::with_var(HOME_VAR, Some(&home), || {
                     let workspace = Workspace::new(&cwd);
-                    let at = |raw: &str| Access::for_path(raw, &workspace);
                     let policy = Policy::resolve(
                         Mode::Manual,
-                        rules(&[(READ, "~/.aws/**")]),
+                        rules(&[(READ, ".env")]),
                         Vec::new(),
                         Vec::new(),
                         &[],
                         &workspace,
                     )
                     .unwrap();
+                    let run = |command: &str| {
+                        decide(&policy, EXEC, &Access::for_command(command, &workspace))
+                    };
 
-                    assert_eq!(at("~/notes.md").resolved(), Some(home.join("notes.md")));
-                    assert_eq!(at("~").resolved(), Some(home.clone()));
-                    assert_eq!(at("~user/x").resolved(), Some(cwd.join("~user/x")));
-                    assert_eq!(
-                        decide(&policy, READ, &at("~/.aws/credentials")),
-                        Decision::Deny
-                    );
-                    assert_eq!(
-                        decide(&policy, READ, &at("~/.ssh/id_ed25519")),
-                        Decision::Deny
-                    );
+                    assert_eq!(run(r#"cat "~/../.env""#), Decision::Ask);
+                    assert_eq!(run(r#"cat < "~/../.env""#), Decision::Deny);
                 });
             }
+        }
+
+        mod for_path {
+            use super::*;
 
             #[test]
             fn inside_an_extra_root_is_a_workspace_target_rooted_there() {
@@ -2463,7 +2454,7 @@ mod tests {
                             .unwrap()
                         };
                         let edit =
-                            |path: PathBuf| Access::for_path(&slash_separated(&path), &workspace);
+                            |path: PathBuf| Access::for_path(slash_separated(&path), &workspace);
 
                         for (path, group) in [
                             (config.join("git/config"), Shipped::Git),
@@ -2836,7 +2827,7 @@ mod tests {
                         store.create(&sample_header("s1"), &[]).unwrap();
                         let session_file = store.find_session_path("s1").unwrap();
                         let spill = artifact_dir(&session_file, "s1").join("tool-results/x.txt");
-                        let target = Access::for_path(&slash_separated(&spill), &workspace);
+                        let target = Access::for_path(slash_separated(&spill), &workspace);
 
                         for mode in [Mode::Manual, Mode::Yolo] {
                             let p = Policy::resolve(
@@ -3687,7 +3678,7 @@ mod tests {
                 for (spelled, denied) in [("config", true), ("../outside", false)] {
                     let walk = filter.walk(&outside, Path::new(spelled), &workspace);
                     assert_eq!(walk.withholds(&env), denied, "{spelled}");
-                    let gate = Access::for_path(&format!("{spelled}/.env"), &workspace);
+                    let gate = Access::for_path(format!("{spelled}/.env"), &workspace);
                     assert_eq!(
                         decide(&p, READ, &gate) == Decision::Deny,
                         denied,

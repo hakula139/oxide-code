@@ -10,9 +10,10 @@ use super::file::FileVerb;
 use super::view::{NumberedLine, ToolResultView};
 use super::{
     Prepared, Tool, ToolCtx, ToolMetadata, ToolOutput, ToolSpec, display_path, extract_input_field,
+    tool_path,
 };
 use crate::file_tracker::{CACHE_HIT_STUB, LastView, RecordRead};
-use crate::permission::{PermissionClass, tool_path};
+use crate::permission::PermissionClass;
 
 const DEFAULT_LINE_LIMIT: usize = 2000;
 const MAX_LINE_CHARS: usize = 2000;
@@ -259,9 +260,29 @@ mod tests {
     use crate::tool::local_testing::{canonical_tempdir, ctx, temp_ctx};
     use crate::tool::spill::MAX_OUTPUT_BYTES;
     use crate::util::fs::testing::symlink_file;
+    use crate::util::path::testing::HOME_VAR;
 
     mod result_view {
         use super::*;
+
+        #[test]
+        fn names_a_home_path_by_where_it_lands() {
+            let input = serde_json::json!({"file_path": "~/example.rs"});
+
+            let view = temp_env::with_var(HOME_VAR, Some("/home/u"), || {
+                ReadTool.result_view(
+                    &input,
+                    "1\tfn main() {}",
+                    &ToolMetadata::default(),
+                    Path::new("/repo"),
+                )
+            });
+
+            let Some(ToolResultView::ReadExcerpt { path, .. }) = view else {
+                panic!("expected a read excerpt, got {view:?}");
+            };
+            assert_eq!(path, "/home/u/example.rs");
+        }
 
         #[test]
         fn builds_read_excerpt() {

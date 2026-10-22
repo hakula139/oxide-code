@@ -14,7 +14,7 @@ pub mod view;
 pub(crate) mod write;
 
 use std::borrow::Cow;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::sync::Arc;
 
@@ -33,8 +33,8 @@ use self::tasks::{Task, TasksTool};
 use self::view::{ApprovalBody, ApprovalPreview, EditDiff, ToolResultView};
 use self::write::WriteTool;
 use crate::file_tracker::FileTracker;
-use crate::permission::{Access, PermissionClass, ReadFilter, Workspace, tool_path};
-use crate::util::path::slash_separated;
+use crate::permission::{Access, PermissionClass, ReadFilter, Workspace};
+use crate::util::path::{expand_user, slash_separated};
 use crate::util::text::ELLIPSIS;
 
 // ── Tool Spec ──
@@ -196,7 +196,7 @@ pub trait Tool: Send + Sync {
         let access = self
             .path_field()
             .and_then(|field| extract_input_field(&input, field))
-            .map(|path| Access::for_path(path, &ctx.workspace))
+            .map(|path| Access::for_path(tool_path(path), &ctx.workspace))
             .unwrap_or_default();
         if let (Some(field), Access::Path { canonical, .. }) = (self.path_field(), &access)
             && let Some(value) = input.get_mut(field)
@@ -384,6 +384,12 @@ fn invalid_input(error: &serde_json::Error) -> String {
 
 // ── Path Utilities ──
 
+/// A file tool's path argument with a leading `~` or `~/` expanded to the home directory, as
+/// config patterns read it. With no home directory, `~` stays literal.
+fn tool_path(raw: &str) -> PathBuf {
+    expand_user(raw).unwrap_or_else(|_| PathBuf::from(raw))
+}
+
 /// Renders `path` for chat display, relative to `base` when under it, as its file name when it is
 /// `base` itself, and in full otherwise.
 fn display_path(path: &Path, base: &Path) -> String {
@@ -448,7 +454,7 @@ pub(crate) mod local_testing {
     use tempfile::TempDir;
     use tokio_util::sync::CancellationToken;
 
-    use super::search::SearchRoot;
+    use super::search::{SearchRoot, search_path};
     use super::spill::run_capped;
     use super::{Tool, ToolCtx, ToolOutput, ToolRegistry, ToolSpec};
     use crate::file_tracker::FileTracker;
@@ -508,7 +514,7 @@ pub(crate) mod local_testing {
     /// `prepare` resolves it.
     pub(super) fn search_root(cwd: &Path, path: Option<&str>) -> Result<SearchRoot, String> {
         let workspace = Arc::new(Workspace::new(cwd));
-        let access = Access::for_path(path.unwrap_or("."), &workspace);
+        let access = Access::for_path(search_path(path), &workspace);
         SearchRoot::new(&access, path, workspace)
     }
 
@@ -810,6 +816,51 @@ mod tests {
                 assert_eq!(missing.access, Access::None, "tool {name}");
                 assert_eq!(missing.input, serde_json::json!({}), "tool {name}");
             }
+        }
+
+        #[test]
+        fn reads_a_leading_tilde_in_a_path_field_as_the_home_directory() {
+            let dir = canonical_tempdir();
+            let (cwd, home) = (dir.path().join("repo"), dir.path().join("home"));
+            fs::create_dir(&cwd).unwrap();
+            fs::create_dir(&home).unwrap();
+            let tools = built_in();
+
+            temp_env::with_var(HOME_VAR, Some(&home), || {
+                let deny = vec![Rule::parse(PermissionClass::Read, "~/.aws/**").unwrap()];
+                let ctx = ctx(&cwd);
+                let policy = Policy::resolve(
+                    Mode::Manual,
+                    deny,
+                    Vec::new(),
+                    Vec::new(),
+                    &[],
+                    &ctx.workspace,
+                )
+                .unwrap();
+                let (spec, read) = tools.get("read").unwrap();
+                let prepare =
+                    |path: &str| read.prepare(serde_json::json!({"file_path": path}), &ctx);
+
+                for (path, pinned) in [
+                    ("~/notes.md", home.join("notes.md")),
+                    ("~", home.clone()),
+                    ("~user/x", cwd.join("~user/x")),
+                ] {
+                    assert_eq!(
+                        prepare(path).input,
+                        serde_json::json!({"file_path": pinned}),
+                        "{path}"
+                    );
+                }
+                for path in ["~/.aws/credentials", "~/.ssh/id_ed25519"] {
+                    assert_eq!(
+                        policy.decide(spec.class, &prepare(path).access.as_target()),
+                        Decision::Deny,
+                        "{path}"
+                    );
+                }
+            });
         }
 
         #[tokio::test]

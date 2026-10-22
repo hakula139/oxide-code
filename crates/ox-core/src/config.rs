@@ -2076,7 +2076,7 @@ mod tests {
                 .await
                 .unwrap();
 
-                let target = Access::for_path(&key.to_string_lossy(), &config.workspace);
+                let target = Access::for_path(&key, &config.workspace);
                 assert_eq!(
                     config
                         .permission
