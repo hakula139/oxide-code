@@ -6,11 +6,12 @@ Companions: [commands.md](commands.md), [modals.md](modals.md). Underlying resea
 
 ## Implementation
 
-`slash/resume` hosts both `ResumeCmd` and `ResumePicker`. Bare returns the picker as `SlashOutcome::Modal`, which forwards `Op::Resume` with `ResumeTarget::Path`, the chosen session file. Typed-arg forwards `ResumeTarget::Prefix` through `command::resume`, which the bare REPL runs too, and the engine resolves the prefix through `resolve_saved_prefix` (current project first, widening to all projects on miss).
+`slash/resume` hosts both `ResumeCmd` and `ResumePicker`. Bare returns the picker as `SlashOutcome::Modal`, which forwards `Op::Resume` with `ResumeTarget::Path`, the chosen session file. Typed-arg forwards `ResumeTarget::Prefix` through `command::resume`, which the bare REPL runs too, and the engine resolves the prefix through `resolve_saved_prefix` (current project first, widening to all projects on miss). The resolver skips the live session, and a prefix that matches only the live session fails the resume with a message saying so.
 
 The picker wraps [`SearchableList`](modals.md) and adds these controls and display rules:
 
-- The picker's named actions come from `ACTIONS`, a [`Keymap`](modals.md) that pairs each action with its key and footer label, and the footer renders its hints from the same entries. Up / Down and PageUp / PageDown, which move the cursor, are handled outside the table, and other keys edit the query.
+- The picker's named actions come from `ACTIONS`, a [`Keymap`](modals.md) that pairs each action with its key and footer label, and the footer renders its hints from the same entries. Up / Down and PageUp / PageDown, which move the cursor, are handled outside the table, and other keys edit the query through the shared `LineEditor`.
+- A query matches each row's ID and title, plus the project when the all-projects view shows it.
 - Each row is one line of columns: the ID prefix, the title, the branch, the project (only in the all-projects view), the message count, abbreviated past 999 as in `12k msgs`, and the relative time, abbreviated as in `3h ago`. The title takes the width the fixed-width columns leave and truncates with an ellipsis. When the title would drop below 24 columns, the ID goes first, then the branch, the project, and the message count, so an 80-column all-projects row keeps the title, project, count, and time, and a narrow row keeps only the title and the time. Below a 12-column title the time drops too, so the title always shows.
 - Rows load in pages of 30 from a `SessionWalk` on a worker thread, which hands each page back to the picker's `Modal::tick`. The picker asks for the next page after each key while fewer than one viewport of rows passing the filter sits below the cursor, so it loads ahead and typical scrolling never waits on the store, and a query keeps loading pages until it fills the viewport with matches or the walk ends. While pages remain, the cursor stops at the last row in place of wrapping, and a query without matches reads `Searching for ...`. A worker that dies without a page, which only a panic does, shows as a load error in the footer.
 - Tab toggles current-project ↔ all-projects, and Ctrl+A toggles the active ↔ archived view, retitling the header to `Resume archived session`. Both restart the walk while preserving the typed query. Dropping the old view's worker handle tells the worker to stop before its next file, and its page is discarded.
@@ -24,7 +25,9 @@ The picker wraps [`SearchableList`](modals.md) and adds these controls and displ
 
 `session/handle` provides `roll_into(...)`, which mirrors `roll(...)`. It loads and sanitizes the target first, so a load failure leaves the live session untouched. Loading an archived target appends an entry unarchiving it, which `RollIntoOutcome::unarchived` reports. It then swaps the handle in place and finalizes the old session with the file tracker snapshots the engine passes in. `RollIntoOutcome` carries the target's `LoadedTranscript` (messages, recorded prompt context, compact boundary, tool-result metadata, recorded usage, task list, and file tracker snapshots), its title, and the prior session's finalize failure.
 
-`Engine::resume` in `engine.rs` resolves the target to a session file, drives `roll_into`, and adopts the loaded transcript, which rebinds `Client::set_session_id`, replays the recorded prompt context, and builds a fresh file tracker through `FileTracker::restored`, which holds back the paths that drifted on disk. It then emits `Event::SessionResumed { id, title, unarchived, history }`, followed in order by the old session's finalize failure as an `Event::Error`, an `Event::UsageUpdated` carrying the restored session cost when it is non-zero, the restored task list, an `Event::Notice` for each instruction file the rebuilt prompt cannot read, an `Event::Notice` for any tracker drift, and the interrupted-response `Event::Error` when the transcript ends mid-reply. `Event::SessionReady` ends the resume, while a prefix without a unique match or a `roll_into` failure ends it with `Event::TurnFailed` and keeps the live session. The history comes from `Engine::take_history`, the same projection the TUI paints at startup, which runs the adopted transcript through `session::history::interactions`: the compaction boundary first, then text, thinking, and each tool call paired with its result, with icons, labels, and result views already resolved.
+`Engine::resume` in `engine.rs` resolves the target to a session file, drives `roll_into`, and adopts the loaded transcript, so neither form of the command resolves a prefix or touches the session handle. Adopting it rebinds `Client::set_session_id`, replays the recorded prompt context, and builds a fresh file tracker through `FileTracker::restored`, which holds back the paths that drifted on disk. It then emits `Event::SessionResumed { id, title, unarchived, history }`, followed in order by the old session's finalize failure as an `Event::Error`, an `Event::UsageUpdated` carrying the restored session cost when it is non-zero, the restored task list, an `Event::Notice` for each instruction file the rebuilt prompt cannot read, an `Event::Notice` for any tracker drift, and the interrupted-response `Event::Error` when the transcript ends mid-reply. `Event::SessionReady` ends the resume, while a prefix without a unique match or a `roll_into` failure ends it with `Event::TurnFailed` and keeps the live session. The history comes from `Engine::take_history`, the same projection the TUI paints at startup. That projection runs the adopted transcript through `session::history::interactions`: the compaction boundary first, then text, thinking, and each tool call paired with its result, with icons, labels, and result views already resolved, so the TUI renders it without a tool registry.
+
+On `SessionResumed`, `apply_session_resumed` rebuilds the chat, clears the modals, and discards the queue with a notice. At `SessionReady`, the TUI returns to idle and submits the queue head, or only returns to idle after a cancel that lost the race to the swap, and a failed resume returns to idle with the queue intact.
 
 `SessionStore::walk` stats every candidate file and sorts by mtime desc, then yields the readable sessions in the requested archive state, parsing each file as it is drawn. `SessionStore::list_paged` takes a page from the walk, reading on until it holds one session past the page. `ListPage` carries the page and whether more matching sessions follow it. `SessionStore::list_matching` filters the same walk by the ID in each file name, so a prefix lookup parses only the matching files. Each `SessionInfo` carries the file it was read from, and resume and delete act on that file. `ox --list --limit N` (default `30`, `0` = unbounded) prints ``... more (use `--limit N` to raise the cap or `--limit 0` to list all)`` when more sessions follow the cap.
 
@@ -50,7 +53,7 @@ The picker wraps [`SearchableList`](modals.md) and adds these controls and displ
 
 10. **Substring search only.** Codex and opencode both use plain substring search.
 
-11. **Project scoping defaults to current cwd, with Tab widening.** Matches the `ox -c` resolver semantics: CLI `--all` widens up front, in-picker `Tab` toggles, and the typed query persists across the rebuild.
+11. **Project scoping defaults to the current project, with Tab widening.** Matches the `ox -c` resolver semantics: CLI `--all` widens up front, in-picker `Tab` toggles, and the typed query persists across the rebuild.
 
 12. **Load pages in the background as the cursor nears the end.** Loading the next page while a viewport of matching rows remains below the cursor keeps paging out of sight and lets a query reach every session in scope. Parsing reads each transcript in full, and a page can parse far more files than it keeps when most sessions sit in the other archive view, so the reads run on a worker thread. On 1,000 sessions of 650 KB each, a 30-session page took about 10 ms with a warm cache, while a scan that found no match in the requested view took about 250 ms. Listing and sorting the files stays on the UI thread and took a few milliseconds there.
 
@@ -58,7 +61,7 @@ The picker wraps [`SearchableList`](modals.md) and adds these controls and displ
 
 14. **`--list --limit 0` opts back into unbounded listing.** Scripts piping output need the full set, so `0` is the explicit unbounded value and no magic large default is needed.
 
-15. **Bare suppresses echo, typed-arg echoes.** Mirrors the universal rule: the modal is the response, so the typed `> /resume` line stays out of history. Typed `> /resume <id>` echoes because the swap-confirmation system message anchors the pair.
+15. **Bare suppresses echo, typed-arg echoes.** Mirrors the universal rule: the modal is the response, so the typed `> /resume` line stays out of history. Typed `> /resume <id>` echoes, so the line shows while the swap runs and heads the error when the swap fails. A successful resume then replaces the chat with the target's history.
 
 16. **Always show the picker, even with one or zero matches.** Auto-resuming on a single match would surprise users who typed `/resume` just to peek the list, and an empty list with a clear message is better than silently doing nothing.
 
@@ -69,22 +72,6 @@ The picker wraps [`SearchableList`](modals.md) and adds these controls and displ
 19. **One keymap drives keys and hints.** Each named action carries its key and a footer label that can depend on the view, so `handle_key` dispatches through the table that renders the footer, and adding a key adds its hint. The picker captures Esc so dismissal is one of those actions. The scope status stays out of the table. [#278](https://github.com/hakula139/oxide-code/issues/278) tracks rebinding these actions, and [#281](https://github.com/hakula139/oxide-code/issues/281) tracks fitting their hints to narrow footers.
 
 20. **Ctrl+X moves a session between views in place.** Clearing out a long list takes one key per session, with no ID prefix to read off and type. Ctrl+X is free among the picker's keys. The filter's `LineEditor` maps it to cutting a selection, which the editor never draws, so the picker shadows it just as it shadows the editor's Ctrl+A (line start), Ctrl+D (delete forward), and Ctrl+U (undo). The highlight moves to the next row, so repeated presses work through a run of sessions.
-
-## Per-Component Notes
-
-- **`ResumePicker`**: Each `ACTIONS` entry binds a `PickerAction` to its key and label, and keys no entry binds edit the query through the shared `LineEditor`.
-
-- **`SessionRow`**: A query matches the ID and title, plus the project when the all-projects view shows it.
-
-- **`SessionStore::walk`**: Takes a `ListScope` with project and archive flags. `list_paged` takes a page from the same walk.
-
-- **`/resume <id>` resolver**: `resolve_saved_prefix` skips the live session, and a prefix that matches only the live session fails the resume with a message saying so.
-
-- **`Op::Resume`**: The engine resolves the target and owns the `roll_into` call, so the slash command never touches the session store or handle.
-
-- **`Event::SessionResumed`**: Carries the history already projected for display, so the TUI renders it without a tool registry.
-
-- **`apply_session_resumed` (TUI)**: While the resume runs, `Status::Resuming` holds queued prompts, and a failed resume returns to idle with them still queued. At `SessionReady`, the TUI returns to idle and submits the queue head, or only returns to idle after a cancel that lost the race to the swap.
 
 ## Out of Scope
 

@@ -32,7 +32,6 @@ use tracing::{debug, warn};
 
 use ox_core::config::ConfigSnapshot;
 use ox_core::engine::{Engine, EngineHandle};
-use ox_core::util::git;
 use ox_core::util::path::tildify;
 
 use action::Action;
@@ -77,7 +76,7 @@ pub async fn run<S: Debug>(
     let session_info = LiveSessionInfo {
         cwd: tildify(cwd),
         working_dir: Some(cwd.to_owned()),
-        project_root: git::project_root(cwd),
+        project_root: engine.project_root().to_owned(),
         version: env!("CARGO_PKG_VERSION"),
         session_id: engine.session_id().to_owned(),
         session_allow: Vec::new(),

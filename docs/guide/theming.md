@@ -98,7 +98,7 @@ Each slot maps to one role in the TUI. Override a slot by name to restyle that r
 | Slot    | Role                                                                             |
 | ------- | -------------------------------------------------------------------------------- |
 | `text`  | Primary text                                                                     |
-| `muted` | Secondary text, labels, soft borders                                             |
+| `muted` | Secondary text, labels, and line numbers                                         |
 | `dim`   | Low-emphasis text such as tool output, hints, modal footers, and unselected rows |
 
 `dim` is the faintest color for text people read, so keep it readable against your background. The built-ins give it at least the contrast of `tool_border`, and at least 4:1 on their dark backgrounds. Rules and unfocused borders (`border_unfocused`, `horizontal_rule`, `table_border`, and `separator`) can sit a step fainter because they only frame content.

@@ -62,7 +62,7 @@ enum WriterStatus {
 impl SessionState {
     pub(super) fn fresh(store: SessionStore, model: &str, git_branch: Option<String>) -> Self {
         let created_at = OffsetDateTime::now_utc();
-        let (session_id, header) = new_header(store.cwd(), model, git_branch, created_at);
+        let (session_id, header) = new_header(&store, model, git_branch, created_at);
         let session_file = store.session_file(&session_id, created_at);
         Self {
             artifact_dir: artifact_dir(&session_file, &session_id).into(),
@@ -317,15 +317,17 @@ impl SessionState {
 // ── Helpers ──
 
 fn new_header(
-    cwd: &Path,
+    store: &SessionStore,
     model: &str,
     git_branch: Option<String>,
     created_at: OffsetDateTime,
 ) -> (String, Entry) {
     let session_id = Uuid::new_v4().to_string();
+    let project = store.project();
     let header = Entry::Header {
         session_id: session_id.clone(),
-        cwd: cwd.display().to_string(),
+        cwd: project.cwd.clone(),
+        project_root: Some(project.root.clone()),
         model: model.to_owned(),
         created_at,
         version: CURRENT_VERSION,

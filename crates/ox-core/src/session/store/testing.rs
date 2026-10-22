@@ -8,25 +8,32 @@ use time::OffsetDateTime;
 
 use super::listing::ListScope;
 use super::{
-    SessionData, SessionStore, SessionWriter, encode_lines, file_session_id,
+    Project, SessionData, SessionStore, SessionWriter, encode_lines, file_session_id,
     load_session_data_from_path, open_append_file, set_archived_at,
 };
 use crate::session::entry::{CURRENT_VERSION, Entry, SessionInfo, TitleSource};
 
-pub(super) const TEST_PROJECT: &str = "test-project";
+pub(crate) const TEST_PROJECT: &str = "test-project";
 
 // ── SessionStore ──
 
 impl SessionStore {
-    /// Opens `project_name` under `sessions_dir`, recording `/work/<project_name>` as the cwd.
+    /// Opens `project_name` under `sessions_dir`, recording `/work/<project_name>` as both the
+    /// launch directory and the project root.
     pub fn open_at(sessions_dir: PathBuf, project_name: &str) -> Result<Self> {
         fs::create_dir_all(&sessions_dir)?;
         let project_dir = sessions_dir.join(project_name);
         fs::create_dir_all(&project_dir)?;
+        let root = format!("/work/{project_name}");
         Ok(Self {
             sessions_dir,
             project_dir,
-            cwd: Path::new("/work").join(project_name),
+            cwd_dir: None,
+            project_root: PathBuf::from(&root),
+            project: Project {
+                cwd: root.clone(),
+                root,
+            },
         })
     }
 
@@ -107,17 +114,7 @@ pub fn seed_test_session(
     created_at: OffsetDateTime,
 ) {
     let mut writer = store
-        .create(
-            &Entry::Header {
-                session_id: session_id.to_owned(),
-                cwd: "/work/proj".to_owned(),
-                model: "claude-opus-5-5".to_owned(),
-                created_at,
-                version: CURRENT_VERSION,
-                git_branch: None,
-            },
-            &[],
-        )
+        .create(&test_header(store, session_id, created_at), &[])
         .expect("the session is created");
     if let Some(t) = title {
         writer
@@ -137,6 +134,23 @@ pub fn seed_test_session(
             .expect("the summary is appended");
     }
     set_modified(writer.path(), created_at);
+}
+
+/// The header `store` writes for session `session_id` created at `created_at`.
+pub(super) fn test_header(
+    store: &SessionStore,
+    session_id: &str,
+    created_at: OffsetDateTime,
+) -> Entry {
+    Entry::Header {
+        session_id: session_id.to_owned(),
+        cwd: store.project.cwd.clone(),
+        project_root: Some(store.project.root.clone()),
+        model: "claude-opus-5-5".to_owned(),
+        created_at,
+        version: CURRENT_VERSION,
+        git_branch: None,
+    }
 }
 
 /// Archives the seeded session `session_id`, keeping the last-active time that orders listings.

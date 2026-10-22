@@ -2,7 +2,7 @@
 source: crates/ox-core/src/session/handle.rs
 expression: write_every_entry(dir.path()).await
 ---
-{"type":"header","session_id":"<UUID-1>","cwd":"<CWD>","model":"m","created_at":"<TS-3>","version":1,"git_branch":"main"}
+{"type":"header","session_id":"<UUID-1>","cwd":"<CWD>","project_root":"<ROOT>","model":"m","created_at":"<TS-3>","version":1,"git_branch":"main"}
 {"type":"context","environment":{"cwd":"<CWD>","is_git":false,"platform":"","shell":"","os_version":""},"user_context":"","seen":{"instructions":"","date":"2026-01-01","model":""},"timestamp":"<TS-4>"}
 {"type":"title","title":"Edit f.rs","source":"first_prompt","updated_at":"<TS-4>"}
 {"type":"message","uuid":"<UUID-2>","message":{"role":"user","content":[{"type":"text","text":"Edit f.rs"}]},"timestamp":"<TS-4>"}
