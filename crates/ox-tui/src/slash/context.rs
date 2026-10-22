@@ -14,8 +14,9 @@ pub(crate) struct LiveSessionInfo {
     /// The real path behind the display `cwd`, for the status bar's git probes and the session
     /// store.
     pub(crate) working_dir: Option<PathBuf>,
-    /// The git repository containing the session's working directory, or that directory itself
-    /// outside a repository. `/init` checks it for instruction files, and `/diff` runs git there.
+    /// The session's project, which scopes the session store, where `/init` checks for instruction
+    /// files, and where `/diff` runs git: the git repository containing the session's working
+    /// directory, or that directory itself outside a repository.
     pub(crate) project_root: PathBuf,
     pub(crate) version: &'static str,
     pub(crate) session_id: String,

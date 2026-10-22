@@ -30,26 +30,34 @@ const SESSIONS_DIR: &str = "sessions";
 
 // ── SessionStore ──
 
-/// Low-level session file operations scoped to a project subdirectory.
+/// Low-level session file operations scoped to one project, the Git repository root of the
+/// launch directory or the launch directory itself outside a repository.
 #[derive(Clone)]
 pub struct SessionStore {
     sessions_dir: PathBuf,
+    /// Where new sessions go, named for the project root.
     project_dir: PathBuf,
+    /// Where releases up to 0.1.0-alpha.5 put sessions started in `cwd`, named for it, when that
+    /// differs from `project_dir`.
+    cwd_dir: Option<PathBuf>,
     cwd: PathBuf,
+    project_root: PathBuf,
 }
 
 impl SessionStore {
-    /// Opens the store scoped to the project at `cwd`, which new session headers record.
-    pub fn open(cwd: &Path) -> Result<Self> {
+    /// Opens the store for the project at `project_root`, launched in `cwd`. New session headers
+    /// record both.
+    pub fn open(cwd: &Path, project_root: &Path) -> Result<Self> {
         let sessions_dir = app_dir(XdgBase::Data)
             .map(|dir| dir.join(SESSIONS_DIR))
             .context("failed to determine the session storage directory")?;
 
         create_private_dir_all(&sessions_dir)?;
 
-        let project_name = sanitize_cwd(cwd);
+        let project_name = sanitize_cwd(project_root);
         let project_dir = sessions_dir.join(&project_name);
         create_private_dir_all(&project_dir)?;
+        let cwd_dir = Some(sessions_dir.join(sanitize_cwd(cwd))).filter(|dir| *dir != project_dir);
 
         debug!(
             "session store at {} (project: {project_name})",
@@ -58,12 +66,18 @@ impl SessionStore {
         Ok(Self {
             sessions_dir,
             project_dir,
+            cwd_dir,
             cwd: cwd.to_path_buf(),
+            project_root: project_root.to_path_buf(),
         })
     }
 
     pub(super) fn cwd(&self) -> &Path {
         &self.cwd
+    }
+
+    pub(super) fn project_root(&self) -> &Path {
+        &self.project_root
     }
 
     /// Where [`Self::create`] puts the file of session `session_id` created at `created_at`.
@@ -612,6 +626,7 @@ struct HeaderInfo {
     session_id: String,
     cwd: String,
     git_branch: Option<String>,
+    project_root: Option<String>,
 }
 
 /// Parses the first non-empty line as the session header and validates its ID.
@@ -630,6 +645,7 @@ fn read_header<R: BufRead>(lines: &mut JsonlLines<R>, path: &Path) -> Result<Hea
         session_id,
         cwd,
         git_branch,
+        project_root,
         ..
     } = serde_json::from_str(line).with_context(no_header)?
     else {
@@ -640,6 +656,7 @@ fn read_header<R: BufRead>(lines: &mut JsonlLines<R>, path: &Path) -> Result<Hea
         session_id,
         cwd,
         git_branch,
+        project_root,
     })
 }
 
@@ -681,7 +698,7 @@ mod tests {
                     ("XDG_DATA_HOME", Some(xdg.to_string_lossy().into_owned())),
                     (HOME_VAR, Some(home.path().to_string_lossy().into_owned())),
                 ],
-                async { SessionStore::open(Path::new("/work/proj")) },
+                async { SessionStore::open(Path::new("/work/proj"), Path::new("/work/proj")) },
             )
             .await
             .unwrap()
@@ -708,7 +725,7 @@ mod tests {
                     ("XDG_DATA_HOME", None),
                     (HOME_VAR, Some(home.path().to_string_lossy().into_owned())),
                 ],
-                async { SessionStore::open(Path::new("/work/proj")) },
+                async { SessionStore::open(Path::new("/work/proj"), Path::new("/work/proj")) },
             )
             .await
             .unwrap();

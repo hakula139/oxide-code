@@ -31,6 +31,10 @@ pub(crate) enum Entry {
         /// The branch the session started on, which tells sibling sessions apart in the picker.
         #[serde(skip_serializing_if = "Option::is_none")]
         git_branch: Option<String>,
+        /// The project the session belongs to, absent from sessions that releases up to
+        /// 0.1.0-alpha.5 wrote, whose project is their `cwd`.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        project_root: Option<String>,
     },
     /// Prompt state a resume rebuilds the request prefix from. Written in one batch ahead of the
     /// user message that first carries it, with the same timestamp, and bound to the next message
@@ -183,6 +187,7 @@ mod tests {
             created_at: datetime!(2026-04-16 12:00:00 UTC),
             version: CURRENT_VERSION,
             git_branch: None,
+            project_root: Some("/home/user".to_owned()),
         };
         let json = serde_json::to_value(&entry).unwrap();
         assert_eq!(json["type"], "header");
@@ -196,6 +201,7 @@ mod tests {
             created_at,
             version,
             git_branch,
+            project_root,
         } = parsed
         else {
             panic!("expected Header");
@@ -206,6 +212,7 @@ mod tests {
         assert_eq!(created_at, datetime!(2026-04-16 12:00:00 UTC));
         assert_eq!(version, CURRENT_VERSION);
         assert!(git_branch.is_none());
+        assert_eq!(project_root.as_deref(), Some("/home/user"));
     }
 
     #[test]

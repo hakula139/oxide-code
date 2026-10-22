@@ -55,6 +55,8 @@ impl ListPage {
 pub struct SessionWalk {
     paths: vec::IntoIter<(PathBuf, OffsetDateTime)>,
     archived: bool,
+    /// The project a home-project walk keeps, `None` for a walk of every project.
+    project: Option<Project>,
 }
 
 impl SessionWalk {
@@ -68,8 +70,9 @@ impl SessionWalk {
     pub fn next_unless(&mut self, stop: impl Fn() -> bool) -> Option<SessionInfo> {
         while !stop() {
             let (path, modified) = self.paths.next()?;
-            if let Some(info) = read_readable(&path, modified)
+            if let Some((info, project_root)) = read_readable(&path, modified)
                 && info.archived == self.archived
+                && in_scope(self.project.as_ref(), &info, project_root.as_deref())
             {
                 return Some(info);
             }
@@ -86,6 +89,30 @@ impl Iterator for SessionWalk {
     }
 }
 
+// ── Project ──
+
+/// The project a home-project listing keeps: a session recorded in it, or one written before
+/// headers recorded a project whose `cwd` is the launch directory or the project root.
+#[derive(Debug)]
+struct Project {
+    cwd: String,
+    root: String,
+}
+
+impl Project {
+    /// Returns whether a session whose header records `cwd` and `project_root` belongs here.
+    fn owns(&self, cwd: &str, project_root: Option<&str>) -> bool {
+        match project_root {
+            Some(root) => root == self.root,
+            None => cwd == self.cwd || cwd == self.root,
+        }
+    }
+}
+
+fn in_scope(project: Option<&Project>, info: &SessionInfo, project_root: Option<&str>) -> bool {
+    project.is_none_or(|project| project.owns(&info.cwd, project_root))
+}
+
 // ── Listing ──
 
 impl SessionStore {
@@ -95,6 +122,7 @@ impl SessionStore {
         Ok(SessionWalk {
             paths: self.session_paths(scope.all)?.into_iter(),
             archived: scope.archived,
+            project: self.scope_project(scope.all),
         })
     }
 
@@ -122,15 +150,36 @@ impl SessionStore {
     pub(crate) fn list_matching(&self, prefix: &str, all: bool) -> Result<Vec<SessionInfo>> {
         let mut paths = self.session_paths(all)?;
         paths.retain(|(path, _)| file_session_id(path).is_some_and(|id| id.starts_with(prefix)));
-        Ok(read_session_infos(paths.into_iter()).collect())
+        let project = self.scope_project(all);
+        Ok(paths
+            .into_iter()
+            .filter_map(|(path, modified)| read_readable(&path, modified))
+            .filter(|(info, project_root)| {
+                in_scope(project.as_ref(), info, project_root.as_deref())
+            })
+            .map(|(info, _)| info)
+            .collect())
     }
 
-    /// Session files paired with their mtimes, most recently active first.
+    /// The project a walk of the home project keeps, or `None` when `all` widens it.
+    fn scope_project(&self, all: bool) -> Option<Project> {
+        (!all).then(|| Project {
+            cwd: self.cwd.display().to_string(),
+            root: self.project_root.display().to_string(),
+        })
+    }
+
+    /// Session files paired with their mtimes, most recently active first. The home project's
+    /// files are in its own directory and, for older sessions, the launch directory's.
     fn session_paths(&self, all: bool) -> Result<Vec<(PathBuf, OffsetDateTime)>> {
         let mut paths = if all {
             self.collect_paths_all_projects()?
         } else {
-            collect_session_paths(&self.project_dir)?
+            let mut paths = collect_session_paths(&self.project_dir)?;
+            if let Some(cwd_dir) = self.cwd_dir.as_ref().filter(|dir| dir.is_dir()) {
+                paths.append(&mut collect_session_paths(cwd_dir)?);
+            }
+            paths
         };
         sort_paths_recent_first(&mut paths);
         Ok(paths)
@@ -183,15 +232,8 @@ fn sort_paths_recent_first(paths: &mut [(PathBuf, OffsetDateTime)]) {
         .sort_by(|(p1, m1), (p2, m2)| m2.cmp(m1).then_with(|| p2.file_name().cmp(&p1.file_name())));
 }
 
-/// Parses `paths` in order, warn-skipping unreadable files.
-fn read_session_infos(
-    paths: impl Iterator<Item = (PathBuf, OffsetDateTime)>,
-) -> impl Iterator<Item = SessionInfo> {
-    paths.filter_map(|(path, modified)| read_readable(&path, modified))
-}
-
 /// [`read_session_info`], warn-skipping an unreadable file.
-fn read_readable(path: &Path, modified: OffsetDateTime) -> Option<SessionInfo> {
+fn read_readable(path: &Path, modified: OffsetDateTime) -> Option<(SessionInfo, Option<String>)> {
     read_session_info(path, modified)
         .inspect_err(|e| warn!("skipping unreadable session file {}: {e:#}", path.display()))
         .ok()
@@ -204,15 +246,20 @@ const TITLE_LINE_PREFIX: &str = r#"{"type":"title""#;
 const ARCHIVE_LINE_PREFIX: &str = r#"{"type":"archive""#;
 const SUMMARY_LINE_PREFIX: &str = r#"{"type":"summary""#;
 
-/// Reads the header, the latest title and summary, and the archive state. `last_active_at` is the
-/// mtime the walk sorted by, so the listed time matches the order.
-fn read_session_info(path: &Path, last_active_at: OffsetDateTime) -> Result<SessionInfo> {
+/// Reads the header, the latest title and summary, and the archive state, returned with the
+/// header's project root. `last_active_at` is the mtime the walk sorted by, so the listed time
+/// matches the order.
+fn read_session_info(
+    path: &Path,
+    last_active_at: OffsetDateTime,
+) -> Result<(SessionInfo, Option<String>)> {
     let file = File::open(path).with_context(|| format!("failed to open {}", path.display()))?;
     let mut lines = JsonlLines::new(BufReader::new(&file));
     let HeaderInfo {
         session_id,
         cwd,
         git_branch,
+        project_root,
     } = read_header(&mut lines, path)?;
 
     let mut title: Option<TitleInfo> = None;
@@ -251,7 +298,7 @@ fn read_session_info(path: &Path, last_active_at: OffsetDateTime) -> Result<Sess
         }
     }
 
-    Ok(SessionInfo {
+    let info = SessionInfo {
         session_id,
         path: path.to_owned(),
         cwd,
@@ -260,7 +307,8 @@ fn read_session_info(path: &Path, last_active_at: OffsetDateTime) -> Result<Sess
         exit,
         git_branch,
         archived,
-    })
+    };
+    Ok((info, project_root))
 }
 
 #[cfg(test)]
@@ -269,15 +317,29 @@ mod tests {
     use uuid::Uuid;
 
     use super::*;
-    use crate::session::entry::{CURRENT_VERSION, TitleSource};
+    use crate::session::entry::TitleSource;
     use crate::session::store::local_testing::{
         sample_header, sample_message_entry, sample_summary_entry, sample_title_entry,
         test_session_file, write_newest_corrupt_session,
     };
     use crate::session::store::set_archived_at;
     use crate::session::store::testing::{
-        seed_test_session, set_modified, test_project_dir, test_store,
+        listed_ids, seed_test_session, set_modified, test_header, test_project_dir, test_store,
     };
+    use crate::util::path::testing::HOME_VAR;
+
+    /// A header that records `cwd` and, from releases that record one, `project_root`.
+    fn header_in(session_id: &str, cwd: &str, project_root: Option<&str>) -> Entry {
+        Entry::Header {
+            session_id: session_id.to_owned(),
+            cwd: cwd.to_owned(),
+            model: "m".to_owned(),
+            created_at: datetime!(2026-04-15 10:00:00 UTC),
+            version: crate::session::entry::CURRENT_VERSION,
+            git_branch: None,
+            project_root: project_root.map(str::to_owned),
+        }
+    }
 
     /// Builds `count` sessions whose mtimes and file names both ascend in seed order.
     fn seed_n_sessions(store: &SessionStore, count: usize) {
@@ -286,17 +348,7 @@ mod tests {
             let offset = i64::try_from(i).expect("test count fits i64");
             let created_at = datetime!(2026-04-15 10:00:00 UTC) + time::Duration::seconds(offset);
             let mut writer = store
-                .create(
-                    &Entry::Header {
-                        session_id: id.clone(),
-                        cwd: "/work/project".to_owned(),
-                        model: "m".to_owned(),
-                        created_at,
-                        version: CURRENT_VERSION,
-                        git_branch: None,
-                    },
-                    &[],
-                )
+                .create(&test_header(store, &id, created_at), &[])
                 .unwrap();
             writer
                 .append(&[sample_title_entry(&format!("Title {i}"))])
@@ -337,6 +389,91 @@ mod tests {
         }
     }
 
+    mod project {
+        use super::*;
+
+        mod owns {
+            use super::*;
+
+            #[test]
+            fn keeps_a_recorded_project_or_an_older_session_started_in_it() {
+                let project = Project {
+                    cwd: "/repo/sub".to_owned(),
+                    root: "/repo".to_owned(),
+                };
+
+                assert!(project.owns("/elsewhere", Some("/repo")));
+                assert!(!project.owns("/repo", Some("/repo-b")));
+                assert!(project.owns("/repo/sub", None));
+                assert!(project.owns("/repo", None));
+                assert!(!project.owns("/repo/other", None));
+            }
+        }
+    }
+
+    mod walk {
+        use super::*;
+
+        #[test]
+        fn leaves_out_another_project_whose_directory_name_collides() {
+            let dir = tempfile::tempdir().unwrap();
+            let store = test_store(dir.path());
+            seed_test_session(
+                &store,
+                "home",
+                None,
+                None,
+                datetime!(2026-04-15 10:00:00 UTC),
+            );
+            let spaced = "/work/test project";
+            for (id, project_root) in [("recorded", Some(spaced)), ("older", None)] {
+                store
+                    .create(&header_in(id, spaced, project_root), &[])
+                    .unwrap();
+            }
+
+            let all: Vec<_> = store
+                .walk(ListScope {
+                    all: true,
+                    archived: false,
+                })
+                .unwrap()
+                .map(|info| info.session_id)
+                .collect();
+
+            assert_eq!(listed_ids(&store, false), ["home"]);
+            assert_eq!(all.len(), 3, "{all:?}");
+        }
+
+        #[test]
+        fn includes_older_sessions_saved_under_the_launch_directory() {
+            let xdg = tempfile::tempdir().unwrap();
+            let home = tempfile::tempdir().unwrap();
+            temp_env::with_vars(
+                [
+                    ("XDG_DATA_HOME", Some(xdg.path().as_os_str())),
+                    (HOME_VAR, Some(home.path().as_os_str())),
+                ],
+                || {
+                    let (cwd, root) = (Path::new("/repo/sub"), Path::new("/repo"));
+                    let legacy = SessionStore::open(cwd, cwd).unwrap();
+                    legacy
+                        .create(&header_in("older", "/repo/sub", None), &[])
+                        .unwrap();
+                    let store = SessionStore::open(cwd, root).unwrap();
+                    seed_test_session(&store, "newer", None, None, datetime!(2030-01-01 0:00 UTC));
+
+                    assert_eq!(listed_ids(&store, false), ["newer", "older"]);
+                    assert_eq!(
+                        listed_ids(&SessionStore::open(root, root).unwrap(), false),
+                        ["newer"],
+                        "the root alone has no launch directory to read older sessions from",
+                    );
+                },
+            );
+        }
+    }
+
     mod list {
         use super::*;
 
@@ -347,14 +484,7 @@ mod tests {
 
             let mut wa = store
                 .create(
-                    &Entry::Header {
-                        session_id: "aaa".to_owned(),
-                        cwd: "/a".to_owned(),
-                        model: "m".to_owned(),
-                        created_at: datetime!(2026-04-15 10:00:00 UTC),
-                        version: CURRENT_VERSION,
-                        git_branch: None,
-                    },
+                    &test_header(&store, "aaa", datetime!(2026-04-15 10:00:00 UTC)),
                     &[],
                 )
                 .unwrap();
@@ -364,14 +494,7 @@ mod tests {
 
             let mut wb = store
                 .create(
-                    &Entry::Header {
-                        session_id: "bbb".to_owned(),
-                        cwd: "/b".to_owned(),
-                        model: "m".to_owned(),
-                        created_at: datetime!(2026-04-16 12:00:00 UTC),
-                        version: CURRENT_VERSION,
-                        git_branch: None,
-                    },
+                    &test_header(&store, "bbb", datetime!(2026-04-16 12:00:00 UTC)),
                     &[],
                 )
                 .unwrap();
@@ -394,14 +517,7 @@ mod tests {
 
             let mut w_old = store
                 .create(
-                    &Entry::Header {
-                        session_id: "aaa-old-header".to_owned(),
-                        cwd: "/a".to_owned(),
-                        model: "m".to_owned(),
-                        created_at: datetime!(2026-01-01 10:00:00 UTC),
-                        version: CURRENT_VERSION,
-                        git_branch: None,
-                    },
+                    &test_header(&store, "aaa-old-header", datetime!(2026-01-01 10:00:00 UTC)),
                     &[],
                 )
                 .unwrap();
@@ -410,14 +526,7 @@ mod tests {
 
             let mut w_new = store
                 .create(
-                    &Entry::Header {
-                        session_id: "zzz-new-header".to_owned(),
-                        cwd: "/z".to_owned(),
-                        model: "m".to_owned(),
-                        created_at: datetime!(2026-04-17 10:00:00 UTC),
-                        version: CURRENT_VERSION,
-                        git_branch: None,
-                    },
+                    &test_header(&store, "zzz-new-header", datetime!(2026-04-17 10:00:00 UTC)),
                     &[],
                 )
                 .unwrap();
