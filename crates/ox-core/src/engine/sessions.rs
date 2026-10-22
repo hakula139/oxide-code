@@ -232,7 +232,8 @@ mod tests {
 
     use super::*;
     use crate::client::anthropic::testing::{sse_body, sse_response};
-    use crate::engine::compaction::AutoCompactFailures;
+    use crate::config::compaction::CompactionConfig;
+    use crate::engine::compaction::{AutoCompactFailures, auto_compaction_due, request_tokens};
     use crate::engine::local_testing::{
         EchoTool, dead_test_session, finished_session, greeting_title, inert_ops, mount_title,
         next_matching, system_prompt, texts, tracked_paths, write_unreadable_instructions,
@@ -671,6 +672,39 @@ mod tests {
         use super::*;
 
         #[tokio::test]
+        async fn estimates_the_resumed_context_so_its_first_prompt_can_auto_compact() {
+            with_pinned_home(async {
+                let dir = tempfile::tempdir().unwrap();
+                let store = test_store(dir.path());
+                let saved = handle::start(&store, MODEL, None);
+                let saved_id = saved.session_id().to_owned();
+                saved
+                    .record_message(Message::user("x".repeat(240_000)))
+                    .await;
+                saved.record_message(Message::assistant("done")).await;
+                saved.finalize(Vec::new()).await;
+                let mut engine = engine("http://127.0.0.1:9".to_owned(), &store, dir.path()).await;
+                engine.compaction = CompactionConfig::with_threshold_for_test(50_000);
+                let path = store.find_session_path(&saved_id).unwrap();
+
+                engine
+                    .resume(&CapturingSink::default(), ResumeTarget::Path(path))
+                    .await;
+
+                assert_eq!(
+                    engine.context_estimate,
+                    Some(request_tokens(&engine.prompt, &[], &engine.messages))
+                );
+                assert!(auto_compaction_due(
+                    engine.auto_compaction(),
+                    engine.context_estimate,
+                    &engine.messages
+                ));
+            })
+            .await;
+        }
+
+        #[tokio::test]
         async fn swaps_in_the_file_state_that_still_matches_disk_and_reports_the_rest() {
             with_pinned_home(async {
                 let dir = tempfile::tempdir().unwrap();
@@ -855,11 +889,11 @@ mod tests {
                 let store = test_store(dir.path());
                 let mut engine = engine(server.uri(), &store, dir.path()).await;
                 let original_id = engine.session.session_id().to_owned();
-                let last_usage = TokenUsage::new(100_000, 10);
+                let context_estimate = 100_000;
                 let displayed_usage = TokenUsage::new(90_000, 9);
                 engine.messages = vec![Message::user("still here")];
                 engine.auto_compaction_failures = AutoCompactFailures::new(2);
-                engine.last_usage = Some(last_usage);
+                engine.context_estimate = Some(context_estimate);
                 engine.displayed_usage = Some(displayed_usage);
                 engine.total_estimated_cost_usd = 1.23;
                 let rule = Rule::parse(PermissionClass::Exec, "cargo test *").unwrap();
@@ -877,7 +911,7 @@ mod tests {
                 assert_eq!(engine.session.session_id(), original_id);
                 assert_eq!(engine.messages.len(), 1);
                 assert_eq!(engine.auto_compaction_failures, AutoCompactFailures::new(2));
-                assert_eq!(engine.last_usage, Some(last_usage));
+                assert_eq!(engine.context_estimate, Some(context_estimate));
                 assert_eq!(engine.displayed_usage, Some(displayed_usage));
                 assert!((engine.total_estimated_cost_usd - 1.23).abs() < f64::EPSILON);
                 assert_eq!(engine.policy.session_allow(), [rule]);

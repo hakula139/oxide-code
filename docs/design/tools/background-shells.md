@@ -20,7 +20,7 @@ The engine ends every open shell and waits for each tree to be gone when it roll
 
 ## Compaction
 
-Shells stay open through `/compact` and auto-compaction. Because the `bash` calls that started them are gone, a `<system-reminder>` block at the end of the synthetic summary message lists each open shell's ID, state, and command's first line. It follows the task list's block. The reminder is part of the persisted summary, so it remains visible when the session is resumed, even after the shells have ended. `bash_output` then reports that the ID is not open.
+Shells stay open through `/compact` and auto-compaction. Because the `bash` calls that started them are gone, a `<system-reminder>` block in the synthetic summary message lists each open shell's ID, state, and command's first line. It follows the task list's block and precedes the reminder to resume the task that a mid-turn compaction adds. The reminder is part of the persisted summary, so it remains visible when the session is resumed, even after the shells have ended. `bash_output` then reports that the ID is not open.
 
 ## Frontends
 

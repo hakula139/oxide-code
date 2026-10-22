@@ -12,7 +12,7 @@ ox -c -p "Run the tests again"                      # Continue the latest sessio
 
 - **Input**: When stdin is not a terminal, `ox -p` reads it to the end and attaches it after the prompt in a `<stdin>` block, so the model can tell your instruction from the data. Piped stdin without a prompt, as in `ox -p < task.md`, is the prompt itself, and a run with neither fails with status `2`. A script or program that runs `ox` with an open stdin it never closes, such as a pipe it never writes to, leaves `ox` waiting, and after 3 seconds `ox` says so on stderr. Redirect stdin from `/dev/null` to keep it away from `ox`.
 - **Sessions**: Each run starts and saves a new session, unless `-c` continues the latest one or `-r <id-prefix>` names one. Resume a run's session later with `ox -r <id-prefix>`, in the TUI or with another `-p`.
-- **Approvals**: No one can respond to approval prompts during a headless run, so calls that require approval are denied. The denial tells the model which allow pattern would permit the call, or which rule holds it. Add `allow` patterns for the calls your script needs, as described in [Rules](permissions.md#rules). Pass `--mode plan` to keep a run read-only, or `--mode yolo` to run tool calls without asking unless a rule denies or asks.
+- **Approvals**: No one can respond to approval prompts during a headless run, so calls that require approval are denied. The denial tells the model which allow pattern would permit the call, or which rule holds it. Add `allow` patterns for the calls your script needs, as described in [Rules](permissions.md#rules). Pass `--mode plan` to keep a run read-only, or `--mode yolo` to run tool calls without asking unless a rule denies or asks. In `yolo`, too, a `bash` command that `ox` cannot parse is denied, and the denial asks the model to rewrite it in simpler shell syntax.
 
 ## Output Formats
 
@@ -60,7 +60,7 @@ The result is the line printed by `json` and the final line of `stream-json`:
 - **`context_window`**: The model's context window, measured in tokens.
 - **`estimated_cost_usd`**: The estimated cost of all requests in the run at public per-token rates, or `null` for models with unknown rates.
 
-A turn reports usage when it ends, so after a signal, `usage` omits requests from the interrupted turn.
+A turn reports usage when it ends and before each automatic compaction inside it, so after a signal, `usage` omits the requests sent since the latest report.
 
 ## Events
 
@@ -78,15 +78,23 @@ Each `stream-json` line is an object with a `type` and, for most types, a `data`
 | `rate_limits_updated`       | A subscription's usage limits, described below                                                     |
 | `tasks_updated`             | The session's whole task list, described below                                                     |
 | `background_shells_updated` | Every open background shell, described below                                                       |
+| `auto_compaction_started`   | No `data`. An automatic compaction started, before the prompt or between the turn's rounds         |
+| `summary_token`             | The next chunk of the compaction summary                                                           |
+| `summary_discarded`         | No `data`. The summary streamed so far was dropped, because a retry starts over or it failed       |
+| `session_compacted`         | The compaction finished, described below                                                           |
 | `notice`                    | A warning the run works around, such as an instruction file it cannot read                         |
 | `error`                     | A problem that does not end the turn, such as a session write failure                              |
 | `turn_complete`             | No `data`. The turn finished with a reply                                                          |
+| `prompt_unsent`             | No `data`. The compaction before the prompt failed, so the prompt was never sent                   |
+| `turn_rolled_back`          | No `data`. The model refused, so the turn was removed from the session                             |
 | `turn_failed`               | Why the turn failed, including a refused request                                                   |
 
 ### Event Payloads
 
 - **`rate_limits_updated`** arrives with each response under a Claude subscription sign-in. Its `five_hour` and `seven_day` windows are each an object with `utilization`, the spent share from 0 to 1, and `resets_at`, the reset time in Unix seconds, or `null` when the response omits that window.
 - **`tasks_updated`** follows the `tool_call_end` of each successful `tasks` call. Its `data` is the task list in order, each task with its `content` and a `status` of `pending`, `in_progress`, or `completed`. An empty array means the list cleared, which happens once every task is completed or when the model sends an empty list.
+- **`session_compacted`** replaces the conversation with a summary when the context nears its window. Its `data` holds the `summary`, the `pre_count` of messages it replaced, `instructions` (`null` for automatic compactions), and the `trigger`, which is `mid_turn` between the turn's rounds and `auto` before the prompt of a continued or resumed session already past the auto-compaction threshold. After `mid_turn`, the turn goes on from the summary. A failed compaction ends the turn with `turn_failed`, after `prompt_unsent` when the prompt never went out. A headless prompt sends `/compact` to the model as text, so to compact after a failure, resume the session with `ox -r <id-prefix>` in the TUI or with `--no-tui` and run `/compact` there.
+- **`turn_rolled_back`** precedes the `turn_failed` of a refused request. The session drops the refused turn, or after a `mid_turn` compaction, only the work that followed the summary.
 - **`background_shells_updated`** arrives when a background shell starts, exits, or stops. Its `data` lists every open shell with its `id`, `command`, and `state`. The state's `type` is `running`, `exited` with the exit code in `data`, or `killed` with the signal number in `data`. A stopped shell leaves the list. When the run ends, every open shell stops without another event, so the last `background_shells_updated` can still list shells as running.
 
 ### Result Views

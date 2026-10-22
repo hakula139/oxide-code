@@ -631,7 +631,7 @@ mod tests {
         use super::*;
 
         #[test]
-        fn cancel_pops_and_yields_modal_action_cancelled() {
+        fn a_silent_close_pops_and_reports_the_cancel() {
             // A silent close yields `Some(Cancelled)`, so the App can tell it from a consumed key.
             let mut stack = ModalStack::default();
             stack.push(Box::new(ScriptedModal::new(ModalAction::Cancelled)));

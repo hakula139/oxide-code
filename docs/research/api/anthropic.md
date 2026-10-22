@@ -259,7 +259,7 @@ Invalidation order (from the Anthropic caching docs) is `tools → system → me
 
 ### `thinking.display`
 
-See [Extended Thinking § Display modes](extended-thinking.md#display-modes). The default is `"omitted"`. `show_thinking=true` in oxide-code opts into `"summarized"`. With it off, requests on every supported model except Haiku 5.5 use `"updates"`.
+See [Extended Thinking § Display modes](extended-thinking.md#display-modes). The default is `"omitted"`. `show_thinking=true` in oxide-code opts into `"summarized"`. With it off, requests on every supported model except Haiku 5.5 use `"updates"`, and Haiku 5.5 sends `"omitted"`.
 
 ## Third-Party Tool Restrictions
 

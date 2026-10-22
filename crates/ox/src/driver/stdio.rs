@@ -108,7 +108,8 @@ fn render(sink: &dyn EventSink, event: Event) {
 // ── Unattended ──
 
 /// Answers every approval with a denial that names what a rerun would need, for a run with nobody
-/// to ask: the allow pattern that admits the call, or the rule that holds it.
+/// to ask: the allow pattern that admits the call, the rule that holds it, or simpler syntax for a
+/// command ox could not parse.
 pub(super) struct Unattended;
 
 impl Approver for Unattended {
@@ -128,11 +129,6 @@ impl Approver for Unattended {
                     rule.class(),
                 )
             }
-            (None, Basis::Builtin(group)) if group.tier() == ShippedTier::Ask => format!(
-                "This run cannot ask for approval, and {basis} holds this call. \
-                 Approve it in an interactive session, \
-                 or set `permission.defaults.{group} = false` in the user config."
-            ),
             (None, Basis::Mode(_)) => {
                 "This run cannot ask for approval, and no allow pattern matches this call. \
                  Under `permission.allow` in the user config, \
@@ -140,6 +136,17 @@ impl Approver for Unattended {
                  and a word that expands needs a pattern ending in `*` at that word. \
                  A command that hides what it runs, \
                  such as `$(...)` or `sh -c`, needs approval in an interactive session."
+                    .to_owned()
+            }
+            (None, Basis::Builtin(group)) if group.tier() == ShippedTier::Ask => format!(
+                "This run cannot ask for approval, and {basis} holds this call. \
+                 Approve it in an interactive session, \
+                 or set `permission.defaults.{group} = false` in the user config."
+            ),
+            (None, Basis::Unparsed) => {
+                "This run cannot ask for approval, and ox could not parse this command, \
+                 so the permission rules may not see everything it runs. \
+                 Rewrite it in simpler shell syntax, or approve it in an interactive session."
                     .to_owned()
             }
             (None, basis) => format!(
@@ -257,6 +264,7 @@ impl StdioSink {
             // TUI-only events and the `SessionReady` marker have no stdio surface to update.
             Event::PromptDrained(_)
             | Event::TurnRolledBack
+            | Event::PromptUnsent
             | Event::UsageUpdated(_)
             | Event::RateLimitsUpdated(_)
             | Event::AutoCompactionPaused { .. }
@@ -747,6 +755,14 @@ mod tests {
                          or set `permission.defaults.git = false` in the user config.",
                     ),
                     (
+                        &Basis::Unparsed,
+                        None,
+                        "This run cannot ask for approval, and ox could not parse this command, \
+                         so the permission rules may not see everything it runs. \
+                         Rewrite it in simpler shell syntax, \
+                         or approve it in an interactive session.",
+                    ),
+                    (
                         &Basis::Builtin(Shipped::Ssh),
                         None,
                         "This run cannot ask for approval, \
@@ -991,14 +1007,11 @@ mod tests {
             }
 
             #[test]
-            fn auto_compaction_started_explains_the_pause_before_the_prompt() {
+            fn auto_compaction_started_explains_the_pause() {
                 let (stdout, stderr) = render_one(&test_sink(false), Event::AutoCompactionStarted);
 
                 assert_eq!(stdout, "");
-                assert_eq!(
-                    stderr,
-                    "Compacting the conversation before sending the prompt\n"
-                );
+                assert_eq!(stderr, "Compacting the conversation to free up context\n");
             }
 
             #[test]
@@ -1101,6 +1114,7 @@ mod tests {
                             resets_at: 1_760_000_000,
                         }),
                     }),
+                    Event::PromptUnsent,
                     Event::AutoCompactionPaused { failures: 3 },
                     Event::AutoCompactionResumed,
                     Event::SummaryToken("Recap".to_owned()),

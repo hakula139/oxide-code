@@ -325,19 +325,21 @@ fn settle_acks(
                 pre_count,
                 synthetic_uuid,
             } => {
-                let committed = failure.is_none() || stopped;
                 // Every failure that leaves the compact uncommitted reaches the agent, so each
                 // discarded summary shows its cause.
-                let failure = if committed {
+                let (checkpoint, failure) = if failure.is_none() || stopped {
                     state.commit_compact(synthetic_uuid);
-                    surface_failure(failure, stopped, shared)
+                    (
+                        Some(state.checkpoint()),
+                        surface_failure(failure, stopped, shared),
+                    )
                 } else {
                     state.abandon_compact();
-                    failure.map(str::to_owned)
+                    (None, failure.map(str::to_owned))
                 };
                 _ = ack.send(CompactOutcome {
                     pre_count,
-                    committed,
+                    checkpoint,
                     failure,
                 });
             }
@@ -769,10 +771,11 @@ mod tests {
                         Entry::Message { .. },
                         Entry::Message { .. },
                         Entry::Compact { .. },
+                        Entry::Context { .. },
                         Entry::Message { .. },
                     ]
                 ),
-                "the synthetic continuation follows its boundary: {entries:?}",
+                "the refreshed context and the synthetic continuation follow the boundary: {entries:?}",
             );
         }
 
@@ -852,7 +855,7 @@ mod tests {
             .await
             .unwrap();
             let outcome = compact_rx.await.unwrap();
-            assert!(!outcome.committed);
+            assert!(outcome.checkpoint.is_none());
             assert!(
                 outcome.failure.is_some(),
                 "the agent must see every compact failure, even after one was already surfaced",
@@ -909,10 +912,10 @@ mod tests {
             drop(tx);
             actor.await.unwrap();
 
-            assert!(first.committed);
+            assert!(first.checkpoint.is_some());
             assert_eq!(first.failure, None, "the stop already surfaced");
             assert_eq!(first.pre_count, 2);
-            assert!(second.committed);
+            assert!(second.checkpoint.is_some());
             assert_eq!(second.failure, None);
             assert_eq!(
                 second.pre_count, 2,

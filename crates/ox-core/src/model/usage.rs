@@ -34,11 +34,6 @@ impl TokenUsage {
             .saturating_add(self.cache_creation_input_tokens)
             .saturating_add(self.cache_read_input_tokens)
     }
-
-    /// Returns the prompt size plus output tokens.
-    pub(crate) const fn total_tokens(self) -> u32 {
-        self.context_tokens().saturating_add(self.output_tokens)
-    }
 }
 
 #[cfg(test)]
@@ -46,7 +41,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn context_and_total_include_cache_tokens() {
+    fn context_includes_cache_tokens() {
         let usage = TokenUsage {
             input_tokens: 10,
             cache_creation_input_tokens: 20,
@@ -55,6 +50,5 @@ mod tests {
         };
 
         assert_eq!(usage.context_tokens(), 60);
-        assert_eq!(usage.total_tokens(), 65);
     }
 }

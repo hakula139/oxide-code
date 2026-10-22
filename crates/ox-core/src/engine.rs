@@ -23,8 +23,8 @@ use tokio::sync::{mpsc, oneshot};
 use tokio::task::{JoinError, JoinHandle};
 
 use self::abort::{Inbox, TurnAbort};
-use self::compaction::AutoCompactFailures;
-use self::turn::{TurnContext, TurnOutcome, TurnReport};
+use self::compaction::{AutoCompactFailures, request_tokens};
+use self::turn::{TurnContext, TurnOutcome, TurnReport, TurnStop};
 use self::usage::estimate_cost_usd;
 use crate::client::anthropic::Client;
 use crate::config::Config;
@@ -151,9 +151,10 @@ pub struct Engine {
     /// Whether a TUI is attached, so titles generate in the background.
     interactive: bool,
     auto_compaction_failures: AutoCompactFailures,
-    /// The last round usage of the latest turn the transcript keeps, `None` when that turn reported
-    /// none.
-    last_usage: Option<TokenUsage>,
+    /// [`TurnReport::context_estimate`] of the latest turn the transcript keeps.
+    /// Before any such turn, an estimate from the parts of the next request.
+    /// `None` when the latest turn reported no usage.
+    context_estimate: Option<u32>,
     /// The latest usage any turn the transcript keeps reported, which the status line shows.
     displayed_usage: Option<TokenUsage>,
     total_estimated_cost_usd: f64,
@@ -200,6 +201,7 @@ impl Engine {
         let workspace = Arc::new(config.workspace.clone());
         let (prompt, instruction_warnings) =
             session_prompt(context, client.model(), workspace.cwd()).await;
+        let context_estimate = request_tokens(&prompt, &tools.definitions(), &messages);
         Ok(Self {
             client,
             oauth_token_url: oauth::OAUTH_TOKEN_URL.to_owned(),
@@ -228,7 +230,7 @@ impl Engine {
             workspace,
             interactive,
             auto_compaction_failures: AutoCompactFailures::default(),
-            last_usage: None,
+            context_estimate: Some(context_estimate),
             displayed_usage: None,
             total_estimated_cost_usd: estimate_cost_usd(&usage),
             title_usage: None,
@@ -313,6 +315,8 @@ impl Engine {
 
     /// Runs `text` through auto-compaction and one agent turn, rolling back a refused turn, and
     /// reports how it ended on `sink`.
+    /// The turn compacts at each round boundary that leaves the context at the threshold,
+    /// then goes on from the summary.
     async fn submit_prompt<S>(
         &mut self,
         text: &str,
@@ -333,7 +337,7 @@ impl Engine {
             return report_abort(sink, abort, "auto-compact-failed");
         }
 
-        let start = self.turn_start();
+        let mut start = self.turn_start();
         let mut user_msg = Message::user(text);
         let fresh = self.load_user_context(sink).await;
         if let Some(reminder) = self.prompt.catch_up(fresh) {
@@ -367,6 +371,58 @@ impl Engine {
             ));
         }
 
+        let mut checkpoint = outcome.checkpoint;
+        let mut rounds_run = 0;
+        let result = loop {
+            let TurnOutcome { mut report, result } =
+                self.run_turn(sink, ops, &mut inbox, rounds_run).await;
+            if let Err(TurnAbort::Refused(_)) = result {
+                self.roll_back(sink, start, checkpoint, &report).await;
+                break result;
+            }
+            self.account_usage(sink, &report).await;
+            if let Some(tasks) = report.tasks.take() {
+                self.tasks = tasks;
+            }
+            let Ok(TurnStop::Compact { rounds_run: run }) = result else {
+                break result;
+            };
+
+            let compacted = self.compact_mid_turn(sink, ops, &mut inbox).await;
+            self.adopt_mode(&mut inbox);
+            match compacted {
+                Ok(summary) => checkpoint = Some(summary),
+                Err(abort) => break Err(abort),
+            }
+            start = self.turn_start();
+            rounds_run = run;
+            turn::record_drained_prompts(
+                inbox.prompts.drain(..),
+                &mut self.messages,
+                &self.session,
+                sink,
+            )
+            .await;
+        };
+        match result {
+            Ok(_) => {
+                sink.emit(Event::TurnComplete, "turn-complete");
+                TurnEnd::Completed
+            }
+            Err(abort) => report_abort(sink, abort, "turn-failed"),
+        }
+    }
+
+    /// Runs [`turn::agent_turn`] on the live transcript from round `rounds_run`, then applies any
+    /// mode switch the turn received.
+    async fn run_turn(
+        &mut self,
+        sink: &dyn EventSink,
+        ops: &mut mpsc::Receiver<Op>,
+        inbox: &mut Inbox,
+        rounds_run: u32,
+    ) -> TurnOutcome {
+        let auto_compaction = self.auto_compaction();
         let mut dispatch_ctx = dispatch::DispatchContext {
             policy: &mut self.policy,
             workspace: Arc::clone(&self.workspace),
@@ -374,7 +430,7 @@ impl Engine {
             artifact_dir: Arc::clone(self.session.artifact_dir()),
             tracker: Arc::clone(&self.file_tracker),
         };
-        let TurnOutcome { mut report, result } = turn::agent_turn(
+        let outcome = turn::agent_turn(
             TurnContext {
                 client: &self.client,
                 tools: &self.tools,
@@ -382,30 +438,17 @@ impl Engine {
                 sink,
                 session: &self.session,
                 max_tool_rounds: self.max_tool_rounds,
+                auto_compaction,
+                rounds_run,
             },
             &mut self.messages,
             ops,
-            &mut inbox,
+            inbox,
             &mut dispatch_ctx,
         )
         .await;
-        self.adopt_mode(&mut inbox);
-        if let Err(TurnAbort::Refused(_)) = result {
-            self.roll_back(sink, start, outcome.checkpoint, &report)
-                .await;
-        } else {
-            self.account_usage(sink, &report).await;
-            if let Some(tasks) = report.tasks.take() {
-                self.tasks = tasks;
-            }
-        }
-        match result {
-            Ok(()) => {
-                sink.emit(Event::TurnComplete, "turn-complete");
-                TurnEnd::Completed
-            }
-            Err(abort) => report_abort(sink, abort, "turn-failed"),
-        }
+        self.adopt_mode(inbox);
+        outcome
     }
 
     /// What [`Self::roll_back`] returns to if the model refuses the turn about to start.
@@ -444,17 +487,22 @@ impl Engine {
         sink.emit(Event::TurnRolledBack, "turn-rolled-back");
     }
 
-    /// Reads the user context afresh, showing each instruction file warning the previous load did
-    /// not raise.
+    /// Reads the user context afresh with [`Self::show_instruction_warnings`].
     async fn load_user_context(&mut self, sink: &dyn EventSink) -> UserContext {
         let (context, warnings) = UserContext::load(self.cwd(), self.client.model()).await;
+        self.show_instruction_warnings(sink, warnings);
+        context
+    }
+
+    /// Keeps the instruction file `warnings` of the latest load,
+    /// showing each one the previous load did not raise.
+    fn show_instruction_warnings(&mut self, sink: &dyn EventSink, warnings: Vec<String>) {
         let previous = std::mem::replace(&mut self.instruction_warnings, warnings);
         for warning in &self.instruction_warnings {
             if !previous.contains(warning) {
                 sink.emit(Event::Notice(warning.clone()), "instruction-warning");
             }
         }
-        context
     }
 
     /// Applies a model and / or effort pick. The model goes first because it re-resolves effort.
@@ -654,6 +702,7 @@ mod tests {
     use crate::protocol::testing::CapturingSink;
     use crate::protocol::{CompactTrigger, ResumeTarget, UsageSnapshot};
     use crate::session::handle;
+    use crate::session::post_compact::synthesize_post_compact_message;
     use crate::session::store::testing::test_store;
     use crate::tool::bash::background::ShellState;
     use crate::tool::bash::background::local_testing::start_shell;
@@ -672,6 +721,27 @@ mod tests {
         model::cost_rates(model)
             .unwrap()
             .estimate_usd(tokens, PromptCacheTtl::OneHour)
+    }
+
+    /// Answers the next Messages request only after a minute, so it stays in flight until the test
+    /// cancels or quits it.
+    /// Mount it before the reply that should follow.
+    async fn mount_stalled_reply_once(server: &MockServer) {
+        Mock::given(method("POST"))
+            .and(path("/v1/messages"))
+            .respond_with(
+                sse_response(text_stream_body("", "too late")).set_delay(Duration::from_secs(60)),
+            )
+            .up_to_n_times(1)
+            .mount(server)
+            .await;
+    }
+
+    /// Waits until `server` has received `count` requests, so the engine is mid-request.
+    async fn until_requested(server: &MockServer, count: usize) {
+        while server.received_requests().await.unwrap().len() < count {
+            tokio::task::yield_now().await;
+        }
     }
 
     mod engine_handle {
@@ -1001,27 +1071,6 @@ mod tests {
 
     mod run {
         use super::*;
-
-        /// Answers the next Messages request only after a minute, so it stays in flight until the
-        /// test cancels or quits it. Mount it before the reply that should follow.
-        async fn mount_stalled_reply_once(server: &MockServer) {
-            Mock::given(method("POST"))
-                .and(path("/v1/messages"))
-                .respond_with(
-                    sse_response(text_stream_body("", "too late"))
-                        .set_delay(Duration::from_secs(60)),
-                )
-                .up_to_n_times(1)
-                .mount(server)
-                .await;
-        }
-
-        /// Waits until `server` has received `count` requests, so the engine is mid-request.
-        async fn until_requested(server: &MockServer, count: usize) {
-            while server.received_requests().await.unwrap().len() < count {
-                tokio::task::yield_now().await;
-            }
-        }
 
         /// Events of the prompt in flight until both its terminal event and its session's AI title
         /// have arrived, in either order.
@@ -1644,7 +1693,7 @@ mod tests {
                 let mut engine = engine(server.uri(), &store, dir.path()).await;
                 engine.compaction = CompactionConfig::with_threshold_for_test(50_000);
                 engine.messages = tool_heavy_transcript();
-                engine.last_usage = Some(TokenUsage::new(50_000, 1));
+                engine.context_estimate = Some(50_000);
                 let mut handle = engine.spawn();
 
                 handle
@@ -1808,6 +1857,100 @@ mod tests {
 
     mod submit_prompt {
         use super::*;
+
+        /// Answers the next Messages request with `text`.
+        async fn mount_reply_once(server: &MockServer, text: &str) {
+            Mock::given(method("POST"))
+                .and(path("/v1/messages"))
+                .respond_with(sse_response(text_stream_body("", text)))
+                .up_to_n_times(1)
+                .mount(server)
+                .await;
+        }
+
+        /// Answers the next Messages request with a refusal that reports `input_tokens`.
+        async fn mount_refusal_once(server: &MockServer, input_tokens: u64) {
+            let start = serde_json::json!({
+                "type": "message_start",
+                "message": {"id": "msg_1", "model": MODEL, "usage": {"input_tokens": input_tokens}},
+            });
+            let stop = serde_json::json!({
+                "type": "message_delta",
+                "delta": {"stop_reason": "refusal"},
+                "usage": {"output_tokens": 1},
+            });
+            let end = serde_json::json!({"type": "message_stop"});
+            Mock::given(method("POST"))
+                .and(path("/v1/messages"))
+                .respond_with(sse_response(sse_body(&[start, stop, end])))
+                .up_to_n_times(1)
+                .mount(server)
+                .await;
+        }
+
+        /// Answers the next Messages request with a `tasks` call that sets [`plan`], billed at
+        /// 60,000 input tokens.
+        async fn mount_heavy_tasks_call_once(server: &MockServer) {
+            let input = serde_json::json!({ "tasks": plan() }).to_string();
+            let frames = [
+                serde_json::json!({"type": "message_start", "message": {"id": "msg_1", "model": MODEL, "usage": {"input_tokens": 60_000, "output_tokens": 0}}}),
+                serde_json::json!({"type": "content_block_start", "index": 0, "content_block": {"type": "tool_use", "id": "call-1", "name": "tasks"}}),
+                serde_json::json!({"type": "content_block_delta", "index": 0, "delta": {"type": "input_json_delta", "partial_json": input}}),
+                serde_json::json!({"type": "content_block_stop", "index": 0}),
+                serde_json::json!({"type": "message_delta", "delta": {"stop_reason": "tool_use"}, "usage": {"output_tokens": 100}}),
+                serde_json::json!({"type": "message_stop"}),
+            ];
+            Mock::given(method("POST"))
+                .and(path("/v1/messages"))
+                .respond_with(sse_response(sse_body(&frames)))
+                .up_to_n_times(1)
+                .mount(server)
+                .await;
+        }
+
+        /// Answers the next Messages request with `text` after `delay`, so an op sent meanwhile
+        /// reaches the engine mid-request.
+        async fn mount_delayed_reply_once(server: &MockServer, text: &str, delay: Duration) {
+            Mock::given(method("POST"))
+                .and(path("/v1/messages"))
+                .respond_with(sse_response(text_stream_body("", text)).set_delay(delay))
+                .up_to_n_times(1)
+                .mount(server)
+                .await;
+        }
+
+        /// Engine past the compaction floor that compacts at 50,000 tokens, with the `tasks` tool,
+        /// whose next prompt's first round is [`mount_heavy_tasks_call_once`].
+        async fn mid_turn_engine(server: &MockServer, store: &SessionStore, dir: &Path) -> Engine {
+            mount_heavy_tasks_call_once(server).await;
+            let mut engine = engine(server.uri(), store, dir)
+                .await
+                .with_tools(ToolRegistry::new(vec![Box::new(TasksTool)]));
+            engine.compaction = CompactionConfig::with_threshold_for_test(50_000);
+            engine.messages = tool_heavy_transcript();
+            engine
+        }
+
+        fn mid_turn_summary() -> Message {
+            synthesize_post_compact_message(
+                "mid-turn summary",
+                &plan(),
+                &[],
+                CompactTrigger::MidTurn,
+            )
+        }
+
+        fn event_types(events: &[Event]) -> Vec<String> {
+            events
+                .iter()
+                .map(|event| {
+                    serde_json::to_value(event).unwrap()["type"]
+                        .as_str()
+                        .unwrap()
+                        .to_owned()
+                })
+                .collect()
+        }
 
         #[tokio::test]
         async fn keeps_the_prefix_and_sends_a_date_change_as_a_reminder() {
@@ -2062,36 +2205,6 @@ mod tests {
             .await;
         }
 
-        /// Answers the next Messages request with `text`.
-        async fn mount_reply_once(server: &MockServer, text: &str) {
-            Mock::given(method("POST"))
-                .and(path("/v1/messages"))
-                .respond_with(sse_response(text_stream_body("", text)))
-                .up_to_n_times(1)
-                .mount(server)
-                .await;
-        }
-
-        /// Answers the next Messages request with a refusal that reports `input_tokens`.
-        async fn mount_refusal_once(server: &MockServer, input_tokens: u64) {
-            let start = serde_json::json!({
-                "type": "message_start",
-                "message": {"id": "msg_1", "model": MODEL, "usage": {"input_tokens": input_tokens}},
-            });
-            let stop = serde_json::json!({
-                "type": "message_delta",
-                "delta": {"stop_reason": "refusal"},
-                "usage": {"output_tokens": 1},
-            });
-            let end = serde_json::json!({"type": "message_stop"});
-            Mock::given(method("POST"))
-                .and(path("/v1/messages"))
-                .respond_with(sse_response(sse_body(&[start, stop, end])))
-                .up_to_n_times(1)
-                .mount(server)
-                .await;
-        }
-
         #[tokio::test]
         async fn rolls_back_a_refused_turn_to_the_state_before_it() {
             with_pinned_home(async {
@@ -2228,8 +2341,8 @@ mod tests {
                 let mut engine = engine(server.uri(), &test_store(dir.path()), dir.path()).await;
                 engine.compaction = CompactionConfig::with_threshold_for_test(50_000);
                 engine.messages = tool_heavy_transcript();
-                engine.last_usage = Some(TokenUsage::new(50_000, 1));
-                engine.displayed_usage = engine.last_usage;
+                engine.context_estimate = Some(50_000);
+                engine.displayed_usage = Some(TokenUsage::new(50_000, 1));
                 engine.total_estimated_cost_usd = 1.23;
                 engine.auto_compaction_failures = AutoCompactFailures::new(2);
                 let sink = CapturingSink::default();
@@ -2263,7 +2376,11 @@ mod tests {
                     ContentBlock::Text { text } if text.contains("auto summary")
                 ));
                 assert_eq!(engine.messages.len(), 3);
-                assert_eq!(engine.last_usage, Some(TokenUsage::new(1_000, 100)));
+                assert_eq!(
+                    engine.context_estimate,
+                    Some(1_000 + compaction::transcript_tokens(&engine.messages[2..])),
+                    "the turn's input plus its reply",
+                );
                 assert!(
                     (engine.total_estimated_cost_usd - (1.23 + 0.006 + 0.006)).abs() < 1e-12,
                     "the session cost keeps earlier turns and adds the summary and the turn: {}",
@@ -2305,7 +2422,7 @@ mod tests {
                 let mut engine = engine(server.uri(), &store, dir.path()).await;
                 engine.compaction = CompactionConfig::with_threshold_for_test(50_000);
                 engine.messages = tool_heavy_transcript();
-                engine.last_usage = Some(TokenUsage::new(50_000, 1));
+                engine.context_estimate = Some(50_000);
                 let sink = CapturingSink::default();
                 let mut ops = inert_ops();
 
@@ -2330,6 +2447,7 @@ mod tests {
                             Event::SummaryToken(token),
                             Event::SummaryDiscarded,
                             Event::UsageUpdated(_),
+                            Event::PromptUnsent,
                             Event::TurnFailed(error),
                         ] if token == "   "
                             && error == "Auto-compaction failed: \
@@ -2351,7 +2469,7 @@ mod tests {
                 let mut engine = engine(server.uri(), &test_store(dir.path()), dir.path()).await;
                 engine.compaction = CompactionConfig::with_threshold_for_test(50_000);
                 engine.messages = tool_heavy_transcript();
-                engine.last_usage = Some(TokenUsage::new(50_000, 1));
+                engine.context_estimate = Some(50_000);
                 let sink = CapturingSink::default();
                 let (ops_tx, mut ops) = mpsc::channel(1);
                 ops_tx.try_send(Op::SetMode(Mode::Plan)).unwrap();
@@ -2388,6 +2506,293 @@ mod tests {
                     ),
                     "{events:?}"
                 );
+            })
+            .await;
+        }
+
+        #[tokio::test]
+        async fn compacts_mid_turn_and_continues_the_turn_from_the_summary() {
+            with_pinned_home(async {
+                let server = MockServer::start().await;
+                let dir = tempfile::tempdir().unwrap();
+                let store = test_store(dir.path());
+                let mut engine = mid_turn_engine(&server, &store, dir.path()).await;
+                mount_reply_once(&server, "mid-turn summary").await;
+                mount_reply(&server, "done").await;
+                let sink = CapturingSink::default();
+
+                let end = engine
+                    .submit_prompt("plan it", &sink, &mut inert_ops())
+                    .await;
+
+                assert_eq!(end, TurnEnd::Completed);
+                let transcript = [mid_turn_summary(), Message::assistant("done")];
+                assert_eq!(engine.messages, transcript);
+                let data = store.load_session_data(engine.session_id()).unwrap();
+                assert_eq!(data.messages, transcript);
+                let requests = request_bodies(&server).await;
+                assert_eq!(requests.len(), 3);
+                let summarized = requests[1]["messages"].as_array().unwrap();
+                assert_eq!(
+                    summarized[summarized.len() - 2]["content"][0]["tool_use_id"],
+                    "call-1",
+                    "the summary covers the finished round"
+                );
+                let Some(ContentBlock::Text { text: continuation }) =
+                    mid_turn_summary().content.pop()
+                else {
+                    panic!("the summary message ends on its continuation");
+                };
+                assert_eq!(
+                    requests[2]["messages"][1]["content"]
+                        .as_array()
+                        .unwrap()
+                        .last()
+                        .unwrap()["text"],
+                    continuation.as_str(),
+                    "the turn resumes from the summary"
+                );
+                assert_eq!(
+                    event_types(&sink.events()),
+                    [
+                        "tool_call_start",
+                        "tool_call_end",
+                        "tasks_updated",
+                        "usage_updated",
+                        "auto_compaction_started",
+                        "summary_token",
+                        "session_compacted",
+                        "usage_updated",
+                        "stream_token",
+                        "usage_updated",
+                        "turn_complete",
+                    ]
+                );
+            })
+            .await;
+        }
+
+        #[tokio::test]
+        async fn fails_the_turn_when_the_mid_turn_compaction_fails() {
+            with_pinned_home(async {
+                let server = MockServer::start().await;
+                let dir = tempfile::tempdir().unwrap();
+                let store = test_store(dir.path());
+                let mut engine = mid_turn_engine(&server, &store, dir.path()).await;
+                mount_reply(&server, "   ").await;
+                let sink = CapturingSink::default();
+
+                let end = engine
+                    .submit_prompt("plan it", &sink, &mut inert_ops())
+                    .await;
+
+                assert_eq!(end, TurnEnd::Failed);
+                assert_eq!(request_bodies(&server).await.len(), 2);
+                assert_eq!(engine.auto_compaction_failures, AutoCompactFailures::new(1));
+                assert_eq!(engine.messages.len(), tool_heavy_transcript().len() + 3);
+                let last = &engine.messages.last().unwrap().content;
+                assert!(
+                    matches!(
+                        &last[..],
+                        [ContentBlock::ToolResult { tool_use_id, .. }] if tool_use_id == "call-1"
+                    ),
+                    "the transcript keeps the finished round: {last:?}"
+                );
+                let events = sink.events();
+                assert!(
+                    !events.contains(&Event::PromptUnsent),
+                    "the prompt already went out: {events:?}"
+                );
+                assert_eq!(
+                    events.last(),
+                    Some(&Event::TurnFailed(
+                        "Auto-compaction failed: the model returned an empty summary. \
+                         The turn stopped before its next request. \
+                         Run `/compact`, then send a message to continue."
+                            .to_owned()
+                    ))
+                );
+            })
+            .await;
+        }
+
+        #[tokio::test]
+        async fn rolls_back_a_refusal_after_a_mid_turn_compaction_to_the_summary() {
+            with_pinned_home(async {
+                let server = MockServer::start().await;
+                let dir = tempfile::tempdir().unwrap();
+                let store = test_store(dir.path());
+                let mut engine = mid_turn_engine(&server, &store, dir.path()).await;
+                let read = dir.path().join("read.txt");
+                std::fs::write(&read, "read").unwrap();
+                seed_full_read(&engine.file_tracker, &read);
+                let summary_delay = Duration::from_millis(200);
+                mount_delayed_reply_once(&server, "mid-turn summary", summary_delay).await;
+                mount_refusal_once(&server, 1_000).await;
+                let sink = CapturingSink::default();
+                let (ops_tx, mut ops) = mpsc::channel(1);
+                let queue = async {
+                    until_requested(&server, 2).await;
+                    let prompt = Op::Queue("also check the docs".to_owned());
+                    ops_tx.send(prompt).await.unwrap();
+                };
+
+                let (end, ()) =
+                    tokio::join!(engine.submit_prompt("plan it", &sink, &mut ops), queue);
+
+                assert_eq!(end, TurnEnd::Failed);
+                let requests = request_bodies(&server).await;
+                assert_eq!(
+                    texts(&requests[2]).last(),
+                    Some(&"also check the docs"),
+                    "the prompt queued during the summary follows it"
+                );
+                assert_eq!(engine.messages, [mid_turn_summary()]);
+                assert_eq!(
+                    engine.file_tracker.snapshot_all(),
+                    [],
+                    "the rollback keeps the tracker the summary cleared"
+                );
+                assert!(!engine.prompt_unrecorded, "the summary recorded the prompt");
+                let data = store.load_session_data(engine.session_id()).unwrap();
+                assert_eq!(data.messages, [mid_turn_summary()]);
+                assert_eq!(data.context, Some(engine.prompt.session_context()));
+                let events = sink.events();
+                assert!(
+                    events.contains(&Event::PromptDrained("also check the docs".to_owned())),
+                    "the frontend learns which prompt the rollback removes: {events:?}"
+                );
+                assert_eq!(
+                    events[events.len() - 2..],
+                    [
+                        Event::TurnRolledBack,
+                        Event::TurnFailed(
+                            "The model declined this request. \
+                             The work since this turn's compaction was removed from the \
+                             conversation, but the summary still holds the request, \
+                             so run `/clear` if the model keeps declining."
+                                .to_owned()
+                        ),
+                    ]
+                );
+            })
+            .await;
+        }
+
+        #[tokio::test]
+        async fn runs_the_turn_on_without_compaction_while_auto_compaction_is_paused() {
+            with_pinned_home(async {
+                let server = MockServer::start().await;
+                let dir = tempfile::tempdir().unwrap();
+                let store = test_store(dir.path());
+                let mut engine = mid_turn_engine(&server, &store, dir.path()).await;
+                engine.auto_compaction_failures = AutoCompactFailures::new(3);
+                mount_reply(&server, "done").await;
+                let sink = CapturingSink::default();
+
+                let end = engine
+                    .submit_prompt("plan it", &sink, &mut inert_ops())
+                    .await;
+
+                assert_eq!(end, TurnEnd::Completed);
+                assert_eq!(request_bodies(&server).await.len(), 2);
+                assert_eq!(engine.messages.last(), Some(&Message::assistant("done")));
+                let events = sink.events();
+                assert!(
+                    !events.contains(&Event::AutoCompactionStarted),
+                    "{events:?}"
+                );
+            })
+            .await;
+        }
+
+        #[tokio::test]
+        async fn interrupt_or_shutdown_during_a_mid_turn_compaction_ends_on_the_marker() {
+            with_pinned_home(async {
+                for (op, expected) in [
+                    (Op::Interrupt, TurnEnd::Cancelled),
+                    (Op::Shutdown, TurnEnd::Shutdown),
+                ] {
+                    let server = MockServer::start().await;
+                    let dir = tempfile::tempdir().unwrap();
+                    let store = test_store(dir.path());
+                    let mut engine = mid_turn_engine(&server, &store, dir.path()).await;
+                    mount_stalled_reply_once(&server).await;
+                    let sink = CapturingSink::default();
+                    let (ops_tx, mut ops) = mpsc::channel(1);
+                    let stop = async {
+                        until_requested(&server, 2).await;
+                        ops_tx.send(op).await.unwrap();
+                    };
+
+                    let (end, ()) =
+                        tokio::join!(engine.submit_prompt("plan it", &sink, &mut ops), stop);
+
+                    assert_eq!(end, expected);
+                    assert_eq!(engine.messages.len(), tool_heavy_transcript().len() + 4);
+                    let data = store.load_session_data(engine.session_id()).unwrap();
+                    assert_eq!(
+                        data.messages.last(),
+                        Some(&Message::interruption()),
+                        "{expected:?}"
+                    );
+                }
+            })
+            .await;
+        }
+
+        #[tokio::test]
+        async fn compacts_again_later_in_the_turn_and_counts_every_round_toward_the_cap() {
+            with_pinned_home(async {
+                let server = MockServer::start().await;
+                let dir = tempfile::tempdir().unwrap();
+                let store = test_store(dir.path());
+                let mut engine = mid_turn_engine(&server, &store, dir.path()).await;
+                engine.max_tool_rounds = Some(3);
+                let long_summary = "Read the logs. ".repeat(400);
+                mount_reply_once(&server, &long_summary).await;
+                mount_heavy_tasks_call_once(&server).await;
+                mount_reply_once(&server, "second summary").await;
+                mount_reply(&server, "done").await;
+                let sink = CapturingSink::default();
+
+                let end = engine
+                    .submit_prompt("plan it", &sink, &mut inert_ops())
+                    .await;
+
+                assert_eq!(end, TurnEnd::Completed, "{:?}", sink.events().last());
+                assert_eq!(request_bodies(&server).await.len(), 5);
+                let summary = synthesize_post_compact_message(
+                    "second summary",
+                    &plan(),
+                    &[],
+                    CompactTrigger::MidTurn,
+                );
+                assert_eq!(engine.messages, [summary, Message::assistant("done")]);
+            })
+            .await;
+        }
+
+        #[tokio::test]
+        async fn keeps_a_mode_switch_sent_during_a_failed_mid_turn_compaction() {
+            with_pinned_home(async {
+                let server = MockServer::start().await;
+                let dir = tempfile::tempdir().unwrap();
+                let store = test_store(dir.path());
+                let mut engine = mid_turn_engine(&server, &store, dir.path()).await;
+                mount_delayed_reply_once(&server, "   ", Duration::from_millis(200)).await;
+                let sink = CapturingSink::default();
+                let (ops_tx, mut ops) = mpsc::channel(1);
+                let switch = async {
+                    until_requested(&server, 2).await;
+                    ops_tx.send(Op::SetMode(Mode::Plan)).await.unwrap();
+                };
+
+                let (end, ()) =
+                    tokio::join!(engine.submit_prompt("plan it", &sink, &mut ops), switch);
+
+                assert_eq!(end, TurnEnd::Failed);
+                assert_eq!(engine.policy.mode(), Mode::Plan);
             })
             .await;
         }
@@ -2584,7 +2989,7 @@ mod tests {
                 let dir = tempfile::tempdir().unwrap();
                 let mut engine = engine(server.uri(), &test_store(dir.path()), dir.path()).await;
                 engine.auto_compaction_failures = AutoCompactFailures::new(3);
-                engine.last_usage = Some(TokenUsage::new(100_000, 1));
+                engine.context_estimate = Some(100_000);
                 engine.total_estimated_cost_usd = 1.23;
                 let sink = CapturingSink::default();
 
@@ -2594,7 +2999,7 @@ mod tests {
                     engine.auto_compaction_failures,
                     AutoCompactFailures::default()
                 );
-                assert_eq!(engine.last_usage, Some(TokenUsage::new(100_000, 1)));
+                assert_eq!(engine.context_estimate, Some(100_000));
                 assert!(
                     (engine.total_estimated_cost_usd - 1.23).abs() < f64::EPSILON,
                     "session cost must accumulate across swaps: {}",
