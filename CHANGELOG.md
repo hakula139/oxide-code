@@ -4,6 +4,91 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.0-alpha.6] - 2026-10-23
+
+### Highlights
+
+- Security fixes close gaps in the permission rules and in how project files load, so some commands and files that were allowed before now ask or are refused. See Security.
+- Pass the prompt as an argument, pipe text in on stdin, and resume a session by ID with `-r`.
+- Compaction runs mid-turn when a tool loop fills the context window.
+- Type `/exit` to quit, and Ctrl+C interrupts a bare REPL turn.
+
+### Security
+
+The project fixes security issues publicly before 1.0, and this release has no advisories. Each entry states what the gap let through and which releases it affected.
+
+- _(prompt)_ Project instruction files followed symlinks to any file. A checked-in `CLAUDE.md` or `AGENTS.md` that linked outside the repository, or to an ignored file such as `.env`, loaded that file into every request with no tool call and without `read` deny rules. Only Markdown files inside the project root now load, and a skipped file prints a notice. Affected: v0.1.0-alpha.1 through v0.1.0-alpha.5 ([#500](https://github.com/hakula139/oxide-code/pull/500)).
+- _(config)_ Project config could make `ox` read files outside the repository. Discovery walked past the repository root and followed a symlinked `.ox/config.toml` or `.ox` directory, and an invalid-TOML parse error printed a line of the target. A project `[tui.theme] base` could name any file the same way. Project config now comes only from inside the project root, may name only built-in themes, and parse errors report a location without quoting source text. Affected: v0.1.0-alpha.1 through v0.1.0-alpha.5 ([#499](https://github.com/hakula139/oxide-code/pull/499)).
+- _(permission)_ Auto-approved commands could expose secrets. `echo`, `pwd`, `true`, and `false` skipped the literal-argument check, so `echo $GITHUB_TOKEN` ran without approval, and a shell expansion could bring a variable's value into a command that ran without approval. Affected: v0.1.0-alpha.3 through v0.1.0-alpha.5 ([#537](https://github.com/hakula139/oxide-code/pull/537)).
+- _(permission)_ Words after a heredoc or redirection were not read as the command's arguments, so the rules saw a different command than bash ran. Affected: v0.1.0-alpha.3 through v0.1.0-alpha.5 ([#542](https://github.com/hakula139/oxide-code/pull/542)).
+- _(permission)_ A bash command could read a process's environment under `/proc`, such as `/proc/self/environ`, which holds variables such as `ANTHROPIC_API_KEY`, with no deny rule. Affected: v0.1.0-alpha.3 through v0.1.0-alpha.5 ([#543](https://github.com/hakula139/oxide-code/pull/543)).
+- _(permission)_ A bash command that failed to parse, or whose word boundaries differ from bash's, ran in `yolo` without a prompt, and the rules could match words that bash splits differently. Those commands now ask in every mode unless a deny rule holds them. Affected: v0.1.0-alpha.3 through v0.1.0-alpha.5 ([#545](https://github.com/hakula139/oxide-code/pull/545), [#550](https://github.com/hakula139/oxide-code/pull/550)).
+- _(tools)_ File tools did not expand a leading `~` in a path before the permission gate and the protected-path check, so a `~/` path could skip rules that match the home path. Affected: v0.1.0-alpha.4 and v0.1.0-alpha.5 ([#552](https://github.com/hakula139/oxide-code/pull/552)).
+- _(permission)_ Deny rules did not apply to a command run by `coproc` or after `time`, so `yolo` ran `time while true; do rm -rf x; done` past an `rm *` deny rule. Affected: v0.1.0-alpha.3 through v0.1.0-alpha.5 ([#553](https://github.com/hakula139/oxide-code/pull/553)).
+- _(permission)_ In `manual` mode, reading the `BASH_CMDS` variable was auto-approved, so a command could run with no rule matching it. Affected: v0.1.0-alpha.4 and v0.1.0-alpha.5. A command could also hide the program it runs from an allow or deny rule, through a statement-level assignment such as `GIT_EDITOR='rm -rf y'; git commit --amend` or an expansion such as `cargo build ${x:n}`. Affected: v0.1.0-alpha.3 through v0.1.0-alpha.5 ([#555](https://github.com/hakula139/oxide-code/pull/555)).
+- _(permission)_ A `cd` in a bash command could change what a later program runs, while the allow rules matched it as if it ran in the working directory. Under `allow.exec = ["./build.sh", "cd *"]`, `cd /tmp/evil && ./build.sh` ran `/tmp/evil/build.sh` without a prompt. Affected: v0.1.0-alpha.3 through v0.1.0-alpha.5 ([#566](https://github.com/hakula139/oxide-code/pull/566)).
+- _(docs)_ `SECURITY.md` now calls `exec` deny and ask rules a guardrail in every mode rather than a boundary, because no analysis of a command line can hold them against every way to start a program. It names the two properties whose gaps count as vulnerabilities ([#567](https://github.com/hakula139/oxide-code/pull/567)).
+
+### Breaking changes
+
+- Take the prompt as an argument, attach piped stdin, and resume by ID with -r ([#480](https://github.com/hakula139/oxide-code/pull/480))
+- _(prompt)_ Load instructions from oxide-code's own roots ([#460](https://github.com/hakula139/oxide-code/pull/460))
+- _(tool)_ Keep ox's credentials out of bash commands ([#469](https://github.com/hakula139/oxide-code/pull/469))
+- _(tool)_ Bound the work of edit replace_all and grep content searches ([#481](https://github.com/hakula139/oxide-code/pull/481))
+
+### Added
+
+- _(engine)_ Compact mid-turn when a tool loop fills the context ([#533](https://github.com/hakula139/oxide-code/pull/533))
+- _(tui)_ Add /exit and tighten the slash dispatch contract ([#516](https://github.com/hakula139/oxide-code/pull/516))
+
+### Fixed
+
+- Interrupt bare REPL turns on Ctrl+C and print stdio diagnostics once ([#471](https://github.com/hakula139/oxide-code/pull/471))
+- Word event notices the same way in the TUI and the bare REPL ([#511](https://github.com/hakula139/oxide-code/pull/511))
+- Title searches from their counts and drop unread tool metadata ([#509](https://github.com/hakula139/oxide-code/pull/509))
+- Label binary sizes in KiB and MiB through one formatter ([#525](https://github.com/hakula139/oxide-code/pull/525))
+- _(client)_ Drop a base URL's trailing slash before joining the messages path ([#457](https://github.com/hakula139/oxide-code/pull/457))
+- _(client)_ Stream initial thinking text and name the Anthropic API in every error ([#470](https://github.com/hakula139/oxide-code/pull/470))
+- _(client)_ Hide Haiku 5.5 reasoning while show_thinking is off ([#548](https://github.com/hakula139/oxide-code/pull/548))
+- _(config)_ Check every project file key against allowlists ([#515](https://github.com/hakula139/oxide-code/pull/515))
+- _(config)_ Honor CLAUDE_CONFIG_DIR and lock refreshes the way Claude Code does ([#492](https://github.com/hakula139/oxide-code/pull/492))
+- _(config)_ Name the real config file and the base URL setting in startup errors ([#526](https://github.com/hakula139/oxide-code/pull/526))
+- _(engine)_ Roll a refused turn back so a rephrased prompt can succeed ([#475](https://github.com/hakula139/oxide-code/pull/475))
+- _(engine)_ Retry the stored login after a transient failure signs a session out ([#513](https://github.com/hakula139/oxide-code/pull/513))
+- _(engine)_ Show the drift notice in every frontend by restoring files in the engine, and name Write in it ([#484](https://github.com/hakula139/oxide-code/pull/484), [#514](https://github.com/hakula139/oxide-code/pull/514))
+- _(engine)_ Attribute denial feedback to the user ([#559](https://github.com/hakula139/oxide-code/pull/559))
+- _(oauth)_ Keep the rotated refresh token when saving a refreshed login fails ([#436](https://github.com/hakula139/oxide-code/pull/436))
+- _(ox-core)_ Condense token endpoint error bodies and advise on HTTP 403 and 404 ([#517](https://github.com/hakula139/oxide-code/pull/517))
+- _(permission)_ Hold deny and ask rules through sudo, xargs, busybox, and find -exec ([#474](https://github.com/hakula139/oxide-code/pull/474))
+- _(prompt)_ Name tools as registered and stop hard-wrapping prompt sections ([#506](https://github.com/hakula139/oxide-code/pull/506))
+- _(release)_ Build for and require macOS 12, as the install guide documents ([#466](https://github.com/hakula139/oxide-code/pull/466))
+- _(session)_ Keep compacting after persistence stops and name failed opens ([#463](https://github.com/hakula139/oxide-code/pull/463))
+- _(session)_ Escape and align ox --list cells by display width ([#490](https://github.com/hakula139/oxide-code/pull/490))
+- _(session)_ Scope sessions to the project root and fall back on a prefix ([#495](https://github.com/hakula139/oxide-code/pull/495))
+- _(session)_ Frame the first prompt as text to title ([#561](https://github.com/hakula139/oxide-code/pull/561))
+- _(slash)_ Run /diff off the event loop from the repository root ([#465](https://github.com/hakula139/oxide-code/pull/465))
+- _(slash)_ Show the session ID once in the delete confirm modal ([#473](https://github.com/hakula139/oxide-code/pull/473))
+- _(tool)_ Keep binary bash output within its byte budget ([#435](https://github.com/hakula139/oxide-code/pull/435))
+- _(tool)_ Detach bash commands from the terminal and stub out editors ([#458](https://github.com/hakula139/oxide-code/pull/458))
+- _(tui)_ Resume the tail when a held selection drops ([#459](https://github.com/hakula139/oxide-code/pull/459))
+- _(tui)_ Show each slash command's usage hint as declared ([#476](https://github.com/hakula139/oxide-code/pull/476))
+- _(tui)_ Measure modal line editors and tab stops by grapheme cluster ([#483](https://github.com/hakula139/oxide-code/pull/483))
+- _(tui)_ Keep theme overrides across /theme previews and swaps ([#486](https://github.com/hakula139/oxide-code/pull/486))
+- _(tui)_ Name the [tui.theme] base and the built-ins in theme errors ([#491](https://github.com/hakula139/oxide-code/pull/491))
+- _(tui)_ Stop the input panicking in a terminal with no rows ([#505](https://github.com/hakula139/oxide-code/pull/505))
+- _(tui)_ Tighten modal key handling and fit overview rows ([#501](https://github.com/hakula139/oxide-code/pull/501))
+- _(tui)_ Stop the /model picker's effort at its ends and share list picker navigation ([#504](https://github.com/hakula139/oxide-code/pull/504))
+- _(tui)_ Hold input through /clear and discard the old queue on every session switch ([#534](https://github.com/hakula139/oxide-code/pull/534))
+- _(tui)_ Keep a code line that syntect fails to highlight ([#546](https://github.com/hakula139/oxide-code/pull/546))
+- _(tui)_ Clarify approval reasons, /clear, effort levels, and the status line cost ([#551](https://github.com/hakula139/oxide-code/pull/551))
+- _(tui)_ Rerun /init's prompt after a failed turn and replay its line after auto-compaction ([#557](https://github.com/hakula139/oxide-code/pull/557))
+
+### Changed
+
+- _(permission)_ Ask before edits anywhere under `~/.ssh` and to cloud CLI config ([#478](https://github.com/hakula139/oxide-code/pull/478))
+- _(session)_ Stop writing a title's source and a compaction's trigger to session files, since nothing read them. Older session files still load, but binaries through v0.1.0-alpha.5 require a title's source, so they list sessions titled by this build as untitled ([#554](https://github.com/hakula139/oxide-code/pull/554))
+- _(tui)_ Sleep between timed changes while idle ([#535](https://github.com/hakula139/oxide-code/pull/535))
+
 ## [0.1.0-alpha.5] - 2026-10-20
 
 ### Highlights
@@ -224,6 +309,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - _(deps)_ Bump rustls-webpki and rand for Dependabot alerts (#17)
 - _(deps)_ Bump rustls-webpki from 0.103.12 to 0.103.13 (#34)
 
+[0.1.0-alpha.6]: https://github.com/hakula139/oxide-code/compare/v0.1.0-alpha.5..v0.1.0-alpha.6
 [0.1.0-alpha.5]: https://github.com/hakula139/oxide-code/compare/v0.1.0-alpha.4..v0.1.0-alpha.5
 [0.1.0-alpha.4]: https://github.com/hakula139/oxide-code/compare/v0.1.0-alpha.3..v0.1.0-alpha.4
 [0.1.0-alpha.3]: https://github.com/hakula139/oxide-code/compare/v0.1.0-alpha.2..v0.1.0-alpha.3
