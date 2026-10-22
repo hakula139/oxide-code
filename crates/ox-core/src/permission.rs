@@ -3117,6 +3117,24 @@ mod tests {
             }
 
             #[test]
+            fn command_rules_see_a_bare_comparison_operator_as_a_word() {
+                let yolo = policy(Mode::Yolo, &[(EXEC, "rm *")], &[], &[]);
+                let manual = policy(Mode::Manual, &[], &[], &[(EXEC, "git status")]);
+
+                for case in ["xargs -I == rm -rf x", "xargs -I =~ rm -rf x"] {
+                    assert_eq!(
+                        decide(&yolo, EXEC, &command(case)),
+                        Decision::Deny,
+                        "{case}"
+                    );
+                }
+                assert_eq!(
+                    decide(&manual, EXEC, &command("git == status")),
+                    Decision::Ask
+                );
+            }
+
+            #[test]
             fn command_allow_sees_through_only_wrappers_that_keep_who_runs_it_and_its_arguments() {
                 let p = policy(Mode::Manual, &[], &[], &[(EXEC, "cat *"), (EXEC, "find *")]);
                 for (case, expected) in [

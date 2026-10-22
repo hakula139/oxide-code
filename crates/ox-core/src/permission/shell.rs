@@ -657,7 +657,15 @@ impl Walk<'_> {
 
     fn command<'t>(&mut self, node: Node<'t>, trailing: &[Node<'t>], src: &str) {
         let mut cursor = node.walk();
-        let parts: Vec<Node<'t>> = node.named_children(&mut cursor).collect();
+        // An argument can be an anonymous token, such as a bare `==`, which bash passes as a word.
+        let parts: Vec<Node<'t>> = node
+            .children(&mut cursor)
+            .zip(0..)
+            .filter(|&(part, index)| {
+                part.is_named() || node.field_name_for_child(index) == Some("argument")
+            })
+            .map(|(part, _)| part)
+            .collect();
         self.parts(&parts, trailing, src);
     }
 
@@ -1492,6 +1500,7 @@ fn unquote(node: Node<'_>, src: &str, leading: bool) -> Option<(String, bool)> {
             }
             Some((value, glob))
         }
+        _ if !node.is_named() => Some((text.to_owned(), false)),
         _ => None,
     }
 }
@@ -1957,6 +1966,24 @@ mod tests {
                     ("echo >&2 hi", &["echo hi"]),
                 ] {
                     assert_eq!(texts(command), expected, "{command:?}");
+                }
+            }
+
+            #[test]
+            fn keeps_an_argument_the_grammar_reads_as_an_operator_as_a_literal_word() {
+                assert_eq!(
+                    words("git == push =~ -f"),
+                    ["git", "==", "push", "=~", "-f"]
+                );
+                for (command, expected) in [
+                    ("cat == x", "cat == x"),
+                    ("cat >out == x", "cat == x"),
+                    ("cat <<'EOF' =~ x\nx\nEOF", "cat =~ x"),
+                ] {
+                    let named = parse(command).segments[0].named().to_vec();
+
+                    assert_eq!(joined(&named), expected, "{command:?}");
+                    assert!(named.iter().all(ShellWord::is_literal), "{command:?}");
                 }
             }
 
