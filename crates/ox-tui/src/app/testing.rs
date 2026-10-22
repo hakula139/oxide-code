@@ -5,6 +5,7 @@ use std::sync::{Arc, Mutex};
 
 use crossterm::event::{KeyCode, KeyEvent};
 use ratatui::backend::TestBackend;
+use ratatui::buffer::{Buffer, CellWidth};
 use ratatui::layout::Rect;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
@@ -14,13 +15,15 @@ use tokio::sync::mpsc;
 use ox_core::client::{RateLimitWindow, RateLimits};
 use ox_core::model::ModelSpec;
 use ox_core::protocol::{Event, Op};
+use ox_core::session::entry::ArchiveState;
 use ox_core::tool::view::{ApprovalBody, ApprovalPreview};
 
 use super::{App, AppHistory};
 use crate::clipboard::{self, Clipboard, Environment};
 use crate::modal::approval::ApprovalModal;
 use crate::modal::{Modal, ModalKey};
-use crate::slash::{self, LiveSessionInfo};
+use crate::session_info::LiveSessionInfo;
+use crate::session_info::testing::test_session_info;
 use crate::testing::buffer_rows;
 use crate::theme::{Theme, ThemeOverrides};
 
@@ -31,7 +34,7 @@ pub(super) const OP_CHANNEL_CAPACITY: usize = 8;
 pub(super) fn test_app(
     title: Option<&str>,
 ) -> (App, mpsc::Receiver<Op>, mpsc::UnboundedSender<Event>) {
-    test_app_with(test_session_info(), title)
+    test_app_with(unknown_model_session_info(), title)
 }
 
 /// [`test_app`] started on `session_info`.
@@ -51,7 +54,7 @@ pub(super) fn test_app_with(
         AppHistory {
             interactions: Vec::new(),
             title: title.map(ToOwned::to_owned),
-            unarchived: false,
+            prior: ArchiveState::Active,
         },
     );
     app.open_browser = |_| Ok(());
@@ -66,10 +69,10 @@ pub(super) fn test_app_with(
     (app, op_rx, event_tx)
 }
 
-/// The slash fixture on `test-model`, an unknown id whose display name falls back to the literal
-/// id, keeping insta snapshots stable.
-pub(super) fn test_session_info() -> LiveSessionInfo {
-    let mut info = slash::testing::test_session_info();
+/// The shared session fixture on `test-model`, an unknown ID whose display name falls back to the
+/// literal ID, keeping insta snapshots stable.
+pub(super) fn unknown_model_session_info() -> LiveSessionInfo {
+    let mut info = test_session_info();
     info.config.model = ModelSpec::resolve("test-model");
     info
 }
@@ -138,6 +141,15 @@ pub(super) fn render_app(app: &mut App, width: u16, height: u16) -> TestBackend 
 /// Renders the app and returns its rows joined by newlines, for asserting on part of the frame.
 pub(super) fn rendered_text(app: &mut App, width: u16, height: u16) -> String {
     buffer_rows(render_app(app, width, height).buffer()).join("\n")
+}
+
+/// Screen cell where `needle` first shows in `buffer`.
+pub(super) fn cell_of(buffer: &Buffer, needle: &str) -> (u16, u16) {
+    let (row, x) = (0..)
+        .zip(buffer_rows(buffer))
+        .find_map(|(row, line)| Some((row, line[..line.find(needle)?].cell_width())))
+        .expect("needle shown");
+    (x, row)
 }
 
 pub(super) fn long_chat_block() -> String {

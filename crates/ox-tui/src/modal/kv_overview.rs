@@ -300,12 +300,14 @@ mod tests {
                     KvSection::new(vec![row("longer", "2")]),
                 ],
             );
+
             assert_eq!(m.label_width(), "longer".len());
         }
 
         #[test]
         fn empty_sections_is_zero() {
             let m = KvOverview::new("T", vec![]);
+
             assert_eq!(m.label_width(), 0);
         }
     }
@@ -393,7 +395,9 @@ mod tests {
         #[test]
         fn lays_out_every_row_with_a_close_hint_when_it_fits() {
             let m = flat_overview();
+
             let rows = trimmed_rows(&m, 40, m.height(40, 40));
+
             assert_eq!(
                 rows,
                 [
@@ -410,7 +414,9 @@ mod tests {
         #[test]
         fn clips_the_body_between_pinned_header_and_scroll_hint() {
             let m = long_overview();
+
             let rows = trimmed_rows(&m, 40, 7);
+
             assert_eq!(
                 rows,
                 [
@@ -429,7 +435,9 @@ mod tests {
         fn aligns_notes_in_a_column_when_they_fit() {
             // 42 columns is exactly label + gap + value + gap + note for this fixture.
             let m = annotated_overview();
+
             let rows = trimmed_rows(&m, 42, m.height(42, 40));
+
             assert_eq!(
                 rows[2..6],
                 [
@@ -444,7 +452,9 @@ mod tests {
         #[test]
         fn puts_notes_after_their_values_when_the_column_would_overflow() {
             let m = annotated_overview();
+
             let rows = trimmed_rows(&m, 41, m.height(41, 40));
+
             assert_eq!(
                 rows[2..4],
                 [
@@ -488,30 +498,43 @@ mod tests {
             trimmed_rows(&m, 40, 7);
 
             m.handle_key(&KeyEvent::from(KeyCode::Down));
+
             assert_eq!(trimmed_rows(&m, 40, 7)[2], "k1  v1");
+
             m.handle_key(&KeyEvent::from(KeyCode::PageDown));
+
             assert_eq!(
                 trimmed_rows(&m, 40, 7)[2],
                 "k4  v4",
                 "a page is the three body rows"
             );
+
             m.handle_key(&KeyEvent::from(KeyCode::End));
+
             assert_eq!(
                 trimmed_rows(&m, 40, 7)[4],
                 "k9  v9",
                 "End pins the last row"
             );
+
             m.handle_key(&KeyEvent::from(KeyCode::Down));
+
             assert_eq!(
                 trimmed_rows(&m, 40, 7)[4],
                 "k9  v9",
                 "no scrolling past the end"
             );
+
             m.handle_key(&KeyEvent::from(KeyCode::Char('k')));
+
             assert_eq!(trimmed_rows(&m, 40, 7)[4], "k8  v8");
+
             m.handle_key(&KeyEvent::from(KeyCode::PageUp));
+
             assert_eq!(trimmed_rows(&m, 40, 7)[2], "k3  v3");
+
             m.handle_key(&KeyEvent::from(KeyCode::Home));
+
             assert_eq!(trimmed_rows(&m, 40, 7)[2], "k0  v0");
         }
 
@@ -519,6 +542,7 @@ mod tests {
         fn every_key_is_consumed_so_only_universal_cancel_dismisses() {
             // Esc / Ctrl+C close at the stack layer, so the modal itself never pops.
             let mut m = flat_overview();
+
             for code in [
                 KeyCode::Enter,
                 KeyCode::Up,
@@ -527,6 +551,7 @@ mod tests {
                 KeyCode::Tab,
             ] {
                 let outcome = m.handle_key(&KeyEvent::from(code));
+
                 assert!(
                     matches!(outcome, ModalKey::Consumed),
                     "{code:?} must be consumed",

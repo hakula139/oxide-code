@@ -53,13 +53,13 @@ impl SlashCommand for EffortCmd {
             // An unknown model has nothing to slide, so error with the same recovery hint the
             // typed-arg path uses.
             let Some(slider) = EffortSlider::new(ctx.info) else {
-                return Err(no_effort_tier_msg(&ctx.info.config.model));
+                return Err(no_effort_levels_msg(&ctx.info.config.model));
             };
             return Ok(SlashOutcome::Modal(Box::new(slider)));
         }
         let op = command::effort(arg)?;
         if ctx.info.config.model.info().is_none() {
-            return Err(no_effort_tier_msg(&ctx.info.config.model));
+            return Err(no_effort_levels_msg(&ctx.info.config.model));
         }
         Ok(SlashOutcome::Forward(Action::Op(op)))
     }
@@ -67,9 +67,9 @@ impl SlashCommand for EffortCmd {
 
 // ── Helpers ──
 
-fn no_effort_tier_msg(model: &ModelSpec) -> String {
+fn no_effort_levels_msg(model: &ModelSpec) -> String {
     format!(
-        "{} has no effort tier. \
+        "{} has no effort levels. \
          Switch to a supported model first with `/model`, for example `/model opus`.",
         model.display_name(),
     )
@@ -80,8 +80,8 @@ mod tests {
     use ox_core::protocol::{ConfigPick, Op};
 
     use super::*;
+    use crate::session_info::testing::test_session_info;
     use crate::slash::registry::testing::run_execute;
-    use crate::slash::testing::test_session_info;
 
     mod classify {
         use super::*;
@@ -131,7 +131,7 @@ mod tests {
     mod execute {
         use super::*;
 
-        const NO_TIER_ERROR: &str = "custom-model has no effort tier. \
+        const NO_LEVELS_ERROR: &str = "custom-model has no effort levels. \
                                      Switch to a supported model first with `/model`, \
                                      for example `/model opus`.";
 
@@ -147,10 +147,10 @@ mod tests {
         }
 
         #[test]
-        fn no_args_on_no_tier_model_errors_with_recovery_hint() {
+        fn no_args_on_a_model_without_levels_errors_with_recovery_hint() {
             let err = run_execute_with_model("custom-model", "").unwrap_err();
 
-            assert_eq!(err, NO_TIER_ERROR);
+            assert_eq!(err, NO_LEVELS_ERROR);
         }
 
         #[test]
@@ -162,7 +162,7 @@ mod tests {
         }
 
         #[test]
-        fn unknown_level_errors_before_the_tier_check() {
+        fn unknown_level_errors_before_the_model_check() {
             let err = run_execute_with_model("custom-model", "turbo").unwrap_err();
 
             assert_eq!(
@@ -172,10 +172,10 @@ mod tests {
         }
 
         #[test]
-        fn explicit_level_on_no_tier_model_errors_with_recovery_hint() {
+        fn explicit_level_on_a_model_without_levels_errors_with_recovery_hint() {
             let err = run_execute_with_model("custom-model", "xhigh").unwrap_err();
 
-            assert_eq!(err, NO_TIER_ERROR);
+            assert_eq!(err, NO_LEVELS_ERROR);
         }
     }
 }

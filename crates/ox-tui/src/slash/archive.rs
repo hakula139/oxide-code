@@ -129,8 +129,9 @@ mod tests {
     };
 
     use super::*;
+    use crate::session_info::testing::test_session_info;
     use crate::slash::registry::testing::run_execute;
-    use crate::slash::testing::{make_read_only, test_session_info};
+    use crate::slash::testing::make_read_only;
 
     fn seed_saved(store: &SessionStore, session_id: &str) {
         seed_test_session(

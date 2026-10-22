@@ -16,7 +16,7 @@ use tracing::{error, warn};
 use uuid::Uuid;
 
 use super::actor::{self, SessionCmd};
-use super::entry::{CompactBoundary, CompactInfo, UsageRecord};
+use super::entry::{ArchiveState, CompactBoundary, CompactInfo, UsageRecord};
 use super::sanitize::{retain_visible_file_snapshots, sanitize_resumed_messages};
 use super::saved::SavedError;
 use super::state::{SessionState, extract_user_text};
@@ -53,10 +53,11 @@ pub(super) struct SharedState {
     flush_failure_surfaced: AtomicBool,
     persistence_stop_surfaced: AtomicBool,
     actor_gone_surfaced: AtomicBool,
-    /// Whether a `/rename` titled the session. [`SessionHandle::set_manual_title`] sets it before
-    /// it sends the title, so no AI title or `FirstPrompt` title follows. The title generator
-    /// checks it before appending, and the actor checks again on arrival, since a `/rename` can
-    /// land in between.
+    /// Whether a `/rename` titled the session.
+    /// [`SessionHandle::set_manual_title`] sets it before it sends the title,
+    /// so no AI or first-prompt title follows.
+    /// The title generator checks it before appending, and the actor checks again on arrival,
+    /// since a `/rename` can land in between.
     manual_title_set: AtomicBool,
     /// Most recent flush error, threaded into actor-gone messages so the user sees the I/O cause.
     last_flush_failure: Mutex<Option<String>>,
@@ -129,8 +130,9 @@ pub(crate) struct Outcome {
 #[derive(Debug)]
 pub(crate) struct CompactOutcome {
     pub(crate) pre_count: u32,
-    /// Whether the boundary took effect: on disk, or in memory alone once persistence stopped.
-    pub(crate) committed: bool,
+    /// The synthetic root as a rewind point, `Some` once the boundary took effect, either on disk
+    /// or in memory alone after persistence stopped.
+    pub(crate) checkpoint: Option<Checkpoint>,
     /// Every failure that leaves the boundary uncommitted, or else a write failure reported only
     /// the first time each kind occurs.
     pub(crate) failure: Option<String>,
@@ -174,9 +176,10 @@ impl SessionHandle {
     }
 
     /// Moves the session's tip back to `checkpoint`, abandoning the messages recorded after it.
-    /// `checkpoint` must come from a record since the last compaction, whose boundary the loader
-    /// cannot rewind across. A rewind to before the first user prompt stops the title request that
-    /// prompt started, so the next prompt titles the session.
+    /// `checkpoint` must come from the last compaction or a later record, because the loader cannot
+    /// rewind across a boundary.
+    /// A rewind to before the first user prompt stops the title request that prompt started,
+    /// so the next prompt titles the session.
     pub(crate) async fn rewind(&self, checkpoint: Checkpoint) -> Outcome {
         if !checkpoint.first_user_prompt_seen {
             self.stop_title_task().await;
@@ -224,8 +227,9 @@ impl SessionHandle {
     }
 
     /// Writes the compaction boundary and the synthetic post-compact message, then resets the chain
-    /// anchor. The caller swaps in the summary only once [`CompactOutcome::committed`] says the
-    /// boundary took effect.
+    /// anchor.
+    /// The caller swaps in the summary only once [`CompactOutcome::checkpoint`]
+    /// says the boundary took effect.
     pub(crate) async fn compact(
         &self,
         boundary: CompactBoundary,
@@ -241,7 +245,7 @@ impl SessionHandle {
             .await
             .unwrap_or_else(|| CompactOutcome {
                 pre_count: 0,
-                committed: false,
+                checkpoint: None,
                 failure: Some(self.actor_stopped_failure()),
             })
     }
@@ -367,13 +371,13 @@ pub struct LoadedTranscript {
     pub(crate) file_snapshots: Vec<FileSnapshot>,
 }
 
-/// Live handle plus display-only extras the TUI uses to reconstruct what the user saw live.
+/// The live handle on a resumed session, with its transcript, title, and prior archive state.
 pub struct ResumedSession {
     pub handle: SessionHandle,
     pub transcript: LoadedTranscript,
     pub title: Option<String>,
-    /// Whether the session was archived, so resuming it appended an entry unarchiving it.
-    pub unarchived: bool,
+    /// The session's state before this resume, which unarchives an archived session.
+    pub prior: ArchiveState,
 }
 
 // ── Constructors ──
@@ -413,12 +417,12 @@ pub(crate) async fn roll(
     }
 }
 
-/// The resumed transcript and the old session's finalize failure.
+/// The resumed transcript, title, and prior archive state, plus the old session's finalize failure.
 #[derive(Debug)]
 pub(crate) struct RollIntoOutcome {
     pub(crate) transcript: LoadedTranscript,
     pub(crate) title: Option<String>,
-    pub(crate) unarchived: bool,
+    pub(crate) prior: ArchiveState,
     pub(crate) finalize_failure: Option<String>,
 }
 
@@ -439,7 +443,7 @@ pub(crate) async fn roll_into(
         handle: target_handle,
         transcript,
         title,
-        unarchived,
+        prior,
     } = resume_loaded(store, target, data)?;
 
     let old_session = std::mem::replace(session, target_handle);
@@ -447,7 +451,7 @@ pub(crate) async fn roll_into(
     Ok(RollIntoOutcome {
         transcript,
         title,
-        unarchived,
+        prior,
         finalize_failure,
     })
 }
@@ -508,7 +512,7 @@ fn resume_loaded(
             file_snapshots: data.file_snapshots,
         },
         title,
-        unarchived: data.archived,
+        prior: ArchiveState::of(data.archived),
     })
 }
 
@@ -544,7 +548,7 @@ mod tests {
     };
     use crate::message::{ContentBlock, Replay, Role};
     use crate::prompt::PromptParts;
-    use crate::session::entry::{Entry, SessionInfo, TitleSource};
+    use crate::session::entry::{Entry, SessionInfo};
     use crate::session::handle::testing::record_write_call;
     use crate::session::store::listing::ProjectScope;
     use crate::session::store::local_testing::{
@@ -1059,7 +1063,7 @@ mod tests {
                 .await;
 
             assert_eq!(outcome.pre_count, 2, "pre_count snapshots before reset");
-            assert!(outcome.committed);
+            assert!(outcome.checkpoint.is_some());
             assert!(outcome.failure.is_none(), "healthy actor acks cleanly");
             handle.finish(Vec::new()).await;
             drop(handle);
@@ -1084,14 +1088,14 @@ mod tests {
             for expected in [STOPPED, STOPPED_AGAIN] {
                 let outcome = compact(&dead).await;
                 assert_eq!(outcome.pre_count, 0, "no actor means no pre-count signal");
-                assert!(!outcome.committed);
+                assert!(outcome.checkpoint.is_none());
                 assert_eq!(outcome.failure.as_deref(), Some(expected));
             }
 
             let stalled = testing::acks_then_drops("stalled", 1);
-            assert!(compact(&stalled).await.committed);
+            assert!(compact(&stalled).await.checkpoint.is_some());
             let dropped = compact(&stalled).await;
-            assert!(!dropped.committed);
+            assert!(dropped.checkpoint.is_none());
             assert_eq!(dropped.failure.as_deref(), Some(STOPPED));
             stalled.shutdown().await;
         }
@@ -1114,13 +1118,13 @@ mod tests {
             assert!(store.load_session_data(&session_id).unwrap().archived);
 
             let resumed = resume_id(&store, &session_id).unwrap();
-            assert!(resumed.unarchived);
+            assert_eq!(resumed.prior, ArchiveState::Archived);
             assert_eq!(resumed.transcript.messages, [Message::user("hello")]);
             resumed.handle.shutdown().await;
             assert!(!store.load_session_data(&session_id).unwrap().archived);
 
             let again = resume_id(&store, &session_id).unwrap();
-            assert!(!again.unarchived);
+            assert_eq!(again.prior, ArchiveState::Active);
             again.handle.shutdown().await;
             let archive_states: Vec<_> = saved_entries(dir.path(), &session_id)
                 .iter()
@@ -1739,8 +1743,8 @@ mod tests {
             let entries = saved_entries(dir.path(), session_id);
             assert_eq!(
                 saved_titles(&entries),
-                [("User-named", TitleSource::UserProvided)],
-                "next message must not add a FirstPrompt title alongside the existing one",
+                ["User-named"],
+                "next message must not add a first-prompt title alongside the existing one",
             );
             let message_count = entries
                 .iter()
@@ -1955,7 +1959,6 @@ mod tests {
 
     mod session_format {
         use super::*;
-        use crate::protocol::CompactTrigger;
 
         /// Writes a session holding every entry type and content block, with messages, contexts,
         /// and sidecars after its compaction, since a resume drops those from before it. Returns
@@ -1989,7 +1992,7 @@ mod tests {
                         summary: "Asked to edit f.rs.".to_owned(),
                         instructions: Some("focus on f.rs".to_owned()),
                         tasks: plan(),
-                        trigger: CompactTrigger::Manual,
+                        context: prompt.session_context(),
                     },
                     Message::user("Summary: asked to edit f.rs."),
                 )
@@ -2257,13 +2260,12 @@ mod tests {
                     "archived": listed.archived,
                 },
                 "title": resumed.title,
-                "unarchived": resumed.unarchived,
+                "prior": resumed.prior,
                 "compact": transcript.compact.as_ref().map(|compact| serde_json::json!({
                     "summary": compact.summary,
                     "pre_message_count": compact.pre_message_count,
                     "instructions": compact.instructions,
                     "tasks": compact.tasks,
-                    "trigger": compact.trigger,
                 })),
                 "context": transcript.context,
                 "messages": transcript.messages,

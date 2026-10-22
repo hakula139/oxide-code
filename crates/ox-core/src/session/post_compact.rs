@@ -6,6 +6,7 @@ use indoc::formatdoc;
 
 use crate::message::{ContentBlock, Message, Role};
 use crate::prompt::system_reminder;
+use crate::protocol::CompactTrigger;
 use crate::tool::bash::background::BackgroundShell;
 use crate::tool::tasks::Task;
 
@@ -14,12 +15,14 @@ const SUMMARY_PREFIX: &str = "This conversation has been compacted. \
                               The summary below covers the prior work. \
                               Continue from here without re-asking the engineer what to do.";
 
-/// Composes the synthetic post-compact root message for the next turn, reminding the model of
-/// the task list and the open background shells the summarized transcript leaves.
+/// Composes the synthetic post-compact root message, reminding the model of the task list and the
+/// open background shells the summarized transcript leaves.
+/// After a [`CompactTrigger::MidTurn`] compaction it also tells the model to resume its turn.
 pub(crate) fn synthesize_post_compact_message(
     summary: &str,
     tasks: &[Task],
     shells: &[BackgroundShell],
+    trigger: CompactTrigger,
 ) -> Message {
     let summary = summary.trim();
     let mut message = Message::user(formatdoc! {"
@@ -27,8 +30,16 @@ pub(crate) fn synthesize_post_compact_message(
 
         {summary}
     "});
+    // Adapts Claude Code's continuation after an automatic compaction.
+    let continuation = (trigger == CompactTrigger::MidTurn).then(|| {
+        system_reminder(
+            "You were partway through your turn when the conversation was compacted. \
+             Resume the task directly: do not acknowledge the summary, recap what was happening, \
+             or announce that you are continuing.",
+        )
+    });
     message.content.extend(
-        [task_reminder(tasks), shell_reminder(shells)]
+        [task_reminder(tasks), shell_reminder(shells), continuation]
             .into_iter()
             .flatten()
             .map(|text| ContentBlock::Text { text }),
@@ -114,7 +125,8 @@ mod tests {
 
         #[test]
         fn prepends_summary_prefix() {
-            let m = synthesize_post_compact_message(" did X, Y, Z\n", &[], &[]);
+            let m =
+                synthesize_post_compact_message(" did X, Y, Z\n", &[], &[], CompactTrigger::Manual);
 
             assert_eq!(m.role, Role::User);
             let [ContentBlock::Text { text }] = &m.content[..] else {
@@ -132,7 +144,7 @@ mod tests {
 
         #[test]
         fn reminds_the_model_of_the_task_list() {
-            let m = synthesize_post_compact_message("did X", &plan(), &[]);
+            let m = synthesize_post_compact_message("did X", &plan(), &[], CompactTrigger::Manual);
 
             let [
                 ContentBlock::Text { text: summary },
@@ -158,7 +170,12 @@ mod tests {
 
         #[test]
         fn lists_the_open_background_shells_after_the_task_list() {
-            let m = synthesize_post_compact_message("did X", &plan(), &shells_in_each_state());
+            let m = synthesize_post_compact_message(
+                "did X",
+                &plan(),
+                &shells_in_each_state(),
+                CompactTrigger::Manual,
+            );
 
             let [
                 _,
@@ -182,6 +199,33 @@ mod tests {
                 },
             );
         }
+
+        #[test]
+        fn tells_the_model_to_resume_only_after_a_mid_turn_compaction() {
+            let between_prompts = [CompactTrigger::Manual, CompactTrigger::Auto]
+                .map(|trigger| synthesize_post_compact_message("did X", &[], &[], trigger));
+
+            let mid_turn =
+                synthesize_post_compact_message("did X", &[], &[], CompactTrigger::MidTurn);
+
+            for m in between_prompts {
+                assert!(
+                    matches!(&m.content[..], [ContentBlock::Text { .. }]),
+                    "{m:?}"
+                );
+            }
+            let [_, ContentBlock::Text { text }] = &mid_turn.content[..] else {
+                panic!("expected the summary and the continuation: {mid_turn:?}");
+            };
+            assert_eq!(
+                text,
+                indoc! {"
+                    <system-reminder>
+                    You were partway through your turn when the conversation was compacted. Resume the task directly: do not acknowledge the summary, recap what was happening, or announce that you are continuing.
+                    </system-reminder>"
+                },
+            );
+        }
     }
 
     mod strip_synthetic_post_compact_prefix {
@@ -189,7 +233,12 @@ mod tests {
 
         #[test]
         fn removes_only_the_prefix_block() {
-            let mut m = synthesize_post_compact_message("internal summary", &[], &[]);
+            let mut m = synthesize_post_compact_message(
+                "internal summary",
+                &[],
+                &[],
+                CompactTrigger::Manual,
+            );
             m.content.push(ContentBlock::Text {
                 text: "real prompt".to_owned(),
             });

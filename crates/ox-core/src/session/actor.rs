@@ -10,7 +10,7 @@ use tokio::sync::{mpsc, oneshot};
 use tracing::warn;
 use uuid::Uuid;
 
-use super::entry::{CompactBoundary, Entry, TitleSource, UsageRecord};
+use super::entry::{CompactBoundary, Entry, UsageRecord};
 use super::handle::{Checkpoint, CompactOutcome, Outcome, RecordOutcome, SharedState};
 use super::state::SessionState;
 use crate::file_tracker::FileSnapshot;
@@ -174,7 +174,6 @@ impl Batch {
                 }
                 self.entries.push(Entry::Title {
                     title,
-                    source: TitleSource::AiGenerated,
                     updated_at: now,
                 });
                 self.acks.push(PendingAck::Outcome(ack));
@@ -186,7 +185,6 @@ impl Batch {
                     Some(title) => {
                         self.entries.push(Entry::Title {
                             title,
-                            source: TitleSource::UserProvided,
                             updated_at: now,
                         });
                         self.acks.push(PendingAck::Outcome(ack));
@@ -325,19 +323,21 @@ fn settle_acks(
                 pre_count,
                 synthetic_uuid,
             } => {
-                let committed = failure.is_none() || stopped;
                 // Every failure that leaves the compact uncommitted reaches the agent, so each
                 // discarded summary shows its cause.
-                let failure = if committed {
+                let (checkpoint, failure) = if failure.is_none() || stopped {
                     state.commit_compact(synthetic_uuid);
-                    surface_failure(failure, stopped, shared)
+                    (
+                        Some(state.checkpoint()),
+                        surface_failure(failure, stopped, shared),
+                    )
                 } else {
                     state.abandon_compact();
-                    failure.map(str::to_owned)
+                    (None, failure.map(str::to_owned))
                 };
                 _ = ack.send(CompactOutcome {
                     pre_count,
-                    committed,
+                    checkpoint,
                     failure,
                 });
             }
@@ -363,7 +363,6 @@ mod tests {
     use tempfile::tempdir;
 
     use super::*;
-    use crate::session::entry::TitleSource;
     use crate::session::handle::testing::boundary;
     use crate::session::state::MAX_UNWRITTEN_BYTES;
     use crate::session::store::SessionWriter;
@@ -596,8 +595,8 @@ mod tests {
             );
             assert_eq!(
                 saved_titles(&entries),
-                [("User-named", TitleSource::UserProvided)],
-                "deferred title replaces FirstPrompt",
+                ["User-named"],
+                "deferred title replaces the first-prompt title",
             );
         }
 
@@ -625,7 +624,7 @@ mod tests {
             let entries = saved_entries(dir.path(), &session_id);
             assert_eq!(
                 saved_titles(&entries),
-                [("Final name", TitleSource::UserProvided)],
+                ["Final name"],
                 "second rename overwrites the first",
             );
         }
@@ -664,10 +663,7 @@ mod tests {
             let entries = saved_entries(dir.path(), &session_id);
             assert_eq!(
                 saved_titles(&entries),
-                [
-                    ("Fix login", TitleSource::FirstPrompt),
-                    ("User-picked title", TitleSource::UserProvided),
-                ],
+                ["Fix login", "User-picked title"],
                 "AI title must not reach disk after a manual override",
             );
         }
@@ -769,10 +765,11 @@ mod tests {
                         Entry::Message { .. },
                         Entry::Message { .. },
                         Entry::Compact { .. },
+                        Entry::Context { .. },
                         Entry::Message { .. },
                     ]
                 ),
-                "the synthetic continuation follows its boundary: {entries:?}",
+                "the refreshed context and the synthetic continuation follow the boundary: {entries:?}",
             );
         }
 
@@ -852,7 +849,7 @@ mod tests {
             .await
             .unwrap();
             let outcome = compact_rx.await.unwrap();
-            assert!(!outcome.committed);
+            assert!(outcome.checkpoint.is_none());
             assert!(
                 outcome.failure.is_some(),
                 "the agent must see every compact failure, even after one was already surfaced",
@@ -909,10 +906,10 @@ mod tests {
             drop(tx);
             actor.await.unwrap();
 
-            assert!(first.committed);
+            assert!(first.checkpoint.is_some());
             assert_eq!(first.failure, None, "the stop already surfaced");
             assert_eq!(first.pre_count, 2);
-            assert!(second.committed);
+            assert!(second.checkpoint.is_some());
             assert_eq!(second.failure, None);
             assert_eq!(
                 second.pre_count, 2,

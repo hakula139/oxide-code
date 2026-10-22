@@ -97,6 +97,7 @@ pkexec
 pkgs
 pname
 popd
+POSIXLY
 procs
 pushd
 PYTHONDONTWRITEBYTECODE

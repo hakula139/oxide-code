@@ -2,7 +2,7 @@
 //! the engine emits, and the [`EventSink`] that delivers them. Ops, events, and their payloads
 //! serialize to JSON, with each enum tagged by `type` and its payload under `data`, so they can
 //! cross a process boundary. Headless `stream-json` output prints events in this form, so renaming
-//! a tag or field breaks the release stability surface.
+//! a tag or field in an event listed in `docs/guide/headless.md` breaks the stability surface.
 
 pub mod notice;
 
@@ -20,6 +20,7 @@ use crate::config::compaction::AutoCompactionConfig;
 use crate::model::{ModelSpec, ResolvedModelId};
 use crate::permission::rule::Rule;
 use crate::permission::{Basis, Mode, SessionGrant};
+use crate::session::entry::ArchiveState;
 use crate::tool::bash::background::BackgroundShell;
 use crate::tool::tasks::Task;
 use crate::tool::view::{ApprovalPreview, ToolResultView};
@@ -41,7 +42,10 @@ pub enum Op {
     Interrupt,
     /// Answers the outstanding [`Event::ApprovalRequested`]. The `id` is matched against the
     /// blocked call so a decision for an already-dropped call is ignored.
-    Resolve { id: String, decision: Decision },
+    Resolve {
+        id: String,
+        decision: ApprovalDecision,
+    },
     /// Swaps the model, the effort, or both for later turns.
     SetModel(ConfigPick),
     /// Switches the permission mode. Mid-turn, the switch applies from the next tool call the gate
@@ -80,10 +84,10 @@ pub enum ResumeTarget {
     Prefix(String),
 }
 
-/// The user's verdict on a pending approval, carried back on [`Op::Resolve`].
+/// The answer to an [`Event::ApprovalRequested`], carried back on [`Op::Resolve`].
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", content = "data", rename_all = "snake_case")]
-pub enum Decision {
+pub enum ApprovalDecision {
     Approve,
     /// Approve, and allow every later call `rule` matches for the rest of the session. The engine
     /// admits `rule` against its own grant for the call and denies the call when it fails.
@@ -91,10 +95,13 @@ pub enum Decision {
         rule: Box<Rule>,
     },
     Deny,
-    /// Deny, with `feedback` returned to the model as the call's result.
+    /// Deny, with the user's `feedback` returned to the model as the call's result.
     DenyWithFeedback {
         feedback: String,
     },
+    /// Deny without asking, since the frontend has nobody to ask.
+    /// The engine tells the model what would let a rerun make the call.
+    DenyUnattended,
     /// Deny, and end the turn as [`Op::Interrupt`] does.
     Abort,
 }
@@ -135,8 +142,8 @@ pub struct UsageSnapshot {
     /// Active model context window. `None` hides the percentage.
     pub context_window: Option<u32>,
     /// Running session cost in USD, accumulated across every request, summaries and the AI title
-    /// included. A roll starts it over, and a resume restores it from the session file. `None`
-    /// hides the cost segment.
+    /// included, and positive when present. A roll starts it over, and a resume restores it from
+    /// the session file. `None` hides the cost segment.
     pub estimated_cost_usd: Option<f64>,
 }
 
@@ -184,8 +191,15 @@ pub enum Event {
     TurnComplete,
     /// The model refused the turn in flight, so the engine removed it from the conversation along
     /// with its prompt and the [`Self::PromptDrained`] prompts it took in, and a
-    /// [`Self::TurnFailed`] follows. The frontend hands those prompts back to the user.
+    /// [`Self::TurnFailed`] follows.
+    /// The frontend hands the removed prompts back to the user.
+    /// After a [`CompactTrigger::MidTurn`] compaction the engine removes only what followed the
+    /// summary, since the summary already covers the prompt and the prompts drained before it.
     TurnRolledBack,
+    /// The automatic compaction ahead of an [`Op::Prompt`] failed, so the engine never sent the
+    /// prompt, and a [`Self::TurnFailed`] follows.
+    /// The frontend hands the prompt back to the user.
+    PromptUnsent,
     /// The in-flight prompt, compaction, resume, archive, sign-in, or sign-out failed. Like
     /// [`Self::TurnComplete`] and [`Self::Cancelled`], it ends the operation.
     TurnFailed(String),
@@ -196,8 +210,9 @@ pub enum Event {
     /// The user cancelled a turn, compaction, or sign-in with [`Op::Interrupt`]. The in-flight
     /// reply is truncated, and frontends mark where it stopped.
     Cancelled,
-    /// Automatic compaction started before the submitted prompt runs. The frontend shows compacting
-    /// status while the summarizer request streams.
+    /// Automatic compaction started, ahead of the submitted prompt or at a round boundary of the
+    /// turn in flight.
+    /// The frontend shows compacting status while the summarizer request streams.
     AutoCompactionStarted,
     /// Automatic compaction failed `failures` times in a row, so later prompts go out without it
     /// until [`Self::AutoCompactionResumed`].
@@ -211,27 +226,34 @@ pub enum Event {
     /// The summary streamed so far was dropped, because a retry starts it over or the compaction
     /// failed or was cancelled. Precedes the event that reports the failure or cancellation.
     SummaryDiscarded,
-    /// The session title changed, from the background generator or an [`Op::Rename`].
-    SessionTitleUpdated { session_id: String, title: String },
+    /// The title of session `id` changed, from the background generator or an [`Op::Rename`]. A
+    /// generated title can arrive after a roll, so frontends ignore one whose `id` is not live.
+    SessionTitleUpdated { id: String, title: String },
     /// An [`Op::Rename`] could not record its title, so the title stays. Ends the rename as
     /// [`Self::SessionTitleUpdated`] does.
     RenameFailed(String),
     /// An [`Op::Clear`] or [`Op::Archive`] rolled the session, making a new session UUID active.
-    /// `archived` marks an archive roll, so the frontend can name the session it archived.
-    SessionRolled { id: String, archived: bool },
-    /// An [`Op::Resume`] swapped to an existing session in place. Payload carries the target's
-    /// transcript projected for display, so the frontend can rebuild chat without restarting the
-    /// process. `unarchived` reports that the target stayed archived until this resume.
+    /// `old_session` is the state the roll left the old session in,
+    /// so the frontend can name the session an archive roll archived.
+    SessionRolled {
+        id: String,
+        old_session: ArchiveState,
+    },
+    /// An [`Op::Resume`] swapped to an existing session in place.
+    /// Payload carries the target's transcript projected for display,
+    /// so the frontend can rebuild chat without restarting the process.
+    /// `prior` is the target's state before this resume, which always leaves it active.
     SessionResumed {
         id: String,
         title: Option<String>,
-        unarchived: bool,
+        prior: ArchiveState,
         history: Vec<Interaction>,
     },
-    /// A compaction finished. The in-memory transcript has already been swapped to the synthetic
-    /// continuation, so the frontend clears its chat and replays a single boundary block. After an
-    /// automatic compaction the frontend stays busy, since the prompt it ran ahead of goes out
-    /// next.
+    /// A compaction finished.
+    /// The in-memory transcript has already been swapped to the synthetic continuation,
+    /// so the frontend clears its chat and replays a single boundary block.
+    /// After an automatic compaction the frontend stays busy,
+    /// since the prompt it ran ahead of or the rest of the turn it paused goes out next.
     SessionCompacted {
         summary: String,
         pre_count: u32,
@@ -305,8 +327,11 @@ pub enum Event {
 pub enum CompactTrigger {
     /// The user ran `/compact`.
     Manual,
-    /// The latest usage reached the threshold ahead of a submitted prompt.
+    /// The context estimate reached the threshold ahead of a submitted prompt.
     Auto,
+    /// The context reached the threshold at a round boundary inside a turn, which continues from
+    /// the summary.
+    MidTurn,
 }
 
 // ── Tool Calls ──
@@ -341,14 +366,12 @@ pub struct ToolResult {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", content = "data", rename_all = "snake_case")]
 pub enum Interaction {
-    /// The boundary a compaction left, which the rest of the transcript continues from. Renders
-    /// like a live [`Event::SessionCompacted`]. `trigger` is `None` for a boundary written before
-    /// sessions recorded it.
+    /// The boundary a compaction left, which the rest of the transcript continues from.
+    /// Renders like a live [`Event::SessionCompacted`].
     Compacted {
         summary: String,
         pre_count: u32,
         instructions: Option<String>,
-        trigger: Option<CompactTrigger>,
     },
     UserText(String),
     AssistantText(String),
@@ -514,27 +537,31 @@ mod tests {
                 Op::Interrupt,
                 Op::Resolve {
                     id: "t1".to_owned(),
-                    decision: Decision::Approve,
+                    decision: ApprovalDecision::Approve,
                 },
                 Op::Resolve {
                     id: "t1".to_owned(),
-                    decision: Decision::AllowForSession {
+                    decision: ApprovalDecision::AllowForSession {
                         rule: Box::new(Rule::parse(PermissionClass::Exec, "cargo test *").unwrap()),
                     },
                 },
                 Op::Resolve {
                     id: "t1".to_owned(),
-                    decision: Decision::Deny,
+                    decision: ApprovalDecision::Deny,
                 },
                 Op::Resolve {
                     id: "t1".to_owned(),
-                    decision: Decision::DenyWithFeedback {
+                    decision: ApprovalDecision::DenyWithFeedback {
                         feedback: "Use rg instead.".to_owned(),
                     },
                 },
                 Op::Resolve {
                     id: "t1".to_owned(),
-                    decision: Decision::Abort,
+                    decision: ApprovalDecision::DenyUnattended,
+                },
+                Op::Resolve {
+                    id: "t1".to_owned(),
+                    decision: ApprovalDecision::Abort,
                 },
                 Op::SetModel(ConfigPick::Model {
                     id: ResolvedModelId::new("claude-opus-5-5"),
@@ -580,13 +607,13 @@ mod tests {
             assert_eq!(
                 serde_json::to_value(Op::Resolve {
                     id: "t1".to_owned(),
-                    decision: Decision::Deny,
+                    decision: ApprovalDecision::Deny,
                 })
                 .unwrap(),
                 json!({"type": "resolve", "data": {"id": "t1", "decision": {"type": "deny"}}}),
             );
             assert_eq!(
-                serde_json::to_value(Decision::AllowForSession {
+                serde_json::to_value(ApprovalDecision::AllowForSession {
                     rule: Box::new(Rule::parse(PermissionClass::Exec, "cargo test *").unwrap()),
                 })
                 .unwrap(),
@@ -596,7 +623,7 @@ mod tests {
                 }),
             );
             assert_eq!(
-                serde_json::to_value(Decision::DenyWithFeedback {
+                serde_json::to_value(ApprovalDecision::DenyWithFeedback {
                     feedback: "Use rg instead.".to_owned(),
                 })
                 .unwrap(),
@@ -688,7 +715,6 @@ mod tests {
                     summary: "Summary.".to_owned(),
                     pre_count: 4,
                     instructions: Some("focus".to_owned()),
-                    trigger: Some(CompactTrigger::Manual),
                 },
                 Interaction::UserText("ask".to_owned()),
                 Interaction::AssistantThinking("thinking".to_owned()),
@@ -718,6 +744,7 @@ mod tests {
                 Event::PromptDrained(_) => "prompt_drained",
                 Event::TurnComplete => "turn_complete",
                 Event::TurnRolledBack => "turn_rolled_back",
+                Event::PromptUnsent => "prompt_unsent",
                 Event::TurnFailed(_) => "turn_failed",
                 Event::UsageUpdated(_) => "usage_updated",
                 Event::RateLimitsUpdated(_) => "rate_limits_updated",
@@ -784,6 +811,7 @@ mod tests {
                 Event::PromptDrained("next".to_owned()),
                 Event::TurnComplete,
                 Event::TurnRolledBack,
+                Event::PromptUnsent,
                 Event::TurnFailed("boom".to_owned()),
                 Event::UsageUpdated(UsageSnapshot {
                     context_tokens: Some(1_200),
@@ -798,18 +826,18 @@ mod tests {
                 Event::SummaryToken("Recap".to_owned()),
                 Event::SummaryDiscarded,
                 Event::SessionTitleUpdated {
-                    session_id: "s1".to_owned(),
+                    id: "s1".to_owned(),
                     title: "Title".to_owned(),
                 },
                 Event::RenameFailed("Session write failed: disk full".to_owned()),
                 Event::SessionRolled {
                     id: "s2".to_owned(),
-                    archived: true,
+                    old_session: ArchiveState::Archived,
                 },
                 Event::SessionResumed {
                     id: "s3".to_owned(),
                     title: Some("Resumed".to_owned()),
-                    unarchived: true,
+                    prior: ArchiveState::Archived,
                     history: full_history(),
                 },
                 Event::SessionCompacted {
@@ -987,6 +1015,23 @@ mod tests {
                     },
                 }),
             );
+        }
+    }
+
+    mod compact_trigger {
+        use super::*;
+
+        #[test]
+        fn tags_each_compaction_trigger_as_headless_output_names_it() {
+            let triggers = [
+                CompactTrigger::Manual,
+                CompactTrigger::Auto,
+                CompactTrigger::MidTurn,
+            ];
+
+            let tags = serde_json::to_value(triggers).unwrap();
+
+            assert_eq!(tags, json!(["manual", "auto", "mid_turn"]));
         }
     }
 

@@ -16,6 +16,7 @@ mod keymap;
 mod markdown;
 mod modal;
 mod pending_calls;
+mod session_info;
 pub mod slash;
 pub mod terminal;
 #[cfg(test)]
@@ -32,11 +33,13 @@ use tracing::{debug, warn};
 
 use ox_core::config::ConfigSnapshot;
 use ox_core::engine::{Engine, EngineHandle};
+use ox_core::session::entry::ArchiveState;
 use ox_core::util::path::tildify;
 
 use action::Action;
 use app::{App, AppHistory};
-use slash::{LiveSessionInfo, ResumePicker};
+use session_info::LiveSessionInfo;
+use slash::ResumePicker;
 use theme::ResolvedTheme;
 
 // ── Constants ──
@@ -55,8 +58,8 @@ pub struct Startup {
     /// The `ox <prompt>` text, submitted as if typed once the TUI opens.
     pub prompt: Option<String>,
     pub title: Option<String>,
-    /// Whether resuming the session unarchived it.
-    pub unarchived: bool,
+    /// The session's state before startup resumed it, which unarchives an archived session.
+    pub prior: ArchiveState,
 }
 
 /// Runs the TUI until the user quits or `shutdown` resolves, then waits for the engine to finalize
@@ -74,8 +77,8 @@ pub async fn run<S: Debug>(
 
     let cwd = engine.cwd();
     let session_info = LiveSessionInfo {
-        cwd: tildify(cwd),
-        working_dir: Some(cwd.to_owned()),
+        cwd: cwd.to_owned(),
+        display_cwd: tildify(cwd),
         project_root: engine.project_root().to_owned(),
         version: env!("CARGO_PKG_VERSION"),
         session_id: engine.session_id().to_owned(),
@@ -103,7 +106,7 @@ pub async fn run<S: Debug>(
         AppHistory {
             interactions,
             title: startup.title,
-            unarchived: startup.unarchived,
+            prior: startup.prior,
         },
     );
     for notice in theme_notices {

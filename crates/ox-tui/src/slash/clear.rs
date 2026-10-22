@@ -16,7 +16,7 @@ impl SlashCommand for ClearCmd {
     }
 
     fn description(&self) -> &'static str {
-        "Reset the conversation context"
+        "Start a new session (this one stays resumable)"
     }
 
     fn classify(&self, _args: &str) -> SlashKind {

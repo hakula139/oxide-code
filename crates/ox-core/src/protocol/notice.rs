@@ -13,8 +13,8 @@ use crate::util::text::plural;
 pub const ENGINE_STOPPED: &str = "ox stopped unexpectedly";
 
 /// Explains the pause an [`Event::AutoCompactionStarted`](super::Event::AutoCompactionStarted)
-/// opens before the prompt goes out.
-pub const AUTO_COMPACTING: &str = "Compacting the conversation before sending the prompt";
+/// opens before the prompt goes out or between the rounds of a turn.
+pub const AUTO_COMPACTING: &str = "Compacting the conversation to free up context";
 
 /// Confirms an [`Event::ModeChanged`](super::Event::ModeChanged).
 pub fn mode_changed(mode: Mode) -> String {
@@ -68,7 +68,7 @@ pub(crate) fn config_changed(
         (None, None, None) => (named, None),
         (None, Some(_), None) => (
             named,
-            Some("Effort cleared (model has no effort tier)".to_owned()),
+            Some("Effort cleared (model has no effort levels)".to_owned()),
         ),
         (None, None, Some(eff)) => (format!("{named} · effort {eff} (model default)"), None),
         (_, _, Some(eff)) => (format!("{named} · effort {eff}"), None),
@@ -154,8 +154,8 @@ mod tests {
         }
 
         #[test]
-        fn swap_to_no_tier_model_surfaces_requested_effort() {
-            // The user needs to know the requested tier didn't apply, or else a silent drop reads
+        fn swap_to_a_model_without_levels_surfaces_requested_effort() {
+            // The user needs to know the requested level didn't apply, or else a silent drop reads
             // as a landed config change.
             let opus = ModelSpec::resolve("claude-opus-5-5");
             let custom = ModelSpec::resolve("custom-model");
@@ -169,7 +169,7 @@ mod tests {
             assert_eq!(
                 s,
                 "Switched to custom-model (custom-model). \
-                 Effort unchanged (model has no effort tier, asked for high).",
+                 Effort unchanged (model has no effort levels, asked for high).",
             );
         }
 
@@ -187,14 +187,14 @@ mod tests {
             assert_eq!(
                 s,
                 "Switched to custom-model (custom-model). \
-                 Effort cleared (model has no effort tier)."
+                 Effort cleared (model has no effort levels)."
             );
         }
 
         #[test]
         fn swap_marks_default_when_previous_was_none() {
             // None → Some means the new model's default kicked in. Distinguishing this from "user's
-            // pick survived" keeps the user from thinking they chose this tier.
+            // pick survived" keeps the user from thinking they chose this level.
             let custom = ModelSpec::resolve("custom-model");
             let opus = ModelSpec::resolve("claude-opus-5-5");
 
@@ -258,7 +258,7 @@ mod tests {
         }
 
         #[test]
-        fn effort_pick_on_no_tier_model_surfaces_loss() {
+        fn effort_pick_on_a_model_without_levels_surfaces_loss() {
             let custom = ModelSpec::resolve("custom-model");
 
             let s = config_changed(
@@ -269,7 +269,7 @@ mod tests {
 
             assert_eq!(
                 s,
-                "Effort unchanged (model has no effort tier, asked for high)"
+                "Effort unchanged (model has no effort levels, asked for high)"
             );
         }
 
@@ -322,7 +322,7 @@ mod tests {
                 s,
                 format!(
                     "Switched to custom-model (custom-model). \
-                     Effort unchanged (model has no effort tier, asked for max). \
+                     Effort unchanged (model has no effort levels, asked for max). \
                      Auto compaction at {WINDOW_1M_THRESHOLD} tokens.",
                 ),
             );

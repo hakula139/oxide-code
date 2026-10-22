@@ -197,6 +197,7 @@ mod tests {
     #[test]
     fn diff_add_row_and_diff_del_row_set_only_background() {
         let t = Theme::default();
+
         assert_eq!(
             t.diff_add_row(),
             Style::default().bg(t.diff_add.bg.unwrap())
@@ -257,6 +258,7 @@ mod tests {
         #[test]
         fn has_distinct_colors() {
             let t = Theme::default();
+
             assert_ne!(t.text.fg, t.muted.fg);
             assert_ne!(t.muted.fg, t.dim.fg);
             assert_ne!(t.accent.fg, t.assistant.fg);
@@ -268,6 +270,7 @@ mod tests {
         #[test]
         fn accent_is_bold() {
             let t = Theme::default();
+
             assert_eq!(t.accent.modifiers, Modifier::BOLD);
         }
 
@@ -275,6 +278,7 @@ mod tests {
         fn headings_step_down_from_bold_underlined_to_italic() {
             let t = Theme::default();
             let text = t.text();
+
             assert_eq!(
                 t.heading_h1(),
                 text.add_modifier(Modifier::BOLD | Modifier::UNDERLINED)
@@ -290,6 +294,7 @@ mod tests {
         #[test]
         fn link_is_underlined_accent() {
             let t = Theme::default();
+
             assert_eq!(
                 t.link(),
                 Style::default()
@@ -301,12 +306,14 @@ mod tests {
         #[test]
         fn thinking_is_italic() {
             let t = Theme::default();
+
             assert!(t.thinking.modifiers.contains(Modifier::ITALIC));
         }
 
         #[test]
         fn status_slots_carry_no_modifiers() {
             let t = Theme::default();
+
             assert_eq!(t.success.modifiers, Modifier::empty());
             assert_eq!(t.error.modifiers, Modifier::empty());
         }
@@ -318,6 +325,7 @@ mod tests {
         #[test]
         fn selection_uses_bold_text_and_other_rows_are_dim() {
             let theme = Theme::default();
+
             assert_eq!(
                 theme.row_style(true),
                 theme.text().add_modifier(Modifier::BOLD)
@@ -332,6 +340,7 @@ mod tests {
         #[test]
         fn pads_a_pipe_in_the_separator_style() {
             let t = Theme::default();
+
             assert_eq!(t.separator_span(), Span::styled(" │ ", t.separator()));
         }
     }
@@ -342,6 +351,7 @@ mod tests {
         #[test]
         fn highlights_the_task_in_progress_and_dims_completed_ones() {
             let t = Theme::default();
+
             assert_eq!(t.task_style(TaskStatus::Pending), t.text());
             assert_eq!(t.task_style(TaskStatus::InProgress), t.info());
             assert_eq!(t.task_style(TaskStatus::Completed), t.dim());

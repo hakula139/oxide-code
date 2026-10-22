@@ -145,7 +145,7 @@ impl App {
         let queued = self.queue.pending();
         let mut lines: Vec<Line<'static>> = Vec::with_capacity(PREVIEW_VISIBLE + 1);
         for prompt in queued.iter().take(PREVIEW_VISIBLE) {
-            lines.push(preview_line(prompt, &self.theme, body_width));
+            lines.push(preview_line(prompt.line(), &self.theme, body_width));
         }
         if queued.len() > PREVIEW_VISIBLE {
             let extra = queued.len() - PREVIEW_VISIBLE;
@@ -263,16 +263,17 @@ mod tests {
 
     use ox_core::config::StatusLineSegment;
     use ox_core::permission::{Basis, Mode};
-    use ox_core::protocol::{CompactTrigger, Decision, Event, Op, ToolCall, ToolResult};
+    use ox_core::protocol::testing::{ls_call, text_result};
+    use ox_core::protocol::{ApprovalDecision, CompactTrigger, Event, Op};
     use ox_core::tool::tasks::testing::plan;
-    use ox_core::tool::view::{ApprovalBody, ApprovalPreview, ToolResultView};
+    use ox_core::tool::view::{ApprovalBody, ApprovalPreview};
     use ox_core::util::git::PullRequest;
 
     use super::*;
     use crate::action::Action;
     use crate::app::CopyNotice;
     use crate::app::testing::{
-        FakeModal, five_hour_limit, long_chat_block, push_answerable_approval, render_app,
+        FakeModal, cell_of, five_hour_limit, long_chat_block, push_answerable_approval, render_app,
         rendered_text, test_app,
     };
     use crate::clipboard::CopyError;
@@ -365,7 +366,9 @@ mod tests {
                 _ = writeln!(body, "line {i:02} of a long system block");
             }
             app.chat.push_system_message(body);
+
             let text = rendered_text(&mut app, 60, 12);
+
             assert!(
                 text.contains("line 39"),
                 "tail of overflowing block must be in the viewport after the first render, \
@@ -393,22 +396,20 @@ mod tests {
 
         /// Pushes a finished `ls` call listing two files.
         fn push_ls_call(app: &mut App) {
-            app.chat.push_tool_call(ToolCall {
-                id: "t1".to_owned(),
-                name: "bash".to_owned(),
-                input: serde_json::json!({"command": "ls"}),
-                icon: "$".to_owned(),
-                label: "ls".to_owned(),
-            });
-            app.chat.push_tool_result(ToolResult {
-                id: "t1".to_owned(),
-                content: "README.md\nCargo.toml".to_owned(),
-                is_error: false,
-                title: Some("ran ls".to_owned()),
-                view: ToolResultView::Text {
-                    content: "README.md\nCargo.toml".to_owned(),
-                },
-            });
+            app.chat.push_tool_call(ls_call());
+            app.chat.push_tool_result(text_result(
+                "t1",
+                "README.md\nCargo.toml",
+                false,
+                Some("ran ls"),
+            ));
+        }
+
+        /// The color of the first cell of `label` in a 60x10 frame.
+        fn label_fg(app: &mut App, label: &str) -> Color {
+            let backend = render_app(app, 60, 10);
+            let buffer = backend.buffer();
+            buffer[cell_of(buffer, label)].fg
         }
 
         const COMPACT_SUMMARY: &str = indoc! {"
@@ -480,6 +481,7 @@ mod tests {
                 (80, 2),
                 (3, 3),
             ];
+
             for (state, arrange) in states {
                 for (width, height) in sizes {
                     let (mut app, _rx, _event_tx) = test_app(Some("title"));
@@ -507,6 +509,7 @@ mod tests {
         #[test]
         fn lays_out_status_chat_and_input_in_order() {
             let (mut app, _rx, _event_tx) = test_app(Some("Session title"));
+
             insta::assert_snapshot!(render_app(&mut app, 80, 10));
         }
 
@@ -539,6 +542,7 @@ mod tests {
             push_ls_call(&mut app);
             app.chat.append_stream_token("Two files.");
             app.chat.commit_streaming();
+
             insta::assert_snapshot!(render_app(&mut app, 60, 12));
         }
 
@@ -547,18 +551,21 @@ mod tests {
             let (mut app, _rx, _event_tx) = test_app(None);
             app.dispatch_action(Action::Submit("working...".to_owned()));
             app.handle_engine_event(Event::StreamToken("part".to_owned()));
+
             insta::assert_snapshot!(render_app(&mut app, 60, 8));
         }
 
         #[test]
         fn compaction_streams_the_summary_below_the_chat() {
             let (mut app, _rx, _event_tx) = app_streaming_a_summary();
+
             insta::assert_snapshot!(render_app(&mut app, 60, 16));
         }
 
         #[test]
         fn compaction_success_leaves_only_the_compacted_summary() {
             let (mut app, _rx, _event_tx) = app_streaming_a_summary();
+
             app.handle_engine_event(Event::SessionCompacted {
                 summary: COMPACT_SUMMARY.trim().to_owned(),
                 pre_count: 3,
@@ -566,20 +573,24 @@ mod tests {
                 trigger: CompactTrigger::Manual,
             });
             app.handle_engine_event(Event::SessionReady);
+
             insta::assert_snapshot!(render_app(&mut app, 60, 16));
         }
 
         #[test]
         fn compaction_cancel_drops_the_partial_summary() {
             let (mut app, _rx, _event_tx) = app_streaming_a_summary();
+
             app.handle_engine_event(Event::SummaryDiscarded);
             app.handle_engine_event(Event::Cancelled);
+
             insta::assert_snapshot!(render_app(&mut app, 60, 16));
         }
 
         #[test]
         fn compaction_failure_drops_the_partial_summary_and_shows_the_error() {
             let (mut app, _rx, _event_tx) = app_streaming_a_summary();
+
             app.handle_engine_event(Event::SummaryDiscarded);
             app.handle_engine_event(Event::TurnFailed(
                 "Compaction failed: the summary hit the max_tokens output limit before it finished"
@@ -614,6 +625,7 @@ mod tests {
                     failed,
                     until: now(),
                 });
+
                 let backend = render_app(&mut app, 60, 10);
 
                 let buffer = backend.buffer();
@@ -649,33 +661,39 @@ mod tests {
                 .expect("pill shown");
             let pill = row.find(" Jump to bottom").unwrap();
             assert!(row.starts_with(" Not copied: Terminal"), "{row}");
-            assert!(row[..pill].trim_end().ends_with("..."), "{row}");
+            assert!(
+                row[..pill].ends_with("...  "),
+                "the notice's padding and one gap cell precede the pill: {row}",
+            );
         }
 
         #[test]
-        fn auto_scroll_on_hides_jump_overlay() {
+        fn following_the_tail_hides_the_jump_pill() {
             let (mut app, _rx, _event_tx) = test_app(None);
             app.chat.push_system_message(long_chat_block());
 
             let text = rendered_text(&mut app, 60, 10);
+
             assert!(!text.contains("Jump to bottom"), "{text}");
         }
 
         #[test]
-        fn scrolled_up_shows_jump_overlay() {
+        fn scrolled_up_shows_a_dim_jump_pill() {
             let (mut app, _rx, _event_tx) = test_app(None);
             app.chat.push_system_message(long_chat_block());
             _ = render_app(&mut app, 60, 10);
 
             app.chat
                 .handle_event(&key_event(KeyCode::PageUp, KeyModifiers::NONE));
-            let text = rendered_text(&mut app, 60, 10);
 
-            assert!(text.contains("Jump to bottom"), "{text}");
+            assert_eq!(
+                Some(label_fg(&mut app, "Jump to bottom")),
+                app.theme.dim().fg
+            );
         }
 
         #[test]
-        fn scrolled_up_counts_new_content() {
+        fn scrolled_up_counts_new_content_in_an_accent_pill() {
             let (mut app, _rx, _event_tx) = test_app(None);
             app.chat.push_system_message(long_chat_block());
             _ = render_app(&mut app, 60, 10);
@@ -683,15 +701,18 @@ mod tests {
                 .handle_event(&key_event(KeyCode::PageUp, KeyModifiers::NONE));
 
             app.chat.push_error("background update");
-            let text = rendered_text(&mut app, 60, 10);
 
-            assert!(text.contains("1 new message"), "{text}");
+            assert_eq!(
+                Some(label_fg(&mut app, "1 new message")),
+                app.theme.accent().fg
+            );
         }
 
         #[test]
         fn narrow_width_still_renders_all_three_panels() {
             let (mut app, _rx, _event_tx) = test_app(Some("narrow"));
             app.chat.push_user_message("hi".to_owned());
+
             insta::assert_snapshot!(render_app(&mut app, 40, 8));
         }
 
@@ -702,6 +723,7 @@ mod tests {
             assert!(app.input.popup_visible());
 
             let text = rendered_text(&mut app, 60, 14);
+
             assert!(
                 text.contains("/archive"),
                 "popup must paint at least one canonical command row: {text}",
@@ -715,6 +737,7 @@ mod tests {
             for i in 0..5 {
                 app.queue.push(format!("queued {i}"));
             }
+
             insta::assert_snapshot!(render_app(&mut app, 60, 14));
         }
 
@@ -741,8 +764,8 @@ mod tests {
             app.handle_engine_event(Event::TasksUpdated(plan()));
 
             let text = rendered_text(&mut app, 40, 12);
-            let rows: Vec<&str> = text.lines().map(str::trim_end).collect();
 
+            let rows: Vec<&str> = text.lines().map(str::trim_end).collect();
             assert_eq!(rows[3..5], ["  ● Add the entry type", "  ... +2 tasks"]);
             assert_eq!(rows[5], "─".repeat(40));
             assert!(rows[6].ends_with("one"), "{text}");
@@ -761,6 +784,7 @@ mod tests {
 
             app.modals
                 .push(Box::new(FakeModal::new("FAKE-MODAL-TITLE")));
+
             let with_modal = rendered_text(&mut app, 60, 14);
             assert!(
                 with_modal.contains("FAKE-MODAL-TITLE"),
@@ -773,6 +797,7 @@ mod tests {
 
             // A non-cancel key still reaches the modal, so the collapse keeps its focus grab.
             let action = app.modals.handle_key(&KeyEvent::from(KeyCode::Char('x')));
+
             assert!(action.is_none(), "FakeModal consumes without emitting");
             assert!(app.modals.is_active(), "Consumed must not pop the stack");
         }
@@ -786,14 +811,16 @@ mod tests {
             push_answerable_approval(&mut app, "cargo test --all");
 
             let text = rendered_text(&mut app, 60, 11);
+
             assert!(text.contains("cargo test --all"), "{text}");
 
             app.handle_crossterm_event(&key_event(KeyCode::Char('y'), KeyModifiers::NONE));
+
             let forwarded = rx.try_recv().expect("approval forwarded");
             assert!(matches!(
                 forwarded,
                 Op::Resolve {
-                    decision: Decision::Approve,
+                    decision: ApprovalDecision::Approve,
                     ..
                 }
             ));
@@ -814,6 +841,7 @@ mod tests {
                 &Basis::Mode(Mode::Manual),
                 None,
             );
+
             insta::assert_snapshot!(render_app(&mut app, 60, 14));
         }
 
@@ -822,11 +850,11 @@ mod tests {
             let (mut app, _rx, _event_tx) = test_app(None);
             let sentinel = Color::Rgb(254, 0, 254);
             let surface_bg = app.theme.surface().bg.expect("surface slot defines bg");
-
             let mut terminal = Terminal::new(TestBackend::new(60, 10)).unwrap();
             for cell in &mut terminal.current_buffer_mut().content {
                 cell.set_bg(sentinel);
             }
+
             terminal.draw(|frame| app.draw_frame(frame)).unwrap();
 
             let buffer = terminal.backend().buffer();
@@ -848,6 +876,7 @@ mod tests {
         #[test]
         fn is_zero_when_queue_empty() {
             let (app, _rx, _event_tx) = test_app(None);
+
             assert_eq!(app.preview_height(), 0);
         }
 
@@ -857,9 +886,10 @@ mod tests {
             for i in 0..(PREVIEW_VISIBLE + 5) {
                 app.queue.push(format!("p{i}"));
             }
+
             assert_eq!(
                 app.preview_height(),
-                u16::try_from(PREVIEW_VISIBLE + 1).unwrap(),
+                u16::try_from(PREVIEW_VISIBLE + 1).unwrap()
             );
         }
     }
@@ -877,6 +907,7 @@ mod tests {
             }
 
             let text = rendered_text(&mut app, 60, 20);
+
             assert!(
                 text.contains(&format!("... +{extra} prompts")),
                 "overflow hint must show exact extra count: {text}",

@@ -2,9 +2,10 @@
 
 use ox_core::config::{display_auth, display_auto_compaction, display_bool, display_effort};
 
-use super::context::{LiveSessionInfo, SlashContext};
+use super::context::SlashContext;
 use super::registry::{SlashCommand, SlashOutcome};
 use crate::modal::kv_overview::{KvOverview, KvSection};
+use crate::session_info::LiveSessionInfo;
 
 // ── StatusCmd ──
 
@@ -42,7 +43,11 @@ fn build_modal(info: &LiveSessionInfo) -> KvOverview {
     let rows = vec![
         ("Model".to_owned(), model),
         ("Effort".to_owned(), display_effort(info.config.effort)),
-        ("Working Directory".to_owned(), info.cwd.clone()),
+        (
+            "Permission Mode".to_owned(),
+            info.config.permission_mode.to_string(),
+        ),
+        ("Working Directory".to_owned(), info.display_cwd.clone()),
         ("Session".to_owned(), info.session_id.clone()),
         ("Auth".to_owned(), display_auth(info.config.auth)),
         ("Version".to_owned(), info.version.to_owned()),
@@ -95,8 +100,8 @@ mod tests {
     use super::*;
     use crate::modal::Modal;
     use crate::modal::testing::{render_rows, rendered_text};
+    use crate::session_info::testing::test_session_info;
     use crate::slash::registry::testing::run_execute;
-    use crate::slash::testing::test_session_info;
 
     mod execute {
         use super::*;

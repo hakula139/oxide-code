@@ -7,6 +7,7 @@ expression: "render_rows(&modal, 80, modal.height(80, u16::MAX))"
     "                                                                                ",
     "Model              Claude Opus 5.5 (claude-opus-5-5)                            ",
     "Effort             high                                                         ",
+    "Permission Mode    manual                                                       ",
     "Working Directory  ~/test                                                       ",
     "Session            test-session                                                 ",
     "Auth               API key (ANTHROPIC_API_KEY)                                  ",

@@ -40,7 +40,8 @@ use crate::components::tasks::TaskPanel;
 use crate::git_probes::GitProbes;
 use crate::modal::{Modal, ModalStack};
 use crate::now;
-use crate::slash::{ChatOutput, LiveSessionInfo};
+use crate::session_info::LiveSessionInfo;
+use crate::slash::ChatOutput;
 use crate::terminal::{Tui, TuiBackend};
 use crate::theme::{Theme, ThemeOverrides};
 
@@ -99,8 +100,8 @@ struct CopyNotice {
 pub(crate) struct AppHistory {
     pub(crate) interactions: Vec<Interaction>,
     pub(crate) title: Option<String>,
-    /// Whether resuming the session unarchived it, so the chat opens with a note saying so.
-    pub(crate) unarchived: bool,
+    /// The session's state before this resume, so an archived one opens with a note.
+    pub(crate) prior: ArchiveState,
 }
 
 impl App {
@@ -116,7 +117,7 @@ impl App {
     ) -> Self {
         let mut chat = ChatView::new(&theme, session_info.config.show_thinking);
         chat.load_history(history.interactions);
-        if history.unarchived {
+        if history.prior == ArchiveState::Archived {
             chat.push_system_message(archive_notice(
                 &session_info.session_id,
                 ArchiveState::Active,
@@ -126,12 +127,12 @@ impl App {
             segments: session_info.config.status_line.clone(),
             model: session_info.config.model.short_display_name().to_owned(),
             effort: session_info.config.effort,
-            cwd: session_info.cwd.clone(),
+            cwd: session_info.display_cwd.clone(),
             git_branch,
         });
         status_bar.set_title(history.title);
         let git_probes = GitProbes::new(
-            session_info.working_dir.clone(),
+            session_info.cwd.clone(),
             &session_info.config.status_line,
             now(),
         );
@@ -294,7 +295,9 @@ mod tests {
 
     use ox_core::config::StatusLineSegment;
 
-    use super::testing::{long_chat_block, render_app, rendered_text, test_app, test_session_info};
+    use super::testing::{
+        long_chat_block, render_app, rendered_text, test_app, unknown_model_session_info,
+    };
     use super::*;
     use crate::components::status::SPINNER_FRAME_INTERVAL;
     use crate::components::status::testing::status_bar_init;
@@ -311,6 +314,7 @@ mod tests {
         #[test]
         fn plumbs_resumed_title_and_branch_into_status_bar() {
             let (app, _rx, _event_tx) = test_app(Some("Resumed title"));
+
             assert_eq!(app.status_bar.title(), Some("Resumed title"));
             assert_eq!(app.status_bar.git_branch(), Some("main"));
             assert_eq!(app.status, Status::Idle);
@@ -322,6 +326,7 @@ mod tests {
         #[test]
         fn without_title_leaves_slot_unset() {
             let (app, _rx, _event_tx) = test_app(None);
+
             assert!(app.status_bar.title().is_none());
         }
 
@@ -329,6 +334,7 @@ mod tests {
         fn whitespace_title_is_filtered_by_status_bar() {
             // The status bar drops whitespace-only titles, so a blank resumed title leaves no slot.
             let (app, _rx, _event_tx) = test_app(Some("   \n "));
+
             assert!(app.status_bar.title().is_none());
         }
 
@@ -336,17 +342,18 @@ mod tests {
         fn after_resume_unarchived_the_session_opens_with_a_notice() {
             let (_event_tx, events) = mpsc::unbounded_channel::<Event>();
             let (ops, _op_rx) = mpsc::channel::<Op>(1);
+
             let mut app = App::new(
                 Theme::default(),
                 ThemeOverrides::default(),
-                test_session_info(),
+                unknown_model_session_info(),
                 None,
                 events,
                 ops,
                 AppHistory {
                     interactions: vec![Interaction::UserText("earlier".to_owned())],
                     title: None,
-                    unarchived: true,
+                    prior: ArchiveState::Archived,
                 },
             );
 
@@ -362,7 +369,9 @@ mod tests {
         #[test]
         fn replaces_welcome_with_notice() {
             let (mut app, _rx, _event_tx) = test_app(None);
+
             app.push_system_message("Model not supported.".to_owned());
+
             assert!(rendered_text(&mut app, 80, 24).contains("Model not supported."));
             assert!(!app.chat.is_empty());
         }
@@ -379,7 +388,6 @@ mod tests {
                 .expect("monotonic clock has run long enough for a test deadline");
             app.set_status(Status::ExitArmed { until });
             app.dirty = false;
-
             let mut terminal = capture_terminal(60, 8);
             let closer = tokio::spawn(async move {
                 tokio::time::sleep(TICK_INTERVAL * 2).await;
@@ -401,11 +409,10 @@ mod tests {
         #[tokio::test(start_paused = true)]
         async fn sleeps_while_idle() {
             let (mut app, _rx, event_tx) = test_app(None);
-            app.git_probes = GitProbes::new(None, &[], now());
+            app.git_probes = GitProbes::new(PathBuf::from("/repo"), &[], now());
             let modal = ScriptedModal::new(ModalAction::Cancelled);
             let ticks = Arc::clone(&modal.tick_count);
             app.modals.push(Box::new(modal));
-
             let mut terminal = capture_terminal(60, 8);
             let closer = tokio::spawn(async move {
                 tokio::time::sleep(Duration::from_secs(10)).await;
@@ -432,7 +439,6 @@ mod tests {
             let (mut app, _rx, event_tx) = test_app(None);
             app.set_status(Status::Streaming);
             app.dirty = false;
-
             let mut terminal = capture_terminal(60, 8);
             let driver = tokio::spawn(async move {
                 tokio::time::sleep(SPINNER_FRAME_INTERVAL).await;
@@ -461,10 +467,8 @@ mod tests {
         async fn pumps_crossterm_and_engine_events_through_select() {
             let (mut app, _rx, event_tx) = test_app(None);
             let mut terminal = capture_terminal(60, 8);
-
             let key = Ok(key_event(KeyCode::Char('x'), KeyModifiers::NONE));
             let stream = futures::stream::iter(vec![key]).chain(futures::stream::pending());
-
             let driver = tokio::spawn(async move {
                 event_tx.send(Event::StreamToken("hi".to_owned())).unwrap();
                 tokio::time::sleep(TICK_INTERVAL * 2).await;
@@ -484,7 +488,6 @@ mod tests {
             let (mut app, _rx, event_tx) = test_app(None);
             app.git_probes
                 .inject(GitUpdate::Branch(Some("feat/x".to_owned())));
-
             let mut terminal = capture_terminal(60, 8);
             let closer = tokio::spawn(async move {
                 tokio::time::sleep(TICK_INTERVAL * 2).await;
@@ -542,7 +545,7 @@ mod tests {
         /// An idle app with no probes, no clock segment, and nothing to redraw.
         fn settled_app() -> App {
             let (mut app, _rx, _event_tx) = test_app(None);
-            app.git_probes = GitProbes::new(None, &[], now());
+            app.git_probes = GitProbes::new(PathBuf::from("/repo"), &[], now());
             app.status_bar = StatusBar::new(status_bar_init(vec![StatusLineSegment::RunState]));
             app.dirty = false;
             app
@@ -568,7 +571,11 @@ mod tests {
         fn wakes_for_the_next_git_probe() {
             let last_tick = now();
             let mut app = settled_app();
-            app.git_probes = GitProbes::new(Some(PathBuf::from("/tmp")), &[], last_tick);
+            app.git_probes = GitProbes::new(
+                PathBuf::from("/repo"),
+                &[StatusLineSegment::GitBranch],
+                last_tick,
+            );
 
             assert_eq!(
                 app.next_tick(last_tick),
@@ -580,7 +587,6 @@ mod tests {
         async fn wakes_for_the_next_spinner_frame_while_busy() {
             let last_tick = now();
             let mut app = settled_app();
-
             app.set_status(Status::Streaming);
 
             assert_eq!(
@@ -593,7 +599,6 @@ mod tests {
         fn wakes_when_the_exit_window_closes() {
             let last_tick = now();
             let mut app = settled_app();
-
             app.set_status(Status::ExitArmed {
                 until: last_tick + Duration::from_secs(1),
             });
@@ -612,7 +617,6 @@ mod tests {
             _ = render_app(&mut app, 60, 10);
             app.handle_crossterm_event(&mouse_event(MouseEventKind::ScrollUp));
             _ = render_app(&mut app, 60, 10);
-
             app.handle_crossterm_event(&mouse_event_at(
                 MouseEventKind::Down(MouseButton::Left),
                 1,
@@ -632,7 +636,6 @@ mod tests {
         fn wakes_when_the_copy_notice_expires() {
             let last_tick = now();
             let mut app = settled_app();
-
             app.copy_notice = Some(CopyNotice {
                 text: "Copied".to_owned(),
                 failed: false,
@@ -651,7 +654,6 @@ mod tests {
             let mut app = settled_app();
             let mut modal = ScriptedModal::new(ModalAction::Cancelled);
             modal.next_tick = Some(last_tick + Duration::from_secs(2));
-
             app.modals.push(Box::new(modal));
 
             assert_eq!(
@@ -672,6 +674,7 @@ mod tests {
                 failed: false,
                 until: last_tick + Duration::from_millis(500),
             });
+
             assert_eq!(
                 app.next_tick(last_tick),
                 Some(last_tick + Duration::from_millis(500))

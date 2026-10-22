@@ -6,20 +6,63 @@ use tracing::warn;
 
 use ox_core::command;
 
-/// The active prompt and the prompts queued behind it, each kept as typed so Esc restores a `//`
-/// escape.
+/// A prompt the TUI holds: the line the user typed and the text the engine receives.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct QueuedPrompt {
+    /// The line as typed, which Esc and a failed turn hand back.
+    /// It unescapes to the text the chat shows.
+    line: String,
+    /// The text the engine receives: the unescaped line, or the prompt a slash command built.
+    prompt: String,
+}
+
+impl QueuedPrompt {
+    /// A prompt typed into the input, sent with its `//` escape removed.
+    fn typed(line: String) -> Self {
+        let prompt = command::unescape_literal(&line).to_owned();
+        Self { line, prompt }
+    }
+
+    /// A prompt a slash command built, headed in the chat by the command `line`.
+    pub(super) fn slash(line: String, prompt: String) -> Self {
+        Self { line, prompt }
+    }
+
+    pub(super) fn line(&self) -> &str {
+        &self.line
+    }
+
+    pub(super) fn prompt(&self) -> &str {
+        &self.prompt
+    }
+
+    /// The text the chat shows for the prompt.
+    pub(super) fn display(&self) -> &str {
+        command::unescape_literal(&self.line)
+    }
+}
+
+#[cfg(test)]
+impl PartialEq<&str> for QueuedPrompt {
+    fn eq(&self, line: &&str) -> bool {
+        self.line == *line
+    }
+}
+
+/// The active prompt and the prompts queued behind it.
 #[derive(Default)]
 pub(super) struct PromptQueue {
-    /// Prompt already painted for the in-flight turn. Replayed if auto-compaction clears chat, and
-    /// handed back if the turn fails before it is sent or is rolled back.
-    active: Option<String>,
+    /// Prompt already painted for the in-flight turn.
+    /// Replayed if auto-compaction clears chat, handed back if the turn fails before it is sent
+    /// or is rolled back, and dropped once a mid-turn compaction summarizes it.
+    active: Option<QueuedPrompt>,
     /// What a failure of the active prompt hands back to the user.
     hand_back: HandBack,
-    pending: VecDeque<String>,
+    pending: VecDeque<QueuedPrompt>,
     /// How many leading `pending` prompts the in-flight turn already holds.
     forwarded: usize,
     /// Queued prompts the in-flight turn took in, which a rolled-back turn hands back.
-    drained: Vec<String>,
+    drained: Vec<QueuedPrompt>,
     /// How many leading `pending` prompts were queued before a requested session switch.
     /// They belong to the session it leaves, and the queue only grows while the switch runs.
     before_switch: Option<usize>,
@@ -31,8 +74,10 @@ enum HandBack {
     /// Nothing, since the prompt ran and the queue goes on.
     #[default]
     Nothing,
-    /// The prompt, since an automatic compaction runs ahead of it and a failure means the engine
-    /// never sent it.
+    /// Nothing, but the queue waits for the user, since an automatic compaction is running
+    /// and after its failure the next prompt would start another summary request.
+    HeldQueue,
+    /// The prompt, since the automatic compaction ahead of it failed, so the engine never sent it.
     UnsentPrompt,
     /// The prompt and the queued prompts its turn took in, since the engine rolled the turn back.
     RolledBackTurn,
@@ -43,21 +88,24 @@ enum HandBack {
 pub(super) enum FailedTurn {
     /// The prompt ran, so nothing comes back and the queue goes on.
     Ran,
-    /// The prompts came back to the queue, apart from the one returned for the empty input.
+    /// The prompt ran, but the queue waits for the user.
+    Held,
+    /// The prompts came back to the queue, apart from the line returned for the empty input.
     HandedBack(Option<String>),
 }
 
 impl PromptQueue {
-    pub(super) fn pending(&self) -> &VecDeque<String> {
+    pub(super) fn pending(&self) -> &VecDeque<QueuedPrompt> {
         &self.pending
     }
 
-    pub(super) fn active(&self) -> Option<&str> {
-        self.active.as_deref()
+    /// The prompt the in-flight turn runs.
+    pub(super) fn active(&self) -> Option<&QueuedPrompt> {
+        self.active.as_ref()
     }
 
-    /// Marks `prompt`, as typed, as the one the in-flight turn runs.
-    pub(super) fn set_active(&mut self, prompt: String) {
+    /// Marks `prompt` as the one the in-flight turn runs.
+    pub(super) fn set_active(&mut self, prompt: QueuedPrompt) {
         self.active = Some(prompt);
     }
 
@@ -65,14 +113,27 @@ impl PromptQueue {
         self.active = None;
     }
 
-    /// Notes that an automatic compaction runs before the active prompt is sent.
+    /// Notes that an automatic compaction is running, so a failure holds the queue.
+    pub(super) fn mark_compacting(&mut self) {
+        self.hand_back = HandBack::HeldQueue;
+    }
+
+    /// Notes that the engine will not send the active prompt.
     pub(super) fn mark_unsent(&mut self) {
         self.hand_back = HandBack::UnsentPrompt;
     }
 
-    /// Notes that the active prompt reached the model after all.
-    pub(super) fn mark_sent(&mut self) {
+    /// Notes that a compaction finished, so a later failure is the turn's own.
+    pub(super) fn mark_compacted(&mut self) {
         self.hand_back = HandBack::Nothing;
+    }
+
+    /// Forgets the active prompt and the prompts the turn took in,
+    /// once a mid-turn compaction summarizes them,
+    /// so a rollback hands back only the prompts drained after it.
+    pub(super) fn mark_summarized(&mut self) {
+        self.active = None;
+        self.drained.clear();
     }
 
     /// Notes that the engine rolled the in-flight turn back.
@@ -80,28 +141,26 @@ impl PromptQueue {
         self.hand_back = HandBack::RolledBackTurn;
     }
 
-    pub(super) fn push(&mut self, prompt: String) {
-        self.pending.push_back(prompt);
+    /// Queues a line typed into the input.
+    pub(super) fn push(&mut self, line: String) {
+        self.pending.push_back(QueuedPrompt::typed(line));
     }
 
-    /// Takes the most recently queued prompt back, for editing.
+    /// Takes the most recently queued line back, for editing.
     pub(super) fn pop_last(&mut self) -> Option<String> {
-        self.pending.pop_back()
+        self.pending.pop_back().map(|queued| queued.line)
     }
 
-    /// Makes the oldest queued prompt the active one, returning it unescaped for its turn.
-    pub(super) fn start_next(&mut self) -> Option<String> {
-        let queued = self.pending.pop_front()?;
-        let prompt = command::unescape_literal(&queued).to_owned();
-        self.active = Some(queued);
-        Some(prompt)
+    /// Takes the oldest queued prompt to run as a turn of its own.
+    pub(super) fn pop_next(&mut self) -> Option<QueuedPrompt> {
+        self.pending.pop_front()
     }
 
-    /// The oldest queued prompt the in-flight turn lacks, unescaped for the engine.
+    /// The text of the oldest queued prompt the in-flight turn lacks.
     pub(super) fn next_to_forward(&self) -> Option<String> {
         self.pending
             .get(self.forwarded)
-            .map(|queued| command::unescape_literal(queued).to_owned())
+            .map(|queued| queued.prompt.clone())
     }
 
     /// Records that the in-flight turn now holds [`Self::next_to_forward`].
@@ -114,29 +173,40 @@ impl PromptQueue {
         self.forwarded
     }
 
-    /// Moves the queue head into the in-flight turn once the engine confirms it drained `text`.
+    /// Moves the queue head into the in-flight turn once the engine confirms it drained `text`,
+    /// returning what the chat shows for it.
     /// Only a forwarded head matches, since the engine drains prompts in the order it took them.
-    pub(super) fn confirm_drained(&mut self, text: &str) {
+    pub(super) fn confirm_drained(&mut self, text: String) -> String {
         if self.forwarded > 0
             && self
                 .pending
                 .front()
-                .is_some_and(|queued| command::unescape_literal(queued) == text)
+                .is_some_and(|queued| queued.prompt == text)
+            && let Some(queued) = self.pending.pop_front()
         {
-            self.drained.extend(self.pending.pop_front());
+            let display = queued.display().to_owned();
+            self.drained.push(queued);
             self.forwarded -= 1;
+            display
         } else {
-            warn!("drained prompt {text:?} does not lead the forwarded queue");
+            warn!(
+                prompt_len = text.len(),
+                "drained prompt does not lead the forwarded queue"
+            );
+            text
         }
     }
 
-    /// Settles a failed turn by what it marked. An unsent prompt returns for the input when the
-    /// input and the queue are empty, so Enter sends it again, and otherwise heads the queue so it
-    /// still runs first. A rolled-back turn returns the queued prompts it took in to the queue
-    /// head and its own prompt for the input when `input_empty`, or else ahead of them.
+    /// Settles a failed turn by what it marked.
+    /// A failed automatic compaction holds the queue.
+    /// An unsent prompt returns for the input when the input and the queue are empty,
+    /// so Enter sends it again, and otherwise heads the queue so it still runs first.
+    /// A rolled-back turn returns the queued prompts it took in to the queue head,
+    /// and its own prompt for the input when `input_empty`, or else ahead of them.
     pub(super) fn fail_turn(&mut self, input_empty: bool) -> FailedTurn {
         match self.hand_back {
             HandBack::Nothing => FailedTurn::Ran,
+            HandBack::HeldQueue => FailedTurn::Held,
             HandBack::UnsentPrompt => {
                 let into_input = input_empty && self.pending.is_empty();
                 FailedTurn::HandedBack(self.restore_active(into_input))
@@ -153,7 +223,7 @@ impl PromptQueue {
     fn restore_active(&mut self, into_input: bool) -> Option<String> {
         let prompt = self.active.take()?;
         if into_input {
-            return Some(prompt);
+            return Some(prompt.line);
         }
         self.pending.push_front(prompt);
         None
@@ -193,12 +263,31 @@ mod tests {
         for prompt in drained.iter().chain(queued) {
             queue.push((*prompt).to_owned());
         }
-        queue.set_active(active.to_owned());
+        queue.set_active(QueuedPrompt::typed(active.to_owned()));
         for prompt in drained {
             queue.mark_forwarded();
-            queue.confirm_drained(prompt);
+            queue.confirm_drained((*prompt).to_owned());
         }
         queue
+    }
+
+    mod confirm_drained {
+        use super::*;
+
+        #[test]
+        fn shows_a_slash_prompt_by_its_line() {
+            let mut queue = PromptQueue::default();
+            queue.pending.push_back(QueuedPrompt::slash(
+                "/init".to_owned(),
+                "Create AGENTS.md.".to_owned(),
+            ));
+            queue.mark_forwarded();
+
+            let display = queue.confirm_drained("Create AGENTS.md.".to_owned());
+
+            assert_eq!(display, "/init");
+            assert_eq!(*queue.pending(), [] as [&str; 0]);
+        }
     }
 
     mod fail_turn {
@@ -216,6 +305,25 @@ mod tests {
         }
 
         #[test]
+        fn a_rolled_back_turn_keeps_each_slash_prompt_as_built() {
+            let init = |prompt: &str| QueuedPrompt::slash("/init".to_owned(), prompt.to_owned());
+            let mut queue = PromptQueue::default();
+            queue.pending.push_back(init("Update AGENTS.md."));
+            queue.set_active(init("Create AGENTS.md."));
+            queue.mark_forwarded();
+            queue.confirm_drained("Update AGENTS.md.".to_owned());
+            queue.mark_rolled_back();
+
+            let failed = queue.fail_turn(false);
+
+            assert_eq!(failed, FailedTurn::HandedBack(None));
+            assert_eq!(
+                *queue.pending(),
+                [init("Create AGENTS.md."), init("Update AGENTS.md.")]
+            );
+        }
+
+        #[test]
         fn a_rolled_back_turn_returns_its_prompt_for_an_empty_input() {
             let mut queue = queue_with("active", &["d1"], &[]);
             queue.mark_rolled_back();
@@ -227,29 +335,62 @@ mod tests {
         }
 
         #[test]
-        fn an_unsent_prompt_returns_for_the_input_only_when_nothing_else_waits() {
-            let mut lone = queue_with("active", &[], &[]);
-            lone.mark_unsent();
-            let mut draft = queue_with("active", &[], &[]);
-            draft.mark_unsent();
-            let mut queued = queue_with("active", &[], &["next"]);
-            queued.mark_unsent();
+        fn a_failed_automatic_compaction_holds_the_queue() {
+            let mut queue = queue_with("active", &["d1"], &["queued"]);
+            queue.mark_compacting();
 
-            assert_eq!(
-                lone.fail_turn(true),
-                FailedTurn::HandedBack(Some("active".to_owned()))
-            );
-            assert_eq!(draft.fail_turn(false), FailedTurn::HandedBack(None));
-            assert_eq!(*draft.pending(), ["active"]);
-            assert_eq!(queued.fail_turn(true), FailedTurn::HandedBack(None));
-            assert_eq!(*queued.pending(), ["active", "next"]);
+            let failed = queue.fail_turn(true);
+
+            assert_eq!(failed, FailedTurn::Held);
+            assert_eq!(*queue.pending(), ["queued"]);
         }
 
         #[test]
-        fn a_sent_prompt_hands_nothing_back() {
+        fn a_mid_turn_summary_leaves_only_later_prompts_to_a_rollback() {
+            let mut queue = queue_with("active", &["d1"], &["d2"]);
+            queue.mark_summarized();
+            queue.mark_forwarded();
+            queue.confirm_drained("d2".to_owned());
+            queue.mark_rolled_back();
+
+            let failed = queue.fail_turn(true);
+
+            assert_eq!(failed, FailedTurn::HandedBack(None));
+            assert_eq!(*queue.pending(), ["d2"]);
+        }
+
+        #[test]
+        fn an_unsent_prompt_returns_for_the_input_only_when_nothing_else_waits() {
+            for (label, waiting, input_empty, into_input, pending) in [
+                ("a lone prompt", &[][..], true, Some("active"), &[][..]),
+                ("a draft in the input", &[], false, None, &["active"][..]),
+                (
+                    "a prompt queued behind it",
+                    &["next"],
+                    true,
+                    None,
+                    &["active", "next"][..],
+                ),
+            ] {
+                let mut queue = queue_with("active", &[], waiting);
+                queue.mark_unsent();
+
+                let failed = queue.fail_turn(input_empty);
+
+                assert_eq!(
+                    failed,
+                    FailedTurn::HandedBack(into_input.map(str::to_owned)),
+                    "{label}"
+                );
+                assert_eq!(*queue.pending(), pending, "{label}");
+            }
+        }
+
+        #[test]
+        fn a_turn_past_its_compaction_hands_nothing_back() {
             let mut queue = queue_with("active", &["d1"], &["queued"]);
-            queue.mark_unsent();
-            queue.mark_sent();
+            queue.mark_compacting();
+            queue.mark_compacted();
 
             let failed = queue.fail_turn(true);
 
@@ -269,14 +410,17 @@ mod tests {
             queue.end_turn();
 
             assert_eq!(queue.active(), None);
-            assert_eq!(
-                queue.fail_turn(true),
-                FailedTurn::Ran,
-                "the hand-back resets"
-            );
-            queue.set_active("next".to_owned());
+
+            let after_end = queue.fail_turn(true);
+
+            assert_eq!(after_end, FailedTurn::Ran, "the hand-back resets");
+
+            queue.set_active(QueuedPrompt::typed("next".to_owned()));
             queue.mark_rolled_back();
-            assert_eq!(queue.fail_turn(false), FailedTurn::HandedBack(None));
+
+            let next_failed = queue.fail_turn(false);
+
+            assert_eq!(next_failed, FailedTurn::HandedBack(None));
             assert_eq!(*queue.pending(), ["next", "queued"]);
         }
     }

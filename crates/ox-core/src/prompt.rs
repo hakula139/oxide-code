@@ -41,10 +41,21 @@ impl PromptParts {
         Some(reminder)
     }
 
-    /// Re-renders `user_context` from `fresh`, for a transcript no earlier request started with.
-    pub(crate) fn refresh(&mut self, fresh: UserContext) {
-        self.user_context = render_user_context(&fresh);
-        self.seen = fresh;
+    /// The prompt state that re-renders `user_context` from `fresh`, for a transcript no earlier
+    /// request started with.
+    /// [`Self::adopt`] switches to it.
+    pub(crate) fn refreshed(&self, fresh: UserContext) -> SessionContext {
+        SessionContext {
+            environment: self.environment.clone(),
+            user_context: render_user_context(&fresh),
+            seen: fresh,
+        }
+    }
+
+    /// Switches to `context`, which [`Self::refreshed`] built from this prompt.
+    pub(crate) fn adopt(&mut self, context: SessionContext) {
+        self.user_context = context.user_context;
+        self.seen = context.seen;
     }
 
     /// What the session records so [`restore_prompt`] can rebuild this prompt on resume.
@@ -93,6 +104,7 @@ impl UserContext {
 
 /// The prompt state a session records, which [`restore_prompt`] rebuilds on resume.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(Default))]
 pub(crate) struct SessionContext {
     environment: Environment,
     user_context: String,
@@ -315,17 +327,18 @@ mod tests {
         }
     }
 
-    mod refresh {
+    mod refreshed {
         use super::*;
 
         #[test]
-        fn rerenders_user_context_and_counts_it_as_seen() {
+        fn rerenders_user_context_and_counts_it_as_seen_once_adopted() {
             let mut parts = PromptParts {
                 user_context: "stale".to_owned(),
                 ..PromptParts::default()
             };
 
-            parts.refresh(context("Rules.", "2026-04-13"));
+            let refreshed = parts.refreshed(context("Rules.", "2026-04-13"));
+            parts.adopt(refreshed);
 
             assert_eq!(
                 parts.user_context,

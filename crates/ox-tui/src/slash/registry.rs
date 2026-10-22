@@ -31,6 +31,8 @@ use crate::modal::Modal;
 pub(crate) enum SlashOutcome {
     /// Dispatches a state-mutating action, applied locally or sent to the engine as an op.
     Forward(Action),
+    /// Starts a turn with a prompt the command built, headed by the line the user typed.
+    Prompt(String),
     /// Opens a modal over the input. The modal is the command's whole response.
     Modal(Box<dyn Modal>),
     /// Prints a system message into chat.
@@ -52,6 +54,7 @@ impl std::fmt::Debug for SlashOutcome {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Forward(action) => f.debug_tuple("Forward").field(action).finish(),
+            Self::Prompt(prompt) => f.debug_tuple("Prompt").field(prompt).finish(),
             Self::Modal(_) => f.write_str("Modal(<modal>)"),
             Self::SystemMessage(text) => f.debug_tuple("SystemMessage").field(text).finish(),
             Self::Background(_) => f.write_str("Background(<task>)"),
@@ -181,7 +184,7 @@ pub(super) fn lookup_in<'a>(
 #[cfg(test)]
 pub(super) mod testing {
     use super::{SlashCommand, SlashContext, SlashOutcome};
-    use crate::slash::testing::test_session_info;
+    use crate::session_info::testing::test_session_info;
 
     /// Runs `cmd` with `args` against [`test_session_info`] and no session title.
     pub(crate) fn run_execute(cmd: &dyn SlashCommand, args: &str) -> Result<SlashOutcome, String> {
@@ -237,7 +240,7 @@ mod tests {
     use super::*;
     use crate::modal::ModalAction;
     use crate::modal::testing::ScriptedModal;
-    use crate::slash::testing::test_session_info;
+    use crate::session_info::testing::test_session_info;
 
     mod slash_outcome {
         use super::*;
@@ -256,6 +259,10 @@ mod tests {
             assert_eq!(
                 format!("{:?}", SlashOutcome::Forward(Action::Op(Op::Clear))),
                 "Forward(Op(Clear))"
+            );
+            assert_eq!(
+                format!("{:?}", SlashOutcome::Prompt("Create AGENTS.md".to_owned())),
+                r#"Prompt("Create AGENTS.md")"#
             );
             assert_eq!(format!("{modal:?}"), "Modal(<modal>)");
             assert_eq!(format!("{:?}", done()), r#"SystemMessage("done")"#);
@@ -350,9 +357,8 @@ mod tests {
                 .collect()
         }
 
-        /// Every `(command, args)` form of `kind` reachable from an empty or junk argument or a
-        /// completion.
-        fn forms_of_kind(kind: SlashKind) -> Vec<(&'static dyn SlashCommand, String)> {
+        /// Every `(command, args)` form reachable from an empty or junk argument or a completion.
+        fn forms() -> Vec<(&'static dyn SlashCommand, String)> {
             BUILT_INS
                 .iter()
                 .flat_map(|&cmd| {
@@ -363,9 +369,15 @@ mod tests {
                     [String::new(), "x".to_owned()]
                         .into_iter()
                         .chain(completions)
-                        .filter(move |args| cmd.classify(args) == kind)
                         .map(move |args| (cmd, args))
                 })
+                .collect()
+        }
+
+        fn forms_of_kind(kind: SlashKind) -> Vec<(&'static dyn SlashCommand, String)> {
+            forms()
+                .into_iter()
+                .filter(|(cmd, args)| cmd.classify(args) == kind)
                 .collect()
         }
 
@@ -423,7 +435,7 @@ mod tests {
         }
 
         #[test]
-        fn read_only_forms_never_forward() {
+        fn read_only_forms_never_forward_or_prompt() {
             let info = test_session_info();
             let ctx = SlashContext::new(&info, None);
             let forms = forms_of_kind(SlashKind::ReadOnly);
@@ -432,14 +444,36 @@ mod tests {
             let forwarding: Vec<String> = forms
                 .iter()
                 .filter_map(|(cmd, args)| match cmd.execute(args, &ctx) {
-                    Ok(SlashOutcome::Forward(action)) => {
-                        Some(format!("/{} {args} forwards {action:?}", cmd.name()))
+                    Ok(outcome @ (SlashOutcome::Forward(_) | SlashOutcome::Prompt(_))) => {
+                        Some(format!("/{} {args} returns {outcome:?}", cmd.name()))
                     }
                     _ => None,
                 })
                 .collect();
 
             assert_eq!(forwarding, [] as [String; 0]);
+        }
+
+        #[test]
+        fn turns_start_only_from_prompts_whose_line_is_echoed() {
+            let info = test_session_info();
+            let ctx = SlashContext::new(&info, None);
+
+            let offenders: Vec<String> = forms()
+                .iter()
+                .filter_map(|(cmd, args)| match cmd.execute(args, &ctx) {
+                    Ok(SlashOutcome::Forward(Action::Op(Op::Prompt(_) | Op::Queue(_)))) => {
+                        Some(format!("/{} {args} bypasses the prompt queue", cmd.name()))
+                    }
+                    Ok(SlashOutcome::Prompt(_)) if !cmd.echoes_input(args) => Some(format!(
+                        "/{} {args} starts a turn without its line",
+                        cmd.name()
+                    )),
+                    _ => None,
+                })
+                .collect();
+
+            assert_eq!(offenders, [] as [String; 0]);
         }
 
         #[test]
@@ -453,8 +487,7 @@ mod tests {
                 .iter()
                 .filter_map(|(cmd, args)| match cmd.execute(args, &ctx) {
                     Ok(SlashOutcome::Forward(
-                        Action::SwapTheme(_)
-                        | Action::Op(Op::Queue(_) | Op::SetMode(_) | Op::Shutdown),
+                        Action::SwapTheme(_) | Action::Op(Op::SetMode(_) | Op::Shutdown),
                     ))
                     | Err(_) => None,
                     other => Some(format!("/{} {args} forwards {other:?}", cmd.name())),

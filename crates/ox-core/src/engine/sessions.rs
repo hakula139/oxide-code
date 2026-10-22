@@ -12,6 +12,7 @@ use crate::file_tracker::FileTracker;
 use crate::protocol::notice::session_write_failed;
 use crate::protocol::{Event, EventSink, ResumeTarget};
 use crate::session::display::id_prefix;
+use crate::session::entry::ArchiveState;
 use crate::session::handle::{self, LoadedTranscript, RollIntoOutcome};
 use crate::session::resolver::resolve_saved_prefix;
 use crate::util::git::current_branch;
@@ -20,7 +21,7 @@ use crate::util::text::plural;
 impl Engine {
     /// Finalizes the live session and continues in a fresh, empty one.
     pub(super) async fn clear(&mut self, sink: &dyn EventSink) {
-        self.roll_session(sink, false).await;
+        self.roll_session(sink, ArchiveState::Active).await;
     }
 
     /// Archives the live session, then rolls like [`Self::clear`].
@@ -41,10 +42,10 @@ impl Engine {
             );
             return;
         }
-        self.roll_session(sink, true).await;
+        self.roll_session(sink, ArchiveState::Archived).await;
     }
 
-    async fn roll_session(&mut self, sink: &dyn EventSink, archived: bool) {
+    async fn roll_session(&mut self, sink: &dyn EventSink, old_session: ArchiveState) {
         let git_branch = current_branch(self.cwd()).await;
         let outcome = handle::roll(
             &mut self.session,
@@ -58,7 +59,7 @@ impl Engine {
         sink.emit(
             Event::SessionRolled {
                 id: outcome.new_id,
-                archived,
+                old_session,
             },
             "session-rolled",
         );
@@ -87,7 +88,7 @@ impl Engine {
             Event::SessionResumed {
                 id: self.session.session_id().to_owned(),
                 title: outcome.title,
-                unarchived: outcome.unarchived,
+                prior: outcome.prior,
                 history: self.take_history(),
             },
             "session-resumed",
@@ -150,7 +151,7 @@ impl Engine {
         }
         sink.emit(
             Event::SessionTitleUpdated {
-                session_id: self.session.session_id().to_owned(),
+                id: self.session.session_id().to_owned(),
                 title,
             },
             "session-title-updated",
@@ -232,7 +233,8 @@ mod tests {
 
     use super::*;
     use crate::client::anthropic::testing::{sse_body, sse_response};
-    use crate::engine::compaction::AutoCompactFailures;
+    use crate::config::compaction::CompactionConfig;
+    use crate::engine::compaction::{AutoCompactFailures, auto_compaction_due, request_tokens};
     use crate::engine::local_testing::{
         EchoTool, dead_test_session, finished_session, greeting_title, inert_ops, mount_title,
         next_matching, system_prompt, texts, tracked_paths, write_unreadable_instructions,
@@ -384,7 +386,7 @@ mod tests {
                     [
                         Event::AutoCompactionResumed,
                         Event::SessionRolled {
-                            archived: false,
+                            old_session: ArchiveState::Active,
                             ..
                         },
                         Event::SessionReady,
@@ -569,7 +571,7 @@ mod tests {
                         events.as_slice(),
                         [
                             Event::SessionRolled {
-                                archived: false,
+                                old_session: ArchiveState::Active,
                                 ..
                             },
                             Event::Error(failure),
@@ -669,6 +671,39 @@ mod tests {
 
     mod resume {
         use super::*;
+
+        #[tokio::test]
+        async fn estimates_the_resumed_context_so_its_first_prompt_can_auto_compact() {
+            with_pinned_home(async {
+                let dir = tempfile::tempdir().unwrap();
+                let store = test_store(dir.path());
+                let saved = handle::start(&store, MODEL, None);
+                let saved_id = saved.session_id().to_owned();
+                saved
+                    .record_message(Message::user("x".repeat(240_000)))
+                    .await;
+                saved.record_message(Message::assistant("done")).await;
+                saved.finalize(Vec::new()).await;
+                let mut engine = engine("http://127.0.0.1:9".to_owned(), &store, dir.path()).await;
+                engine.compaction = CompactionConfig::with_threshold_for_test(50_000);
+                let path = store.find_session_path(&saved_id).unwrap();
+
+                engine
+                    .resume(&CapturingSink::default(), ResumeTarget::Path(path))
+                    .await;
+
+                assert_eq!(
+                    engine.context_estimate,
+                    Some(request_tokens(&engine.prompt, &[], &engine.messages))
+                );
+                assert!(auto_compaction_due(
+                    engine.auto_compaction(),
+                    engine.context_estimate,
+                    &engine.messages
+                ));
+            })
+            .await;
+        }
 
         #[tokio::test]
         async fn swaps_in_the_file_state_that_still_matches_disk_and_reports_the_rest() {
@@ -855,11 +890,11 @@ mod tests {
                 let store = test_store(dir.path());
                 let mut engine = engine(server.uri(), &store, dir.path()).await;
                 let original_id = engine.session.session_id().to_owned();
-                let last_usage = TokenUsage::new(100_000, 10);
+                let context_estimate = 100_000;
                 let displayed_usage = TokenUsage::new(90_000, 9);
                 engine.messages = vec![Message::user("still here")];
                 engine.auto_compaction_failures = AutoCompactFailures::new(2);
-                engine.last_usage = Some(last_usage);
+                engine.context_estimate = Some(context_estimate);
                 engine.displayed_usage = Some(displayed_usage);
                 engine.total_estimated_cost_usd = 1.23;
                 let rule = Rule::parse(PermissionClass::Exec, "cargo test *").unwrap();
@@ -877,7 +912,7 @@ mod tests {
                 assert_eq!(engine.session.session_id(), original_id);
                 assert_eq!(engine.messages.len(), 1);
                 assert_eq!(engine.auto_compaction_failures, AutoCompactFailures::new(2));
-                assert_eq!(engine.last_usage, Some(last_usage));
+                assert_eq!(engine.context_estimate, Some(context_estimate));
                 assert_eq!(engine.displayed_usage, Some(displayed_usage));
                 assert!((engine.total_estimated_cost_usd - 1.23).abs() < f64::EPSILON);
                 assert_eq!(engine.policy.session_allow(), [rule]);
@@ -923,9 +958,9 @@ mod tests {
                     matches!(
                         events.as_slice(),
                         [
-                            Event::SessionTitleUpdated { session_id, title },
+                            Event::SessionTitleUpdated { id, title },
                             Event::RenameFailed(write),
-                        ] if *session_id == live_id && title == "Fix login"
+                        ] if *id == live_id && title == "Fix login"
                             && write == "Session write failed: session writer task has stopped. \
                                          Conversation history may be incomplete."
                     ),

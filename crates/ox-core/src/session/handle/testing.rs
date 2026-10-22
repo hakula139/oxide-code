@@ -7,11 +7,11 @@ use std::sync::{Arc, Mutex};
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 
-use super::{CompactOutcome, Outcome, RecordOutcome, SessionHandle, SharedState};
+use super::{Checkpoint, CompactOutcome, Outcome, RecordOutcome, SessionHandle, SharedState};
 use crate::file_tracker::FileTracker;
 use crate::file_tracker::testing::record_tracked_file;
 use crate::message::{ContentBlock, Message, Role};
-use crate::protocol::CompactTrigger;
+use crate::prompt::SessionContext;
 use crate::session::actor::SessionCmd;
 use crate::session::entry::CompactBoundary;
 
@@ -21,7 +21,7 @@ pub(crate) fn boundary(summary: &str) -> CompactBoundary {
         summary: summary.to_owned(),
         instructions: None,
         tasks: Vec::new(),
-        trigger: CompactTrigger::Manual,
+        context: SessionContext::default(),
     }
 }
 
@@ -105,7 +105,11 @@ pub(crate) fn acks_then_drops(session_id: &str, succeed: usize) -> SessionHandle
                 SessionCmd::Compact { ack, .. } => {
                     _ = ack.send(CompactOutcome {
                         pre_count: 0,
-                        committed: true,
+                        checkpoint: Some(Checkpoint {
+                            tip: None,
+                            message_count: 1,
+                            first_user_prompt_seen: true,
+                        }),
                         failure: None,
                     });
                 }

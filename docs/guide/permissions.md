@@ -6,7 +6,7 @@ Every tool call passes a permission check before running. In the default `manual
 
 - **`manual`**, the default, asks before tool calls that no permission rule allows or denies.
 - **`plan`** is read-only, so it denies every edit, `exec`, and `net` call, including read-only commands such as `ls`. Reads behave as in `manual`, and the `tasks`, `bash_output`, and `bash_stop` tools count as reads, so they still run.
-- **`yolo`** runs tool calls without asking unless a rule denies or asks. The built-in ask rules count, so `yolo` asks before an edit to `.git/hooks` until you set `git = false` under `[permission.defaults]`. A `bash` command that `ox` cannot parse also asks unless a deny rule holds it, since the rules may not see everything it runs. Some valid shell syntax falls in this group, and rewriting the command in simpler syntax avoids the prompt. A headless run denies the calls that would ask.
+- **`yolo`** runs tool calls without asking unless a rule denies or asks. The built-in ask rules count, so `yolo` asks before an edit to `.git/hooks` until you set `git = false` under `[permission.defaults]`. A `bash` command that `ox` cannot parse, or that sets a variable bash reads to find or expand commands, such as `PATH`, `IFS`, or `BASH_CMDS`, also asks unless a deny rule holds it, since the rules may not see everything it runs. Some valid shell syntax falls in this group, and rewriting the command in simpler syntax avoids the prompt. A headless run denies the calls that would ask.
 
 Set the mode with `mode` under `[permission]` in your user config. The environment variable `OX_PERMISSION_MODE` overrides `mode`, and `ox --mode <mode>` overrides both for one run.
 

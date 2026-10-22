@@ -72,7 +72,7 @@ status_line = [
 | `base_url`         | string  | `https://api.anthropic.com` | API base URL, [user config only](#project-config)                           |
 | `extra_ca_certs`   | string  | -                           | PEM bundle appended to the trust store, [user config only](#project-config) |
 | `model`            | string  | `claude-opus-5-5`           | Model to use                                                                |
-| `effort`           | string  | per-model (see below)       | Intelligence-vs-latency tier                                                |
+| `effort`           | string  | per-model (see below)       | Effort level, `low` to `max`                                                |
 | `max_tokens`       | integer | per-model (see below)       | Max tokens per response                                                     |
 | `max_tool_rounds`  | integer | unset (unbounded)           | Per-turn safety cap on tool rounds                                          |
 | `prompt_cache_ttl` | string  | `"1h"`                      | Prompt-cache TTL (`"5m"` or `"1h"`)                                         |
@@ -81,7 +81,7 @@ status_line = [
 
 oxide-code supports `claude-fable-5-1`, `claude-opus-5-5`, `claude-sonnet-5-5`, and `claude-haiku-5-5`. Each has a 1M-token context window and adaptive thinking. Fable 5.1 isn't available to every account, and some third-party gateways serve it. Requests to it fail where your account or gateway does not serve it. Any other ID, such as a gateway alias, is sent verbatim without `effort`, `thinking`, or context management. Its `max_tokens` defaults to `16000`, no cost estimate is provided, and automatic compaction stays off unless you set `auto_threshold_tokens`. oxide-code warns about unsupported IDs at startup. For a `claude-*` ID that names a model family or an ID with a `[1m]` suffix, it suggests the matching supported model.
 
-#### `effort`: Intelligence Tier
+#### `effort`: Reasoning Effort
 
 `effort` maps 1:1 to the `output_config.effort` body field. Accepted values: `"low"`, `"medium"`, `"high"`, `"xhigh"`, `"max"`. Every supported model accepts all five.
 
@@ -96,14 +96,14 @@ Per-model defaults when `effort` is unset, matching the API's own defaults:
 
 A `/model` swap carries the current effort over to the new model.
 
-This tier guide follows Anthropic's [effort documentation](https://platform.claude.com/docs/en/build-with-claude/effort) for Haiku 5.5, and for Sonnet 5.5 on agentic work:
+This guide follows Anthropic's [effort documentation](https://platform.claude.com/docs/en/build-with-claude/effort) for Haiku 5.5, and for Sonnet 5.5 on agentic work:
 
 - `max` / `xhigh`: Only where you have measured a quality gain, since turns run much longer and cost more.
 - `high`: Knowledge work, harder or longer agent tasks, and strict instruction following.
 - `medium`: The starting point for most work, including well-specified agentic coding and multistep tool use.
 - `low`: Chat and short, latency-sensitive tasks. At this level, long agent tasks are more likely to stop early or skip verifying a change.
 
-For Opus 5.5, the documentation names no starting tier and recommends an effort sweep on your own evaluations. Fable 5.1's recommended start is its `high` default.
+For Opus 5.5, the documentation names no starting level and recommends an effort sweep on your own evaluations. Fable 5.1's recommended start is its `high` default.
 
 #### `max_tokens`: Response Ceiling
 
@@ -149,7 +149,7 @@ Auto-compaction is enabled by default for the supported models. The default trig
 
 For other model IDs, the default and percent-based automatic triggers stay off. An explicit token threshold still works, snapped to the `50000` floor when set lower.
 
-If automatic compaction fails, oxide-code does not send the prompt, and the TUI puts it back in the input. Sending it again retries the compaction. After 3 failures in a row, automatic compaction pauses, so the next prompt goes out without it, and `/status` shows it as paused. A successful `/compact`, a `/model` or `/effort` change, `/clear`, `/archive`, or `/resume` turns it back on.
+Automatic compaction runs before a prompt and between the tool rounds of a long turn, which then continues from the summary on its own. If the compaction before a prompt fails, oxide-code does not send the prompt, and the TUI puts it back in the input. Sending it again retries the compaction. If the compaction between tool rounds fails, the turn stops, so run `/compact`, then send a message to continue. After 3 failures in a row, automatic compaction pauses, so the next prompt goes out without it, and `/status` shows it as paused. A successful `/compact`, a `/model` or `/effort` change, `/clear`, `/archive`, or `/resume` turns it back on.
 
 ### `[tui]`: Terminal UI
 
@@ -173,9 +173,9 @@ If automatic compaction fails, oxide-code does not send the prompt, and the TUI 
 | `pull-request-checks` | `Checks: 2 failing`, `1 pending`, `1 cancelled`, or `passing` | Every 60 s      |
 | `pull-request-review` | `Review: approved`, `changes requested`, or `required`        | Every 60 s      |
 | `model`               | Compact model label (e.g., `Opus 5.5`)                        | On `/model`     |
-| `model-with-effort`   | Model label plus the effort tier in parens                    | On `/model`     |
+| `model-with-effort`   | Model label plus the effort level in parens                   | On `/model`     |
 | `context-used`        | `Ctx: 10% (100k/1M)` after the first turn                     | Per turn        |
-| `session-cost`        | `Sess: $0.4321` running USD estimate                          | Per turn        |
+| `session-cost`        | `Cost: $0.43` running USD estimate                            | Per turn        |
 | `five-hour-limit`     | `5h: 42%` of a subscription's five-hour usage limit           | Per request     |
 | `weekly-limit`        | `7d: 13%` of a subscription's weekly usage limit              | Per request     |
 | `permission-mode`     | `Mode: plan` or `Mode: yolo`, omitted in `manual`             | On switch       |
@@ -273,7 +273,7 @@ Environment variables override all config file values.
 | `CLAUDE_CONFIG_DIR`                      | -                                          | `~/.claude`                 | Claude Code's config dir     |
 | `ANTHROPIC_BASE_URL`                     | `client.base_url`                          | `https://api.anthropic.com` | API base URL                 |
 | `ANTHROPIC_MODEL`                        | `client.model`                             | `claude-opus-5-5`           | Model to use                 |
-| `OX_EFFORT`                              | `client.effort`                            | per-model                   | Intelligence-vs-latency tier |
+| `OX_EFFORT`                              | `client.effort`                            | per-model                   | Effort level, `low` to `max` |
 | `OX_MAX_TOKENS`                          | `client.max_tokens`                        | per-model                   | Max tokens per response      |
 | `OX_EXTRA_CA_CERTS`                      | `client.extra_ca_certs`                    | -                           | Path to a PEM trust bundle   |
 | `NODE_EXTRA_CA_CERTS`                    | -                                          | -                           | Fallback PEM trust bundle    |

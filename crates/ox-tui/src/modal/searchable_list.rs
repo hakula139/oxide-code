@@ -23,7 +23,7 @@ pub(crate) trait SearchableItem {
     const ROW_HEIGHT: u16;
 
     /// Text the query filters on, covering every field a user might search for, such as the title
-    /// and id.
+    /// and ID.
     fn haystack(&self) -> Cow<'_, str>;
 
     /// Renders the item to the right of the list's cursor gutter. The list marks the cursor on the
@@ -400,10 +400,12 @@ mod tests {
         let mut l = list(vec![FakeItem::new("alpha"), FakeItem::new("beta")]);
         l.set_query("zzz");
         assert_eq!(l.visible_len(), 0);
+
         l.select_next();
         l.select_prev();
         l.page_down();
         l.page_up();
+
         assert_eq!(l.cursor_index(), 0);
     }
 
@@ -417,11 +419,17 @@ mod tests {
                 FakeItem::new("BETA"),
                 FakeItem::new("gamma"),
             ]);
+
             l.set_query("a");
+
             assert_eq!(l.visible_len(), 3, "all three contain 'a' case-insensitive");
+
             l.set_query("BE");
+
             assert_eq!(l.visible_len(), 1);
+
             l.set_query("BeT");
+
             assert_eq!(l.visible_len(), 1, "case-insensitive substring");
         }
 
@@ -435,7 +443,9 @@ mod tests {
             l.select_next();
             l.select_next();
             assert_eq!(l.cursor_index(), 2);
+
             l.set_query("a");
+
             assert_eq!(l.cursor_index(), 0, "filter resets cursor");
         }
 
@@ -444,7 +454,9 @@ mod tests {
             let mut l = list(vec![FakeItem::new("a"), FakeItem::new("b")]);
             l.set_query("zzz");
             assert_eq!(l.visible_len(), 0);
+
             l.set_query("");
+
             assert_eq!(l.visible_len(), 2);
         }
     }
@@ -455,13 +467,21 @@ mod tests {
         #[test]
         fn refilters_as_the_query_grows_and_shrinks() {
             let mut l = list(vec![FakeItem::new("alpha"), FakeItem::new("beta")]);
+
             l.edit_query(&KeyEvent::from(KeyCode::Char('a')));
+
             assert_eq!(l.visible_len(), 2, "both contain 'a'");
+
             l.edit_query(&KeyEvent::from(KeyCode::Char('l')));
+
             assert_eq!(l.visible_len(), 1, "only `alpha` contains `al`");
+
             l.edit_query(&KeyEvent::from(KeyCode::Backspace));
+
             assert_eq!(l.visible_len(), 2);
+
             l.edit_query(&KeyEvent::from(KeyCode::Backspace));
+
             assert_eq!(l.query(), "");
         }
 
@@ -475,6 +495,7 @@ mod tests {
             l.edit_query(&KeyEvent::from(KeyCode::Left));
             l.edit_query(&KeyEvent::from(KeyCode::Char('l')));
             l.edit_query(&KeyEvent::from(KeyCode::Char('p')));
+
             assert_eq!(l.query(), "alpha");
             assert_eq!(l.visible_len(), 1);
         }
@@ -483,8 +504,10 @@ mod tests {
         fn cursor_only_keys_keep_the_list_cursor() {
             let mut l = list(vec![FakeItem::new("alpha"), FakeItem::new("beta")]);
             l.select_next();
+
             l.edit_query(&KeyEvent::from(KeyCode::Home));
             l.edit_query(&KeyEvent::new(KeyCode::Char('g'), KeyModifiers::CONTROL));
+
             assert_eq!(l.query(), "", "control chords never insert");
             assert_eq!(l.cursor_index(), 1, "no refilter, so no cursor reset");
         }
@@ -497,7 +520,9 @@ mod tests {
         fn refilters_on_the_pasted_line() {
             let mut l = list(vec![FakeItem::new("fix auth"), FakeItem::new("beta")]);
             l.select_next();
+
             l.paste_query("fix\nauth");
+
             assert_eq!(l.query(), "fix auth");
             assert_eq!(l.visible_len(), 1);
             assert_eq!(l.cursor_index(), 0, "a refilter resets the cursor");
@@ -515,6 +540,7 @@ mod tests {
             assert_eq!(l.cursor_index(), 1);
 
             l.replace_items(vec![FakeItem::new("alpine"), FakeItem::new("albatross")]);
+
             assert_eq!(
                 l.visible_len(),
                 0,
@@ -542,8 +568,10 @@ mod tests {
                 ["  item-3", "  item-4", "> item-5"],
                 "the window holds still",
             );
+
             l.set_query("item-1");
             l.append_items(vec![FakeItem::new("item-11"), FakeItem::new("other")]);
+
             assert_eq!(
                 shown(&l),
                 ["> item-1", "  item-10", "  item-11"],
@@ -587,6 +615,7 @@ mod tests {
 
             l.set_query("zzz");
             l.retain_items(|_| true);
+
             assert_eq!(l.cursor_index(), 0);
             assert!(l.selected().is_none());
         }
@@ -602,9 +631,13 @@ mod tests {
                 FakeItem::new("beta"),
                 FakeItem::new("gamma"),
             ]);
+
             l.cursor_to(|item| item.haystack == "gamma");
+
             assert_eq!(l.cursor_index(), 2);
+
             l.cursor_to(|item| item.haystack == "alpha");
+
             assert_eq!(l.cursor_index(), 0);
         }
 
@@ -613,7 +646,9 @@ mod tests {
             let mut l = list(vec![FakeItem::new("alpha"), FakeItem::new("beta")]);
             l.select_next();
             assert_eq!(l.cursor_index(), 1);
+
             l.cursor_to(|item| item.haystack == "missing");
+
             assert_eq!(l.cursor_index(), 1, "no match leaves cursor untouched");
         }
 
@@ -626,7 +661,9 @@ mod tests {
             ]);
             l.set_query("ap");
             assert_eq!(l.visible_len(), 2, "berry filtered out");
+
             l.cursor_to(|item| item.haystack == "BERRY");
+
             assert_eq!(
                 l.cursor_index(),
                 0,
@@ -646,13 +683,19 @@ mod tests {
                 FakeItem::new("apricot"),
                 FakeItem::new("avocado"),
             ]);
+
             assert_eq!(l.rows_below_cursor(), 3);
 
             l.set_query("ap");
+
             assert_eq!(l.rows_below_cursor(), 1);
+
             l.select_next();
+
             assert_eq!(l.rows_below_cursor(), 0);
+
             l.set_query("zzz");
+
             assert_eq!(l.rows_below_cursor(), 0);
         }
     }
@@ -678,10 +721,14 @@ mod tests {
                 FakeItem::new("beta"),
                 FakeItem::new("gamma"),
             ]);
+
             l.select_next();
+
             assert_eq!(l.cursor_index(), 1);
+
             l.select_next();
             l.select_next();
+
             assert_eq!(l.cursor_index(), 0, "wraps past last");
         }
 
@@ -694,9 +741,13 @@ mod tests {
             ]);
             l.set_query("ap");
             assert_eq!(l.visible_len(), 2, "berry filtered out");
+
             l.select_next();
+
             assert_eq!(l.cursor_index(), 1);
+
             l.select_next();
+
             assert_eq!(l.cursor_index(), 0, "wraps within filtered set");
         }
     }
@@ -717,7 +768,9 @@ mod tests {
         #[test]
         fn wraps_at_zero() {
             let mut l = list(vec![FakeItem::new("a"), FakeItem::new("b")]);
+
             l.select_prev();
+
             assert_eq!(l.cursor_index(), 1);
         }
     }
@@ -729,11 +782,15 @@ mod tests {
         fn steps_by_the_rendered_page_and_clamps_at_last_visible_row() {
             let mut l = numbered(20, 5);
             render_rows(&l, 20, l.height(20, 40));
+
             l.page_down();
+
             assert_eq!(l.cursor_index(), 5);
+
             for _ in 0..4 {
                 l.page_down();
             }
+
             assert_eq!(l.cursor_index(), 19, "clamps at last");
         }
 
@@ -741,7 +798,9 @@ mod tests {
         fn shrinks_its_step_to_a_shorter_render() {
             let mut l = numbered(20, 5);
             render_rows(&l, 20, l.height(20, 6));
+
             l.page_down();
+
             assert_eq!(
                 l.cursor_index(),
                 2,
@@ -758,8 +817,10 @@ mod tests {
             let mut l = numbered(10, 5);
             render_rows(&l, 20, l.height(20, 40));
             l.page_down();
+
             l.page_up();
             l.page_up();
+
             assert_eq!(l.cursor_index(), 0);
         }
     }
@@ -775,6 +836,7 @@ mod tests {
         #[test]
         fn drops_items_that_do_not_fit_whole() {
             let l = SearchableList::new("Pick", vec![FakeItem::<3> { haystack: "tall" }], 6);
+
             assert_eq!(
                 l.height(40, 12),
                 4 + 6,
@@ -799,7 +861,9 @@ mod tests {
             for _ in 0..6 {
                 l.select_next();
             }
+
             let rows = render_rows(&l, 20, l.height(20, 7));
+
             assert_eq!(rows.len(), 7);
             assert!(
                 rows[4].contains("item-4") && rows[6].contains("> item-6"),
@@ -813,6 +877,7 @@ mod tests {
             let theme = Theme::default();
             let h = l.height(20, 40);
             let mut terminal = Terminal::new(TestBackend::new(20, h)).unwrap();
+
             terminal
                 .draw(|frame| l.render(frame, Rect::new(0, 0, 20, h), &theme))
                 .expect("render must not panic");
@@ -821,6 +886,7 @@ mod tests {
         #[test]
         fn places_cursor_at_prompt_plus_visible_query_width() {
             let theme = Theme::default();
+
             for (query, x) in [("", 2), ("ab", 4)] {
                 let mut l = list(vec![FakeItem::new("alpha")]);
                 l.set_query(query);
@@ -867,6 +933,7 @@ mod tests {
             let l = list(vec![FakeItem::new("alpha")]);
             let theme = Theme::default();
             let mut terminal = Terminal::new(TestBackend::new(40, 1)).unwrap();
+
             terminal
                 .draw(|frame| l.render(frame, Rect::new(0, 0, 40, 1), &theme))
                 .expect("render must not panic when area is too short for the search row");
@@ -885,6 +952,7 @@ mod tests {
         fn shows_the_empty_text_once_no_items_are_left_to_load() {
             let mut l = list(Vec::new()).with_empty_text("nothing here");
             l.set_has_more(true);
+
             assert_eq!(first_row(&l), "", "more items may still come");
 
             l.set_has_more(false);
