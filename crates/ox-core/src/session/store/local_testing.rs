@@ -11,7 +11,7 @@ use uuid::Uuid;
 use super::testing::{TEST_PROJECT, find_session_in, set_modified, test_project_dir};
 use super::{SessionStore, SessionWriter, open_append_at};
 use crate::message::Message;
-use crate::session::entry::{CURRENT_VERSION, Entry, TitleSource};
+use crate::session::entry::{CURRENT_VERSION, Entry, Header, TitleSource};
 
 // ── SessionStore ──
 
@@ -51,9 +51,9 @@ pub(crate) fn write_newest_corrupt_session(dir: &Path) {
 }
 
 /// A header for session `session_id` in the [`test_store`](super::testing::test_store) project.
-pub(crate) fn sample_header(session_id: &str) -> Entry {
+pub(crate) fn sample_header(session_id: &str) -> Header {
     let project = format!("/work/{TEST_PROJECT}");
-    Entry::Header {
+    Header {
         session_id: session_id.to_owned(),
         cwd: project.clone(),
         project_root: Some(project),

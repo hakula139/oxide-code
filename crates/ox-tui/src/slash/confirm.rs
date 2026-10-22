@@ -36,7 +36,7 @@ pub(super) struct ConfirmDeleteSessionModal {
     path: PathBuf,
     session_id: String,
     display_title: String,
-    /// The [`format_metadata_line`](ox_core::session::display::format_metadata_line) row, such as
+    /// The [`format_metadata_line`](crate::slash::sessions::format_metadata_line) row, such as
     /// `abcd1234 · 2 hours ago · 14 msgs`, which carries the ID prefix.
     metadata: String,
     live_session_id: String,
@@ -122,19 +122,20 @@ impl Modal for ConfirmDeleteSessionModal {
 #[cfg(test)]
 mod tests {
     use crossterm::event::KeyModifiers;
+    use time::OffsetDateTime;
     use time::macros::datetime;
-    use time::{OffsetDateTime, UtcOffset};
 
-    use ox_core::session::display::format_metadata_line;
     use ox_core::session::store::SessionStore;
-    use ox_core::session::store::testing::{isolated_store, seed_test_session};
+    use ox_core::session::store::testing::{isolated_store, seed_test_session, stamped_id};
 
     use super::*;
     use crate::modal::ModalStack;
     use crate::modal::testing::render_rows;
-    use crate::slash::testing::stamped_id;
+    use crate::slash::sessions::format_metadata_line;
 
     const LAST_ACTIVE: OffsetDateTime = datetime!(2026-04-18 09:00:00 UTC);
+    /// Past the 30 days after which the metadata line shows a date.
+    const NOW: OffsetDateTime = datetime!(2026-06-01 09:00:00 UTC);
     const MESSAGES: u32 = 3;
 
     fn seed_modal(store: &SessionStore, byte: u8, title: &str) -> ConfirmDeleteSessionModal {
@@ -158,14 +159,7 @@ mod tests {
     /// The [`format_metadata_line`] row of a seeded session, as the `/resume` picker builds it in
     /// the current project.
     fn metadata(session_id: &str) -> String {
-        format_metadata_line(
-            session_id,
-            LAST_ACTIVE,
-            UtcOffset::UTC,
-            MESSAGES,
-            None,
-            None,
-        )
+        format_metadata_line(session_id, LAST_ACTIVE, NOW, MESSAGES, None, None)
     }
 
     mod render {

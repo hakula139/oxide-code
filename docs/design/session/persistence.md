@@ -177,7 +177,7 @@ Listings sort rows and render them as follows:
 - `crates/ox-core/src/engine/turn.rs`: the joined writes that put a tool round's records in one batch.
 - `crates/ox-core/src/session/actor.rs`: the actor that owns the writer and appends each wakeup's commands in one write.
 - `crates/ox-core/src/session/chain.rs`: message chain reconstruction from the `parent_uuid` DAG.
-- `crates/ox-core/src/session/display.rs`: the title and metadata formatting that listings use.
+- `crates/ox-core/src/session/display.rs`: the session ID and title formatting that listings use.
 - `crates/ox-core/src/session/entry.rs`: the JSONL entry schema and its header `version`.
 - `crates/ox-core/src/session/handle.rs`: `SessionHandle`, the public API that sends each write to the actor and surfaces the first write failure of each kind.
 - `crates/ox-core/src/session/history.rs`: the resumed transcript, whose tool results take their views from `ToolRegistry::result_view`.

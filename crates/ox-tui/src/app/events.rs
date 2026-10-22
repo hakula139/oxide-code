@@ -16,6 +16,7 @@ use ox_core::model::ModelSpec;
 use ox_core::permission::{Basis, Mode, SessionGrant};
 use ox_core::protocol::{Event, Interaction, Op, notice};
 use ox_core::session::display::archive_notice;
+use ox_core::session::entry::ArchiveState;
 use ox_core::tool::view::ApprovalPreview;
 use ox_core::util::text::plural;
 
@@ -182,7 +183,8 @@ impl App {
     fn apply_session_rolled(&mut self, id: String, archived: bool) {
         let old_id = self.rebind_session(id, None);
         if archived {
-            self.chat.push_system_message(archive_notice(&old_id, true));
+            self.chat
+                .push_system_message(archive_notice(&old_id, ArchiveState::Archived));
         }
     }
 
@@ -197,8 +199,10 @@ impl App {
         self.rebind_session(id, title);
         self.chat.load_history(history);
         if unarchived {
-            self.chat
-                .push_system_message(archive_notice(&self.session_info.session_id, false));
+            self.chat.push_system_message(archive_notice(
+                &self.session_info.session_id,
+                ArchiveState::Active,
+            ));
         }
         if let Some(notice) = self.session_info.config.model.unsupported_notice() {
             self.chat.push_system_message(notice);

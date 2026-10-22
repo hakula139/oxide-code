@@ -53,6 +53,13 @@ pub(crate) fn dead(session_id: &str) -> SessionHandle {
     handle(session_id, cmd_tx, None)
 }
 
+/// Handle whose actor task panicked.
+pub(crate) fn panicked(session_id: &str) -> SessionHandle {
+    let (cmd_tx, _) = mpsc::channel(1);
+    let join = tokio::spawn(async { panic!("deliberate actor panic for testing") });
+    handle(session_id, cmd_tx, Some(join))
+}
+
 /// Handle on a stand-in actor that acks the first `succeed` cmds, then drops each cmd without
 /// acking it. It always honors `Shutdown`.
 pub(crate) fn acks_then_drops(session_id: &str, succeed: usize) -> SessionHandle {
@@ -95,7 +102,6 @@ pub(crate) fn acks_then_drops(session_id: &str, succeed: usize) -> SessionHandle
                     });
                 }
                 SessionCmd::Shutdown { .. } => unreachable!("filtered above"),
-                SessionCmd::Panic => panic!("deliberate actor panic for testing"),
             }
         }
     });

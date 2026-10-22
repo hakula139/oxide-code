@@ -9,7 +9,7 @@ use time::OffsetDateTime;
 use uuid::Uuid;
 
 use super::display::fit_title;
-use super::entry::{CURRENT_VERSION, Entry, TitleSource};
+use super::entry::{CURRENT_VERSION, Entry, Header, TitleSource};
 use super::handle::Checkpoint;
 use super::store::{SessionStore, SessionWriter, artifact_dir, encode_lines};
 use crate::file_tracker::FileSnapshot;
@@ -53,7 +53,7 @@ pub(super) struct SessionState {
 /// Writer lifecycle. `Pending` defers file creation until the first non-empty flush.
 enum WriterStatus {
     Pending {
-        header: Entry,
+        header: Header,
         deferred_title: Option<String>,
     },
     Active(SessionWriter),
@@ -62,11 +62,11 @@ enum WriterStatus {
 impl SessionState {
     pub(super) fn fresh(store: SessionStore, model: &str, git_branch: Option<String>) -> Self {
         let created_at = OffsetDateTime::now_utc();
-        let (session_id, header) = new_header(&store, model, git_branch, created_at);
-        let session_file = store.session_file(&session_id, created_at);
+        let header = new_header(&store, model, git_branch, created_at);
+        let session_file = store.session_file(&header.session_id, created_at);
         Self {
-            artifact_dir: artifact_dir(&session_file, &session_id).into(),
-            session_id: Arc::from(session_id),
+            artifact_dir: artifact_dir(&session_file, &header.session_id).into(),
+            session_id: Arc::from(header.session_id.as_str()),
             store,
             writer_status: WriterStatus::Pending {
                 header,
@@ -321,19 +321,17 @@ fn new_header(
     model: &str,
     git_branch: Option<String>,
     created_at: OffsetDateTime,
-) -> (String, Entry) {
-    let session_id = Uuid::new_v4().to_string();
+) -> Header {
     let project = store.project();
-    let header = Entry::Header {
-        session_id: session_id.clone(),
+    Header {
+        session_id: Uuid::new_v4().to_string(),
         cwd: project.cwd.clone(),
         project_root: Some(project.root.clone()),
         model: model.to_owned(),
         created_at,
         version: CURRENT_VERSION,
         git_branch,
-    };
-    (session_id, header)
+    }
 }
 
 /// Extracts the first non-empty text content from a user message.
@@ -354,7 +352,7 @@ mod tests {
     use crate::file_tracker::{FileTracker, LastView};
     use crate::session::store::load_session_data_from_path;
     use crate::session::store::local_testing::test_session_file;
-    use crate::session::store::testing::{test_project_dir, test_store};
+    use crate::session::store::testing::{isolated_store, test_project_dir, test_store};
     use crate::tool::tasks::testing::plan;
 
     mod try_defer_title {
@@ -362,8 +360,7 @@ mod tests {
 
         #[test]
         fn pending_accepts_and_overwrites_previous_value() {
-            let dir = tempfile::tempdir().unwrap();
-            let store = test_store(dir.path());
+            let (_dir, store) = isolated_store();
             let mut state = SessionState::fresh(store, "m", None);
 
             assert!(state.try_defer_title("first".to_owned()).is_none());
@@ -381,8 +378,7 @@ mod tests {
 
         #[test]
         fn active_rejects_with_title() {
-            let dir = tempfile::tempdir().unwrap();
-            let store = test_store(dir.path());
+            let (_dir, store) = isolated_store();
             let mut state = SessionState::fresh(store, "m", None);
             let now = OffsetDateTime::now_utc();
             let (entries, _) = state.queue_message_entries(&Message::user("first"), now, false);
@@ -399,8 +395,7 @@ mod tests {
 
         #[test]
         fn seeds_ai_title_on_first_user_text() {
-            let dir = tempfile::tempdir().unwrap();
-            let store = test_store(dir.path());
+            let (_dir, store) = isolated_store();
             let mut state = SessionState::fresh(store, "m", None);
             let now = OffsetDateTime::now_utc();
 
@@ -421,8 +416,7 @@ mod tests {
 
         #[test]
         fn subsequent_user_message_skips_title_and_chains_uuid() {
-            let dir = tempfile::tempdir().unwrap();
-            let store = test_store(dir.path());
+            let (_dir, store) = isolated_store();
             let mut state = SessionState::fresh(store, "m", None);
             let now = OffsetDateTime::now_utc();
             _ = state.queue_message_entries(&Message::user("first"), now, false);
@@ -445,8 +439,7 @@ mod tests {
 
         #[test]
         fn tool_result_only_user_does_not_seed_title() {
-            let dir = tempfile::tempdir().unwrap();
-            let store = test_store(dir.path());
+            let (_dir, store) = isolated_store();
             let mut state = SessionState::fresh(store, "m", None);
             let now = OffsetDateTime::now_utc();
             let msg = Message {
@@ -471,8 +464,7 @@ mod tests {
 
         #[test]
         fn assistant_message_skips_title() {
-            let dir = tempfile::tempdir().unwrap();
-            let store = test_store(dir.path());
+            let (_dir, store) = isolated_store();
             let mut state = SessionState::fresh(store, "m", None);
             let now = OffsetDateTime::now_utc();
 
@@ -530,8 +522,7 @@ mod tests {
 
         #[test]
         fn writes_boundary_and_synthetic_message_without_committing() {
-            let dir = tempfile::tempdir().unwrap();
-            let store = test_store(dir.path());
+            let (_dir, store) = isolated_store();
             let mut state = SessionState::fresh(store, "m", None);
             let now = OffsetDateTime::now_utc();
             let (rec, _) = state.queue_message_entries(&Message::user("first"), now, false);
@@ -586,8 +577,7 @@ mod tests {
 
         #[test]
         fn omits_absent_instructions() {
-            let dir = tempfile::tempdir().unwrap();
-            let store = test_store(dir.path());
+            let (_dir, store) = isolated_store();
             let state = SessionState::fresh(store, "m", None);
             let now = OffsetDateTime::now_utc();
 
@@ -609,8 +599,7 @@ mod tests {
 
         #[test]
         fn resets_chain_and_message_count() {
-            let dir = tempfile::tempdir().unwrap();
-            let store = test_store(dir.path());
+            let (_dir, store) = isolated_store();
             let mut state = SessionState::fresh(store, "m", None);
             let now = OffsetDateTime::now_utc();
             let (rec, _) = state.queue_message_entries(&Message::user("first"), now, false);
@@ -628,8 +617,7 @@ mod tests {
 
         #[test]
         fn marks_first_user_prompt_seen_so_post_compact_record_skips_title() {
-            let dir = tempfile::tempdir().unwrap();
-            let store = test_store(dir.path());
+            let (_dir, store) = isolated_store();
             let mut state = SessionState::fresh(store, "m", None);
             let now = OffsetDateTime::now_utc();
 
@@ -644,8 +632,7 @@ mod tests {
 
         #[test]
         fn clears_resume_anchor_so_finish_writes_summary() {
-            let dir = tempfile::tempdir().unwrap();
-            let store = test_store(dir.path());
+            let (_dir, store) = isolated_store();
             let mut state = SessionState::fresh(store, "m", None);
             state.initial_message_count = 5;
             state.message_count = 5;
@@ -665,8 +652,7 @@ mod tests {
 
         #[test]
         fn after_record_produces_summary_with_count() {
-            let dir = tempfile::tempdir().unwrap();
-            let store = test_store(dir.path());
+            let (_dir, store) = isolated_store();
             let mut state = SessionState::fresh(store, "m", None);
             let now = OffsetDateTime::now_utc();
             let (entries, _) = state.queue_message_entries(&Message::user("hello"), now, false);
@@ -681,8 +667,7 @@ mod tests {
 
         #[test]
         fn pending_writer_is_empty_and_marks_finished() {
-            let dir = tempfile::tempdir().unwrap();
-            let store = test_store(dir.path());
+            let (_dir, store) = isolated_store();
             let mut state = SessionState::fresh(store, "m", None);
 
             let entries = state.finish_entries(Vec::new(), OffsetDateTime::now_utc());
@@ -693,8 +678,7 @@ mod tests {
 
         #[test]
         fn emits_one_file_snapshot_per_tracked_file() {
-            let dir = tempfile::tempdir().unwrap();
-            let store = test_store(dir.path());
+            let (_dir, store) = isolated_store();
             let tracker = FileTracker::default();
             let mut state = SessionState::fresh(store, "m", None);
             let now = OffsetDateTime::now_utc();
@@ -724,8 +708,7 @@ mod tests {
 
         #[test]
         fn is_idempotent() {
-            let dir = tempfile::tempdir().unwrap();
-            let store = test_store(dir.path());
+            let (_dir, store) = isolated_store();
             let mut state = SessionState::fresh(store, "m", None);
             let now = OffsetDateTime::now_utc();
             let (entries, _) = state.queue_message_entries(&Message::user("hi"), now, false);
@@ -740,8 +723,7 @@ mod tests {
 
         #[test]
         fn skips_summary_on_empty_resume() {
-            let dir = tempfile::tempdir().unwrap();
-            let store = test_store(dir.path());
+            let (_dir, store) = isolated_store();
             let mut original = SessionState::fresh(store.clone(), "m", None);
             let now = OffsetDateTime::now_utc();
             let (entries, _) = original.queue_message_entries(&Message::user("hi"), now, false);
