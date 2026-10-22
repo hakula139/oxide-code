@@ -1,7 +1,6 @@
 //! Headless driver for `--print`: one turn, printed to stdout as text or JSON.
 
 use std::io::{self, IsTerminal, Write};
-use std::path::PathBuf;
 use std::pin::pin;
 use std::sync::{Mutex, MutexGuard};
 use std::time::Duration;
@@ -30,7 +29,6 @@ const STDIN_NOTICE_DELAY: Duration = Duration::from_secs(3);
 pub(crate) async fn run(
     engine: Engine,
     show_thinking: bool,
-    drifted: &[PathBuf],
     prompt: &str,
     format: OutputFormat,
 ) -> Result<Exit, EnginePanic> {
@@ -42,7 +40,7 @@ pub(crate) async fn run(
         io::stdout(),
         io::stderr(),
     );
-    drive(engine.spawn(drifted), &printer, prompt).await
+    drive(engine.spawn(), &printer, prompt).await
 }
 
 /// The prompt a `--print` run answers: `prompt` with stdin attached when stdin is not a terminal,
@@ -461,7 +459,7 @@ mod tests {
                     let printer =
                         Printer::new(format, false, session_id.clone(), Vec::new(), Vec::new());
 
-                    let exit = Box::pin(drive(engine.spawn(&[]), &printer, "Look around."))
+                    let exit = Box::pin(drive(engine.spawn(), &printer, "Look around."))
                         .await
                         .unwrap();
 
@@ -489,7 +487,7 @@ mod tests {
                 let engine = engine(server.uri(), &test_store(dir.path()), dir.path()).await;
                 let printer = printer(OutputFormat::Json);
 
-                let exit = Box::pin(drive(engine.spawn(&[]), &printer, "//hello"))
+                let exit = Box::pin(drive(engine.spawn(), &printer, "//hello"))
                     .await
                     .unwrap();
 
@@ -519,7 +517,7 @@ mod tests {
                 let engine = engine(server.uri(), &test_store(dir.path()), dir.path()).await;
                 let printer = printer(OutputFormat::Json);
 
-                let exit = Box::pin(drive(engine.spawn(&[]), &printer, "hello"))
+                let exit = Box::pin(drive(engine.spawn(), &printer, "hello"))
                     .await
                     .unwrap();
 
@@ -575,7 +573,7 @@ mod tests {
                     Vec::new(),
                 );
 
-                let exit = Box::pin(drive(engine.spawn(&[]), &printer, "hello"))
+                let exit = Box::pin(drive(engine.spawn(), &printer, "hello"))
                     .await
                     .unwrap();
 

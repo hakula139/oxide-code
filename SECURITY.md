@@ -17,7 +17,7 @@ The maintainer acknowledges a report within 7 days and shares an assessment with
 
 ## Trust Model
 
-`ox` runs locally with the permissions of the user who starts it and has no OS-level sandbox. Its [permission gate](docs/guide/configuration.md#permission-tool-approval) determines which tool calls run, require approval, or are denied. In `manual` and `plan` modes, read, grep, and glob calls run without approval on any path you can read unless a `deny` rule matches. In `manual` mode, edits inside the working directory also run without approval.
+`ox` runs locally with the permissions of the user who starts it and has no OS-level sandbox. Its [permission gate](docs/guide/permissions.md) determines which tool calls run, require approval, or are denied. In `manual` and `plan` modes, read, grep, and glob calls run without approval on any path you can read unless a `deny` or `ask` rule matches. In `manual` mode, edits inside the working directory also run without approval.
 
 Commands run by the `bash` tool inherit your environment, except for the credential variables `ox` uses to authenticate: `ANTHROPIC_AUTH_TOKEN`, `ANTHROPIC_API_KEY`, `CLAUDE_CODE_OAUTH_TOKEN`, and `ANTHROPIC_CUSTOM_HEADERS`. Other secrets in your environment, such as cloud or GitHub tokens, are available to every command, including `echo`, which runs without approval.
 
