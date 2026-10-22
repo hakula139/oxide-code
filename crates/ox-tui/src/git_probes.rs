@@ -95,6 +95,13 @@ impl GitProbes {
         }
     }
 
+    /// When [`Self::poll`] next starts a probe, or `None` while every probe is off or running.
+    pub(crate) fn next_poll(&self) -> Option<Instant> {
+        self.cwd.as_ref()?;
+        let pull_request = self.pull_request.as_ref().and_then(|s| s.next_due);
+        self.branch.next_due.into_iter().chain(pull_request).min()
+    }
+
     /// Waits for the next probe update, scheduling each finished probe's next run one interval out.
     /// Cancel-safe, so it can sit in a `tokio::select!` arm.
     pub(crate) async fn recv(&mut self) -> Option<GitUpdate> {
@@ -253,6 +260,28 @@ mod tests {
             probes.poll(now + PULL_REQUEST_REFRESH_INTERVAL);
             assert_eq!(probes.branch.next_due, Some(now + BRANCH_REFRESH_INTERVAL));
             assert_eq!(probes.pull_request.unwrap().next_due, Some(now));
+        }
+    }
+
+    mod next_poll {
+        use super::*;
+
+        #[test]
+        fn is_the_earliest_probe_not_yet_running() {
+            let now = Instant::now();
+            let mut probes = GitProbes::new(Some(PathBuf::from("/tmp")), PULL_REQUEST, now);
+            assert_eq!(probes.next_poll(), Some(now));
+
+            assert!(probes.pull_request.as_mut().unwrap().start(now));
+
+            assert_eq!(probes.next_poll(), Some(now + BRANCH_REFRESH_INTERVAL));
+        }
+
+        #[test]
+        fn never_falls_due_without_a_cwd() {
+            let probes = GitProbes::new(None, PULL_REQUEST, Instant::now());
+
+            assert_eq!(probes.next_poll(), None);
         }
     }
 

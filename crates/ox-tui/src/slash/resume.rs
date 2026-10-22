@@ -795,6 +795,13 @@ impl Modal for ResumePicker {
         }
     }
 
+    fn next_tick(&self, now: Instant) -> Option<Instant> {
+        if matches!(self.pages, Pages::Loading(_)) {
+            return Some(now);
+        }
+        self.notice.as_ref().map(|notice| notice.until)
+    }
+
     fn on_cancel(&mut self) -> Option<ModalAction> {
         (self.dismissal == Dismissal::Quit)
             .then_some(ModalAction::Dispatch(Action::Op(Op::Shutdown)))
@@ -2373,6 +2380,26 @@ mod tests {
                 format!("{MODAL_ERROR_PREFIX}{LOADER_STOPPED}"),
             );
             assert!(!picker.pages.has_more());
+        }
+    }
+
+    mod next_tick {
+        use super::*;
+
+        #[tokio::test(start_paused = true)]
+        async fn ticks_every_frame_while_a_page_loads_and_then_waits_for_the_notice() {
+            let (_dir, store) = isolated_store();
+            seed_many(&store, 1);
+            let mut picker = ResumePicker::new(store, "live-session-id".to_owned());
+            let start = now();
+            assert_eq!(picker.next_tick(start), Some(start), "the first page loads");
+
+            picker.settle();
+            assert_eq!(picker.next_tick(start), None);
+
+            picker.handle_key(&KeyEvent::new(KeyCode::Char('x'), KeyModifiers::CONTROL));
+
+            assert_eq!(picker.next_tick(start), Some(start + NOTICE_DURATION));
         }
     }
 
