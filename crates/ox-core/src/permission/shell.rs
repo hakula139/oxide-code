@@ -922,8 +922,8 @@ impl Walk<'_> {
         self.changes_dir = true;
     }
 
-    /// Returns whether `args` are one literal directory inside a workspace root, spelled without
-    /// `..`, which bash's `cd` drops from the spelled path while the gate resolves symlinks first.
+    /// Returns whether `args` name one literal directory inside a workspace root without `..`,
+    /// which bash's `cd` applies to the spelled path while the gate resolves symlinks first.
     fn enters_workspace(&self, args: &[Word]) -> bool {
         let [target] = args else {
             return false;
@@ -3138,6 +3138,7 @@ mod tests {
                     "./build.sh",
                     "cd x && make",
                     "cd /repo/x && make",
+                    "for i in 1 2; do echo $i; done; cd x && make",
                     "cd /tmp/evil",
                     "cd x; cd /tmp/evil",
                     "ls $HOME",
