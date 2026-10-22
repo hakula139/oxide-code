@@ -1,10 +1,10 @@
 //! Filesystem helpers for persisting private state (0700 dirs, 0600 files).
 
 use std::fs::{self, File, OpenOptions};
-use std::io::{self, Write};
+use std::io::{self, Write as _};
 use std::path::Path;
 
-use anyhow::{Context, Result};
+use anyhow::{Context as _, Result};
 use tempfile::Builder;
 
 /// Creates `path` and its missing parents with `0700` perms on Unix, also tightening an existing
@@ -14,7 +14,7 @@ pub(crate) fn create_private_dir_all(path: &Path) -> Result<()> {
     builder.recursive(true);
     #[cfg(unix)]
     {
-        use std::os::unix::fs::DirBuilderExt;
+        use std::os::unix::fs::DirBuilderExt as _;
         builder.mode(0o700);
     }
     builder
@@ -23,7 +23,7 @@ pub(crate) fn create_private_dir_all(path: &Path) -> Result<()> {
 
     #[cfg(unix)]
     {
-        use std::os::unix::fs::PermissionsExt;
+        use std::os::unix::fs::PermissionsExt as _;
 
         use tracing::debug;
 
@@ -60,14 +60,14 @@ pub(crate) fn open_private_append(path: &Path) -> io::Result<File> {
     options.append(true).create(true);
     #[cfg(unix)]
     {
-        use std::os::unix::fs::OpenOptionsExt;
+        use std::os::unix::fs::OpenOptionsExt as _;
         options.mode(0o600);
     }
     let file = options.open(path)?;
 
     #[cfg(unix)]
     {
-        use std::os::unix::fs::PermissionsExt;
+        use std::os::unix::fs::PermissionsExt as _;
         file.set_permissions(fs::Permissions::from_mode(0o600))?;
     }
     Ok(file)
@@ -100,7 +100,7 @@ pub(crate) mod testing {
 mod tests {
     use std::ffi::OsString;
     #[cfg(unix)]
-    use std::os::unix::fs::PermissionsExt;
+    use std::os::unix::fs::PermissionsExt as _;
 
     use tempfile::tempdir;
 
@@ -164,7 +164,7 @@ mod tests {
         #[cfg(unix)]
         #[test]
         fn tightens_lax_existing_directory() {
-            use std::os::unix::fs::DirBuilderExt;
+            use std::os::unix::fs::DirBuilderExt as _;
 
             let dir = tempdir().unwrap();
             let target = dir.path().join("lax");
@@ -178,7 +178,7 @@ mod tests {
         #[cfg(unix)]
         #[test]
         fn tolerates_existing_directory_it_cannot_chmod() {
-            use std::os::unix::fs::MetadataExt;
+            use std::os::unix::fs::MetadataExt as _;
 
             let root = Path::new("/");
             let own_uid = fs::metadata(tempdir().unwrap().path()).unwrap().uid();

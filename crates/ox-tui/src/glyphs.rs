@@ -156,7 +156,7 @@ pub(crate) const SPINNER_FRAMES: &[char] = &['⣷', '⣯', '⣟', '⡿', '⢿', 
 
 #[cfg(test)]
 mod tests {
-    use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
+    use unicode_width::{UnicodeWidthChar as _, UnicodeWidthStr as _};
 
     use super::*;
 

@@ -346,7 +346,7 @@ impl InputArea {
 #[cfg(test)]
 mod tests {
     use ratatui::Terminal;
-    use ratatui::backend::{Backend, TestBackend};
+    use ratatui::backend::{Backend as _, TestBackend};
     use ratatui::layout::Position;
 
     use super::*;

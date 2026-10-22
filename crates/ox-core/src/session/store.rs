@@ -11,7 +11,7 @@ use std::fs::{self, File, OpenOptions};
 use std::io::{self, BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context as _, Result, bail};
 use time::OffsetDateTime;
 use tracing::{debug, warn};
 use uuid::Uuid;
@@ -489,7 +489,7 @@ fn open_create_exclusive(path: &Path) -> io::Result<File> {
     options.create_new(true);
     #[cfg(unix)]
     {
-        use std::os::unix::fs::OpenOptionsExt;
+        use std::os::unix::fs::OpenOptionsExt as _;
         options.mode(0o600);
     }
     options.open(path)
@@ -751,7 +751,7 @@ mod tests {
         #[cfg(unix)]
         #[test]
         fn creates_private_dirs_with_mode_0o700_on_unix() {
-            use std::os::unix::fs::PermissionsExt;
+            use std::os::unix::fs::PermissionsExt as _;
 
             let xdg = tempfile::tempdir().unwrap();
             let store = open_in_isolated_env(xdg.path());
@@ -816,7 +816,7 @@ mod tests {
         #[cfg(unix)]
         #[test]
         fn sets_user_only_file_permissions_on_unix() {
-            use std::os::unix::fs::PermissionsExt;
+            use std::os::unix::fs::PermissionsExt as _;
 
             let dir = tempfile::tempdir().unwrap();
             let store = test_store(dir.path());

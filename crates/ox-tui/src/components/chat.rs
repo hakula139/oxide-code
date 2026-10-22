@@ -585,7 +585,7 @@ mod tests {
     use indoc::{formatdoc, indoc};
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
-    use unicode_width::UnicodeWidthStr;
+    use unicode_width::UnicodeWidthStr as _;
 
     use ox_core::protocol::testing::text_result;
     use ox_core::tool::testing::edit_diff;

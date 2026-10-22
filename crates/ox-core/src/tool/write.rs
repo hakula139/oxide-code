@@ -191,10 +191,11 @@ mod tests {
     use super::*;
     use crate::file_tracker::MAX_TRACKED_FILE_SIZE;
     use crate::file_tracker::testing::seed_full_read;
-    use crate::tool::local_testing::{self, canonical_tempdir, ctx, temp_ctx};
+    use crate::tool::local_testing::{self, ctx, temp_ctx};
     use crate::tool::read::ReadTool;
     use crate::tool::view::{DiffChunk, NumberedLine};
     use crate::util::fs::testing::symlink_file;
+    use crate::util::path::local_testing::canonical_tempdir;
 
     mod approval_preview {
         use super::*;
@@ -649,7 +650,7 @@ mod tests {
         #[cfg(unix)]
         #[tokio::test]
         async fn fails_on_read_only_file() {
-            use std::os::unix::fs::PermissionsExt;
+            use std::os::unix::fs::PermissionsExt as _;
 
             let dir = canonical_tempdir();
             let path = dir.path().join("locked.txt");
@@ -672,7 +673,7 @@ mod tests {
         async fn fails_when_parent_creation_is_denied() {
             // The missing target passes the stat, so the read-only ancestor denies
             // `create_dir_all`. It stays empty, so the temp dir still cleans up.
-            use std::os::unix::fs::PermissionsExt;
+            use std::os::unix::fs::PermissionsExt as _;
 
             let dir = canonical_tempdir();
             let readonly = dir.path().join("readonly");

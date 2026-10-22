@@ -5,7 +5,7 @@ use std::fmt;
 use std::path::Path;
 use std::sync::Arc;
 
-use anyhow::Context;
+use anyhow::Context as _;
 use futures::StreamExt as _;
 use futures::stream::FuturesUnordered;
 use tokio::sync::mpsc;
@@ -540,14 +540,14 @@ mod tests {
     use crate::permission::{Mode, PermissionClass, Tier};
     use crate::protocol::testing::{CapturingSink, FailingSink};
     #[cfg(unix)]
-    use crate::tool::local_testing::canonical_tempdir;
-    #[cfg(unix)]
     use crate::tool::read::ReadTool;
     use crate::tool::tasks::TasksTool;
     use crate::tool::tasks::testing::plan;
     use crate::tool::testing::bash_registry;
     #[cfg(unix)]
     use crate::tool::write::WriteTool;
+    #[cfg(unix)]
+    use crate::util::path::local_testing::canonical_tempdir;
 
     fn approval_ids(sink: &CapturingSink) -> Vec<String> {
         sink.events()

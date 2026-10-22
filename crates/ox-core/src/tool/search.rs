@@ -245,8 +245,9 @@ mod tests {
 
     use super::*;
     use crate::tool::local_testing::{
-        canonical_tempdir, create_modified_at, deny_read_access, deny_reads, search_root,
+        create_modified_at, deny_read_access, deny_reads, search_root,
     };
+    use crate::util::path::local_testing::canonical_tempdir;
     use crate::util::path::testing::HOME_VAR;
 
     mod new {

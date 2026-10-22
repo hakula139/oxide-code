@@ -1,7 +1,7 @@
 //! Non-streaming `/v1/messages` side-query path. Returns flattened assistant text and the response's
 //! usage.
 
-use anyhow::{Context, Result};
+use anyhow::{Context as _, Result};
 use serde::Deserialize;
 
 use super::transport::{post_messages, with_retry};

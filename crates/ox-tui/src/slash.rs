@@ -33,7 +33,7 @@ pub(crate) use matcher::MatchedCommand;
 pub(crate) use registry::{ArgCompletion, ChatOutput, SlashKind, SlashOutcome};
 pub use resume::ResumePicker;
 
-use futures::TryFutureExt;
+use futures::TryFutureExt as _;
 
 use ox_core::command::Parsed;
 

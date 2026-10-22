@@ -227,8 +227,8 @@ mod tests {
     use std::fs;
 
     use super::*;
-    use crate::tool::local_testing::canonical_tempdir;
     use crate::util::fs::testing::symlink_file;
+    use crate::util::path::local_testing::canonical_tempdir;
 
     mod tracker_key {
         use super::*;

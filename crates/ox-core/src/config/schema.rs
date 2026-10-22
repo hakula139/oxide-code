@@ -4,7 +4,7 @@ use std::collections::BTreeMap;
 use std::fmt;
 use std::ops::RangeInclusive;
 
-use anyhow::{Context, Result};
+use anyhow::{Context as _, Result};
 use serde::de::{self, Unexpected};
 use serde::{Deserialize, Deserializer};
 

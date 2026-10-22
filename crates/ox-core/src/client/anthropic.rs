@@ -22,7 +22,7 @@ pub(crate) mod wire;
 use std::sync::Arc;
 use std::time::Duration;
 
-use anyhow::{Context, Result};
+use anyhow::{Context as _, Result};
 use reqwest::header::{CONTENT_TYPE, HeaderMap, HeaderValue, USER_AGENT};
 use serde::Serialize;
 use tokio::sync::mpsc;
@@ -30,7 +30,7 @@ use tokio_util::task::TaskTracker;
 use tracing::debug;
 use uuid::Uuid;
 
-use crate::client::{ResponseEvent, Wire};
+use super::{ResponseEvent, Wire};
 use crate::config::auth::{self, Auth, AuthSource, LoginUnavailable};
 use crate::config::gateway::GatewayCompat;
 use crate::config::oauth::ClaudeCodeKeychain;

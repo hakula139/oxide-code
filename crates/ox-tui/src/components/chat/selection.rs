@@ -5,7 +5,7 @@ use std::ops::Range;
 use std::time::{Duration, Instant};
 
 use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
-use ratatui::buffer::{Buffer, CellWidth};
+use ratatui::buffer::{Buffer, CellWidth as _};
 use ratatui::layout::{Position, Rect};
 use ratatui::style::Style;
 use ratatui::text::Line;

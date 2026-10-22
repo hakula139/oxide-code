@@ -380,8 +380,9 @@ mod tests {
     use super::*;
     use crate::file_tracker::testing::tracker_seeded;
     use crate::file_tracker::{LastView, MAX_TRACKED_FILE_SIZE};
-    use crate::tool::local_testing::{self, canonical_tempdir, ctx_with, temp_ctx};
+    use crate::tool::local_testing::{self, ctx_with, temp_ctx};
     use crate::tool::read::ReadTool;
+    use crate::util::path::local_testing::canonical_tempdir;
 
     fn seeded_ctx(path: &Path) -> ToolCtx {
         ctx_with(&std::env::temp_dir(), tracker_seeded(path))
@@ -1052,7 +1053,7 @@ mod tests {
         #[cfg(unix)]
         #[tokio::test]
         async fn fails_if_write_is_rejected() {
-            use std::os::unix::fs::PermissionsExt;
+            use std::os::unix::fs::PermissionsExt as _;
 
             let dir = canonical_tempdir();
             let path = dir.path().join("readonly.txt");

@@ -452,7 +452,6 @@ pub(crate) mod local_testing {
     use std::sync::Arc;
     use std::time::{Duration, SystemTime};
 
-    use tempfile::TempDir;
     use tokio_util::sync::CancellationToken;
 
     use super::search::{SearchRoot, search_path};
@@ -535,24 +534,6 @@ pub(crate) mod local_testing {
         pub(super) fn iter(&self) -> impl Iterator<Item = (&ToolSpec, &dyn Tool)> {
             self.tools.iter().map(|(spec, tool)| (spec, tool.as_ref()))
         }
-    }
-
-    /// A temp dir with a canonical path, the form a resolved workspace path takes.
-    pub(crate) struct CanonicalTempDir {
-        _dir: TempDir,
-        path: PathBuf,
-    }
-
-    impl CanonicalTempDir {
-        pub(crate) fn path(&self) -> &Path {
-            &self.path
-        }
-    }
-
-    pub(crate) fn canonical_tempdir() -> CanonicalTempDir {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dunce::canonicalize(dir.path()).unwrap();
-        CanonicalTempDir { _dir: dir, path }
     }
 
     /// Creates an empty file at `path`, last modified `secs` seconds after the Unix epoch.
@@ -663,12 +644,13 @@ mod tests {
     use std::collections::HashSet;
     use std::fs;
 
-    use super::local_testing::{canonical_tempdir, ctx, deny_reads, temp_ctx};
+    use super::local_testing::{ctx, deny_reads, temp_ctx};
     use super::testing::bash_registry;
     use super::view::{DiffChunk, NumberedLine};
     use super::*;
     use crate::permission::rule::Rule;
     use crate::permission::{Decision, Mode, PermissionClass, Policy, Zone};
+    use crate::util::path::local_testing::canonical_tempdir;
     use crate::util::path::testing::HOME_VAR;
 
     /// The built-in tools, with no read rules and background shells of their own.

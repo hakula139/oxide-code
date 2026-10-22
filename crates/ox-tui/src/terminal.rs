@@ -1,7 +1,7 @@
 //! Terminal setup and restore, the panic hook, escape-sequence output, and the stdout width query.
 
 use std::fmt;
-use std::io::{self, IsTerminal, Stdout, Write};
+use std::io::{self, IsTerminal as _, Stdout, Write};
 use std::sync::Mutex;
 
 use anyhow::Result;
@@ -27,7 +27,7 @@ use crossterm::terminal::{
 use crossterm::{Command, execute, queue};
 use ratatui::Terminal;
 use ratatui::backend::Backend;
-use ratatui::prelude::{CrosstermBackend, IntoCrossterm};
+use ratatui::prelude::{CrosstermBackend, IntoCrossterm as _};
 use tracing::error;
 
 use ox_core::util::sync::lock_or_recover;

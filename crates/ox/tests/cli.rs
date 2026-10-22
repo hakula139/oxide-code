@@ -479,7 +479,7 @@ async fn headless_mode_flag_overrides_the_configured_mode() {
 async fn interrupted_run(args: &[&str], signal: &str) -> (Option<i32>, String) {
     use std::time::Duration;
 
-    use tokio::io::AsyncWriteExt;
+    use tokio::io::AsyncWriteExt as _;
 
     use ox_core::engine::testing::{mount_stalled_reply_once, until_requested};
 

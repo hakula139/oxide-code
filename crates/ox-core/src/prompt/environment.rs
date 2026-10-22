@@ -3,7 +3,7 @@
 use std::path::Path;
 
 use indoc::formatdoc;
-use platform_info::{PlatformInfo, PlatformInfoAPI, UNameAPI};
+use platform_info::{PlatformInfo, PlatformInfoAPI as _, UNameAPI as _};
 use serde::{Deserialize, Serialize};
 use time::macros::format_description;
 use time::{OffsetDateTime, UtcOffset};

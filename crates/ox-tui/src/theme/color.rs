@@ -8,7 +8,7 @@
 //!
 //! Three-digit hex shorthand (`#fff`) is rejected to keep the format unambiguous.
 
-use anyhow::{Context, Result, anyhow, bail};
+use anyhow::{Context as _, Result, anyhow, bail};
 use ratatui::style::Color;
 
 /// Every accepted color format, which an unknown color lists.

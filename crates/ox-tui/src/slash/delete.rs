@@ -105,6 +105,13 @@ mod tests {
     use crate::session_info::testing::test_session_info;
     use crate::slash::registry::testing::run_execute;
 
+    #[test]
+    fn name_and_metadata_match_built_ins_contract() {
+        assert_eq!(DeleteCmd.name(), "delete");
+        assert_ne!(DeleteCmd.description(), "");
+        assert_eq!(DeleteCmd.usage(), Some("<id-prefix>"));
+    }
+
     mod classify {
         use super::*;
 

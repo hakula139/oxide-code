@@ -1,8 +1,8 @@
 //! Text helpers: display-width-aware truncation and padding, count-based pluralization and
 //! abbreviation, byte-size labels, sentence joining, blank-edge trimming, and terminal escaping.
 
-use unicode_segmentation::UnicodeSegmentation;
-use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
+use unicode_segmentation::UnicodeSegmentation as _;
+use unicode_width::{UnicodeWidthChar as _, UnicodeWidthStr as _};
 
 pub const ELLIPSIS: &str = "...";
 /// Columns [`ELLIPSIS`] fills, one per byte since it is ASCII.

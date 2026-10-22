@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
-use anyhow::{Context, Result, anyhow, bail};
+use anyhow::{Context as _, Result, anyhow, bail};
 use serde::{Deserialize, Serialize};
 use tokio::sync::{Mutex, OwnedMutexGuard};
 use tokio_util::task::TaskTracker;
@@ -612,7 +612,7 @@ fn read_credentials(path: &Path) -> Result<Option<StoredCredentials<'_>>> {
 
 #[cfg(unix)]
 fn enforce_private_mode(path: &Path) {
-    use std::os::unix::fs::PermissionsExt;
+    use std::os::unix::fs::PermissionsExt as _;
 
     if let Err(e) = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)) {
         debug!("failed to reassert 0o600 on {}: {e}", path.display());
@@ -718,7 +718,7 @@ fn keychain_account() -> Result<String> {
 /// hex digits of the SHA-256 of the variable's value, so each config directory keeps its own login.
 #[cfg(any(target_os = "macos", test))]
 fn keychain_service() -> String {
-    use sha2::{Digest, Sha256};
+    use sha2::{Digest as _, Sha256};
 
     claude_config_var().map_or_else(
         || KEYCHAIN_SERVICE.to_owned(),
@@ -1235,7 +1235,7 @@ mod tests {
     use super::testing::{HeldRefresh, creds_json, ok_refresh_body, write_creds};
     use super::*;
     use crate::util::fs::testing::symlink_dir;
-    use crate::util::path::local_testing::abs;
+    use crate::util::path::local_testing::{abs, canonical_tempdir};
     use crate::util::path::testing::HOME_VAR;
     use crate::util::tls::PlatformTrust;
     use crate::util::tls::local_testing::no_roots;
@@ -1400,8 +1400,8 @@ mod tests {
 
             #[test]
             fn keeps_the_claude_code_login_in_claude_config_dir_and_locks_beside_its_real_path() {
-                let root = tempfile::tempdir().unwrap();
-                let root = dunce::canonicalize(root.path()).unwrap();
+                let root = canonical_tempdir();
+                let root = root.path();
                 std::fs::create_dir(root.join("other")).unwrap();
                 std::fs::create_dir(root.join("claude-work")).unwrap();
                 let spelled = root.join("other").join("..").join("claude-work");
@@ -1421,16 +1421,13 @@ mod tests {
 
             #[test]
             fn locks_where_a_symlinked_claude_directory_resolves() {
-                let home = tempfile::tempdir().unwrap();
-                let home = dunce::canonicalize(home.path()).unwrap();
+                let home = canonical_tempdir();
+                let home = home.path();
                 std::fs::create_dir(home.join("dotfiles")).unwrap();
                 symlink_dir(&home.join("dotfiles"), &home.join(".claude"));
 
                 let store = temp_env::with_vars(
-                    [
-                        (HOME_VAR, Some(home.as_path())),
-                        ("CLAUDE_CONFIG_DIR", None),
-                    ],
+                    [(HOME_VAR, Some(home)), ("CLAUDE_CONFIG_DIR", None)],
                     || Store::locate(Login::ClaudeCode, None).unwrap(),
                 );
 

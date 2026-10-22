@@ -2,8 +2,8 @@
 
 use ratatui::style::Style;
 use ratatui::text::{Line, Span};
-use unicode_segmentation::UnicodeSegmentation;
-use unicode_width::UnicodeWidthStr;
+use unicode_segmentation::UnicodeSegmentation as _;
+use unicode_width::UnicodeWidthStr as _;
 
 /// Wraps a line to fit within `max_width`, preserving visual indentation on continuation lines.
 ///

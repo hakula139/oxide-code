@@ -160,7 +160,7 @@ mod tests {
     use ox_core::util::path::testing::HOME_VAR;
 
     use super::*;
-    use crate::modal::Modal;
+    use crate::modal::Modal as _;
     use crate::modal::testing::rendered_text;
     use crate::session_info::testing::test_session_info;
     use crate::slash::registry::testing::run_execute;

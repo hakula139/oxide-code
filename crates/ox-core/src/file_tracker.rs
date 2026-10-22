@@ -5,7 +5,7 @@ use std::fs::Metadata;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard};
 
-use anyhow::{Context, ensure};
+use anyhow::{Context as _, ensure};
 use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;
 use tracing::debug;

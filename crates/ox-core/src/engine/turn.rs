@@ -532,12 +532,12 @@ mod tests {
     use crate::protocol::{ApprovalDecision, ConfigPick, ResumeTarget, ToolCall, ToolResult};
     use crate::session::handle;
     use crate::session::store::testing::test_store;
-    use crate::tool::local_testing::canonical_tempdir;
     use crate::tool::view::{NumberedLine, ToolResultView};
     use crate::tool::{
         DEFAULT_TOOL_ICON, Prepared, Tool, ToolCtx, ToolMetadata, ToolOutput, ToolRegistry,
         ToolSpec,
     };
+    use crate::util::path::local_testing::canonical_tempdir;
 
     fn text_block(text: &str) -> ContentBlock {
         ContentBlock::Text {

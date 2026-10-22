@@ -109,7 +109,7 @@ mod tests {
     use indoc::indoc;
 
     use super::*;
-    use crate::components::chat::blocks::{AssistantText, ChatBlock};
+    use crate::components::chat::blocks::{AssistantText, ChatBlock as _};
     use crate::theme::Theme;
 
     /// Streams `tokens` into a new turn, advancing the cache after each one as the chat does.

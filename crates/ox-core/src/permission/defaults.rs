@@ -5,11 +5,11 @@
 use std::fmt;
 use std::path::{Path, PathBuf};
 
-use anyhow::{Context, Result};
+use anyhow::{Context as _, Result};
 use serde::{Deserialize, Serialize};
 
-use crate::permission::rule::{Rule, escaped};
-use crate::permission::{PermissionClass, folded_names, resolve};
+use super::rule::{Rule, escaped};
+use super::{PermissionClass, folded_names, resolve};
 use crate::util::path::{
     CLAUDE_CREDENTIALS, XdgBase, app_dir, claude_dir, lexical_normalize, xdg_dir,
 };
@@ -540,11 +540,12 @@ mod tests {
     #[cfg(unix)]
     mod protected_roots {
         use super::*;
+        use crate::util::path::local_testing::canonical_tempdir;
 
         #[test]
         fn tags_where_each_symlinked_name_resolves_with_its_group() {
-            let dir = tempfile::tempdir().unwrap();
-            let cwd = dunce::canonicalize(dir.path()).unwrap();
+            let dir = canonical_tempdir();
+            let cwd = dir.path().to_path_buf();
             std::fs::create_dir_all(cwd.join("tools/vscode")).unwrap();
             std::os::unix::fs::symlink("tools/vscode", cwd.join(".vscode")).unwrap();
 

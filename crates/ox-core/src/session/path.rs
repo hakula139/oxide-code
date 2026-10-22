@@ -107,7 +107,7 @@ mod tests {
         fn distinguishes_non_utf8_paths_with_same_lossy_form() {
             // Both invalid bytes lossy-render as U+FFFD, so the raw-byte hash must disambiguate.
             use std::ffi::OsStr;
-            use std::os::unix::ffi::OsStrExt;
+            use std::os::unix::ffi::OsStrExt as _;
             use std::path::PathBuf;
 
             let base = "/".to_owned() + &"a".repeat(200) + "/";

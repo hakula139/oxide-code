@@ -11,8 +11,8 @@ use std::process::{Output, Stdio};
 use serde::Deserialize;
 use tracing::debug;
 
+use super::text::truncate_to_width;
 use crate::config::auth::secret_env_vars;
-use crate::util::text::truncate_to_width;
 
 // ── Repository ──
 
@@ -353,7 +353,7 @@ mod tests {
     #[cfg(target_os = "linux")]
     use std::ffi::OsStr;
     #[cfg(target_os = "linux")]
-    use std::os::unix::ffi::OsStrExt;
+    use std::os::unix::ffi::OsStrExt as _;
 
     use super::local_testing::init_fixture_repo;
     use super::testing::{isolated_git, with_isolated_git_env_async};
