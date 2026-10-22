@@ -43,6 +43,10 @@ const SESSION_ID_VAR: &str = "OX_SESSION_ID";
 /// git's `core.editor`, which outranks `VISUAL` and `EDITOR`.
 const EDITOR_VARS: [&str; 3] = ["EDITOR", "GIT_EDITOR", "VISUAL"];
 
+/// The variable each command's environment drops, so `cd sub` reaches the `sub` the permission
+/// gate checked, where an exported `CDPATH` would look elsewhere first.
+const CDPATH_VAR: &str = "CDPATH";
+
 /// Bytes of pipe output one call renders, less the spill paths its omission markers name. The
 /// reserve below the dispatcher cap holds the rest of the markers, the stream separator, and the
 /// footer, so the dispatcher never re-truncates bash output.
@@ -571,6 +575,7 @@ impl ShellTree {
                 .current_dir(ctx.cwd())
                 .env(SESSION_ID_VAR, &ctx.session_id)
                 .envs(EDITOR_VARS.map(|var| (var, "true")))
+                .env_remove(CDPATH_VAR)
                 .stdin(Stdio::null())
                 .stdout(Stdio::piped())
                 .stderr(Stdio::piped());
@@ -1514,6 +1519,24 @@ mod tests {
                         OX_TEST_INHERITED=secret
                     "},
                 );
+            }
+
+            #[tokio::test]
+            async fn resolves_cd_against_the_cwd_whatever_cdpath_ox_inherits() {
+                let cwd = tempfile::tempdir().unwrap();
+                for (dir, marker) in [("sub", "cwd"), ("elsewhere/sub", "elsewhere")] {
+                    fs::create_dir_all(cwd.path().join(dir)).unwrap();
+                    fs::write(cwd.path().join(dir).join("marker"), marker).unwrap();
+                }
+
+                let mut tree = temp_env::with_var("CDPATH", Some("elsewhere"), || {
+                    ShellTree::spawn("cd sub && cat marker", &ctx(cwd.path())).unwrap()
+                });
+                let (mut stdout, _) = tree.take_pipes();
+                let mut output = String::new();
+                stdout.read_to_string(&mut output).await.unwrap();
+
+                assert_eq!(output, "cwd");
             }
 
             #[cfg(unix)]

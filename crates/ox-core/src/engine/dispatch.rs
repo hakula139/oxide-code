@@ -482,7 +482,8 @@ fn unattended_reason(basis: &Basis, grant: Option<&SessionGrant>) -> String {
              a chained command needs a pattern per command, \
              and a word that expands needs a pattern ending in `*` at that word. \
              A command that hides what it runs, \
-             such as `$(...)` or `sh -c`, needs approval in an interactive session."
+             such as `$(...)`, `sh -c`, or `cd /tmp/x && make`, \
+             needs approval in an interactive session."
                 .to_owned()
         }
         (None, Basis::Builtin(group)) if group.tier() == ShippedTier::Ask => format!(
@@ -1370,7 +1371,8 @@ mod tests {
                      a chained command needs a pattern per command, \
                      and a word that expands needs a pattern ending in `*` at that word. \
                      A command that hides what it runs, \
-                     such as `$(...)` or `sh -c`, needs approval in an interactive session.",
+                     such as `$(...)`, `sh -c`, or `cd /tmp/x && make`, \
+                     needs approval in an interactive session.",
                 ),
                 (
                     &Basis::Builtin(Shipped::Git),

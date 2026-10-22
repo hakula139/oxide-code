@@ -13,7 +13,7 @@ Because the session has no controlling terminal, a command that prompts on `/dev
 
 ## Environment
 
-The command inherits ox's environment minus the [credentials](#credentials) ox authenticates with, and it adds these variables:
+The command inherits ox's environment minus the [credentials](#credentials) ox authenticates with and `CDPATH`, and it adds these variables:
 
 | Variable                         | Value            | Purpose                                                                                          |
 | -------------------------------- | ---------------- | ------------------------------------------------------------------------------------------------ |
@@ -21,6 +21,8 @@ The command inherits ox's environment minus the [credentials](#credentials) ox a
 | `EDITOR`, `GIT_EDITOR`, `VISUAL` | `true`           | Makes a command that opens an editor keep its default text, so nothing waits on an editor window |
 
 With the editor set to `true`, `git rebase --continue` and `git cherry-pick --continue` keep the prepared message, while `git commit` without `-m` stops with `Aborting commit due to empty commit message`. `GIT_EDITOR` takes precedence over git's `core.editor`, which takes precedence over `VISUAL` and `EDITOR`, so all three are needed for git and for tools that fall back to the generic pair, such as `gh` and `crontab -e`.
+
+An exported `CDPATH` makes `cd sub` try each of its entries before the working directory, while the [permission gate](permissions.md#command-targets) resolves `sub` against the working directory alone. Dropping it keeps `cd` where the gate placed it, so an allowed `cd sub && make` cannot run `make` in another `sub`.
 
 ### Credentials
 
@@ -38,5 +40,5 @@ A [known-safe command](permissions.md#command-targets) never expands a variable,
 ## Sources
 
 - `crates/ox-core/src/config/auth.rs`: `secret_env_vars`, derived from `AuthSource::EXPLICIT` and `CUSTOM_HEADERS_VAR`.
-- `crates/ox-core/src/tool/bash.rs`: `ShellTree`, `SESSION_ID_VAR`, `EDITOR_VARS`, and `bash`, which finds Git Bash on Windows.
+- `crates/ox-core/src/tool/bash.rs`: `ShellTree`, `SESSION_ID_VAR`, `EDITOR_VARS`, `CDPATH_VAR`, and `bash`, which finds Git Bash on Windows.
 - `crates/ox-core/src/tool/bash/background.rs`: `BackgroundShells::start`, which spawns a background shell through the same `ShellTree`.

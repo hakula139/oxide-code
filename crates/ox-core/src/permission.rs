@@ -3256,6 +3256,33 @@ mod tests {
             }
 
             #[test]
+            fn command_allows_nothing_after_a_directory_change_it_cannot_place_in_the_workspace() {
+                let p = policy(
+                    Mode::Manual,
+                    &[],
+                    &[],
+                    &[
+                        (EXEC, "./build.sh"),
+                        (EXEC, "./nice *"),
+                        (EXEC, "cargo build"),
+                        (EXEC, "cd *"),
+                    ],
+                );
+                for (case, expected) in [
+                    ("./build.sh", Decision::Allow),
+                    ("cd x && cargo build", Decision::Allow),
+                    ("cd /tmp/evil && ./build.sh", Decision::Ask),
+                    ("cd x && ./build.sh", Decision::Ask),
+                    ("cd x && ./nice cargo build", Decision::Ask),
+                    ("cd /tmp/evil && cargo build", Decision::Ask),
+                    ("cd $DIR; cargo build", Decision::Ask),
+                    ("cd /tmp/evil && ls", Decision::Ask),
+                ] {
+                    assert_eq!(decide(&p, EXEC, &command(case)), expected, "{case}");
+                }
+            }
+
+            #[test]
             fn command_deny_holds_what_a_followed_runner_runs_even_in_yolo() {
                 let p = policy(Mode::Yolo, &[(EXEC, "rm *")], &[], &[]);
                 for case in [

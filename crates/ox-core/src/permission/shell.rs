@@ -13,7 +13,7 @@ use regex::Regex;
 use serde::{Deserialize, Serialize};
 use tree_sitter::{Node, Parser, Tree};
 
-use super::{Access, Workspace, fold_name};
+use super::{Access, Target, Workspace, Zone, fold_name};
 use crate::util::path::expand_user;
 
 /// Shells and the commands that start one as another user, whose `-c` script, script file, or
@@ -388,6 +388,8 @@ impl CommandTarget {
             reads: Vec::new(),
             opaque: false,
             changes_dir: false,
+            leaves_workspace: false,
+            repeats: 0,
             relative_path: false,
             expands: false,
             unparsed: false,
@@ -400,11 +402,18 @@ impl CommandTarget {
                 segment.safe = false;
             }
         }
+        let runs_elsewhere = walk.leaves_workspace
+            && walk
+                .segments
+                .iter()
+                .flat_map(Segment::programs)
+                .any(|program| !DIRECTORY_CHANGERS.contains(&program[0].text.as_str()));
         let opaque = walk.opaque
             || walk.unparsed
             || walk.sets_shell_variable
             || (walk.statement_assignment && !walk.segments.is_empty())
-            || (walk.changes_dir && walk.relative_path);
+            || (walk.changes_dir && walk.relative_path)
+            || runs_elsewhere;
         Self {
             segments: walk.segments,
             writes: walk.writes,
@@ -576,7 +585,14 @@ struct Walk<'a> {
     opaque: bool,
     /// Whether some segment changes the working directory.
     changes_dir: bool,
-    /// Whether some redirection or known-safe read names a relative path.
+    /// Whether some directory change may leave the workspace. Only a first `cd` or `pushd`
+    /// that runs once, to a target [`Walk::enters_workspace`] accepts, stays inside.
+    leaves_workspace: bool,
+    /// How many loop or function bodies enclose the node the walk is at,
+    /// where a directory change may run more than once.
+    repeats: usize,
+    /// Whether some redirection, reader operand, or program spelled with a directory
+    /// names a relative path.
     relative_path: bool,
     /// Whether any part of the command expands a variable at run time, wherever the value ends up.
     expands: bool,
@@ -633,6 +649,15 @@ impl Walk<'_> {
                 self.visit_children(node, src);
             }
             "redirected_statement" => self.redirected_statement(node, Vec::new(), src),
+            "c_style_for_statement"
+            | "for_statement"
+            | "function_definition"
+            | "while_statement" => {
+                self.opaque |= runs_hidden_code(node);
+                self.repeats += 1;
+                self.visit_children(node, src);
+                self.repeats -= 1;
+            }
             "variable_assignment" => {
                 self.statement_assignment |=
                     !SAFE_VARIABLES.contains(&assigned(&src[node.byte_range()]));
@@ -859,8 +884,10 @@ impl Walk<'_> {
         }
     }
 
-    /// Weighs the program `name` runs: a shell or builtin that runs code, or a directory change.
+    /// Weighs the program `name` runs: a shell or builtin that runs code, a directory change,
+    /// or a path relative to the working directory.
     fn program(&mut self, name: &str, args: &[Word], src: &str) {
+        self.relative_path |= is_relative_program(name);
         let base = basename(name);
         let folded = fold_name(base);
         let runner = [base, folded.as_str()]
@@ -870,7 +897,9 @@ impl Walk<'_> {
             self.opaque = true;
             self.nested_script(runner, args, src);
         }
-        self.changes_dir |= DIRECTORY_CHANGERS.contains(&name);
+        if DIRECTORY_CHANGERS.contains(&name) {
+            self.change_dir(self.enters_workspace(args));
+        }
         // `shopt` can turn on `dotglob` or `globstar`, which change what a glob matches.
         self.opaque |= name == "shopt";
         let names = name_arguments(base, args);
@@ -884,6 +913,40 @@ impl Walk<'_> {
                 .as_deref()
                 .is_none_or(|value| value.contains(['[', '!']))
         });
+    }
+
+    /// Records a directory change, which may leave the workspace
+    /// unless it is the first, it runs once, and `inside` holds.
+    fn change_dir(&mut self, inside: bool) {
+        self.leaves_workspace |= self.changes_dir || self.repeats > 0 || !inside;
+        self.changes_dir = true;
+    }
+
+    /// Returns whether `args` name one literal directory inside a workspace root without `..`,
+    /// which bash's `cd` applies to the spelled path while the gate resolves symlinks first.
+    fn enters_workspace(&self, args: &[Word]) -> bool {
+        let [target] = args else {
+            return false;
+        };
+        target
+            .value
+            .as_deref()
+            .filter(|path| {
+                !target.glob
+                    && !path.starts_with(['-', '+'])
+                    && !Path::new(path)
+                        .components()
+                        .any(|c| c == Component::ParentDir)
+            })
+            .is_some_and(|path| {
+                matches!(
+                    Access::for_path(path, self.workspace).as_target(),
+                    Target::Path {
+                        zone: Zone::Workspace,
+                        ..
+                    }
+                )
+            })
     }
 
     /// Strips the wrappers that lead `words`. The named words keep every wrapper from the first one
@@ -904,6 +967,7 @@ impl Walk<'_> {
                 && let Some(name) = name.value.as_deref()
                 && let Some(wrapper) = WRAPPERS.iter().find(|w| w.name == basename(name))
             {
+                self.relative_path |= is_relative_program(name);
                 let run = match wrapper.invocation(args) {
                     Ok(run) => run,
                     Err(unknown) => {
@@ -918,7 +982,9 @@ impl Walk<'_> {
                     }
                 };
                 self.opaque |= run.shell;
-                self.changes_dir |= run.elsewhere;
+                if run.elsewhere {
+                    self.change_dir(false);
+                }
                 unwrapped.reads.extend(run.reads);
                 if run.start == args.len() {
                     let input = wrapper.kind == Kind::Input;
@@ -976,10 +1042,13 @@ impl Walk<'_> {
                 .as_deref()
                 .is_some_and(|value| FIND_RUNNERS.contains(&value))
         }) {
-            self.changes_dir |= rest[at]
+            if rest[at]
                 .value
                 .as_deref()
-                .is_some_and(|value| value.ends_with("dir"));
+                .is_some_and(|value| value.ends_with("dir"))
+            {
+                self.change_dir(false);
+            }
             let body = &rest[at + 1..];
             let end = body
                 .iter()
@@ -1320,6 +1389,12 @@ fn parse_tree(source: &str) -> Tree {
 /// The last component of a command path, so `/bin/sh` counts as `sh`.
 fn basename(name: &str) -> &str {
     name.rsplit(['/', '\\']).next().unwrap_or(name)
+}
+
+/// Returns whether bash runs the program `name` from a path relative to the working directory,
+/// as it does for a name with a `/` that does not start at the root, such as `./build.sh`.
+fn is_relative_program(name: &str) -> bool {
+    name.contains('/') && Path::new(name).is_relative()
 }
 
 /// Returns whether a shell option cluster such as `-c` or `-lc` takes the script as the next word.
@@ -2705,7 +2780,6 @@ mod tests {
             fn strips_transparent_wrappers_and_their_options() {
                 for command in [
                     "env -i -u HOME TZ=UTC rm -rf x",
-                    "env --chdir=/tmp rm -rf x",
                     "nice -n 5 rm -rf x",
                     "nice -10 rm -rf x",
                     "nice -n5 rm -rf x",
@@ -2730,6 +2804,7 @@ mod tests {
                     );
                     assert!(!command.is_opaque(), "{command:?}");
                 }
+                assert_eq!(texts("env --chdir=/tmp rm -rf x"), ["rm -rf x"]);
             }
 
             #[test]
@@ -2761,7 +2836,6 @@ mod tests {
                     ("sudo 1=x cat a", "cat a"),
                     ("sudo -- cat a", "cat a"),
                     ("doas -n -u root cat a", "cat a"),
-                    ("pkexec --user root echo hi", "echo hi"),
                     ("busybox rm -rf x", "rm -rf x"),
                     ("nice sudo nohup cat a", "cat a"),
                 ] {
@@ -2777,6 +2851,10 @@ mod tests {
                     assert!(!parsed.is_opaque(), "{command:?}");
                 }
                 assert_eq!(texts("nice sudo nohup cat a"), ["sudo nohup cat a"]);
+                assert_eq!(
+                    texts("pkexec --user root echo hi"),
+                    ["pkexec --user root echo hi"]
+                );
             }
 
             #[test]
@@ -3016,6 +3094,28 @@ mod tests {
                     "env -C /etc echo > hosts",
                     "env --chdir=/etc echo > hosts",
                     "cd / && cat etc/shadow",
+                    "cd /tmp/evil && ./build.sh",
+                    "pushd /tmp/evil; bin/build",
+                    "env -C /tmp/evil ./build.sh",
+                    "cd /tmp/evil && ./nice cargo test",
+                    "cd /tmp/evil && echo x | xargs ./build.sh",
+                    "cd x && ./build.sh",
+                    "cd /tmp/evil && make",
+                    "cd $DIR && make",
+                    "cd && make",
+                    "cd - && make",
+                    "cd -P x && make",
+                    "cd x* && make",
+                    "popd && make",
+                    "cd x && cd y && make",
+                    "cd x/../y && make",
+                    "cd .. && make",
+                    "for i in 1 2; do cd x; done; make",
+                    "until make; do cd x; done",
+                    "f() { cd x; }; f; f; make",
+                    "env -C x make",
+                    "pkexec make",
+                    "find . -execdir wc {} +",
                     "{ cat; } <<'EOF' a\nx\nEOF",
                     "exec sh -c 'ls'",
                     "command eval ls",
@@ -3034,6 +3134,13 @@ mod tests {
                     "cd x && echo > /dev/null",
                     "cd x && ls",
                     &format!("cd x && cat {}", abs("/etc/hosts")),
+                    &format!("cd x && {}", abs("/usr/bin/make")),
+                    "./build.sh",
+                    "cd x && make",
+                    "cd /repo/x && make",
+                    "for i in 1 2; do echo $i; done; cd x && make",
+                    "cd /tmp/evil",
+                    "cd x; cd /tmp/evil",
                     "ls $HOME",
                 ] {
                     assert!(!parse(command).is_opaque(), "{command:?}");
