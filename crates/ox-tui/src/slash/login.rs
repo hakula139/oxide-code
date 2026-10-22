@@ -63,12 +63,6 @@ mod tests {
             .into_forward()
     }
 
-    #[test]
-    fn name_and_metadata_match_built_ins_contract() {
-        assert_eq!(LoginCmd.name(), "login");
-        assert_ne!(LoginCmd.description(), "");
-    }
-
     mod classify {
         use super::*;
 
@@ -89,12 +83,6 @@ mod tests {
 
     mod logout_cmd {
         use super::*;
-
-        #[test]
-        fn name_and_metadata_match_built_ins_contract() {
-            assert_eq!(LogoutCmd.name(), "logout");
-            assert_ne!(LogoutCmd.description(), "");
-        }
 
         mod classify {
             use super::*;

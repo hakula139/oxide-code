@@ -360,14 +360,14 @@ mod tests {
         }
 
         #[test]
-        fn enter_with_no_changes_returns_cancelled() {
+        fn enter_with_no_changes_cancels() {
             let mut p = picker();
             let outcome = p.handle_key(&KeyEvent::from(KeyCode::Enter));
             assert!(matches!(outcome, ModalKey::Cancelled));
         }
 
         #[test]
-        fn enter_after_effort_round_trip_returns_cancelled() {
+        fn enter_after_effort_round_trip_cancels() {
             let mut p = picker();
             p.handle_key(&KeyEvent::from(KeyCode::Right));
             p.handle_key(&KeyEvent::from(KeyCode::Left));

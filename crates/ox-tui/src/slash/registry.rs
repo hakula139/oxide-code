@@ -115,11 +115,6 @@ pub(crate) struct ArgCompletion {
 pub(super) trait SlashCommand: Sync {
     fn name(&self) -> &'static str;
 
-    /// Other names the command answers to, from the [`command::aliases`] table the REPL shares.
-    fn aliases(&self) -> &'static [&'static str] {
-        command::aliases(self.name())
-    }
-
     fn description(&self) -> &'static str;
 
     /// The [`SlashKind`] of the form `args`, which decides whether it may run mid-turn.
@@ -170,14 +165,14 @@ pub(super) const BUILT_INS: &[&dyn SlashCommand] = &[
     &UnarchiveCmd,
 ];
 
-/// Resolves `name` to the command it names, canonically or as an alias.
+/// Resolves `name` to the command it names, canonically or as one of its [`command::aliases`].
 pub(super) fn lookup_in<'a>(
     commands: &'a [&'a dyn SlashCommand],
     name: &str,
 ) -> Option<&'a dyn SlashCommand> {
     commands
         .iter()
-        .find(|cmd| cmd.name() == name || cmd.aliases().contains(&name))
+        .find(|cmd| cmd.name() == name || command::aliases(cmd.name()).contains(&name))
         .copied()
 }
 
@@ -193,9 +188,9 @@ pub(super) mod testing {
         cmd.execute(args, &SlashContext::new(&test_session_info(), None))
     }
 
+    /// A command that fails with `error`, answering to the aliases the shared table gives `name`.
     pub(crate) struct FakeCmd {
         pub(crate) name: &'static str,
-        pub(crate) aliases: &'static [&'static str],
         pub(crate) description: &'static str,
         pub(crate) error: &'static str,
         /// Whether `execute` fails from a [`SlashOutcome::Background`] task.
@@ -205,7 +200,6 @@ pub(super) mod testing {
     impl FakeCmd {
         pub(crate) const DEFAULT: Self = Self {
             name: "fake",
-            aliases: &[],
             description: "fake",
             error: "Explicit failure.",
             background: false,
@@ -216,12 +210,11 @@ pub(super) mod testing {
         fn name(&self) -> &'static str {
             self.name
         }
-        fn aliases(&self) -> &'static [&'static str] {
-            self.aliases
-        }
+
         fn description(&self) -> &'static str {
             self.description
         }
+
         fn execute(&self, _: &str, _: &SlashContext<'_>) -> Result<SlashOutcome, String> {
             let error = self.error.to_owned();
             if self.background {
@@ -240,10 +233,10 @@ mod tests {
     use ox_core::command::testing::aliased_names;
     use ox_core::protocol::Op;
 
+    use super::testing::FakeCmd;
     use super::*;
     use crate::modal::ModalAction;
     use crate::modal::testing::ScriptedModal;
-    use crate::slash::registry::testing::FakeCmd;
     use crate::slash::testing::test_session_info;
 
     mod slash_outcome {
@@ -313,12 +306,6 @@ mod tests {
     mod lookup_in {
         use super::*;
 
-        const ALIASED: FakeCmd = FakeCmd {
-            name: "primary",
-            aliases: &["alt", "shortcut"],
-            ..FakeCmd::DEFAULT
-        };
-
         #[test]
         fn resolves_canonical_name() {
             let cmd = lookup_in(BUILT_INS, "help").expect("/help is registered");
@@ -327,10 +314,9 @@ mod tests {
 
         #[test]
         fn resolves_each_alias_to_canonical_impl() {
-            let registry: &[&dyn SlashCommand] = &[&ALIASED];
-            for alias in ["alt", "shortcut"] {
-                let cmd = lookup_in(registry, alias).expect("alias must resolve");
-                assert_eq!(cmd.name(), "primary");
+            for alias in ["new", "reset"] {
+                let cmd = lookup_in(BUILT_INS, alias).expect("alias must resolve");
+                assert_eq!(cmd.name(), "clear");
             }
         }
 
@@ -348,7 +334,7 @@ mod tests {
             commands
                 .iter()
                 .flat_map(|cmd| {
-                    cmd.aliases()
+                    command::aliases(cmd.name())
                         .iter()
                         .filter(|alias| names.contains(*alias))
                         .map(move |alias| (cmd.name(), *alias))
@@ -402,25 +388,11 @@ mod tests {
         #[test]
         fn alias_collisions_finds_a_synthetic_overlap() {
             let collider = FakeCmd {
-                name: "collider",
-                aliases: &["help"],
-                description: "collide",
+                name: "new",
                 ..FakeCmd::DEFAULT
             };
-            let registry: &[&dyn SlashCommand] = &[&HelpCmd, &collider];
-            assert_eq!(alias_collisions(registry), vec![("collider", "help")]);
-        }
-
-        #[test]
-        fn take_their_aliases_from_the_shared_table() {
-            for cmd in BUILT_INS {
-                assert_eq!(
-                    cmd.aliases(),
-                    command::aliases(cmd.name()),
-                    "/{}",
-                    cmd.name()
-                );
-            }
+            let registry: &[&dyn SlashCommand] = &[&ClearCmd, &collider];
+            assert_eq!(alias_collisions(registry), vec![("clear", "new")]);
         }
 
         #[test]

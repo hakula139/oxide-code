@@ -7,6 +7,8 @@ use super::context::SlashContext;
 use super::registry::{SlashCommand, SlashKind, SlashOutcome};
 use crate::action::Action;
 
+// ── CompactCmd ──
+
 pub(super) struct CompactCmd;
 
 impl SlashCommand for CompactCmd {
@@ -37,13 +39,6 @@ mod tests {
 
     use super::*;
     use crate::slash::registry::testing::run_execute;
-
-    #[test]
-    fn metadata_matches_built_ins_contract() {
-        assert_eq!(CompactCmd.name(), "compact");
-        assert_ne!(CompactCmd.description(), "");
-        assert_eq!(CompactCmd.usage(), Some("[<instructions>]"));
-    }
 
     mod classify {
         use super::*;

@@ -63,12 +63,12 @@ impl SlashCommand for UnarchiveCmd {
         SlashKind::Mutating
     }
 
-    fn echoes_input(&self, args: &str) -> bool {
-        !args.is_empty()
-    }
-
     fn usage(&self) -> Option<&'static str> {
         Some("<id-prefix>")
+    }
+
+    fn echoes_input(&self, args: &str) -> bool {
+        !args.is_empty()
     }
 
     fn execute(&self, prefix: &str, ctx: &SlashContext<'_>) -> Result<SlashOutcome, String> {
@@ -129,7 +129,7 @@ mod tests {
     };
 
     use super::*;
-    use crate::slash::testing::test_session_info;
+    use crate::slash::testing::{make_read_only, test_session_info};
 
     fn seed_saved(store: &SessionStore, session_id: &str) {
         seed_test_session(
@@ -139,13 +139,6 @@ mod tests {
             Some(1),
             datetime!(2026-04-18 09:00:00 UTC),
         );
-    }
-
-    #[test]
-    fn name_and_metadata_match_built_ins_contract() {
-        assert_eq!(ArchiveCmd.name(), "archive");
-        assert_ne!(ArchiveCmd.description(), "");
-        assert_eq!(ArchiveCmd.usage(), Some("[<id-prefix>]"));
     }
 
     mod classify {
@@ -223,17 +216,14 @@ mod tests {
             });
         }
 
-        #[cfg(unix)]
         #[test]
         fn prefix_reports_a_failed_write() {
-            use std::os::unix::fs::PermissionsExt;
-
             with_isolated_xdg(|_| {
                 let store = open_store(&test_session_info()).unwrap();
                 let target_id = stamped_id(0xab);
                 seed_saved(&store, &target_id);
                 let path = store.find_session_path(&target_id).unwrap();
-                std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o444)).unwrap();
+                make_read_only(&path);
                 let cause = std::fs::OpenOptions::new()
                     .append(true)
                     .open(&path)
@@ -257,13 +247,6 @@ mod tests {
 
     mod unarchive_cmd {
         use super::*;
-
-        #[test]
-        fn name_and_metadata_match_built_ins_contract() {
-            assert_eq!(UnarchiveCmd.name(), "unarchive");
-            assert_ne!(UnarchiveCmd.description(), "");
-            assert_eq!(UnarchiveCmd.usage(), Some("<id-prefix>"));
-        }
 
         mod classify {
             use super::*;

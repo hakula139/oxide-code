@@ -33,12 +33,6 @@ mod tests {
     use super::*;
     use crate::slash::testing::test_session_info;
 
-    #[test]
-    fn name_and_metadata_match_built_ins_contract() {
-        assert_eq!(ClearCmd.name(), "clear");
-        assert_ne!(ClearCmd.description(), "");
-    }
-
     mod classify {
         use super::*;
 

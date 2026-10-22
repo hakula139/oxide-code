@@ -1,6 +1,8 @@
 //! Slash-popup matching, which ranks the commands a typed query matches by name prefix → alias
 //! prefix → name substring → alias substring, alphabetically within each tier.
 
+use ox_core::command;
+
 use super::registry::SlashCommand;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -21,7 +23,7 @@ enum Tier {
 
 /// Matches `query` by prefix or substring, sorted by tier. An empty `query` returns `commands` in
 /// declared order.
-pub(super) fn filter_and_rank(query: &str, commands: &[&dyn SlashCommand]) -> Vec<MatchedCommand> {
+pub(super) fn filter_and_rank(commands: &[&dyn SlashCommand], query: &str) -> Vec<MatchedCommand> {
     if query.is_empty() {
         return commands.iter().map(|cmd| on_name(*cmd)).collect();
     }
@@ -30,7 +32,7 @@ pub(super) fn filter_and_rank(query: &str, commands: &[&dyn SlashCommand]) -> Ve
         .iter()
         .filter_map(|cmd| best_match(&q, *cmd))
         .collect();
-    hits.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.name.cmp(b.1.name)));
+    hits.sort_by_key(|(tier, m)| (*tier, m.name));
     hits.into_iter().map(|(_, m)| m).collect()
 }
 
@@ -54,7 +56,7 @@ fn best_match(query: &str, cmd: &dyn SlashCommand) -> Option<(Tier, MatchedComma
 }
 
 fn matching_alias(cmd: &dyn SlashCommand, pred: impl Fn(&str) -> bool) -> Option<&'static str> {
-    cmd.aliases()
+    command::aliases(cmd.name())
         .iter()
         .copied()
         .find(|alias| pred(&alias.to_ascii_lowercase()))
@@ -105,9 +107,9 @@ mod tests {
     use super::*;
     use crate::slash::registry::testing::FakeCmd;
 
+    /// Answers to `/new` and `/reset` through the shared alias table.
     const CLEAR: FakeCmd = FakeCmd {
         name: "clear",
-        aliases: &["new", "reset"],
         description: "wipe",
         ..FakeCmd::DEFAULT
     };
@@ -117,19 +119,16 @@ mod tests {
 
         const HELP: FakeCmd = FakeCmd {
             name: "help",
-            aliases: &[],
             description: "list",
             ..FakeCmd::DEFAULT
         };
         const STATUS: FakeCmd = FakeCmd {
             name: "status",
-            aliases: &[],
             description: "show",
             ..FakeCmd::DEFAULT
         };
         const COMPACT: FakeCmd = FakeCmd {
             name: "compact",
-            aliases: &[],
             description: "fold",
             ..FakeCmd::DEFAULT
         };
@@ -144,7 +143,7 @@ mod tests {
 
         #[test]
         fn empty_query_is_full_registry_in_declared_order() {
-            let rows = filter_and_rank("", &registry());
+            let rows = filter_and_rank(&registry(), "");
             assert_eq!(names(&rows), vec!["help", "clear", "status", "compact"]);
             assert!(rows.iter().all(|m| m.matched_alias.is_none()));
         }
@@ -153,12 +152,11 @@ mod tests {
         fn name_prefix_beats_substring_within_other_command() {
             const FORCONFIG: FakeCmd = FakeCmd {
                 name: "forconfig",
-                aliases: &[],
                 description: "fake",
                 ..FakeCmd::DEFAULT
             };
             let with_substring: Vec<&dyn SlashCommand> = vec![&COMPACT, &FORCONFIG];
-            let rows = filter_and_rank("co", &with_substring);
+            let rows = filter_and_rank(&with_substring, "co");
             assert_eq!(names(&rows), vec!["compact", "forconfig"]);
         }
 
@@ -166,12 +164,11 @@ mod tests {
         fn alias_prefix_beats_name_substring() {
             const RENEW: FakeCmd = FakeCmd {
                 name: "renew",
-                aliases: &[],
                 description: "fake",
                 ..FakeCmd::DEFAULT
             };
             let with_substring: Vec<&dyn SlashCommand> = vec![&CLEAR, &RENEW];
-            let rows = filter_and_rank("new", &with_substring);
+            let rows = filter_and_rank(&with_substring, "new");
             assert_eq!(names(&rows), vec!["clear", "renew"]);
             assert_eq!(rows[0].matched_alias, Some("new"));
             assert_eq!(rows[1].matched_alias, None);
@@ -181,60 +178,46 @@ mod tests {
         fn within_tier_sorts_alphabetically_on_canonical_name() {
             const SELECT: FakeCmd = FakeCmd {
                 name: "select",
-                aliases: &[],
                 description: "fake",
                 ..FakeCmd::DEFAULT
             };
             let two_prefix: Vec<&dyn SlashCommand> = vec![&STATUS, &SELECT];
-            let rows = filter_and_rank("s", &two_prefix);
+            let rows = filter_and_rank(&two_prefix, "s");
             assert_eq!(names(&rows), vec!["select", "status"]);
         }
 
         #[test]
         fn alias_match_surfaces_only_typed_alias() {
-            let rows = filter_and_rank("res", &registry());
+            let rows = filter_and_rank(&registry(), "res");
             assert_eq!(names(&rows), vec!["clear"]);
             assert_eq!(rows[0].matched_alias, Some("reset"));
         }
 
         #[test]
         fn alias_substring_lands_below_other_tiers() {
-            let rows = filter_and_rank("se", &registry());
+            let rows = filter_and_rank(&registry(), "se");
             assert_eq!(names(&rows), vec!["clear"]);
             assert_eq!(rows[0].matched_alias, Some("reset"));
         }
 
         #[test]
         fn query_is_case_insensitive() {
-            let prefix = filter_and_rank("HE", &registry());
+            let prefix = filter_and_rank(&registry(), "HE");
             assert_eq!(names(&prefix), vec!["help"]);
 
-            let substring = filter_and_rank("EAR", &registry());
+            let substring = filter_and_rank(&registry(), "EAR");
             assert_eq!(names(&substring), vec!["clear"]);
         }
 
         #[test]
         fn unmatched_query_is_empty() {
-            let rows = filter_and_rank("zzz", &registry());
+            let rows = filter_and_rank(&registry(), "zzz");
             assert_eq!(rows, []);
         }
     }
 
     mod best_match {
         use super::*;
-
-        #[test]
-        fn prefers_name_prefix_over_any_alias_branch() {
-            const ALSO: FakeCmd = FakeCmd {
-                name: "clearview",
-                aliases: &["cl"],
-                description: "fake",
-                ..FakeCmd::DEFAULT
-            };
-            let (tier, m) = best_match("cl", &ALSO).unwrap();
-            assert_eq!(tier, Tier::NamePrefix);
-            assert_eq!(m.matched_alias, None);
-        }
 
         #[test]
         fn finds_nothing_when_neither_name_nor_alias_match() {

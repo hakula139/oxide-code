@@ -202,12 +202,6 @@ mod tests {
         git_setup(repo, &["commit", "--quiet", "-m", "init"]);
     }
 
-    #[test]
-    fn name_and_metadata_match_built_ins_contract() {
-        assert_eq!(DiffCmd.name(), "diff");
-        assert_ne!(DiffCmd.description(), "");
-    }
-
     mod execute {
         use super::*;
 

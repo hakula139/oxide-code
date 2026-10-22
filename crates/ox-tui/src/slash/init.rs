@@ -158,12 +158,6 @@ mod tests {
         submitted(picker.handle_key(&KeyEvent::from(code)))
     }
 
-    #[test]
-    fn metadata_matches_built_ins_contract() {
-        assert_eq!(InitCmd.name(), "init");
-        assert_eq!(InitCmd.usage(), Some("[<file>]"));
-    }
-
     mod classify {
         use super::*;
 

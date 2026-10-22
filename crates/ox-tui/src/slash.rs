@@ -39,7 +39,7 @@ use ox_core::command::Parsed;
 
 /// Filters the built-in registry against a popup query (leading `/` stripped).
 pub(crate) fn filter_built_ins(query: &str) -> Vec<MatchedCommand> {
-    matcher::filter_and_rank(query, registry::BUILT_INS)
+    matcher::filter_and_rank(registry::BUILT_INS, query)
 }
 
 /// Curated arg completions for `cmd_name`, matching ASCII case-insensitively with prefix matches
@@ -113,6 +113,13 @@ pub(crate) fn classify(parsed: &Parsed) -> Option<SlashKind> {
 pub(crate) mod testing {
     pub(crate) use super::context::testing::test_session_info;
     pub(crate) use super::diff::testing::{added, context, removed};
+
+    /// Marks the file at `path` read-only, so appending to it fails on every platform.
+    pub(super) fn make_read_only(path: &std::path::Path) {
+        let mut permissions = std::fs::metadata(path).unwrap().permissions();
+        permissions.set_readonly(true);
+        std::fs::set_permissions(path, permissions).unwrap();
+    }
 }
 
 #[cfg(test)]
@@ -187,9 +194,7 @@ mod tests {
             let info = test_session_info();
             dispatch_with(
                 &[&FakeCmd {
-                    name: "failing",
-                    aliases: &["bust", "boom"],
-                    error: "Explicit failure.",
+                    name: "clear",
                     ..FakeCmd::DEFAULT
                 }],
                 &parsed,
@@ -200,28 +205,27 @@ mod tests {
 
         #[test]
         fn command_failure_prefixes_the_command_name() {
-            assert_eq!(dispatch_fake("failing"), "/failing: Explicit failure.");
+            assert_eq!(dispatch_fake("clear"), "/clear: Explicit failure.");
         }
 
         #[test]
         fn alias_routes_to_canonical_impl() {
             // Error must echo the alias the user typed.
-            assert_eq!(dispatch_fake("boom"), "/boom: Explicit failure.");
+            assert_eq!(dispatch_fake("reset"), "/reset: Explicit failure.");
         }
 
         #[tokio::test]
         async fn background_failure_prefixes_the_name_the_user_typed() {
             let info = test_session_info();
             let cmd = FakeCmd {
-                name: "failing",
-                aliases: &["boom"],
+                name: "clear",
                 background: true,
                 ..FakeCmd::DEFAULT
             };
 
             for (typed, expected) in [
-                ("failing", "/failing: Explicit failure."),
-                ("boom", "/boom: Explicit failure."),
+                ("clear", "/clear: Explicit failure."),
+                ("reset", "/reset: Explicit failure."),
             ] {
                 let ctx = SlashContext::new(&info, None);
                 let task = dispatch_with(&[&cmd], &parsed(typed, ""), &ctx)
@@ -235,7 +239,7 @@ mod tests {
         fn unknown_command_lists_available_and_the_escape() {
             assert_eq!(
                 dispatch_fake("etc"),
-                "Unknown command: `/etc`. Available: /failing. Use `//etc` to send the literal text.",
+                "Unknown command: `/etc`. Available: /clear. Use `//etc` to send the literal text.",
             );
         }
     }

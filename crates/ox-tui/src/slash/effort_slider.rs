@@ -29,7 +29,7 @@ const TIER_GAP: usize = 3;
 const TITLE: &str = "Select effort";
 
 /// Title + blank + speed / intel + track + tier labels + blank + footer.
-const BODY_HEIGHT: u16 = 7;
+const MODAL_HEIGHT: u16 = 7;
 
 // ── Tier Colors ──
 
@@ -78,7 +78,7 @@ impl EffortSlider {
         ))))
     }
 
-    /// Width every render line targets so `Paragraph::Center` aligns them on a single axis.
+    /// Width every render line targets so `Alignment::Center` aligns them on a single axis.
     fn slider_width() -> usize {
         let units: usize = Effort::ALL
             .iter()
@@ -132,7 +132,7 @@ impl EffortSlider {
 
 impl Modal for EffortSlider {
     fn height(&self, _width: u16, _max_height: u16) -> u16 {
-        BODY_HEIGHT
+        MODAL_HEIGHT
     }
 
     fn render(&self, frame: &mut Frame<'_>, area: Rect, theme: &Theme) {
@@ -331,7 +331,7 @@ mod tests {
         }
 
         #[test]
-        fn enter_with_no_change_returns_cancelled() {
+        fn enter_with_no_change_cancels() {
             let mut s = slider_for("claude-opus-5-5", Some(Effort::High));
             let outcome = s.handle_key(&KeyEvent::from(KeyCode::Enter));
             assert!(matches!(outcome, ModalKey::Cancelled));

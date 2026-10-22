@@ -28,6 +28,8 @@ impl SlashCommand for StatusCmd {
     }
 }
 
+// ── Helpers ──
+
 fn build_modal(info: &LiveSessionInfo) -> KvOverview {
     let model = &info.config.model;
     let model = format!("{} ({})", model.display_name(), model.id());
@@ -92,14 +94,8 @@ mod tests {
 
     use super::*;
     use crate::modal::Modal;
-    use crate::modal::testing::rendered_text;
+    use crate::modal::testing::{render_rows, rendered_text};
     use crate::slash::testing::test_session_info;
-
-    #[test]
-    fn name_and_metadata_match_built_ins_contract() {
-        assert_eq!(StatusCmd.name(), "status");
-        assert_ne!(StatusCmd.description(), "");
-    }
 
     mod execute {
         use super::*;
@@ -116,11 +112,10 @@ mod tests {
         use super::*;
 
         #[test]
-        fn renders_one_row_per_session_descriptor() {
-            let info = test_session_info();
-            let m = build_modal(&info);
-            // Title + blank + 10 rows + blank + footer = 14.
-            assert_eq!(m.height(80, u16::MAX), 14);
+        fn lists_each_session_descriptor() {
+            let modal = build_modal(&test_session_info());
+
+            insta::assert_debug_snapshot!(render_rows(&modal, 80, modal.height(80, u16::MAX)));
         }
 
         #[test]

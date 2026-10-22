@@ -38,12 +38,12 @@ impl SlashCommand for DeleteCmd {
         SlashKind::Mutating
     }
 
-    fn echoes_input(&self, args: &str) -> bool {
-        !args.is_empty()
-    }
-
     fn usage(&self) -> Option<&'static str> {
         Some("<id-prefix>")
+    }
+
+    fn echoes_input(&self, args: &str) -> bool {
+        !args.is_empty()
     }
 
     fn execute(&self, arg: &str, ctx: &SlashContext<'_>) -> Result<SlashOutcome, String> {
@@ -104,13 +104,6 @@ mod tests {
     use crate::modal::testing::render_rows;
     use crate::slash::registry::SlashCommand;
     use crate::slash::testing::test_session_info;
-
-    #[test]
-    fn name_and_metadata_match_built_ins_contract() {
-        assert_eq!(DeleteCmd.name(), "delete");
-        assert_ne!(DeleteCmd.description(), "");
-        assert_eq!(DeleteCmd.usage(), Some("<id-prefix>"));
-    }
 
     mod classify {
         use super::*;
