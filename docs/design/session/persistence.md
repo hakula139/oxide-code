@@ -1,6 +1,6 @@
 # Session Persistence
 
-JSONL append-only storage, actor-owned writes, resume semantics.
+How `ox` stores each session as an append-only JSONL file, writes it through a single actor task, and rebuilds the transcript on resume.
 
 ## Storage Format
 
@@ -113,7 +113,7 @@ An `archive` entry sets whether default listings and `ox -c` skip the session, a
 
 ### Fork-on-Conflict Concurrency
 
-There is no file-level lock: two processes resuming the same session both append, and the newest-leaf rule resolves forks deterministically. A rewind abandons every leaf it moves away from, including one another process wrote, so that branch ends the chain again only once a newer message extends it. Each batch lands in one append write (`O_APPEND` on Unix, an end-of-file-offset write on Windows), so concurrent appends interleave only between batches.
+There is no file-level lock: two processes resuming the same session both append, and the newest-leaf rule resolves forks deterministically. A rewind abandons every leaf it moves away from, including one another process wrote, so that branch ends the chain again only once a newer message extends it. Each batch lands in one append write (`O_APPEND` on Unix, an end-of-file-offset write on Windows), so concurrent appends interleave only between batches. A compaction starts a new chain, so once one process compacts, resume drops the messages another process appends to the old chain after the boundary, whatever their timestamps.
 
 ### AI-Generated Titles
 
@@ -159,17 +159,11 @@ Listings sort rows and render them as follows:
 
 1. **JSONL, append-only, one file per session.** A process crash loses at most the batch in progress, and readers can stream the file line by line.
 2. **Per-project subdirectory keyed by the project root.** Listings stay scoped, `--all` opts into cross-project view, and the header's `project_root` keeps a colliding directory name from mixing projects. Older files stay where they are, since a listing reads both subdirectories.
-3. **`{epoch}-{uuid}.jsonl` naming.** Timestamp prefix for `ls` order, UUID suffix for lookup.
-4. **Explicit entry schema.** A tagged union of entries, a `parent_uuid` DAG, and a header `version`.
-5. **Lazy file creation.** Empty sessions leave no artifact.
-6. **Resume with symmetric sanitization.** Resume walks the DAG and drops orphans on both sides of each tool call, so every transcript stays API-valid.
-7. **Fork-on-conflict concurrency, no file lock.** Newest-leaf rule resolves forks, and one write per batch keeps concurrent appends from splitting a line.
-8. **Best-effort AI titles scoped to their session.** A one-shot Haiku call logs a warning on failure, and finalizing the session aborts it. The title with the newest `updated_at` wins.
-9. **First-failure-only write-error surfacing.** One `Event::Error` per failure kind plus warn-logs gives visibility without spam.
-10. **Listing scan with message pre-filter, mtime sort.** Titles and summaries can appear anywhere in the file, so the scan reads every line and the prefix check keeps message lines out of JSON parsing.
-11. **Actor-owned writes, receive-and-drain batching.** One task owns the writer, and `tokio::join!` coalesces a tool round's records into one append.
-12. **Archive state as an appended entry.** A session keeps the same path whether it is archived or active. Because filtering listings by archive state requires parsing files, listings indicate whether more sessions follow the current page without counting them.
-13. **Result views derive from the result text.** The `tool_result_metadata` sidecar records only what the result text does not carry: a call's title, an edit's diff, and a search's uncapped total. The `read`, `glob`, and `grep` views parse the text the model received, so a resumed session shows the view the live call showed and the session file holds each result once. A stored view would repeat up to 128 KiB per call, and it would have to drop the rows the output cap cut. Parsing has two costs. A path with a line break or trailing whitespace, or a `grep` row whose path contains `:<digits>:` or `:<digits>-`, splits in the wrong place, so the view shows the wrong file or line where the model saw an ambiguous row. Each tool's text format also becomes part of the session format, since a parser that no longer recognizes an older result shows it as plain text.
+3. **Best-effort AI titles scoped to their session.** A one-shot Haiku call logs a warning on failure, and finalizing the session aborts it. The title with the newest `updated_at` wins.
+4. **First-failure-only write-error surfacing.** One `Event::Error` per failure kind plus warn-logs gives visibility without spam.
+5. **Listing scan with message pre-filter, mtime sort.** Titles and summaries can appear anywhere in the file, so the scan reads every line and the prefix check keeps message lines out of JSON parsing.
+6. **Archive state as an appended entry.** A session keeps the same path whether it is archived or active. Because filtering listings by archive state requires parsing files, listings indicate whether more sessions follow the current page without counting them.
+7. **Result views derive from the result text.** The `tool_result_metadata` sidecar records only what the result text does not carry: a call's title, an edit's diff, and a search's uncapped total. The `read`, `glob`, and `grep` views parse the text the model received, so a resumed session shows the view the live call showed and the session file holds each result once. A stored view would repeat up to 128 KiB per call, and it would have to drop the rows the output cap cut. Parsing has two costs. A path with a line break or trailing whitespace, or a `grep` row whose path contains `:<digits>:` or `:<digits>-`, splits in the wrong place, so the view shows the wrong file or line where the model saw an ambiguous row. Each tool's text format also becomes part of the session format, since a parser that no longer recognizes an older result shows it as plain text.
 
 ## Sources
 
