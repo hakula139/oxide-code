@@ -26,7 +26,7 @@ With the editor set to `true`, `git rebase --continue` and `git cherry-pick --co
 
 Every command runs without `ANTHROPIC_AUTH_TOKEN`, `ANTHROPIC_API_KEY`, `CLAUDE_CODE_OAUTH_TOKEN`, and `ANTHROPIC_CUSTOM_HEADERS`, which carries gateway keys. `secret_env_vars` derives the list from the order in which credentials are resolved, so ox withholds each new credential variable as soon as it reads it. ox reads these variables from its own environment, which this does not change.
 
-`echo` is a [known-safe command](permissions.md#command-targets), so in `manual` mode `echo $ANTHROPIC_API_KEY` would run without approval and put the key into the session file and the model's context. A workspace `write` could then copy it into the repository. Withholding these variables closes that path and every other path through commands the gate allows, such as a build script run by an allowed `cargo test`. A script that needs its own Anthropic key, such as a test suite that calls the API, has to read it from another variable or a file. Other secrets in ox's environment, such as cloud or GitHub tokens, still reach every command.
+A [known-safe command](permissions.md#command-targets) never expands a variable, but any command the user approves or an allow rule admits can, such as a build script run by an allowed `cargo test`, and its output reaches the session file and the model's context. Withholding these variables keeps ox's own credentials off every such path. A script that needs its own Anthropic key, such as a test suite that calls the API, has to read it from another variable or a file. Other secrets in ox's environment, such as cloud or GitHub tokens, still reach every command.
 
 ## Design Decisions
 
