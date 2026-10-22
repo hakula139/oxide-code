@@ -167,6 +167,7 @@ Listings sort rows and render them as follows:
 10. **Listing scan with message pre-filter, mtime sort.** Titles and summaries can appear anywhere in the file, so the scan reads every line and the prefix check keeps message lines out of JSON parsing.
 11. **Actor-owned writes, receive-and-drain batching.** One task owns the writer, and `tokio::join!` coalesces a tool round's records into one append.
 12. **Archive state as an appended entry.** A session keeps the same path whether it is archived or active. Because filtering listings by archive state requires parsing files, listings indicate whether more sessions follow the current page without counting them.
+13. **Result views derive from the result text.** The `tool_result_metadata` sidecar records only what the result text does not carry: a call's title, an edit's diff, and a search's uncapped total. The `read`, `glob`, and `grep` views parse the text the model received, so a resumed session shows the view the live call showed and the session file holds each result once. A stored view would repeat up to 128 KiB per call, and it would have to drop the rows the output cap cut. Parsing has two costs. A path with a line break or trailing whitespace, or a `grep` row whose path contains `:<digits>:` or `:<digits>-`, splits in the wrong place, so the view shows the wrong file or line where the model saw an ambiguous row. Each tool's text format also becomes part of the session format, since a parser that no longer recognizes an older result shows it as plain text.
 
 ## Sources
 
@@ -177,6 +178,7 @@ Listings sort rows and render them as follows:
 - `crates/ox-core/src/session/display.rs`: the title and metadata formatting that listings use.
 - `crates/ox-core/src/session/entry.rs`: the JSONL entry schema and its header `version`.
 - `crates/ox-core/src/session/handle.rs`: `SessionHandle`, the public API that sends each write to the actor and surfaces the first write failure of each kind.
+- `crates/ox-core/src/session/history.rs`: the resumed transcript, whose tool results take their views from `ToolRegistry::result_view`.
 - `crates/ox-core/src/session/path.rs`: the sanitized per-project subdirectory names.
 - `crates/ox-core/src/session/resolver.rs`: the `--continue` argument and session-ID prefix resolution.
 - `crates/ox-core/src/session/sanitize.rs`: resume-time transcript repair.
@@ -185,4 +187,5 @@ Listings sort rows and render them as follows:
 - `crates/ox-core/src/session/store.rs`: session file I/O and the `{epoch}-{uuid}.jsonl` file names.
 - `crates/ox-core/src/session/store/listing.rs`: stat-only listing walks and metadata parsing.
 - `crates/ox-core/src/session/title_generator.rs`: the background AI title generator.
+- `crates/ox-core/src/tool.rs`: `ToolMetadata`, the fields the `tool_result_metadata` sidecar records.
 - `crates/ox/src/session_list.rs`: the `ox --list` table.
