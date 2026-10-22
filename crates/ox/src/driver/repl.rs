@@ -567,7 +567,7 @@ mod tests {
                 .unwrap();
 
                 assert_eq!(exit, Exit::Success);
-                let Ok(Some(Op::Prompt(prompt))) = command::init::resolve("", dir.path()) else {
+                let Ok(Some(prompt)) = command::init::resolve("", dir.path()) else {
                     panic!("bare /init must resolve once AGENTS.md exists");
                 };
                 let requests = request_bodies(&server).await;

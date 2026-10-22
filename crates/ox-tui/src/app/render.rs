@@ -145,7 +145,7 @@ impl App {
         let queued = self.queue.pending();
         let mut lines: Vec<Line<'static>> = Vec::with_capacity(PREVIEW_VISIBLE + 1);
         for prompt in queued.iter().take(PREVIEW_VISIBLE) {
-            lines.push(preview_line(prompt, &self.theme, body_width));
+            lines.push(preview_line(prompt.line(), &self.theme, body_width));
         }
         if queued.len() > PREVIEW_VISIBLE {
             let extra = queued.len() - PREVIEW_VISIBLE;

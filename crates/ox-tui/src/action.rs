@@ -6,14 +6,24 @@ use ox_core::protocol::Op;
 use crate::keymap::{KeyAction, KeyChord, Keymap};
 use crate::theme::builtin::BuiltinTheme;
 
-/// A request from a TUI surface. [`Self::Op`] reaches the engine after the app applies its local
-/// state change. The other variants act on TUI state alone.
+/// A request from a TUI surface.
+/// [`Self::Submit`] runs as a slash command or a prompt, [`Self::Op`] reaches the engine after the
+/// app applies its local state change, and [`Self::SlashPrompt`] starts a turn.
+/// The other variants act on TUI state alone.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum Action {
     /// Text submitted from the input box, which runs as a slash command or a prompt, or joins the
     /// queue while a turn runs.
     Submit(String),
     Op(Op),
+    /// A prompt a slash command built, which starts a turn headed by the command's echoed `line`.
+    /// Auto-compaction replays the line.
+    /// A failed turn hands the line back to an empty input, where it runs again as a command, or
+    /// returns the pair to the queue head, where the built prompt runs as it is.
+    SlashPrompt {
+        line: String,
+        prompt: String,
+    },
     /// Shift+Tab, which switches to the next permission mode.
     CycleMode,
     /// A preview of the picker's highlighted theme, without committing it. Cursor moves in the

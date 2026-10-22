@@ -1,5 +1,6 @@
-//! `/init` forwards the prompt [`init::resolve`] builds. A bare `/init` in a project with neither
-//! `AGENTS.md` nor `CLAUDE.md` first opens a picker asking which one to create.
+//! `/init` starts a turn with the prompt [`init::resolve`] builds.
+//! A bare `/init` in a project with neither `AGENTS.md` nor `CLAUDE.md` first opens a picker asking
+//! which one to create.
 
 use std::borrow::Cow;
 use std::path::{Path, PathBuf};
@@ -9,7 +10,6 @@ use ratatui::Frame;
 use ratatui::layout::Rect;
 
 use ox_core::command::init::{self, FILE_CHOICES};
-use ox_core::protocol::Op;
 
 use super::context::SlashContext;
 use super::matcher::rank_by_prefix;
@@ -54,7 +54,7 @@ impl SlashCommand for InitCmd {
     fn execute(&self, args: &str, ctx: &SlashContext<'_>) -> Result<SlashOutcome, String> {
         let root = &ctx.info.project_root;
         Ok(match init::resolve(args, root)? {
-            Some(op) => SlashOutcome::Forward(Action::Op(op)),
+            Some(prompt) => SlashOutcome::Prompt(prompt),
             None => SlashOutcome::Modal(Box::new(InitPicker::new(root))),
         })
     }
@@ -84,7 +84,7 @@ impl PickerItem for FileRow {
 
 // ── InitPicker ──
 
-/// Asks which instruction file to create, then forwards the prompt that creates it.
+/// Asks which instruction file to create, then starts the turn that creates it.
 struct InitPicker {
     list: ListPicker<FileRow>,
     root: PathBuf,
@@ -112,7 +112,10 @@ impl InitPicker {
 
     fn submit(&self) -> ModalKey {
         let prompt = init::create_prompt(&self.root, self.list.selected().name);
-        ModalKey::Submitted(ModalAction::Dispatch(Action::Op(Op::Prompt(prompt))))
+        ModalKey::Submitted(ModalAction::Dispatch(Action::SlashPrompt {
+            line: format!("/{}", InitCmd.name()),
+            prompt,
+        }))
     }
 }
 
@@ -141,9 +144,12 @@ mod tests {
     use crate::modal::testing::render_rows;
     use crate::slash::testing::test_session_info;
 
-    /// The action that forwards the prompt creating `file` at `root`.
+    /// The action the picker submits to start the turn creating `file` at `root`.
     fn create_action(root: &Path, file: &str) -> Action {
-        Action::Op(Op::Prompt(init::create_prompt(root, file)))
+        Action::SlashPrompt {
+            line: "/init".to_owned(),
+            prompt: init::create_prompt(root, file),
+        }
     }
 
     /// The action pressing `code` submits, or `None` when it leaves the picker open.
@@ -216,12 +222,16 @@ mod tests {
         }
 
         #[test]
-        fn with_a_file_name_forwards_its_create_prompt() {
+        fn with_a_file_name_starts_a_turn_with_its_create_prompt() {
             let root = tempfile::tempdir().unwrap();
 
-            let action = execute_in(root.path(), "CLAUDE.md").unwrap().into_forward();
+            let outcome = execute_in(root.path(), "CLAUDE.md").unwrap();
 
-            assert_eq!(action, create_action(root.path(), "CLAUDE.md"));
+            let expected = init::create_prompt(root.path(), "CLAUDE.md");
+            assert!(
+                matches!(&outcome, SlashOutcome::Prompt(prompt) if *prompt == expected),
+                "{outcome:?}"
+            );
         }
 
         #[test]
