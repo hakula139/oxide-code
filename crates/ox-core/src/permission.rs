@@ -81,8 +81,9 @@ impl Mode {
 /// The rule namespace a tool's calls fall under, which also sets the pipeline's default treatment.
 /// Rules address classes, so one `read` deny pattern covers every tool that reads a file. Each tool
 /// declares its class in its [`crate::tool::ToolSpec`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Display)]
 #[serde(rename_all = "lowercase")]
+#[strum(serialize_all = "lowercase")]
 pub enum PermissionClass {
     /// Reads the workspace or acts only on state the session owns (`read`, `grep`, `glob`, `tasks`,
     /// `bash_output`, `bash_stop`), so it allows unless a deny or ask rule matches.
@@ -97,49 +98,16 @@ pub enum PermissionClass {
     Mcp,
 }
 
-impl PermissionClass {
-    const fn as_str(self) -> &'static str {
-        match self {
-            Self::Read => "read",
-            Self::Edit => "edit",
-            Self::Exec => "exec",
-            Self::Net => "net",
-            Self::Mcp => "mcp",
-        }
-    }
-}
-
-impl fmt::Display for PermissionClass {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(self.as_str())
-    }
-}
-
 // ── Tier ──
 
 /// Where a rule list sits in the pipeline: deny outranks ask, which outranks allow.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Display)]
 #[serde(rename_all = "lowercase")]
+#[strum(serialize_all = "lowercase")]
 pub enum Tier {
     Deny,
     Ask,
     Allow,
-}
-
-impl Tier {
-    const fn as_str(self) -> &'static str {
-        match self {
-            Self::Deny => "deny",
-            Self::Ask => "ask",
-            Self::Allow => "allow",
-        }
-    }
-}
-
-impl fmt::Display for Tier {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(self.as_str())
-    }
 }
 
 // ── Workspace ──
@@ -851,7 +819,7 @@ impl Default for Policy {
             ask: Vec::new(),
             allow: Vec::new(),
             session_allow: Vec::new(),
-            enabled: Shipped::ALL.to_vec(),
+            enabled: Shipped::VARIANTS.to_vec(),
         }
     }
 }
@@ -881,8 +849,9 @@ impl Policy {
         workspace: &Workspace,
     ) -> Result<Self> {
         let enabled = || {
-            Shipped::ALL
-                .into_iter()
+            Shipped::VARIANTS
+                .iter()
+                .copied()
                 .filter(|group| !disabled.contains(group))
         };
         let mut deny: Vec<TierRule> = deny.into_iter().map(TierRule::configured).collect();

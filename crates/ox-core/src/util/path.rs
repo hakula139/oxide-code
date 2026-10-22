@@ -4,6 +4,7 @@
 use std::path::{Component, Path, PathBuf};
 
 use anyhow::{Result, anyhow};
+use strum::VariantArray;
 use unicode_normalization::UnicodeNormalization as _;
 
 use super::env;
@@ -18,7 +19,7 @@ const CLAUDE_CONFIG_DIR: &str = "CLAUDE_CONFIG_DIR";
 pub(crate) const CLAUDE_CREDENTIALS: &str = ".credentials.json";
 
 /// An XDG base directory that oxide-code keeps files under.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, VariantArray)]
 pub(crate) enum XdgBase {
     Config,
     Data,
@@ -26,8 +27,6 @@ pub(crate) enum XdgBase {
 }
 
 impl XdgBase {
-    pub(crate) const ALL: [Self; 3] = [Self::Config, Self::Data, Self::State];
-
     const fn var(self) -> &'static str {
         match self {
             Self::Config => "XDG_CONFIG_HOME",

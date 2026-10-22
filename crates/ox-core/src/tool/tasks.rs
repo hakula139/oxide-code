@@ -7,6 +7,7 @@ use std::path::Path;
 use std::pin::Pin;
 
 use serde::{Deserialize, Serialize};
+use strum::{Display, IntoStaticStr, VariantArray};
 
 use super::view::ToolResultView;
 use super::{Prepared, Tool, ToolCtx, ToolMetadata, ToolOutput, ToolSpec, invalid_input};
@@ -25,25 +26,15 @@ pub struct Task {
     pub status: TaskStatus,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Display, IntoStaticStr, VariantArray,
+)]
 #[serde(rename_all = "snake_case")]
+#[strum(serialize_all = "snake_case")]
 pub enum TaskStatus {
     Pending,
     InProgress,
     Completed,
-}
-
-impl TaskStatus {
-    const ALL: [Self; 3] = [Self::Pending, Self::InProgress, Self::Completed];
-
-    /// The name the tool schema uses.
-    pub(crate) fn as_str(self) -> &'static str {
-        match self {
-            Self::Pending => "pending",
-            Self::InProgress => "in_progress",
-            Self::Completed => "completed",
-        }
-    }
 }
 
 /// Completed tasks out of all tasks on a list.
@@ -149,7 +140,7 @@ fn input_schema() -> serde_json::Value {
                         },
                         "status": {
                             "type": "string",
-                            "enum": TaskStatus::ALL.map(TaskStatus::as_str)
+                            "enum": TaskStatus::VARIANTS.iter().map(|&status| <&str>::from(status)).collect::<Vec<_>>()
                         }
                     },
                     "required": ["content", "status"]
@@ -303,13 +294,13 @@ mod tests {
 
         #[test]
         fn names_each_status_the_way_serde_does() {
-            for (status, name) in
-                TaskStatus::ALL
-                    .into_iter()
+            for (&status, name) in
+                TaskStatus::VARIANTS
+                    .iter()
                     .zip(["pending", "in_progress", "completed"])
             {
                 assert_eq!(serde_json::to_value(status).unwrap(), name);
-                assert_eq!(status.as_str(), name);
+                assert_eq!(<&str>::from(status), name);
             }
         }
     }

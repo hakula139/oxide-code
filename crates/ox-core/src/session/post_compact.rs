@@ -55,7 +55,7 @@ fn task_reminder(tasks: &[Task]) -> Option<String> {
     }
     let list = tasks
         .iter()
-        .map(|task| format!("- [{}] {}", task.status.as_str(), task.content))
+        .map(|task| format!("- [{}] {}", task.status, task.content))
         .collect::<Vec<_>>()
         .join("\n");
     Some(system_reminder(&formatdoc! {"
