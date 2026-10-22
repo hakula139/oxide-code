@@ -3300,6 +3300,30 @@ mod tests {
             }
 
             #[test]
+            fn command_rules_hold_or_ask_where_the_grammar_reads_a_reserved_word_as_a_command() {
+                let yolo = policy(Mode::Yolo, &[(EXEC, "rm *")], &[], &[]);
+
+                assert_eq!(
+                    decide(&yolo, EXEC, &command("coproc rm -rf x")),
+                    Decision::Deny
+                );
+                for case in [
+                    "coproc worker { rm -rf x; }",
+                    "time coproc worker { rm -rf x; }",
+                    "time while true; do rm -rf x; done",
+                    "time -p ! rm -rf x",
+                    "time -- ! rm -rf x",
+                ] {
+                    let verdict = yolo.verdict(EXEC, &command(case).as_target());
+                    assert_eq!(
+                        (verdict.decision, verdict.basis),
+                        (Decision::Ask, Basis::Unparsed),
+                        "{case:?}"
+                    );
+                }
+            }
+
+            #[test]
             fn command_rules_see_the_program_a_runner_starts_past_an_operator_or_dollar_word() {
                 let yolo = policy(Mode::Yolo, &[(EXEC, "rm *")], &[], &[]);
                 let manual = policy(Mode::Manual, &[], &[], &[(EXEC, "git status")]);

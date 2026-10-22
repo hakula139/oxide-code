@@ -53,10 +53,11 @@ pub(super) struct SharedState {
     flush_failure_surfaced: AtomicBool,
     persistence_stop_surfaced: AtomicBool,
     actor_gone_surfaced: AtomicBool,
-    /// Whether a `/rename` titled the session. [`SessionHandle::set_manual_title`] sets it before
-    /// it sends the title, so no AI title or `FirstPrompt` title follows. The title generator
-    /// checks it before appending, and the actor checks again on arrival, since a `/rename` can
-    /// land in between.
+    /// Whether a `/rename` titled the session.
+    /// [`SessionHandle::set_manual_title`] sets it before it sends the title,
+    /// so no AI or first-prompt title follows.
+    /// The title generator checks it before appending, and the actor checks again on arrival,
+    /// since a `/rename` can land in between.
     manual_title_set: AtomicBool,
     /// Most recent flush error, threaded into actor-gone messages so the user sees the I/O cause.
     last_flush_failure: Mutex<Option<String>>,
@@ -547,7 +548,7 @@ mod tests {
     };
     use crate::message::{ContentBlock, Replay, Role};
     use crate::prompt::PromptParts;
-    use crate::session::entry::{Entry, SessionInfo, TitleSource};
+    use crate::session::entry::{Entry, SessionInfo};
     use crate::session::handle::testing::record_write_call;
     use crate::session::store::listing::ProjectScope;
     use crate::session::store::local_testing::{
@@ -1742,8 +1743,8 @@ mod tests {
             let entries = saved_entries(dir.path(), session_id);
             assert_eq!(
                 saved_titles(&entries),
-                [("User-named", TitleSource::UserProvided)],
-                "next message must not add a FirstPrompt title alongside the existing one",
+                ["User-named"],
+                "next message must not add a first-prompt title alongside the existing one",
             );
             let message_count = entries
                 .iter()
@@ -1958,7 +1959,6 @@ mod tests {
 
     mod session_format {
         use super::*;
-        use crate::protocol::CompactTrigger;
 
         /// Writes a session holding every entry type and content block, with messages, contexts,
         /// and sidecars after its compaction, since a resume drops those from before it. Returns
@@ -1992,7 +1992,6 @@ mod tests {
                         summary: "Asked to edit f.rs.".to_owned(),
                         instructions: Some("focus on f.rs".to_owned()),
                         tasks: plan(),
-                        trigger: CompactTrigger::Manual,
                         context: prompt.session_context(),
                     },
                     Message::user("Summary: asked to edit f.rs."),
@@ -2267,7 +2266,6 @@ mod tests {
                     "pre_message_count": compact.pre_message_count,
                     "instructions": compact.instructions,
                     "tasks": compact.tasks,
-                    "trigger": compact.trigger,
                 })),
                 "context": transcript.context,
                 "messages": transcript.messages,

@@ -8,13 +8,12 @@ use indoc::formatdoc;
 use tokio::task::{JoinError, JoinSet};
 use tracing::{debug, warn};
 
-use ox_core::command;
 use ox_core::config::Effort;
 use ox_core::config::auth::AuthSource;
 use ox_core::config::compaction::AutoCompactionConfig;
 use ox_core::model::ModelSpec;
 use ox_core::permission::{Basis, Mode, SessionGrant};
-use ox_core::protocol::{CompactTrigger, Event, Interaction, Op, notice};
+use ox_core::protocol::{CompactTrigger, Event, Interaction, notice};
 use ox_core::session::display::archive_notice;
 use ox_core::session::entry::ArchiveState;
 use ox_core::tool::view::ApprovalPreview;
@@ -131,8 +130,8 @@ impl App {
     }
 
     fn apply_prompt_drained(&mut self, text: String) {
-        self.queue.confirm_drained(&text);
-        self.chat.push_user_message(text);
+        let display = self.queue.confirm_drained(text);
+        self.chat.push_user_message(display);
     }
 
     /// Opens the approve-or-deny overlay for a gated tool call. Pushing onto the stack lets it nest
@@ -266,9 +265,8 @@ impl App {
         match trigger {
             CompactTrigger::Manual => self.clear_modals(),
             CompactTrigger::Auto => {
-                if let Some(prompt) = self.queue.active() {
-                    self.chat
-                        .push_user_message(command::unescape_literal(prompt).to_owned());
+                if let Some(active) = self.queue.active() {
+                    self.chat.push_user_message(active.display().to_owned());
                 }
                 self.clear_modals();
             }
@@ -398,9 +396,9 @@ impl App {
 
     /// Starts a turn with the oldest queued prompt.
     pub(super) fn drain_pending_prompt(&mut self) {
-        if let Some(prompt) = self.queue.start_next() {
-            self.chat.push_user_message(prompt.clone());
-            self.start_turn(Op::Prompt(prompt));
+        if let Some(next) = self.queue.pop_next() {
+            self.chat.push_user_message(next.display().to_owned());
+            self.start_turn(next);
         }
     }
 
@@ -477,7 +475,7 @@ mod tests {
     use ox_core::permission::rule::Rule;
     use ox_core::permission::testing::exec_grant;
     use ox_core::protocol::testing::text_result;
-    use ox_core::protocol::{ConfigPick, ResumeTarget, ToolCall, ToolResult, UsageSnapshot};
+    use ox_core::protocol::{ConfigPick, Op, ResumeTarget, ToolCall, ToolResult, UsageSnapshot};
     use ox_core::tool::bash::background::ShellState;
     use ox_core::tool::bash::background::testing::{shell, shells_in_each_state};
     use ox_core::tool::tasks::TaskStatus;
@@ -868,23 +866,35 @@ mod tests {
         }
 
         #[tokio::test]
-        async fn prompt_unsent_holds_the_queue_after_an_untyped_prompt() {
+        async fn prompt_unsent_reruns_a_slash_prompt_as_built() {
             let (mut app, mut rx, _event_tx) = test_app(None);
-            app.dispatch_op(Op::Prompt(
-                "Create AGENTS.md for this repository.".to_owned(),
-            ));
+            app.dispatch_action(Action::SlashPrompt {
+                line: "/init".to_owned(),
+                prompt: "Create AGENTS.md for this repository.".to_owned(),
+            });
             rx.try_recv().expect("prompt forwarded");
             app.handle_engine_event(Event::AutoCompactionStarted);
-            app.queue.push("queued".to_owned());
-
+            app.dispatch_action(Action::Submit("queued".to_owned()));
             app.handle_engine_event(Event::PromptUnsent);
             app.handle_engine_event(Event::TurnFailed(
                 "Auto-compaction failed: summarizer down. The prompt was not sent.".to_owned(),
             ));
+            assert_eq!(*app.queue.pending(), ["/init", "queued"]);
 
-            assert!(app.input.is_empty(), "a command's prompt was never typed");
-            assert_eq!(*app.queue.pending(), ["queued"],);
-            assert_eq!(rx.try_recv(), Err(TryRecvError::Empty));
+            app.dispatch_action(Action::Submit("go".to_owned()));
+
+            assert_eq!(
+                rx.try_recv().ok(),
+                Some(Op::Prompt(
+                    "Create AGENTS.md for this repository.".to_owned()
+                )),
+                "the command's prompt runs, not its line",
+            );
+            let text = rendered_text(&mut app, 80, 20);
+            assert!(
+                text.contains("/init") && !text.contains("Create AGENTS.md"),
+                "the chat shows the line: {text}"
+            );
         }
 
         #[test]
@@ -1395,7 +1405,6 @@ mod tests {
                         summary: "Compact summary".to_owned(),
                         pre_count: 4,
                         instructions: None,
-                        trigger: None,
                     },
                     Interaction::AssistantText("post-compact reply".to_owned()),
                 ],
@@ -1516,28 +1525,39 @@ mod tests {
 
         #[tokio::test]
         async fn session_compacted_automatic_replays_active_prompt_after_summary() {
-            let (mut app, mut rx, _event_tx) = test_app(None);
+            let slash_prompt = Action::SlashPrompt {
+                line: "/init".to_owned(),
+                prompt: "Create AGENTS.md for this repository.".to_owned(),
+            };
+            for (action, shown, hidden) in [
+                (
+                    Action::Submit("//etc/hosts".to_owned()),
+                    "/etc/hosts",
+                    "//etc",
+                ),
+                (slash_prompt, "/init", "Create AGENTS.md"),
+            ] {
+                let (mut app, mut rx, _event_tx) = test_app(None);
+                app.dispatch_action(action);
+                rx.try_recv().expect("prompt reaches the engine");
+                app.handle_engine_event(Event::AutoCompactionStarted);
 
-            app.dispatch_action(Action::Submit("//etc/hosts".to_owned()));
-            let forwarded = rx.try_recv().expect("prompt reaches the engine");
-            assert_eq!(forwarded, Op::Prompt("/etc/hosts".to_owned()));
-            app.handle_engine_event(Event::AutoCompactionStarted);
+                app.handle_engine_event(Event::SessionCompacted {
+                    summary: "auto summary".to_owned(),
+                    pre_count: 4,
+                    instructions: None,
+                    trigger: CompactTrigger::Auto,
+                });
 
-            app.handle_engine_event(Event::SessionCompacted {
-                summary: "auto summary".to_owned(),
-                pre_count: 4,
-                instructions: None,
-                trigger: CompactTrigger::Auto,
-            });
-
-            assert_eq!(app.chat.entry_count(), 2);
-            assert_eq!(app.status, Status::Compacting);
-            let text = rendered_text(&mut app, 80, 10);
-            assert!(text.contains("auto summary"));
-            assert!(
-                text.contains("/etc/hosts") && !text.contains("//etc"),
-                "the replay shows the literal text: {text}"
-            );
+                assert_eq!(app.chat.entry_count(), 2, "{shown}");
+                assert_eq!(app.status, Status::Compacting, "{shown}");
+                let text = rendered_text(&mut app, 80, 10);
+                assert!(text.contains("auto summary"), "{text}");
+                assert!(
+                    text.contains(shown) && !text.contains(hidden),
+                    "the replay shows {shown}: {text}"
+                );
+            }
         }
 
         #[tokio::test]
