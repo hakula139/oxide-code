@@ -34,7 +34,7 @@ impl SlashCommand for ModeCmd {
     }
 
     fn classify(&self, args: &str) -> SlashKind {
-        if args.trim().is_empty() {
+        if args.is_empty() {
             SlashKind::ReadOnly
         } else {
             SlashKind::Steering
@@ -42,7 +42,7 @@ impl SlashCommand for ModeCmd {
     }
 
     fn echoes_input(&self, args: &str) -> bool {
-        !args.trim().is_empty()
+        !args.is_empty()
     }
 
     fn usage(&self) -> Option<&'static str> {
@@ -60,7 +60,7 @@ impl SlashCommand for ModeCmd {
     }
 
     fn execute(&self, args: &str, ctx: &SlashContext<'_>) -> Result<SlashOutcome, String> {
-        if args.trim().is_empty() {
+        if args.is_empty() {
             return Ok(SlashOutcome::Modal(Box::new(ModePicker::new(
                 ctx.info.config.permission_mode,
             ))));
@@ -167,7 +167,7 @@ mod tests {
 
         #[test]
         fn opens_the_picker_read_only_and_steers_with_a_mode() {
-            assert_eq!(ModeCmd.classify("  "), SlashKind::ReadOnly);
+            assert_eq!(ModeCmd.classify(""), SlashKind::ReadOnly);
             assert_eq!(ModeCmd.classify("plan"), SlashKind::Steering);
         }
     }

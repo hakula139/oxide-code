@@ -12,6 +12,7 @@ mod delete;
 mod diff;
 mod effort;
 mod effort_slider;
+mod exit;
 mod help;
 mod init;
 mod login;
@@ -74,9 +75,9 @@ fn dispatch_with(
 ) -> Result<SlashOutcome, String> {
     let Some(cmd) = registry::lookup_in(commands, &parsed.name) else {
         return Err(format!(
-            "Unknown command: /{name}. \
+            "Unknown command: `/{name}`. \
              Available: {available}. \
-             Use //{name} to send the literal text.",
+             Use `//{name}` to send the literal text.",
             name = parsed.name,
             available = format_available(commands),
         ));
@@ -100,16 +101,10 @@ fn format_available(commands: &[&dyn registry::SlashCommand]) -> String {
         .join(", ")
 }
 
-/// Returns the [`SlashKind`] that decides whether `parsed` may dispatch mid-turn.
-pub(crate) fn classify(parsed: &Parsed) -> SlashKind {
-    classify_in(registry::BUILT_INS, parsed)
-}
-
-fn classify_in(commands: &[&dyn registry::SlashCommand], parsed: &Parsed) -> SlashKind {
-    match registry::lookup_in(commands, &parsed.name) {
-        None => SlashKind::Unknown,
-        Some(cmd) => cmd.classify(&parsed.args),
-    }
+/// Returns the [`SlashKind`] that decides whether `parsed` may dispatch mid-turn, or `None` for an
+/// unknown command.
+pub(crate) fn classify(parsed: &Parsed) -> Option<SlashKind> {
+    registry::lookup_in(registry::BUILT_INS, &parsed.name).map(|cmd| cmd.classify(&parsed.args))
 }
 
 // ── Testing ──
@@ -240,7 +235,7 @@ mod tests {
         fn unknown_command_lists_available_and_the_escape() {
             assert_eq!(
                 dispatch_fake("etc"),
-                "Unknown command: /etc. Available: /failing. Use //etc to send the literal text.",
+                "Unknown command: `/etc`. Available: /failing. Use `//etc` to send the literal text.",
             );
         }
     }
@@ -251,21 +246,29 @@ mod tests {
         #[test]
         fn built_in_read_only_command_is_read_only() {
             let parsed = parsed("help", "");
-            assert_eq!(classify(&parsed), SlashKind::ReadOnly);
+            assert_eq!(classify(&parsed), Some(SlashKind::ReadOnly));
         }
 
         #[test]
         fn built_in_state_mutating_command_is_mutating() {
             for name in ["clear", "new", "reset", "init"] {
                 let parsed = parsed(name, "");
-                assert_eq!(classify(&parsed), SlashKind::Mutating, "{name}");
+                assert_eq!(classify(&parsed), Some(SlashKind::Mutating), "{name}");
             }
         }
 
         #[test]
-        fn unknown_command_is_unknown() {
+        fn exit_and_its_alias_steer() {
+            for name in ["exit", "quit"] {
+                let parsed = parsed(name, "");
+                assert_eq!(classify(&parsed), Some(SlashKind::Steering), "{name}");
+            }
+        }
+
+        #[test]
+        fn unknown_command_has_no_kind() {
             let parsed = parsed("no-such-thing", "");
-            assert_eq!(classify(&parsed), SlashKind::Unknown);
+            assert_eq!(classify(&parsed), None);
         }
     }
 }

@@ -407,8 +407,8 @@ mod tests {
             );
         }
 
-        #[tokio::test]
-        async fn continue_errors_without_sessions() {
+        #[test]
+        fn continue_errors_without_sessions() {
             let (_dir, store) = isolated_store();
             let latest = |projects: ProjectScope| {
                 resolve_session(&store, "m", None, Some(SessionTarget::Latest), projects)
@@ -445,8 +445,8 @@ mod tests {
             assert_eq!(err, "no session matching `zzzz`");
         }
 
-        #[tokio::test]
-        async fn prefix_reports_ambiguous_matches_newest_first() {
+        #[test]
+        fn prefix_reports_ambiguous_matches_newest_first() {
             let (_dir, store) = isolated_store();
             for i in 0..7 {
                 seed_test_session(
@@ -475,8 +475,8 @@ mod tests {
             );
         }
 
-        #[tokio::test]
-        async fn prefix_reports_a_listing_failure() {
+        #[test]
+        fn prefix_reports_a_listing_failure() {
             let dir = tempfile::tempdir().unwrap();
             let store = test_store(dir.path());
             std::fs::remove_dir_all(dir.path()).unwrap();
@@ -503,8 +503,8 @@ mod tests {
             }
         }
 
-        #[tokio::test]
-        async fn path_errors_on_missing_file() {
+        #[test]
+        fn path_errors_on_missing_file() {
             let (_dir, store) = isolated_store();
             let err = resolve_session(
                 &store,

@@ -59,9 +59,9 @@ mod tests {
         use super::*;
 
         #[test]
-        fn with_args_forwards_trimmed_instructions() {
+        fn with_args_forwards_the_instructions() {
             assert_eq!(
-                run_execute(&CompactCmd, "  focus on the build error  ")
+                run_execute(&CompactCmd, "focus on the build error")
                     .unwrap()
                     .into_forward(),
                 Action::Op(Op::Compact {

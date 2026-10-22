@@ -366,28 +366,18 @@ impl App {
         if echoes {
             self.chat.push_user_message(text.to_owned());
         }
-        if idle {
-            if let Some(action) = self.run_slash(&parsed) {
-                if echoes && matches!(action, Action::Op(Op::Prompt(_))) {
-                    self.queue.set_active(text.to_owned());
-                }
-                self.dispatch_action(action);
-            }
+        if !idle && slash::classify(&parsed) == Some(SlashKind::Mutating) {
+            self.chat.push_system_message(format!(
+                "/{} runs only when idle. Try again after the turn finishes.",
+                parsed.name,
+            ));
             return;
         }
-        match slash::classify(&parsed) {
-            SlashKind::ReadOnly | SlashKind::Unknown => _ = self.run_slash(&parsed),
-            SlashKind::Steering => {
-                if let Some(action) = self.run_slash(&parsed) {
-                    self.dispatch_action(action);
-                }
+        if let Some(action) = self.run_slash(&parsed) {
+            if echoes && matches!(action, Action::Op(Op::Prompt(_))) {
+                self.queue.set_active(text.to_owned());
             }
-            SlashKind::Mutating => {
-                self.chat.push_system_message(format!(
-                    "/{} runs only when idle. Try again after the turn finishes.",
-                    parsed.name,
-                ));
-            }
+            self.dispatch_action(action);
         }
     }
 
@@ -1253,11 +1243,11 @@ mod tests {
             assert_eq!(
                 app.chat.last_error_text(),
                 Some(
-                    "Unknown command: /no-such. \
+                    "Unknown command: `/no-such`. \
                      Available: /archive, /clear, /compact, /config, /delete, /diff, \
-                     /effort, /help, /init, /login, /logout, /mode, /model, /rename, \
+                     /effort, /exit, /help, /init, /login, /logout, /mode, /model, /rename, \
                      /resume, /status, /theme, /unarchive. \
-                     Use //no-such to send the literal text."
+                     Use `//no-such` to send the literal text."
                 ),
             );
             assert_eq!(rx.try_recv(), Err(TryRecvError::Empty));
@@ -1583,11 +1573,11 @@ mod tests {
             assert_eq!(
                 app.chat.last_error_text(),
                 Some(
-                    "Unknown command: /nope. \
+                    "Unknown command: `/nope`. \
                      Available: /archive, /clear, /compact, /config, /delete, /diff, \
-                     /effort, /help, /init, /login, /logout, /mode, /model, /rename, \
+                     /effort, /exit, /help, /init, /login, /logout, /mode, /model, /rename, \
                      /resume, /status, /theme, /unarchive. \
-                     Use //nope to send the literal text."
+                     Use `//nope` to send the literal text."
                 ),
             );
         }
@@ -1606,6 +1596,18 @@ mod tests {
             assert_eq!(rx.try_recv().ok(), Some(Op::SetMode(Mode::Manual)));
             assert!(app.modals.is_active(), "the bare form opens the picker");
             assert_eq!(*app.queue.pending(), [] as [&str; 0]);
+        }
+
+        #[tokio::test]
+        async fn exit_during_busy_quits_and_shuts_the_engine_down() {
+            let (mut app, mut rx, _event_tx) = test_app(None);
+            app.dispatch_action(Action::Submit("active".to_owned()));
+            rx.recv().await.expect("active submit forwarded");
+
+            app.dispatch_action(Action::Submit("/quit".to_owned()));
+
+            assert!(app.should_quit);
+            assert_eq!(rx.try_recv().ok(), Some(Op::Shutdown));
         }
     }
 

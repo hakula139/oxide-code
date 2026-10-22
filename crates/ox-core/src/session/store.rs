@@ -158,6 +158,152 @@ pub(super) fn load_session_data_from_path(path: &Path) -> Result<SessionData> {
     Ok(builder.finish(header.session_id))
 }
 
+/// Reads just the `session_id` from a session file's header line.
+pub(super) fn read_session_id_from_path(path: &Path) -> Result<String> {
+    let file = File::open(path).with_context(|| format!("failed to open {}", path.display()))?;
+    let header = read_header(&mut JsonlLines::new(BufReader::new(file)), path)?;
+    Ok(header.session_id)
+}
+
+/// The directory beside `session_file` that holds the artifacts of session `session_id`,
+/// such as spilled tool output.
+/// It exists only once the session writes an artifact, and [`delete_at`] removes it with the file.
+pub(crate) fn artifact_dir(session_file: &Path, session_id: &str) -> PathBuf {
+    session_file.with_file_name(session_id)
+}
+
+/// Removes the session file at `path` and the session's [`artifact_dir`], the directory first so a
+/// failure leaves the session listed for another try.
+pub(crate) fn delete_at(path: &Path) -> Result<()> {
+    let session_id = read_session_id_from_path(path)?;
+    let artifact_dir = artifact_dir(path, &session_id);
+    if let Err(e) = fs::remove_dir_all(&artifact_dir)
+        && e.kind() != io::ErrorKind::NotFound
+    {
+        return Err(e).with_context(|| {
+            format!(
+                "failed to remove session directory {}",
+                artifact_dir.display()
+            )
+        });
+    }
+    fs::remove_file(path)
+        .with_context(|| format!("failed to remove session file {}", path.display()))
+}
+
+/// Sets the archive state of the session file at `path`.
+/// The file keeps its mtime, since listings order sessions by activity and toggling the state is
+/// not activity.
+pub(super) fn set_archived_at(path: &Path, archived: bool) -> Result<()> {
+    let mut writer = open_append_at(path)?;
+    let modified = fs::metadata(path)
+        .and_then(|meta| meta.modified())
+        .with_context(|| format!("failed to stat {}", path.display()))?;
+    writer.set_archived(archived)?;
+    if let Some(file) = &writer.file
+        && let Err(e) = file.set_modified(modified)
+    {
+        warn!(
+            "archive toggle moved {} up the listing: {e}",
+            path.display()
+        );
+    }
+    Ok(())
+}
+
+const MAX_SESSION_ID_LEN: usize = 64;
+
+fn validate_session_id(session_id: &str) -> Result<()> {
+    let ok = !session_id.is_empty()
+        && session_id.len() <= MAX_SESSION_ID_LEN
+        && session_id
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_');
+    if !ok {
+        bail!("invalid session ID {session_id:?}");
+    }
+    Ok(())
+}
+
+fn session_filename(session_id: &str, created_at: OffsetDateTime) -> String {
+    format!("{}-{session_id}.jsonl", created_at.unix_timestamp())
+}
+
+/// The session ID in a `{ts}-{id}.jsonl` file name.
+fn file_session_id(path: &Path) -> Option<&str> {
+    let stem = path.file_name()?.to_str()?.strip_suffix(".jsonl")?;
+    stem.split_once('-').map(|(_, id)| id)
+}
+
+// ── SessionWriter ──
+
+/// Append handle for one session file that reopens its path after a failed write.
+#[derive(Debug)]
+pub(crate) struct SessionWriter {
+    path: PathBuf,
+    file: Option<File>,
+}
+
+impl SessionWriter {
+    pub(super) fn path(&self) -> &Path {
+        &self.path
+    }
+
+    /// Appends JSONL `lines` in one write, so concurrent appenders interleave only between batches.
+    pub(super) fn append_lines(&mut self, lines: &[u8]) -> Result<()> {
+        let file = match self.file.take() {
+            Some(file) => file,
+            None => open_append_file(&self.path)?,
+        };
+        append_whole(&file, &mut Appender(&file), lines)
+            .with_context(|| format!("failed to write {}", self.path.display()))?;
+        self.file = Some(file);
+        Ok(())
+    }
+
+    /// Appends an [`Entry::Archive`] setting the session's archive state.
+    pub(super) fn set_archived(&mut self, archived: bool) -> Result<()> {
+        let entry = Entry::Archive {
+            archived,
+            at: OffsetDateTime::now_utc(),
+        };
+        self.append_lines(&encode_lines([&entry])?)
+    }
+}
+
+/// Encodes `entries` as JSONL, one line each.
+pub(super) fn encode_lines<'a>(entries: impl IntoIterator<Item = &'a Entry>) -> Result<Vec<u8>> {
+    let mut buf = Vec::new();
+    for entry in entries {
+        serde_json::to_writer(&mut buf, entry).context("failed to serialize entry")?;
+        buf.push(b'\n');
+    }
+    Ok(buf)
+}
+
+// ── SessionData ──
+
+/// Data loaded from a session file on resume.
+#[derive(Debug)]
+pub(crate) struct SessionData {
+    /// The ID the file's header records.
+    pub(crate) session_id: String,
+    pub(crate) messages: Vec<Message>,
+    pub(crate) last_uuid: Option<Uuid>,
+    /// Prompt state recorded on the resolved chain, `None` for a transcript that predates
+    /// recording or whose last compaction no user message followed.
+    pub(crate) context: Option<SessionContext>,
+    pub(crate) compact: Option<CompactInfo>,
+    pub(crate) title: Option<TitleInfo>,
+    pub(crate) archived: bool,
+    pub(crate) tool_result_metadata: HashMap<String, ToolMetadata>,
+    /// Every billed request in the file, on any branch and across compactions.
+    pub(crate) usage: Vec<UsageRecord>,
+    pub(crate) file_snapshots: Vec<FileSnapshot>,
+}
+
+// ── Loader ──
+
 /// The messages of a compaction's tail, the chain since its boundary.
 struct CompactTail {
     uuids: HashSet<Uuid>,
@@ -321,149 +467,6 @@ impl SessionDataBuilder {
             file_snapshots: self.file_snapshots,
         }
     }
-}
-
-/// Reads just the `session_id` from a session file's header line.
-pub(super) fn read_session_id_from_path(path: &Path) -> Result<String> {
-    let file = File::open(path).with_context(|| format!("failed to open {}", path.display()))?;
-    let header = read_header(&mut JsonlLines::new(BufReader::new(file)), path)?;
-    Ok(header.session_id)
-}
-
-/// The directory beside `session_file` that holds the artifacts of session `session_id`, such as
-/// spilled tool output. Nothing creates it until the session writes an artifact, and [`delete_at`]
-/// removes it with the file.
-pub(crate) fn artifact_dir(session_file: &Path, session_id: &str) -> PathBuf {
-    session_file.with_file_name(session_id)
-}
-
-/// Removes the session file at `path` and the session's [`artifact_dir`], the directory first so a
-/// failure leaves the session listed for another try.
-pub(crate) fn delete_at(path: &Path) -> Result<()> {
-    let session_id = read_session_id_from_path(path)?;
-    let artifact_dir = artifact_dir(path, &session_id);
-    if let Err(e) = fs::remove_dir_all(&artifact_dir)
-        && e.kind() != io::ErrorKind::NotFound
-    {
-        return Err(e).with_context(|| {
-            format!(
-                "failed to remove session directory {}",
-                artifact_dir.display()
-            )
-        });
-    }
-    fs::remove_file(path)
-        .with_context(|| format!("failed to remove session file {}", path.display()))
-}
-
-/// Sets the archive state of the session file at `path`. The file keeps its mtime, since listings
-/// order sessions by activity and toggling the state is not activity.
-pub(super) fn set_archived_at(path: &Path, archived: bool) -> Result<()> {
-    let mut writer = open_append_at(path)?;
-    let modified = fs::metadata(path)
-        .and_then(|meta| meta.modified())
-        .with_context(|| format!("failed to stat {}", path.display()))?;
-    writer.set_archived(archived)?;
-    if let Some(file) = &writer.file
-        && let Err(e) = file.set_modified(modified)
-    {
-        warn!(
-            "archive toggle moved {} up the listing: {e}",
-            path.display()
-        );
-    }
-    Ok(())
-}
-
-const MAX_SESSION_ID_LEN: usize = 64;
-
-fn validate_session_id(session_id: &str) -> Result<()> {
-    let ok = !session_id.is_empty()
-        && session_id.len() <= MAX_SESSION_ID_LEN
-        && session_id
-            .bytes()
-            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_');
-    if !ok {
-        bail!("invalid session ID {session_id:?}");
-    }
-    Ok(())
-}
-
-fn session_filename(session_id: &str, created_at: OffsetDateTime) -> String {
-    format!("{}-{session_id}.jsonl", created_at.unix_timestamp())
-}
-
-/// The session ID in a `{ts}-{id}.jsonl` file name.
-fn file_session_id(path: &Path) -> Option<&str> {
-    let stem = path.file_name()?.to_str()?.strip_suffix(".jsonl")?;
-    stem.split_once('-').map(|(_, id)| id)
-}
-
-// ── SessionWriter ──
-
-/// Append handle for one session file that reopens its path after a failed write.
-#[derive(Debug)]
-pub(crate) struct SessionWriter {
-    path: PathBuf,
-    file: Option<File>,
-}
-
-impl SessionWriter {
-    pub(super) fn path(&self) -> &Path {
-        &self.path
-    }
-
-    /// Appends JSONL `lines` in one write, so concurrent appenders interleave only between batches.
-    pub(super) fn append_lines(&mut self, lines: &[u8]) -> Result<()> {
-        let file = match self.file.take() {
-            Some(file) => file,
-            None => open_append_file(&self.path)?,
-        };
-        append_whole(&file, &mut Appender(&file), lines)
-            .with_context(|| format!("failed to write {}", self.path.display()))?;
-        self.file = Some(file);
-        Ok(())
-    }
-
-    /// Appends an [`Entry::Archive`] setting the session's archive state.
-    pub(super) fn set_archived(&mut self, archived: bool) -> Result<()> {
-        let entry = Entry::Archive {
-            archived,
-            at: OffsetDateTime::now_utc(),
-        };
-        self.append_lines(&encode_lines([&entry])?)
-    }
-}
-
-/// Encodes `entries` as JSONL, one line each.
-pub(super) fn encode_lines<'a>(entries: impl IntoIterator<Item = &'a Entry>) -> Result<Vec<u8>> {
-    let mut buf = Vec::new();
-    for entry in entries {
-        serde_json::to_writer(&mut buf, entry).context("failed to serialize entry")?;
-        buf.push(b'\n');
-    }
-    Ok(buf)
-}
-
-// ── SessionData ──
-
-/// Data loaded from a session file on resume.
-#[derive(Debug)]
-pub(crate) struct SessionData {
-    /// The ID the file's header records.
-    pub(crate) session_id: String,
-    pub(crate) messages: Vec<Message>,
-    pub(crate) last_uuid: Option<Uuid>,
-    /// Prompt state recorded on the resolved chain, `None` for a transcript that predates
-    /// recording or whose last compaction no user message followed.
-    pub(crate) context: Option<SessionContext>,
-    pub(crate) compact: Option<CompactInfo>,
-    pub(crate) title: Option<TitleInfo>,
-    pub(crate) archived: bool,
-    pub(crate) tool_result_metadata: HashMap<String, ToolMetadata>,
-    /// Every billed request in the file, on any branch and across compactions.
-    pub(crate) usage: Vec<UsageRecord>,
-    pub(crate) file_snapshots: Vec<FileSnapshot>,
 }
 
 // ── File Opening ──
@@ -701,23 +704,22 @@ mod tests {
     mod open {
         use super::*;
 
-        async fn open_in_isolated_env(xdg: &Path) -> SessionStore {
+        fn open_in_isolated_env(xdg: &Path) -> SessionStore {
             let home = tempfile::tempdir().unwrap();
-            temp_env::async_with_vars(
+            temp_env::with_vars(
                 [
                     ("XDG_DATA_HOME", Some(xdg.to_string_lossy().into_owned())),
                     (HOME_VAR, Some(home.path().to_string_lossy().into_owned())),
                 ],
-                async { SessionStore::open(Path::new("/work/proj"), Path::new("/work/proj")) },
+                || SessionStore::open(Path::new("/work/proj"), Path::new("/work/proj")),
             )
-            .await
             .unwrap()
         }
 
-        #[tokio::test]
-        async fn uses_xdg_data_home_when_set() {
+        #[test]
+        fn uses_xdg_data_home_when_set() {
             let xdg = tempfile::tempdir().unwrap();
-            let store = open_in_isolated_env(xdg.path()).await;
+            let store = open_in_isolated_env(xdg.path());
             let sessions = xdg.path().join("ox").join(SESSIONS_DIR);
             assert_eq!(store.sessions_dir, sessions);
             assert_eq!(
@@ -727,17 +729,16 @@ mod tests {
             assert!(store.project_dir.is_dir(), "project dir created");
         }
 
-        #[tokio::test]
-        async fn falls_back_to_home_local_share_when_xdg_unset() {
+        #[test]
+        fn falls_back_to_home_local_share_when_xdg_unset() {
             let home = tempfile::tempdir().unwrap();
-            let store = temp_env::async_with_vars(
+            let store = temp_env::with_vars(
                 [
                     ("XDG_DATA_HOME", None),
                     (HOME_VAR, Some(home.path().to_string_lossy().into_owned())),
                 ],
-                async { SessionStore::open(Path::new("/work/proj"), Path::new("/work/proj")) },
+                || SessionStore::open(Path::new("/work/proj"), Path::new("/work/proj")),
             )
-            .await
             .unwrap();
             let expected = home
                 .path()
@@ -748,12 +749,12 @@ mod tests {
         }
 
         #[cfg(unix)]
-        #[tokio::test]
-        async fn creates_private_dirs_with_mode_0o700_on_unix() {
+        #[test]
+        fn creates_private_dirs_with_mode_0o700_on_unix() {
             use std::os::unix::fs::PermissionsExt;
 
             let xdg = tempfile::tempdir().unwrap();
-            let store = open_in_isolated_env(xdg.path()).await;
+            let store = open_in_isolated_env(xdg.path());
             for dir in [&store.sessions_dir, &store.project_dir] {
                 let mode = fs::metadata(dir).unwrap().permissions().mode() & 0o777;
                 assert_eq!(mode, 0o700, "{dir:?} must be 0o700, got {mode:o}");
@@ -764,8 +765,8 @@ mod tests {
     mod create {
         use super::*;
 
-        #[tokio::test]
-        async fn writes_the_header_then_the_given_lines() {
+        #[test]
+        fn writes_the_header_then_the_given_lines() {
             let dir = tempfile::tempdir().unwrap();
             let store = test_store(dir.path());
             let uuid = Uuid::new_v4();
@@ -790,20 +791,31 @@ mod tests {
             );
         }
 
-        #[tokio::test]
-        async fn fails_when_file_already_exists() {
+        #[test]
+        fn fails_when_file_already_exists() {
             let dir = tempfile::tempdir().unwrap();
             let store = test_store(dir.path());
             let header = sample_header("existing");
             let created_at = header.created_at;
             let taken = test_project_path(dir.path(), &session_filename("existing", created_at));
-            fs::write(taken, "{}").unwrap();
-            assert!(store.create(&header, &[]).is_err());
+            fs::write(&taken, "{}").unwrap();
+
+            let err = store.create(&header, &[]).unwrap_err();
+
+            assert_eq!(
+                err.to_string(),
+                format!("failed to create {}", taken.display())
+            );
+            assert_eq!(
+                fs::read_to_string(&taken).unwrap(),
+                "{}",
+                "the file is left as it was"
+            );
         }
 
         #[cfg(unix)]
-        #[tokio::test]
-        async fn sets_user_only_file_permissions_on_unix() {
+        #[test]
+        fn sets_user_only_file_permissions_on_unix() {
             use std::os::unix::fs::PermissionsExt;
 
             let dir = tempfile::tempdir().unwrap();
@@ -818,8 +830,8 @@ mod tests {
     mod open_append_at {
         use super::*;
 
-        #[tokio::test]
-        async fn writes_to_existing_file() {
+        #[test]
+        fn writes_to_existing_file() {
             let dir = tempfile::tempdir().unwrap();
             let store = test_store(dir.path());
             let mut writer = store.create(&sample_header("append-test"), &[]).unwrap();
@@ -962,8 +974,34 @@ mod tests {
             }
         }
 
-        #[tokio::test]
-        async fn includes_only_messages_with_last_uuid() {
+        /// A boundary compacting one message, with no focus instructions or tasks.
+        fn sample_compact(timestamp: OffsetDateTime) -> Entry {
+            Entry::Compact {
+                summary: "summary".to_owned(),
+                pre_message_count: 1,
+                instructions: None,
+                tasks: Vec::new(),
+                timestamp,
+            }
+        }
+
+        fn sample_tool_metadata(
+            tool_use_id: &str,
+            title: &str,
+            timestamp: OffsetDateTime,
+        ) -> Entry {
+            Entry::ToolResultMetadata {
+                tool_use_id: tool_use_id.to_owned(),
+                metadata: ToolMetadata {
+                    title: Some(title.to_owned()),
+                    ..ToolMetadata::default()
+                },
+                timestamp,
+            }
+        }
+
+        #[test]
+        fn includes_only_messages_with_last_uuid() {
             let (_dir, store) = isolated_store();
             let mut writer = store.create(&sample_header("load-test"), &[]).unwrap();
 
@@ -1021,24 +1059,15 @@ mod tests {
                 )])
                 .unwrap();
             writer
-                .append(&[Entry::ToolResultMetadata {
-                    tool_use_id: "pre-tool".to_owned(),
-                    metadata: ToolMetadata {
-                        title: Some("pre metadata".to_owned()),
-                        ..ToolMetadata::default()
-                    },
-                    timestamp: datetime!(2026-04-16 12:00:02 UTC),
-                }])
+                .append(&[sample_tool_metadata(
+                    "pre-tool",
+                    "pre metadata",
+                    datetime!(2026-04-16 12:00:02 UTC),
+                )])
                 .unwrap();
             writer.append(&[sample_snapshot("pre.txt")]).unwrap();
             writer
-                .append(&[Entry::Compact {
-                    summary: "summary".to_owned(),
-                    pre_message_count: 1,
-                    instructions: None,
-                    tasks: Vec::new(),
-                    timestamp: datetime!(2026-04-16 12:00:03 UTC),
-                }])
+                .append(&[sample_compact(datetime!(2026-04-16 12:00:03 UTC))])
                 .unwrap();
 
             let post = Uuid::new_v4();
@@ -1051,14 +1080,11 @@ mod tests {
                 )])
                 .unwrap();
             writer
-                .append(&[Entry::ToolResultMetadata {
-                    tool_use_id: "post-tool".to_owned(),
-                    metadata: ToolMetadata {
-                        title: Some("post metadata".to_owned()),
-                        ..ToolMetadata::default()
-                    },
-                    timestamp: datetime!(2026-04-16 12:00:05 UTC),
-                }])
+                .append(&[sample_tool_metadata(
+                    "post-tool",
+                    "post metadata",
+                    datetime!(2026-04-16 12:00:05 UTC),
+                )])
                 .unwrap();
             writer.append(&[sample_snapshot("post.txt")]).unwrap();
             drop(writer);
@@ -1108,13 +1134,7 @@ mod tests {
             assert_eq!(load(), Some(session_context("2026-04-17")));
 
             writer
-                .append(&[Entry::Compact {
-                    summary: "summary".to_owned(),
-                    pre_message_count: 1,
-                    instructions: None,
-                    tasks: Vec::new(),
-                    timestamp: datetime!(2026-04-17 12:00:00 UTC),
-                }])
+                .append(&[sample_compact(datetime!(2026-04-17 12:00:00 UTC))])
                 .unwrap();
             assert_eq!(
                 load(),
@@ -1192,13 +1212,7 @@ mod tests {
             writer
                 .append(&[
                     sample_message_at(pre, None, datetime!(2026-04-16 12:00:01 UTC), "pre"),
-                    Entry::Compact {
-                        summary: "summary".to_owned(),
-                        pre_message_count: 1,
-                        instructions: None,
-                        tasks: Vec::new(),
-                        timestamp: datetime!(2026-04-16 12:00:02 UTC),
-                    },
+                    sample_compact(datetime!(2026-04-16 12:00:02 UTC)),
                     sample_message_at(
                         synthetic,
                         None,
@@ -1364,14 +1378,8 @@ mod tests {
                     "pre-compact",
                 )])
                 .unwrap();
-            let mut torn = encode_lines(&[Entry::Compact {
-                summary: "summary".to_owned(),
-                pre_message_count: 1,
-                instructions: None,
-                tasks: Vec::new(),
-                timestamp: datetime!(2026-04-16 12:00:02 UTC),
-            }])
-            .unwrap();
+            let mut torn =
+                encode_lines(&[sample_compact(datetime!(2026-04-16 12:00:02 UTC))]).unwrap();
             torn.extend_from_slice(br#"{"type":"message","uuid":"#);
             writer.append_lines(&torn).unwrap();
 
@@ -1408,13 +1416,7 @@ mod tests {
                 )])
                 .unwrap();
             writer
-                .append(&[Entry::Compact {
-                    summary: "summary".to_owned(),
-                    pre_message_count: 1,
-                    instructions: None,
-                    tasks: Vec::new(),
-                    timestamp: datetime!(2026-04-16 12:00:02 UTC),
-                }])
+                .append(&[sample_compact(datetime!(2026-04-16 12:00:02 UTC))])
                 .unwrap();
 
             let synthetic = Uuid::new_v4();
@@ -1435,14 +1437,11 @@ mod tests {
                 )])
                 .unwrap();
             writer
-                .append(&[Entry::ToolResultMetadata {
-                    tool_use_id: "stale-tool".to_owned(),
-                    metadata: ToolMetadata {
-                        title: Some("stale metadata".to_owned()),
-                        ..ToolMetadata::default()
-                    },
-                    timestamp: datetime!(2026-04-16 12:00:05 UTC),
-                }])
+                .append(&[sample_tool_metadata(
+                    "stale-tool",
+                    "stale metadata",
+                    datetime!(2026-04-16 12:00:05 UTC),
+                )])
                 .unwrap();
             writer.append(&[sample_snapshot("stale.txt")]).unwrap();
 
@@ -1456,14 +1455,11 @@ mod tests {
                 )])
                 .unwrap();
             writer
-                .append(&[Entry::ToolResultMetadata {
-                    tool_use_id: "valid-tool".to_owned(),
-                    metadata: ToolMetadata {
-                        title: Some("valid metadata".to_owned()),
-                        ..ToolMetadata::default()
-                    },
-                    timestamp: datetime!(2026-04-16 12:00:08 UTC),
-                }])
+                .append(&[sample_tool_metadata(
+                    "valid-tool",
+                    "valid metadata",
+                    datetime!(2026-04-16 12:00:08 UTC),
+                )])
                 .unwrap();
             writer.append(&[sample_snapshot("valid.txt")]).unwrap();
             drop(writer);
@@ -1562,8 +1558,8 @@ mod tests {
             assert_eq!(format!("{err:#}"), open_failure(&path));
         }
 
-        #[tokio::test]
-        async fn resolves_transcript_through_newest_chain_leaf() {
+        #[test]
+        fn resolves_transcript_through_newest_chain_leaf() {
             let (_dir, store) = isolated_store();
             let mut writer = store.create(&sample_header("fork"), &[]).unwrap();
 
@@ -1918,8 +1914,8 @@ mod tests {
         mod append_lines {
             use super::*;
 
-            #[tokio::test]
-            async fn writes_multiple_entries() {
+            #[test]
+            fn writes_multiple_entries() {
                 let dir = tempfile::tempdir().unwrap();
                 let store = test_store(dir.path());
                 let mut writer = store.create(&sample_header("multi"), &[]).unwrap();
