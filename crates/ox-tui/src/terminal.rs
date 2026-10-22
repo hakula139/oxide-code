@@ -34,6 +34,8 @@ use ox_core::util::sync::lock_or_recover;
 
 use crate::components::status::{HyperlinkCell, StatusHyperlink};
 
+// ── Setup and Restore ──
+
 pub(crate) type Tui = Terminal<CrosstermBackend<Stdout>>;
 
 /// A backend the TUI draws frames to and then writes escape sequences to, such as the OSC 8 status
@@ -141,6 +143,8 @@ fn write_deferred_panics(deferred: &Mutex<DeferredPanics>, out: &mut impl Write)
     Ok(())
 }
 
+// ── Escape Sequences ──
+
 /// Runs `f` inside a DEC synchronized update (mode 2026), so the terminal presents everything it
 /// writes as one tear-free frame.
 pub(crate) fn synchronized_update<B: TuiBackend>(
@@ -154,18 +158,14 @@ pub(crate) fn synchronized_update<B: TuiBackend>(
     result
 }
 
-pub(crate) fn write_status_hyperlinks<W: Write>(
-    out: &mut W,
+/// Writes the OSC 8 links over their status cells, saving and restoring the cursor around them.
+/// Writes nothing when no link has a usable URL.
+pub(crate) fn write_status_hyperlinks(
+    out: &mut impl Write,
     links: &[StatusHyperlink],
 ) -> io::Result<()> {
     // Plain OSC 8 suits tmux as well: 3.4+ maps it to pane cells and forwards it to outer
     // terminals with the `hyperlinks` feature, and older versions drop the OSC but keep the text.
-    out.write_all(&build_status_hyperlink_envelope(links)?)
-}
-
-/// Builds the OSC 8 byte stream for the link batch. Empty when no link has a usable URL.
-fn build_status_hyperlink_envelope(links: &[StatusHyperlink]) -> io::Result<Vec<u8>> {
-    let mut buf: Vec<u8> = Vec::new();
     let mut wrote_any = false;
     for link in links {
         let safe_url: String = link.url.chars().filter(|c| !c.is_control()).collect();
@@ -173,20 +173,20 @@ fn build_status_hyperlink_envelope(links: &[StatusHyperlink]) -> io::Result<Vec<
             continue;
         }
         if !wrote_any {
-            queue!(buf, Ansi(SavePosition))?;
+            queue!(out, Ansi(SavePosition))?;
             wrote_any = true;
         }
-        queue!(buf, Ansi(MoveTo(link.rect.x, link.rect.y)))?;
-        write!(buf, "\x1b]8;;{safe_url}\x07")?;
+        queue!(out, Ansi(MoveTo(link.rect.x, link.rect.y)))?;
+        write!(out, "\x1b]8;;{safe_url}\x07")?;
         for cell in &link.cells {
-            queue_cell(&mut buf, cell)?;
+            queue_cell(out, cell)?;
         }
-        write!(buf, "\x1b]8;;\x07")?;
+        write!(out, "\x1b]8;;\x07")?;
     }
     if wrote_any {
-        queue!(buf, Ansi(RestorePosition))?;
+        queue!(out, Ansi(RestorePosition))?;
     }
-    Ok(buf)
+    Ok(())
 }
 
 /// Queues `cell`'s symbol in its style, resetting the style after a styled cell. crossterm's
@@ -234,6 +234,8 @@ impl<C: Command> Command for Ansi<C> {
         true
     }
 }
+
+// ── Panic Hook ──
 
 /// Background-thread panic reports waiting for [`restore`] to print them.
 #[derive(Default)]
@@ -304,6 +306,8 @@ fn route_panic(
     error!("{report}");
     PanicRoute::Deferred
 }
+
+// ── Terminal Size ──
 
 /// The column count of the terminal on stdout, or `None` when stdout is not a terminal.
 pub fn stdout_width() -> Option<usize> {
@@ -610,31 +614,17 @@ mod tests {
     mod write_status_hyperlinks {
         use super::*;
 
-        #[test]
-        fn writes_the_envelope() {
-            let link = plain_hyperlink(Rect::new(0, 0, 1, 1), "https://example.com", &["x"]);
+        /// The bytes [`write_status_hyperlinks`] writes for `links`.
+        fn envelope(links: &[StatusHyperlink]) -> String {
             let mut buf = Vec::new();
-
-            write_status_hyperlinks(&mut buf, &[link]).unwrap();
-
-            assert_eq!(
-                String::from_utf8(buf).unwrap(),
-                "\x1b7\x1b[1;1H\x1b]8;;https://example.com\x07x\x1b]8;;\x07\x1b8",
-            );
+            write_status_hyperlinks(&mut buf, links).unwrap();
+            String::from_utf8(buf).unwrap()
         }
 
         #[test]
-        fn is_a_noop_when_no_links_pending() {
-            let mut buf: Vec<u8> = Vec::new();
-
-            write_status_hyperlinks(&mut buf, &[]).unwrap();
-
-            assert_eq!(buf, b"");
+        fn writes_nothing_without_links() {
+            assert_eq!(envelope(&[]), "");
         }
-    }
-
-    mod build_status_hyperlink_envelope {
-        use super::*;
 
         #[test]
         fn wraps_each_link_in_cup_and_osc8() {
@@ -647,10 +637,10 @@ mod tests {
                 plain_hyperlink(Rect::new(9, 1, 2, 1), "https://example.com/ci", &["C", "I"]),
             ];
 
-            let bytes = build_status_hyperlink_envelope(&links).unwrap();
+            let envelope = envelope(&links);
 
             assert_eq!(
-                String::from_utf8(bytes).unwrap(),
+                envelope,
                 "\x1b7\
                  \x1b[1;3H\x1b]8;;https://example.com/pull/86\x07#86\x1b]8;;\x07\
                  \x1b[2;10H\x1b]8;;https://example.com/ci\x07CI\x1b]8;;\x07\
@@ -701,10 +691,10 @@ mod tests {
                 ],
             };
 
-            let bytes = build_status_hyperlink_envelope(&[link]).unwrap();
+            let envelope = envelope(&[link]);
 
             assert_eq!(
-                String::from_utf8(bytes).unwrap(),
+                envelope,
                 "\x1b7\x1b[1;1H\x1b]8;;https://x\x07\
                  \x1b[48;5;4m\x1b[38;5;1m\x1b[58;5;2m\x1b[1mA\x1b[0m\x1b[3mB\x1b[0m\
                  \x1b]8;;\x07\x1b8",
@@ -719,10 +709,10 @@ mod tests {
                 &["x"],
             );
 
-            let bytes = build_status_hyperlink_envelope(&[link]).unwrap();
+            let envelope = envelope(&[link]);
 
             assert_eq!(
-                String::from_utf8(bytes).unwrap(),
+                envelope,
                 "\x1b7\x1b[1;1H\x1b]8;;https://example.com/ok\x07x\x1b]8;;\x07\x1b8",
             );
         }
@@ -731,9 +721,7 @@ mod tests {
         fn is_empty_when_safe_url_is_empty() {
             let link = plain_hyperlink(Rect::new(0, 0, 1, 1), "\x1b\x07", &["x"]);
 
-            let bytes = build_status_hyperlink_envelope(&[link]).unwrap();
-
-            assert_eq!(bytes, b"");
+            assert_eq!(envelope(&[link]), "");
         }
     }
 

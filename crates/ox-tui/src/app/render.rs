@@ -605,7 +605,7 @@ mod tests {
             for (text, failed, fg) in [
                 ("Copied 5 characters", false, app.theme.success.fg),
                 (
-                    "Not copied: no clipboard is reachable",
+                    "Not copied: the clipboard did not answer within 2 s",
                     true,
                     app.theme.warning.fg,
                 ),
@@ -637,7 +637,7 @@ mod tests {
             app.chat
                 .handle_event(&key_event(KeyCode::PageUp, KeyModifiers::NONE));
             app.copy_notice = Some(CopyNotice {
-                text: "Not copied: Terminal.app ignores OSC 52. Fn-drag to select.".to_owned(),
+                text: "Not copied: Terminal.app ignores OSC 52. Fn+drag to select.".to_owned(),
                 failed: true,
                 until: now(),
             });
