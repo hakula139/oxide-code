@@ -56,11 +56,11 @@ pub(crate) fn sample_header(session_id: &str) -> Entry {
     Entry::Header {
         session_id: session_id.to_owned(),
         cwd: project.clone(),
+        project_root: Some(project),
         model: "claude-opus-5-5".to_owned(),
         created_at: datetime!(2026-04-16 12:00:00 UTC),
         version: CURRENT_VERSION,
         git_branch: None,
-        project_root: Some(project),
     }
 }
 

@@ -24,6 +24,10 @@ pub(crate) enum Entry {
     Header {
         session_id: String,
         cwd: String,
+        /// The project the session belongs to, absent from sessions that releases up to
+        /// 0.1.0-alpha.5 wrote, whose project is their `cwd`.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        project_root: Option<String>,
         model: String,
         #[serde(with = "time::serde::rfc3339")]
         created_at: OffsetDateTime,
@@ -31,10 +35,6 @@ pub(crate) enum Entry {
         /// The branch the session started on, which tells sibling sessions apart in the picker.
         #[serde(skip_serializing_if = "Option::is_none")]
         git_branch: Option<String>,
-        /// The project the session belongs to, absent from sessions that releases up to
-        /// 0.1.0-alpha.5 wrote, whose project is their `cwd`.
-        #[serde(skip_serializing_if = "Option::is_none")]
-        project_root: Option<String>,
     },
     /// Prompt state a resume rebuilds the request prefix from. Written in one batch ahead of the
     /// user message that first carries it, with the same timestamp, and bound to the next message
@@ -160,12 +160,21 @@ pub struct SessionInfo {
     /// ID can name another file.
     pub path: PathBuf,
     pub cwd: String,
+    /// The header's project root, `None` in sessions that releases up to 0.1.0-alpha.5 wrote.
+    pub project_root: Option<String>,
     pub last_active_at: OffsetDateTime,
     pub title: Option<TitleInfo>,
     pub exit: Option<ExitInfo>,
     /// Branch the session started on, or `None` outside a git repo.
     pub git_branch: Option<String>,
     pub archived: bool,
+}
+
+impl SessionInfo {
+    /// The project the session belongs to, which is its `cwd` when the header records none.
+    pub fn project(&self) -> &str {
+        self.project_root.as_deref().unwrap_or(&self.cwd)
+    }
 }
 
 #[cfg(test)]
@@ -183,11 +192,11 @@ mod tests {
         let entry = Entry::Header {
             session_id: "abc-123".to_owned(),
             cwd: "/home/user/project".to_owned(),
+            project_root: Some("/home/user".to_owned()),
             model: "claude-opus-5-5".to_owned(),
             created_at: datetime!(2026-04-16 12:00:00 UTC),
             version: CURRENT_VERSION,
             git_branch: None,
-            project_root: Some("/home/user".to_owned()),
         };
         let json = serde_json::to_value(&entry).unwrap();
         assert_eq!(json["type"], "header");
@@ -197,22 +206,22 @@ mod tests {
         let Entry::Header {
             session_id,
             cwd,
+            project_root,
             model,
             created_at,
             version,
             git_branch,
-            project_root,
         } = parsed
         else {
             panic!("expected Header");
         };
         assert_eq!(session_id, "abc-123");
         assert_eq!(cwd, "/home/user/project");
+        assert_eq!(project_root.as_deref(), Some("/home/user"));
         assert_eq!(model, "claude-opus-5-5");
         assert_eq!(created_at, datetime!(2026-04-16 12:00:00 UTC));
         assert_eq!(version, CURRENT_VERSION);
         assert!(git_branch.is_none());
-        assert_eq!(project_root.as_deref(), Some("/home/user"));
     }
 
     #[test]

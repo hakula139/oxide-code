@@ -4,7 +4,7 @@ oxide-code automatically saves every conversation to disk. You can list past ses
 
 ## Where Sessions Live
 
-Sessions are stored under `$XDG_DATA_HOME/ox/sessions/` (default: `~/.local/share/ox/sessions/`), grouped by project. A session's project is the Git repository containing the directory where you start `ox`, or that directory itself outside a repository, which is the same project root that [instruction files](instructions.md#where-instruction-files-can-live) load from. Sessions started in different subdirectories of one repository share a project. Sessions saved by 0.1.0-alpha.5 and earlier belong to the directory they started in, so the current project lists them only when you start `ox` in that same directory, while `--all` and an ID prefix always find them.
+Sessions are stored under `$XDG_DATA_HOME/ox/sessions/` (default: `~/.local/share/ox/sessions/`), grouped by project. A session's project is the Git repository containing the directory where you start `ox`, or that directory itself outside a repository, which is the same project root that [instruction files](instructions.md#where-instruction-files-can-live) load from. Sessions started in different subdirectories of one repository share a project. Sessions saved by 0.1.0-alpha.5 and earlier belong to the directory they started in, so the current project lists them when you start `ox` in that directory, or anywhere in the repository for a session started at its root, while `--all` and an ID prefix always find them.
 
 A session file is created on the first message, so launching `ox` and quitting without typing leaves nothing behind.
 
@@ -57,7 +57,7 @@ ox -r ./conversation.jsonl
 ox -r /home/me/archive/2026-04/session.jsonl
 ```
 
-Search every project with `--all` / `-a`:
+Widen the search to every project with `--all` / `-a`, where a prefix that matches sessions in several projects lists them all as candidates:
 
 ```bash
 ox -c --all        # Latest unarchived session across all projects

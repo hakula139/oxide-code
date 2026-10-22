@@ -8,12 +8,12 @@ use time::OffsetDateTime;
 
 use super::listing::ListScope;
 use super::{
-    SessionData, SessionStore, SessionWriter, encode_lines, file_session_id,
+    Project, SessionData, SessionStore, SessionWriter, encode_lines, file_session_id,
     load_session_data_from_path, open_append_file, set_archived_at,
 };
 use crate::session::entry::{CURRENT_VERSION, Entry, SessionInfo, TitleSource};
 
-pub(super) const TEST_PROJECT: &str = "test-project";
+pub(crate) const TEST_PROJECT: &str = "test-project";
 
 // ── SessionStore ──
 
@@ -24,13 +24,16 @@ impl SessionStore {
         fs::create_dir_all(&sessions_dir)?;
         let project_dir = sessions_dir.join(project_name);
         fs::create_dir_all(&project_dir)?;
-        let cwd = Path::new("/work").join(project_name);
+        let root = format!("/work/{project_name}");
         Ok(Self {
             sessions_dir,
             project_dir,
             cwd_dir: None,
-            project_root: cwd.clone(),
-            cwd,
+            project_root: PathBuf::from(&root),
+            project: Project {
+                cwd: root.clone(),
+                root,
+            },
         })
     }
 
@@ -141,12 +144,12 @@ pub(super) fn test_header(
 ) -> Entry {
     Entry::Header {
         session_id: session_id.to_owned(),
-        cwd: store.cwd.display().to_string(),
+        cwd: store.project.cwd.clone(),
+        project_root: Some(store.project.root.clone()),
         model: "claude-opus-5-5".to_owned(),
         created_at,
         version: CURRENT_VERSION,
         git_branch: None,
-        project_root: Some(store.project_root.display().to_string()),
     }
 }
 

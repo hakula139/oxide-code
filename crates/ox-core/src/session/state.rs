@@ -323,14 +323,15 @@ fn new_header(
     created_at: OffsetDateTime,
 ) -> (String, Entry) {
     let session_id = Uuid::new_v4().to_string();
+    let project = store.project();
     let header = Entry::Header {
         session_id: session_id.clone(),
-        cwd: store.cwd().display().to_string(),
+        cwd: project.cwd.clone(),
+        project_root: Some(project.root.clone()),
         model: model.to_owned(),
         created_at,
         version: CURRENT_VERSION,
         git_branch,
-        project_root: Some(store.project_root().display().to_string()),
     };
     (session_id, header)
 }

@@ -374,14 +374,18 @@ mod tests {
         async fn continue_errors_without_sessions() {
             let dir = tempfile::tempdir().unwrap();
             let store = test_store(dir.path());
-            let err = resolve_session(&store, "m", None, Some(SessionTarget::Latest), false)
-                .err()
-                .unwrap()
-                .to_string();
+            let latest = |all: bool| {
+                resolve_session(&store, "m", None, Some(SessionTarget::Latest), all)
+                    .err()
+                    .unwrap()
+                    .to_string()
+            };
+
             assert_eq!(
-                err,
+                latest(false),
                 "no sessions to resume in this project (use --all to search every project)",
             );
+            assert_eq!(latest(true), "no sessions to resume");
         }
 
         #[tokio::test]

@@ -54,9 +54,9 @@ Tests in `session/handle.rs` enforce this guarantee for stable releases, using o
 
 ## Storage Layout
 
-Sessions live in `$XDG_DATA_HOME/ox/sessions/{project}/`. `{project}` is a filesystem-safe name derived by `sanitize_cwd` from the project root, which is the Git repository containing the working directory, or the working directory itself outside a repository. Characters other than ASCII letters, digits, `.`, `_`, and `-` become `-`, and a name longer than 80 characters is cut and given an xxh64 suffix over the raw path bytes.
+Sessions live in `$XDG_DATA_HOME/ox/sessions/{project}/`. `{project}` is a filesystem-safe name derived by `project_dir_name` from the project root, which is the Git repository containing the working directory, or the working directory itself outside a repository. Characters other than ASCII letters, digits, `.`, `_`, and `-` become `-`, and a name longer than 80 characters is cut and given an xxh64 suffix over the raw path bytes.
 
-Distinct paths can share a name, such as `/work/a b` and `/work/a-b`, so the header records `project_root`, and a project-scoped listing keeps only the files whose header names its project. Headers written by 0.1.0-alpha.5 and earlier have no `project_root`, and those files sit under the name of the directory the session started in. A project-scoped listing also reads the working directory's subdirectory, and keeps a header without `project_root` when its `cwd` is the working directory or the project root. Files are never moved, so older binaries keep reading the sessions they wrote.
+Distinct paths can share a name, such as `/work/a b` and `/work/a-b`, so the header records `project_root`, and a project-scoped listing keeps only the files whose header names its project. Headers written by 0.1.0-alpha.5 and earlier have no `project_root`, and those files sit under the name of the directory the session started in. A project-scoped listing also reads the working directory's subdirectory, and keeps a file when its header records the project's root, when its `cwd` is the working directory, or when it records no root and its `cwd` is the project root. Files are never moved, so older binaries keep reading the sessions they wrote.
 
 File naming: `{unix_timestamp}-{session_id}.jsonl`. Timestamp prefix gives chronological listings, while lookup by session ID uses the suffix.
 
@@ -151,7 +151,7 @@ Listings sort rows and render them as follows:
 - Sessions without a title are shown as `(untitled)`.
 - Sessions without a summary still list (`Msgs` displays `-`).
 - Sort by file mtime, with the file name breaking ties.
-- Under `--all`, a `Project` column shows the tildified stored `cwd`.
+- Under `--all`, a `Project` column shows the tildified project root, or the stored `cwd` for a header that records none.
 - Titles truncated to terminal width with trailing `...`.
 - Control characters in titles and project paths, line breaks included, are escaped, so a row stays on one line and cannot change the terminal's state.
 
