@@ -31,7 +31,7 @@ impl SlashCommand for ThemeCmd {
     }
 
     fn classify(&self, args: &str) -> SlashKind {
-        if args.trim().is_empty() {
+        if args.is_empty() {
             SlashKind::ReadOnly
         } else {
             SlashKind::Steering
@@ -39,7 +39,7 @@ impl SlashCommand for ThemeCmd {
     }
 
     fn echoes_input(&self, args: &str) -> bool {
-        !args.trim().is_empty()
+        !args.is_empty()
     }
 
     fn usage(&self) -> Option<&'static str> {
@@ -56,8 +56,7 @@ impl SlashCommand for ThemeCmd {
             .collect()
     }
 
-    fn execute(&self, args: &str, ctx: &SlashContext<'_>) -> Result<SlashOutcome, String> {
-        let arg = args.trim();
+    fn execute(&self, arg: &str, ctx: &SlashContext<'_>) -> Result<SlashOutcome, String> {
         if arg.is_empty() {
             return Ok(SlashOutcome::Modal(Box::new(ThemePicker::new(
                 &ctx.info.config.theme_name,
@@ -187,7 +186,6 @@ mod tests {
         #[test]
         fn splits_on_args() {
             assert_eq!(ThemeCmd.classify(""), SlashKind::ReadOnly);
-            assert_eq!(ThemeCmd.classify("   "), SlashKind::ReadOnly);
             assert_eq!(ThemeCmd.classify("latte"), SlashKind::Steering);
         }
     }

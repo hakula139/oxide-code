@@ -19,7 +19,7 @@ use ox_core::util::text::escape_hidden;
 use super::stdio::{Approver, StdioSink, Unattended, render_op, render_queued};
 use super::{Exit, Shutdown, shutdown_signal};
 
-/// Reads prompts and slash commands until EOF or a signal, then finalizes the session. EOF after
+/// Reads prompts and slash commands until EOF, `/exit`, or a signal, then finalizes the session. EOF after
 /// an operation failed or a command was rejected exits with failure. Only a terminal on stdin
 /// answers approvals, so a piped line is never taken as an answer. With a terminal, SIGINT
 /// interrupts the running operation or discards the line at the prompt, as shells do. Every other
@@ -99,6 +99,9 @@ where
                 },
                 None => Op::Prompt(command::unescape_literal(input).to_owned()),
             };
+            if op == Op::Shutdown {
+                break;
+            }
 
             // A send fails only once the engine has stopped, which `render_op` then reports.
             _ = handle.ops.send(op.clone()).await;
@@ -156,9 +159,9 @@ fn command_op(parsed: &Parsed, project_root: &Path) -> Result<Op, String> {
             .map(|name| format!("/{name}"))
             .collect();
         Err(format!(
-            "/{name} is not a REPL command. \
+            "`/{name}` is not a REPL command. \
              Available: {names}. \
-             Use //{name} to send the literal text.",
+             Use `//{name}` to send the literal text.",
             name = parsed.name,
             names = names.join(", "),
         ))
@@ -626,6 +629,36 @@ mod tests {
         }
 
         #[tokio::test]
+        async fn exit_stops_reading_and_exits_cleanly() {
+            with_pinned_home(async {
+                let server = MockServer::start().await;
+                mount_reply(&server, "reply").await;
+                let dir = tempfile::tempdir().unwrap();
+                let engine = engine(server.uri(), &test_store(dir.path()), dir.path()).await;
+                let input: &[u8] = indoc! {b"
+                    /quit
+                    hello
+                "};
+
+                let exit = Box::pin(drive(
+                    engine.spawn(),
+                    dir.path(),
+                    &CapturingSink::default(),
+                    None,
+                    input,
+                    true,
+                    no_signal,
+                ))
+                .await
+                .unwrap();
+
+                assert_eq!(exit, Exit::Success);
+                assert_eq!(request_bodies(&server).await, [] as [serde_json::Value; 0]);
+            })
+            .await;
+        }
+
+        #[tokio::test]
         async fn rejects_a_command_it_cannot_run_and_exits_with_failure() {
             with_pinned_home(async {
                 let server = MockServer::start().await;
@@ -671,9 +704,10 @@ mod tests {
                 );
                 assert_eq!(
                     reports[2],
-                    "/help is not a REPL command. \
-                     Available: /clear, /compact, /effort, /init, /mode, /model, /rename, /resume. \
-                     Use //help to send the literal text.",
+                    "`/help` is not a REPL command. \
+                     Available: /clear, /compact, /effort, /exit, /init, /mode, /model, /rename, \
+                     /resume. \
+                     Use `//help` to send the literal text.",
                 );
             })
             .await;

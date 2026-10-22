@@ -334,6 +334,7 @@ mod tests {
                     "delete",
                     "diff",
                     "effort",
+                    "exit",
                     "help",
                     "init",
                     "login",

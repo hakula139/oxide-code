@@ -31,7 +31,7 @@ impl SlashCommand for EffortCmd {
     }
 
     fn echoes_input(&self, args: &str) -> bool {
-        !args.trim().is_empty()
+        !args.is_empty()
     }
 
     fn usage(&self) -> Option<&'static str> {
@@ -48,8 +48,7 @@ impl SlashCommand for EffortCmd {
             .collect()
     }
 
-    fn execute(&self, args: &str, ctx: &SlashContext<'_>) -> Result<SlashOutcome, String> {
-        let arg = args.trim();
+    fn execute(&self, arg: &str, ctx: &SlashContext<'_>) -> Result<SlashOutcome, String> {
         if arg.is_empty() {
             // An unknown model has nothing to slide, so error with the same recovery hint the
             // typed-arg path uses.
@@ -95,7 +94,6 @@ mod tests {
         #[test]
         fn is_mutating_for_modal_and_direct_forms() {
             assert_eq!(EffortCmd.classify(""), SlashKind::Mutating);
-            assert_eq!(EffortCmd.classify("   "), SlashKind::Mutating);
             assert_eq!(EffortCmd.classify("xhigh"), SlashKind::Mutating);
         }
     }

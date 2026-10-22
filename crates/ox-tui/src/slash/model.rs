@@ -27,7 +27,7 @@ impl SlashCommand for ModelCmd {
     }
 
     fn echoes_input(&self, args: &str) -> bool {
-        !args.trim().is_empty()
+        !args.is_empty()
     }
 
     fn usage(&self) -> Option<&'static str> {
@@ -44,8 +44,7 @@ impl SlashCommand for ModelCmd {
             .collect()
     }
 
-    fn execute(&self, args: &str, ctx: &SlashContext<'_>) -> Result<SlashOutcome, String> {
-        let arg = args.trim();
+    fn execute(&self, arg: &str, ctx: &SlashContext<'_>) -> Result<SlashOutcome, String> {
         if arg.is_empty() {
             return Ok(SlashOutcome::Modal(Box::new(ModelEffortPicker::new(
                 ctx.info,
@@ -76,7 +75,6 @@ mod tests {
         #[test]
         fn is_mutating_for_picker_and_direct_forms() {
             assert_eq!(ModelCmd.classify(""), SlashKind::Mutating);
-            assert_eq!(ModelCmd.classify("   "), SlashKind::Mutating);
             assert_eq!(ModelCmd.classify("opus"), SlashKind::Mutating);
             assert_eq!(ModelCmd.classify("claude-opus-5-5"), SlashKind::Mutating);
         }
@@ -119,7 +117,7 @@ mod tests {
 
         #[test]
         fn no_args_opens_the_picker() {
-            run_execute(&ModelCmd, "  ").unwrap().into_modal();
+            run_execute(&ModelCmd, "").unwrap().into_modal();
         }
 
         #[test]
