@@ -36,7 +36,7 @@ use crate::model::ModelSpec;
 use crate::permission::{Mode, Policy, Tier, Workspace};
 use crate::util::env;
 use crate::util::git::project_root;
-use crate::util::path::expand_user;
+use crate::util::path::{expand_user, tildify};
 use crate::util::tls::{PlatformTrust, Trust, load_extra_ca_certs};
 
 pub const DEFAULT_MODEL: &str = "claude-opus-5-5";
@@ -708,7 +708,7 @@ fn validate_base_url(base_url: &Sourced<String>) -> Result<()> {
     };
     let setting = match &base_url.source {
         Source::Env(var) => format!("{var} {raw:?}"),
-        Source::File(layer) => format!("client.base_url {raw:?} in {}", layer.path().display()),
+        Source::File(layer) => format!("client.base_url {raw:?} in {}", tildify(layer.path())),
         _ => format!("base URL {raw:?}"),
     };
     bail!("invalid {setting}: {reason}")
@@ -1375,24 +1375,22 @@ mod tests {
         #[tokio::test]
         async fn rejects_a_base_url_naming_the_file_that_sets_it() {
             let dir = tempfile::tempdir().unwrap();
-            let layer = write_user_config(
+            write_user_config(
                 dir.path(),
                 indoc! {r#"
                     [client]
                     base_url = "http://gw:8080"
                 "#},
             );
+            let home = [(HOME_VAR, Some(dir.path()))];
 
-            let err = load_with(&dir, &[])
+            let err = Box::pin(temp_env::async_with_vars(home, load_with(&dir, &[])))
                 .await
                 .expect_err("http must be rejected");
 
             assert_eq!(
                 format!("{err:#}"),
-                format!(
-                    r#"invalid client.base_url "http://gw:8080" in {}: http is allowed only for localhost"#,
-                    layer.path().display()
-                ),
+                r#"invalid client.base_url "http://gw:8080" in ~/ox/config.toml: http is allowed only for localhost"#,
             );
         }
 
