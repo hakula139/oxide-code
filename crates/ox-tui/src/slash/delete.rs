@@ -72,9 +72,9 @@ impl SlashCommand for DeleteCmd {
 // ── Display Formatting ──
 
 /// Wraps [`format_metadata_line`] with the `/delete`-specific project rule: the confirm modal has
-/// no scope context, so the project always shows when `cwd` is non-empty.
+/// no scope context, so the project always shows when it is non-empty.
 fn metadata_line(info: &SessionInfo) -> String {
-    let project = tildify(Path::new(&info.cwd));
+    let project = tildify(Path::new(info.project()));
     format_metadata_line(
         &info.session_id,
         info.last_active_at,
@@ -351,6 +351,7 @@ mod tests {
                 session_id: stamped_id(0xab),
                 path: std::path::PathBuf::new(),
                 cwd: "/work/oxide".to_owned(),
+                project_root: None,
                 last_active_at,
                 title: None,
                 exit: Some(ExitInfo {
@@ -375,6 +376,7 @@ mod tests {
                 session_id: stamped_id(0xab),
                 path: std::path::PathBuf::new(),
                 cwd: String::new(),
+                project_root: None,
                 last_active_at: datetime!(2026-05-08 09:00:00 UTC),
                 title: None,
                 exit: None,

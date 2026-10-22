@@ -19,7 +19,8 @@ use ox_core::session::display::archive_notice;
 use ox_core::tool::view::ApprovalPreview;
 use ox_core::util::text::plural;
 
-use super::{App, CopyNotice, HandBack};
+use super::queue::FailedTurn;
+use super::{App, CopyNotice};
 use crate::clipboard::{CopyReport, Delivery};
 use crate::components::status::Status;
 use crate::git_probes::GitUpdate;
@@ -33,7 +34,6 @@ impl App {
             Event::StreamToken(token) => {
                 self.chat.append_stream_token(&token);
                 self.set_active_status(Status::Streaming);
-                self.input.set_enabled(false);
             }
             Event::ThinkingToken(token) => {
                 self.chat.append_thinking_token(&token);
@@ -50,19 +50,17 @@ impl App {
             Event::ToolCallEnd(result) => self.chat.push_tool_result(result),
             Event::PromptDrained(text) => self.apply_prompt_drained(text),
             Event::TurnComplete => self.finish_turn(),
-            Event::TurnRolledBack => self.hand_back = HandBack::RolledBackTurn,
+            Event::TurnRolledBack => self.queue.mark_rolled_back(),
             Event::TurnFailed(msg) => self.apply_turn_failed(&msg),
             Event::UsageUpdated(usage) => self.status_bar.set_usage(Some(usage)),
             Event::RateLimitsUpdated(limits) => self.status_bar.set_rate_limits(Some(limits)),
             Event::Cancelled => {
                 self.chat.push_interrupted_marker();
-                self.active_prompt = None;
                 self.enter_idle();
             }
             Event::AutoCompactionStarted => {
-                self.hand_back = HandBack::UnsentPrompt;
+                self.queue.mark_unsent();
                 self.set_active_status(Status::Compacting);
-                self.input.set_enabled(false);
             }
             Event::AutoCompactionPaused { failures } => {
                 self.session_info.auto_compaction_paused_after = Some(failures);
@@ -132,18 +130,7 @@ impl App {
     }
 
     fn apply_prompt_drained(&mut self, text: String) {
-        if self.forwarded_prompts > 0
-            && self
-                .pending_prompts
-                .front()
-                .is_some_and(|queued| command::unescape_literal(queued) == text)
-        {
-            self.drained_prompts
-                .extend(self.pending_prompts.pop_front());
-            self.forwarded_prompts -= 1;
-        } else {
-            warn!("drained prompt {text:?} does not lead the forwarded queue");
-        }
+        self.queue.confirm_drained(&text);
         self.chat.push_user_message(text);
     }
 
@@ -166,57 +153,29 @@ impl App {
 
     fn finish_turn(&mut self) {
         self.chat.commit_streaming();
-        self.active_prompt = None;
         // A cancel that lost the race to the turn's end, or a failed resume, still leaves the next
         // step to the user.
-        if matches!(
-            self.status_bar.status(),
-            Status::Cancelling | Status::Resuming
-        ) {
+        if matches!(&self.status, Status::Cancelling | Status::Resuming) {
             self.enter_idle();
         } else {
             self.finalize_idle();
         }
     }
 
+    /// Ends a failed turn. A turn that never reached the model, or that the engine rolled back,
+    /// goes idle without starting the queue and hands its prompts back, one into the empty input
+    /// for another try.
     fn apply_turn_failed(&mut self, msg: &str) {
         self.chat.push_error(msg);
-        match self.hand_back {
-            HandBack::Nothing => self.finish_turn(),
-            HandBack::UnsentPrompt => self.return_unsent_prompt(),
-            HandBack::RolledBackTurn => self.return_rolled_back_prompts(),
-        }
-    }
-
-    /// Ends a turn the engine rolled back after a refusal. Goes idle without starting the queue,
-    /// and hands the prompts back: the queued ones the turn took in to the queue head, and the
-    /// refused one into the empty input for rephrasing, or else ahead of them.
-    fn return_rolled_back_prompts(&mut self) {
-        for drained in self.drained_prompts.drain(..).rev() {
-            self.pending_prompts.push_front(drained);
-        }
-        if let Some(prompt) = self.active_prompt.take() {
-            if self.input.is_empty() {
-                self.input.set_text(&prompt);
-            } else {
-                self.pending_prompts.push_front(prompt);
+        match self.queue.fail_turn(self.input.is_empty()) {
+            FailedTurn::Ran => self.finish_turn(),
+            FailedTurn::HandedBack(prompt) => {
+                if let Some(prompt) = prompt {
+                    self.input.set_text(&prompt);
+                }
+                self.enter_idle();
             }
         }
-        self.enter_idle();
-    }
-
-    /// Ends a prompt whose automatic compaction failed before it was sent. Goes idle without
-    /// starting the queue, and hands the prompt back: into the empty input when nothing else is
-    /// queued, so Enter sends it again, or else to the queue head, so it still runs first.
-    fn return_unsent_prompt(&mut self) {
-        if let Some(prompt) = self.active_prompt.take() {
-            if self.pending_prompts.is_empty() && self.input.is_empty() {
-                self.input.set_text(&prompt);
-            } else {
-                self.pending_prompts.push_front(prompt);
-            }
-        }
-        self.enter_idle();
     }
 
     /// `/clear` or `/archive`: rebinds the session and empties chat for the fresh one.
@@ -244,8 +203,7 @@ impl App {
         if let Some(notice) = self.session_info.config.model.unsupported_notice() {
             self.chat.push_system_message(notice);
         }
-        let dropped = self.pending_prompts.len();
-        self.pending_prompts.clear();
+        let dropped = self.queue.discard();
         if dropped > 0 {
             self.chat.push_system_message(format!(
                 "Discarded {dropped} queued {} from the previous session",
@@ -267,7 +225,7 @@ impl App {
         self.status_bar.set_title(title);
         self.status_bar.set_usage(None);
         self.chat.clear_history();
-        self.active_prompt = None;
+        self.queue.clear_active();
         old_id
     }
 
@@ -284,8 +242,8 @@ impl App {
         self.status_bar.set_usage(None);
         self.chat
             .push_compacted_block(pre_count, instructions, summary.to_owned());
-        self.hand_back = HandBack::Nothing;
-        if automatic && let Some(prompt) = &self.active_prompt {
+        self.queue.mark_sent();
+        if automatic && let Some(prompt) = self.queue.active() {
             self.chat
                 .push_user_message(command::unescape_literal(prompt).to_owned());
         }
@@ -296,7 +254,7 @@ impl App {
     /// lost the race to the swap leaves the queue to the user, and a roll never leaves idle, so its
     /// `SessionReady` changes nothing.
     fn apply_session_ready(&mut self) {
-        match self.status_bar.status() {
+        match &self.status {
             Status::Compacting | Status::Resuming => self.finalize_idle(),
             Status::Cancelling => self.enter_idle(),
             _ => {}
@@ -405,34 +363,29 @@ impl App {
     /// Resets to idle, clears orphan calls, and re-enables input. Queued prompts stay queued, and
     /// the ended turn no longer holds any of them.
     fn enter_idle(&mut self) {
-        self.hand_back = HandBack::Nothing;
+        self.queue.end_turn();
         self.chat.clear_pending_calls();
-        self.forwarded_prompts = 0;
-        self.drained_prompts.clear();
-        self.status_bar.set_status(Status::Idle);
-        self.input.set_enabled(true);
+        self.set_status(Status::Idle);
     }
 
     /// Starts a turn with the oldest queued prompt.
     pub(super) fn drain_pending_prompt(&mut self) {
-        if let Some(queued) = self.pending_prompts.pop_front() {
-            let prompt = command::unescape_literal(&queued).to_owned();
+        if let Some(prompt) = self.queue.start_next() {
             self.chat.push_user_message(prompt.clone());
-            self.active_prompt = Some(queued);
             self.start_turn(Op::Prompt(prompt));
         }
     }
 
-    /// Sets busy status unless a user-acknowledgment status is showing. Leaving `Compacting`
-    /// releases the prompts held during an automatic compaction.
+    /// Sets busy status unless a cancel is pending. Leaving `Compacting` releases the prompts held
+    /// during an automatic compaction.
     fn set_active_status(&mut self, status: Status) {
-        match self.status_bar.status() {
-            Status::Cancelling | Status::ExitArmed { .. } => {}
+        match &self.status {
+            Status::Cancelling => {}
             Status::Compacting => {
-                self.status_bar.set_status(status);
+                self.set_status(status);
                 self.forward_queued_prompts();
             }
-            _ => self.status_bar.set_status(status),
+            _ => self.set_status(status),
         }
     }
 
@@ -551,11 +504,10 @@ mod tests {
         }
 
         #[test]
-        fn stream_token_switches_to_streaming_and_disables_input() {
+        fn stream_token_switches_to_streaming() {
             let (mut app, _rx, _event_tx) = test_app(None);
             app.handle_engine_event(Event::StreamToken("partial".to_owned()));
-            assert_eq!(app.status_bar.status(), &Status::Streaming);
-            assert!(!app.input.is_enabled());
+            assert_eq!(app.status, Status::Streaming);
         }
 
         #[test]
@@ -564,9 +516,7 @@ mod tests {
             // Streaming, so the user sees the engine working before any visible text arrives.
             let (mut app, _rx, _event_tx) = test_app(None);
             app.handle_engine_event(Event::ThinkingToken("planning...".to_owned()));
-            assert_eq!(app.status_bar.status(), &Status::Streaming);
-            // Unlike StreamToken, thinking does not disable input on its own, since the matching
-            // prompt already did that.
+            assert_eq!(app.status, Status::Streaming);
         }
 
         #[test]
@@ -580,9 +530,9 @@ mod tests {
         async fn retrying_notice_and_error_events_keep_the_turn_running() {
             let (mut app, mut rx, _event_tx) = test_app(None);
             app.dispatch_action(Action::Submit("active".to_owned()));
-            rx.recv().await.expect("active submit forwarded");
+            rx.try_recv().expect("active submit forwarded");
             app.dispatch_action(Action::Submit("queued".to_owned()));
-            rx.recv().await.expect("queued submit forwarded");
+            rx.try_recv().expect("queued submit forwarded");
 
             app.handle_engine_event(Event::Retrying(
                 "HTTP 529 overloaded_error. Retrying in 1 s (retry 1 of 5).".to_owned(),
@@ -601,17 +551,13 @@ mod tests {
                 app.chat.last_error_text(),
                 Some("Session write failed: disk full")
             );
-            assert_eq!(app.status_bar.status(), &Status::Streaming);
-            assert!(!app.input.is_enabled());
+            assert_eq!(app.status, Status::Streaming);
             assert_eq!(
                 rx.try_recv(),
                 Err(TryRecvError::Empty),
                 "nothing resubmits mid-turn"
             );
-            assert_eq!(
-                app.pending_prompts.iter().cloned().collect::<Vec<_>>(),
-                ["queued".to_owned()],
-            );
+            assert_eq!(*app.queue.pending(), ["queued"],);
         }
 
         #[test]
@@ -619,8 +565,8 @@ mod tests {
             let (mut app, _rx, _event_tx) = test_app(None);
             app.handle_engine_event(bash_call_start("t1", "ls"));
             assert_eq!(
-                app.status_bar.status(),
-                &Status::ToolRunning {
+                app.status,
+                Status::ToolRunning {
                     name: "bash".to_owned()
                 },
             );
@@ -708,19 +654,16 @@ mod tests {
         async fn prompt_drained_pops_queue_head_and_pushes_user_message() {
             let (mut app, mut rx, _event_tx) = test_app(None);
             app.dispatch_action(Action::Submit("active".to_owned()));
-            rx.recv().await.expect("active submit forwarded");
+            rx.try_recv().expect("active submit forwarded");
             app.dispatch_action(Action::Submit("queued-a".to_owned()));
-            rx.recv().await.expect("queued-a submit forwarded");
+            rx.try_recv().expect("queued-a submit forwarded");
             app.dispatch_action(Action::Submit("queued-b".to_owned()));
-            rx.recv().await.expect("queued-b submit forwarded");
+            rx.try_recv().expect("queued-b submit forwarded");
 
             let chat_before = app.chat.entry_count();
             app.handle_engine_event(Event::PromptDrained("queued-a".to_owned()));
 
-            assert_eq!(
-                app.pending_prompts.iter().cloned().collect::<Vec<_>>(),
-                vec!["queued-b".to_owned()],
-            );
+            assert_eq!(*app.queue.pending(), ["queued-b"],);
             assert_eq!(
                 app.chat.entry_count(),
                 chat_before + 1,
@@ -732,15 +675,12 @@ mod tests {
         fn prompt_drained_outside_the_forwarded_queue_keeps_the_queue_and_shows_the_text() {
             // The engine only drains prompts it was handed, but a desync must still show the text.
             let (mut app, _rx, _event_tx) = test_app(None);
-            app.pending_prompts.push_back("held".to_owned());
+            app.queue.push("held".to_owned());
             let chat_before = app.chat.entry_count();
 
             app.handle_engine_event(Event::PromptDrained("held".to_owned()));
 
-            assert_eq!(
-                app.pending_prompts.iter().cloned().collect::<Vec<_>>(),
-                ["held".to_owned()],
-            );
+            assert_eq!(*app.queue.pending(), ["held"],);
             assert_eq!(app.chat.entry_count(), chat_before + 1);
         }
 
@@ -748,7 +688,7 @@ mod tests {
         async fn prompt_held_during_auto_compaction_forwards_ahead_of_later_submits() {
             let (mut app, mut rx, _event_tx) = test_app(None);
             app.dispatch_action(Action::Submit("first".to_owned()));
-            rx.recv().await.expect("first submit forwarded");
+            rx.try_recv().expect("first submit forwarded");
             app.handle_engine_event(Event::AutoCompactionStarted);
             app.dispatch_action(Action::Submit("held".to_owned()));
             assert_eq!(
@@ -766,32 +706,27 @@ mod tests {
                 forwarded,
                 [Op::Queue("held".to_owned()), Op::Queue("later".to_owned())],
             );
-            assert_eq!(
-                app.pending_prompts.iter().cloned().collect::<Vec<_>>(),
-                ["later".to_owned()],
-            );
+            assert_eq!(*app.queue.pending(), ["later"],);
         }
 
         #[test]
-        fn turn_complete_becomes_idle_and_reenables_input() {
+        fn turn_complete_becomes_idle() {
             let (mut app, _rx, _event_tx) = test_app(None);
             // Drive into streaming first so TurnComplete has state to tear down.
             app.dispatch_action(Action::Submit("hi".to_owned()));
-            assert_eq!(app.status_bar.status(), &Status::Streaming);
-            assert!(!app.input.is_enabled());
+            assert_eq!(app.status, Status::Streaming);
 
             app.handle_engine_event(Event::TurnComplete);
-            assert_eq!(app.status_bar.status(), &Status::Idle);
-            assert!(app.input.is_enabled());
+            assert_eq!(app.status, Status::Idle);
         }
 
         #[tokio::test]
         async fn turn_complete_starts_a_turn_with_the_queue_head_and_hands_it_the_rest() {
             let (mut app, mut rx, _event_tx) = test_app(None);
             app.dispatch_action(Action::Submit("active".to_owned()));
-            rx.recv().await.expect("active submit forwarded");
-            app.pending_prompts.push_back("a".to_owned());
-            app.pending_prompts.push_back("b".to_owned());
+            rx.try_recv().expect("active submit forwarded");
+            app.queue.push("a".to_owned());
+            app.queue.push("b".to_owned());
 
             app.handle_engine_event(Event::TurnComplete);
 
@@ -800,22 +735,19 @@ mod tests {
                 forwarded,
                 [Op::Prompt("a".to_owned()), Op::Queue("b".to_owned())],
             );
-            assert_eq!(app.status_bar.status(), &Status::Streaming);
-            assert_eq!(
-                app.pending_prompts.iter().cloned().collect::<Vec<_>>(),
-                vec!["b".to_owned()],
-            );
+            assert_eq!(app.status, Status::Streaming);
+            assert_eq!(*app.queue.pending(), ["b"],);
         }
 
         #[tokio::test]
         async fn turn_complete_after_a_cancel_request_leaves_the_queue_to_the_user() {
             let (mut app, mut rx, _event_tx) = test_app(None);
             app.dispatch_action(Action::Submit("active".to_owned()));
-            rx.recv().await.expect("active submit forwarded");
+            rx.try_recv().expect("active submit forwarded");
             app.dispatch_action(Action::Submit("queued".to_owned()));
-            rx.recv().await.expect("queued submit forwarded");
+            rx.try_recv().expect("queued submit forwarded");
             app.handle_esc();
-            assert_eq!(rx.recv().await, Some(Op::Interrupt));
+            assert_eq!(rx.try_recv().ok(), Some(Op::Interrupt));
 
             app.handle_engine_event(Event::TurnComplete);
 
@@ -824,11 +756,8 @@ mod tests {
                 Err(TryRecvError::Empty),
                 "nothing resubmits after a cancel"
             );
-            assert_eq!(app.status_bar.status(), &Status::Idle);
-            assert_eq!(
-                app.pending_prompts.iter().cloned().collect::<Vec<_>>(),
-                ["queued".to_owned()],
-            );
+            assert_eq!(app.status, Status::Idle);
+            assert_eq!(*app.queue.pending(), ["queued"],);
         }
 
         #[test]
@@ -838,17 +767,16 @@ mod tests {
             app.handle_engine_event(Event::TurnFailed("API blew up".to_owned()));
 
             assert_eq!(app.chat.last_error_text(), Some("API blew up"));
-            assert_eq!(app.status_bar.status(), &Status::Idle);
-            assert!(app.input.is_enabled());
+            assert_eq!(app.status, Status::Idle);
         }
 
         #[tokio::test]
         async fn turn_failed_shows_the_error_and_starts_the_queue_head_once() {
             let (mut app, mut rx, _event_tx) = test_app(None);
             app.dispatch_action(Action::Submit("active".to_owned()));
-            rx.recv().await.expect("active submit forwarded");
-            app.pending_prompts.push_back("first".to_owned());
-            app.pending_prompts.push_back("second".to_owned());
+            rx.try_recv().expect("active submit forwarded");
+            app.queue.push("first".to_owned());
+            app.queue.push("second".to_owned());
             let chat_before = app.chat.entry_count();
 
             app.handle_engine_event(Event::TurnFailed("API failed".to_owned()));
@@ -866,17 +794,14 @@ mod tests {
                     Op::Queue("second".to_owned()),
                 ],
             );
-            assert_eq!(
-                app.pending_prompts.iter().cloned().collect::<Vec<_>>(),
-                vec!["second".to_owned()],
-            );
+            assert_eq!(*app.queue.pending(), ["second"],);
         }
 
         #[tokio::test]
         async fn turn_failed_during_auto_compaction_returns_the_unsent_prompt_to_the_input() {
             let (mut app, mut rx, _event_tx) = test_app(None);
             app.dispatch_action(Action::Submit("//etc/hosts".to_owned()));
-            rx.recv().await.expect("prompt forwarded");
+            rx.try_recv().expect("prompt forwarded");
             app.handle_engine_event(Event::AutoCompactionStarted);
 
             app.handle_engine_event(Event::TurnFailed(
@@ -887,14 +812,13 @@ mod tests {
                 app.chat.last_error_text(),
                 Some("Auto-compaction failed: summarizer down. The prompt was not sent.")
             );
-            assert_eq!(app.status_bar.status(), &Status::Idle);
-            assert!(app.input.is_enabled());
+            assert_eq!(app.status, Status::Idle);
             assert_eq!(
                 app.input.lines(),
                 ["//etc/hosts".to_owned()],
                 "Enter sends the prompt again as typed",
             );
-            assert!(app.pending_prompts.is_empty());
+            assert_eq!(*app.queue.pending(), [] as [&str; 0]);
             assert_eq!(
                 rx.try_recv(),
                 Err(TryRecvError::Empty),
@@ -906,24 +830,21 @@ mod tests {
         async fn turn_rolled_back_hands_the_refused_prompt_and_the_drained_ones_back() {
             let (mut app, mut rx, _event_tx) = test_app(None);
             app.dispatch_action(Action::Submit("//refused".to_owned()));
-            rx.recv().await.expect("prompt forwarded");
+            rx.try_recv().expect("prompt forwarded");
             app.dispatch_action(Action::Submit("drained".to_owned()));
-            rx.recv().await.expect("queued prompt forwarded");
+            rx.try_recv().expect("queued prompt forwarded");
             app.handle_engine_event(Event::PromptDrained("drained".to_owned()));
             app.dispatch_action(Action::Submit("queued".to_owned()));
-            rx.recv().await.expect("queued prompt forwarded");
+            rx.try_recv().expect("queued prompt forwarded");
 
             app.handle_engine_event(Event::TurnRolledBack);
             app.handle_engine_event(Event::TurnFailed(
                 "The model declined this request.".to_owned(),
             ));
 
-            assert_eq!(app.status_bar.status(), &Status::Idle);
+            assert_eq!(app.status, Status::Idle);
             assert_eq!(app.input.lines(), ["//refused".to_owned()]);
-            assert_eq!(
-                app.pending_prompts.iter().cloned().collect::<Vec<_>>(),
-                ["drained".to_owned(), "queued".to_owned()],
-            );
+            assert_eq!(*app.queue.pending(), ["drained", "queued"],);
             assert_eq!(
                 rx.try_recv(),
                 Err(TryRecvError::Empty),
@@ -935,7 +856,7 @@ mod tests {
         async fn turn_failed_during_auto_compaction_returns_the_prompt_to_the_held_queue_head() {
             let (mut app, mut rx, _event_tx) = test_app(None);
             app.dispatch_action(Action::Submit("active".to_owned()));
-            rx.recv().await.expect("prompt forwarded");
+            rx.try_recv().expect("prompt forwarded");
             app.handle_engine_event(Event::AutoCompactionStarted);
             app.dispatch_action(Action::Submit("queued".to_owned()));
 
@@ -943,11 +864,11 @@ mod tests {
                 "Auto-compaction failed: summarizer down. The prompt was not sent.".to_owned(),
             ));
 
-            assert_eq!(app.status_bar.status(), &Status::Idle);
+            assert_eq!(app.status, Status::Idle);
             assert!(app.input.is_empty());
             assert_eq!(
-                app.pending_prompts.iter().cloned().collect::<Vec<_>>(),
-                ["active".to_owned(), "queued".to_owned()],
+                *app.queue.pending(),
+                ["active", "queued"],
                 "the unsent prompt still runs first",
             );
             assert_eq!(
@@ -963,19 +884,16 @@ mod tests {
             app.dispatch_op(Op::Prompt(
                 "Create AGENTS.md for this repository.".to_owned(),
             ));
-            rx.recv().await.expect("prompt forwarded");
+            rx.try_recv().expect("prompt forwarded");
             app.handle_engine_event(Event::AutoCompactionStarted);
-            app.pending_prompts.push_back("queued".to_owned());
+            app.queue.push("queued".to_owned());
 
             app.handle_engine_event(Event::TurnFailed(
                 "Auto-compaction failed: summarizer down. The prompt was not sent.".to_owned(),
             ));
 
             assert!(app.input.is_empty(), "a command's prompt was never typed");
-            assert_eq!(
-                app.pending_prompts.iter().cloned().collect::<Vec<_>>(),
-                ["queued".to_owned()],
-            );
+            assert_eq!(*app.queue.pending(), ["queued"],);
             assert_eq!(rx.try_recv(), Err(TryRecvError::Empty));
         }
 
@@ -983,7 +901,7 @@ mod tests {
         async fn turn_failed_after_auto_compaction_succeeded_starts_the_queue_head() {
             let (mut app, mut rx, _event_tx) = test_app(None);
             app.dispatch_action(Action::Submit("active".to_owned()));
-            rx.recv().await.expect("prompt forwarded");
+            rx.try_recv().expect("prompt forwarded");
             app.handle_engine_event(Event::AutoCompactionStarted);
             app.handle_engine_event(Event::SessionCompacted {
                 summary: "auto summary".to_owned(),
@@ -991,7 +909,7 @@ mod tests {
                 instructions: None,
                 automatic: true,
             });
-            app.pending_prompts.push_back("queued".to_owned());
+            app.queue.push("queued".to_owned());
 
             app.handle_engine_event(Event::TurnFailed("API failed".to_owned()));
 
@@ -1003,16 +921,16 @@ mod tests {
         async fn failed_resume_goes_idle_and_keeps_the_prompts_a_cancel_held() {
             let (mut app, mut rx, _event_tx) = test_app(None);
             app.dispatch_action(Action::Submit("first".to_owned()));
-            rx.recv().await.expect("first submit forwarded");
+            rx.try_recv().expect("first submit forwarded");
             app.handle_engine_event(Event::StreamToken("x".to_owned()));
             app.dispatch_action(Action::Submit("second".to_owned()));
-            rx.recv().await.expect("second submit forwarded");
+            rx.try_recv().expect("second submit forwarded");
             app.handle_esc();
-            assert_eq!(rx.recv().await, Some(Op::Interrupt));
+            assert_eq!(rx.try_recv().ok(), Some(Op::Interrupt));
             app.handle_engine_event(Event::Cancelled);
             app.dispatch_action(Action::Submit("/resume zzzz".to_owned()));
             assert_eq!(
-                rx.recv().await,
+                rx.try_recv().ok(),
                 Some(Op::Resume {
                     target: ResumeTarget::Prefix("zzzz".to_owned()),
                 }),
@@ -1028,12 +946,8 @@ mod tests {
                 Err(TryRecvError::Empty),
                 "nothing runs after a failed resume"
             );
-            assert_eq!(app.status_bar.status(), &Status::Idle);
-            assert!(app.input.is_enabled());
-            assert_eq!(
-                app.pending_prompts.iter().cloned().collect::<Vec<_>>(),
-                ["second".to_owned(), "third".to_owned()],
-            );
+            assert_eq!(app.status, Status::Idle);
+            assert_eq!(*app.queue.pending(), ["second", "third"],);
         }
 
         #[tokio::test]
@@ -1042,7 +956,7 @@ mod tests {
             // each one must come back as a later turn.
             let (mut app, mut rx, _event_tx) = test_app(None);
             app.dispatch_action(Action::Submit("active".to_owned()));
-            rx.recv().await.expect("active submit forwarded");
+            rx.try_recv().expect("active submit forwarded");
             for prompt in ["a", "b", "c"] {
                 app.dispatch_action(Action::Submit(prompt.to_owned()));
             }
@@ -1076,7 +990,7 @@ mod tests {
 
             app.handle_engine_event(Event::TurnComplete);
             assert_eq!(forwarded(), [Op::Prompt("c".to_owned())]);
-            assert!(app.pending_prompts.is_empty());
+            assert_eq!(*app.queue.pending(), [] as [&str; 0]);
         }
 
         #[test]
@@ -1096,12 +1010,11 @@ mod tests {
             app.dispatch_action(Action::Submit("hi".to_owned()));
             app.handle_engine_event(Event::StreamToken("partial answer".to_owned()));
             let entries_before = app.chat.entry_count();
-            assert_eq!(app.status_bar.status(), &Status::Streaming);
+            assert_eq!(app.status, Status::Streaming);
 
             app.handle_engine_event(Event::Cancelled);
 
-            assert_eq!(app.status_bar.status(), &Status::Idle);
-            assert!(app.input.is_enabled());
+            assert_eq!(app.status, Status::Idle);
             // commit_streaming pushes the partial text as an AssistantText block, and
             // push_interrupted_marker pushes the marker, adding two entries to whatever was there.
             assert_eq!(
@@ -1123,12 +1036,12 @@ mod tests {
             let (mut app, _rx, _event_tx) = test_app(None);
             app.dispatch_action(Action::Submit("hi".to_owned()));
             app.dispatch_action(Action::Op(Op::Interrupt));
-            assert_eq!(app.status_bar.status(), &Status::Cancelling);
+            assert_eq!(app.status, Status::Cancelling);
 
             app.handle_engine_event(Event::StreamToken("late".to_owned()));
-            assert_eq!(app.status_bar.status(), &Status::Cancelling);
+            assert_eq!(app.status, Status::Cancelling);
             app.handle_engine_event(bash_call_start("t-late", "ls"));
-            assert_eq!(app.status_bar.status(), &Status::Cancelling);
+            assert_eq!(app.status, Status::Cancelling);
         }
 
         #[test]
@@ -1150,12 +1063,12 @@ mod tests {
         async fn cancelled_goes_idle_and_esc_recalls_the_queued_prompt() {
             let (mut app, mut rx, _event_tx) = test_app(None);
             app.dispatch_action(Action::Submit("first".to_owned()));
-            rx.recv().await.expect("first submit forwarded");
+            rx.try_recv().expect("first submit forwarded");
             app.handle_engine_event(Event::StreamToken("x".to_owned()));
             app.dispatch_action(Action::Submit("second".to_owned()));
-            rx.recv().await.expect("second submit forwarded");
+            rx.try_recv().expect("second submit forwarded");
             app.handle_esc();
-            assert_eq!(rx.recv().await, Some(Op::Interrupt));
+            assert_eq!(rx.try_recv().ok(), Some(Op::Interrupt));
 
             app.handle_engine_event(Event::Cancelled);
 
@@ -1164,10 +1077,10 @@ mod tests {
                 Err(TryRecvError::Empty),
                 "nothing resubmits after a cancel"
             );
-            assert_eq!(app.status_bar.status(), &Status::Idle);
+            assert_eq!(app.status, Status::Idle);
             app.handle_esc();
             assert_eq!(app.input.lines(), ["second".to_owned()]);
-            assert!(app.pending_prompts.is_empty());
+            assert_eq!(*app.queue.pending(), [] as [&str; 0]);
         }
 
         #[test]
@@ -1177,8 +1090,7 @@ mod tests {
 
             app.handle_engine_event(Event::AutoCompactionStarted);
 
-            assert_eq!(app.status_bar.status(), &Status::Compacting);
-            assert!(!app.input.is_enabled());
+            assert_eq!(app.status, Status::Compacting);
         }
 
         #[test]
@@ -1297,8 +1209,8 @@ mod tests {
             app.session_info.config.model = ModelSpec::resolve("claude-opus-5-5");
             app.chat.push_user_message("live prompt".to_owned());
             app.status_bar.set_usage(Some(usage_snapshot()));
-            app.pending_prompts
-                .extend(["queued-a".to_owned(), "queued-b".to_owned()]);
+            app.queue.push("queued-a".to_owned());
+            app.queue.push("queued-b".to_owned());
             app.handle_engine_event(bash_call_start("pending-1", "ls"));
             app.session_info.session_allow =
                 vec![Rule::parse(PermissionClass::Exec, "ls").unwrap()];
@@ -1340,9 +1252,10 @@ mod tests {
                 0,
                 "pending tool calls must drop on resume",
             );
-            assert!(
-                app.pending_prompts.is_empty(),
-                "queued prompts must drop on resume",
+            assert_eq!(
+                *app.queue.pending(),
+                [] as [&str; 0],
+                "queued prompts must drop on resume"
             );
             assert!(app.dirty);
         }
@@ -1491,10 +1404,8 @@ mod tests {
         #[test]
         fn session_compacted_automatic_keeps_busy_state_and_queued_prompts() {
             let (mut app, mut rx, _event_tx) = test_app(None);
-            app.input.set_enabled(false);
-            app.status_bar.set_status(Status::Compacting);
-            app.pending_prompts
-                .push_back("queued while busy".to_owned());
+            app.set_status(Status::Compacting);
+            app.queue.push("queued while busy".to_owned());
 
             app.handle_engine_event(Event::SessionCompacted {
                 summary: "auto summary".to_owned(),
@@ -1504,9 +1415,8 @@ mod tests {
             });
 
             assert_eq!(app.chat.entry_count(), 1);
-            assert_eq!(app.status_bar.status(), &Status::Compacting);
-            assert!(!app.input.is_enabled());
-            assert_eq!(app.pending_prompts, ["queued while busy"]);
+            assert_eq!(app.status, Status::Compacting);
+            assert_eq!(*app.queue.pending(), ["queued while busy"]);
             assert_eq!(
                 rx.try_recv(),
                 Err(TryRecvError::Empty),
@@ -1519,7 +1429,7 @@ mod tests {
             let (mut app, mut rx, _event_tx) = test_app(None);
 
             app.dispatch_action(Action::Submit("//etc/hosts".to_owned()));
-            let forwarded = rx.recv().await.expect("prompt reaches the engine");
+            let forwarded = rx.try_recv().expect("prompt reaches the engine");
             assert_eq!(forwarded, Op::Prompt("/etc/hosts".to_owned()));
             app.handle_engine_event(Event::AutoCompactionStarted);
 
@@ -1531,8 +1441,7 @@ mod tests {
             });
 
             assert_eq!(app.chat.entry_count(), 2);
-            assert_eq!(app.status_bar.status(), &Status::Compacting);
-            assert!(!app.input.is_enabled());
+            assert_eq!(app.status, Status::Compacting);
             let text = rendered_text(&mut app, 80, 10);
             assert!(text.contains("auto summary"));
             assert!(
@@ -1544,8 +1453,7 @@ mod tests {
         #[test]
         fn session_ready_after_a_roll_keeps_the_queue_waiting() {
             let (mut app, mut rx, _event_tx) = test_app(None);
-            app.pending_prompts
-                .push_back("queued before clear".to_owned());
+            app.queue.push("queued before clear".to_owned());
 
             app.handle_engine_event(Event::SessionRolled {
                 id: "rolled-session".to_owned(),
@@ -1553,7 +1461,7 @@ mod tests {
             });
             app.handle_engine_event(Event::SessionReady);
 
-            assert_eq!(app.pending_prompts, ["queued before clear"]);
+            assert_eq!(*app.queue.pending(), ["queued before clear"]);
             assert_eq!(rx.try_recv().ok(), None);
         }
 
@@ -1562,10 +1470,9 @@ mod tests {
             // Compaction keeps the session, so a queued prompt becomes the first post-compact turn.
             // `/resume` swaps sessions and drops it.
             let (mut app, mut rx, _event_tx) = test_app(None);
-            app.pending_prompts
-                .push_back("queued before compact".to_owned());
+            app.queue.push("queued before compact".to_owned());
             app.dispatch_op(Op::Compact { instructions: None });
-            assert_eq!(rx.recv().await, Some(Op::Compact { instructions: None }));
+            assert_eq!(rx.try_recv().ok(), Some(Op::Compact { instructions: None }));
 
             app.handle_engine_event(Event::SessionCompacted {
                 summary: "s".to_owned(),
@@ -1581,10 +1488,10 @@ mod tests {
 
             assert_eq!(before_ready, Err(TryRecvError::Empty));
             assert_eq!(
-                rx.recv().await,
+                rx.try_recv().ok(),
                 Some(Op::Prompt("queued before compact".to_owned())),
             );
-            assert_eq!(app.status_bar.status(), &Status::Streaming);
+            assert_eq!(app.status, Status::Streaming);
             let text = rendered_text(&mut app, 80, 12);
             let notice_at = text.find("Skipped instruction file CLAUDE.md").unwrap();
             let prompt_at = text.find("queued before compact").unwrap();
@@ -1594,12 +1501,11 @@ mod tests {
         #[tokio::test]
         async fn session_ready_after_a_cancelled_compaction_keeps_the_queue_waiting() {
             let (mut app, mut rx, _event_tx) = test_app(None);
-            app.pending_prompts
-                .push_back("queued before compact".to_owned());
+            app.queue.push("queued before compact".to_owned());
             app.dispatch_op(Op::Compact { instructions: None });
             app.dispatch_op(Op::Interrupt);
-            assert_eq!(rx.recv().await, Some(Op::Compact { instructions: None }));
-            assert_eq!(rx.recv().await, Some(Op::Interrupt));
+            assert_eq!(rx.try_recv().ok(), Some(Op::Compact { instructions: None }));
+            assert_eq!(rx.try_recv().ok(), Some(Op::Interrupt));
 
             app.handle_engine_event(Event::SessionCompacted {
                 summary: "s".to_owned(),
@@ -1610,9 +1516,8 @@ mod tests {
             app.handle_engine_event(Event::SessionReady);
 
             assert_eq!(rx.try_recv(), Err(TryRecvError::Empty));
-            assert_eq!(app.pending_prompts, ["queued before compact"]);
-            assert_eq!(app.status_bar.status(), &Status::Idle);
-            assert!(app.input.is_enabled());
+            assert_eq!(*app.queue.pending(), ["queued before compact"]);
+            assert_eq!(app.status, Status::Idle);
         }
 
         #[tokio::test]
@@ -1622,7 +1527,7 @@ mod tests {
                 target: ResumeTarget::Prefix("1a2b".to_owned()),
             };
             app.dispatch_op(resume.clone());
-            assert_eq!(rx.recv().await, Some(resume));
+            assert_eq!(rx.try_recv().ok(), Some(resume));
 
             app.handle_engine_event(Event::SessionResumed {
                 id: "resumed-session".to_owned(),
@@ -1630,12 +1535,11 @@ mod tests {
                 unarchived: false,
                 history: Vec::new(),
             });
-            let at_swap = (app.status_bar.status().clone(), app.input.is_enabled());
+            let at_swap = app.status.clone();
             app.handle_engine_event(Event::SessionReady);
 
-            assert_eq!(at_swap, (Status::Resuming, false));
-            assert_eq!(app.status_bar.status(), &Status::Idle);
-            assert!(app.input.is_enabled());
+            assert_eq!(at_swap, Status::Resuming);
+            assert_eq!(app.status, Status::Idle);
         }
 
         #[test]
@@ -1759,14 +1663,13 @@ mod tests {
             ] {
                 let (mut app, _rx, _event_tx) = test_app(None);
                 app.session_info.config.auth = None;
-                app.status_bar.set_status(Status::SigningIn);
+                app.set_status(Status::SigningIn);
 
                 app.handle_engine_event(Event::SignedIn { auth });
 
                 assert_eq!(app.session_info.config.auth, Some(auth));
                 assert_eq!(app.chat.last_system_text(), Some(expected));
-                assert_eq!(app.status_bar.status(), &Status::Idle);
-                assert!(app.input.is_enabled());
+                assert_eq!(app.status, Status::Idle);
             }
         }
 
@@ -1774,31 +1677,31 @@ mod tests {
         async fn signed_in_runs_a_prompt_held_while_signing_in() {
             let (mut app, mut rx, _event_tx) = test_app(None);
             app.dispatch_op(Op::Login);
-            rx.recv().await.expect("login forwarded");
+            rx.try_recv().expect("login forwarded");
             app.dispatch_action(Action::Submit("held".to_owned()));
 
             app.handle_engine_event(Event::SignedIn {
                 auth: AuthSource::OxLogin,
             });
 
-            assert_eq!(rx.recv().await, Some(Op::Prompt("held".to_owned())));
-            assert_eq!(app.status_bar.status(), &Status::Streaming);
+            assert_eq!(rx.try_recv().ok(), Some(Op::Prompt("held".to_owned())));
+            assert_eq!(app.status, Status::Streaming);
         }
 
         #[tokio::test]
         async fn signed_in_after_a_lost_cancel_keeps_the_held_prompt_queued() {
             let (mut app, mut rx, _event_tx) = test_app(None);
             app.dispatch_op(Op::Login);
-            rx.recv().await.expect("login forwarded");
+            rx.try_recv().expect("login forwarded");
             app.dispatch_action(Action::Submit("held".to_owned()));
-            app.status_bar.set_status(Status::Cancelling);
+            app.set_status(Status::Cancelling);
 
             app.handle_engine_event(Event::SignedIn {
                 auth: AuthSource::OxLogin,
             });
 
-            assert_eq!(app.status_bar.status(), &Status::Idle);
-            assert_eq!(app.pending_prompts, ["held"]);
+            assert_eq!(app.status, Status::Idle);
+            assert_eq!(*app.queue.pending(), ["held"]);
             assert_eq!(
                 rx.try_recv(),
                 Err(TryRecvError::Empty),
@@ -1810,7 +1713,7 @@ mod tests {
         fn login_restored_names_the_credential_and_keeps_the_turn_running() {
             let (mut app, _rx, _event_tx) = test_app(None);
             app.session_info.config.auth = None;
-            app.status_bar.set_status(Status::Streaming);
+            app.set_status(Status::Streaming);
 
             app.handle_engine_event(Event::LoginRestored {
                 auth: AuthSource::ClaudeCodeLogin,
@@ -1824,7 +1727,7 @@ mod tests {
                 app.chat.last_system_text(),
                 Some("Signed in. Requests now use OAuth (Claude Code login).")
             );
-            assert_eq!(app.status_bar.status(), &Status::Streaming);
+            assert_eq!(app.status, Status::Streaming);
         }
 
         #[test]
@@ -1909,7 +1812,7 @@ mod tests {
                 Some("Session write failed: disk full")
             );
             assert_eq!(app.status_bar.title(), Some("First prompt"));
-            assert!(app.input.is_enabled());
+            assert!(app.status.is_idle());
         }
 
         #[test]

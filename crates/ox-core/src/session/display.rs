@@ -149,6 +149,7 @@ mod tests {
                 session_id: "abc".to_owned(),
                 path: std::path::PathBuf::new(),
                 cwd: String::new(),
+                project_root: None,
                 last_active_at: datetime!(2026-05-08 09:00:00 UTC),
                 title: None,
                 exit: None,

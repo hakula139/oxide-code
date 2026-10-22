@@ -9,7 +9,7 @@ use anyhow::{Context, Result};
 use time::OffsetDateTime;
 use tracing::warn;
 
-use super::{HeaderInfo, JsonlLines, SessionStore, file_session_id, read_header};
+use super::{HeaderInfo, JsonlLines, Project, SessionStore, file_session_id, read_header};
 use crate::session::entry::{Entry, ExitInfo, SessionInfo, TitleInfo};
 
 pub const DEFAULT_SESSION_LIST_LIMIT: usize = 30;
@@ -55,6 +55,8 @@ impl ListPage {
 pub struct SessionWalk {
     paths: vec::IntoIter<(PathBuf, OffsetDateTime)>,
     archived: bool,
+    /// The project a home-project walk keeps, `None` for a walk of every project.
+    project: Option<Project>,
 }
 
 impl SessionWalk {
@@ -68,7 +70,7 @@ impl SessionWalk {
     pub fn next_unless(&mut self, stop: impl Fn() -> bool) -> Option<SessionInfo> {
         while !stop() {
             let (path, modified) = self.paths.next()?;
-            if let Some(info) = read_readable(&path, modified)
+            if let Some(info) = read_readable(&path, modified, self.project.as_ref())
                 && info.archived == self.archived
             {
                 return Some(info);
@@ -95,6 +97,7 @@ impl SessionStore {
         Ok(SessionWalk {
             paths: self.session_paths(scope.all)?.into_iter(),
             archived: scope.archived,
+            project: self.scope_project(scope.all),
         })
     }
 
@@ -122,15 +125,29 @@ impl SessionStore {
     pub(crate) fn list_matching(&self, prefix: &str, all: bool) -> Result<Vec<SessionInfo>> {
         let mut paths = self.session_paths(all)?;
         paths.retain(|(path, _)| file_session_id(path).is_some_and(|id| id.starts_with(prefix)));
-        Ok(read_session_infos(paths.into_iter()).collect())
+        let project = self.scope_project(all);
+        Ok(paths
+            .into_iter()
+            .filter_map(|(path, modified)| read_readable(&path, modified, project.as_ref()))
+            .collect())
     }
 
-    /// Session files paired with their mtimes, most recently active first.
+    /// The project a walk of the home project keeps, or `None` when `all` widens it.
+    fn scope_project(&self, all: bool) -> Option<Project> {
+        (!all).then(|| self.project.clone())
+    }
+
+    /// Session files paired with their mtimes, most recently active first. The home project's
+    /// files are in its own directory and, for older sessions, the launch directory's.
     fn session_paths(&self, all: bool) -> Result<Vec<(PathBuf, OffsetDateTime)>> {
         let mut paths = if all {
             self.collect_paths_all_projects()?
         } else {
-            collect_session_paths(&self.project_dir)?
+            let mut paths = collect_session_paths(&self.project_dir)?;
+            if let Some(cwd_dir) = self.cwd_dir.as_ref().filter(|dir| dir.is_dir()) {
+                paths.append(&mut collect_session_paths(cwd_dir)?);
+            }
+            paths
         };
         sort_paths_recent_first(&mut paths);
         Ok(paths)
@@ -183,18 +200,16 @@ fn sort_paths_recent_first(paths: &mut [(PathBuf, OffsetDateTime)]) {
         .sort_by(|(p1, m1), (p2, m2)| m2.cmp(m1).then_with(|| p2.file_name().cmp(&p1.file_name())));
 }
 
-/// Parses `paths` in order, warn-skipping unreadable files.
-fn read_session_infos(
-    paths: impl Iterator<Item = (PathBuf, OffsetDateTime)>,
-) -> impl Iterator<Item = SessionInfo> {
-    paths.filter_map(|(path, modified)| read_readable(&path, modified))
-}
-
 /// [`read_session_info`], warn-skipping an unreadable file.
-fn read_readable(path: &Path, modified: OffsetDateTime) -> Option<SessionInfo> {
-    read_session_info(path, modified)
+fn read_readable(
+    path: &Path,
+    modified: OffsetDateTime,
+    project: Option<&Project>,
+) -> Option<SessionInfo> {
+    read_session_info(path, modified, project)
         .inspect_err(|e| warn!("skipping unreadable session file {}: {e:#}", path.display()))
         .ok()
+        .flatten()
 }
 
 // ── Session Info Extraction ──
@@ -204,16 +219,25 @@ const TITLE_LINE_PREFIX: &str = r#"{"type":"title""#;
 const ARCHIVE_LINE_PREFIX: &str = r#"{"type":"archive""#;
 const SUMMARY_LINE_PREFIX: &str = r#"{"type":"summary""#;
 
-/// Reads the header, the latest title and summary, and the archive state. `last_active_at` is the
-/// mtime the walk sorted by, so the listed time matches the order.
-fn read_session_info(path: &Path, last_active_at: OffsetDateTime) -> Result<SessionInfo> {
+/// Reads the header, the latest title and summary, and the archive state, or `None` past the
+/// header for a session that `project` does not own. `last_active_at` is the mtime the walk
+/// sorted by, so the listed time matches the order.
+fn read_session_info(
+    path: &Path,
+    last_active_at: OffsetDateTime,
+    project: Option<&Project>,
+) -> Result<Option<SessionInfo>> {
     let file = File::open(path).with_context(|| format!("failed to open {}", path.display()))?;
     let mut lines = JsonlLines::new(BufReader::new(&file));
     let HeaderInfo {
         session_id,
         cwd,
+        project_root,
         git_branch,
     } = read_header(&mut lines, path)?;
+    if project.is_some_and(|project| !project.owns(&cwd, project_root.as_deref())) {
+        return Ok(None);
+    }
 
     let mut title: Option<TitleInfo> = None;
     let mut exit: Option<ExitInfo> = None;
@@ -251,16 +275,17 @@ fn read_session_info(path: &Path, last_active_at: OffsetDateTime) -> Result<Sess
         }
     }
 
-    Ok(SessionInfo {
+    Ok(Some(SessionInfo {
         session_id,
         path: path.to_owned(),
         cwd,
+        project_root,
         last_active_at,
         title,
         exit,
         git_branch,
         archived,
-    })
+    }))
 }
 
 #[cfg(test)]
@@ -269,15 +294,16 @@ mod tests {
     use uuid::Uuid;
 
     use super::*;
-    use crate::session::entry::{CURRENT_VERSION, TitleSource};
+    use crate::session::entry::TitleSource;
     use crate::session::store::local_testing::{
         sample_header, sample_message_entry, sample_summary_entry, sample_title_entry,
         test_session_file, write_newest_corrupt_session,
     };
     use crate::session::store::set_archived_at;
     use crate::session::store::testing::{
-        seed_test_session, set_modified, test_project_dir, test_store,
+        listed_ids, seed_test_session, set_modified, test_header, test_project_dir, test_store,
     };
+    use crate::util::path::testing::HOME_VAR;
 
     /// Builds `count` sessions whose mtimes and file names both ascend in seed order.
     fn seed_n_sessions(store: &SessionStore, count: usize) {
@@ -286,17 +312,7 @@ mod tests {
             let offset = i64::try_from(i).expect("test count fits i64");
             let created_at = datetime!(2026-04-15 10:00:00 UTC) + time::Duration::seconds(offset);
             let mut writer = store
-                .create(
-                    &Entry::Header {
-                        session_id: id.clone(),
-                        cwd: "/work/project".to_owned(),
-                        model: "m".to_owned(),
-                        created_at,
-                        version: CURRENT_VERSION,
-                        git_branch: None,
-                    },
-                    &[],
-                )
+                .create(&test_header(store, &id, created_at), &[])
                 .unwrap();
             writer
                 .append(&[sample_title_entry(&format!("Title {i}"))])
@@ -337,6 +353,114 @@ mod tests {
         }
     }
 
+    mod walk {
+        use super::*;
+        use crate::session::entry::CURRENT_VERSION;
+
+        /// A header that records `cwd` and, from releases that record one, `project_root`.
+        fn header_in(session_id: &str, cwd: &str, project_root: Option<&str>) -> Entry {
+            Entry::Header {
+                session_id: session_id.to_owned(),
+                cwd: cwd.to_owned(),
+                project_root: project_root.map(str::to_owned),
+                model: "m".to_owned(),
+                created_at: datetime!(2026-04-15 10:00:00 UTC),
+                version: CURRENT_VERSION,
+                git_branch: None,
+            }
+        }
+
+        /// Runs `f` with session storage under a fresh `XDG_DATA_HOME`.
+        fn with_isolated_data(f: impl FnOnce()) {
+            let xdg = tempfile::tempdir().unwrap();
+            let home = tempfile::tempdir().unwrap();
+            temp_env::with_vars(
+                [
+                    ("XDG_DATA_HOME", Some(xdg.path().as_os_str())),
+                    (HOME_VAR, Some(home.path().as_os_str())),
+                ],
+                f,
+            );
+        }
+
+        #[test]
+        fn leaves_out_another_project_whose_directory_name_collides() {
+            let dir = tempfile::tempdir().unwrap();
+            let store = test_store(dir.path());
+            seed_test_session(
+                &store,
+                "home",
+                None,
+                None,
+                datetime!(2026-04-15 10:00:00 UTC),
+            );
+            let spaced = "/work/test project";
+            for (id, project_root) in [("recorded", Some(spaced)), ("older", None)] {
+                store
+                    .create(&header_in(id, spaced, project_root), &[])
+                    .unwrap();
+            }
+
+            let mut all: Vec<_> = store
+                .walk(ListScope {
+                    all: true,
+                    archived: false,
+                })
+                .unwrap()
+                .map(|info| info.session_id)
+                .collect();
+            all.sort_unstable();
+
+            assert_eq!(listed_ids(&store, false), ["home"]);
+            assert_eq!(all, ["home", "older", "recorded"]);
+        }
+
+        #[test]
+        fn includes_older_sessions_saved_under_the_launch_directory() {
+            with_isolated_data(|| {
+                let (cwd, root) = (Path::new("/repo/sub"), Path::new("/repo"));
+                let legacy = SessionStore::open(cwd, cwd).unwrap();
+                let older = legacy
+                    .create(&header_in("older", "/repo/sub", None), &[])
+                    .unwrap();
+                set_modified(older.path(), datetime!(2026-04-15 10:00:00 UTC));
+                let store = SessionStore::open(cwd, root).unwrap();
+                seed_test_session(
+                    &store,
+                    "newer",
+                    None,
+                    None,
+                    datetime!(2026-04-16 10:00:00 UTC),
+                );
+
+                assert_eq!(listed_ids(&store, false), ["newer", "older"]);
+                assert_eq!(
+                    listed_ids(&SessionStore::open(root, root).unwrap(), false),
+                    ["newer"],
+                    "the root alone has no launch directory to read older sessions from",
+                );
+            });
+        }
+
+        #[test]
+        fn lists_a_subdirectory_without_older_sessions() {
+            with_isolated_data(|| {
+                let root = Path::new("/repo");
+                seed_test_session(
+                    &SessionStore::open(root, root).unwrap(),
+                    "at-root",
+                    None,
+                    None,
+                    datetime!(2026-04-15 10:00:00 UTC),
+                );
+
+                let store = SessionStore::open(Path::new("/repo/sub"), root).unwrap();
+
+                assert_eq!(listed_ids(&store, false), ["at-root"]);
+            });
+        }
+    }
+
     mod list {
         use super::*;
 
@@ -347,14 +471,7 @@ mod tests {
 
             let mut wa = store
                 .create(
-                    &Entry::Header {
-                        session_id: "aaa".to_owned(),
-                        cwd: "/a".to_owned(),
-                        model: "m".to_owned(),
-                        created_at: datetime!(2026-04-15 10:00:00 UTC),
-                        version: CURRENT_VERSION,
-                        git_branch: None,
-                    },
+                    &test_header(&store, "aaa", datetime!(2026-04-15 10:00:00 UTC)),
                     &[],
                 )
                 .unwrap();
@@ -364,14 +481,7 @@ mod tests {
 
             let mut wb = store
                 .create(
-                    &Entry::Header {
-                        session_id: "bbb".to_owned(),
-                        cwd: "/b".to_owned(),
-                        model: "m".to_owned(),
-                        created_at: datetime!(2026-04-16 12:00:00 UTC),
-                        version: CURRENT_VERSION,
-                        git_branch: None,
-                    },
+                    &test_header(&store, "bbb", datetime!(2026-04-16 12:00:00 UTC)),
                     &[],
                 )
                 .unwrap();
@@ -394,14 +504,7 @@ mod tests {
 
             let mut w_old = store
                 .create(
-                    &Entry::Header {
-                        session_id: "aaa-old-header".to_owned(),
-                        cwd: "/a".to_owned(),
-                        model: "m".to_owned(),
-                        created_at: datetime!(2026-01-01 10:00:00 UTC),
-                        version: CURRENT_VERSION,
-                        git_branch: None,
-                    },
+                    &test_header(&store, "aaa-old-header", datetime!(2026-01-01 10:00:00 UTC)),
                     &[],
                 )
                 .unwrap();
@@ -410,14 +513,7 @@ mod tests {
 
             let mut w_new = store
                 .create(
-                    &Entry::Header {
-                        session_id: "zzz-new-header".to_owned(),
-                        cwd: "/z".to_owned(),
-                        model: "m".to_owned(),
-                        created_at: datetime!(2026-04-17 10:00:00 UTC),
-                        version: CURRENT_VERSION,
-                        git_branch: None,
-                    },
+                    &test_header(&store, "zzz-new-header", datetime!(2026-04-17 10:00:00 UTC)),
                     &[],
                 )
                 .unwrap();
@@ -533,7 +629,14 @@ mod tests {
             let sibling_store =
                 SessionStore::open_at(dir.path().to_path_buf(), "other-project").unwrap();
             let _foreign = sibling_store
-                .create(&sample_header("foreign"), &[])
+                .create(
+                    &test_header(
+                        &sibling_store,
+                        "foreign",
+                        datetime!(2026-04-16 12:00:00 UTC),
+                    ),
+                    &[],
+                )
                 .unwrap();
             drop(sibling_store);
 
@@ -597,7 +700,14 @@ mod tests {
             let foreign_store =
                 SessionStore::open_at(dir.path().to_path_buf(), "other-project").unwrap();
             let _foreign = foreign_store
-                .create(&sample_header("foreign"), &[])
+                .create(
+                    &test_header(
+                        &foreign_store,
+                        "foreign",
+                        datetime!(2026-04-16 12:00:00 UTC),
+                    ),
+                    &[],
+                )
                 .unwrap();
             drop(foreign_store);
 
@@ -762,6 +872,37 @@ mod tests {
 
     mod list_matching {
         use super::*;
+
+        #[test]
+        fn leaves_out_another_project_whose_directory_name_collides() {
+            let dir = tempfile::tempdir().unwrap();
+            let store = test_store(dir.path());
+            seed_test_session(
+                &store,
+                "abcd-home",
+                None,
+                None,
+                datetime!(2026-04-15 10:00:00 UTC),
+            );
+            let mut foreign = sample_header("abcd-coll");
+            if let Entry::Header {
+                cwd, project_root, ..
+            } = &mut foreign
+            {
+                *cwd = "/work/test project".to_owned();
+                *project_root = Some(cwd.clone());
+            }
+            store.create(&foreign, &[]).unwrap();
+
+            let ids: Vec<_> = store
+                .list_matching("abcd", false)
+                .unwrap()
+                .into_iter()
+                .map(|s| s.session_id)
+                .collect();
+
+            assert_eq!(ids, ["abcd-home"]);
+        }
 
         #[test]
         fn matches_the_id_part_of_file_names_newest_first() {

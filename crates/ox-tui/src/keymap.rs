@@ -7,7 +7,7 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 // ── KeyChord ──
 
-/// Ctrl+C, shared so the modal stack, selection copy, and input agree on which keys count.
+/// Ctrl+C, shared so the modal stack, selection copy, and the app agree on which keys count.
 pub(crate) const CTRL_C: KeyChord = KeyChord::ctrl('c');
 
 /// Ctrl+D, which quits from an empty input.

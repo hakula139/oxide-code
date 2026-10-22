@@ -1,6 +1,6 @@
 # Welcome Screen
 
-Empty-state surface that paints when the chat has no blocks: identity, session environment, and a small starter slash-command list.
+The welcome screen paints in the chat region while the chat has no blocks, showing the app's identity, the session environment, and a short list of starter slash commands.
 
 ## Goals
 
