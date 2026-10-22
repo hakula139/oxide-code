@@ -30,10 +30,6 @@ impl SlashCommand for EffortCmd {
         SlashKind::Mutating
     }
 
-    fn echoes_input(&self, args: &str) -> bool {
-        !args.is_empty()
-    }
-
     fn usage(&self) -> Option<&'static str> {
         Some("[<level>]")
     }
@@ -46,6 +42,10 @@ impl SlashCommand for EffortCmd {
                 description: Cow::Borrowed(level.description()),
             })
             .collect()
+    }
+
+    fn echoes_input(&self, args: &str) -> bool {
+        !args.is_empty()
     }
 
     fn execute(&self, arg: &str, ctx: &SlashContext<'_>) -> Result<SlashOutcome, String> {
@@ -65,6 +65,8 @@ impl SlashCommand for EffortCmd {
     }
 }
 
+// ── Helpers ──
+
 fn no_effort_tier_msg(model: &ModelSpec) -> String {
     format!(
         "{} has no effort tier. \
@@ -80,13 +82,6 @@ mod tests {
     use super::*;
     use crate::slash::registry::testing::run_execute;
     use crate::slash::testing::test_session_info;
-
-    #[test]
-    fn name_and_metadata_match_built_ins_contract() {
-        assert_eq!(EffortCmd.name(), "effort");
-        assert_ne!(EffortCmd.description(), "");
-        assert_eq!(EffortCmd.usage(), Some("[<level>]"));
-    }
 
     mod classify {
         use super::*;

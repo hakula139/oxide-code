@@ -32,6 +32,7 @@ ENOENT
 ENOTDIR
 envrc
 EPERM
+esac
 esbenp
 ESRCH
 fcntl

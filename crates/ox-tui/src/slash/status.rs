@@ -28,6 +28,8 @@ impl SlashCommand for StatusCmd {
     }
 }
 
+// ── Helpers ──
+
 fn build_modal(info: &LiveSessionInfo) -> KvOverview {
     let model = &info.config.model;
     let model = format!("{} ({})", model.display_name(), model.id());
@@ -92,22 +94,16 @@ mod tests {
 
     use super::*;
     use crate::modal::Modal;
-    use crate::modal::testing::rendered_text;
+    use crate::modal::testing::{render_rows, rendered_text};
+    use crate::slash::registry::testing::run_execute;
     use crate::slash::testing::test_session_info;
-
-    #[test]
-    fn name_and_metadata_match_built_ins_contract() {
-        assert_eq!(StatusCmd.name(), "status");
-        assert_ne!(StatusCmd.description(), "");
-    }
 
     mod execute {
         use super::*;
 
         #[test]
         fn opens_the_overview_modal() {
-            let info = test_session_info();
-            let outcome = StatusCmd.execute("", &SlashContext::new(&info, None));
+            let outcome = run_execute(&StatusCmd, "");
             outcome.unwrap().into_modal();
         }
     }
@@ -116,26 +112,24 @@ mod tests {
         use super::*;
 
         #[test]
-        fn renders_one_row_per_session_descriptor() {
-            let info = test_session_info();
-            let m = build_modal(&info);
-            // Title + blank + 10 rows + blank + footer = 14.
-            assert_eq!(m.height(80, u16::MAX), 14);
+        fn lists_each_session_descriptor() {
+            let modal = build_modal(&test_session_info());
+
+            insta::assert_debug_snapshot!(render_rows(&modal, 80, modal.height(80, u16::MAX)));
         }
 
         #[test]
         fn lists_session_rules_under_their_own_heading() {
             let mut info = test_session_info();
-            let without = rendered_text(&build_modal(&info), 80);
-            assert!(!without.contains("Session Rules"), "{without}");
-
             info.session_allow = [
                 (PermissionClass::Exec, "cargo test *"),
                 (PermissionClass::Edit, "./out/**"),
             ]
             .map(|(class, pattern)| Rule::parse(class, pattern).unwrap())
             .to_vec();
+
             let rendered = rendered_text(&build_modal(&info), 80);
+
             let rules: Vec<Vec<&str>> = rendered
                 .lines()
                 .skip_while(|line| !line.contains("Session Rules"))
@@ -157,10 +151,8 @@ mod tests {
         #[test]
         fn lists_background_shells_with_their_state() {
             let mut info = test_session_info();
-            let without = rendered_text(&build_modal(&info), 80);
-            assert!(!without.contains("Background Shells"), "{without}");
-
             info.background_shells = shells_in_each_state();
+
             let rendered = rendered_text(&build_modal(&info), 80);
 
             let shells: Vec<&str> = rendered
@@ -181,26 +173,17 @@ mod tests {
         }
 
         #[test]
-        fn renders_the_auto_compaction_threshold_until_paused() {
+        fn shows_the_auto_compaction_pause_and_how_to_resume() {
             let mut info = test_session_info();
-            let auto_compaction_row = |info: &LiveSessionInfo| {
-                let rendered = rendered_text(&build_modal(info), 80);
-                rendered
-                    .lines()
-                    .find(|line| line.contains("Auto Compaction"))
-                    .map(|line| line.trim().to_owned())
-            };
-
-            let threshold = auto_compaction_row(&info);
             info.auto_compaction_paused_after = Some(3);
-            let paused = auto_compaction_row(&info);
 
+            let rendered = rendered_text(&build_modal(&info), 80);
+
+            let row = rendered
+                .lines()
+                .find(|line| line.contains("Auto Compaction"));
             assert_eq!(
-                threshold.as_deref(),
-                Some("Auto Compaction    at 155000 tokens"),
-            );
-            assert_eq!(
-                paused.as_deref(),
+                row.map(str::trim),
                 Some(
                     "Auto Compaction    paused after 3 failures in a row (run `/compact` to resume)"
                 ),

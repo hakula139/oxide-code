@@ -2,6 +2,8 @@
 
 use std::fmt::Write as _;
 
+use ox_core::command;
+
 use super::context::SlashContext;
 use super::registry::{BUILT_INS, SlashCommand, SlashOutcome};
 use crate::modal::kv_overview::{KvOverview, KvSection};
@@ -28,6 +30,8 @@ impl SlashCommand for HelpCmd {
     }
 }
 
+// ── Helpers ──
+
 fn build_modal() -> KvOverview {
     let rows = BUILT_INS
         .iter()
@@ -39,8 +43,9 @@ fn build_modal() -> KvOverview {
 /// `/name (aliases) <usage>`, where the aliases and usage are optional.
 fn display_label(cmd: &dyn SlashCommand) -> String {
     let mut out = format!("/{}", cmd.name());
-    if !cmd.aliases().is_empty() {
-        _ = write!(out, " ({})", cmd.aliases().join(", "));
+    let aliases = command::aliases(cmd.name());
+    if !aliases.is_empty() {
+        _ = write!(out, " ({})", aliases.join(", "));
     }
     if let Some(usage) = cmd.usage() {
         out.push(' ');
@@ -53,24 +58,15 @@ fn display_label(cmd: &dyn SlashCommand) -> String {
 mod tests {
     use super::*;
     use crate::modal::Modal;
-    use crate::slash::clear::ClearCmd;
-    use crate::slash::context::SlashContext;
-    use crate::slash::model::ModelCmd;
-    use crate::slash::resume::ResumeCmd;
-
-    #[test]
-    fn name_and_metadata_match_built_ins_contract() {
-        assert_eq!(HelpCmd.name(), "help");
-        assert_ne!(HelpCmd.description(), "");
-    }
+    use crate::modal::testing::render_rows;
+    use crate::slash::registry::testing::run_execute;
 
     mod execute {
         use super::*;
 
         #[test]
         fn opens_the_overview_modal() {
-            let info = crate::slash::testing::test_session_info();
-            let outcome = HelpCmd.execute("", &SlashContext::new(&info, None));
+            let outcome = run_execute(&HelpCmd, "");
             outcome.unwrap().into_modal();
         }
     }
@@ -79,26 +75,10 @@ mod tests {
         use super::*;
 
         #[test]
-        fn renders_one_row_per_built_in() {
-            let m = build_modal();
-            // title + blank + N rows + blank + footer.
-            let expected = u16::try_from(BUILT_INS.len() + 4).unwrap();
-            assert_eq!(m.height(80, u16::MAX), expected);
-        }
-    }
+        fn lists_every_built_in_with_its_aliases_usage_and_description() {
+            let modal = build_modal();
 
-    mod display_label {
-        use super::*;
-
-        #[test]
-        fn combines_name_aliases_and_usage() {
-            assert_eq!(display_label(&HelpCmd), "/help");
-            assert_eq!(display_label(&ClearCmd), "/clear (new, reset)");
-            assert_eq!(display_label(&ModelCmd), "/model [<id>]");
-            assert_eq!(
-                display_label(&ResumeCmd),
-                "/resume (continue) [<id-prefix>]"
-            );
+            insta::assert_debug_snapshot!(render_rows(&modal, 100, modal.height(100, u16::MAX)));
         }
     }
 }

@@ -9,10 +9,11 @@ pub(crate) use view::testing;
 pub(crate) use view::{DiffRow, WorkingTreeDiff};
 
 use std::path::{Path, PathBuf};
-use std::process::{Output, Stdio};
+use std::process::Output;
 
 use anyhow::{Result, anyhow, bail};
-use tokio::process::Command;
+
+use ox_core::util::git::output_async;
 
 use super::context::SlashContext;
 use super::registry::{ChatOutput, SlashCommand, SlashOutcome};
@@ -130,16 +131,11 @@ async fn run_git_in(root: &Path, args: &[&str]) -> Result<String> {
     Ok(String::from_utf8_lossy(&out.stdout).into_owned())
 }
 
-/// Runs git without its optional locks, so a `/diff` beside the user's own git commands never
-/// writes the index. Dropping the future kills the child.
+/// Runs git through [`output_async`] without its optional locks, so a `/diff` beside the user's own
+/// git commands never writes the index. Dropping the future kills the child.
 async fn git_output(root: &Path, args: &[&str]) -> Result<Output> {
-    Command::new("git")
-        .arg("--no-optional-locks")
-        .args(args)
-        .current_dir(root)
-        .stdin(Stdio::null())
-        .kill_on_drop(true)
-        .output()
+    let args_without_locks = [&["--no-optional-locks"], args].concat();
+    output_async("git", &args_without_locks, root)
         .await
         .map_err(|e| {
             anyhow!(
@@ -200,12 +196,6 @@ mod tests {
         std::fs::write(repo.join(name), content).unwrap();
         git_setup(repo, &["add", name]);
         git_setup(repo, &["commit", "--quiet", "-m", "init"]);
-    }
-
-    #[test]
-    fn name_and_metadata_match_built_ins_contract() {
-        assert_eq!(DiffCmd.name(), "diff");
-        assert_ne!(DiffCmd.description(), "");
     }
 
     mod execute {
@@ -399,13 +389,13 @@ mod tests {
         use super::*;
 
         #[tokio::test]
-        async fn is_false_in_fresh_repo_with_no_commits() {
+        async fn finds_no_head_in_a_fresh_repo() {
             let (_dir, repo) = fresh_repo();
             assert!(!with_isolated_git_env_async(has_head(&repo)).await);
         }
 
         #[tokio::test]
-        async fn is_true_after_first_commit() {
+        async fn finds_the_head_after_the_first_commit() {
             let (_dir, repo) = fresh_repo();
             commit_file(&repo, "a.txt", "hello\n");
             assert!(with_isolated_git_env_async(has_head(&repo)).await);

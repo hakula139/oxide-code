@@ -6,11 +6,12 @@
 use std::collections::HashSet;
 use std::io;
 use std::path::{Path, PathBuf};
-use std::process::Output;
+use std::process::{Output, Stdio};
 
 use serde::Deserialize;
 use tracing::debug;
 
+use crate::config::auth::secret_env_vars;
 use crate::util::text::truncate_to_width;
 
 // ── Repository ──
@@ -219,17 +220,26 @@ fn summarize_checks(mut checks: Vec<CheckView>) -> Option<Checks> {
 
 // ── Probes ──
 
-/// Runs `program` with `args` in `cwd` on the tokio runtime and returns the output of a
-/// successful run, logging any other outcome under the `name` probe.
-/// Dropping the future kills the child process.
-async fn probe(name: &str, cwd: &Path, program: &str, args: &[&str]) -> Option<Output> {
-    let result = tokio::process::Command::new(program)
+/// Runs the `git` or `gh` `program` with `args` in `cwd` on the tokio runtime, with no stdin and
+/// without ox's [`secret_env_vars`], killing the child if the caller drops the future. Git runs
+/// commands a repository's own config names, so it must not hand them ox's credentials.
+pub async fn output_async(program: &str, args: &[&str], cwd: &Path) -> io::Result<Output> {
+    let mut command = tokio::process::Command::new(program);
+    command
         .args(args)
         .current_dir(cwd)
-        .kill_on_drop(true)
-        .output()
-        .await;
-    check_output(name, cwd, result)
+        .stdin(Stdio::null())
+        .kill_on_drop(true);
+    for var in secret_env_vars() {
+        command.env_remove(var);
+    }
+    command.output().await
+}
+
+/// Runs `program` with `args` in `cwd` through [`output_async`] and returns the output of a
+/// successful run, logging any other outcome under the `name` probe.
+async fn probe(name: &str, cwd: &Path, program: &str, args: &[&str]) -> Option<Output> {
+    check_output(name, cwd, output_async(program, args, cwd).await)
 }
 
 /// Logs a spawn failure or non-zero exit and returns the successful output or `None`.
@@ -651,6 +661,42 @@ mod tests {
             assert_eq!(parse_pull_request(br#"{"number":86,"url":""}"#), None);
             assert_eq!(parse_pull_request(br#"{"number":-1,"url":"x"}"#), None);
             assert_eq!(parse_pull_request(br#"{"number":86,"url":42}"#), None);
+        }
+    }
+
+    mod output_async {
+        use indoc::indoc;
+
+        use super::*;
+
+        #[tokio::test]
+        async fn withholds_the_secrets_ox_authenticates_with() {
+            let dir = tempfile::tempdir().unwrap();
+            let names: Vec<_> = secret_env_vars().chain(["OX_TEST_INHERITED"]).collect();
+            let vars: Vec<_> = names.iter().map(|&var| (var, Some("secret"))).collect();
+            let script = names
+                .iter()
+                .map(|var| format!("echo {var}=${{{var}-unset}}"))
+                .collect::<Vec<_>>()
+                .join("; ");
+            // A shell alias runs the way a command a repository's config names would.
+            let alias = format!("alias.print-env=!{script}");
+            let args = ["-c", &alias, "print-env"];
+
+            let output = temp_env::async_with_vars(vars, output_async("git", &args, dir.path()))
+                .await
+                .unwrap();
+
+            assert_eq!(
+                String::from_utf8(output.stdout).unwrap(),
+                indoc! {"
+                    ANTHROPIC_AUTH_TOKEN=unset
+                    ANTHROPIC_API_KEY=unset
+                    CLAUDE_CODE_OAUTH_TOKEN=unset
+                    ANTHROPIC_CUSTOM_HEADERS=unset
+                    OX_TEST_INHERITED=secret
+                "},
+            );
         }
     }
 

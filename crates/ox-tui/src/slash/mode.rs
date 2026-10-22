@@ -41,10 +41,6 @@ impl SlashCommand for ModeCmd {
         }
     }
 
-    fn echoes_input(&self, args: &str) -> bool {
-        !args.is_empty()
-    }
-
     fn usage(&self) -> Option<&'static str> {
         Some("[<mode>]")
     }
@@ -57,6 +53,10 @@ impl SlashCommand for ModeCmd {
                 description: Cow::Borrowed(mode.description()),
             })
             .collect()
+    }
+
+    fn echoes_input(&self, args: &str) -> bool {
+        !args.is_empty()
     }
 
     fn execute(&self, args: &str, ctx: &SlashContext<'_>) -> Result<SlashOutcome, String> {
@@ -154,13 +154,6 @@ mod tests {
     use super::*;
     use crate::modal::testing::render_rows;
     use crate::slash::registry::testing::run_execute;
-
-    #[test]
-    fn name_and_metadata_match_built_ins_contract() {
-        assert_eq!(ModeCmd.name(), "mode");
-        assert_ne!(ModeCmd.description(), "");
-        assert_eq!(ModeCmd.usage(), Some("[<mode>]"));
-    }
 
     mod classify {
         use super::*;
