@@ -60,7 +60,7 @@ App owns `ModalStack` and runs the key gate first inside `handle_crossterm_event
 
 - **`/theme` picker**: `ThemePicker` wraps `ListPicker<ThemeRow>` over the curated built-in roster and emits `Action::PreviewTheme` on every cursor move so the App repaints the chat in the candidate palette without committing. Esc snaps back via the cached `preview_theme_snapshot`, while Enter promotes the preview to an `Action::SwapTheme` swap. Numeric `1`–`9` shortcuts jump to a row to match the visual ladder.
 
-- **`/init` picker**: `InitPicker` wraps `ListPicker<FileRow>` over `AGENTS.md` and `CLAUDE.md`, each described by the other tools that read it. Enter forwards the prompt that creates the highlighted file, and numeric `1` / `2` shortcuts jump to a row. [init.md](init.md) covers when it opens.
+- **`/init` picker**: `InitPicker` wraps `ListPicker<FileRow>` over `AGENTS.md` and `CLAUDE.md`, each described by the other tools that read it. Enter sends the prompt that creates the highlighted file, and numeric `1` / `2` shortcuts jump to a row. [init.md](init.md) covers when it opens.
 
 - **`/rename` editor**: `RenameModal` is a single-line text editor pre-filled with the current title, which takes input up to the 80-column title cap. Render is a fixed five-row stack: title, gap, prompt + buffer, gap, footer hint. Editing runs through the shared `LineEditor`, so the cursor moves within the title, pastes land as one line, and a title wider than the row scrolls to keep the cursor in view. Enter on a non-empty trimmed buffer submits `Op::Rename` through `command::rename`, the typed form's parser, and blank Enter is a silent no-op so the user can keep typing.
 

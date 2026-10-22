@@ -14,6 +14,7 @@ use tracing::debug;
 use ox_core::command::{self, Parsed};
 use ox_core::protocol::Op;
 
+use super::queue::QueuedPrompt;
 use super::{App, EXIT_WINDOW};
 use crate::action::{APP_KEYMAP, Action, AppAction};
 use crate::components::input::InputOutcome;
@@ -225,22 +226,27 @@ impl App {
         }
     }
 
-    /// Routes an input, slash-command, or modal action. TUI-only actions apply here, and an op goes
-    /// through [`Self::dispatch_op`].
+    /// Routes an input, slash-command, or modal action.
+    /// A submit runs as a slash command or a prompt, a built prompt starts a turn, an op goes
+    /// through [`Self::dispatch_op`], and the rest apply to TUI state.
     pub(crate) fn dispatch_action(&mut self, action: Action) {
         match action {
             Action::Submit(text) => self.handle_submit_prompt(&text),
             Action::Op(op) => self.dispatch_op(op),
+            Action::SlashPrompt { line, prompt } => {
+                self.start_turn(QueuedPrompt::slash(line, prompt));
+            }
             Action::CycleMode => self.cycle_mode(),
             Action::PreviewTheme(theme) => self.preview_theme(theme),
             Action::SwapTheme(theme) => self.swap_theme(theme),
         }
     }
 
-    /// Applies the op's local state change, then sends it to the engine. A prompt starts a turn.
+    /// Applies the op's local state change, then sends it to the engine.
+    /// Prompts reach the engine only through the prompt queue, by [`Self::start_turn`] and
+    /// [`Self::forward_queued_prompts`].
     pub(super) fn dispatch_op(&mut self, op: Op) {
         match &op {
-            Op::Prompt(_) => return self.start_turn(op),
             Op::Interrupt => self.set_status(Status::Cancelling),
             Op::Shutdown => self.should_quit = true,
             Op::Clear => {
@@ -259,7 +265,11 @@ impl App {
                 self.set_status(Status::Archiving);
             }
             Op::SetMode(mode) => self.requested_mode = *mode,
-            Op::Queue(_) | Op::Resolve { .. } | Op::SetModel(_) | Op::Rename { .. } => {}
+            Op::Prompt(_)
+            | Op::Queue(_)
+            | Op::Resolve { .. }
+            | Op::SetModel(_)
+            | Op::Rename { .. } => {}
         }
         self.send_op(op);
     }
@@ -379,18 +389,18 @@ impl App {
             ));
             return;
         }
-        if let Some(action) = self.run_slash(&parsed) {
-            if echoes && matches!(action, Action::Op(Op::Prompt(_))) {
-                self.queue.set_active(text.to_owned());
-            }
+        if let Some(action) = self.run_slash(&parsed, text) {
             self.dispatch_action(action);
         }
     }
 
-    /// Starts a turn, then hands it the queued prompts so they splice in at its round boundaries.
-    pub(super) fn start_turn(&mut self, prompt: Op) {
+    /// Starts a turn running `prompt` as the active prompt, then hands it the queued prompts so
+    /// they splice in at its round boundaries.
+    pub(super) fn start_turn(&mut self, prompt: QueuedPrompt) {
+        let text = prompt.prompt().to_owned();
+        self.queue.set_active(prompt);
         self.set_status(Status::Streaming);
-        self.send_op(prompt);
+        self.send_op(Op::Prompt(text));
         self.forward_queued_prompts();
     }
 
@@ -423,18 +433,31 @@ impl App {
         }
     }
 
-    /// Runs `parsed` and applies its outcome, returning the action it asks the caller to route.
-    fn run_slash(&mut self, parsed: &Parsed) -> Option<Action> {
+    /// Runs `parsed`, the command the user typed as `line`, and applies its outcome, returning the
+    /// action it asks the caller to route.
+    fn run_slash(&mut self, parsed: &Parsed, line: &str) -> Option<Action> {
         let ctx = SlashContext::new(&self.session_info, self.status_bar.title());
         let outcome = slash::dispatch(parsed, &ctx);
-        self.apply_slash_outcome(outcome)
+        self.apply_slash_outcome(outcome, line)
     }
 
-    /// Shows a slash command's chat output or modal, or starts its background task, returning a
-    /// forwarded action unapplied. Must run inside a tokio runtime.
-    fn apply_slash_outcome(&mut self, outcome: Result<SlashOutcome, String>) -> Option<Action> {
+    /// Shows a slash command's chat output or modal, or starts its background task.
+    /// Returns a forwarded action, or the [`Action::SlashPrompt`] that runs a built prompt under the
+    /// typed `line`, unapplied.
+    /// Must run inside a tokio runtime.
+    fn apply_slash_outcome(
+        &mut self,
+        outcome: Result<SlashOutcome, String>,
+        line: &str,
+    ) -> Option<Action> {
         match outcome {
             Ok(SlashOutcome::Forward(action)) => return Some(action),
+            Ok(SlashOutcome::Prompt(prompt)) => {
+                return Some(Action::SlashPrompt {
+                    line: line.to_owned(),
+                    prompt,
+                });
+            }
             Ok(SlashOutcome::Modal(modal)) => self.modals.push(modal),
             Ok(SlashOutcome::SystemMessage(text)) => self.chat.push_system_message(text),
             Ok(SlashOutcome::Background(task)) => _ = self.slash_tasks.spawn(task),
@@ -1266,7 +1289,7 @@ mod tests {
                 Op::Prompt(s) if s == "/etc/hosts",
             ));
             assert_eq!(
-                app.queue.active(),
+                app.queue.active().map(QueuedPrompt::line),
                 Some("//etc/hosts"),
                 "kept as typed, so a failed auto-compaction hands back the escape",
             );
@@ -1446,6 +1469,11 @@ mod tests {
 
             assert_eq!(app.chat.entry_count(), 1, "only the typed `/init` line");
             assert_eq!(app.status, Status::Streaming);
+            assert_eq!(
+                app.queue.active().map(QueuedPrompt::line),
+                Some("/init"),
+                "the line auto-compaction replays"
+            );
             let forwarded = rx.try_recv().expect("synthesized prompt forwarded");
             assert!(
                 matches!(
@@ -1475,6 +1503,11 @@ mod tests {
 
             assert!(!app.modals.is_active());
             assert_eq!(app.status, Status::Streaming);
+            assert_eq!(
+                app.queue.active().map(QueuedPrompt::line),
+                Some("/init"),
+                "the line auto-compaction replays"
+            );
             let forwarded = rx.try_recv().expect("create prompt forwarded");
             assert!(
                 matches!(&forwarded, Op::Prompt(body) if body.contains("create `CLAUDE.md`")),
@@ -2038,7 +2071,7 @@ mod tests {
                 forwarded(),
                 [Op::Prompt("/tmp".to_owned()), Op::Queue("new".to_owned())],
             );
-            assert_eq!(app.queue.active(), Some("//tmp"));
+            assert_eq!(app.queue.active().map(QueuedPrompt::line), Some("//tmp"));
         }
     }
 
@@ -2101,7 +2134,7 @@ mod tests {
         use super::*;
 
         #[test]
-        fn shows_output_and_hands_back_forwards_whether_idle_or_busy() {
+        fn shows_output_and_hands_back_forwards_and_prompts_whether_idle_or_busy() {
             for busy in [false, true] {
                 let (mut app, mut rx, _event_tx) = test_app(None);
                 if busy {
@@ -2109,25 +2142,37 @@ mod tests {
                 }
 
                 let clean = SlashOutcome::SystemMessage("Working tree clean".to_owned());
-                assert_eq!(app.apply_slash_outcome(Ok(clean)), None);
+                assert_eq!(app.apply_slash_outcome(Ok(clean), "/diff"), None);
                 assert_eq!(app.chat.last_system_text(), Some("Working tree clean"));
 
-                assert_eq!(app.apply_slash_outcome(Err("/diff: boom".to_owned())), None);
+                assert_eq!(
+                    app.apply_slash_outcome(Err("/diff: boom".to_owned()), "/diff"),
+                    None
+                );
                 assert_eq!(app.chat.last_error_text(), Some("/diff: boom"));
 
                 let modal = SlashOutcome::Modal(Box::new(FakeModal::new("picker")));
-                assert_eq!(app.apply_slash_outcome(Ok(modal)), None);
+                assert_eq!(app.apply_slash_outcome(Ok(modal), "/theme"), None);
                 assert!(app.modals.is_active());
 
                 let forward = SlashOutcome::Forward(Action::Op(Op::Clear));
                 assert_eq!(
-                    app.apply_slash_outcome(Ok(forward)),
+                    app.apply_slash_outcome(Ok(forward), "/clear"),
                     Some(Action::Op(Op::Clear)),
+                );
+
+                let prompt = SlashOutcome::Prompt("Create AGENTS.md".to_owned());
+                assert_eq!(
+                    app.apply_slash_outcome(Ok(prompt), "/init AGENTS.md"),
+                    Some(Action::SlashPrompt {
+                        line: "/init AGENTS.md".to_owned(),
+                        prompt: "Create AGENTS.md".to_owned(),
+                    }),
                 );
                 assert_eq!(
                     rx.try_recv(),
                     Err(TryRecvError::Empty),
-                    "the caller routes a forwarded action"
+                    "the caller routes the returned actions"
                 );
             }
         }
@@ -2140,7 +2185,7 @@ mod tests {
                 Ok(ChatOutput::SystemMessage(rx.await.unwrap()))
             }));
 
-            assert_eq!(app.apply_slash_outcome(Ok(task)), None);
+            assert_eq!(app.apply_slash_outcome(Ok(task), "/diff"), None);
             assert_eq!(app.chat.entry_count(), 0);
 
             tx.send("done".to_owned()).unwrap();

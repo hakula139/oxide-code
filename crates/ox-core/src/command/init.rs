@@ -23,18 +23,18 @@ pub fn no_file_sentence() -> String {
 /// [`resolve`] for a frontend without a picker, where a bare `/init` in a project with no
 /// instruction file errors naming both files.
 pub(super) fn parse(args: &str, root: &Path) -> Result<Op, String> {
-    resolve(args, root)?.ok_or_else(|| {
+    resolve(args, root)?.map(Op::Prompt).ok_or_else(|| {
         let no_file = no_file_sentence();
         let [(first, _), (second, _)] = FILE_CHOICES;
         format!("{no_file} Run `/init {first}` or `/init {second}` to create one.")
     })
 }
 
-/// The op `/init [<file>]` runs at the project `root`: the create prompt for `<file>` when the
+/// The prompt `/init [<file>]` sends at the project `root`: the create prompt for `<file>` when the
 /// project has no instruction file, or else the update prompt, which a named `<file>` gets only
 /// when one of the existing files has that name. `<file>` matches ignoring ASCII case. `None` for
 /// a bare `/init` in a project with no instruction file, which must first pick the file to create.
-pub fn resolve(args: &str, root: &Path) -> Result<Option<Op>, String> {
+pub fn resolve(args: &str, root: &Path) -> Result<Option<String>, String> {
     let file = match args.trim() {
         "" => None,
         arg => Some(file_choice(arg)?),
@@ -48,7 +48,7 @@ pub fn resolve(args: &str, root: &Path) -> Result<Option<Op>, String> {
         }
         _ => update_prompt(root, &existing),
     };
-    Ok(Some(Op::Prompt(prompt)))
+    Ok(Some(prompt))
 }
 
 /// The [`FILE_CHOICES`] name that `arg` matches ignoring ASCII case, or the error listing them.
@@ -190,10 +190,10 @@ mod tests {
 
             assert_eq!(
                 resolve("", root.path()),
-                Ok(Some(Op::Prompt(update_prompt(
+                Ok(Some(update_prompt(
                     root.path(),
-                    &[PathBuf::from("AGENTS.md")],
-                )))),
+                    &[PathBuf::from("AGENTS.md")]
+                ))),
             );
         }
 
@@ -205,10 +205,10 @@ mod tests {
 
             assert_eq!(
                 resolve("Claude.md", root.path()),
-                Ok(Some(Op::Prompt(update_prompt(
+                Ok(Some(update_prompt(
                     root.path(),
                     &[Path::new(".claude").join("CLAUDE.md")],
-                )))),
+                ))),
             );
         }
 
@@ -220,7 +220,7 @@ mod tests {
             for (arg, file) in [("AGENTS.md", "AGENTS.md"), (" claude.md ", "CLAUDE.md")] {
                 assert_eq!(
                     resolve(arg, root.path()),
-                    Ok(Some(Op::Prompt(create_prompt(root.path(), file)))),
+                    Ok(Some(create_prompt(root.path(), file))),
                     "{arg}",
                 );
             }
