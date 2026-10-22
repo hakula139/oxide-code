@@ -159,7 +159,7 @@ If automatic compaction fails, oxide-code does not send the prompt, and the TUI 
 | `show_welcome`  | boolean | `true`    | Paint the welcome splash on an empty chat |
 | `status_line`   | array   | see below | Ordered status-line segments              |
 
-`show_thinking = true` opts the request into `thinking.display = "summarized"` so the API streams reasoning text, which the chat shows as it arrives and then collapses to a `Thought` header that **Ctrl+O** or a click expands. Otherwise, reasoning stays hidden, and the chat still shows the short progress notes the model writes before each tool call on every supported model except Haiku 5.5.
+`show_thinking = true` opts the request into `thinking.display = "summarized"` so the API streams reasoning text, which the chat shows as it arrives and then collapses to a `Thought` header that **Ctrl+O** or a click expands. Otherwise, reasoning stays hidden, and the chat still shows the short progress notes the model writes before each tool call on every supported model except Haiku 5.5, which writes none, so its requests ask for `thinking.display = "omitted"` and the chat shows no reasoning.
 
 `show_welcome = false` blanks the chat region until you submit a prompt, which is useful when piping or screen-recording.
 
@@ -259,7 +259,7 @@ export NODE_EXTRA_CA_CERTS=~/.config/ox/corp-cachain.pem
 
 oxide-code is stricter than Claude Code in three ways. It never sends a stored login to a custom base URL, it sends one credential even when several are set, and it rejects malformed `ANTHROPIC_CUSTOM_HEADERS` lines where Claude Code skips them.
 
-A gateway that does not serve the configured model may return HTTP 404 with a plain-text `404 page not found` response. The gateway may list the models it serves at `GET /v1/models`.
+A gateway that does not serve the configured model may return HTTP 404 with a plain-text `404 page not found` response, which `ox` reports as `Anthropic API found no such endpoint or model`. The gateway may list the models it serves at `GET /v1/models`.
 
 ## Environment Variables
 

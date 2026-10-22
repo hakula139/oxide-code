@@ -807,13 +807,13 @@ mod tests {
 
         #[test]
         fn keeps_a_cause_that_ends_a_sentence_verbatim() {
-            let cause = anyhow!("token exchange failed with 400 Bad Request: Code expired.");
+            let cause = anyhow!("token exchange failed with HTTP 400 Bad Request: Code expired.");
 
             let abort = sign_in_failed(&cause);
 
             assert_eq!(
                 abort.into_failure().to_string(),
-                "Sign-in failed: token exchange failed with 400 Bad Request: Code expired. \
+                "Sign-in failed: token exchange failed with HTTP 400 Bad Request: Code expired. \
                  Run `/login` to try again.",
             );
         }

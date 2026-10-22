@@ -31,6 +31,7 @@ impl Client {
         let request = &self.prepare(RequestSpec {
             kind: RequestKind::SideQuery,
             model,
+            thinking: None,
             max_tokens,
             system: &[(system, None)],
             tools: None,
