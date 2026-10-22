@@ -17,25 +17,29 @@ use crate::tool::tasks::Task;
 /// On-disk schema version stamped into every `Header`.
 pub(crate) const CURRENT_VERSION: u32 = 1;
 
+/// The first line of every session file, identifying the session and where it started.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct Header {
+    pub(crate) session_id: String,
+    pub(crate) cwd: String,
+    /// The project the session belongs to, absent from sessions that releases up to
+    /// 0.1.0-alpha.5 wrote, whose project is their `cwd`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) project_root: Option<String>,
+    pub(crate) model: String,
+    #[serde(with = "time::serde::rfc3339")]
+    pub(crate) created_at: OffsetDateTime,
+    pub(crate) version: u32,
+    /// The branch the session started on, which tells sibling sessions apart in the picker.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) git_branch: Option<String>,
+}
+
 /// One JSONL line in the session transcript.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub(crate) enum Entry {
-    Header {
-        session_id: String,
-        cwd: String,
-        /// The project the session belongs to, absent from sessions that releases up to
-        /// 0.1.0-alpha.5 wrote, whose project is their `cwd`.
-        #[serde(skip_serializing_if = "Option::is_none")]
-        project_root: Option<String>,
-        model: String,
-        #[serde(with = "time::serde::rfc3339")]
-        created_at: OffsetDateTime,
-        version: u32,
-        /// The branch the session started on, which tells sibling sessions apart in the picker.
-        #[serde(skip_serializing_if = "Option::is_none")]
-        git_branch: Option<String>,
-    },
+    Header(Header),
     /// Prompt state a resume rebuilds the request prefix from. Written in one batch ahead of the
     /// user message that first carries it, with the same timestamp, and bound to the next message
     /// entry whose timestamp matches. Resume applies the latest one on the chain it resolves.
@@ -215,7 +219,7 @@ mod tests {
 
     #[test]
     fn header_round_trips_with_correct_discriminator_and_version() {
-        let entry = Entry::Header {
+        let entry = Entry::Header(Header {
             session_id: "abc-123".to_owned(),
             cwd: "/home/user/project".to_owned(),
             project_root: Some("/home/user".to_owned()),
@@ -223,13 +227,13 @@ mod tests {
             created_at: datetime!(2026-04-16 12:00:00 UTC),
             version: CURRENT_VERSION,
             git_branch: None,
-        };
+        });
         let json = serde_json::to_value(&entry).unwrap();
         assert_eq!(json["type"], "header");
         assert_eq!(json["version"], CURRENT_VERSION);
 
         let parsed: Entry = serde_json::from_str(&json.to_string()).unwrap();
-        let Entry::Header {
+        let Entry::Header(Header {
             session_id,
             cwd,
             project_root,
@@ -237,7 +241,7 @@ mod tests {
             created_at,
             version,
             git_branch,
-        } = parsed
+        }) = parsed
         else {
             panic!("expected Header");
         };
@@ -576,7 +580,7 @@ mod tests {
 
         assert_eq!(entries.len(), 4);
         assert!(
-            matches!(&entries[0], Entry::Header { session_id, version, .. } if session_id == "s1" && *version == CURRENT_VERSION)
+            matches!(&entries[0], Entry::Header(Header { session_id, version, .. }) if session_id == "s1" && *version == CURRENT_VERSION)
         );
         let Entry::Message {
             uuid,

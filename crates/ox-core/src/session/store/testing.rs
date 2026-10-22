@@ -11,7 +11,9 @@ use super::{
     Project, SessionData, SessionStore, SessionWriter, encode_lines, file_session_id,
     load_session_data_from_path, open_append_file, set_archived_at,
 };
-use crate::session::entry::{ArchiveState, CURRENT_VERSION, Entry, SessionInfo, TitleSource};
+use crate::session::entry::{
+    ArchiveState, CURRENT_VERSION, Entry, Header, SessionInfo, TitleSource,
+};
 
 pub(crate) const TEST_PROJECT: &str = "test-project";
 
@@ -157,8 +159,8 @@ pub(super) fn test_header(
     store: &SessionStore,
     session_id: &str,
     created_at: OffsetDateTime,
-) -> Entry {
-    Entry::Header {
+) -> Header {
+    Header {
         session_id: session_id.to_owned(),
         cwd: store.project.cwd.clone(),
         project_root: Some(store.project.root.clone()),

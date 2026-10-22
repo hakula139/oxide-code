@@ -449,7 +449,7 @@ mod tests {
                 matches!(
                     entries.as_slice(),
                     [
-                        Entry::Header { .. },
+                        Entry::Header(_),
                         Entry::Title { .. },
                         Entry::Message { .. },
                         Entry::Summary {

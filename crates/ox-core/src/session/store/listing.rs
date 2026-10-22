@@ -9,8 +9,8 @@ use anyhow::{Context, Result};
 use time::OffsetDateTime;
 use tracing::warn;
 
-use super::{HeaderInfo, JsonlLines, Project, SessionStore, file_session_id, read_header};
-use crate::session::entry::{ArchiveState, Entry, ExitInfo, SessionInfo, TitleInfo};
+use super::{JsonlLines, Project, SessionStore, file_session_id, read_header};
+use crate::session::entry::{ArchiveState, Entry, ExitInfo, Header, SessionInfo, TitleInfo};
 
 pub const DEFAULT_SESSION_LIST_LIMIT: usize = 30;
 
@@ -261,11 +261,12 @@ fn read_session_info(
 ) -> Result<Option<SessionInfo>> {
     let file = File::open(path).with_context(|| format!("failed to open {}", path.display()))?;
     let mut lines = JsonlLines::new(BufReader::new(&file));
-    let HeaderInfo {
+    let Header {
         session_id,
         cwd,
         project_root,
         git_branch,
+        ..
     } = read_header(&mut lines, path)?;
     if project.is_some_and(|project| !project.owns(&cwd, project_root.as_deref())) {
         return Ok(None);
@@ -390,8 +391,8 @@ mod tests {
         use crate::session::entry::CURRENT_VERSION;
 
         /// A header that records `cwd` and, from releases that record one, `project_root`.
-        fn header_in(session_id: &str, cwd: &str, project_root: Option<&str>) -> Entry {
-            Entry::Header {
+        fn header_in(session_id: &str, cwd: &str, project_root: Option<&str>) -> Header {
+            Header {
                 session_id: session_id.to_owned(),
                 cwd: cwd.to_owned(),
                 project_root: project_root.map(str::to_owned),
@@ -928,13 +929,8 @@ mod tests {
                 datetime!(2026-04-15 10:00:00 UTC),
             );
             let mut foreign = sample_header("abcd-coll");
-            if let Entry::Header {
-                cwd, project_root, ..
-            } = &mut foreign
-            {
-                *cwd = "/work/test project".to_owned();
-                *project_root = Some(cwd.clone());
-            }
+            foreign.cwd = "/work/test project".to_owned();
+            foreign.project_root = Some(foreign.cwd.clone());
             store.create(&foreign, &[]).unwrap();
 
             let ids: Vec<_> = store

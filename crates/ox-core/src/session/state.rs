@@ -9,7 +9,7 @@ use time::OffsetDateTime;
 use uuid::Uuid;
 
 use super::display::fit_title;
-use super::entry::{CURRENT_VERSION, Entry, TitleSource};
+use super::entry::{CURRENT_VERSION, Entry, Header, TitleSource};
 use super::handle::Checkpoint;
 use super::store::{SessionStore, SessionWriter, artifact_dir, encode_lines};
 use crate::file_tracker::FileSnapshot;
@@ -53,7 +53,7 @@ pub(super) struct SessionState {
 /// Writer lifecycle. `Pending` defers file creation until the first non-empty flush.
 enum WriterStatus {
     Pending {
-        header: Entry,
+        header: Header,
         deferred_title: Option<String>,
     },
     Active(SessionWriter),
@@ -62,11 +62,11 @@ enum WriterStatus {
 impl SessionState {
     pub(super) fn fresh(store: SessionStore, model: &str, git_branch: Option<String>) -> Self {
         let created_at = OffsetDateTime::now_utc();
-        let (session_id, header) = new_header(&store, model, git_branch, created_at);
-        let session_file = store.session_file(&session_id, created_at);
+        let header = new_header(&store, model, git_branch, created_at);
+        let session_file = store.session_file(&header.session_id, created_at);
         Self {
-            artifact_dir: artifact_dir(&session_file, &session_id).into(),
-            session_id: Arc::from(session_id),
+            artifact_dir: artifact_dir(&session_file, &header.session_id).into(),
+            session_id: Arc::from(header.session_id.as_str()),
             store,
             writer_status: WriterStatus::Pending {
                 header,
@@ -321,19 +321,17 @@ fn new_header(
     model: &str,
     git_branch: Option<String>,
     created_at: OffsetDateTime,
-) -> (String, Entry) {
-    let session_id = Uuid::new_v4().to_string();
+) -> Header {
     let project = store.project();
-    let header = Entry::Header {
-        session_id: session_id.clone(),
+    Header {
+        session_id: Uuid::new_v4().to_string(),
         cwd: project.cwd.clone(),
         project_root: Some(project.root.clone()),
         model: model.to_owned(),
         created_at,
         version: CURRENT_VERSION,
         git_branch,
-    };
-    (session_id, header)
+    }
 }
 
 /// Extracts the first non-empty text content from a user message.
