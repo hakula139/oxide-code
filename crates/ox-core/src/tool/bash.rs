@@ -1521,21 +1521,22 @@ mod tests {
                 );
             }
 
-            #[cfg(unix)]
             #[tokio::test]
             async fn resolves_cd_against_the_cwd_whatever_cdpath_ox_inherits() {
-                let (cwd, elsewhere) = (canonical_tempdir(), canonical_tempdir());
-                fs::create_dir(cwd.path().join("sub")).unwrap();
-                fs::create_dir(elsewhere.path().join("sub")).unwrap();
+                let cwd = tempfile::tempdir().unwrap();
+                for (dir, marker) in [("sub", "cwd"), ("elsewhere/sub", "elsewhere")] {
+                    fs::create_dir_all(cwd.path().join(dir)).unwrap();
+                    fs::write(cwd.path().join(dir).join("marker"), marker).unwrap();
+                }
 
-                let mut tree = temp_env::with_var("CDPATH", Some(elsewhere.path()), || {
-                    ShellTree::spawn("cd sub && pwd -P", &ctx(cwd.path())).unwrap()
+                let mut tree = temp_env::with_var("CDPATH", Some("elsewhere"), || {
+                    ShellTree::spawn("cd sub && cat marker", &ctx(cwd.path())).unwrap()
                 });
                 let (mut stdout, _) = tree.take_pipes();
                 let mut output = String::new();
                 stdout.read_to_string(&mut output).await.unwrap();
 
-                assert_eq!(Path::new(output.trim_end()), cwd.path().join("sub"));
+                assert_eq!(output, "cwd");
             }
 
             #[cfg(unix)]
