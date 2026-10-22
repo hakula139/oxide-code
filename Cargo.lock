@@ -1903,7 +1903,6 @@ dependencies = [
  "tempfile",
  "time",
  "tokio",
- "toml",
  "tracing",
  "unicode-width",
  "wiremock",

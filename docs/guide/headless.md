@@ -118,7 +118,7 @@ A run that lists files and then attempts `cargo test`, which needs approval, str
 {"type":"tool_call_start","data":{"id":"call-1","name":"glob","input":{"pattern":"Cargo.toml"},"icon":"✱","label":"Glob(Cargo.toml)"}}
 {"type":"tool_call_end","data":{"id":"call-1","content":"Cargo.toml","is_error":false,"title":"Found 1 file","view":{"type":"glob_files","data":{"pattern":"Cargo.toml","files":["Cargo.toml"],"total":1}}}}
 {"type":"tool_call_start","data":{"id":"call-2","name":"bash","input":{"command":"cargo test"},"icon":"$","label":"cargo test"}}
-{"type":"tool_call_end","data":{"id":"call-2","content":"The bash call was denied with this feedback: This run cannot ask for approval. To allow this call, add `\"cargo test\"` to `permission.allow.exec` in the user config.","is_error":true,"title":null,"view":{"type":"text","data":{"content":"The bash call was denied with this feedback: This run cannot ask for approval. To allow this call, add `\"cargo test\"` to `permission.allow.exec` in the user config."}}}}
+{"type":"tool_call_end","data":{"id":"call-2","content":"The bash call was denied. This run cannot ask for approval. To allow this call, add `\"cargo test\"` to `permission.allow.exec` in the user config.","is_error":true,"title":null,"view":{"type":"text","data":{"content":"The bash call was denied. This run cannot ask for approval. To allow this call, add `\"cargo test\"` to `permission.allow.exec` in the user config."}}}}
 {"type":"stream_token","data":"Done."}
 {"type":"usage_updated","data":{"context_tokens":1000,"context_window":1000000,"estimated_cost_usd":0.018}}
 {"type":"turn_complete"}

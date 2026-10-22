@@ -748,7 +748,7 @@ mod tests {
                 assert_eq!(result["type"], "tool_result");
                 assert_eq!(
                     result["content"],
-                    "The bash call was denied with this feedback: Use git ls-files.",
+                    "The user denied the bash call and wrote: Use git ls-files.",
                 );
             })
             .await;
