@@ -299,9 +299,10 @@ async fn async_main(offset_error: Option<IndeterminateOffset>) -> Result<Exit> {
         warn!("failed to read the local timezone offset, so times show in UTC: {e}");
     }
     let cwd = env::current_dir().context("failed to read the current working directory")?;
+    let project_root = util::git::project_root(&cwd);
 
     if cli.list {
-        let store = SessionStore::open(&cwd)?;
+        let store = SessionStore::open(&cwd, &project_root)?;
         session_list::write(
             &mut io::stdout().lock(),
             &store,
@@ -324,7 +325,7 @@ async fn async_main(offset_error: Option<IndeterminateOffset>) -> Result<Exit> {
     let show_thinking = config.show_thinking;
     let theme = tui_mode.then(|| resolve_theme(&config.theme)).transpose()?;
 
-    let store = SessionStore::open(&cwd)?;
+    let store = SessionStore::open(&cwd, &project_root)?;
     let git_branch = util::git::current_branch(&cwd).await;
     let ResumedSession {
         handle,

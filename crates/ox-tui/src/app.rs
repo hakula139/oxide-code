@@ -4,15 +4,15 @@
 //! loop multiplexing crossterm events, engine events, git probe results, clipboard reports,
 //! background slash-command results, and a 60 FPS render tick. A dirty flag coalesces redraws so
 //! each state change renders once. Terminal input, engine events, and drawing live in the
-//! `dispatch`, `events`, and `render` submodules.
+//! `dispatch`, `events`, and `render` submodules, and the prompt queue in `queue`.
 
 mod dispatch;
 mod events;
+mod queue;
 mod render;
 #[cfg(test)]
 mod testing;
 
-use std::collections::VecDeque;
 use std::io;
 use std::time::{Duration, Instant};
 
@@ -27,10 +27,11 @@ use ox_core::permission::Mode;
 use ox_core::protocol::{Event, Interaction, Op};
 use ox_core::session::display::archive_notice;
 
+use self::queue::PromptQueue;
 use crate::clipboard::{Clipboard, Environment};
 use crate::components::chat::ChatView;
 use crate::components::input::InputArea;
-use crate::components::status::{StatusBar, StatusBarInit, StatusHyperlink};
+use crate::components::status::{Status, StatusBar, StatusBarInit, StatusHyperlink};
 use crate::components::tasks::TaskPanel;
 use crate::git_probes::GitProbes;
 use crate::modal::{Modal, ModalStack};
@@ -51,6 +52,9 @@ pub(crate) struct App {
     theme_overrides: ThemeOverrides,
     /// Theme saved when a `/theme` picker opens. Restored if the modal cancels.
     preview_theme_snapshot: Option<Theme>,
+    /// What the app is doing, which gates input and sets the status bar's run state. Change it
+    /// through [`Self::set_status`], which shows it in both.
+    status: Status,
     status_bar: StatusBar,
     git_probes: GitProbes,
     chat: ChatView,
@@ -76,34 +80,9 @@ pub(crate) struct App {
     copy_notice: Option<CopyNotice>,
     /// Background slash commands still running for the live session.
     slash_tasks: JoinSet<Result<ChatOutput, String>>,
-    /// Prompt already painted for the in-flight turn, kept as typed. Replayed if auto-compaction
-    /// clears chat, and handed back if auto-compaction fails before the prompt is sent.
-    active_prompt: Option<String>,
-    /// What a failure of the active prompt hands back to the user.
-    hand_back: HandBack,
-    /// FIFO of prompts submitted mid-turn, kept as typed so Esc restores a `//` escape. Each stays
-    /// with the TUI until the engine confirms it with `PromptDrained` or it starts its own turn.
-    pending_prompts: VecDeque<String>,
-    /// How many leading `pending_prompts` the in-flight turn already holds.
-    forwarded_prompts: usize,
-    /// Queued prompts the in-flight turn took in, kept as typed so a rolled-back turn hands them
-    /// back.
-    drained_prompts: Vec<String>,
+    queue: PromptQueue,
     should_quit: bool,
     dirty: bool,
-}
-
-/// What a failure of the active prompt hands back to the user.
-#[derive(Clone, Copy, Default)]
-enum HandBack {
-    /// Nothing, since the prompt ran and the queue goes on.
-    #[default]
-    Nothing,
-    /// The prompt, since an automatic compaction runs ahead of it and a failure means the engine
-    /// never sent it.
-    UnsentPrompt,
-    /// The prompt and the queued prompts its turn took in, since the engine rolled the turn back.
-    RolledBackTurn,
 }
 
 /// Outcome of the last copy, shown over the chat until `until`.
@@ -136,16 +115,13 @@ impl App {
         if history.unarchived {
             chat.push_system_message(archive_notice(&session_info.session_id, false));
         }
-        let mut status_bar = StatusBar::new(
-            &theme,
-            StatusBarInit {
-                segments: session_info.config.status_line.clone(),
-                model: session_info.config.model.short_display_name().to_owned(),
-                effort: session_info.config.effort,
-                cwd: session_info.cwd.clone(),
-                git_branch,
-            },
-        );
+        let mut status_bar = StatusBar::new(StatusBarInit {
+            segments: session_info.config.status_line.clone(),
+            model: session_info.config.model.short_display_name().to_owned(),
+            effort: session_info.config.effort,
+            cwd: session_info.cwd.clone(),
+            git_branch,
+        });
         status_bar.set_title(history.title);
         let git_probes = GitProbes::new(
             session_info.working_dir.clone(),
@@ -157,16 +133,16 @@ impl App {
             Mode::Yolo => &[Mode::Manual, Mode::Plan, Mode::Yolo][..],
             Mode::Manual | Mode::Plan => &[Mode::Manual, Mode::Plan][..],
         };
-        let input = InputArea::new(&theme);
         Self {
             theme,
             theme_overrides,
             preview_theme_snapshot: None,
+            status: Status::Idle,
             status_bar,
             git_probes,
             chat,
             tasks: TaskPanel::default(),
-            input,
+            input: InputArea::new(),
             modals: ModalStack::default(),
             session_info,
             mode_cycle,
@@ -179,11 +155,7 @@ impl App {
             pending_clipboard: None,
             copy_notice: None,
             slash_tasks: JoinSet::new(),
-            active_prompt: None,
-            hand_back: HandBack::Nothing,
-            pending_prompts: VecDeque::new(),
-            forwarded_prompts: 0,
-            drained_prompts: Vec::new(),
+            queue: PromptQueue::default(),
             should_quit: false,
             dirty: true,
         }
@@ -198,6 +170,12 @@ impl App {
     pub(crate) fn push_modal(&mut self, modal: Box<dyn Modal>) {
         self.modals.push(modal);
         self.dirty = true;
+    }
+
+    /// Moves to `status` and shows it in the status bar.
+    fn set_status(&mut self, status: Status) {
+        self.status_bar.set_status(status.clone());
+        self.status = status;
     }
 
     /// Runs until the user quits or the engine's event channel closes.
@@ -270,7 +248,7 @@ mod tests {
 
     use super::testing::{rendered_text, test_app, test_session_info};
     use super::*;
-    use crate::components::status::{Status, TICKS_PER_FRAME};
+    use crate::components::status::TICKS_PER_FRAME;
     use crate::git_probes::GitUpdate;
     use crate::glyphs::SPINNER_FRAMES;
     use crate::terminal::testing::capture_terminal;
@@ -284,9 +262,8 @@ mod tests {
             let (app, _rx, _event_tx) = test_app(Some("Resumed title"));
             assert_eq!(app.status_bar.title(), Some("Resumed title"));
             assert_eq!(app.status_bar.git_branch(), Some("main"));
-            assert_eq!(app.status_bar.status(), &Status::Idle);
+            assert_eq!(app.status, Status::Idle);
             assert_eq!(app.chat.entry_count(), 0);
-            assert!(app.input.is_enabled());
             assert!(!app.should_quit);
             assert!(app.dirty, "first frame must render");
         }
@@ -349,7 +326,7 @@ mod tests {
             let until = now()
                 .checked_sub(EXIT_WINDOW)
                 .expect("monotonic clock has run long enough for a test deadline");
-            app.status_bar.set_status(Status::ExitArmed { until });
+            app.set_status(Status::ExitArmed { until });
             app.dirty = false;
 
             let mut terminal = capture_terminal(60, 8);
@@ -366,7 +343,7 @@ mod tests {
             .unwrap();
             closer.await.unwrap();
 
-            assert_eq!(app.status_bar.status(), &Status::Idle);
+            assert_eq!(app.status, Status::Idle);
             assert!(app.should_quit);
         }
 
@@ -374,7 +351,7 @@ mod tests {
         async fn repaints_when_the_spinner_frame_advances() {
             // Sleep past the spinner interval so `tick()` reports a visible frame change.
             let (mut app, _rx, event_tx) = test_app(None);
-            app.status_bar.set_status(Status::Streaming);
+            app.set_status(Status::Streaming);
             app.dirty = false;
 
             let mut terminal = capture_terminal(60, 8);
@@ -421,10 +398,7 @@ mod tests {
 
             assert!(app.should_quit);
             assert_eq!(app.input.lines(), vec!["x"], "crossterm key reached input");
-            assert!(
-                !app.input.is_enabled(),
-                "engine StreamToken disabled the input",
-            );
+            assert_eq!(app.status, Status::Streaming, "engine StreamToken arrived");
         }
 
         #[tokio::test(start_paused = true)]

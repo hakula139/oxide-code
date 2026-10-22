@@ -550,7 +550,9 @@ mod tests {
     use crate::session::entry::{Entry, SessionInfo};
     use crate::session::handle::testing::record_write_call;
     use crate::session::store::local_testing::test_session_file;
-    use crate::session::store::testing::{seed_test_session, test_project_dir, test_store};
+    use crate::session::store::testing::{
+        TEST_PROJECT, seed_test_session, test_project_dir, test_store,
+    };
     use crate::tool::tasks::testing::plan;
     use crate::tool::view::{DiffChunk, EditDiff, NumberedLine};
 
@@ -2267,6 +2269,7 @@ mod tests {
             let ts_re =
                 regex::Regex::new(r#""\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z""#).unwrap();
             let cwd_re = regex::Regex::new(r#""cwd":"[^"]*""#).unwrap();
+            let root_re = regex::Regex::new(r#""project_root":"[^"]*""#).unwrap();
             let parse =
                 |quoted: &str| OffsetDateTime::parse(quoted.trim_matches('"'), &Rfc3339).unwrap();
 
@@ -2291,7 +2294,10 @@ mod tests {
                 let n = timestamps.binary_search(&parse(&caps[0])).unwrap() + 1;
                 format!(r#""<TS-{n}>""#)
             });
-            cwd_re.replace_all(&masked, r#""cwd":"<CWD>""#).into_owned()
+            let masked = cwd_re.replace_all(&masked, r#""cwd":"<CWD>""#);
+            root_re
+                .replace_all(&masked, r#""project_root":"<ROOT>""#)
+                .into_owned()
         }
 
         /// Lists and resumes the unmasked `fixture`, checks that a new message continues the
@@ -2348,13 +2354,14 @@ mod tests {
         /// Fills each placeholder [`mask_volatile`] writes with one fixed value, giving a higher
         /// `<TS-n>` a later time.
         fn unmask(fixture: &str) -> String {
-            let placeholder = regex::Regex::new(r"<(UUID|TS|CWD)(?:-(\d+))?>").unwrap();
+            let placeholder = regex::Regex::new(r"<(UUID|TS|CWD|ROOT)(?:-(\d+))?>").unwrap();
             placeholder
                 .replace_all(fixture, |caps: &regex::Captures<'_>| {
                     let n: u64 = caps.get(2).map_or(0, |n| n.as_str().parse().unwrap());
                     match &caps[1] {
                         "UUID" => format!("00000000-0000-4000-8000-{n:012x}"),
                         "TS" => format!("2026-01-01T00:{:02}:{:02}Z", n / 60, n % 60),
+                        "ROOT" => format!("/work/{TEST_PROJECT}"),
                         _ => "/repo".to_owned(),
                     }
                 })

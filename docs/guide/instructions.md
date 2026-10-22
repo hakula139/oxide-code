@@ -15,7 +15,7 @@ Instruction files are loaded from two scopes:
 | User    | `~/.config/ox/AGENTS.md` (or `$XDG_CONFIG_HOME/ox/AGENTS.md`), then `~/.claude/CLAUDE.md` (or `$CLAUDE_CONFIG_DIR/CLAUDE.md`)               | Personal preferences that apply everywhere |
 | Project | `<dir>/AGENTS.md`, `<dir>/CLAUDE.md`, then `<dir>/.claude/CLAUDE.md`, in each directory from the project root down to the working directory | Team-shared conventions                    |
 
-The project root is the nearest directory at or above the working directory that holds a `.git` directory or file, or the working directory if it is outside a repository. Files closer to the working directory appear later in the prompt and conventionally take precedence. For a working directory of `/repo/crates/core`, files load in this order:
+The project root is the nearest directory at or above the working directory that holds a `.git` directory or file, or the working directory if it is outside a repository. [Sessions](sessions.md#where-sessions-live) are grouped by the same project. Files closer to the working directory appear later in the prompt and conventionally take precedence. For a working directory of `/repo/crates/core`, files load in this order:
 
 1. The user file
 2. `/repo/`
