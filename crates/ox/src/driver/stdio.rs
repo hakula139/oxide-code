@@ -108,8 +108,8 @@ fn render(sink: &dyn EventSink, event: Event) {
 // ── Unattended ──
 
 /// Answers every approval with a denial that names what a rerun would need, for a run with nobody
-/// to ask: the allow pattern that admits the call, the rule that holds it, or simpler syntax for a
-/// command ox could not parse.
+/// to ask: the allow pattern that admits the call, the rule that made it ask, or simpler syntax
+/// for a command ox could not parse.
 pub(super) struct Unattended;
 
 impl Approver for Unattended {
@@ -139,7 +139,7 @@ impl Approver for Unattended {
                     .to_owned()
             }
             (None, Basis::Builtin(group)) if group.tier() == ShippedTier::Ask => format!(
-                "This run cannot ask for approval, and {basis} holds this call. \
+                "This run cannot ask for approval, and this call asks because of {basis}. \
                  Approve it in an interactive session, \
                  or set `permission.defaults.{group} = false` in the user config."
             ),
@@ -150,7 +150,7 @@ impl Approver for Unattended {
                     .to_owned()
             }
             (None, basis) => format!(
-                "This run cannot ask for approval, and {basis} holds this call. \
+                "This run cannot ask for approval, and this call asks because of {basis}. \
                  Approve it in an interactive session."
             ),
         };
@@ -716,7 +716,7 @@ mod tests {
             use super::*;
 
             #[tokio::test]
-            async fn denies_naming_the_allow_pattern_or_what_holds_the_call() {
+            async fn denies_naming_the_allow_pattern_or_the_rule_that_made_it_ask() {
                 let command = r#"echo "a\b""#;
                 let preview = bash_preview(command);
                 let manual = Basis::Mode(Mode::Manual);
@@ -747,7 +747,7 @@ mod tests {
                         &Basis::Builtin(Shipped::Git),
                         None,
                         "This run cannot ask for approval, \
-                         and the built-in `git` rule holds this call. \
+                         and this call asks because of the built-in `git` rule. \
                          Approve it in an interactive session, \
                          or set `permission.defaults.git = false` in the user config.",
                     ),
@@ -763,14 +763,14 @@ mod tests {
                         &Basis::Builtin(Shipped::Ssh),
                         None,
                         "This run cannot ask for approval, \
-                         and the built-in `ssh` rule holds this call. \
+                         and this call asks because of the built-in `ssh` rule. \
                          Approve it in an interactive session.",
                     ),
                     (
                         &ask,
                         None,
                         "This run cannot ask for approval, \
-                         and the `ask.exec` pattern `git push *` holds this call. \
+                         and this call asks because of the `ask.exec` pattern `git push *`. \
                          Approve it in an interactive session.",
                     ),
                 ];

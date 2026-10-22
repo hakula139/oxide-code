@@ -357,7 +357,7 @@ fn context_label(usage: UsageSnapshot) -> Option<(String, SegmentStyle)> {
 fn session_cost_label(usage: UsageSnapshot) -> Option<String> {
     usage
         .estimated_cost_usd
-        .map(|cost| format!("Sess: {}", format_cost(cost)))
+        .map(|cost| format!("Cost: {}", format_cost(cost)))
 }
 
 fn rate_limit_label(name: &str, window: Option<RateLimitWindow>) -> Option<(String, SegmentStyle)> {
@@ -408,11 +408,11 @@ fn theme_label(theme_name: &str) -> Option<String> {
 }
 
 fn format_cost(cost: f64) -> String {
-    // Two decimals take over once `{cost:.2}` rounds up to `$1.00`, so `$0.9999` reads `$1.00`.
-    if cost >= 0.995 {
-        format!("${cost:.2}")
-    } else {
+    // Cents take over once `{cost:.4}` would round up to `$0.0100`, so `$0.00996` reads `$0.01`.
+    if cost < 0.009_95 {
         format!("${cost:.4}")
+    } else {
+        format!("${cost:.2}")
     }
 }
 
@@ -686,7 +686,7 @@ mod tests {
                 },
             );
 
-            assert_eq!(text_of(&rendered), "  Sess: $0.5385");
+            assert_eq!(text_of(&rendered), "  Cost: $0.54");
             assert_eq!(rendered.line.spans[1].style, Theme::default().muted());
         }
 
@@ -989,11 +989,16 @@ mod tests {
         use super::*;
 
         #[test]
-        fn switches_to_cents_where_they_round_up_to_a_dollar() {
-            assert_eq!(format_cost(1.234), "$1.23");
-            assert_eq!(format_cost(0.9951), "$1.00");
-            assert_eq!(format_cost(0.9949), "$0.9949");
-            assert_eq!(format_cost(0.12345), "$0.1235");
+        fn shows_cents_and_more_digits_only_under_a_cent() {
+            for (cost, expected) in [
+                (0.0042, "$0.0042"),
+                (0.0099, "$0.0099"),
+                (0.009_95, "$0.01"),
+                (0.4321, "$0.43"),
+                (1.234, "$1.23"),
+            ] {
+                assert_eq!(format_cost(cost), expected, "{cost}");
+            }
         }
     }
 }

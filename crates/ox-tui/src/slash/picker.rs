@@ -12,7 +12,7 @@ use ox_core::model::{MODELS, ModelInfo, ResolvedModelId};
 use ox_core::protocol::{ConfigPick, Op};
 
 use super::context::LiveSessionInfo;
-use super::effort_slider::{Direction, step_level, tier_color};
+use super::effort_slider::{Direction, level_color, step_level};
 use crate::action::Action;
 use crate::glyphs::RADIO_SELECTED;
 use crate::modal::chrome::{
@@ -144,7 +144,7 @@ impl ModelEffortPicker {
         let level = self.shown_effort();
         let was_default = self.picked_effort.is_none() && self.active_effort.is_none();
         let suffix = if was_default { " (default)" } else { "" };
-        let color = tier_color(level);
+        let color = level_color(level);
         Line::from(vec![
             Span::styled(format!("{RADIO_SELECTED} "), Style::default().fg(color)),
             Span::styled(

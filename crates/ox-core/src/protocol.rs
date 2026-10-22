@@ -139,8 +139,8 @@ pub struct UsageSnapshot {
     /// Active model context window. `None` hides the percentage.
     pub context_window: Option<u32>,
     /// Running session cost in USD, accumulated across every request, summaries and the AI title
-    /// included. A roll starts it over, and a resume restores it from the session file. `None`
-    /// hides the cost segment.
+    /// included, and positive when present. A roll starts it over, and a resume restores it from
+    /// the session file. `None` hides the cost segment.
     pub estimated_cost_usd: Option<f64>,
 }
 

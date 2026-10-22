@@ -23,19 +23,19 @@ const SPEED_LABEL: &str = "Speed";
 const INTEL_LABEL: &str = "Intelligence";
 
 const GLYPH_PREFIX_WIDTH: usize = 2;
-/// Fixed inter-tier spacing, since slot-based widths drift by half a column on even-length labels.
-const TIER_GAP: usize = 3;
+/// Fixed inter-level spacing, since slot-based widths drift by half a column on even-length labels.
+const LEVEL_GAP: usize = 3;
 
 const TITLE: &str = "Select effort";
 
-/// Title + blank + speed / intel + track + tier labels + blank + footer.
+/// Title + blank + speed / intel + track + level labels + blank + footer.
 const MODAL_HEIGHT: u16 = 7;
 
-// ── Tier Colors ──
+// ── Level Colors ──
 
-/// Per-tier color from Low blue to Max red. Xhigh is magenta because the gradient's yellow reads
+/// Per-level color from Low blue to Max red. Xhigh is magenta because the gradient's yellow reads
 /// close to High's green on pastel palettes.
-pub(super) fn tier_color(level: Effort) -> Color {
+pub(super) fn level_color(level: Effort) -> Color {
     match level {
         Effort::Low => Color::Blue,
         Effort::Medium => Color::Cyan,
@@ -47,7 +47,7 @@ pub(super) fn tier_color(level: Effort) -> Color {
 
 // ── EffortSlider ──
 
-/// Opened by bare `/effort` when the active model has an effort tier.
+/// Opened by bare `/effort` when the active model has effort levels.
 pub(super) struct EffortSlider {
     /// Cursor index into [`Effort::ALL`].
     selected: usize,
@@ -56,7 +56,7 @@ pub(super) struct EffortSlider {
 }
 
 impl EffortSlider {
-    /// `None` when the active model has no effort tier.
+    /// `None` when the active model has no effort levels.
     pub(super) fn new(info: &LiveSessionInfo) -> Option<Self> {
         let initial = info.config.model.resolve_effort(info.config.effort)?;
         let selected = Effort::ALL
@@ -84,7 +84,7 @@ impl EffortSlider {
             .iter()
             .map(|e| GLYPH_PREFIX_WIDTH + e.as_str().len())
             .sum();
-        units + (Effort::ALL.len() - 1) * TIER_GAP
+        units + (Effort::ALL.len() - 1) * LEVEL_GAP
     }
 
     fn line_speed_intel(theme: &Theme) -> Line<'static> {
@@ -102,11 +102,11 @@ impl EffortSlider {
         Line::from(Span::styled(buf, theme.dim()))
     }
 
-    fn line_tier_labels(&self) -> Line<'static> {
+    fn line_level_labels(&self) -> Line<'static> {
         let mut spans: Vec<Span<'static>> = Vec::with_capacity(Effort::ALL.len() * 2);
         for (idx, level) in Effort::ALL.iter().enumerate() {
             if idx > 0 {
-                spans.push(Span::raw(" ".repeat(TIER_GAP)));
+                spans.push(Span::raw(" ".repeat(LEVEL_GAP)));
             }
             let active = idx == self.selected;
             let glyph = if active {
@@ -114,7 +114,7 @@ impl EffortSlider {
             } else {
                 RADIO_UNSELECTED
             };
-            let mut style = Style::default().fg(tier_color(*level));
+            let mut style = Style::default().fg(level_color(*level));
             if active {
                 style = style.add_modifier(Modifier::BOLD);
             }
@@ -144,7 +144,7 @@ impl Modal for EffortSlider {
             Line::default(),
             Self::line_speed_intel(theme),
             Self::line_track(theme),
-            self.line_tier_labels(),
+            self.line_level_labels(),
             Line::default(),
             Self::line_footer(theme),
         ];
@@ -263,7 +263,7 @@ mod tests {
         }
 
         #[test]
-        fn active_glyph_column_tracks_selected_tier() {
+        fn active_glyph_column_tracks_selected_level() {
             let theme = Theme::default();
             let width: u16 = 80;
             let mut s = slider_for("claude-opus-5-5", Some(Effort::Low));
@@ -281,7 +281,7 @@ mod tests {
                         let cell = &buf[(*x, 4)];
                         cell.symbol() == "●" && cell.style().add_modifier.contains(Modifier::BOLD)
                     })
-                    .expect("active bold `●` must appear on the tier-label row")
+                    .expect("active bold `●` must appear on the level-label row")
             };
 
             let x_low = active_x(&s);
