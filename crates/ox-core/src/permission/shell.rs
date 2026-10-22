@@ -389,6 +389,7 @@ impl CommandTarget {
             opaque: false,
             changes_dir: false,
             leaves_workspace: false,
+            repeats: 0,
             relative_path: false,
             expands: false,
             unparsed: false,
@@ -584,9 +585,12 @@ struct Walk<'a> {
     opaque: bool,
     /// Whether some segment changes the working directory.
     changes_dir: bool,
-    /// Whether some directory change may leave the workspace: any but a first `cd` or `pushd` to
-    /// one literal directory inside a workspace root.
+    /// Whether some directory change may leave the workspace. Only a first `cd` or `pushd`
+    /// that runs once, to a target [`Walk::enters_workspace`] accepts, stays inside.
     leaves_workspace: bool,
+    /// How many loop or function bodies enclose the node the walk is at,
+    /// where a directory change may run more than once.
+    repeats: usize,
     /// Whether some redirection, reader operand, or program spelled with a directory
     /// names a relative path.
     relative_path: bool,
@@ -645,6 +649,15 @@ impl Walk<'_> {
                 self.visit_children(node, src);
             }
             "redirected_statement" => self.redirected_statement(node, Vec::new(), src),
+            "c_style_for_statement"
+            | "for_statement"
+            | "function_definition"
+            | "while_statement" => {
+                self.opaque |= runs_hidden_code(node);
+                self.repeats += 1;
+                self.visit_children(node, src);
+                self.repeats -= 1;
+            }
             "variable_assignment" => {
                 self.statement_assignment |=
                     !SAFE_VARIABLES.contains(&assigned(&src[node.byte_range()]));
@@ -885,7 +898,7 @@ impl Walk<'_> {
             self.nested_script(runner, args, src);
         }
         if DIRECTORY_CHANGERS.contains(&name) {
-            self.change_dir(self.enters_workspace(name, args));
+            self.change_dir(self.enters_workspace(args));
         }
         // `shopt` can turn on `dotglob` or `globstar`, which change what a glob matches.
         self.opaque |= name == "shopt";
@@ -902,33 +915,38 @@ impl Walk<'_> {
         });
     }
 
-    /// Records a directory change, which may leave the workspace unless it is the first and
-    /// `inside` places its target in a workspace root.
+    /// Records a directory change, which may leave the workspace
+    /// unless it is the first, it runs once, and `inside` holds.
     fn change_dir(&mut self, inside: bool) {
-        self.leaves_workspace |= self.changes_dir || !inside;
+        self.leaves_workspace |= self.changes_dir || self.repeats > 0 || !inside;
         self.changes_dir = true;
     }
 
-    /// Returns whether the directory changer `name` moves to the one literal directory `args`
-    /// names inside a workspace root, as `cd` and `pushd` do.
-    fn enters_workspace(&self, name: &str, args: &[Word]) -> bool {
+    /// Returns whether `args` are one literal directory inside a workspace root, spelled without
+    /// `..`, which bash's `cd` drops from the spelled path while the gate resolves symlinks first.
+    fn enters_workspace(&self, args: &[Word]) -> bool {
         let [target] = args else {
             return false;
         };
-        name != "popd"
-            && target
-                .value
-                .as_deref()
-                .filter(|path| !target.glob && !path.starts_with(['-', '+']))
-                .is_some_and(|path| {
-                    matches!(
-                        Access::for_path(path, self.workspace).as_target(),
-                        Target::Path {
-                            zone: Zone::Workspace,
-                            ..
-                        }
-                    )
-                })
+        target
+            .value
+            .as_deref()
+            .filter(|path| {
+                !target.glob
+                    && !path.starts_with(['-', '+'])
+                    && !Path::new(path)
+                        .components()
+                        .any(|c| c == Component::ParentDir)
+            })
+            .is_some_and(|path| {
+                matches!(
+                    Access::for_path(path, self.workspace).as_target(),
+                    Target::Path {
+                        zone: Zone::Workspace,
+                        ..
+                    }
+                )
+            })
     }
 
     /// Strips the wrappers that lead `words`. The named words keep every wrapper from the first one
@@ -3090,6 +3108,11 @@ mod tests {
                     "cd x* && make",
                     "popd && make",
                     "cd x && cd y && make",
+                    "cd x/../y && make",
+                    "cd .. && make",
+                    "for i in 1 2; do cd x; done; make",
+                    "until make; do cd x; done",
+                    "f() { cd x; }; f; f; make",
                     "env -C x make",
                     "pkexec make",
                     "find . -execdir wc {} +",
@@ -3114,7 +3137,7 @@ mod tests {
                     &format!("cd x && {}", abs("/usr/bin/make")),
                     "./build.sh",
                     "cd x && make",
-                    &format!("cd {} && make", abs("/repo/x")),
+                    "cd /repo/x && make",
                     "cd /tmp/evil",
                     "cd x; cd /tmp/evil",
                     "ls $HOME",
