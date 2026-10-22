@@ -797,8 +797,19 @@ mod tests {
             let header = sample_header("existing");
             let created_at = header.created_at;
             let taken = test_project_path(dir.path(), &session_filename("existing", created_at));
-            fs::write(taken, "{}").unwrap();
-            assert!(store.create(&header, &[]).is_err());
+            fs::write(&taken, "{}").unwrap();
+
+            let err = store.create(&header, &[]).unwrap_err();
+
+            assert_eq!(
+                err.to_string(),
+                format!("failed to create {}", taken.display())
+            );
+            assert_eq!(
+                fs::read_to_string(&taken).unwrap(),
+                "{}",
+                "the file is left as it was"
+            );
         }
 
         #[cfg(unix)]

@@ -1235,7 +1235,6 @@ mod tests {
             let dir = tempfile::tempdir().unwrap();
             let store = test_store(dir.path());
             let handle = start(&store, "m", None);
-            let _sid = handle.session_id().to_owned();
             handle.finish(Vec::new()).await;
             drop(handle);
 
@@ -1621,8 +1620,13 @@ mod tests {
             session.record_message(Message::user("live")).await;
 
             let missing = dir.path().join("missing-target.jsonl");
-            let result = roll_into(&mut session, &store, Vec::new(), &missing).await;
-            assert!(result.is_err(), "missing target file must error");
+            let err = roll_into(&mut session, &store, Vec::new(), &missing)
+                .await
+                .unwrap_err();
+            assert_eq!(
+                err.to_string(),
+                format!("failed to open {}", missing.display())
+            );
             assert_eq!(
                 session.session_id(),
                 original_id,
@@ -1806,7 +1810,9 @@ mod tests {
             original.finish(Vec::new()).await;
             drop(original);
 
-            assert!(resume_id(&store, &session_id).is_err());
+            let err = resume_id(&store, &session_id).err().unwrap();
+
+            assert_eq!(err.to_string(), format!("session not found: {session_id}"));
         }
 
         #[tokio::test]

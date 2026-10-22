@@ -766,7 +766,11 @@ mod tests {
                 true,
             );
             let (entries, _) = state.queue_message_entries(&Message::user("second"), now, false);
-            assert!(state.flush_entries(entries).is_err());
+            let err = state.flush_entries(entries).unwrap_err();
+            assert_eq!(
+                err.to_string(),
+                format!("failed to write {}", copied.display())
+            );
             let (entries, _) =
                 state.queue_message_entries(&Message::assistant("third"), now, false);
             state.flush_entries(entries).unwrap();
@@ -800,9 +804,10 @@ mod tests {
             let project_dir = test_project_dir(dir.path());
             std::fs::remove_dir_all(&project_dir).unwrap();
             let (entries, _) = state.queue_message_entries(&Message::user("first"), now, false);
+            let err = state.flush_entries(entries).unwrap_err().to_string();
             assert!(
-                state.flush_entries(entries).is_err(),
-                "create must fail with project dir gone",
+                err.starts_with(&format!("failed to create {}", project_dir.display())),
+                "{err}",
             );
             let WriterStatus::Pending {
                 deferred_title: Some(restored),

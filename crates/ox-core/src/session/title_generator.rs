@@ -603,7 +603,9 @@ mod tests {
 
         #[test]
         fn errors_on_empty_response() {
-            assert!(parse_title("   ").is_err());
+            let err = parse_title("   ").unwrap_err();
+
+            assert_eq!(err.to_string(), "empty response");
         }
 
         #[test]
