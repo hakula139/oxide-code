@@ -361,21 +361,29 @@ mod tests {
 
         #[test]
         fn an_unsent_prompt_returns_for_the_input_only_when_nothing_else_waits() {
-            let mut lone = queue_with("active", &[], &[]);
-            lone.mark_unsent();
-            let mut draft = queue_with("active", &[], &[]);
-            draft.mark_unsent();
-            let mut queued = queue_with("active", &[], &["next"]);
-            queued.mark_unsent();
+            for (label, waiting, input_empty, into_input, pending) in [
+                ("a lone prompt", &[][..], true, Some("active"), &[][..]),
+                ("a draft in the input", &[], false, None, &["active"][..]),
+                (
+                    "a prompt queued behind it",
+                    &["next"],
+                    true,
+                    None,
+                    &["active", "next"][..],
+                ),
+            ] {
+                let mut queue = queue_with("active", &[], waiting);
+                queue.mark_unsent();
 
-            assert_eq!(
-                lone.fail_turn(true),
-                FailedTurn::HandedBack(Some("active".to_owned()))
-            );
-            assert_eq!(draft.fail_turn(false), FailedTurn::HandedBack(None));
-            assert_eq!(*draft.pending(), ["active"]);
-            assert_eq!(queued.fail_turn(true), FailedTurn::HandedBack(None));
-            assert_eq!(*queued.pending(), ["active", "next"]);
+                let failed = queue.fail_turn(input_empty);
+
+                assert_eq!(
+                    failed,
+                    FailedTurn::HandedBack(into_input.map(str::to_owned)),
+                    "{label}"
+                );
+                assert_eq!(*queue.pending(), pending, "{label}");
+            }
         }
 
         #[test]
@@ -402,14 +410,17 @@ mod tests {
             queue.end_turn();
 
             assert_eq!(queue.active(), None);
-            assert_eq!(
-                queue.fail_turn(true),
-                FailedTurn::Ran,
-                "the hand-back resets"
-            );
+
+            let after_end = queue.fail_turn(true);
+
+            assert_eq!(after_end, FailedTurn::Ran, "the hand-back resets");
+
             queue.set_active(QueuedPrompt::typed("next".to_owned()));
             queue.mark_rolled_back();
-            assert_eq!(queue.fail_turn(false), FailedTurn::HandedBack(None));
+
+            let next_failed = queue.fail_turn(false);
+
+            assert_eq!(next_failed, FailedTurn::HandedBack(None));
             assert_eq!(*queue.pending(), ["next", "queued"]);
         }
     }

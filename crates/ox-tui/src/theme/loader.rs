@@ -381,6 +381,7 @@ mod tests {
         #[test]
         fn named_builtin_loads_that_palette() {
             let t = resolved(&config("latte", ""));
+
             assert_eq!(t.text.fg, Some(Color::Rgb(0x4c, 0x4f, 0x69)));
         }
 
@@ -388,6 +389,7 @@ mod tests {
         fn unknown_name_with_no_matching_file_errors() {
             let err = resolve_theme(&config("solarized", ""))
                 .expect_err("unknown built-in and not a path");
+
             let msg = format!("{err:#}");
             assert!(
                 msg.starts_with(
@@ -402,7 +404,9 @@ mod tests {
         fn rejects_a_base_path_that_is_not_a_theme_sized_file() {
             let dir = tempfile::tempdir().unwrap();
             let dir_str = dir.path().to_string_lossy().into_owned();
+
             let err = resolve_theme(&config(&dir_str, "")).expect_err("a directory is not a theme");
+
             assert_eq!(
                 format!("{err:#}"),
                 format!(
@@ -415,8 +419,10 @@ mod tests {
             let len = MAX_THEME_FILE_BYTES + 1;
             std::fs::File::create(&path).unwrap().set_len(len).unwrap();
             let path_str = path.to_string_lossy().into_owned();
+
             let err =
                 resolve_theme(&config(&path_str, "")).expect_err("an oversized file is rejected");
+
             assert_eq!(
                 format!("{err:#}"),
                 format!(
@@ -434,6 +440,7 @@ mod tests {
             std::fs::write(&path, body).unwrap();
 
             let t = resolved(&config(&path.to_string_lossy(), ""));
+
             assert_eq!(t.error.fg, Some(Color::Rgb(0xff, 0x00, 0x00)));
         }
 
@@ -491,6 +498,7 @@ mod tests {
         #[test]
         fn accepts_a_built_in_base_set_by_a_project() {
             let t = resolved(&project_config("latte", Path::new("/repo/.ox/config.toml")));
+
             assert_eq!(t.text.fg, Some(Color::Rgb(0x4c, 0x4f, 0x69)));
         }
 
@@ -503,6 +511,7 @@ mod tests {
             let path_str = path.to_string_lossy().into_owned();
 
             let err = resolve_theme(&config(&path_str, "")).expect_err("bad slot color must error");
+
             let msg = format!("{err:#}");
             assert!(
                 msg.contains(&format!("failed to parse base theme {path_str:?}")),
@@ -515,6 +524,7 @@ mod tests {
         fn bare_string_override_patches_only_fg() {
             // Mocha's accent is bold blue, so the override must replace the fg and keep the bold.
             let t = resolved(&config("mocha", r##"accent = "#ff0000""##));
+
             assert_eq!(t.accent.fg, Some(Color::Rgb(0xff, 0x00, 0x00)));
             assert_eq!(t.accent.bg, None);
             assert!(
@@ -526,6 +536,7 @@ mod tests {
         #[test]
         fn inline_override_clears_modifier_with_false() {
             let t = resolved(&config("mocha", "accent = { bold = false }"));
+
             assert_eq!(t.accent.fg, Some(Color::Rgb(0x89, 0xb4, 0xfa)));
             assert!(!t.accent.modifiers.contains(Modifier::BOLD));
         }
@@ -533,6 +544,7 @@ mod tests {
         #[test]
         fn inline_override_can_add_a_modifier() {
             let t = resolved(&config("mocha", "success = { italic = true }"));
+
             assert!(t.success.modifiers.contains(Modifier::ITALIC));
             assert_eq!(t.success.fg, Some(Color::Rgb(0xa6, 0xe3, 0xa1)));
         }
@@ -546,6 +558,7 @@ mod tests {
                     success = "#00ff00"
                 "##},
             ));
+
             assert_eq!(t.error.fg, Some(Color::Rgb(0xff, 0x00, 0x00)));
             assert_eq!(t.success.fg, Some(Color::Rgb(0x00, 0xff, 0x00)));
         }
@@ -661,12 +674,15 @@ mod tests {
                 bg: None,
                 modifiers: Modifier::empty(),
             };
+
             for &target in SLOT_NAMES {
                 let mut patched = Theme::default();
                 let original = patched.clone();
                 let accessor =
                     slot_accessor(target).unwrap_or_else(|| panic!("unknown slot {target:?}"));
+
                 *accessor(&mut patched) = sentinel;
+
                 for &other in SLOT_NAMES {
                     let other_slot = slot_accessor(other).expect("slot must exist");
                     let post = *other_slot(&mut patched.clone());
@@ -791,6 +807,7 @@ mod tests {
         fn surface_and_selection_are_bg_only_in_every_builtin() {
             for builtin::BuiltinTheme { name, body, .. } in builtin::BUILT_IN {
                 let t = parse_theme(body).unwrap_or_else(|e| panic!("{name} parse: {e:#}"));
+
                 for (slot, style) in [("surface", t.surface), ("selection", t.selection)] {
                     assert_eq!(style.fg, None, "{name}: {slot} must be bg-only, never fg");
                     assert!(
@@ -805,6 +822,7 @@ mod tests {
         fn table_header_is_the_bold_accent_in_every_builtin() {
             for builtin::BuiltinTheme { name, body, .. } in builtin::BUILT_IN {
                 let t = parse_theme(body).unwrap_or_else(|e| panic!("{name} parse: {e:#}"));
+
                 assert_eq!(t.table_header, t.accent, "{name}");
                 assert_eq!(t.table_header.modifiers, Modifier::BOLD, "{name}");
             }
@@ -813,6 +831,7 @@ mod tests {
         #[test]
         fn mocha_matches_known_palette() {
             let t = parse_theme(builtin::MOCHA).unwrap();
+
             assert_eq!(t.text.fg, Some(Color::Rgb(0xcd, 0xd6, 0xf4)), "Text");
             assert_eq!(t.muted.fg, Some(Color::Rgb(0xa6, 0xad, 0xc8)), "Subtext0");
             assert_eq!(t.dim.fg, Some(Color::Rgb(0x7f, 0x84, 0x9c)), "Overlay1");
@@ -884,7 +903,9 @@ mod tests {
 
                 unknown_slot = "#000000"
             "##};
+
             let err = parse_theme(&body).expect_err("unknown slot rejected");
+
             let msg = format!("{err:#}");
             assert!(msg.contains("unknown field"), "{msg}");
             assert!(msg.contains("unknown_slot"), "{msg}");
@@ -897,7 +918,9 @@ mod tests {
                 r##"accent = { fg = "#89b4fa", bold = true }"##,
                 r##"accent = { fg = "#89b4fa", sparkle = true }"##,
             );
+
             let err = parse_theme(&body).expect_err("unknown modifier rejected");
+
             // The untagged enum reports a generic "did not match any variant" error, so only the
             // position and the slot point at `sparkle`.
             let line = body.lines().position(|l| l.starts_with("accent")).unwrap() + 1;
@@ -957,6 +980,7 @@ mod tests {
         #[test]
         fn bare_string_slot_yields_fg_only_no_modifiers() {
             let t = parse_theme(builtin::MOCHA).unwrap();
+
             // `user = "#fab387"` is a bare string in mocha.toml.
             assert_eq!(t.user.fg, Some(Color::Rgb(0xfa, 0xb3, 0x87)));
             assert_eq!(t.user.bg, None);
@@ -978,6 +1002,7 @@ mod tests {
         #[test]
         fn inline_table_slot_carries_modifiers() {
             let t = parse_theme(builtin::MOCHA).unwrap();
+
             // `accent = { fg = "#89b4fa", bold = true }` is inline.
             assert_eq!(t.accent.fg, Some(Color::Rgb(0x89, 0xb4, 0xfa)));
             assert_eq!(t.accent.bg, None);
@@ -987,6 +1012,7 @@ mod tests {
         #[test]
         fn bg_only_inline_slot_leaves_fg_unset() {
             let t = parse_theme(builtin::MOCHA).unwrap();
+
             // `diff_add = { bg = "#2a3a37" }` is bg-only.
             assert_eq!(t.diff_add.fg, None);
             assert_eq!(t.diff_add.bg, Some(Color::Rgb(0x2a, 0x3a, 0x37)));
@@ -1003,7 +1029,9 @@ mod tests {
                 r##"thinking = { fg = "#7f849c", italic = true }"##,
                 replacement,
             );
+
             let t = parse_theme(&body).unwrap();
+
             assert!(t.thinking.modifiers.contains(Modifier::BOLD));
             assert!(t.thinking.modifiers.contains(Modifier::ITALIC));
             assert!(t.thinking.modifiers.contains(Modifier::UNDERLINED));
@@ -1034,7 +1062,9 @@ mod tests {
         #[test]
         fn without_syntax_theme_defaults_to_base16_ocean_dark() {
             let body = mocha_with_slot_replacement(r#"syntax_theme = "base16-ocean.dark""#, "");
+
             let t = parse_theme(&body).unwrap();
+
             assert_eq!(t.syntax.name.as_deref(), Some("Base16 Ocean Dark"));
         }
 
@@ -1044,7 +1074,9 @@ mod tests {
                 r#"syntax_theme = "base16-ocean.dark""#,
                 r#"syntax_theme = "dracula""#,
             );
+
             let err = parse_theme(&body).expect_err("unknown syntax theme rejected");
+
             let msg = format!("{err:#}");
             assert!(msg.contains("dracula"), "{msg}");
             assert!(msg.contains("InspiredGitHub"), "{msg}");

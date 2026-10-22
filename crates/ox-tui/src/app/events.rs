@@ -528,7 +528,9 @@ mod tests {
         #[test]
         fn stream_token_switches_to_streaming() {
             let (mut app, _rx, _event_tx) = test_app(None);
+
             app.handle_engine_event(Event::StreamToken("partial".to_owned()));
+
             assert_eq!(app.status, Status::Streaming);
         }
 
@@ -537,14 +539,18 @@ mod tests {
             // Thinking tokens land in the chat view as their own block and must flip the bar to
             // Streaming, so the user sees the engine working before any visible text arrives.
             let (mut app, _rx, _event_tx) = test_app(None);
+
             app.handle_engine_event(Event::ThinkingToken("planning...".to_owned()));
+
             assert_eq!(app.status, Status::Streaming);
         }
 
         #[test]
         fn progress_update_renders_note_in_chat() {
             let (mut app, _rx, _event_tx) = test_app(None);
+
             app.handle_engine_event(Event::ProgressUpdate("Running the suite.".to_owned()));
+
             assert!(rendered_text(&mut app, 80, 24).contains("Running the suite."));
         }
 
@@ -559,14 +565,18 @@ mod tests {
             app.handle_engine_event(Event::Retrying(
                 "HTTP 529 overloaded_error. Retrying in 1 s (retry 1 of 5).".to_owned(),
             ));
+
             assert_eq!(
                 app.chat.last_error_text(),
                 None,
                 "a retry is not an error block"
             );
+
             let notice = "Skipped instruction file /repo/CLAUDE.md: Permission denied";
             app.handle_engine_event(Event::Notice(notice.to_owned()));
+
             assert_eq!(app.chat.last_system_text(), Some(notice));
+
             app.handle_engine_event(Event::Error("Session write failed: disk full".to_owned()));
 
             assert_eq!(
@@ -585,7 +595,9 @@ mod tests {
         #[test]
         fn tool_call_start_switches_to_tool_running() {
             let (mut app, _rx, _event_tx) = test_app(None);
+
             app.handle_engine_event(bash_call_start("t1", "ls"));
+
             assert_eq!(
                 app.status,
                 Status::ToolRunning {
@@ -605,6 +617,7 @@ mod tests {
             let (mut app, _rx, _event_tx) = test_app(None);
             app.handle_engine_event(bash_call_start("t1", "ls"));
             let before = app.chat.entry_count();
+
             app.handle_engine_event(Event::ToolCallEnd(ToolResult {
                 id: "t1".to_owned(),
                 content: "raw output".to_owned(),
@@ -614,6 +627,7 @@ mod tests {
                     content: "viewed output".to_owned(),
                 },
             }));
+
             assert_eq!(app.chat.entry_count(), before + 1);
             let text = rendered_text(&mut app, 60, 8);
             assert!(text.contains("Listed files"), "{text}");
@@ -629,12 +643,14 @@ mod tests {
             let (mut app, _rx, _event_tx) = test_app(None);
             app.handle_engine_event(bash_call_start("t1", "distinctive_label_xyz"));
             let before = app.chat.entry_count();
+
             app.handle_engine_event(text_call_end(
                 "t1",
                 "spawn failed: permission denied",
                 true,
                 None,
             ));
+
             assert_eq!(
                 app.chat.entry_count(),
                 before + 1,
@@ -662,7 +678,9 @@ mod tests {
             // so the user sees the output. No pending entry → header falls back to `(result)`.
             let (mut app, _rx, _event_tx) = test_app(None);
             let before = app.chat.entry_count();
+
             app.handle_engine_event(text_call_end("orphan", "stray output", false, None));
+
             assert_eq!(app.chat.entry_count(), before + 1);
             // Viewport must fit header + body or auto-scroll hides the header.
             let text = rendered_text(&mut app, 60, 8);
@@ -681,8 +699,8 @@ mod tests {
             rx.try_recv().expect("queued-a submit forwarded");
             app.dispatch_action(Action::Submit("queued-b".to_owned()));
             rx.try_recv().expect("queued-b submit forwarded");
-
             let chat_before = app.chat.entry_count();
+
             app.handle_engine_event(Event::PromptDrained("queued-a".to_owned()));
 
             assert_eq!(*app.queue.pending(), ["queued-b"],);
@@ -712,7 +730,9 @@ mod tests {
             app.dispatch_action(Action::Submit("first".to_owned()));
             rx.try_recv().expect("first submit forwarded");
             app.handle_engine_event(Event::AutoCompactionStarted);
+
             app.dispatch_action(Action::Submit("held".to_owned()));
+
             assert_eq!(
                 rx.try_recv(),
                 Err(TryRecvError::Empty),
@@ -739,6 +759,7 @@ mod tests {
             assert_eq!(app.status, Status::Streaming);
 
             app.handle_engine_event(Event::TurnComplete);
+
             assert_eq!(app.status, Status::Idle);
         }
 
@@ -901,6 +922,7 @@ mod tests {
         fn turn_failed_shows_the_error_and_finishes_the_turn() {
             let (mut app, _rx, _event_tx) = test_app(None);
             app.dispatch_action(Action::Submit("boom".to_owned()));
+
             app.handle_engine_event(Event::TurnFailed("API blew up".to_owned()));
 
             assert_eq!(app.chat.last_error_text(), Some("API blew up"));
@@ -1039,9 +1061,11 @@ mod tests {
             let (mut app, mut rx, _event_tx) = test_app(None);
             app.dispatch_action(Action::Submit("active".to_owned()));
             rx.try_recv().expect("active submit forwarded");
+
             for prompt in ["a", "b", "c"] {
                 app.dispatch_action(Action::Submit(prompt.to_owned()));
             }
+
             let mut forwarded = || std::iter::from_fn(|| rx.try_recv().ok()).collect::<Vec<_>>();
             assert_eq!(
                 forwarded(),
@@ -1055,6 +1079,7 @@ mod tests {
             app.handle_engine_event(Event::TurnFailed(
                 "agent stopped after 3 tool rounds".to_owned(),
             ));
+
             assert_eq!(
                 forwarded(),
                 [
@@ -1065,12 +1090,14 @@ mod tests {
             );
 
             app.handle_engine_event(Event::TurnComplete);
+
             assert_eq!(
                 forwarded(),
                 [Op::Prompt("b".to_owned()), Op::Queue("c".to_owned())],
             );
 
             app.handle_engine_event(Event::TurnComplete);
+
             assert_eq!(forwarded(), [Op::Prompt("c".to_owned())]);
             assert_eq!(*app.queue.pending(), [] as [&str; 0]);
         }
@@ -1121,8 +1148,11 @@ mod tests {
             assert_eq!(app.status, Status::Cancelling);
 
             app.handle_engine_event(Event::StreamToken("late".to_owned()));
+
             assert_eq!(app.status, Status::Cancelling);
+
             app.handle_engine_event(bash_call_start("t-late", "ls"));
+
             assert_eq!(app.status, Status::Cancelling);
         }
 
@@ -1160,7 +1190,9 @@ mod tests {
                 "nothing resubmits after a cancel"
             );
             assert_eq!(app.status, Status::Idle);
+
             app.handle_esc();
+
             assert_eq!(app.input.lines(), ["second".to_owned()]);
             assert_eq!(*app.queue.pending(), [] as [&str; 0]);
         }
@@ -1190,10 +1222,12 @@ mod tests {
         #[test]
         fn session_title_updated_overwrites_existing_title_for_current_session() {
             let (mut app, _rx, _event_tx) = test_app(Some("First prompt"));
+
             app.handle_engine_event(Event::SessionTitleUpdated {
                 id: app.session_info.session_id.clone(),
                 title: "AI-generated".to_owned(),
             });
+
             assert_eq!(app.status_bar.title(), Some("AI-generated"));
             assert!(app.dirty);
         }
@@ -1203,10 +1237,12 @@ mod tests {
             // A title task spawned before `/clear` can finish after the roll, so its event must not
             // paint the old session's title onto the current one.
             let (mut app, _rx, _event_tx) = test_app(Some("First prompt"));
+
             app.handle_engine_event(Event::SessionTitleUpdated {
                 id: "different-session".to_owned(),
                 title: "Stale title".to_owned(),
             });
+
             assert_eq!(
                 app.status_bar.title(),
                 Some("First prompt"),
@@ -1363,12 +1399,14 @@ mod tests {
         fn session_resumed_with_no_queued_prompts_is_silent() {
             let (mut app, _rx, _event_tx) = test_app(None);
             app.session_info.config.model = ModelSpec::resolve("claude-opus-5-5");
+
             app.handle_engine_event(Event::SessionResumed {
                 id: "resumed".to_owned(),
                 title: None,
                 prior: ArchiveState::Active,
                 history: vec![Interaction::UserText("only msg".to_owned())],
             });
+
             assert_eq!(
                 app.chat.entry_count(),
                 1,
@@ -1380,6 +1418,7 @@ mod tests {
         fn session_resumed_after_unarchiving_appends_a_notice() {
             let (mut app, _rx, _event_tx) = test_app(None);
             app.session_info.config.model = ModelSpec::resolve("claude-opus-5-5");
+
             app.handle_engine_event(Event::SessionResumed {
                 id: "bbbb2222-resumed".to_owned(),
                 title: None,
@@ -1396,6 +1435,7 @@ mod tests {
         fn session_resumed_with_compact_replays_boundary_block() {
             let (mut app, _rx, _event_tx) = test_app(None);
             app.session_info.config.model = ModelSpec::resolve("claude-opus-5-5");
+
             app.handle_engine_event(Event::SessionResumed {
                 id: "resumed".to_owned(),
                 title: None,
@@ -1421,12 +1461,14 @@ mod tests {
         fn session_resumed_with_no_title_clears_stale_chrome() {
             let (mut app, _rx, _event_tx) = test_app(Some("Stale"));
             app.session_info.config.model = ModelSpec::resolve("claude-opus-5-5");
+
             app.handle_engine_event(Event::SessionResumed {
                 id: "resumed".to_owned(),
                 title: None,
                 prior: ArchiveState::Active,
                 history: Vec::new(),
             });
+
             assert!(
                 app.status_bar.title().is_none(),
                 "Some(None) title must clear the chrome",
@@ -1437,6 +1479,7 @@ mod tests {
         #[test]
         fn session_resumed_with_an_unsupported_model_repeats_its_notice() {
             let (mut app, _rx, _event_tx) = test_app(None);
+
             app.handle_engine_event(Event::SessionResumed {
                 id: "resumed".to_owned(),
                 title: None,
@@ -1491,12 +1534,14 @@ mod tests {
         #[test]
         fn session_compacted_without_instructions_renders_clean_block() {
             let (mut app, _rx, _event_tx) = test_app(None);
+
             app.handle_engine_event(Event::SessionCompacted {
                 summary: "summary only".to_owned(),
                 pre_count: 2,
                 instructions: None,
                 trigger: CompactTrigger::Manual,
             });
+
             assert_eq!(app.chat.entry_count(), 1, "exactly one boundary block");
         }
 
@@ -1718,6 +1763,7 @@ mod tests {
             // / `/config`), and a chat confirmation block.
             let (mut app, _rx, _event_tx) = test_app(None);
             let sonnet = ModelSpec::resolve("claude-sonnet-5-5");
+
             app.handle_engine_event(Event::ConfigChanged {
                 model: sonnet.clone(),
                 effort: Some(Effort::High),
@@ -1750,6 +1796,7 @@ mod tests {
             // and chat confirmation update.
             let (mut app, _rx, _event_tx) = test_app(None);
             let original_model = app.status_bar.model().to_owned();
+
             app.handle_engine_event(Event::ConfigChanged {
                 model: app.session_info.config.model.clone(),
                 effort: Some(Effort::Xhigh),
@@ -1786,12 +1833,13 @@ mod tests {
             let started = || Event::LoginStarted {
                 url: "https://example.com/authorize".to_owned(),
             };
-
             app.open_browser = |url| {
                 assert_eq!(url, "https://example.com/authorize");
                 Ok(())
             };
+
             app.handle_engine_event(started());
+
             assert_eq!(
                 app.chat.last_system_text(),
                 Some(indoc! {"
@@ -1802,6 +1850,7 @@ mod tests {
 
             app.open_browser = |_| Err(io::Error::other("no browser"));
             app.handle_engine_event(started());
+
             assert_eq!(
                 app.chat.last_system_text(),
                 Some(indoc! {"
@@ -2007,6 +2056,7 @@ mod tests {
         #[test]
         fn approval_with_a_grant_offers_allow_for_session() {
             let (mut app, _rx, _event_tx) = test_app(None);
+
             app.handle_engine_event(Event::ApprovalRequested {
                 id: "call-1".to_owned(),
                 preview: ApprovalPreview {
@@ -2079,7 +2129,9 @@ mod tests {
             let (mut app, _rx, _event_tx) = test_app(None);
             app.handle_engine_event(bash_call_start("orphan", "ls"));
             assert_eq!(app.chat.pending_call_count(), 1);
+
             app.handle_engine_event(Event::TurnComplete);
+
             assert_eq!(
                 app.chat.pending_call_count(),
                 0,
@@ -2097,6 +2149,7 @@ mod tests {
             app.dirty = false;
 
             app.apply_git_update(GitUpdate::Branch(Some("main".to_owned())));
+
             assert!(!app.dirty, "unchanged branch skips the repaint");
 
             app.apply_git_update(GitUpdate::PullRequest(Some(PullRequest {
@@ -2105,6 +2158,7 @@ mod tests {
                 checks: None,
                 review: None,
             })));
+
             assert!(app.dirty, "new pull request repaints");
         }
     }
@@ -2157,14 +2211,17 @@ mod tests {
             };
 
             app.apply_slash_task(finish(Ok(ChatOutput::SystemMessage("clean".to_owned()))).await);
+
             assert_eq!(app.chat.last_system_text(), Some("clean"));
 
             app.dirty = false;
             app.apply_slash_task(finish(Ok(ChatOutput::GitDiff(diff))).await);
+
             assert!(app.dirty);
             assert!(rendered_text(&mut app, 60, 24).contains("  new.txt"));
 
             app.apply_slash_task(finish(Err("/diff: boom".to_owned())).await);
+
             assert_eq!(app.chat.last_error_text(), Some("/diff: boom"));
         }
 
@@ -2191,16 +2248,20 @@ mod tests {
                 chars: 4,
                 outcome: Ok(Delivery::Copied),
             });
-
             let just_before = NOTICE_DURATION
                 .checked_sub(Duration::from_millis(1))
                 .unwrap();
+
             tokio::time::advance(just_before).await;
-            assert!(!app.expire_copy_notice(now()));
+            let expired_early = app.expire_copy_notice(now());
+
+            assert!(!expired_early);
             assert!(app.copy_notice.is_some());
 
             tokio::time::advance(Duration::from_millis(1)).await;
-            assert!(app.expire_copy_notice(now()));
+            let expired = app.expire_copy_notice(now());
+
+            assert!(expired);
             assert!(app.copy_notice.is_none());
             assert!(!app.expire_copy_notice(now()), "nothing left to clear");
         }

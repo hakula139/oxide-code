@@ -608,6 +608,7 @@ mod tests {
             ))));
 
             app.handle_crossterm_event(&key_event(KeyCode::Char('x'), KeyModifiers::NONE));
+
             assert!(
                 app.input.lines().iter().all(String::is_empty),
                 "input must stay empty while modal is active",
@@ -620,6 +621,7 @@ mod tests {
 
             // Modal submit flows through the normal dispatch path.
             app.handle_crossterm_event(&key_event(KeyCode::Char('s'), KeyModifiers::NONE));
+
             let forwarded = rx.try_recv().expect("modal-submitted action forwarded");
             assert!(matches!(forwarded, Op::Interrupt));
         }
@@ -684,6 +686,7 @@ mod tests {
         fn cancelling_a_modal_closes_it_without_dispatching() {
             let (mut app, mut rx, _event_tx) = test_app(None);
             app.push_modal(Box::new(ScriptedModal::new(ModalAction::Cancelled)));
+
             app.handle_crossterm_event(&key_event(KeyCode::Char('c'), KeyModifiers::NONE));
 
             assert_eq!(
@@ -691,8 +694,10 @@ mod tests {
                 Err(TryRecvError::Empty),
                 "Cancelled must not dispatch any Op"
             );
+
             // With the modal closed, later keys reach the input.
             app.handle_crossterm_event(&key_event(KeyCode::Char('y'), KeyModifiers::NONE));
+
             assert_eq!(app.input.lines(), vec!["y".to_owned()]);
         }
 
@@ -710,8 +715,8 @@ mod tests {
             app.dirty = false;
 
             app.handle_crossterm_event(&key_event(KeyCode::Char('o'), KeyModifiers::CONTROL));
-            assert!(app.dirty);
 
+            assert!(app.dirty);
             let expanded = rendered_text(&mut app, 80, 20);
             assert!(
                 compact.contains("... +3 lines · Ctrl+O to expand"),
@@ -725,7 +730,9 @@ mod tests {
         #[tokio::test(start_paused = true)]
         async fn ctrl_c_while_idle_arms_exit_then_confirms() {
             let (mut app, _rx, _event_tx) = test_app(None);
+
             app.handle_crossterm_event(&key_event(KeyCode::Char('c'), KeyModifiers::CONTROL));
+
             assert!(!app.should_quit, "first press only arms");
             assert_eq!(
                 app.status,
@@ -736,6 +743,7 @@ mod tests {
 
             tokio::time::advance(EXIT_WINDOW.checked_sub(Duration::from_millis(1)).unwrap()).await;
             app.handle_crossterm_event(&key_event(KeyCode::Char('c'), KeyModifiers::CONTROL));
+
             assert!(app.should_quit, "second press within window confirms");
         }
 
@@ -810,6 +818,7 @@ mod tests {
             app.handle_engine_event(Event::StreamToken("partial".to_owned()));
 
             app.handle_crossterm_event(&key_event(KeyCode::Esc, KeyModifiers::NONE));
+
             assert!(!app.should_quit);
             let forwarded = rx.try_recv().expect("Interrupt forwarded to the engine");
             assert!(matches!(forwarded, Op::Interrupt));
@@ -820,6 +829,7 @@ mod tests {
             let (mut app, mut rx, _event_tx) = test_app(None);
             app.handle_crossterm_event(&key_event(KeyCode::Char('h'), KeyModifiers::NONE));
             app.handle_crossterm_event(&key_event(KeyCode::Char('i'), KeyModifiers::NONE));
+
             app.handle_crossterm_event(&key_event(KeyCode::Enter, KeyModifiers::NONE));
 
             assert!(app.dirty);
@@ -837,9 +847,11 @@ mod tests {
             app.input.set_text("draft");
 
             app.handle_crossterm_event(&key_event(KeyCode::PageUp, KeyModifiers::NONE));
+
             assert!(app.chat.is_scrolled_up(), "idle PageUp reaches chat");
 
             app.handle_crossterm_event(&key_event(KeyCode::End, KeyModifiers::CONTROL));
+
             assert!(
                 !app.chat.is_scrolled_up(),
                 "Ctrl+End jumps chat to the bottom"
@@ -855,12 +867,14 @@ mod tests {
             app.input.set_text("one\ntwo");
 
             app.handle_crossterm_event(&key_event(KeyCode::Up, KeyModifiers::NONE));
+
             assert!(
                 !app.chat.is_scrolled_up(),
                 "first Up moves the input cursor"
             );
 
             app.handle_crossterm_event(&key_event(KeyCode::Up, KeyModifiers::NONE));
+
             assert!(app.chat.is_scrolled_up(), "Up on the top row scrolls chat");
         }
 
@@ -949,8 +963,8 @@ mod tests {
             _ = render_app(&mut app, 60, 10);
 
             app.handle_crossterm_event(&mouse_event(MouseEventKind::ScrollUp));
-            let text = rendered_text(&mut app, 60, 10);
 
+            let text = rendered_text(&mut app, 60, 10);
             assert!(text.contains("Jump to bottom"), "{text}");
             assert!(app.dirty);
         }
@@ -1006,11 +1020,13 @@ mod tests {
             app.handle_crossterm_event(&press(12, KeyModifiers::SUPER));
             app.open_browser = |_| Ok(());
             app.handle_crossterm_event(&press(10, KeyModifiers::NONE));
+
             assert_eq!(
                 app.chat.last_system_text(),
                 None,
                 "an opened link needs no note"
             );
+
             app.open_browser = |url| {
                 assert_eq!(url, "https://example.com/pull/7");
                 Err(io::Error::other("no browser"))
@@ -1057,7 +1073,9 @@ mod tests {
             // Resize falls through to `dirty = true` so the next tick re-splits with the new area.
             let (mut app, _rx, _event_tx) = test_app(None);
             app.dirty = false;
+
             app.handle_crossterm_event(&CrosstermEvent::Resize(80, 24));
+
             assert!(app.dirty, "Resize must trigger a re-layout render");
         }
 
@@ -1073,6 +1091,7 @@ mod tests {
                 mouse_event(MouseEventKind::Up(MouseButton::Middle)),
             ] {
                 app.handle_crossterm_event(&event);
+
                 assert!(!app.dirty, "{event:?}");
             }
         }
@@ -1087,7 +1106,9 @@ mod tests {
             // ModalAction::Cancelled path, so the rollback arm must skip cleanly with no snapshot.
             let (mut app, _rx, _event_tx) = test_app(None);
             let original_text = app.theme.text;
+
             app.apply_modal_action(ModalAction::Cancelled);
+
             assert!(app.preview_theme_snapshot.is_none());
             assert_eq!(app.theme.text, original_text);
         }
@@ -1100,7 +1121,9 @@ mod tests {
             let (mut app, _rx, _event_tx) = test_app(None);
             let entries_before = app.chat.entry_count();
             let body = "Deleted session abc12345: Fix auth flow".to_owned();
+
             app.apply_modal_action(ModalAction::SystemMessage(body.clone()));
+
             assert_eq!(
                 app.chat.entry_count(),
                 entries_before + 1,
@@ -1165,7 +1188,9 @@ mod tests {
             // Esc is routed by `App` because its meaning depends on queue state and run-state.
             let (mut app, mut rx, _event_tx) = test_app(None);
             app.handle_engine_event(Event::StreamToken("partial".to_owned()));
+
             app.handle_crossterm_event(&key_event(KeyCode::Esc, KeyModifiers::NONE));
+
             assert_eq!(app.status, Status::Cancelling);
             let forwarded = rx.try_recv().expect("Interrupt forwarded");
             assert!(matches!(forwarded, Op::Interrupt));
@@ -1174,7 +1199,9 @@ mod tests {
         #[test]
         fn idle_with_empty_queue_is_silent() {
             let (mut app, _rx, _event_tx) = test_app(None);
+
             app.handle_crossterm_event(&key_event(KeyCode::Esc, KeyModifiers::NONE));
+
             assert_eq!(app.status, Status::Idle);
             assert_eq!(*app.queue.pending(), [] as [&str; 0]);
         }
@@ -1230,6 +1257,7 @@ mod tests {
         #[tokio::test]
         async fn submit_prompt_updates_chat_status_and_forwards_action() {
             let (mut app, mut rx, _event_tx) = test_app(None);
+
             app.dispatch_action(Action::Submit("hello".to_owned()));
 
             assert_eq!(app.chat.entry_count(), 1);
@@ -1242,6 +1270,7 @@ mod tests {
         #[test]
         fn slash_command_renders_locally_without_forwarding() {
             let (mut app, mut rx, _event_tx) = test_app(None);
+
             app.dispatch_action(Action::Submit("/help".to_owned()));
 
             assert!(app.modals.is_active(), "/help opens a modal");
@@ -1258,6 +1287,7 @@ mod tests {
         #[test]
         fn unknown_slash_command_renders_error_without_forwarding() {
             let (mut app, mut rx, _event_tx) = test_app(None);
+
             app.dispatch_action(Action::Submit("/no-such".to_owned()));
 
             assert_eq!(app.chat.entry_count(), 2);
@@ -1278,6 +1308,7 @@ mod tests {
         #[tokio::test]
         async fn double_slash_escapes_command_and_forwards_literal() {
             let (mut app, mut rx, _event_tx) = test_app(None);
+
             app.dispatch_action(Action::Submit("//etc/hosts".to_owned()));
 
             assert_eq!(app.chat.entry_count(), 1, "only the user message");
@@ -1492,12 +1523,14 @@ mod tests {
             app.session_info.project_root = root.path().to_owned();
 
             app.dispatch_action(Action::Submit("/init".to_owned()));
+
             assert!(app.modals.is_active(), "the file picker opens first");
             assert_eq!(
                 rx.try_recv(),
                 Err(TryRecvError::Empty),
                 "no turn before the pick"
             );
+
             app.handle_crossterm_event(&key_event(KeyCode::Down, KeyModifiers::NONE));
             app.handle_crossterm_event(&key_event(KeyCode::Enter, KeyModifiers::NONE));
 
@@ -1666,6 +1699,7 @@ mod tests {
         #[test]
         fn shutdown_sets_should_quit_and_leaves_chat_untouched() {
             let (mut app, _rx, _event_tx) = test_app(None);
+
             app.dispatch_action(Action::Op(Op::Shutdown));
 
             assert!(app.should_quit);
@@ -1682,6 +1716,7 @@ mod tests {
             let action = Op::Resume {
                 target: ResumeTarget::Path("resume-target.jsonl".into()),
             };
+
             app.dispatch_op(action.clone());
 
             let forwarded = rx.try_recv().expect("Resume must reach the engine");
@@ -1697,6 +1732,7 @@ mod tests {
             let action = Op::Compact {
                 instructions: Some("focus".to_owned()),
             };
+
             app.dispatch_op(action.clone());
 
             let forwarded = rx.try_recv().expect("Compact must reach the engine");
@@ -1707,6 +1743,7 @@ mod tests {
         #[tokio::test]
         async fn login_goes_busy_and_holds_prompts_typed_while_signing_in() {
             let (mut app, mut rx, _event_tx) = test_app(None);
+
             app.dispatch_op(Op::Login);
 
             assert_eq!(rx.try_recv().ok(), Some(Op::Login));
@@ -1785,6 +1822,7 @@ mod tests {
                 Op::SetModel(ConfigPick::Effort(Effort::High)),
             ] {
                 let (mut app, mut rx, _event_tx) = test_app(None);
+
                 app.dispatch_op(op.clone());
 
                 let forwarded = rx.try_recv().expect("op forwarded to the engine");
@@ -1857,9 +1895,14 @@ mod tests {
             };
             let before = until.checked_sub(Duration::from_millis(1)).unwrap();
 
-            assert!(!app.expire_armed_exit(before));
+            let expired_early = app.expire_armed_exit(before);
+
+            assert!(!expired_early);
             assert_eq!(app.status, Status::ExitArmed { until });
-            assert!(app.expire_armed_exit(until));
+
+            let expired = app.expire_armed_exit(until);
+
+            assert!(expired);
             assert_eq!(app.status, Status::Idle);
         }
 
@@ -1868,7 +1911,9 @@ mod tests {
             let (mut app, _rx, _event_tx) = test_app(None);
             app.set_status(Status::Streaming);
 
-            assert!(!app.expire_armed_exit(Instant::now()));
+            let expired = app.expire_armed_exit(Instant::now());
+
+            assert!(!expired);
             assert_eq!(app.status, Status::Streaming);
         }
     }
@@ -1937,7 +1982,9 @@ mod tests {
             assert!(app.preview_theme_snapshot.is_none());
             assert_eq!(app.session_info.config.theme_name, "latte");
             assert_eq!(app.theme.text, previewed.text);
+
             app.apply_modal_action(ModalAction::Cancelled);
+
             assert_eq!(
                 app.session_info.config.theme_name, "latte",
                 "post-commit cancel must not restore the pre-preview theme",
@@ -1968,7 +2015,9 @@ mod tests {
             // land on `App::modals`.
             let (mut app, _rx, _event_tx) = test_app(None);
             assert!(!app.modals.is_active(), "stack starts empty");
+
             app.dispatch_action(Action::Submit("/theme".to_owned()));
+
             assert!(app.modals.is_active(), "bare `/theme` opens a picker modal");
         }
 
@@ -1976,6 +2025,7 @@ mod tests {
         fn slash_typed_swap_theme_routes_through_local_handler() {
             // A synthesized TUI-only action like `/theme latte` runs its `dispatch_action` arm.
             let (mut app, mut rx, _event_tx) = test_app(None);
+
             app.dispatch_action(Action::Submit("/theme latte".to_owned()));
 
             assert_eq!(
@@ -2004,6 +2054,7 @@ mod tests {
         #[tokio::test]
         async fn slash_typed_model_routes_synthesized_set_model_through_dispatch() {
             let (mut app, mut rx, _event_tx) = test_app(None);
+
             app.dispatch_action(Action::Submit("/model haiku".to_owned()));
 
             let forwarded = rx.try_recv().expect("SetModel forwarded to the engine");
@@ -2045,9 +2096,11 @@ mod tests {
         #[test]
         fn double_slash_while_busy_queues_the_literal_and_keeps_the_escape() {
             let (mut app, mut rx, _event_tx) = test_app(None);
+
             app.dispatch_action(Action::Submit("active".to_owned()));
             app.dispatch_action(Action::Submit("//etc/hosts".to_owned()));
             app.dispatch_action(Action::Submit("//tmp".to_owned()));
+
             let mut forwarded = || std::iter::from_fn(|| rx.try_recv().ok()).collect::<Vec<_>>();
             assert_eq!(
                 forwarded(),
@@ -2059,6 +2112,7 @@ mod tests {
             );
 
             app.handle_engine_event(Event::PromptDrained("/etc/hosts".to_owned()));
+
             assert_eq!(
                 *app.queue.pending(),
                 ["//tmp"],
@@ -2067,6 +2121,7 @@ mod tests {
 
             app.handle_engine_event(Event::Cancelled);
             app.dispatch_action(Action::Submit("new".to_owned()));
+
             assert_eq!(
                 forwarded(),
                 [Op::Prompt("/tmp".to_owned()), Op::Queue("new".to_owned())],
@@ -2142,28 +2197,32 @@ mod tests {
                 }
 
                 let clean = SlashOutcome::SystemMessage("Working tree clean".to_owned());
-                assert_eq!(app.apply_slash_outcome(Ok(clean), "/diff"), None);
+                let handed_back = app.apply_slash_outcome(Ok(clean), "/diff");
+
+                assert_eq!(handed_back, None);
                 assert_eq!(app.chat.last_system_text(), Some("Working tree clean"));
 
-                assert_eq!(
-                    app.apply_slash_outcome(Err("/diff: boom".to_owned()), "/diff"),
-                    None
-                );
+                let handed_back = app.apply_slash_outcome(Err("/diff: boom".to_owned()), "/diff");
+
+                assert_eq!(handed_back, None);
                 assert_eq!(app.chat.last_error_text(), Some("/diff: boom"));
 
                 let modal = SlashOutcome::Modal(Box::new(FakeModal::new("picker")));
-                assert_eq!(app.apply_slash_outcome(Ok(modal), "/theme"), None);
+                let handed_back = app.apply_slash_outcome(Ok(modal), "/theme");
+
+                assert_eq!(handed_back, None);
                 assert!(app.modals.is_active());
 
                 let forward = SlashOutcome::Forward(Action::Op(Op::Clear));
-                assert_eq!(
-                    app.apply_slash_outcome(Ok(forward), "/clear"),
-                    Some(Action::Op(Op::Clear)),
-                );
+                let handed_back = app.apply_slash_outcome(Ok(forward), "/clear");
+
+                assert_eq!(handed_back, Some(Action::Op(Op::Clear)));
 
                 let prompt = SlashOutcome::Prompt("Create AGENTS.md".to_owned());
+                let handed_back = app.apply_slash_outcome(Ok(prompt), "/init AGENTS.md");
+
                 assert_eq!(
-                    app.apply_slash_outcome(Ok(prompt), "/init AGENTS.md"),
+                    handed_back,
                     Some(Action::SlashPrompt {
                         line: "/init AGENTS.md".to_owned(),
                         prompt: "Create AGENTS.md".to_owned(),
@@ -2185,12 +2244,15 @@ mod tests {
                 Ok(ChatOutput::SystemMessage(rx.await.unwrap()))
             }));
 
-            assert_eq!(app.apply_slash_outcome(Ok(task), "/diff"), None);
+            let handed_back = app.apply_slash_outcome(Ok(task), "/diff");
+
+            assert_eq!(handed_back, None);
             assert_eq!(app.chat.entry_count(), 0);
 
             tx.send("done".to_owned()).unwrap();
             let finished = app.slash_tasks.join_next().await.expect("the task runs");
             app.apply_slash_task(finished);
+
             assert_eq!(app.chat.last_system_text(), Some("done"));
         }
     }

@@ -326,9 +326,14 @@ mod tests {
             for code in [KeyCode::Down, KeyCode::Char('j')] {
                 let mut p = hinted(&["a", "b"]);
 
-                assert!(press(&mut p, code));
+                let moved = press(&mut p, code);
+
+                assert!(moved, "{code:?}");
                 assert_eq!(p.cursor_index(), 1, "{code:?}");
-                assert!(press(&mut p, code));
+
+                let wrapped = press(&mut p, code);
+
+                assert!(wrapped, "{code:?}");
                 assert_eq!(p.cursor_index(), 0, "{code:?} wraps past the last row");
             }
         }
@@ -338,9 +343,14 @@ mod tests {
             for code in [KeyCode::Up, KeyCode::Char('k')] {
                 let mut p = hinted(&["a", "b", "c"]);
 
-                assert!(press(&mut p, code));
+                let wrapped = press(&mut p, code);
+
+                assert!(wrapped, "{code:?}");
                 assert_eq!(p.cursor_index(), 2, "{code:?} wraps past the first row");
-                assert!(press(&mut p, code));
+
+                let moved = press(&mut p, code);
+
+                assert!(moved, "{code:?}");
                 assert_eq!(p.cursor_index(), 1, "{code:?}");
             }
         }
@@ -349,7 +359,9 @@ mod tests {
         fn a_digit_jumps_to_the_row_it_labels() {
             let mut p = hinted(&["a", "b", "c"]);
 
-            assert!(press(&mut p, KeyCode::Char('3')));
+            let jumped = press(&mut p, KeyCode::Char('3'));
+
+            assert!(jumped);
             assert_eq!(p.cursor_index(), 2);
         }
 
@@ -358,7 +370,9 @@ mod tests {
             let mut p = hinted(&["a", "b"]);
 
             for code in [KeyCode::Char('9'), KeyCode::Char('x'), KeyCode::Enter] {
-                assert!(!press(&mut p, code), "{code:?}");
+                let moved = press(&mut p, code);
+
+                assert!(!moved, "{code:?}");
             }
 
             assert_eq!(p.cursor_index(), 0);

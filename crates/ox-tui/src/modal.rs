@@ -440,6 +440,7 @@ mod tests {
     #[test]
     fn empty_stack_is_inactive_with_zero_height() {
         let stack = ModalStack::default();
+
         assert!(!stack.is_active());
         assert_eq!(stack.height(80, 40), 0);
     }
@@ -507,7 +508,9 @@ mod tests {
         #[test]
         fn activates_stack_and_height_reflects_top_modal() {
             let mut stack = ModalStack::default();
+
             stack.push(Box::new(ScriptedModal::new(ModalAction::Cancelled)));
+
             assert!(stack.is_active());
             assert_eq!(stack.height(80, 40), 3 + TOP_BORDER_HEIGHT);
         }
@@ -522,7 +525,9 @@ mod tests {
             stack.push(Box::new(ScriptedModal::new(ModalAction::Cancelled)));
             stack.push(Box::new(ScriptedModal::new(ModalAction::Cancelled)));
             assert!(stack.is_active());
+
             let actions = stack.clear();
+
             assert!(!stack.is_active(), "clear must empty the stack");
             assert_eq!(stack.height(80, 40), 0);
             assert!(
@@ -542,6 +547,7 @@ mod tests {
             stack.push(Box::new(top));
 
             let actions = stack.clear();
+
             assert!(!stack.is_active());
             assert!(
                 matches!(
@@ -585,7 +591,6 @@ mod tests {
             let modal = ScriptedModal::new(ModalAction::Cancelled);
             let body_height = modal.declared_height;
             stack.push(Box::new(modal));
-
             let total_height = stack.height(12, 40);
             assert_eq!(total_height, body_height + TOP_BORDER_HEIGHT);
 
@@ -696,11 +701,13 @@ mod tests {
             stack.push(Box::new(modal));
 
             let outcome = stack.handle_key(&KeyEvent::from(KeyCode::Esc));
+
             assert!(outcome.is_none());
             assert!(stack.is_active());
 
             let outcome =
                 stack.handle_key(&KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL));
+
             assert!(matches!(
                 outcome,
                 Some(ModalAction::Dispatch(Action::Op(Op::Interrupt)))
@@ -844,7 +851,6 @@ mod tests {
             let mut child = ScriptedModal::new(ModalAction::Cancelled);
             child.declared_height = 7;
             parent.push_child = Some(Box::new(child));
-
             let mut stack = ModalStack::default();
             stack.push(Box::new(parent));
             assert_eq!(stack.height(80, 40), 3 + TOP_BORDER_HEIGHT, "parent height");
@@ -873,7 +879,6 @@ mod tests {
                 let parent = ScriptedModal::new(ModalAction::Cancelled);
                 let counter = Arc::clone(&parent.focus_regained_count);
                 let child = ScriptedModal::new(ModalAction::Cancelled);
-
                 let mut stack = ModalStack::default();
                 stack.push(Box::new(parent));
                 stack.push(Box::new(child));
@@ -918,10 +923,15 @@ mod tests {
         #[test]
         fn with_no_modal_or_a_default_hook_asks_for_no_repaint() {
             let mut stack = ModalStack::default();
-            assert!(!stack.tick(Instant::now()));
+
+            let empty_repaint = stack.tick(Instant::now());
+
+            assert!(!empty_repaint);
 
             stack.push(Box::new(BareModal));
-            assert!(!stack.tick(Instant::now()));
+            let default_repaint = stack.tick(Instant::now());
+
+            assert!(!default_repaint);
         }
     }
 

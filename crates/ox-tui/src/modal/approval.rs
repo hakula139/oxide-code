@@ -675,6 +675,7 @@ mod tests {
         fn counts_body_rows_plus_chrome() {
             // Single command line → 1 body row, plus title + blank + position row + footer = 4.
             let modal = command_modal("ls");
+
             assert_eq!(modal.height(40, 40), 5);
         }
 
@@ -682,6 +683,7 @@ mod tests {
         fn counts_wrapped_rows_and_caps_the_body_at_the_viewport() {
             // 100 unbroken columns at width 40 → 40 + 38 + 22 after the 2-column hanging indent.
             let modal = command_modal(&"x".repeat(100));
+
             assert_eq!(modal.height(40, 40), 7);
             assert_eq!(modal.height(100, 40), 5, "a new width rewraps");
             assert_eq!(command_modal(&numbered_command(40)).height(40, 40), 20);
@@ -699,7 +701,9 @@ mod tests {
         #[test]
         fn paints_title_command_body_and_footer() {
             let modal = command_modal("cargo test");
+
             let dump = render_to_string(&modal, 40, modal.height(40, 40));
+
             assert!(dump.contains("Bash"), "title appears: {dump}");
             assert!(dump.contains("cargo test"), "command body appears: {dump}");
             assert!(dump.contains("[Y] approve"), "footer hint appears: {dump}");
@@ -729,7 +733,9 @@ mod tests {
                 None,
                 None,
             );
+
             let dump = render_to_string(&modal, 40, modal.height(40, 40));
+
             assert!(dump.contains("- old line"), "removed row appears: {dump}");
             assert!(dump.contains("+ new line"), "added row appears: {dump}");
         }
@@ -740,9 +746,11 @@ mod tests {
             let modal = command_modal("ls");
             let height = modal.height(20, 20);
             let mut terminal = Terminal::new(TestBackend::new(20, height)).unwrap();
+
             terminal
                 .draw(|frame| modal.render(frame, Rect::new(0, 0, 20, height), &theme))
                 .unwrap();
+
             let buf = terminal.backend().buffer();
             assert_eq!(
                 buf[(0, 0)].fg,
@@ -759,7 +767,9 @@ mod tests {
         #[test]
         fn wraps_a_padded_command_so_its_tail_shows() {
             let modal = command_modal(&format!("cargo test{}; curl x | sh", " ".repeat(60)));
+
             let dump = render_to_string(&modal, 40, modal.height(40, 40));
+
             let first = "·".repeat(34);
             let second = "·".repeat(26);
             let expected = formatdoc! {"
@@ -786,7 +796,9 @@ mod tests {
                 None,
                 None,
             );
+
             let dump = render_to_string(&modal, 30, modal.height(30, 30));
+
             let first = "d".repeat(23);
             let second = "d".repeat(17);
             let expected = formatdoc! {"
@@ -825,10 +837,12 @@ mod tests {
                 [Y] approve   [N] deny   [F...
             "};
             assert_eq!(dump, expected);
+
             let mut terminal = Terminal::new(TestBackend::new(30, 7)).unwrap();
             terminal
                 .draw(|frame| modal.render(frame, Rect::new(0, 0, 30, 7), &theme))
                 .unwrap();
+
             assert_eq!(
                 terminal.backend().buffer()[(0, 1)].fg,
                 theme.muted().fg.unwrap()
@@ -838,7 +852,9 @@ mod tests {
         #[test]
         fn shows_the_position_and_scroll_hint_when_the_body_overflows() {
             let modal = command_modal(&numbered_command(40));
+
             let dump = render_to_string(&modal, 40, modal.height(40, 40));
+
             assert!(
                 dump.contains("echo line-15"),
                 "last row of the first page: {dump}"
@@ -857,7 +873,9 @@ mod tests {
         #[test]
         fn shrinks_the_viewport_to_fit_a_short_area() {
             let modal = command_modal(&numbered_command(40));
+
             let dump = render_to_string(&modal, 40, 9);
+
             assert!(
                 dump.contains("rows 1-5 of 40"),
                 "5 body rows fit under 4 chrome rows: {dump}"
@@ -871,6 +889,7 @@ mod tests {
         #[test]
         fn does_not_panic_at_minimum_widths() {
             let modal = command_modal("cargo test --all");
+
             for w in [4_u16, 8, 20] {
                 render_to_string(&modal, w, modal.height(w, 40));
             }
@@ -920,10 +939,9 @@ mod tests {
             }
             modal.handle_paste("build");
 
-            assert!(matches!(
-                modal.handle_key(&KeyEvent::from(KeyCode::Enter)),
-                ModalKey::Consumed
-            ));
+            let outcome = modal.handle_key(&KeyEvent::from(KeyCode::Enter));
+
+            assert!(matches!(outcome, ModalKey::Consumed));
             let height = modal.height(60, 40);
             let rejected = render_to_string(&modal, 60, height);
             assert!(
@@ -933,6 +951,7 @@ mod tests {
 
             // Editing again clears the error and gives its row back.
             modal.handle_key(&KeyEvent::from(KeyCode::Backspace));
+
             assert_eq!(modal.height(60, 40), height - 1);
         }
 
@@ -941,7 +960,9 @@ mod tests {
             let mut modal = granted_modal("cargo test");
             modal.handle_key(&KeyEvent::from(KeyCode::Char('a')));
             render_to_string(&modal, 60, modal.height(60, 40));
+
             let outcome = modal.handle_key(&KeyEvent::from(KeyCode::Enter));
+
             assert!(
                 matches!(outcome, ModalKey::Consumed),
                 "an Enter typed right behind the `a` must not grant the rule"
@@ -949,22 +970,20 @@ mod tests {
 
             tokio::time::advance(TYPE_AHEAD_GUARD).await;
             let cramped = render_to_string(&modal, 60, 5);
+            let outcome = modal.handle_key(&KeyEvent::from(KeyCode::Enter));
+
             assert!(!cramped.contains("[Enter]"), "{cramped}");
-            assert!(matches!(
-                modal.handle_key(&KeyEvent::from(KeyCode::Enter)),
-                ModalKey::Consumed
-            ));
+            assert!(matches!(outcome, ModalKey::Consumed));
 
             let full = render_to_string(&modal, 60, 6);
+            let outcome = modal.handle_key(&KeyEvent::from(KeyCode::Enter));
+
             assert!(full.contains("cargo test"), "{full}");
             assert!(
                 full.contains("[Enter]"),
                 "the body yields its rows to the editor: {full}"
             );
-            assert!(matches!(
-                modal.handle_key(&KeyEvent::from(KeyCode::Enter)),
-                ModalKey::Submitted(_)
-            ));
+            assert!(matches!(outcome, ModalKey::Submitted(_)));
         }
 
         #[test]
@@ -976,6 +995,7 @@ mod tests {
             render_to_string(&modal, 60, modal.height(60, 40));
             modal.handle_key(&KeyEvent::from(KeyCode::End));
             type_text(&mut modal, " $X");
+
             modal.handle_key(&KeyEvent::from(KeyCode::Enter));
 
             let rejected = render_to_string(&modal, 60, modal.height(60, 40));
@@ -997,6 +1017,7 @@ mod tests {
             assert!(rejected.contains("rows 1-"), "{rejected}");
 
             modal.handle_key(&KeyEvent::from(KeyCode::Down));
+
             let scrolled = render_to_string(&modal, 60, modal.height(60, 40));
             assert!(scrolled.contains("rows 2-"), "{scrolled}");
             assert!(scrolled.contains("[Enter] allow for session"), "{scrolled}");
@@ -1007,7 +1028,9 @@ mod tests {
             for opener in ['a', 'f'] {
                 let mut modal = granted_modal("cargo test");
                 modal.handle_key(&KeyEvent::from(KeyCode::Char(opener)));
+
                 modal.handle_key(&KeyEvent::from(KeyCode::Esc));
+
                 assert!(!modal.captures_esc());
                 let choice = render_to_string(&modal, 80, modal.height(80, 40));
                 assert!(choice.contains("[A] allow for session"), "{choice}");
@@ -1016,9 +1039,14 @@ mod tests {
                 modal.expire_guard();
                 modal.handle_key(&KeyEvent::from(KeyCode::Char(opener)));
                 stack.push(Box::new(modal));
-                assert!(stack.handle_key(&KeyEvent::from(KeyCode::Esc)).is_none());
+
+                let first = stack.handle_key(&KeyEvent::from(KeyCode::Esc));
+
+                assert!(first.is_none());
                 assert!(stack.is_active());
+
                 let outcome = stack.handle_key(&KeyEvent::from(KeyCode::Esc));
+
                 assert!(
                     matches!(
                         outcome,
@@ -1038,10 +1066,10 @@ mod tests {
             modal.handle_key(&KeyEvent::from(KeyCode::Char('f')));
             render_to_string(&modal, 60, modal.height(60, 40));
             type_text(&mut modal, "no");
-            assert!(matches!(
-                modal.handle_key(&KeyEvent::from(KeyCode::Enter)),
-                ModalKey::Consumed
-            ));
+
+            let outcome = modal.handle_key(&KeyEvent::from(KeyCode::Enter));
+
+            assert!(matches!(outcome, ModalKey::Consumed));
             assert!(modal.captures_esc(), "the editor stays open");
         }
 
@@ -1049,11 +1077,11 @@ mod tests {
         async fn keys_typed_ahead_of_the_modal_are_dropped() {
             let mut modal = fresh_command_modal("ls");
             render_to_string(&modal, 40, modal.height(40, 40));
+
             for code in [KeyCode::Char('y'), KeyCode::Char('n')] {
-                assert!(
-                    matches!(modal.handle_key(&KeyEvent::from(code)), ModalKey::Consumed),
-                    "{code:?}"
-                );
+                let outcome = modal.handle_key(&KeyEvent::from(code));
+
+                assert!(matches!(outcome, ModalKey::Consumed), "{code:?}");
             }
         }
 
@@ -1077,14 +1105,17 @@ mod tests {
             let just_inside = TYPE_AHEAD_GUARD
                 .checked_sub(Duration::from_millis(1))
                 .unwrap();
+
             for _ in 0..2 {
                 tokio::time::advance(just_inside).await;
                 let outcome = modal.handle_key(&y);
+
                 assert!(matches!(outcome, ModalKey::Consumed));
             }
 
             tokio::time::advance(TYPE_AHEAD_GUARD).await;
             let outcome = modal.handle_key(&y);
+
             assert!(matches!(outcome, ModalKey::Submitted(_)), "{outcome:?}");
         }
 
@@ -1095,6 +1126,7 @@ mod tests {
             render_to_string(&modal, 40, height);
 
             modal.handle_key(&KeyEvent::from(KeyCode::End));
+
             let dump = render_to_string(&modal, 40, height);
             assert!(
                 dump.contains("echo line-39"),
@@ -1104,6 +1136,7 @@ mod tests {
 
             modal.handle_key(&KeyEvent::from(KeyCode::Down));
             modal.handle_key(&KeyEvent::from(KeyCode::Up));
+
             let dump = render_to_string(&modal, 40, height);
             assert!(
                 dump.contains("rows 24-39 of 40"),
@@ -1111,6 +1144,7 @@ mod tests {
             );
 
             modal.handle_key(&KeyEvent::from(KeyCode::PageUp));
+
             let dump = render_to_string(&modal, 40, height);
             assert!(
                 dump.contains("rows 9-24 of 40"),
@@ -1119,6 +1153,7 @@ mod tests {
 
             modal.handle_key(&KeyEvent::from(KeyCode::PageDown));
             modal.handle_key(&KeyEvent::from(KeyCode::Home));
+
             let dump = render_to_string(&modal, 40, height);
             assert!(
                 dump.contains("rows 1-16 of 40"),
@@ -1130,10 +1165,10 @@ mod tests {
         fn scroll_keys_do_nothing_when_the_body_fits() {
             let mut modal = command_modal("ls");
             render_to_string(&modal, 40, modal.height(40, 40));
-            assert!(matches!(
-                modal.handle_key(&KeyEvent::from(KeyCode::Down)),
-                ModalKey::Consumed
-            ));
+
+            let outcome = modal.handle_key(&KeyEvent::from(KeyCode::Down));
+
+            assert!(matches!(outcome, ModalKey::Consumed));
             assert_eq!(modal.scroll, 0);
         }
 
@@ -1177,7 +1212,9 @@ mod tests {
         fn y_submits_an_approve_decision() {
             for code in [KeyCode::Char('y'), KeyCode::Char('Y')] {
                 let mut modal = shown_modal("ls");
+
                 let outcome = modal.handle_key(&KeyEvent::from(code));
+
                 let ModalKey::Submitted(ModalAction::Dispatch(Action::Op(Op::Resolve {
                     id,
                     decision,
@@ -1203,10 +1240,13 @@ mod tests {
                 .map(|modifiers| KeyEvent::new(KeyCode::Enter, modifiers));
 
             for event in enters.into_iter().chain(modified) {
-                assert!(stack.handle_key(&event).is_none(), "{event:?}");
+                let outcome = stack.handle_key(&event);
+
+                assert!(outcome.is_none(), "{event:?}");
             }
 
             let approved = stack.handle_key(&KeyEvent::from(KeyCode::Char('y')));
+
             assert!(
                 matches!(
                     approved,
@@ -1223,53 +1263,58 @@ mod tests {
         fn y_waits_until_a_body_row_has_shown() {
             let y = KeyEvent::from(KeyCode::Char('y'));
             let mut modal = command_modal("one\ntwo");
-            assert!(
-                matches!(modal.handle_key(&y), ModalKey::Consumed),
-                "no render yet"
-            );
+
+            let outcome = modal.handle_key(&y);
+
+            assert!(matches!(outcome, ModalKey::Consumed), "no render yet");
 
             render_to_string(&modal, 40, 2);
-            assert!(
-                matches!(modal.handle_key(&y), ModalKey::Consumed),
-                "body clipped"
-            );
+            let outcome = modal.handle_key(&y);
+
+            assert!(matches!(outcome, ModalKey::Consumed), "body clipped");
 
             let shown = render_to_string(&modal, 40, 3);
+            let outcome = modal.handle_key(&y);
+
             assert!(shown.contains("one"), "{shown}");
-            assert!(matches!(modal.handle_key(&y), ModalKey::Submitted(_)));
+            assert!(matches!(outcome, ModalKey::Submitted(_)));
 
             let mut empty = command_modal("");
-            assert!(
-                matches!(empty.handle_key(&y), ModalKey::Submitted(_)),
-                "nothing to hide"
-            );
+            let outcome = empty.handle_key(&y);
+
+            assert!(matches!(outcome, ModalKey::Submitted(_)), "nothing to hide");
         }
 
         #[test]
         fn a_edits_the_suggested_rule_and_enter_allows_it_for_the_session() {
             let mut modal = granted_modal("cargo test");
+
             let choice = render_to_string(&modal, 60, modal.height(60, 40));
             assert!(choice.contains("[A] allow for session"), "{choice}");
 
-            assert!(matches!(
-                modal.handle_key(&KeyEvent::from(KeyCode::Char('a'))),
-                ModalKey::Consumed
-            ));
+            let outcome = modal.handle_key(&KeyEvent::from(KeyCode::Char('a')));
+
+            assert!(matches!(outcome, ModalKey::Consumed));
             assert!(modal.captures_esc());
+
             modal.expire_guard();
             let editing = render_to_string(&modal, 60, modal.height(60, 40));
+
             assert!(editing.contains(RULE_LABEL), "{editing}");
             assert!(editing.contains("cargo test"), "{editing}");
             assert!(editing.contains("[Enter] allow for session"), "{editing}");
 
             // `y` and `n` type into the pattern while it is being edited.
             type_text(&mut modal, "yn");
+
             assert!(modal.captures_esc());
+
             for _ in 0.."yn".len() {
                 modal.handle_key(&KeyEvent::from(KeyCode::Backspace));
             }
             type_text(&mut modal, " *");
             let outcome = modal.handle_key(&KeyEvent::from(KeyCode::Enter));
+
             let ModalKey::Submitted(ModalAction::Dispatch(Action::Op(Op::Resolve {
                 id,
                 decision,
@@ -1290,20 +1335,22 @@ mod tests {
         #[test]
         fn a_does_nothing_without_a_grant() {
             let mut modal = shown_modal("cargo test");
+
             let dump = render_to_string(&modal, 60, modal.height(60, 40));
             assert!(!dump.contains("[A]"), "{dump}");
 
-            assert!(matches!(
-                modal.handle_key(&KeyEvent::from(KeyCode::Char('a'))),
-                ModalKey::Consumed
-            ));
+            let outcome = modal.handle_key(&KeyEvent::from(KeyCode::Char('a')));
+
+            assert!(matches!(outcome, ModalKey::Consumed));
             assert!(!modal.captures_esc());
         }
 
         #[test]
         fn n_submits_a_deny_decision() {
             let mut modal = command_modal("ls");
+
             let outcome = modal.handle_key(&KeyEvent::from(KeyCode::Char('n')));
+
             let ModalKey::Submitted(ModalAction::Dispatch(Action::Op(Op::Resolve {
                 id,
                 decision,
@@ -1318,13 +1365,19 @@ mod tests {
         #[test]
         fn f_opens_a_feedback_editor_whose_enter_denies_with_the_text() {
             let mut modal = granted_modal("cargo test");
+
             modal.handle_key(&KeyEvent::from(KeyCode::Char('f')));
+
             assert!(modal.captures_esc());
+
             modal.expire_guard();
             let editing = render_to_string(&modal, 60, modal.height(60, 40));
+
             assert!(editing.contains(FEEDBACK_LABEL), "{editing}");
             assert!(editing.contains("[Enter] deny with feedback"), "{editing}");
+
             let outcome = modal.handle_key(&KeyEvent::from(KeyCode::Enter));
+
             assert!(
                 matches!(outcome, ModalKey::Consumed),
                 "an empty answer submits nothing"
@@ -1333,6 +1386,7 @@ mod tests {
             // The feedback holds the `y` and `n` answer keys, which the editor takes as text.
             type_text(&mut modal, " try nextest ");
             let outcome = modal.handle_key(&KeyEvent::from(KeyCode::Enter));
+
             let ModalKey::Submitted(ModalAction::Dispatch(Action::Op(Op::Resolve {
                 id,
                 decision,
@@ -1352,8 +1406,10 @@ mod tests {
         #[test]
         fn unrecognized_keys_consume_silently() {
             let mut modal = command_modal("ls");
+
             for code in [KeyCode::Char('z'), KeyCode::Tab] {
                 let outcome = modal.handle_key(&KeyEvent::from(code));
+
                 assert!(matches!(outcome, ModalKey::Consumed));
             }
         }
@@ -1365,9 +1421,11 @@ mod tests {
         #[test]
         fn aborts_the_turn_for_this_call() {
             let mut modal = command_modal("ls");
+
             let action = modal
                 .on_cancel()
                 .expect("approval cancel must resolve the call");
+
             let ModalAction::Dispatch(Action::Op(Op::Resolve { id, decision })) = action else {
                 panic!("on_cancel must resolve via Op::Resolve, got {action:?}");
             };
@@ -1396,6 +1454,7 @@ mod tests {
                     text: "\tfoo()".to_owned(),
                 }],
             }));
+
             assert_eq!(rows[0].text, "    foo()");
         }
     }
@@ -1410,7 +1469,9 @@ mod tests {
         #[test]
         fn marks_whitespace_runs_but_keeps_indentation_and_single_spaces() {
             let dim = Style::default().add_modifier(Modifier::DIM);
+
             let spans = reveal("\ta  b\tc d\u{a0}e", Style::default(), dim, true);
+
             assert_eq!(texts(&spans), "    a··b·c d·e");
             let runs: Vec<_> = spans
                 .iter()
@@ -1428,12 +1489,14 @@ mod tests {
                 Style::default(),
                 true,
             );
+
             assert_eq!(texts(&spans), r"safe\rrm\u{1b}[2J\u{200b}\u{202e}x");
         }
 
         #[test]
         fn without_whitespace_marking_keeps_runs_and_escapes_tabs() {
             let spans = reveal("a  b\tc", Style::default(), Style::default(), false);
+
             assert_eq!(texts(&spans), r"a  b\tc");
         }
     }
