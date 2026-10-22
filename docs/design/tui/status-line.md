@@ -83,8 +83,8 @@ A user-command segment is [#166](https://github.com/hakula139/oxide-code/issues/
 - `crates/ox-core/src/client/anthropic/sse.rs`: `pump_events`, which forwards each response's limits.
 - `crates/ox-core/src/client/anthropic/transport.rs`: `rate_limits`, the unified rate-limit header parser.
 - `crates/ox-core/src/config.rs`: `StatusLineSegment`, the segment roster and its default order.
-- `crates/ox-core/src/engine.rs`: `Engine` usage accounting, `UsageUpdated` emission, and restored-cost pricing.
 - `crates/ox-core/src/engine/turn.rs`: `collect_response`, which emits `RateLimitsUpdated`.
+- `crates/ox-core/src/engine/usage.rs`: `Engine` usage accounting, `UsageUpdated` emission, and restored-cost pricing.
 - `crates/ox-core/src/model/pricing.rs`: `TokenCostRates`, the per-model rate cards and the request estimate.
 - `crates/ox-core/src/model/usage.rs`: `TokenUsage`, the token counts one request reports.
 - `crates/ox-core/src/session/entry.rs`: `Entry::Usage` and `UsageRecord`, the per-request record a resume prices.

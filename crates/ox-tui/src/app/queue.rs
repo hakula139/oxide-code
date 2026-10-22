@@ -20,6 +20,9 @@ pub(super) struct PromptQueue {
     forwarded: usize,
     /// Queued prompts the in-flight turn took in, which a rolled-back turn hands back.
     drained: Vec<String>,
+    /// How many leading `pending` prompts were queued before a requested session switch.
+    /// They belong to the session it leaves, and the queue only grows while the switch runs.
+    before_switch: Option<usize>,
 }
 
 /// What a failure of the active prompt hands back to the user.
@@ -162,11 +165,21 @@ impl PromptQueue {
         self.hand_back = HandBack::Nothing;
         self.forwarded = 0;
         self.drained.clear();
+        self.before_switch = None;
     }
 
-    /// Drops every queued prompt, returning how many there were.
-    pub(super) fn discard(&mut self) -> usize {
-        std::mem::take(&mut self.pending).len()
+    /// Notes that a session switch starts.
+    /// The prompts queued so far belong to the session it leaves,
+    /// and the ones queued while it runs to the session it reaches.
+    pub(super) fn mark_switch(&mut self) {
+        self.before_switch = Some(self.pending.len());
+    }
+
+    /// Drops the prompts that belong to the session just left, returning how many there were.
+    /// Without a [`Self::mark_switch`], that is every queued prompt.
+    pub(super) fn discard_left_behind(&mut self) -> usize {
+        let count = self.before_switch.take().unwrap_or(self.pending.len());
+        self.pending.drain(..count).count()
     }
 }
 
@@ -265,6 +278,37 @@ mod tests {
             queue.mark_rolled_back();
             assert_eq!(queue.fail_turn(false), FailedTurn::HandedBack(None));
             assert_eq!(*queue.pending(), ["next", "queued"]);
+        }
+    }
+
+    mod discard_left_behind {
+        use super::*;
+
+        #[test]
+        fn keeps_the_prompts_queued_after_the_switch_started() {
+            let mut queue = PromptQueue::default();
+            queue.push("before".to_owned());
+            queue.mark_switch();
+            queue.push("after".to_owned());
+
+            let dropped = queue.discard_left_behind();
+
+            assert_eq!(dropped, 1);
+            assert_eq!(*queue.pending(), ["after"]);
+        }
+
+        #[test]
+        fn drops_every_prompt_once_an_ended_turn_cleared_the_mark() {
+            let mut queue = PromptQueue::default();
+            queue.push("before".to_owned());
+            queue.mark_switch();
+            queue.push("after".to_owned());
+            queue.end_turn();
+
+            let dropped = queue.discard_left_behind();
+
+            assert_eq!(dropped, 2);
+            assert_eq!(*queue.pending(), [] as [&str; 0]);
         }
     }
 }

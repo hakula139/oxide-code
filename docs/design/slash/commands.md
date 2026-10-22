@@ -75,7 +75,8 @@ Client-side command surface: `/help`, `/clear`, `/model`, `/status`, and friends
 - `crates/ox-core/src/command.rs`: the alias table, `typed_op`, `parse`, and the typed forms of `/clear`, `/compact`, `/effort`, `/mode`, `/model`, `/rename`, and `/resume`, plus the model resolver.
 - `crates/ox-core/src/command/init.rs`: the typed form of `/init`, the instruction-file discovery, and the create and update prompts.
 - `crates/ox-core/src/command/parser.rs`: `parse_slash`, which parses a typed line into a command name and its arguments, `split_slash`, the borrowed split it shares with the popup, and `unescape_literal` for the `//` escape.
-- `crates/ox-core/src/engine.rs`: `Engine::run` arms for `Op::Clear`, `Op::SetModel`, and `Op::SetMode`, `Engine::set_model`, which re-resolves the compaction threshold for the new model and words the `ConfigChanged` notice against the settings before the swap, `Engine::archive`, which waits for the archive entry to reach disk before rolling the session, and `TurnEnd::of`.
+- `crates/ox-core/src/engine.rs`: `Engine::run` arms for `Op::Clear`, `Op::SetModel`, and `Op::SetMode`, `Engine::set_model`, which re-resolves the compaction threshold for the new model and words the `ConfigChanged` notice against the settings before the swap, and `TurnEnd::of`.
+- `crates/ox-core/src/engine/sessions.rs`: `Engine::archive`, which waits for the archive entry to reach disk before rolling the session.
 - `crates/ox-core/src/protocol/notice.rs`: `config_changed` and `mode_changed`, the confirmations every frontend shows.
 - `crates/ox-core/src/session/display.rs`: shared `id_prefix` and `display_title`, `archive_notice`, and the `MAX_TITLE_WIDTH` cap that `fit_title` applies to every title.
 - `crates/ox-core/src/session/resolver.rs`: `resolve_prefix_to_info` checks the current project first, widens the search on a miss, and returns a typed `ResolveError` that the CLI prints as is and slash commands rephrase. `resolve_saved_prefix` reports a live-only match as `ResolveError::Live` for `/archive`, `/unarchive`, `/delete`, and the engine's prefix resume.
@@ -111,7 +112,7 @@ Client-side command surface: `/help`, `/clear`, `/model`, `/status`, and friends
 - `crates/ox-tui/src/slash/mode.rs`: `ModeCmd` plus `ModePicker`.
 - `crates/ox-tui/src/slash/model.rs`: `ModelCmd`.
 - `crates/ox-tui/src/slash/picker.rs`: combined model and effort picker modal.
-- `crates/ox-tui/src/slash/registry.rs`: `BUILT_INS`, `SlashKind`, `SlashOutcome`, `ChatOutput`, and the `SlashCommand` trait, whose aliases default to `command::aliases`.
+- `crates/ox-tui/src/slash/registry.rs`: `BUILT_INS`, `SlashKind`, `SlashOutcome`, `ChatOutput`, and the `SlashCommand` trait.
 - `crates/ox-tui/src/slash/rename.rs`: `RenameCmd` plus `RenameModal` editor.
 - `crates/ox-tui/src/slash/resume.rs`: `ResumeCmd` plus `ResumePicker` (see `resume.md`).
 - `crates/ox-tui/src/slash/sessions.rs`: `open_store`, `resolve_error_message`, `saved_error_message`, and the live-session recovery hints, shared by the session commands, plus `format_metadata_line` for the delete confirm modal.

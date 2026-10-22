@@ -116,7 +116,7 @@ impl App {
     }
 
     /// Opens the status-bar link under a plain left press, returning whether it hit one. A press
-    /// with modifiers stays with terminals that open OSC 8 links on Ctrl / Cmd-click themselves.
+    /// with modifiers stays with terminals that open OSC 8 links on Ctrl+click or Cmd+click.
     fn open_status_link(&mut self, mouse: MouseEvent) -> bool {
         if mouse.kind != MouseEventKind::Down(MouseButton::Left) || !mouse.modifiers.is_empty() {
             return false;
@@ -243,17 +243,23 @@ impl App {
             Op::Prompt(_) => return self.start_turn(op),
             Op::Interrupt => self.set_status(Status::Cancelling),
             Op::Shutdown => self.should_quit = true,
-            Op::Resume { .. } => self.set_status(Status::Resuming),
+            Op::Clear => {
+                self.queue.mark_switch();
+                self.set_status(Status::Clearing);
+            }
+            Op::Resume { .. } => {
+                self.queue.mark_switch();
+                self.set_status(Status::Resuming);
+            }
             Op::Compact { .. } => self.set_status(Status::Compacting),
             Op::Login => self.set_status(Status::SigningIn),
+            Op::Logout => self.set_status(Status::SigningOut),
+            Op::Archive => {
+                self.queue.mark_switch();
+                self.set_status(Status::Archiving);
+            }
             Op::SetMode(mode) => self.requested_mode = *mode,
-            Op::Queue(_)
-            | Op::Resolve { .. }
-            | Op::SetModel(_)
-            | Op::Clear
-            | Op::Archive
-            | Op::Rename { .. }
-            | Op::Logout => {}
+            Op::Queue(_) | Op::Resolve { .. } | Op::SetModel(_) | Op::Rename { .. } => {}
         }
         self.send_op(op);
     }
@@ -388,14 +394,20 @@ impl App {
         self.forward_queued_prompts();
     }
 
-    /// Forwards the queued prompts the in-flight turn lacks, in order. A prompt that a full channel
-    /// turns away stays queued for a later call, and a closed channel quits. Holds the
-    /// prompts while compacting, signing in, resuming, or cancelling, when no turn may be left to
-    /// splice them in.
+    /// Forwards the queued prompts the in-flight turn lacks, in order.
+    /// A prompt that a full channel turns away stays queued for a later call,
+    /// and a closed channel quits.
+    /// Holds them during an op that runs no turn to splice them into, or while cancelling.
     pub(super) fn forward_queued_prompts(&mut self) {
         if matches!(
             &self.status,
-            Status::Compacting | Status::SigningIn | Status::Resuming | Status::Cancelling,
+            Status::Compacting
+                | Status::SigningIn
+                | Status::SigningOut
+                | Status::Clearing
+                | Status::Resuming
+                | Status::Archiving
+                | Status::Cancelling,
         ) {
             return;
         }
@@ -1691,6 +1703,54 @@ mod tests {
         }
 
         #[tokio::test]
+        async fn a_switch_holds_prompts_typed_during_it_for_the_new_session() {
+            let landed = |id: &str| Event::SessionResumed {
+                id: id.to_owned(),
+                title: None,
+                unarchived: false,
+                history: Vec::new(),
+            };
+            let rolled = |id: &str, archived| Event::SessionRolled {
+                id: id.to_owned(),
+                archived,
+            };
+            for (command, switched, swapped) in [
+                ("/clear", Status::Clearing, rolled("rolled-session", false)),
+                (
+                    "/archive",
+                    Status::Archiving,
+                    rolled("rolled-session", true),
+                ),
+                ("/resume abcd", Status::Resuming, landed("resumed-session")),
+            ] {
+                let (mut app, mut rx, _event_tx) = test_app(None);
+                app.queue.push("left by a cancel".to_owned());
+                app.dispatch_action(Action::Submit(command.to_owned()));
+                rx.try_recv().expect("switch forwarded");
+
+                app.dispatch_action(Action::Submit("after the switch".to_owned()));
+
+                assert_eq!(app.status, switched, "{command}");
+                assert_eq!(rx.try_recv(), Err(TryRecvError::Empty), "{command}");
+
+                app.handle_engine_event(swapped);
+                app.handle_engine_event(Event::SessionReady);
+
+                assert_eq!(app.status, Status::Streaming, "{command}");
+                assert_eq!(
+                    rx.try_recv().ok(),
+                    Some(Op::Prompt("after the switch".to_owned())),
+                    "{command}",
+                );
+                let text = rendered_text(&mut app, 80, 12);
+                assert!(
+                    text.contains("Discarded 1 queued prompt from the previous session"),
+                    "{command}: {text}"
+                );
+            }
+        }
+
+        #[tokio::test]
         async fn forwards_engine_ops_unchanged() {
             // A modal-emitted `SetModel` must reach the engine so it can emit `ConfigChanged`.
             for op in [
@@ -1699,7 +1759,6 @@ mod tests {
                     effort: None,
                 }),
                 Op::SetModel(ConfigPick::Effort(Effort::High)),
-                Op::Clear,
             ] {
                 let (mut app, mut rx, _event_tx) = test_app(None);
                 app.dispatch_op(op.clone());

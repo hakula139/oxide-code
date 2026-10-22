@@ -16,7 +16,7 @@ use tracing::{error, warn};
 use uuid::Uuid;
 
 use super::actor::{self, SessionCmd};
-use super::entry::{CompactInfo, UsageRecord};
+use super::entry::{CompactBoundary, CompactInfo, UsageRecord};
 use super::sanitize::{retain_visible_file_snapshots, sanitize_resumed_messages};
 use super::saved::SavedError;
 use super::state::{SessionState, extract_user_text};
@@ -224,20 +224,16 @@ impl SessionHandle {
     }
 
     /// Writes the compaction boundary and the synthetic post-compact message, then resets the chain
-    /// anchor. `tasks` is the task list the summarized transcript leaves. The caller swaps in the
-    /// summary only once [`CompactOutcome::committed`] says the boundary took effect.
+    /// anchor. The caller swaps in the summary only once [`CompactOutcome::committed`] says the
+    /// boundary took effect.
     pub(crate) async fn compact(
         &self,
-        summary: String,
-        instructions: Option<String>,
-        tasks: Vec<Task>,
+        boundary: CompactBoundary,
         synthetic_message: Message,
     ) -> CompactOutcome {
         let (ack, rx) = oneshot::channel();
         let cmd = SessionCmd::Compact {
-            summary,
-            instructions,
-            tasks,
+            boundary,
             synthetic_message,
             ack,
         };
@@ -1054,9 +1050,10 @@ mod tests {
 
             let outcome = handle
                 .compact(
-                    "synth summary".to_owned(),
-                    Some("focus".to_owned()),
-                    Vec::new(),
+                    CompactBoundary {
+                        instructions: Some("focus".to_owned()),
+                        ..testing::boundary("synth summary")
+                    },
                     Message::user("post"),
                 )
                 .await;
@@ -1079,7 +1076,7 @@ mod tests {
         async fn reports_every_failure_to_reach_the_actor() {
             async fn compact(handle: &SessionHandle) -> CompactOutcome {
                 handle
-                    .compact("s".to_owned(), None, Vec::new(), Message::user("synth"))
+                    .compact(testing::boundary("s"), Message::user("synth"))
                     .await
             }
 
@@ -1958,6 +1955,7 @@ mod tests {
 
     mod session_format {
         use super::*;
+        use crate::protocol::CompactTrigger;
 
         /// Writes a session holding every entry type and content block, with messages, contexts,
         /// and sidecars after its compaction, since a resume drops those from before it. Returns
@@ -1987,9 +1985,12 @@ mod tests {
             session.record_usage(vec![usage("1h", 2)]).await;
             session
                 .compact(
-                    "Asked to edit f.rs.".to_owned(),
-                    Some("focus on f.rs".to_owned()),
-                    plan(),
+                    CompactBoundary {
+                        summary: "Asked to edit f.rs.".to_owned(),
+                        instructions: Some("focus on f.rs".to_owned()),
+                        tasks: plan(),
+                        trigger: CompactTrigger::Manual,
+                    },
                     Message::user("Summary: asked to edit f.rs."),
                 )
                 .await;
@@ -2262,6 +2263,7 @@ mod tests {
                     "pre_message_count": compact.pre_message_count,
                     "instructions": compact.instructions,
                     "tasks": compact.tasks,
+                    "trigger": compact.trigger,
                 })),
                 "context": transcript.context,
                 "messages": transcript.messages,

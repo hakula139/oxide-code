@@ -19,14 +19,14 @@ The maintainer acknowledges a report within 7 days and shares an assessment with
 
 `ox` runs locally with the permissions of the user who starts it and has no OS-level sandbox. Its [permission gate](docs/guide/permissions.md) determines which tool calls run, require approval, or are denied. In `manual` and `plan` modes, read, grep, and glob calls run without approval on any path you can read unless a `deny` or `ask` rule matches. In `manual` mode, edits inside the working directory also run without approval.
 
-Commands run by the `bash` tool inherit your environment, except for the credential variables `ox` uses to authenticate: `ANTHROPIC_AUTH_TOKEN`, `ANTHROPIC_API_KEY`, `CLAUDE_CODE_OAUTH_TOKEN`, and `ANTHROPIC_CUSTOM_HEADERS`. Other secrets in your environment, such as cloud or GitHub tokens, are available to every command, including `echo`, which runs without approval.
+Commands run by the `bash` tool, and the `git` and `gh` processes `ox` starts itself, such as for the status line and `/diff`, inherit your environment, except for the credential variables `ox` uses to authenticate: `ANTHROPIC_AUTH_TOKEN`, `ANTHROPIC_API_KEY`, `CLAUDE_CODE_OAUTH_TOKEN`, and `ANTHROPIC_CUSTOM_HEADERS`. Other secrets in your environment, such as cloud or GitHub tokens, stay available because tools such as `gh` and `aws` need them, so the approval gate is the boundary. Any command you approve or allow can read them. In `manual` mode, a command that runs without approval never expands a variable, so `echo $GITHUB_TOKEN` asks first.
 
 In scope:
 
 - Tool calls that bypass a check required by their permission mode, such as approval, a matching `deny` rule (including in `yolo` mode), a protected path, or the built-in deny list
 - Approval prompts that misrepresent a call, or allow rules that match commands or paths excluded by their documented grammar
 - Repository content, such as a project `.ox/config.toml`, that widens permissions, redirects credentials, extends the TLS trust store, or reads files outside the permission gate
-- `ox` writing your API key or OAuth token to logs, session files, or files accessible to other users, passing it to a `bash` command, or sending it to any endpoint other than the configured endpoint or Anthropic's OAuth token endpoint
+- `ox` writing your API key or OAuth token to logs, session files, or files accessible to other users, passing it to a `bash` command or a `git` or `gh` process, or sending it to any endpoint other than the configured endpoint or Anthropic's OAuth token endpoint
 - Flaws in the release workflow, the Homebrew formula, the Nix flake, or the `cargo install --git` path that let someone other than the maintainer change what you install
 
 Out of scope:

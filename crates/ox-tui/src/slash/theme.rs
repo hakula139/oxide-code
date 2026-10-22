@@ -38,10 +38,6 @@ impl SlashCommand for ThemeCmd {
         }
     }
 
-    fn echoes_input(&self, args: &str) -> bool {
-        !args.is_empty()
-    }
-
     fn usage(&self) -> Option<&'static str> {
         Some("[<name>]")
     }
@@ -56,6 +52,10 @@ impl SlashCommand for ThemeCmd {
             .collect()
     }
 
+    fn echoes_input(&self, args: &str) -> bool {
+        !args.is_empty()
+    }
+
     fn execute(&self, arg: &str, ctx: &SlashContext<'_>) -> Result<SlashOutcome, String> {
         if arg.is_empty() {
             return Ok(SlashOutcome::Modal(Box::new(ThemePicker::new(
@@ -66,6 +66,8 @@ impl SlashCommand for ThemeCmd {
         Ok(SlashOutcome::Forward(Action::SwapTheme(theme)))
     }
 }
+
+// ── Helpers ──
 
 /// Resolves a typed `/theme <name>` argument against the curated catalog. Custom themes require
 /// an edit to `config.toml`, so file paths are rejected.
@@ -172,13 +174,6 @@ mod tests {
     use super::*;
     use crate::modal::testing::render_rows;
     use crate::slash::registry::testing::run_execute;
-
-    #[test]
-    fn name_and_metadata_match_built_ins_contract() {
-        assert_eq!(ThemeCmd.name(), "theme");
-        assert_ne!(ThemeCmd.description(), "");
-        assert_eq!(ThemeCmd.usage(), Some("[<name>]"));
-    }
 
     mod classify {
         use super::*;
@@ -292,16 +287,12 @@ mod tests {
     mod theme_picker {
         use super::*;
 
-        fn picker_with_active(name: &str) -> ThemePicker {
-            ThemePicker::new(name)
-        }
-
         mod new {
             use super::*;
 
             #[test]
             fn positions_cursor_on_active_theme() {
-                let p = picker_with_active("latte");
+                let p = ThemePicker::new("latte");
                 let row = p.list.selected();
                 assert_eq!(row.theme.name, "latte");
                 assert!(row.is_active);
@@ -310,7 +301,7 @@ mod tests {
             #[test]
             fn with_unknown_active_keeps_cursor_on_first_row() {
                 // A custom path matches no built-in row, so the cursor falls back to the first.
-                let p = picker_with_active("~/themes/custom.toml");
+                let p = ThemePicker::new("~/themes/custom.toml");
                 let row = p.list.selected();
                 assert_eq!(row.theme.name, "mocha");
             }
@@ -321,7 +312,7 @@ mod tests {
 
             #[test]
             fn lists_themes_above_the_footer() {
-                let p = picker_with_active("latte");
+                let p = ThemePicker::new("latte");
 
                 let rows = render_rows(&p, 80, p.height(80, 20));
 
@@ -353,7 +344,7 @@ mod tests {
                     (KeyCode::Down, "macchiato"),
                     (KeyCode::Up, BUILT_IN.last().unwrap().name),
                 ] {
-                    let mut p = picker_with_active("mocha");
+                    let mut p = ThemePicker::new("mocha");
 
                     let outcome = p.handle_key(&KeyEvent::from(code));
 
@@ -368,7 +359,7 @@ mod tests {
 
             #[test]
             fn numeric_jump_emits_preview_for_target_row() {
-                let mut p = picker_with_active("mocha");
+                let mut p = ThemePicker::new("mocha");
                 let outcome = p.handle_key(&KeyEvent::from(KeyCode::Char('4')));
                 match outcome {
                     ModalKey::Preview(ModalAction::Dispatch(Action::PreviewTheme(theme))) => {
@@ -384,21 +375,21 @@ mod tests {
                 // keeps the test valid as themes are added.
                 let past_end = char::from_digit(u32::try_from(BUILT_IN.len()).unwrap() + 1, 10)
                     .expect("roster fits in a single digit");
-                let mut p = picker_with_active("mocha");
+                let mut p = ThemePicker::new("mocha");
                 let outcome = p.handle_key(&KeyEvent::from(KeyCode::Char(past_end)));
                 assert!(matches!(outcome, ModalKey::Consumed));
             }
 
             #[test]
-            fn enter_on_unchanged_cursor_returns_cancelled() {
-                let mut p = picker_with_active("mocha");
+            fn enter_on_unchanged_cursor_cancels() {
+                let mut p = ThemePicker::new("mocha");
                 let outcome = p.handle_key(&KeyEvent::from(KeyCode::Enter));
                 assert!(matches!(outcome, ModalKey::Cancelled));
             }
 
             #[test]
             fn enter_after_cursor_move_emits_swap_for_new_theme() {
-                let mut p = picker_with_active("mocha");
+                let mut p = ThemePicker::new("mocha");
                 p.handle_key(&KeyEvent::from(KeyCode::Down)); // → macchiato
                 let outcome = p.handle_key(&KeyEvent::from(KeyCode::Enter));
                 match outcome {
@@ -411,7 +402,7 @@ mod tests {
 
             #[test]
             fn other_keys_are_consumed_and_modal_stays_open() {
-                let mut p = picker_with_active("mocha");
+                let mut p = ThemePicker::new("mocha");
                 for code in [KeyCode::Tab, KeyCode::Char('x'), KeyCode::Char('0')] {
                     let outcome = p.handle_key(&KeyEvent::from(code));
                     assert!(

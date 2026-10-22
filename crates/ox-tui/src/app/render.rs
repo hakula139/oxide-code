@@ -55,9 +55,7 @@ impl App {
     /// Replays captured status links as OSC 8 envelopes over the drawn frame.
     fn emit_status_hyperlinks<B: TuiBackend>(&mut self, terminal: &mut Terminal<B>) -> Result<()> {
         let links = self.status_bar.take_pending_hyperlinks();
-        if !links.is_empty() {
-            write_status_hyperlinks(terminal.backend_mut(), &links)?;
-        }
+        write_status_hyperlinks(terminal.backend_mut(), &links)?;
         self.status_links = links;
         Ok(())
     }
@@ -265,7 +263,7 @@ mod tests {
 
     use ox_core::config::StatusLineSegment;
     use ox_core::permission::{Basis, Mode};
-    use ox_core::protocol::{Decision, Event, Op, ToolCall, ToolResult};
+    use ox_core::protocol::{CompactTrigger, Decision, Event, Op, ToolCall, ToolResult};
     use ox_core::tool::tasks::testing::plan;
     use ox_core::tool::view::{ApprovalBody, ApprovalPreview, ToolResultView};
     use ox_core::util::git::PullRequest;
@@ -277,6 +275,7 @@ mod tests {
         FakeModal, five_hour_limit, long_chat_block, push_answerable_approval, render_app,
         rendered_text, test_app,
     };
+    use crate::clipboard::CopyError;
     use crate::components::status::testing::status_bar_init;
     use crate::components::status::{Status, StatusBar};
     use crate::git_probes::GitUpdate;
@@ -564,7 +563,7 @@ mod tests {
                 summary: COMPACT_SUMMARY.trim().to_owned(),
                 pre_count: 3,
                 instructions: None,
-                automatic: false,
+                trigger: CompactTrigger::Manual,
             });
             app.handle_engine_event(Event::SessionReady);
             insta::assert_snapshot!(render_app(&mut app, 60, 16));
@@ -605,7 +604,7 @@ mod tests {
             for (text, failed, fg) in [
                 ("Copied 5 characters", false, app.theme.success.fg),
                 (
-                    "Not copied: no clipboard is reachable",
+                    &*CopyError::TimedOut.to_string(),
                     true,
                     app.theme.warning.fg,
                 ),
@@ -637,7 +636,7 @@ mod tests {
             app.chat
                 .handle_event(&key_event(KeyCode::PageUp, KeyModifiers::NONE));
             app.copy_notice = Some(CopyNotice {
-                text: "Not copied: Terminal.app ignores OSC 52. Fn-drag to select.".to_owned(),
+                text: CopyError::AppleTerminal.to_string(),
                 failed: true,
                 until: now(),
             });

@@ -425,8 +425,8 @@ mod tests {
     use ox_core::permission::rule::Rule;
     use ox_core::permission::testing::exec_grant;
     use ox_core::permission::{Mode, PermissionClass, Tier};
-    use ox_core::protocol::ConfigPick;
     use ox_core::protocol::testing::{CapturingSink, FailingSink, ls_call, text_result};
+    use ox_core::protocol::{CompactTrigger, ConfigPick};
     use ox_core::session::store::testing::test_store;
     use ox_core::tool::bash::background::testing::shells_in_each_state;
     use ox_core::tool::tasks::TaskStatus;
@@ -1009,7 +1009,7 @@ mod tests {
                         summary: "summary".to_owned(),
                         pre_count: 4,
                         instructions: Some("login\u{1b}[2J".to_owned()),
-                        automatic: false,
+                        trigger: CompactTrigger::Manual,
                     },
                 );
 

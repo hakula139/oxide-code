@@ -20,7 +20,7 @@ use crate::theme::Theme;
 
 // ── Constants ──
 
-const MODAL_TITLE: &str = "Rename session";
+const TITLE: &str = "Rename session";
 const FOOTER_HINTS: [&str; 2] = ["Enter to save", "Esc to cancel"];
 
 // ── RenameCmd ──
@@ -66,7 +66,7 @@ struct RenameModal {
 impl RenameModal {
     fn new(initial: Option<&str>) -> Self {
         Self {
-            header: Header::new(MODAL_TITLE),
+            header: Header::new(TITLE),
             editor: LineEditor::new(initial.unwrap_or_default()).with_max_width(MAX_TITLE_WIDTH),
         }
     }
@@ -127,13 +127,6 @@ mod tests {
     use crate::modal::testing::render_rows;
     use crate::slash::registry::testing::run_execute;
     use crate::slash::testing::test_session_info;
-
-    #[test]
-    fn name_and_metadata_match_built_ins_contract() {
-        assert_eq!(RenameCmd.name(), "rename");
-        assert_ne!(RenameCmd.description(), "");
-        assert_eq!(RenameCmd.usage(), Some("[<title>]"));
-    }
 
     mod classify {
         use super::*;

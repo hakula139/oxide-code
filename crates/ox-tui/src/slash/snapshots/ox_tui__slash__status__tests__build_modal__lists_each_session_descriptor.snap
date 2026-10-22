@@ -1,0 +1,20 @@
+---
+source: crates/ox-tui/src/slash/status.rs
+expression: "render_rows(&modal, 80, modal.height(80, u16::MAX))"
+---
+[
+    "Status                                                                          ",
+    "                                                                                ",
+    "Model              Claude Opus 5.5 (claude-opus-5-5)                            ",
+    "Effort             high                                                         ",
+    "Working Directory  ~/test                                                       ",
+    "Session            test-session                                                 ",
+    "Auth               API key (ANTHROPIC_API_KEY)                                  ",
+    "Version            0.0.0-test                                                   ",
+    "Prompt Cache TTL   1h                                                           ",
+    "Auto Compaction    at 155000 tokens                                             ",
+    "Show Thinking      off                                                          ",
+    "Show Welcome       on                                                           ",
+    "                                                                                ",
+    "Esc to close                                                                    ",
+]

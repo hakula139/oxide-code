@@ -109,7 +109,7 @@ The literal script in `sh -c` and the joined arguments to `eval` are parsed too,
 
 These wrappers, `find` actions, and literal scripts are the only places the analysis looks for a command inside another. Any other program that runs a command from its arguments, its input, or a file, such as `watch`, `fd -x`, `make`, `python3 -c`, or a `git` alias, is the program a rule sees, and variables set by `read` or `printf -v` stay unknown. In `manual`, such a command asks unless an allow rule names the runner. In `yolo`, it runs unless a deny or ask rule names the runner, since no rule sees the command inside it.
 
-Some read-only commands run without an allow rule. `echo`, `false`, `pwd`, and `true` are always safe. Because `echo` can print any variable it expands, every command runs without the [credentials](bash.md#credentials) ox authenticates with. `cat`, `head`, `ls`, `tail`, `wc`, `find`, `grep`, and `sed` are safe when every argument is a literal word without globs and the command runs under its bare name. The commands that can do more have these guards:
+Some read-only commands run without an allow rule. `echo`, `false`, `pwd`, `true`, `cat`, `head`, `ls`, `tail`, `wc`, `find`, `grep`, and `sed` are safe when every argument is a literal word without globs, the command runs under its bare name, and nothing in the whole command expands a variable. That last condition covers a `case` subject, an assignment, a `for` list, a here-string, and an unquoted heredoc too, since any of them can bring a variable's value into what a safe command prints. The commands that can do more have these guards:
 
 - `find` must not use an action that runs a command, deletes, or writes a file (`-exec`, `-execdir`, `-ok`, `-okdir`, `-delete`, `-fls`, `-fprint`, `-fprint0`, `-fprintf`).
 - `grep` must not use a recursive option or `-d`.
@@ -239,9 +239,10 @@ The stdio sink escapes control characters other than tabs and line breaks in mod
 - `crates/ox-core/src/config/load.rs`: `reject_project_keys` and the project allowlists.
 - `crates/ox-core/src/config/merge.rs`: `APPENDED_TABLES` and `APPENDED` lists, `merge`.
 - `crates/ox-core/src/config/schema.rs`: `PermissionTable`, `TierTable`, the `defaults` map.
-- `crates/ox-core/src/engine.rs`: the live policy, whose session grants reset when the session changes, `Engine::set_mode`, and `Engine::adopt_mode`.
+- `crates/ox-core/src/engine.rs`: the live policy, `Engine::set_mode`, and `Engine::adopt_mode`.
 - `crates/ox-core/src/engine/abort.rs`: `await_unless_aborted`, which races an allowed call against cancel and quit, and the `Inbox` whose `absorb` keeps queued prompts and mode switches.
 - `crates/ox-core/src/engine/dispatch.rs`: `run_tool_round` (parallel-safe batches), `Dispatcher::gate` (prepare, then decide), `check_permission` (take a waiting mode switch, then log the verdict), `allow_for_session` (admit against the call's grant), `await_approval`, `denied_output`.
+- `crates/ox-core/src/engine/sessions.rs`: `adopt_session`, which resets the session grants when the session changes.
 - `crates/ox-core/src/permission.rs`: `Mode`, `PermissionClass`, `Workspace`, `Access::for_path`, `Access::for_command`, `Verdict`, `Basis`, `Policy::verdict`, `Policy::session_grant`, `SessionGrant`, `ReadFilter`.
 - `crates/ox-core/src/permission/defaults.rs`: the shipped defaults, `ShippedTier`, protected names and home locations, and `[permission.defaults]` names.
 - `crates/ox-core/src/permission/rule.rs`: `Rule`, the exec, path, net, and MCP patterns, `MatchDiscipline`, and `Rule::for_call`.
