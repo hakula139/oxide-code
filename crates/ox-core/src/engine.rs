@@ -562,22 +562,36 @@ pub enum TurnEnd {
 }
 
 impl TurnEnd {
-    /// How `op` ended, if `event` is its terminal event. Covers only the ops the stdio frontends
-    /// wait on.
+    /// How `op` ended, if `event` is one of the terminal events [`Event`] lists for it.
     pub fn of(op: &Op, event: &Event) -> Option<Self> {
         match (op, event) {
-            (Op::Prompt(_) | Op::Compact { .. } | Op::Resume { .. }, Event::TurnFailed(_))
+            (
+                Op::Prompt(_)
+                | Op::Compact { .. }
+                | Op::Archive
+                | Op::Resume { .. }
+                | Op::Login
+                | Op::Logout,
+                Event::TurnFailed(_),
+            )
             | (Op::Rename { .. }, Event::RenameFailed(_))
             // The model has no tier for the effort, so the pick changed nothing.
             | (Op::SetModel(ConfigPick::Effort(_)), Event::ConfigChanged { effort: None, .. }) => {
                 Some(Self::Failed)
             }
             (Op::Prompt(_), Event::TurnComplete)
-            | (Op::Clear | Op::Compact { .. } | Op::Resume { .. }, Event::SessionReady)
+            | (
+                Op::Compact { .. } | Op::Clear | Op::Archive | Op::Resume { .. },
+                Event::SessionReady,
+            )
             | (Op::Rename { .. }, Event::SessionTitleUpdated { .. })
+            | (Op::Login, Event::SignedIn { .. })
+            | (Op::Logout, Event::SignedOut { .. })
             | (Op::SetModel(_), Event::ConfigChanged { .. })
             | (Op::SetMode(_), Event::ModeChanged(_)) => Some(Self::Completed),
-            (Op::Prompt(_) | Op::Compact { .. }, Event::Cancelled) => Some(Self::Cancelled),
+            (Op::Prompt(_) | Op::Compact { .. } | Op::Login, Event::Cancelled) => {
+                Some(Self::Cancelled)
+            }
             _ => None,
         }
     }
@@ -2709,7 +2723,7 @@ mod tests {
                     (&resume, Event::SessionReady, Some(TurnEnd::Completed)),
                     (&resume, failed.clone(), Some(TurnEnd::Failed)),
                     (&Op::Clear, notice.clone(), None),
-                    (&Op::Clear, rolled, None),
+                    (&Op::Clear, rolled.clone(), None),
                     (&Op::Clear, Event::SessionReady, Some(TurnEnd::Completed)),
                     (
                         &rename,
@@ -2747,14 +2761,53 @@ mod tests {
                         },
                         Some(TurnEnd::Failed),
                     ),
-                    (&set_model, failed, None),
+                    (&set_model, failed.clone(), None),
                     (
                         &set_mode,
                         Event::ModeChanged(Mode::Plan),
                         Some(TurnEnd::Completed),
                     ),
                     (&set_mode, notice.clone(), None),
-                    (&Op::Archive, Event::SessionReady, None),
+                    (&Op::Archive, rolled, None),
+                    (&Op::Archive, Event::SessionReady, Some(TurnEnd::Completed)),
+                    (&Op::Archive, failed, Some(TurnEnd::Failed)),
+                ] {
+                    assert_eq!(TurnEnd::of(op, &event), end, "{op:?} then {event:?}");
+                }
+            }
+
+            #[test]
+            fn reads_the_sign_in_terminal_events() {
+                let failed = Event::TurnFailed("failure".to_owned());
+
+                for (op, event, end) in [
+                    (
+                        &Op::Login,
+                        Event::LoginStarted {
+                            url: "https://example.com/login".to_owned(),
+                        },
+                        None,
+                    ),
+                    (
+                        &Op::Login,
+                        Event::SignedIn {
+                            auth: AuthSource::ApiKeyEnv,
+                        },
+                        Some(TurnEnd::Completed),
+                    ),
+                    (&Op::Login, Event::Cancelled, Some(TurnEnd::Cancelled)),
+                    (&Op::Login, failed.clone(), Some(TurnEnd::Failed)),
+                    (
+                        &Op::Logout,
+                        Event::SignedOut {
+                            removed: true,
+                            auth: None,
+                            fallback_error: None,
+                        },
+                        Some(TurnEnd::Completed),
+                    ),
+                    (&Op::Logout, Event::Cancelled, None),
+                    (&Op::Logout, failed, Some(TurnEnd::Failed)),
                 ] {
                     assert_eq!(TurnEnd::of(op, &event), end, "{op:?} then {event:?}");
                 }
