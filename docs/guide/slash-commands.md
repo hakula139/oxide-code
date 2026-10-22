@@ -24,9 +24,9 @@ After `/effort`, `/init`, `/mode`, `/model`, or `/theme`, type a space to switch
 | `/model [<id>]`                             | Open the model and effort picker, or switch directly by ID or unique substring.                                                               |
 | `/rename [<title>]`                         | Open a single-line editor pre-filled with the current title, or set it directly.                                                              |
 | `/resume [<id-prefix>]` (alias `/continue`) | Open the session picker (search, scope and archived toggles, **Ctrl+X** to archive or unarchive, **Ctrl+D** to delete), or jump by ID prefix. |
-| `/status`                                   | Show the model, auth, settings, session rules, and background shells.                                                                         |
+| `/status`                                   | Show the model, permission mode, auth, settings, session rules, and background shells.                                                        |
 | `/theme [<name>]`                           | Open the theme picker with live preview, or switch directly to a built-in theme.                                                              |
-| `/unarchive <id-prefix>`                    | List an archived session again.                                                                                                               |
+| `/unarchive <id-prefix>`                    | Unarchive a saved session by ID prefix, so it shows in listings again.                                                                        |
 
 To send text that starts with `/`, double the slash. For example, typing `//etc` sends `/etc`.
 
@@ -43,7 +43,7 @@ Model, effort, permission mode, and theme choices last for the session. No slash
 - **`/model <id>`** accepts a full ID or any unique substring, so `fable`, `opus`, `sonnet`, and `haiku` work as aliases. Switching models preserves the current effort.
 - **`/effort`** fails if the session uses a model outside the supported catalog, because that model has no effort levels.
 
-See [`effort`](configuration.md#effort-intelligence-tier) for each model's defaults.
+See [`effort`](configuration.md#effort-reasoning-effort) for each model's defaults.
 
 ## Permission Mode
 

@@ -809,7 +809,7 @@ mod tests {
                     title: "Bash".to_owned(),
                     body: ApprovalBody::Command("git push".to_owned()),
                 },
-                Some("Held by the `ask.exec` pattern `git push *`".to_owned()),
+                Some("Asks because of the `ask.exec` pattern `git push *`".to_owned()),
                 None,
             );
 
@@ -817,8 +817,8 @@ mod tests {
 
             let expected = indoc! {"
                 Bash
-                Held by the `ask.exec` pattern
-                  `git push *`
+                Asks because of the `ask.exec`
+                  pattern `git push *`
 
                 git push
 

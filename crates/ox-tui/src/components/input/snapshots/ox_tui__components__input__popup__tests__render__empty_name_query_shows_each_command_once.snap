@@ -4,7 +4,7 @@ expression: "render_to_backend(&popup, 60)"
 ---
 "────────────────────────────────────────────────────────────"
 "/archive  Archive this session or a saved one               "
-"/clear    Reset the conversation context                    "
+"/clear    Start a new session (this one stays resumable)    "
 "/compact  Compress conversation context into a summary      "
 "/config   Show resolved config                              "
 "/delete   Delete a saved session                            "

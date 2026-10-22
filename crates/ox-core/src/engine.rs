@@ -623,7 +623,7 @@ impl TurnEnd {
                 Event::TurnFailed(_),
             )
             | (Op::Rename { .. }, Event::RenameFailed(_))
-            // The model has no tier for the effort, so the pick changed nothing.
+            // The model has no level for the effort, so the pick changed nothing.
             | (Op::SetModel(ConfigPick::Effort(_)), Event::ConfigChanged { effort: None, .. }) => {
                 Some(Self::Failed)
             }
@@ -2838,7 +2838,7 @@ mod tests {
                     notices,
                     [
                         "Switched to custom-model (custom-model). \
-                         Effort cleared (model has no effort tier). \
+                         Effort cleared (model has no effort levels). \
                          Auto compaction off."
                             .to_owned(),
                         format!(
