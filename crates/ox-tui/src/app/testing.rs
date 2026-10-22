@@ -5,7 +5,7 @@ use std::sync::{Arc, Mutex};
 
 use crossterm::event::{KeyCode, KeyEvent};
 use ratatui::backend::TestBackend;
-use ratatui::buffer::{Buffer, CellWidth};
+use ratatui::buffer::{Buffer, CellWidth as _};
 use ratatui::layout::Rect;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;

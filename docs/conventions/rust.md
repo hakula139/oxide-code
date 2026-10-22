@@ -68,7 +68,7 @@ Keep each `tracing` message a constant phrase and pass variable data as fields, 
 - Open a module with its `//!` doc, then its `mod` declarations, its re-exports at any visibility as a group of their own, and its `use` groups.
 - Order `use` groups as std, external crates, workspace crates (`ox_core::`, `ox_tui::`), then internal paths (`crate::`, `super::`, `self::`, and the file's child modules), with a blank line between groups. rustfmt sorts imports within each group, putting `self` before `super` before `crate`, but does not move imports between groups. Authors and reviewers must maintain the grouping.
 - Access a module's children through `self::` and its parent and siblings through `super::`, following `config/*`. Use `crate::` for more distant modules and test modules, which already glob-import their parent.
-- Import a trait as `Trait as _` when its methods are the only things used, as with `std::fmt::Write as _` and `PermissionsExt as _`. Import it by name only when code refers to the trait itself, such as in a bound.
+- Import a trait as `Trait as _` when its methods are the only things used, as with `std::fmt::Write as _` and `PermissionsExt as _`. Import it by name only when code refers to the trait itself, such as in a bound. Clippy's `unused_trait_names` lint enforces this.
 
 ## Strings
 

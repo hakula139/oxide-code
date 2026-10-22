@@ -21,6 +21,7 @@ dbg_macro = "warn"
 let_underscore_untyped = "warn"
 mod_module_files = "warn"
 todo = "warn"
+unused_trait_names = "warn"
 unwrap_used = "warn"
 
 # Pedantic lints whose docs and `#[must_use]` serve callers outside the workspace, which these

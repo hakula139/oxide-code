@@ -5,7 +5,7 @@ mod session_list;
 
 use std::env;
 use std::ffi::OsStr;
-use std::io::{self, IsTerminal as _, Write};
+use std::io::{self, IsTerminal as _, Write as _};
 use std::process::ExitCode;
 
 use anyhow::{Context as _, Result, bail};

@@ -1674,7 +1674,8 @@ mod tests {
 
             #[test]
             fn reads_a_quoted_tilde_under_the_cwd_as_bash_does() {
-                let (_dir, root) = temp_cwd();
+                let base_dir = canonical_tempdir();
+                let root = base_dir.path().to_path_buf();
                 let (cwd, home) = (root.join("repo"), root.join("home"));
                 std::fs::create_dir_all(cwd.join("~")).unwrap();
                 std::fs::create_dir(&home).unwrap();
@@ -2173,13 +2174,13 @@ mod tests {
                 std::fs::write(cwd.join(r"secrets-store\key"), "").unwrap();
 
                 let target =
-                    Access::for_path(r".git::$INDEX_ALLOCATION\config", &Workspace::new(&cwd));
+                    Access::for_path(r".git::$INDEX_ALLOCATION\config", &Workspace::new(cwd));
                 let (path, relative, _) = resolved(&target);
                 assert_eq!(path.as_os_str(), cwd.join(r".git\config").as_os_str());
                 assert_eq!(relative, Some(Path::new(r".git\config")));
                 assert_eq!(protected(&target), [Shipped::Git]);
                 let p = policy(Mode::Manual, &[(EDIT, "secrets-store/key")], &[], &[]);
-                let target = Access::for_path(r"secrets-store\key::$DATA", &Workspace::new(&cwd));
+                let target = Access::for_path(r"secrets-store\key::$DATA", &Workspace::new(cwd));
                 assert_eq!(decide(&p, EDIT, &target), Decision::Deny);
 
                 // The home directory spelled with a stream suffix is still never a workspace.
@@ -2270,7 +2271,7 @@ mod tests {
             let cwd_dir = canonical_tempdir();
             let cwd = cwd_dir.path();
             std::fs::write(cwd.join("notes"), "original").unwrap();
-            let verbatim = std::fs::canonicalize(&cwd).unwrap();
+            let verbatim = std::fs::canonicalize(cwd).unwrap();
 
             for suffix in ["\\", "\\."] {
                 let file = PathBuf::from(format!("{}\\notes{suffix}", verbatim.display()));
@@ -2654,7 +2655,8 @@ mod tests {
             #[cfg(unix)]
             #[test]
             fn denies_reading_a_process_environment_until_credentials_are_off() {
-                let (_dir, cwd) = temp_cwd();
+                let base_dir = canonical_tempdir();
+                let cwd = base_dir.path().to_path_buf();
                 let workspace = Workspace::new(&cwd);
                 let resolve = |disabled: &[Shipped]| {
                     Policy::resolve(
@@ -2689,7 +2691,8 @@ mod tests {
             #[cfg(target_os = "linux")]
             #[test]
             fn holds_back_a_process_environment_reached_through_a_link() {
-                let (_dir, cwd) = temp_cwd();
+                let base_dir = canonical_tempdir();
+                let cwd = base_dir.path().to_path_buf();
                 symlink_file(Path::new("/proc/self/environ"), &cwd.join("env"));
                 symlink_file(
                     Path::new("/proc/thread-self/environ"),
@@ -3372,7 +3375,8 @@ mod tests {
 
             #[test]
             fn command_rules_see_the_words_a_heredoc_passes_to_its_command() {
-                let (_dir, cwd) = temp_cwd();
+                let base_dir = canonical_tempdir();
+                let cwd = base_dir.path().to_path_buf();
                 let workspace = Workspace::new(&cwd);
                 let decide = |p: &Policy, case: &str| {
                     p.decide(EXEC, &Access::for_command(case, &workspace).as_target())

@@ -712,8 +712,6 @@ mod tests {
     use crate::tool::read::ReadTool;
     use crate::tool::tasks::TasksTool;
     use crate::tool::tasks::testing::plan;
-    use crate::util::git::local_testing::init_fixture_repo;
-    use crate::util::git::testing::with_isolated_git_env_async;
     use crate::util::path::local_testing::canonical_tempdir;
     use crate::util::tls::testing::NoRoots;
 

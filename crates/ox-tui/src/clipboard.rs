@@ -16,7 +16,7 @@ use tokio::io::AsyncWriteExt as _;
 use tokio::process::Command;
 use tokio::sync::mpsc;
 use tracing::debug;
-use unicode_segmentation::UnicodeSegmentation;
+use unicode_segmentation::UnicodeSegmentation as _;
 
 use ox_core::util::env;
 use ox_core::util::sync::lock_or_recover;

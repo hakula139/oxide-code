@@ -385,7 +385,7 @@ pub(super) fn protected_by(paths: &[&Path], roots: &[(Shipped, PathBuf)]) -> Vec
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::util::path::local_testing::{abs, canonical_tempdir};
+    use crate::util::path::local_testing::abs;
     use crate::util::path::slash_separated;
     use crate::util::path::testing::HOME_VAR;
 
@@ -540,6 +540,7 @@ mod tests {
     #[cfg(unix)]
     mod protected_roots {
         use super::*;
+        use crate::util::path::local_testing::canonical_tempdir;
 
         #[test]
         fn tags_where_each_symlinked_name_resolves_with_its_group() {

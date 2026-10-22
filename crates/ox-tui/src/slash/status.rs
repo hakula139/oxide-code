@@ -98,10 +98,16 @@ mod tests {
     use ox_core::tool::bash::background::testing::shells_in_each_state;
 
     use super::*;
-    use crate::modal::Modal;
+    use crate::modal::Modal as _;
     use crate::modal::testing::{render_rows, rendered_text};
     use crate::session_info::testing::test_session_info;
     use crate::slash::registry::testing::run_execute;
+
+    #[test]
+    fn name_and_metadata_match_built_ins_contract() {
+        assert_eq!(StatusCmd.name(), "status");
+        assert_ne!(StatusCmd.description(), "");
+    }
 
     mod execute {
         use super::*;

@@ -3578,7 +3578,7 @@ mod tests {
             let cwd = cwd_dir.path();
             std::fs::write(cwd.join(std::ffi::OsStr::from_bytes(b"a\xff")), "").unwrap();
 
-            assert_eq!(expand_glob("*", &cwd), None);
+            assert_eq!(expand_glob("*", cwd), None);
         }
     }
 }

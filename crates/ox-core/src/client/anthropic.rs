@@ -30,7 +30,7 @@ use tokio_util::task::TaskTracker;
 use tracing::debug;
 use uuid::Uuid;
 
-use crate::client::{ResponseEvent, Wire};
+use super::{ResponseEvent, Wire};
 use crate::config::auth::{self, Auth, AuthSource, LoginUnavailable};
 use crate::config::gateway::GatewayCompat;
 use crate::config::oauth::ClaudeCodeKeychain;
