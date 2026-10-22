@@ -12,7 +12,6 @@ use tokio::sync::mpsc;
 use tracing::debug;
 
 use ox_core::engine::TurnEnd;
-use ox_core::permission::defaults::ShippedTier;
 use ox_core::permission::{Basis, SessionGrant};
 use ox_core::protocol::{ApprovalDecision, Event, EventSink, Op, ToolCall, ToolResult, notice};
 use ox_core::session::display::{UNTITLED_MARKER, archive_notice, id_prefix};
@@ -107,54 +106,17 @@ fn render(sink: &dyn EventSink, event: Event) {
 
 // ── Unattended ──
 
-/// Answers every approval with a denial that names what a rerun would need, for a run with nobody
-/// to ask: the allow pattern that admits the call, the rule that made it ask, or simpler syntax
-/// for a command ox could not parse.
+/// Answers every approval with [`ApprovalDecision::DenyUnattended`], for a run with nobody to ask.
 pub(super) struct Unattended;
 
 impl Approver for Unattended {
     fn decide(
         &mut self,
         _: &ApprovalPreview,
-        basis: &Basis,
-        grant: Option<&SessionGrant>,
+        _: &Basis,
+        _: Option<&SessionGrant>,
     ) -> impl Future<Output = ApprovalDecision> {
-        let feedback = match (grant, basis) {
-            (Some(grant), _) => {
-                let rule = grant.suggested();
-                format!(
-                    "This run cannot ask for approval. \
-                     To allow this call, add `{}` to `permission.allow.{}` in the user config.",
-                    toml::Value::from(rule.pattern()),
-                    rule.class(),
-                )
-            }
-            (None, Basis::Mode(_)) => {
-                "This run cannot ask for approval, and no allow pattern matches this call. \
-                 Under `permission.allow` in the user config, \
-                 a chained command needs a pattern per command, \
-                 and a word that expands needs a pattern ending in `*` at that word. \
-                 A command that hides what it runs, \
-                 such as `$(...)` or `sh -c`, needs approval in an interactive session."
-                    .to_owned()
-            }
-            (None, Basis::Builtin(group)) if group.tier() == ShippedTier::Ask => format!(
-                "This run cannot ask for approval, and this call asks because of {basis}. \
-                 Approve it in an interactive session, \
-                 or set `permission.defaults.{group} = false` in the user config."
-            ),
-            (None, Basis::Unparsed) => {
-                "This run cannot ask for approval, and ox could not parse this command, \
-                 so the permission rules may not see everything it runs. \
-                 Rewrite it in simpler shell syntax, or approve it in an interactive session."
-                    .to_owned()
-            }
-            (None, basis) => format!(
-                "This run cannot ask for approval, and this call asks because of {basis}. \
-                 Approve it in an interactive session."
-            ),
-        };
-        std::future::ready(ApprovalDecision::DenyWithFeedback { feedback })
+        std::future::ready(ApprovalDecision::DenyUnattended)
     }
 }
 
@@ -426,10 +388,8 @@ mod tests {
     use ox_core::config::compaction::AutoCompactionConfig;
     use ox_core::engine::testing::{engine, with_pinned_home};
     use ox_core::model::ModelSpec;
-    use ox_core::permission::defaults::Shipped;
-    use ox_core::permission::rule::Rule;
+    use ox_core::permission::Mode;
     use ox_core::permission::testing::exec_grant;
-    use ox_core::permission::{Mode, PermissionClass, Tier};
     use ox_core::protocol::testing::{CapturingSink, FailingSink, ls_call, text_result};
     use ox_core::protocol::{CompactTrigger, ConfigPick};
     use ox_core::session::store::testing::test_store;
@@ -706,87 +666,6 @@ mod tests {
 
             assert_eq!(end, None);
             assert_eq!(sink.events(), [Event::StreamToken("partial".to_owned())]);
-        }
-    }
-
-    mod unattended {
-        use super::*;
-
-        mod decide {
-            use super::*;
-
-            #[tokio::test]
-            async fn denies_naming_the_allow_pattern_or_the_rule_that_made_it_ask() {
-                let command = r#"echo "a\b""#;
-                let preview = bash_preview(command);
-                let manual = Basis::Mode(Mode::Manual);
-                let grant = exec_grant(command);
-                let ask = Basis::Rule {
-                    tier: Tier::Ask,
-                    rule: Rule::parse(PermissionClass::Exec, "git push *").unwrap(),
-                };
-                let cases = [
-                    (
-                        &manual,
-                        Some(&grant),
-                        "This run cannot ask for approval. \
-                         To allow this call, \
-                         add `'''echo 'a\\b''''` to `permission.allow.exec` in the user config.",
-                    ),
-                    (
-                        &manual,
-                        None,
-                        "This run cannot ask for approval, and no allow pattern matches this call. \
-                         Under `permission.allow` in the user config, \
-                         a chained command needs a pattern per command, \
-                         and a word that expands needs a pattern ending in `*` at that word. \
-                         A command that hides what it runs, \
-                         such as `$(...)` or `sh -c`, needs approval in an interactive session.",
-                    ),
-                    (
-                        &Basis::Builtin(Shipped::Git),
-                        None,
-                        "This run cannot ask for approval, \
-                         and this call asks because of the built-in `git` rule. \
-                         Approve it in an interactive session, \
-                         or set `permission.defaults.git = false` in the user config.",
-                    ),
-                    (
-                        &Basis::Unparsed,
-                        None,
-                        "This run cannot ask for approval, and ox could not parse this command, \
-                         so the permission rules may not see everything it runs. \
-                         Rewrite it in simpler shell syntax, \
-                         or approve it in an interactive session.",
-                    ),
-                    (
-                        &Basis::Builtin(Shipped::Ssh),
-                        None,
-                        "This run cannot ask for approval, \
-                         and this call asks because of the built-in `ssh` rule. \
-                         Approve it in an interactive session.",
-                    ),
-                    (
-                        &ask,
-                        None,
-                        "This run cannot ask for approval, \
-                         and this call asks because of the `ask.exec` pattern `git push *`. \
-                         Approve it in an interactive session.",
-                    ),
-                ];
-
-                for (basis, grant, expected) in cases {
-                    let decision = Unattended.decide(&preview, basis, grant).await;
-
-                    assert_eq!(
-                        decision,
-                        ApprovalDecision::DenyWithFeedback {
-                            feedback: expected.to_owned()
-                        },
-                        "{basis:?}"
-                    );
-                }
-            }
         }
     }
 

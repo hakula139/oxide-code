@@ -84,7 +84,7 @@ pub enum ResumeTarget {
     Prefix(String),
 }
 
-/// The user's answer to an [`Event::ApprovalRequested`], carried back on [`Op::Resolve`].
+/// The answer to an [`Event::ApprovalRequested`], carried back on [`Op::Resolve`].
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", content = "data", rename_all = "snake_case")]
 pub enum ApprovalDecision {
@@ -95,10 +95,13 @@ pub enum ApprovalDecision {
         rule: Box<Rule>,
     },
     Deny,
-    /// Deny, with `feedback` returned to the model as the call's result.
+    /// Deny, with the user's `feedback` returned to the model as the call's result.
     DenyWithFeedback {
         feedback: String,
     },
+    /// Deny without asking, since the frontend has nobody to ask.
+    /// The engine tells the model what would let a rerun make the call.
+    DenyUnattended,
     /// Deny, and end the turn as [`Op::Interrupt`] does.
     Abort,
 }
@@ -553,6 +556,10 @@ mod tests {
                     decision: ApprovalDecision::DenyWithFeedback {
                         feedback: "Use rg instead.".to_owned(),
                     },
+                },
+                Op::Resolve {
+                    id: "t1".to_owned(),
+                    decision: ApprovalDecision::DenyUnattended,
                 },
                 Op::Resolve {
                     id: "t1".to_owned(),

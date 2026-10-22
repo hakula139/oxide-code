@@ -88,7 +88,7 @@ impl Shipped {
     }
 
     /// The tier the group holds calls back in: deny for the secret files, ask for the rest.
-    pub const fn tier(self) -> ShippedTier {
+    pub(crate) const fn tier(self) -> ShippedTier {
         match self {
             Self::Ssh | Self::Credentials => ShippedTier::Deny,
             Self::Git
@@ -173,7 +173,7 @@ impl fmt::Display for Shipped {
 /// The tier a shipped group's rules join. A shipped default only holds calls back, so none joins
 /// the allow tier.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ShippedTier {
+pub(crate) enum ShippedTier {
     Deny,
     Ask,
 }

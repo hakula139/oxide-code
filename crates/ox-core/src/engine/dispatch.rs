@@ -15,8 +15,9 @@ use tracing::{debug, warn};
 use super::abort::{AbortResult, Inbox, TurnAbort, await_unless_aborted};
 use crate::file_tracker::FileTracker;
 use crate::message::ContentBlock;
+use crate::permission::defaults::ShippedTier;
 use crate::permission::rule::Rule;
-use crate::permission::{Decision, Policy, SessionGrant, Workspace};
+use crate::permission::{Basis, Decision, Policy, SessionGrant, Workspace};
 use crate::protocol::{ApprovalDecision, Event, EventSink, Op, ToolCall, ToolResult};
 use crate::tool::spill::run_capped;
 use crate::tool::tasks::Task;
@@ -403,8 +404,12 @@ impl<'r> Dispatcher<'r, '_> {
                     }
                     ApprovalDecision::Deny => Ok(Some(denied_output(name, "by the user"))),
                     ApprovalDecision::DenyWithFeedback { feedback } => Ok(Some(ToolOutput::error(
-                        format!("The {name} call was denied with this feedback: {feedback}"),
+                        format!("The user denied the {name} call and wrote: {feedback}"),
                     ))),
+                    ApprovalDecision::DenyUnattended => Ok(Some(ToolOutput::error(format!(
+                        "The {name} call was denied. {}",
+                        unattended_reason(&verdict.basis, grant.as_ref()),
+                    )))),
                     ApprovalDecision::Abort => Err(TurnAbort::Cancelled),
                 }
             }
@@ -457,6 +462,47 @@ fn denied_output(name: &str, reason: impl fmt::Display) -> ToolOutput {
     ))
 }
 
+/// Why a run with nobody to ask denied a call, naming what a rerun would need:
+/// the allow pattern that admits the call, the rule that made it ask,
+/// or simpler syntax for a command ox could not parse.
+fn unattended_reason(basis: &Basis, grant: Option<&SessionGrant>) -> String {
+    match (grant, basis) {
+        (Some(grant), _) => {
+            let rule = grant.suggested();
+            format!(
+                "This run cannot ask for approval. \
+                 To allow this call, add `{}` to `permission.allow.{}` in the user config.",
+                toml::Value::from(rule.pattern()),
+                rule.class(),
+            )
+        }
+        (None, Basis::Mode(_)) => {
+            "This run cannot ask for approval, and no allow pattern matches this call. \
+             Under `permission.allow` in the user config, \
+             a chained command needs a pattern per command, \
+             and a word that expands needs a pattern ending in `*` at that word. \
+             A command that hides what it runs, \
+             such as `$(...)` or `sh -c`, needs approval in an interactive session."
+                .to_owned()
+        }
+        (None, Basis::Builtin(group)) if group.tier() == ShippedTier::Ask => format!(
+            "This run cannot ask for approval, and this call asks because of {basis}. \
+             Approve it in an interactive session, \
+             or set `permission.defaults.{group} = false` in the user config."
+        ),
+        (None, Basis::Unparsed) => {
+            "This run cannot ask for approval, and ox could not parse this command, \
+             so the permission rules may not see everything it runs. \
+             Rewrite it in simpler shell syntax, or approve it in an interactive session."
+                .to_owned()
+        }
+        (None, basis) => format!(
+            "This run cannot ask for approval, and this call asks because of {basis}. \
+             Approve it in an interactive session."
+        ),
+    }
+}
+
 /// Blocks on `ops` for the [`Op::Resolve`] matching `id`, while [`Inbox::absorb`] handles the
 /// other ops. A decision for a different ID is a stale reply for an already-resolved call, so it
 /// is ignored, like any op the gate must not act on mid-approval. Cancel-safe by drop.
@@ -489,7 +535,9 @@ mod tests {
 
     use super::*;
     use crate::engine::local_testing::{EchoTool, dispatch_with, inert_ops};
-    use crate::permission::{Basis, Mode, PermissionClass};
+    use crate::permission::defaults::Shipped;
+    use crate::permission::testing::exec_grant;
+    use crate::permission::{Mode, PermissionClass, Tier};
     use crate::protocol::testing::{CapturingSink, FailingSink};
     #[cfg(unix)]
     use crate::tool::local_testing::canonical_tempdir;
@@ -1291,6 +1339,75 @@ mod tests {
                     );
                     assert_eq!(matches!(gate, Gated::Ready(_)), !asks, "{id}");
                 }
+            }
+        }
+    }
+
+    mod unattended_reason {
+        use super::*;
+
+        #[test]
+        fn names_the_allow_pattern_or_the_rule_that_made_it_ask() {
+            let manual = Basis::Mode(Mode::Manual);
+            let grant = exec_grant(r#"echo "a\b""#);
+            let ask = Basis::Rule {
+                tier: Tier::Ask,
+                rule: Rule::parse(PermissionClass::Exec, "git push *").unwrap(),
+            };
+            let cases = [
+                (
+                    &manual,
+                    Some(&grant),
+                    "This run cannot ask for approval. \
+                     To allow this call, \
+                     add `'''echo 'a\\b''''` to `permission.allow.exec` in the user config.",
+                ),
+                (
+                    &manual,
+                    None,
+                    "This run cannot ask for approval, and no allow pattern matches this call. \
+                     Under `permission.allow` in the user config, \
+                     a chained command needs a pattern per command, \
+                     and a word that expands needs a pattern ending in `*` at that word. \
+                     A command that hides what it runs, \
+                     such as `$(...)` or `sh -c`, needs approval in an interactive session.",
+                ),
+                (
+                    &Basis::Builtin(Shipped::Git),
+                    None,
+                    "This run cannot ask for approval, \
+                     and this call asks because of the built-in `git` rule. \
+                     Approve it in an interactive session, \
+                     or set `permission.defaults.git = false` in the user config.",
+                ),
+                (
+                    &Basis::Unparsed,
+                    None,
+                    "This run cannot ask for approval, and ox could not parse this command, \
+                     so the permission rules may not see everything it runs. \
+                     Rewrite it in simpler shell syntax, \
+                     or approve it in an interactive session.",
+                ),
+                (
+                    &Basis::Builtin(Shipped::Ssh),
+                    None,
+                    "This run cannot ask for approval, \
+                     and this call asks because of the built-in `ssh` rule. \
+                     Approve it in an interactive session.",
+                ),
+                (
+                    &ask,
+                    None,
+                    "This run cannot ask for approval, \
+                     and this call asks because of the `ask.exec` pattern `git push *`. \
+                     Approve it in an interactive session.",
+                ),
+            ];
+
+            for (basis, grant, expected) in cases {
+                let reason = unattended_reason(basis, grant);
+
+                assert_eq!(reason, expected, "{basis:?}");
             }
         }
     }
