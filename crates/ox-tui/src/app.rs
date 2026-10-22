@@ -100,8 +100,8 @@ struct CopyNotice {
 pub(crate) struct AppHistory {
     pub(crate) interactions: Vec<Interaction>,
     pub(crate) title: Option<String>,
-    /// Whether resuming the session unarchived it, so the chat opens with a note saying so.
-    pub(crate) unarchived: bool,
+    /// The session's state before this resume, so an archived one opens with a note.
+    pub(crate) prior: ArchiveState,
 }
 
 impl App {
@@ -117,7 +117,7 @@ impl App {
     ) -> Self {
         let mut chat = ChatView::new(&theme, session_info.config.show_thinking);
         chat.load_history(history.interactions);
-        if history.unarchived {
+        if history.prior == ArchiveState::Archived {
             chat.push_system_message(archive_notice(
                 &session_info.session_id,
                 ArchiveState::Active,
@@ -349,7 +349,7 @@ mod tests {
                 AppHistory {
                     interactions: vec![Interaction::UserText("earlier".to_owned())],
                     title: None,
-                    unarchived: true,
+                    prior: ArchiveState::Archived,
                 },
             );
 

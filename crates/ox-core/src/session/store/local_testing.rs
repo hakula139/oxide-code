@@ -11,7 +11,7 @@ use uuid::Uuid;
 use super::testing::{TEST_PROJECT, find_session_in, set_modified, test_project_dir};
 use super::{SessionStore, SessionWriter, open_append_at};
 use crate::message::Message;
-use crate::session::entry::{CURRENT_VERSION, Entry, Header, TitleSource};
+use crate::session::entry::{CURRENT_VERSION, Entry, Header};
 
 // ── SessionStore ──
 
@@ -50,12 +50,12 @@ pub(crate) fn saved_entries(dir: &Path, session_id: &str) -> Vec<Entry> {
         .collect()
 }
 
-/// Text and source of each title entry, in file order.
-pub(crate) fn saved_titles(entries: &[Entry]) -> Vec<(&str, TitleSource)> {
+/// Text of each title entry, in file order.
+pub(crate) fn saved_titles(entries: &[Entry]) -> Vec<&str> {
     entries
         .iter()
         .filter_map(|entry| match entry {
-            Entry::Title { title, source, .. } => Some((title.as_str(), *source)),
+            Entry::Title { title, .. } => Some(title.as_str()),
             _ => None,
         })
         .collect()
@@ -116,7 +116,6 @@ pub(super) fn sample_message_at(
 pub(super) fn sample_title_entry(title: &str) -> Entry {
     Entry::Title {
         title: title.to_owned(),
-        source: TitleSource::FirstPrompt,
         updated_at: datetime!(2026-04-16 12:00:01 UTC),
     }
 }

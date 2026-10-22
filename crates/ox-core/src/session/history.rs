@@ -31,7 +31,6 @@ pub(crate) fn interactions(
         summary: info.summary.clone(),
         pre_count: info.pre_message_count,
         instructions: info.instructions.clone(),
-        trigger: info.trigger,
     }];
     out.extend(walk_transcript(
         &post_compact_messages(messages),
@@ -222,7 +221,6 @@ mod tests {
                 pre_message_count: 4,
                 instructions: Some("focus on auth".to_owned()),
                 tasks: plan(),
-                trigger: Some(CompactTrigger::Auto),
             }
         }
 
@@ -231,7 +229,6 @@ mod tests {
                 summary: "Kept the important decisions.".to_owned(),
                 pre_count: 4,
                 instructions: Some("focus on auth".to_owned()),
-                trigger: Some(CompactTrigger::Auto),
             }
         }
 

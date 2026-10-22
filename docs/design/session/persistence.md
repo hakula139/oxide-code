@@ -13,12 +13,12 @@ Every session is a single append-only `.jsonl` file with one JSON object per lin
 | `header`               | First line     | Session metadata: ID, working directory, project root, Git branch, model, created timestamp, format version |
 | `message`              | Middle lines   | Conversation message with `uuid`, optional `parent_uuid`, timestamp                                         |
 | `rewind`               | After messages | Moves the active branch's tip back to an earlier message, or before the first one                           |
-| `title`                | Re-appended    | Session title + source. Latest wins                                                                         |
+| `title`                | Re-appended    | Session title. Latest wins                                                                                  |
 | `tool_result_metadata` | Sidecar        | Display metadata for replaying tool results                                                                 |
 | `file_snapshot`        | Sidecar        | File-tracker state restored on resume when disk state still matches                                         |
 | `usage`                | After request  | One billed request's token usage, model, and prompt-cache TTL                                               |
 | `context`              | Before message | Prompt context of that message. Latest on the resolved chain wins                                           |
-| `compact`              | Boundary       | Summary, pre-compact count, trigger, and optional instructions and tasks                                    |
+| `compact`              | Boundary       | Summary, pre-compact count, and optional instructions and tasks                                             |
 | `archive`              | Re-appended    | Archive state: `archived` + `at`. Latest wins                                                               |
 | `summary`              | Last line      | Exit marker: `message_count` + `updated_at`. Latest wins                                                    |
 
@@ -38,13 +38,13 @@ Within the stability surface, a newer binary can read an older file as long as e
 - **Removals.** A removed field, since the loader ignores fields it does not know. The data the field held is lost on resume.
 - **Changed shapes with a loader.** Renaming a field or changing its type or meaning requires a loader that still reads the old shape.
 
-An older binary reading a newer file skips entry types it does not know as malformed lines and ignores unknown fields. Bump the header's `version` only when an older binary would misread a newer file, since an older binary refuses any file whose `version` is newer than it supports. A prerelease binary that predates `rewind` entries skips them, so until a newer message follows a rewind it resumes the abandoned branch.
+An older binary reading a newer file skips entry types it does not know as malformed lines and ignores unknown fields. Bump the header's `version` only when an older binary would misread a newer file, since an older binary refuses any file whose `version` is newer than it supports. A prerelease binary that predates `rewind` entries skips them, so until a newer message follows a rewind it resumes the abandoned branch. Binaries through 0.1.0-alpha.5 require a `source` field on `title` entries, so they skip the titles later binaries write and list those sessions as untitled.
 
 A reasoning block stores the `wire` and `model` that produced it alongside a `payload` that only that wire can read, such as the `signature` of an Anthropic `thinking` block or the `data` of a `redacted_thinking` block. The Anthropic wire sends every Anthropic block back unchanged whichever model produced it, as Anthropic's guide to [switching models](https://platform.claude.com/docs/en/build-with-claude/preserved-thinking#switching-models) asks, so the recorded `model` changes no request. Which blocks a model reads depends on the platform, and the API drops or ignores the rest, as the [research note](../../research/api/extended-thinking.md#constraints) details.
 
 A server tool's result, such as a `web_search_tool_result`, is stored as a `server_tool_result` block that keeps the API's block type in `kind` and every other field unchanged, so the Anthropic wire sends it back as the API returned it.
 
-A `wire` value or content block `type` that an older binary does not know fails to parse, and that binary skips the whole message as a malformed line. From 0.1.0 on, adding either needs a header `version` bump. A task `status` or a compaction `trigger` works the same way inside a `compact` entry: an unknown one makes an older binary skip the boundary, so adding either needs a bump too.
+A `wire` value or content block `type` that an older binary does not know fails to parse, and that binary skips the whole message as a malformed line. From 0.1.0 on, adding either needs a header `version` bump. A task `status` works the same way inside a `compact` entry: an unknown one makes an older binary skip the boundary, so adding one needs a bump too. Removing a field that older binaries require makes them skip the entry in the same way, so from 0.1.0 on that needs a bump as well.
 
 Tests in `session/handle.rs` enforce this guarantee for stable releases, using one fixture per release starting with `v0.1.0`. Each fixture lives in `crates/ox-core/src/session/fixtures/` and is named after its tag:
 
@@ -117,7 +117,7 @@ There is no file-level lock: two processes resuming the same session both append
 
 ### AI-Generated Titles
 
-In the TUI, the first user prompt of a fresh session spawns a tokio task that asks Haiku through `Client::complete` for a 3-7 word sentence-case title, constrained by a structured-outputs JSON schema, and keeps the first line of the reply under the same 80-column cap as other titles. The session owns the task, and finalizing the session on a roll or at exit aborts it first, so a late title never writes to or reports on a session that has ended. Once the API answers and reports usage, the task appends the request's `usage` entry before parsing the reply, since a reply without a usable title is billed too. Generation failures only log a warning, while a failed title or usage write surfaces like any other session write error.
+In the TUI, the first user prompt of a fresh session spawns a tokio task that asks Haiku through `Client::complete` for a 3-7 word sentence-case title, constrained by a structured-outputs JSON schema unless `CLAUDE_CODE_DISABLE_STRUCTURED_OUTPUTS` turns it off, and keeps the first line of the reply under the same 80-column cap as other titles. The request wraps the prompt's last 1,000 characters in `<first_prompt>` tags and ends with an instruction to title them, so that an imperative prompt reads as text to title even without the schema. The session owns the task, and finalizing the session on a roll or at exit aborts it first, so a late title never writes to or reports on a session that has ended. Once the API answers and reports usage, the task appends the request's `usage` entry before parsing the reply, since a reply without a usable title is billed too. Generation failures only log a warning, while a failed title or usage write surfaces like any other session write error.
 
 ### Session Cost
 

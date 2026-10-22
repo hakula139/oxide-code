@@ -11,9 +11,7 @@ use super::{
     Project, SessionData, SessionStore, SessionWriter, encode_lines, file_session_id,
     load_session_data_from_path, open_append_file, set_archived_at,
 };
-use crate::session::entry::{
-    ArchiveState, CURRENT_VERSION, Entry, Header, SessionInfo, TitleSource,
-};
+use crate::session::entry::{ArchiveState, CURRENT_VERSION, Entry, Header, SessionInfo};
 
 pub(crate) const TEST_PROJECT: &str = "test-project";
 
@@ -135,9 +133,9 @@ pub(super) fn set_modified(path: &Path, at: OffsetDateTime) {
         .expect("the mtime is set");
 }
 
-/// Seeds a session created and last active at `created_at`, holding a header and, when given, a
-/// `UserProvided` title and a summary of `message_count`, so a `None` `message_count` leaves the
-/// session unfinished.
+/// Seeds a session created and last active at `created_at`,
+/// holding a header and, when given, a title and a summary of `message_count`,
+/// so a `None` `message_count` leaves the session unfinished.
 pub fn seed_test_session(
     store: &SessionStore,
     session_id: &str,
@@ -152,7 +150,6 @@ pub fn seed_test_session(
         writer
             .append(&[Entry::Title {
                 title: t.to_owned(),
-                source: TitleSource::UserProvided,
                 updated_at: created_at,
             }])
             .expect("the title is appended");

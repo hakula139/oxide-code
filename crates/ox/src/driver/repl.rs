@@ -12,7 +12,7 @@ use ox_core::engine::{Engine, EngineHandle, TurnEnd};
 use ox_core::permission::rule::Rule;
 use ox_core::permission::{Basis, SessionGrant};
 use ox_core::protocol::notice::ENGINE_STOPPED;
-use ox_core::protocol::{Decision, Event, EventSink, Op};
+use ox_core::protocol::{ApprovalDecision, Event, EventSink, Op};
 use ox_core::tool::view::{ApprovalBody, ApprovalPreview};
 use ox_core::util::text::escape_hidden;
 
@@ -188,7 +188,7 @@ impl<R: AsyncBufRead + Unpin, W: Write> Approver for Prompter<'_, R, W> {
         preview: &ApprovalPreview,
         basis: &Basis,
         grant: Option<&SessionGrant>,
-    ) -> Decision {
+    ) -> ApprovalDecision {
         if !self.attended {
             return Unattended.decide(preview, basis, grant).await;
         }
@@ -200,28 +200,28 @@ impl<R: AsyncBufRead + Unpin, W: Write> Approver for Prompter<'_, R, W> {
         };
         loop {
             let Some(answer) = self.ask(choices).await else {
-                return Decision::Abort;
+                return ApprovalDecision::Abort;
             };
             match (answer.to_ascii_lowercase().as_str(), grant) {
-                ("y" | "yes", _) => return Decision::Approve,
+                ("y" | "yes", _) => return ApprovalDecision::Approve,
                 ("a", Some(grant)) => match self.rule(grant).await {
                     Some(Ok(rule)) => {
-                        return Decision::AllowForSession {
+                        return ApprovalDecision::AllowForSession {
                             rule: Box::new(rule),
                         };
                     }
                     Some(Err(e)) => _ = writeln!(self.out, "Rule rejected: {e:#}"),
-                    None => return Decision::Abort,
+                    None => return ApprovalDecision::Abort,
                 },
-                ("n" | "no", _) => return Decision::Deny,
+                ("n" | "no", _) => return ApprovalDecision::Deny,
                 ("f", _) => match self.ask("Feedback for the model: ").await {
                     Some(feedback) if !feedback.is_empty() => {
-                        return Decision::DenyWithFeedback { feedback };
+                        return ApprovalDecision::DenyWithFeedback { feedback };
                     }
                     Some(_) => {}
-                    None => return Decision::Abort,
+                    None => return ApprovalDecision::Abort,
                 },
-                ("x", _) => return Decision::Abort,
+                ("x", _) => return ApprovalDecision::Abort,
                 _ => _ = writeln!(self.out, "Answer with one of the letters in brackets"),
             }
         }
@@ -748,7 +748,7 @@ mod tests {
                 assert_eq!(result["type"], "tool_result");
                 assert_eq!(
                     result["content"],
-                    "The bash call was denied with this feedback: Use git ls-files.",
+                    "The user denied the bash call and wrote: Use git ls-files.",
                 );
             })
             .await;
@@ -953,7 +953,10 @@ mod tests {
             use super::*;
 
             /// Runs one `decide` over `input`, returning the decision and what the prompter wrote.
-            async fn decide(input: &str, grant: Option<&SessionGrant>) -> (Decision, String) {
+            async fn decide(
+                input: &str,
+                grant: Option<&SessionGrant>,
+            ) -> (ApprovalDecision, String) {
                 let mut lines = input.as_bytes().lines();
                 let mut prompter = Prompter {
                     lines: &mut lines,
@@ -973,18 +976,18 @@ mod tests {
             #[tokio::test]
             async fn maps_each_answer_to_its_decision() {
                 for (input, decision) in [
-                    ("y\n", Decision::Approve),
-                    (" YES \n", Decision::Approve),
-                    ("n\n", Decision::Deny),
+                    ("y\n", ApprovalDecision::Approve),
+                    (" YES \n", ApprovalDecision::Approve),
+                    ("n\n", ApprovalDecision::Deny),
                     (
                         "f\nRun the unit tests only.\n",
-                        Decision::DenyWithFeedback {
+                        ApprovalDecision::DenyWithFeedback {
                             feedback: "Run the unit tests only.".to_owned(),
                         },
                     ),
-                    ("x\n", Decision::Abort),
-                    ("f\n", Decision::Abort),
-                    ("", Decision::Abort),
+                    ("x\n", ApprovalDecision::Abort),
+                    ("f\n", ApprovalDecision::Abort),
+                    ("", ApprovalDecision::Abort),
                 ] {
                     let (got, out) = decide(input, None).await;
                     assert_eq!(got, decision, "{input:?}");
@@ -1008,7 +1011,7 @@ mod tests {
                 "};
                 let (decision, out) = decide(input, None).await;
 
-                assert_eq!(decision, Decision::Deny);
+                assert_eq!(decision, ApprovalDecision::Deny);
                 assert_eq!(out.matches(CHOICES).count(), 5, "{out}");
                 assert_eq!(
                     out.matches("Answer with one of the letters").count(),
@@ -1020,7 +1023,7 @@ mod tests {
             #[tokio::test]
             async fn allows_the_suggested_or_an_edited_rule_for_the_session() {
                 let grant = exec_grant("cargo test");
-                let allowed = |pattern: &str| Decision::AllowForSession {
+                let allowed = |pattern: &str| ApprovalDecision::AllowForSession {
                     rule: Box::new(Rule::parse(PermissionClass::Exec, pattern).unwrap()),
                 };
 
@@ -1050,7 +1053,7 @@ mod tests {
                 let (decision, _) = decide("a\n", Some(&grant)).await;
                 assert_eq!(
                     decision,
-                    Decision::Abort,
+                    ApprovalDecision::Abort,
                     "the input ending mid-rule aborts"
                 );
             }
@@ -1068,7 +1071,7 @@ mod tests {
                     .decide(&bash_preview("ls"), &Basis::Mode(Mode::Manual), None)
                     .await;
 
-                assert_eq!(decision, Decision::Abort);
+                assert_eq!(decision, ApprovalDecision::Abort);
                 let out = String::from_utf8(prompter.out).unwrap();
                 assert!(out.contains("Could not read the answer: "), "{out}");
             }

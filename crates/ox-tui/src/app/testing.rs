@@ -15,6 +15,7 @@ use tokio::sync::mpsc;
 use ox_core::client::{RateLimitWindow, RateLimits};
 use ox_core::model::ModelSpec;
 use ox_core::protocol::{Event, Op};
+use ox_core::session::entry::ArchiveState;
 use ox_core::tool::view::{ApprovalBody, ApprovalPreview};
 
 use super::{App, AppHistory};
@@ -53,7 +54,7 @@ pub(super) fn test_app_with(
         AppHistory {
             interactions: Vec::new(),
             title: title.map(ToOwned::to_owned),
-            unarchived: false,
+            prior: ArchiveState::Active,
         },
     );
     app.open_browser = |_| Ok(());

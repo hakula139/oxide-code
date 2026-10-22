@@ -73,19 +73,26 @@ const SAFE_VARIABLES: &[&str] = &[
     "TZ",
 ];
 
-/// Variables the shell itself reads to find programs, expand words, or run startup code, so
-/// assigning one changes what later commands run.
+/// Variables bash itself reads to find or start commands, expand words, set its options, or run
+/// startup code, so setting one changes what later words run, from the bash manual's Shell
+/// Variables. `BASH_CMDS` and `BASH_ALIASES` are its command hash table and aliases.
 const SHELL_VARIABLES: &[&str] = &[
     "BASHOPTS",
+    "BASH_ALIASES",
+    "BASH_CMDS",
+    "BASH_COMPAT",
     "BASH_ENV",
+    "BASH_LOADABLES_PATH",
     "CDPATH",
     "ENV",
     "EXECIGNORE",
     "GLOBIGNORE",
+    "GLOBSORT",
     "HOME",
     "IFS",
     "OLDPWD",
     "PATH",
+    "POSIXLY_CORRECT",
     "PS4",
     "PWD",
     "SHELLOPTS",
@@ -110,6 +117,10 @@ const WRAPPERS: &[Wrapper] = &[
     Wrapper {
         name: "command",
         options: &[flag("-V"), flag("-p"), flag("-v")],
+        ..Wrapper::TRANSPARENT
+    },
+    Wrapper {
+        name: "coproc",
         ..Wrapper::TRANSPARENT
     },
     Wrapper {
@@ -359,9 +370,12 @@ pub(crate) struct CommandTarget {
     /// Whether it runs code the analysis does not see or cannot place.
     opaque: bool,
     /// Whether tree-sitter-bash failed to parse it or a script nested in it, or parsed a shape
-    /// whose word boundaries differ from bash's, so the words a rule sees may not be the words
-    /// bash runs.
+    /// whose word boundaries differ from bash's or that it has no grammar for, such as `coproc`,
+    /// so the words a rule sees may not be the words bash runs.
     unparsed: bool,
+    /// Whether it sets one of the [`SHELL_VARIABLES`] or declares a name reference, so the words a
+    /// rule sees may not be the commands bash runs.
+    sets_shell_variable: bool,
 }
 
 impl CommandTarget {
@@ -377,6 +391,8 @@ impl CommandTarget {
             relative_path: false,
             expands: false,
             unparsed: false,
+            sets_shell_variable: false,
+            statement_assignment: false,
         };
         walk.script(command);
         if walk.expands {
@@ -384,12 +400,18 @@ impl CommandTarget {
                 segment.safe = false;
             }
         }
+        let opaque = walk.opaque
+            || walk.unparsed
+            || walk.sets_shell_variable
+            || (walk.statement_assignment && !walk.segments.is_empty())
+            || (walk.changes_dir && walk.relative_path);
         Self {
             segments: walk.segments,
             writes: walk.writes,
             reads: walk.reads,
-            opaque: walk.opaque || walk.unparsed || (walk.changes_dir && walk.relative_path),
+            opaque,
             unparsed: walk.unparsed,
+            sets_shell_variable: walk.sets_shell_variable,
         }
     }
 
@@ -411,6 +433,10 @@ impl CommandTarget {
 
     pub(super) const fn is_unparsed(&self) -> bool {
         self.unparsed
+    }
+
+    pub(super) const fn sets_shell_variable(&self) -> bool {
+        self.sets_shell_variable
     }
 }
 
@@ -555,8 +581,12 @@ struct Walk<'a> {
     /// Whether any part of the command expands a variable at run time, wherever the value ends up.
     expands: bool,
     /// Whether the command or a script nested in it failed to parse, or parsed with word
-    /// boundaries that differ from bash's.
+    /// boundaries that differ from bash's or as a `coproc` the grammar cannot read.
     unparsed: bool,
+    sets_shell_variable: bool,
+    /// Whether it sets a variable at statement level, outside any command's prefix, so a later
+    /// command bash runs may read a value the rules did not weigh.
+    statement_assignment: bool,
 }
 
 impl Walk<'_> {
@@ -571,32 +601,53 @@ impl Walk<'_> {
         match node.kind() {
             "command" => self.command(node, &[], src),
             "file_redirect" => self.redirect(node, src),
-            "variable_assignment" => {
-                self.opaque |= SHELL_VARIABLES.contains(&assigned(&src[node.byte_range()]));
+            "variable_name" => {
+                self.sets_shell_variable |=
+                    SHELL_VARIABLES.contains(&&src[node.byte_range()]) && is_set(node);
+            }
+            "subscript" => {
+                self.sets_shell_variable |= node
+                    .child_by_field_name("index")
+                    .is_some_and(|index| names_a_shell_variable(&src[index.byte_range()]));
                 self.visit_children(node, src);
             }
             "declaration_command" => {
                 let mut cursor = node.walk();
+                let nameref = !src[node.byte_range()].starts_with("export")
+                    && node.named_children(&mut cursor).any(|child| {
+                        child.kind() == "word" && is_nameref_option(&src[child.byte_range()])
+                    });
+                self.sets_shell_variable |= nameref
+                    || node.named_children(&mut cursor).any(|child| {
+                        let text = &src[child.byte_range()];
+                        text.contains('=') && names_a_shell_variable(text)
+                    });
                 self.opaque |= node.named_children(&mut cursor).any(|child| {
-                    let name = match child.kind() {
-                        "variable_assignment" => assigned(&src[child.byte_range()]),
-                        "variable_name" => &src[child.byte_range()],
-                        _ => return false,
-                    };
-                    !SAFE_VARIABLES.contains(&name)
+                    let text = &src[child.byte_range()];
+                    match child.kind() {
+                        "variable_assignment" => !SAFE_VARIABLES.contains(&assigned(text)),
+                        "variable_name" => !SAFE_VARIABLES.contains(&text),
+                        _ => text.contains('='),
+                    }
                 });
                 self.visit_children(node, src);
             }
             "redirected_statement" => self.redirected_statement(node, Vec::new(), src),
-            "for_statement" => {
-                self.opaque |= node
-                    .child_by_field_name("variable")
-                    .is_some_and(|name| SHELL_VARIABLES.contains(&&src[name.byte_range()]));
+            "variable_assignment" => {
+                self.statement_assignment |=
+                    !SAFE_VARIABLES.contains(&assigned(&src[node.byte_range()]));
                 self.visit_children(node, src);
             }
             _ => {
                 self.opaque |= runs_hidden_code(node);
-                self.expands |= matches!(node.kind(), "expansion" | "simple_expansion");
+                match node.kind() {
+                    "simple_expansion" => self.expands = true,
+                    "expansion" => {
+                        self.expands = true;
+                        self.opaque |= !reads_a_variable_plainly(node);
+                    }
+                    _ => {}
+                }
                 self.visit_children(node, src);
             }
         }
@@ -670,7 +721,9 @@ impl Walk<'_> {
     }
 
     fn command<'t>(&mut self, node: Node<'t>, trailing: &[Node<'t>], src: &str) {
-        self.parts(&command_parts(node), trailing, src);
+        let parts = command_parts(node);
+        self.unparsed |= runs_a_reserved_word(&parts, src);
+        self.parts(&parts, trailing, src);
     }
 
     /// Records the simple command whose assignments, name, arguments, and redirections are
@@ -820,6 +873,17 @@ impl Walk<'_> {
         self.changes_dir |= DIRECTORY_CHANGERS.contains(&name);
         // `shopt` can turn on `dotglob` or `globstar`, which change what a glob matches.
         self.opaque |= name == "shopt";
+        let names = name_arguments(base, args);
+        // `test` and `[` only query whether `-v`'s name is set, so they read it without setting it.
+        self.sets_shell_variable |= !matches!(base, "test" | "[")
+            && names
+                .iter()
+                .any(|word| word.value.as_deref().is_some_and(names_a_shell_variable));
+        self.opaque |= names.iter().any(|word| {
+            word.value
+                .as_deref()
+                .is_none_or(|value| value.contains(['[', '!']))
+        });
     }
 
     /// Strips the wrappers that lead `words`. The named words keep every wrapper from the first one
@@ -862,11 +926,16 @@ impl Walk<'_> {
                     unwrapped.appends |= input && run.replace.is_none();
                     break;
                 }
-                let sets_unsafe = args[..run.start].iter().any(|word| {
-                    word.value.as_deref().is_some_and(|arg| {
-                        is_assignment(arg) && !SAFE_VARIABLES.contains(&assigned(arg))
-                    })
-                });
+                let assignments = || {
+                    args[..run.start]
+                        .iter()
+                        .filter_map(|word| word.value.as_deref())
+                        .filter(|arg| is_assignment(arg))
+                        .map(assigned)
+                };
+                self.sets_shell_variable |=
+                    assignments().any(|name| SHELL_VARIABLES.contains(&name));
+                let sets_unsafe = assignments().any(|name| !SAFE_VARIABLES.contains(&name));
                 at += 1 + run.start;
                 if wrapper.kind == Kind::Input {
                     match run.replace {
@@ -1193,6 +1262,35 @@ fn redirect_words(redirect: Node<'_>) -> Vec<Node<'_>> {
         }
         _ => Vec::new(),
     }
+}
+
+/// Bash's reserved words other than `time`, which tree-sitter-bash reads as a command name and
+/// [`runs_a_reserved_word`] reads past. The grammar gives each compound command it parses a node of
+/// its own, so a command word in bash's command position spelled as one of these comes from a
+/// mis-parse: of `coproc`, which the grammar lacks, or of a compound after `time`.
+const RESERVED_WORDS: &[&str] = &[
+    "!", "[[", "]]", "case", "coproc", "do", "done", "elif", "else", "esac", "fi", "for",
+    "function", "if", "in", "select", "then", "until", "while", "{", "}",
+];
+
+/// Returns whether bash reads the word in the command position of the command made of `parts` as a
+/// reserved word: its name, or the first word after a leading `time` keyword and its options.
+fn runs_a_reserved_word(parts: &[Node<'_>], src: &str) -> bool {
+    if parts
+        .first()
+        .is_none_or(|name| name.kind() != "command_name")
+    {
+        return false;
+    }
+    let mut after_time = false;
+    for part in parts {
+        match &src[part.byte_range()] {
+            "time" => after_time = true,
+            "-p" | "--" if after_time => {}
+            word => return RESERVED_WORDS.contains(&word),
+        }
+    }
+    false
 }
 
 /// Returns whether `node` runs code no simple command shows: a substitution, or arithmetic, which
@@ -1551,6 +1649,109 @@ impl Unwrapped {
                 }
         })
     }
+}
+
+/// Returns whether the variable `name` names is set where it appears: anywhere but a `$` expansion
+/// that only reads it, which `${NAME=...}` and `${NAME:=...}` do not.
+fn is_set(name: Node<'_>) -> bool {
+    let mut parent = name.parent();
+    if parent.is_some_and(|node| node.kind() == "subscript") {
+        parent = parent.and_then(|node| node.parent());
+    }
+    match parent.map(|node| (node.kind(), node)) {
+        Some(("simple_expansion", _)) => false,
+        Some(("expansion", expansion)) => {
+            let mut cursor = expansion.walk();
+            expansion
+                .children(&mut cursor)
+                .any(|child| matches!(child.kind(), "=" | ":="))
+        }
+        _ => true,
+    }
+}
+
+/// Returns whether `option` is an option cluster of `declare`, `local`, or `typeset` that holds
+/// `-n`, which makes a name a reference to whatever variable its value names.
+fn is_nameref_option(option: &str) -> bool {
+    option
+        .strip_prefix('-')
+        .is_some_and(|flags| flags.contains('n'))
+}
+
+/// Operators in a `${...}` expansion that read a variable without running code or evaluating an
+/// arithmetic context: the plain default and alternate forms. The grammar names them after the
+/// variable, so an expansion with only one of these and a plain `variable_name` substitutes a
+/// value the way `${name}` does.
+const PLAIN_EXPANSION_OPERATORS: &[&str] = &[":-", "-", ":+", "+"];
+
+/// Returns whether `expansion`, a `${...}` node, only substitutes a variable's value: it names a
+/// plain `variable_name` and applies at most a [`PLAIN_EXPANSION_OPERATORS`] operator. Other
+/// operators run a substring, replacement, or transformation, and a subscript, offset, indirection,
+/// or length evaluates an arithmetic context that can hold a command substitution, so they leave
+/// the command opaque.
+fn reads_a_variable_plainly(expansion: Node<'_>) -> bool {
+    let mut cursor = expansion.walk();
+    let mut names_a_variable = false;
+    for child in expansion.children(&mut cursor) {
+        match child.kind() {
+            "variable_name" => names_a_variable = true,
+            "${" | "}" => {}
+            operator if PLAIN_EXPANSION_OPERATORS.contains(&operator) => {}
+            "word"
+            | "string"
+            | "simple_expansion"
+            | "expansion"
+            | "command_substitution"
+            | "arithmetic_expansion" => {}
+            _ => return false,
+        }
+    }
+    names_a_variable
+}
+
+/// The arguments a builtin reads as a variable name, which it may evaluate as an arithmetic
+/// subscript and so run code the rules do not see. `printf`, `test`, and `[` name the word after
+/// `-v`; `read` names its operands, past each option that takes a value of its own; `declare`,
+/// `local`, `typeset`, `export`, and the rest name every operand, which catches a wrapped form such
+/// as `builtin declare ...` that reaches here when the `declaration_command` handler does not see
+/// it. Returns nothing for a command that is not one of these builtins.
+fn name_arguments<'w>(base: &str, args: &'w [Word]) -> Vec<&'w Word> {
+    let after_v = || {
+        args.iter()
+            .position(|word| word.value.as_deref() == Some("-v"))
+            .and_then(|at| args.get(at + 1))
+            .into_iter()
+            .collect()
+    };
+    let operands = |value_options: &[&str]| {
+        let mut names = Vec::new();
+        let mut skip = false;
+        for word in args {
+            if std::mem::take(&mut skip) {
+                continue;
+            }
+            match word.value.as_deref() {
+                Some(option) if value_options.contains(&option) => skip = true,
+                Some(option) if option.starts_with('-') => {}
+                _ => names.push(word),
+            }
+        }
+        names
+    };
+    match base {
+        "printf" | "test" | "[" => after_v(),
+        "read" => operands(&["-d", "-i", "-n", "-N", "-p", "-t", "-u"]),
+        "declare" | "export" | "getopts" | "let" | "local" | "mapfile" | "readarray"
+        | "readonly" | "typeset" | "unset" => operands(&[]),
+        _ => Vec::new(),
+    }
+}
+
+/// Returns whether `text` holds one of the [`SHELL_VARIABLES`] as a name of its own, as an
+/// arithmetic subscript or a variable builtin's argument may.
+fn names_a_shell_variable(text: &str) -> bool {
+    text.split(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
+        .any(|name| SHELL_VARIABLES.contains(&name))
 }
 
 /// The variable a `NAME=VALUE`, `NAME+=VALUE`, or `NAME[i]=VALUE` assignment sets.
@@ -2196,8 +2397,8 @@ mod tests {
                     ),
                     ("GIT_PAGER=sh git log", "GIT_PAGER=sh git log", "git"),
                     (
-                        "nice env PATH=. nohup cat a",
-                        "env PATH=. nohup cat a",
+                        "nice env LD_PRELOAD=./x.so nohup cat a",
+                        "env LD_PRELOAD=./x.so nohup cat a",
                         "cat",
                     ),
                 ] {
@@ -2212,18 +2413,117 @@ mod tests {
             }
 
             #[test]
+            fn flags_a_command_that_sets_a_variable_bash_finds_or_expands_commands_by() {
+                for command in [
+                    "BASH_CMDS[ls]=/bin/rm; ls -rf x",
+                    "BASH_CMDS+=([ls]=/bin/rm); ls -rf x",
+                    "declare -A BASH_CMDS=([ls]=/bin/rm); ls -rf x",
+                    "POSIXLY_CORRECT=1\nBASH_ALIASES[ls]=rm\nls -rf x",
+                    "PATH=/tmp ls",
+                    "export PATH=/tmp:$PATH; ls",
+                    "env BASH_ENV=./x.sh ./build.sh",
+                    "for IFS in x; do ls; done",
+                    "local -n r=BASH_CMDS",
+                    ": ${BASH_CMDS[ls]:=/bin/rm}",
+                    "(( PATH = 1 ))",
+                    "echo $(( IFS = 1 ))",
+                    "a[IFS=1]=2",
+                    "read -r 'BASH_CMDS[ls]' <<< /bin/rm",
+                    "printf -v PATH %s /tmp",
+                    "declare \"BASH_CMDS[ls]=/bin/rm\"; ls -rf x",
+                    "declare BASH_CMDS\\[ls\\]=/bin/rm; ls -rf x",
+                    "declare 'BASH_CMDS'[ls]=/bin/rm; ls -rf x",
+                    "builtin declare \"BASH_CMDS[ls]=/bin/rm\"; ls -rf x",
+                    "command typeset \"BASH_CMDS[ls]=/bin/rm\"; ls -rf x",
+                    "builtin export PATH=/tmp",
+                    "unset PATH",
+                    "let PATH=1",
+                    "sh -c 'BASH_CMDS[ls]=/bin/rm; ls -rf x'",
+                ] {
+                    let command = parse(command);
+                    assert!(command.sets_shell_variable(), "{command:?}");
+                    assert!(command.is_opaque(), "{command:?}");
+                }
+                for command in [
+                    "echo $PATH ${PATH:-x} ${#PATH} ${BASH_CMDS[ls]}",
+                    "X=1; echo hi",
+                    "LANG=C ls",
+                    "export RUST_LOG=debug; cargo test",
+                    "declare -a list=(a b)",
+                    "export -n FOO",
+                    "read -r line",
+                    "read -p 'ENV? ' answer",
+                    "printf '%s\\n' 'Set HOME first'",
+                    "let count=1",
+                    "test -v PATH",
+                    "[ -v HOME ]",
+                ] {
+                    assert!(!parse(command).sets_shell_variable(), "{command:?}");
+                }
+            }
+
+            #[test]
+            fn flags_a_statement_level_assignment_before_a_later_command() {
+                for command in [
+                    "GIT_EDITOR='rm -rf y'; git commit --amend",
+                    "EDITOR=vi; git rebase -i HEAD~2",
+                    "http_proxy=http://x; curl example.com",
+                    "FOO=bar\ncat file",
+                ] {
+                    assert!(parse(command).is_opaque(), "{command:?}");
+                }
+                for command in [
+                    "RUST_LOG=debug; cargo test",
+                    "LANG=C; ls",
+                    "FOO=bar",
+                    "FOO=bar ls",
+                ] {
+                    assert!(!parse(command).is_opaque(), "{command:?}");
+                }
+            }
+
+            #[test]
+            fn flags_an_expansion_that_runs_code_or_evaluates_a_name() {
+                for command in [
+                    "cargo build ${x:n}",
+                    "echo ${arr[n]}",
+                    "echo ${!n}",
+                    "echo ${x@P}",
+                    "echo ${#x}",
+                    "echo ${x/a/b}",
+                    "echo ${x:1:2}",
+                    "test -v \"$n\"",
+                    "[ -v \"$n\" ]",
+                    "printf -v \"$n\" hi",
+                    "read -r 'a[$(rm -rf y)]'",
+                ] {
+                    assert!(parse(command).is_opaque(), "{command:?}");
+                }
+                for command in [
+                    "echo $x ${x} ${x:-a} ${x-a} ${x:+a} ${x+a}",
+                    "cargo build ${profile:-release}",
+                    "test -f file",
+                    "read -r line",
+                ] {
+                    assert!(!parse(command).is_opaque(), "{command:?}");
+                }
+            }
+
+            #[test]
             fn turns_a_variable_the_shell_or_a_later_program_reads_opaque() {
                 for command in [
                     "PATH=.; ls",
                     "HOME=/; cat ~/x",
                     "export GIT_PAGER=sh; git log",
                     "declare -x PATH",
+                    "declare \"BASH_CMDS[ls]=/bin/rm\"; ls -rf x",
+                    "declare BASH_CMDS\\[ls\\]=/bin/rm; ls -rf x",
+                    "declare 'BASH_CMDS'[ls]=/bin/rm; ls -rf x",
                     "for PATH in .; do ls; done",
                 ] {
                     assert!(parse(command).is_opaque(), "{command:?}");
                 }
                 for command in [
-                    "X=1; echo hi",
                     "export RUST_LOG=debug; cargo test",
                     "for f in a b; do cat \"$f\"; done",
                 ] {
@@ -2334,6 +2634,20 @@ mod tests {
             }
 
             #[test]
+            fn turns_a_reserved_word_the_grammar_reads_as_a_command_unparsed() {
+                for command in [
+                    "coproc rm -rf x",
+                    "coproc worker { rm -rf x; }",
+                    "time while true; do rm -rf x; done",
+                    "time -p ! rm -rf x",
+                    "time -- ! rm -rf x",
+                    "time time if true; then rm -rf x; fi",
+                ] {
+                    assert!(parse(command).is_unparsed(), "{command:?}");
+                }
+            }
+
+            #[test]
             fn keeps_everyday_commands_parsed() {
                 for command in [
                     "LC_ALL=$y rm -rf z",
@@ -2347,6 +2661,10 @@ mod tests {
                     "python3 - <<'EOF'\nprint(1)\nEOF",
                     "kubectl apply -f - <<EOF\nx\nEOF",
                     "cmd - 2>&1",
+                    "time cargo test",
+                    "time -p",
+                    "help coproc",
+                    "echo if then fi",
                 ] {
                     assert!(!parse(command).is_unparsed(), "{command:?}");
                 }
