@@ -9,17 +9,13 @@ use crate::protocol::{Event, EventSink, Op};
 
 /// Why a turn ended without a clean assistant reply. The engine keeps serving after `Cancelled`
 /// but stops on `Shutdown`.
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug)]
 pub(super) enum TurnAbort {
-    #[error("turn cancelled")]
     Cancelled,
-    #[error("engine shut down")]
     Shutdown,
     /// The model declined the turn's request, so the engine rolls the turn back. Holds the notice.
-    #[error("{0}")]
     Refused(String),
-    #[error(transparent)]
-    Failed(#[from] anyhow::Error),
+    Failed(anyhow::Error),
 }
 
 pub(super) type AbortResult<T> = std::result::Result<T, TurnAbort>;
@@ -90,7 +86,7 @@ where
                 // Unreachable under current wiring, and a `Resolve` here is a stale reply for an
                 // already-resolved call.
                 if let Some(op) = inbox.absorb(op, sink)? {
-                    warn!("dropped mid-turn op: {op:?}");
+                    warn!(?op, "dropped mid-turn op");
                 }
             }
             output = &mut fut => return Ok(output),
@@ -100,27 +96,8 @@ where
 
 #[cfg(test)]
 mod tests {
-    use anyhow::anyhow;
-
     use super::*;
     use crate::protocol::testing::CapturingSink;
-
-    #[test]
-    fn display_alternate_propagates_anyhow_cause_chain() {
-        let abort = TurnAbort::Failed(anyhow!("HTTP 503 from upstream").context("request failed"));
-
-        let plain = format!("{abort}");
-        let alternate = format!("{abort:#}");
-
-        assert_eq!(plain, "request failed");
-        assert_eq!(alternate, "request failed: HTTP 503 from upstream");
-    }
-
-    #[test]
-    fn display_cancelled_and_shutdown_use_static_labels() {
-        assert_eq!(format!("{}", TurnAbort::Cancelled), "turn cancelled");
-        assert_eq!(format!("{}", TurnAbort::Shutdown), "engine shut down");
-    }
 
     mod inbox {
         use super::*;

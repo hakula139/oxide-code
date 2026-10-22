@@ -246,14 +246,11 @@ impl App {
             Op::Resume { .. } => self.set_status(Status::Resuming),
             Op::Compact { .. } => self.set_status(Status::Compacting),
             Op::Login => self.set_status(Status::SigningIn),
+            Op::Logout => self.set_status(Status::SigningOut),
+            Op::Archive => self.set_status(Status::Archiving),
             Op::SetMode(mode) => self.requested_mode = *mode,
-            Op::Queue(_)
-            | Op::Resolve { .. }
-            | Op::SetModel(_)
-            | Op::Clear
-            | Op::Archive
-            | Op::Rename { .. }
-            | Op::Logout => {}
+            Op::Queue(_) | Op::Resolve { .. } | Op::SetModel(_) | Op::Clear | Op::Rename { .. } => {
+            }
         }
         self.send_op(op);
     }
@@ -389,13 +386,17 @@ impl App {
     }
 
     /// Forwards the queued prompts the in-flight turn lacks, in order. A prompt that a full channel
-    /// turns away stays queued for a later call, and a closed channel quits. Holds the
-    /// prompts while compacting, signing in, resuming, or cancelling, when no turn may be left to
-    /// splice them in.
+    /// turns away stays queued for a later call, and a closed channel quits. Holds the prompts
+    /// during an op that runs no turn to splice them into, or while cancelling.
     pub(super) fn forward_queued_prompts(&mut self) {
         if matches!(
             &self.status,
-            Status::Compacting | Status::SigningIn | Status::Resuming | Status::Cancelling,
+            Status::Compacting
+                | Status::SigningIn
+                | Status::SigningOut
+                | Status::Resuming
+                | Status::Archiving
+                | Status::Cancelling,
         ) {
             return;
         }

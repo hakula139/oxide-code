@@ -11,7 +11,19 @@ use super::{CompactOutcome, Outcome, RecordOutcome, SessionHandle, SharedState};
 use crate::file_tracker::FileTracker;
 use crate::file_tracker::testing::record_tracked_file;
 use crate::message::{ContentBlock, Message, Role};
+use crate::protocol::CompactTrigger;
 use crate::session::actor::SessionCmd;
+use crate::session::entry::CompactBoundary;
+
+/// A `/compact` boundary for `summary` with no focus or task list.
+pub(crate) fn boundary(summary: &str) -> CompactBoundary {
+    CompactBoundary {
+        summary: summary.to_owned(),
+        instructions: None,
+        tasks: Vec::new(),
+        trigger: CompactTrigger::Manual,
+    }
+}
 
 /// Records a Write call of `tool_use_id` on `handle` that leaves `alpha` at `path`, as `tracker`
 /// records it. An `answered` call also gets its tool result.

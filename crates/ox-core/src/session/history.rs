@@ -31,6 +31,7 @@ pub(crate) fn interactions(
         summary: info.summary.clone(),
         pre_count: info.pre_message_count,
         instructions: info.instructions.clone(),
+        trigger: info.trigger,
     }];
     out.extend(walk_transcript(
         &post_compact_messages(messages),
@@ -200,7 +201,7 @@ mod tests {
 
     use super::*;
     use crate::message::Replay;
-    use crate::protocol::testing;
+    use crate::protocol::{CompactTrigger, testing};
     use crate::session::post_compact::synthesize_post_compact_message;
     use crate::tool::DEFAULT_TOOL_ICON;
     use crate::tool::edit::EditTool;
@@ -221,6 +222,7 @@ mod tests {
                 pre_message_count: 4,
                 instructions: Some("focus on auth".to_owned()),
                 tasks: plan(),
+                trigger: Some(CompactTrigger::Auto),
             }
         }
 
@@ -229,6 +231,7 @@ mod tests {
                 summary: "Kept the important decisions.".to_owned(),
                 pre_count: 4,
                 instructions: Some("focus on auth".to_owned()),
+                trigger: Some(CompactTrigger::Auto),
             }
         }
 

@@ -18,7 +18,7 @@ Every session is a single append-only `.jsonl` file with one JSON object per lin
 | `file_snapshot`        | Sidecar        | File-tracker state restored on resume when disk state still matches                                         |
 | `usage`                | After request  | One billed request's token usage, model, and prompt-cache TTL                                               |
 | `context`              | Before message | Prompt context of that message. Latest on the resolved chain wins                                           |
-| `compact`              | Boundary       | Summary, pre-compact count, and optional instructions and tasks                                             |
+| `compact`              | Boundary       | Summary, pre-compact count, trigger, and optional instructions and tasks                                    |
 | `archive`              | Re-appended    | Archive state: `archived` + `at`. Latest wins                                                               |
 | `summary`              | Last line      | Exit marker: `message_count` + `updated_at`. Latest wins                                                    |
 
@@ -44,7 +44,7 @@ A reasoning block stores the `wire` and `model` that produced it alongside a `pa
 
 A server tool's result, such as a `web_search_tool_result`, is stored as a `server_tool_result` block that keeps the API's block type in `kind` and every other field unchanged, so the Anthropic wire sends it back as the API returned it.
 
-A `wire` value or content block `type` that an older binary does not know fails to parse, and that binary skips the whole message as a malformed line. From 0.1.0 on, adding either needs a header `version` bump. A task `status` works the same way inside a `compact` entry: an unknown one makes an older binary skip the boundary, so adding a status needs a bump too.
+A `wire` value or content block `type` that an older binary does not know fails to parse, and that binary skips the whole message as a malformed line. From 0.1.0 on, adding either needs a header `version` bump. A task `status` or a compaction `trigger` works the same way inside a `compact` entry: an unknown one makes an older binary skip the boundary, so adding either needs a bump too.
 
 Tests in `session/handle.rs` enforce this guarantee for stable releases, using one fixture per release starting with `v0.1.0`. Each fixture lives in `crates/ox-core/src/session/fixtures/` and is named after its tag:
 
@@ -165,7 +165,7 @@ Listings sort rows and render them as follows:
 
 ## Sources
 
-- `crates/ox-core/src/engine.rs`: the session cost summed from the resumed `usage` entries.
+- `crates/ox-core/src/engine/sessions.rs`: `adopt_session`, which sums the session cost from the resumed `usage` entries.
 - `crates/ox-core/src/engine/turn.rs`: the joined writes that put a tool round's records in one batch.
 - `crates/ox-core/src/session/actor.rs`: the actor that owns the writer and appends each wakeup's commands in one write.
 - `crates/ox-core/src/session/chain.rs`: message chain reconstruction from the `parent_uuid` DAG.

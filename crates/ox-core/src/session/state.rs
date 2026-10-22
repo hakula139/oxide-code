@@ -9,12 +9,11 @@ use time::OffsetDateTime;
 use uuid::Uuid;
 
 use super::display::fit_title;
-use super::entry::{CURRENT_VERSION, Entry, Header, TitleSource};
+use super::entry::{CURRENT_VERSION, CompactBoundary, Entry, Header, TitleSource};
 use super::handle::Checkpoint;
 use super::store::{SessionStore, SessionWriter, artifact_dir, encode_lines};
 use crate::file_tracker::FileSnapshot;
 use crate::message::{ContentBlock, Message, Role};
-use crate::tool::tasks::Task;
 
 /// Retry-queue size in MiB past which a failed flush stops persistence for the rest of the session.
 const MAX_UNWRITTEN_MIB: usize = 8;
@@ -179,20 +178,24 @@ impl SessionState {
     /// Builds the compaction boundary and the synthetic post-compact root message.
     pub(super) fn compact_entries(
         &self,
-        summary: &str,
-        instructions: Option<String>,
-        tasks: Vec<Task>,
+        boundary: CompactBoundary,
         synthetic_message: Message,
         now: OffsetDateTime,
     ) -> (Vec<Entry>, Uuid) {
-        let pre_count = self.message_count;
+        let CompactBoundary {
+            summary,
+            instructions,
+            tasks,
+            trigger,
+        } = boundary;
         let synthetic_uuid = Uuid::new_v4();
         let entries = vec![
             Entry::Compact {
-                summary: summary.to_owned(),
-                pre_message_count: pre_count,
+                summary,
+                pre_message_count: self.message_count,
                 instructions,
                 tasks,
+                trigger: Some(trigger),
                 timestamp: now,
             },
             Entry::Message {
@@ -350,6 +353,8 @@ pub(super) fn extract_user_text(message: &Message) -> Option<&str> {
 mod tests {
     use super::*;
     use crate::file_tracker::{FileTracker, LastView};
+    use crate::protocol::CompactTrigger;
+    use crate::session::handle::testing::boundary;
     use crate::session::store::load_session_data_from_path;
     use crate::session::store::local_testing::test_session_file;
     use crate::session::store::testing::{isolated_store, test_project_dir, test_store};
@@ -528,9 +533,12 @@ mod tests {
             assert_eq!(state.message_count(), 2);
 
             let (entries, synthetic_uuid) = state.compact_entries(
-                "summary body",
-                Some("focus on auth".to_owned()),
-                plan(),
+                CompactBoundary {
+                    summary: "summary body".to_owned(),
+                    instructions: Some("focus on auth".to_owned()),
+                    tasks: plan(),
+                    trigger: CompactTrigger::Auto,
+                },
                 Message::user("post-compact"),
                 now,
             );
@@ -544,11 +552,12 @@ mod tests {
                         pre_message_count: 2,
                         instructions: Some(i),
                         tasks,
+                        trigger: Some(CompactTrigger::Auto),
                         ..
                     } if summary == "summary body" && i == "focus on auth" && *tasks == plan()
                 ),
-                "boundary entry must carry summary, pre-count, instructions, and tasks verbatim: \
-                 {:?}",
+                "boundary entry must carry summary, pre-count, instructions, tasks, and trigger \
+                 verbatim: {:?}",
                 entries[0],
             );
             assert!(
@@ -577,8 +586,7 @@ mod tests {
             let state = SessionState::fresh(store, "m", None);
             let now = OffsetDateTime::now_utc();
 
-            let (entries, _) =
-                state.compact_entries("s", None, Vec::new(), Message::user("synth"), now);
+            let (entries, _) = state.compact_entries(boundary("s"), Message::user("synth"), now);
 
             assert!(matches!(
                 &entries[0],
@@ -604,7 +612,7 @@ mod tests {
             state.flush_entries(rec).unwrap();
 
             let (_, synthetic_uuid) =
-                state.compact_entries("s", None, Vec::new(), Message::user("synth"), now);
+                state.compact_entries(boundary("s"), Message::user("synth"), now);
             state.commit_compact(synthetic_uuid);
 
             assert_eq!(state.last_message_uuid, Some(synthetic_uuid));
@@ -618,7 +626,7 @@ mod tests {
             let now = OffsetDateTime::now_utc();
 
             let (_, synthetic_uuid) =
-                state.compact_entries("s", None, Vec::new(), Message::user("synth"), now);
+                state.compact_entries(boundary("s"), Message::user("synth"), now);
             state.commit_compact(synthetic_uuid);
 
             assert!(state.first_user_prompt_seen);
@@ -635,7 +643,7 @@ mod tests {
             let now = OffsetDateTime::now_utc();
 
             let (_, synthetic_uuid) =
-                state.compact_entries("s", None, Vec::new(), Message::user("synth"), now);
+                state.compact_entries(boundary("s"), Message::user("synth"), now);
             state.commit_compact(synthetic_uuid);
 
             assert_eq!(state.initial_message_count, 0);
