@@ -1,13 +1,16 @@
-//! Agent turn loop. Streams the model response, runs each round's tool calls through
-//! [`super::dispatch`], records to the session, and stops on a text-only response or the optional
-//! per-turn round cap.
+//! Agent turn loop.
+//! Streams the model response, runs each round's tool calls through [`super::dispatch`],
+//! records to the session, and stops on a text-only response, the optional per-turn round cap,
+//! or a context that needs compacting before the next round.
 
 use anyhow::{Result, anyhow, bail};
 use tokio::sync::mpsc;
 
 use super::abort::{AbortResult, Inbox, TurnAbort, await_unless_aborted};
+use super::compaction::{auto_compaction_due, transcript_tokens};
 use super::dispatch::{self, DispatchContext};
 use crate::client::{Response, ResponseEvent, StopDetails, StopReason, Wire};
+use crate::config::compaction::AutoCompactionConfig;
 use crate::message::{ContentBlock, Message, Role};
 use crate::model::TokenUsage;
 use crate::prompt::PromptParts;
@@ -28,32 +31,57 @@ pub(super) struct TurnReport {
     pub(super) billable_rounds: Vec<TokenUsage>,
     /// The task list the turn's last `tasks` call left, `None` when no call set one.
     pub(super) tasks: Option<Vec<Task>>,
+    /// How many transcript messages the request behind [`Self::usage`] sent.
+    sent_messages: usize,
 }
 
 impl TurnReport {
-    /// The usage of the latest request that reported any, which the auto-compaction threshold
-    /// checks.
+    /// The usage of the latest request that reported any.
     pub(super) fn usage(&self) -> Option<TokenUsage> {
         self.billable_rounds.last().copied()
     }
 
-    fn record(&mut self, round: Option<TokenUsage>) {
-        self.billable_rounds.extend(round);
+    /// Rough size of the next request's context, which the auto-compaction threshold checks: the
+    /// input of the latest request that reported usage, plus an estimate of every message
+    /// `messages` gained after that request went out, its reply included.
+    pub(super) fn context_estimate(&self, messages: &[Message]) -> Option<u32> {
+        self.usage().map(|usage| {
+            let appended = transcript_tokens(&messages[self.sent_messages..]);
+            usage.context_tokens().saturating_add(appended)
+        })
     }
+
+    /// Adds the usage of a request that sent `sent_messages` messages, if it reported any.
+    fn record(&mut self, round: Option<TokenUsage>, sent_messages: usize) {
+        if let Some(usage) = round {
+            self.billable_rounds.push(usage);
+            self.sent_messages = sent_messages;
+        }
+    }
+}
+
+/// Why an [`agent_turn`] stopped without an abort.
+#[derive(Debug, PartialEq, Eq)]
+pub(super) enum TurnStop {
+    /// The model gave its final reply.
+    Replied,
+    /// The context crossed the auto-compaction threshold at a round boundary, after `rounds_run`
+    /// rounds, so the engine compacts before the turn goes on.
+    Compact { rounds_run: u32 },
 }
 
 /// Result of one [`agent_turn`] invocation.
 #[derive(Debug)]
 pub(super) struct TurnOutcome {
     pub(super) report: TurnReport,
-    pub(super) result: AbortResult<()>,
+    pub(super) result: AbortResult<TurnStop>,
 }
 
 impl TurnOutcome {
-    fn completed(report: TurnReport) -> Self {
+    fn stopped(report: TurnReport, stop: TurnStop) -> Self {
         Self {
             report,
-            result: Ok(()),
+            result: Ok(stop),
         }
     }
 
@@ -64,10 +92,13 @@ impl TurnOutcome {
         }
     }
 
-    /// The report of a completed turn, or the abort that stopped it.
+    /// The report of a turn that replied, or the abort that stopped it.
     #[cfg(test)]
     fn into_result(self) -> AbortResult<TurnReport> {
-        self.result.map(|()| self.report)
+        self.result.map(|stop| {
+            assert_eq!(stop, TurnStop::Replied);
+            self.report
+        })
     }
 }
 
@@ -80,14 +111,24 @@ pub(super) struct TurnContext<'a> {
     pub(super) session: &'a SessionHandle,
     /// How many rounds may run without a final reply before the turn fails, unbounded when `None`.
     pub(super) max_tool_rounds: Option<u32>,
+    /// When the context needs compacting before the next round.
+    pub(super) auto_compaction: AutoCompactionConfig,
+    /// The rounds the turn ran before its latest mid-turn compaction, which count toward
+    /// `max_tool_rounds`.
+    /// Nonzero means the summary now holds the prompt.
+    pub(super) rounds_run: u32,
 }
 
-/// Drives one user prompt to a final assistant text reply, re-requesting after a `pause_turn`
-/// stop. [`Op::Queue`]s splice in as user messages at round boundaries, and an [`Op::SetMode`]
-/// waits in `inbox` for the next gated call. An abort mid-stream commits none of the reply, while
-/// an abort mid-round commits the round with the unfinished calls marked interrupted. Either way
-/// the transcript then ends on [`Message::interruption`]. A refusal commits none of the reply and
-/// ends the turn with [`TurnAbort::Refused`], so the caller can roll the turn back.
+/// Drives one user prompt to a final assistant text reply, re-requesting after a `pause_turn` stop.
+/// [`Op::Queue`]s splice in as user messages at round boundaries,
+/// and an [`Op::SetMode`] waits in `inbox` for the next gated call.
+/// An abort mid-stream commits none of the reply,
+/// while an abort mid-round commits the round with the unfinished calls marked interrupted.
+/// Either way the transcript then ends on [`Message::interruption`].
+/// A refusal commits none of the reply and ends the turn with [`TurnAbort::Refused`],
+/// so the caller can roll the turn back.
+/// Once a round leaves the context at the auto-compaction threshold,
+/// the turn stops with [`TurnStop::Compact`] for the caller to compact and call again.
 pub(super) async fn agent_turn(
     turn: TurnContext<'_>,
     messages: &mut Vec<Message>,
@@ -102,12 +143,15 @@ pub(super) async fn agent_turn(
         sink,
         session,
         max_tool_rounds,
+        auto_compaction,
+        rounds_run,
     } = turn;
     let tool_defs = tools.definitions();
     let mut report = TurnReport::default();
     let cap = max_tool_rounds.unwrap_or(u32::MAX);
 
-    for _ in 0..cap {
+    for round_index in rounds_run..cap {
+        let sent_messages = messages.len();
         let mut round_usage = None;
         let stream = await_unless_aborted(
             stream_response(client, messages, &tool_defs, prompt, sink, &mut round_usage),
@@ -116,7 +160,7 @@ pub(super) async fn agent_turn(
             sink,
         )
         .await;
-        report.record(round_usage);
+        report.record(round_usage, sent_messages);
         let Response {
             content: blocks,
             parse_errors,
@@ -132,6 +176,7 @@ pub(super) async fn agent_turn(
             stop_reason,
             stop_details.as_ref(),
             blocks,
+            rounds_run > 0,
             session,
             sink,
             messages,
@@ -140,7 +185,7 @@ pub(super) async fn agent_turn(
         {
             StopAction::Proceed(blocks) => blocks,
             StopAction::Resume => continue,
-            StopAction::Finish(result) => return TurnOutcome { report, result },
+            StopAction::Finish(abort) => return TurnOutcome::aborted(report, abort),
         };
 
         let tool_uses = dispatch::collect_tool_uses(&blocks);
@@ -148,7 +193,7 @@ pub(super) async fn agent_turn(
             // Queued prompts drain on the TUI side at idle.
             commit_assistant_message(session, sink, messages, blocks).await;
             notify_if_interrupted(messages, sink);
-            return TurnOutcome::completed(report);
+            return TurnOutcome::stopped(report, TurnStop::Replied);
         }
         let assistant_msg = Message {
             role: Role::Assistant,
@@ -182,6 +227,12 @@ pub(super) async fn agent_turn(
             return interrupt_turn(session, sink, messages, report, abort).await;
         }
         record_drained_prompts(inbox.prompts.drain(..), messages, session, sink).await;
+
+        let ran = round_index + 1;
+        let estimate = report.context_estimate(messages);
+        if ran < cap && auto_compaction_due(auto_compaction, estimate, messages) {
+            return TurnOutcome::stopped(report, TurnStop::Compact { rounds_run: ran });
+        }
     }
 
     TurnOutcome::aborted(
@@ -200,14 +251,16 @@ enum StopAction {
     /// `pause_turn`: the reply is committed and the next request resumes it.
     Resume,
     /// The turn ends here.
-    Finish(AbortResult<()>),
+    Finish(TurnAbort),
 }
 
 /// Handles the stop reasons that end or pause a round before any tool runs.
+/// `compacted` says a mid-turn compaction summarized the turn's prompt.
 async fn settle_stop_reason(
     stop_reason: Option<StopReason>,
     stop_details: Option<&StopDetails>,
     blocks: Vec<ContentBlock>,
+    compacted: bool,
     session: &SessionHandle,
     sink: &dyn EventSink,
     messages: &mut Vec<Message>,
@@ -215,7 +268,7 @@ async fn settle_stop_reason(
     match stop_reason {
         // The API asks clients to drop refused output without running it.
         Some(StopReason::Refusal) => {
-            StopAction::Finish(Err(TurnAbort::Refused(refusal_message(stop_details))))
+            StopAction::Finish(TurnAbort::Refused(refusal_message(stop_details, compacted)))
         }
         // Running a cut-off call, or asking the model to retry it, would repeat the same
         // oversized output, so the round stops and keeps only the finished prose.
@@ -226,7 +279,7 @@ async fn settle_stop_reason(
                 .filter(|b| !matches!(b, ContentBlock::ToolUse { .. }))
                 .collect();
             commit_assistant_message(session, sink, messages, prose).await;
-            StopAction::Finish(Err(TurnAbort::Failed(error)))
+            StopAction::Finish(TurnAbort::Failed(error))
         }
         Some(StopReason::PauseTurn) => {
             commit_assistant_message(session, sink, messages, blocks).await;
@@ -255,8 +308,7 @@ async fn commit_assistant_message(
     messages.push(message);
 }
 
-/// Ends a turn on a user abort, recording [`Message::interruption`] after whatever the turn
-/// committed so later requests leave the abandoned prompts unanswered.
+/// Ends a turn on a user abort with [`record_interruption`].
 async fn interrupt_turn(
     session: &SessionHandle,
     sink: &dyn EventSink,
@@ -264,18 +316,34 @@ async fn interrupt_turn(
     report: TurnReport,
     abort: TurnAbort,
 ) -> TurnOutcome {
-    let marker = Message::interruption();
-    record_message(session, marker.clone(), sink).await;
-    messages.push(marker);
+    record_interruption(session, sink, messages).await;
     TurnOutcome::aborted(report, abort)
 }
 
-/// User-facing notice for a `refusal` stop, naming the policy category and explanation when the
-/// API supplied them. The API keeps refusing while the turn stays in the conversation, so the
-/// notice says the engine removed it.
-fn refusal_message(details: Option<&StopDetails>) -> String {
-    const REPHRASE: &str =
-        "The request was removed from the conversation, so rephrase it to try again.";
+/// Records and appends [`Message::interruption`] after whatever an aborted turn committed,
+/// so later requests leave the abandoned prompts unanswered.
+pub(super) async fn record_interruption(
+    session: &SessionHandle,
+    sink: &dyn EventSink,
+    messages: &mut Vec<Message>,
+) {
+    let marker = Message::interruption();
+    record_message(session, marker.clone(), sink).await;
+    messages.push(marker);
+}
+
+/// User-facing notice for a `refusal` stop,
+/// naming the policy category and explanation when the API supplied them.
+/// The API keeps refusing while the turn stays in the conversation,
+/// so the notice says the engine removed it,
+/// or, once `compacted` says a mid-turn summary holds the request, that only `/clear` removes it.
+fn refusal_message(details: Option<&StopDetails>, compacted: bool) -> String {
+    let next = if compacted {
+        "The work since this turn's compaction was removed from the conversation, \
+         but the summary still holds the request, so run `/clear` if the model keeps declining."
+    } else {
+        "The request was removed from the conversation, so rephrase it to try again."
+    };
     let category = details
         .and_then(|d| d.category.as_deref())
         .map(|c| format!(" (category: {c})"))
@@ -287,9 +355,9 @@ fn refusal_message(details: Option<&StopDetails>) -> String {
     match explanation {
         Some(explanation) => join_sentences(
             &format!("The model declined this request{category}: {explanation}"),
-            REPHRASE,
+            next,
         ),
-        None => format!("The model declined this request{category}. {REPHRASE}"),
+        None => format!("The model declined this request{category}. {next}"),
     }
 }
 
@@ -450,9 +518,11 @@ mod tests {
     use crate::client::anthropic::testing::{api_key, sse_response};
     use crate::client::testing::five_hour_limit;
     use crate::config::Effort;
+    use crate::config::compaction::CompactionConfig;
     use crate::engine::dispatch::NOT_RUN;
     use crate::engine::local_testing::{
         EchoTool, dead_test_session, dispatch_with, inert_ops, thinking_block,
+        tool_heavy_transcript,
     };
     use crate::engine::testing::MODEL;
     use crate::message::{Replay, Role};
@@ -734,14 +804,6 @@ mod tests {
             (calls, results)
         }
 
-        fn round_totals(report: &TurnReport) -> Vec<u32> {
-            report
-                .billable_rounds
-                .iter()
-                .map(|usage| usage.total_tokens())
-                .collect()
-        }
-
         fn turn_context<'a>(
             client: &'a dyn Wire,
             tools: &'a ToolRegistry,
@@ -755,6 +817,8 @@ mod tests {
                 sink,
                 session,
                 max_tool_rounds: None,
+                auto_compaction: AutoCompactionConfig::disabled(),
+                rounds_run: 0,
             }
         }
 
@@ -956,8 +1020,7 @@ mod tests {
             .into_result()
             .unwrap();
 
-            assert_eq!(report.usage().map(TokenUsage::total_tokens), Some(107));
-            assert_eq!(round_totals(&report), [107]);
+            assert_eq!(report.billable_rounds, [TokenUsage::new(100, 7)]);
         }
 
         #[tokio::test]
@@ -1095,7 +1158,7 @@ mod tests {
         }
 
         #[tokio::test]
-        async fn does_not_auto_compact_between_tool_result_and_follow_up() {
+        async fn bills_each_round_and_reports_the_latest_usage() {
             let dir = tempfile::tempdir().unwrap();
             let session = test_session(dir.path());
             let client = FakeClient::new(vec![
@@ -1121,14 +1184,9 @@ mod tests {
             .into_result()
             .unwrap();
 
-            assert_eq!(report.usage().map(TokenUsage::total_tokens), Some(3));
-            assert_eq!(round_totals(&report), [11, 3]);
             assert_eq!(
-                sink.events()
-                    .iter()
-                    .filter(|event| matches!(event, Event::SessionCompacted { .. }))
-                    .count(),
-                0
+                report.billable_rounds,
+                [TokenUsage::new(9, 2), TokenUsage::new(1, 2)]
             );
             assert!(
                 matches!(&messages[5].content[0], ContentBlock::Text { text } if text == "Done")
@@ -1539,8 +1597,8 @@ mod tests {
                 outcome.result,
             );
             assert_eq!(
-                round_totals(&outcome.report),
-                [10],
+                outcome.report.billable_rounds,
+                [TokenUsage::new(7, 3)],
                 "round 1 usage must reach the caller despite the abort: {:?}",
                 outcome.report,
             );
@@ -1699,10 +1757,131 @@ mod tests {
                 outcome.result,
             );
             assert_eq!(
-                round_totals(&outcome.report),
-                vec![7; CAP as usize],
+                outcome.report.billable_rounds,
+                vec![TokenUsage::new(5, 2); CAP as usize],
                 "every capped round must reach billable_rounds: {:?}",
                 outcome.report,
+            );
+        }
+
+        #[tokio::test]
+        async fn stops_for_compaction_once_a_round_and_its_results_reach_the_threshold() {
+            let large_input = json!({ "log": "x".repeat(16_000) }).to_string();
+            for (input_tokens, input, expected) in [
+                (60_000, "{}", TurnStop::Compact { rounds_run: 1 }),
+                (
+                    45_000,
+                    large_input.as_str(),
+                    TurnStop::Compact { rounds_run: 1 },
+                ),
+                (45_000, "{}", TurnStop::Replied),
+            ] {
+                let dir = tempfile::tempdir().unwrap();
+                let session = test_session(dir.path());
+                let client = FakeClient::new(vec![
+                    with_usage(tool_use_turn("tool_1", "echo", input), input_tokens, 2),
+                    text_turn("done"),
+                ]);
+                let tools = ToolRegistry::new(vec![Box::new(EchoTool)]);
+                let sink = CapturingSink::default();
+                let mut messages = tool_heavy_transcript();
+
+                let outcome = agent_turn(
+                    TurnContext {
+                        auto_compaction: CompactionConfig::with_threshold_for_test(50_000).auto,
+                        ..turn_context(&client, &tools, &sink, &session)
+                    },
+                    &mut messages,
+                    &mut inert_ops(),
+                    &mut Inbox::default(),
+                    &mut yolo_dispatch(),
+                )
+                .await;
+
+                let stop = outcome.result.expect("the turn stops cleanly");
+                let requests = if expected == TurnStop::Replied { 2 } else { 1 };
+                assert_eq!(stop, expected, "{input_tokens} tokens");
+                assert_eq!(client.requests().len(), requests, "{input_tokens} tokens");
+                let results = &messages[tool_heavy_transcript().len() + 1].content;
+                assert!(
+                    matches!(
+                        &results[..],
+                        [ContentBlock::ToolResult { tool_use_id, .. }] if tool_use_id == "tool_1"
+                    ),
+                    "the round's results are recorded before it stops: {results:?}"
+                );
+            }
+        }
+
+        #[tokio::test]
+        async fn leaves_the_last_allowed_round_to_the_cap() {
+            let dir = tempfile::tempdir().unwrap();
+            let session = test_session(dir.path());
+            let client = FakeClient::new(vec![with_usage(
+                tool_use_turn("tool_1", "echo", "{}"),
+                60_000,
+                2,
+            )]);
+            let tools = ToolRegistry::new(vec![Box::new(EchoTool)]);
+            let sink = CapturingSink::default();
+            let mut messages = tool_heavy_transcript();
+
+            let err = agent_turn(
+                TurnContext {
+                    max_tool_rounds: Some(1),
+                    auto_compaction: CompactionConfig::with_threshold_for_test(50_000).auto,
+                    ..turn_context(&client, &tools, &sink, &session)
+                },
+                &mut messages,
+                &mut inert_ops(),
+                &mut Inbox::default(),
+                &mut yolo_dispatch(),
+            )
+            .await
+            .into_result()
+            .expect_err("the cap ends the turn without a summary");
+
+            assert_eq!(
+                format!("{:#}", err.into_failure()),
+                "Agent stopped after 1 tool rounds without a final response. \
+                 Raise or unset `client.max_tool_rounds` (`OX_MAX_TOOL_ROUNDS`) \
+                 to allow longer turns.",
+            );
+        }
+
+        #[tokio::test]
+        async fn counts_the_rounds_run_before_a_compaction_toward_the_cap() {
+            let dir = tempfile::tempdir().unwrap();
+            let session = test_session(dir.path());
+            let client = FakeClient::new(vec![
+                tool_use_turn("tool_3", "echo", "{}"),
+                tool_use_turn("tool_4", "echo", "{}"),
+            ]);
+            let tools = ToolRegistry::new(vec![Box::new(EchoTool)]);
+            let sink = CapturingSink::default();
+            let mut messages = vec![Message::user("keep going")];
+
+            let err = agent_turn(
+                TurnContext {
+                    max_tool_rounds: Some(3),
+                    rounds_run: 2,
+                    ..turn_context(&client, &tools, &sink, &session)
+                },
+                &mut messages,
+                &mut inert_ops(),
+                &mut Inbox::default(),
+                &mut yolo_dispatch(),
+            )
+            .await
+            .into_result()
+            .expect_err("the cap counts the rounds before the summary");
+
+            assert_eq!(client.requests().len(), 1);
+            assert_eq!(
+                format!("{:#}", err.into_failure()),
+                "Agent stopped after 3 tool rounds without a final response. \
+                 Raise or unset `client.max_tool_rounds` (`OX_MAX_TOOL_ROUNDS`) \
+                 to allow longer turns.",
             );
         }
 
@@ -1788,8 +1967,8 @@ mod tests {
                 outcome.result,
             );
             assert_eq!(
-                round_totals(&outcome.report),
-                [13],
+                outcome.report.billable_rounds,
+                [TokenUsage::new(9, 4)],
                 "round 1 usage must reach the caller despite the bail: {:?}",
                 outcome.report,
             );
@@ -2445,8 +2624,30 @@ mod tests {
                      so rephrase it to try again.",
                 ),
             ] {
-                assert_eq!(refusal_message(details.as_ref()), expected, "{details:?}");
+                assert_eq!(
+                    refusal_message(details.as_ref(), false),
+                    expected,
+                    "{details:?}"
+                );
             }
+        }
+
+        #[test]
+        fn points_to_clear_once_a_mid_turn_summary_holds_the_request() {
+            let details = StopDetails {
+                category: Some("cyber".to_owned()),
+                explanation: None,
+            };
+
+            let notice = refusal_message(Some(&details), true);
+
+            assert_eq!(
+                notice,
+                "The model declined this request (category: cyber). \
+                 The work since this turn's compaction was removed from the conversation, \
+                 but the summary still holds the request, \
+                 so run `/clear` if the model keeps declining.",
+            );
         }
     }
 

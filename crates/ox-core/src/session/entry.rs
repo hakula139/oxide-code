@@ -190,6 +190,9 @@ pub(crate) struct CompactBoundary {
     /// The task list the summarized transcript left, which the summary message carries over.
     pub(crate) tasks: Vec<Task>,
     pub(crate) trigger: CompactTrigger,
+    /// The prompt state the transcript after the boundary starts with,
+    /// recorded beside the summary message so a resume rebuilds the same prompt.
+    pub(crate) context: SessionContext,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

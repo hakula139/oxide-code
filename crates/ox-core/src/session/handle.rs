@@ -129,8 +129,9 @@ pub(crate) struct Outcome {
 #[derive(Debug)]
 pub(crate) struct CompactOutcome {
     pub(crate) pre_count: u32,
-    /// Whether the boundary took effect: on disk, or in memory alone once persistence stopped.
-    pub(crate) committed: bool,
+    /// The synthetic root as a rewind point, `Some` once the boundary took effect, either on disk
+    /// or in memory alone after persistence stopped.
+    pub(crate) checkpoint: Option<Checkpoint>,
     /// Every failure that leaves the boundary uncommitted, or else a write failure reported only
     /// the first time each kind occurs.
     pub(crate) failure: Option<String>,
@@ -174,9 +175,10 @@ impl SessionHandle {
     }
 
     /// Moves the session's tip back to `checkpoint`, abandoning the messages recorded after it.
-    /// `checkpoint` must come from a record since the last compaction, whose boundary the loader
-    /// cannot rewind across. A rewind to before the first user prompt stops the title request that
-    /// prompt started, so the next prompt titles the session.
+    /// `checkpoint` must come from the last compaction or a later record, because the loader cannot
+    /// rewind across a boundary.
+    /// A rewind to before the first user prompt stops the title request that prompt started,
+    /// so the next prompt titles the session.
     pub(crate) async fn rewind(&self, checkpoint: Checkpoint) -> Outcome {
         if !checkpoint.first_user_prompt_seen {
             self.stop_title_task().await;
@@ -224,8 +226,9 @@ impl SessionHandle {
     }
 
     /// Writes the compaction boundary and the synthetic post-compact message, then resets the chain
-    /// anchor. The caller swaps in the summary only once [`CompactOutcome::committed`] says the
-    /// boundary took effect.
+    /// anchor.
+    /// The caller swaps in the summary only once [`CompactOutcome::checkpoint`]
+    /// says the boundary took effect.
     pub(crate) async fn compact(
         &self,
         boundary: CompactBoundary,
@@ -241,7 +244,7 @@ impl SessionHandle {
             .await
             .unwrap_or_else(|| CompactOutcome {
                 pre_count: 0,
-                committed: false,
+                checkpoint: None,
                 failure: Some(self.actor_stopped_failure()),
             })
     }
@@ -1059,7 +1062,7 @@ mod tests {
                 .await;
 
             assert_eq!(outcome.pre_count, 2, "pre_count snapshots before reset");
-            assert!(outcome.committed);
+            assert!(outcome.checkpoint.is_some());
             assert!(outcome.failure.is_none(), "healthy actor acks cleanly");
             handle.finish(Vec::new()).await;
             drop(handle);
@@ -1084,14 +1087,14 @@ mod tests {
             for expected in [STOPPED, STOPPED_AGAIN] {
                 let outcome = compact(&dead).await;
                 assert_eq!(outcome.pre_count, 0, "no actor means no pre-count signal");
-                assert!(!outcome.committed);
+                assert!(outcome.checkpoint.is_none());
                 assert_eq!(outcome.failure.as_deref(), Some(expected));
             }
 
             let stalled = testing::acks_then_drops("stalled", 1);
-            assert!(compact(&stalled).await.committed);
+            assert!(compact(&stalled).await.checkpoint.is_some());
             let dropped = compact(&stalled).await;
-            assert!(!dropped.committed);
+            assert!(dropped.checkpoint.is_none());
             assert_eq!(dropped.failure.as_deref(), Some(STOPPED));
             stalled.shutdown().await;
         }
@@ -1990,6 +1993,7 @@ mod tests {
                         instructions: Some("focus on f.rs".to_owned()),
                         tasks: plan(),
                         trigger: CompactTrigger::Manual,
+                        context: prompt.session_context(),
                     },
                     Message::user("Summary: asked to edit f.rs."),
                 )

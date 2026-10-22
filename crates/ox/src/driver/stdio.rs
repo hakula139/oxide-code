@@ -264,6 +264,7 @@ impl StdioSink {
             // TUI-only events and the `SessionReady` marker have no stdio surface to update.
             Event::PromptDrained(_)
             | Event::TurnRolledBack
+            | Event::PromptUnsent
             | Event::UsageUpdated(_)
             | Event::RateLimitsUpdated(_)
             | Event::AutoCompactionPaused { .. }
@@ -1006,14 +1007,11 @@ mod tests {
             }
 
             #[test]
-            fn auto_compaction_started_explains_the_pause_before_the_prompt() {
+            fn auto_compaction_started_explains_the_pause() {
                 let (stdout, stderr) = render_one(&test_sink(false), Event::AutoCompactionStarted);
 
                 assert_eq!(stdout, "");
-                assert_eq!(
-                    stderr,
-                    "Compacting the conversation before sending the prompt\n"
-                );
+                assert_eq!(stderr, "Compacting the conversation to free up context\n");
             }
 
             #[test]
@@ -1116,6 +1114,7 @@ mod tests {
                             resets_at: 1_760_000_000,
                         }),
                     }),
+                    Event::PromptUnsent,
                     Event::AutoCompactionPaused { failures: 3 },
                     Event::AutoCompactionResumed,
                     Event::SummaryToken("Recap".to_owned()),
