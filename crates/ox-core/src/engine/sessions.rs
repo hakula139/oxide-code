@@ -12,6 +12,7 @@ use crate::file_tracker::FileTracker;
 use crate::protocol::notice::session_write_failed;
 use crate::protocol::{Event, EventSink, ResumeTarget};
 use crate::session::display::id_prefix;
+use crate::session::entry::ArchiveState;
 use crate::session::handle::{self, LoadedTranscript, RollIntoOutcome};
 use crate::session::resolver::resolve_saved_prefix;
 use crate::util::git::current_branch;
@@ -20,7 +21,7 @@ use crate::util::text::plural;
 impl Engine {
     /// Finalizes the live session and continues in a fresh, empty one.
     pub(super) async fn clear(&mut self, sink: &dyn EventSink) {
-        self.roll_session(sink, false).await;
+        self.roll_session(sink, ArchiveState::Active).await;
     }
 
     /// Archives the live session, then rolls like [`Self::clear`].
@@ -41,10 +42,10 @@ impl Engine {
             );
             return;
         }
-        self.roll_session(sink, true).await;
+        self.roll_session(sink, ArchiveState::Archived).await;
     }
 
-    async fn roll_session(&mut self, sink: &dyn EventSink, archived: bool) {
+    async fn roll_session(&mut self, sink: &dyn EventSink, old_session: ArchiveState) {
         let git_branch = current_branch(self.cwd()).await;
         let outcome = handle::roll(
             &mut self.session,
@@ -58,7 +59,7 @@ impl Engine {
         sink.emit(
             Event::SessionRolled {
                 id: outcome.new_id,
-                archived,
+                old_session,
             },
             "session-rolled",
         );
@@ -87,7 +88,7 @@ impl Engine {
             Event::SessionResumed {
                 id: self.session.session_id().to_owned(),
                 title: outcome.title,
-                unarchived: outcome.unarchived,
+                prior: outcome.prior,
                 history: self.take_history(),
             },
             "session-resumed",
@@ -385,7 +386,7 @@ mod tests {
                     [
                         Event::AutoCompactionResumed,
                         Event::SessionRolled {
-                            archived: false,
+                            old_session: ArchiveState::Active,
                             ..
                         },
                         Event::SessionReady,
@@ -570,7 +571,7 @@ mod tests {
                         events.as_slice(),
                         [
                             Event::SessionRolled {
-                                archived: false,
+                                old_session: ArchiveState::Active,
                                 ..
                             },
                             Event::Error(failure),

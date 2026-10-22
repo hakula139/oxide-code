@@ -224,11 +224,7 @@ impl Cli {
     fn list_scope(&self) -> ListScope {
         ListScope {
             projects: self.projects(),
-            archive: if self.archived {
-                ArchiveState::Archived
-            } else {
-                ArchiveState::Active
-            },
+            archive: ArchiveState::of(self.archived),
         }
     }
 
@@ -350,7 +346,7 @@ async fn async_main(offset_error: Option<IndeterminateOffset>) -> Result<Exit> {
         handle,
         transcript,
         title,
-        unarchived,
+        prior,
     } = resolve_session(
         &store,
         config.model.id(),
@@ -358,7 +354,7 @@ async fn async_main(offset_error: Option<IndeterminateOffset>) -> Result<Exit> {
         cli.session_target(),
         cli.projects(),
     )?;
-    if unarchived && !tui_mode {
+    if prior == ArchiveState::Archived && !tui_mode {
         _ = writeln!(
             io::stderr(),
             "{}",
@@ -399,7 +395,7 @@ async fn async_main(offset_error: Option<IndeterminateOffset>) -> Result<Exit> {
         picker,
         prompt: cli.prompt,
         title,
-        unarchived,
+        prior,
     };
     // Boxed, since on Windows this future passes clippy's 16 KiB `large_futures` threshold.
     let signal = Box::pin(ox_tui::run(

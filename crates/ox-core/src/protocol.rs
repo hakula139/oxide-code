@@ -20,6 +20,7 @@ use crate::config::compaction::AutoCompactionConfig;
 use crate::model::{ModelSpec, ResolvedModelId};
 use crate::permission::rule::Rule;
 use crate::permission::{Basis, Mode, SessionGrant};
+use crate::session::entry::ArchiveState;
 use crate::tool::bash::background::BackgroundShell;
 use crate::tool::tasks::Task;
 use crate::tool::view::{ApprovalPreview, ToolResultView};
@@ -229,15 +230,20 @@ pub enum Event {
     /// [`Self::SessionTitleUpdated`] does.
     RenameFailed(String),
     /// An [`Op::Clear`] or [`Op::Archive`] rolled the session, making a new session UUID active.
-    /// `archived` marks an archive roll, so the frontend can name the session it archived.
-    SessionRolled { id: String, archived: bool },
-    /// An [`Op::Resume`] swapped to an existing session in place. Payload carries the target's
-    /// transcript projected for display, so the frontend can rebuild chat without restarting the
-    /// process. `unarchived` reports that the target stayed archived until this resume.
+    /// `old_session` is the state the roll left the old session in,
+    /// so the frontend can name the session an archive roll archived.
+    SessionRolled {
+        id: String,
+        old_session: ArchiveState,
+    },
+    /// An [`Op::Resume`] swapped to an existing session in place.
+    /// Payload carries the target's transcript projected for display,
+    /// so the frontend can rebuild chat without restarting the process.
+    /// `prior` is the target's state before this resume, which always leaves it active.
     SessionResumed {
         id: String,
         title: Option<String>,
-        unarchived: bool,
+        prior: ArchiveState,
         history: Vec<Interaction>,
     },
     /// A compaction finished.
@@ -822,12 +828,12 @@ mod tests {
                 Event::RenameFailed("Session write failed: disk full".to_owned()),
                 Event::SessionRolled {
                     id: "s2".to_owned(),
-                    archived: true,
+                    old_session: ArchiveState::Archived,
                 },
                 Event::SessionResumed {
                     id: "s3".to_owned(),
                     title: Some("Resumed".to_owned()),
-                    unarchived: true,
+                    prior: ArchiveState::Archived,
                     history: full_history(),
                 },
                 Event::SessionCompacted {

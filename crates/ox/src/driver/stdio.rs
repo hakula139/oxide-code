@@ -251,12 +251,9 @@ impl StdioSink {
                 writeln!(stderr, "Started session {}", id_prefix(&id))?;
             }
             Event::SessionResumed {
-                id,
-                title,
-                unarchived,
-                ..
+                id, title, prior, ..
             } => {
-                let notice = resumed_notice(&id, title.as_deref(), unarchived);
+                let notice = resumed_notice(&id, title.as_deref(), prior);
                 writeln!(stderr, "{notice}")?;
             }
             Event::ConfigChanged { notice, .. } => writeln!(stderr, "{notice}")?,
@@ -410,10 +407,10 @@ fn task_lines(tasks: &[Task]) -> String {
 }
 
 /// The session an [`Event::SessionResumed`] continues, then a note when resuming it unarchived it.
-fn resumed_notice(id: &str, title: Option<&str>, unarchived: bool) -> String {
+fn resumed_notice(id: &str, title: Option<&str>, prior: ArchiveState) -> String {
     let title = title.map_or_else(|| UNTITLED_MARKER.to_owned(), escape_line);
     let resumed = format!("Resumed session {}: {title}", id_prefix(id));
-    if unarchived {
+    if prior == ArchiveState::Archived {
         return format!("{resumed}\n{}", archive_notice(id, ArchiveState::Active));
     }
     resumed
@@ -629,7 +626,7 @@ mod tests {
             let cleared = [
                 Event::SessionRolled {
                     id: "next".to_owned(),
-                    archived: false,
+                    old_session: ArchiveState::Active,
                 },
                 Event::Error("Previous session write failed: disk full".to_owned()),
                 Event::Notice(
@@ -1046,7 +1043,7 @@ mod tests {
                     (
                         Event::SessionRolled {
                             id: "0123456789abcdef".to_owned(),
-                            archived: false,
+                            old_session: ArchiveState::Active,
                         },
                         "Started session 01234567\n",
                     ),
@@ -1054,7 +1051,7 @@ mod tests {
                         Event::SessionResumed {
                             id: "89abcdef01234567".to_owned(),
                             title: Some("Fix login".to_owned()),
-                            unarchived: false,
+                            prior: ArchiveState::Active,
                             history: Vec::new(),
                         },
                         "Resumed session 89abcdef: Fix login\n",
@@ -1063,7 +1060,7 @@ mod tests {
                         Event::SessionResumed {
                             id: "89abcdef01234567".to_owned(),
                             title: None,
-                            unarchived: true,
+                            prior: ArchiveState::Archived,
                             history: Vec::new(),
                         },
                         "Resumed session 89abcdef: (untitled)\nUnarchived session 89abcdef\n",

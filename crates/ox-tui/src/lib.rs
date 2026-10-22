@@ -32,6 +32,7 @@ use tracing::{debug, warn};
 
 use ox_core::config::ConfigSnapshot;
 use ox_core::engine::{Engine, EngineHandle};
+use ox_core::session::entry::ArchiveState;
 use ox_core::util::path::tildify;
 
 use action::Action;
@@ -55,8 +56,8 @@ pub struct Startup {
     /// The `ox <prompt>` text, submitted as if typed once the TUI opens.
     pub prompt: Option<String>,
     pub title: Option<String>,
-    /// Whether resuming the session unarchived it.
-    pub unarchived: bool,
+    /// The session's state before startup resumed it, which unarchives an archived session.
+    pub prior: ArchiveState,
 }
 
 /// Runs the TUI until the user quits or `shutdown` resolves, then waits for the engine to finalize
@@ -103,7 +104,7 @@ pub async fn run<S: Debug>(
         AppHistory {
             interactions,
             title: startup.title,
-            unarchived: startup.unarchived,
+            prior: startup.prior,
         },
     );
     for notice in theme_notices {
