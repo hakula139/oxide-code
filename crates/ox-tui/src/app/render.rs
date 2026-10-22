@@ -95,7 +95,7 @@ impl App {
         .areas(frame.area());
 
         self.status_bar
-            .set_queued_prompts(self.pending_prompts.len());
+            .set_queued_prompts(self.queue.pending().len());
         self.status_bar.set_task_progress(self.tasks.progress());
         self.status_bar
             .set_session_id(&self.session_info.session_id);
@@ -128,17 +128,14 @@ impl App {
             if popup_height > 0 {
                 self.input.render_popup(frame, popup);
             }
-            self.input.render(frame, input);
+            self.input.render(frame, input, self.status.is_busy());
         }
     }
 
     fn preview_height(&self) -> u16 {
-        if self.pending_prompts.is_empty() {
-            return 0;
-        }
-        let visible = self.pending_prompts.len().min(PREVIEW_VISIBLE);
-        let overflow = usize::from(self.pending_prompts.len() > PREVIEW_VISIBLE);
-        saturating_u16(visible + overflow)
+        let queued = self.queue.pending().len();
+        let overflow = usize::from(queued > PREVIEW_VISIBLE);
+        saturating_u16(queued.min(PREVIEW_VISIBLE) + overflow)
     }
 
     fn render_preview(&self, frame: &mut Frame<'_>, area: Rect) {
@@ -146,12 +143,13 @@ impl App {
             .saturating_sub(usize::from(USER_PROMPT_PREFIX_WIDTH))
             .saturating_sub(1);
 
+        let queued = self.queue.pending();
         let mut lines: Vec<Line<'static>> = Vec::with_capacity(PREVIEW_VISIBLE + 1);
-        for prompt in self.pending_prompts.iter().take(PREVIEW_VISIBLE) {
+        for prompt in queued.iter().take(PREVIEW_VISIBLE) {
             lines.push(preview_line(prompt, &self.theme, body_width));
         }
-        if self.pending_prompts.len() > PREVIEW_VISIBLE {
-            let extra = self.pending_prompts.len() - PREVIEW_VISIBLE;
+        if queued.len() > PREVIEW_VISIBLE {
+            let extra = queued.len() - PREVIEW_VISIBLE;
             let gutter = " ".repeat(usize::from(USER_PROMPT_PREFIX_WIDTH));
             let count = overflow_count(extra, "prompt", "prompts");
             lines.push(Line::from(Span::styled(
@@ -278,8 +276,8 @@ mod tests {
         FakeModal, five_hour_limit, long_chat_block, push_answerable_approval, render_app,
         rendered_text, test_app,
     };
-    use crate::components::status::StatusBar;
     use crate::components::status::testing::status_bar_init;
+    use crate::components::status::{Status, StatusBar};
     use crate::git_probes::GitUpdate;
     use crate::now;
     use crate::terminal::testing::{BEGIN_SYNC, END_SYNC, FLUSH, FRAME, capture_terminal};
@@ -442,7 +440,7 @@ mod tests {
                     app.chat.push_user_message("one\ntwo".to_owned());
                     app.chat.append_thinking_token("thinking");
                     app.chat.append_stream_token("partial reply\n\nmore");
-                    app.pending_prompts.push_back("queued".to_owned());
+                    app.queue.push("queued".to_owned());
                     app.handle_engine_event(Event::TasksUpdated(plan()));
                     app.input.set_text("line one\nline two\nline three");
                 }),
@@ -524,7 +522,7 @@ mod tests {
                     StatusLineSegment::Theme,
                 ]),
             );
-            app.pending_prompts.push_back("next".to_owned());
+            app.queue.push("next".to_owned());
 
             app.handle_engine_event(Event::RateLimitsUpdated(five_hour_limit()));
 
@@ -718,7 +716,7 @@ mod tests {
             let (mut app, _rx, _event_tx) = test_app(None);
             app.dispatch_action(Action::Submit("active".to_owned()));
             for i in 0..5 {
-                app.pending_prompts.push_back(format!("queued {i}"));
+                app.queue.push(format!("queued {i}"));
             }
             insta::assert_snapshot!(render_app(&mut app, 60, 14));
         }
@@ -735,7 +733,7 @@ mod tests {
             );
             app.dispatch_action(Action::Submit("active".to_owned()));
             push_ls_call(&mut app);
-            app.pending_prompts.push_back("queued 0".to_owned());
+            app.queue.push("queued 0".to_owned());
 
             app.handle_engine_event(Event::TasksUpdated(plan()));
 
@@ -789,7 +787,7 @@ mod tests {
         fn sizes_a_modal_before_the_queued_prompt_preview() {
             let (mut app, mut rx, _event_tx) = test_app(None);
             for i in 0..5 {
-                app.pending_prompts.push_back(format!("queued {i}"));
+                app.queue.push(format!("queued {i}"));
             }
             push_answerable_approval(&mut app, "cargo test --all");
 
@@ -863,7 +861,7 @@ mod tests {
         fn caps_at_visible_plus_overflow_row() {
             let (mut app, _rx, _event_tx) = test_app(None);
             for i in 0..(PREVIEW_VISIBLE + 5) {
-                app.pending_prompts.push_back(format!("p{i}"));
+                app.queue.push(format!("p{i}"));
             }
             assert_eq!(
                 app.preview_height(),
@@ -878,10 +876,10 @@ mod tests {
         #[test]
         fn overflow_appends_a_count_row() {
             let (mut app, _rx, _event_tx) = test_app(None);
-            app.input.set_enabled(false);
+            app.set_status(Status::Streaming);
             let extra = 3;
             for i in 0..(PREVIEW_VISIBLE + extra) {
-                app.pending_prompts.push_back(format!("queued-{i}"));
+                app.queue.push(format!("queued-{i}"));
             }
 
             let text = rendered_text(&mut app, 60, 20);
