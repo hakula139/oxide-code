@@ -67,6 +67,8 @@ impl SlashCommand for ThemeCmd {
     }
 }
 
+// ── Helpers ──
+
 /// Resolves a typed `/theme <name>` argument against the curated catalog. Custom themes require
 /// an edit to `config.toml`, so file paths are rejected.
 fn resolve_theme_arg(arg: &str) -> Result<&'static BuiltinTheme, String> {

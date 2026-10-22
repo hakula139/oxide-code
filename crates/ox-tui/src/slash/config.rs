@@ -161,6 +161,7 @@ mod tests {
     use super::*;
     use crate::modal::Modal;
     use crate::modal::testing::rendered_text;
+    use crate::slash::registry::testing::run_execute;
     use crate::slash::testing::test_session_info;
 
     mod execute {
@@ -168,8 +169,7 @@ mod tests {
 
         #[test]
         fn opens_the_overview_modal() {
-            let info = test_session_info();
-            let outcome = ConfigCmd.execute("", &SlashContext::new(&info, None));
+            let outcome = run_execute(&ConfigCmd, "");
             outcome.unwrap().into_modal();
         }
     }

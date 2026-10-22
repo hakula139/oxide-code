@@ -393,13 +393,13 @@ mod tests {
         use super::*;
 
         #[tokio::test]
-        async fn is_false_in_fresh_repo_with_no_commits() {
+        async fn finds_no_head_in_a_fresh_repo() {
             let (_dir, repo) = fresh_repo();
             assert!(!with_isolated_git_env_async(has_head(&repo)).await);
         }
 
         #[tokio::test]
-        async fn is_true_after_first_commit() {
+        async fn finds_the_head_after_the_first_commit() {
             let (_dir, repo) = fresh_repo();
             commit_file(&repo, "a.txt", "hello\n");
             assert!(with_isolated_git_env_async(has_head(&repo)).await);

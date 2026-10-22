@@ -54,11 +54,10 @@ impl SlashCommand for LogoutCmd {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::slash::testing::test_session_info;
+    use crate::slash::registry::testing::run_execute;
 
     fn forwarded(cmd: &dyn SlashCommand) -> Action {
-        let info = test_session_info();
-        cmd.execute("", &SlashContext::new(&info, None))
+        run_execute(cmd, "")
             .expect("the command must succeed")
             .into_forward()
     }

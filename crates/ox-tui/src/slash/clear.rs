@@ -31,7 +31,7 @@ impl SlashCommand for ClearCmd {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::slash::testing::test_session_info;
+    use crate::slash::registry::testing::run_execute;
 
     mod classify {
         use super::*;
@@ -47,10 +47,7 @@ mod tests {
 
         #[test]
         fn forwards_the_clear_action() {
-            let info = test_session_info();
-            let outcome = ClearCmd
-                .execute("", &SlashContext::new(&info, None))
-                .expect("/clear must succeed");
+            let outcome = run_execute(&ClearCmd, "").expect("/clear must succeed");
             assert_eq!(outcome.into_forward(), Action::Op(Op::Clear));
         }
     }

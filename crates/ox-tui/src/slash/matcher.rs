@@ -30,33 +30,36 @@ pub(super) fn filter_and_rank(commands: &[&dyn SlashCommand], query: &str) -> Ve
     let q = query.to_ascii_lowercase();
     let mut hits: Vec<(Tier, MatchedCommand)> = commands
         .iter()
-        .filter_map(|cmd| best_match(&q, *cmd))
+        .filter_map(|cmd| best_match(*cmd, command::aliases(cmd.name()), &q))
         .collect();
     hits.sort_by_key(|(tier, m)| (*tier, m.name));
     hits.into_iter().map(|(_, m)| m).collect()
 }
 
-/// `None` when neither name nor alias match.
-fn best_match(query: &str, cmd: &dyn SlashCommand) -> Option<(Tier, MatchedCommand)> {
-    let name = cmd.name();
-    let name_lower = name.to_ascii_lowercase();
+/// `None` when neither the name nor any of `aliases` match. `query` is already lowercased.
+fn best_match(
+    cmd: &dyn SlashCommand,
+    aliases: &[&'static str],
+    query: &str,
+) -> Option<(Tier, MatchedCommand)> {
+    let name_lower = cmd.name().to_ascii_lowercase();
     if name_lower.starts_with(query) {
         return Some((Tier::NamePrefix, on_name(cmd)));
     }
-    if let Some(alias) = matching_alias(cmd, |a| a.starts_with(query)) {
+    if let Some(alias) = matching_alias(aliases, |a| a.starts_with(query)) {
         return Some((Tier::AliasPrefix, on_alias(cmd, alias)));
     }
     if name_lower.contains(query) {
         return Some((Tier::NameSubstring, on_name(cmd)));
     }
-    if let Some(alias) = matching_alias(cmd, |a| a.contains(query)) {
+    if let Some(alias) = matching_alias(aliases, |a| a.contains(query)) {
         return Some((Tier::AliasSubstring, on_alias(cmd, alias)));
     }
     None
 }
 
-fn matching_alias(cmd: &dyn SlashCommand, pred: impl Fn(&str) -> bool) -> Option<&'static str> {
-    command::aliases(cmd.name())
+fn matching_alias(aliases: &[&'static str], pred: impl Fn(&str) -> bool) -> Option<&'static str> {
+    aliases
         .iter()
         .copied()
         .find(|alias| pred(&alias.to_ascii_lowercase()))
@@ -110,7 +113,6 @@ mod tests {
     /// Answers to `/new` and `/reset` through the shared alias table.
     const CLEAR: FakeCmd = FakeCmd {
         name: "clear",
-        description: "wipe",
         ..FakeCmd::DEFAULT
     };
 
@@ -119,17 +121,14 @@ mod tests {
 
         const HELP: FakeCmd = FakeCmd {
             name: "help",
-            description: "list",
             ..FakeCmd::DEFAULT
         };
         const STATUS: FakeCmd = FakeCmd {
             name: "status",
-            description: "show",
             ..FakeCmd::DEFAULT
         };
         const COMPACT: FakeCmd = FakeCmd {
             name: "compact",
-            description: "fold",
             ..FakeCmd::DEFAULT
         };
 
@@ -152,7 +151,6 @@ mod tests {
         fn name_prefix_beats_substring_within_other_command() {
             const FORCONFIG: FakeCmd = FakeCmd {
                 name: "forconfig",
-                description: "fake",
                 ..FakeCmd::DEFAULT
             };
             let with_substring: Vec<&dyn SlashCommand> = vec![&COMPACT, &FORCONFIG];
@@ -164,7 +162,6 @@ mod tests {
         fn alias_prefix_beats_name_substring() {
             const RENEW: FakeCmd = FakeCmd {
                 name: "renew",
-                description: "fake",
                 ..FakeCmd::DEFAULT
             };
             let with_substring: Vec<&dyn SlashCommand> = vec![&CLEAR, &RENEW];
@@ -178,7 +175,6 @@ mod tests {
         fn within_tier_sorts_alphabetically_on_canonical_name() {
             const SELECT: FakeCmd = FakeCmd {
                 name: "select",
-                description: "fake",
                 ..FakeCmd::DEFAULT
             };
             let two_prefix: Vec<&dyn SlashCommand> = vec![&STATUS, &SELECT];
@@ -219,9 +215,40 @@ mod tests {
     mod best_match {
         use super::*;
 
+        fn tier_and_alias(
+            aliases: &[&'static str],
+            query: &str,
+        ) -> Option<(Tier, Option<&'static str>)> {
+            best_match(&CLEAR, aliases, query).map(|(tier, m)| (tier, m.matched_alias))
+        }
+
+        #[test]
+        fn name_prefix_beats_alias_prefix() {
+            assert_eq!(
+                tier_and_alias(&["cl"], "cl"),
+                Some((Tier::NamePrefix, None)),
+            );
+        }
+
+        #[test]
+        fn alias_prefix_beats_name_substring() {
+            assert_eq!(
+                tier_and_alias(command::aliases(CLEAR.name), "r"),
+                Some((Tier::AliasPrefix, Some("reset"))),
+            );
+        }
+
+        #[test]
+        fn name_substring_beats_alias_substring() {
+            assert_eq!(
+                tier_and_alias(command::aliases(CLEAR.name), "e"),
+                Some((Tier::NameSubstring, None)),
+            );
+        }
+
         #[test]
         fn finds_nothing_when_neither_name_nor_alias_match() {
-            assert!(best_match("zzz", &CLEAR).is_none());
+            assert_eq!(tier_and_alias(command::aliases(CLEAR.name), "zzz"), None);
         }
     }
 

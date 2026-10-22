@@ -166,12 +166,6 @@ impl Column {
     }
 }
 
-/// Columns besides the title and the gaps between all of `columns`.
-fn fixed_width(columns: &[Column]) -> usize {
-    let gaps = COLUMN_GAP * columns.len().saturating_sub(1);
-    columns.iter().filter_map(|c| c.width()).sum::<usize>() + gaps
-}
-
 impl SessionRow {
     fn from_info(info: SessionInfo, listed_at: OffsetDateTime, show_project: bool) -> Self {
         let title = escape_line(display_title(&info));
@@ -254,6 +248,12 @@ impl SessionRow {
             }
         }
     }
+}
+
+/// Columns besides the title and the gaps between all of `columns`.
+fn fixed_width(columns: &[Column]) -> usize {
+    let gaps = COLUMN_GAP * columns.len().saturating_sub(1);
+    columns.iter().filter_map(|c| c.width()).sum::<usize>() + gaps
 }
 
 impl SearchableItem for SessionRow {
@@ -831,10 +831,11 @@ mod tests {
     use crate::modal::ModalStack;
     use crate::modal::chrome::HINT_SEPARATOR;
     use crate::modal::testing::{render_rows, rendered_text};
-    use crate::slash::testing::{make_read_only, test_session_info};
+    use crate::slash::registry::testing::run_execute;
+    use crate::slash::testing::make_read_only;
 
-    /// Seeds one titled session per `(byte, title)` under [`stamped_id`], each last active `byte`
-    /// seconds after a fixed time, so a higher byte sorts newer.
+    /// Seeds one titled session per `(byte, title)` under [`stamped_id`],
+    /// each last active `byte` seconds after a fixed time, so a higher byte sorts newer.
     fn seed_titled(store: &SessionStore, sessions: &[(u8, &str)]) {
         for &(byte, title) in sessions {
             seed_test_session(
@@ -847,9 +848,9 @@ mod tests {
         }
     }
 
-    /// Seeds active sessions `0x11` and `0x22`, then archived sessions `0x33` and `0x44`, each last
-    /// active a day before the previous one. The fixed dates fall outside the relative-time window,
-    /// so each row reads the same on every run.
+    /// Seeds active sessions `0x11` and `0x22`, then archived sessions `0x33` and `0x44`,
+    /// each last active a day before the previous one.
+    /// The fixed dates fall outside the relative-time window, so each row reads the same every run.
     fn seed_active_and_archived(store: &SessionStore) {
         let sessions = [
             (0x11, "Fix login redirect", 12, false),
@@ -943,19 +944,14 @@ mod tests {
             #[test]
             fn bare_opens_the_picker() {
                 with_isolated_xdg(|_| {
-                    let info = test_session_info();
-                    let outcome = ResumeCmd.execute("", &SlashContext::new(&info, None));
+                    let outcome = run_execute(&ResumeCmd, "");
                     outcome.unwrap().into_modal();
                 });
             }
 
             #[test]
             fn typed_arg_forwards_the_prefix_for_the_engine_to_resolve() {
-                let info = test_session_info();
-
-                let outcome = ResumeCmd
-                    .execute(" ab12 ", &SlashContext::new(&info, None))
-                    .unwrap();
+                let outcome = run_execute(&ResumeCmd, " ab12 ").unwrap();
 
                 assert_eq!(
                     outcome.into_forward(),
@@ -2040,16 +2036,9 @@ mod tests {
         #[test]
         fn ctrl_x_in_the_archived_view_unarchives_the_last_row_and_lands_above_it() {
             let (_dir, store) = isolated_store();
-            for (byte, title) in [(0x11_u8, "first"), (0x22, "second")] {
-                let id = stamped_id(byte);
-                seed_test_session(
-                    &store,
-                    &id,
-                    Some(title),
-                    Some(1),
-                    datetime!(2026-04-18 09:00:00 UTC) + time::Duration::seconds(i64::from(byte)),
-                );
-                archive_test_session(&store, &id);
+            seed_titled(&store, &[(0x11, "first"), (0x22, "second")]);
+            for byte in [0x11, 0x22] {
+                archive_test_session(&store, &stamped_id(byte));
             }
             let mut picker = opened(ResumePicker::new(
                 store.clone(),

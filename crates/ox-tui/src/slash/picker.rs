@@ -191,8 +191,6 @@ impl Modal for ModelEffortPicker {
     }
 }
 
-// ── Direction ──
-
 #[cfg(test)]
 mod tests {
     use ox_core::model::ModelSpec;

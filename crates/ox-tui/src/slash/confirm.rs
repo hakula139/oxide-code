@@ -152,14 +152,8 @@ mod tests {
         let id = stamped_id(byte);
         seed_test_session(store, &id, Some(title), Some(MESSAGES), LAST_ACTIVE);
         let path = store.find_session_path(&id).unwrap();
-        let metadata = metadata(&id);
+        let metadata = format_metadata_line(&id, LAST_ACTIVE, NOW, MESSAGES, None, None);
         ConfirmDeleteSessionModal::new(path, id, title.to_owned(), metadata, live_id.to_owned())
-    }
-
-    /// The [`format_metadata_line`] row of a seeded session, as the `/resume` picker builds it in
-    /// the current project.
-    fn metadata(session_id: &str) -> String {
-        format_metadata_line(session_id, LAST_ACTIVE, NOW, MESSAGES, None, None)
     }
 
     mod render {

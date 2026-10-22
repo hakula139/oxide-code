@@ -59,15 +59,14 @@ mod tests {
     use super::*;
     use crate::modal::Modal;
     use crate::modal::testing::render_rows;
-    use crate::slash::testing::test_session_info;
+    use crate::slash::registry::testing::run_execute;
 
     mod execute {
         use super::*;
 
         #[test]
         fn opens_the_overview_modal() {
-            let info = test_session_info();
-            let outcome = HelpCmd.execute("", &SlashContext::new(&info, None));
+            let outcome = run_execute(&HelpCmd, "");
             outcome.unwrap().into_modal();
         }
     }

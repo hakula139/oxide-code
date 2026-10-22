@@ -111,7 +111,7 @@ Client-side command surface: `/help`, `/clear`, `/model`, `/status`, and friends
 - `crates/ox-tui/src/slash/mode.rs`: `ModeCmd` plus `ModePicker`.
 - `crates/ox-tui/src/slash/model.rs`: `ModelCmd`.
 - `crates/ox-tui/src/slash/picker.rs`: combined model and effort picker modal.
-- `crates/ox-tui/src/slash/registry.rs`: `BUILT_INS`, `SlashKind`, `SlashOutcome`, `ChatOutput`, and the `SlashCommand` trait, whose aliases default to `command::aliases`.
+- `crates/ox-tui/src/slash/registry.rs`: `BUILT_INS`, `SlashKind`, `SlashOutcome`, `ChatOutput`, and the `SlashCommand` trait.
 - `crates/ox-tui/src/slash/rename.rs`: `RenameCmd` plus `RenameModal` editor.
 - `crates/ox-tui/src/slash/resume.rs`: `ResumeCmd` plus `ResumePicker` (see `resume.md`).
 - `crates/ox-tui/src/slash/sessions.rs`: `open_store`, `resolve_error_message`, `saved_error_message`, and the live-session recovery hints, shared by the session commands, plus `format_metadata_line` for the delete confirm modal.

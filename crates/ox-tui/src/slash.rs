@@ -172,7 +172,7 @@ mod tests {
         }
 
         #[test]
-        fn known_command_returns_its_outcome() {
+        fn known_command_runs_its_command() {
             run_dispatch("help").unwrap().into_modal();
         }
 
