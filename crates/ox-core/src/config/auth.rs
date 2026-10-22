@@ -229,7 +229,7 @@ impl Auth {
             Ok(secret) => Credential::new(self.source, secret).map(Some),
             Err(e) if e.is_transient() => Err(e.into()),
             Err(e) => {
-                warn!("failed to reload the stored login after HTTP 401: {e:#}");
+                warn!(error = %format_args!("{e:#}"), "failed to reload the stored login after HTTP 401");
                 Ok(None)
             }
         }
@@ -471,13 +471,6 @@ mod tests {
         AuthSource::OxLogin,
         AuthSource::ClaudeCodeLogin,
     ];
-
-    fn credentials_json(access_token: &str) -> String {
-        serde_json::json!({
-            "claudeAiOauth": { "accessToken": access_token, "expiresAt": 9_999_999_999_999_u64 },
-        })
-        .to_string()
-    }
 
     #[test]
     fn debug_omits_secret() {
@@ -900,11 +893,12 @@ mod tests {
         async fn reads_the_oxide_code_login_from_the_data_dir() {
             let data = tempfile::tempdir().unwrap();
             std::fs::create_dir(data.path().join("ox")).unwrap();
-            std::fs::write(
-                data.path().join("ox").join("credentials.json"),
-                credentials_json("ox-token"),
-            )
-            .unwrap();
+            write_creds(
+                &data.path().join("ox").join("credentials.json"),
+                "ox-token",
+                None,
+                9_999_999_999_999,
+            );
 
             let auth = temp_env::async_with_vars(
                 [("XDG_DATA_HOME", Some(data.path()))],
@@ -986,7 +980,7 @@ mod tests {
                     std::fs::create_dir(file.parent().unwrap()).unwrap();
                     std::fs::write(&file, "not json").unwrap();
                     let unreadable = claude_code_login(ClaudeCodeKeychain::NONE, &NoRoots).await;
-                    std::fs::write(&file, credentials_json("claude-code-token")).unwrap();
+                    write_creds(&file, "claude-code-token", None, 9_999_999_999_999);
                     (
                         missing,
                         unreadable,

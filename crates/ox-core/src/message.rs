@@ -441,19 +441,18 @@ mod tests {
 
         #[test]
         fn stops_at_non_thinking_blocks() {
-            let empty = [thinking(""), tool_use()];
-            assert_eq!(progress_update_before(&empty, 1), None);
+            let text = ContentBlock::Text {
+                text: "Checking.".to_owned(),
+            };
+            for (blocks, index) in [
+                (vec![thinking(""), tool_use()], 1),
+                (vec![thinking("Found it."), text, tool_use()], 2),
+                (vec![tool_use()], 0),
+            ] {
+                let note = progress_update_before(&blocks, index);
 
-            let text = [
-                thinking("Found it."),
-                ContentBlock::Text {
-                    text: "Checking.".to_owned(),
-                },
-                tool_use(),
-            ];
-            assert_eq!(progress_update_before(&text, 2), None);
-
-            assert_eq!(progress_update_before(&[tool_use()], 0), None);
+                assert_eq!(note, None, "{blocks:?}");
+            }
         }
 
         #[test]
@@ -465,6 +464,7 @@ mod tests {
                 },
                 tool_use(),
             ];
+
             assert_eq!(progress_update_before(&blocks, 2), Some("note"));
         }
 

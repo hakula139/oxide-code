@@ -15,7 +15,7 @@ use super::dispatch::DispatchContext;
 use super::testing::MODEL;
 use super::{Engine, EngineHandle, TurnEnd};
 use crate::client::anthropic::local_testing::completion_body;
-use crate::file_tracker::FileTracker;
+use crate::file_tracker::testing::tracker;
 use crate::message::{ContentBlock, Message, Replay, Role};
 use crate::permission::rule::Rule;
 use crate::permission::{Mode, PermissionClass, Policy, Workspace};
@@ -134,6 +134,16 @@ pub(super) fn tracked_paths(engine: &Engine) -> Vec<PathBuf> {
     paths
 }
 
+/// Files of the sessions `store` lists.
+pub(super) fn session_paths(store: &SessionStore) -> Vec<PathBuf> {
+    store
+        .list()
+        .unwrap()
+        .into_iter()
+        .map(|info| info.path)
+        .collect()
+}
+
 /// Records one exchange in a new session in `store` and finishes it, returning its ID.
 pub(super) async fn finished_session(store: &SessionStore) -> String {
     let session = handle::start(store, MODEL, None);
@@ -224,7 +234,7 @@ pub(super) fn dispatch_with(
         workspace,
         session_id: "test-session".to_owned(),
         artifact_dir: Arc::from(cwd.join("session")),
-        tracker: Arc::new(FileTracker::default()),
+        tracker: tracker(),
     }
 }
 

@@ -562,29 +562,43 @@ pub enum TurnEnd {
 }
 
 impl TurnEnd {
-    /// How `op` ended, if `event` is its terminal event. Covers only the ops the stdio frontends
-    /// wait on.
+    /// How `op` ended, if `event` is one of the terminal events [`Event`] lists for it.
     pub fn of(op: &Op, event: &Event) -> Option<Self> {
         match (op, event) {
-            (Op::Prompt(_) | Op::Compact { .. } | Op::Resume { .. }, Event::TurnFailed(_))
+            (
+                Op::Prompt(_)
+                | Op::Compact { .. }
+                | Op::Archive
+                | Op::Resume { .. }
+                | Op::Login
+                | Op::Logout,
+                Event::TurnFailed(_),
+            )
             | (Op::Rename { .. }, Event::RenameFailed(_))
             // The model has no tier for the effort, so the pick changed nothing.
             | (Op::SetModel(ConfigPick::Effort(_)), Event::ConfigChanged { effort: None, .. }) => {
                 Some(Self::Failed)
             }
             (Op::Prompt(_), Event::TurnComplete)
-            | (Op::Clear | Op::Compact { .. } | Op::Resume { .. }, Event::SessionReady)
+            | (
+                Op::Compact { .. } | Op::Clear | Op::Archive | Op::Resume { .. },
+                Event::SessionReady,
+            )
             | (Op::Rename { .. }, Event::SessionTitleUpdated { .. })
+            | (Op::Login, Event::SignedIn { .. })
+            | (Op::Logout, Event::SignedOut { .. })
             | (Op::SetModel(_), Event::ConfigChanged { .. })
             | (Op::SetMode(_), Event::ModeChanged(_)) => Some(Self::Completed),
-            (Op::Prompt(_) | Op::Compact { .. }, Event::Cancelled) => Some(Self::Cancelled),
+            (Op::Prompt(_) | Op::Compact { .. } | Op::Login, Event::Cancelled) => {
+                Some(Self::Cancelled)
+            }
             _ => None,
         }
     }
 }
 
 /// Shows `abort` on `sink` as the operation's one terminal event, logging `label` if a failure
-/// event is dropped. `Shutdown` stays silent. See `docs/design/tui/cancellation.md` for the set.
+/// event is dropped. `Shutdown` stays silent. [`Event`] lists each op's terminal events.
 fn report_abort(sink: &dyn EventSink, abort: TurnAbort, label: &'static str) -> TurnEnd {
     match abort {
         TurnAbort::Cancelled => {
@@ -613,9 +627,9 @@ mod tests {
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
     use super::local_testing::{
-        TITLE_MODEL, finished_session, greeting_title, inert_ops, login_url, mount_title,
-        next_matching, service_log, submit, system_prompt, texts, tool_heavy_transcript,
-        tracked_paths, turn_events, write_unreadable_instructions,
+        TITLE_MODEL, dead_test_session, finished_session, greeting_title, inert_ops, login_url,
+        mount_title, next_matching, service_log, session_paths, submit, system_prompt, texts,
+        tool_heavy_transcript, tracked_paths, turn_events, write_unreadable_instructions,
     };
     use super::sessions::format_drift_warning;
     use super::testing::{
@@ -673,13 +687,16 @@ mod tests {
                     let dir = tempfile::tempdir().unwrap();
                     let mut engine =
                         engine(server.uri(), &test_store(dir.path()), dir.path()).await;
-                    engine.session = handle::testing::dead("dead");
+                    engine.session = dead_test_session();
 
                     let failure = engine.spawn().shutdown().await.unwrap();
 
-                    assert!(
-                        failure.is_some_and(|f| f.starts_with("session writer task has stopped")),
-                        "a session that cannot finish reports why"
+                    assert_eq!(
+                        failure.as_deref(),
+                        Some(
+                            "session writer task has stopped. \
+                             Conversation history may be incomplete."
+                        ),
                     );
                 })
                 .await;
@@ -1532,7 +1549,7 @@ mod tests {
                 handle.ops.send(Op::Shutdown).await.unwrap();
                 assert_eq!(handle.task.join().await.unwrap(), None);
 
-                assert!(store.list().unwrap().is_empty());
+                assert_eq!(session_paths(&store), [] as [PathBuf; 0]);
             })
             .await;
         }
@@ -1652,8 +1669,9 @@ mod tests {
                     1,
                     "the prompt never reaches the model"
                 );
-                assert!(
-                    store.list().unwrap().is_empty(),
+                assert_eq!(
+                    session_paths(&store),
+                    [] as [PathBuf; 0],
                     "neither the prompt nor an interruption marker is recorded",
                 );
             })
@@ -2186,7 +2204,7 @@ mod tests {
                 mount_reply(&server, "reply").await;
                 let dir = tempfile::tempdir().unwrap();
                 let mut engine = engine(server.uri(), &test_store(dir.path()), dir.path()).await;
-                engine.session = handle::testing::dead("dead");
+                engine.session = dead_test_session();
                 let sink = CapturingSink::default();
                 let mut ops = inert_ops();
 
@@ -2705,7 +2723,7 @@ mod tests {
                     (&resume, Event::SessionReady, Some(TurnEnd::Completed)),
                     (&resume, failed.clone(), Some(TurnEnd::Failed)),
                     (&Op::Clear, notice.clone(), None),
-                    (&Op::Clear, rolled, None),
+                    (&Op::Clear, rolled.clone(), None),
                     (&Op::Clear, Event::SessionReady, Some(TurnEnd::Completed)),
                     (
                         &rename,
@@ -2743,14 +2761,53 @@ mod tests {
                         },
                         Some(TurnEnd::Failed),
                     ),
-                    (&set_model, failed, None),
+                    (&set_model, failed.clone(), None),
                     (
                         &set_mode,
                         Event::ModeChanged(Mode::Plan),
                         Some(TurnEnd::Completed),
                     ),
                     (&set_mode, notice.clone(), None),
-                    (&Op::Archive, Event::SessionReady, None),
+                    (&Op::Archive, rolled, None),
+                    (&Op::Archive, Event::SessionReady, Some(TurnEnd::Completed)),
+                    (&Op::Archive, failed, Some(TurnEnd::Failed)),
+                ] {
+                    assert_eq!(TurnEnd::of(op, &event), end, "{op:?} then {event:?}");
+                }
+            }
+
+            #[test]
+            fn reads_the_sign_in_terminal_events() {
+                let failed = Event::TurnFailed("failure".to_owned());
+
+                for (op, event, end) in [
+                    (
+                        &Op::Login,
+                        Event::LoginStarted {
+                            url: "https://example.com/login".to_owned(),
+                        },
+                        None,
+                    ),
+                    (
+                        &Op::Login,
+                        Event::SignedIn {
+                            auth: AuthSource::ApiKeyEnv,
+                        },
+                        Some(TurnEnd::Completed),
+                    ),
+                    (&Op::Login, Event::Cancelled, Some(TurnEnd::Cancelled)),
+                    (&Op::Login, failed.clone(), Some(TurnEnd::Failed)),
+                    (
+                        &Op::Logout,
+                        Event::SignedOut {
+                            removed: true,
+                            auth: None,
+                            fallback_error: None,
+                        },
+                        Some(TurnEnd::Completed),
+                    ),
+                    (&Op::Logout, Event::Cancelled, None),
+                    (&Op::Logout, failed, Some(TurnEnd::Failed)),
                 ] {
                     assert_eq!(TurnEnd::of(op, &event), end, "{op:?} then {event:?}");
                 }

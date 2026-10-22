@@ -29,9 +29,9 @@ use crate::wrap::{expand_tabs_in_spans, longest_word_width, wrap_line, wrap_line
 /// modifiers), every `Event::End` pops, and inline events append spans to `lines.last_mut()`.
 /// Block boundaries set `needs_newline = true` so the next block opener emits a separator
 /// without producing trailing blanks.
-pub(super) struct MarkdownRenderer<I> {
+pub(super) struct MarkdownRenderer<'t, I> {
     iter: I,
-    theme: Theme,
+    theme: &'t Theme,
     /// Style of the body, which fills the spans still without a color once the walk ends and
     /// decides the quote style.
     base: Style,
@@ -84,7 +84,6 @@ type Cell = Vec<Line<'static>>;
 #[derive(Default)]
 struct TableState {
     active: bool,
-    in_head: bool,
     alignments: Vec<Alignment>,
     head_rows: usize,
     rows: Vec<Vec<Cell>>,
@@ -116,20 +115,20 @@ impl TableState {
     }
 }
 
-impl<'a, I> MarkdownRenderer<I>
+impl<'a, 't, I> MarkdownRenderer<'t, I>
 where
     I: Iterator<Item = Event<'a>>,
 {
     pub(super) fn new(
         iter: I,
-        theme: &Theme,
+        theme: &'t Theme,
         base: Style,
         width: usize,
         after_block: bool,
     ) -> Self {
         Self {
             iter,
-            theme: theme.clone(),
+            theme,
             base,
             width,
             lines: Vec::new(),
@@ -196,8 +195,7 @@ where
                 ..
             } => self.start_link(link_type, dest_url),
             Tag::Table(alignments) => self.start_table(alignments),
-            Tag::TableHead => self.table.in_head = true,
-            Tag::TableRow => {}
+            Tag::TableHead | Tag::TableRow => {}
             Tag::TableCell => self.table.cell_buf.clear(),
             Tag::HtmlBlock => self.start_block(),
             Tag::Image { .. }
@@ -218,7 +216,6 @@ where
             TagEnd::Paragraph => self.end_paragraph(),
             TagEnd::Heading(_) => self.end_heading(),
             TagEnd::BlockQuote(_) => self.end_blockquote(),
-            TagEnd::HtmlBlock => self.needs_newline = true,
             TagEnd::CodeBlock => self.end_code_block(),
             TagEnd::List(_) => self.end_list(),
             TagEnd::Item => self.end_item(),
@@ -229,15 +226,20 @@ where
             TagEnd::Table => self.end_table(),
             TagEnd::TableHead => {
                 // pulldown-cmark 0.13: header cells sit inside TableHead without a TableRow.
-                if !self.table.current_row.is_empty() {
-                    self.flush_row();
-                }
-                self.table.in_head = false;
+                self.flush_row();
                 self.table.head_rows = self.table.rows.len();
             }
             TagEnd::TableRow => self.flush_row(),
             TagEnd::TableCell => self.table.end_cell(),
-            _ => {}
+            TagEnd::HtmlBlock => self.needs_newline = true,
+            TagEnd::Image
+            | TagEnd::FootnoteDefinition
+            | TagEnd::MetadataBlock(_)
+            | TagEnd::DefinitionList
+            | TagEnd::DefinitionListTitle
+            | TagEnd::DefinitionListDefinition
+            | TagEnd::Subscript
+            | TagEnd::Superscript => {}
         }
     }
 
@@ -340,7 +342,7 @@ where
     fn start_item(&mut self) {
         let marker = match self.list_stack.last_mut() {
             Some(Some(index)) => {
-                let m = format!("{}. ", *index);
+                let m = format!("{index}. ");
                 *index += 1;
                 m
             }
@@ -383,7 +385,7 @@ where
         let code = std::mem::take(&mut self.code_block.buf);
         let lang = std::mem::take(&mut self.code_block.lang);
 
-        for line in highlight_code(&lang, &code, &self.theme) {
+        for line in highlight_code(&lang, &code, self.theme) {
             self.push_code_line(line);
         }
         self.needs_newline = true;
@@ -427,10 +429,6 @@ where
             head_rows,
             ..
         } = std::mem::take(&mut self.table);
-
-        if rows.is_empty() {
-            return;
-        }
 
         let header_style = self.theme.table_header();
         for line in rows.iter_mut().take(head_rows).flatten().flatten() {
@@ -526,10 +524,7 @@ where
             return;
         }
         if self.table.active {
-            let style = self.current_inline_style();
-            self.table
-                .cell_buf
-                .push(Span::styled(text.to_owned(), style));
+            self.emit_span(Span::styled(text.to_owned(), self.current_inline_style()));
             return;
         }
 
@@ -555,27 +550,26 @@ where
         // Surrounding inline modifiers (bold / italic / heading) compose with the inline-code
         // palette: theme supplies the distinctive fg, enclosing style adds modifiers on top.
         let style = self.current_inline_style().patch(self.theme.inline_code());
-        if self.table.active {
-            self.table
-                .cell_buf
-                .push(Span::styled(code.into_string(), style));
-            return;
-        }
-        self.push_span(Span::styled(code.into_string(), style));
+        self.emit_span(Span::styled(code.into_string(), style));
     }
 
     /// Writes inline HTML verbatim, except that a `<br>` in a table cell breaks the cell's line,
     /// since a GFM cell has no other way to hold several lines.
     fn inline_html(&mut self, html: &str) {
-        if self.table.active {
-            if is_line_break_tag(html) {
-                self.table.break_cell_line();
-            } else {
-                self.table.cell_buf.push(Span::raw(html.to_owned()));
-            }
-            return;
+        if self.table.active && is_line_break_tag(html) {
+            self.table.break_cell_line();
+        } else {
+            self.emit_span(Span::raw(html.to_owned()));
         }
-        self.push_span(Span::raw(html.to_owned()));
+    }
+
+    /// Appends `span` to the open table cell, or else to the current line.
+    fn emit_span(&mut self, span: Span<'static>) {
+        if self.table.active {
+            self.table.cell_buf.push(span);
+        } else {
+            self.push_span(span);
+        }
     }
 
     fn soft_break(&mut self) {
@@ -599,22 +593,15 @@ where
     }
 
     fn pop_link(&mut self) {
-        if let Some(link) = self.link.take() {
-            match link {
-                OpenLink::Bare => self.pop_inline_style(),
-                OpenLink::Labeled(url) => {
-                    let suffix = [
-                        Span::raw(" ("),
-                        Span::styled(url, self.theme.link()),
-                        Span::raw(")"),
-                    ];
-                    if self.table.active {
-                        self.table.cell_buf.extend(suffix);
-                    } else {
-                        for span in suffix {
-                            self.push_span(span);
-                        }
-                    }
+        match self.link.take().expect("every link end follows its start") {
+            OpenLink::Bare => self.pop_inline_style(),
+            OpenLink::Labeled(url) => {
+                for span in [
+                    Span::raw(" ("),
+                    Span::styled(url, self.theme.link()),
+                    Span::raw(")"),
+                ] {
+                    self.emit_span(span);
                 }
             }
         }

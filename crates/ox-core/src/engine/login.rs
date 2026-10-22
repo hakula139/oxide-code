@@ -455,7 +455,7 @@ mod tests {
         }
 
         #[tokio::test]
-        async fn stores_the_browser_s_login_and_sends_it_with_the_next_prompt() {
+        async fn stores_the_login_from_the_browser_and_sends_it_with_the_next_prompt() {
             with_pinned_home(async {
                 let server = MockServer::start().await;
                 Mock::given(method("POST"))
@@ -807,13 +807,13 @@ mod tests {
 
         #[test]
         fn keeps_a_cause_that_ends_a_sentence_verbatim() {
-            let cause = anyhow!("token exchange failed with 400 Bad Request: Code expired.");
+            let cause = anyhow!("token exchange failed with HTTP 400 Bad Request: Code expired.");
 
             let abort = sign_in_failed(&cause);
 
             assert_eq!(
                 abort.into_failure().to_string(),
-                "Sign-in failed: token exchange failed with 400 Bad Request: Code expired. \
+                "Sign-in failed: token exchange failed with HTTP 400 Bad Request: Code expired. \
                  Run `/login` to try again.",
             );
         }

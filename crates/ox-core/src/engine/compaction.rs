@@ -42,22 +42,18 @@ const RETRY_TRUNCATION_MARKER: &str = "[Earlier conversation truncated to fit th
 /// finished turn, which may omit it.
 const RETRY_TURN_CLOSE_MARKER: &str = "[Stopped here to summarize the conversation.]";
 
-/// User-message rubric. The request still carries the conversation's tools, so its last sentence
-/// keeps the model from calling one.
+/// User-message rubric. The request still carries the conversation's tools, so its last two
+/// sentences keep the model from calling one.
 const SUMMARIZATION_USER_RUBRIC: &str = indoc! {"
-    Summarize the conversation above so another instance of yourself can pick up where this one left
-    off. Capture, in this order:
+    Summarize the conversation above so another instance of yourself can pick up where this one left off. Capture, in this order:
 
     1. The engineer's overall intent and any constraints they stated.
     2. Key technical decisions made and why.
     3. Files, functions, and code paths touched (full paths when known).
-    4. Current state: what is done, what is in progress, what is blocked, and which checks passed,
-       failed, or have not run.
+    4. Current state: what is done, what is in progress, what is blocked, and which checks passed, failed, or have not run.
     5. The next concrete step, if one is obvious.
 
-    Be concise. Terse bullets beat paragraphs. Preserve exact identifiers, file paths, error strings,
-    and command lines verbatim. Output only the summary, without addressing the engineer or asking
-    questions. Do not call any tools while writing this summary. Respond with text only."
+    Be concise. Terse bullets beat paragraphs. Preserve exact identifiers, file paths, error strings, and command lines verbatim. Output only the summary, without addressing the engineer or asking questions. Do not call any tools while writing this summary. Respond with text only."
 };
 
 // ── Auto-Compaction Failures ──
@@ -609,7 +605,6 @@ mod tests {
     use crate::protocol::notice::session_write_failed;
     use crate::protocol::testing::CapturingSink;
     use crate::protocol::{ResumeTarget, UsageSnapshot};
-    use crate::session::handle;
     use crate::session::store::testing::{test_project_dir, test_store};
     use crate::tool::bash::background::ShellState;
     use crate::tool::bash::background::local_testing::start_shell;
@@ -939,13 +934,10 @@ mod tests {
                     .await;
 
                 assert_eq!(end, TurnEnd::Completed);
-                assert!(matches!(
-                    engine.messages.as_slice(),
-                    [Message { content, .. }] if matches!(
-                        &content[0],
-                        ContentBlock::Text { text } if text.contains("manual summary")
-                    )
-                ));
+                assert_eq!(
+                    engine.messages,
+                    [synthesize_post_compact_message("manual summary", &[], &[])]
+                );
                 assert_eq!(engine.displayed_usage, None);
                 assert!(
                     (engine.total_estimated_cost_usd - (1.23 + 0.006)).abs() < 1e-12,
@@ -1078,7 +1070,7 @@ mod tests {
                 assert_eq!(end, TurnEnd::Cancelled);
                 assert_eq!(engine.messages, tool_heavy_transcript());
 
-                engine.session = handle::testing::dead("dead");
+                engine.session = dead_test_session();
                 let end = engine.compact(&sink, &mut ops, None).await;
                 assert_eq!(
                     end,
@@ -1299,9 +1291,10 @@ mod tests {
                 assert_eq!(partial, "partial");
                 assert_eq!(usage.context_tokens, Some(50_000));
                 assert!((usage.estimated_cost_usd.unwrap() - expected).abs() < 1e-12);
-                assert!(
-                    msg.starts_with("Compaction failed") && msg.contains("max_tokens"),
-                    "{msg}"
+                assert_eq!(
+                    msg,
+                    "Compaction failed: \
+                     the summary hit the `max_tokens` output limit before it finished",
                 );
             })
             .await;
@@ -1621,26 +1614,28 @@ mod tests {
         }
 
         #[tokio::test]
-        async fn returns_trimmed_summary_on_happy_path() {
+        async fn trims_the_whitespace_around_the_summary() {
             let server = MockServer::start().await;
             mount_summary(&server, streamed_summary_body("  fixed login bug  \n")).await;
-
             let client = test_client(server.uri(), api_key(), "claude-haiku-5-5");
+
             let summary = summarize(&client, &tool_heavy_transcript()).await.unwrap();
+
             assert_eq!(summary, "fixed login bug");
         }
 
         #[tokio::test]
-        async fn collects_initial_text_from_content_block_start() {
+        async fn keeps_the_text_that_opens_the_reply() {
             let server = MockServer::start().await;
             mount_summary(
                 &server,
                 summary_stream("  fixed", " login bug  \n", "end_turn", true),
             )
             .await;
-
             let client = test_client(server.uri(), api_key(), "claude-haiku-5-5");
+
             let (summary, events) = summarize_streaming(&client, &tool_heavy_transcript()).await;
+
             assert_eq!(summary.unwrap(), "fixed login bug");
             assert_eq!(
                 events,
@@ -1668,9 +1663,10 @@ mod tests {
                 ]),
             )
             .await;
-
             let client = test_client(server.uri(), api_key(), "claude-haiku-5-5");
+
             let (summary, events) = summarize_streaming(&client, &tool_heavy_transcript()).await;
+
             assert_eq!(summary.unwrap(), "fixed login bug");
             assert_eq!(events, [token("fixed login bug")]);
         }
@@ -1709,13 +1705,7 @@ mod tests {
             .await
             .unwrap();
 
-            let mut bodies: Vec<serde_json::Value> = server
-                .received_requests()
-                .await
-                .unwrap()
-                .iter()
-                .map(|request| serde_json::from_slice(&request.body).unwrap())
-                .collect();
+            let mut bodies = request_bodies(&server).await;
             bodies.iter_mut().for_each(strip_cache_control);
             let [parent, fork] = bodies.as_slice() else {
                 panic!("expected two requests, got {}", bodies.len());
@@ -1725,15 +1715,18 @@ mod tests {
                 |body: &serde_json::Value| body["system"].as_array().unwrap()[1..].to_vec();
             assert_eq!(system(fork), system(parent));
             assert_eq!(fork["tools"], parent["tools"]);
-            let parent_messages = parent["messages"].as_array().unwrap();
-            let fork_messages = fork["messages"].as_array().unwrap();
-            assert_eq!(fork_messages[..parent_messages.len()], parent_messages[..]);
-            assert_eq!(fork_messages.len(), parent_messages.len() + 1);
-            let rubric = fork_messages.last().unwrap();
-            assert_eq!(rubric["role"], "user");
-            let rubric = rubric.to_string();
-            assert!(rubric.contains("Do not call any tools"), "{rubric}");
-            assert!(rubric.contains("focus on auth"), "{rubric}");
+            let rubric = json!({
+                "role": "user",
+                "content": [{"type": "text", "text": build_user_message(Some("focus on auth"))}],
+            });
+            let expected: Vec<_> = parent["messages"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .cloned()
+                .chain([rubric])
+                .collect();
+            assert_eq!(fork["messages"].as_array().unwrap(), &expected);
         }
 
         #[tokio::test]
@@ -1766,32 +1759,21 @@ mod tests {
                 ],
                 "the retry starts the summary over",
             );
-            let requests = server.received_requests().await.unwrap();
-            assert_eq!(requests.len(), 2);
-            let mut retry: serde_json::Value = serde_json::from_slice(&requests[1].body).unwrap();
+            let [_, retry] = request_bodies(&server).await.try_into().unwrap();
             assert!(
                 !retry["messages"].to_string().contains("cache_control"),
                 "no later request extends the retry, so its transcript carries no breakpoint",
             );
-            strip_cache_control(&mut retry);
-            let messages = retry["messages"].as_array().unwrap();
             assert_eq!(
-                messages[..messages.len() - 1],
-                [
-                    json!({"role": "user", "content": [{"type": "text", "text": "Project instructions."}]}),
-                    json!({"role": "user", "content": [{"type": "text", "text": RETRY_TRUNCATION_MARKER}]}),
-                    json!({"role": "assistant", "content": [{"type": "text", "text": "found it"}]}),
-                    json!({"role": "user", "content": [{"type": "text", "text": "any progress?"}]}),
-                    json!({"role": "assistant", "content": [{"type": "text", "text": "fixed"}]}),
-                ],
-            );
-            assert!(
-                messages
-                    .last()
-                    .unwrap()
-                    .to_string()
-                    .contains("Summarize the conversation"),
-                "the rubric stays last",
+                retry["messages"],
+                json!([
+                    {"role": "user", "content": [{"type": "text", "text": "Project instructions."}]},
+                    {"role": "user", "content": [{"type": "text", "text": RETRY_TRUNCATION_MARKER}]},
+                    {"role": "assistant", "content": [{"type": "text", "text": "found it"}]},
+                    {"role": "user", "content": [{"type": "text", "text": "any progress?"}]},
+                    {"role": "assistant", "content": [{"type": "text", "text": "fixed"}]},
+                    {"role": "user", "content": [{"type": "text", "text": build_user_message(None)}]},
+                ]),
             );
             assert_eq!(
                 spent,
@@ -1924,9 +1906,9 @@ mod tests {
             .await
             .expect_err("an overflow with no round left to drop fails the compaction");
 
-            assert!(
-                format!("{err:#}").contains("no room in the context window"),
-                "{err:#}"
+            assert_eq!(
+                format!("{err:#}"),
+                "the transcript left no room in the context window for the summary"
             );
             let requests = server.received_requests().await.unwrap();
             assert_eq!(requests.len(), 3);
@@ -1962,7 +1944,11 @@ mod tests {
                 .await
                 .expect_err("every retry overflows");
 
-            assert!(format!("{err:#}").contains("prompt is too long"), "{err:#}");
+            assert_eq!(
+                format!("{err:#}"),
+                "Anthropic API error (HTTP 400 Bad Request): \
+                 prompt is too long: 200001 tokens > 200000 maximum"
+            );
             assert_eq!(server.received_requests().await.unwrap().len(), 4);
         }
 
@@ -1990,16 +1976,17 @@ mod tests {
 
                 assert_eq!(format!("{err:#}"), expected);
             }
-            assert_eq!(server.received_requests().await.unwrap().len(), 0);
+            assert_eq!(request_bodies(&server).await, [] as [serde_json::Value; 0]);
         }
 
         #[tokio::test]
-        async fn empty_summary_errors() {
+        async fn rejects_an_empty_summary() {
             let server = MockServer::start().await;
             mount_summary(&server, streamed_summary_body("   \n  ")).await;
-
             let client = test_client(server.uri(), api_key(), "claude-haiku-5-5");
+
             let (summary, events) = summarize_streaming(&client, &tool_heavy_transcript()).await;
+
             let err = summary.expect_err("empty summary must error");
             assert_eq!(format!("{err:#}"), "the model returned an empty summary");
             assert_eq!(events, [token("   \n  "), Event::SummaryDiscarded]);
@@ -2008,11 +1995,27 @@ mod tests {
         #[tokio::test]
         async fn rejects_an_unfinished_summary_and_still_records_usage() {
             let cases = [
-                ("max_tokens", true, "`max_tokens` output limit"),
-                ("refusal", true, "declined to summarize"),
-                ("tool_use", true, "called a tool"),
-                ("pause_turn", true, "stopped early (PauseTurn)"),
-                ("end_turn", false, "ended before message_stop"),
+                (
+                    "max_tokens",
+                    true,
+                    "the summary hit the `max_tokens` output limit before it finished",
+                ),
+                (
+                    "refusal",
+                    true,
+                    "the model declined to summarize the conversation",
+                ),
+                (
+                    "tool_use",
+                    true,
+                    "the model called a tool before finishing the summary",
+                ),
+                ("pause_turn", true, "the summary stopped early (PauseTurn)"),
+                (
+                    "end_turn",
+                    false,
+                    "Anthropic API stream ended before message_stop",
+                ),
             ];
             for (stop_reason, finished, expected) in cases {
                 let server = MockServer::start().await;
@@ -2037,10 +2040,7 @@ mod tests {
                 .await
                 .expect_err("an unfinished summary must not replace the transcript");
 
-                assert!(
-                    format!("{err:#}").contains(expected),
-                    "{stop_reason}: {err:#}"
-                );
+                assert_eq!(format!("{err:#}"), expected, "{stop_reason}");
                 assert_eq!(spent, [TokenUsage::new(100, 7)], "{stop_reason}");
                 assert_eq!(
                     sink.events(),
@@ -2315,17 +2315,6 @@ mod tests {
         }
 
         #[test]
-        fn asks_which_checks_ran() {
-            let message = build_user_message(None);
-
-            let prose = message.split_whitespace().collect::<Vec<_>>().join(" ");
-            assert!(
-                prose.contains("which checks passed, failed, or have not run"),
-                "{message}"
-            );
-        }
-
-        #[test]
         fn with_instructions_appends_them_under_an_anchor() {
             let message = build_user_message(Some("  focus on the build error\n"));
 
@@ -2338,6 +2327,28 @@ mod tests {
 
                     focus on the build error"
                 },
+            );
+        }
+    }
+
+    mod summarization_user_rubric {
+        use super::*;
+
+        #[test]
+        fn asks_which_checks_ran() {
+            assert!(
+                SUMMARIZATION_USER_RUBRIC.contains("which checks passed, failed, or have not run"),
+                "{SUMMARIZATION_USER_RUBRIC}"
+            );
+        }
+
+        #[test]
+        fn ends_by_forbidding_tool_calls() {
+            assert!(
+                SUMMARIZATION_USER_RUBRIC.ends_with(
+                    "Do not call any tools while writing this summary. Respond with text only."
+                ),
+                "{SUMMARIZATION_USER_RUBRIC}"
             );
         }
     }
