@@ -529,7 +529,7 @@ mod tests {
     use crate::model::ResolvedModelId;
     use crate::prompt::SystemPrompt;
     use crate::protocol::testing::CapturingSink;
-    use crate::protocol::{ConfigPick, Decision, ResumeTarget, ToolCall, ToolResult};
+    use crate::protocol::{ApprovalDecision, ConfigPick, ResumeTarget, ToolCall, ToolResult};
     use crate::session::handle;
     use crate::session::store::testing::test_store;
     use crate::tool::local_testing::canonical_tempdir;
@@ -837,7 +837,7 @@ mod tests {
         struct ReplyingSink {
             events: CapturingSink,
             op_tx: mpsc::Sender<Op>,
-            decision: Decision,
+            decision: ApprovalDecision,
         }
 
         impl EventSink for ReplyingSink {
@@ -1425,7 +1425,7 @@ mod tests {
                 Op::Prompt("late".to_owned()),
                 Op::Resolve {
                     id: "stale".to_owned(),
-                    decision: Decision::Approve,
+                    decision: ApprovalDecision::Approve,
                 },
                 Op::SetModel(ConfigPick::Model {
                     id: ResolvedModelId::new("claude-opus-5-5"),
@@ -2442,13 +2442,13 @@ mod tests {
 
         #[tokio::test]
         async fn approval_decision_arriving_mid_turn_settles_the_call() {
-            let feedback = Decision::DenyWithFeedback {
+            let feedback = ApprovalDecision::DenyWithFeedback {
                 feedback: "Use ls instead.".to_owned(),
             };
             for (decision, result, aborted) in [
-                (Decision::Approve, r#"{"v":42}"#, false),
+                (ApprovalDecision::Approve, r#"{"v":42}"#, false),
                 (
-                    Decision::Deny,
+                    ApprovalDecision::Deny,
                     "The echo call was denied by the user.",
                     false,
                 ),
@@ -2457,7 +2457,7 @@ mod tests {
                     "The echo call was denied with this feedback: Use ls instead.",
                     false,
                 ),
-                (Decision::Abort, NOT_RUN, true),
+                (ApprovalDecision::Abort, NOT_RUN, true),
             ] {
                 let dir = tempfile::tempdir().unwrap();
                 let session = test_session(dir.path());
@@ -2514,7 +2514,11 @@ mod tests {
                     panic!("expected ToolResult, got {:?}", messages[2].content[0]);
                 };
                 assert!(content.starts_with(result), "{decision:?}: {content}");
-                assert_eq!(*is_error, decision != Decision::Approve, "{decision:?}");
+                assert_eq!(
+                    *is_error,
+                    decision != ApprovalDecision::Approve,
+                    "{decision:?}"
+                );
             }
         }
 
@@ -2543,7 +2547,7 @@ mod tests {
             let sink = ReplyingSink {
                 events: CapturingSink::default(),
                 op_tx,
-                decision: Decision::Deny,
+                decision: ApprovalDecision::Deny,
             };
 
             agent_turn(

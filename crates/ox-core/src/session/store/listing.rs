@@ -281,7 +281,6 @@ fn read_session_info(
             && let Ok(Entry::Title {
                 title: text,
                 updated_at,
-                ..
             }) = serde_json::from_str(line)
         {
             keep_newer(
@@ -332,7 +331,6 @@ mod tests {
     use uuid::Uuid;
 
     use super::*;
-    use crate::session::entry::TitleSource;
     use crate::session::store::local_testing::{
         sample_header, sample_message_entry, sample_summary_entry, sample_title_entry,
         test_session_file, write_newest_corrupt_session,
@@ -579,14 +577,12 @@ mod tests {
             writer
                 .append(&[Entry::Title {
                     title: "original prompt".to_owned(),
-                    source: TitleSource::FirstPrompt,
                     updated_at: datetime!(2026-04-16 12:00:00 UTC),
                 }])
                 .unwrap();
             writer
                 .append(&[Entry::Title {
                     title: "AI generated".to_owned(),
-                    source: TitleSource::AiGenerated,
                     updated_at: datetime!(2026-04-16 12:01:00 UTC),
                 }])
                 .unwrap();
@@ -622,7 +618,6 @@ mod tests {
             writer
                 .append(&[Entry::Title {
                     title: "first prompt".to_owned(),
-                    source: TitleSource::FirstPrompt,
                     updated_at: datetime!(2026-04-16 12:00:00 UTC),
                 }])
                 .unwrap();
@@ -632,7 +627,6 @@ mod tests {
             writer
                 .append(&[Entry::Title {
                     title: "AI picked".to_owned(),
-                    source: TitleSource::AiGenerated,
                     updated_at: datetime!(2026-04-16 12:00:05 UTC),
                 }])
                 .unwrap();

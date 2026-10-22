@@ -471,7 +471,8 @@ mod tests {
     use ox_core::permission::defaults::Shipped;
     use ox_core::permission::{Basis, Mode};
     use ox_core::protocol::testing::text_result;
-    use ox_core::protocol::{ConfigPick, Decision, Event, ResumeTarget};
+    use ox_core::protocol::{ApprovalDecision, ConfigPick, Event, ResumeTarget};
+    use ox_core::session::entry::ArchiveState;
     use ox_core::tool::view::{ApprovalBody, ApprovalPreview};
 
     use super::*;
@@ -1113,7 +1114,7 @@ mod tests {
                 forwarded,
                 Op::Resolve {
                     id,
-                    decision: Decision::Abort,
+                    decision: ApprovalDecision::Abort,
                 } if id == "call-1"
             ));
         }
@@ -1321,7 +1322,7 @@ mod tests {
 
             app.dispatch_action(Action::Op(Op::Resolve {
                 id: "call-1".to_owned(),
-                decision: Decision::Approve,
+                decision: ApprovalDecision::Approve,
             }));
 
             assert!(!app.should_quit, "Full is not fatal");
@@ -1693,19 +1694,23 @@ mod tests {
             let landed = |id: &str| Event::SessionResumed {
                 id: id.to_owned(),
                 title: None,
-                unarchived: false,
+                prior: ArchiveState::Active,
                 history: Vec::new(),
             };
-            let rolled = |id: &str, archived| Event::SessionRolled {
+            let rolled = |id: &str, old_session| Event::SessionRolled {
                 id: id.to_owned(),
-                archived,
+                old_session,
             };
             for (command, switched, swapped) in [
-                ("/clear", Status::Clearing, rolled("rolled-session", false)),
+                (
+                    "/clear",
+                    Status::Clearing,
+                    rolled("rolled-session", ArchiveState::Active),
+                ),
                 (
                     "/archive",
                     Status::Archiving,
-                    rolled("rolled-session", true),
+                    rolled("rolled-session", ArchiveState::Archived),
                 ),
                 ("/resume abcd", Status::Resuming, landed("resumed-session")),
             ] {

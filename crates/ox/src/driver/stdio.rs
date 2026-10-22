@@ -14,7 +14,7 @@ use tracing::debug;
 use ox_core::engine::TurnEnd;
 use ox_core::permission::defaults::ShippedTier;
 use ox_core::permission::{Basis, SessionGrant};
-use ox_core::protocol::{Decision, Event, EventSink, Op, ToolCall, ToolResult, notice};
+use ox_core::protocol::{ApprovalDecision, Event, EventSink, Op, ToolCall, ToolResult, notice};
 use ox_core::session::display::{UNTITLED_MARKER, archive_notice, id_prefix};
 use ox_core::session::entry::ArchiveState;
 use ox_core::tool::tasks::{Progress, Task};
@@ -89,7 +89,7 @@ pub(super) trait Approver {
         preview: &ApprovalPreview,
         basis: &Basis,
         grant: Option<&SessionGrant>,
-    ) -> impl Future<Output = Decision>;
+    ) -> impl Future<Output = ApprovalDecision>;
 }
 
 /// Renders the events already queued, such as the engine's startup warnings.
@@ -108,8 +108,8 @@ fn render(sink: &dyn EventSink, event: Event) {
 // ── Unattended ──
 
 /// Answers every approval with a denial that names what a rerun would need, for a run with nobody
-/// to ask: the allow pattern that admits the call, the rule that holds it, or simpler syntax for a
-/// command ox could not parse.
+/// to ask: the allow pattern that admits the call, the rule that made it ask, or simpler syntax
+/// for a command ox could not parse.
 pub(super) struct Unattended;
 
 impl Approver for Unattended {
@@ -118,7 +118,7 @@ impl Approver for Unattended {
         _: &ApprovalPreview,
         basis: &Basis,
         grant: Option<&SessionGrant>,
-    ) -> impl Future<Output = Decision> {
+    ) -> impl Future<Output = ApprovalDecision> {
         let feedback = match (grant, basis) {
             (Some(grant), _) => {
                 let rule = grant.suggested();
@@ -139,7 +139,7 @@ impl Approver for Unattended {
                     .to_owned()
             }
             (None, Basis::Builtin(group)) if group.tier() == ShippedTier::Ask => format!(
-                "This run cannot ask for approval, and {basis} holds this call. \
+                "This run cannot ask for approval, and this call asks because of {basis}. \
                  Approve it in an interactive session, \
                  or set `permission.defaults.{group} = false` in the user config."
             ),
@@ -150,11 +150,11 @@ impl Approver for Unattended {
                     .to_owned()
             }
             (None, basis) => format!(
-                "This run cannot ask for approval, and {basis} holds this call. \
+                "This run cannot ask for approval, and this call asks because of {basis}. \
                  Approve it in an interactive session."
             ),
         };
-        std::future::ready(Decision::DenyWithFeedback { feedback })
+        std::future::ready(ApprovalDecision::DenyWithFeedback { feedback })
     }
 }
 
@@ -251,12 +251,9 @@ impl StdioSink {
                 writeln!(stderr, "Started session {}", id_prefix(&id))?;
             }
             Event::SessionResumed {
-                id,
-                title,
-                unarchived,
-                ..
+                id, title, prior, ..
             } => {
-                let notice = resumed_notice(&id, title.as_deref(), unarchived);
+                let notice = resumed_notice(&id, title.as_deref(), prior);
                 writeln!(stderr, "{notice}")?;
             }
             Event::ConfigChanged { notice, .. } => writeln!(stderr, "{notice}")?,
@@ -410,10 +407,10 @@ fn task_lines(tasks: &[Task]) -> String {
 }
 
 /// The session an [`Event::SessionResumed`] continues, then a note when resuming it unarchived it.
-fn resumed_notice(id: &str, title: Option<&str>, unarchived: bool) -> String {
+fn resumed_notice(id: &str, title: Option<&str>, prior: ArchiveState) -> String {
     let title = title.map_or_else(|| UNTITLED_MARKER.to_owned(), escape_line);
     let resumed = format!("Resumed session {}: {title}", id_prefix(id));
-    if unarchived {
+    if prior == ArchiveState::Archived {
         return format!("{resumed}\n{}", archive_notice(id, ArchiveState::Active));
     }
     resumed
@@ -449,7 +446,7 @@ mod tests {
 
         /// Answers every approval with its decision, recording what each request offered.
         struct Fixed {
-            decision: Decision,
+            decision: ApprovalDecision,
             offered: Vec<(String, Option<String>)>,
         }
 
@@ -459,14 +456,14 @@ mod tests {
                 preview: &ApprovalPreview,
                 _: &Basis,
                 grant: Option<&SessionGrant>,
-            ) -> impl Future<Output = Decision> {
+            ) -> impl Future<Output = ApprovalDecision> {
                 let rule = grant.map(|grant| grant.suggested().pattern().to_owned());
                 self.offered.push((preview.title.clone(), rule));
                 std::future::ready(self.decision.clone())
             }
         }
 
-        fn fixed(decision: Decision) -> Fixed {
+        fn fixed(decision: ApprovalDecision) -> Fixed {
             Fixed {
                 decision,
                 offered: Vec::new(),
@@ -491,7 +488,7 @@ mod tests {
             }
             let (ops_tx, mut ops) = mpsc::channel(1);
             let sink = CapturingSink::default();
-            let mut approver = fixed(Decision::Deny);
+            let mut approver = fixed(ApprovalDecision::Deny);
 
             let end = render_op(&mut events, &sink, &ops_tx, &prompt(), &mut approver).await;
 
@@ -504,7 +501,7 @@ mod tests {
                 ops.try_recv().ok(),
                 Some(Op::Resolve {
                     id: "t1".to_owned(),
-                    decision: Decision::Deny,
+                    decision: ApprovalDecision::Deny,
                 }),
             );
             assert_eq!(sink.events(), [Event::TurnComplete]);
@@ -521,7 +518,7 @@ mod tests {
                     _: &ApprovalPreview,
                     _: &Basis,
                     _: Option<&SessionGrant>,
-                ) -> impl Future<Output = Decision> {
+                ) -> impl Future<Output = ApprovalDecision> {
                     std::future::pending()
                 }
             }
@@ -567,10 +564,10 @@ mod tests {
                     _: &ApprovalPreview,
                     _: &Basis,
                     _: Option<&SessionGrant>,
-                ) -> Decision {
+                ) -> ApprovalDecision {
                     tokio::task::yield_now().await;
                     self.rendered = Some(self.sink.events());
-                    Decision::Deny
+                    ApprovalDecision::Deny
                 }
             }
 
@@ -616,7 +613,7 @@ mod tests {
             }
 
             let (ops, _) = mpsc::channel(1);
-            let mut approver = fixed(Decision::Deny);
+            let mut approver = fixed(ApprovalDecision::Deny);
             let end = render_op(&mut events, &FailingSink, &ops, &prompt(), &mut approver).await;
 
             assert_eq!(end, Some(TurnEnd::Cancelled));
@@ -629,7 +626,7 @@ mod tests {
             let cleared = [
                 Event::SessionRolled {
                     id: "next".to_owned(),
-                    archived: false,
+                    old_session: ArchiveState::Active,
                 },
                 Event::Error("Previous session write failed: disk full".to_owned()),
                 Event::Notice(
@@ -644,7 +641,7 @@ mod tests {
             let sink = CapturingSink::default();
 
             let (ops, _) = mpsc::channel(1);
-            let mut approver = fixed(Decision::Deny);
+            let mut approver = fixed(ApprovalDecision::Deny);
             let end = render_op(&mut events, &sink, &ops, &Op::Clear, &mut approver).await;
 
             assert_eq!(end, Some(TurnEnd::Completed));
@@ -663,7 +660,7 @@ mod tests {
                 let mut handle = engine.spawn();
                 handle.ops.send(Op::Clear).await.unwrap();
                 let sink = CapturingSink::default();
-                let mut approver = fixed(Decision::Deny);
+                let mut approver = fixed(ApprovalDecision::Deny);
 
                 let end = render_op(
                     &mut handle.events,
@@ -704,7 +701,7 @@ mod tests {
             let sink = CapturingSink::default();
 
             let (ops, _) = mpsc::channel(1);
-            let mut approver = fixed(Decision::Deny);
+            let mut approver = fixed(ApprovalDecision::Deny);
             let end = render_op(&mut events, &sink, &ops, &prompt(), &mut approver).await;
 
             assert_eq!(end, None);
@@ -719,7 +716,7 @@ mod tests {
             use super::*;
 
             #[tokio::test]
-            async fn denies_naming_the_allow_pattern_or_what_holds_the_call() {
+            async fn denies_naming_the_allow_pattern_or_the_rule_that_made_it_ask() {
                 let command = r#"echo "a\b""#;
                 let preview = bash_preview(command);
                 let manual = Basis::Mode(Mode::Manual);
@@ -750,7 +747,7 @@ mod tests {
                         &Basis::Builtin(Shipped::Git),
                         None,
                         "This run cannot ask for approval, \
-                         and the built-in `git` rule holds this call. \
+                         and this call asks because of the built-in `git` rule. \
                          Approve it in an interactive session, \
                          or set `permission.defaults.git = false` in the user config.",
                     ),
@@ -766,14 +763,14 @@ mod tests {
                         &Basis::Builtin(Shipped::Ssh),
                         None,
                         "This run cannot ask for approval, \
-                         and the built-in `ssh` rule holds this call. \
+                         and this call asks because of the built-in `ssh` rule. \
                          Approve it in an interactive session.",
                     ),
                     (
                         &ask,
                         None,
                         "This run cannot ask for approval, \
-                         and the `ask.exec` pattern `git push *` holds this call. \
+                         and this call asks because of the `ask.exec` pattern `git push *`. \
                          Approve it in an interactive session.",
                     ),
                 ];
@@ -783,7 +780,7 @@ mod tests {
 
                     assert_eq!(
                         decision,
-                        Decision::DenyWithFeedback {
+                        ApprovalDecision::DenyWithFeedback {
                             feedback: expected.to_owned()
                         },
                         "{basis:?}"
@@ -1038,7 +1035,7 @@ mod tests {
                 let cases = [
                     (
                         Event::SessionTitleUpdated {
-                            session_id: "sid".to_owned(),
+                            id: "sid".to_owned(),
                             title: "Fix login\u{1b}[2J".to_owned(),
                         },
                         "Renamed the session to Fix login\\u{1b}[2J\n",
@@ -1046,7 +1043,7 @@ mod tests {
                     (
                         Event::SessionRolled {
                             id: "0123456789abcdef".to_owned(),
-                            archived: false,
+                            old_session: ArchiveState::Active,
                         },
                         "Started session 01234567\n",
                     ),
@@ -1054,7 +1051,7 @@ mod tests {
                         Event::SessionResumed {
                             id: "89abcdef01234567".to_owned(),
                             title: Some("Fix login".to_owned()),
-                            unarchived: false,
+                            prior: ArchiveState::Active,
                             history: Vec::new(),
                         },
                         "Resumed session 89abcdef: Fix login\n",
@@ -1063,7 +1060,7 @@ mod tests {
                         Event::SessionResumed {
                             id: "89abcdef01234567".to_owned(),
                             title: None,
-                            unarchived: true,
+                            prior: ArchiveState::Archived,
                             history: Vec::new(),
                         },
                         "Resumed session 89abcdef: (untitled)\nUnarchived session 89abcdef\n",

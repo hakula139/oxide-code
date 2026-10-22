@@ -6,7 +6,7 @@ use anyhow::{Context, Result, bail};
 use tracing::debug;
 
 use super::display::id_prefix;
-use super::entry::SessionInfo;
+use super::entry::{ArchiveState, SessionInfo};
 use super::handle::{self, LoadedTranscript, ResumedSession};
 use super::store::SessionStore;
 use super::store::listing::ProjectScope;
@@ -50,7 +50,7 @@ pub fn resolve_session(
                 handle: handle::start(store, model, git_branch),
                 transcript: LoadedTranscript::default(),
                 title: None,
-                unarchived: false,
+                prior: ArchiveState::Active,
             });
         }
         ResumeMode::Path(path) => path.to_owned(),
@@ -369,7 +369,7 @@ mod tests {
             .unwrap();
             assert_eq!(resumed.handle.session_id(), "newer");
             assert_eq!(resumed.title.as_deref(), Some("Newer"));
-            assert!(!resumed.unarchived);
+            assert_eq!(resumed.prior, ArchiveState::Active);
         }
 
         #[tokio::test]
@@ -395,7 +395,7 @@ mod tests {
             )
             .unwrap();
             assert_eq!(resumed.handle.session_id(), "archived");
-            assert!(resumed.unarchived);
+            assert_eq!(resumed.prior, ArchiveState::Archived);
             assert_eq!(
                 store
                     .latest(ProjectScope::Current)

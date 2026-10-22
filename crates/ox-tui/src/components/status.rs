@@ -894,7 +894,7 @@ mod tests {
                 output.contains("Ctx: 12% (124k/1M)"),
                 "usage slot should render before status: {output:?}",
             );
-            assert!(output.contains("Sess: $0.4321"));
+            assert!(output.contains("Cost: $0.43"));
             assert!(output.contains("Ready"));
         }
 

@@ -752,7 +752,7 @@ impl Basis {
                 "ox could not parse this command, so the permission rules may not see everything it runs"
                     .to_owned(),
             ),
-            basis => Some(format!("Held by {basis}")),
+            basis => Some(format!("Asks because of {basis}")),
         }
     }
 }
@@ -2305,11 +2305,11 @@ mod tests {
                     rule_basis(Tier::Ask, EXEC, "git push *")
                         .reason()
                         .as_deref(),
-                    Some("Held by the `ask.exec` pattern `git push *`"),
+                    Some("Asks because of the `ask.exec` pattern `git push *`"),
                 );
                 assert_eq!(
                     Basis::Builtin(Shipped::Git).reason().as_deref(),
-                    Some("Held by the built-in `git` rule"),
+                    Some("Asks because of the built-in `git` rule"),
                 );
                 assert_eq!(Basis::Mode(Mode::Manual).reason(), None);
             }
