@@ -33,7 +33,7 @@ use self::tasks::{Task, TasksTool};
 use self::view::{ApprovalBody, ApprovalPreview, EditDiff, ToolResultView};
 use self::write::WriteTool;
 use crate::file_tracker::FileTracker;
-use crate::permission::{Access, PermissionClass, ReadFilter, Workspace};
+use crate::permission::{Access, PermissionClass, ReadFilter, Workspace, tool_path};
 use crate::util::path::slash_separated;
 use crate::util::text::ELLIPSIS;
 
@@ -223,7 +223,7 @@ pub trait Tool: Send + Sync {
         let label = pascal_case(name);
         let arg = match self.path_field() {
             Some(field) => extract_input_field(input, field)
-                .map(|path| Cow::Owned(display_path(Path::new(path), cwd))),
+                .map(|path| Cow::Owned(display_path(&tool_path(path), cwd))),
             None => self.summarize_input(input).map(Cow::Borrowed),
         };
         match arg {
@@ -662,6 +662,7 @@ mod tests {
     use super::*;
     use crate::permission::rule::Rule;
     use crate::permission::{Decision, Mode, PermissionClass, Policy, Zone};
+    use crate::util::path::testing::HOME_VAR;
 
     /// The built-in tools, with no read rules and background shells of their own.
     fn built_in() -> ToolRegistry {
@@ -1147,6 +1148,21 @@ mod tests {
                         "tool {name}",
                     );
                 }
+            }
+
+            #[test]
+            fn names_a_home_path_by_where_it_lands() {
+                let tools = built_in();
+                let input = serde_json::json!({"file_path": "~/notes.md"});
+
+                let labels = temp_env::with_var(HOME_VAR, Some("/home/u"), || {
+                    [
+                        tools.label("read", &input, Path::new("/repo")),
+                        tools.label("read", &input, Path::new("/home/u")),
+                    ]
+                });
+
+                assert_eq!(labels, ["Read(/home/u/notes.md)", "Read(notes.md)"]);
             }
 
             #[test]

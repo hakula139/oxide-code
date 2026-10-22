@@ -12,7 +12,7 @@ use super::{
     Prepared, Tool, ToolCtx, ToolMetadata, ToolOutput, ToolSpec, display_path, extract_input_field,
 };
 use crate::file_tracker::{CACHE_HIT_STUB, LastView, RecordRead};
-use crate::permission::PermissionClass;
+use crate::permission::{PermissionClass, tool_path};
 
 const DEFAULT_LINE_LIMIT: usize = 2000;
 const MAX_LINE_CHARS: usize = 2000;
@@ -50,7 +50,7 @@ impl Tool for ReadTool {
         _metadata: &ToolMetadata,
         cwd: &Path,
     ) -> Option<ToolResultView> {
-        let path = display_path(Path::new(extract_input_field(input, "file_path")?), cwd);
+        let path = display_path(&tool_path(extract_input_field(input, "file_path")?), cwd);
         parse_excerpt_view(path, content)
     }
 

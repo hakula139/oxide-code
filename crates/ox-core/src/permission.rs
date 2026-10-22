@@ -242,6 +242,13 @@ impl Workspace {
     }
 }
 
+/// A file tool's path argument with a leading `~` or `~/` expanded to the home directory, as the
+/// shell and config patterns read it. With no home directory, `~` stays literal, so the tool
+/// reports the missing file.
+pub(crate) fn tool_path(raw: &str) -> PathBuf {
+    expand_user(raw).unwrap_or_else(|_| PathBuf::from(raw))
+}
+
 /// Resolves the configured extra root `raw`, which must be absolute or `~/`-rooted, resolvable, and
 /// neither `/`, `$HOME`, nor an ancestor of it.
 pub(crate) fn extra_root(raw: &str) -> Result<PathBuf> {
@@ -339,13 +346,13 @@ impl Access {
         Self::Command(CommandTarget::parse(command, workspace))
     }
 
-    /// Builds a path target for the location the tool will touch, resolving `path` against the
-    /// workspace's cwd with `resolve`. A path `resolve` cannot place keeps its joined spelling with
+    /// Builds a path target for the location the tool will touch, resolving `path`, read as
+    /// [`tool_path`] reads it, against the workspace's cwd with `resolve`. A path `resolve` cannot place keeps its joined spelling with
     /// no rooted forms, so it never auto-allows. The tool follows native filesystem behavior.
     /// A resolved path that is not valid UTF-8 never auto-allows either, since the input a file
     /// tool opens can only pin its lossy spelling.
     pub(crate) fn for_path(path: &str, workspace: &Workspace) -> Self {
-        let joined = workspace.cwd().join(path);
+        let joined = workspace.cwd().join(tool_path(path));
         let requested = lexical_normalize(&joined);
         let resolved = resolve(&joined).ok();
         let cwd = workspace.resolved_cwd();
@@ -1637,6 +1644,40 @@ mod tests {
 
         mod for_path {
             use super::*;
+
+            #[test]
+            fn reads_a_leading_tilde_as_the_home_directory_under_every_rule() {
+                let (_dir, root) = temp_cwd();
+                let (cwd, home) = (root.join("repo"), root.join("home"));
+                std::fs::create_dir(&cwd).unwrap();
+                std::fs::create_dir(&home).unwrap();
+
+                temp_env::with_var(HOME_VAR, Some(&home), || {
+                    let workspace = Workspace::new(&cwd);
+                    let at = |raw: &str| Access::for_path(raw, &workspace);
+                    let policy = Policy::resolve(
+                        Mode::Manual,
+                        rules(&[(READ, "~/.aws/**")]),
+                        Vec::new(),
+                        Vec::new(),
+                        &[],
+                        &workspace,
+                    )
+                    .unwrap();
+
+                    assert_eq!(at("~/notes.md").resolved(), Some(home.join("notes.md")));
+                    assert_eq!(at("~").resolved(), Some(home.clone()));
+                    assert_eq!(at("~user/x").resolved(), Some(cwd.join("~user/x")));
+                    assert_eq!(
+                        decide(&policy, READ, &at("~/.aws/credentials")),
+                        Decision::Deny
+                    );
+                    assert_eq!(
+                        decide(&policy, READ, &at("~/.ssh/id_ed25519")),
+                        Decision::Deny
+                    );
+                });
+            }
 
             #[test]
             fn inside_an_extra_root_is_a_workspace_target_rooted_there() {

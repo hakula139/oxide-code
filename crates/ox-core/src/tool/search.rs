@@ -10,7 +10,7 @@ use std::time::SystemTime;
 use tokio_util::sync::CancellationToken;
 
 use super::{Prepared, ToolCtx, display_path, extract_input_field};
-use crate::permission::{Access, WalkFilter, Workspace};
+use crate::permission::{Access, WalkFilter, Workspace, tool_path};
 use crate::util::text::{ELLIPSIS, plural};
 
 // ── Search Root ──
@@ -27,7 +27,8 @@ pub(super) fn prepare_search_root(input: serde_json::Value, ctx: &ToolCtx) -> Pr
 pub(super) struct SearchRoot {
     /// The resolved root, which exists.
     pub(super) base: PathBuf,
-    /// The root as the call spells it, for the read deny and ask rules each found file faces.
+    /// The root as the call spells it with `~` expanded, for the read deny and ask rules each found
+    /// file faces.
     pub(super) spelled: PathBuf,
     /// The canonical working directory, so hits under the canonical base render relative to it.
     pub(super) cwd: PathBuf,
@@ -44,7 +45,7 @@ impl SearchRoot {
         workspace: Arc<Workspace>,
     ) -> Result<Self, String> {
         let cwd = workspace.cwd();
-        let spelled = PathBuf::from(path.unwrap_or("."));
+        let spelled = tool_path(path.unwrap_or("."));
         let Some(base) = access.resolved() else {
             return Err(format!(
                 "Failed to access {}: the search root was not resolved.",
@@ -239,6 +240,7 @@ mod tests {
     use crate::tool::local_testing::{
         canonical_tempdir, create_modified_at, deny_read_access, deny_reads, search_root,
     };
+    use crate::util::path::testing::HOME_VAR;
 
     mod new {
         use super::*;
@@ -262,6 +264,22 @@ mod tests {
                 ),
             );
             assert_eq!(absolute.base, lib);
+        }
+
+        #[test]
+        fn reads_a_leading_tilde_as_the_home_directory() {
+            let dir = canonical_tempdir();
+            let home = dir.path().join("home");
+            fs::create_dir_all(home.join("notes")).unwrap();
+
+            let root = temp_env::with_var(HOME_VAR, Some(&home), || {
+                search_root(dir.path(), Some("~/notes")).unwrap()
+            });
+
+            assert_eq!(
+                (root.base, root.spelled),
+                (home.join("notes"), home.join("notes"))
+            );
         }
 
         #[test]
