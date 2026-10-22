@@ -1,3 +1,8 @@
+codecov:
+  notify:
+    # One upload per leg of the Rust matrix in ci.yml.
+    after_n_builds: 3
+
 coverage:
   status:
     project:
