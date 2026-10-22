@@ -216,12 +216,7 @@ async fn execute_until(
 ) -> Result<ToolOutput, TimedOut> {
     let mut shell = match ShellTree::spawn(command, ctx) {
         Ok(shell) => shell,
-        Err(e) => {
-            return Ok(ToolOutput::error(format!(
-                "Failed to execute command in {}: {e}",
-                ctx.cwd().display()
-            )));
-        }
+        Err(message) => return Ok(ToolOutput::error(message)),
     };
 
     let (mut stdout, mut stderr) = shell.take_pipes();
@@ -564,8 +559,13 @@ struct ShellTree {
 }
 
 impl ShellTree {
-    fn spawn(command: &str, ctx: &ToolCtx) -> io::Result<Self> {
-        let mut cmd = CommandWrap::with_new(bash()?, |cmd| {
+    /// Spawns `command` in the context's cwd, failing with the message a tool call reports.
+    fn spawn(command: &str, ctx: &ToolCtx) -> Result<Self, String> {
+        let failed = |e: io::Error| {
+            let cwd = ctx.cwd().display();
+            format!("Failed to execute command in {cwd}: {e}")
+        };
+        let mut cmd = CommandWrap::with_new(bash().map_err(failed)?, |cmd| {
             cmd.arg("-c")
                 .arg(command)
                 .current_dir(ctx.cwd())
@@ -583,7 +583,7 @@ impl ShellTree {
         #[cfg(windows)]
         cmd.wrap(process_wrap::tokio::JobObject);
         Ok(Self {
-            child: cmd.spawn()?,
+            child: cmd.spawn().map_err(failed)?,
             armed: true,
         })
     }
@@ -649,8 +649,11 @@ impl ShellTree {
 
     /// Kills the tree as [`Self::kill`] does, blocking the thread between signals, for `Drop`.
     fn kill_blocking(&mut self) {
+        self.kill_blocking_until(Instant::now() + Self::KILL_LIMIT);
+    }
+
+    fn kill_blocking_until(&mut self, deadline: Instant) {
         self.armed = false;
-        let deadline = Instant::now() + Self::KILL_LIMIT;
         while self.signal(deadline) {
             std::thread::sleep(Self::KILL_RETRY_DELAY);
         }
@@ -825,7 +828,7 @@ mod tests {
         use super::*;
 
         #[tokio::test]
-        async fn valid_command_executes_successfully() {
+        async fn returns_the_output_of_a_command_that_succeeds() {
             let output = run(
                 &Arc::default(),
                 serde_json::json!({"command": "echo hello"}),
@@ -839,8 +842,9 @@ mod tests {
         #[tokio::test]
         async fn missing_command_field_reports_input_error() {
             let output = run(&Arc::default(), serde_json::json!({}), &temp_ctx()).await;
+
             assert!(output.is_error);
-            assert!(output.content.contains("Invalid input"));
+            assert_eq!(output.content, "Invalid input: missing field `command`");
         }
 
         #[tokio::test]
@@ -1107,12 +1111,10 @@ mod tests {
             let output = execute("true", DEFAULT_TIMEOUT, &ctx(&gone)).await;
 
             assert!(output.is_error);
+            let cause = io::Error::from_raw_os_error(nix::errno::Errno::ENOENT as i32);
             assert_eq!(
                 output.content,
-                format!(
-                    "Failed to execute command in {}: No such file or directory (os error 2)",
-                    gone.display()
-                ),
+                format!("Failed to execute command in {}: {cause}", gone.display()),
             );
         }
 
@@ -1440,6 +1442,49 @@ mod tests {
     mod shell_tree {
         use super::*;
 
+        /// A process tree whose first `live` signals reach a member and whose later ones find
+        /// none, with a count of the signals it has received.
+        fn fake_tree(live: usize) -> (ShellTree, Arc<AtomicUsize>) {
+            let signals = Arc::new(AtomicUsize::new(0));
+            let child = FakeChild {
+                live,
+                signals: Arc::clone(&signals),
+            };
+            let tree = ShellTree {
+                child: Box::new(child),
+                armed: true,
+            };
+            (tree, signals)
+        }
+
+        #[derive(Debug)]
+        struct FakeChild {
+            live: usize,
+            signals: Arc<AtomicUsize>,
+        }
+
+        impl ChildWrapper for FakeChild {
+            fn inner(&self) -> &dyn ChildWrapper {
+                unreachable!("a fake child wraps no process")
+            }
+
+            fn inner_mut(&mut self) -> &mut dyn ChildWrapper {
+                unreachable!("a fake child wraps no process")
+            }
+
+            fn into_inner(self: Box<Self>) -> Box<dyn ChildWrapper> {
+                self
+            }
+
+            fn start_kill(&mut self) -> io::Result<()> {
+                if self.signals.fetch_add(1, Ordering::Relaxed) < self.live {
+                    Ok(())
+                } else {
+                    Err(io::ErrorKind::PermissionDenied.into())
+                }
+            }
+        }
+
         mod spawn {
             use super::*;
 
@@ -1485,49 +1530,6 @@ mod tests {
         mod kill {
             use super::*;
 
-            /// A process tree whose first `live` signals reach a member and whose later ones find
-            /// none, with a count of the signals it has received.
-            fn fake_tree(live: usize) -> (ShellTree, Arc<AtomicUsize>) {
-                let signals = Arc::new(AtomicUsize::new(0));
-                let child = FakeChild {
-                    live,
-                    signals: Arc::clone(&signals),
-                };
-                let tree = ShellTree {
-                    child: Box::new(child),
-                    armed: true,
-                };
-                (tree, signals)
-            }
-
-            #[derive(Debug)]
-            struct FakeChild {
-                live: usize,
-                signals: Arc<AtomicUsize>,
-            }
-
-            impl ChildWrapper for FakeChild {
-                fn inner(&self) -> &dyn ChildWrapper {
-                    unreachable!("a fake child wraps no process")
-                }
-
-                fn inner_mut(&mut self) -> &mut dyn ChildWrapper {
-                    unreachable!("a fake child wraps no process")
-                }
-
-                fn into_inner(self: Box<Self>) -> Box<dyn ChildWrapper> {
-                    self
-                }
-
-                fn start_kill(&mut self) -> io::Result<()> {
-                    if self.signals.fetch_add(1, Ordering::Relaxed) < self.live {
-                        Ok(())
-                    } else {
-                        Err(io::ErrorKind::PermissionDenied.into())
-                    }
-                }
-            }
-
             #[cfg(any(target_os = "linux", windows))]
             #[tokio::test]
             async fn signals_once_from_a_call_and_from_drop() {
@@ -1567,17 +1569,20 @@ mod tests {
                 assert_eq!(before_drop, 1);
                 assert_eq!(signals.load(Ordering::Relaxed), 6);
             }
+        }
 
-            #[cfg(all(unix, not(target_os = "linux")))]
+        #[cfg(all(unix, not(target_os = "linux")))]
+        mod kill_blocking_until {
+            use super::*;
+
             #[test]
-            fn from_drop_gives_up_on_a_tree_that_outlives_the_limit() {
-                let (tree, signals) = fake_tree(usize::MAX);
+            fn gives_up_on_a_tree_alive_past_the_deadline() {
+                let (mut tree, signals) = fake_tree(usize::MAX);
 
-                let began = Instant::now();
+                tree.kill_blocking_until(Instant::now());
                 drop(tree);
 
-                assert!(began.elapsed() >= ShellTree::KILL_LIMIT);
-                assert!(signals.load(Ordering::Relaxed) > 1);
+                assert_eq!(signals.load(Ordering::Relaxed), 1);
             }
         }
     }

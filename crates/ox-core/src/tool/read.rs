@@ -493,8 +493,9 @@ mod tests {
         #[tokio::test]
         async fn missing_file_path_reports_input_error() {
             let output = run(serde_json::json!({}), &temp_ctx()).await;
+
             assert!(output.is_error);
-            assert!(output.content.contains("Invalid input"));
+            assert_eq!(output.content, "Invalid input: missing field `file_path`");
         }
 
         #[tokio::test]
@@ -683,8 +684,8 @@ mod tests {
             let result = read_file(path.to_str().unwrap(), None, None, &temp_ctx())
                 .await
                 .unwrap();
-            assert!(result.contains("1\thello"));
-            assert!(!result.contains('\u{feff}'));
+
+            assert_eq!(result, "1\thello");
         }
 
         #[tokio::test]
@@ -732,9 +733,10 @@ mod tests {
             let err = read_file(path.to_str().unwrap(), None, None, &temp_ctx())
                 .await
                 .unwrap_err();
-            assert!(
-                err.contains("too large") && err.contains("Use the bash tool to read large files"),
-                "{err}",
+
+            assert_eq!(
+                err,
+                "File is too large (10.0 MB, max 10 MB). Use the bash tool to read large files."
             );
         }
 
@@ -747,7 +749,11 @@ mod tests {
             let err = read_file(path.to_str().unwrap(), None, None, &temp_ctx())
                 .await
                 .unwrap_err();
-            assert!(err.contains("binary"));
+
+            assert_eq!(
+                err,
+                "File appears to be binary. Use the bash tool to inspect binary files."
+            );
         }
 
         #[tokio::test]
@@ -759,7 +765,8 @@ mod tests {
             let err = read_file(path.to_str().unwrap(), Some(100), None, &temp_ctx())
                 .await
                 .unwrap_err();
-            assert!(err.contains("beyond the end"));
+
+            assert_eq!(err, "Offset 100 is beyond the end of the file (2 lines).");
         }
 
         #[tokio::test]
@@ -775,7 +782,12 @@ mod tests {
             let err = read_file(path.to_str().unwrap(), None, None, &temp_ctx())
                 .await
                 .unwrap_err();
-            assert!(!err.contains("SECRET"), "{err}");
+
+            #[cfg(unix)]
+            let cause = std::io::Error::from_raw_os_error(nix::errno::Errno::ELOOP as i32);
+            #[cfg(windows)]
+            let cause = "the final path component is a symlink";
+            assert_eq!(err, format!("Failed to read {}: {cause}", path.display()));
         }
 
         #[cfg(unix)]
@@ -789,9 +801,13 @@ mod tests {
             let err = read_file(path.to_str().unwrap(), None, None, &temp_ctx())
                 .await
                 .unwrap_err();
-            assert!(
-                err.contains("not a regular file"),
-                "expected non-regular-file error, got: {err}",
+
+            assert_eq!(
+                err,
+                format!(
+                    "{} is not a regular file (fifo, socket, or device). Refusing to read.",
+                    path.display(),
+                ),
             );
         }
     }
@@ -805,7 +821,7 @@ mod tests {
         }
 
         #[test]
-        fn no_bom_unchanged() {
+        fn keeps_text_without_a_bom() {
             assert_eq!(strip_bom("hello"), "hello");
         }
     }

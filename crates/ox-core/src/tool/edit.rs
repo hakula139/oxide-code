@@ -498,14 +498,8 @@ mod tests {
             assert_eq!(
                 preview.body,
                 ApprovalBody::Diff(DiffChunk {
-                    old: vec![NumberedLine {
-                        number: 1,
-                        text: "let a = 1;".to_owned(),
-                    }],
-                    new: vec![NumberedLine {
-                        number: 1,
-                        text: "let a = 2;".to_owned(),
-                    }],
+                    old: vec![line(1, "let a = 1;")],
+                    new: vec![line(1, "let a = 2;")],
                 }),
             );
         }
@@ -593,8 +587,9 @@ mod tests {
                 &temp_ctx(),
             )
             .await;
+
             assert!(output.is_error);
-            assert!(output.content.contains("Invalid input"));
+            assert_eq!(output.content, "Invalid input: missing field `new_string`");
         }
 
         #[tokio::test]
@@ -746,7 +741,8 @@ mod tests {
             let err = edit_file(path.to_str().unwrap(), "", "x", false, &temp_ctx())
                 .await
                 .unwrap_err();
-            assert!(err.contains("must not be empty"));
+
+            assert_eq!(err, "old_string must not be empty.");
             assert_eq!(fs::read_to_string(&path).unwrap(), "hello");
         }
 
@@ -759,7 +755,11 @@ mod tests {
             let err = edit_file(path.to_str().unwrap(), "hello", "hello", false, &temp_ctx())
                 .await
                 .unwrap_err();
-            assert!(err.contains("identical"));
+
+            assert_eq!(
+                err,
+                "old_string and new_string are identical. No changes to make."
+            );
         }
 
         #[tokio::test]
@@ -802,9 +802,13 @@ mod tests {
             )
             .await
             .unwrap_err();
-            assert!(
-                err.contains("has not been read"),
-                "expected must-read-first rejection, got: {err}",
+
+            assert_eq!(
+                err,
+                format!(
+                    "File {} has not been read in this session. Read it before editing it.",
+                    path.display(),
+                ),
             );
             assert_eq!(fs::read_to_string(&path).unwrap(), "hello world");
         }
@@ -820,9 +824,14 @@ mod tests {
             let err = edit_file(path.to_str().unwrap(), "external", "ours", false, &ctx)
                 .await
                 .unwrap_err();
-            assert!(
-                err.contains("modified externally"),
-                "drift error expected, got: {err}",
+
+            assert_eq!(
+                err,
+                format!(
+                    "File {} has been modified externally since it was last read. \
+                     Re-read it before editing it.",
+                    path.display(),
+                ),
             );
         }
 
@@ -942,7 +951,11 @@ mod tests {
             let err = edit_file(path.to_str().unwrap(), "a", "b", false, &temp_ctx())
                 .await
                 .unwrap_err();
-            assert!(err.contains("too large"));
+
+            assert_eq!(
+                err,
+                "File is too large (10.0 MB, max 10 MB). Use the bash tool to edit large files."
+            );
         }
 
         #[tokio::test]
@@ -1027,9 +1040,12 @@ mod tests {
                 .await
                 .unwrap_err();
 
-            assert!(
-                err.contains("not a regular file"),
-                "expected non-regular-file rejection, got: {err}",
+            assert_eq!(
+                err,
+                format!(
+                    "{} is not a regular file (fifo, socket, or device). Refusing to edit.",
+                    path.display(),
+                ),
             );
         }
 
@@ -1050,7 +1066,9 @@ mod tests {
             let err = edit_file(path.to_str().unwrap(), "hello", "goodbye", false, &ctx)
                 .await
                 .unwrap_err();
-            assert!(err.contains("Failed to write"));
+
+            let cause = std::io::Error::from_raw_os_error(nix::errno::Errno::EACCES as i32);
+            assert_eq!(err, format!("Failed to write {}: {cause}", path.display()));
         }
     }
 
@@ -1159,16 +1177,7 @@ mod tests {
         fn numbers_from_start_line() {
             assert_eq!(
                 split_into_diff_lines("a\nb", 47),
-                vec![
-                    NumberedLine {
-                        number: 47,
-                        text: "a".to_owned()
-                    },
-                    NumberedLine {
-                        number: 48,
-                        text: "b".to_owned()
-                    },
-                ],
+                vec![line(47, "a"), line(48, "b")],
             );
         }
 
@@ -1176,21 +1185,12 @@ mod tests {
         fn drops_trailing_newline() {
             assert_eq!(
                 split_into_diff_lines("a\nb\n", 1),
-                vec![
-                    NumberedLine {
-                        number: 1,
-                        text: "a".to_owned()
-                    },
-                    NumberedLine {
-                        number: 2,
-                        text: "b".to_owned()
-                    },
-                ],
+                vec![line(1, "a"), line(2, "b")],
             );
         }
 
         #[test]
-        fn empty_yields_empty() {
+        fn yields_no_lines_for_empty_text() {
             assert_eq!(split_into_diff_lines("", 1), []);
         }
     }
@@ -1201,92 +1201,30 @@ mod tests {
         #[test]
         fn drops_matching_prefix_and_suffix_preserving_numbers() {
             let mut chunk = DiffChunk {
-                old: vec![
-                    NumberedLine {
-                        number: 10,
-                        text: "anchor".to_owned(),
-                    },
-                    NumberedLine {
-                        number: 11,
-                        text: "old".to_owned(),
-                    },
-                    NumberedLine {
-                        number: 12,
-                        text: "tail".to_owned(),
-                    },
-                ],
-                new: vec![
-                    NumberedLine {
-                        number: 10,
-                        text: "anchor".to_owned(),
-                    },
-                    NumberedLine {
-                        number: 11,
-                        text: "new".to_owned(),
-                    },
-                    NumberedLine {
-                        number: 12,
-                        text: "tail".to_owned(),
-                    },
-                ],
+                old: vec![line(10, "anchor"), line(11, "old"), line(12, "tail")],
+                new: vec![line(10, "anchor"), line(11, "new"), line(12, "tail")],
             };
             trim_chunk(&mut chunk);
-            assert_eq!(
-                chunk.old,
-                vec![NumberedLine {
-                    number: 11,
-                    text: "old".to_owned()
-                }]
-            );
-            assert_eq!(
-                chunk.new,
-                vec![NumberedLine {
-                    number: 11,
-                    text: "new".to_owned()
-                }]
-            );
+            assert_eq!(chunk.old, vec![line(11, "old")]);
+            assert_eq!(chunk.new, vec![line(11, "new")]);
         }
 
         #[test]
         fn pure_tail_insertion_strips_anchor() {
             let mut chunk = DiffChunk {
-                old: vec![NumberedLine {
-                    number: 5,
-                    text: "fn foo()".to_owned(),
-                }],
-                new: vec![
-                    NumberedLine {
-                        number: 5,
-                        text: "fn foo()".to_owned(),
-                    },
-                    NumberedLine {
-                        number: 6,
-                        text: "    return 42;".to_owned(),
-                    },
-                ],
+                old: vec![line(5, "fn foo()")],
+                new: vec![line(5, "fn foo()"), line(6, "    return 42;")],
             };
             trim_chunk(&mut chunk);
             assert_eq!(chunk.old, []);
-            assert_eq!(
-                chunk.new,
-                vec![NumberedLine {
-                    number: 6,
-                    text: "    return 42;".to_owned()
-                }],
-            );
+            assert_eq!(chunk.new, vec![line(6, "    return 42;")]);
         }
 
         #[test]
         fn fully_identical_collapses_both_sides() {
             let mut chunk = DiffChunk {
-                old: vec![NumberedLine {
-                    number: 1,
-                    text: "a".to_owned(),
-                }],
-                new: vec![NumberedLine {
-                    number: 1,
-                    text: "a".to_owned(),
-                }],
+                old: vec![line(1, "a")],
+                new: vec![line(1, "a")],
             };
             trim_chunk(&mut chunk);
             assert_eq!(chunk.old, []);
@@ -1311,8 +1249,7 @@ mod tests {
 
         #[test]
         fn empty_inputs_have_zero_boundaries() {
-            let empty: [&str; 0] = [];
-            assert_eq!(common_boundaries(&empty, &empty), (0, 0));
+            assert_eq!(common_boundaries::<&str>(&[], &[]), (0, 0));
         }
 
         #[test]

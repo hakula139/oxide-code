@@ -1,7 +1,5 @@
 name: Set up Nix
-description: >-
-  Install Nix and configure the Cachix substituter
-  named by the caller's CACHIX_NAME environment variable
+description: Install Nix and configure the hakula Cachix substituter
 
 inputs:
   cachix_auth_token:
@@ -22,7 +20,7 @@ runs:
     - name: Set up Cachix
       uses: cachix/cachix-action@v17
       with:
-        name: ${{ env.CACHIX_NAME }}
+        name: hakula
         authToken: ${{ inputs.cachix_auth_token }}
         skipPush: >-
           ${{ !inputs.cachix_auth_token ||

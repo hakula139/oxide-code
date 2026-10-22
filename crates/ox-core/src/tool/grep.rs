@@ -744,6 +744,7 @@ fn parse_match_line(line: &str) -> Option<(&str, GrepMatchLine)> {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashSet;
     use std::fs::{self, File};
 
     use indoc::indoc;
@@ -873,21 +874,21 @@ mod tests {
         #[tokio::test]
         async fn missing_pattern_reports_input_error() {
             let output = local_testing::run(&grep_tool(), serde_json::json!({}), &temp_ctx()).await;
+
             assert!(output.is_error);
-            assert!(output.content.contains("Invalid input"));
+            assert_eq!(output.content, "Invalid input: missing field `pattern`");
         }
 
         #[tokio::test]
         async fn invalid_regex_omits_title() {
-            let input = serde_json::json!({"pattern": "(unclosed"});
+            let pattern = "(unclosed";
+            let input = serde_json::json!({"pattern": pattern});
 
             let output = local_testing::run(&grep_tool(), input, &temp_ctx()).await;
+
+            let cause = regex::Regex::new(pattern).unwrap_err();
             assert!(output.is_error);
-            assert!(
-                output.content.contains("Invalid regex"),
-                "{}",
-                output.content
-            );
+            assert_eq!(output.content, format!("Invalid regex: {cause}"));
             assert_eq!(output.metadata.title, None, "errors are not a match count");
         }
     }
@@ -957,8 +958,8 @@ mod tests {
             let mut p = params("hello", dir.path());
             p.case_insensitive = true;
             let result = grep_files(&p).unwrap().content;
-            assert!(result.contains("test.txt:1:Hello World"));
-            assert!(result.contains("test.txt:2:hello world"));
+
+            assert_eq!(result, "test.txt:1:Hello World\ntest.txt:2:hello world");
         }
 
         #[test]
@@ -979,11 +980,15 @@ mod tests {
             let mut p = params("ccc", dir.path());
             p.context = 1;
             let result = grep_files(&p).unwrap().content;
-            assert!(result.contains("test.txt:2-bbb"));
-            assert!(result.contains("test.txt:3:ccc"));
-            assert!(result.contains("test.txt:4-ddd"));
-            assert!(!result.contains("aaa"));
-            assert!(!result.contains("eee"));
+
+            assert_eq!(
+                result,
+                indoc! {"
+                    test.txt:2-bbb
+                    test.txt:3:ccc
+                    test.txt:4-ddd"
+                },
+            );
         }
 
         #[test]
@@ -1007,14 +1012,19 @@ mod tests {
             let mut p = params("MATCH", dir.path());
             p.context = 1;
             let result = grep_files(&p).unwrap().content;
+
             // MATCH1 ctx → 2-4 and MATCH2 ctx → 5-7, so lines 4-5 bridge the gap and ranges merge.
-            assert!(!result.contains("--"));
-            assert!(result.contains("test.txt:2-b"));
-            assert!(result.contains("test.txt:3:MATCH1"));
-            assert!(result.contains("test.txt:4-c"));
-            assert!(result.contains("test.txt:5-d"));
-            assert!(result.contains("test.txt:6:MATCH2"));
-            assert!(result.contains("test.txt:7-e"));
+            assert_eq!(
+                result,
+                indoc! {"
+                    test.txt:2-b
+                    test.txt:3:MATCH1
+                    test.txt:4-c
+                    test.txt:5-d
+                    test.txt:6:MATCH2
+                    test.txt:7-e"
+                },
+            );
         }
 
         #[test]
@@ -1041,21 +1051,23 @@ mod tests {
                 content: result,
                 title,
             } = grep_files(&p).unwrap();
+
             // MATCH1 ctx → 1-2 and MATCH2 ctx → 7-8, so the gap forces a "--" separator.
+            assert_eq!(
+                result,
+                indoc! {"
+                    test.txt:1:MATCH1
+                    test.txt:2-a
+                    --
+                    test.txt:7-f
+                    test.txt:8:MATCH2"
+                },
+            );
             assert_eq!(title, "2 matches");
-            assert!(result.contains("--"));
-            assert!(result.contains("test.txt:1:MATCH1"));
-            assert!(result.contains("test.txt:2-a"));
-            assert!(result.contains("test.txt:7-f"));
-            assert!(result.contains("test.txt:8:MATCH2"));
-            assert!(!result.contains("test.txt:3"));
-            assert!(!result.contains("test.txt:4"));
-            assert!(!result.contains("test.txt:5"));
-            assert!(!result.contains("test.txt:6"));
         }
 
         #[test]
-        fn with_context_no_matches_in_file() {
+        fn with_context_reports_no_matches_when_none_match() {
             let dir = canonical_tempdir();
             fs::write(
                 dir.path().join("test.txt"),
@@ -1070,6 +1082,7 @@ mod tests {
             let mut p = params("xyz", dir.path());
             p.context = 1;
             let result = grep_files(&p).unwrap().content;
+
             assert_eq!(result, "No matches found");
         }
 
@@ -1094,13 +1107,21 @@ mod tests {
             p.context = 1;
             p.head_limit = Some(3);
             let result = grep_files(&p).unwrap().content;
-            assert!(result.contains("Results limited to 3 lines"));
-            let entry_count = result.lines().filter(|l| l.contains("test.txt:")).count();
-            assert_eq!(entry_count, 3);
+
+            assert_eq!(
+                result,
+                indoc! {"
+                    test.txt:1-before1
+                    test.txt:2:MATCH
+                    test.txt:3-after1
+
+                    (Results limited to 3 lines)"
+                },
+            );
         }
 
         #[test]
-        fn with_include_filter() {
+        fn include_glob_skips_the_files_it_does_not_match() {
             let dir = canonical_tempdir();
             fs::write(dir.path().join("code.rs"), "fn test() {}\n").unwrap();
             fs::write(dir.path().join("readme.md"), "fn test()\n").unwrap();
@@ -1108,6 +1129,7 @@ mod tests {
             let mut p = params("fn test", dir.path());
             p.include_glob = Some("*.rs");
             let result = grep_files(&p).unwrap().content;
+
             assert_eq!(result, "code.rs:1:fn test() {}");
         }
 
@@ -1370,21 +1392,27 @@ mod tests {
 
         #[test]
         fn invalid_regex_reports_error() {
-            let err = grep_files(&params("[invalid", Path::new("/"))).unwrap_err();
-            assert!(err.contains("Invalid regex"));
+            let pattern = "[invalid";
+
+            let err = grep_files(&params(pattern, Path::new("/"))).unwrap_err();
+
+            let cause = regex::Regex::new(pattern).unwrap_err();
+            assert_eq!(err, format!("Invalid regex: {cause}"));
         }
 
         #[test]
-        fn invalid_include_pattern() {
+        fn rejects_an_invalid_include_pattern() {
             let dir = canonical_tempdir();
             let mut p = params("test", dir.path());
             p.include_glob = Some("[bad");
             let err = grep_files(&p).unwrap_err();
-            assert!(err.contains("Invalid include pattern"));
+
+            let cause = globset::Glob::new("[bad").unwrap_err();
+            assert_eq!(err, format!("Invalid include pattern: {cause}"));
         }
 
         #[test]
-        fn single_file_too_large() {
+        fn skips_a_searched_file_over_the_tracked_size_limit() {
             let dir = canonical_tempdir();
             let large = dir.path().join("large.txt");
             let f = File::create(&large).unwrap();
@@ -1440,11 +1468,21 @@ mod tests {
 
             let mut p = params("match", dir.path());
             p.head_limit = Some(5);
+
             let result = grep_files(&p).unwrap().content;
-            let lines: Vec<&str> = result.lines().collect();
-            // 5 match lines + blank + truncation notice
-            assert!(result.contains("Results limited to 5 lines"));
-            assert!(lines.len() <= 8);
+
+            assert_eq!(
+                result,
+                indoc! {"
+                    test.txt:1:match line 0
+                    test.txt:2:match line 1
+                    test.txt:3:match line 2
+                    test.txt:4:match line 3
+                    test.txt:5:match line 4
+
+                    (Results limited to 5 lines)"
+                },
+            );
         }
 
         #[test]
@@ -1478,8 +1516,11 @@ mod tests {
             let mut p = params("match", dir.path());
             p.head_limit = Some(0);
             let result = grep_files(&p).unwrap().content;
-            assert!(!result.contains("Results limited"));
-            assert!(result.contains(&format!("test.txt:{}:", DEFAULT_HEAD_LIMIT + 1)));
+
+            let expected: Vec<String> = (0..DEFAULT_HEAD_LIMIT + 10)
+                .map(|i| format!("test.txt:{}:match line {i}", i + 1))
+                .collect();
+            assert_eq!(result, expected.join("\n"));
         }
 
         #[test]
@@ -1492,9 +1533,22 @@ mod tests {
             let mut p = params("match", dir.path());
             p.head_limit = Some(3);
             let result = grep_files(&p).unwrap().content;
-            assert!(result.contains("Results limited to 3 lines"));
-            let match_lines: Vec<_> = result.lines().filter(|l| l.contains(":match")).collect();
-            assert_eq!(match_lines.len(), 3);
+
+            // Files with the same mtime may come in either order,
+            // so the rows name whichever came first.
+            let (rows, footer) = result.split_once("\n\n").unwrap();
+            let (file, _) = rows.split_once(':').unwrap();
+
+            assert!(["a.txt", "b.txt"].contains(&file), "{result}");
+            assert_eq!(
+                rows,
+                formatdoc! {"
+                    {file}:1:match
+                    {file}:2:match
+                    {file}:3:match"
+                },
+            );
+            assert_eq!(footer, "(Results limited to 3 lines)");
         }
 
         #[test]
@@ -1510,15 +1564,17 @@ mod tests {
                 content: result,
                 title,
             } = grep_files(&p).unwrap();
+            let (header, files) = result.split_once('\n').unwrap();
+            let mut files: Vec<_> = files.lines().collect();
+            files.sort_unstable();
+
+            assert_eq!(header, "Found 2 files");
+            assert_eq!(files, ["a.rs", "b.rs"]);
             assert_eq!(title, "Found 2 files");
-            assert!(result.starts_with("Found 2 files\n"));
-            assert!(result.lines().any(|l| l == "a.rs"));
-            assert!(result.lines().any(|l| l == "b.rs"));
-            assert!(!result.contains("c.txt"));
         }
 
         #[test]
-        fn files_with_matches_truncated() {
+        fn files_with_matches_lists_files_up_to_the_head_limit() {
             let dir = canonical_tempdir();
             for i in 0..5 {
                 fs::write(dir.path().join(format!("{i}.txt")), "match\n").unwrap();
@@ -1528,10 +1584,16 @@ mod tests {
             p.output_mode = OutputMode::FilesWithMatches;
             p.head_limit = Some(2);
             let result = grep_files(&p).unwrap().content;
-            assert!(result.starts_with("Found 2 files\n"));
-            assert!(result.contains("Results limited to 2 files"));
-            let file_count = result.lines().filter(|l| l.contains(".txt")).count();
-            assert_eq!(file_count, 2);
+
+            let (listing, footer) = result.split_once("\n\n").unwrap();
+            let (header, files) = listing.split_once('\n').unwrap();
+            let files: HashSet<_> = files.lines().collect();
+            let all: HashSet<_> = ["0.txt", "1.txt", "2.txt", "3.txt", "4.txt"].into();
+
+            assert_eq!(header, "Found 2 files");
+            assert_eq!(files.len(), 2);
+            assert!(files.is_subset(&all), "{files:?}");
+            assert_eq!(footer, "(Results limited to 2 files)");
         }
 
         #[test]
@@ -1545,21 +1607,24 @@ mod tests {
             p.output_mode = OutputMode::FilesWithMatches;
             p.head_limit = Some(2);
             let result = grep_files(&p).unwrap().content;
-            assert!(result.starts_with("Found 2 files\n"));
-            assert!(
-                !result.contains("Results limited"),
-                "no further file was dropped: {result:?}",
-            );
+
+            let (header, files) = result.split_once('\n').unwrap();
+            let mut files: Vec<_> = files.lines().collect();
+            files.sort_unstable();
+
+            assert_eq!(header, "Found 2 files");
+            assert_eq!(files, ["0.txt", "1.txt"], "no further file was dropped");
         }
 
         #[test]
-        fn files_with_matches_no_matches() {
+        fn files_with_matches_reports_no_files_without_a_match() {
             let dir = canonical_tempdir();
             fs::write(dir.path().join("a.rs"), "fn foo() {}\n").unwrap();
 
             let mut p = params("nonexistent", dir.path());
             p.output_mode = OutputMode::FilesWithMatches;
             let result = grep_files(&p).unwrap();
+
             assert_eq!(result.content, "No files found");
             assert_eq!(result.title, "No matches found");
         }
@@ -1580,12 +1645,15 @@ mod tests {
             let mut p = params("aaa", dir.path());
             p.output_mode = OutputMode::Count;
             let result = grep_files(&p).unwrap().content;
-            assert!(result.contains("\ntest.txt:2"));
-            assert!(result.contains("2 total occurrences"));
+
+            assert_eq!(
+                result,
+                "Found 2 total occurrences across 1 file\ntest.txt:2"
+            );
         }
 
         #[test]
-        fn count_mode_truncated() {
+        fn count_mode_summary_counts_files_past_the_head_limit() {
             let dir = canonical_tempdir();
             for i in 0..5 {
                 fs::write(dir.path().join(format!("{i}.txt")), "match\n").unwrap();
@@ -1595,28 +1663,33 @@ mod tests {
             p.output_mode = OutputMode::Count;
             p.head_limit = Some(2);
             let result = grep_files(&p).unwrap().content;
+
             // The summary counts all 5 files even though `head_limit` caps the listing at 2.
-            assert!(result.contains("5 total occurrences across 5 files"));
-            assert!(result.contains("Results limited to 2 files"));
-            let file_lines: Vec<_> = result.lines().filter(|l| l.ends_with(":1")).collect();
-            assert_eq!(file_lines.len(), 2);
+            let (listing, footer) = result.split_once("\n\n").unwrap();
+            let (header, counts) = listing.split_once('\n').unwrap();
+            let counts: HashSet<_> = counts.lines().collect();
+            let all: HashSet<_> = ["0.txt:1", "1.txt:1", "2.txt:1", "3.txt:1", "4.txt:1"].into();
+
+            assert_eq!(header, "Found 5 total occurrences across 5 files");
+            assert_eq!(counts.len(), 2);
+            assert!(counts.is_subset(&all), "{counts:?}");
+            assert_eq!(footer, "(Results limited to 2 files)");
         }
 
         #[test]
-        fn count_mode_singular() {
+        fn count_mode_summary_uses_singular_words_for_one() {
             let dir = canonical_tempdir();
             fs::write(dir.path().join("a.txt"), "match once\n").unwrap();
 
             let mut p = params("match", dir.path());
             p.output_mode = OutputMode::Count;
             let result = grep_files(&p).unwrap().content;
-            assert!(result.contains("1 total occurrence across 1 file"));
-            assert!(!result.contains("occurrences"));
-            assert!(!result.contains(" files"));
+
+            assert_eq!(result, "Found 1 total occurrence across 1 file\na.txt:1");
         }
 
         #[test]
-        fn count_mode_summary_first() {
+        fn count_mode_titles_and_leads_with_the_summary() {
             let dir = canonical_tempdir();
             fs::write(dir.path().join("a.txt"), "match\n").unwrap();
             fs::write(dir.path().join("b.txt"), "match\n").unwrap();
@@ -1627,11 +1700,12 @@ mod tests {
                 content: result,
                 title,
             } = grep_files(&p).unwrap();
+
+            let (header, counts) = result.split_once('\n').unwrap();
+            let counts: HashSet<_> = counts.lines().collect();
             assert_eq!(title, "Found 2 total occurrences across 2 files");
-            assert!(
-                result.starts_with("Found 2 total occurrences across 2 files\n"),
-                "summary must lead the body: {result:?}",
-            );
+            assert_eq!(header, title);
+            assert_eq!(counts, HashSet::from(["a.txt:1", "b.txt:1"]));
         }
 
         #[test]
