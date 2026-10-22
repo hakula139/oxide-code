@@ -529,10 +529,7 @@ where
             return;
         }
         if self.table.active {
-            let style = self.current_inline_style();
-            self.table
-                .cell_buf
-                .push(Span::styled(text.to_owned(), style));
+            self.emit_span(Span::styled(text.to_owned(), self.current_inline_style()));
             return;
         }
 
