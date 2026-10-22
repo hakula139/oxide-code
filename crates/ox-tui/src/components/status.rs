@@ -93,7 +93,6 @@ impl Status {
 
 /// Status bar at the top of the TUI.
 pub(crate) struct StatusBar {
-    theme: Theme,
     line: StatusLine,
     /// Minute of the local day the current-time segment shows, or `None` when the line has no
     /// such segment.
@@ -133,7 +132,7 @@ impl StatusBar {
     /// Rows the bar fills: the status line and the border under it.
     pub(crate) const HEIGHT: u16 = 2;
 
-    pub(crate) fn new(theme: &Theme, init: StatusBarInit) -> Self {
+    pub(crate) fn new(init: StatusBarInit) -> Self {
         let StatusBarInit {
             segments,
             model,
@@ -145,7 +144,6 @@ impl StatusBar {
             .contains(&StatusLineSegment::CurrentTime)
             .then(local_minute);
         Self {
-            theme: theme.clone(),
             line: StatusLine::new(segments),
             current_minute,
             model,
@@ -230,11 +228,6 @@ impl StatusBar {
         theme_name.clone_into(&mut self.theme_name);
     }
 
-    /// Re-skins every subsequent render.
-    pub(crate) fn set_theme(&mut self, theme: &Theme) {
-        self.theme = theme.clone();
-    }
-
     pub(crate) fn set_status(&mut self, status: Status) {
         if status != self.status {
             self.spinner_frame = 0;
@@ -316,12 +309,12 @@ impl StatusBar {
 }
 
 impl StatusBar {
-    pub(crate) fn render(&mut self, frame: &mut Frame<'_>, area: Rect) {
+    pub(crate) fn render(&mut self, frame: &mut Frame<'_>, area: Rect, theme: &Theme) {
         let block = Block::default()
             .borders(Borders::BOTTOM)
-            .border_style(self.theme.border_unfocused())
-            .style(self.theme.surface());
-        let rendered = self.render_line(area.width);
+            .border_style(theme.border_unfocused())
+            .style(theme.surface());
+        let rendered = self.render_line(area.width, theme);
         frame.render_widget(Paragraph::new(rendered.line).block(block), area);
         // Snapshot link cells after the paint so emit_status_hyperlinks can replay them.
         self.pending_hyperlinks.clear();
@@ -354,23 +347,23 @@ impl StatusBar {
 // ── Render Helpers ──
 
 impl StatusBar {
-    fn status_span(&self) -> Span<'static> {
+    fn status_span(&self, theme: &Theme) -> Span<'static> {
         let label = self.status.label();
         if self.status.is_busy() {
             let spinner = SPINNER_FRAMES[self.spinner_frame];
-            return Span::styled(format!("{spinner} {label}"), self.theme.info());
+            return Span::styled(format!("{spinner} {label}"), theme.info());
         }
         let style = if matches!(self.status, Status::ExitArmed { .. }) {
-            self.theme.warning()
+            theme.warning()
         } else {
-            self.theme.muted()
+            theme.muted()
         };
         Span::styled(label, style)
     }
 
-    fn render_line(&self, width: u16) -> RenderedStatusLine {
+    fn render_line(&self, width: u16, theme: &Theme) -> RenderedStatusLine {
         self.line.render(
-            &self.theme,
+            theme,
             &StatusLineState {
                 model: &self.model,
                 effort: self.effort,
@@ -381,7 +374,7 @@ impl StatusBar {
                 pull_request: self.pull_request.as_ref(),
                 rate_limits: self.rate_limits,
                 permission_mode: self.permission_mode,
-                status_span: self.status_span(),
+                status_span: self.status_span(theme),
                 queued_prompts: self.queued_prompts,
                 task_progress: self.task_progress,
                 session_id: &self.session_id,
@@ -430,24 +423,18 @@ mod tests {
     const FUTURE_RESET: i64 = 4_102_444_800;
 
     fn test_bar() -> StatusBar {
-        StatusBar::new(
-            &Theme::default(),
-            StatusBarInit {
-                effort: Some(Effort::High),
-                git_branch: Some("main".to_owned()),
-                ..status_bar_init(StatusLineSegment::DEFAULT.to_vec())
-            },
-        )
+        StatusBar::new(StatusBarInit {
+            effort: Some(Effort::High),
+            git_branch: Some("main".to_owned()),
+            ..status_bar_init(StatusLineSegment::DEFAULT.to_vec())
+        })
     }
 
     fn pr_bar() -> StatusBar {
-        StatusBar::new(
-            &Theme::default(),
-            status_bar_init(vec![
-                StatusLineSegment::PullRequest,
-                StatusLineSegment::RunState,
-            ]),
-        )
+        StatusBar::new(status_bar_init(vec![
+            StatusLineSegment::PullRequest,
+            StatusLineSegment::RunState,
+        ]))
     }
 
     fn pr_state(number: u64) -> git::PullRequest {
@@ -463,7 +450,7 @@ mod tests {
         let mut terminal = Terminal::new(TestBackend::new(width, 2)).unwrap();
         terminal
             .draw(|frame| {
-                bar.render(frame, frame.area());
+                bar.render(frame, frame.area(), &Theme::default());
             })
             .unwrap();
         terminal.backend().clone()
@@ -635,10 +622,10 @@ mod tests {
 
         #[test]
         fn without_current_time_segment_skips_minute_refresh() {
-            let mut bar = StatusBar::new(
-                &Theme::default(),
-                status_bar_init(vec![StatusLineSegment::Model, StatusLineSegment::RunState]),
-            );
+            let mut bar = StatusBar::new(status_bar_init(vec![
+                StatusLineSegment::Model,
+                StatusLineSegment::RunState,
+            ]));
 
             assert_eq!(bar.current_minute, None);
             assert!(!bar.tick());
@@ -647,10 +634,7 @@ mod tests {
 
         #[test]
         fn idle_current_time_marks_dirty_on_minute_change() {
-            let mut bar = StatusBar::new(
-                &Theme::default(),
-                status_bar_init(vec![StatusLineSegment::CurrentTime]),
-            );
+            let mut bar = StatusBar::new(status_bar_init(vec![StatusLineSegment::CurrentTime]));
             let current = local_minute();
             bar.current_minute = Some((current + 1) % 1440);
 
@@ -728,37 +712,31 @@ mod tests {
         use super::*;
 
         fn bar_idle(title: Option<&str>, cwd: &str) -> StatusBar {
-            let mut bar = StatusBar::new(
-                &Theme::default(),
-                StatusBarInit {
-                    segments: StatusLineSegment::DEFAULT.to_vec(),
-                    model: "Opus 5.5".to_owned(),
-                    effort: Some(Effort::Xhigh),
-                    cwd: cwd.into(),
-                    git_branch: Some("main".to_owned()),
-                },
-            );
+            let mut bar = StatusBar::new(StatusBarInit {
+                segments: StatusLineSegment::DEFAULT.to_vec(),
+                model: "Opus 5.5".to_owned(),
+                effort: Some(Effort::Xhigh),
+                cwd: cwd.into(),
+                git_branch: Some("main".to_owned()),
+            });
             bar.set_title(title.map(ToOwned::to_owned));
             bar
         }
 
         /// Shows `segment` between the directory and the model.
         fn segment_bar(segment: StatusLineSegment) -> StatusBar {
-            StatusBar::new(
-                &Theme::default(),
-                StatusBarInit {
-                    segments: vec![
-                        StatusLineSegment::CurrentDir,
-                        segment,
-                        StatusLineSegment::ModelWithEffort,
-                        StatusLineSegment::RunState,
-                    ],
-                    model: "Opus 5.5".to_owned(),
-                    effort: Some(Effort::Xhigh),
-                    cwd: "~/projects/demo".to_owned(),
-                    git_branch: None,
-                },
-            )
+            StatusBar::new(StatusBarInit {
+                segments: vec![
+                    StatusLineSegment::CurrentDir,
+                    segment,
+                    StatusLineSegment::ModelWithEffort,
+                    StatusLineSegment::RunState,
+                ],
+                model: "Opus 5.5".to_owned(),
+                effort: Some(Effort::Xhigh),
+                cwd: "~/projects/demo".to_owned(),
+                git_branch: None,
+            })
         }
 
         /// Renders the bar 100 columns wide, then 40.
@@ -886,20 +864,17 @@ mod tests {
 
         #[test]
         fn configured_segments_control_order() {
-            let mut bar = StatusBar::new(
-                &Theme::default(),
-                StatusBarInit {
-                    segments: vec![
-                        StatusLineSegment::RunState,
-                        StatusLineSegment::Model,
-                        StatusLineSegment::CurrentDir,
-                    ],
-                    model: "Opus 5.5".to_owned(),
-                    effort: Some(Effort::Xhigh),
-                    cwd: "~/projects/demo".to_owned(),
-                    git_branch: Some("main".to_owned()),
-                },
-            );
+            let mut bar = StatusBar::new(StatusBarInit {
+                segments: vec![
+                    StatusLineSegment::RunState,
+                    StatusLineSegment::Model,
+                    StatusLineSegment::CurrentDir,
+                ],
+                model: "Opus 5.5".to_owned(),
+                effort: Some(Effort::Xhigh),
+                cwd: "~/projects/demo".to_owned(),
+                git_branch: Some("main".to_owned()),
+            });
             let output = render_top_row(&mut bar, 120);
             let state_at = output.find("Ready").unwrap();
             let model_at = output.find("Opus 5.5").unwrap();
@@ -914,21 +889,18 @@ mod tests {
 
         #[test]
         fn uses_theme_separator_and_segment_labels() {
-            let mut bar = StatusBar::new(
-                &Theme::default(),
-                StatusBarInit {
-                    segments: vec![
-                        StatusLineSegment::CurrentDir,
-                        StatusLineSegment::GitBranch,
-                        StatusLineSegment::ModelWithEffort,
-                        StatusLineSegment::RunState,
-                    ],
-                    model: "Opus 5.5".to_owned(),
-                    effort: Some(Effort::Xhigh),
-                    cwd: "~/projects/demo".to_owned(),
-                    git_branch: Some("feat/status-line".to_owned()),
-                },
-            );
+            let mut bar = StatusBar::new(StatusBarInit {
+                segments: vec![
+                    StatusLineSegment::CurrentDir,
+                    StatusLineSegment::GitBranch,
+                    StatusLineSegment::ModelWithEffort,
+                    StatusLineSegment::RunState,
+                ],
+                model: "Opus 5.5".to_owned(),
+                effort: Some(Effort::Xhigh),
+                cwd: "~/projects/demo".to_owned(),
+                git_branch: Some("feat/status-line".to_owned()),
+            });
             let output = render_top_row(&mut bar, 120);
             assert!(
                 output.contains("~/projects/demo │ feat/status-line │ Opus 5.5 (xhigh) │ Ready")
@@ -986,13 +958,10 @@ mod tests {
 
         #[test]
         fn empty_cwd_drops_cwd_slot_entirely() {
-            let mut bar = StatusBar::new(
-                &Theme::default(),
-                StatusBarInit {
-                    cwd: String::new(),
-                    ..status_bar_init(StatusLineSegment::DEFAULT.to_vec())
-                },
-            );
+            let mut bar = StatusBar::new(StatusBarInit {
+                cwd: String::new(),
+                ..status_bar_init(StatusLineSegment::DEFAULT.to_vec())
+            });
             let output = render_top_row(&mut bar, 120);
             assert!(output.contains("test-model"));
             assert!(output.contains("Ready"));
@@ -1061,7 +1030,7 @@ mod tests {
             let bar = test_bar();
 
             assert_eq!(
-                bar.status_span(),
+                bar.status_span(&Theme::default()),
                 Span::styled("Ready", Theme::default().muted())
             );
         }
@@ -1087,7 +1056,7 @@ mod tests {
                 bar.set_status(status);
 
                 assert_eq!(
-                    bar.status_span(),
+                    bar.status_span(&Theme::default()),
                     Span::styled(
                         format!("{} {label}", SPINNER_FRAMES[0]),
                         Theme::default().info()
@@ -1104,7 +1073,7 @@ mod tests {
             });
 
             assert_eq!(
-                bar.status_span(),
+                bar.status_span(&Theme::default()),
                 Span::styled("Press Ctrl+C again to exit", Theme::default().warning())
             );
         }

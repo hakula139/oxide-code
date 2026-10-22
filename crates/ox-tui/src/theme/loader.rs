@@ -346,6 +346,8 @@ mod tests {
     use indoc::{formatdoc, indoc};
     use ratatui::style::Color;
 
+    use ox_core::util::path::testing::HOME_VAR;
+
     use super::*;
     use crate::theme::SLOT_NAMES;
     use crate::theme::color::COLOR_FORMATS_HINT;
@@ -463,10 +465,16 @@ mod tests {
             let project = dir.path().join(".ox").join("config.toml");
             let config_home = dir.path().join("config-home");
 
-            let err = temp_env::with_var("XDG_CONFIG_HOME", Some(&config_home), || {
-                resolve_theme(&project_config(&theme_str, &project))
-                    .expect_err("a project file may not name a theme file")
-            });
+            let err = temp_env::with_vars(
+                [
+                    (HOME_VAR, Some(dir.path())),
+                    ("XDG_CONFIG_HOME", Some(&config_home)),
+                ],
+                || {
+                    resolve_theme(&project_config(&theme_str, &project))
+                        .expect_err("a project file may not name a theme file")
+                },
+            );
 
             assert_eq!(
                 format!("{err:#}"),
@@ -474,9 +482,8 @@ mod tests {
                     "{} cannot set tui.theme.base to {theme_str:?}. \
                      A project file may only name a built-in theme \
                      (mocha, macchiato, frappe, latte, material). \
-                     Set a theme file in {} or a config.d drop-in.",
+                     Set a theme file in ~/config-home/ox/config.toml or a config.d drop-in.",
                     project.display(),
-                    config_home.join("ox").join("config.toml").display(),
                 ),
             );
         }

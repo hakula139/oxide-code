@@ -4,7 +4,7 @@ Research on stale-file edit prevention across reference codebases. Based on [Cla
 
 ## Claude Code (TypeScript)
 
-Explicit `FileStateCache` (LRU, 100 entries x 25 MB) per session.
+Explicit `FileStateCache` (LRU, 100 entries x 25 MiB, checked against the frozen 2.1.87 source on 2026-10-21) per session.
 
 Per-file state: `content`, `timestamp` (mtime ms), `offset`, `limit`, `isPartialView`.
 

@@ -1,3 +1,10 @@
+[alias]
+live = "test --test live -- --ignored"
+
 [build]
 # Most items in these unpublished crates are private, so the docs and their lints cover them too.
 rustdocflags = ["--document-private-items"]
+warnings = "deny"
+
+[env]
+RUST_BACKTRACE = "1"

@@ -26,7 +26,9 @@ desync
 direnv
 disambiguable
 doas
+EACCES
 ELOOP
+ENOENT
 ENOTDIR
 envrc
 EPERM
@@ -46,6 +48,7 @@ GOEXPERIMENT
 hakula
 idna
 illumos
+ilog
 impls
 indoc
 insta

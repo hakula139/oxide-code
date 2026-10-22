@@ -9,9 +9,9 @@ use time::UtcOffset;
 use unicode_width::UnicodeWidthStr;
 
 use ox_core::session::display::{display_title, id_prefix};
-use ox_core::session::entry::SessionInfo;
+use ox_core::session::entry::{ArchiveState, SessionInfo};
 use ox_core::session::store::SessionStore;
-use ox_core::session::store::listing::ListScope;
+use ox_core::session::store::listing::{ListScope, ProjectScope};
 use ox_core::util;
 use ox_core::util::path::tildify;
 use ox_core::util::text::{escape_line, pad_to_width, truncate_to_width};
@@ -30,7 +30,7 @@ const PROJECT_COL_MIN: usize = "Project".len() + 1;
 /// keeps its width in every other row.
 const PROJECT_COL_MAX: usize = 40;
 
-/// Writes the sessions of `store`'s project, or of every project when `scope.all` is set, to
+/// Writes the sessions of `store`'s project, or of every project when `scope` spans them all, to
 /// `out`. `limit` caps the rows, where `0` lists them all. Titles are cut to `term_width`, the
 /// width of a terminal on stdout, or left whole without one.
 pub(crate) fn write(
@@ -52,7 +52,7 @@ pub(crate) fn write(
         .context("failed to write the session list")
 }
 
-/// The `--list` table of `sessions`, with a `Project` column when `scope.all` is set and a
+/// The `--list` table of `sessions`, with a `Project` column when `scope` spans every project and a
 /// `... more` footer when `more` is set. A `term_width` of `None` skips title truncation
 /// for piped output.
 fn render(
@@ -62,9 +62,12 @@ fn render(
     local_offset: UtcOffset,
     term_width: Option<usize>,
 ) -> String {
-    let ListScope { all, archived } = scope;
+    let all = scope.projects == ProjectScope::Every;
     if sessions.is_empty() {
-        let kind = if archived { "archived " } else { "" };
+        let kind = match scope.archive {
+            ArchiveState::Active => "",
+            ArchiveState::Archived => "archived ",
+        };
         let scope = if all {
             ""
         } else {
@@ -76,7 +79,7 @@ fn render(
     let projects: Vec<String> = if all {
         sessions
             .iter()
-            .map(|s| escape_line(&tildify(Path::new(&s.cwd))))
+            .map(|s| escape_line(&tildify(Path::new(s.project()))))
             .collect()
     } else {
         Vec::new()
@@ -115,7 +118,7 @@ fn render(
             .exit
             .as_ref()
             .map_or("-".to_owned(), |e| e.message_count.to_string());
-        let raw_title = escape_line(&display_title(s));
+        let raw_title = escape_line(display_title(s));
         let title = match title_budget {
             Some(budget) => truncate_to_width(&raw_title, budget),
             None => raw_title,
@@ -140,7 +143,9 @@ mod tests {
     use time::macros::datetime;
 
     use ox_core::session::entry::{ExitInfo, TitleInfo};
-    use ox_core::session::store::testing::{archive_test_session, seed_test_session};
+    use ox_core::session::store::testing::{
+        archive_test_session, listed_session, seed_test_session,
+    };
 
     use super::*;
 
@@ -183,7 +188,7 @@ mod tests {
             );
             archive_test_session(&other, "archived-session");
             let every = ListScope {
-                all: true,
+                projects: ProjectScope::Every,
                 ..ListScope::default()
             };
 
@@ -193,7 +198,7 @@ mod tests {
             let archived = listed(
                 &local,
                 ListScope {
-                    archived: true,
+                    archive: ArchiveState::Archived,
                     ..every
                 },
                 0,
@@ -238,14 +243,9 @@ mod tests {
 
         fn session(session_id: &str, last_active_at: time::OffsetDateTime) -> SessionInfo {
             SessionInfo {
-                session_id: session_id.to_owned(),
-                path: std::path::PathBuf::new(),
                 cwd: "/work/project".to_owned(),
                 last_active_at,
-                title: None,
-                exit: None,
-                git_branch: None,
-                archived: false,
+                ..listed_session(session_id)
             }
         }
 
@@ -254,7 +254,11 @@ mod tests {
                 sessions,
                 false,
                 ListScope {
-                    all,
+                    projects: if all {
+                        ProjectScope::Every
+                    } else {
+                        ProjectScope::Current
+                    },
                     ..ListScope::default()
                 },
                 UtcOffset::UTC,
@@ -399,6 +403,24 @@ mod tests {
         }
 
         #[test]
+        fn shows_the_recorded_project_root_over_the_launch_directory() {
+            let mut recorded = session("eeeeeeeeeeee", datetime!(2026-04-18 09:00:00 UTC));
+            recorded.cwd = "/work/repo/crates/core".to_owned();
+            recorded.project_root = Some("/work/repo".to_owned());
+            let mut older = session("ffffffffffff", datetime!(2026-04-18 08:00:00 UTC));
+            older.cwd = "/work/legacy".to_owned();
+
+            let out = rendered(&[recorded, older], true, None);
+
+            let projects: Vec<_> = out
+                .lines()
+                .skip(1)
+                .filter_map(|row| row.split_whitespace().nth(4))
+                .collect();
+            assert_eq!(projects, ["/work/repo", "/work/legacy"], "{out}");
+        }
+
+        #[test]
         fn escapes_control_characters_in_titles_and_projects() {
             let mut s = session("dddddddddddd", datetime!(2026-04-18 09:00:00 UTC));
             s.cwd = "/work/a\nb".to_owned();
@@ -486,23 +508,26 @@ mod tests {
 
         #[test]
         fn names_the_scope_and_archive_state_when_empty() {
-            let empty = |all, archived| {
+            let empty = |projects, archive| {
                 render(
                     &[],
                     false,
-                    ListScope { all, archived },
+                    ListScope { projects, archive },
                     UtcOffset::UTC,
                     None,
                 )
             };
 
             assert_eq!(
-                empty(false, false),
+                empty(ProjectScope::Current, ArchiveState::Active),
                 "No sessions found in this project (use --all to search every project)\n"
             );
-            assert_eq!(empty(true, false), "No sessions found\n");
             assert_eq!(
-                empty(false, true),
+                empty(ProjectScope::Every, ArchiveState::Active),
+                "No sessions found\n"
+            );
+            assert_eq!(
+                empty(ProjectScope::Current, ArchiveState::Archived),
                 "No archived sessions found in this project (use --all to search every project)\n"
             );
         }

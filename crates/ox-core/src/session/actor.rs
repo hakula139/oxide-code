@@ -70,9 +70,6 @@ pub(super) enum SessionCmd {
     /// Drains pending writes, acks, then exits the actor loop so shutdown returns without
     /// waiting for orphaned clones to drop.
     Shutdown { ack: oneshot::Sender<()> },
-    /// Panics inside the actor task, for the `JoinError::is_panic()` path in `shutdown`.
-    #[cfg(test)]
-    Panic,
 }
 
 /// Pending ack for one absorbed cmd, fired once the batch flush returns.
@@ -232,8 +229,6 @@ impl Batch {
                 self.should_exit = true;
                 BatchFlow::Continue
             }
-            #[cfg(test)]
-            SessionCmd::Panic => panic!("deliberate actor panic for testing"),
         }
     }
 
@@ -449,7 +444,7 @@ mod tests {
                 matches!(
                     entries.as_slice(),
                     [
-                        Entry::Header { .. },
+                        Entry::Header(_),
                         Entry::Title { .. },
                         Entry::Message { .. },
                         Entry::Summary {

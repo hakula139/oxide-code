@@ -103,7 +103,7 @@ impl App {
             .set_theme_name(&self.session_info.config.theme_name);
         self.status_bar
             .set_permission_mode(self.session_info.config.permission_mode);
-        self.status_bar.render(frame, status);
+        self.status_bar.render(frame, status, &self.theme);
         if self.chat.is_empty() && self.session_info.config.show_welcome {
             welcome::paint(frame, chat, &self.theme, &self.session_info);
         } else {
@@ -126,9 +126,10 @@ impl App {
             self.modals.render(frame, modal, &self.theme);
         } else {
             if popup_height > 0 {
-                self.input.render_popup(frame, popup);
+                self.input.render_popup(frame, popup, &self.theme);
             }
-            self.input.render(frame, input, self.status.is_busy());
+            self.input
+                .render(frame, input, self.status.is_busy(), &self.theme);
         }
     }
 
@@ -513,15 +514,12 @@ mod tests {
         #[test]
         fn shows_rate_limits_and_app_state_in_opt_in_segments() {
             let (mut app, _rx, _event_tx) = test_app(None);
-            app.status_bar = StatusBar::new(
-                &app.theme,
-                status_bar_init(vec![
-                    StatusLineSegment::QueuedPrompts,
-                    StatusLineSegment::FiveHourLimit,
-                    StatusLineSegment::SessionId,
-                    StatusLineSegment::Theme,
-                ]),
-            );
+            app.status_bar = StatusBar::new(status_bar_init(vec![
+                StatusLineSegment::QueuedPrompts,
+                StatusLineSegment::FiveHourLimit,
+                StatusLineSegment::SessionId,
+                StatusLineSegment::Theme,
+            ]));
             app.queue.push("next".to_owned());
 
             app.handle_engine_event(Event::RateLimitsUpdated(five_hour_limit()));
@@ -724,13 +722,10 @@ mod tests {
         #[test]
         fn task_panel_sits_above_the_preview_and_feeds_the_status_progress() {
             let (mut app, _rx, _event_tx) = test_app(None);
-            app.status_bar = StatusBar::new(
-                &app.theme,
-                status_bar_init(vec![
-                    StatusLineSegment::Model,
-                    StatusLineSegment::TaskProgress,
-                ]),
-            );
+            app.status_bar = StatusBar::new(status_bar_init(vec![
+                StatusLineSegment::Model,
+                StatusLineSegment::TaskProgress,
+            ]));
             app.dispatch_action(Action::Submit("active".to_owned()));
             push_ls_call(&mut app);
             app.queue.push("queued 0".to_owned());

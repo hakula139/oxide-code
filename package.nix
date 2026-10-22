@@ -20,6 +20,9 @@ rustPlatform.buildRustPackage {
 
   cargoLock.lockFile = ./Cargo.lock;
 
+  # Tests build much faster without the release profile's LTO and single codegen unit.
+  checkType = "debug";
+
   # Tests bind loopback ports, which the darwin sandbox denies by default.
   __darwinAllowLocalNetworking = true;
 

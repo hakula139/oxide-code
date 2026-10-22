@@ -14,7 +14,6 @@ use ox_core::permission::{Basis, SessionGrant};
 use ox_core::protocol::notice::ENGINE_STOPPED;
 use ox_core::protocol::{Decision, Event, EventSink, Op};
 use ox_core::tool::view::{ApprovalBody, ApprovalPreview};
-use ox_core::util::git;
 use ox_core::util::text::escape_hidden;
 
 use super::stdio::{Approver, StdioSink, Unattended, render_op, render_queued};
@@ -33,7 +32,7 @@ pub(crate) async fn run(
     let sink = StdioSink::new(show_thinking);
     let attended = io::stdin().is_terminal();
     let stdin = BufReader::new(tokio::io::stdin());
-    let project_root = git::project_root(engine.cwd());
+    let project_root = engine.project_root().to_owned();
     let handle = engine.spawn();
     let signal = async || {
         let caught = shutdown_signal().await;

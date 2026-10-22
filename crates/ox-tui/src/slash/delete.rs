@@ -4,17 +4,21 @@
 
 use std::path::Path;
 
+use time::OffsetDateTime;
+
 use ox_core::command;
-use ox_core::session::display::{display_title, format_metadata_line};
+use ox_core::session::display::display_title;
 use ox_core::session::entry::SessionInfo;
 use ox_core::session::resolver::resolve_saved_prefix;
 use ox_core::util::path::tildify;
-use ox_core::util::time::local_offset;
+use ox_core::util::time::now_local;
 
 use super::confirm::ConfirmDeleteSessionModal;
 use super::context::SlashContext;
 use super::registry::{SlashCommand, SlashKind, SlashOutcome};
-use super::sessions::{CLEAR_THEN_DELETE_HINT, open_store, resolve_error_message};
+use super::sessions::{
+    CLEAR_THEN_DELETE_HINT, format_metadata_line, open_store, resolve_error_message,
+};
 
 // ── DeleteCmd ──
 
@@ -54,8 +58,8 @@ impl SlashCommand for DeleteCmd {
         let live_id = ctx.info.session_id.as_str();
         let info = resolve_saved_prefix(&store, arg, live_id)
             .map_err(|e| resolve_error_message(e, Some(CLEAR_THEN_DELETE_HINT)))?;
-        let title = display_title(&info);
-        let metadata = metadata_line(&info);
+        let title = display_title(&info).to_owned();
+        let metadata = metadata_line(&info, now_local());
         Ok(SlashOutcome::Modal(Box::new(
             ConfirmDeleteSessionModal::new(
                 info.path,
@@ -71,13 +75,13 @@ impl SlashCommand for DeleteCmd {
 // ── Display Formatting ──
 
 /// Wraps [`format_metadata_line`] with the `/delete`-specific project rule: the confirm modal has
-/// no scope context, so the project always shows when `cwd` is non-empty.
-fn metadata_line(info: &SessionInfo) -> String {
-    let project = tildify(Path::new(&info.cwd));
+/// no scope context, so the project always shows when it is non-empty.
+fn metadata_line(info: &SessionInfo, now: OffsetDateTime) -> String {
+    let project = tildify(Path::new(info.project()));
     format_metadata_line(
         &info.session_id,
         info.last_active_at,
-        local_offset(),
+        now,
         info.exit.as_ref().map_or(0, |e| e.message_count),
         info.git_branch.as_deref(),
         (!project.is_empty()).then_some(project.as_str()),
@@ -90,14 +94,16 @@ mod tests {
 
     use ox_core::session::entry::ExitInfo;
     use ox_core::session::store::SessionStore;
-    use ox_core::session::store::testing::seed_test_session;
+    use ox_core::session::store::testing::{
+        listed_session, seed_test_session, stamped_id, with_isolated_xdg,
+    };
     use ox_core::util::path::testing::HOME_VAR;
 
     use super::*;
     use crate::modal::Modal;
     use crate::modal::testing::render_rows;
     use crate::slash::registry::SlashCommand;
-    use crate::slash::testing::{stamped_id, test_session_info, with_isolated_xdg};
+    use crate::slash::testing::test_session_info;
 
     #[test]
     fn name_and_metadata_match_built_ins_contract() {
@@ -342,46 +348,36 @@ mod tests {
     mod metadata_line {
         use super::*;
 
+        const NOW: time::OffsetDateTime = datetime!(2026-04-18 12:00:00 UTC);
+
         #[test]
         fn shows_the_count_branch_and_tildified_project() {
-            let last_active_at = datetime!(2026-05-08 09:00:00 UTC);
             let info = SessionInfo {
-                session_id: stamped_id(0xab),
-                path: std::path::PathBuf::new(),
                 cwd: "/work/oxide".to_owned(),
-                last_active_at,
-                title: None,
                 exit: Some(ExitInfo {
                     message_count: 14,
-                    updated_at: last_active_at,
+                    updated_at: NOW,
                 }),
                 git_branch: Some("feat/login".to_owned()),
-                archived: false,
+                ..listed_session(&stamped_id(0xab))
             };
 
-            let line = temp_env::with_var(HOME_VAR, Some("/work"), || metadata_line(&info));
+            let line = temp_env::with_var(HOME_VAR, Some("/work"), || metadata_line(&info, NOW));
 
             assert_eq!(
                 line,
-                "abababab · 2026-05-08 · 14 msgs · feat/login · ~/oxide"
+                "abababab · 3 hours ago · 14 msgs · feat/login · ~/oxide"
             );
         }
 
         #[test]
         fn omits_project_when_cwd_is_empty() {
             let info = SessionInfo {
-                session_id: stamped_id(0xab),
-                path: std::path::PathBuf::new(),
                 cwd: String::new(),
-                last_active_at: datetime!(2026-05-08 09:00:00 UTC),
-                title: None,
-                exit: None,
-                git_branch: None,
-                archived: false,
+                ..listed_session(&stamped_id(0xab))
             };
-            let line = metadata_line(&info);
-            assert!(!line.ends_with(" · "), "no trailing separator: {line}");
-            assert!(!line.contains(" ·  · "), "no double separator: {line}");
+
+            assert_eq!(metadata_line(&info, NOW), "abababab · 3 hours ago");
         }
     }
 }

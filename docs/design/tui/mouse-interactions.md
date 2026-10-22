@@ -81,7 +81,8 @@ URLs are sanitized: every control char is filtered out before the envelope is bu
 - `crates/ox-tui/src/app/dispatch.rs`: `App::handle_crossterm_event`, which routes wheel and button events, and `open_status_link`.
 - `crates/ox-tui/src/app/render.rs`: `App::emit_status_hyperlinks`, which replays the link cells inside OSC 8 and keeps their rects for clicks.
 - `crates/ox-tui/src/clipboard.rs`: `Clipboard`, its copy routes, and `osc52_sequence`.
-- `crates/ox-tui/src/components/chat.rs`: `ChatView::handle_event`, the wheel scroll, and `expand_at`, the click expansion.
+- `crates/ox-tui/src/components/chat.rs`: `ChatView::expand_at`, the click expansion.
+- `crates/ox-tui/src/components/chat/scroll.rs`: `ChatView::handle_event`, the wheel and key scroll.
 - `crates/ox-tui/src/components/chat/selection.rs`: `ChatView::handle_mouse`, the selection units, anchors, edge auto-scroll, and copied text.
 - `crates/ox-tui/src/components/status.rs`: `StatusBar::render`, which captures each hyperlink's cells after the paint.
 - `crates/ox-tui/src/terminal.rs`: `init`, `enter_tui_mode`, and `leave_tui_mode`, which enable and release mouse capture, and `write_status_hyperlinks`.

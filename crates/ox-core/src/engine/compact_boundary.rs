@@ -77,7 +77,7 @@ mod tests {
     use crate::protocol::notice::session_write_failed;
     use crate::protocol::testing::{CapturingSink, FailingSink};
     use crate::session::handle;
-    use crate::session::store::testing::{test_project_dir, test_store};
+    use crate::session::store::testing::{isolated_store, test_project_dir, test_store};
     use crate::tool::tasks::testing::plan;
 
     mod replace_session_with_summary {
@@ -104,8 +104,7 @@ mod tests {
 
         #[tokio::test]
         async fn clears_tracker_and_carries_the_task_list_over() {
-            let dir = tempfile::tempdir().unwrap();
-            let store = test_store(dir.path());
+            let (_dir, store) = isolated_store();
             let session = handle::start(&store, "claude-sonnet-5-5", None);
             let session_id = session.session_id().to_owned();
             let tracker = FileTracker::default();
@@ -230,8 +229,7 @@ mod tests {
 
         #[tokio::test]
         async fn still_replaces_messages_when_event_send_fails() {
-            let dir = tempfile::tempdir().unwrap();
-            let store = test_store(dir.path());
+            let (_dir, store) = isolated_store();
             let session = handle::start(&store, "claude-sonnet-5-5", None);
             let tracker = FileTracker::default();
             tracker.record_read(

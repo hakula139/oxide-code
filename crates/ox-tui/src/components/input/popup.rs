@@ -61,8 +61,8 @@ struct PopupRow {
 }
 
 /// Slash-command autocomplete overlay, hidden while `list` is `None`.
+#[derive(Default)]
 pub(super) struct SlashPopup {
-    theme: Theme,
     list: Option<PopupList>,
 }
 
@@ -74,18 +74,6 @@ struct PopupList {
 }
 
 impl SlashPopup {
-    pub(super) fn new(theme: &Theme) -> Self {
-        Self {
-            theme: theme.clone(),
-            list: None,
-        }
-    }
-
-    /// Re-skins every subsequent render.
-    pub(super) fn set_theme(&mut self, theme: &Theme) {
-        self.theme = theme.clone();
-    }
-
     pub(super) fn set_state(&mut self, state: Option<&PopupState<'_>>) {
         let mut list = state.and_then(PopupList::new);
         // Mode transitions, including a switch to another command's args, reset to row 0 since
@@ -132,14 +120,14 @@ impl SlashPopup {
         })
     }
 
-    pub(super) fn render(&self, frame: &mut Frame<'_>, area: Rect) {
+    pub(super) fn render(&self, frame: &mut Frame<'_>, area: Rect, theme: &Theme) {
         let Some(list) = &self.list else {
             return;
         };
         let block = Block::default()
             .borders(Borders::TOP)
-            .border_style(self.theme.border_unfocused())
-            .style(self.theme.surface());
+            .border_style(theme.border_unfocused())
+            .style(theme.surface());
         let inner = block.inner(area);
         frame.render_widget(block, area);
         if inner.height == 0 {
@@ -157,22 +145,29 @@ impl SlashPopup {
             .zip(labels)
             .enumerate()
             .map(|(i, (r, label))| {
-                self.render_row(r, label, offset + i == list.selected, label_width, width)
+                Self::render_row(
+                    r,
+                    label,
+                    offset + i == list.selected,
+                    label_width,
+                    width,
+                    theme,
+                )
             })
             .collect();
-        frame.render_widget(Paragraph::new(lines).style(self.theme.surface()), inner);
+        frame.render_widget(Paragraph::new(lines).style(theme.surface()), inner);
     }
 
     fn render_row(
-        &self,
         row: &PopupRow,
         label_text: String,
         selected: bool,
         label_width: usize,
         width: usize,
+        theme: &Theme,
     ) -> Line<'static> {
         let pad = label_width.saturating_sub(label_text.width());
-        let row_style = self.theme.row_style(selected);
+        let row_style = theme.row_style(selected);
         let desc_budget = width.saturating_sub(label_width + COLUMN_GAP);
         let desc = truncate_to_width(&row.description, desc_budget);
 
@@ -267,7 +262,7 @@ mod tests {
     use super::*;
 
     fn popup_with_state(state: Option<&PopupState<'_>>) -> SlashPopup {
-        let mut p = SlashPopup::new(&Theme::default());
+        let mut p = SlashPopup::default();
         p.set_state(state);
         p
     }
@@ -286,19 +281,19 @@ mod tests {
 
     fn long_popup(n: usize) -> SlashPopup {
         // Hand-rolled list keeps the test independent of registry growth.
-        let mut p = SlashPopup::new(&Theme::default());
-        p.list = Some(PopupList {
-            mode: PopupMode::Name,
-            rows: (0..n)
-                .map(|i| PopupRow {
-                    value: Cow::Owned(format!("cmd{i}")),
-                    description: Cow::Borrowed("desc"),
-                    matched_alias: None,
-                })
-                .collect(),
-            selected: 0,
-        });
-        p
+        SlashPopup {
+            list: Some(PopupList {
+                mode: PopupMode::Name,
+                rows: (0..n)
+                    .map(|i| PopupRow {
+                        value: Cow::Owned(format!("cmd{i}")),
+                        description: Cow::Borrowed("desc"),
+                        matched_alias: None,
+                    })
+                    .collect(),
+                selected: 0,
+            }),
+        }
     }
 
     #[test]
@@ -528,7 +523,7 @@ mod tests {
             let height = popup.height().max(1);
             let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
             terminal
-                .draw(|frame| popup.render(frame, frame.area()))
+                .draw(|frame| popup.render(frame, frame.area(), &Theme::default()))
                 .unwrap();
             terminal.backend().clone()
         }
@@ -607,7 +602,13 @@ mod tests {
             let width: u16 = 60;
             let mut terminal = Terminal::new(TestBackend::new(width, CHROME_ROWS)).unwrap();
             terminal
-                .draw(|frame| popup.render(frame, Rect::new(0, 0, width, CHROME_ROWS)))
+                .draw(|frame| {
+                    popup.render(
+                        frame,
+                        Rect::new(0, 0, width, CHROME_ROWS),
+                        &Theme::default(),
+                    );
+                })
                 .unwrap();
             let buf = terminal.backend().buffer();
             for x in 0..width {

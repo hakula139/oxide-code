@@ -40,4 +40,3 @@ serde_json.workspace = true
 temp-env.workspace = true
 tempfile.workspace = true
 tokio = { workspace = true, features = ["test-util"] }
-uuid.workspace = true
