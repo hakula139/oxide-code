@@ -16,7 +16,7 @@ use tracing::{error, warn};
 use uuid::Uuid;
 
 use super::actor::{self, SessionCmd};
-use super::entry::{CompactBoundary, CompactInfo, UsageRecord};
+use super::entry::{ArchiveState, CompactBoundary, CompactInfo, UsageRecord};
 use super::sanitize::{retain_visible_file_snapshots, sanitize_resumed_messages};
 use super::saved::SavedError;
 use super::state::{SessionState, extract_user_text};
@@ -371,13 +371,13 @@ pub struct LoadedTranscript {
     pub(crate) file_snapshots: Vec<FileSnapshot>,
 }
 
-/// Live handle plus display-only extras the TUI uses to reconstruct what the user saw live.
+/// The live handle on a resumed session, with its transcript, title, and prior archive state.
 pub struct ResumedSession {
     pub handle: SessionHandle,
     pub transcript: LoadedTranscript,
     pub title: Option<String>,
-    /// Whether the session was archived, so resuming it appended an entry unarchiving it.
-    pub unarchived: bool,
+    /// The session's state before this resume, which unarchives an archived session.
+    pub prior: ArchiveState,
 }
 
 // ── Constructors ──
@@ -417,12 +417,12 @@ pub(crate) async fn roll(
     }
 }
 
-/// The resumed transcript and the old session's finalize failure.
+/// The resumed transcript, title, and prior archive state, plus the old session's finalize failure.
 #[derive(Debug)]
 pub(crate) struct RollIntoOutcome {
     pub(crate) transcript: LoadedTranscript,
     pub(crate) title: Option<String>,
-    pub(crate) unarchived: bool,
+    pub(crate) prior: ArchiveState,
     pub(crate) finalize_failure: Option<String>,
 }
 
@@ -443,7 +443,7 @@ pub(crate) async fn roll_into(
         handle: target_handle,
         transcript,
         title,
-        unarchived,
+        prior,
     } = resume_loaded(store, target, data)?;
 
     let old_session = std::mem::replace(session, target_handle);
@@ -451,7 +451,7 @@ pub(crate) async fn roll_into(
     Ok(RollIntoOutcome {
         transcript,
         title,
-        unarchived,
+        prior,
         finalize_failure,
     })
 }
@@ -512,7 +512,7 @@ fn resume_loaded(
             file_snapshots: data.file_snapshots,
         },
         title,
-        unarchived: data.archived,
+        prior: ArchiveState::of(data.archived),
     })
 }
 
@@ -1118,13 +1118,13 @@ mod tests {
             assert!(store.load_session_data(&session_id).unwrap().archived);
 
             let resumed = resume_id(&store, &session_id).unwrap();
-            assert!(resumed.unarchived);
+            assert_eq!(resumed.prior, ArchiveState::Archived);
             assert_eq!(resumed.transcript.messages, [Message::user("hello")]);
             resumed.handle.shutdown().await;
             assert!(!store.load_session_data(&session_id).unwrap().archived);
 
             let again = resume_id(&store, &session_id).unwrap();
-            assert!(!again.unarchived);
+            assert_eq!(again.prior, ArchiveState::Active);
             again.handle.shutdown().await;
             let archive_states: Vec<_> = saved_entries(dir.path(), &session_id)
                 .iter()
@@ -2260,7 +2260,7 @@ mod tests {
                     "archived": listed.archived,
                 },
                 "title": resumed.title,
-                "unarchived": resumed.unarchived,
+                "prior": resumed.prior,
                 "compact": transcript.compact.as_ref().map(|compact| serde_json::json!({
                     "summary": compact.summary,
                     "pre_message_count": compact.pre_message_count,

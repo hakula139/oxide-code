@@ -222,6 +222,7 @@ expression: recovered
       "role": "assistant"
     }
   ],
+  "prior": "archived",
   "tasks": [
     {
       "content": "Rename main",
@@ -264,7 +265,6 @@ expression: recovered
       "truncated_total": 250
     }
   },
-  "unarchived": true,
   "usage": [
     {
       "cache_creation_input_tokens": 10,

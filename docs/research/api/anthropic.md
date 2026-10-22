@@ -214,7 +214,7 @@ Some capabilities live in the request body alongside the `anthropic-beta` header
 
 ### `output_config.effort`
 
-Controls the intelligence-vs-latency tier of agentic turns via one of five tokens: `low`, `medium`, `high`, `xhigh`, `max`.
+Controls the intelligence-vs-latency level of agentic turns via one of five tokens: `low`, `medium`, `high`, `xhigh`, `max`.
 
 ```json
 {

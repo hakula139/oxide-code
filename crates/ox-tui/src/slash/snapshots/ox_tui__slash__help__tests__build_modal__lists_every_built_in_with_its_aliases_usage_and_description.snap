@@ -6,7 +6,7 @@ expression: "render_rows(&modal, 100, modal.height(100, u16::MAX))"
     "Help                                                                                                ",
     "                                                                                                    ",
     "/archive [<id-prefix>]            Archive this session or a saved one                               ",
-    "/clear (new, reset)               Reset the conversation context                                    ",
+    "/clear (new, reset)               Start a new session (this one stays resumable)                    ",
     "/compact [<instructions>]         Compress conversation context into a summary                      ",
     "/config                           Show resolved config                                              ",
     "/delete <id-prefix>               Delete a saved session                                            ",

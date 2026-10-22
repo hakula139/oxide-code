@@ -623,7 +623,7 @@ impl TurnEnd {
                 Event::TurnFailed(_),
             )
             | (Op::Rename { .. }, Event::RenameFailed(_))
-            // The model has no tier for the effort, so the pick changed nothing.
+            // The model has no level for the effort, so the pick changed nothing.
             | (Op::SetModel(ConfigPick::Effort(_)), Event::ConfigChanged { effort: None, .. }) => {
                 Some(Self::Failed)
             }
@@ -701,6 +701,7 @@ mod tests {
     use crate::permission::rule::Rule;
     use crate::protocol::testing::CapturingSink;
     use crate::protocol::{CompactTrigger, ResumeTarget, UsageSnapshot};
+    use crate::session::entry::ArchiveState;
     use crate::session::handle;
     use crate::session::post_compact::synthesize_post_compact_message;
     use crate::session::store::testing::test_store;
@@ -1153,9 +1154,7 @@ mod tests {
                 handle.shutdown().await.unwrap();
 
                 let titled = first.iter().find_map(|event| match event {
-                    Event::SessionTitleUpdated { session_id, title } => {
-                        Some((session_id.as_str(), title.as_str()))
-                    }
+                    Event::SessionTitleUpdated { id, title } => Some((id.as_str(), title.as_str())),
                     _ => None,
                 });
                 assert_eq!(titled, Some((live_id.as_str(), "Greeting")));
@@ -1512,25 +1511,26 @@ mod tests {
 
                 submit(&mut handle, "first").await;
                 handle.ops.send(Op::Archive).await.unwrap();
-                let (fresh_id, archived) = next_matching(&mut handle.events, |event| match event {
-                    Event::SessionRolled { id, archived } => Some((id, archived)),
-                    _ => None,
-                })
-                .await;
+                let (fresh_id, old_session) =
+                    next_matching(&mut handle.events, |event| match event {
+                        Event::SessionRolled { id, old_session } => Some((id, old_session)),
+                        _ => None,
+                    })
+                    .await;
                 assert_ne!(fresh_id, archived_id);
-                assert!(archived);
+                assert_eq!(old_session, ArchiveState::Archived);
                 assert!(store.load_session_data(&archived_id).unwrap().archived);
 
                 let target = ResumeTarget::Path(store.find_session_path(&archived_id).unwrap());
                 handle.ops.send(Op::Resume { target }).await.unwrap();
                 let resumed = next_matching(&mut handle.events, |event| match event {
-                    Event::SessionResumed { id, unarchived, .. } => Some((id, unarchived)),
+                    Event::SessionResumed { id, prior, .. } => Some((id, prior)),
                     _ => None,
                 })
                 .await;
                 handle.shutdown().await.unwrap();
 
-                assert_eq!(resumed, (archived_id.clone(), true));
+                assert_eq!(resumed, (archived_id.clone(), ArchiveState::Archived));
                 assert!(!store.load_session_data(&archived_id).unwrap().archived);
             })
             .await;
@@ -1573,13 +1573,13 @@ mod tests {
                     matches!(
                         seen.as_slice(),
                         [
-                            Event::SessionTitleUpdated { session_id, title },
+                            Event::SessionTitleUpdated { id, title },
                             Event::ConfigChanged {
                                 requested: ConfigPick::Effort(Effort::Low),
                                 ..
                             },
                             Event::ModeChanged(Mode::Plan),
-                        ] if *session_id == live_id && title == "Fix login"
+                        ] if *id == live_id && title == "Fix login"
                     ),
                     "{seen:?}"
                 );
@@ -2838,7 +2838,7 @@ mod tests {
                     notices,
                     [
                         "Switched to custom-model (custom-model). \
-                         Effort cleared (model has no effort tier). \
+                         Effort cleared (model has no effort levels). \
                          Auto compaction off."
                             .to_owned(),
                         format!(
@@ -3100,7 +3100,7 @@ mod tests {
                 };
                 let rolled = Event::SessionRolled {
                     id: "new".to_owned(),
-                    archived: false,
+                    old_session: ArchiveState::Active,
                 };
                 let notice = Event::Error("Session write failed".to_owned());
                 let failed = Event::TurnFailed("failure".to_owned());
@@ -3120,7 +3120,7 @@ mod tests {
                         Event::SessionResumed {
                             id: "1a2b".to_owned(),
                             title: None,
-                            unarchived: false,
+                            prior: ArchiveState::Active,
                             history: Vec::new(),
                         },
                         None,
@@ -3133,7 +3133,7 @@ mod tests {
                     (
                         &rename,
                         Event::SessionTitleUpdated {
-                            session_id: "live".to_owned(),
+                            id: "live".to_owned(),
                             title: "Fix login".to_owned(),
                         },
                         Some(TurnEnd::Completed),

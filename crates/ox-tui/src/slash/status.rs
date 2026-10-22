@@ -42,6 +42,10 @@ fn build_modal(info: &LiveSessionInfo) -> KvOverview {
     let rows = vec![
         ("Model".to_owned(), model),
         ("Effort".to_owned(), display_effort(info.config.effort)),
+        (
+            "Permission Mode".to_owned(),
+            info.config.permission_mode.to_string(),
+        ),
         ("Working Directory".to_owned(), info.cwd.clone()),
         ("Session".to_owned(), info.session_id.clone()),
         ("Auth".to_owned(), display_auth(info.config.auth)),

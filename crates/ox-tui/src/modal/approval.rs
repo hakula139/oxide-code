@@ -13,7 +13,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 
 use ox_core::permission::SessionGrant;
-use ox_core::protocol::{Decision, Op};
+use ox_core::protocol::{ApprovalDecision, Op};
 use ox_core::tool::view::{ApprovalBody, ApprovalPreview, DiffChunk};
 use ox_core::util::text::{is_hidden, truncate_to_width};
 
@@ -109,7 +109,7 @@ enum Purpose {
 enum EditStep {
     Stay,
     Back,
-    Submit(Decision),
+    Submit(ApprovalDecision),
 }
 
 impl Edit {
@@ -122,7 +122,7 @@ impl Edit {
                 let text = self.editor.text().trim();
                 match &self.purpose {
                     Purpose::Rule(offer) => match offer.accept(text) {
-                        Ok(rule) => EditStep::Submit(Decision::AllowForSession {
+                        Ok(rule) => EditStep::Submit(ApprovalDecision::AllowForSession {
                             rule: Box::new(rule),
                         }),
                         Err(e) => {
@@ -131,7 +131,7 @@ impl Edit {
                         }
                     },
                     Purpose::Feedback if text.is_empty() => EditStep::Stay,
-                    Purpose::Feedback => EditStep::Submit(Decision::DenyWithFeedback {
+                    Purpose::Feedback => EditStep::Submit(ApprovalDecision::DenyWithFeedback {
                         feedback: text.to_owned(),
                     }),
                 }
@@ -205,7 +205,7 @@ impl ApprovalModal {
         self.guard_until = now();
     }
 
-    fn decision(&self, decision: Decision) -> ModalAction {
+    fn decision(&self, decision: ApprovalDecision) -> ModalAction {
         ModalAction::Dispatch(Action::Op(Op::Resolve {
             id: self.id.clone(),
             decision,
@@ -437,7 +437,7 @@ impl Modal for ApprovalModal {
         // Esc and Ctrl+C are intercepted at the stack level and resolve through `on_cancel`.
         match event.code {
             KeyCode::Char('y' | 'Y') if self.body_visible() => {
-                ModalKey::Submitted(self.decision(Decision::Approve))
+                ModalKey::Submitted(self.decision(ApprovalDecision::Approve))
             }
             KeyCode::Char('a' | 'A') if self.body_visible() => match self.grant.take() {
                 Some(offer) => {
@@ -446,7 +446,7 @@ impl Modal for ApprovalModal {
                 }
                 None => ModalKey::Consumed,
             },
-            KeyCode::Char('n' | 'N') => ModalKey::Submitted(self.decision(Decision::Deny)),
+            KeyCode::Char('n' | 'N') => ModalKey::Submitted(self.decision(ApprovalDecision::Deny)),
             KeyCode::Char('f' | 'F') => self.start_edit(Purpose::Feedback, ""),
             KeyCode::Home => self.scroll_by(isize::MIN),
             KeyCode::End => self.scroll_by(isize::MAX),
@@ -463,7 +463,7 @@ impl Modal for ApprovalModal {
     }
 
     fn on_cancel(&mut self) -> Option<ModalAction> {
-        Some(self.decision(Decision::Abort))
+        Some(self.decision(ApprovalDecision::Abort))
     }
 
     fn captures_esc(&self) -> bool {
@@ -809,7 +809,7 @@ mod tests {
                     title: "Bash".to_owned(),
                     body: ApprovalBody::Command("git push".to_owned()),
                 },
-                Some("Held by the `ask.exec` pattern `git push *`".to_owned()),
+                Some("Asks because of the `ask.exec` pattern `git push *`".to_owned()),
                 None,
             );
 
@@ -817,8 +817,8 @@ mod tests {
 
             let expected = indoc! {"
                 Bash
-                Held by the `ask.exec` pattern
-                  `git push *`
+                Asks because of the `ask.exec`
+                  pattern `git push *`
 
                 git push
 
@@ -1023,7 +1023,7 @@ mod tests {
                     matches!(
                         outcome,
                         Some(ModalAction::Dispatch(Action::Op(Op::Resolve {
-                            decision: Decision::Abort,
+                            decision: ApprovalDecision::Abort,
                             ..
                         })))
                     ),
@@ -1165,7 +1165,7 @@ mod tests {
                 matches!(
                     outcome,
                     Some(ModalAction::Dispatch(Action::Op(Op::Resolve {
-                        decision: Decision::Approve,
+                        decision: ApprovalDecision::Approve,
                         ..
                     })))
                 ),
@@ -1186,7 +1186,7 @@ mod tests {
                     panic!("{code:?} must Submit an Approve decision, got {outcome:?}");
                 };
                 assert_eq!(id, "call-1");
-                assert_eq!(decision, Decision::Approve);
+                assert_eq!(decision, ApprovalDecision::Approve);
             }
         }
 
@@ -1211,7 +1211,7 @@ mod tests {
                 matches!(
                     approved,
                     Some(ModalAction::Dispatch(Action::Op(Op::Resolve {
-                        decision: Decision::Approve,
+                        decision: ApprovalDecision::Approve,
                         ..
                     })))
                 ),
@@ -1278,7 +1278,7 @@ mod tests {
                 panic!("Enter must submit the session rule, got {outcome:?}");
             };
             assert_eq!(id, "call-1");
-            let Decision::AllowForSession { rule } = decision else {
+            let ApprovalDecision::AllowForSession { rule } = decision else {
                 panic!("expected AllowForSession, got {decision:?}");
             };
             assert_eq!(
@@ -1312,7 +1312,7 @@ mod tests {
                 panic!("N must submit a Deny decision, got {outcome:?}");
             };
             assert_eq!(id, "call-1");
-            assert_eq!(decision, Decision::Deny);
+            assert_eq!(decision, ApprovalDecision::Deny);
         }
 
         #[test]
@@ -1343,7 +1343,7 @@ mod tests {
             assert_eq!(id, "call-1");
             assert_eq!(
                 decision,
-                Decision::DenyWithFeedback {
+                ApprovalDecision::DenyWithFeedback {
                     feedback: "try nextest".to_owned()
                 }
             );
@@ -1372,7 +1372,7 @@ mod tests {
                 panic!("on_cancel must resolve via Op::Resolve, got {action:?}");
             };
             assert_eq!(id, "call-1");
-            assert_eq!(decision, Decision::Abort);
+            assert_eq!(decision, ApprovalDecision::Abort);
         }
     }
 

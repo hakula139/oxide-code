@@ -216,7 +216,8 @@ pub struct SessionInfo {
 }
 
 /// Whether a session is archived, which keeps it out of the default listings.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum ArchiveState {
     #[default]
     Active,
@@ -224,6 +225,15 @@ pub enum ArchiveState {
 }
 
 impl ArchiveState {
+    #[must_use]
+    pub const fn of(archived: bool) -> Self {
+        if archived {
+            Self::Archived
+        } else {
+            Self::Active
+        }
+    }
+
     #[must_use]
     pub fn toggled(self) -> Self {
         match self {
@@ -240,11 +250,7 @@ impl SessionInfo {
     }
 
     pub fn archive_state(&self) -> ArchiveState {
-        if self.archived {
-            ArchiveState::Archived
-        } else {
-            ArchiveState::Active
-        }
+        ArchiveState::of(self.archived)
     }
 }
 
