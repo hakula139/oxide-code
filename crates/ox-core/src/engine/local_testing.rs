@@ -1,27 +1,28 @@
-//! Test fixtures for this crate's engine, turn, dispatch, and compaction tests. They script turns
-//! and seed transcripts large enough to compact.
+//! Test fixtures that this crate's engine test modules share. They drive turns through an engine
+//! handle, build dispatch contexts and dead sessions, and seed transcripts large enough to compact.
 
-use std::collections::VecDeque;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::pin::Pin;
-use std::sync::{Arc, LazyLock, Mutex as StdMutex};
+use std::sync::Arc;
 
-use anyhow::{Result, anyhow};
 use serde_json::json;
 use tokio::sync::mpsc;
+use wiremock::matchers::{body_partial_json, method, path};
+use wiremock::{Mock, MockServer, ResponseTemplate};
 
+use super::abort::TurnAbort;
 use super::dispatch::DispatchContext;
 use super::testing::MODEL;
-use crate::client::{Response, ResponseEvent, StopDetails, StopReason, Wire};
+use super::{Engine, EngineHandle, TurnEnd};
+use crate::client::anthropic::local_testing::completion_body;
 use crate::file_tracker::FileTracker;
 use crate::message::{ContentBlock, Message, Replay, Role};
 use crate::permission::rule::Rule;
 use crate::permission::{Mode, PermissionClass, Policy, Workspace};
-use crate::prompt::{PromptParts, SystemPrompt};
-use crate::protocol::Op;
+use crate::protocol::{Event, Op};
 use crate::session::handle::{self, SessionHandle};
-use crate::session::store::testing::test_store;
-use crate::tool::{Prepared, Tool, ToolCtx, ToolDefinition, ToolOutput, ToolSpec};
+use crate::session::store::SessionStore;
+use crate::tool::{Prepared, Tool, ToolCtx, ToolOutput, ToolSpec};
 
 // ── Engine ──
 
@@ -40,67 +41,122 @@ pub(super) fn system_prompt(request: &serde_json::Value) -> Vec<&serde_json::Val
         .collect()
 }
 
+pub(super) const TITLE_MODEL: &str = "claude-haiku-5-5";
+
+/// Next event the engine emits that `pick` accepts, skipping the rest.
+pub(super) async fn next_matching<T>(
+    events: &mut mpsc::UnboundedReceiver<Event>,
+    mut pick: impl FnMut(Event) -> Option<T>,
+) -> T {
+    loop {
+        let event = events.recv().await.expect("the engine stopped early");
+        if let Some(found) = pick(event) {
+            return found;
+        }
+    }
+}
+
+/// Events up to and including the terminal event of the prompt in flight.
+pub(super) async fn turn_events(events: &mut mpsc::UnboundedReceiver<Event>) -> Vec<Event> {
+    let prompt = Op::Prompt(String::new());
+    let mut seen = Vec::new();
+    loop {
+        let event = events.recv().await.expect("the engine stopped early");
+        let ended = TurnEnd::of(&prompt, &event).is_some();
+        seen.push(event);
+        if ended {
+            return seen;
+        }
+    }
+}
+
+/// Answers each title request with `response`. Mount it before the reply that answers turns.
+pub(super) async fn mount_title(server: &MockServer, response: ResponseTemplate) {
+    Mock::given(method("POST"))
+        .and(path("/v1/messages"))
+        .and(body_partial_json(
+            serde_json::json!({ "model": TITLE_MODEL }),
+        ))
+        .respond_with(response)
+        .mount(server)
+        .await;
+}
+
+/// A title reply naming the session `Greeting`, billed at [`COMPLETION_USAGE`].
+///
+/// [`COMPLETION_USAGE`]: crate::client::anthropic::local_testing::COMPLETION_USAGE
+pub(super) fn greeting_title() -> ResponseTemplate {
+    ResponseTemplate::new(200).set_body_string(completion_body(r#"{"title":"Greeting"}"#))
+}
+
+pub(super) async fn submit(handle: &mut EngineHandle, text: &str) -> Vec<Event> {
+    handle.ops.send(Op::Prompt(text.to_owned())).await.unwrap();
+    turn_events(&mut handle.events).await
+}
+
+/// The first text block of each message in `request`, empty for a message that opens with
+/// another block.
+pub(super) fn texts(request: &serde_json::Value) -> Vec<&str> {
+    request["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|message| message["content"][0]["text"].as_str().unwrap_or_default())
+        .collect()
+}
+
+/// The URL `/login` announced, once the engine emits it.
+pub(super) async fn login_url(events: &mut mpsc::UnboundedReceiver<Event>) -> String {
+    next_matching(events, |event| match event {
+        Event::LoginStarted { url } => Some(url),
+        _ => None,
+    })
+    .await
+}
+
+/// Writes a `CLAUDE.md` that is not UTF-8 into `dir`, returning the warning its load raises.
+pub(super) fn write_unreadable_instructions(dir: &Path) -> String {
+    let path = dir.join("CLAUDE.md");
+    std::fs::write(&path, b"\xff\xfe").unwrap();
+    let cause = std::fs::read_to_string(&path).unwrap_err();
+    format!("Skipped instruction file {}: {cause}", path.display())
+}
+
+/// Paths the engine's file tracker holds, sorted.
+pub(super) fn tracked_paths(engine: &Engine) -> Vec<PathBuf> {
+    let mut paths: Vec<_> = engine
+        .file_tracker
+        .snapshot_all()
+        .into_iter()
+        .map(|snapshot| snapshot.path)
+        .collect();
+    paths.sort();
+    paths
+}
+
+/// Records one exchange in a new session in `store` and finishes it, returning its ID.
+pub(super) async fn finished_session(store: &SessionStore) -> String {
+    let session = handle::start(store, MODEL, None);
+    let id = session.session_id().to_owned();
+    session
+        .record_message(Message::user("earlier prompt"))
+        .await;
+    session
+        .record_message(Message::assistant("earlier reply"))
+        .await;
+    session.finish(Vec::new()).await;
+    id
+}
+
 // ── Turn ──
 
-/// In-process fake that scripts a [`ResponseEvent`] stream per turn and records every request. A
-/// request past the last scripted turn panics.
-pub(super) struct FakeClient {
-    turns: StdMutex<VecDeque<Vec<Result<ResponseEvent>>>>,
-    requests: StdMutex<Vec<Vec<Message>>>,
-}
-
-impl FakeClient {
-    pub(super) fn new(turns: Vec<Vec<ResponseEvent>>) -> Self {
-        let turns = turns
-            .into_iter()
-            .map(|events| events.into_iter().map(Ok).collect())
-            .collect();
-        Self {
-            turns: StdMutex::new(turns),
-            requests: StdMutex::default(),
+impl TurnAbort {
+    /// The error a `Failed` abort holds. Panics on any other abort.
+    pub(super) fn into_failure(self) -> anyhow::Error {
+        match self {
+            Self::Failed(e) => e,
+            other => panic!("expected a failure: {other:?}"),
         }
-    }
-
-    /// Appends a turn whose stream fails with `error`.
-    pub(super) fn then_fail(self, error: &str) -> Self {
-        self.turns
-            .lock()
-            .unwrap()
-            .push_back(vec![Err(anyhow!("{error}"))]);
-        self
-    }
-
-    pub(super) fn requests(&self) -> Vec<Vec<Message>> {
-        self.requests.lock().unwrap().clone()
-    }
-}
-
-impl Wire for FakeClient {
-    fn stream_message(
-        &self,
-        messages: &[Message],
-        _system: &SystemPrompt,
-        _user_context: Option<&str>,
-        _tools: &[ToolDefinition],
-    ) -> Result<mpsc::Receiver<Result<ResponseEvent>>> {
-        self.requests.lock().unwrap().push(messages.to_vec());
-        let events = self
-            .turns
-            .lock()
-            .unwrap()
-            .pop_front()
-            .expect("every request has a scripted turn");
-        let (tx, rx) = mpsc::channel(events.len().max(1));
-        for event in events {
-            tx.try_send(event).expect("channel capacity");
-        }
-        Ok(rx)
-    }
-}
-
-pub(super) fn text_block(text: &str) -> ContentBlock {
-    ContentBlock::Text {
-        text: text.to_owned(),
     }
 }
 
@@ -109,49 +165,6 @@ pub(super) fn thinking_block(thinking: &str) -> ContentBlock {
         thinking: thinking.to_owned(),
         replay: Replay::with_model(MODEL, "sig"),
     }
-}
-
-/// One reply completing with `content`, streaming its text and thinking first.
-pub(super) fn reply_turn(content: Vec<ContentBlock>) -> Vec<ResponseEvent> {
-    let mut events: Vec<ResponseEvent> = content
-        .iter()
-        .filter_map(|block| match block {
-            ContentBlock::Text { text } => Some(ResponseEvent::Text(text.clone())),
-            ContentBlock::Thinking { thinking, .. } => {
-                Some(ResponseEvent::Thinking(thinking.clone()))
-            }
-            _ => None,
-        })
-        .collect();
-    events.push(ResponseEvent::Completed(Response {
-        content,
-        ..Response::default()
-    }));
-    events
-}
-
-pub(super) fn text_turn(text: &str) -> Vec<ResponseEvent> {
-    reply_turn(vec![text_block(text)])
-}
-
-/// The turn's completed reply.
-pub(super) fn reply_of(events: &mut [ResponseEvent]) -> &mut Response {
-    match events.last_mut() {
-        Some(ResponseEvent::Completed(response)) => response,
-        last => panic!("the turn ends in its reply: {last:?}"),
-    }
-}
-
-/// Ends the turn's reply on `stop_reason`.
-pub(super) fn with_stop(
-    mut events: Vec<ResponseEvent>,
-    stop_reason: StopReason,
-    stop_details: Option<StopDetails>,
-) -> Vec<ResponseEvent> {
-    let reply = reply_of(&mut events);
-    reply.stop_reason = Some(stop_reason);
-    reply.stop_details = stop_details;
-    events
 }
 
 /// Echoes its input.
@@ -186,11 +199,6 @@ pub(super) fn inert_ops() -> mpsc::Receiver<Op> {
     rx
 }
 
-pub(super) fn empty_prompt() -> &'static PromptParts {
-    static PROMPT: LazyLock<PromptParts> = LazyLock::new(PromptParts::default);
-    &PROMPT
-}
-
 /// Dispatch context in `cwd` over `exec` deny / allow patterns and the shipped defaults, leaking
 /// the policy so the context can borrow it for `'static`. `echo` is an `exec`-class tool that
 /// accesses nothing, so only `*` matches it.
@@ -218,11 +226,6 @@ pub(super) fn dispatch_with(
         artifact_dir: Arc::from(cwd.join("session")),
         tracker: Arc::new(FileTracker::default()),
     }
-}
-
-pub(super) fn test_session(dir: &Path) -> SessionHandle {
-    let store = test_store(dir);
-    handle::start(&store, "claude-sonnet-5-5", None)
 }
 
 /// Handle whose actor channel is closed. Every write returns actor-gone.

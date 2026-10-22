@@ -239,9 +239,10 @@ The stdio sink escapes control characters other than tabs and line breaks in mod
 - `crates/ox-core/src/config/load.rs`: `reject_project_keys` and the project allowlists.
 - `crates/ox-core/src/config/merge.rs`: `APPENDED_TABLES` and `APPENDED` lists, `merge`.
 - `crates/ox-core/src/config/schema.rs`: `PermissionTable`, `TierTable`, the `defaults` map.
-- `crates/ox-core/src/engine.rs`: the live policy, whose session grants reset when the session changes, `Engine::set_mode`, and `Engine::adopt_mode`.
+- `crates/ox-core/src/engine.rs`: the live policy, `Engine::set_mode`, and `Engine::adopt_mode`.
 - `crates/ox-core/src/engine/abort.rs`: `await_unless_aborted`, which races an allowed call against cancel and quit, and the `Inbox` whose `absorb` keeps queued prompts and mode switches.
 - `crates/ox-core/src/engine/dispatch.rs`: `run_tool_round` (parallel-safe batches), `Dispatcher::gate` (prepare, then decide), `check_permission` (take a waiting mode switch, then log the verdict), `allow_for_session` (admit against the call's grant), `await_approval`, `denied_output`.
+- `crates/ox-core/src/engine/sessions.rs`: `adopt_session`, which resets the session grants when the session changes.
 - `crates/ox-core/src/permission.rs`: `Mode`, `PermissionClass`, `Workspace`, `Access::for_path`, `Access::for_command`, `Verdict`, `Basis`, `Policy::verdict`, `Policy::session_grant`, `SessionGrant`, `ReadFilter`.
 - `crates/ox-core/src/permission/defaults.rs`: the shipped defaults, `ShippedTier`, protected names and home locations, and `[permission.defaults]` names.
 - `crates/ox-core/src/permission/rule.rs`: `Rule`, the exec, path, net, and MCP patterns, `MatchDiscipline`, and `Rule::for_call`.

@@ -38,12 +38,12 @@ impl SlashCommand for DeleteCmd {
         SlashKind::Mutating
     }
 
-    fn echoes_input(&self, args: &str) -> bool {
-        !args.is_empty()
-    }
-
     fn usage(&self) -> Option<&'static str> {
         Some("<id-prefix>")
+    }
+
+    fn echoes_input(&self, args: &str) -> bool {
+        !args.is_empty()
     }
 
     fn execute(&self, arg: &str, ctx: &SlashContext<'_>) -> Result<SlashOutcome, String> {
@@ -102,15 +102,8 @@ mod tests {
     use super::*;
     use crate::modal::Modal;
     use crate::modal::testing::render_rows;
-    use crate::slash::registry::SlashCommand;
+    use crate::slash::registry::testing::run_execute;
     use crate::slash::testing::test_session_info;
-
-    #[test]
-    fn name_and_metadata_match_built_ins_contract() {
-        assert_eq!(DeleteCmd.name(), "delete");
-        assert_ne!(DeleteCmd.description(), "");
-        assert_eq!(DeleteCmd.usage(), Some("<id-prefix>"));
-    }
 
     mod classify {
         use super::*;
@@ -145,10 +138,7 @@ mod tests {
 
         #[test]
         fn bare_points_to_the_picker_and_typed_form() {
-            let info = test_session_info();
-            let err = DeleteCmd
-                .execute("", &SlashContext::new(&info, None))
-                .unwrap_err();
+            let err = run_execute(&DeleteCmd, "").unwrap_err();
             assert_eq!(
                 err,
                 "Missing session ID. \
@@ -159,9 +149,7 @@ mod tests {
         #[test]
         fn unknown_prefix_reports_no_match() {
             with_isolated_xdg(|_| {
-                let info = test_session_info();
-                let ctx = SlashContext::new(&info, None);
-                let err = DeleteCmd.execute("zzz1234", &ctx).unwrap_err();
+                let err = run_execute(&DeleteCmd, "zzz1234").unwrap_err();
                 assert_eq!(err, "No session matching `zzz1234`");
             });
         }
@@ -178,11 +166,8 @@ mod tests {
                     Some(3),
                     datetime!(2026-04-18 09:00:00 UTC),
                 );
-                let info = test_session_info();
-                let ctx = SlashContext::new(&info, None);
 
-                let modal = DeleteCmd
-                    .execute(&target_id[..4], &ctx)
+                let modal = run_execute(&DeleteCmd, &target_id[..4])
                     .unwrap()
                     .into_modal();
 
@@ -206,11 +191,8 @@ mod tests {
                     Some(1),
                     datetime!(2026-04-18 09:00:00 UTC),
                 );
-                let info = test_session_info();
-                let ctx = SlashContext::new(&info, None);
 
-                let modal = DeleteCmd
-                    .execute(&target_id[..4], &ctx)
+                let modal = run_execute(&DeleteCmd, &target_id[..4])
                     .unwrap()
                     .into_modal();
 
@@ -245,10 +227,8 @@ mod tests {
                     datetime!(2026-04-18 09:00:05 UTC),
                 );
                 let bystander = store.find_session_path(&header_id).unwrap();
-                let info = test_session_info();
-                let ctx = SlashContext::new(&info, None);
 
-                let mut modal = DeleteCmd.execute("renamed", &ctx).unwrap().into_modal();
+                let mut modal = run_execute(&DeleteCmd, "renamed").unwrap().into_modal();
                 modal.handle_key(&crossterm::event::KeyEvent::from(
                     crossterm::event::KeyCode::Char('y'),
                 ));
@@ -262,7 +242,7 @@ mod tests {
         }
 
         #[test]
-        fn with_live_id_prefix_returns_distinct_live_session_error() {
+        fn with_live_id_prefix_explains_the_live_session() {
             // The resolver drops the live ID from its matches, so a prefix that matches only the
             // live session gets its own explanation.
             with_isolated_xdg(|_| {
@@ -275,10 +255,8 @@ mod tests {
                     Some(1),
                     datetime!(2026-04-18 09:00:00 UTC),
                 );
-                let info = test_session_info();
-                let ctx = SlashContext::new(&info, None);
 
-                let err = DeleteCmd.execute(live_id, &ctx).unwrap_err();
+                let err = run_execute(&DeleteCmd, live_id).unwrap_err();
                 assert_eq!(
                     err,
                     "Session prefix `test-session` matches the live session. \
@@ -288,7 +266,7 @@ mod tests {
         }
 
         #[test]
-        fn with_live_id_prefix_returns_other_match_when_one_exists() {
+        fn with_live_id_prefix_targets_the_other_match() {
             with_isolated_xdg(|_| {
                 let store = open_store(&test_session_info()).unwrap();
                 let live_id = "test-session";
@@ -307,10 +285,8 @@ mod tests {
                     Some(1),
                     datetime!(2026-04-18 09:01:00 UTC),
                 );
-                let info = test_session_info();
-                let ctx = SlashContext::new(&info, None);
 
-                let modal = DeleteCmd.execute("test-", &ctx).unwrap().into_modal();
+                let modal = run_execute(&DeleteCmd, "test-").unwrap().into_modal();
 
                 let [title, metadata] = target_rows(&*modal);
                 assert_eq!(title, "Other");
@@ -332,10 +308,8 @@ mod tests {
                             + time::Duration::seconds(i64::from(byte)),
                     );
                 }
-                let info = test_session_info();
-                let ctx = SlashContext::new(&info, None);
 
-                let err = DeleteCmd.execute("aaaa", &ctx).unwrap_err();
+                let err = run_execute(&DeleteCmd, "aaaa").unwrap_err();
                 assert_eq!(
                     err,
                     "Ambiguous prefix `aaaa` matches 6 sessions: \

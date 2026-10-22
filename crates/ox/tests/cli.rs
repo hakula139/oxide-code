@@ -24,6 +24,9 @@ fn ox(root: &Path) -> Command {
     // On Linux, building the HTTP client reads the system trust store and fails when it holds no
     // certificates, so the tests pin it to a test CA.
     ox.env("SSL_CERT_FILE", TEST_CA_PATH);
+    // Tokio's `output` inherits an unset stdin where std's closes it, and `--print` reads a
+    // non-terminal stdin to its end, so a parent stdin that never closes would hang the run.
+    ox.stdin(Stdio::null());
     ox
 }
 
@@ -99,7 +102,6 @@ async fn headless_reports_startup_notices_and_retries_once_as_plain_text() {
             .env("ANTHROPIC_API_KEY", "test-key")
             .env("ANTHROPIC_BASE_URL", server.uri())
             .env("ANTHROPIC_MODEL", "claude-nonexistent-9")
-            .stdin(Stdio::null())
             .output()
             .await
             .unwrap();
@@ -187,7 +189,6 @@ fn resume_in_the_repl_unarchives_the_session_with_a_note() {
         .current_dir(dir.path())
         .env("ANTHROPIC_AUTH_TOKEN", "test-token")
         .env("ANTHROPIC_BASE_URL", "http://127.0.0.1:9")
-        .stdin(Stdio::null())
         .output()
         .unwrap();
 
@@ -213,7 +214,6 @@ fn resume_with_an_unmatched_prefix_fails() {
         .current_dir(dir.path())
         .env("ANTHROPIC_AUTH_TOKEN", "test-token")
         .env("ANTHROPIC_BASE_URL", "http://127.0.0.1:9")
-        .stdin(Stdio::null())
         .output()
         .unwrap();
 
@@ -282,7 +282,6 @@ async fn headless_rejected_request_preserves_branch_and_user_message() {
         .env_remove("GIT_DIR")
         .env_remove("GIT_WORK_TREE")
         .env_remove("GIT_INDEX_FILE")
-        .stdin(Stdio::null())
         .output()
         .await
         .unwrap();
@@ -327,7 +326,7 @@ async fn headless_attaches_piped_stdin_and_continues_its_session() {
     let server = MockServer::start().await;
     mount_reply(&server, "Done.").await;
     let dir = tempfile::tempdir().unwrap();
-    let run = |args: &[&str], stdin: Stdio| {
+    let run = |args: &[&str]| {
         let mut command = tokio::process::Command::from(ox(dir.path()));
         command
             .args(args)
@@ -335,7 +334,6 @@ async fn headless_attaches_piped_stdin_and_continues_its_session() {
             .current_dir(dir.path())
             .env("ANTHROPIC_API_KEY", "test-key")
             .env("ANTHROPIC_BASE_URL", server.uri())
-            .stdin(stdin)
             .stdout(Stdio::piped());
         command
     };
@@ -344,7 +342,8 @@ async fn headless_attaches_piped_stdin_and_continues_its_session() {
         result["data"]["session_id"].as_str().unwrap().to_owned()
     };
 
-    let mut first = run(&["-p", "Review this diff"], Stdio::piped())
+    let mut first = run(&["-p", "Review this diff"])
+        .stdin(Stdio::piped())
         .spawn()
         .unwrap();
     let mut stdin = first.stdin.take().unwrap();
@@ -353,10 +352,7 @@ async fn headless_attaches_piped_stdin_and_continues_its_session() {
         .unwrap();
     drop(stdin);
     let first = first.wait_with_output().await.unwrap();
-    let next = run(&["-c", "-p", "Next step"], Stdio::null())
-        .output()
-        .await
-        .unwrap();
+    let next = run(&["-c", "-p", "Next step"]).output().await.unwrap();
 
     assert!(first.status.success(), "{first:?}");
     assert!(next.status.success(), "{next:?}");
@@ -395,8 +391,7 @@ async fn headless_continue_reports_files_changed_since_the_session_read_them() {
             .args(prompt)
             .current_dir(dir.path())
             .env("ANTHROPIC_API_KEY", "test-key")
-            .env("ANTHROPIC_BASE_URL", server.uri())
-            .stdin(Stdio::null());
+            .env("ANTHROPIC_BASE_URL", server.uri());
         command
     };
     let first = run(&["-p", "Read the notes"]).output().await.unwrap();
@@ -461,7 +456,6 @@ async fn headless_mode_flag_overrides_the_configured_mode() {
         .env("ANTHROPIC_AUTH_TOKEN", "test-token")
         .env("ANTHROPIC_BASE_URL", server.uri())
         .env_remove("OX_PERMISSION_MODE")
-        .stdin(Stdio::null())
         .output()
         .await
         .unwrap();

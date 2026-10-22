@@ -265,7 +265,7 @@ mod tests {
 
     use ox_core::config::StatusLineSegment;
     use ox_core::permission::{Basis, Mode};
-    use ox_core::protocol::{Decision, Event, Op, ToolCall, ToolResult};
+    use ox_core::protocol::{CompactTrigger, Decision, Event, Op, ToolCall, ToolResult};
     use ox_core::tool::tasks::testing::plan;
     use ox_core::tool::view::{ApprovalBody, ApprovalPreview, ToolResultView};
     use ox_core::util::git::PullRequest;
@@ -564,7 +564,7 @@ mod tests {
                 summary: COMPACT_SUMMARY.trim().to_owned(),
                 pre_count: 3,
                 instructions: None,
-                automatic: false,
+                trigger: CompactTrigger::Manual,
             });
             app.handle_engine_event(Event::SessionReady);
             insta::assert_snapshot!(render_app(&mut app, 60, 16));

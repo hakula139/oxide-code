@@ -146,22 +146,12 @@ mod tests {
         Action::Op(Op::Prompt(init::create_prompt(root, file)))
     }
 
-    /// The action `key` submits, or `None` when it leaves the picker open.
-    fn submitted(key: ModalKey) -> Option<Action> {
-        match key {
+    /// The action pressing `code` submits, or `None` when it leaves the picker open.
+    fn press(picker: &mut dyn Modal, code: KeyCode) -> Option<Action> {
+        match picker.handle_key(&KeyEvent::from(code)) {
             ModalKey::Submitted(ModalAction::Dispatch(action)) => Some(action),
             _ => None,
         }
-    }
-
-    fn press(picker: &mut dyn Modal, code: KeyCode) -> Option<Action> {
-        submitted(picker.handle_key(&KeyEvent::from(code)))
-    }
-
-    #[test]
-    fn metadata_matches_built_ins_contract() {
-        assert_eq!(InitCmd.name(), "init");
-        assert_eq!(InitCmd.usage(), Some("[<file>]"));
     }
 
     mod classify {

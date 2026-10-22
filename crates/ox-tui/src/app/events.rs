@@ -14,7 +14,7 @@ use ox_core::config::auth::AuthSource;
 use ox_core::config::compaction::AutoCompactionConfig;
 use ox_core::model::ModelSpec;
 use ox_core::permission::{Basis, Mode, SessionGrant};
-use ox_core::protocol::{Event, Interaction, Op, notice};
+use ox_core::protocol::{CompactTrigger, Event, Interaction, Op, notice};
 use ox_core::session::display::archive_notice;
 use ox_core::session::entry::ArchiveState;
 use ox_core::tool::view::ApprovalPreview;
@@ -85,13 +85,10 @@ impl App {
                 summary,
                 pre_count,
                 instructions,
-                automatic,
-            } => self.apply_session_compacted(
-                &summary,
-                pre_count,
-                instructions.as_deref(),
-                automatic,
-            ),
+                trigger,
+            } => {
+                self.apply_session_compacted(&summary, pre_count, instructions.as_deref(), trigger);
+            }
             Event::SessionReady => self.apply_session_ready(),
             Event::ConfigChanged {
                 model,
@@ -154,18 +151,21 @@ impl App {
 
     fn finish_turn(&mut self) {
         self.chat.commit_streaming();
-        // A cancel that lost the race to the turn's end, or a failed resume, still leaves the next
-        // step to the user.
-        if matches!(&self.status, Status::Cancelling | Status::Resuming) {
+        // A cancel that lost the race to the turn's end, or a failed resume or archive, still
+        // leaves the next step to the user.
+        if matches!(
+            &self.status,
+            Status::Cancelling | Status::Resuming | Status::Archiving
+        ) {
             self.enter_idle();
         } else {
             self.finalize_idle();
         }
     }
 
-    /// Ends a failed turn. A turn that never reached the model, or that the engine rolled back,
-    /// goes idle without starting the queue and hands its prompts back, one into the empty input
-    /// for another try.
+    /// Ends a failed operation. A turn that never reached the model, or that the engine rolled
+    /// back, goes idle without starting the queue and hands its prompts back, one into the empty
+    /// input for another try.
     fn apply_turn_failed(&mut self, msg: &str) {
         self.chat.push_error(msg);
         match self.queue.fail_turn(self.input.is_empty()) {
@@ -240,26 +240,28 @@ impl App {
         summary: &str,
         pre_count: u32,
         instructions: Option<&str>,
-        automatic: bool,
+        trigger: CompactTrigger,
     ) {
         self.chat.clear_history();
         self.status_bar.set_usage(None);
         self.chat
             .push_compacted_block(pre_count, instructions, summary.to_owned());
         self.queue.mark_sent();
-        if automatic && let Some(prompt) = self.queue.active() {
+        if trigger == CompactTrigger::Auto
+            && let Some(prompt) = self.queue.active()
+        {
             self.chat
                 .push_user_message(command::unescape_literal(prompt).to_owned());
         }
         self.clear_modals();
     }
 
-    /// Ends a `/compact` or `/resume` once the new transcript has reported its state. A cancel that
-    /// lost the race to the swap leaves the queue to the user, and a roll never leaves idle, so its
-    /// `SessionReady` changes nothing.
+    /// Ends a `/compact`, `/resume`, or `/archive` once the new transcript has reported its state.
+    /// A cancel that lost the race to the swap leaves the queue to the user, and `/clear` never
+    /// leaves idle, so its `SessionReady` changes nothing.
     fn apply_session_ready(&mut self) {
         match &self.status {
-            Status::Compacting | Status::Resuming => self.finalize_idle(),
+            Status::Compacting | Status::Resuming | Status::Archiving => self.finalize_idle(),
             Status::Cancelling => self.enter_idle(),
             _ => {}
         }
@@ -298,7 +300,7 @@ impl App {
                 {url}"
             },
             Err(e) => {
-                debug!("failed to open the browser: {e}");
+                debug!(error = %e, "failed to open the browser");
                 formatdoc! {"
                     Could not open the browser. Sign in at this URL in a browser on this machine:
                     {url}"
@@ -356,6 +358,7 @@ impl App {
             (None, None) => "No credential is active. Run `/login` to sign in.".to_owned(),
         };
         self.chat.push_system_message(format!("{outcome} {active}"));
+        self.finish_turn();
     }
 
     /// Goes idle, then submits the next queued prompt.
@@ -775,6 +778,26 @@ mod tests {
         }
 
         #[tokio::test]
+        async fn turn_failed_ends_an_archive_and_holds_the_prompts_queued_during_it() {
+            let (mut app, mut rx, _event_tx) = test_app(None);
+            app.dispatch_op(Op::Archive);
+            assert_eq!(rx.recv().await, Some(Op::Archive));
+            app.dispatch_action(Action::Submit("typed meanwhile".to_owned()));
+            let during = rx.try_recv();
+
+            app.handle_engine_event(Event::TurnFailed("Archive failed: disk full".to_owned()));
+
+            assert_eq!(during, Err(TryRecvError::Empty));
+            assert_eq!(
+                app.chat.last_error_text(),
+                Some("Archive failed: disk full")
+            );
+            assert_eq!(app.status, Status::Idle);
+            assert_eq!(*app.queue.pending(), ["typed meanwhile"]);
+            assert_eq!(rx.try_recv(), Err(TryRecvError::Empty));
+        }
+
+        #[tokio::test]
         async fn turn_failed_shows_the_error_and_starts_the_queue_head_once() {
             let (mut app, mut rx, _event_tx) = test_app(None);
             app.dispatch_action(Action::Submit("active".to_owned()));
@@ -911,7 +934,7 @@ mod tests {
                 summary: "auto summary".to_owned(),
                 pre_count: 4,
                 instructions: None,
-                automatic: true,
+                trigger: CompactTrigger::Auto,
             });
             app.queue.push("queued".to_owned());
 
@@ -1310,6 +1333,7 @@ mod tests {
                         summary: "Compact summary".to_owned(),
                         pre_count: 4,
                         instructions: None,
+                        trigger: None,
                     },
                     Interaction::AssistantText("post-compact reply".to_owned()),
                 ],
@@ -1368,7 +1392,7 @@ mod tests {
                 summary: "## Recap\n\nDid the thing.".to_owned(),
                 pre_count: 4,
                 instructions: Some("focus on auth".to_owned()),
-                automatic: false,
+                trigger: CompactTrigger::Manual,
             });
 
             assert_eq!(
@@ -1400,7 +1424,7 @@ mod tests {
                 summary: "summary only".to_owned(),
                 pre_count: 2,
                 instructions: None,
-                automatic: false,
+                trigger: CompactTrigger::Manual,
             });
             assert_eq!(app.chat.entry_count(), 1, "exactly one boundary block");
         }
@@ -1415,7 +1439,7 @@ mod tests {
                 summary: "auto summary".to_owned(),
                 pre_count: 4,
                 instructions: None,
-                automatic: true,
+                trigger: CompactTrigger::Auto,
             });
 
             assert_eq!(app.chat.entry_count(), 1);
@@ -1441,7 +1465,7 @@ mod tests {
                 summary: "auto summary".to_owned(),
                 pre_count: 4,
                 instructions: None,
-                automatic: true,
+                trigger: CompactTrigger::Auto,
             });
 
             assert_eq!(app.chat.entry_count(), 2);
@@ -1482,7 +1506,7 @@ mod tests {
                 summary: "s".to_owned(),
                 pre_count: 2,
                 instructions: None,
-                automatic: false,
+                trigger: CompactTrigger::Manual,
             });
             app.handle_engine_event(Event::Notice(
                 "Skipped instruction file CLAUDE.md".to_owned(),
@@ -1515,7 +1539,7 @@ mod tests {
                 summary: "s".to_owned(),
                 pre_count: 2,
                 instructions: None,
-                automatic: false,
+                trigger: CompactTrigger::Manual,
             });
             app.handle_engine_event(Event::SessionReady);
 
@@ -1544,6 +1568,27 @@ mod tests {
 
             assert_eq!(at_swap, Status::Resuming);
             assert_eq!(app.status, Status::Idle);
+        }
+
+        #[tokio::test]
+        async fn session_ready_ends_an_archive_and_starts_the_prompt_queued_during_it() {
+            let (mut app, mut rx, _event_tx) = test_app(None);
+            app.dispatch_op(Op::Archive);
+            assert_eq!(rx.recv().await, Some(Op::Archive));
+            app.dispatch_action(Action::Submit("next".to_owned()));
+            let during = rx.try_recv();
+
+            app.handle_engine_event(Event::SessionRolled {
+                id: "rolled-session".to_owned(),
+                archived: true,
+            });
+            let at_roll = app.status.clone();
+            app.handle_engine_event(Event::SessionReady);
+
+            assert_eq!(during, Err(TryRecvError::Empty));
+            assert_eq!(at_roll, Status::Archiving);
+            assert_eq!(rx.recv().await, Some(Op::Prompt("next".to_owned())));
+            assert_eq!(app.status, Status::Streaming);
         }
 
         #[test]
@@ -1776,6 +1821,25 @@ mod tests {
                 assert_eq!(app.session_info.config.auth, auth);
                 assert_eq!(app.chat.last_system_text(), Some(expected));
             }
+        }
+
+        #[tokio::test]
+        async fn signed_out_ends_a_logout_and_starts_the_prompt_queued_during_it() {
+            let (mut app, mut rx, _event_tx) = test_app(None);
+            app.dispatch_op(Op::Logout);
+            assert_eq!(rx.recv().await, Some(Op::Logout));
+            app.dispatch_action(Action::Submit("next".to_owned()));
+            let during = (app.status.clone(), rx.try_recv());
+
+            app.handle_engine_event(Event::SignedOut {
+                removed: true,
+                auth: Some(AuthSource::ApiKeyEnv),
+                fallback_error: None,
+            });
+
+            assert_eq!(during, (Status::SigningOut, Err(TryRecvError::Empty)));
+            assert_eq!(rx.recv().await, Some(Op::Prompt("next".to_owned())));
+            assert_eq!(app.status, Status::Streaming);
         }
 
         #[test]
