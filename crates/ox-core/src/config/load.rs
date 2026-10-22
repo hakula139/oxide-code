@@ -586,19 +586,22 @@ mod tests {
             symlink_dir(outside.path(), &dir_link.join(".ox"));
 
             for root in [file_link, dir_link] {
-                let err = temp_env::with_var("XDG_CONFIG_HOME", Some(&config_home), || {
-                    project_layer(&root, &root).expect_err("an escaping link must fail")
-                });
+                let err = temp_env::with_vars(
+                    [
+                        (HOME_VAR, Some(dir.path())),
+                        ("XDG_CONFIG_HOME", Some(&config_home)),
+                    ],
+                    || project_layer(&root, &root).expect_err("an escaping link must fail"),
+                );
 
                 assert_eq!(
                     format!("{err:#}"),
                     format!(
                         "{} links outside the project root {}. \
                          Replace the link with a regular file, \
-                         or move personal settings to {}.",
+                         or move personal settings to ~/config-home/ox/config.toml.",
                         root.join(".ox").join("config.toml").display(),
                         root.display(),
-                        config_home.join("ox").join("config.toml").display(),
                     ),
                 );
             }
@@ -963,9 +966,13 @@ mod tests {
             let path = write(&dir.path().join(".ox/config.toml"), body);
             let config_home = dir.path().join("config-home");
 
-            let err = temp_env::with_var("XDG_CONFIG_HOME", Some(&config_home), || {
-                read_layer(&Layer::Project(path.clone())).expect_err("user-only keys")
-            });
+            let err = temp_env::with_vars(
+                [
+                    (HOME_VAR, Some(dir.path())),
+                    ("XDG_CONFIG_HOME", Some(&config_home)),
+                ],
+                || read_layer(&Layer::Project(path.clone())).expect_err("user-only keys"),
+            );
 
             assert_eq!(
                 format!("{err:#}"),
@@ -977,11 +984,10 @@ mod tests {
                      A project file may only set \
                      model, effort, max_tokens, max_tool_rounds, prompt_cache_ttl, compaction \
                      in [client] and add deny and ask rules in [permission]. \
-                     Set other keys in {} or a config.d drop-in, \
+                     Set other keys in ~/config-home/ox/config.toml or a config.d drop-in, \
                      credentials in environment variables, \
                      and the mode with OX_PERMISSION_MODE.",
                     path.display(),
-                    config_home.join("ox").join("config.toml").display(),
                 )
             );
         }
