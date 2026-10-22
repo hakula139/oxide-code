@@ -674,8 +674,9 @@ impl Walk<'_> {
     }
 
     fn command<'t>(&mut self, node: Node<'t>, trailing: &[Node<'t>], src: &str) {
-        self.unparsed |= runs_a_reserved_word(node, src);
-        self.parts(&command_parts(node), trailing, src);
+        let parts = command_parts(node);
+        self.unparsed |= runs_a_reserved_word(&parts, src);
+        self.parts(&parts, trailing, src);
     }
 
     /// Records the simple command whose assignments, name, arguments, and redirections are
@@ -1200,19 +1201,18 @@ fn redirect_words(redirect: Node<'_>) -> Vec<Node<'_>> {
     }
 }
 
-/// Bash's reserved words. tree-sitter-bash gives each compound command it parses a node of its own,
-/// so a command word in bash's command position spelled as one of these comes from a mis-parse:
-/// of `coproc`, which the grammar lacks, or of a compound after the `time` keyword, which it reads
-/// as a command name.
+/// Bash's reserved words other than `time`, which tree-sitter-bash reads as a command name and
+/// [`runs_a_reserved_word`] reads past. The grammar gives each compound command it parses a node of
+/// its own, so a command word in bash's command position spelled as one of these comes from a
+/// mis-parse: of `coproc`, which the grammar lacks, or of a compound after `time`.
 const RESERVED_WORDS: &[&str] = &[
     "!", "[[", "]]", "case", "coproc", "do", "done", "elif", "else", "esac", "fi", "for",
     "function", "if", "in", "select", "then", "until", "while", "{", "}",
 ];
 
-/// Returns whether bash reads the word in `command`'s command position as a reserved word: its
-/// name, or the first word after a leading `time` keyword and its options.
-fn runs_a_reserved_word(command: Node<'_>, src: &str) -> bool {
-    let parts = command_parts(command);
+/// Returns whether bash reads the word in the command position of the command made of `parts` as a
+/// reserved word: its name, or the first word after a leading `time` keyword and its options.
+fn runs_a_reserved_word(parts: &[Node<'_>], src: &str) -> bool {
     if parts
         .first()
         .is_none_or(|name| name.kind() != "command_name")
@@ -2375,6 +2375,7 @@ mod tests {
                     "coproc worker { rm -rf x; }",
                     "time while true; do rm -rf x; done",
                     "time -p ! rm -rf x",
+                    "time -- ! rm -rf x",
                     "time time if true; then rm -rf x; fi",
                 ] {
                     assert!(parse(command).is_unparsed(), "{command:?}");
@@ -2396,6 +2397,7 @@ mod tests {
                     "kubectl apply -f - <<EOF\nx\nEOF",
                     "cmd - 2>&1",
                     "time cargo test",
+                    "time -p",
                     "help coproc",
                     "echo if then fi",
                 ] {

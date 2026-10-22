@@ -3300,7 +3300,7 @@ mod tests {
             }
 
             #[test]
-            fn command_asks_where_the_grammar_reads_a_reserved_word_as_a_command() {
+            fn command_rules_hold_or_ask_where_the_grammar_reads_a_reserved_word_as_a_command() {
                 let yolo = policy(Mode::Yolo, &[(EXEC, "rm *")], &[], &[]);
 
                 assert_eq!(
@@ -3312,6 +3312,7 @@ mod tests {
                     "time coproc worker { rm -rf x; }",
                     "time while true; do rm -rf x; done",
                     "time -p ! rm -rf x",
+                    "time -- ! rm -rf x",
                 ] {
                     let verdict = yolo.verdict(EXEC, &command(case).as_target());
                     assert_eq!(
