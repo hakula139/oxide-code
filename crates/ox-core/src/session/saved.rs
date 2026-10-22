@@ -6,6 +6,7 @@ use std::path::Path;
 use tracing::warn;
 
 use super::display::id_prefix;
+use super::entry::ArchiveState;
 use super::store::{delete_at, set_archived_at};
 
 /// Why an operation on a saved session failed, where `id` is the session's [`id_prefix`]. Resume
@@ -47,13 +48,16 @@ impl SavedError {
 pub fn set_archived(
     path: &Path,
     session_id: &str,
-    archived: bool,
+    state: ArchiveState,
     live_id: &str,
 ) -> Result<(), SavedError> {
-    if archived && session_id == live_id {
-        return Err(SavedError::live(session_id));
-    }
-    let action = if archived { "archive" } else { "unarchive" };
+    let (action, archived) = match state {
+        ArchiveState::Archived if session_id == live_id => {
+            return Err(SavedError::live(session_id));
+        }
+        ArchiveState::Archived => ("archive", true),
+        ArchiveState::Active => ("unarchive", false),
+    };
     set_archived_at(path, archived).map_err(|e| SavedError::failed(action, session_id, e))
 }
 
@@ -91,12 +95,18 @@ mod tests {
             );
             let path = test_session_file(dir.path(), "live-session");
 
-            let err = set_archived(&path, "live-session", true, "live-session").unwrap_err();
+            let err = set_archived(
+                &path,
+                "live-session",
+                ArchiveState::Archived,
+                "live-session",
+            )
+            .unwrap_err();
 
             assert_eq!(err.to_string(), "session live-ses is the live session");
-            assert_eq!(listed_ids(&store, false), ["live-session"]);
+            assert_eq!(listed_ids(&store, ArchiveState::Active), ["live-session"]);
 
-            set_archived(&path, "live-session", false, "live-session").unwrap();
+            set_archived(&path, "live-session", ArchiveState::Active, "live-session").unwrap();
         }
 
         #[test]
@@ -104,7 +114,13 @@ mod tests {
             let dir = tempfile::tempdir().unwrap();
             let path = dir.path().join("missing.jsonl");
 
-            let err = set_archived(&path, "missing-session", false, "live-session").unwrap_err();
+            let err = set_archived(
+                &path,
+                "missing-session",
+                ArchiveState::Active,
+                "live-session",
+            )
+            .unwrap_err();
 
             let cause = set_archived_at(&path, false).unwrap_err();
             assert_eq!(

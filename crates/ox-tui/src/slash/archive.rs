@@ -5,7 +5,7 @@
 use ox_core::command;
 use ox_core::protocol::Op;
 use ox_core::session::display::{archive_notice, id_prefix};
-use ox_core::session::entry::SessionInfo;
+use ox_core::session::entry::{ArchiveState, SessionInfo};
 use ox_core::session::resolver::{ResolveError, resolve_saved_prefix};
 use ox_core::session::saved;
 
@@ -43,7 +43,7 @@ impl SlashCommand for ArchiveCmd {
         let store = open_store(ctx.info)?;
         let info = resolve_saved_prefix(&store, prefix, &ctx.info.session_id)
             .map_err(|e| resolve_error_message(e, Some(BARE_ARCHIVE_HINT)))?;
-        apply_archived(&info, true, &ctx.info.session_id)
+        apply_archived(&info, ArchiveState::Archived, &ctx.info.session_id)
     }
 }
 
@@ -86,7 +86,7 @@ impl SlashCommand for UnarchiveCmd {
         }
         let store = open_store(ctx.info)?;
         match resolve_saved_prefix(&store, prefix, &ctx.info.session_id) {
-            Ok(info) => apply_archived(&info, false, &ctx.info.session_id),
+            Ok(info) => apply_archived(&info, ArchiveState::Active, &ctx.info.session_id),
             Err(ResolveError::Live { .. }) => Ok(SlashOutcome::SystemMessage(
                 "The live session is not archived".to_owned(),
             )),
@@ -99,25 +99,25 @@ impl SlashCommand for UnarchiveCmd {
 
 fn apply_archived(
     info: &SessionInfo,
-    archived: bool,
+    target: ArchiveState,
     live_id: &str,
 ) -> Result<SlashOutcome, String> {
-    if info.archived == archived {
-        let state = if archived {
-            "already archived"
-        } else {
-            "not archived"
+    if info.archive_state() == target {
+        let state = match target {
+            ArchiveState::Active => "not archived",
+            ArchiveState::Archived => "already archived",
         };
         return Ok(SlashOutcome::SystemMessage(format!(
             "Session {} is {state}",
             id_prefix(&info.session_id),
         )));
     }
-    saved::set_archived(&info.path, &info.session_id, archived, live_id)
-        .map_err(|e| saved_error_message(e, archived.then_some(BARE_ARCHIVE_HINT)))?;
+    let live_recovery = (target == ArchiveState::Archived).then_some(BARE_ARCHIVE_HINT);
+    saved::set_archived(&info.path, &info.session_id, target, live_id)
+        .map_err(|e| saved_error_message(e, live_recovery))?;
     Ok(SlashOutcome::SystemMessage(archive_notice(
         &info.session_id,
-        archived,
+        target,
     )))
 }
 
@@ -180,8 +180,11 @@ mod tests {
                 let ctx = SlashContext::new(&info, None);
 
                 let note = ArchiveCmd.execute(&target_id[..4], &ctx).unwrap();
-                assert_eq!(note.into_system_message(), archive_notice(&target_id, true));
-                assert_eq!(listed_ids(&store, false), [] as [String; 0]);
+                assert_eq!(
+                    note.into_system_message(),
+                    archive_notice(&target_id, ArchiveState::Archived)
+                );
+                assert_eq!(listed_ids(&store, ArchiveState::Active), [] as [String; 0]);
 
                 let again = ArchiveCmd.execute(&target_id[..4], &ctx).unwrap();
                 assert_eq!(
@@ -205,7 +208,7 @@ mod tests {
                     "Session prefix `test-` matches the live session. \
                      Use bare `/archive` to archive it and start a new one.",
                 );
-                assert_eq!(listed_ids(&store, false), ["test-session"]);
+                assert_eq!(listed_ids(&store, ArchiveState::Active), ["test-session"]);
             });
         }
 
@@ -311,9 +314,12 @@ mod tests {
                     let note = UnarchiveCmd.execute(&target_id[..4], &ctx).unwrap();
                     assert_eq!(
                         note.into_system_message(),
-                        archive_notice(&target_id, false)
+                        archive_notice(&target_id, ArchiveState::Active)
                     );
-                    assert_eq!(listed_ids(&store, false), [target_id.as_str()]);
+                    assert_eq!(
+                        listed_ids(&store, ArchiveState::Active),
+                        [target_id.as_str()]
+                    );
 
                     let again = UnarchiveCmd.execute(&target_id[..4], &ctx).unwrap();
                     assert_eq!(

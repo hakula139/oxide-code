@@ -170,10 +170,36 @@ pub struct SessionInfo {
     pub archived: bool,
 }
 
+/// Whether a session is archived, which keeps it out of the default listings.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum ArchiveState {
+    #[default]
+    Active,
+    Archived,
+}
+
+impl ArchiveState {
+    #[must_use]
+    pub fn toggled(self) -> Self {
+        match self {
+            Self::Active => Self::Archived,
+            Self::Archived => Self::Active,
+        }
+    }
+}
+
 impl SessionInfo {
     /// The project the session belongs to, which is its `cwd` when the header records none.
     pub fn project(&self) -> &str {
         self.project_root.as_deref().unwrap_or(&self.cwd)
+    }
+
+    pub fn archive_state(&self) -> ArchiveState {
+        if self.archived {
+            ArchiveState::Archived
+        } else {
+            ArchiveState::Active
+        }
     }
 }
 

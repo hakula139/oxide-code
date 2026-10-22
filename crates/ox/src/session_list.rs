@@ -9,9 +9,9 @@ use time::UtcOffset;
 use unicode_width::UnicodeWidthStr;
 
 use ox_core::session::display::{display_title, id_prefix};
-use ox_core::session::entry::SessionInfo;
+use ox_core::session::entry::{ArchiveState, SessionInfo};
 use ox_core::session::store::SessionStore;
-use ox_core::session::store::listing::ListScope;
+use ox_core::session::store::listing::{ListScope, ProjectScope};
 use ox_core::util;
 use ox_core::util::path::tildify;
 use ox_core::util::text::{escape_line, pad_to_width, truncate_to_width};
@@ -30,7 +30,7 @@ const PROJECT_COL_MIN: usize = "Project".len() + 1;
 /// keeps its width in every other row.
 const PROJECT_COL_MAX: usize = 40;
 
-/// Writes the sessions of `store`'s project, or of every project when `scope.all` is set, to
+/// Writes the sessions of `store`'s project, or of every project when `scope` spans them all, to
 /// `out`. `limit` caps the rows, where `0` lists them all. Titles are cut to `term_width`, the
 /// width of a terminal on stdout, or left whole without one.
 pub(crate) fn write(
@@ -52,7 +52,7 @@ pub(crate) fn write(
         .context("failed to write the session list")
 }
 
-/// The `--list` table of `sessions`, with a `Project` column when `scope.all` is set and a
+/// The `--list` table of `sessions`, with a `Project` column when `scope` spans every project and a
 /// `... more` footer when `more` is set. A `term_width` of `None` skips title truncation
 /// for piped output.
 fn render(
@@ -62,9 +62,12 @@ fn render(
     local_offset: UtcOffset,
     term_width: Option<usize>,
 ) -> String {
-    let ListScope { all, archived } = scope;
+    let all = scope.projects == ProjectScope::Every;
     if sessions.is_empty() {
-        let kind = if archived { "archived " } else { "" };
+        let kind = match scope.archive {
+            ArchiveState::Active => "",
+            ArchiveState::Archived => "archived ",
+        };
         let scope = if all {
             ""
         } else {
@@ -115,7 +118,7 @@ fn render(
             .exit
             .as_ref()
             .map_or("-".to_owned(), |e| e.message_count.to_string());
-        let raw_title = escape_line(&display_title(s));
+        let raw_title = escape_line(display_title(s));
         let title = match title_budget {
             Some(budget) => truncate_to_width(&raw_title, budget),
             None => raw_title,
@@ -183,7 +186,7 @@ mod tests {
             );
             archive_test_session(&other, "archived-session");
             let every = ListScope {
-                all: true,
+                projects: ProjectScope::Every,
                 ..ListScope::default()
             };
 
@@ -193,7 +196,7 @@ mod tests {
             let archived = listed(
                 &local,
                 ListScope {
-                    archived: true,
+                    archive: ArchiveState::Archived,
                     ..every
                 },
                 0,
@@ -255,7 +258,11 @@ mod tests {
                 sessions,
                 false,
                 ListScope {
-                    all,
+                    projects: if all {
+                        ProjectScope::Every
+                    } else {
+                        ProjectScope::Current
+                    },
                     ..ListScope::default()
                 },
                 UtcOffset::UTC,
@@ -505,23 +512,26 @@ mod tests {
 
         #[test]
         fn names_the_scope_and_archive_state_when_empty() {
-            let empty = |all, archived| {
+            let empty = |projects, archive| {
                 render(
                     &[],
                     false,
-                    ListScope { all, archived },
+                    ListScope { projects, archive },
                     UtcOffset::UTC,
                     None,
                 )
             };
 
             assert_eq!(
-                empty(false, false),
+                empty(ProjectScope::Current, ArchiveState::Active),
                 "No sessions found in this project (use --all to search every project)\n"
             );
-            assert_eq!(empty(true, false), "No sessions found\n");
             assert_eq!(
-                empty(false, true),
+                empty(ProjectScope::Every, ArchiveState::Active),
+                "No sessions found\n"
+            );
+            assert_eq!(
+                empty(ProjectScope::Current, ArchiveState::Archived),
                 "No archived sessions found in this project (use --all to search every project)\n"
             );
         }

@@ -1,6 +1,6 @@
 //! Display helpers for session IDs, titles, and archive notices shared by every frontend.
 
-use super::entry::SessionInfo;
+use super::entry::{ArchiveState, SessionInfo};
 use crate::util::text::truncate_to_width;
 
 pub const ID_PREFIX_WIDTH: usize = 8;
@@ -26,16 +26,15 @@ pub(crate) fn fit_title(text: &str) -> String {
     truncate_to_width(first_line.trim_end(), MAX_TITLE_WIDTH)
 }
 
-/// Notice that `session_id` was archived or unarchived.
-pub fn archive_notice(session_id: &str, archived: bool) -> String {
+/// Notice that `session_id` moved to `state`.
+pub fn archive_notice(session_id: &str, state: ArchiveState) -> String {
     let id = id_prefix(session_id);
-    if archived {
-        format!(
+    match state {
+        ArchiveState::Archived => format!(
             "Archived session {id}. \
              Press Ctrl+A in the `/resume` picker to list archived sessions."
-        )
-    } else {
-        format!("Unarchived session {id}")
+        ),
+        ArchiveState::Active => format!("Unarchived session {id}"),
     }
 }
 
@@ -131,12 +130,12 @@ mod tests {
         #[test]
         fn names_the_id_prefix_and_where_archived_sessions_list() {
             assert_eq!(
-                archive_notice("abcdefghij", true),
+                archive_notice("abcdefghij", ArchiveState::Archived),
                 "Archived session abcdefgh. \
                  Press Ctrl+A in the `/resume` picker to list archived sessions.",
             );
             assert_eq!(
-                archive_notice("abcdefghij", false),
+                archive_notice("abcdefghij", ArchiveState::Active),
                 "Unarchived session abcdefgh"
             );
         }

@@ -19,10 +19,10 @@ use time::OffsetDateTime;
 use ox_core::command;
 use ox_core::protocol::{Op, ResumeTarget};
 use ox_core::session::display::{ID_PREFIX_WIDTH, display_title, id_prefix};
-use ox_core::session::entry::SessionInfo;
+use ox_core::session::entry::{ArchiveState, SessionInfo};
 use ox_core::session::saved;
 use ox_core::session::store::SessionStore;
-use ox_core::session::store::listing::{ListScope, SessionWalk};
+use ox_core::session::store::listing::{ListScope, ProjectScope, SessionWalk};
 use ox_core::util::path::tildify;
 use ox_core::util::text::{
     center_truncate_to_width, compact_count, escape_line, pad_start_to_width, pad_to_width, plural,
@@ -320,10 +320,9 @@ const ACTIONS: Keymap<PickerAction, ResumePicker> = Keymap::new(&[
         action: PickerAction::Archive,
         key: KeyChord::ctrl('x'),
         label: |picker| {
-            let label = if picker.archived {
-                "to unarchive"
-            } else {
-                "to archive"
+            let label = match picker.scope.archive {
+                ArchiveState::Active => "to archive",
+                ArchiveState::Archived => "to unarchive",
             };
             picker.has_selection().then_some(label)
         },
@@ -337,10 +336,9 @@ const ACTIONS: Keymap<PickerAction, ResumePicker> = Keymap::new(&[
         action: PickerAction::ToggleScope,
         key: KeyChord::plain(KeyCode::Tab),
         label: |picker| {
-            Some(if picker.all {
-                "for current project"
-            } else {
-                "for all projects"
+            Some(match picker.scope.projects {
+                ProjectScope::Current => "for all projects",
+                ProjectScope::Every => "for current project",
             })
         },
     },
@@ -348,10 +346,9 @@ const ACTIONS: Keymap<PickerAction, ResumePicker> = Keymap::new(&[
         action: PickerAction::ToggleArchivedView,
         key: KeyChord::ctrl('a'),
         label: |picker| {
-            Some(if picker.archived {
-                "for active"
-            } else {
-                "for archived"
+            Some(match picker.scope.archive {
+                ArchiveState::Active => "for archived",
+                ArchiveState::Archived => "for active",
             })
         },
     },
@@ -492,10 +489,7 @@ struct Notice {
 pub struct ResumePicker {
     store: SessionStore,
     list: SearchableList<SessionRow>,
-    /// Whether the list covers every project.
-    all: bool,
-    /// Whether the list shows only archived sessions.
-    archived: bool,
+    scope: ListScope,
     dismissal: Dismissal,
     /// Filtered out of every page so the user can't self-resume onto the open append-writer.
     live_session_id: String,
@@ -508,22 +502,38 @@ pub struct ResumePicker {
 
 impl ResumePicker {
     pub(super) fn new(store: SessionStore, live_session_id: String) -> Self {
-        Self::open(store, live_session_id, false, Dismissal::Cancel)
+        Self::open(
+            store,
+            live_session_id,
+            ProjectScope::Current,
+            Dismissal::Cancel,
+        )
     }
 
-    /// The picker `ox -r` opens without a session, scoped to every project when `all` is set.
-    pub fn at_startup(store: SessionStore, live_session_id: String, all: bool) -> Self {
-        Self::open(store, live_session_id, all, Dismissal::Quit)
+    /// The picker `ox -r` opens without a session, which starts in `projects`.
+    pub fn at_startup(
+        store: SessionStore,
+        live_session_id: String,
+        projects: ProjectScope,
+    ) -> Self {
+        Self::open(store, live_session_id, projects, Dismissal::Quit)
     }
 
-    fn open(store: SessionStore, live_session_id: String, all: bool, dismissal: Dismissal) -> Self {
+    fn open(
+        store: SessionStore,
+        live_session_id: String,
+        projects: ProjectScope,
+        dismissal: Dismissal,
+    ) -> Self {
         let mut picker = Self {
             store,
             list: SearchableList::new(PICKER_TITLE, Vec::new(), VIEWPORT_HEIGHT)
                 .with_description(PICKER_DESCRIPTION)
                 .with_empty_text(EMPTY_TEXT),
-            all,
-            archived: false,
+            scope: ListScope {
+                projects,
+                archive: ArchiveState::Active,
+            },
             dismissal,
             live_session_id,
             pages: Pages::Done,
@@ -537,11 +547,7 @@ impl ResumePicker {
     /// Restarts the listing for the current scope and view, with the cursor and scroll back at
     /// the top. Rows arrive as pages load.
     fn reload(&mut self) {
-        let scope = ListScope {
-            all: self.all,
-            archived: self.archived,
-        };
-        self.pages = match self.store.walk(scope) {
+        self.pages = match self.store.walk(self.scope) {
             Ok(walk) => {
                 self.load_error = None;
                 Pages::rest(walk)
@@ -572,7 +578,9 @@ impl ResumePicker {
         let rows = page
             .into_iter()
             .filter(|info| info.session_id != live_id)
-            .map(|info| SessionRow::from_info(info, listed_at, self.all))
+            .map(|info| {
+                SessionRow::from_info(info, listed_at, self.scope.projects == ProjectScope::Every)
+            })
             .collect();
         self.list.append_items(rows);
         self.load_ahead();
@@ -592,17 +600,17 @@ impl ResumePicker {
     }
 
     fn toggle_scope(&mut self) {
-        self.all = !self.all;
+        self.scope.projects = self.scope.projects.toggled();
         self.reload();
     }
 
     fn toggle_archived(&mut self) {
-        self.archived = !self.archived;
-        if self.archived {
-            self.list
-                .set_header(ARCHIVED_PICKER_TITLE, ARCHIVED_PICKER_DESCRIPTION);
-        } else {
-            self.list.set_header(PICKER_TITLE, PICKER_DESCRIPTION);
+        self.scope.archive = self.scope.archive.toggled();
+        match self.scope.archive {
+            ArchiveState::Active => self.list.set_header(PICKER_TITLE, PICKER_DESCRIPTION),
+            ArchiveState::Archived => self
+                .list
+                .set_header(ARCHIVED_PICKER_TITLE, ARCHIVED_PICKER_DESCRIPTION),
         }
         self.reload();
     }
@@ -612,12 +620,14 @@ impl ResumePicker {
         let Some(row) = self.list.selected() else {
             return;
         };
-        let archived = !self.archived;
-        let result =
-            saved::set_archived(&row.path, &row.session_id, archived, &self.live_session_id);
+        let target = self.scope.archive.toggled();
+        let result = saved::set_archived(&row.path, &row.session_id, target, &self.live_session_id);
         let (text, failed) = match result {
             Ok(()) => {
-                let verb = if archived { "Archived" } else { "Unarchived" };
+                let verb = match target {
+                    ArchiveState::Active => "Unarchived",
+                    ArchiveState::Archived => "Archived",
+                };
                 let text = format!(
                     "{verb} session {}: {}",
                     id_prefix(&row.session_id),
@@ -628,7 +638,10 @@ impl ResumePicker {
                 (text, false)
             }
             Err(err) => (
-                saved_error_message(err, archived.then_some(BARE_ARCHIVE_HINT)),
+                saved_error_message(
+                    err,
+                    (target == ArchiveState::Archived).then_some(BARE_ARCHIVE_HINT),
+                ),
                 true,
             ),
         };
@@ -666,10 +679,9 @@ impl ResumePicker {
     }
 
     fn footer_hints(&self) -> Vec<String> {
-        let scope = if self.all {
-            "all projects"
-        } else {
-            "current project"
+        let scope = match self.scope.projects {
+            ProjectScope::Current => "current project",
+            ProjectScope::Every => "all projects",
         };
         // The scope follows the Esc hint, ahead of the other keys, so a medium-width footer keeps
         // it.
@@ -1320,13 +1332,13 @@ mod tests {
             let scoped = opened(ResumePicker::at_startup(
                 store.clone(),
                 "live-session-id".to_owned(),
-                false,
+                ProjectScope::Current,
             ));
             assert_eq!(row_ids(&scoped), Vec::<String>::new());
             let picker = opened(ResumePicker::at_startup(
                 store,
                 "live-session-id".to_owned(),
-                true,
+                ProjectScope::Every,
             ));
             assert_eq!(
                 picker.list.selected().map(|row| row.session_id.as_str()),
@@ -1504,7 +1516,7 @@ mod tests {
             let picker = opened(ResumePicker::at_startup(
                 store,
                 "live-session-id".to_owned(),
-                true,
+                ProjectScope::Every,
             ));
 
             insta::assert_snapshot!(render_to_backend(&picker, 80));
@@ -1737,14 +1749,22 @@ mod tests {
                 datetime!(2026-04-18 09:00:00 UTC),
             );
             let mut picker = opened(ResumePicker::new(store, "live-session-id".to_owned()));
-            assert!(!picker.all);
+            assert_eq!(picker.scope.projects, ProjectScope::Current);
             picker.handle_key(&KeyEvent::from(KeyCode::Tab));
             picker.settle();
-            assert!(picker.all, "Tab flips scope to all-projects");
+            assert_eq!(
+                picker.scope.projects,
+                ProjectScope::Every,
+                "Tab flips scope to all-projects"
+            );
             assert_eq!(picker.footer_hints()[2], "scope: all projects");
             picker.handle_key(&KeyEvent::from(KeyCode::Tab));
             picker.settle();
-            assert!(!picker.all, "second Tab flips back");
+            assert_eq!(
+                picker.scope.projects,
+                ProjectScope::Current,
+                "second Tab flips back"
+            );
         }
 
         #[test]
@@ -1973,7 +1993,10 @@ mod tests {
                 picker.handle_key(&KeyEvent::new(KeyCode::Char('x'), KeyModifiers::CONTROL));
 
             assert!(matches!(outcome, ModalKey::Consumed), "{outcome:?}");
-            assert_eq!(listed_ids(&store, true), [stamped_id(0x22)]);
+            assert_eq!(
+                listed_ids(&store, ArchiveState::Archived),
+                [stamped_id(0x22)]
+            );
             assert_eq!(
                 footer_row(&picker, 80),
                 "Archived session 22222222: fix two"
@@ -1985,7 +2008,11 @@ mod tests {
             );
             assert_eq!(picker.list.visible_len(), 2);
             assert_eq!(picker.list.query(), "fix");
-            assert!(picker.all, "the scope survives the reload");
+            assert_eq!(
+                picker.scope.projects,
+                ProjectScope::Every,
+                "the scope survives the reload"
+            );
 
             picker.handle_key(&KeyEvent::from(KeyCode::Up));
             assert_eq!(
@@ -2054,7 +2081,7 @@ mod tests {
 
             picker.handle_key(&KeyEvent::new(KeyCode::Char('x'), KeyModifiers::CONTROL));
 
-            assert_eq!(listed_ids(&store, false), [stamped_id(0x11)]);
+            assert_eq!(listed_ids(&store, ArchiveState::Active), [stamped_id(0x11)]);
             assert_eq!(
                 footer_row(&picker, 80),
                 "Unarchived session 11111111: first"
@@ -2088,7 +2115,7 @@ mod tests {
                 "! Session 11111111 is the live session. \
                  Use bare `/archive` to archive it and start a new one.",
             );
-            assert_eq!(listed_ids(&store, false), [id.as_str()]);
+            assert_eq!(listed_ids(&store, ArchiveState::Active), [id.as_str()]);
             assert_eq!(row_ids(&picker), [id]);
         }
 
@@ -2127,7 +2154,8 @@ mod tests {
             let path = store.find_session_path(&id).unwrap();
             std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o444)).unwrap();
             let failure = saved_error_message(
-                saved::set_archived(&path, &id, true, "live-session-id").unwrap_err(),
+                saved::set_archived(&path, &id, ArchiveState::Archived, "live-session-id")
+                    .unwrap_err(),
                 Some(BARE_ARCHIVE_HINT),
             );
             let mut picker = opened(ResumePicker::new(store, "live-session-id".to_owned()));
@@ -2354,7 +2382,7 @@ mod tests {
             stack.push(Box::new(ResumePicker::at_startup(
                 store.clone(),
                 "live-session-id".to_owned(),
-                false,
+                ProjectScope::Current,
             )));
             let outcome = stack.handle_key(&KeyEvent::from(KeyCode::Esc));
             assert!(

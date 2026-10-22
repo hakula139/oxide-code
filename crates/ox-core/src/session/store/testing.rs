@@ -6,12 +6,12 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result, bail};
 use time::OffsetDateTime;
 
-use super::listing::ListScope;
+use super::listing::{ListScope, ProjectScope};
 use super::{
     Project, SessionData, SessionStore, SessionWriter, encode_lines, file_session_id,
     load_session_data_from_path, open_append_file, set_archived_at,
 };
-use crate::session::entry::{CURRENT_VERSION, Entry, SessionInfo, TitleSource};
+use crate::session::entry::{ArchiveState, CURRENT_VERSION, Entry, SessionInfo, TitleSource};
 
 pub(crate) const TEST_PROJECT: &str = "test-project";
 
@@ -187,10 +187,10 @@ pub fn saved_message_count(store: &SessionStore, session_id: &str) -> usize {
 }
 
 /// IDs of the home project's sessions in the given archive state, most recently active first.
-pub fn listed_ids(store: &SessionStore, archived: bool) -> Vec<String> {
+pub fn listed_ids(store: &SessionStore, archive: ArchiveState) -> Vec<String> {
     let scope = ListScope {
-        all: false,
-        archived,
+        projects: ProjectScope::Current,
+        archive,
     };
     store
         .walk(scope)

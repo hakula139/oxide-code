@@ -2308,8 +2308,11 @@ mod tests {
             let path = test_project_dir(dir.path()).join("0-fixture.jsonl");
             std::fs::write(&path, unmask(fixture)).unwrap();
 
-            let [listed]: [SessionInfo; 1] =
-                store.list_matching("", false).unwrap().try_into().unwrap();
+            let [listed]: [SessionInfo; 1] = store
+                .list_matching("", crate::session::store::listing::ProjectScope::Current)
+                .unwrap()
+                .try_into()
+                .unwrap();
             let resumed = resume_from_path(&store, &path).unwrap();
             let transcript = &resumed.transcript;
             let recovered = serde_json::json!({

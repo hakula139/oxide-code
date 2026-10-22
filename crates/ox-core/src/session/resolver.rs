@@ -9,6 +9,7 @@ use super::display::id_prefix;
 use super::entry::SessionInfo;
 use super::handle::{self, LoadedTranscript, ResumedSession};
 use super::store::SessionStore;
+use super::store::listing::ProjectScope;
 
 /// The saved session a run continues.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -34,14 +35,14 @@ enum ResumeMode<'a> {
 /// Starts a new session, or resumes the one `target` names.
 /// A fresh session records `git_branch`.
 /// A prefix matches in the current project first and then in every project,
-/// as `/resume <prefix>` does, while `all` searches every project at once
+/// as `/resume <prefix>` does, while [`ProjectScope::Every`] searches every project at once
 /// for both a prefix and the latest session.
 pub fn resolve_session(
     store: &SessionStore,
     model: &str,
     git_branch: Option<String>,
     target: Option<SessionTarget<'_>>,
-    all: bool,
+    projects: ProjectScope,
 ) -> Result<ResumedSession> {
     let path = match normalize_target(target)? {
         ResumeMode::Fresh => {
@@ -54,21 +55,19 @@ pub fn resolve_session(
         }
         ResumeMode::Path(path) => path.to_owned(),
         ResumeMode::Latest => {
-            let scope_hint = if all {
-                ""
-            } else {
-                " in this project (use --all to search every project)"
+            let scope_hint = match projects {
+                ProjectScope::Current => " in this project (use --all to search every project)",
+                ProjectScope::Every => "",
             };
             store
-                .latest(all)?
+                .latest(projects)?
                 .with_context(|| format!("no sessions to resume{scope_hint}"))?
                 .path
         }
         ResumeMode::Prefix(prefix) => {
-            let info = if all {
-                match_in_scope(store, prefix, None, true)?
-            } else {
-                resolve_prefix_to_info(store, prefix, None)?
+            let info = match projects {
+                ProjectScope::Current => resolve_prefix_to_info(store, prefix, None)?,
+                ProjectScope::Every => match_in_scope(store, prefix, None, ProjectScope::Every)?,
             };
             info.ok_or_else(|| ResolveError::NoMatch {
                 prefix: prefix.to_owned(),
@@ -146,10 +145,10 @@ pub(crate) fn resolve_prefix_to_info(
     prefix: &str,
     live_id: Option<&str>,
 ) -> Result<Option<SessionInfo>, ResolveError> {
-    if let Some(info) = match_in_scope(store, prefix, live_id, false)? {
+    if let Some(info) = match_in_scope(store, prefix, live_id, ProjectScope::Current)? {
         return Ok(Some(info));
     }
-    match_in_scope(store, prefix, live_id, true)
+    match_in_scope(store, prefix, live_id, ProjectScope::Every)
 }
 
 /// [`resolve_prefix_to_info`] for commands that act on a saved session, telling a prefix that
@@ -174,12 +173,15 @@ fn match_in_scope(
     store: &SessionStore,
     prefix: &str,
     live_id: Option<&str>,
-    all: bool,
+    projects: ProjectScope,
 ) -> Result<Option<SessionInfo>, ResolveError> {
-    let scope = if all { "all projects" } else { "this project" };
-    let mut matches = store
-        .list_matching(prefix, all)
-        .map_err(|cause| ResolveError::List { scope, cause })?;
+    let mut matches =
+        store
+            .list_matching(prefix, projects)
+            .map_err(|cause| ResolveError::List {
+                scope: projects.label(),
+                cause,
+            })?;
     matches.retain(|info| live_id != Some(info.session_id.as_str()));
     match matches.len() {
         0 => Ok(None),
@@ -223,7 +225,7 @@ mod tests {
         async fn starts_fresh_when_no_continue_flag() {
             let dir = tempfile::tempdir().unwrap();
             let store = test_store(dir.path());
-            let resumed = resolve_session(&store, "m", None, None, false).unwrap();
+            let resumed = resolve_session(&store, "m", None, None, ProjectScope::Current).unwrap();
             assert_eq!(resumed.transcript.messages, []);
             assert!(resumed.title.is_none());
             assert!(resumed.transcript.tool_metadata.is_empty());
@@ -254,9 +256,14 @@ mod tests {
             std::fs::copy(&path, &external_path).unwrap();
 
             let arg = external_path.to_string_lossy().into_owned();
-            let resumed =
-                resolve_session(&store, "m", None, Some(SessionTarget::Named(&arg)), false)
-                    .unwrap();
+            let resumed = resolve_session(
+                &store,
+                "m",
+                None,
+                Some(SessionTarget::Named(&arg)),
+                ProjectScope::Current,
+            )
+            .unwrap();
             assert_eq!(resumed.handle.session_id(), full_id);
             assert_eq!(resumed.transcript.messages.len(), 1);
             assert_eq!(resumed.title.as_deref(), Some("external path test"));
@@ -274,9 +281,14 @@ mod tests {
 
             let prefix = full_id[..10].to_owned();
             let arg = prefix;
-            let resumed =
-                resolve_session(&store, "m", None, Some(SessionTarget::Named(&arg)), false)
-                    .unwrap();
+            let resumed = resolve_session(
+                &store,
+                "m",
+                None,
+                Some(SessionTarget::Named(&arg)),
+                ProjectScope::Current,
+            )
+            .unwrap();
             assert_eq!(resumed.handle.session_id(), full_id);
             assert_eq!(resumed.transcript.messages.len(), 1);
             assert_eq!(resumed.title.as_deref(), Some("hello"));
@@ -290,15 +302,30 @@ mod tests {
             let at = time::macros::datetime!(2026-04-18 09:00:00 UTC);
             seed_test_session(&store, "abcd-local", Some("Local"), Some(1), at);
             seed_test_session(&other, "abcd-other", Some("Other"), Some(1), at);
-            let resume = |prefix: &str, all: bool| {
-                resolve_session(&store, "m", None, Some(SessionTarget::Named(prefix)), all)
-                    .map(|resumed| resumed.title)
+            let resume = |prefix: &str, projects: ProjectScope| {
+                resolve_session(
+                    &store,
+                    "m",
+                    None,
+                    Some(SessionTarget::Named(prefix)),
+                    projects,
+                )
+                .map(|resumed| resumed.title)
             };
 
-            assert_eq!(resume("abcd", false).unwrap().as_deref(), Some("Local"));
-            assert_eq!(resume("abcd-o", false).unwrap().as_deref(), Some("Other"));
             assert_eq!(
-                resume("abcd", true).err().unwrap().to_string(),
+                resume("abcd", ProjectScope::Current).unwrap().as_deref(),
+                Some("Local")
+            );
+            assert_eq!(
+                resume("abcd-o", ProjectScope::Current).unwrap().as_deref(),
+                Some("Other")
+            );
+            assert_eq!(
+                resume("abcd", ProjectScope::Every)
+                    .err()
+                    .unwrap()
+                    .to_string(),
                 "ambiguous prefix `abcd` matches 2 sessions: abcd-oth, abcd-loc",
                 "--all weighs every project at once",
             );
@@ -332,8 +359,14 @@ mod tests {
             set_archived_at(&test_session_file(dir.path(), "archived"), true).unwrap();
             write_newest_corrupt_session(dir.path());
 
-            let resumed =
-                resolve_session(&store, "m", None, Some(SessionTarget::Latest), false).unwrap();
+            let resumed = resolve_session(
+                &store,
+                "m",
+                None,
+                Some(SessionTarget::Latest),
+                ProjectScope::Current,
+            )
+            .unwrap();
             assert_eq!(resumed.handle.session_id(), "newer");
             assert_eq!(resumed.title.as_deref(), Some("Newer"));
             assert!(!resumed.unarchived);
@@ -354,14 +387,19 @@ mod tests {
             set_archived_at(&path, true).unwrap();
 
             let arg = "arch".to_owned();
-            let resumed =
-                resolve_session(&store, "m", None, Some(SessionTarget::Named(&arg)), false)
-                    .unwrap();
+            let resumed = resolve_session(
+                &store,
+                "m",
+                None,
+                Some(SessionTarget::Named(&arg)),
+                ProjectScope::Current,
+            )
+            .unwrap();
             assert_eq!(resumed.handle.session_id(), "archived");
             assert!(resumed.unarchived);
             assert_eq!(
                 store
-                    .latest(false)
+                    .latest(ProjectScope::Current)
                     .unwrap()
                     .map(|s| s.session_id)
                     .as_deref(),
@@ -374,18 +412,18 @@ mod tests {
         async fn continue_errors_without_sessions() {
             let dir = tempfile::tempdir().unwrap();
             let store = test_store(dir.path());
-            let latest = |all: bool| {
-                resolve_session(&store, "m", None, Some(SessionTarget::Latest), all)
+            let latest = |projects: ProjectScope| {
+                resolve_session(&store, "m", None, Some(SessionTarget::Latest), projects)
                     .err()
                     .unwrap()
                     .to_string()
             };
 
             assert_eq!(
-                latest(false),
+                latest(ProjectScope::Current),
                 "no sessions to resume in this project (use --all to search every project)",
             );
-            assert_eq!(latest(true), "no sessions to resume");
+            assert_eq!(latest(ProjectScope::Every), "no sessions to resume");
         }
 
         #[tokio::test]
@@ -403,7 +441,7 @@ mod tests {
                 "m",
                 None,
                 Some(SessionTarget::Named(&prefix_arg)),
-                false,
+                ProjectScope::Current,
             )
             .err()
             .unwrap()
@@ -431,7 +469,7 @@ mod tests {
                 "m",
                 None,
                 Some(SessionTarget::Named(&prefix_arg)),
-                false,
+                ProjectScope::Current,
             )
             .err()
             .unwrap()
@@ -448,7 +486,9 @@ mod tests {
             let dir = tempfile::tempdir().unwrap();
             let store = test_store(dir.path());
             std::fs::remove_dir_all(test_project_dir(dir.path())).unwrap();
-            let cause = store.list_matching("ab", false).unwrap_err();
+            let cause = store
+                .list_matching("ab", ProjectScope::Current)
+                .unwrap_err();
 
             let prefix_arg = "ab".to_owned();
             let err = resolve_session(
@@ -456,7 +496,7 @@ mod tests {
                 "m",
                 None,
                 Some(SessionTarget::Named(&prefix_arg)),
-                false,
+                ProjectScope::Current,
             )
             .err()
             .unwrap()
@@ -472,9 +512,15 @@ mod tests {
             let dir = tempfile::tempdir().unwrap();
             let store = test_store(dir.path());
             let arg = "/does/not/exist.jsonl".to_owned();
-            let err = resolve_session(&store, "m", None, Some(SessionTarget::Named(&arg)), false)
-                .err()
-                .unwrap();
+            let err = resolve_session(
+                &store,
+                "m",
+                None,
+                Some(SessionTarget::Named(&arg)),
+                ProjectScope::Current,
+            )
+            .err()
+            .unwrap();
             let cause = std::fs::metadata("/does/not/exist.jsonl").unwrap_err();
             assert_eq!(
                 format!("{err:#}"),
