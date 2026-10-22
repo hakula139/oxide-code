@@ -6,7 +6,7 @@
 use std::collections::HashSet;
 use std::io;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Output};
+use std::process::Output;
 
 use serde::Deserialize;
 use tracing::debug;
@@ -16,31 +16,26 @@ use crate::util::text::truncate_to_width;
 /// Probes the current branch via `git branch --show-current`, returning `None` on a detached HEAD.
 /// Dropping the future kills the child process.
 pub async fn current_branch(cwd: &Path) -> Option<String> {
-    let cwd_str = cwd_to_str(cwd, "git branch")?;
-    let mut command = Command::new("git");
-    command.args([
-        "-C",
-        cwd_str,
-        "--no-optional-locks",
-        "branch",
-        "--show-current",
-    ]);
-    let output = check_output("git branch", cwd_str, output_async(command).await)?;
+    let output = probe(
+        "git branch",
+        cwd,
+        "git",
+        &["--no-optional-locks", "branch", "--show-current"],
+    )
+    .await?;
     stdout_line(&output.stdout)
 }
 
 /// Probes the top-level directory of the repository containing `cwd` via
 /// `git rev-parse --show-toplevel`. Dropping the future kills the child process.
 pub(crate) async fn repo_root(cwd: &Path) -> Option<PathBuf> {
-    let mut command = Command::new("git");
-    command
-        .args(["rev-parse", "--show-toplevel"])
-        .current_dir(cwd);
-    let output = check_output(
+    let output = probe(
         "git rev-parse",
-        &cwd.to_string_lossy(),
-        output_async(command).await,
-    )?;
+        cwd,
+        "git",
+        &["rev-parse", "--show-toplevel"],
+    )
+    .await?;
     stdout_line(&output.stdout).map(PathBuf::from)
 }
 
@@ -116,12 +111,8 @@ impl PullRequestDetail {
 /// Returns `None` when `gh` is missing, the user is unauthenticated, or no PR is open. Dropping
 /// the future kills the child process.
 pub async fn current_pull_request(cwd: &Path, detail: PullRequestDetail) -> Option<PullRequest> {
-    let cwd_str = cwd_to_str(cwd, "gh pr")?;
-    let mut command = Command::new("gh");
-    command
-        .args(["pr", "view", "--json", detail.json_fields()])
-        .current_dir(cwd_str);
-    let output = check_output("gh pr", cwd_str, output_async(command).await)?;
+    let args = ["pr", "view", "--json", detail.json_fields()];
+    let output = probe("gh pr", cwd, "gh", &args).await?;
     parse_pull_request(&output.stdout)
 }
 
@@ -222,32 +213,26 @@ fn summarize_checks(mut checks: Vec<CheckView>) -> Option<Checks> {
     })
 }
 
-/// Coerces `cwd` to a `&str` so it can flow into `Command::args` / `current_dir`. Logs and
-/// surfaces `None` when the path isn't valid UTF-8.
-fn cwd_to_str<'a>(cwd: &'a Path, probe: &str) -> Option<&'a str> {
-    if let Some(s) = cwd.to_str() {
-        Some(s)
-    } else {
-        debug!(cwd = ?cwd, "{probe} probe: cwd is not valid UTF-8");
-        None
-    }
-}
-
-/// Runs `command` on the tokio runtime, killing the child if the caller drops the future.
-async fn output_async(command: Command) -> io::Result<Output> {
-    tokio::process::Command::from(command)
+/// Runs `program` with `args` in `cwd` on the tokio runtime and returns the output of a
+/// successful run, logging any other outcome under the `name` probe.
+/// Dropping the future kills the child process.
+async fn probe(name: &str, cwd: &Path, program: &str, args: &[&str]) -> Option<Output> {
+    let result = tokio::process::Command::new(program)
+        .args(args)
+        .current_dir(cwd)
         .kill_on_drop(true)
         .output()
-        .await
+        .await;
+    check_output(name, cwd, result)
 }
 
-/// Logs a spawn failure or non-zero exit and returns the successful output or `None`. `cwd` rides
-/// along on the log records so a user can pinpoint which worktree the probe failed in.
-fn check_output(probe: &str, cwd: &str, result: io::Result<Output>) -> Option<Output> {
+/// Logs a spawn failure or non-zero exit and returns the successful output or `None`.
+/// `cwd` rides along on the log records so a user can pinpoint which worktree the probe failed in.
+fn check_output(name: &str, cwd: &Path, result: io::Result<Output>) -> Option<Output> {
     let output = match result {
         Ok(output) => output,
         Err(e) => {
-            debug!(error = %e, cwd = %cwd, "{probe} probe: spawn failed");
+            debug!(error = %e, ?cwd, "{name} probe: spawn failed");
             return None;
         }
     };
@@ -255,8 +240,8 @@ fn check_output(probe: &str, cwd: &str, result: io::Result<Output>) -> Option<Ou
         debug!(
             code = output.status.code().unwrap_or(-1),
             stderr = stderr_summary(&output.stderr),
-            cwd = %cwd,
-            "{probe} probe: non-zero exit",
+            ?cwd,
+            "{name} probe: non-zero exit",
         );
         return None;
     }
@@ -349,12 +334,10 @@ pub mod testing {
 
 #[cfg(test)]
 mod tests {
-    #[cfg(unix)]
+    #[cfg(target_os = "linux")]
     use std::ffi::OsStr;
-    #[cfg(unix)]
+    #[cfg(target_os = "linux")]
     use std::os::unix::ffi::OsStrExt;
-    #[cfg(unix)]
-    use std::path::PathBuf;
 
     use super::local_testing::init_fixture_repo;
     use super::testing::{isolated_git, with_isolated_git_env_async};
@@ -383,12 +366,16 @@ mod tests {
         }
 
         #[tokio::test]
-        #[cfg(unix)]
-        async fn with_non_utf8_cwd_is_absent() {
-            // Unix paths are bytes, so a non-UTF-8 one fails `cwd_to_str` before git spawns.
-            let cwd = PathBuf::from(OsStr::from_bytes(b"/tmp/\xff"));
+        #[cfg(target_os = "linux")]
+        async fn in_a_non_utf8_directory_yields_the_branch_name() {
+            let dir = tempfile::tempdir().unwrap();
+            init_fixture_repo(dir.path());
+            let cwd = dir.path().join(OsStr::from_bytes(b"sub-\xff"));
+            std::fs::create_dir(&cwd).unwrap();
 
-            assert_eq!(current_branch(&cwd).await, None);
+            let branch = with_isolated_git_env_async(current_branch(&cwd)).await;
+
+            assert_eq!(branch, Some("fixture-branch".to_owned()));
         }
     }
 
@@ -500,16 +487,6 @@ mod tests {
                     "{detail:?}",
                 );
             }
-        }
-
-        #[tokio::test]
-        #[cfg(unix)]
-        async fn with_non_utf8_cwd_is_absent() {
-            let cwd = PathBuf::from(OsStr::from_bytes(b"/tmp/\xff"));
-            assert_eq!(
-                current_pull_request(&cwd, PullRequestDetail::Link).await,
-                None
-            );
         }
     }
 
@@ -671,23 +648,9 @@ mod tests {
         }
     }
 
-    mod cwd_to_str {
-        use super::*;
-
-        #[test]
-        fn utf8_path_is_preserved() {
-            assert_eq!(cwd_to_str(Path::new("/tmp/a"), "p"), Some("/tmp/a"));
-        }
-
-        #[test]
-        #[cfg(unix)]
-        fn is_absent_when_not_utf8() {
-            let cwd = PathBuf::from(OsStr::from_bytes(b"/tmp/\xff"));
-            assert_eq!(cwd_to_str(&cwd, "p"), None);
-        }
-    }
-
     mod check_output {
+        use std::process::Command;
+
         use super::*;
 
         fn status_with_code(code: i32) -> std::process::ExitStatus {
@@ -702,7 +665,7 @@ mod tests {
         fn success_preserves_stdout() {
             let output = check_output(
                 "test",
-                "/tmp/cwd",
+                Path::new("/tmp/cwd"),
                 Ok(Output {
                     status: status_with_code(0),
                     stdout: b"ok".to_vec(),
@@ -717,7 +680,7 @@ mod tests {
         fn drops_output_on_non_zero_exit() {
             let result = check_output(
                 "test",
-                "/tmp/cwd",
+                Path::new("/tmp/cwd"),
                 Ok(Output {
                     status: status_with_code(1),
                     stdout: b"unused".to_vec(),
@@ -731,7 +694,7 @@ mod tests {
         fn drops_output_on_spawn_failure() {
             let result = check_output(
                 "test",
-                "/tmp/cwd",
+                Path::new("/tmp/cwd"),
                 Err(io::Error::new(io::ErrorKind::NotFound, "binary missing")),
             );
             assert!(result.is_none());

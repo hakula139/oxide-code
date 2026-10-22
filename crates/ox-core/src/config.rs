@@ -15,6 +15,7 @@ pub mod provenance;
 mod schema;
 
 use std::fmt;
+use std::net::IpAddr;
 use std::ops::RangeInclusive;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
@@ -35,7 +36,7 @@ use crate::model::ModelSpec;
 use crate::permission::{Mode, Policy, Tier, Workspace};
 use crate::util::env;
 use crate::util::git::project_root;
-use crate::util::path::expand_user;
+use crate::util::path::{expand_user, tildify};
 use crate::util::tls::{PlatformTrust, Trust, load_extra_ca_certs};
 
 pub const DEFAULT_MODEL: &str = "claude-opus-5-5";
@@ -361,7 +362,7 @@ impl Config {
         let base_url = env_string("ANTHROPIC_BASE_URL")
             .or_else(|| origins.sourced("client.base_url", client.base_url))
             .unwrap_or_else(|| Sourced::fallback(DEFAULT_BASE_URL.to_owned()));
-        validate_base_url(&base_url.value)?;
+        validate_base_url(&base_url)?;
 
         // Resolved before `auth`, since the OAuth refresh needs the extra trust anchors too.
         let extra_ca_certs = resolve_extra_ca_certs(
@@ -694,35 +695,47 @@ where
 
 // ── Base URL ──
 
-fn validate_base_url(raw: &str) -> Result<()> {
-    let url = reqwest::Url::parse(raw).with_context(|| format!("invalid base URL {raw:?}"))?;
-    match url.scheme() {
-        "https" => Ok(()),
-        "http" if is_loopback_url(&url) => Ok(()),
-        "http" => bail!("base URL must use https unless it points at localhost"),
-        scheme => bail!("base URL must use http or https, got {scheme:?}"),
-    }
+fn validate_base_url(base_url: &Sourced<String>) -> Result<()> {
+    let raw = &base_url.value;
+    let reason = match reqwest::Url::parse(raw) {
+        Err(e) => e.to_string(),
+        Ok(url) => match url.scheme() {
+            "https" => return Ok(()),
+            "http" if is_loopback_url(&url) => return Ok(()),
+            "http" => "http is allowed only for localhost".to_owned(),
+            scheme => format!("expected http or https, got {scheme:?}"),
+        },
+    };
+    let setting = match &base_url.source {
+        Source::Env(var) => format!("{var} {raw:?}"),
+        Source::File(layer) => format!("client.base_url {raw:?} in {}", tildify(layer.path())),
+        _ => format!("base URL {raw:?}"),
+    };
+    bail!("invalid {setting}: {reason}")
 }
 
 fn is_loopback_url(url: &reqwest::Url) -> bool {
-    matches!(
-        url.host_str(),
-        Some("localhost" | "127.0.0.1" | "::1" | "[::1]")
-    )
+    match url.host_str() {
+        Some("localhost") => true,
+        Some(host) => host
+            .trim_start_matches('[')
+            .trim_end_matches(']')
+            .parse::<IpAddr>()
+            .is_ok_and(|ip| ip.is_loopback()),
+        None => false,
+    }
 }
 
 /// Returns whether `base_url` points at Anthropic's production or staging host. Gates the
 /// stored-login fallback, body-side `cache_control.scope = "global"`, and the billing `cch` hash.
 pub(crate) fn is_first_party_base_url(base_url: &str) -> bool {
-    reqwest::Url::parse(base_url)
-        .ok()
-        .and_then(|u| u.host_str().map(str::to_ascii_lowercase))
-        .is_some_and(|h| {
-            matches!(
-                h.as_str(),
-                "api.anthropic.com" | "api-staging.anthropic.com"
-            )
-        })
+    // `Url` lowercases the host of an `http` or `https` URL.
+    reqwest::Url::parse(base_url).is_ok_and(|url| {
+        matches!(
+            url.host_str(),
+            Some("api.anthropic.com" | "api-staging.anthropic.com")
+        )
+    })
 }
 
 // ── Display ──
@@ -1330,34 +1343,73 @@ mod tests {
         }
 
         #[tokio::test]
-        async fn rejects_plain_http_base_url_unless_loopback() {
-            let dir = tempfile::tempdir().unwrap();
-            let err = load_with(&dir, &[("ANTHROPIC_BASE_URL", "http://example.com")])
-                .await
-                .expect_err("non-loopback http must be rejected");
-            let msg = format!("{err:#}");
-            assert!(msg.contains("https"), "{msg}");
-            assert!(msg.contains("localhost"), "{msg}");
+        async fn rejects_a_base_url_naming_its_variable_value_and_reason() {
+            for (raw, expected) in [
+                (
+                    "http://gw:8080",
+                    r#"invalid ANTHROPIC_BASE_URL "http://gw:8080": http is allowed only for localhost"#,
+                ),
+                (
+                    "ftp://example.com",
+                    r#"invalid ANTHROPIC_BASE_URL "ftp://example.com": expected http or https, got "ftp""#,
+                ),
+                (
+                    "gw:8080/v1",
+                    r#"invalid ANTHROPIC_BASE_URL "gw:8080/v1": expected http or https, got "gw""#,
+                ),
+                (
+                    "not a url",
+                    r#"invalid ANTHROPIC_BASE_URL "not a url": relative URL without a base"#,
+                ),
+            ] {
+                let dir = tempfile::tempdir().unwrap();
+
+                let err = load_with(&dir, &[("ANTHROPIC_BASE_URL", raw)])
+                    .await
+                    .expect_err("the base URL must be rejected");
+
+                assert_eq!(format!("{err:#}"), expected);
+            }
         }
 
         #[tokio::test]
-        async fn rejects_non_http_base_url_scheme() {
+        async fn rejects_a_base_url_naming_the_file_that_sets_it() {
             let dir = tempfile::tempdir().unwrap();
-            let err = load_with(&dir, &[("ANTHROPIC_BASE_URL", "ftp://example.com")])
+            write_user_config(
+                dir.path(),
+                indoc! {r#"
+                    [client]
+                    base_url = "http://gw:8080"
+                "#},
+            );
+            let home = [(HOME_VAR, Some(dir.path()))];
+
+            let err = Box::pin(temp_env::async_with_vars(home, load_with(&dir, &[])))
                 .await
-                .expect_err("non-http schemes must be rejected");
-            let msg = format!("{err:#}");
-            assert!(msg.contains("http or https"), "{msg}");
-            assert!(msg.contains("ftp"), "{msg}");
+                .expect_err("http must be rejected");
+
+            assert_eq!(
+                format!("{err:#}"),
+                r#"invalid client.base_url "http://gw:8080" in ~/ox/config.toml: http is allowed only for localhost"#,
+            );
         }
 
         #[tokio::test]
         async fn accepts_loopback_http_base_url_for_local_proxy() {
-            let dir = tempfile::tempdir().unwrap();
-            let config = load_with(&dir, &[("ANTHROPIC_BASE_URL", "http://127.0.0.1:8080")])
-                .await
-                .unwrap();
-            assert_eq!(config.base_url, "http://127.0.0.1:8080");
+            for raw in [
+                "http://127.0.0.1:8080",
+                "http://127.0.0.2:8080",
+                "http://localhost:8080",
+                "http://[::1]:8080",
+            ] {
+                let dir = tempfile::tempdir().unwrap();
+
+                let config = load_with(&dir, &[("ANTHROPIC_BASE_URL", raw)])
+                    .await
+                    .unwrap();
+
+                assert_eq!(config.base_url, raw);
+            }
         }
 
         #[tokio::test]

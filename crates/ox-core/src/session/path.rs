@@ -1,4 +1,4 @@
-//! Filesystem-safe project subdir names, as in `$XDG_DATA_HOME/ox/sessions/{sanitized-cwd}/`.
+//! Filesystem-safe project subdir names, as in `$XDG_DATA_HOME/ox/sessions/{project}/`.
 
 use std::path::Path;
 
@@ -10,13 +10,13 @@ const MAX_PROJECT_DIR_LEN: usize = 80;
 /// Hex chars in the truncation hash suffix.
 const HASH_SUFFIX_HEX_LEN: usize = 16;
 
-/// The subdir for a cwd with no safe characters to keep, such as `/`.
+/// The subdir for a project root with no safe characters to keep, such as `/`.
 const UNKNOWN_PROJECT_DIR: &str = "_unknown_";
 
 /// Derives a filesystem-safe subdir name. Non-`[A-Za-z0-9._-]` chars become `-`, and a long name
 /// gets an xxh64 suffix over the raw path bytes, so names that truncate alike stay distinct, as do
 /// non-UTF-8 paths whose lossy forms collide.
-pub(crate) fn sanitize_cwd(path: &Path) -> String {
+pub(super) fn project_dir_name(path: &Path) -> String {
     let raw = path.to_string_lossy();
     let sanitized: String = raw
         .chars()
@@ -51,44 +51,44 @@ pub(crate) fn sanitize_cwd(path: &Path) -> String {
 mod tests {
     use super::*;
 
-    mod sanitize_cwd {
+    mod project_dir_name {
         use super::*;
 
         #[test]
         fn replaces_slashes_and_trims_leading() {
-            let out = sanitize_cwd(Path::new("/Users/alice/project"));
+            let out = project_dir_name(Path::new("/Users/alice/project"));
             assert_eq!(out, "Users-alice-project");
         }
 
         #[test]
         fn replaces_backslash_and_drive_letter() {
-            let out = sanitize_cwd(Path::new(r"C:\Users\alice\project"));
+            let out = project_dir_name(Path::new(r"C:\Users\alice\project"));
             assert_eq!(out, "C--Users-alice-project");
         }
 
         #[test]
         fn preserves_dots_underscores_and_dashes() {
-            let out = sanitize_cwd(Path::new("/home/user/my-proj_v1.0"));
+            let out = project_dir_name(Path::new("/home/user/my-proj_v1.0"));
             assert_eq!(out, "home-user-my-proj_v1.0");
         }
 
         #[test]
         fn replaces_other_reserved_chars_with_dash() {
-            let out = sanitize_cwd(Path::new("/sub dir/with spaces&symbols!"));
+            let out = project_dir_name(Path::new("/sub dir/with spaces&symbols!"));
             assert_eq!(out, "sub-dir-with-spaces-symbols");
         }
 
         #[test]
         fn is_unknown_for_empty_result() {
-            assert_eq!(sanitize_cwd(Path::new("/")), UNKNOWN_PROJECT_DIR);
-            assert_eq!(sanitize_cwd(Path::new("")), UNKNOWN_PROJECT_DIR);
-            assert_eq!(sanitize_cwd(Path::new("///")), UNKNOWN_PROJECT_DIR);
+            assert_eq!(project_dir_name(Path::new("/")), UNKNOWN_PROJECT_DIR);
+            assert_eq!(project_dir_name(Path::new("")), UNKNOWN_PROJECT_DIR);
+            assert_eq!(project_dir_name(Path::new("///")), UNKNOWN_PROJECT_DIR);
         }
 
         #[test]
         fn truncates_long_paths_with_stable_hash_suffix() {
             let long = "/".to_owned() + &"a".repeat(200);
-            let out = sanitize_cwd(Path::new(&long));
+            let out = project_dir_name(Path::new(&long));
             assert_eq!(out.chars().count(), MAX_PROJECT_DIR_LEN);
             let suffix = &out[out.len() - (HASH_SUFFIX_HEX_LEN + 1)..];
             assert!(suffix.starts_with('-'));
@@ -98,15 +98,15 @@ mod tests {
         #[test]
         fn truncation_distinguishes_similar_long_paths() {
             let base = "/".to_owned() + &"a".repeat(200);
-            let a = sanitize_cwd(Path::new(&(base.clone() + "/alpha")));
-            let b = sanitize_cwd(Path::new(&(base + "/beta")));
+            let a = project_dir_name(Path::new(&(base.clone() + "/alpha")));
+            let b = project_dir_name(Path::new(&(base + "/beta")));
             assert_ne!(a, b, "hash suffix must disambiguate");
         }
 
         #[test]
         fn is_deterministic() {
             let p = Path::new("/some/deterministic/path");
-            assert_eq!(sanitize_cwd(p), sanitize_cwd(p));
+            assert_eq!(project_dir_name(p), project_dir_name(p));
         }
 
         #[cfg(unix)]
@@ -132,8 +132,8 @@ mod tests {
                 "precondition: lossy forms collide"
             );
             assert_ne!(
-                sanitize_cwd(&path_a),
-                sanitize_cwd(&path_b),
+                project_dir_name(&path_a),
+                project_dir_name(&path_b),
                 "raw-byte hash must disambiguate"
             );
         }

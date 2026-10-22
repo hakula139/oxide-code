@@ -14,29 +14,29 @@ use ratatui::Frame;
 use ratatui::layout::Rect;
 use ratatui::style::Modifier;
 use ratatui::text::{Line, Span};
-use time::{OffsetDateTime, UtcOffset};
+use time::OffsetDateTime;
 
 use ox_core::command;
 use ox_core::protocol::{Op, ResumeTarget};
-use ox_core::session::display::{
-    ID_PREFIX_WIDTH, SHORT_RELATIVE_TIME_WIDTH, display_title, format_metadata_line,
-    format_short_relative_time, id_prefix,
-};
-use ox_core::session::entry::SessionInfo;
+use ox_core::session::display::{ID_PREFIX_WIDTH, display_title, id_prefix};
+use ox_core::session::entry::{ArchiveState, SessionInfo};
 use ox_core::session::saved;
 use ox_core::session::store::SessionStore;
-use ox_core::session::store::listing::{ListScope, SessionWalk};
+use ox_core::session::store::listing::{ListScope, ProjectScope, SessionWalk};
 use ox_core::util::path::tildify;
 use ox_core::util::text::{
     center_truncate_to_width, compact_count, escape_line, pad_start_to_width, pad_to_width, plural,
     truncate_to_width,
 };
-use ox_core::util::time::local_offset;
+use ox_core::util::time::now_local;
 
 use super::confirm::ConfirmDeleteSessionModal;
 use super::context::SlashContext;
 use super::registry::{SlashCommand, SlashKind, SlashOutcome};
-use super::sessions::{BARE_ARCHIVE_HINT, open_store, saved_error_message};
+use super::sessions::{
+    BARE_ARCHIVE_HINT, SHORT_RELATIVE_TIME_WIDTH, format_metadata_line, format_short_relative_time,
+    open_store, saved_error_message,
+};
 use crate::action::Action;
 use crate::glyphs::MODAL_ERROR_PREFIX;
 use crate::keymap::{KeyAction, KeyChord, Keymap, is_unmodified};
@@ -116,7 +116,9 @@ struct SessionRow {
     session_id: String,
     path: PathBuf,
     last_active_at: OffsetDateTime,
-    local_offset: UtcOffset,
+    /// When the listing started, in local time.
+    /// The row's relative times count from here.
+    listed_at: OffsetDateTime,
     title: String,
     /// `0` when no `Summary` line was found, as in a session that never finalized.
     message_count: u32,
@@ -171,9 +173,9 @@ fn fixed_width(columns: &[Column]) -> usize {
 }
 
 impl SessionRow {
-    fn from_info(info: SessionInfo, local_offset: UtcOffset, show_project: bool) -> Self {
-        let title = escape_line(&display_title(&info));
-        let project_path = escape_line(&tildify(Path::new(&info.cwd)));
+    fn from_info(info: SessionInfo, listed_at: OffsetDateTime, show_project: bool) -> Self {
+        let title = escape_line(display_title(&info));
+        let project_path = escape_line(&tildify(Path::new(info.project())));
         // The project is searchable only when shown, since every scoped row shares it.
         let haystack = if show_project {
             format!("{} {} {}", info.session_id, title, project_path)
@@ -184,7 +186,7 @@ impl SessionRow {
             session_id: info.session_id,
             path: info.path,
             last_active_at: info.last_active_at,
-            local_offset,
+            listed_at,
             title,
             message_count: info.exit.as_ref().map_or(0, |e| e.message_count),
             git_branch: info.git_branch,
@@ -193,12 +195,12 @@ impl SessionRow {
         }
     }
 
-    /// Single-line metadata summary for the delete-confirm modal.
-    fn metadata_line(&self) -> String {
+    /// Single-line metadata summary for the delete-confirm modal, relative to `now`.
+    fn metadata_line(&self, now: OffsetDateTime) -> String {
         format_metadata_line(
             &self.session_id,
             self.last_active_at,
-            self.local_offset,
+            now,
             self.message_count,
             self.git_branch.as_deref(),
             self.project.as_deref(),
@@ -247,7 +249,7 @@ impl SessionRow {
                 pad_start_to_width(&truncate_to_width(&msgs, width), width)
             }
             Column::When => {
-                let when = format_short_relative_time(self.last_active_at, self.local_offset);
+                let when = format_short_relative_time(self.last_active_at, self.listed_at);
                 pad_start_to_width(&when, width)
             }
         }
@@ -319,10 +321,9 @@ const ACTIONS: Keymap<PickerAction, ResumePicker> = Keymap::new(&[
         action: PickerAction::Archive,
         key: KeyChord::ctrl('x'),
         label: |picker| {
-            let label = if picker.archived {
-                "to unarchive"
-            } else {
-                "to archive"
+            let label = match picker.scope.archive {
+                ArchiveState::Active => "to archive",
+                ArchiveState::Archived => "to unarchive",
             };
             picker.has_selection().then_some(label)
         },
@@ -336,10 +337,9 @@ const ACTIONS: Keymap<PickerAction, ResumePicker> = Keymap::new(&[
         action: PickerAction::ToggleScope,
         key: KeyChord::plain(KeyCode::Tab),
         label: |picker| {
-            Some(if picker.all {
-                "for current project"
-            } else {
-                "for all projects"
+            Some(match picker.scope.projects {
+                ProjectScope::Current => "for all projects",
+                ProjectScope::Every => "for current project",
             })
         },
     },
@@ -347,10 +347,9 @@ const ACTIONS: Keymap<PickerAction, ResumePicker> = Keymap::new(&[
         action: PickerAction::ToggleArchivedView,
         key: KeyChord::ctrl('a'),
         label: |picker| {
-            Some(if picker.archived {
-                "for active"
-            } else {
-                "for archived"
+            Some(match picker.scope.archive {
+                ArchiveState::Active => "for archived",
+                ArchiveState::Archived => "for active",
             })
         },
     },
@@ -491,15 +490,13 @@ struct Notice {
 pub struct ResumePicker {
     store: SessionStore,
     list: SearchableList<SessionRow>,
-    /// Whether the list covers every project.
-    all: bool,
-    /// Whether the list shows only archived sessions.
-    archived: bool,
+    scope: ListScope,
     dismissal: Dismissal,
-    local_offset: UtcOffset,
     /// Filtered out of every page so the user can't self-resume onto the open append-writer.
     live_session_id: String,
     pages: Pages,
+    /// When the last reload started, in local time, which every page's rows count from.
+    listed_at: OffsetDateTime,
     /// Last reload's failure, surfaced inline so failures don't disguise themselves as "no
     /// sessions found". Cleared on the next successful reload.
     load_error: Option<String>,
@@ -508,26 +505,42 @@ pub struct ResumePicker {
 
 impl ResumePicker {
     pub(super) fn new(store: SessionStore, live_session_id: String) -> Self {
-        Self::open(store, live_session_id, false, Dismissal::Cancel)
+        Self::open(
+            store,
+            live_session_id,
+            ProjectScope::Current,
+            Dismissal::Cancel,
+        )
     }
 
-    /// The picker `ox -r` opens without a session, scoped to every project when `all` is set.
-    pub fn at_startup(store: SessionStore, live_session_id: String, all: bool) -> Self {
-        Self::open(store, live_session_id, all, Dismissal::Quit)
+    /// The picker `ox -r` opens without a session, which starts in `projects`.
+    pub fn at_startup(
+        store: SessionStore,
+        live_session_id: String,
+        projects: ProjectScope,
+    ) -> Self {
+        Self::open(store, live_session_id, projects, Dismissal::Quit)
     }
 
-    fn open(store: SessionStore, live_session_id: String, all: bool, dismissal: Dismissal) -> Self {
+    fn open(
+        store: SessionStore,
+        live_session_id: String,
+        projects: ProjectScope,
+        dismissal: Dismissal,
+    ) -> Self {
         let mut picker = Self {
             store,
             list: SearchableList::new(PICKER_TITLE, Vec::new(), VIEWPORT_HEIGHT)
                 .with_description(PICKER_DESCRIPTION)
                 .with_empty_text(EMPTY_TEXT),
-            all,
-            archived: false,
+            scope: ListScope {
+                projects,
+                archive: ArchiveState::Active,
+            },
             dismissal,
-            local_offset: local_offset(),
             live_session_id,
             pages: Pages::Done,
+            listed_at: now_local(),
             load_error: None,
             notice: None,
         };
@@ -538,11 +551,8 @@ impl ResumePicker {
     /// Restarts the listing for the current scope and view, with the cursor and scroll back at
     /// the top. Rows arrive as pages load.
     fn reload(&mut self) {
-        let scope = ListScope {
-            all: self.all,
-            archived: self.archived,
-        };
-        self.pages = match self.store.walk(scope) {
+        self.listed_at = now_local();
+        self.pages = match self.store.walk(self.scope) {
             Ok(walk) => {
                 self.load_error = None;
                 Pages::rest(walk)
@@ -572,7 +582,13 @@ impl ResumePicker {
         let rows = page
             .into_iter()
             .filter(|info| info.session_id != live_id)
-            .map(|info| SessionRow::from_info(info, self.local_offset, self.all))
+            .map(|info| {
+                SessionRow::from_info(
+                    info,
+                    self.listed_at,
+                    self.scope.projects == ProjectScope::Every,
+                )
+            })
             .collect();
         self.list.append_items(rows);
         self.load_ahead();
@@ -592,17 +608,17 @@ impl ResumePicker {
     }
 
     fn toggle_scope(&mut self) {
-        self.all = !self.all;
+        self.scope.projects = self.scope.projects.toggled();
         self.reload();
     }
 
     fn toggle_archived(&mut self) {
-        self.archived = !self.archived;
-        if self.archived {
-            self.list
-                .set_header(ARCHIVED_PICKER_TITLE, ARCHIVED_PICKER_DESCRIPTION);
-        } else {
-            self.list.set_header(PICKER_TITLE, PICKER_DESCRIPTION);
+        self.scope.archive = self.scope.archive.toggled();
+        match self.scope.archive {
+            ArchiveState::Active => self.list.set_header(PICKER_TITLE, PICKER_DESCRIPTION),
+            ArchiveState::Archived => self
+                .list
+                .set_header(ARCHIVED_PICKER_TITLE, ARCHIVED_PICKER_DESCRIPTION),
         }
         self.reload();
     }
@@ -612,12 +628,14 @@ impl ResumePicker {
         let Some(row) = self.list.selected() else {
             return;
         };
-        let archived = !self.archived;
-        let result =
-            saved::set_archived(&row.path, &row.session_id, archived, &self.live_session_id);
+        let target = self.scope.archive.toggled();
+        let result = saved::set_archived(&row.path, &row.session_id, target, &self.live_session_id);
         let (text, failed) = match result {
             Ok(()) => {
-                let verb = if archived { "Archived" } else { "Unarchived" };
+                let verb = match target {
+                    ArchiveState::Active => "Unarchived",
+                    ArchiveState::Archived => "Archived",
+                };
                 let text = format!(
                     "{verb} session {}: {}",
                     id_prefix(&row.session_id),
@@ -628,7 +646,10 @@ impl ResumePicker {
                 (text, false)
             }
             Err(err) => (
-                saved_error_message(err, archived.then_some(BARE_ARCHIVE_HINT)),
+                saved_error_message(
+                    err,
+                    (target == ArchiveState::Archived).then_some(BARE_ARCHIVE_HINT),
+                ),
                 true,
             ),
         };
@@ -660,16 +681,15 @@ impl ResumePicker {
             row.path.clone(),
             row.session_id.clone(),
             row.title.clone(),
-            row.metadata_line(),
+            row.metadata_line(now_local()),
             self.live_session_id.clone(),
         )))
     }
 
     fn footer_hints(&self) -> Vec<String> {
-        let scope = if self.all {
-            "all projects"
-        } else {
-            "current project"
+        let scope = match self.scope.projects {
+            ProjectScope::Current => "current project",
+            ProjectScope::Every => "all projects",
         };
         // The scope follows the Esc hint, ahead of the other keys, so a medium-width footer keeps
         // it.
@@ -803,15 +823,15 @@ mod tests {
     use ox_core::session::display::UNTITLED_MARKER;
     use ox_core::session::entry::{ExitInfo, TitleInfo};
     use ox_core::session::store::testing::{
-        archive_test_session, isolated_store, listed_ids, seed_test_session, test_project_dir,
-        test_store,
+        archive_test_session, isolated_store, listed_ids, listed_session, seed_test_session,
+        stamped_id, test_project_dir, test_store, with_isolated_xdg,
     };
 
     use super::Column::{Branch, Id, Msgs, Project, Title, When};
     use super::*;
     use crate::modal::chrome::HINT_SEPARATOR;
     use crate::modal::testing::{render_rows, rendered_text};
-    use crate::slash::testing::{stamped_id, test_session_info, with_isolated_xdg};
+    use crate::slash::testing::test_session_info;
 
     fn seed_session(
         store: &SessionStore,
@@ -954,21 +974,22 @@ mod tests {
     mod session_row {
         use super::*;
 
+        /// When the test rows are listed, more than 30 days after they were last active.
+        const LISTED_AT: OffsetDateTime = datetime!(2026-06-01 00:00:00 UTC);
+
         /// A session last active on 2026-04-18, more than 30 days ago, so rows show the date.
         /// `message_count` is `None` for a session that never finalized.
         fn raw_session_info(
-            session_id: String,
+            session_id: &str,
             cwd: &str,
             title: Option<&str>,
             message_count: Option<u32>,
             git_branch: Option<&str>,
         ) -> SessionInfo {
-            let last_active_at = datetime!(2026-04-18 09:00:00 UTC);
+            let info = listed_session(session_id);
+            let last_active_at = info.last_active_at;
             SessionInfo {
-                session_id,
-                path: PathBuf::new(),
                 cwd: cwd.to_owned(),
-                last_active_at,
                 title: title.map(|t| TitleInfo {
                     title: t.to_owned(),
                     updated_at: last_active_at,
@@ -978,20 +999,20 @@ mod tests {
                     updated_at: last_active_at,
                 }),
                 git_branch: git_branch.map(str::to_owned),
-                archived: false,
+                ..info
             }
         }
 
         /// The `Fix auth` row with 14 messages on `feat/login` in `/work/oxide`.
         fn fix_auth_row(show_project: bool) -> SessionRow {
             let info = raw_session_info(
-                stamped_id(0xab),
+                &stamped_id(0xab),
                 "/work/oxide",
                 Some("Fix auth"),
                 Some(14),
                 Some("feat/login"),
             );
-            SessionRow::from_info(info, UtcOffset::UTC, show_project)
+            SessionRow::from_info(info, LISTED_AT, show_project)
         }
 
         mod from_info {
@@ -999,20 +1020,20 @@ mod tests {
 
             #[test]
             fn handles_titled_and_untitled_sessions() {
-                let absent = raw_session_info(stamped_id(0xab), "/work/oxide", None, None, None);
-                let row = SessionRow::from_info(absent, UtcOffset::UTC, true);
+                let absent = raw_session_info(&stamped_id(0xab), "/work/oxide", None, None, None);
+                let row = SessionRow::from_info(absent, LISTED_AT, true);
                 assert_eq!(row.title, UNTITLED_MARKER);
                 assert!(row.haystack.contains(&row.session_id));
                 assert!(row.haystack.contains("/work/oxide"));
 
                 let present = raw_session_info(
-                    stamped_id(0xcd),
+                    &stamped_id(0xcd),
                     "/work/oxide",
                     Some("Fix auth bug"),
                     None,
                     None,
                 );
-                let row = SessionRow::from_info(present, UtcOffset::UTC, true);
+                let row = SessionRow::from_info(present, LISTED_AT, true);
                 assert_eq!(row.title, "Fix auth bug");
                 assert!(row.haystack.contains("Fix auth bug"));
             }
@@ -1073,22 +1094,25 @@ mod tests {
             #[test]
             fn aligns_each_cell_in_its_column() {
                 let one = raw_session_info(
-                    stamped_id(0x22),
+                    &stamped_id(0x22),
                     "/work/oxide",
                     Some("First turn"),
                     Some(1),
                     None,
                 );
                 let unfinished =
-                    raw_session_info(stamped_id(0x33), "/work/oxide", None, None, None);
+                    raw_session_info(&stamped_id(0x33), "/work/oxide", None, None, None);
+
+                let recent = SessionRow {
+                    listed_at: datetime!(2026-04-18 12:00:00 UTC),
+                    ..SessionRow::from_info(unfinished.clone(), LISTED_AT, true)
+                };
 
                 let rows = [
                     rendered(&fix_auth_row(true), 120),
-                    rendered(&SessionRow::from_info(one, UtcOffset::UTC, true), 120),
-                    rendered(
-                        &SessionRow::from_info(unfinished, UtcOffset::UTC, true),
-                        120,
-                    ),
+                    rendered(&SessionRow::from_info(one, LISTED_AT, true), 120),
+                    rendered(&SessionRow::from_info(unfinished, LISTED_AT, true), 120),
+                    rendered(&recent, 120),
                 ];
 
                 assert_eq!(
@@ -1097,6 +1121,7 @@ mod tests {
                         "abababab  Fix auth                                         feat/login        /work/oxide             14 msgs  2026-04-18",
                         "22222222  First turn                                                         /work/oxide               1 msg  2026-04-18",
                         "33333333  (untitled)                                                         /work/oxide                      2026-04-18",
+                        "33333333  (untitled)                                                         /work/oxide                          3h ago",
                     ],
                 );
             }
@@ -1105,13 +1130,13 @@ mod tests {
             fn abbreviates_counts_past_999_to_fit_the_column() {
                 let row = |count| {
                     let info = raw_session_info(
-                        stamped_id(0xab),
+                        &stamped_id(0xab),
                         "/work/oxide",
                         Some("Long run"),
                         Some(count),
                         None,
                     );
-                    rendered(&SessionRow::from_info(info, UtcOffset::UTC, false), 60)
+                    rendered(&SessionRow::from_info(info, LISTED_AT, false), 60)
                 };
 
                 assert_eq!(
@@ -1126,13 +1151,13 @@ mod tests {
             #[test]
             fn truncates_every_long_cell_to_fill_exactly_its_width() {
                 let info = raw_session_info(
-                    stamped_id(0xab),
+                    &stamped_id(0xab),
                     "/home/user/projects/a-rather-deep/checkout",
                     Some("修复登录重定向 and a long English tail that never fits"),
                     Some(123_456),
                     Some("feature/an-unusually-long-branch-name"),
                 );
-                let row = SessionRow::from_info(info, UtcOffset::UTC, true);
+                let row = SessionRow::from_info(info, LISTED_AT, true);
 
                 assert_eq!(
                     [rendered(&row, 160), rendered(&row, 80), rendered(&row, 14)],
@@ -1312,13 +1337,13 @@ mod tests {
             let scoped = opened(ResumePicker::at_startup(
                 store.clone(),
                 "live-session-id".to_owned(),
-                false,
+                ProjectScope::Current,
             ));
             assert_eq!(row_ids(&scoped), Vec::<String>::new());
             let picker = opened(ResumePicker::at_startup(
                 store,
                 "live-session-id".to_owned(),
-                true,
+                ProjectScope::Every,
             ));
             assert_eq!(
                 picker.list.selected().map(|row| row.session_id.as_str()),
@@ -1496,7 +1521,7 @@ mod tests {
             let picker = opened(ResumePicker::at_startup(
                 store,
                 "live-session-id".to_owned(),
-                true,
+                ProjectScope::Every,
             ));
 
             insta::assert_snapshot!(render_to_backend(&picker, 80));
@@ -1729,14 +1754,22 @@ mod tests {
                 datetime!(2026-04-18 09:00:00 UTC),
             );
             let mut picker = opened(ResumePicker::new(store, "live-session-id".to_owned()));
-            assert!(!picker.all);
+            assert_eq!(picker.scope.projects, ProjectScope::Current);
             picker.handle_key(&KeyEvent::from(KeyCode::Tab));
             picker.settle();
-            assert!(picker.all, "Tab flips scope to all-projects");
+            assert_eq!(
+                picker.scope.projects,
+                ProjectScope::Every,
+                "Tab flips scope to all-projects"
+            );
             assert_eq!(picker.footer_hints()[2], "scope: all projects");
             picker.handle_key(&KeyEvent::from(KeyCode::Tab));
             picker.settle();
-            assert!(!picker.all, "second Tab flips back");
+            assert_eq!(
+                picker.scope.projects,
+                ProjectScope::Current,
+                "second Tab flips back"
+            );
         }
 
         #[test]
@@ -1965,7 +1998,10 @@ mod tests {
                 picker.handle_key(&KeyEvent::new(KeyCode::Char('x'), KeyModifiers::CONTROL));
 
             assert!(matches!(outcome, ModalKey::Consumed), "{outcome:?}");
-            assert_eq!(listed_ids(&store, true), [stamped_id(0x22)]);
+            assert_eq!(
+                listed_ids(&store, ArchiveState::Archived),
+                [stamped_id(0x22)]
+            );
             assert_eq!(
                 footer_row(&picker, 80),
                 "Archived session 22222222: fix two"
@@ -1977,7 +2013,11 @@ mod tests {
             );
             assert_eq!(picker.list.visible_len(), 2);
             assert_eq!(picker.list.query(), "fix");
-            assert!(picker.all, "the scope survives the reload");
+            assert_eq!(
+                picker.scope.projects,
+                ProjectScope::Every,
+                "the scope survives the reload"
+            );
 
             picker.handle_key(&KeyEvent::from(KeyCode::Up));
             assert_eq!(
@@ -2046,7 +2086,7 @@ mod tests {
 
             picker.handle_key(&KeyEvent::new(KeyCode::Char('x'), KeyModifiers::CONTROL));
 
-            assert_eq!(listed_ids(&store, false), [stamped_id(0x11)]);
+            assert_eq!(listed_ids(&store, ArchiveState::Active), [stamped_id(0x11)]);
             assert_eq!(
                 footer_row(&picker, 80),
                 "Unarchived session 11111111: first"
@@ -2080,7 +2120,7 @@ mod tests {
                 "! Session 11111111 is the live session. \
                  Use bare `/archive` to archive it and start a new one.",
             );
-            assert_eq!(listed_ids(&store, false), [id.as_str()]);
+            assert_eq!(listed_ids(&store, ArchiveState::Active), [id.as_str()]);
             assert_eq!(row_ids(&picker), [id]);
         }
 
@@ -2119,7 +2159,8 @@ mod tests {
             let path = store.find_session_path(&id).unwrap();
             std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o444)).unwrap();
             let failure = saved_error_message(
-                saved::set_archived(&path, &id, true, "live-session-id").unwrap_err(),
+                saved::set_archived(&path, &id, ArchiveState::Archived, "live-session-id")
+                    .unwrap_err(),
                 Some(BARE_ARCHIVE_HINT),
             );
             let mut picker = opened(ResumePicker::new(store, "live-session-id".to_owned()));
@@ -2346,7 +2387,7 @@ mod tests {
             stack.push(Box::new(ResumePicker::at_startup(
                 store.clone(),
                 "live-session-id".to_owned(),
-                false,
+                ProjectScope::Current,
             )));
             let outcome = stack.handle_key(&KeyEvent::from(KeyCode::Esc));
             assert!(

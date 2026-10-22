@@ -12,7 +12,7 @@ use super::provenance::Layer;
 use super::schema::FileConfig;
 use crate::permission::project::{ProjectFileError, resolve_project_file};
 use crate::permission::{Tier, extra_root};
-use crate::util::path::{XdgBase, app_dir};
+use crate::util::path::{XdgBase, app_dir, tildify};
 use crate::util::toml::{describe_error, locate_error};
 
 const CONFIG_FILE: &str = "config.toml";
@@ -268,7 +268,7 @@ fn keys_outside(table: &Table, section: &str, allowed: &[&str]) -> Vec<String> {
 pub fn user_config_hint() -> String {
     user_config_path().map_or_else(
         || "~/.config/ox/config.toml".to_owned(),
-        |path| path.display().to_string(),
+        |path| tildify(&path),
     )
 }
 
@@ -586,19 +586,22 @@ mod tests {
             symlink_dir(outside.path(), &dir_link.join(".ox"));
 
             for root in [file_link, dir_link] {
-                let err = temp_env::with_var("XDG_CONFIG_HOME", Some(&config_home), || {
-                    project_layer(&root, &root).expect_err("an escaping link must fail")
-                });
+                let err = temp_env::with_vars(
+                    [
+                        (HOME_VAR, Some(dir.path())),
+                        ("XDG_CONFIG_HOME", Some(&config_home)),
+                    ],
+                    || project_layer(&root, &root).expect_err("an escaping link must fail"),
+                );
 
                 assert_eq!(
                     format!("{err:#}"),
                     format!(
                         "{} links outside the project root {}. \
                          Replace the link with a regular file, \
-                         or move personal settings to {}.",
+                         or move personal settings to ~/config-home/ox/config.toml.",
                         root.join(".ox").join("config.toml").display(),
                         root.display(),
-                        config_home.join("ox").join("config.toml").display(),
                     ),
                 );
             }
@@ -627,10 +630,10 @@ mod tests {
                 format!(
                     "{} is reached through a symlink, \
                      which is not followed when the project root {} contains the home directory. \
-                     Replace the link with a regular file, or move personal settings to {}.",
+                     Replace the link with a regular file, \
+                     or move personal settings to ~/config-home/ox/config.toml.",
                     path.display(),
                     home.path().display(),
-                    config_home.join("ox").join("config.toml").display(),
                 ),
             );
         }
@@ -963,9 +966,13 @@ mod tests {
             let path = write(&dir.path().join(".ox/config.toml"), body);
             let config_home = dir.path().join("config-home");
 
-            let err = temp_env::with_var("XDG_CONFIG_HOME", Some(&config_home), || {
-                read_layer(&Layer::Project(path.clone())).expect_err("user-only keys")
-            });
+            let err = temp_env::with_vars(
+                [
+                    (HOME_VAR, Some(dir.path())),
+                    ("XDG_CONFIG_HOME", Some(&config_home)),
+                ],
+                || read_layer(&Layer::Project(path.clone())).expect_err("user-only keys"),
+            );
 
             assert_eq!(
                 format!("{err:#}"),
@@ -977,11 +984,10 @@ mod tests {
                      A project file may only set \
                      model, effort, max_tokens, max_tool_rounds, prompt_cache_ttl, compaction \
                      in [client] and add deny and ask rules in [permission]. \
-                     Set other keys in {} or a config.d drop-in, \
+                     Set other keys in ~/config-home/ox/config.toml or a config.d drop-in, \
                      credentials in environment variables, \
                      and the mode with OX_PERMISSION_MODE.",
                     path.display(),
-                    config_home.join("ox").join("config.toml").display(),
                 )
             );
         }

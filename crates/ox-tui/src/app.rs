@@ -26,6 +26,7 @@ use tokio::task::JoinSet;
 use ox_core::permission::Mode;
 use ox_core::protocol::{Event, Interaction, Op};
 use ox_core::session::display::archive_notice;
+use ox_core::session::entry::ArchiveState;
 
 use self::queue::PromptQueue;
 use crate::clipboard::{Clipboard, Environment};
@@ -113,7 +114,10 @@ impl App {
         let mut chat = ChatView::new(&theme, session_info.config.show_thinking);
         chat.load_history(history.interactions);
         if history.unarchived {
-            chat.push_system_message(archive_notice(&session_info.session_id, false));
+            chat.push_system_message(archive_notice(
+                &session_info.session_id,
+                ArchiveState::Active,
+            ));
         }
         let mut status_bar = StatusBar::new(StatusBarInit {
             segments: session_info.config.status_line.clone(),

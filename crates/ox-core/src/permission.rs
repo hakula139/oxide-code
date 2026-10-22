@@ -2719,7 +2719,7 @@ mod tests {
                     [(HOME_VAR, Some(&home)), ("XDG_DATA_HOME", Some(&data))],
                     || {
                         let workspace = Workspace::new(&cwd);
-                        let store = SessionStore::open(&cwd).unwrap();
+                        let store = SessionStore::open(&cwd, &cwd).unwrap();
                         store.create(&sample_header("s1"), &[]).unwrap();
                         let session_file = store.find_session_path("s1").unwrap();
                         let spill = artifact_dir(&session_file, "s1").join("tool-results/x.txt");

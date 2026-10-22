@@ -16,6 +16,7 @@ use ox_core::permission::defaults::ShippedTier;
 use ox_core::permission::{Basis, SessionGrant};
 use ox_core::protocol::{Decision, Event, EventSink, Op, ToolCall, ToolResult, notice};
 use ox_core::session::display::{UNTITLED_MARKER, archive_notice, id_prefix};
+use ox_core::session::entry::ArchiveState;
 use ox_core::tool::tasks::{Progress, Task};
 use ox_core::tool::view::ApprovalPreview;
 use ox_core::util::sync::lock_or_recover;
@@ -405,7 +406,7 @@ fn resumed_notice(id: &str, title: Option<&str>, unarchived: bool) -> String {
     let title = title.map_or_else(|| UNTITLED_MARKER.to_owned(), escape_line);
     let resumed = format!("Resumed session {}: {title}", id_prefix(id));
     if unarchived {
-        return format!("{resumed}\n{}", archive_notice(id, false));
+        return format!("{resumed}\n{}", archive_notice(id, ArchiveState::Active));
     }
     resumed
 }
