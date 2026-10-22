@@ -84,7 +84,6 @@ type Cell = Vec<Line<'static>>;
 #[derive(Default)]
 struct TableState {
     active: bool,
-    in_head: bool,
     alignments: Vec<Alignment>,
     head_rows: usize,
     rows: Vec<Vec<Cell>>,
@@ -196,8 +195,7 @@ where
                 ..
             } => self.start_link(link_type, dest_url),
             Tag::Table(alignments) => self.start_table(alignments),
-            Tag::TableHead => self.table.in_head = true,
-            Tag::TableRow => {}
+            Tag::TableHead | Tag::TableRow => {}
             Tag::TableCell => self.table.cell_buf.clear(),
             Tag::HtmlBlock => self.start_block(),
             Tag::Image { .. }
@@ -218,7 +216,6 @@ where
             TagEnd::Paragraph => self.end_paragraph(),
             TagEnd::Heading(_) => self.end_heading(),
             TagEnd::BlockQuote(_) => self.end_blockquote(),
-            TagEnd::HtmlBlock => self.needs_newline = true,
             TagEnd::CodeBlock => self.end_code_block(),
             TagEnd::List(_) => self.end_list(),
             TagEnd::Item => self.end_item(),
@@ -229,14 +226,12 @@ where
             TagEnd::Table => self.end_table(),
             TagEnd::TableHead => {
                 // pulldown-cmark 0.13: header cells sit inside TableHead without a TableRow.
-                if !self.table.current_row.is_empty() {
-                    self.flush_row();
-                }
-                self.table.in_head = false;
+                self.flush_row();
                 self.table.head_rows = self.table.rows.len();
             }
             TagEnd::TableRow => self.flush_row(),
             TagEnd::TableCell => self.table.end_cell(),
+            TagEnd::HtmlBlock => self.needs_newline = true,
             TagEnd::Image
             | TagEnd::FootnoteDefinition
             | TagEnd::MetadataBlock(_)
@@ -598,18 +593,15 @@ where
     }
 
     fn pop_link(&mut self) {
-        if let Some(link) = self.link.take() {
-            match link {
-                OpenLink::Bare => self.pop_inline_style(),
-                OpenLink::Labeled(url) => {
-                    let suffix = [
-                        Span::raw(" ("),
-                        Span::styled(url, self.theme.link()),
-                        Span::raw(")"),
-                    ];
-                    for span in suffix {
-                        self.emit_span(span);
-                    }
+        match self.link.take().expect("every link end follows its start") {
+            OpenLink::Bare => self.pop_inline_style(),
+            OpenLink::Labeled(url) => {
+                for span in [
+                    Span::raw(" ("),
+                    Span::styled(url, self.theme.link()),
+                    Span::raw(")"),
+                ] {
+                    self.emit_span(span);
                 }
             }
         }
