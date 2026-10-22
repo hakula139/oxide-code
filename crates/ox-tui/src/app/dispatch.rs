@@ -189,12 +189,10 @@ impl App {
         }
     }
 
-    /// Repaints every theme-styled component for a mid-session theme swap.
+    /// Swaps the theme every later frame paints with and re-renders the chat's cached blocks.
     fn apply_theme(&mut self, theme: &Theme) {
         self.theme = theme.clone();
         self.chat.set_theme(theme);
-        self.status_bar.set_theme(theme);
-        self.input.set_theme(theme);
         self.dirty = true;
     }
 
