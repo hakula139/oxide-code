@@ -3,6 +3,8 @@
 
 use std::fmt;
 
+use ox_core::util::text::format_size;
+
 // ── Constants ──
 
 /// Bytes of git output a view keeps.
@@ -104,7 +106,7 @@ impl fmt::Display for Truncation {
         write!(
             f,
             "(Truncated {}. Run {} for the full output.)",
-            format_size(self.dropped_bytes),
+            format_size(self.dropped_bytes as u64),
             self.full_command,
         )
     }
@@ -354,23 +356,6 @@ fn context_text(line: &str) -> Option<&str> {
 }
 
 // ── Helpers ──
-
-/// `"N B"`, `"N.N KiB"`, or `"N.N MiB"`, truncating to one decimal.
-fn format_size(bytes: usize) -> String {
-    const KIB: usize = 1024;
-    const MIB: usize = KIB * 1024;
-    if bytes < KIB {
-        format!("{bytes} B")
-    } else if bytes < MIB {
-        let whole = bytes / KIB;
-        let tenth = (bytes % KIB) * 10 / KIB;
-        format!("{whole}.{tenth} KiB")
-    } else {
-        let whole = bytes / MIB;
-        let tenth = (bytes % MIB) * 10 / MIB;
-        format!("{whole}.{tenth} MiB")
-    }
-}
 
 // ── Testing ──
 
@@ -826,22 +811,6 @@ mod tests {
             assert_eq!(parse_hunk_header("+ added line"), None);
             assert_eq!(parse_hunk_header("@@ -x +1 @@"), None);
             assert_eq!(parse_hunk_header(""), None);
-        }
-    }
-
-    mod format_size {
-        use super::*;
-
-        #[test]
-        fn picks_the_binary_unit_and_truncates_to_one_decimal() {
-            assert_eq!(format_size(0), "0 B");
-            assert_eq!(format_size(1023), "1023 B");
-            assert_eq!(format_size(1024), "1.0 KiB");
-            assert_eq!(format_size(1536), "1.5 KiB");
-            assert_eq!(format_size(1024 * 1024 - 1), "1023.9 KiB");
-            let mib = 1024 * 1024;
-            assert_eq!(format_size(mib), "1.0 MiB");
-            assert_eq!(format_size(mib * 3 / 2), "1.5 MiB");
         }
     }
 }

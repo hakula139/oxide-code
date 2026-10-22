@@ -414,7 +414,7 @@ fn tokens(usage: &Value, field: &str) -> u64 {
     count
 }
 
-/// About 60 KB of word lines ending in `marker`, roughly 27K tokens.
+/// About 60 kB of word lines ending in `marker`, roughly 27K tokens.
 fn log_text(seed: u64, marker: &str) -> String {
     const WORDS: [&str; 26] = [
         "amber", "basil", "cedar", "delta", "ember", "fable", "garnet", "harbor", "indigo",
