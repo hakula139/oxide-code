@@ -49,4 +49,4 @@ Layers run from the foundation to the frontends.
 
 ## Dependency Direction
 
-A module imports only from its own layer and lower layers. `ox-tui` depends on `ox-core`, `ox` depends on both, and no dependency runs the other way. Only `ox-tui` depends on terminal UI crates, such as `ratatui` and `crossterm`. The crate manifests encode this direction, and review of their changes enforces it, so `deny.toml` holds no crate-layering bans.
+A module imports only from its own layer and lower layers. `ox-tui` depends on `ox-core`, `ox` depends on both, and no dependency runs the other way. Only `ox-tui` depends on terminal UI crates, such as `ratatui` and `crossterm`. The crate manifests encode this direction and the terminal UI rule, and review of manifest changes enforces both, so `deny.toml` holds no crate-layering bans.
