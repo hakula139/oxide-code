@@ -116,7 +116,7 @@ impl App {
     }
 
     /// Opens the status-bar link under a plain left press, returning whether it hit one. A press
-    /// with modifiers stays with terminals that open OSC 8 links on Ctrl / Cmd-click themselves.
+    /// with modifiers stays with terminals that open OSC 8 links on Ctrl+click or Cmd+click.
     fn open_status_link(&mut self, mouse: MouseEvent) -> bool {
         if mouse.kind != MouseEventKind::Down(MouseButton::Left) || !mouse.modifiers.is_empty() {
             return false;
