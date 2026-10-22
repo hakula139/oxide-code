@@ -6,7 +6,7 @@ use std::time::{Duration, Instant};
 
 use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
 use ratatui::buffer::{Buffer, CellWidth};
-use ratatui::layout::Position;
+use ratatui::layout::{Position, Rect};
 use ratatui::style::Style;
 use ratatui::text::Line;
 
@@ -110,6 +110,34 @@ impl Selection {
     pub(super) fn held(&self) -> bool {
         self.pointer.is_some()
     }
+
+    /// Whether a drag past the edge of the chat `viewport` scrolls up or down, and when its next
+    /// row is due.
+    /// `None` when the pointer is inside the chat, the view already shows that end, or the drag
+    /// spent its rows.
+    fn edge_scroll(
+        &self,
+        viewport: Rect,
+        scroll_offset: usize,
+        max_offset: usize,
+        now: Instant,
+    ) -> Option<(bool, Instant)> {
+        let (_, y) = self.pointer?;
+        if self.edge_scrolls >= MAX_EDGE_SCROLLS {
+            return None;
+        }
+        let up = if y < viewport.y && scroll_offset > 0 {
+            true
+        } else if y >= viewport.bottom() && scroll_offset < max_offset {
+            false
+        } else {
+            return None;
+        };
+        let due = self
+            .last_edge_scroll
+            .map_or(now, |at| at + EDGE_SCROLL_INTERVAL);
+        Some((up, due))
+    }
 }
 
 // ── ClickCounter ──
@@ -180,23 +208,15 @@ impl ChatView {
     /// Scrolls one row toward the pointer while a drag holds it past the chat's top or bottom,
     /// until the view reaches the content's end. Returns whether it scrolled.
     pub(crate) fn tick_selection(&mut self, now: Instant) -> bool {
-        let area = self.viewport;
-        let (at_top, at_bottom) = (
-            self.scroll_offset == 0,
-            self.scroll_offset >= self.max_offset,
-        );
         let Some(selection) = &mut self.selection else {
             return false;
         };
-        let Some((_, y)) = selection.pointer else {
+        let Some((up, due)) =
+            selection.edge_scroll(self.viewport, self.scroll_offset, self.max_offset, now)
+        else {
             return false;
         };
-        let up = y < area.y && !at_top;
-        let down = y >= area.bottom() && !at_bottom;
-        let waiting = selection
-            .last_edge_scroll
-            .is_some_and(|at| now.duration_since(at) < EDGE_SCROLL_INTERVAL);
-        if !(up || down) || waiting || selection.edge_scrolls >= MAX_EDGE_SCROLLS {
+        if now < due {
             return false;
         }
         selection.last_edge_scroll = Some(now);
@@ -207,6 +227,17 @@ impl ChatView {
             self.scroll_down(1);
         }
         true
+    }
+
+    /// When [`Self::tick_selection`] next scrolls, or `None` while it has nothing to scroll.
+    pub(crate) fn next_selection_tick(&self, now: Instant) -> Option<Instant> {
+        let (_, due) = self.selection.as_ref()?.edge_scroll(
+            self.viewport,
+            self.scroll_offset,
+            self.max_offset,
+            now,
+        )?;
+        Some(due)
     }
 
     /// Moves the selection's head to the pointer once a frame has scrolled the content under it.
@@ -1044,6 +1075,34 @@ mod tests {
                 hold(&mut chat, (0, 1), (4, 1), now);
 
                 assert!(!chat.tick_selection(now));
+            }
+        }
+
+        mod next_selection_tick {
+            use super::*;
+
+            #[test]
+            fn is_due_at_once_and_then_one_interval_after_each_scroll() {
+                let mut chat = chat_of(&TEN_ROWS);
+                let now = Instant::now();
+                hold(&mut chat, (0, 3), (0, 0), now);
+                assert_eq!(chat.next_selection_tick(now), Some(now));
+
+                assert!(chat.tick_selection(now));
+
+                assert_eq!(
+                    chat.next_selection_tick(now),
+                    Some(now + EDGE_SCROLL_INTERVAL)
+                );
+            }
+
+            #[test]
+            fn never_scrolls_for_a_pointer_inside_the_chat() {
+                let mut chat = chat_of(&TEN_ROWS);
+                let now = Instant::now();
+                hold(&mut chat, (0, 1), (2, 2), now);
+
+                assert_eq!(chat.next_selection_tick(now), None);
             }
         }
 

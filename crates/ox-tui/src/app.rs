@@ -2,9 +2,12 @@
 //!
 //! [`App`] owns every component, holds the cross-task channels, and runs the `tokio::select!`
 //! loop multiplexing crossterm events, engine events, git probe results, clipboard reports,
-//! background slash-command results, and a 60 FPS render tick. A dirty flag coalesces redraws so
-//! each state change renders once. Terminal input, engine events, and drawing live in the
-//! `dispatch`, `events`, and `render` submodules, and the prompt queue in `queue`.
+//! background slash-command results, and a render tick.
+//! The tick runs at up to 60 FPS while a redraw is pending and otherwise sleeps until the next
+//! timed change.
+//! A dirty flag coalesces redraws so each state change renders once.
+//! Input, engine events, drawing, and the prompt queue live in the `dispatch`, `events`, `render`,
+//! and `queue` submodules.
 
 mod dispatch;
 mod events;
@@ -41,7 +44,7 @@ use crate::slash::{ChatOutput, LiveSessionInfo};
 use crate::terminal::{Tui, TuiBackend};
 use crate::theme::{Theme, ThemeOverrides};
 
-/// Tick interval for animation frames and render coalescing (~60 FPS).
+/// Shortest gap between ticks, which paces animation frames and coalesces renders (~60 FPS).
 const TICK_INTERVAL: Duration = Duration::from_millis(16);
 
 /// Window in which a second Ctrl+C confirms exit.
@@ -196,14 +199,13 @@ impl App {
         B: TuiBackend,
         S: Stream<Item = io::Result<CrosstermEvent>> + Unpin,
     {
-        let mut tick = tokio::time::interval(TICK_INTERVAL);
-        tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-
         self.render(terminal)?;
+        let mut last_tick = now();
 
         loop {
+            let next_tick = self.next_tick(last_tick);
             // Six sources can wake the loop. The tick arm is the only renderer, so handlers only
-            // mark `dirty` and render work stays paced by the 60 FPS clock.
+            // mark `dirty` and render work stays paced by the frame clock.
             tokio::select! {
                 event = crossterm_events.next() => {
                     match event {
@@ -222,10 +224,11 @@ impl App {
                 Some(update) = self.git_probes.recv() => self.apply_git_update(update),
                 Some(report) = self.clipboard.recv() => self.apply_copy_report(report),
                 Some(finished) = self.slash_tasks.join_next() => self.apply_slash_task(finished),
-                _ = tick.tick() => {
+                () = sleep_until(next_tick) => {
                     let now = now();
+                    last_tick = now;
                     self.git_probes.poll(now);
-                    self.dirty |= self.status_bar.tick();
+                    self.dirty |= self.status_bar.tick(now);
                     self.dirty |= self.expire_armed_exit(now);
                     self.dirty |= self.chat.tick_selection(now);
                     self.dirty |= self.expire_copy_notice(now);
@@ -244,19 +247,63 @@ impl App {
 
         Ok(())
     }
+
+    /// When the loop next ticks: one frame after `last_tick` while a redraw is pending, and
+    /// otherwise at the earliest deadline a component reports, never sooner than that frame.
+    /// `None` when only an event can change what the app shows.
+    fn next_tick(&self, last_tick: Instant) -> Option<Instant> {
+        let frame = last_tick + TICK_INTERVAL;
+        if self.dirty {
+            return Some(frame);
+        }
+        let now = now();
+        let exit_window = match self.status {
+            Status::ExitArmed { until } => Some(until),
+            _ => None,
+        };
+        [
+            self.git_probes.next_poll(),
+            self.status_bar.next_tick(now),
+            exit_window,
+            self.chat.next_selection_tick(now),
+            self.copy_notice.as_ref().map(|notice| notice.until),
+            self.modals.next_tick(now),
+        ]
+        .into_iter()
+        .flatten()
+        .min()
+        .map(|due| due.max(frame))
+    }
+}
+
+/// Sleeps until `deadline`, or forever without one.
+async fn sleep_until(deadline: Option<Instant>) {
+    match deadline {
+        Some(deadline) => tokio::time::sleep_until(deadline.into()).await,
+        None => std::future::pending().await,
+    }
 }
 
 #[cfg(test)]
 mod tests {
-    use crossterm::event::{KeyCode, KeyModifiers};
+    use std::path::PathBuf;
+    use std::sync::Arc;
+    use std::sync::atomic::Ordering;
 
-    use super::testing::{rendered_text, test_app, test_session_info};
+    use crossterm::event::{KeyCode, KeyModifiers, MouseButton, MouseEventKind};
+
+    use ox_core::config::StatusLineSegment;
+
+    use super::testing::{long_chat_block, render_app, rendered_text, test_app, test_session_info};
     use super::*;
-    use crate::components::status::TICKS_PER_FRAME;
+    use crate::components::status::SPINNER_FRAME_INTERVAL;
+    use crate::components::status::testing::status_bar_init;
     use crate::git_probes::GitUpdate;
     use crate::glyphs::SPINNER_FRAMES;
+    use crate::modal::ModalAction;
+    use crate::modal::testing::ScriptedModal;
     use crate::terminal::testing::capture_terminal;
-    use crate::testing::{buffer_rows, key_event};
+    use crate::testing::{buffer_rows, key_event, mouse_event, mouse_event_at};
 
     mod new {
         use super::*;
@@ -352,16 +399,43 @@ mod tests {
         }
 
         #[tokio::test(start_paused = true)]
+        async fn sleeps_while_idle() {
+            let (mut app, _rx, event_tx) = test_app(None);
+            app.git_probes = GitProbes::new(None, &[], now());
+            let modal = ScriptedModal::new(ModalAction::Cancelled);
+            let ticks = Arc::clone(&modal.tick_count);
+            app.modals.push(Box::new(modal));
+
+            let mut terminal = capture_terminal(60, 8);
+            let closer = tokio::spawn(async move {
+                tokio::time::sleep(Duration::from_secs(10)).await;
+                drop(event_tx);
+            });
+
+            app.run_with_events(
+                &mut terminal,
+                futures::stream::pending::<io::Result<CrosstermEvent>>(),
+            )
+            .await
+            .unwrap();
+            closer.await.unwrap();
+
+            assert_eq!(
+                ticks.load(Ordering::Relaxed),
+                1,
+                "only the startup redraw ticks"
+            );
+        }
+
+        #[tokio::test(start_paused = true)]
         async fn repaints_when_the_spinner_frame_advances() {
-            // Sleep past the spinner interval so `tick()` reports a visible frame change.
             let (mut app, _rx, event_tx) = test_app(None);
             app.set_status(Status::Streaming);
             app.dirty = false;
 
             let mut terminal = capture_terminal(60, 8);
-            let frame = TICK_INTERVAL * u32::try_from(TICKS_PER_FRAME).unwrap();
             let driver = tokio::spawn(async move {
-                tokio::time::sleep(frame).await;
+                tokio::time::sleep(SPINNER_FRAME_INTERVAL).await;
                 drop(event_tx);
             });
 
@@ -459,6 +533,153 @@ mod tests {
             .unwrap();
 
             assert!(app.should_quit);
+        }
+    }
+
+    mod next_tick {
+        use super::*;
+
+        /// An idle app with no probes, no clock segment, and nothing to redraw.
+        fn settled_app() -> App {
+            let (mut app, _rx, _event_tx) = test_app(None);
+            app.git_probes = GitProbes::new(None, &[], now());
+            app.status_bar = StatusBar::new(status_bar_init(vec![StatusLineSegment::RunState]));
+            app.dirty = false;
+            app
+        }
+
+        #[test]
+        fn sleeps_until_an_event_when_nothing_is_timed() {
+            let app = settled_app();
+
+            assert_eq!(app.next_tick(now()), None);
+        }
+
+        #[test]
+        fn ticks_one_frame_on_while_a_redraw_is_pending() {
+            let last_tick = now();
+            let mut app = settled_app();
+            app.dirty = true;
+
+            assert_eq!(app.next_tick(last_tick), Some(last_tick + TICK_INTERVAL));
+        }
+
+        #[test]
+        fn wakes_for_the_next_git_probe() {
+            let last_tick = now();
+            let mut app = settled_app();
+            app.git_probes = GitProbes::new(Some(PathBuf::from("/tmp")), &[], last_tick);
+
+            assert_eq!(
+                app.next_tick(last_tick),
+                Some(last_tick + Duration::from_secs(5))
+            );
+        }
+
+        #[tokio::test(start_paused = true)]
+        async fn wakes_for_the_next_spinner_frame_while_busy() {
+            let last_tick = now();
+            let mut app = settled_app();
+
+            app.set_status(Status::Streaming);
+
+            assert_eq!(
+                app.next_tick(last_tick),
+                Some(last_tick + SPINNER_FRAME_INTERVAL)
+            );
+        }
+
+        #[test]
+        fn wakes_when_the_exit_window_closes() {
+            let last_tick = now();
+            let mut app = settled_app();
+
+            app.set_status(Status::ExitArmed {
+                until: last_tick + Duration::from_secs(1),
+            });
+
+            assert_eq!(
+                app.next_tick(last_tick),
+                Some(last_tick + Duration::from_secs(1))
+            );
+        }
+
+        #[tokio::test(start_paused = true)]
+        async fn ticks_every_frame_while_a_drag_holds_above_the_chat() {
+            let last_tick = now();
+            let mut app = settled_app();
+            app.chat.push_system_message(long_chat_block());
+            _ = render_app(&mut app, 60, 10);
+            app.handle_crossterm_event(&mouse_event(MouseEventKind::ScrollUp));
+            _ = render_app(&mut app, 60, 10);
+
+            app.handle_crossterm_event(&mouse_event_at(
+                MouseEventKind::Down(MouseButton::Left),
+                1,
+                3,
+            ));
+            app.handle_crossterm_event(&mouse_event_at(
+                MouseEventKind::Drag(MouseButton::Left),
+                1,
+                0,
+            ));
+            app.dirty = false;
+
+            assert_eq!(app.next_tick(last_tick), Some(last_tick + TICK_INTERVAL));
+        }
+
+        #[test]
+        fn wakes_when_the_copy_notice_expires() {
+            let last_tick = now();
+            let mut app = settled_app();
+
+            app.copy_notice = Some(CopyNotice {
+                text: "Copied".to_owned(),
+                failed: false,
+                until: last_tick + Duration::from_secs(3),
+            });
+
+            assert_eq!(
+                app.next_tick(last_tick),
+                Some(last_tick + Duration::from_secs(3))
+            );
+        }
+
+        #[test]
+        fn wakes_for_the_top_modal() {
+            let last_tick = now();
+            let mut app = settled_app();
+            let mut modal = ScriptedModal::new(ModalAction::Cancelled);
+            modal.next_tick = Some(last_tick + Duration::from_secs(2));
+
+            app.modals.push(Box::new(modal));
+
+            assert_eq!(
+                app.next_tick(last_tick),
+                Some(last_tick + Duration::from_secs(2))
+            );
+        }
+
+        #[test]
+        fn wakes_for_the_earliest_deadline_but_no_sooner_than_a_frame() {
+            let last_tick = now();
+            let mut app = settled_app();
+            app.set_status(Status::ExitArmed {
+                until: last_tick + Duration::from_secs(1),
+            });
+            app.copy_notice = Some(CopyNotice {
+                text: "Copied".to_owned(),
+                failed: false,
+                until: last_tick + Duration::from_millis(500),
+            });
+            assert_eq!(
+                app.next_tick(last_tick),
+                Some(last_tick + Duration::from_millis(500))
+            );
+
+            app.set_status(Status::ExitArmed { until: last_tick });
+
+            assert_eq!(app.next_tick(last_tick), Some(last_tick + TICK_INTERVAL));
         }
     }
 }

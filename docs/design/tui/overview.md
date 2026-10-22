@@ -32,7 +32,7 @@ tokio::select! {
     Some(update) = self.git_probes.recv()         => { /* branch / PR probe results for the status line */ }
     Some(report) = self.clipboard.recv()          => { /* outcome of a copy, shown as a notice */ }
     Some(finished) = self.slash_tasks.join_next() => { /* output of a background slash command, such as /diff */ }
-    _ = tick.tick()                               => { /* spinner frame, probe scheduling, exit-arm expiry, selection edge scroll, copy-notice expiry, top-modal tick, render when dirty */ }
+    () = sleep_until(self.next_tick(last_tick))   => { /* spinner frame, probe scheduling, exit-arm expiry, selection edge scroll, copy-notice expiry, top-modal tick, render when dirty */ }
 }
 ```
 
@@ -86,7 +86,7 @@ A `<br>` in a cell starts a new line in that cell, since a GFM cell has no other
 1. **ratatui + crossterm + tokio.** No custom rendering engine.
 2. **Concrete component structs.** `App` composes chat, input, status, and modal surfaces directly, with no shared component trait.
 3. **Synchronized output by default.** A terminal that supports mode 2026 presents each frame at once, so a large repaint never shows half drawn, and a terminal without it ignores the mode.
-4. **Render throttling at ~60 FPS.** Tokens can stream faster than a terminal can repaint, so the tick batches them into one frame, which keeps the event loop free for input.
+4. **Render throttling at ~60 FPS, and a sleeping idle loop.** Tokens can stream faster than a terminal can repaint, so the tick batches them into one frame, which keeps the event loop free for input. The tick runs every frame while a redraw or a modal's page load is pending, and otherwise only at the earliest timed change, such as the busy spinner's next frame, a git probe falling due, the clock segment's next minute, a usage-limit reset, or an expiring notice, so an idle session wakes about once every 5 s, for the branch probe. Each component that changes with time reports its next deadline beside its `tick`.
 5. **Block-based markdown commit with stable-prefix cache** during streaming, full render on completion.
 6. **Custom pulldown-cmark + syntect renderer.** Uses Codex's `pending_marker` pattern for correct list handling.
 7. **Catppuccin Mocha dark theme by default** with named color slots covering text, surfaces, accents, status, code, diff, headings, body, and chrome. Transparent background.
@@ -99,7 +99,7 @@ A `<br>` in a cell starts a new line in that cell, since a GFM cell has no other
 ## Sources
 
 - `crates/ox-tui/src/action.rs`: `APP_KEYMAP`, the app's named keys and their hints.
-- `crates/ox-tui/src/app.rs`: `App`, its `tokio::select!` loop, and `TICK_INTERVAL`, the frame tick.
+- `crates/ox-tui/src/app.rs`: `App`, its `tokio::select!` loop, `TICK_INTERVAL`, the shortest gap between ticks, and `App::next_tick`, which picks when the loop wakes.
 - `crates/ox-tui/src/components/chat.rs`: `ChatView` and the compact and expanded views.
 - `crates/ox-tui/src/components/chat/blocks.rs`: `ChatBlock` and `RenderCtx`, the render contract of a chat block.
 - `crates/ox-tui/src/components/chat/blocks/streaming.rs`: `StreamingAssistant`, the stable-prefix cache of a streaming reply.
