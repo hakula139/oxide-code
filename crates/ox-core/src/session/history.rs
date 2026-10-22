@@ -812,5 +812,31 @@ mod tests {
                 ]
             );
         }
+
+        #[test]
+        fn keeps_reasoning_from_a_model_without_progress_updates_out_of_progress_notes() {
+            let messages = [Message {
+                role: Role::Assistant,
+                content: vec![
+                    ContentBlock::Thinking {
+                        thinking: "Running the suite.".to_owned(),
+                        replay: Replay::with_model("claude-haiku-5-5", "sig"),
+                    },
+                    ContentBlock::tool_use(
+                        "t1",
+                        "bash",
+                        serde_json::json!({"command": "cargo test"}),
+                    ),
+                ],
+            }];
+
+            assert_eq!(
+                walk(&messages),
+                [
+                    Interaction::AssistantThinking("Running the suite.".to_owned()),
+                    bash_call("t1", "cargo test"),
+                ]
+            );
+        }
     }
 }

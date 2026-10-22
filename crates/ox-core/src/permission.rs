@@ -737,6 +737,9 @@ pub enum Basis {
     SafeRead,
     /// An allowed command, by what let each of its simple commands and its writes through.
     Command(Vec<Basis>),
+    /// A command ox could not parse, so the rules may not see everything it runs. It asks even in
+    /// `yolo` unless a deny rule holds it.
+    Unparsed,
 }
 
 impl Basis {
@@ -745,6 +748,10 @@ impl Basis {
     pub fn reason(&self) -> Option<String> {
         match self {
             Self::Mode(_) => None,
+            Self::Unparsed => Some(
+                "ox could not parse this command, so the permission rules may not see everything it runs"
+                    .to_owned(),
+            ),
             basis => Some(format!("Held by {basis}")),
         }
     }
@@ -781,6 +788,7 @@ impl fmt::Display for Basis {
                 }
                 Ok(())
             }
+            Self::Unparsed => f.write_str("a command ox could not parse"),
         }
     }
 }
@@ -978,7 +986,8 @@ impl Policy {
     /// Order, stopping at the first match:
     /// 1. A deny rule denies, in every mode.
     /// 2. `plan` denies an edit, exec, or net call.
-    /// 3. An ask rule or an enabled protected name asks, in every mode.
+    /// 3. An ask rule, an enabled protected name, or a `bash` command that failed to parse asks, in
+    ///    every mode.
     /// 4. A read-class call allows.
     /// 5. An edit-class call inside a workspace root allows.
     /// 6. An allow rule or a session allow rule allows.
@@ -1034,8 +1043,9 @@ impl Policy {
     }
 
     /// What holds the call in the ask tier: an ask rule, the protected group of a path the call
-    /// edits or a command writes, the [`read` rule](Self::read_holder) for a file a reader opens,
-    /// or the `rm` group for a [forced recursive delete](Segment::removes_recursively_by_force).
+    /// edits or a command writes, a command that failed to parse, the
+    /// [`read` rule](Self::read_holder) for a file a reader opens, or the `rm` group for a
+    /// [forced recursive delete](Segment::removes_recursively_by_force).
     fn asks(&self, class: PermissionClass, target: &Target<'_>) -> Option<Basis> {
         if let Some(rule) = held_by(&self.ask, class, target) {
             return Some(rule.basis(Tier::Ask));
@@ -1048,6 +1058,9 @@ impl Policy {
         let Target::Command(command) = target else {
             return None;
         };
+        if command.is_unparsed() {
+            return Some(Basis::Unparsed);
+        }
         command
             .writes()
             .iter()
@@ -2245,6 +2258,7 @@ mod tests {
                     Basis::Command(vec![Basis::SafeRead, Basis::Session(make)]),
                     "a known-safe read, the session `allow.exec` pattern `make *`",
                 ),
+                (Basis::Unparsed, "a command ox could not parse"),
             ] {
                 assert_eq!(basis.to_string(), expected);
             }
@@ -2266,6 +2280,16 @@ mod tests {
                     Some("Held by the built-in `git` rule"),
                 );
                 assert_eq!(Basis::Mode(Mode::Manual).reason(), None);
+            }
+
+            #[test]
+            fn says_that_ox_could_not_parse_a_command() {
+                assert_eq!(
+                    Basis::Unparsed.reason().as_deref(),
+                    Some(
+                        "ox could not parse this command, so the permission rules may not see everything it runs"
+                    ),
+                );
             }
         }
     }
@@ -3151,6 +3175,44 @@ mod tests {
                 assert_eq!(
                     decide(&p, EXEC, &command("echo x | xargs")),
                     Decision::Allow
+                );
+            }
+
+            #[test]
+            fn command_asks_even_in_yolo_when_ox_cannot_parse_it_unless_denied() {
+                let unparsed = [
+                    "true <<EOF x; git push\nx\nEOF",
+                    "ls 'unterminated",
+                    "sh -c 'ls (('",
+                ];
+                for mode in [Mode::Manual, Mode::Yolo] {
+                    let p = policy(mode, &[(EXEC, "rm *")], &[], &[(EXEC, "*")]);
+                    for case in unparsed {
+                        let verdict = p.verdict(EXEC, &command(case).as_target());
+                        assert_eq!(
+                            (verdict.decision, verdict.basis),
+                            (Decision::Ask, Basis::Unparsed),
+                            "{mode} {case:?}"
+                        );
+                    }
+                    assert_eq!(
+                        decide(&p, EXEC, &command("rm x; ls 'unterminated")),
+                        Decision::Deny,
+                        "{mode}"
+                    );
+                    assert_eq!(
+                        decide(&p, EXEC, &command("ls 'done'")),
+                        Decision::Allow,
+                        "{mode}"
+                    );
+                }
+                let yolo = policy(Mode::Yolo, &[], &[], &[]);
+                assert_eq!(
+                    yolo.verdict(EXEC, &command("sh -c 'ls'").as_target()),
+                    Verdict {
+                        decision: Decision::Allow,
+                        basis: Basis::Mode(Mode::Yolo),
+                    }
                 );
             }
 
