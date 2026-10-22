@@ -455,7 +455,7 @@ mod tests {
         }
 
         #[tokio::test]
-        async fn stores_the_browser_s_login_and_sends_it_with_the_next_prompt() {
+        async fn stores_the_login_from_the_browser_and_sends_it_with_the_next_prompt() {
             with_pinned_home(async {
                 let server = MockServer::start().await;
                 Mock::given(method("POST"))
