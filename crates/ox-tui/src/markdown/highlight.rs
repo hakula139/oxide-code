@@ -10,11 +10,13 @@ use syntect::easy::HighlightLines;
 use syntect::highlighting::{FontStyle, HighlightState, Theme as SyntaxTheme};
 use syntect::parsing::{ParseState, SyntaxReference, SyntaxSet};
 use syntect::util::LinesWithEndings;
+use tracing::debug;
 
 use crate::theme::Theme;
 
 // Loaded once on first highlight (a few hundred ms of grammar parsing) and reused for the rest of
-// the process. Keeping it lazy avoids paying that cost when no fenced block is rendered.
+// the process.
+// Keeping it lazy avoids paying that cost when no fenced block is rendered.
 static SYNTAX_SET: LazyLock<SyntaxSet> = LazyLock::new(SyntaxSet::load_defaults_newlines);
 
 /// Highlighter state after the complete lines of the last highlighted block, so a fenced block
@@ -35,9 +37,9 @@ thread_local! {
 /// Highlights `code` with the theme's syntax colors, returning one [`Line`] per source line.
 ///
 /// `lang` is a fenced-block info string whose first token, ending at whitespace or a comma, names
-/// the language (`rust,no_run` and `rust ignore` both resolve to `rust`). Unknown or empty
-/// languages fall back to the theme's `code` style with no per-token coloring so plain fenced
-/// blocks render uniformly without ragged background fills.
+/// the language (`rust,no_run` and `rust ignore` both resolve to `rust`).
+/// Unknown or empty languages fall back to the theme's `code` style with no per-token coloring,
+/// so plain fenced blocks render uniformly without ragged background fills.
 pub(super) fn highlight_code(lang: &str, code: &str, theme: &Theme) -> Vec<Line<'static>> {
     let syntax = lang
         .split(|c: char| c.is_whitespace() || c == ',')
@@ -45,23 +47,24 @@ pub(super) fn highlight_code(lang: &str, code: &str, theme: &Theme) -> Vec<Line<
         .filter(|s| !s.is_empty())
         .and_then(|token| SYNTAX_SET.find_syntax_by_token(token));
 
+    let fallback = theme.code();
     let Some(syntax) = syntax else {
-        let fallback = theme.code();
-        return code
-            .lines()
-            .map(|l| Line::styled(l.to_owned(), fallback))
-            .collect();
+        return plain_rows(code, fallback).collect();
     };
 
-    RESUME.with_borrow_mut(|resume| highlight_resuming(resume, syntax, theme.syntax, code))
+    RESUME
+        .with_borrow_mut(|resume| highlight_resuming(resume, syntax, theme.syntax, fallback, code))
 }
 
 /// Highlights `code`, reusing `resume` when it holds a line-aligned prefix of `code` highlighted
 /// with the same syntax and theme, and leaves the state after `code`'s complete lines in it.
+/// Once syntect fails on a line, its parse state no longer matches the text, so that line and the
+/// rest of the block render plain in `fallback` and nothing is kept for reuse.
 fn highlight_resuming(
     resume: &mut Option<Resume>,
     syntax: &'static SyntaxReference,
     theme: &'static SyntaxTheme,
+    fallback: Style,
     code: &str,
 ) -> Vec<Line<'static>> {
     let reusable = resume.take().filter(|r| {
@@ -78,17 +81,31 @@ fn highlight_resuming(
 
     let rest = &code[done..];
     let complete = rest.rfind('\n').map_or(0, |i| i + 1);
-    rows.extend(
-        LinesWithEndings::from(&rest[..complete])
-            .map(|line| highlight_line(&mut highlighter, line)),
-    );
+    let mut at = 0;
+    for line in LinesWithEndings::from(&rest[..complete]) {
+        match highlight_line(&mut highlighter, line) {
+            Ok(row) => rows.push(row),
+            Err(error) => {
+                debug!(%error, syntax = %syntax.name, "syntax highlighting failed");
+                rows.extend(plain_rows(&rest[at..], fallback));
+                return rows;
+            }
+        }
+        at += line.len();
+    }
     let (highlight_state, parse_state) = highlighter.state();
 
     let mut out = rows.clone();
     if complete < rest.len() {
         let mut partial =
             HighlightLines::from_state(theme, highlight_state.clone(), parse_state.clone());
-        out.push(highlight_line(&mut partial, &rest[complete..]));
+        match highlight_line(&mut partial, &rest[complete..]) {
+            Ok(row) => out.push(row),
+            Err(error) => {
+                debug!(%error, syntax = %syntax.name, "syntax highlighting failed");
+                out.extend(plain_rows(&rest[complete..], fallback));
+            }
+        }
     }
     *resume = Some(Resume {
         syntax,
@@ -101,12 +118,20 @@ fn highlight_resuming(
     out
 }
 
+/// One row per line of `code` in `style`, with no per-token coloring.
+fn plain_rows(code: &str, style: Style) -> impl Iterator<Item = Line<'static>> {
+    code.lines()
+        .map(move |line| Line::styled(line.to_owned(), style))
+}
+
 // The newline grammars close line-scoped tokens such as `//` comments at the `\n`, so each line
 // goes in with its ending and the ending is dropped from the output.
-fn highlight_line(highlighter: &mut HighlightLines<'_>, line: &str) -> Line<'static> {
-    let spans: Vec<Span<'static>> = highlighter
-        .highlight_line(line, &SYNTAX_SET)
-        .unwrap_or_default()
+fn highlight_line(
+    highlighter: &mut HighlightLines<'_>,
+    line: &str,
+) -> Result<Line<'static>, syntect::Error> {
+    let tokens = highlighter.highlight_line(line, &SYNTAX_SET)?;
+    let spans: Vec<Span<'static>> = tokens
         .into_iter()
         .filter_map(|(style, text)| {
             let text = text.trim_end_matches(['\n', '\r']);
@@ -121,7 +146,7 @@ fn highlight_line(highlighter: &mut HighlightLines<'_>, line: &str) -> Line<'sta
             Some(Span::styled(text.to_owned(), rs))
         })
         .collect();
-    Line::from(spans)
+    Ok(Line::from(spans))
 }
 
 #[cfg(test)]
@@ -131,7 +156,8 @@ mod tests {
     use super::*;
     use crate::theme::builtin::find;
 
-    /// Joins each row's raw span text. `Line::to_string` would drop a line ending left in a span.
+    /// Joins each row's raw span text.
+    /// `Line::to_string` would drop a line ending left in a span.
     fn all_text(lines: &[Line<'_>]) -> String {
         lines
             .iter()
@@ -252,10 +278,30 @@ mod tests {
             SYNTAX_SET.find_syntax_by_token(token).unwrap()
         }
 
+        /// [`SYNTAX_SET`] plus a second Rust syntax, whose context IDs [`SYNTAX_SET`] lacks, so
+        /// highlighting with that syntax fails on every line.
+        static FOREIGN: LazyLock<SyntaxSet> = LazyLock::new(|| {
+            let mut builder = SYNTAX_SET.clone().into_builder();
+            let rust = builder
+                .syntaxes()
+                .iter()
+                .find(|s| s.name == "Rust")
+                .unwrap()
+                .clone();
+            builder.add(rust);
+            builder.build()
+        });
+
         /// Caches `prefix` and swaps its first row for a sentinel, so a reused row is recognizable.
         fn sentinel_resume(prefix: &str) -> Option<Resume> {
             let mut resume = None;
-            _ = highlight_resuming(&mut resume, syntax("rust"), Theme::default().syntax, prefix);
+            _ = highlight_resuming(
+                &mut resume,
+                syntax("rust"),
+                Theme::default().syntax,
+                Style::new(),
+                prefix,
+            );
             resume.as_mut().unwrap().rows[0] = Line::from("sentinel");
             resume
         }
@@ -266,8 +312,13 @@ mod tests {
             assert_eq!(resume.as_ref().unwrap().code, "fn a() {}\n");
 
             let code = "fn a() {}\nfn b() {}\n";
-            let lines =
-                highlight_resuming(&mut resume, syntax("rust"), Theme::default().syntax, code);
+            let lines = highlight_resuming(
+                &mut resume,
+                syntax("rust"),
+                Theme::default().syntax,
+                Style::new(),
+                code,
+            );
 
             assert_eq!(lines[0], Line::from("sentinel"));
             assert_eq!(all_text(&lines[1..]), "fn b() {}");
@@ -288,8 +339,8 @@ mod tests {
             for end in (1..=code.len()).filter(|&i| code.is_char_boundary(i)) {
                 let prefix = &code[..end];
                 assert_eq!(
-                    highlight_resuming(&mut resume, syntax, theme, prefix),
-                    highlight_resuming(&mut None, syntax, theme, prefix),
+                    highlight_resuming(&mut resume, syntax, theme, Style::new(), prefix),
+                    highlight_resuming(&mut None, syntax, theme, Style::new(), prefix),
                     "{prefix:?}",
                 );
             }
@@ -306,9 +357,47 @@ mod tests {
                 (rust_dark.0, rust_dark.1, "fn z() {}\n"),
             ] {
                 let mut resume = sentinel_resume("fn a() {}\n");
-                let lines = highlight_resuming(&mut resume, syntax, theme, code);
+                let lines = highlight_resuming(&mut resume, syntax, theme, Style::new(), code);
                 assert_ne!(lines[0], Line::from("sentinel"), "{code:?}");
             }
+        }
+
+        #[test]
+        fn renders_the_block_plain_from_a_failed_line_and_keeps_nothing() {
+            let fallback = Style::new().fg(Color::Red);
+            let mut resume = None;
+
+            let lines = highlight_resuming(
+                &mut resume,
+                FOREIGN.syntaxes().last().unwrap(),
+                Theme::default().syntax,
+                fallback,
+                "fn a() {}\r\nfn b",
+            );
+
+            assert_eq!(
+                lines,
+                [
+                    Line::styled("fn a() {}", fallback),
+                    Line::styled("fn b", fallback),
+                ],
+            );
+            assert!(resume.is_none());
+        }
+
+        #[test]
+        fn renders_a_failed_partial_line_plain() {
+            let fallback = Style::new().fg(Color::Red);
+
+            let lines = highlight_resuming(
+                &mut None,
+                FOREIGN.syntaxes().last().unwrap(),
+                Theme::default().syntax,
+                fallback,
+                "fn b",
+            );
+
+            assert_eq!(lines, [Line::styled("fn b", fallback)]);
         }
     }
 }
