@@ -86,5 +86,5 @@ Below 25 cols nothing paints, since the terminal is too narrow to read the welco
 - `crates/ox-tui/src/app/render.rs`: `draw_frame` empty-chat branch, `show_welcome` gate.
 - `crates/ox-tui/src/components/chat.rs`: `is_empty()` predicate.
 - `crates/ox-tui/src/components/welcome.rs`: `paint`, `Picks`, `NOT_STARTERS`, `TIP_POOL`, `PR_TIP`, starter rows.
+- `crates/ox-tui/src/session_info.rs`: `LiveSessionInfo` (snapshot input).
 - `crates/ox-tui/src/slash/registry.rs`: `BUILT_INS`, the commands and descriptions the starters sample.
-- `crates/ox-tui/src/slash/context.rs`: `LiveSessionInfo` (snapshot input).

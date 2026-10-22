@@ -40,7 +40,8 @@ use crate::components::tasks::TaskPanel;
 use crate::git_probes::GitProbes;
 use crate::modal::{Modal, ModalStack};
 use crate::now;
-use crate::slash::{ChatOutput, LiveSessionInfo};
+use crate::session_info::LiveSessionInfo;
+use crate::slash::ChatOutput;
 use crate::terminal::{Tui, TuiBackend};
 use crate::theme::{Theme, ThemeOverrides};
 
@@ -126,12 +127,12 @@ impl App {
             segments: session_info.config.status_line.clone(),
             model: session_info.config.model.short_display_name().to_owned(),
             effort: session_info.config.effort,
-            cwd: session_info.cwd.clone(),
+            cwd: session_info.display_cwd.clone(),
             git_branch,
         });
         status_bar.set_title(history.title);
         let git_probes = GitProbes::new(
-            session_info.working_dir.clone(),
+            session_info.cwd.clone(),
             &session_info.config.status_line,
             now(),
         );
@@ -294,7 +295,9 @@ mod tests {
 
     use ox_core::config::StatusLineSegment;
 
-    use super::testing::{long_chat_block, render_app, rendered_text, test_app, test_session_info};
+    use super::testing::{
+        long_chat_block, render_app, rendered_text, test_app, unknown_model_session_info,
+    };
     use super::*;
     use crate::components::status::SPINNER_FRAME_INTERVAL;
     use crate::components::status::testing::status_bar_init;
@@ -339,7 +342,7 @@ mod tests {
             let mut app = App::new(
                 Theme::default(),
                 ThemeOverrides::default(),
-                test_session_info(),
+                unknown_model_session_info(),
                 None,
                 events,
                 ops,
@@ -401,7 +404,7 @@ mod tests {
         #[tokio::test(start_paused = true)]
         async fn sleeps_while_idle() {
             let (mut app, _rx, event_tx) = test_app(None);
-            app.git_probes = GitProbes::new(None, &[], now());
+            app.git_probes = GitProbes::new(PathBuf::from("/repo"), &[], now());
             let modal = ScriptedModal::new(ModalAction::Cancelled);
             let ticks = Arc::clone(&modal.tick_count);
             app.modals.push(Box::new(modal));
@@ -542,7 +545,7 @@ mod tests {
         /// An idle app with no probes, no clock segment, and nothing to redraw.
         fn settled_app() -> App {
             let (mut app, _rx, _event_tx) = test_app(None);
-            app.git_probes = GitProbes::new(None, &[], now());
+            app.git_probes = GitProbes::new(PathBuf::from("/repo"), &[], now());
             app.status_bar = StatusBar::new(status_bar_init(vec![StatusLineSegment::RunState]));
             app.dirty = false;
             app
@@ -568,7 +571,11 @@ mod tests {
         fn wakes_for_the_next_git_probe() {
             let last_tick = now();
             let mut app = settled_app();
-            app.git_probes = GitProbes::new(Some(PathBuf::from("/tmp")), &[], last_tick);
+            app.git_probes = GitProbes::new(
+                PathBuf::from("/repo"),
+                &[StatusLineSegment::GitBranch],
+                last_tick,
+            );
 
             assert_eq!(
                 app.next_tick(last_tick),

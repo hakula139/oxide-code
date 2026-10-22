@@ -502,7 +502,7 @@ mod tests {
     use crate::app::testing::{
         FakeModal, KeyLogModal, OP_CHANNEL_CAPACITY, cell_of, long_chat_block,
         push_answerable_approval, render_app, rendered_text, test_app, test_app_with,
-        test_session_info,
+        unknown_model_session_info,
     };
     use crate::components::status::StatusHyperlink;
     use crate::modal::testing::ScriptedModal;
@@ -1805,7 +1805,7 @@ mod tests {
                 (Mode::Plan, [Mode::Manual, Mode::Plan, Mode::Manual]),
                 (Mode::Yolo, [Mode::Manual, Mode::Plan, Mode::Yolo]),
             ] {
-                let mut info = test_session_info();
+                let mut info = unknown_model_session_info();
                 info.config.permission_mode = start;
                 let (mut app, mut rx, _event_tx) = test_app_with(info, None);
 

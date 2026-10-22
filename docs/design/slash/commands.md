@@ -98,7 +98,7 @@ Client-side command surface: `/help`, `/clear`, `/model`, `/status`, and friends
 - `crates/ox-tui/src/slash/compact.rs`: `CompactCmd`.
 - `crates/ox-tui/src/slash/config.rs`: `/config` row builder plus sectioned `KvOverview` constructor.
 - `crates/ox-tui/src/slash/confirm.rs`: `ConfirmDeleteSessionModal` (destructive-action gate, inline error kept until a retry or close).
-- `crates/ox-tui/src/slash/context.rs`: `SlashContext` (`LiveSessionInfo` plus the live title).
+- `crates/ox-tui/src/slash/context.rs`: `SlashContext` (the App's `LiveSessionInfo` plus the live title).
 - `crates/ox-tui/src/slash/delete.rs`: `DeleteCmd`, which resolves its prefix through `ox-core`'s `resolve_saved_prefix` and pushes the confirm-delete modal.
 - `crates/ox-tui/src/slash/diff.rs`: `DiffCmd` and the git calls it makes from the work tree root.
 - `crates/ox-tui/src/slash/diff/view.rs`: `WorkingTreeDiff`, the typed rows parsed from git's output within the 64 KiB cap.

@@ -142,7 +142,7 @@ impl Modal for InitPicker {
 mod tests {
     use super::*;
     use crate::modal::testing::render_rows;
-    use crate::slash::testing::test_session_info;
+    use crate::session_info::testing::test_session_info;
 
     /// The action the picker submits to start the turn creating `file` at `root`.
     fn create_action(root: &Path, file: &str) -> Action {

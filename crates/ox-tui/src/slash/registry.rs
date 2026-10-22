@@ -184,7 +184,7 @@ pub(super) fn lookup_in<'a>(
 #[cfg(test)]
 pub(super) mod testing {
     use super::{SlashCommand, SlashContext, SlashOutcome};
-    use crate::slash::testing::test_session_info;
+    use crate::session_info::testing::test_session_info;
 
     /// Runs `cmd` with `args` against [`test_session_info`] and no session title.
     pub(crate) fn run_execute(cmd: &dyn SlashCommand, args: &str) -> Result<SlashOutcome, String> {
@@ -240,7 +240,7 @@ mod tests {
     use super::*;
     use crate::modal::ModalAction;
     use crate::modal::testing::ScriptedModal;
-    use crate::slash::testing::test_session_info;
+    use crate::session_info::testing::test_session_info;
 
     mod slash_outcome {
         use super::*;

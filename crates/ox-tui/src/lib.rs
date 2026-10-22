@@ -16,6 +16,7 @@ mod keymap;
 mod markdown;
 mod modal;
 mod pending_calls;
+mod session_info;
 pub mod slash;
 pub mod terminal;
 #[cfg(test)]
@@ -37,7 +38,8 @@ use ox_core::util::path::tildify;
 
 use action::Action;
 use app::{App, AppHistory};
-use slash::{LiveSessionInfo, ResumePicker};
+use session_info::LiveSessionInfo;
+use slash::ResumePicker;
 use theme::ResolvedTheme;
 
 // ── Constants ──
@@ -75,8 +77,8 @@ pub async fn run<S: Debug>(
 
     let cwd = engine.cwd();
     let session_info = LiveSessionInfo {
-        cwd: tildify(cwd),
-        working_dir: Some(cwd.to_owned()),
+        cwd: cwd.to_owned(),
+        display_cwd: tildify(cwd),
         project_root: engine.project_root().to_owned(),
         version: env!("CARGO_PKG_VERSION"),
         session_id: engine.session_id().to_owned(),

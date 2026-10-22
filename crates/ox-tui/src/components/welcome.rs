@@ -15,7 +15,8 @@ use ox_core::config::{NOT_SIGNED_IN, StatusLineSegment};
 use ox_core::util::text::{center_truncate_to_width, pad_to_width, truncate_to_width};
 
 use crate::glyphs::INLINE_SEPARATOR;
-use crate::slash::{LiveSessionInfo, MatchedCommand, filter_built_ins};
+use crate::session_info::LiveSessionInfo;
+use crate::slash::{MatchedCommand, filter_built_ins};
 use crate::theme::Theme;
 
 // ── Content Pools ──
@@ -127,7 +128,7 @@ fn build_lines(
     // A shared column width keeps the centered rows on one left edge. Starter and tip widths count
     // only when that block renders, so a short area reserves no space for rows it drops.
     let env = truncate_to_width(&environment_text(info, full, with_starters), max_body);
-    let cwd = cwd_text(max_body, &info.cwd, with_starters);
+    let cwd = cwd_text(max_body, &info.display_cwd, with_starters);
     let starter_rows = render_starters_block.then(|| starter_rows(&picks.starters));
     let tip_text = render_starters_block.then(|| format!("{TIP_LABEL}{TIP_SEP}{}", picks.tip));
     // Clamp to area.width, since wider columns clip on the right under center alignment.
@@ -289,11 +290,11 @@ mod tests {
     use ox_core::config::auth::AuthSource;
 
     use super::*;
-    use crate::slash::testing::test_session_info;
+    use crate::session_info::testing::test_session_info;
 
     fn fixture() -> LiveSessionInfo {
         let mut info = test_session_info();
-        info.cwd = "~/github/oxide-code".to_owned();
+        info.display_cwd = "~/github/oxide-code".to_owned();
         info.version = "0.1.0";
         info.config.auth = Some(AuthSource::ClaudeCodeLogin);
         info.config.effort = Some(Effort::Xhigh);
@@ -445,7 +446,7 @@ mod tests {
         #[test]
         fn narrow_drops_starters_and_truncates_cwd_in_the_middle() {
             let mut info = fixture();
-            info.cwd = "~/very/long/working/directory/path/oxide-code".to_owned();
+            info.display_cwd = "~/very/long/working/directory/path/oxide-code".to_owned();
             insta::assert_snapshot!(render(30, 8, &info));
         }
 

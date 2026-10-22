@@ -36,6 +36,7 @@ Layers run from the foundation to the frontends.
 | `ox-tui`  | Frontend   | `markdown`      | Markdown rendering with syntax highlighting                                                                                                                         |
 | `ox-tui`  | Frontend   | `modal`         | The modal stack and the shared pickers, overviews, and editors built on it                                                                                          |
 | `ox-tui`  | Frontend   | `pending_calls` | Tool-call correlation shared by live streaming and transcript resume                                                                                                |
+| `ox-tui`  | Frontend   | `session_info`  | The `App`'s snapshot of the running session, which slash commands and the welcome screen read                                                                       |
 | `ox-tui`  | Frontend   | `slash`         | Slash-command registry and built-in commands                                                                                                                        |
 | `ox-tui`  | Frontend   | `terminal`      | Terminal setup and restore, the panic hook, escape-sequence output, and the stdout width query                                                                      |
 | `ox-tui`  | Frontend   | `theme`         | Theme palette, built-in themes, and theme file loading                                                                                                              |

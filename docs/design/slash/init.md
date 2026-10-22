@@ -35,6 +35,6 @@ Both prompts share one rubric: include only information an agent would otherwise
 - `crates/ox-core/src/prompt/instructions.rs`: `project_candidates` and `read_project`, the files `/init` checks and the rule for which of them count.
 - `crates/ox-core/src/util/git.rs`: `project_root`, the lookup for the project root.
 - `crates/ox-tui/src/lib.rs`: `run`, which resolves the project root and stores it in `LiveSessionInfo`.
-- `crates/ox-tui/src/slash/context.rs`: `LiveSessionInfo::project_root`.
+- `crates/ox-tui/src/session_info.rs`: `LiveSessionInfo::project_root`.
 - `crates/ox-tui/src/slash/init.rs`: `InitCmd` and the file picker.
 - `crates/ox/src/driver/repl.rs`: resolves the project root and runs `/init` in the bare REPL.

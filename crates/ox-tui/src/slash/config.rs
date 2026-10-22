@@ -10,9 +10,10 @@ use ox_core::config::{
 };
 use ox_core::util::path::tildify;
 
-use super::context::{LiveSessionInfo, SlashContext};
+use super::context::SlashContext;
 use super::registry::{SlashCommand, SlashOutcome};
 use crate::modal::kv_overview::{KvOverview, KvSection};
+use crate::session_info::LiveSessionInfo;
 
 // ── ConfigCmd ──
 
@@ -161,8 +162,8 @@ mod tests {
     use super::*;
     use crate::modal::Modal;
     use crate::modal::testing::rendered_text;
+    use crate::session_info::testing::test_session_info;
     use crate::slash::registry::testing::run_execute;
-    use crate::slash::testing::test_session_info;
 
     mod execute {
         use super::*;

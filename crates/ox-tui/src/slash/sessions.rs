@@ -10,17 +10,13 @@ use ox_core::session::saved::SavedError;
 use ox_core::session::store::SessionStore;
 use ox_core::util::text::plural;
 
-use super::context::LiveSessionInfo;
+use crate::session_info::LiveSessionInfo;
 
 // ── Store ──
 
 /// Opens the store scoped to the session's project.
 pub(super) fn open_store(info: &LiveSessionInfo) -> Result<SessionStore, String> {
-    let cwd = info
-        .working_dir
-        .as_deref()
-        .ok_or("No working directory for this session")?;
-    SessionStore::open(cwd, &info.project_root)
+    SessionStore::open(&info.cwd, &info.project_root)
         .map_err(|e| format!("Session store unavailable: {e:#}"))
 }
 
@@ -152,7 +148,7 @@ mod tests {
     use time::macros::datetime;
 
     use super::*;
-    use crate::slash::testing::test_session_info;
+    use crate::session_info::testing::test_session_info;
 
     mod open_store {
         use super::*;

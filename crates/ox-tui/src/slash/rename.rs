@@ -125,8 +125,8 @@ mod tests {
     use super::*;
     use crate::modal::ModalStack;
     use crate::modal::testing::render_rows;
+    use crate::session_info::testing::test_session_info;
     use crate::slash::registry::testing::run_execute;
-    use crate::slash::testing::test_session_info;
 
     mod classify {
         use super::*;
