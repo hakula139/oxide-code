@@ -9,7 +9,7 @@ use time::OffsetDateTime;
 use uuid::Uuid;
 
 use super::display::fit_title;
-use super::entry::{CURRENT_VERSION, CompactBoundary, Entry, Header, TitleSource};
+use super::entry::{CURRENT_VERSION, CompactBoundary, Entry, Header};
 use super::handle::Checkpoint;
 use super::store::{SessionStore, SessionWriter, artifact_dir, encode_lines};
 use crate::file_tracker::FileSnapshot;
@@ -116,7 +116,7 @@ impl SessionState {
     }
 
     /// Builds entries for one message and returns the AI-title seed on first user text.
-    /// `manual_title_set` skips both the `FirstPrompt` push and the AI-title seed.
+    /// `manual_title_set` skips both the first-prompt title and the AI-title seed.
     pub(super) fn queue_message_entries(
         &mut self,
         message: &Message,
@@ -135,7 +135,6 @@ impl SessionState {
                 ai_title_seed = Some(text.to_owned());
                 entries.push(Entry::Title {
                     title: fit_title(text),
-                    source: TitleSource::FirstPrompt,
                     updated_at: now,
                 });
             }
@@ -175,7 +174,8 @@ impl SessionState {
         }
     }
 
-    /// Builds the compaction boundary and the synthetic post-compact root message.
+    /// Builds the compaction boundary, the refreshed context entry, and the synthetic post-compact
+    /// root message.
     pub(super) fn compact_entries(
         &self,
         boundary: CompactBoundary,
@@ -186,7 +186,6 @@ impl SessionState {
             summary,
             instructions,
             tasks,
-            trigger,
             context,
         } = boundary;
         let synthetic_uuid = Uuid::new_v4();
@@ -196,7 +195,6 @@ impl SessionState {
                 pre_message_count: self.message_count,
                 instructions,
                 tasks,
-                trigger: Some(trigger),
                 timestamp: now,
             },
             Entry::Context {
@@ -295,7 +293,6 @@ impl SessionState {
                 ..
             } => Some(Entry::Title {
                 title: title.clone(),
-                source: TitleSource::UserProvided,
                 updated_at: OffsetDateTime::now_utc(),
             }),
             _ => None,
@@ -358,7 +355,6 @@ pub(super) fn extract_user_text(message: &Message) -> Option<&str> {
 mod tests {
     use super::*;
     use crate::file_tracker::{FileTracker, LastView};
-    use crate::protocol::CompactTrigger;
     use crate::session::handle::testing::boundary;
     use crate::session::store::load_session_data_from_path;
     use crate::session::store::local_testing::test_session_file;
@@ -543,7 +539,6 @@ mod tests {
                     summary: "summary body".to_owned(),
                     instructions: Some("focus on auth".to_owned()),
                     tasks: plan(),
-                    trigger: CompactTrigger::Auto,
                     context: SessionContext::default(),
                 },
                 Message::user("post-compact"),
@@ -559,11 +554,10 @@ mod tests {
                         pre_message_count: 2,
                         instructions: Some(i),
                         tasks,
-                        trigger: Some(CompactTrigger::Auto),
                         ..
                     } if summary == "summary body" && i == "focus on auth" && *tasks == plan()
                 ),
-                "boundary entry must carry summary, pre-count, instructions, tasks, and trigger \
+                "boundary entry must carry summary, pre-count, instructions, and tasks \
                  verbatim: {:?}",
                 entries[0],
             );

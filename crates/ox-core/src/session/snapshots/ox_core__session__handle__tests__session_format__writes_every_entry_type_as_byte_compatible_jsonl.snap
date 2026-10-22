@@ -4,14 +4,14 @@ expression: write_every_entry(dir.path()).await
 ---
 {"type":"header","session_id":"<UUID-1>","cwd":"<CWD>","project_root":"<ROOT>","model":"m","created_at":"<TS-3>","version":1,"git_branch":"main"}
 {"type":"context","environment":{"cwd":"<CWD>","is_git":false,"platform":"","shell":"","os_version":""},"user_context":"","seen":{"instructions":"","date":"2026-01-01","model":""},"timestamp":"<TS-4>"}
-{"type":"title","title":"Edit f.rs","source":"first_prompt","updated_at":"<TS-4>"}
+{"type":"title","title":"Edit f.rs","updated_at":"<TS-4>"}
 {"type":"message","uuid":"<UUID-2>","message":{"role":"user","content":[{"type":"text","text":"Edit f.rs"}]},"timestamp":"<TS-4>"}
 {"type":"message","uuid":"<UUID-3>","parent_uuid":"<UUID-2>","message":{"role":"assistant","content":[{"type":"text","text":"Which change?"}]},"timestamp":"<TS-5>"}
 {"type":"usage","uuid":"<UUID-4>","model":"claude-sonnet-5-5","cache_ttl":"5m","input_tokens":1,"cache_creation_input_tokens":10,"cache_read_input_tokens":100,"output_tokens":1000,"timestamp":"<TS-6>"}
-{"type":"title","title":"Edit f.rs","source":"ai_generated","updated_at":"<TS-7>"}
-{"type":"title","title":"Fix f.rs","source":"user_provided","updated_at":"<TS-8>"}
+{"type":"title","title":"Edit f.rs","updated_at":"<TS-7>"}
+{"type":"title","title":"Fix f.rs","updated_at":"<TS-8>"}
 {"type":"usage","uuid":"<UUID-5>","model":"claude-sonnet-5-5","cache_ttl":"1h","input_tokens":2,"cache_creation_input_tokens":20,"cache_read_input_tokens":200,"output_tokens":2000,"timestamp":"<TS-9>"}
-{"type":"compact","summary":"Asked to edit f.rs.","pre_message_count":2,"instructions":"focus on f.rs","tasks":[{"content":"Read the config loader","status":"completed"},{"content":"Add the entry type","status":"in_progress"},{"content":"Write the tests","status":"pending"}],"trigger":"manual","timestamp":"<TS-10>"}
+{"type":"compact","summary":"Asked to edit f.rs.","pre_message_count":2,"instructions":"focus on f.rs","tasks":[{"content":"Read the config loader","status":"completed"},{"content":"Add the entry type","status":"in_progress"},{"content":"Write the tests","status":"pending"}],"timestamp":"<TS-10>"}
 {"type":"context","environment":{"cwd":"<CWD>","is_git":false,"platform":"","shell":"","os_version":""},"user_context":"","seen":{"instructions":"","date":"2026-01-01","model":""},"timestamp":"<TS-10>"}
 {"type":"message","uuid":"<UUID-6>","message":{"role":"user","content":[{"type":"text","text":"Summary: asked to edit f.rs."}]},"timestamp":"<TS-10>"}
 {"type":"context","environment":{"cwd":"<CWD>","is_git":false,"platform":"","shell":"","os_version":""},"user_context":"","seen":{"instructions":"","date":"2026-01-02","model":""},"timestamp":"<TS-11>"}

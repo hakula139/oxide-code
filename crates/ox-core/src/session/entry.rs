@@ -11,7 +11,6 @@ use crate::file_tracker::FileSnapshot;
 use crate::message::Message;
 use crate::model::TokenUsage;
 use crate::prompt::SessionContext;
-use crate::protocol::CompactTrigger;
 use crate::tool::ToolMetadata;
 use crate::tool::tasks::Task;
 
@@ -75,7 +74,6 @@ pub(crate) enum Entry {
     /// The newest `updated_at` wins.
     Title {
         title: String,
-        source: TitleSource,
         #[serde(with = "time::serde::rfc3339")]
         updated_at: OffsetDateTime,
     },
@@ -114,11 +112,11 @@ pub(crate) enum Entry {
         #[serde(flatten)]
         snapshot: FileSnapshot,
     },
-    /// Compaction boundary, written just before the synthetic post-compact `Message`.
+    /// Compaction boundary, written ahead of the refreshed `Context` and the synthetic
+    /// post-compact `Message`.
     /// Carries the pre-compact message count the resumed chat shows,
     /// and the task list the summarized transcript left,
     /// which applies on resume until a later `tasks` call replaces it.
-    /// `trigger` is absent from boundaries that 0.1.0-alpha.5 and earlier wrote.
     Compact {
         summary: String,
         pre_message_count: u32,
@@ -126,20 +124,9 @@ pub(crate) enum Entry {
         instructions: Option<String>,
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         tasks: Vec<Task>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        trigger: Option<CompactTrigger>,
         #[serde(with = "time::serde::rfc3339")]
         timestamp: OffsetDateTime,
     },
-}
-
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub(crate) enum TitleSource {
-    #[default]
-    FirstPrompt,
-    AiGenerated,
-    UserProvided,
 }
 
 #[derive(Debug, Clone)]
@@ -189,7 +176,6 @@ pub(crate) struct CompactBoundary {
     pub(crate) instructions: Option<String>,
     /// The task list the summarized transcript left, which the summary message carries over.
     pub(crate) tasks: Vec<Task>,
-    pub(crate) trigger: CompactTrigger,
     /// The prompt state the transcript after the boundary starts with,
     /// recorded beside the summary message so a resume rebuilds the same prompt.
     pub(crate) context: SessionContext,
@@ -201,7 +187,6 @@ pub(crate) struct CompactInfo {
     pub(crate) pre_message_count: u32,
     pub(crate) instructions: Option<String>,
     pub(crate) tasks: Vec<Task>,
-    pub(crate) trigger: Option<CompactTrigger>,
 }
 
 /// One billed request's token usage, with the model and prompt-cache TTL that price it.
@@ -382,27 +367,19 @@ mod tests {
     }
 
     #[test]
-    fn title_round_trips_with_source() {
+    fn title_round_trips() {
         let entry = Entry::Title {
             title: "Fix auth bug".to_owned(),
-            source: TitleSource::AiGenerated,
             updated_at: datetime!(2026-04-16 12:05:00 UTC),
         };
         let json = serde_json::to_value(&entry).unwrap();
         assert_eq!(json["type"], "title");
-        assert_eq!(json["source"], "ai_generated");
 
         let parsed: Entry = serde_json::from_str(&json.to_string()).unwrap();
-        let Entry::Title {
-            title,
-            source,
-            updated_at,
-        } = parsed
-        else {
+        let Entry::Title { title, updated_at } = parsed else {
             panic!("expected Title");
         };
         assert_eq!(title, "Fix auth bug");
-        assert_eq!(source, TitleSource::AiGenerated);
         assert_eq!(updated_at, datetime!(2026-04-16 12:05:00 UTC));
     }
 
@@ -414,10 +391,7 @@ mod tests {
         };
         let json = serde_json::to_value(&entry).unwrap();
         assert_eq!(json["type"], "summary");
-        assert!(
-            json.get("title").is_none(),
-            "title moved to its own entry type"
-        );
+        assert!(json.get("title").is_none(), "a summary carries no title");
 
         let parsed: Entry = serde_json::from_str(&json.to_string()).unwrap();
         let Entry::Summary {
@@ -572,7 +546,6 @@ mod tests {
             pre_message_count: 42,
             instructions: Some("focus on the build error".to_owned()),
             tasks: plan(),
-            trigger: Some(CompactTrigger::Auto),
             timestamp: datetime!(2026-04-16 13:00:00 UTC),
         };
         let json = serde_json::to_value(&entry).unwrap();
@@ -581,7 +554,6 @@ mod tests {
         assert_eq!(json["pre_message_count"], 42);
         assert_eq!(json["instructions"], "focus on the build error");
         assert_eq!(json["tasks"], serde_json::to_value(plan()).unwrap());
-        assert_eq!(json["trigger"], "auto");
         assert_eq!(json["timestamp"], "2026-04-16T13:00:00Z");
 
         let parsed: Entry = serde_json::from_str(&json.to_string()).unwrap();
@@ -590,7 +562,6 @@ mod tests {
             pre_message_count,
             instructions,
             tasks,
-            trigger,
             timestamp,
         } = parsed
         else {
@@ -600,30 +571,26 @@ mod tests {
         assert_eq!(pre_message_count, 42);
         assert_eq!(instructions.as_deref(), Some("focus on the build error"));
         assert_eq!(tasks, plan());
-        assert_eq!(trigger, Some(CompactTrigger::Auto));
         assert_eq!(timestamp, datetime!(2026-04-16 13:00:00 UTC));
     }
 
     #[test]
-    fn compact_omits_absent_instructions_tasks_and_trigger_and_reads_them_back_empty() {
+    fn compact_omits_absent_instructions_and_tasks_and_reads_them_back_empty() {
         let entry = Entry::Compact {
             summary: "s".to_owned(),
             pre_message_count: 4,
             instructions: None,
             tasks: Vec::new(),
-            trigger: None,
             timestamp: datetime!(2026-04-16 13:00:00 UTC),
         };
         let json = serde_json::to_value(&entry).unwrap();
         assert_eq!(json.get("instructions"), None);
         assert_eq!(json.get("tasks"), None);
-        assert_eq!(json.get("trigger"), None);
 
         let parsed: Entry = serde_json::from_value(json).unwrap();
         let Entry::Compact {
             instructions,
             tasks,
-            trigger,
             ..
         } = parsed
         else {
@@ -631,7 +598,26 @@ mod tests {
         };
         assert_eq!(instructions, None);
         assert_eq!(tasks, []);
-        assert_eq!(trigger, None);
+    }
+
+    #[test]
+    fn entries_from_older_builds_load_without_the_title_source_or_compaction_trigger() {
+        let cases = [
+            (
+                r#"{"type":"title","title":"hi","source":"ai_generated","updated_at":"2026-04-16T12:00:01Z"}"#,
+                r#"{"type":"title","title":"hi","updated_at":"2026-04-16T12:00:01Z"}"#,
+            ),
+            (
+                r#"{"type":"compact","summary":"s","pre_message_count":4,"trigger":"mid_turn","timestamp":"2026-04-16T13:00:00Z"}"#,
+                r#"{"type":"compact","summary":"s","pre_message_count":4,"timestamp":"2026-04-16T13:00:00Z"}"#,
+            ),
+        ];
+
+        for (old, current) in cases {
+            let parsed: Entry = serde_json::from_str(old).unwrap();
+
+            assert_eq!(serde_json::to_string(&parsed).unwrap(), current);
+        }
     }
 
     #[test]
@@ -639,7 +625,7 @@ mod tests {
         let jsonl = indoc! {r#"
             {"type":"header","session_id":"s1","cwd":"/tmp","model":"m","created_at":"2026-04-16T12:00:00Z","version":1}
             {"type":"message","uuid":"a1b2c3d4-e5f6-7890-abcd-1234567890ef","message":{"role":"user","content":[{"type":"text","text":"hi"}]},"timestamp":"2026-04-16T12:00:01Z"}
-            {"type":"title","title":"hi","source":"first_prompt","updated_at":"2026-04-16T12:00:01Z"}
+            {"type":"title","title":"hi","updated_at":"2026-04-16T12:00:01Z"}
             {"type":"summary","message_count":1,"updated_at":"2026-04-16T12:00:02Z"}
         "#};
         let entries: Vec<Entry> = jsonl
@@ -664,9 +650,7 @@ mod tests {
         assert_eq!(uuid.to_string(), "a1b2c3d4-e5f6-7890-abcd-1234567890ef");
         assert_eq!(*parent_uuid, None);
         assert_eq!(message.role, crate::message::Role::User);
-        assert!(
-            matches!(&entries[2], Entry::Title { title, source, .. } if title == "hi" && *source == TitleSource::FirstPrompt)
-        );
+        assert!(matches!(&entries[2], Entry::Title { title, .. } if title == "hi"));
         assert!(matches!(
             &entries[3],
             Entry::Summary {

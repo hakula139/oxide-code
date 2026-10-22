@@ -1395,7 +1395,6 @@ mod tests {
                         summary: "Compact summary".to_owned(),
                         pre_count: 4,
                         instructions: None,
-                        trigger: None,
                     },
                     Interaction::AssistantText("post-compact reply".to_owned()),
                 ],
