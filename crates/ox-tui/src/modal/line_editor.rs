@@ -294,23 +294,32 @@ mod tests {
         #[test]
         fn truncates_and_drops_growth_past_the_cap() {
             let mut editor = LineEditor::new("hello world").with_max_width(5);
+
             assert_eq!(editor.text(), "hello");
 
-            assert!(!editor.handle_key(&KeyEvent::from(KeyCode::Char('x'))));
+            let inserted = editor.handle_key(&KeyEvent::from(KeyCode::Char('x')));
+
+            assert!(!inserted);
             assert_eq!(editor.text(), "hello", "insert at the cap is dropped");
 
-            assert!(editor.handle_key(&KeyEvent::from(KeyCode::Backspace)));
-            assert!(editor.handle_key(&KeyEvent::from(KeyCode::Char('!'))));
+            let deleted = editor.handle_key(&KeyEvent::from(KeyCode::Backspace));
+            let inserted = editor.handle_key(&KeyEvent::from(KeyCode::Char('!')));
+
+            assert!(deleted && inserted);
             assert_eq!(editor.text(), "hell!", "room freed by a delete is usable");
         }
 
         #[test]
         fn counts_wide_chars_by_column() {
             let mut editor = LineEditor::new("界界界").with_max_width(5);
+
             assert_eq!(editor.text(), "界界");
 
-            assert!(!editor.handle_key(&KeyEvent::from(KeyCode::Char('界'))));
-            assert!(editor.handle_key(&KeyEvent::from(KeyCode::Char('a'))));
+            let wide = editor.handle_key(&KeyEvent::from(KeyCode::Char('界')));
+            let narrow = editor.handle_key(&KeyEvent::from(KeyCode::Char('a')));
+
+            assert!(!wide);
+            assert!(narrow);
             assert_eq!(
                 editor.text(),
                 "界界a",
@@ -342,11 +351,14 @@ mod tests {
             editor.handle_key(&KeyEvent::from(KeyCode::Left));
             editor.handle_key(&KeyEvent::from(KeyCode::Left));
 
-            assert!(editor.handle_key(&KeyEvent::from(KeyCode::Char('b'))));
+            let inserted = editor.handle_key(&KeyEvent::from(KeyCode::Char('b')));
+
+            assert!(inserted);
             assert_eq!(editor.text(), "abcd");
 
             editor.handle_key(&KeyEvent::new(KeyCode::Char('a'), KeyModifiers::CONTROL));
             type_str(&mut editor, ">");
+
             assert_eq!(editor.text(), ">abcd", "Ctrl+A jumps to the start");
         }
 
@@ -354,7 +366,10 @@ mod tests {
         fn supports_readline_word_deletion() {
             let mut editor = LineEditor::new("fix auth bug");
 
-            assert!(editor.handle_key(&KeyEvent::new(KeyCode::Char('w'), KeyModifiers::CONTROL)));
+            let deleted =
+                editor.handle_key(&KeyEvent::new(KeyCode::Char('w'), KeyModifiers::CONTROL));
+
+            assert!(deleted);
             assert_eq!(editor.text(), "fix auth ");
         }
 
@@ -371,7 +386,9 @@ mod tests {
                 KeyEvent::from(KeyCode::Char('\n')),
                 KeyEvent::new(KeyCode::Char('x'), KeyModifiers::ALT),
             ] {
-                assert!(!editor.handle_key(&event), "{event:?} must not edit");
+                let edited = editor.handle_key(&event);
+
+                assert!(!edited, "{event:?} must not edit");
             }
 
             assert_eq!(editor.text(), "ab");
@@ -423,7 +440,9 @@ mod tests {
             let mut editor = LineEditor::new("[]");
             editor.handle_key(&KeyEvent::from(KeyCode::Left));
 
-            assert!(editor.paste("\nfix\r\nauth\n\tflow\n"));
+            let pasted = editor.paste("\nfix\r\nauth\n\tflow\n");
+
+            assert!(pasted);
             assert_eq!(editor.text(), "[fix auth flow]");
         }
 
@@ -431,15 +450,21 @@ mod tests {
         fn keeps_only_what_fits_under_the_cap() {
             let mut editor = LineEditor::new("ab").with_max_width(6);
 
-            assert!(editor.paste("c界d界"));
+            let pasted = editor.paste("c界d界");
+
+            assert!(pasted);
             assert_eq!(
                 editor.text(),
                 "abc界d",
                 "a wide char past the cap is dropped"
             );
 
-            assert!(!editor.paste("x"), "a full field takes nothing");
-            assert!(!editor.paste("\n\n"), "line breaks alone insert nothing");
+            let past_the_cap = editor.paste("x");
+            let line_breaks = editor.paste("\n\n");
+
+            assert!(!past_the_cap, "a full field takes nothing");
+            assert!(!line_breaks, "line breaks alone insert nothing");
+            assert_eq!(editor.text(), "abc界d");
         }
 
         #[test]
@@ -470,9 +495,11 @@ mod tests {
         fn shows_the_placeholder_only_while_empty() {
             let theme = Theme::default();
             let mut editor = LineEditor::new("").with_placeholder("Type to filter");
+
             assert_eq!(editor.line(40, &theme).to_string(), "/ Type to filter");
 
             type_str(&mut editor, "ab");
+
             assert_eq!(editor.line(40, &theme).to_string(), "/ ab");
         }
 
@@ -480,19 +507,23 @@ mod tests {
         fn scrolls_as_little_as_possible_to_keep_the_cursor_in_view() {
             // Width 12 leaves 9 columns for text beside the prompt and the end-of-line cursor.
             let mut editor = LineEditor::new("abcdefghijklmnopqrstuvwxyz");
+
             assert_eq!(shown(&editor), ("/ rstuvwxyz".to_owned(), 11));
 
             editor.handle_key(&KeyEvent::new(KeyCode::Char('a'), KeyModifiers::CONTROL));
+
             assert_eq!(shown(&editor), ("/ abcdefghi".to_owned(), 2));
 
             for _ in 0..10 {
                 editor.handle_key(&KeyEvent::from(KeyCode::Right));
             }
+
             assert_eq!(shown(&editor), ("/ bcdefghij".to_owned(), 11));
 
             for _ in 0..5 {
                 editor.handle_key(&KeyEvent::from(KeyCode::Left));
             }
+
             assert_eq!(
                 shown(&editor),
                 ("/ bcdefghij".to_owned(), 6),
@@ -503,11 +534,13 @@ mod tests {
         #[test]
         fn refills_the_row_when_the_tail_shrinks() {
             let mut editor = LineEditor::new("abcdefghijklmnopqrstuvwxyz");
+
             assert_eq!(shown(&editor).0, "/ rstuvwxyz");
 
             for _ in 0..5 {
                 editor.handle_key(&KeyEvent::from(KeyCode::Backspace));
             }
+
             assert_eq!(shown(&editor), ("/ mnopqrstu".to_owned(), 11));
         }
 
@@ -536,6 +569,7 @@ mod tests {
         #[test]
         fn tracks_the_editing_position_by_display_width() {
             let mut editor = LineEditor::new("日本");
+
             assert_eq!(
                 cursor_x(&editor, 20),
                 PROMPT_WIDTH + 4,
@@ -543,15 +577,18 @@ mod tests {
             );
 
             editor.handle_key(&KeyEvent::from(KeyCode::Left));
+
             assert_eq!(cursor_x(&editor, 20), PROMPT_WIDTH + 2);
         }
 
         #[test]
         fn measures_emoji_sequences_as_ratatui_paints_them() {
             let mut editor = LineEditor::new("❤️x");
+
             assert_eq!(cursor_x(&editor, 20), PROMPT_WIDTH + 3);
 
             editor.handle_key(&KeyEvent::from(KeyCode::Left));
+
             assert_eq!(
                 cursor_x(&editor, 20),
                 PROMPT_WIDTH + 2,
@@ -559,6 +596,7 @@ mod tests {
             );
 
             editor.handle_key(&KeyEvent::from(KeyCode::Left));
+
             assert_eq!(
                 cursor_x(&editor, 20),
                 PROMPT_WIDTH,
