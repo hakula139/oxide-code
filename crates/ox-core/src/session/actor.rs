@@ -439,12 +439,7 @@ mod tests {
 
             drive(state, vec![rec, fin]).await;
 
-            let path = test_session_file(dir.path(), &session_id);
-            let content = std::fs::read_to_string(path).unwrap();
-            let entries: Vec<Entry> = content
-                .lines()
-                .map(|line| serde_json::from_str(line).unwrap())
-                .collect();
+            let entries = saved_entries(dir.path(), &session_id);
             assert!(
                 matches!(
                     entries.as_slice(),
@@ -458,7 +453,7 @@ mod tests {
                         },
                     ]
                 ),
-                "{content}",
+                "{entries:?}",
             );
         }
 
@@ -767,14 +762,20 @@ mod tests {
                     _ => None,
                 })
                 .collect();
-            let message_count = entries
-                .iter()
-                .filter(|entry| matches!(entry, Entry::Message { .. }))
-                .count();
             assert_eq!(boundaries, [("synth summary", Some("focus on auth"))]);
-            assert_eq!(
-                message_count, 3,
-                "two recorded + one synthetic continuation"
+            assert!(
+                matches!(
+                    entries[..],
+                    [
+                        Entry::Header(_),
+                        Entry::Title { .. },
+                        Entry::Message { .. },
+                        Entry::Message { .. },
+                        Entry::Compact { .. },
+                        Entry::Message { .. },
+                    ]
+                ),
+                "the synthetic continuation follows its boundary: {entries:?}",
             );
         }
 

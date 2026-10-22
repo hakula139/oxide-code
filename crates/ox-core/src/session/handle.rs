@@ -551,12 +551,21 @@ mod tests {
     use crate::session::entry::{Entry, SessionInfo, TitleSource};
     use crate::session::handle::testing::record_write_call;
     use crate::session::store::listing::ProjectScope;
-    use crate::session::store::local_testing::{saved_entries, saved_titles, test_session_file};
+    use crate::session::store::local_testing::{
+        saved_entries, saved_snapshot_paths, saved_titles, test_session_file,
+    };
     use crate::session::store::testing::{
         TEST_PROJECT, isolated_store, seed_test_session, test_project_dir, test_store,
     };
     use crate::tool::tasks::testing::plan;
     use crate::tool::view::{DiffChunk, EditDiff, NumberedLine};
+
+    /// The failure the first write after the actor stops reports.
+    const STOPPED: &str =
+        "session writer task has stopped. Conversation history may be incomplete.";
+
+    /// The failure every later write reports once [`STOPPED`] was surfaced.
+    const STOPPED_AGAIN: &str = "session writer task has stopped";
 
     /// Resumes the session whose file name carries `session_id`.
     fn resume_id(store: &SessionStore, session_id: &str) -> Result<ResumedSession> {
@@ -565,32 +574,6 @@ mod tests {
 
     mod record_message {
         use super::*;
-
-        #[tokio::test]
-        async fn writes_title_before_first_user_message() {
-            let dir = tempfile::tempdir().unwrap();
-            let store = test_store(dir.path());
-            let handle = start(&store, "m", None);
-            let sid = handle.session_id().to_owned();
-
-            handle.record_message(Message::user("First prompt")).await;
-            handle.finish(Vec::new()).await;
-            drop(handle);
-
-            let entries = saved_entries(dir.path(), &sid);
-            assert!(
-                matches!(
-                    entries[..],
-                    [
-                        Entry::Header(_),
-                        Entry::Title { .. },
-                        Entry::Message { .. },
-                        ..
-                    ]
-                ),
-                "{entries:?}",
-            );
-        }
 
         #[tokio::test]
         async fn seeds_ai_title_only_for_first_user_text() {
@@ -617,10 +600,7 @@ mod tests {
             let first = handle.record_message(Message::user("a")).await;
             let second = handle.record_message(Message::user("b")).await;
 
-            assert_eq!(
-                first.failure.as_deref(),
-                Some("session writer task has stopped. Conversation history may be incomplete."),
-            );
+            assert_eq!(first.failure.as_deref(), Some(STOPPED),);
             assert_eq!(second.failure, None);
         }
 
@@ -633,10 +613,12 @@ mod tests {
 
             let first = handle.record_message(Message::user("a")).await;
 
-            let msg = first.failure.expect("actor-gone surfaces on first call");
-            assert!(
-                msg.contains("after I/O error: permission denied"),
-                "underlying flush error should be carried: {msg}",
+            assert_eq!(
+                first.failure.as_deref(),
+                Some(
+                    "session writer task has stopped after I/O error: \
+                     permission denied: /readonly/path. Conversation history may be incomplete."
+                ),
             );
         }
 
@@ -648,7 +630,13 @@ mod tests {
 
             let first = handle.record_message(Message::user("a")).await;
 
-            assert!(first.failure.is_some());
+            assert_eq!(
+                first.failure.as_deref(),
+                Some(
+                    "session writer task has stopped after I/O error: disk full. \
+                     Conversation history may be incomplete."
+                ),
+            );
         }
 
         #[tokio::test]
@@ -769,33 +757,6 @@ mod tests {
         }
 
         #[tokio::test]
-        async fn all_default_acks_without_writing() {
-            let dir = tempfile::tempdir().unwrap();
-            let store = test_store(dir.path());
-            let handle = start(&store, "m", None);
-            let sid = handle.session_id().to_owned();
-            handle.record_message(Message::user("trigger")).await;
-
-            let outcome = handle
-                .record_tool_metadata_batch(vec![
-                    ("t1".to_owned(), ToolMetadata::default()),
-                    ("t2".to_owned(), ToolMetadata::default()),
-                ])
-                .await;
-            handle.finish(Vec::new()).await;
-            drop(handle);
-
-            assert!(outcome.failure.is_none());
-            let entries = saved_entries(dir.path(), &sid);
-            assert!(
-                !entries
-                    .iter()
-                    .any(|entry| matches!(entry, Entry::ToolResultMetadata { .. })),
-                "all-default batch writes nothing: {entries:?}",
-            );
-        }
-
-        #[tokio::test]
         async fn actor_drops_ack_surfaces_actor_gone_failure() {
             // Five healthy acks cover each cmd `dispatch_outcome` sends. The actor drops the sixth.
             let handle = testing::acks_then_drops("acks-then-drops", 5);
@@ -826,8 +787,9 @@ mod tests {
                 batch_ok.failure.is_none(),
                 "ToolMetadata is acked healthily"
             );
-            assert!(
-                batch_dropped.failure.is_some(),
+            assert_eq!(
+                batch_dropped.failure.as_deref(),
+                Some(STOPPED),
                 "dropped ack surfaces actor-gone",
             );
 
@@ -1105,14 +1067,11 @@ mod tests {
             handle.finish(Vec::new()).await;
             drop(handle);
 
-            let entries = saved_entries(dir.path(), &sid);
             assert!(
-                entries.iter().any(|entry| matches!(
-                    entry,
-                    Entry::Compact { summary, instructions, .. }
-                        if summary == "synth summary" && instructions.as_deref() == Some("focus")
-                )),
-                "boundary with its summary on disk: {entries:?}",
+                saved_entries(dir.path(), &sid)
+                    .iter()
+                    .any(|entry| matches!(entry, Entry::Compact { .. })),
+                "the committed boundary is on disk",
             );
         }
 
@@ -1125,24 +1084,18 @@ mod tests {
             }
 
             let dead = testing::dead("dead");
-            for _ in 0..2 {
+            for expected in [STOPPED, STOPPED_AGAIN] {
                 let outcome = compact(&dead).await;
                 assert_eq!(outcome.pre_count, 0, "no actor means no pre-count signal");
                 assert!(!outcome.committed);
-                assert!(
-                    outcome.failure.is_some(),
-                    "a later failure must not read as success once actor-gone was surfaced",
-                );
+                assert_eq!(outcome.failure.as_deref(), Some(expected));
             }
 
             let stalled = testing::acks_then_drops("stalled", 1);
             assert!(compact(&stalled).await.committed);
             let dropped = compact(&stalled).await;
             assert!(!dropped.committed);
-            assert!(
-                dropped.failure.is_some(),
-                "a dropped ack must surface as a failure",
-            );
+            assert_eq!(dropped.failure.as_deref(), Some(STOPPED));
             stalled.shutdown().await;
         }
     }
@@ -1172,11 +1125,16 @@ mod tests {
             let again = resume_id(&store, &session_id).unwrap();
             assert!(!again.unarchived);
             again.handle.shutdown().await;
-            let jsonl =
-                std::fs::read_to_string(test_session_file(dir.path(), &session_id)).unwrap();
+            let archive_states: Vec<_> = saved_entries(dir.path(), &session_id)
+                .iter()
+                .filter_map(|entry| match entry {
+                    Entry::Archive { archived, .. } => Some(*archived),
+                    _ => None,
+                })
+                .collect();
             assert_eq!(
-                jsonl.matches(r#"{"type":"archive""#).count(),
-                2,
+                archive_states,
+                [true, false],
                 "resuming an active session appends no archive entry",
             );
         }
@@ -1184,15 +1142,16 @@ mod tests {
         #[tokio::test]
         async fn reports_every_failure_to_reach_the_actor() {
             let dead = testing::dead("dead");
-            assert!(dead.archive().await.failure.is_some());
-            assert!(
-                dead.archive().await.failure.is_some(),
+            assert_eq!(dead.archive().await.failure.as_deref(), Some(STOPPED));
+            assert_eq!(
+                dead.archive().await.failure.as_deref(),
+                Some(STOPPED_AGAIN),
                 "a second failure must not read as success once actor-gone was surfaced",
             );
 
             let stalled = testing::acks_then_drops("stalled", 1);
-            assert!(stalled.archive().await.failure.is_none());
-            assert!(stalled.archive().await.failure.is_some());
+            assert_eq!(stalled.archive().await.failure, None);
+            assert_eq!(stalled.archive().await.failure.as_deref(), Some(STOPPED));
             stalled.shutdown().await;
         }
     }
@@ -1266,10 +1225,7 @@ mod tests {
             let first = handle.finish(Vec::new()).await;
             let second = handle.finish(Vec::new()).await;
 
-            assert_eq!(
-                first.failure.as_deref(),
-                Some("session writer task has stopped. Conversation history may be incomplete."),
-            );
+            assert_eq!(first.failure.as_deref(), Some(STOPPED),);
             assert_eq!(second.failure, None);
         }
 
@@ -1341,8 +1297,10 @@ mod tests {
         #[tokio::test]
         async fn fails_when_actor_dead() {
             let handle = testing::dead("dead");
+
             let failure = handle.finalize(Vec::new()).await;
-            assert!(failure.is_some(), "dead handle finalize surfaces failure");
+
+            assert_eq!(failure.as_deref(), Some(STOPPED));
         }
 
         #[tokio::test]
@@ -1551,11 +1509,10 @@ mod tests {
             .await;
 
             assert_eq!(outcome.finalize_failure, None);
-            let old_jsonl = std::fs::read_to_string(test_session_file(dir.path(), &original_id))
-                .expect("old session file lands on disk");
-            assert!(
-                old_jsonl.contains("seed.txt"),
-                "snapshot survived into old JSONL: {old_jsonl}",
+            assert_eq!(
+                saved_snapshot_paths(&saved_entries(dir.path(), &original_id)),
+                [seed.as_path()],
+                "snapshot survived into the old JSONL",
             );
         }
     }
@@ -1592,8 +1549,11 @@ mod tests {
                 "handle now points at target"
             );
             assert_eq!(
-                outcome.transcript.messages.len(),
-                2,
+                outcome.transcript.messages,
+                [
+                    Message::user("target prompt"),
+                    Message::assistant("target reply")
+                ],
                 "resumed payload carries the target's transcript",
             );
             assert!(
@@ -1603,7 +1563,13 @@ mod tests {
 
             let entries = saved_entries(dir.path(), &original_id);
             assert!(
-                matches!(entries.last(), Some(Entry::Summary { .. })),
+                matches!(
+                    entries.last(),
+                    Some(Entry::Summary {
+                        message_count: 1,
+                        ..
+                    })
+                ),
                 "old JSONL gets a summary: {entries:?}",
             );
         }
@@ -1620,6 +1586,7 @@ mod tests {
             let err = roll_into(&mut session, &store, Vec::new(), &missing)
                 .await
                 .unwrap_err();
+
             assert_eq!(
                 err.to_string(),
                 format!("failed to open {}", missing.display())
@@ -1678,11 +1645,10 @@ mod tests {
                 .await
                 .expect("roll_into must succeed");
 
-            let old_jsonl = std::fs::read_to_string(test_session_file(dir.path(), &original_id))
-                .expect("old session file persists");
-            assert!(
-                old_jsonl.contains("live.txt"),
-                "live tracker snapshot drains into old JSONL: {old_jsonl}",
+            assert_eq!(
+                saved_snapshot_paths(&saved_entries(dir.path(), &original_id)),
+                [live_seed.as_path()],
+                "live tracker snapshot drains into the old JSONL",
             );
             let loaded: Vec<_> = outcome
                 .transcript
@@ -1794,7 +1760,9 @@ mod tests {
             original.finish(Vec::new()).await;
             drop(original);
 
-            let err = resume_id(&store, &session_id).err().unwrap();
+            let err = resume_id(&store, &session_id)
+                .err()
+                .expect("a session with no messages must not resume");
 
             assert_eq!(err.to_string(), format!("session not found: {session_id}"));
         }
@@ -1846,12 +1814,12 @@ mod tests {
             original.shutdown().await;
 
             let ResumedSession { transcript, .. } = resume_id(&store, &session_id).unwrap();
+
             assert_eq!(
-                transcript.messages.len(),
-                1,
-                "assistant-only-tool-use should be dropped"
+                transcript.messages,
+                [Message::user("do X")],
+                "assistant-only-tool-use should be dropped",
             );
-            assert_eq!(transcript.messages[0].role, Role::User);
         }
 
         #[tokio::test]
@@ -1870,12 +1838,7 @@ mod tests {
             resumed.finish(Vec::new()).await;
             drop(resumed);
 
-            let content =
-                std::fs::read_to_string(test_session_file(dir.path(), &session_id)).unwrap();
-            let entries: Vec<Entry> = content
-                .lines()
-                .map(|line| serde_json::from_str(line).unwrap())
-                .collect();
+            let entries = saved_entries(dir.path(), &session_id);
 
             let msg_uuids: Vec<_> = entries
                 .iter()

@@ -11,8 +11,8 @@ use crate::tool::tasks::Task;
 
 /// Prefix for the synthetic post-compact user message.
 const SUMMARY_PREFIX: &str = "This conversation has been compacted. \
-    The summary below covers the prior work. \
-    Continue from here without re-asking the engineer what to do.";
+                              The summary below covers the prior work. \
+                              Continue from here without re-asking the engineer what to do.";
 
 /// Composes the synthetic post-compact root message for the next turn, reminding the model of
 /// the task list and the open background shells the summarized transcript leaves.
@@ -122,9 +122,11 @@ mod tests {
             };
             assert_eq!(
                 text,
-                "This conversation has been compacted. \
-                 The summary below covers the prior work. \
-                 Continue from here without re-asking the engineer what to do.\n\ndid X, Y, Z\n",
+                indoc! {"
+                    This conversation has been compacted. The summary below covers the prior work. Continue from here without re-asking the engineer what to do.
+
+                    did X, Y, Z
+                "},
             );
         }
 
@@ -193,8 +195,7 @@ mod tests {
             });
 
             assert!(strip_synthetic_post_compact_prefix(&mut m));
-            assert_eq!(m.content.len(), 1);
-            assert!(matches!(&m.content[0], ContentBlock::Text { text } if text == "real prompt"));
+            assert_eq!(m, Message::user("real prompt"));
         }
 
         #[test]
@@ -210,9 +211,7 @@ mod tests {
             });
 
             assert!(strip_synthetic_post_compact_prefix(&mut m));
-            assert!(
-                matches!(&m.content[..], [ContentBlock::Text { text }] if text == "real prompt")
-            );
+            assert_eq!(m, Message::user("real prompt"));
         }
 
         #[test]
@@ -240,11 +239,7 @@ mod tests {
         fn leaves_non_text_first_block() {
             let mut m = Message {
                 role: Role::User,
-                content: vec![ContentBlock::tool_result(
-                    "toolu_1",
-                    SUMMARY_PREFIX.trim(),
-                    false,
-                )],
+                content: vec![ContentBlock::tool_result("toolu_1", SUMMARY_PREFIX, false)],
             };
 
             assert!(!strip_synthetic_post_compact_prefix(&mut m));

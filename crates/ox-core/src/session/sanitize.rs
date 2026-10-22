@@ -216,18 +216,12 @@ mod tests {
         fn pairs_tool_use_with_result_and_appends_continuation_sentinel() {
             let mut messages = vec![
                 Message::user("do X"),
-                Message {
-                    role: Role::Assistant,
-                    content: vec![
-                        text("checking"),
-                        unresolved_tool_use("t1"),
-                        unresolved_tool_use("t2"),
-                    ],
-                },
-                Message {
-                    role: Role::User,
-                    content: vec![ContentBlock::tool_result("t1", "ok", false)],
-                },
+                assistant(vec![
+                    text("checking"),
+                    unresolved_tool_use("t1"),
+                    unresolved_tool_use("t2"),
+                ]),
+                user(vec![ContentBlock::tool_result("t1", "ok", false)]),
             ];
 
             sanitize_resumed_messages(&mut messages);
@@ -248,13 +242,10 @@ mod tests {
             let mut messages = vec![
                 Message::user("do X"),
                 Message::assistant("done, no tool needed"),
-                Message {
-                    role: Role::User,
-                    content: vec![
-                        ContentBlock::tool_result("orphan", "ghost", false),
-                        text("follow-up"),
-                    ],
-                },
+                user(vec![
+                    ContentBlock::tool_result("orphan", "ghost", false),
+                    text("follow-up"),
+                ]),
             ];
 
             sanitize_resumed_messages(&mut messages);
@@ -274,10 +265,11 @@ mod tests {
             let mut messages = vec![
                 Message::user("do X"),
                 Message::assistant("all clear"),
-                Message {
-                    role: Role::User,
-                    content: vec![ContentBlock::tool_result("ghost", "nobody asked", false)],
-                },
+                user(vec![ContentBlock::tool_result(
+                    "ghost",
+                    "nobody asked",
+                    false,
+                )]),
             ];
 
             sanitize_resumed_messages(&mut messages);
@@ -292,10 +284,7 @@ mod tests {
         fn collapses_adjacent_users_after_empty_assistant_drop() {
             let mut messages = vec![
                 Message::user("do X"),
-                Message {
-                    role: Role::Assistant,
-                    content: vec![unresolved_tool_use("unresolved")],
-                },
+                assistant(vec![unresolved_tool_use("unresolved")]),
                 Message::user("and now Y"),
             ];
 
@@ -309,10 +298,7 @@ mod tests {
             let mut messages = vec![
                 Message::user("do X"),
                 Message::assistant("first answer"),
-                Message {
-                    role: Role::User,
-                    content: vec![ContentBlock::tool_result("ghost", "stale", false)],
-                },
+                user(vec![ContentBlock::tool_result("ghost", "stale", false)]),
                 Message::assistant("second answer"),
             ];
 
@@ -331,14 +317,8 @@ mod tests {
         fn drops_orphan_when_assistant_tool_use_was_dropped() {
             let mut messages = vec![
                 Message::user("do X"),
-                Message {
-                    role: Role::Assistant,
-                    content: vec![text("checking"), unresolved_tool_use("t1")],
-                },
-                Message {
-                    role: Role::User,
-                    content: vec![ContentBlock::tool_result("t2", "stale", false)],
-                },
+                assistant(vec![text("checking"), unresolved_tool_use("t1")]),
+                user(vec![ContentBlock::tool_result("t2", "stale", false)]),
             ];
 
             sanitize_resumed_messages(&mut messages);
@@ -353,18 +333,12 @@ mod tests {
         fn keeps_answered_server_calls_and_drops_a_paused_one() {
             let mut messages = vec![
                 Message::user("research X"),
-                Message {
-                    role: Role::Assistant,
-                    content: vec![text("Searching."), server_tool_use("s1")],
-                },
-                Message {
-                    role: Role::Assistant,
-                    content: vec![
-                        server_tool_result("s1"),
-                        text("Found X."),
-                        server_tool_use("s2"),
-                    ],
-                },
+                assistant(vec![text("Searching."), server_tool_use("s1")]),
+                assistant(vec![
+                    server_tool_result("s1"),
+                    text("Found X."),
+                    server_tool_use("s2"),
+                ]),
             ];
 
             sanitize_resumed_messages(&mut messages);
@@ -374,15 +348,12 @@ mod tests {
                 messages,
                 [
                     Message::user("research X"),
-                    Message {
-                        role: Role::Assistant,
-                        content: vec![
-                            text("Searching."),
-                            server_tool_use("s1"),
-                            server_tool_result("s1"),
-                            text("Found X."),
-                        ],
-                    },
+                    assistant(vec![
+                        text("Searching."),
+                        server_tool_use("s1"),
+                        server_tool_result("s1"),
+                        text("Found X."),
+                    ]),
                 ],
             );
         }
@@ -390,10 +361,7 @@ mod tests {
         #[test]
         fn prepends_head_sentinel_when_leading_user_is_dropped() {
             let mut messages = vec![
-                Message {
-                    role: Role::User,
-                    content: vec![ContentBlock::tool_result("ghost", "stale", false)],
-                },
+                user(vec![ContentBlock::tool_result("ghost", "stale", false)]),
                 Message::assistant("carrying on"),
                 Message::user("next question"),
             ];
@@ -430,14 +398,11 @@ mod tests {
         fn drops_records_whose_call_sanitize_removed() {
             let mut messages = vec![
                 Message::user("read both"),
-                Message {
-                    role: Role::Assistant,
-                    content: vec![unresolved_tool_use("seen"), unresolved_tool_use("lost")],
-                },
-                Message {
-                    role: Role::User,
-                    content: vec![ContentBlock::tool_result("seen", "a body", false)],
-                },
+                assistant(vec![
+                    unresolved_tool_use("seen"),
+                    unresolved_tool_use("lost"),
+                ]),
+                user(vec![ContentBlock::tool_result("seen", "a body", false)]),
                 Message::assistant("done"),
             ];
             let mut snapshots = vec![snapshot("/a", "seen"), snapshot("/b", "lost")];
@@ -455,19 +420,27 @@ mod tests {
         #[test]
         fn removes_assistant_block_without_matching_result() {
             let mut messages = vec![
-                Message {
-                    role: Role::Assistant,
-                    content: vec![text("checking"), unresolved_tool_use("ghost")],
-                },
-                Message {
-                    role: Role::User,
-                    content: vec![ContentBlock::tool_result("other", "irrelevant", false)],
-                },
+                assistant(vec![text("checking"), unresolved_tool_use("ghost")]),
+                user(vec![ContentBlock::tool_result(
+                    "other",
+                    "irrelevant",
+                    false,
+                )]),
             ];
 
             drop_unresolved_tool_uses(&mut messages);
 
-            assert_eq!(messages[0].content, [text("checking")]);
+            assert_eq!(
+                messages,
+                [
+                    assistant(vec![text("checking")]),
+                    user(vec![ContentBlock::tool_result(
+                        "other",
+                        "irrelevant",
+                        false
+                    )]),
+                ],
+            );
         }
 
         #[test]
@@ -475,44 +448,38 @@ mod tests {
             // The API ran `deferred` only after client call `t1` returned, so its result opens the
             // next reply. `misplaced` has only a user `tool_result`, which answers no server call.
             let mut messages = vec![
-                Message {
-                    role: Role::Assistant,
-                    content: vec![
-                        server_tool_use("deferred"),
-                        unresolved_tool_use("t1"),
-                        server_tool_use("misplaced"),
-                    ],
-                },
-                Message {
-                    role: Role::User,
-                    content: vec![
-                        ContentBlock::tool_result("t1", "ok", false),
-                        ContentBlock::tool_result("misplaced", "stale", false),
-                    ],
-                },
-                Message {
-                    role: Role::Assistant,
-                    content: vec![
-                        server_tool_result("deferred"),
-                        server_tool_use("same"),
-                        server_tool_result("same"),
-                        server_tool_use("ghost"),
-                    ],
-                },
+                assistant(vec![
+                    server_tool_use("deferred"),
+                    unresolved_tool_use("t1"),
+                    server_tool_use("misplaced"),
+                ]),
+                user(vec![
+                    ContentBlock::tool_result("t1", "ok", false),
+                    ContentBlock::tool_result("misplaced", "stale", false),
+                ]),
+                assistant(vec![
+                    server_tool_result("deferred"),
+                    server_tool_use("same"),
+                    server_tool_result("same"),
+                    server_tool_use("ghost"),
+                ]),
             ];
 
             drop_unresolved_tool_uses(&mut messages);
 
             assert_eq!(
-                messages[0].content,
-                [server_tool_use("deferred"), unresolved_tool_use("t1")],
-            );
-            assert_eq!(
-                messages[2].content,
+                messages,
                 [
-                    server_tool_result("deferred"),
-                    server_tool_use("same"),
-                    server_tool_result("same"),
+                    assistant(vec![server_tool_use("deferred"), unresolved_tool_use("t1")]),
+                    user(vec![
+                        ContentBlock::tool_result("t1", "ok", false),
+                        ContentBlock::tool_result("misplaced", "stale", false),
+                    ]),
+                    assistant(vec![
+                        server_tool_result("deferred"),
+                        server_tool_use("same"),
+                        server_tool_result("same"),
+                    ]),
                 ],
             );
         }
@@ -520,14 +487,8 @@ mod tests {
         #[test]
         fn keeps_resolved_calls_and_ignores_user_role() {
             let mut messages = vec![
-                Message {
-                    role: Role::Assistant,
-                    content: vec![unresolved_tool_use("kept")],
-                },
-                Message {
-                    role: Role::User,
-                    content: vec![ContentBlock::tool_result("kept", "ok", false)],
-                },
+                assistant(vec![unresolved_tool_use("kept")]),
+                user(vec![ContentBlock::tool_result("kept", "ok", false)]),
             ];
             let before = messages.clone();
 
@@ -543,52 +504,43 @@ mod tests {
         #[test]
         fn removes_user_block_without_matching_call() {
             let mut messages = vec![
-                Message {
-                    role: Role::Assistant,
-                    content: vec![unresolved_tool_use("real")],
-                },
-                Message {
-                    role: Role::User,
-                    content: vec![
-                        ContentBlock::tool_result("real", "ok", false),
-                        ContentBlock::tool_result("ghost", "stale", false),
-                    ],
-                },
-            ];
-
-            drop_orphan_tool_results(&mut messages);
-
-            assert_eq!(
-                messages[1].content,
-                [ContentBlock::tool_result("real", "ok", false)]
-            );
-        }
-
-        #[test]
-        fn pairs_server_results_only_with_server_calls() {
-            let mut messages = vec![
-                Message {
-                    role: Role::Assistant,
-                    content: vec![
-                        server_tool_use("srv_1"),
-                        server_tool_result("srv_1"),
-                        server_tool_result("ghost"),
-                    ],
-                },
-                Message {
-                    role: Role::User,
-                    content: vec![ContentBlock::tool_result("srv_1", "stale", false)],
-                },
+                assistant(vec![unresolved_tool_use("real")]),
+                user(vec![
+                    ContentBlock::tool_result("real", "ok", false),
+                    ContentBlock::tool_result("ghost", "stale", false),
+                ]),
             ];
 
             drop_orphan_tool_results(&mut messages);
 
             assert_eq!(
                 messages,
-                [Message {
-                    role: Role::Assistant,
-                    content: vec![server_tool_use("srv_1"), server_tool_result("srv_1")],
-                }],
+                [
+                    assistant(vec![unresolved_tool_use("real")]),
+                    user(vec![ContentBlock::tool_result("real", "ok", false)]),
+                ],
+            );
+        }
+
+        #[test]
+        fn pairs_server_results_only_with_server_calls() {
+            let mut messages = vec![
+                assistant(vec![
+                    server_tool_use("srv_1"),
+                    server_tool_result("srv_1"),
+                    server_tool_result("ghost"),
+                ]),
+                user(vec![ContentBlock::tool_result("srv_1", "stale", false)]),
+            ];
+
+            drop_orphan_tool_results(&mut messages);
+
+            assert_eq!(
+                messages,
+                [assistant(vec![
+                    server_tool_use("srv_1"),
+                    server_tool_result("srv_1")
+                ])],
             );
         }
 
@@ -596,10 +548,7 @@ mod tests {
         fn drops_emptied_messages() {
             let mut messages = vec![
                 Message::user("first"),
-                Message {
-                    role: Role::User,
-                    content: vec![ContentBlock::tool_result("ghost", "stale", false)],
-                },
+                user(vec![ContentBlock::tool_result("ghost", "stale", false)]),
             ];
 
             drop_orphan_tool_results(&mut messages);
@@ -670,10 +619,7 @@ mod tests {
         fn appends_assistant_after_tool_result_only_user() {
             let mut messages = vec![
                 Message::user("do X"),
-                Message {
-                    role: Role::User,
-                    content: vec![ContentBlock::tool_result("t1", "ok", false)],
-                },
+                user(vec![ContentBlock::tool_result("t1", "ok", false)]),
             ];
 
             insert_resume_sentinels(&mut messages);
@@ -692,13 +638,10 @@ mod tests {
         fn skips_append_when_trailing_user_has_text() {
             let mut messages = vec![
                 Message::user("do X"),
-                Message {
-                    role: Role::User,
-                    content: vec![
-                        ContentBlock::tool_result("t1", "ok", false),
-                        text("and a question"),
-                    ],
-                },
+                user(vec![
+                    ContentBlock::tool_result("t1", "ok", false),
+                    text("and a question"),
+                ]),
             ];
             let before = messages.clone();
 

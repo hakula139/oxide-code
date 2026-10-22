@@ -61,6 +61,17 @@ pub(crate) fn saved_titles(entries: &[Entry]) -> Vec<(&str, TitleSource)> {
         .collect()
 }
 
+/// Path of each file snapshot entry, in file order.
+pub(crate) fn saved_snapshot_paths(entries: &[Entry]) -> Vec<&Path> {
+    entries
+        .iter()
+        .filter_map(|entry| match entry {
+            Entry::FileSnapshot { snapshot } => Some(snapshot.path.as_path()),
+            _ => None,
+        })
+        .collect()
+}
+
 /// Writes an unparsable session file with ID `corrupt`, whose name and mtime both carry a time
 /// past every seeded session, so it sorts first.
 pub(crate) fn write_newest_corrupt_session(dir: &Path) {

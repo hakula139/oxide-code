@@ -800,18 +800,20 @@ mod tests {
             let project_dir = test_project_dir(dir.path());
             std::fs::remove_dir_all(&project_dir).unwrap();
             let (entries, _) = state.queue_message_entries(&Message::user("first"), now, false);
-            let err = state.flush_entries(entries).unwrap_err().to_string();
-            assert!(
-                err.starts_with(&format!("failed to create {}", project_dir.display())),
-                "{err}",
-            );
+            let err = state.flush_entries(entries).unwrap_err();
+
             let WriterStatus::Pending {
+                header,
                 deferred_title: Some(restored),
-                ..
             } = &state.writer_status
             else {
                 panic!("create failure must leave Pending with deferred title intact");
             };
+            let path = state.store.session_file(&session_id, header.created_at);
+            assert_eq!(
+                err.to_string(),
+                format!("failed to create {}", path.display())
+            );
             assert_eq!(restored, "Survives rollback");
 
             std::fs::create_dir_all(&project_dir).unwrap();

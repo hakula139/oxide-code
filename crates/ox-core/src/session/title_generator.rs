@@ -691,9 +691,10 @@ mod tests {
         #[test]
         fn keeps_the_tail_of_long_text() {
             let long = "a".repeat(50) + "TAIL";
+
             let out = truncate_prompt(&long, 10);
-            assert_eq!(out.chars().count(), 10);
-            assert!(out.ends_with("TAIL"), "should retain tail: {out:?}");
+
+            assert_eq!(out, "aaaaaaTAIL");
         }
 
         #[test]
