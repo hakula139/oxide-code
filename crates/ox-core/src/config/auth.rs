@@ -375,8 +375,8 @@ pub(super) fn explicit_credentials(
 }
 
 /// The env vars that can carry a secret ox authenticates with: each credential variable, and
-/// [`CUSTOM_HEADERS_VAR`], which gateways use for their keys. Commands run for the model do not
-/// inherit them.
+/// [`CUSTOM_HEADERS_VAR`], which gateways use for their keys. Commands run for the model and the
+/// git probes do not inherit them.
 pub(crate) fn secret_env_vars() -> impl Iterator<Item = &'static str> {
     AuthSource::EXPLICIT
         .into_iter()

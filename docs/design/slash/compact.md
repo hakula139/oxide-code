@@ -62,7 +62,7 @@ The stdio driver's `StdioSink` prints the same header on stderr, which `protocol
 
 10. **Reset the file tracker.** `/compact` discards the read history because Edit and Write contracts depend on a Read having happened _in the visible transcript_. Since the visible transcript is now the summary, the previous `Read`s are no longer "in scope" from a user-visible standpoint. The reset forces a fresh `Read` before any `Edit`, matching the post-`/clear` behavior, at the cost of extra Reads after a compaction.
 
-11. **Keep queued prompts.** Unlike `/resume` (queued prompts belong to the source thread and get dropped), `/compact` _preserves_ the user's intent. Queued prompts continue to make sense after compaction, and dropping them would surprise the user. `/clear` also keeps queued prompts, though it starts a new session.
+11. **Keep queued prompts.** A session switch (`/clear`, bare `/archive`, or `/resume`) drops the prompts queued before it because they belong to the conversation that ended, as [cancellation.md](../tui/cancellation.md) decision 5 records. `/compact` _preserves_ the user's intent, so queued prompts continue to make sense after it, and dropping them would surprise the user.
 
 12. **Stream the summary as it generates.** A long session's summary can take tens of seconds, and streaming it shows progress and lets the user judge it early. The engine streams the text and decides its fate, so every frontend sees one protocol: `SummaryToken` chunks end in `SessionCompacted` or `SummaryDiscarded`. A discard precedes the event that reports a failure or cancellation, and a retry discards before streaming again, so a frontend never shows two attempts at once. The stdio frontends skip the stream and keep their one-line boundary notice.
 
