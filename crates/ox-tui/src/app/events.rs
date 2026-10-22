@@ -462,6 +462,7 @@ mod tests {
     use ox_core::permission::PermissionClass;
     use ox_core::permission::rule::Rule;
     use ox_core::permission::testing::exec_grant;
+    use ox_core::protocol::testing::text_result;
     use ox_core::protocol::{ConfigPick, ResumeTarget, ToolCall, ToolResult, UsageSnapshot};
     use ox_core::tool::bash::background::ShellState;
     use ox_core::tool::bash::background::testing::{shell, shells_in_each_state};
@@ -498,15 +499,7 @@ mod tests {
         use super::*;
 
         fn text_call_end(id: &str, content: &str, is_error: bool, title: Option<&str>) -> Event {
-            Event::ToolCallEnd(ToolResult {
-                id: id.to_owned(),
-                content: content.to_owned(),
-                is_error,
-                title: title.map(ToOwned::to_owned),
-                view: ToolResultView::Text {
-                    content: content.to_owned(),
-                },
-            })
+            Event::ToolCallEnd(text_result(id, content, is_error, title))
         }
 
         fn usage_snapshot() -> UsageSnapshot {
@@ -1184,7 +1177,7 @@ mod tests {
 
             assert_eq!(
                 app.session_info.session_id, "rolled-session",
-                "session id must rebind to the rolled session",
+                "session ID must rebind to the rolled session",
             );
             assert_ne!(app.session_info.session_id, original_id);
             assert!(
@@ -1963,7 +1956,7 @@ mod tests {
         fn evicts_orphaned_pending_calls() {
             // A `ToolCallStart` without a matching `ToolCallEnd` by the turn's end is an orphan
             // (crashed tool, agent-loop bug, mid-turn abort). The pending entry must be discarded
-            // so long sessions don't accumulate stale ids across turns.
+            // so long sessions don't accumulate stale IDs across turns.
             let (mut app, _rx, _event_tx) = test_app(None);
             app.handle_engine_event(bash_call_start("orphan", "ls"));
             assert_eq!(app.chat.pending_call_count(), 1);

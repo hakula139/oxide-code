@@ -263,16 +263,17 @@ mod tests {
 
     use ox_core::config::StatusLineSegment;
     use ox_core::permission::{Basis, Mode};
-    use ox_core::protocol::{CompactTrigger, Decision, Event, Op, ToolCall, ToolResult};
+    use ox_core::protocol::testing::{ls_call, text_result};
+    use ox_core::protocol::{CompactTrigger, Decision, Event, Op};
     use ox_core::tool::tasks::testing::plan;
-    use ox_core::tool::view::{ApprovalBody, ApprovalPreview, ToolResultView};
+    use ox_core::tool::view::{ApprovalBody, ApprovalPreview};
     use ox_core::util::git::PullRequest;
 
     use super::*;
     use crate::action::Action;
     use crate::app::CopyNotice;
     use crate::app::testing::{
-        FakeModal, five_hour_limit, long_chat_block, push_answerable_approval, render_app,
+        FakeModal, cell_of, five_hour_limit, long_chat_block, push_answerable_approval, render_app,
         rendered_text, test_app,
     };
     use crate::clipboard::CopyError;
@@ -393,22 +394,20 @@ mod tests {
 
         /// Pushes a finished `ls` call listing two files.
         fn push_ls_call(app: &mut App) {
-            app.chat.push_tool_call(ToolCall {
-                id: "t1".to_owned(),
-                name: "bash".to_owned(),
-                input: serde_json::json!({"command": "ls"}),
-                icon: "$".to_owned(),
-                label: "ls".to_owned(),
-            });
-            app.chat.push_tool_result(ToolResult {
-                id: "t1".to_owned(),
-                content: "README.md\nCargo.toml".to_owned(),
-                is_error: false,
-                title: Some("ran ls".to_owned()),
-                view: ToolResultView::Text {
-                    content: "README.md\nCargo.toml".to_owned(),
-                },
-            });
+            app.chat.push_tool_call(ls_call());
+            app.chat.push_tool_result(text_result(
+                "t1",
+                "README.md\nCargo.toml",
+                false,
+                Some("ran ls"),
+            ));
+        }
+
+        /// The color of the first cell of `label` in a 60x10 frame.
+        fn label_fg(app: &mut App, label: &str) -> Color {
+            let backend = render_app(app, 60, 10);
+            let buffer = backend.buffer();
+            buffer[cell_of(buffer, label)].fg
         }
 
         const COMPACT_SUMMARY: &str = indoc! {"
@@ -649,11 +648,14 @@ mod tests {
                 .expect("pill shown");
             let pill = row.find(" Jump to bottom").unwrap();
             assert!(row.starts_with(" Not copied: Terminal"), "{row}");
-            assert!(row[..pill].trim_end().ends_with("..."), "{row}");
+            assert!(
+                row[..pill].ends_with("...  "),
+                "the notice's padding and one gap cell precede the pill: {row}",
+            );
         }
 
         #[test]
-        fn auto_scroll_on_hides_jump_overlay() {
+        fn following_the_tail_hides_the_jump_pill() {
             let (mut app, _rx, _event_tx) = test_app(None);
             app.chat.push_system_message(long_chat_block());
 
@@ -662,20 +664,22 @@ mod tests {
         }
 
         #[test]
-        fn scrolled_up_shows_jump_overlay() {
+        fn scrolled_up_shows_a_dim_jump_pill() {
             let (mut app, _rx, _event_tx) = test_app(None);
             app.chat.push_system_message(long_chat_block());
             _ = render_app(&mut app, 60, 10);
 
             app.chat
                 .handle_event(&key_event(KeyCode::PageUp, KeyModifiers::NONE));
-            let text = rendered_text(&mut app, 60, 10);
 
-            assert!(text.contains("Jump to bottom"), "{text}");
+            assert_eq!(
+                Some(label_fg(&mut app, "Jump to bottom")),
+                app.theme.dim().fg
+            );
         }
 
         #[test]
-        fn scrolled_up_counts_new_content() {
+        fn scrolled_up_counts_new_content_in_an_accent_pill() {
             let (mut app, _rx, _event_tx) = test_app(None);
             app.chat.push_system_message(long_chat_block());
             _ = render_app(&mut app, 60, 10);
@@ -683,9 +687,11 @@ mod tests {
                 .handle_event(&key_event(KeyCode::PageUp, KeyModifiers::NONE));
 
             app.chat.push_error("background update");
-            let text = rendered_text(&mut app, 60, 10);
 
-            assert!(text.contains("1 new message"), "{text}");
+            assert_eq!(
+                Some(label_fg(&mut app, "1 new message")),
+                app.theme.accent().fg
+            );
         }
 
         #[test]

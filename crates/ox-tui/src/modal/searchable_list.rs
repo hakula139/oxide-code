@@ -23,7 +23,7 @@ pub(crate) trait SearchableItem {
     const ROW_HEIGHT: u16;
 
     /// Text the query filters on, covering every field a user might search for, such as the title
-    /// and id.
+    /// and ID.
     fn haystack(&self) -> Cow<'_, str>;
 
     /// Renders the item to the right of the list's cursor gutter. The list marks the cursor on the
