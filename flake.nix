@@ -122,7 +122,7 @@
             enable = true;
             name = "prettier";
             entry = nodeHook "prettier-write" "prettier --write --ignore-unknown";
-            files = "\\.(json|jsonc|md|ya?ml)$";
+            types = [ "text" ];
           };
 
           cspell = {

@@ -1,13 +1,13 @@
 {
   "private": true,
   "scripts": {
-    "format": "prettier --check \"**/*.{json,jsonc,md,yaml,yml}\"",
+    "format": "prettier --check .",
     "lint": "markdownlint-cli2 \"**/*.md\"",
     "spellcheck": "git ls-files | cspell --no-progress --file-list stdin"
   },
   "devDependencies": {
     "cspell": "^10.4.0",
-    "markdownlint-cli2": "^0.23.3",
+    "markdownlint-cli2": "^0.24.0",
     "prettier": "^3.9.10"
   }
 }
