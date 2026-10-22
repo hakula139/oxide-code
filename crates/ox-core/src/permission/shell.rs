@@ -358,8 +358,9 @@ pub(crate) struct CommandTarget {
     reads: Vec<Access>,
     /// Whether it runs code the analysis does not see or cannot place.
     opaque: bool,
-    /// Whether tree-sitter-bash failed to parse it or a script nested in it, so the words a rule
-    /// sees may not be the words bash runs.
+    /// Whether tree-sitter-bash failed to parse it or a script nested in it, or parsed a shape
+    /// whose word boundaries differ from bash's, so the words a rule sees may not be the words
+    /// bash runs.
     unparsed: bool,
 }
 
@@ -553,7 +554,8 @@ struct Walk<'a> {
     relative_path: bool,
     /// Whether any part of the command expands a variable at run time, wherever the value ends up.
     expands: bool,
-    /// Whether the command or a script nested in it failed to parse.
+    /// Whether the command or a script nested in it failed to parse, or parsed with word
+    /// boundaries that differ from bash's.
     unparsed: bool,
 }
 
@@ -561,7 +563,7 @@ impl Walk<'_> {
     fn script(&mut self, source: &str) {
         let tree = parse_tree(source);
         let root = tree.root_node();
-        self.unparsed |= root.has_error();
+        self.unparsed |= root.has_error() || !splits_words_like_bash(root, source);
         self.visit(root, source);
     }
 
@@ -683,9 +685,11 @@ impl Walk<'_> {
                 "variable_assignment" | "herestring_redirect" => Vec::new(),
                 _ => vec![part],
             })
-            .chain(trailing.iter().copied())
             .collect();
-        let words = words(&nodes, src);
+        let trailing = words(trailing, src);
+        let mut words = words(&nodes, src);
+        words.extend(parts.last().and_then(|&last| dropped_dash(last, src)));
+        words.extend(trailing);
         let mut assignments = Vec::new();
         let mut unsafe_assignment = None;
         for &part in parts {
@@ -1021,12 +1025,148 @@ fn command_parts(command: Node<'_>) -> Vec<Node<'_>> {
         .collect()
 }
 
-/// The words bash reads from `nodes`, in source order, joining nodes with no blank between them.
+/// The words bash reads from `nodes`, in source order, joining the parts of one word that the
+/// grammar splits where only backslash escapes separate them.
 fn words(nodes: &[Node<'_>], src: &str) -> Vec<Word> {
     nodes
-        .chunk_by(|left, right| left.end_byte() == right.start_byte())
+        .chunk_by(|left, right| Gap::between(*left, *right, src).joins())
         .map(|parts| Word::new(parts, src))
         .collect()
+}
+
+/// What separates two tokens tree-sitter-bash parses apart.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Gap {
+    /// Nothing.
+    Empty,
+    /// Unescaped spaces, tabs, or newlines, with any line continuations, which end a word.
+    Blank,
+    /// Backslash escapes of characters other than a newline, which bash reads as part of a word.
+    Escapes,
+    /// Line continuations, which bash removes before it reads any token, so the tokens abut.
+    Continuations,
+    /// Anything else, such as an escape beside a blank or a mix of escapes and continuations.
+    Other,
+}
+
+impl Gap {
+    fn between(left: Node<'_>, right: Node<'_>, src: &str) -> Self {
+        Self::of(&src[left.end_byte()..right.start_byte()])
+    }
+
+    fn of(text: &str) -> Self {
+        let (mut blank, mut escape, mut continuation) = (false, false, false);
+        let mut chars = text.chars();
+        while let Some(c) = chars.next() {
+            match c {
+                ' ' | '\t' | '\n' => blank = true,
+                '\\' => match chars.next() {
+                    Some('\n') => continuation = true,
+                    Some(_) | None => escape = true,
+                },
+                _ => return Self::Other,
+            }
+        }
+        match (blank, escape, continuation) {
+            (false, false, false) => Self::Empty,
+            (true, false, _) => Self::Blank,
+            (false, true, false) => Self::Escapes,
+            (false, false, true) => Self::Continuations,
+            (_, true, _) => Self::Other,
+        }
+    }
+
+    /// Returns whether bash reads the tokens on either side as one word.
+    fn joins(self) -> bool {
+        matches!(self, Self::Empty | Self::Escapes | Self::Continuations)
+    }
+
+    /// The text bash reads in `text`, a gap that [`joins`](Self::joins): each escaped character,
+    /// with line continuations removed.
+    fn value(text: &str) -> String {
+        let mut value = String::new();
+        let mut chars = text.chars();
+        while chars.next().is_some() {
+            value.extend(chars.next().filter(|&escaped| escaped != '\n'));
+        }
+        value
+    }
+}
+
+/// Returns whether tree-sitter-bash ends every word in the tree under `root` where bash does, so
+/// the words a rule sees are the words bash runs. Outside quotes, only blanks and line
+/// continuations may separate tokens. Escapes alone may separate only the parts of one command
+/// word, which [`words`] joins, and line continuations alone may only follow a control operator,
+/// since bash removes them before it reads tokens. A `$` expansion may not span a blank. Command
+/// and process substitutions are checked as scripts of their own, even inside quotes.
+fn splits_words_like_bash(root: Node<'_>, src: &str) -> bool {
+    let edge = |text: &str| matches!(Gap::of(text), Gap::Empty | Gap::Blank | Gap::Continuations);
+    edge(&src[..root.start_byte()])
+        && edge(&src[root.end_byte()..])
+        && node_splits_words_like_bash(root, src, false)
+}
+
+fn node_splits_words_like_bash(node: Node<'_>, src: &str, quoted: bool) -> bool {
+    let quoted = match node.kind() {
+        "command_substitution" | "process_substitution" => false,
+        "expansion" | "heredoc_body" | "string" | "translated_string" => true,
+        _ => quoted,
+    };
+    let mut cursor = node.walk();
+    let children: Vec<Node<'_>> = node.children(&mut cursor).collect();
+    (quoted
+        || children
+            .windows(2)
+            .all(|pair| separates_like_bash(node, pair[0], pair[1], src)))
+        && children
+            .iter()
+            .all(|&child| node_splits_words_like_bash(child, src, quoted))
+}
+
+/// Returns whether bash reads the source between the sibling tokens `left` and `right` of
+/// `parent` as tree-sitter-bash does.
+fn separates_like_bash(parent: Node<'_>, left: Node<'_>, right: Node<'_>, src: &str) -> bool {
+    let text = &src[left.end_byte()..right.start_byte()];
+    match Gap::of(text) {
+        Gap::Empty => true,
+        Gap::Blank => parent.kind() != "simple_expansion",
+        Gap::Escapes => parent.kind() == "command" && is_word_part(left) && is_word_part(right),
+        Gap::Continuations => {
+            matches!(left.kind(), "&" | "&&" | ";" | "|" | "|&" | "||") && right.is_named()
+        }
+        Gap::Other => parent.kind() == "redirected_statement" && is_dropped_dash(text),
+    }
+}
+
+/// Returns whether `part`, a child of a command, is its name or an argument.
+fn is_word_part(part: Node<'_>) -> bool {
+    !matches!(
+        part.kind(),
+        "variable_assignment" | "file_redirect" | "herestring_redirect" | "heredoc_redirect"
+    )
+}
+
+/// Returns whether `gap` holds only the lone `-` word tree-sitter-bash drops from the end of a
+/// command before a numbered redirection or a heredoc, as in `python3 - <<EOF`, between blanks.
+fn is_dropped_dash(gap: &str) -> bool {
+    let blank = |c: char| c == ' ' || c == '\t';
+    gap.starts_with(blank) && gap.ends_with(blank) && gap.trim_matches(blank) == "-"
+}
+
+/// The lone `-` bash passes after `last`, the last part of a simple command, when
+/// tree-sitter-bash drops it, as [`is_dropped_dash`] describes.
+fn dropped_dash(last: Node<'_>, src: &str) -> Option<Word> {
+    let rest = &src[last.end_byte()..];
+    let start = last.end_byte() + rest.find(|c| c != ' ' && c != '\t')?;
+    let dash = start..start + 1;
+    (start > last.end_byte()
+        && src[start..].starts_with('-')
+        && src[dash.end..].starts_with([' ', '\t']))
+    .then(|| Word {
+        span: dash,
+        value: Some("-".to_owned()),
+        glob: false,
+    })
 }
 
 /// The words bash passes to the command `redirect` belongs to, which tree-sitter-bash parses as
@@ -1526,7 +1666,7 @@ fn unquote(node: Node<'_>, src: &str, leading: bool) -> Option<(String, bool)> {
 }
 
 /// The value and glob flag of the one word `parts` spell in order, each read as [`unquote`] reads
-/// it, or `None` when any part has none.
+/// it and joined by the [`Gap::value`] between them, or `None` when any part has none.
 fn unquote_parts<'t>(
     parts: impl IntoIterator<Item = Node<'t>>,
     src: &str,
@@ -1534,10 +1674,15 @@ fn unquote_parts<'t>(
 ) -> Option<(String, bool)> {
     let mut value = String::new();
     let mut glob = false;
-    for (i, part) in parts.into_iter().enumerate() {
-        let (part, part_glob) = unquote(part, src, leading && i == 0)?;
-        value.push_str(&part);
+    let mut previous: Option<Node<'t>> = None;
+    for part in parts {
+        if let Some(previous) = previous {
+            value.push_str(&Gap::value(&src[previous.end_byte()..part.start_byte()]));
+        }
+        let (text, part_glob) = unquote(part, src, leading && previous.is_none())?;
+        value.push_str(&text);
         glob |= part_glob;
+        previous = Some(part);
     }
     Some((value, glob))
 }
@@ -1672,6 +1817,11 @@ pub(super) fn pattern_words(pattern: &str) -> Result<Vec<PatternWord>> {
     let tree = parse_tree(pattern);
     let root = tree.root_node();
     ensure!(!root.has_error(), "it does not parse as a shell command");
+    ensure!(
+        splits_words_like_bash(root, pattern),
+        "the shell parser `ox` uses would split its words where bash does not. \
+         Write it without escaped blanks or line continuations between words."
+    );
     let mut cursor = root.walk();
     let nodes: Vec<Node<'_>> = root.named_children(&mut cursor).collect();
     let command = match nodes.as_slice() {
@@ -2151,6 +2301,55 @@ mod tests {
                         (r"$'\x80'", false)
                     ]
                 );
+            }
+
+            #[test]
+            fn joins_the_parts_of_a_word_a_backslash_escape_splits() {
+                assert_eq!(words("cat a\\\tb c"), ["cat", "a\tb", "c"]);
+                assert_eq!(words(r#"echo "x"\ "y""#), ["echo", "x y"]);
+                assert_eq!(texts("r\\\nm -rf x"), ["rm -rf x"]);
+            }
+
+            #[test]
+            fn recovers_a_lone_dash_the_grammar_drops_before_a_redirection() {
+                assert_eq!(words("python3 - <<'EOF'\nprint(1)\nEOF"), ["python3", "-"]);
+                assert_eq!(words("cmd x - 2>&1"), ["cmd", "x", "-"]);
+                assert_eq!(words("cmd - <<EOF a\nx\nEOF"), ["cmd", "-", "a"]);
+            }
+
+            #[test]
+            fn turns_a_command_whose_word_boundaries_differ_from_bash_unparsed() {
+                for command in [
+                    "LC_ALL=$ rm -rf y",
+                    "echo  \\  x",
+                    "\\\trm x",
+                    "rm x\\\n#y",
+                    "x=1\\\nrm y",
+                    "x=1\\\trm y",
+                    "r\\\nm x",
+                    "sh -c 'echo  \\  x'",
+                ] {
+                    assert!(parse(command).is_unparsed(), "{command:?}");
+                }
+            }
+
+            #[test]
+            fn keeps_everyday_commands_parsed() {
+                for command in [
+                    "LC_ALL=$y rm -rf z",
+                    "cargo test \\\n  --all",
+                    "cat a\\\tb",
+                    "rm x \\\n#y",
+                    "ls |\\\ngrep x",
+                    r#"echo "$a $b" "Price: $ 5" "${x:-a b}" "$(date) $x""#,
+                    "for f in *.rs; do echo \"$f $f\"; done",
+                    "cat > f <<EOF\nhello $USER\nEOF",
+                    "python3 - <<'EOF'\nprint(1)\nEOF",
+                    "kubectl apply -f - <<EOF\nx\nEOF",
+                    "cmd - 2>&1",
+                ] {
+                    assert!(!parse(command).is_unparsed(), "{command:?}");
+                }
             }
 
             #[test]

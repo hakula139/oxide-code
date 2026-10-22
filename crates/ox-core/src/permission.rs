@@ -3283,6 +3283,23 @@ mod tests {
             }
 
             #[test]
+            fn command_rules_hold_the_program_bash_runs_where_the_grammar_splits_its_words() {
+                let yolo = policy(Mode::Yolo, &[(EXEC, "git push *")], &[], &[]);
+
+                for (case, expected) in [
+                    ("gi\\\nt push origin", Decision::Deny),
+                    ("LC_ALL=$ git push origin", Decision::Ask),
+                    ("git status \\  x", Decision::Ask),
+                ] {
+                    assert_eq!(decide(&yolo, EXEC, &command(case)), expected, "{case:?}");
+                }
+
+                let yolo = policy(Mode::Yolo, &[(EXEC, "kubectl delete -f -")], &[], &[]);
+                let case = "kubectl delete -f - <<EOF\nkind: Namespace\nEOF";
+                assert_eq!(decide(&yolo, EXEC, &command(case)), Decision::Deny);
+            }
+
+            #[test]
             fn command_rules_see_the_program_a_runner_starts_past_an_operator_or_dollar_word() {
                 let yolo = policy(Mode::Yolo, &[(EXEC, "rm *")], &[], &[]);
                 let manual = policy(Mode::Manual, &[], &[], &[(EXEC, "git status")]);
