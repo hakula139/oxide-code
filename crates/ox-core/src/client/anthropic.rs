@@ -36,10 +36,11 @@ use crate::config::gateway::GatewayCompat;
 use crate::config::oauth::ClaudeCodeKeychain;
 use crate::config::{Config, Effort, PromptCacheTtl, is_first_party_base_url};
 use crate::message::{ContentBlock, Message, Role};
-use crate::model::ModelSpec;
+use crate::model::{ModelSpec, ThinkingConfig};
 use crate::prompt::SystemPrompt;
 use crate::tool::ToolDefinition;
 use crate::util::tls::Trust;
+use accumulator::ReplySpec;
 use betas::{compute_betas, conversation_cache_control, static_prefix_cache_control};
 use sse::spawn_stream;
 use transport::{MessagesRequest, messages_url};
@@ -240,9 +241,11 @@ impl Client {
         breakpoint: Option<CacheControl>,
     ) -> Result<mpsc::Receiver<Result<ResponseEvent>>> {
         let prefix_cache = static_prefix_cache_control(self.is_first_party, self.prompt_cache_ttl);
+        let thinking = self.model.thinking(self.show_thinking);
         let request = self.prepare(RequestSpec {
             kind: RequestKind::Agentic,
             model: &self.model,
+            thinking: thinking.as_ref(),
             max_tokens: self.max_tokens(),
             system: &[
                 (&system.stable, Some(prefix_cache)),
@@ -260,7 +263,12 @@ impl Client {
         Ok(spawn_stream(
             self.http.clone(),
             request,
-            self.model.id().to_owned(),
+            ReplySpec {
+                model: self.model.id().to_owned(),
+                thinking_text: thinking
+                    .as_ref()
+                    .map_or(self.show_thinking, ThinkingConfig::asks_for_text),
+            },
         ))
     }
 }
@@ -382,9 +390,9 @@ fn normalize_arch(arch: &str) -> &'static str {
 /// What a request serves, which decides its betas and the body fields beyond the caller's.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum RequestKind {
-    /// A conversation turn, streamed with thinking, `context_management`, and the agentic betas.
+    /// A conversation turn, streamed with `context_management` and the agentic betas.
     Agentic,
-    /// A side request such as a session title, sent without streaming, thinking, or agentic betas.
+    /// A side request such as a session title, sent without streaming or agentic betas.
     SideQuery,
 }
 
@@ -392,6 +400,7 @@ enum RequestKind {
 struct RequestSpec<'a> {
     kind: RequestKind,
     model: &'a ModelSpec,
+    thinking: Option<&'a ThinkingConfig>,
     max_tokens: u32,
     /// The text after the identity block, each with its `cache_control`. Empty text is left out.
     system: &'a [(&'a str, Option<CacheControl>)],
@@ -403,12 +412,13 @@ struct RequestSpec<'a> {
 impl Client {
     /// Builds the `/v1/messages` call `spec` describes. The body gains the attribution and
     /// identity blocks ahead of `spec.system`, the metadata, and on first-party requests the `cch`
-    /// hash. The kind decides streaming, thinking, `context_management`, and the betas, and the
-    /// thinking betas derive from the body's `thinking`.
+    /// hash. The kind decides streaming, `context_management`, and the betas, and the thinking
+    /// betas derive from `spec.thinking`.
     fn prepare(&self, spec: RequestSpec<'_>) -> Result<MessagesRequest> {
         let RequestSpec {
             kind,
             model,
+            thinking,
             max_tokens,
             system,
             tools,
@@ -423,7 +433,6 @@ impl Client {
             .gateway
             .attribution
             .then(|| attribution_text(first_user_text(messages.messages), self.is_first_party));
-        let thinking = model.thinking(self.show_thinking).filter(|_| agentic);
         let mut body = serde_json::to_string(&CreateMessageRequest {
             model: model.id(),
             max_tokens,
@@ -431,7 +440,7 @@ impl Client {
             metadata: build_metadata(&self.device_id, &self.session_id),
             system: build_system_blocks(attribution.as_deref(), system),
             tools,
-            thinking: thinking.as_ref(),
+            thinking,
             output_config,
             // Accompanies the context-management beta, which `compute_betas` gates the same way.
             context_management: (agentic && model.info().is_some())
@@ -449,7 +458,7 @@ impl Client {
             body_len = body.len(),
             "sending API request"
         );
-        let betas = compute_betas(model, thinking.as_ref(), auth.kind(), kind).join(",");
+        let betas = compute_betas(model, thinking, auth.kind(), kind).join(",");
         Ok(self.messages_request(betas, body, auth))
     }
 }
@@ -530,7 +539,9 @@ mod tests {
     use super::local_testing::{
         client_for, completion_body, oauth, request_count, serve, test_client,
     };
-    use super::testing::{DEVICE_ID, api_key, sse_response, test_config, text_stream_body};
+    use super::testing::{
+        DEVICE_ID, api_key, sse_body, sse_response, test_config, text_stream_body,
+    };
     use super::*;
     use crate::client::{Response, StopReason};
     use crate::config::oauth::testing::{HeldRefresh, ok_refresh_body, ox_login_in, write_creds};
@@ -1488,22 +1499,54 @@ mod tests {
             }
 
             #[tokio::test]
-            async fn hidden_thinking_requests_updates_where_supported() {
+            async fn hidden_thinking_requests_updates_where_supported_and_omits_it_elsewhere() {
                 for (id, display, sends_beta) in [
-                    ("claude-opus-5-5", Some("updates"), true),
-                    ("claude-haiku-5-5", None, false),
+                    ("claude-opus-5-5", "updates", true),
+                    ("claude-haiku-5-5", "omitted", false),
                 ] {
                     let client = test_client(OFFLINE_URL, api_key(), id);
                     let (body, betas) = capture_stream_turn(client).await;
-                    assert_eq!(
-                        body["thinking"].get("display"),
-                        display.map(Into::into).as_ref(),
-                        "{id}"
-                    );
+                    assert_eq!(body["thinking"]["display"], display, "{id}");
                     assert_eq!(
                         betas.contains("thinking-display-updates-2026-08-18"),
                         sends_beta,
                         "{id}: {betas}",
+                    );
+                }
+            }
+
+            #[tokio::test]
+            async fn forwards_thinking_text_only_when_the_request_asked_for_it() {
+                let body = sse_body(&[
+                    serde_json::json!({
+                        "type": "content_block_start",
+                        "index": 0,
+                        "content_block": {"type": "thinking", "thinking": "", "signature": "sig"},
+                    }),
+                    serde_json::json!({
+                        "type": "content_block_delta",
+                        "index": 0,
+                        "delta": {"type": "thinking_delta", "thinking": "Plan."},
+                    }),
+                    serde_json::json!({"type": "message_stop"}),
+                ]);
+                for (id, show_thinking, forwards) in [
+                    ("claude-haiku-5-5", false, false),
+                    ("claude-haiku-5-5", true, true),
+                    ("claude-opus-5-5", false, true),
+                    ("custom-model", false, false),
+                    ("custom-model", true, true),
+                ] {
+                    let server = serve(vec![sse_response(body.clone())]).await;
+                    let mut cfg = test_config(server.uri(), api_key(), id);
+                    cfg.show_thinking = show_thinking;
+
+                    let events = stream_hi(&client_for(&cfg)).await.unwrap();
+
+                    assert_eq!(
+                        events.contains(&ResponseEvent::Thinking("Plan.".to_owned())),
+                        forwards,
+                        "{id} show_thinking={show_thinking}"
                     );
                 }
             }
@@ -1545,6 +1588,7 @@ mod tests {
                             .prepare(RequestSpec {
                                 kind,
                                 model: client.model(),
+                                thinking: None,
                                 max_tokens: 40,
                                 system: &[],
                                 tools: None,

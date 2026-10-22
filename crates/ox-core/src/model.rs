@@ -124,6 +124,12 @@ pub(crate) fn replacement_for(id: &str) -> Option<&'static ModelInfo> {
     })
 }
 
+/// Returns whether `id` names a catalog model that writes no progress updates, so none of its
+/// reasoning text is a progress note.
+pub(crate) fn lacks_progress_updates(id: &str) -> bool {
+    lookup(id).is_some_and(|info| !info.progress_updates)
+}
+
 /// The catalog rates for `id`, or `None` for an id outside the catalog.
 pub(crate) fn cost_rates(id: &str) -> Option<TokenCostRates> {
     lookup(id).map(|info| info.cost_rates)
@@ -171,13 +177,16 @@ impl ModelSpec {
 
     /// Adaptive thinking for known models, dropping replayed blocks whose conversation prefix
     /// changed. `show_thinking` opts into summarized thinking text, otherwise models with progress
-    /// updates return only those. `None` for unknown ids, whose upstream may reject the field.
+    /// updates return only those, and other models return none. `None` for unknown ids, whose
+    /// upstream may reject the field.
     pub(crate) fn thinking(&self, show_thinking: bool) -> Option<ThinkingConfig> {
         self.info.map(|info| ThinkingConfig::Adaptive {
             display: if show_thinking {
-                Some(ThinkingDisplay::Summarized)
+                ThinkingDisplay::Summarized
+            } else if info.progress_updates {
+                ThinkingDisplay::Updates
             } else {
-                info.progress_updates.then_some(ThinkingDisplay::Updates)
+                ThinkingDisplay::Omitted
             },
             block_binding: BlockBinding::DropBlock,
         })
@@ -255,13 +264,22 @@ impl<'de> Deserialize<'de> for ModelSpec {
 pub(crate) enum ThinkingConfig {
     /// Model decides the thinking budget.
     Adaptive {
-        #[serde(skip_serializing_if = "Option::is_none")]
-        display: Option<ThinkingDisplay>,
+        display: ThinkingDisplay,
         block_binding: BlockBinding,
     },
 }
 
-/// `thinking.display` values. Omitting the field returns no thinking text.
+impl ThinkingConfig {
+    /// Returns whether the request asks for thinking text, as summaries or progress notes.
+    pub(crate) fn asks_for_text(&self) -> bool {
+        match self {
+            Self::Adaptive { display, .. } => *display != ThinkingDisplay::Omitted,
+        }
+    }
+}
+
+/// `thinking.display` values, always sent so a reply carries only the thinking text ox renders,
+/// whatever an upstream's default.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum ThinkingDisplay {
@@ -269,6 +287,8 @@ pub(crate) enum ThinkingDisplay {
     /// Only the progress notes written between tool calls come back as text. Requires the
     /// `thinking-display-updates-2026-08-18` beta.
     Updates,
+    /// No thinking text comes back, and the server can skip streaming it.
+    Omitted,
 }
 
 /// `thinking.block_binding`. `DropBlock` makes the API drop a replayed thinking block whose
@@ -463,10 +483,10 @@ mod tests {
         fn known_model_is_adaptive_with_display_following_show_thinking() {
             let drop_block = serde_json::json!({"prefix_mismatch_behavior": "drop_block"});
             for (id, hidden_display) in [
-                ("claude-fable-5-1", Some("updates")),
-                ("claude-opus-5-5", Some("updates")),
-                ("claude-sonnet-5-5", Some("updates")),
-                ("claude-haiku-5-5", None),
+                ("claude-fable-5-1", "updates"),
+                ("claude-opus-5-5", "updates"),
+                ("claude-sonnet-5-5", "updates"),
+                ("claude-haiku-5-5", "omitted"),
             ] {
                 let model = ModelSpec::resolve(id);
                 assert_eq!(
@@ -478,14 +498,13 @@ mod tests {
                     }),
                     "{id}",
                 );
-                let mut hidden =
-                    serde_json::json!({"type": "adaptive", "block_binding": drop_block});
-                if let Some(display) = hidden_display {
-                    hidden["display"] = display.into();
-                }
                 assert_eq!(
                     serde_json::to_value(model.thinking(false)).unwrap(),
-                    hidden,
+                    serde_json::json!({
+                        "type": "adaptive",
+                        "display": hidden_display,
+                        "block_binding": drop_block,
+                    }),
                     "{id}"
                 );
             }
