@@ -92,7 +92,8 @@ Each simple command retains two word lists. Its program words start at the progr
 
 A command is opaque if the parse cannot show everything it runs or writes:
 
-- It fails to parse, or tree-sitter-bash ends a word where bash does not, as at an escaped blank between words or a `$` before a blank, has words after a redirection of a compound statement, which bash rejects, or contains a command or process substitution, an arithmetic expansion, or a `[[` or `((` test, which can evaluate a substitution inside an array subscript.
+- It fails to parse, or tree-sitter-bash ends one of its words where bash does not, as at an escaped blank between words or a `$` before a blank.
+- It has words after a redirection of a compound statement, which bash rejects, or contains a command or process substitution, an arithmetic expansion, or a `[[` or `((` test, which can evaluate a substitution inside an array subscript.
 - Its command name is not a literal word or holds a glob, as in `$CMD -rf x` or `/bin/s? -c ls`.
 - It runs a shell such as `sh`, `bash`, or `zsh`, or a builtin that runs code (`eval`, `source`, `.`, `trap`, `let`), compared by folded name, so `BASH` counts too. Thus, both `sh -c '...'` and `curl ... | sh` are opaque.
 - A wrapper uses an option the parser does not know or one that expands, such as `env -S` or `nice $LEVEL`. Deny and ask rules and the `rm` rule then treat each later word as where the program may start, so `sudo --unknown value rm -rf x` still counts as `rm -rf x`.
