@@ -5,6 +5,7 @@ use std::sync::{Arc, Mutex};
 
 use crossterm::event::{KeyCode, KeyEvent};
 use ratatui::backend::TestBackend;
+use ratatui::buffer::{Buffer, CellWidth};
 use ratatui::layout::Rect;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
@@ -66,8 +67,8 @@ pub(super) fn test_app_with(
     (app, op_rx, event_tx)
 }
 
-/// The slash fixture on `test-model`, an unknown id whose display name falls back to the literal
-/// id, keeping insta snapshots stable.
+/// The slash fixture on `test-model`, an unknown ID whose display name falls back to the literal
+/// ID, keeping insta snapshots stable.
 pub(super) fn test_session_info() -> LiveSessionInfo {
     let mut info = slash::testing::test_session_info();
     info.config.model = ModelSpec::resolve("test-model");
@@ -138,6 +139,15 @@ pub(super) fn render_app(app: &mut App, width: u16, height: u16) -> TestBackend 
 /// Renders the app and returns its rows joined by newlines, for asserting on part of the frame.
 pub(super) fn rendered_text(app: &mut App, width: u16, height: u16) -> String {
     buffer_rows(render_app(app, width, height).buffer()).join("\n")
+}
+
+/// Screen cell where `needle` first shows in `buffer`.
+pub(super) fn cell_of(buffer: &Buffer, needle: &str) -> (u16, u16) {
+    let (row, x) = (0..)
+        .zip(buffer_rows(buffer))
+        .find_map(|(row, line)| Some((row, line[..line.find(needle)?].cell_width())))
+        .expect("needle shown");
+    (x, row)
 }
 
 pub(super) fn long_chat_block() -> String {

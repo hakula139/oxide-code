@@ -14,7 +14,7 @@ pub(crate) fn result_header(title: Option<String>, call_label: Option<String>) -
         .unwrap_or_else(|| FALLBACK_RESULT_HEADER.to_owned())
 }
 
-/// In-flight tool calls keyed by their id, so each result can fall back to its call's label as its
+/// In-flight tool calls keyed by their ID, so each result can fall back to its call's label as its
 /// header and sit right under the call. Cleared at turn boundaries so orphan starts from a
 /// cancelled or errored turn don't leak across turns.
 #[derive(Debug, Default)]
