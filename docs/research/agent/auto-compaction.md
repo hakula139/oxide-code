@@ -85,7 +85,7 @@ Key files:
 
 3. **Reserve output headroom.** Claude Code and opencode both avoid compacting exactly at the model's advertised context limit. The compact request itself needs room to produce the summary.
 
-4. **Run at turn boundaries first.** Pre-turn or post-round compaction is much simpler than interrupting an in-flight response. Mid-turn compaction is useful only once the loop can resume safely after history replacement.
+4. **Run at turn boundaries first.** Pre-turn or post-round compaction is much simpler than interrupting an in-flight response. oxide-code also compacts at a round boundary inside a turn, where no call is left open and the loop resumes from the summary.
 
 5. **Circuit-break automatic failures.** Automatic failures should not spam chat or repeatedly hit the API when the session is too large to summarize.
 
@@ -93,14 +93,12 @@ Key files:
 
 ## Patterns Not Adopted
 
-1. **Mid-turn compaction.** Requires pausing a tool loop or assistant continuation, replacing history, and resuming the same logical turn. Tracked in [#184](https://github.com/hakula139/oxide-code/issues/184).
+1. **Microcompact / prune.** Clearing old tool outputs can save tokens, but it is a separate retention policy with its own UI and persistence implications.
 
-2. **Microcompact / prune.** Clearing old tool outputs can save tokens, but it is a separate retention policy with its own UI and persistence implications.
+2. **Anchored summary rewrites.** opencode's `<previous-summary>` pattern helps repeated compactions, but repeated lossy rewrite quality needs real usage data before adding complexity.
 
-3. **Anchored summary rewrites.** opencode's `<previous-summary>` pattern helps repeated compactions, but repeated lossy rewrite quality needs real usage data before adding complexity.
+3. **Provider-specific remote compaction.** oxide-code talks to Anthropic Messages today, and the current manual compaction path already works through the normal stream.
 
-4. **Provider-specific remote compaction.** oxide-code talks to Anthropic Messages today, and the current manual compaction path already works through the normal stream.
+4. **Automatic continue prompts.** opencode can synthesize a "Continue..." prompt after auto-compaction. oxide-code waits for the user after a compaction between prompts unless a queued prompt already exists, and adds a continuation only after a mid-turn compaction, which resumes work the user already asked for.
 
-5. **Automatic continue prompts.** opencode can synthesize a "Continue..." prompt after auto-compaction. oxide-code should wait for the user unless a queued prompt already exists.
-
-6. **Hooks.** PreCompact / PostCompact hooks belong with the broader hook surface ([#157](https://github.com/hakula139/oxide-code/issues/157)), and the `pre_compact` event is tracked in [#168](https://github.com/hakula139/oxide-code/issues/168).
+5. **Hooks.** PreCompact / PostCompact hooks belong with the broader hook surface ([#157](https://github.com/hakula139/oxide-code/issues/157)), and the `pre_compact` event is tracked in [#168](https://github.com/hakula139/oxide-code/issues/168).

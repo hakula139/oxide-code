@@ -9,7 +9,7 @@ use std::time::SystemTime;
 
 use tokio_util::sync::CancellationToken;
 
-use super::{Prepared, ToolCtx, display_path, extract_input_field};
+use super::{Prepared, ToolCtx, display_path, extract_input_field, tool_path};
 use crate::permission::{Access, WalkFilter, Workspace};
 use crate::util::text::{ELLIPSIS, plural};
 
@@ -18,16 +18,24 @@ use crate::util::text::{ELLIPSIS, plural};
 /// Prepares a search tool's call, resolving its `path` argument, the cwd by default, as the root
 /// the gate checks and the walk covers.
 pub(super) fn prepare_search_root(input: serde_json::Value, ctx: &ToolCtx) -> Prepared {
-    let path = extract_input_field(&input, "path").unwrap_or(".");
-    let access = Access::for_path(path, &ctx.workspace);
+    let root = search_path(extract_input_field(&input, "path"));
+    let access = Access::for_path(root, &ctx.workspace);
     Prepared { input, access }
+}
+
+/// The root a search call's `path` argument names, the cwd by default, read as [`tool_path`]
+/// reads it.
+/// The gate and the walk both take the root from here, so they see one spelling.
+pub(super) fn search_path(path: Option<&str>) -> PathBuf {
+    tool_path(path.unwrap_or("."))
 }
 
 /// Where a search tool's walk starts, which its prepared call resolved.
 pub(super) struct SearchRoot {
     /// The resolved root, which exists.
     pub(super) base: PathBuf,
-    /// The root as the call spells it, for the read deny and ask rules each found file faces.
+    /// The root as the call spells it with `~` expanded, for the read deny and ask rules each found
+    /// file faces.
     pub(super) spelled: PathBuf,
     /// The canonical working directory, so hits under the canonical base render relative to it.
     pub(super) cwd: PathBuf,
@@ -44,7 +52,7 @@ impl SearchRoot {
         workspace: Arc<Workspace>,
     ) -> Result<Self, String> {
         let cwd = workspace.cwd();
-        let spelled = PathBuf::from(path.unwrap_or("."));
+        let spelled = search_path(path);
         let Some(base) = access.resolved() else {
             return Err(format!(
                 "Failed to access {}: the search root was not resolved.",
@@ -239,6 +247,7 @@ mod tests {
     use crate::tool::local_testing::{
         canonical_tempdir, create_modified_at, deny_read_access, deny_reads, search_root,
     };
+    use crate::util::path::testing::HOME_VAR;
 
     mod new {
         use super::*;
@@ -262,6 +271,22 @@ mod tests {
                 ),
             );
             assert_eq!(absolute.base, lib);
+        }
+
+        #[test]
+        fn reads_a_leading_tilde_as_the_home_directory() {
+            let dir = canonical_tempdir();
+            let home = dir.path().join("home");
+            fs::create_dir_all(home.join("notes")).unwrap();
+
+            let root = temp_env::with_var(HOME_VAR, Some(&home), || {
+                search_root(dir.path(), Some("~/notes")).unwrap()
+            });
+
+            assert_eq!(
+                (root.base, root.spelled),
+                (home.join("notes"), home.join("notes"))
+            );
         }
 
         #[test]

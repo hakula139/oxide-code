@@ -50,9 +50,9 @@ impl AutoCompactionConfig {
         }
     }
 
-    pub(crate) const fn should_trigger(self, total_tokens: u32) -> bool {
+    pub(crate) const fn should_trigger(self, context_tokens: u32) -> bool {
         match (self.enabled, self.threshold_tokens) {
-            (true, Some(threshold)) => total_tokens >= threshold,
+            (true, Some(threshold)) => context_tokens >= threshold,
             _ => false,
         }
     }

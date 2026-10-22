@@ -184,8 +184,15 @@ pub enum Event {
     TurnComplete,
     /// The model refused the turn in flight, so the engine removed it from the conversation along
     /// with its prompt and the [`Self::PromptDrained`] prompts it took in, and a
-    /// [`Self::TurnFailed`] follows. The frontend hands those prompts back to the user.
+    /// [`Self::TurnFailed`] follows.
+    /// The frontend hands the removed prompts back to the user.
+    /// After a [`CompactTrigger::MidTurn`] compaction the engine removes only what followed the
+    /// summary, since the summary already covers the prompt and the prompts drained before it.
     TurnRolledBack,
+    /// The automatic compaction ahead of an [`Op::Prompt`] failed, so the engine never sent the
+    /// prompt, and a [`Self::TurnFailed`] follows.
+    /// The frontend hands the prompt back to the user.
+    PromptUnsent,
     /// The in-flight prompt, compaction, resume, archive, sign-in, or sign-out failed. Like
     /// [`Self::TurnComplete`] and [`Self::Cancelled`], it ends the operation.
     TurnFailed(String),
@@ -196,8 +203,9 @@ pub enum Event {
     /// The user cancelled a turn, compaction, or sign-in with [`Op::Interrupt`]. The in-flight
     /// reply is truncated, and frontends mark where it stopped.
     Cancelled,
-    /// Automatic compaction started before the submitted prompt runs. The frontend shows compacting
-    /// status while the summarizer request streams.
+    /// Automatic compaction started, ahead of the submitted prompt or at a round boundary of the
+    /// turn in flight.
+    /// The frontend shows compacting status while the summarizer request streams.
     AutoCompactionStarted,
     /// Automatic compaction failed `failures` times in a row, so later prompts go out without it
     /// until [`Self::AutoCompactionResumed`].
@@ -228,10 +236,11 @@ pub enum Event {
         unarchived: bool,
         history: Vec<Interaction>,
     },
-    /// A compaction finished. The in-memory transcript has already been swapped to the synthetic
-    /// continuation, so the frontend clears its chat and replays a single boundary block. After an
-    /// automatic compaction the frontend stays busy, since the prompt it ran ahead of goes out
-    /// next.
+    /// A compaction finished.
+    /// The in-memory transcript has already been swapped to the synthetic continuation,
+    /// so the frontend clears its chat and replays a single boundary block.
+    /// After an automatic compaction the frontend stays busy,
+    /// since the prompt it ran ahead of or the rest of the turn it paused goes out next.
     SessionCompacted {
         summary: String,
         pre_count: u32,
@@ -305,8 +314,11 @@ pub enum Event {
 pub enum CompactTrigger {
     /// The user ran `/compact`.
     Manual,
-    /// The latest usage reached the threshold ahead of a submitted prompt.
+    /// The context estimate reached the threshold ahead of a submitted prompt.
     Auto,
+    /// The context reached the threshold at a round boundary inside a turn, which continues from
+    /// the summary.
+    MidTurn,
 }
 
 // ── Tool Calls ──
@@ -718,6 +730,7 @@ mod tests {
                 Event::PromptDrained(_) => "prompt_drained",
                 Event::TurnComplete => "turn_complete",
                 Event::TurnRolledBack => "turn_rolled_back",
+                Event::PromptUnsent => "prompt_unsent",
                 Event::TurnFailed(_) => "turn_failed",
                 Event::UsageUpdated(_) => "usage_updated",
                 Event::RateLimitsUpdated(_) => "rate_limits_updated",
@@ -784,6 +797,7 @@ mod tests {
                 Event::PromptDrained("next".to_owned()),
                 Event::TurnComplete,
                 Event::TurnRolledBack,
+                Event::PromptUnsent,
                 Event::TurnFailed("boom".to_owned()),
                 Event::UsageUpdated(UsageSnapshot {
                     context_tokens: Some(1_200),
@@ -987,6 +1001,23 @@ mod tests {
                     },
                 }),
             );
+        }
+    }
+
+    mod compact_trigger {
+        use super::*;
+
+        #[test]
+        fn tags_each_compaction_trigger_as_session_files_store_it() {
+            let triggers = [
+                CompactTrigger::Manual,
+                CompactTrigger::Auto,
+                CompactTrigger::MidTurn,
+            ];
+
+            let tags = serde_json::to_value(triggers).unwrap();
+
+            assert_eq!(tags, json!(["manual", "auto", "mid_turn"]));
         }
     }
 
