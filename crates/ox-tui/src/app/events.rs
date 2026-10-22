@@ -69,18 +69,20 @@ impl App {
             Event::AutoCompactionResumed => self.session_info.auto_compaction_paused_after = None,
             Event::SummaryToken(token) => self.chat.append_summary_token(&token),
             Event::SummaryDiscarded => self.chat.discard_summary(),
-            Event::SessionTitleUpdated { session_id, title } => {
-                if session_id == self.session_info.session_id {
+            Event::SessionTitleUpdated { id, title } => {
+                if id == self.session_info.session_id {
                     self.status_bar.set_title(Some(title));
                 }
             }
-            Event::SessionRolled { id, archived } => self.apply_session_rolled(id, archived),
+            Event::SessionRolled { id, old_session } => {
+                self.apply_session_rolled(id, old_session);
+            }
             Event::SessionResumed {
                 id,
                 title,
-                unarchived,
+                prior,
                 history,
-            } => self.apply_session_resumed(id, title, unarchived, history),
+            } => self.apply_session_resumed(id, title, prior, history),
             Event::SessionCompacted {
                 summary,
                 pre_count,
@@ -185,9 +187,9 @@ impl App {
     }
 
     /// `/clear` or `/archive`: rebinds the session and empties chat for the fresh one.
-    fn apply_session_rolled(&mut self, id: String, archived: bool) {
+    fn apply_session_rolled(&mut self, id: String, old_session: ArchiveState) {
         let old_id = self.rebind_session(id, None);
-        if archived {
+        if old_session == ArchiveState::Archived {
             self.chat
                 .push_system_message(archive_notice(&old_id, ArchiveState::Archived));
         }
@@ -199,12 +201,12 @@ impl App {
         &mut self,
         id: String,
         title: Option<String>,
-        unarchived: bool,
+        prior: ArchiveState,
         history: Vec<Interaction>,
     ) {
         self.rebind_session(id, title);
         self.chat.load_history(history);
-        if unarchived {
+        if prior == ArchiveState::Archived {
             self.chat.push_system_message(archive_notice(
                 &self.session_info.session_id,
                 ArchiveState::Active,
@@ -1189,7 +1191,7 @@ mod tests {
         fn session_title_updated_overwrites_existing_title_for_current_session() {
             let (mut app, _rx, _event_tx) = test_app(Some("First prompt"));
             app.handle_engine_event(Event::SessionTitleUpdated {
-                session_id: app.session_info.session_id.clone(),
+                id: app.session_info.session_id.clone(),
                 title: "AI-generated".to_owned(),
             });
             assert_eq!(app.status_bar.title(), Some("AI-generated"));
@@ -1202,7 +1204,7 @@ mod tests {
             // paint the old session's title onto the current one.
             let (mut app, _rx, _event_tx) = test_app(Some("First prompt"));
             app.handle_engine_event(Event::SessionTitleUpdated {
-                session_id: "different-session".to_owned(),
+                id: "different-session".to_owned(),
                 title: "Stale title".to_owned(),
             });
             assert_eq!(
@@ -1225,7 +1227,7 @@ mod tests {
 
             app.handle_engine_event(Event::SessionRolled {
                 id: "rolled-session".to_owned(),
-                archived: false,
+                old_session: ArchiveState::Active,
             });
 
             assert_eq!(
@@ -1259,7 +1261,7 @@ mod tests {
 
             app.handle_engine_event(Event::SessionRolled {
                 id: "rolled-session".to_owned(),
-                archived: false,
+                old_session: ArchiveState::Active,
             });
 
             assert!(app.slash_tasks.join_next().await.is_none());
@@ -1273,7 +1275,7 @@ mod tests {
 
             app.handle_engine_event(Event::SessionRolled {
                 id: "rolled-session".to_owned(),
-                archived: true,
+                old_session: ArchiveState::Archived,
             });
 
             assert_eq!(app.session_info.session_id, "rolled-session");
@@ -1290,7 +1292,7 @@ mod tests {
 
             app.handle_engine_event(Event::SessionRolled {
                 id: "rolled-session".to_owned(),
-                archived: false,
+                old_session: ArchiveState::Active,
             });
 
             assert_eq!(*app.queue.pending(), [] as [&str; 0]);
@@ -1318,7 +1320,7 @@ mod tests {
             app.handle_engine_event(Event::SessionResumed {
                 id: "resumed-session".to_owned(),
                 title: Some("Resumed title".to_owned()),
-                unarchived: false,
+                prior: ArchiveState::Active,
                 history: vec![
                     Interaction::UserText("resumed user".to_owned()),
                     Interaction::AssistantText("resumed assistant".to_owned()),
@@ -1364,7 +1366,7 @@ mod tests {
             app.handle_engine_event(Event::SessionResumed {
                 id: "resumed".to_owned(),
                 title: None,
-                unarchived: false,
+                prior: ArchiveState::Active,
                 history: vec![Interaction::UserText("only msg".to_owned())],
             });
             assert_eq!(
@@ -1381,7 +1383,7 @@ mod tests {
             app.handle_engine_event(Event::SessionResumed {
                 id: "bbbb2222-resumed".to_owned(),
                 title: None,
-                unarchived: true,
+                prior: ArchiveState::Archived,
                 history: vec![Interaction::UserText("only msg".to_owned())],
             });
 
@@ -1397,13 +1399,12 @@ mod tests {
             app.handle_engine_event(Event::SessionResumed {
                 id: "resumed".to_owned(),
                 title: None,
-                unarchived: false,
+                prior: ArchiveState::Active,
                 history: vec![
                     Interaction::Compacted {
                         summary: "Compact summary".to_owned(),
                         pre_count: 4,
                         instructions: None,
-                        trigger: None,
                     },
                     Interaction::AssistantText("post-compact reply".to_owned()),
                 ],
@@ -1423,7 +1424,7 @@ mod tests {
             app.handle_engine_event(Event::SessionResumed {
                 id: "resumed".to_owned(),
                 title: None,
-                unarchived: false,
+                prior: ArchiveState::Active,
                 history: Vec::new(),
             });
             assert!(
@@ -1439,7 +1440,7 @@ mod tests {
             app.handle_engine_event(Event::SessionResumed {
                 id: "resumed".to_owned(),
                 title: None,
-                unarchived: false,
+                prior: ArchiveState::Active,
                 history: vec![Interaction::UserText("only msg".to_owned())],
             });
 
@@ -1680,7 +1681,7 @@ mod tests {
             app.handle_engine_event(Event::SessionResumed {
                 id: "resumed-session".to_owned(),
                 title: None,
-                unarchived: false,
+                prior: ArchiveState::Active,
                 history: Vec::new(),
             });
             let at_swap = app.status.clone();
@@ -1700,7 +1701,7 @@ mod tests {
 
             app.handle_engine_event(Event::SessionRolled {
                 id: "rolled-session".to_owned(),
-                archived: true,
+                old_session: ArchiveState::Archived,
             });
             let at_roll = app.status.clone();
             app.handle_engine_event(Event::SessionReady);

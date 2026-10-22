@@ -306,10 +306,9 @@ impl Engine {
                     summary,
                     instructions,
                     tasks: self.tasks.clone(),
-                    trigger,
                     context: self.prompt.refreshed(fresh),
                 };
-                let compacted = self.replace_with_summary(sink, boundary).await;
+                let compacted = self.replace_with_summary(sink, boundary, trigger).await;
                 if compacted.is_some() {
                     self.show_instruction_warnings(sink, warnings);
                 }
@@ -330,25 +329,27 @@ impl Engine {
         compacted
     }
 
-    /// Saves the compaction boundary and swaps the transcript to the summary message, which lists
-    /// the open background shells, then clears the file tracker and returns the summary's
-    /// checkpoint.
+    /// Saves the compaction boundary and swaps the transcript to the summary message,
+    /// which lists the open background shells and, after a mid-turn `trigger`, asks the model
+    /// to resume the turn.
+    /// It then clears the file tracker, reports the compaction under `trigger`,
+    /// and returns the summary's checkpoint.
     /// A failed write discards the streamed summary and leaves the transcript unchanged,
     /// unless persistence has stopped, when the swap happens in memory alone.
     async fn replace_with_summary(
         &mut self,
         sink: &dyn EventSink,
         boundary: CompactBoundary,
+        trigger: CompactTrigger,
     ) -> Option<Checkpoint> {
         let synthetic = synthesize_post_compact_message(
             &boundary.summary,
             &boundary.tasks,
             &self.shells.list(),
-            boundary.trigger,
+            trigger,
         );
         let summary = boundary.summary.clone();
         let instructions = boundary.instructions.clone();
-        let trigger = boundary.trigger;
         let context = boundary.context.clone();
         let outcome = self.session.compact(boundary, synthetic.clone()).await;
         let Some(checkpoint) = outcome.checkpoint else {
@@ -1482,7 +1483,6 @@ mod tests {
                 summary: "fixed login bug".to_owned(),
                 instructions: None,
                 tasks,
-                trigger: CompactTrigger::Auto,
                 context: SessionContext::default(),
             }
         }
@@ -1501,7 +1501,9 @@ mod tests {
                 seed_full_read(&engine.file_tracker, &read);
                 let sink = CapturingSink::default();
 
-                let compacted = engine.replace_with_summary(&sink, boundary(plan())).await;
+                let compacted = engine
+                    .replace_with_summary(&sink, boundary(plan()), CompactTrigger::Auto)
+                    .await;
 
                 assert!(compacted.is_some());
                 assert_eq!(engine.file_tracker.snapshot_all(), []);
@@ -1547,7 +1549,7 @@ mod tests {
                 let sink = CapturingSink::default();
 
                 let compacted = engine
-                    .replace_with_summary(&sink, boundary(Vec::new()))
+                    .replace_with_summary(&sink, boundary(Vec::new()), CompactTrigger::Auto)
                     .await;
 
                 assert!(compacted.is_none());
@@ -1586,7 +1588,9 @@ mod tests {
                 large.summary.clone_from(&summary);
                 let sink = CapturingSink::default();
 
-                let compacted = engine.replace_with_summary(&sink, large).await;
+                let compacted = engine
+                    .replace_with_summary(&sink, large, CompactTrigger::Auto)
+                    .await;
 
                 assert!(compacted.is_some());
                 assert_eq!(

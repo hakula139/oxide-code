@@ -264,7 +264,7 @@ mod tests {
     use ox_core::config::StatusLineSegment;
     use ox_core::permission::{Basis, Mode};
     use ox_core::protocol::testing::{ls_call, text_result};
-    use ox_core::protocol::{CompactTrigger, Decision, Event, Op};
+    use ox_core::protocol::{ApprovalDecision, CompactTrigger, Event, Op};
     use ox_core::tool::tasks::testing::plan;
     use ox_core::tool::view::{ApprovalBody, ApprovalPreview};
     use ox_core::util::git::PullRequest;
@@ -799,7 +799,7 @@ mod tests {
             assert!(matches!(
                 forwarded,
                 Op::Resolve {
-                    decision: Decision::Approve,
+                    decision: ApprovalDecision::Approve,
                     ..
                 }
             ));
