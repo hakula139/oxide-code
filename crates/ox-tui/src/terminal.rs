@@ -38,12 +38,6 @@ use crate::components::status::{HyperlinkCell, StatusHyperlink};
 
 pub(crate) type Tui = Terminal<CrosstermBackend<Stdout>>;
 
-/// A backend the TUI draws frames to and then writes escape sequences to, such as the OSC 8 status
-/// links and OSC 52 copies.
-pub(crate) trait TuiBackend: Backend<Error: Send + Sync + 'static> + Write {}
-
-impl<B: Backend<Error: Send + Sync + 'static> + Write> TuiBackend for B {}
-
 /// Enters raw mode, the alternate screen, mouse capture, bracketed paste, and, outside Windows,
 /// Kitty keyboard disambiguation. A failed setup restores the terminal before returning the error.
 /// Otherwise the caller must invoke [`restore`] on exit, including panics.
@@ -144,6 +138,12 @@ fn write_deferred_panics(deferred: &Mutex<DeferredPanics>, out: &mut impl Write)
 }
 
 // ── Escape Sequences ──
+
+/// A backend the TUI draws frames to and then writes escape sequences to, such as the OSC 8 status
+/// links and OSC 52 copies.
+pub(crate) trait TuiBackend: Backend<Error: Send + Sync + 'static> + Write {}
+
+impl<B: Backend<Error: Send + Sync + 'static> + Write> TuiBackend for B {}
 
 /// Runs `f` inside a DEC synchronized update (mode 2026), so the terminal presents everything it
 /// writes as one tear-free frame.
@@ -622,11 +622,6 @@ mod tests {
         }
 
         #[test]
-        fn writes_nothing_without_links() {
-            assert_eq!(envelope(&[]), "");
-        }
-
-        #[test]
         fn wraps_each_link_in_cup_and_osc8() {
             let links = [
                 plain_hyperlink(
@@ -718,9 +713,10 @@ mod tests {
         }
 
         #[test]
-        fn is_empty_when_safe_url_is_empty() {
+        fn writes_nothing_without_a_usable_url() {
             let link = plain_hyperlink(Rect::new(0, 0, 1, 1), "\x1b\x07", &["x"]);
 
+            assert_eq!(envelope(&[]), "");
             assert_eq!(envelope(&[link]), "");
         }
     }

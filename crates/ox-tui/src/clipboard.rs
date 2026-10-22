@@ -9,7 +9,7 @@ use std::process::Stdio;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use anyhow::{Context as _, Result, anyhow};
+use anyhow::{Context as _, Result, bail};
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD;
 use tokio::io::AsyncWriteExt as _;
@@ -104,15 +104,18 @@ pub(crate) enum Delivery {
     /// The terminal applies this OSC 52 sequence once it is written.
     Osc52 {
         sequence: String,
-        terminal: Terminal,
+        /// Whether the terminal applies the sequence only once the user allows clipboard access,
+        /// as iTerm2 does with "Applications in terminal may access clipboard".
+        needs_permission: bool,
     },
 }
 
 /// Why a copy did not reach the clipboard.
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) enum CopyError {
-    /// The selection is over [`MAX_TERMINAL_COPY_BYTES`], and only a terminal route was left.
-    TooLarge,
+    /// The selection is over [`MAX_TERMINAL_COPY_BYTES`], with its size in bytes, and only a
+    /// terminal route was left.
+    TooLarge(usize),
     /// Every route failed, and Terminal.app ignores OSC 52.
     AppleTerminal,
     /// Every route failed, and the Linux console has no clipboard.
@@ -124,9 +127,11 @@ pub(crate) enum CopyError {
 impl fmt::Display for CopyError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::TooLarge => write!(
+            Self::TooLarge(bytes) => write!(
                 f,
-                "Not copied: the selection is over the {} kB terminal copy limit",
+                "Not copied: the selection is {} kB, over the {} kB terminal copy limit. \
+                 Select less text.",
+                bytes.div_ceil(1000),
                 MAX_TERMINAL_COPY_BYTES / 1000,
             ),
             Self::AppleTerminal => f.write_str(
@@ -163,7 +168,7 @@ impl CopyReport {
         );
         match &self.outcome {
             Ok(Delivery::Osc52 {
-                terminal: Terminal::ITerm2,
+                needs_permission: true,
                 ..
             }) => (
                 format!(
@@ -231,6 +236,8 @@ impl Clipboard {
     }
 }
 
+// ── Routes ──
+
 /// The routes one copy may take.
 struct Route {
     environment: Environment,
@@ -272,10 +279,10 @@ fn settle(
     tmux: Option<&Result<TmuxLoad>>,
 ) -> Result<Delivery, CopyError> {
     if let Some(Err(error)) = native {
-        debug!("native clipboard write failed: {error:#}");
+        debug!(error = %format_args!("{error:#}"), "native clipboard write failed");
     }
     if let Some(Err(error)) = tmux {
-        debug!("tmux load-buffer failed: {error:#}");
+        debug!(error = %format_args!("{error:#}"), "tmux load-buffer failed");
     }
     if matches!(native, Some(Ok(()))) || matches!(tmux, Some(Ok(TmuxLoad::Forwarded))) {
         return Ok(Delivery::Copied);
@@ -283,20 +290,20 @@ fn settle(
     if matches!(tmux, Some(Ok(TmuxLoad::BufferOnly))) {
         return Ok(Delivery::TmuxBuffer);
     }
+    let needs_permission = match environment.terminal {
+        Terminal::Apple => return Err(CopyError::AppleTerminal),
+        Terminal::LinuxConsole => return Err(CopyError::LinuxConsole),
+        Terminal::ITerm2 => true,
+        Terminal::Other => false,
+    };
     if text.len() > MAX_TERMINAL_COPY_BYTES {
-        return Err(CopyError::TooLarge);
+        return Err(CopyError::TooLarge(text.len()));
     }
-    match environment.terminal {
-        Terminal::Apple => Err(CopyError::AppleTerminal),
-        Terminal::LinuxConsole => Err(CopyError::LinuxConsole),
-        terminal @ (Terminal::ITerm2 | Terminal::Other) => Ok(Delivery::Osc52 {
-            sequence: osc52_sequence(text, environment.screen),
-            terminal,
-        }),
-    }
+    Ok(Delivery::Osc52 {
+        sequence: osc52_sequence(text, environment.screen),
+        needs_permission,
+    })
 }
-
-// ── Routes ──
 
 /// Writes the system clipboard, keeping the handle in `native` for later copies.
 async fn write_native(
@@ -316,7 +323,7 @@ async fn write_native(
             .context("failed to write the clipboard")
     })
     .await
-    .context("the clipboard task panicked")?
+    .context("failed to finish the clipboard write")?
 }
 
 trait Runner: Send + Sync {
@@ -356,11 +363,11 @@ impl Runner for Program {
                 .with_context(|| format!("failed to wait for {}", self.0))?;
             if !output.status.success() {
                 let stderr = String::from_utf8_lossy(&output.stderr).trim().to_owned();
-                return Err(anyhow!(if stderr.is_empty() {
+                bail!(if stderr.is_empty() {
                     output.status.to_string()
                 } else {
                     stderr
-                }));
+                });
             }
             written.with_context(|| format!("failed to write to {}", self.0))
         })
@@ -399,6 +406,8 @@ fn osc52_sequence(text: &str, screen: bool) -> String {
 #[cfg(test)]
 mod tests {
     use std::collections::VecDeque;
+
+    use anyhow::anyhow;
 
     use super::*;
 
@@ -506,8 +515,9 @@ mod tests {
         #[test]
         fn messages_name_the_cause() {
             assert_eq!(
-                CopyError::TooLarge.to_string(),
-                "Not copied: the selection is over the 100 kB terminal copy limit",
+                CopyError::TooLarge(MAX_TERMINAL_COPY_BYTES + 1).to_string(),
+                "Not copied: the selection is 101 kB, over the 100 kB terminal copy limit. \
+                 Select less text.",
             );
             assert_eq!(
                 CopyError::LinuxConsole.to_string(),
@@ -529,10 +539,10 @@ mod tests {
             #[test]
             fn counts_characters_and_names_the_fix_for_a_failed_copy() {
                 let notice = |chars, outcome| CopyReport { chars, outcome }.notice();
-                let osc52 = |terminal| {
+                let osc52 = |needs_permission| {
                     Ok(Delivery::Osc52 {
                         sequence: String::new(),
-                        terminal,
+                        needs_permission,
                     })
                 };
 
@@ -541,11 +551,11 @@ mod tests {
                     ("Copied 1 character".to_owned(), false)
                 );
                 assert_eq!(
-                    notice(9, osc52(Terminal::Other)),
+                    notice(9, osc52(false)),
                     ("Copied 9 characters".to_owned(), false)
                 );
                 assert_eq!(
-                    notice(9, osc52(Terminal::ITerm2)),
+                    notice(9, osc52(true)),
                     (
                         "Copied 9 characters \
                          if iTerm2's \"Applications in terminal may access clipboard\" is on"
@@ -587,27 +597,19 @@ mod tests {
         async fn in_a_remote_session_sends_osc52() {
             let mut clipboard = Clipboard::new(REMOTE);
 
-            let report = copy_with(&mut clipboard, "café").await;
+            let report = copy_with(&mut clipboard, "cafe\u{301}").await;
 
             assert_eq!(
                 report,
                 CopyReport {
                     chars: 4,
                     outcome: Ok(Delivery::Osc52 {
-                        sequence: "\x1b]52;c;Y2Fmw6k=\x07".to_owned(),
-                        terminal: Terminal::Other,
+                        sequence: "\x1b]52;c;Y2FmZcyB\x07".to_owned(),
+                        needs_permission: false,
                     }),
                 },
+                "the combining accent counts with its letter",
             );
-        }
-
-        #[tokio::test]
-        async fn counts_a_combined_emoji_as_one_character() {
-            let mut clipboard = Clipboard::new(REMOTE);
-
-            let report = copy_with(&mut clipboard, "\u{1f469}\u{200d}\u{1f4bb}!").await;
-
-            assert_eq!(report.chars, 2);
         }
 
         #[tokio::test]
@@ -626,18 +628,25 @@ mod tests {
         }
 
         #[tokio::test]
-        async fn inside_tmux_keeps_an_oversized_selection_from_tmux() {
-            let tmux = FakeTmux::new([]);
+        async fn inside_tmux_keeps_a_selection_over_the_limit_from_tmux() {
+            let tmux = FakeTmux::new([Ok(())]);
             let mut clipboard = Clipboard::new(Environment {
                 tmux: true,
                 ..REMOTE
             });
             clipboard.tmux = tmux.clone();
+            let at_limit = "x".repeat(MAX_TERMINAL_COPY_BYTES);
+            let over_limit = "x".repeat(MAX_TERMINAL_COPY_BYTES + 1);
 
-            let report = copy_with(&mut clipboard, &"x".repeat(MAX_TERMINAL_COPY_BYTES + 1)).await;
+            let fits = copy_with(&mut clipboard, &at_limit).await;
+            let too_large = copy_with(&mut clipboard, &over_limit).await;
 
-            assert_eq!(report.outcome, Err(CopyError::TooLarge));
-            assert_eq!(tmux.runs(), []);
+            assert_eq!(fits.outcome, Ok(Delivery::Copied));
+            assert_eq!(
+                too_large.outcome,
+                Err(CopyError::TooLarge(MAX_TERMINAL_COPY_BYTES + 1))
+            );
+            assert_eq!(tmux.runs(), [load_buffer(&["-w", "-"], &at_limit)]);
         }
 
         #[tokio::test(start_paused = true)]
@@ -702,7 +711,7 @@ mod tests {
             assert!(settle(&at_limit, REMOTE, None, None).is_ok());
             assert_eq!(
                 settle(&over_limit, REMOTE, None, None),
-                Err(CopyError::TooLarge),
+                Err(CopyError::TooLarge(MAX_TERMINAL_COPY_BYTES + 1)),
             );
             assert_eq!(
                 settle(&over_limit, REMOTE, Some(&Ok(())), None),
@@ -720,6 +729,19 @@ mod tests {
                     None
                 ),
                 Err(CopyError::AppleTerminal),
+            );
+            assert_eq!(
+                settle(
+                    &over_limit,
+                    Environment {
+                        terminal: Terminal::LinuxConsole,
+                        ..REMOTE
+                    },
+                    None,
+                    None
+                ),
+                Err(CopyError::LinuxConsole),
+                "no selection size would copy without OSC 52",
             );
             assert_eq!(
                 settle(
