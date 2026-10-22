@@ -312,8 +312,9 @@ mod tests {
         #[tokio::test]
         async fn missing_required_fields_reports_input_error() {
             let output = run(serde_json::json!({"file_path": "/tmp/x"}), &temp_ctx()).await;
+
             assert!(output.is_error);
-            assert!(output.content.contains("Invalid input"));
+            assert_eq!(output.content, "Invalid input: missing field `content`");
         }
 
         #[tokio::test]
@@ -411,9 +412,13 @@ mod tests {
             let err = write_file(path.to_str().unwrap(), "new content", &temp_ctx())
                 .await
                 .unwrap_err();
-            assert!(
-                err.contains("has not been read"),
-                "expected must-read-first error, got: {err}",
+
+            assert_eq!(
+                err,
+                format!(
+                    "File {} has not been read in this session. Read it before writing to it.",
+                    path.display(),
+                ),
             );
             assert_eq!(fs::read_to_string(&path).unwrap(), "old content");
         }
@@ -453,7 +458,15 @@ mod tests {
             let err = write_file(path.to_str().unwrap(), "new", &ctx)
                 .await
                 .unwrap_err();
-            assert!(err.contains("only been read in part"), "{err}");
+            assert_eq!(
+                err,
+                format!(
+                    "File {} has only been read in part. \
+                     Read the remaining lines, paging with `offset` and `limit` if needed, \
+                     before writing to it.",
+                    path.display(),
+                ),
+            );
 
             let rest = local_testing::run(
                 &read,
@@ -481,9 +494,14 @@ mod tests {
             let err = write_file(path.to_str().unwrap(), "our edit", &ctx)
                 .await
                 .unwrap_err();
-            assert!(
-                err.contains("modified externally"),
-                "drift error expected, got: {err}",
+
+            assert_eq!(
+                err,
+                format!(
+                    "File {} has been modified externally since it was last read. \
+                     Re-read it before writing to it.",
+                    path.display(),
+                ),
             );
             assert_eq!(fs::read_to_string(&path).unwrap(), "external edit");
         }
@@ -513,19 +531,29 @@ mod tests {
         #[tokio::test]
         async fn fails_when_parent_is_a_file() {
             // Unix fails the stat with ENOTDIR, and Windows, which reports the path as missing,
-            // fails creating the parent. Either error names the blocking path.
+            // fails creating the parent.
             let dir = canonical_tempdir();
             let blocker = dir.path().join("blocker");
             fs::write(&blocker, "I am a file").unwrap();
-
             let path = blocker.join("child.txt");
+
             let err = write_file(path.to_str().unwrap(), "content", &temp_ctx())
                 .await
                 .unwrap_err();
-            assert!(
-                err.contains(blocker.to_str().unwrap()),
-                "expected the error to name the blocking file, got: {err}",
+
+            #[cfg(unix)]
+            let expected = format!(
+                "Failed to access {}: {}",
+                path.display(),
+                std::io::Error::from_raw_os_error(nix::errno::Errno::ENOTDIR as i32),
             );
+            #[cfg(windows)]
+            let expected = format!(
+                "Failed to create directory {}: {}",
+                blocker.display(),
+                fs::create_dir_all(&blocker).unwrap_err(),
+            );
+            assert_eq!(err, expected);
             assert_eq!(fs::read_to_string(&blocker).unwrap(), "I am a file");
         }
 
@@ -549,9 +577,10 @@ mod tests {
             let err = write_file(path.to_str().unwrap(), "content", &temp_ctx())
                 .await
                 .unwrap_err();
-            assert!(
-                err.contains("too large"),
-                "expected size-limit rejection, got: {err}",
+
+            assert_eq!(
+                err,
+                "File is too large (10.0 MB, max 10 MB). Use the bash tool to write large files."
             );
         }
 
@@ -566,9 +595,13 @@ mod tests {
             let err = write_file(link.to_str().unwrap(), "payload", &temp_ctx())
                 .await
                 .unwrap_err();
-            assert!(
-                err.contains("is a symlink"),
-                "expected symlink refusal, got: {err}"
+
+            assert_eq!(
+                err,
+                format!(
+                    "{} is a symlink. Refusing to write through it.",
+                    link.display()
+                ),
             );
             assert!(!target.exists(), "the link target must not be created");
         }
@@ -603,9 +636,13 @@ mod tests {
             let err = write_file(path.to_str().unwrap(), "content", &temp_ctx())
                 .await
                 .unwrap_err();
-            assert!(
-                err.contains("not a regular file"),
-                "expected non-regular-file rejection, got: {err}",
+
+            assert_eq!(
+                err,
+                format!(
+                    "{} is not a regular file (fifo, socket, or device). Refusing to write.",
+                    path.display(),
+                ),
             );
         }
 
@@ -646,13 +683,12 @@ mod tests {
             let err = write_file(path.to_str().unwrap(), "content", &temp_ctx())
                 .await
                 .unwrap_err();
-            let expected = format!(
-                "Failed to create directory {}: ",
-                readonly.join("nested").display()
-            );
-            assert!(
-                err.starts_with(&expected),
-                "expected mkdir denial, got: {err}"
+
+            let cause = std::io::Error::from_raw_os_error(nix::errno::Errno::EACCES as i32);
+            let nested = readonly.join("nested");
+            assert_eq!(
+                err,
+                format!("Failed to create directory {}: {cause}", nested.display()),
             );
         }
     }

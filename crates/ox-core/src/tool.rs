@@ -658,7 +658,7 @@ mod tests {
 
     use super::local_testing::{canonical_tempdir, ctx, deny_reads, temp_ctx};
     use super::testing::bash_registry;
-    use super::view::{DiffChunk, GrepFileGroup, GrepMatchLine, NumberedLine};
+    use super::view::{DiffChunk, NumberedLine};
     use super::*;
     use crate::permission::rule::Rule;
     use crate::permission::{Decision, Mode, PermissionClass, Policy, Zone};
@@ -1029,45 +1029,20 @@ mod tests {
                 let tools = ToolRegistry::built_in(&deny_reads(&["secret.txt"]), &Arc::default());
                 let ctx = ctx(dir.path());
 
-                for (tool, pattern) in [("glob", "*.txt"), ("grep", "token")] {
+                for (tool, pattern, rows) in [
+                    ("glob", "*.txt", "notes.txt"),
+                    ("grep", "token", "notes.txt:1:token"),
+                ] {
                     let input = serde_json::json!({"pattern": pattern});
                     let output = tools.run_input(tool, input, &ctx).await;
 
                     assert!(!output.is_error, "{tool}: {}", output.content);
-                    assert!(
-                        output.content.contains("notes.txt"),
-                        "{tool}: {}",
-                        output.content
-                    );
-                    assert!(
-                        !output.content.contains("secret"),
-                        "{tool}: {}",
-                        output.content
-                    );
-                    assert!(
-                        output
-                            .content
-                            .ends_with("(1 file withheld by read deny or ask rules)"),
-                        "{tool}: {}",
-                        output.content
+                    assert_eq!(
+                        output.content,
+                        format!("{rows}\n\n(1 file withheld by read deny or ask rules)"),
+                        "{tool}",
                     );
                 }
-            }
-        }
-
-        mod get {
-            use super::*;
-
-            #[test]
-            fn finds_registered_tool() {
-                let registry = bash_registry(Vec::new());
-                assert_eq!(registry.get("bash").unwrap().0.name, "bash");
-            }
-
-            #[test]
-            fn unknown_tool_has_no_entry() {
-                let registry = bash_registry(Vec::new());
-                assert!(registry.get("nonexistent").is_none());
             }
         }
 
@@ -1075,15 +1050,20 @@ mod tests {
             use super::*;
 
             #[test]
-            fn produces_tool_with_valid_schema() {
-                let registry = bash_registry(Vec::new());
+            fn lists_each_tool_with_the_spec_it_registered() {
+                let registry = built_in();
+
                 let defs = registry.definitions();
-                assert_eq!(defs.len(), 1);
-                assert_eq!(defs[0].name, "bash");
-                let schema = &defs[0].input_schema;
-                assert_eq!(schema["type"], "object");
-                assert!(schema["properties"]["command"].is_object());
-                assert_eq!(schema["required"], serde_json::json!(["command"]));
+
+                let listed: Vec<_> = defs
+                    .iter()
+                    .map(|def| (&def.name, &def.description, &def.input_schema))
+                    .collect();
+                let registered: Vec<_> = registry
+                    .iter()
+                    .map(|(spec, _)| (&spec.name, &spec.description, &spec.input_schema))
+                    .collect();
+                assert_eq!(listed, registered);
             }
         }
 
@@ -1259,86 +1239,6 @@ mod tests {
             }
 
             #[test]
-            fn delegates_grep_matches() {
-                let registry =
-                    ToolRegistry::new(vec![Box::new(GrepTool::new(ReadFilter::default()))]);
-                let input = serde_json::json!({"pattern": "fn"});
-                let metadata = ToolMetadata::default();
-                let view = registry.result_view(
-                    "grep",
-                    &input,
-                    "src/main.rs:10:fn main()",
-                    &metadata,
-                    false,
-                    Path::new("/repo"),
-                );
-                assert_eq!(
-                    view,
-                    ToolResultView::GrepMatches {
-                        groups: vec![GrepFileGroup {
-                            path: "src/main.rs".to_owned(),
-                            lines: vec![GrepMatchLine {
-                                number: 10,
-                                text: "fn main()".to_owned(),
-                                is_match: true,
-                            }],
-                        }],
-                        truncated: false,
-                    },
-                );
-            }
-
-            #[test]
-            fn delegates_read_excerpt() {
-                let registry = ToolRegistry::new(vec![Box::new(ReadTool)]);
-                let input = serde_json::json!({"file_path": "/tmp/lib.rs"});
-                let metadata = ToolMetadata::default();
-                let view = registry.result_view(
-                    "read",
-                    &input,
-                    "1\tmod foo;",
-                    &metadata,
-                    false,
-                    Path::new("/repo"),
-                );
-                assert_eq!(
-                    view,
-                    ToolResultView::ReadExcerpt {
-                        path: "/tmp/lib.rs".to_owned(),
-                        lines: vec![NumberedLine {
-                            number: 1,
-                            text: "mod foo;".to_owned(),
-                        }],
-                        total_lines: 1,
-                    },
-                );
-            }
-
-            #[test]
-            fn delegates_glob_files() {
-                let registry =
-                    ToolRegistry::new(vec![Box::new(GlobTool::new(ReadFilter::default()))]);
-                let input = serde_json::json!({"pattern": "*.rs"});
-                let metadata = ToolMetadata::default();
-                let view = registry.result_view(
-                    "glob",
-                    &input,
-                    "src/main.rs\nsrc/lib.rs",
-                    &metadata,
-                    false,
-                    Path::new("/repo"),
-                );
-                assert_eq!(
-                    view,
-                    ToolResultView::GlobFiles {
-                        pattern: "*.rs".to_owned(),
-                        files: vec!["src/main.rs".to_owned(), "src/lib.rs".to_owned()],
-                        total: 2,
-                    },
-                );
-            }
-
-            #[test]
             fn short_circuits_errors_to_text() {
                 let registry = ToolRegistry::new(vec![Box::new(EditTool)]);
                 let input = serde_json::json!({
@@ -1423,9 +1323,10 @@ mod tests {
         }
 
         #[test]
-        fn same_path_is_filename() {
+        fn names_the_base_itself_by_its_file_name() {
             let base = Path::new("/home/user/project/src/main.rs");
             let path = Path::new("/home/user/project/src/main.rs");
+
             assert_eq!(display_path(path, base), "main.rs");
         }
     }
@@ -1439,7 +1340,7 @@ mod tests {
         }
 
         #[test]
-        fn bare_name_unchanged() {
+        fn returns_a_bare_name_as_is() {
             assert_eq!(file_name("README.md"), "README.md");
         }
     }
@@ -1465,8 +1366,11 @@ mod tests {
         const MAX_CHARS: usize = 500;
 
         #[test]
-        fn short_unchanged() {
-            assert_eq!(truncate_line("hello", MAX_CHARS).as_ref(), "hello");
+        fn borrows_a_line_within_the_cap() {
+            assert!(matches!(
+                truncate_line("hello", MAX_CHARS),
+                Cow::Borrowed("hello")
+            ));
         }
 
         #[test]
@@ -1494,9 +1398,10 @@ mod tests {
         }
 
         #[test]
-        fn multibyte_under_char_cap_unchanged() {
+        fn counts_characters_against_the_cap_not_bytes() {
             let line = "é".repeat(MAX_CHARS);
             let result = truncate_line(&line, MAX_CHARS);
+
             assert!(matches!(result, Cow::Borrowed(_)));
             assert_eq!(result.as_ref(), line);
         }

@@ -57,7 +57,7 @@ The [live tests](#live-tests) are the sole exception because they send paid requ
 
 ## Snapshots
 
-`insta` snapshot tests compare TUI renders, session JSONL, and headless output against baselines in the module's `snapshots/` directory. When output changes, the test fails and writes a `.snap.new` file beside the baseline. Review the difference, accept it with `INSTA_UPDATE=always cargo test <filter>` or `cargo insta review`, and commit the updated `.snap`.
+`insta` snapshot tests compare TUI renders, session JSONL, and headless output against baselines in the module's `snapshots/` directory. When output changes, the test fails and writes a `.snap.new` file beside the baseline. Review and accept the difference with `cargo insta review`, then commit the updated `.snap`.
 
 A baseline's file name consists of the test's `module_path!()`, which starts with the crate name, such as `ox_core`, `ox_tui`, or `ox`, followed by the snapshot name, with `__` replacing each `::`, as in `ox__driver__headless__tests__drive__stderr.snap`. An unnamed assertion takes the test's name, where insta strips a leading `test_` and appends `-2`, `-3`, and so on to each further unnamed snapshot in the same test. A `snapshot_suffix` setting appends `@<suffix>`. An explicit name drops the function prefix just as a test name does, so `drive_stderr` becomes `stderr` inside `mod drive`. Moving a test to another module renames every baseline it writes, while renaming a test renames only its unnamed ones. Rename each `.snap` file to match, and delete baselines left behind by removed tests. `cargo insta test --unreferenced=reject` fails whenever any baseline is left without a test.
 
@@ -76,17 +76,17 @@ CI uploads `cargo llvm-cov` results to Codecov. Its PR comment reports patch cov
 Coverage shows whether a line ran. Mutation testing shows whether a mutation of that line would be caught. A full run is slow, so run it out of band before large-scope changes ship:
 
 ```bash
-cargo mutants --workspace
+cargo mutants
 ```
 
-`.cargo/mutants.toml` sets `test_workspace`, so each mutant faces every crate's tests. A surviving mutant usually means an assertion is too loose, so tighten it. If a mutant is genuinely equivalent, exclude it in that file with an `exclude_re` pattern and a comment explaining the equivalence.
+It mutates every workspace crate, and `.cargo/mutants.toml` sets `test_workspace`, so each mutant faces every crate's tests. A surviving mutant usually means an assertion is too loose, so tighten it. If a mutant is genuinely equivalent, exclude it in that file with an `exclude_re` pattern and a comment explaining the equivalence.
 
 ## Live Tests
 
 `crates/ox/tests/live.rs` covers what only a real endpoint can show: streamed text, a tool round trip, interleaved thinking replayed across turns, prompt cache reads, auto-compaction, and `--resume`. Its tests send paid requests, so they are ignored by default and return early unless `OX_LIVE=1`. Run them after changes to the client, the prompt, thinking, compaction, or session resume:
 
 ```bash
-OX_LIVE=1 cargo test --test live -- --ignored
+OX_LIVE=1 cargo live
 ```
 
 Each test runs `ox` with a scratch directory as its home and for its config, sessions, and logs. `ox` loads no global instructions, config file, or stored login there, so the endpoint and credentials come only from the [environment variables](../guide/configuration.md#environment-variables), and one credential variable must be set. The harness also drops inherited `OX_*` settings other than `OX_EXTRA_CA_CERTS`, so they cannot change what the tests observe. `OX_LIVE_MODEL` picks the model, `claude-haiku-5-5` by default, and `OX_LIVE_THINKING_MODEL` picks the one for the thinking test, `claude-opus-5-5` by default.
@@ -103,11 +103,4 @@ The tests drive headless and REPL runs. Check the TUI-only paths by hand in a sc
 2. **`/model` swap**: Send a prompt on Opus, switch to Haiku with `/model`, and send another. Then switch back to Opus and send a third. Every reply succeeds and remembers the earlier exchanges.
 3. **Cancellation**: Press Esc while a long reply streams, and check that the stream stops within a second. Then send a new prompt and verify that the reply answers only that prompt.
 4. **Scrolling and the mouse**: In a bare terminal, inside tmux with `mouse on`, and over SSH, wheel-scroll the chat and check that tmux stays out of copy mode. Press PageUp until the jump-to-bottom pill appears, then press Ctrl+End and check that the chat follows the tail again. Drag-select a region and paste it elsewhere, double-click a word, triple-click a row, and hold a drag past the top edge until the chat scrolls. Press Ctrl+C on a selection and check that it copies without interrupting, then hold the bypass modifier and check that native selection still works. Click a `... +N lines` footer and a `Thought` header, and check that only that block expands. Click each pull request segment, then Ctrl+click it (Cmd+click in iTerm2 and Terminal.app), and check that each opens its page once. Quit, and check that the terminal screen is restored.
-5. **Leak check**: Search the logs and session files for each credential. Pass the value straight to `grep` so it never prints, and check the exit status: `1` means no match, `0` a match, and `2` an error such as a missing directory.
-
-   ```bash
-   grep -rqF -- "$ANTHROPIC_AUTH_TOKEN" \
-     "${XDG_STATE_HOME:-$HOME/.local/state}/ox" \
-     "${XDG_DATA_HOME:-$HOME/.local/share}/ox/sessions"
-   echo $?
-   ```
+5. **Leak check**: Run `scripts/check-leaks.sh` in the environment the sessions used. It searches the logs and session files for each credential the live tests check and prints only the names of the variables whose values it finds.

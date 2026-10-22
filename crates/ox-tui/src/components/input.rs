@@ -12,14 +12,12 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph};
 use ratatui_textarea::{CursorMove, TextArea, WrapMode};
 
-use ox_core::protocol::Op;
 use ox_core::util::text::trim_blank_edges;
 
 use self::popup::{PopupState, SlashPopup, popup_state};
 use crate::action::Action;
 use crate::cursor::place_clamped;
 use crate::glyphs::{USER_PROMPT_PREFIX, USER_PROMPT_PREFIX_WIDTH};
-use crate::keymap::{CTRL_C, CTRL_D};
 use crate::saturating_u16;
 use crate::slash::arg_placeholder_for;
 use crate::theme::Theme;
@@ -47,10 +45,8 @@ pub(crate) enum InputOutcome {
 
 /// Multi-line input area with dynamic height and slash-command popup.
 pub(crate) struct InputArea {
-    theme: Theme,
     textarea: TextArea<'static>,
     popup: SlashPopup,
-    enabled: bool,
     /// Textarea width at the last render, which sets the wrap layout.
     rendered_width: Cell<u16>,
     /// Cached [`Self::visual_line_count`], cleared when the text or the rendered width changes.
@@ -60,35 +56,17 @@ pub(crate) struct InputArea {
 // ── Public API ──
 
 impl InputArea {
-    pub(crate) fn new(theme: &Theme) -> Self {
+    pub(crate) fn new() -> Self {
         let mut textarea = TextArea::default();
         textarea.set_cursor_line_style(Style::default());
-        textarea.set_style(theme.text());
         textarea.set_wrap_mode(WrapMode::WordOrGlyph);
 
         Self {
-            theme: theme.clone(),
             textarea,
-            popup: SlashPopup::new(theme),
-            enabled: true,
+            popup: SlashPopup::default(),
             rendered_width: Cell::new(0),
             visual_lines: Cell::new(None),
         }
-    }
-
-    /// Re-skins every subsequent render, including the textarea's cached text style.
-    pub(crate) fn set_theme(&mut self, theme: &Theme) {
-        self.theme = theme.clone();
-        self.textarea.set_style(theme.text());
-        self.popup.set_theme(theme);
-    }
-
-    pub(crate) fn set_enabled(&mut self, enabled: bool) {
-        self.enabled = enabled;
-    }
-
-    pub(crate) fn is_enabled(&self) -> bool {
-        self.enabled
     }
 
     #[cfg(test)]
@@ -124,8 +102,8 @@ impl InputArea {
         self.popup.height()
     }
 
-    pub(crate) fn render_popup(&self, frame: &mut Frame<'_>, area: Rect) {
-        self.popup.render(frame, area);
+    pub(crate) fn render_popup(&self, frame: &mut Frame<'_>, area: Rect, theme: &Theme) {
+        self.popup.render(frame, area, theme);
     }
 }
 
@@ -143,16 +121,17 @@ impl InputArea {
         }
     }
 
-    pub(crate) fn render(&self, frame: &mut Frame<'_>, area: Rect) {
-        let rule_style = if self.enabled {
-            self.theme.border_focused()
+    /// Draws the input in `area`, with its rules in the accent color while `busy`.
+    pub(crate) fn render(&self, frame: &mut Frame<'_>, area: Rect, busy: bool, theme: &Theme) {
+        let rule_style = if busy {
+            theme.accent()
         } else {
-            self.theme.accent()
+            theme.border_focused()
         };
         let block = Block::default()
             .borders(Borders::TOP | Borders::BOTTOM)
             .border_style(rule_style)
-            .style(self.theme.surface());
+            .style(theme.surface());
         let inner = block.inner(area);
         frame.render_widget(block, area);
 
@@ -163,10 +142,7 @@ impl InputArea {
         .areas(inner);
 
         frame.render_widget(
-            Paragraph::new(Line::from(Span::styled(
-                USER_PROMPT_PREFIX,
-                self.theme.user(),
-            ))),
+            Paragraph::new(Line::from(Span::styled(USER_PROMPT_PREFIX, theme.user()))),
             prompt_area,
         );
 
@@ -174,6 +150,8 @@ impl InputArea {
         if textarea_area.is_empty() {
             return;
         }
+        // The textarea keeps its default style and takes the text slot from the cells under it.
+        frame.render_widget(Block::default().style(theme.text()), textarea_area);
         frame.render_widget(&self.textarea, textarea_area);
         if self.rendered_width.replace(textarea_area.width) != textarea_area.width {
             self.visual_lines.set(None);
@@ -194,7 +172,7 @@ impl InputArea {
             if width > 0 {
                 let area = Rect::new(ghost_x, cursor_y, width, 1);
                 frame.render_widget(
-                    Paragraph::new(Line::from(Span::styled(token, self.theme.dim()))),
+                    Paragraph::new(Line::from(Span::styled(token, theme.dim()))),
                     area,
                 );
             }
@@ -210,20 +188,6 @@ impl InputArea {
     // ── Key Routing ──
 
     fn handle_key(&mut self, key: &KeyEvent) -> InputOutcome {
-        if CTRL_C.matches(key) {
-            return InputOutcome::Action(if self.enabled {
-                Action::ConfirmExit
-            } else {
-                Action::Op(Op::Interrupt)
-            });
-        }
-        if CTRL_D.matches(key) {
-            return if self.enabled && self.is_empty() {
-                InputOutcome::Action(Action::Op(Op::Shutdown))
-            } else {
-                InputOutcome::Consumed
-            };
-        }
         match (key.code, key.modifiers) {
             (KeyCode::BackTab, _) => return InputOutcome::Action(Action::CycleMode),
             (KeyCode::PageUp | KeyCode::PageDown, _)
@@ -388,7 +352,7 @@ mod tests {
     use super::*;
 
     fn test_input() -> InputArea {
-        InputArea::new(&Theme::default())
+        InputArea::new()
     }
 
     fn key(code: KeyCode, modifiers: KeyModifiers) -> Event {
@@ -404,29 +368,17 @@ mod tests {
     }
 
     fn render_to_backend(input: &InputArea, width: u16, height: u16) -> TestBackend {
+        render_in_state(input, width, height, false)
+    }
+
+    fn render_in_state(input: &InputArea, width: u16, height: u16, busy: bool) -> TestBackend {
         let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
         terminal
             .draw(|frame| {
-                input.render(frame, frame.area());
+                input.render(frame, frame.area(), busy, &Theme::default());
             })
             .unwrap();
         terminal.backend().clone()
-    }
-
-    mod set_enabled {
-        use super::*;
-
-        #[test]
-        fn reports_the_last_state_set() {
-            let mut input = test_input();
-            assert!(input.is_enabled());
-
-            input.set_enabled(false);
-            assert!(!input.is_enabled());
-
-            input.set_enabled(true);
-            assert!(input.is_enabled());
-        }
     }
 
     mod height {
@@ -485,75 +437,26 @@ mod tests {
         }
 
         #[test]
-        fn ctrl_d_empty_buffer_quits_only_when_idle() {
-            // POSIX EOF idiom: idle Ctrl+D on an empty buffer exits.
-            let mut input = test_input();
-            let idle = input.handle_event(&key(KeyCode::Char('d'), KeyModifiers::CONTROL));
-            assert_eq!(idle, InputOutcome::Action(Action::Op(Op::Shutdown)));
-
-            // Busy Ctrl+D is a no-op even with an empty buffer, so a habitual EOF press can't tear
-            // down an in-flight turn.
-            input.set_enabled(false);
-            let busy = input.handle_event(&key(KeyCode::Char('d'), KeyModifiers::CONTROL));
-            assert_eq!(busy, InputOutcome::Consumed);
-        }
-
-        #[test]
-        fn ctrl_d_with_content_is_a_noop_in_idle_and_busy() {
-            // Ctrl+D mid-prompt keeps the typed text, as in bash, zsh, and Codex. Typing reaches
-            // the buffer while busy too, so the same holds in both states.
-            let mut input = test_input();
-            type_text(&mut input, "h");
-            let idle = input.handle_event(&key(KeyCode::Char('d'), KeyModifiers::CONTROL));
-            assert_eq!(idle, InputOutcome::Consumed);
-            assert_eq!(input.textarea.lines(), vec!["h"]);
-
-            input.set_enabled(false);
-            let busy = input.handle_event(&key(KeyCode::Char('d'), KeyModifiers::CONTROL));
-            assert_eq!(busy, InputOutcome::Consumed);
-            assert_eq!(input.textarea.lines(), vec!["h"]);
-        }
-
-        #[test]
-        fn ctrl_c_idle_arms_exit() {
-            let mut input = test_input();
-            let outcome = input.handle_event(&key(KeyCode::Char('c'), KeyModifiers::CONTROL));
-            assert_eq!(outcome, InputOutcome::Action(Action::ConfirmExit));
-        }
-
-        #[test]
-        fn ctrl_c_busy_triggers_interrupt() {
-            let mut input = test_input();
-            input.set_enabled(false);
-            let outcome = input.handle_event(&key(KeyCode::Char('c'), KeyModifiers::CONTROL));
-            assert_eq!(outcome, InputOutcome::Action(Action::Op(Op::Interrupt)));
-        }
-
-        #[test]
-        fn page_and_jump_keys_are_ignored_in_both_run_states() {
+        fn page_and_jump_keys_are_ignored() {
             // Chat owns these keys, so a draft must neither change nor swallow them.
             let mut input = test_input();
             type_text(&mut input, "draft");
 
-            for enabled in [true, false] {
-                input.set_enabled(enabled);
-
-                for event in [
-                    key(KeyCode::PageUp, KeyModifiers::NONE),
-                    key(KeyCode::PageDown, KeyModifiers::NONE),
-                    key(KeyCode::Home, KeyModifiers::CONTROL),
-                    key(KeyCode::End, KeyModifiers::CONTROL),
-                ] {
-                    assert_eq!(
-                        input.handle_event(&event),
-                        InputOutcome::Ignored,
-                        "{event:?}"
-                    );
-                }
-
-                assert_eq!(input.textarea.lines(), vec!["draft"]);
-                assert_eq!(input.textarea.cursor(), (0, 5));
+            for event in [
+                key(KeyCode::PageUp, KeyModifiers::NONE),
+                key(KeyCode::PageDown, KeyModifiers::NONE),
+                key(KeyCode::Home, KeyModifiers::CONTROL),
+                key(KeyCode::End, KeyModifiers::CONTROL),
+            ] {
+                assert_eq!(
+                    input.handle_event(&event),
+                    InputOutcome::Ignored,
+                    "{event:?}"
+                );
             }
+
+            assert_eq!(input.textarea.lines(), vec!["draft"]);
+            assert_eq!(input.textarea.cursor(), (0, 5));
         }
 
         #[test]
@@ -733,25 +636,10 @@ mod tests {
         }
 
         #[test]
-        fn disabled_empty_enter_is_silent() {
-            // Submit's empty-buffer guard short-circuits, so a stray Enter mid-turn produces no
-            // action even though the textarea accepts typing while busy.
+        fn empty_enter_is_silent() {
             let mut input = test_input();
-            input.set_enabled(false);
             let outcome = input.handle_event(&key(KeyCode::Enter, KeyModifiers::NONE));
             assert_eq!(outcome, InputOutcome::Consumed);
-        }
-
-        #[test]
-        fn disabled_enter_with_content_submits() {
-            let mut input = test_input();
-            input.set_enabled(false);
-            input.handle_event(&key(KeyCode::Char('q'), KeyModifiers::NONE));
-            let outcome = input.handle_event(&key(KeyCode::Enter, KeyModifiers::NONE));
-            assert_eq!(
-                outcome,
-                InputOutcome::Action(Action::Submit("q".to_owned())),
-            );
         }
 
         #[test]
@@ -785,19 +673,8 @@ mod tests {
         }
 
         #[test]
-        fn disabled_typing_lands_in_textarea() {
-            // Enables the queue UX: the user composes a follow-up while the spinner still spins.
+        fn plain_home_moves_the_cursor() {
             let mut input = test_input();
-            input.set_enabled(false);
-            input.handle_event(&key(KeyCode::Char('h'), KeyModifiers::NONE));
-            input.handle_event(&key(KeyCode::Char('i'), KeyModifiers::NONE));
-            assert_eq!(input.textarea.lines(), vec!["hi"]);
-        }
-
-        #[test]
-        fn plain_home_moves_the_cursor_while_busy() {
-            let mut input = test_input();
-            input.set_enabled(false);
             type_text(&mut input, "draft");
             let outcome = input.handle_event(&key(KeyCode::Home, KeyModifiers::NONE));
             assert_eq!(outcome, InputOutcome::Consumed);
@@ -830,7 +707,7 @@ mod tests {
             let mut terminal = Terminal::new(TestBackend::new(10, 2)).unwrap();
 
             terminal
-                .draw(|frame| input.render(frame, Rect::new(0, 0, 10, 0)))
+                .draw(|frame| input.render(frame, Rect::new(0, 0, 10, 0), false, &Theme::default()))
                 .unwrap();
 
             let buffer = terminal.backend().buffer();
@@ -854,62 +731,52 @@ mod tests {
         fn busy_state_keeps_text_styled_normally() {
             // Composing mid-turn for the queue looks the same as composing idle, as in Claude Code.
             let theme = Theme::default();
-            let mut input = InputArea::new(&theme);
+            let mut input = InputArea::new();
             type_text(&mut input, "pending");
 
-            let enabled_fg = render_to_backend(&input, 60, 3)
-                .buffer()
-                .cell(Position::new(USER_PROMPT_PREFIX_WIDTH, 1))
-                .unwrap()
-                .fg;
-            input.set_enabled(false);
-            let disabled_fg = render_to_backend(&input, 60, 3)
-                .buffer()
-                .cell(Position::new(USER_PROMPT_PREFIX_WIDTH, 1))
-                .unwrap()
-                .fg;
+            let text_fg = |busy| {
+                render_in_state(&input, 60, 3, busy)
+                    .buffer()
+                    .cell(Position::new(USER_PROMPT_PREFIX_WIDTH, 1))
+                    .unwrap()
+                    .fg
+            };
 
-            assert_eq!(enabled_fg, theme.text().fg.unwrap());
-            assert_eq!(disabled_fg, theme.text().fg.unwrap());
+            assert_eq!(text_fg(false), theme.text().fg.unwrap());
+            assert_eq!(text_fg(true), theme.text().fg.unwrap());
         }
 
         #[test]
         fn prompt_marker_always_uses_user_color() {
             // The chevron keeps the user accent while busy, since composing mid-turn is allowed.
             let theme = Theme::default();
-            let mut input = InputArea::new(&theme);
+            let input = InputArea::new();
+            let marker_fg = |busy| {
+                render_in_state(&input, 60, 3, busy)
+                    .buffer()
+                    .cell(Position::new(0, 1))
+                    .unwrap()
+                    .fg
+            };
 
-            let enabled_fg = render_to_backend(&input, 60, 3)
-                .buffer()
-                .cell(Position::new(0, 1))
-                .unwrap()
-                .fg;
-            input.set_enabled(false);
-            let disabled_fg = render_to_backend(&input, 60, 3)
-                .buffer()
-                .cell(Position::new(0, 1))
-                .unwrap()
-                .fg;
-
-            assert_eq!(enabled_fg, theme.user().fg.unwrap());
-            assert_eq!(disabled_fg, theme.user().fg.unwrap());
+            assert_eq!(marker_fg(false), theme.user().fg.unwrap());
+            assert_eq!(marker_fg(true), theme.user().fg.unwrap());
         }
 
         #[test]
         fn rules_rest_in_border_focused_and_take_the_accent_while_busy() {
             let theme = Theme::default();
-            let mut input = InputArea::new(&theme);
-            let rule_styles = |input: &InputArea| {
-                let backend = render_to_backend(input, 60, 3);
+            let input = InputArea::new();
+            let rule_styles = |busy| {
+                let backend = render_in_state(&input, 60, 3, busy);
                 [0, 2].map(|row| {
                     let cell = backend.buffer().cell(Position::new(30, row)).unwrap();
                     (cell.fg, cell.modifier)
                 })
             };
 
-            let idle = rule_styles(&input);
-            input.set_enabled(false);
-            let busy = rule_styles(&input);
+            let idle = rule_styles(false);
+            let busy = rule_styles(true);
 
             let rule = |style: Style| (style.fg.unwrap(), style.add_modifier);
             assert_eq!(idle, [rule(theme.border_focused()); 2]);
@@ -947,7 +814,9 @@ mod tests {
             type_text(&mut input, "/model ");
             input.refresh_popup();
             let mut terminal = Terminal::new(TestBackend::new(60, 3)).unwrap();
-            terminal.draw(|f| input.render(f, f.area())).unwrap();
+            terminal
+                .draw(|f| input.render(f, f.area(), false, &Theme::default()))
+                .unwrap();
 
             let buf = terminal.backend().buffer();
             let row: String = (0..60).map(|x| buf[(x, 1)].symbol()).collect();

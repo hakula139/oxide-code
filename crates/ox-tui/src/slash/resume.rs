@@ -173,7 +173,7 @@ fn fixed_width(columns: &[Column]) -> usize {
 impl SessionRow {
     fn from_info(info: SessionInfo, local_offset: UtcOffset, show_project: bool) -> Self {
         let title = escape_line(&display_title(&info));
-        let project_path = escape_line(&tildify(Path::new(&info.cwd)));
+        let project_path = escape_line(&tildify(Path::new(info.project())));
         // The project is searchable only when shown, since every scoped row shares it.
         let haystack = if show_project {
             format!("{} {} {}", info.session_id, title, project_path)
@@ -968,6 +968,7 @@ mod tests {
                 session_id,
                 path: PathBuf::new(),
                 cwd: cwd.to_owned(),
+                project_root: None,
                 last_active_at,
                 title: title.map(|t| TitleInfo {
                     title: t.to_owned(),

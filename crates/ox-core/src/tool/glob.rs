@@ -286,6 +286,7 @@ fn glob_output_body(content: &str) -> Option<&str> {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashSet;
     use std::fs;
 
     use indoc::{formatdoc, indoc};
@@ -429,7 +430,7 @@ mod tests {
         }
 
         #[test]
-        fn single_file_no_footer() {
+        fn lists_a_single_file_with_a_total_of_one() {
             let view = glob_tool()
                 .result_view(
                     &serde_json::json!({"pattern": "*.rs"}),
@@ -438,6 +439,7 @@ mod tests {
                     Path::new("/repo"),
                 )
                 .unwrap();
+
             assert_eq!(
                 view,
                 ToolResultView::GlobFiles {
@@ -554,17 +556,18 @@ mod tests {
 
             let output = local_testing::run(&glob_tool(), input, &temp_ctx()).await;
 
+            let name = dir.path().file_name().unwrap().to_str().unwrap();
             assert!(!output.is_error);
-            assert!(output.content.contains("a.txt"));
-            assert!(!output.content.contains("b.rs"));
+            assert_eq!(output.content, format!("{name}/a.txt"));
             assert!(output.metadata.truncated_total.is_none());
         }
 
         #[tokio::test]
         async fn missing_pattern_reports_input_error() {
             let output = local_testing::run(&glob_tool(), serde_json::json!({}), &temp_ctx()).await;
+
             assert!(output.is_error);
-            assert!(output.content.contains("Invalid input"));
+            assert_eq!(output.content, "Invalid input: missing field `pattern`");
         }
 
         #[tokio::test]
@@ -572,12 +575,10 @@ mod tests {
             let input = serde_json::json!({"pattern": "[unclosed"});
 
             let output = local_testing::run(&glob_tool(), input, &temp_ctx()).await;
+
+            let cause = globset::Glob::new("**/[unclosed").unwrap_err();
             assert!(output.is_error);
-            assert!(
-                output.content.contains("Invalid glob pattern"),
-                "{}",
-                output.content
-            );
+            assert_eq!(output.content, format!("Invalid glob pattern: {cause}"));
             assert_eq!(output.metadata.title, None, "errors are not a file count");
         }
 
@@ -723,7 +724,9 @@ mod tests {
         fn invalid_pattern_reports_error() {
             let dir = canonical_tempdir();
             let err = glob_in("[invalid", None, dir.path(), &ReadFilter::default()).unwrap_err();
-            assert!(err.contains("Invalid glob pattern"));
+
+            let cause = globset::Glob::new("**/[invalid").unwrap_err();
+            assert_eq!(err, format!("Invalid glob pattern: {cause}"));
         }
 
         #[test]
@@ -755,23 +758,27 @@ mod tests {
         }
 
         #[test]
-        fn truncated_at_max_results() {
+        fn lists_at_most_max_results_and_names_the_total() {
             let dir = canonical_tempdir();
             for i in 0..MAX_RESULTS + 10 {
                 fs::write(dir.path().join(format!("{i:04}.txt")), "").unwrap();
             }
 
             let result = glob_in("*.txt", None, dir.path(), &ReadFilter::default()).unwrap();
-            let file_count = result
-                .content
-                .lines()
-                .filter(|l| l.contains(".txt"))
-                .count();
-            assert_eq!(file_count, MAX_RESULTS);
-            assert!(
-                result
-                    .content
-                    .contains(&format!("Showing {MAX_RESULTS} of {}", MAX_RESULTS + 10))
+
+            let (files, footer) = result.content.split_once("\n\n").unwrap();
+            let files: HashSet<_> = files.lines().map(str::to_owned).collect();
+            let all: HashSet<_> = (0..MAX_RESULTS + 10)
+                .map(|i| format!("{i:04}.txt"))
+                .collect();
+            assert_eq!(files.len(), MAX_RESULTS);
+            assert!(files.is_subset(&all), "{files:?}");
+            assert_eq!(
+                footer,
+                format!(
+                    "(Showing {MAX_RESULTS} of {} matches. Use a more specific pattern.)",
+                    MAX_RESULTS + 10,
+                ),
             );
             assert_eq!(result.truncated_total, Some(MAX_RESULTS + 10));
             assert_eq!(result.title, format!("Found {MAX_RESULTS} files"));

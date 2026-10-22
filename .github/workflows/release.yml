@@ -284,7 +284,7 @@ jobs:
             exit 1
           fi
 
-          # A PR opened with GITHUB_TOKEN starts no workflows, so dispatch CI for its checks.
+          # GitHub holds CI on a PR opened with GITHUB_TOKEN until approved, so dispatch CI now.
           run_url=$(gh workflow run ci.yml --ref "$branch")
           if [[ -z "$run_url" ]]; then
             echo "::error::The CI dispatch on $branch returned no run."

@@ -61,7 +61,6 @@
         rustToolchain = pkgs.rust-bin.fromRustupToolchainFile ./rust-toolchain.toml;
         rustDevToolchain = rustToolchain.override (prev: {
           extensions = prev.extensions ++ [
-            "llvm-tools-preview"
             "rust-analyzer"
             "rust-src"
           ];
@@ -81,12 +80,15 @@
           end-of-file-fixer.enable = true;
           trim-trailing-whitespace.enable = true;
           check-added-large-files.enable = true;
+          check-shebang-scripts-are-executable.enable = true;
           check-yaml.enable = true;
           taplo.enable = true;
 
           nixfmt.enable = true;
           deadnix.enable = true;
           statix.enable = true;
+
+          shellcheck.enable = true;
 
           rustfmt = {
             enable = true;
@@ -98,7 +100,7 @@
         };
 
         # These hooks run the tools pinned in node_modules, which the Nix sandbox lacks. The flake
-        # check leaves them to CI's Node Check job.
+        # check leaves them to CI's Lint job.
         nodeHook =
           name: cmd:
           pkgs.lib.getExe (
@@ -110,10 +112,6 @@
               ];
 
               text = ''
-                if [ ! -d node_modules ]; then
-                  echo "node_modules is missing. Run pnpm install, then commit again." >&2
-                  exit 1
-                fi
                 pnpm exec ${cmd} "$@"
               '';
             }
@@ -192,8 +190,6 @@
               ) 9>"$common/git-hooks.lock"
             fi
           '';
-
-          env.RUST_BACKTRACE = "1";
         };
 
         # ------------------------------------------------------------------------------------------

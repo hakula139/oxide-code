@@ -10,13 +10,14 @@ pub(super) const BARE_ARCHIVE_HINT: &str = "Use bare `/archive` to archive it an
 
 pub(super) const CLEAR_THEN_DELETE_HINT: &str = "Run `/clear` to start a new one, then delete it.";
 
-/// Opens the store scoped to the session's working directory.
+/// Opens the store scoped to the session's project.
 pub(super) fn open_store(info: &LiveSessionInfo) -> Result<SessionStore, String> {
     let cwd = info
         .working_dir
         .as_deref()
         .ok_or("No working directory for this session")?;
-    SessionStore::open(cwd).map_err(|e| format!("Session store unavailable: {e:#}"))
+    SessionStore::open(cwd, &info.project_root)
+        .map_err(|e| format!("Session store unavailable: {e:#}"))
 }
 
 /// Phrases `error` as a sentence, ending a live-session match with `live_recovery` when given.
