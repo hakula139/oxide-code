@@ -16,6 +16,11 @@ use crate::util::path::{
 
 // ── Shipped ──
 
+/// The Linux files that hold each process's environment, with every secret it started with. A
+/// path through `/proc/self` or `/proc/thread-self` resolves to one of these. They ship on every
+/// Unix, like `/dev/**`, and match nothing where `/proc` has no such files.
+const PROCESS_ENVIRONMENTS: [&str; 2] = ["/proc/*/environ", "/proc/*/task/*/environ"];
+
 /// A named group of shipped rules.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -130,6 +135,12 @@ impl Shipped {
                 .into_iter()
                 .flatten()
                 .map(pattern)
+                .chain(
+                    PROCESS_ENVIRONMENTS
+                        .iter()
+                        .filter(|_| cfg!(unix))
+                        .map(|&pattern| pattern.to_owned()),
+                )
                 .collect(),
             ),
             Self::Git
@@ -378,6 +389,9 @@ mod tests {
     use crate::util::path::slash_separated;
     use crate::util::path::testing::HOME_VAR;
 
+    /// The process-environment patterns `credentials` adds on Unix, spelled out.
+    const PROC_ENVIRONS: [&str; 2] = ["/proc/*/environ", "/proc/*/task/*/environ"];
+
     mod shipped {
         use super::*;
 
@@ -425,17 +439,21 @@ mod tests {
                             vec![format!("{home}/.ssh")]
                         )
                     );
+                    let mut credentials = vec![
+                        format!("{data}/ox/credentials.json"),
+                        format!("{home}/.claude/.credentials.json"),
+                        format!("{home}/.git-credentials"),
+                        format!("{config}/git/credentials"),
+                    ];
+                    if cfg!(unix) {
+                        credentials.extend(PROC_ENVIRONS.map(str::to_owned));
+                    }
                     assert_eq!(
                         patterns(Shipped::Credentials),
                         (
                             ShippedTier::Deny,
-                            vec![PermissionClass::Read; 4],
-                            vec![
-                                format!("{data}/ox/credentials.json"),
-                                format!("{home}/.claude/.credentials.json"),
-                                format!("{home}/.git-credentials"),
-                                format!("{config}/git/credentials"),
-                            ]
+                            vec![PermissionClass::Read; credentials.len()],
+                            credentials
                         )
                     );
                     assert!(Shipped::Git.rules().unwrap().is_none());
@@ -488,17 +506,18 @@ mod tests {
                             })
                         },
                     );
+                    let mut credentials = vec![
+                        format!("{expected}/.local/share/ox/credentials.json"),
+                        format!("{expected}/.claude/.credentials.json"),
+                        format!("{expected}/.git-credentials"),
+                        format!("{expected}/.config/git/credentials"),
+                    ];
+                    if cfg!(unix) {
+                        credentials.extend(PROC_ENVIRONS.map(str::to_owned));
+                    }
                     assert_eq!(
                         patterns,
-                        [
-                            vec![format!("{expected}/.ssh")],
-                            vec![
-                                format!("{expected}/.local/share/ox/credentials.json"),
-                                format!("{expected}/.claude/.credentials.json"),
-                                format!("{expected}/.git-credentials"),
-                                format!("{expected}/.config/git/credentials"),
-                            ],
-                        ],
+                        [vec![format!("{expected}/.ssh")], credentials],
                         "{spelling}"
                     );
                 }

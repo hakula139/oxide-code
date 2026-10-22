@@ -2527,6 +2527,69 @@ mod tests {
                     assert_eq!(decide(&p, READ, &target), decision, "{raw}");
                 }
             }
+
+            #[cfg(unix)]
+            #[test]
+            fn denies_reading_a_process_environment_until_credentials_are_off() {
+                let (_dir, cwd) = temp_cwd();
+                let workspace = Workspace::new(&cwd);
+                let resolve = |disabled: &[Shipped]| {
+                    Policy::resolve(
+                        Mode::Manual,
+                        Vec::new(),
+                        Vec::new(),
+                        Vec::new(),
+                        disabled,
+                        &workspace,
+                    )
+                    .unwrap()
+                };
+
+                for path in ["/proc/1/environ", "/proc/1/task/2/environ"] {
+                    assert_eq!(
+                        decide(&resolve(&[]), READ, &outside(path)),
+                        Decision::Deny,
+                        "{path}"
+                    );
+                    assert_eq!(
+                        decide(&resolve(&[Shipped::Credentials]), READ, &outside(path)),
+                        Decision::Allow,
+                        "{path}"
+                    );
+                }
+                assert_eq!(
+                    decide(&resolve(&[]), READ, &outside("/proc/1/status")),
+                    Decision::Allow
+                );
+            }
+
+            #[cfg(target_os = "linux")]
+            #[test]
+            fn holds_back_a_process_environment_reached_through_a_link() {
+                let (_dir, cwd) = temp_cwd();
+                symlink_file(Path::new("/proc/self/environ"), &cwd.join("env"));
+                symlink_file(
+                    Path::new("/proc/thread-self/environ"),
+                    &cwd.join("thread-env"),
+                );
+                let workspace = Workspace::new(&cwd);
+                let p = Policy::resolve(
+                    Mode::Manual,
+                    Vec::new(),
+                    Vec::new(),
+                    Vec::new(),
+                    &[],
+                    &workspace,
+                )
+                .unwrap();
+
+                for name in ["env", "thread-env"] {
+                    let target = Access::for_path(name, &workspace);
+                    assert_eq!(decide(&p, READ, &target), Decision::Deny, "{name}");
+                }
+                let cat = Access::for_command("cat env", &workspace);
+                assert_eq!(decide(&p, EXEC, &cat), Decision::Ask);
+            }
         }
 
         mod session_grant {
