@@ -188,10 +188,7 @@ fn strip_code_fence(s: &str) -> &str {
 
 /// Truncates `text` to `max_chars`, keeping the tail, where the request usually is.
 fn truncate_prompt(text: &str, max_chars: usize) -> String {
-    if text.chars().count() <= max_chars {
-        return text.to_owned();
-    }
-    let skip = text.chars().count() - max_chars;
+    let skip = text.chars().count().saturating_sub(max_chars);
     text.chars().skip(skip).collect()
 }
 
@@ -603,7 +600,9 @@ mod tests {
 
         #[test]
         fn errors_on_empty_response() {
-            assert!(parse_title("   ").is_err());
+            let err = parse_title("   ").unwrap_err();
+
+            assert_eq!(err.to_string(), "empty response");
         }
 
         #[test]
@@ -692,9 +691,10 @@ mod tests {
         #[test]
         fn keeps_the_tail_of_long_text() {
             let long = "a".repeat(50) + "TAIL";
+
             let out = truncate_prompt(&long, 10);
-            assert_eq!(out.chars().count(), 10);
-            assert!(out.ends_with("TAIL"), "should retain tail: {out:?}");
+
+            assert_eq!(out, "aaaaaaTAIL");
         }
 
         #[test]

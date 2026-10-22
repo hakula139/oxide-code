@@ -113,20 +113,18 @@ impl Write for RotatingFile {
 
 #[cfg(test)]
 mod tests {
-    use std::io::Write;
-
     use super::*;
     use crate::util::path::local_testing::abs;
 
     fn read_log(dir: &Path, name: &str) -> String {
-        std::fs::read_to_string(dir.join(name)).unwrap()
+        fs::read_to_string(dir.join(name)).unwrap()
     }
 
     #[cfg(unix)]
     fn mode(path: &Path) -> u32 {
         use std::os::unix::fs::PermissionsExt;
 
-        std::fs::metadata(path).unwrap().permissions().mode() & 0o777
+        fs::metadata(path).unwrap().permissions().mode() & 0o777
     }
 
     mod make_filter {
@@ -220,7 +218,7 @@ mod tests {
             #[test]
             fn counts_existing_bytes_toward_cap() {
                 let tmp = tempfile::tempdir().unwrap();
-                std::fs::write(tmp.path().join(LOG_FILE), b"0123456789").unwrap();
+                fs::write(tmp.path().join(LOG_FILE), b"0123456789").unwrap();
 
                 let mut file = RotatingFile::open(tmp.path(), 12).unwrap();
                 file.write_all(b"abc").unwrap();

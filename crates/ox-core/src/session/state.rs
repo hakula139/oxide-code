@@ -444,11 +444,7 @@ mod tests {
             let now = OffsetDateTime::now_utc();
             let msg = Message {
                 role: Role::User,
-                content: vec![ContentBlock::ToolResult {
-                    tool_use_id: "t".to_owned(),
-                    content: "out".to_owned(),
-                    is_error: false,
-                }],
+                content: vec![ContentBlock::tool_result("t", "out", false)],
             };
 
             let (entries, seed) = state.queue_message_entries(&msg, now, false);
@@ -766,7 +762,11 @@ mod tests {
                 true,
             );
             let (entries, _) = state.queue_message_entries(&Message::user("second"), now, false);
-            assert!(state.flush_entries(entries).is_err());
+            let err = state.flush_entries(entries).unwrap_err();
+            assert_eq!(
+                err.to_string(),
+                format!("failed to write {}", copied.display())
+            );
             let (entries, _) =
                 state.queue_message_entries(&Message::assistant("third"), now, false);
             state.flush_entries(entries).unwrap();
@@ -800,17 +800,20 @@ mod tests {
             let project_dir = test_project_dir(dir.path());
             std::fs::remove_dir_all(&project_dir).unwrap();
             let (entries, _) = state.queue_message_entries(&Message::user("first"), now, false);
-            assert!(
-                state.flush_entries(entries).is_err(),
-                "create must fail with project dir gone",
-            );
+            let err = state.flush_entries(entries).unwrap_err();
+
             let WriterStatus::Pending {
+                header,
                 deferred_title: Some(restored),
-                ..
             } = &state.writer_status
             else {
                 panic!("create failure must leave Pending with deferred title intact");
             };
+            let path = state.store.session_file(&session_id, header.created_at);
+            assert_eq!(
+                err.to_string(),
+                format!("failed to create {}", path.display())
+            );
             assert_eq!(restored, "Survives rollback");
 
             std::fs::create_dir_all(&project_dir).unwrap();
@@ -875,11 +878,7 @@ mod tests {
 
         #[test]
         fn selects_first_nonempty_user_text() {
-            let tool_result = ContentBlock::ToolResult {
-                tool_use_id: "t1".to_owned(),
-                content: "output".to_owned(),
-                is_error: false,
-            };
+            let tool_result = ContentBlock::tool_result("t1", "output", false);
             let user_with_only_blank = Message {
                 role: Role::User,
                 content: vec![ContentBlock::Text {

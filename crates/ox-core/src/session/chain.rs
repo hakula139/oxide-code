@@ -147,10 +147,6 @@ mod tests {
     mod resolve {
         use super::*;
 
-        fn user_message(text: &str) -> Message {
-            Message::user(text)
-        }
-
         /// Asserts the messages open with Text blocks holding `want`, in order.
         fn assert_chain_texts(chain: &[Message], want: &[&str]) {
             assert_eq!(chain.len(), want.len());
@@ -168,14 +164,14 @@ mod tests {
             b.insert(
                 root,
                 None,
-                user_message("root"),
+                Message::user("root"),
                 datetime!(2026-04-16 12:00:00 UTC),
                 None,
             );
             b.insert(
                 refused,
                 Some(root),
-                user_message("refused"),
+                Message::user("refused"),
                 datetime!(2026-04-16 12:00:01 UTC),
                 None,
             );
@@ -196,7 +192,7 @@ mod tests {
             b.insert(
                 u,
                 None,
-                user_message("solo"),
+                Message::user("solo"),
                 datetime!(2026-04-16 12:00:00 UTC),
                 None,
             );
@@ -216,21 +212,21 @@ mod tests {
             b.insert(
                 u1,
                 None,
-                user_message("a"),
+                Message::user("a"),
                 datetime!(2026-04-16 12:00:00 UTC),
                 None,
             );
             b.insert(
                 u2,
                 Some(u1),
-                user_message("b"),
+                Message::user("b"),
                 datetime!(2026-04-16 12:00:01 UTC),
                 None,
             );
             b.insert(
                 u3,
                 Some(u2),
-                user_message("c"),
+                Message::user("c"),
                 datetime!(2026-04-16 12:00:02 UTC),
                 None,
             );
@@ -249,21 +245,21 @@ mod tests {
             b.insert(
                 root,
                 None,
-                user_message("root"),
+                Message::user("root"),
                 datetime!(2026-04-16 12:00:00 UTC),
                 None,
             );
             b.insert(
                 older,
                 Some(root),
-                user_message("older"),
+                Message::user("older"),
                 datetime!(2026-04-16 12:00:01 UTC),
                 None,
             );
             b.insert(
                 newer,
                 Some(root),
-                user_message("newer"),
+                Message::user("newer"),
                 datetime!(2026-04-16 12:00:02 UTC),
                 None,
             );
@@ -285,21 +281,21 @@ mod tests {
             b.insert(
                 root,
                 None,
-                user_message("root"),
+                Message::user("root"),
                 datetime!(2026-04-16 12:00:00 UTC),
                 context("2026-04-16"),
             );
             b.insert(
                 Uuid::new_v4(),
                 Some(root),
-                user_message("sibling"),
+                Message::user("sibling"),
                 datetime!(2026-04-17 12:00:00 UTC),
                 context("2026-04-17"),
             );
             b.insert(
                 Uuid::new_v4(),
                 Some(root),
-                user_message("tip"),
+                Message::user("tip"),
                 datetime!(2026-04-18 12:00:00 UTC),
                 None,
             );
@@ -319,12 +315,12 @@ mod tests {
             b.insert(
                 root,
                 None,
-                user_message("root"),
+                Message::user("root"),
                 datetime!(2026-04-16 12:00:00 UTC),
                 None,
             );
-            b.insert(lo, Some(root), user_message("lo"), same, None);
-            b.insert(hi, Some(root), user_message("hi"), same, None);
+            b.insert(lo, Some(root), Message::user("lo"), same, None);
+            b.insert(hi, Some(root), Message::user("hi"), same, None);
 
             let tip = b.resolve().tip;
             assert_eq!(
@@ -379,7 +375,7 @@ mod tests {
             b.insert(
                 next,
                 Some(root),
-                user_message("next"),
+                Message::user("next"),
                 datetime!(2026-04-16 11:00:00 UTC),
                 None,
             );
@@ -413,7 +409,7 @@ mod tests {
             b.insert(
                 only,
                 Some(Uuid::new_v4()),
-                user_message("dangling"),
+                Message::user("dangling"),
                 datetime!(2026-04-16 12:00:01 UTC),
                 None,
             );
@@ -434,21 +430,21 @@ mod tests {
             b.insert(
                 leaf,
                 Some(mid),
-                user_message("leaf"),
+                Message::user("leaf"),
                 datetime!(2026-04-16 12:00:03 UTC),
                 None,
             );
             b.insert(
                 mid,
                 Some(tail),
-                user_message("mid"),
+                Message::user("mid"),
                 datetime!(2026-04-16 12:00:02 UTC),
                 None,
             );
             b.insert(
                 tail,
                 Some(mid),
-                user_message("tail"),
+                Message::user("tail"),
                 datetime!(2026-04-16 12:00:01 UTC),
                 None,
             );
@@ -470,14 +466,14 @@ mod tests {
             b.insert(
                 a,
                 Some(bb),
-                user_message("A"),
+                Message::user("A"),
                 datetime!(2026-04-16 12:00:01 UTC),
                 None,
             );
             b.insert(
                 bb,
                 Some(a),
-                user_message("B"),
+                Message::user("B"),
                 datetime!(2026-04-16 12:00:02 UTC),
                 None,
             );
@@ -494,14 +490,14 @@ mod tests {
             b.insert(
                 u,
                 None,
-                user_message("first"),
+                Message::user("first"),
                 datetime!(2026-04-16 12:00:01 UTC),
                 None,
             );
             b.insert(
                 u,
                 None,
-                user_message("second"),
+                Message::user("second"),
                 datetime!(2026-04-16 12:00:05 UTC),
                 None,
             );

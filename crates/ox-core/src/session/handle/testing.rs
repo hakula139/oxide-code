@@ -1,8 +1,8 @@
 //! Test-only [`SessionHandle`] constructors.
 
 use std::path::Path;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
@@ -25,11 +25,11 @@ pub(crate) async fn record_write_call(
     handle
         .record_message(Message {
             role: Role::Assistant,
-            content: vec![ContentBlock::ToolUse {
-                id: tool_use_id.to_owned(),
-                name: "write".to_owned(),
-                input: serde_json::Value::Null,
-            }],
+            content: vec![ContentBlock::tool_use(
+                tool_use_id,
+                "write",
+                serde_json::Value::Null,
+            )],
         })
         .await;
     record_tracked_file(tracker, path, b"alpha", tool_use_id);
@@ -37,11 +37,7 @@ pub(crate) async fn record_write_call(
         handle
             .record_message(Message {
                 role: Role::User,
-                content: vec![ContentBlock::ToolResult {
-                    tool_use_id: tool_use_id.to_owned(),
-                    content: "wrote".to_owned(),
-                    is_error: false,
-                }],
+                content: vec![ContentBlock::tool_result(tool_use_id, "wrote", false)],
             })
             .await;
     }
@@ -120,7 +116,7 @@ fn handle(
         session_id: Arc::from(session_id),
         artifact_dir: std::env::temp_dir().join(session_id).into(),
         shared: Arc::new(SharedState::default()),
-        actor_join: Arc::new(std::sync::Mutex::new(join)),
+        actor_join: Arc::new(Mutex::new(join)),
         title_task: Arc::default(),
     }
 }

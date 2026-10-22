@@ -2,7 +2,7 @@
 //! summary as its first block, and the resumed display strips that block again, since the
 //! boundary block shows the summary.
 
-use indoc::{formatdoc, indoc};
+use indoc::formatdoc;
 
 use crate::message::{ContentBlock, Message, Role};
 use crate::prompt::system_reminder;
@@ -10,10 +10,9 @@ use crate::tool::bash::background::BackgroundShell;
 use crate::tool::tasks::Task;
 
 /// Prefix for the synthetic post-compact user message.
-const SUMMARY_PREFIX: &str = indoc! {"
-    This conversation has been compacted. The summary below covers the prior work. Continue from here
-    without re-asking the engineer what to do.
-"};
+const SUMMARY_PREFIX: &str = "This conversation has been compacted. \
+                              The summary below covers the prior work. \
+                              Continue from here without re-asking the engineer what to do.";
 
 /// Composes the synthetic post-compact root message for the next turn, reminding the model of
 /// the task list and the open background shells the summarized transcript leaves.
@@ -22,10 +21,9 @@ pub(crate) fn synthesize_post_compact_message(
     tasks: &[Task],
     shells: &[BackgroundShell],
 ) -> Message {
-    let prefix = SUMMARY_PREFIX.trim();
     let summary = summary.trim();
     let mut message = Message::user(formatdoc! {"
-        {prefix}
+        {SUMMARY_PREFIX}
 
         {summary}
     "});
@@ -75,8 +73,7 @@ fn shell_reminder(shells: &[BackgroundShell]) -> Option<String> {
         .collect::<Vec<_>>()
         .join("\n");
     Some(system_reminder(&formatdoc! {"
-        These background shells are still open from before the summary. Read them with bash_output,
-        and stop the ones you no longer need with bash_stop:
+        These background shells are still open from before the summary. Read them with bash_output, and stop the ones you no longer need with bash_stop:
 
         {list}"
     }))
@@ -91,7 +88,12 @@ pub(super) fn strip_synthetic_post_compact_prefix(message: &mut Message) -> bool
     let Some(ContentBlock::Text { text }) = message.content.first() else {
         return false;
     };
-    if !text.trim_start().starts_with(SUMMARY_PREFIX.trim()) {
+    // Releases up to 0.1.0-alpha.5 broke the prefix across two lines, so match it word by word.
+    let mut words = text.split_whitespace();
+    if !SUMMARY_PREFIX
+        .split_whitespace()
+        .all(|word| words.next() == Some(word))
+    {
         return false;
     }
 
@@ -101,6 +103,8 @@ pub(super) fn strip_synthetic_post_compact_prefix(message: &mut Message) -> bool
 
 #[cfg(test)]
 mod tests {
+    use indoc::indoc;
+
     use super::*;
     use crate::tool::bash::background::testing::shells_in_each_state;
     use crate::tool::tasks::testing::plan;
@@ -110,13 +114,20 @@ mod tests {
 
         #[test]
         fn prepends_summary_prefix() {
-            let m = synthesize_post_compact_message("did X, Y, Z", &[], &[]);
+            let m = synthesize_post_compact_message(" did X, Y, Z\n", &[], &[]);
+
             assert_eq!(m.role, Role::User);
             let [ContentBlock::Text { text }] = &m.content[..] else {
                 panic!("expected one text block: {m:?}");
             };
-            assert!(text.contains("This conversation has been compacted"));
-            assert!(text.contains("did X, Y, Z"));
+            assert_eq!(
+                text,
+                indoc! {"
+                    This conversation has been compacted. The summary below covers the prior work. Continue from here without re-asking the engineer what to do.
+
+                    did X, Y, Z
+                "},
+            );
         }
 
         #[test]
@@ -162,8 +173,7 @@ mod tests {
                 shells,
                 indoc! {"
                     <system-reminder>
-                    These background shells are still open from before the summary. Read them with bash_output,
-                    and stop the ones you no longer need with bash_stop:
+                    These background shells are still open from before the summary. Read them with bash_output, and stop the ones you no longer need with bash_stop:
 
                     - shell-1 (running): cargo watch
                     - shell-2 (exit code 2): make test
@@ -185,8 +195,23 @@ mod tests {
             });
 
             assert!(strip_synthetic_post_compact_prefix(&mut m));
-            assert_eq!(m.content.len(), 1);
-            assert!(matches!(&m.content[0], ContentBlock::Text { text } if text == "real prompt"));
+            assert_eq!(m, Message::user("real prompt"));
+        }
+
+        #[test]
+        fn removes_the_prefix_as_earlier_releases_wrapped_it() {
+            let mut m = Message::user(indoc! {"
+                This conversation has been compacted. The summary below covers the prior work. Continue from here
+                without re-asking the engineer what to do.
+
+                internal summary"
+            });
+            m.content.push(ContentBlock::Text {
+                text: "real prompt".to_owned(),
+            });
+
+            assert!(strip_synthetic_post_compact_prefix(&mut m));
+            assert_eq!(m, Message::user("real prompt"));
         }
 
         #[test]
@@ -199,9 +224,8 @@ mod tests {
 
         #[test]
         fn leaves_assistant_messages() {
-            let prefix = SUMMARY_PREFIX.trim();
             let mut m = Message::assistant(formatdoc! {"
-                {prefix}
+                {SUMMARY_PREFIX}
 
                 not a synthetic user root"
             });
@@ -215,11 +239,7 @@ mod tests {
         fn leaves_non_text_first_block() {
             let mut m = Message {
                 role: Role::User,
-                content: vec![ContentBlock::ToolResult {
-                    tool_use_id: "toolu_1".to_owned(),
-                    content: SUMMARY_PREFIX.trim().to_owned(),
-                    is_error: false,
-                }],
+                content: vec![ContentBlock::tool_result("toolu_1", SUMMARY_PREFIX, false)],
             };
 
             assert!(!strip_synthetic_post_compact_prefix(&mut m));

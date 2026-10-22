@@ -13,6 +13,8 @@ use tracing::debug;
 
 use crate::util::text::truncate_to_width;
 
+// ── Repository ──
+
 /// Probes the current branch via `git branch --show-current`, returning `None` on a detached HEAD.
 /// Dropping the future kills the child process.
 pub async fn current_branch(cwd: &Path) -> Option<String> {
@@ -59,6 +61,8 @@ fn stdout_line(stdout: &[u8]) -> Option<String> {
         Some(line.to_owned())
     }
 }
+
+// ── Pull Request ──
 
 /// Open pull request for the current branch.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -212,6 +216,8 @@ fn summarize_checks(mut checks: Vec<CheckView>) -> Option<Checks> {
         Checks::Passing
     })
 }
+
+// ── Probes ──
 
 /// Runs `program` with `args` in `cwd` on the tokio runtime and returns the output of a
 /// successful run, logging any other outcome under the `name` probe.
@@ -649,16 +655,16 @@ mod tests {
     }
 
     mod check_output {
-        use std::process::Command;
+        use std::process::ExitStatus;
 
         use super::*;
 
-        fn status_with_code(code: i32) -> std::process::ExitStatus {
-            Command::new("sh")
-                .arg("-c")
-                .arg(format!("exit {code}"))
-                .status()
-                .unwrap()
+        fn exit_code_one() -> ExitStatus {
+            #[cfg(unix)]
+            let status = std::os::unix::process::ExitStatusExt::from_raw(1 << 8);
+            #[cfg(windows)]
+            let status = std::os::windows::process::ExitStatusExt::from_raw(1);
+            status
         }
 
         #[test]
@@ -667,7 +673,7 @@ mod tests {
                 "test",
                 Path::new("/tmp/cwd"),
                 Ok(Output {
-                    status: status_with_code(0),
+                    status: ExitStatus::default(),
                     stdout: b"ok".to_vec(),
                     stderr: Vec::new(),
                 }),
@@ -682,7 +688,7 @@ mod tests {
                 "test",
                 Path::new("/tmp/cwd"),
                 Ok(Output {
-                    status: status_with_code(1),
+                    status: exit_code_one(),
                     stdout: b"unused".to_vec(),
                     stderr: b"fatal: not a git repository\n".to_vec(),
                 }),
