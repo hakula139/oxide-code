@@ -11,6 +11,7 @@ use tokio_util::task::TaskTracker;
 use tracing::warn;
 
 use super::gateway::CUSTOM_HEADERS_VAR;
+use super::load::user_config_hint;
 use super::oauth::{ClaudeCodeKeychain, Login, LoginError, SessionLogin, login_stores};
 use crate::util::env;
 use crate::util::text::join_sentences;
@@ -290,17 +291,22 @@ impl Credential {
 #[derive(Debug, thiserror::Error)]
 pub(super) enum ResolveError {
     /// `base_url` is a gateway, which never receives a stored login.
-    #[error(
-        "no credentials for {0}. \
-         Set ANTHROPIC_AUTH_TOKEN, ANTHROPIC_API_KEY, or CLAUDE_CODE_OAUTH_TOKEN, \
-         or add `api_key` to ~/.config/ox/config.toml. \
-         Stored logins are sent only to the Anthropic API."
-    )]
+    #[error("{}", gateway_error(.0))]
     Gateway(String),
     /// No stored login supplied a token. A TUI session starts signed out, since `/login` can sign
     /// it in.
     #[error("{}", signed_out_error(.0))]
     SignedOut(LoginError),
+}
+
+fn gateway_error(base_url: &str) -> String {
+    format!(
+        "no credentials for {base_url}. \
+         Set ANTHROPIC_AUTH_TOKEN, ANTHROPIC_API_KEY, or CLAUDE_CODE_OAUTH_TOKEN, \
+         or add `api_key` to {config}. \
+         Stored logins are sent only to the Anthropic API.",
+        config = user_config_hint(),
+    )
 }
 
 fn signed_out_error(e: &LoginError) -> String {
@@ -309,8 +315,9 @@ fn signed_out_error(e: &LoginError) -> String {
             "no credentials found: no API key or token is set, no oxide-code login is stored, \
              and no Claude Code login is in {stores}. \
              Set ANTHROPIC_API_KEY or CLAUDE_CODE_OAUTH_TOKEN, \
-             add `api_key` to ~/.config/ox/config.toml, or sign in with `/login` in the `ox` TUI.",
+             add `api_key` to {config}, or sign in with `/login` in the `ox` TUI.",
             stores = login_stores(),
+            config = user_config_hint(),
         ),
         e => e.to_string(),
     }
@@ -448,6 +455,8 @@ async fn load_login(
 
 #[cfg(test)]
 mod tests {
+    use std::path::Path;
+
     use super::*;
     use crate::config::oauth::testing::{ox_login_in, write_creds};
     use crate::util::path::local_testing::abs;
@@ -796,17 +805,27 @@ mod tests {
 
         #[tokio::test]
         async fn refuses_stored_login_for_third_party_host_without_reading_it() {
-            let err = resolve(explicit(&[]), GATEWAY, unreachable_store())
-                .await
-                .expect_err("stored login must not go to a gateway");
+            let config = abs("/srv/cfg");
+
+            let (err, message) =
+                temp_env::async_with_vars([("XDG_CONFIG_HOME", Some(config.as_str()))], async {
+                    let err = resolve(explicit(&[]), GATEWAY, unreachable_store())
+                        .await
+                        .expect_err("stored login must not go to a gateway");
+                    let message = format!("{err:#}");
+                    (err, message)
+                })
+                .await;
+
             assert!(matches!(err, ResolveError::Gateway(_)), "{err:?}");
             assert_eq!(
-                format!("{err:#}"),
+                message,
                 format!(
                     "no credentials for {GATEWAY}. \
                      Set ANTHROPIC_AUTH_TOKEN, ANTHROPIC_API_KEY, or CLAUDE_CODE_OAUTH_TOKEN, \
-                     or add `api_key` to ~/.config/ox/config.toml. \
-                     Stored logins are sent only to the Anthropic API."
+                     or add `api_key` to {file}. \
+                     Stored logins are sent only to the Anthropic API.",
+                    file = Path::new(&config).join("ox").join("config.toml").display(),
                 ),
             );
         }
@@ -814,9 +833,13 @@ mod tests {
         #[tokio::test]
         async fn missing_login_lists_every_credential_option() {
             let claude_dir = abs("/srv/claude");
+            let config = abs("/srv/cfg");
 
             let (err, message) = temp_env::async_with_vars(
-                [("CLAUDE_CONFIG_DIR", Some(claude_dir.as_str()))],
+                [
+                    ("CLAUDE_CONFIG_DIR", Some(claude_dir.as_str())),
+                    ("XDG_CONFIG_HOME", Some(config.as_str())),
+                ],
                 async {
                     let err = resolve(explicit(&[]), FIRST_PARTY, async {
                         Err(LoginError::Missing)
@@ -840,7 +863,7 @@ mod tests {
                      no API key or token is set, no oxide-code login is stored, \
                      and no Claude Code login is in {keychain}{file}. \
                      Set ANTHROPIC_API_KEY or CLAUDE_CODE_OAUTH_TOKEN, \
-                     add `api_key` to ~/.config/ox/config.toml, \
+                     add `api_key` to {config_file}, \
                      or sign in with `/login` in the `ox` TUI.",
                     keychain = if cfg!(target_os = "macos") {
                         "the macOS Keychain or "
@@ -851,6 +874,7 @@ mod tests {
                         .unwrap()
                         .join(".credentials.json")
                         .display(),
+                    config_file = Path::new(&config).join("ox").join("config.toml").display(),
                 ),
             );
         }
