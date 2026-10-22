@@ -7,7 +7,7 @@ use futures::StreamExt;
 use tokio::sync::mpsc;
 use tracing::debug;
 
-use super::accumulator::ResponseAccumulator;
+use super::accumulator::{ReplySpec, ResponseAccumulator};
 use super::transport::{
     AttemptError, MessagesRequest, format_stream_error, post_messages, rate_limits, with_retry,
 };
@@ -26,10 +26,10 @@ const MAX_SSE_FRAME_BYTES: usize = 8 * 1024 * 1024;
 pub(super) fn spawn_stream(
     http: reqwest::Client,
     request: MessagesRequest,
-    model: String,
+    spec: ReplySpec,
 ) -> mpsc::Receiver<Result<ResponseEvent>> {
     let (tx, rx) = mpsc::channel(STREAM_BUFFER);
-    tokio::spawn(forward_sse(http, request, model, tx));
+    tokio::spawn(forward_sse(http, request, spec, tx));
     rx
 }
 
@@ -38,11 +38,11 @@ pub(super) fn spawn_stream(
 async fn forward_sse(
     http: reqwest::Client,
     request: MessagesRequest,
-    model: String,
+    spec: ReplySpec,
     tx: mpsc::Sender<Result<ResponseEvent>>,
 ) {
     tokio::select! {
-        result = stream_sse(&http, &request, &model, &tx) => {
+        result = stream_sse(&http, &request, &spec, &tx) => {
             if let Err(e) = result {
                 _ = tx.send(Err(e)).await;
             }
@@ -53,8 +53,8 @@ async fn forward_sse(
 
 /// Drives the streaming `/v1/messages` request and forwards its [`ResponseEvent`]s on `tx`,
 /// retrying an attempt that fails before any content block arrives. Each retry forwards a
-/// [`ResponseEvent::Retrying`] notice first. `model` is the id the request names, which the
-/// reply's reasoning blocks record.
+/// [`ResponseEvent::Retrying`] notice first. `spec` says what the request asked the reply to
+/// carry.
 ///
 /// Returns `Ok(())` once the completed reply is forwarded or the receiver drops. Returns `Err`
 /// for transport / HTTP failures, an in-band `error` event, a stream that ends before
@@ -63,13 +63,13 @@ async fn forward_sse(
 async fn stream_sse(
     http: &reqwest::Client,
     request: &MessagesRequest,
-    model: &str,
+    spec: &ReplySpec,
     tx: &mpsc::Sender<Result<ResponseEvent>>,
 ) -> Result<()> {
     with_retry(
         |retry| async move {
             let response = post_messages(http, request, retry).await?;
-            pump_events(response, model, tx).await
+            pump_events(response, spec, tx).await
         },
         |notice| {
             _ = tx.try_send(Ok(ResponseEvent::Retrying(notice.to_string())));
@@ -83,7 +83,7 @@ async fn stream_sse(
 /// would have to retract.
 async fn pump_events(
     response: reqwest::Response,
-    model: &str,
+    spec: &ReplySpec,
     tx: &mpsc::Sender<Result<ResponseEvent>>,
 ) -> Result<(), AttemptError> {
     if let Some(limits) = rate_limits(response.headers())
@@ -96,7 +96,7 @@ async fn pump_events(
     }
     let mut stream = response.bytes_stream();
     let mut frames = FrameDecoder::new(MAX_SSE_FRAME_BYTES);
-    let mut reply = ResponseAccumulator::new(model);
+    let mut reply = ResponseAccumulator::new(spec);
     let fail = |cause: &str, error: anyhow::Error, retryable: bool| {
         if retryable {
             AttemptError::retryable(cause, error)
@@ -269,6 +269,13 @@ mod tests {
 
     const START_USAGE: ResponseEvent = ResponseEvent::Usage(TokenUsage::new(5, 0));
 
+    fn opus_spec() -> ReplySpec {
+        ReplySpec {
+            model: "claude-opus-5-5".to_owned(),
+            thinking_text: true,
+        }
+    }
+
     /// HTTP/1.1 response streaming `body` under a declared length of `declared` bytes. Declaring
     /// more than `body` holds fails the client's body read once the connection closes.
     fn raw_sse_response(body: &str, declared: usize) -> String {
@@ -316,12 +323,7 @@ mod tests {
         async fn ends_a_stalled_stream_once_the_receiver_drops() {
             let request = messages_request(format!("{}/v1/messages", serve_stalled(MESSAGE_START)));
             let (tx, mut rx) = mpsc::channel(STREAM_BUFFER);
-            let forwarding = tokio::spawn(forward_sse(
-                plain_http(),
-                request,
-                "claude-opus-5-5".to_owned(),
-                tx,
-            ));
+            let forwarding = tokio::spawn(forward_sse(plain_http(), request, opus_spec(), tx));
             let first = rx.recv().await.map(Result::unwrap);
 
             drop(rx);
@@ -384,7 +386,7 @@ mod tests {
         async fn run_stream(base_url: &str) -> (Result<()>, Vec<ResponseEvent>) {
             let request = messages_request(format!("{base_url}/v1/messages"));
             let (tx, mut rx) = mpsc::channel(STREAM_BUFFER);
-            let result = stream_sse(&plain_http(), &request, "claude-opus-5-5", &tx).await;
+            let result = stream_sse(&plain_http(), &request, &opus_spec(), &tx).await;
             drop(tx);
             let mut events = Vec::new();
             while let Some(event) = rx.recv().await {
@@ -629,7 +631,7 @@ mod tests {
                 let (tx, rx) = mpsc::channel::<Result<ResponseEvent>>(1);
                 drop(rx);
 
-                let result = stream_sse(&plain_http(), &request, "claude-opus-5-5", &tx).await;
+                let result = stream_sse(&plain_http(), &request, &opus_spec(), &tx).await;
 
                 assert!(matches!(result, Ok(())), "graceful shutdown: {result:?}");
             }

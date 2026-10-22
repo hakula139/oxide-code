@@ -40,6 +40,7 @@ use crate::model::ModelSpec;
 use crate::prompt::SystemPrompt;
 use crate::tool::ToolDefinition;
 use crate::util::tls::Trust;
+use accumulator::ReplySpec;
 use betas::{compute_betas, conversation_cache_control, static_prefix_cache_control};
 use sse::spawn_stream;
 use transport::{MessagesRequest, messages_url};
@@ -260,7 +261,13 @@ impl Client {
         Ok(spawn_stream(
             self.http.clone(),
             request,
-            self.model.id().to_owned(),
+            ReplySpec {
+                model: self.model.id().to_owned(),
+                thinking_text: self
+                    .model
+                    .thinking(self.show_thinking)
+                    .is_some_and(|thinking| thinking.returns_text()),
+            },
         ))
     }
 }
@@ -530,7 +537,9 @@ mod tests {
     use super::local_testing::{
         client_for, completion_body, oauth, request_count, serve, test_client,
     };
-    use super::testing::{DEVICE_ID, api_key, sse_response, test_config, text_stream_body};
+    use super::testing::{
+        DEVICE_ID, api_key, sse_body, sse_response, test_config, text_stream_body,
+    };
     use super::*;
     use crate::client::{Response, StopReason};
     use crate::config::oauth::testing::{HeldRefresh, ok_refresh_body, ox_login_in, write_creds};
@@ -1488,22 +1497,52 @@ mod tests {
             }
 
             #[tokio::test]
-            async fn hidden_thinking_requests_updates_where_supported() {
+            async fn hidden_thinking_requests_updates_where_supported_and_omits_it_elsewhere() {
                 for (id, display, sends_beta) in [
-                    ("claude-opus-5-5", Some("updates"), true),
-                    ("claude-haiku-5-5", None, false),
+                    ("claude-opus-5-5", "updates", true),
+                    ("claude-haiku-5-5", "omitted", false),
                 ] {
                     let client = test_client(OFFLINE_URL, api_key(), id);
                     let (body, betas) = capture_stream_turn(client).await;
-                    assert_eq!(
-                        body["thinking"].get("display"),
-                        display.map(Into::into).as_ref(),
-                        "{id}"
-                    );
+                    assert_eq!(body["thinking"]["display"], display, "{id}");
                     assert_eq!(
                         betas.contains("thinking-display-updates-2026-08-18"),
                         sends_beta,
                         "{id}: {betas}",
+                    );
+                }
+            }
+
+            #[tokio::test]
+            async fn forwards_thinking_text_only_when_the_request_asked_for_it() {
+                let body = sse_body(&[
+                    serde_json::json!({
+                        "type": "content_block_start",
+                        "index": 0,
+                        "content_block": {"type": "thinking", "thinking": "", "signature": "sig"},
+                    }),
+                    serde_json::json!({
+                        "type": "content_block_delta",
+                        "index": 0,
+                        "delta": {"type": "thinking_delta", "thinking": "Plan."},
+                    }),
+                    serde_json::json!({"type": "message_stop"}),
+                ]);
+                for (id, show_thinking, forwards) in [
+                    ("claude-haiku-5-5", false, false),
+                    ("claude-haiku-5-5", true, true),
+                    ("claude-opus-5-5", false, true),
+                ] {
+                    let server = serve(vec![sse_response(body.clone())]).await;
+                    let mut cfg = test_config(server.uri(), api_key(), id);
+                    cfg.show_thinking = show_thinking;
+
+                    let events = stream_hi(&client_for(&cfg)).await.unwrap();
+
+                    assert_eq!(
+                        events.contains(&ResponseEvent::Thinking("Plan.".to_owned())),
+                        forwards,
+                        "{id} show_thinking={show_thinking}"
                     );
                 }
             }

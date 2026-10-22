@@ -10,13 +10,24 @@ use crate::client::{Response, ResponseEvent, StopDetails, StopReason};
 use crate::message::{ContentBlock, Replay, WireKind, progress_note};
 use crate::model::TokenUsage;
 
+// ── ReplySpec ──
+
+/// What a request asked its reply to carry.
+#[derive(Debug, Clone)]
+pub(super) struct ReplySpec {
+    /// The model the request names, the only one its reasoning blocks replay to.
+    pub(super) model: String,
+    /// Whether the request asked for thinking text. Text it did not ask for, which an upstream
+    /// may still send, stays in the reply for replay but reaches no consumer.
+    pub(super) thinking_text: bool,
+}
+
 // ── ResponseAccumulator ──
 
 /// One attempt's reply as it streams. A retried attempt starts a fresh one.
 #[derive(Debug)]
 pub(super) struct ResponseAccumulator {
-    /// The model the request asked for, the only one its reasoning blocks replay to.
-    model: String,
+    spec: ReplySpec,
     /// By stream index.
     blocks: Vec<BlockAccumulator>,
     usage: Option<TokenUsage>,
@@ -25,9 +36,9 @@ pub(super) struct ResponseAccumulator {
 }
 
 impl ResponseAccumulator {
-    pub(super) fn new(model: &str) -> Self {
+    pub(super) fn new(spec: &ReplySpec) -> Self {
         Self {
-            model: model.to_owned(),
+            spec: spec.clone(),
             blocks: Vec::new(),
             usage: None,
             stop_reason: None,
@@ -72,7 +83,13 @@ impl ResponseAccumulator {
             StreamEvent::Error { error } => return Err(error),
             StreamEvent::ContentBlockStop | StreamEvent::Ping | StreamEvent::Unknown => None,
         };
-        Ok(forward)
+        Ok(forward.filter(|event| {
+            self.spec.thinking_text
+                || !matches!(
+                    event,
+                    ResponseEvent::Thinking(_) | ResponseEvent::Progress(_)
+                )
+        }))
     }
 
     /// Opens the block at `index`. A start out of index order is skipped, along with its deltas,
@@ -111,7 +128,7 @@ impl ResponseAccumulator {
             ..Response::default()
         };
         for block in mem::take(&mut self.blocks) {
-            let (block, parse_error) = block.into_content_block(&self.model);
+            let (block, parse_error) = block.into_content_block(&self.spec.model);
             response.parse_errors.extend(parse_error);
             response.content.extend(block);
         }
@@ -337,6 +354,13 @@ mod tests {
 
     const MODEL: &str = "claude-sonnet-5-5";
 
+    fn accumulator(thinking_text: bool) -> ResponseAccumulator {
+        ResponseAccumulator::new(&ReplySpec {
+            model: MODEL.to_owned(),
+            thinking_text,
+        })
+    }
+
     fn event(value: serde_json::Value) -> StreamEvent {
         serde_json::from_value(value).expect("fixture is a stream event")
     }
@@ -362,7 +386,7 @@ mod tests {
 
         #[test]
         fn once_a_block_starts() {
-            let mut reply = ResponseAccumulator::new(MODEL);
+            let mut reply = accumulator(true);
 
             fold(
                 &mut reply,
@@ -389,7 +413,7 @@ mod tests {
 
         #[test]
         fn layers_usage_from_message_start_and_message_delta() {
-            let mut reply = ResponseAccumulator::new(MODEL);
+            let mut reply = accumulator(true);
 
             let forwarded = fold(
                 &mut reply,
@@ -436,7 +460,7 @@ mod tests {
 
         #[test]
         fn streams_text_and_thinking_from_block_starts_and_deltas() {
-            let mut reply = ResponseAccumulator::new(MODEL);
+            let mut reply = accumulator(true);
 
             let forwarded = fold(
                 &mut reply,
@@ -523,7 +547,7 @@ mod tests {
                 thinking("Summing up."),
                 text("Checked."),
             ];
-            let mut reply = ResponseAccumulator::new(MODEL);
+            let mut reply = accumulator(true);
 
             let forwarded = fold(
                 &mut reply,
@@ -596,9 +620,49 @@ mod tests {
         }
 
         #[test]
+        fn withholds_thinking_text_the_request_did_not_ask_for() {
+            let mut reply = accumulator(false);
+
+            let forwarded = fold(
+                &mut reply,
+                vec![
+                    block_start(
+                        0,
+                        &json!({"type": "thinking", "thinking": "Plan.", "signature": "sig"}),
+                    ),
+                    block_delta(0, &json!({"type": "thinking_delta", "thinking": " Next."})),
+                    block_start(1, &json!({"type": "tool_use", "id": "t1", "name": "echo"})),
+                    block_delta(
+                        1,
+                        &json!({"type": "input_json_delta", "partial_json": "{}"}),
+                    ),
+                    json!({"type": "message_stop"}),
+                ],
+            );
+
+            assert_eq!(
+                forwarded,
+                [ResponseEvent::Completed(Response {
+                    content: vec![
+                        ContentBlock::Thinking {
+                            thinking: "Plan. Next.".to_owned(),
+                            replay: Replay::with_model(MODEL, "sig"),
+                        },
+                        ContentBlock::ToolUse {
+                            id: "t1".to_owned(),
+                            name: "echo".to_owned(),
+                            input: json!({}),
+                        },
+                    ],
+                    ..Response::default()
+                })],
+            );
+        }
+
+        #[test]
         fn keeps_a_server_tool_result_whole_beside_its_call() {
             let results = json!([{"type": "web_search_result", "encrypted_content": "opaque"}]);
-            let mut reply = ResponseAccumulator::new(MODEL);
+            let mut reply = accumulator(true);
 
             let forwarded = fold(
                 &mut reply,
@@ -656,7 +720,7 @@ mod tests {
 
         #[test]
         fn completes_the_reply_with_parse_errors_and_the_stop() {
-            let mut reply = ResponseAccumulator::new(MODEL);
+            let mut reply = accumulator(true);
 
             let forwarded = fold(
                 &mut reply,
@@ -706,7 +770,7 @@ mod tests {
 
         #[test]
         fn skips_a_block_that_starts_out_of_order() {
-            let mut reply = ResponseAccumulator::new(MODEL);
+            let mut reply = accumulator(true);
 
             let forwarded = fold(
                 &mut reply,
@@ -742,7 +806,7 @@ mod tests {
 
         #[test]
         fn in_band_error_fails_the_reply() {
-            let mut reply = ResponseAccumulator::new(MODEL);
+            let mut reply = accumulator(true);
 
             let error = reply
                 .apply(event(json!({

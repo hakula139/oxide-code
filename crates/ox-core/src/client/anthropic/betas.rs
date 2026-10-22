@@ -68,7 +68,7 @@ pub(super) fn compute_betas(
     }
     if let Some(ThinkingConfig::Adaptive { display, .. }) = thinking {
         out.push(THINKING_BINDING_CONTROLS_BETA_HEADER);
-        if *display == Some(ThinkingDisplay::Updates) {
+        if *display == ThinkingDisplay::Updates {
             out.push(THINKING_DISPLAY_UPDATES_BETA_HEADER);
         }
     }
@@ -201,7 +201,7 @@ mod tests {
                     THINKING_DISPLAY_UPDATES_BETA_HEADER,
                 ],
             );
-            // Haiku has no progress updates, so hidden thinking sends no display and no beta.
+            // Haiku has no progress updates, so hidden thinking omits the text and needs no beta.
             let haiku = ModelSpec::resolve("claude-haiku-5-5");
             assert!(
                 !compute_betas(

@@ -59,7 +59,7 @@ Every supported model defaults to `"omitted"`. As a result, any UI that renders 
 
 Claude Fable 5.1, Opus 5.5, and Sonnet 5.5 return the notes the model writes between tool calls as progress-update thinking blocks. These blocks are empty under `"omitted"`. Each note appears in its own thinking block immediately before the tool call it introduces. On Opus 5.5 and Sonnet 5.5, a response that stops early (`max_tokens`, context window, stop sequence) can end with a note whose text is exactly `This part of the response was interrupted before it finished.` To continue, pass that turn back unchanged with a new user message.
 
-oxide-code couples `display` to `config.show_thinking`: `"summarized"` when the TUI renders reasoning, otherwise `"updates"` on models that support it and no field on the rest.
+oxide-code couples `display` to `config.show_thinking`: `"summarized"` when the TUI renders reasoning, otherwise `"updates"` on models that support it and `"omitted"` on the rest. It always sends the field, since a gateway may not apply the documented default, and it forwards no thinking text that the request did not ask for, keeping the block only for replay.
 
 `"summarized"` and `"omitted"` are GA. `"updates"` requires the `thinking-display-updates-2026-08-18` beta.
 
