@@ -1,6 +1,6 @@
 # Mouse Interactions
 
-The TUI captures the mouse so the wheel scrolls the chat in a bare terminal and inside tmux. Capture takes drags away from the terminal, so `ox` selects and copies chat text itself, in any terminal the user runs it in (iTerm2, WezTerm, kitty, Alacritty, Terminal.app, GNOME Terminal, Konsole, Ghostty, Windows Terminal, and the integrated terminals of VS Code and Cursor). A plain click expands a collapsed block, on its overflow footer or its `Thought` header, and opens the pull request page a status-bar segment links. The links are also OSC 8 hyperlinks, which terminals open on Ctrl / Cmd+click.
+The TUI captures the mouse so the wheel scrolls the chat in a bare terminal and inside tmux. Capture takes drags away from the terminal, so `ox` selects and copies chat text itself, in any terminal the user runs it in (iTerm2, WezTerm, kitty, Alacritty, Terminal.app, GNOME Terminal, Konsole, Ghostty, Windows Terminal, and the integrated terminals of VS Code and Cursor). A plain click expands a collapsed block, on its overflow footer or its `Thought` header, and opens the pull request page a status-bar segment links. The links are also OSC 8 hyperlinks, which terminals open on Ctrl+click or Cmd+click.
 
 ## Setup and Event Routing
 
@@ -66,9 +66,9 @@ Three mechanics worth surfacing:
 - **BEL (`\x07`) terminator.** Some xterm.js-based terminals (VS Code's and Cursor's integrated terminals) misparse self-contained per-cell ST (`\x1b\\`) closers, leaking visible bytes into the next cells of the line. BEL is one byte and every modern emulator parses it identically.
 - **Plain OSC 8 inside tmux.** tmux 3.4 and later parse OSC 8, place the link in pane coordinates, and forward it to outer terminals that have the `hyperlinks` terminal feature. For an outer terminal tmux does not detect, add `set -as terminal-features ',<TERM>:hyperlinks'` to `tmux.conf`, where `<TERM>` matches the outer terminal's `$TERM`. Older tmux drops the OSC and keeps the visible text.
 
-Mouse capture hands plain clicks to `ox`, and some terminals, such as kitty and WezTerm, also deliver clicks on links to an app that captures the mouse. `App::emit_status_hyperlinks` therefore keeps the frame's link rects, and a left press without modifiers inside one opens its URL through `App::open_browser`. A press with modifiers is left to the terminal, so a terminal that opens OSC 8 links on Ctrl / Cmd+click itself doesn't open the page twice. Terminals that ignore OSC control strings leave the visible text intact. Terminals that print raw OSC bytes may show escape text, which is the legacy fallback.
+Mouse capture hands plain clicks to `ox`, and some terminals, such as kitty and WezTerm, also deliver clicks on links to an app that captures the mouse. `App::emit_status_hyperlinks` therefore keeps the frame's link rects, and a left press without modifiers inside one opens its URL through `App::open_browser`. A press with modifiers is left to the terminal, so a terminal that opens OSC 8 links on Ctrl+click or Cmd+click itself doesn't open the page twice. Terminals that ignore OSC control strings leave the visible text intact. Terminals that print raw OSC bytes may show escape text, which is the legacy fallback.
 
-URLs are sanitized: every control char is filtered out before the envelope is built, so a malformed value can't break out of the OSC 8 sequence.
+URLs are sanitized: every control char is filtered out before the envelope is written, so a malformed value can't break out of the OSC 8 sequence.
 
 ## Out of Scope
 

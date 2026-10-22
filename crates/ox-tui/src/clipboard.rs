@@ -9,15 +9,20 @@ use std::process::Stdio;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use anyhow::{Context as _, Result, bail};
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD;
 use tokio::io::AsyncWriteExt as _;
 use tokio::process::Command;
 use tokio::sync::mpsc;
 use tracing::debug;
+use unicode_segmentation::UnicodeSegmentation;
 
 use ox_core::util::env;
 use ox_core::util::sync::lock_or_recover;
+use ox_core::util::text::plural;
+
+// ── Constants ──
 
 /// Largest selection sent through tmux or OSC 52, in bytes, matching xterm's default cap.
 const MAX_TERMINAL_COPY_BYTES: usize = 100_000;
@@ -28,6 +33,8 @@ const SCREEN_CHUNK_BYTES: usize = 76;
 
 /// How long a copy may take before it is reported as failed.
 const COPY_TIMEOUT: Duration = Duration::from_secs(2);
+
+// ── Environment ──
 
 /// The terminal running the session, as far as its OSC 52 support goes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -85,6 +92,8 @@ impl Environment {
     }
 }
 
+// ── Copy Outcome ──
+
 /// How a copy reached the clipboard.
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) enum Delivery {
@@ -95,7 +104,9 @@ pub(crate) enum Delivery {
     /// The terminal applies this OSC 52 sequence once it is written.
     Osc52 {
         sequence: String,
-        terminal: Terminal,
+        /// Whether the terminal applies the sequence only once the user allows clipboard access,
+        /// as iTerm2 does with "Applications in terminal may access clipboard".
+        needs_permission: bool,
     },
 }
 
@@ -105,8 +116,10 @@ pub(crate) enum CopyError {
     /// The selection is over [`MAX_TERMINAL_COPY_BYTES`], with its size in bytes, and only a
     /// terminal route was left.
     TooLarge(usize),
-    /// Every route failed, and this terminal ignores OSC 52.
-    Unsupported(Terminal),
+    /// Every route failed, and Terminal.app ignores OSC 52.
+    AppleTerminal,
+    /// Every route failed, and the Linux console has no clipboard.
+    LinuxConsole,
     /// The routes took longer than [`COPY_TIMEOUT`].
     TimedOut,
 }
@@ -116,19 +129,17 @@ impl fmt::Display for CopyError {
         match self {
             Self::TooLarge(bytes) => write!(
                 f,
-                "Not copied: the selection is {} kB, over the {} kB limit",
+                "Not copied: the selection is {} kB, over the {} kB terminal copy limit. \
+                 Select less text.",
                 bytes.div_ceil(1000),
                 MAX_TERMINAL_COPY_BYTES / 1000,
             ),
-            Self::Unsupported(Terminal::Apple) => f.write_str(
+            Self::AppleTerminal => f.write_str(
                 "Not copied: Terminal.app ignores OSC 52. \
-                 Fn-drag to select, or press Cmd-R to turn off mouse reporting.",
+                 Fn+drag to select, or press Cmd+R to turn off mouse reporting.",
             ),
-            Self::Unsupported(Terminal::LinuxConsole) => {
-                f.write_str("Not copied: the Linux console has no clipboard. Shift-drag to select.")
-            }
-            Self::Unsupported(Terminal::ITerm2 | Terminal::Other) => {
-                f.write_str("Not copied: no clipboard is reachable")
+            Self::LinuxConsole => {
+                f.write_str("Not copied: the Linux console has no clipboard. Shift+drag to select.")
             }
             Self::TimedOut => write!(
                 f,
@@ -142,6 +153,7 @@ impl fmt::Display for CopyError {
 /// The outcome of one copy, for the notice over the chat.
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) struct CopyReport {
+    /// The selection's length in grapheme clusters, the characters a reader counts.
     pub(crate) chars: usize,
     pub(crate) outcome: Result<Delivery, CopyError>,
 }
@@ -149,13 +161,14 @@ pub(crate) struct CopyReport {
 impl CopyReport {
     /// The notice text, and whether it warns that the copy may not have landed.
     pub(crate) fn notice(&self) -> (String, bool) {
-        let copied = match self.chars {
-            1 => "Copied 1 character".to_owned(),
-            count => format!("Copied {count} characters"),
-        };
+        let count = self.chars;
+        let copied = format!(
+            "Copied {count} {}",
+            plural(count, "character", "characters"),
+        );
         match &self.outcome {
             Ok(Delivery::Osc52 {
-                terminal: Terminal::ITerm2,
+                needs_permission: true,
                 ..
             }) => (
                 format!(
@@ -174,6 +187,8 @@ impl CopyReport {
         }
     }
 }
+
+// ── Clipboard ──
 
 /// Copies text off the event loop. The native clipboard handle lives as long as this value, since
 /// X11 and some Wayland compositors drop the contents once the process that wrote them lets go.
@@ -207,7 +222,7 @@ impl Clipboard {
         };
         let tx = self.tx.clone();
         tokio::spawn(async move {
-            let chars = text.chars().count();
+            let chars = text.graphemes(true).count();
             let outcome = tokio::time::timeout(COPY_TIMEOUT, route.deliver(text))
                 .await
                 .unwrap_or(Err(CopyError::TimedOut));
@@ -220,6 +235,8 @@ impl Clipboard {
         self.rx.recv().await
     }
 }
+
+// ── Routes ──
 
 /// The routes one copy may take.
 struct Route {
@@ -258,14 +275,14 @@ enum TmuxLoad {
 fn settle(
     text: &str,
     environment: Environment,
-    native: Option<&Result<(), String>>,
-    tmux: Option<&Result<TmuxLoad, String>>,
+    native: Option<&Result<()>>,
+    tmux: Option<&Result<TmuxLoad>>,
 ) -> Result<Delivery, CopyError> {
     if let Some(Err(error)) = native {
-        debug!("native clipboard write failed: {error}");
+        debug!(error = %format_args!("{error:#}"), "native clipboard write failed");
     }
     if let Some(Err(error)) = tmux {
-        debug!("tmux load-buffer failed: {error}");
+        debug!(error = %format_args!("{error:#}"), "tmux load-buffer failed");
     }
     if matches!(native, Some(Ok(()))) || matches!(tmux, Some(Ok(TmuxLoad::Forwarded))) {
         return Ok(Delivery::Copied);
@@ -273,35 +290,40 @@ fn settle(
     if matches!(tmux, Some(Ok(TmuxLoad::BufferOnly))) {
         return Ok(Delivery::TmuxBuffer);
     }
+    let needs_permission = match environment.terminal {
+        Terminal::Apple => return Err(CopyError::AppleTerminal),
+        Terminal::LinuxConsole => return Err(CopyError::LinuxConsole),
+        Terminal::ITerm2 => true,
+        Terminal::Other => false,
+    };
     if text.len() > MAX_TERMINAL_COPY_BYTES {
         return Err(CopyError::TooLarge(text.len()));
     }
-    match environment.terminal {
-        terminal @ (Terminal::Apple | Terminal::LinuxConsole) => {
-            Err(CopyError::Unsupported(terminal))
-        }
-        terminal @ (Terminal::ITerm2 | Terminal::Other) => Ok(Delivery::Osc52 {
-            sequence: osc52_sequence(text, environment.screen),
-            terminal,
-        }),
-    }
+    Ok(Delivery::Osc52 {
+        sequence: osc52_sequence(text, environment.screen),
+        needs_permission,
+    })
 }
 
 /// Writes the system clipboard, keeping the handle in `native` for later copies.
 async fn write_native(
     native: Arc<Mutex<Option<arboard::Clipboard>>>,
     text: Arc<str>,
-) -> Result<(), String> {
+) -> Result<()> {
     tokio::task::spawn_blocking(move || {
         let mut native = lock_or_recover(&native, "native clipboard");
         let clipboard = match &mut *native {
             Some(clipboard) => clipboard,
-            None => native.insert(arboard::Clipboard::new().map_err(|e| e.to_string())?),
+            None => {
+                native.insert(arboard::Clipboard::new().context("failed to open the clipboard")?)
+            }
         };
-        clipboard.set_text(&*text).map_err(|e| e.to_string())
+        clipboard
+            .set_text(&*text)
+            .context("failed to write the clipboard")
     })
     .await
-    .map_err(|e| e.to_string())?
+    .context("failed to finish the clipboard write")?
 }
 
 trait Runner: Send + Sync {
@@ -311,7 +333,7 @@ trait Runner: Send + Sync {
         &'a self,
         args: &'a [&'a str],
         stdin: &'a str,
-    ) -> Pin<Box<dyn Future<Output = Result<(), String>> + Send + 'a>>;
+    ) -> Pin<Box<dyn Future<Output = Result<()>> + Send + 'a>>;
 }
 
 /// A program on `PATH`. Dropping a run's future kills the child, and tokio reaps it.
@@ -322,7 +344,7 @@ impl Runner for Program {
         &'a self,
         args: &'a [&'a str],
         stdin: &'a str,
-    ) -> Pin<Box<dyn Future<Output = Result<(), String>> + Send + 'a>> {
+    ) -> Pin<Box<dyn Future<Output = Result<()>> + Send + 'a>> {
         Box::pin(async move {
             let mut child = Command::new(self.0)
                 .args(args)
@@ -331,20 +353,23 @@ impl Runner for Program {
                 .stderr(Stdio::piped())
                 .kill_on_drop(true)
                 .spawn()
-                .map_err(|e| e.to_string())?;
+                .with_context(|| format!("failed to run {}", self.0))?;
             let mut pipe = child.stdin.take().expect("stdin is piped");
             let written = pipe.write_all(stdin.as_bytes()).await;
             drop(pipe);
-            let output = child.wait_with_output().await.map_err(|e| e.to_string())?;
+            let output = child
+                .wait_with_output()
+                .await
+                .with_context(|| format!("failed to wait for {}", self.0))?;
             if !output.status.success() {
                 let stderr = String::from_utf8_lossy(&output.stderr).trim().to_owned();
-                return Err(if stderr.is_empty() {
+                bail!(if stderr.is_empty() {
                     output.status.to_string()
                 } else {
                     stderr
                 });
             }
-            written.map_err(|e| e.to_string())
+            written.with_context(|| format!("failed to write to {}", self.0))
         })
     }
 }
@@ -352,7 +377,7 @@ impl Runner for Program {
 /// Stores `text` in a tmux paste buffer. `-w` also forwards it to the outer terminal's clipboard
 /// unless `set-clipboard` is off, and tmux before 3.2 rejects the flag, so a failure retries
 /// without it.
-async fn load_tmux_buffer(tmux: &dyn Runner, text: &str) -> Result<TmuxLoad, String> {
+async fn load_tmux_buffer(tmux: &dyn Runner, text: &str) -> Result<TmuxLoad> {
     match tmux.run(&["load-buffer", "-w", "-"], text).await {
         Ok(()) => Ok(TmuxLoad::Forwarded),
         Err(error) => tmux
@@ -382,6 +407,8 @@ fn osc52_sequence(text: &str, screen: bool) -> String {
 mod tests {
     use std::collections::VecDeque;
 
+    use anyhow::anyhow;
+
     use super::*;
 
     const REMOTE: Environment = Environment {
@@ -395,19 +422,14 @@ mod tests {
     /// failing any unexpected call.
     struct FakeTmux {
         runs: Mutex<Vec<(Vec<String>, String)>>,
-        replies: Mutex<VecDeque<Result<(), String>>>,
+        replies: Mutex<VecDeque<Result<(), &'static str>>>,
     }
 
     impl FakeTmux {
-        fn new<const N: usize>(replies: [Result<(), &str>; N]) -> Arc<Self> {
+        fn new<const N: usize>(replies: [Result<(), &'static str>; N]) -> Arc<Self> {
             Arc::new(Self {
                 runs: Mutex::default(),
-                replies: Mutex::new(
-                    replies
-                        .into_iter()
-                        .map(|reply| reply.map_err(ToOwned::to_owned))
-                        .collect(),
-                ),
+                replies: Mutex::new(replies.into()),
             })
         }
 
@@ -421,7 +443,7 @@ mod tests {
             &'a self,
             args: &'a [&'a str],
             stdin: &'a str,
-        ) -> Pin<Box<dyn Future<Output = Result<(), String>> + Send + 'a>> {
+        ) -> Pin<Box<dyn Future<Output = Result<()>> + Send + 'a>> {
             let args = args.iter().map(|&arg| arg.to_owned()).collect();
             self.runs.lock().unwrap().push((args, stdin.to_owned()));
             let reply = self
@@ -429,8 +451,8 @@ mod tests {
                 .lock()
                 .unwrap()
                 .pop_front()
-                .unwrap_or_else(|| Err("unexpected tmux invocation".to_owned()));
-            Box::pin(async move { reply })
+                .unwrap_or(Err("unexpected tmux invocation"));
+            Box::pin(async move { reply.map_err(|error| anyhow!(error)) })
         }
     }
 
@@ -441,7 +463,7 @@ mod tests {
             &'a self,
             _args: &'a [&'a str],
             _stdin: &'a str,
-        ) -> Pin<Box<dyn Future<Output = Result<(), String>> + Send + 'a>> {
+        ) -> Pin<Box<dyn Future<Output = Result<()>> + Send + 'a>> {
             Box::pin(std::future::pending())
         }
     }
@@ -494,11 +516,12 @@ mod tests {
         fn messages_name_the_cause() {
             assert_eq!(
                 CopyError::TooLarge(MAX_TERMINAL_COPY_BYTES + 1).to_string(),
-                "Not copied: the selection is 101 kB, over the 100 kB limit",
+                "Not copied: the selection is 101 kB, over the 100 kB terminal copy limit. \
+                 Select less text.",
             );
             assert_eq!(
-                CopyError::Unsupported(Terminal::LinuxConsole).to_string(),
-                "Not copied: the Linux console has no clipboard. Shift-drag to select.",
+                CopyError::LinuxConsole.to_string(),
+                "Not copied: the Linux console has no clipboard. Shift+drag to select.",
             );
             assert_eq!(
                 CopyError::TimedOut.to_string(),
@@ -516,10 +539,10 @@ mod tests {
             #[test]
             fn counts_characters_and_names_the_fix_for_a_failed_copy() {
                 let notice = |chars, outcome| CopyReport { chars, outcome }.notice();
-                let osc52 = |terminal| {
+                let osc52 = |needs_permission| {
                     Ok(Delivery::Osc52 {
                         sequence: String::new(),
-                        terminal,
+                        needs_permission,
                     })
                 };
 
@@ -528,11 +551,11 @@ mod tests {
                     ("Copied 1 character".to_owned(), false)
                 );
                 assert_eq!(
-                    notice(9, osc52(Terminal::Other)),
+                    notice(9, osc52(false)),
                     ("Copied 9 characters".to_owned(), false)
                 );
                 assert_eq!(
-                    notice(9, osc52(Terminal::ITerm2)),
+                    notice(9, osc52(true)),
                     (
                         "Copied 9 characters \
                          if iTerm2's \"Applications in terminal may access clipboard\" is on"
@@ -550,10 +573,10 @@ mod tests {
                     ),
                 );
                 assert_eq!(
-                    notice(9, Err(CopyError::Unsupported(Terminal::Apple))),
+                    notice(9, Err(CopyError::AppleTerminal)),
                     (
                         "Not copied: Terminal.app ignores OSC 52. \
-                         Fn-drag to select, or press Cmd-R to turn off mouse reporting."
+                         Fn+drag to select, or press Cmd+R to turn off mouse reporting."
                             .to_owned(),
                         true,
                     ),
@@ -574,17 +597,18 @@ mod tests {
         async fn in_a_remote_session_sends_osc52() {
             let mut clipboard = Clipboard::new(REMOTE);
 
-            let report = copy_with(&mut clipboard, "café").await;
+            let report = copy_with(&mut clipboard, "cafe\u{301}").await;
 
             assert_eq!(
                 report,
                 CopyReport {
                     chars: 4,
                     outcome: Ok(Delivery::Osc52 {
-                        sequence: "\x1b]52;c;Y2Fmw6k=\x07".to_owned(),
-                        terminal: Terminal::Other,
+                        sequence: "\x1b]52;c;Y2FmZcyB\x07".to_owned(),
+                        needs_permission: false,
                     }),
                 },
+                "the combining accent counts with its letter",
             );
         }
 
@@ -601,6 +625,28 @@ mod tests {
 
             assert_eq!(report.outcome, Ok(Delivery::Copied));
             assert_eq!(tmux.runs(), [load_buffer(&["-w", "-"], "text")]);
+        }
+
+        #[tokio::test]
+        async fn inside_tmux_keeps_a_selection_over_the_limit_from_tmux() {
+            let tmux = FakeTmux::new([Ok(())]);
+            let mut clipboard = Clipboard::new(Environment {
+                tmux: true,
+                ..REMOTE
+            });
+            clipboard.tmux = tmux.clone();
+            let at_limit = "x".repeat(MAX_TERMINAL_COPY_BYTES);
+            let over_limit = "x".repeat(MAX_TERMINAL_COPY_BYTES + 1);
+
+            let fits = copy_with(&mut clipboard, &at_limit).await;
+            let too_large = copy_with(&mut clipboard, &over_limit).await;
+
+            assert_eq!(fits.outcome, Ok(Delivery::Copied));
+            assert_eq!(
+                too_large.outcome,
+                Err(CopyError::TooLarge(MAX_TERMINAL_COPY_BYTES + 1))
+            );
+            assert_eq!(tmux.runs(), [load_buffer(&["-w", "-"], &at_limit)]);
         }
 
         #[tokio::test(start_paused = true)]
@@ -622,20 +668,19 @@ mod tests {
 
         #[test]
         fn takes_a_confirmed_route_before_osc52() {
-            let settle_with =
-                |native: Option<Result<(), String>>, tmux: Option<Result<TmuxLoad, String>>| {
-                    settle("text", REMOTE, native.as_ref(), tmux.as_ref())
-                };
+            let settle_with = |native: Option<Result<()>>, tmux: Option<Result<TmuxLoad>>| {
+                settle("text", REMOTE, native.as_ref(), tmux.as_ref())
+            };
 
             assert_eq!(settle_with(Some(Ok(())), None), Ok(Delivery::Copied));
             assert_eq!(
-                settle_with(Some(Ok(())), Some(Err("no server running".to_owned()))),
+                settle_with(Some(Ok(())), Some(Err(anyhow!("no server running")))),
                 Ok(Delivery::Copied),
                 "a native write needs no tmux",
             );
             assert_eq!(
                 settle_with(
-                    Some(Err("no display".to_owned())),
+                    Some(Err(anyhow!("no display"))),
                     Some(Ok(TmuxLoad::Forwarded))
                 ),
                 Ok(Delivery::Copied),
@@ -645,7 +690,7 @@ mod tests {
                 Ok(Delivery::TmuxBuffer)
             );
             assert!(matches!(
-                settle_with(Some(Err("no display".to_owned())), None),
+                settle_with(Some(Err(anyhow!("no display"))), None),
                 Ok(Delivery::Osc52 { .. })
             ));
             let screen = Environment {
@@ -680,10 +725,23 @@ mod tests {
                         terminal: Terminal::Apple,
                         ..REMOTE
                     },
-                    Some(&Err("denied".to_owned())),
+                    Some(&Err(anyhow!("denied"))),
                     None
                 ),
-                Err(CopyError::Unsupported(Terminal::Apple)),
+                Err(CopyError::AppleTerminal),
+            );
+            assert_eq!(
+                settle(
+                    &over_limit,
+                    Environment {
+                        terminal: Terminal::LinuxConsole,
+                        ..REMOTE
+                    },
+                    None,
+                    None
+                ),
+                Err(CopyError::LinuxConsole),
+                "no selection size would copy without OSC 52",
             );
             assert_eq!(
                 settle(
@@ -695,7 +753,7 @@ mod tests {
                     None,
                     None
                 ),
-                Err(CopyError::Unsupported(Terminal::LinuxConsole)),
+                Err(CopyError::LinuxConsole),
             );
         }
     }
@@ -717,13 +775,11 @@ mod tests {
                     "exit status: 1"
                 };
 
-                assert_eq!(
-                    git.run(&["config", "--file", "-", "--get", "a.b"], config)
-                        .await,
-                    Ok(())
-                );
-                assert_eq!(
-                    git.run(
+                git.run(&["config", "--file", "-", "--get", "a.b"], config)
+                    .await
+                    .unwrap();
+                let stderr = git
+                    .run(
                         &[
                             "-c",
                             "alias.fixture=!echo '  fixture error  ' >&2; exit 3",
@@ -731,14 +787,14 @@ mod tests {
                         ],
                         "",
                     )
-                    .await,
-                    Err("fixture error".to_owned()),
-                );
-                assert_eq!(
-                    git.run(&["config", "--file", "-", "--get", "a.c"], config)
-                        .await,
-                    Err(exit_1.to_owned()),
-                );
+                    .await
+                    .unwrap_err();
+                assert_eq!(stderr.to_string(), "fixture error");
+                let status = git
+                    .run(&["config", "--file", "-", "--get", "a.c"], config)
+                    .await
+                    .unwrap_err();
+                assert_eq!(status.to_string(), exit_1);
             }
         }
     }
@@ -752,8 +808,8 @@ mod tests {
             let down = FakeTmux::new([Err("no server running"), Err("usage: load-buffer")]);
 
             assert_eq!(
-                load_tmux_buffer(&*old, "text").await,
-                Ok(TmuxLoad::BufferOnly)
+                load_tmux_buffer(&*old, "text").await.unwrap(),
+                TmuxLoad::BufferOnly
             );
             assert_eq!(
                 old.runs(),
@@ -763,8 +819,11 @@ mod tests {
                 ]
             );
             assert_eq!(
-                load_tmux_buffer(&*down, "text").await,
-                Err("no server running".to_owned()),
+                load_tmux_buffer(&*down, "text")
+                    .await
+                    .unwrap_err()
+                    .to_string(),
+                "no server running",
                 "the first error explains the failure",
             );
             assert_eq!(
