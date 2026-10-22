@@ -113,6 +113,10 @@ const WRAPPERS: &[Wrapper] = &[
         ..Wrapper::TRANSPARENT
     },
     Wrapper {
+        name: "coproc",
+        ..Wrapper::TRANSPARENT
+    },
+    Wrapper {
         name: "doas",
         options: &[
             valued("-a"),
@@ -359,8 +363,8 @@ pub(crate) struct CommandTarget {
     /// Whether it runs code the analysis does not see or cannot place.
     opaque: bool,
     /// Whether tree-sitter-bash failed to parse it or a script nested in it, or parsed a shape
-    /// whose word boundaries differ from bash's, so the words a rule sees may not be the words
-    /// bash runs.
+    /// whose word boundaries differ from bash's or that it has no grammar for, such as `coproc`,
+    /// so the words a rule sees may not be the words bash runs.
     unparsed: bool,
 }
 
@@ -555,7 +559,7 @@ struct Walk<'a> {
     /// Whether any part of the command expands a variable at run time, wherever the value ends up.
     expands: bool,
     /// Whether the command or a script nested in it failed to parse, or parsed with word
-    /// boundaries that differ from bash's.
+    /// boundaries that differ from bash's or as a `coproc` the grammar cannot read.
     unparsed: bool,
 }
 
@@ -670,6 +674,11 @@ impl Walk<'_> {
     }
 
     fn command<'t>(&mut self, node: Node<'t>, trailing: &[Node<'t>], src: &str) {
+        // tree-sitter-bash has no `coproc` grammar, so it reads the keyword as a command name and
+        // splits a compound body into commands of its own.
+        self.unparsed |= node
+            .child_by_field_name("name")
+            .is_some_and(|name| &src[name.byte_range()] == "coproc");
         self.parts(&command_parts(node), trailing, src);
     }
 
@@ -2328,6 +2337,8 @@ mod tests {
                     "x=1\\\trm y",
                     "r\\\nm x",
                     "sh -c 'echo  \\  x'",
+                    "coproc rm -rf x",
+                    "coproc worker { rm -rf x; }",
                 ] {
                     assert!(parse(command).is_unparsed(), "{command:?}");
                 }
