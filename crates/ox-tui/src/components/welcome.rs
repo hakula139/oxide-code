@@ -1,5 +1,7 @@
 //! Welcome surface painted into the chat region while the chat is empty.
 
+use std::fmt::Write as _;
+
 use fastrand::Rng;
 use ratatui::Frame;
 use ratatui::layout::{Alignment, Rect};
@@ -9,7 +11,7 @@ use ratatui::widgets::Paragraph;
 use unicode_width::UnicodeWidthStr;
 use xxhash_rust::xxh64::xxh64;
 
-use ox_core::config::{NOT_SIGNED_IN, display_effort};
+use ox_core::config::{NOT_SIGNED_IN, StatusLineSegment};
 use ox_core::util::text::{center_truncate_to_width, pad_to_width, truncate_to_width};
 
 use crate::glyphs::INLINE_SEPARATOR;
@@ -22,8 +24,11 @@ use crate::theme::Theme;
 /// nothing to archive yet, `/exit` ends the session, and `/logout` only undoes a `/login`.
 const NOT_STARTERS: &[&str] = &["archive", "delete", "exit", "logout", "unarchive"];
 
+/// Offered only when the configured status line includes the `pull-request` segment.
+const PR_TIP: &str = "click the PR number in the status line to open it";
+
 const TIP_POOL: &[&str] = &[
-    "click #NN in the status bar to open the PR",
+    PR_TIP,
     "drag chat text to select it",
     "ox --continue resumes your last session",
     "ox --list shows recent sessions",
@@ -67,14 +72,20 @@ struct Picks {
 }
 
 impl Picks {
-    fn for_session(session_id: &str) -> Self {
+    fn for_session(session_id: &str, status_line: &[StatusLineSegment]) -> Self {
         let mut rng = Rng::with_seed(xxh64(session_id.as_bytes(), 0));
         let pool = filter_built_ins("")
             .into_iter()
             .filter(|cmd| !NOT_STARTERS.contains(&cmd.name));
+        let pr_tip = status_line.contains(&StatusLineSegment::PullRequest);
+        let tips: Vec<&'static str> = TIP_POOL
+            .iter()
+            .copied()
+            .filter(|&tip| pr_tip || tip != PR_TIP)
+            .collect();
         Self {
             starters: rng.choose_multiple(pool, STARTER_PICK),
-            tip: TIP_POOL[rng.usize(..TIP_POOL.len())],
+            tip: tips[rng.usize(..tips.len())],
         }
     }
 }
@@ -86,7 +97,7 @@ pub(crate) fn paint(frame: &mut Frame<'_>, area: Rect, theme: &Theme, info: &Liv
     if area.width < NARROW_MIN || area.height == 0 {
         return;
     }
-    let picks = Picks::for_session(&info.session_id);
+    let picks = Picks::for_session(&info.session_id, &info.config.status_line);
     let lines = build_lines(area.width, area.height, theme, info, &picks);
     let paragraph = Paragraph::new(lines)
         .alignment(Alignment::Center)
@@ -164,13 +175,12 @@ fn push_identity(lines: &mut Vec<Line<'static>>, theme: &Theme, version: &str, f
 
 fn environment_text(info: &LiveSessionInfo, full: bool, with_starters: bool) -> String {
     let config = &info.config;
-    // Drop the " effort" suffix below COLLAPSED_MIN so the line fits at NARROW_MIN.
-    let suffix = if with_starters { " effort" } else { "" };
-    let mut text = format!(
-        "{model}{INLINE_SEPARATOR}{effort}{suffix}",
-        model = config.model.display_name(),
-        effort = display_effort(config.effort),
-    );
+    let mut text = config.model.display_name().to_owned();
+    if let Some(effort) = config.effort {
+        // Drop the " effort" suffix below COLLAPSED_MIN so the line fits at NARROW_MIN.
+        let suffix = if with_starters { " effort" } else { "" };
+        _ = write!(text, "{INLINE_SEPARATOR}{effort}{suffix}");
+    }
     if full {
         text.push_str(INLINE_SEPARATOR);
         text.push_str(
@@ -290,20 +300,20 @@ mod tests {
         info
     }
 
-    fn starter_names(picks: &Picks) -> Vec<&'static str> {
-        picks.starters.iter().map(|cmd| cmd.name).collect()
-    }
-
     mod picks {
         use super::*;
 
         const SESSION_IDS: [&str; 8] = ["a", "b", "c", "d", "e", "f", "g", "h"];
 
+        fn starter_names(picks: &Picks) -> Vec<&'static str> {
+            picks.starters.iter().map(|cmd| cmd.name).collect()
+        }
+
         #[test]
         fn draws_the_same_picks_on_every_frame_of_a_session() {
-            let first = Picks::for_session("session");
+            let first = Picks::for_session("session", &[]);
 
-            let again = Picks::for_session("session");
+            let again = Picks::for_session("session", &[]);
 
             assert_eq!(starter_names(&again), starter_names(&first));
             assert_eq!(again.tip, first.tip);
@@ -312,7 +322,7 @@ mod tests {
         #[test]
         fn draws_distinct_starters_a_new_session_can_run() {
             for id in SESSION_IDS {
-                let picks = Picks::for_session(id);
+                let picks = Picks::for_session(id, &[]);
 
                 let mut names = starter_names(&picks);
 
@@ -330,11 +340,26 @@ mod tests {
         fn draws_again_for_another_session() {
             let draws: Vec<(Vec<&str>, &str)> = SESSION_IDS
                 .iter()
-                .map(|id| Picks::for_session(id))
+                .map(|id| Picks::for_session(id, &[]))
                 .map(|picks| (starter_names(&picks), picks.tip))
                 .collect();
 
             assert!(draws.iter().any(|draw| *draw != draws[0]), "{draws:?}");
+        }
+
+        #[test]
+        fn offers_the_pr_tip_only_with_the_pull_request_segment() {
+            let tips = |status_line: &[StatusLineSegment]| -> Vec<&str> {
+                (0..64)
+                    .map(|n| Picks::for_session(&n.to_string(), status_line).tip)
+                    .collect()
+            };
+
+            let with_segment = tips(&[StatusLineSegment::PullRequest]);
+            let without_segment = tips(&[]);
+
+            assert!(with_segment.contains(&PR_TIP), "{with_segment:?}");
+            assert!(!without_segment.contains(&PR_TIP), "{without_segment:?}");
         }
     }
 
@@ -363,6 +388,16 @@ mod tests {
             let text = environment_text(&info, true, true);
 
             assert_eq!(text, "Claude Opus 5.5 · xhigh effort · Not signed in");
+        }
+
+        #[test]
+        fn leaves_out_the_effort_of_a_model_without_levels() {
+            let mut info = fixture();
+            info.config.effort = None;
+
+            let text = environment_text(&info, true, true);
+
+            assert_eq!(text, "Claude Opus 5.5 · OAuth");
         }
     }
 

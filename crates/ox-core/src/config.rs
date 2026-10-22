@@ -103,7 +103,7 @@ impl ConfigSnapshot {
 
 // ── Effort ──
 
-/// Intelligence-vs-latency tier sent as `output_config.effort`.
+/// Effort level sent as `output_config.effort`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Effort {
@@ -139,9 +139,9 @@ impl Effort {
         }
     }
 
-    /// Notes that the model has no effort tier, so this requested effort did not apply.
+    /// Notes that the model has no effort levels, so this requested effort did not apply.
     pub fn unapplied_notice(self) -> String {
-        format!("Effort unchanged (model has no effort tier, asked for {self})")
+        format!("Effort unchanged (model has no effort levels, asked for {self})")
     }
 }
 
@@ -748,7 +748,7 @@ pub fn display_auth(auth: Option<AuthSource>) -> String {
 }
 
 pub fn display_effort(effort: Option<Effort>) -> String {
-    effort.map_or_else(|| "(no effort tier)".to_owned(), |e| e.to_string())
+    effort.map_or_else(|| "(no effort levels)".to_owned(), |e| e.to_string())
 }
 
 pub fn display_bool(flag: bool) -> &'static str {
@@ -1769,7 +1769,7 @@ mod tests {
         }
 
         #[tokio::test]
-        async fn effort_invalid_env_lists_the_accepted_tiers() {
+        async fn effort_invalid_env_lists_the_accepted_levels() {
             let dir = tempfile::tempdir().unwrap();
             let err = load_with(&dir, &[("OX_EFFORT", "insane")])
                 .await
@@ -2420,9 +2420,9 @@ mod tests {
         use super::*;
 
         #[test]
-        fn names_effective_tier_or_no_tier() {
+        fn names_the_effective_level_or_its_absence() {
             assert_eq!(display_effort(Some(Effort::High)), "high");
-            assert_eq!(display_effort(None), "(no effort tier)");
+            assert_eq!(display_effort(None), "(no effort levels)");
         }
     }
 

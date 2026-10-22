@@ -1111,7 +1111,7 @@ mod tests {
                     Edit(src/a.rs) needs approval:
                       - let a = 1;
                       + let a = 2;\u{1b}[2K\u{200b}
-                    Held by the `ask.edit` pattern `src/\u{200b}*.rs`
+                    Asks because of the `ask.edit` pattern `src/\u{200b}*.rs`
                 "},
             );
         }
