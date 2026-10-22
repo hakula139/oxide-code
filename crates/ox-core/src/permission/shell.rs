@@ -358,6 +358,9 @@ pub(crate) struct CommandTarget {
     reads: Vec<Access>,
     /// Whether it runs code the analysis does not see or cannot place.
     opaque: bool,
+    /// Whether tree-sitter-bash failed to parse it or a script nested in it, so the words a rule
+    /// sees may not be the words bash runs.
+    unparsed: bool,
 }
 
 impl CommandTarget {
@@ -372,6 +375,7 @@ impl CommandTarget {
             changes_dir: false,
             relative_path: false,
             expands: false,
+            unparsed: false,
         };
         walk.script(command);
         if walk.expands {
@@ -383,7 +387,8 @@ impl CommandTarget {
             segments: walk.segments,
             writes: walk.writes,
             reads: walk.reads,
-            opaque: walk.opaque || (walk.changes_dir && walk.relative_path),
+            opaque: walk.opaque || walk.unparsed || (walk.changes_dir && walk.relative_path),
+            unparsed: walk.unparsed,
         }
     }
 
@@ -401,6 +406,10 @@ impl CommandTarget {
 
     pub(super) const fn is_opaque(&self) -> bool {
         self.opaque
+    }
+
+    pub(super) const fn is_unparsed(&self) -> bool {
+        self.unparsed
     }
 }
 
@@ -544,13 +553,15 @@ struct Walk<'a> {
     relative_path: bool,
     /// Whether any part of the command expands a variable at run time, wherever the value ends up.
     expands: bool,
+    /// Whether the command or a script nested in it failed to parse.
+    unparsed: bool,
 }
 
 impl Walk<'_> {
     fn script(&mut self, source: &str) {
         let tree = parse_tree(source);
         let root = tree.root_node();
-        self.opaque |= root.has_error();
+        self.unparsed |= root.has_error();
         self.visit(root, source);
     }
 
