@@ -3300,14 +3300,25 @@ mod tests {
             }
 
             #[test]
-            fn command_rules_hold_the_program_a_coproc_runs() {
+            fn command_asks_where_the_grammar_reads_a_reserved_word_as_a_command() {
                 let yolo = policy(Mode::Yolo, &[(EXEC, "rm *")], &[], &[]);
 
-                for (case, expected) in [
-                    ("coproc rm -rf x", Decision::Deny),
-                    ("coproc worker { rm -rf x; }", Decision::Ask),
+                assert_eq!(
+                    decide(&yolo, EXEC, &command("coproc rm -rf x")),
+                    Decision::Deny
+                );
+                for case in [
+                    "coproc worker { rm -rf x; }",
+                    "time coproc worker { rm -rf x; }",
+                    "time while true; do rm -rf x; done",
+                    "time -p ! rm -rf x",
                 ] {
-                    assert_eq!(decide(&yolo, EXEC, &command(case)), expected, "{case:?}");
+                    let verdict = yolo.verdict(EXEC, &command(case).as_target());
+                    assert_eq!(
+                        (verdict.decision, verdict.basis),
+                        (Decision::Ask, Basis::Unparsed),
+                        "{case:?}"
+                    );
                 }
             }
 

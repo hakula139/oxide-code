@@ -674,11 +674,7 @@ impl Walk<'_> {
     }
 
     fn command<'t>(&mut self, node: Node<'t>, trailing: &[Node<'t>], src: &str) {
-        // tree-sitter-bash has no `coproc` grammar, so it reads the keyword as a command name and
-        // splits a compound body into commands of its own.
-        self.unparsed |= node
-            .child_by_field_name("name")
-            .is_some_and(|name| &src[name.byte_range()] == "coproc");
+        self.unparsed |= runs_a_reserved_word(node, src);
         self.parts(&command_parts(node), trailing, src);
     }
 
@@ -1202,6 +1198,36 @@ fn redirect_words(redirect: Node<'_>) -> Vec<Node<'_>> {
         }
         _ => Vec::new(),
     }
+}
+
+/// Bash's reserved words. tree-sitter-bash gives each compound command it parses a node of its own,
+/// so a command word in bash's command position spelled as one of these comes from a mis-parse:
+/// of `coproc`, which the grammar lacks, or of a compound after the `time` keyword, which it reads
+/// as a command name.
+const RESERVED_WORDS: &[&str] = &[
+    "!", "[[", "]]", "case", "coproc", "do", "done", "elif", "else", "esac", "fi", "for",
+    "function", "if", "in", "select", "then", "until", "while", "{", "}",
+];
+
+/// Returns whether bash reads the word in `command`'s command position as a reserved word: its
+/// name, or the first word after a leading `time` keyword and its options.
+fn runs_a_reserved_word(command: Node<'_>, src: &str) -> bool {
+    let parts = command_parts(command);
+    if parts
+        .first()
+        .is_none_or(|name| name.kind() != "command_name")
+    {
+        return false;
+    }
+    let mut after_time = false;
+    for part in parts {
+        match &src[part.byte_range()] {
+            "time" => after_time = true,
+            "-p" | "--" if after_time => {}
+            word => return RESERVED_WORDS.contains(&word),
+        }
+    }
+    false
 }
 
 /// Returns whether `node` runs code no simple command shows: a substitution, or arithmetic, which
@@ -2337,8 +2363,19 @@ mod tests {
                     "x=1\\\trm y",
                     "r\\\nm x",
                     "sh -c 'echo  \\  x'",
+                ] {
+                    assert!(parse(command).is_unparsed(), "{command:?}");
+                }
+            }
+
+            #[test]
+            fn turns_a_reserved_word_the_grammar_reads_as_a_command_unparsed() {
+                for command in [
                     "coproc rm -rf x",
                     "coproc worker { rm -rf x; }",
+                    "time while true; do rm -rf x; done",
+                    "time -p ! rm -rf x",
+                    "time time if true; then rm -rf x; fi",
                 ] {
                     assert!(parse(command).is_unparsed(), "{command:?}");
                 }
@@ -2358,6 +2395,9 @@ mod tests {
                     "python3 - <<'EOF'\nprint(1)\nEOF",
                     "kubectl apply -f - <<EOF\nx\nEOF",
                     "cmd - 2>&1",
+                    "time cargo test",
+                    "help coproc",
+                    "echo if then fi",
                 ] {
                     assert!(!parse(command).is_unparsed(), "{command:?}");
                 }
