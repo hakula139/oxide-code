@@ -548,10 +548,10 @@ mod tests {
     };
     use crate::message::{ContentBlock, Replay, Role};
     use crate::prompt::PromptParts;
-    use crate::session::entry::{Entry, SessionInfo};
+    use crate::session::entry::{Entry, SessionInfo, TitleSource};
     use crate::session::handle::testing::record_write_call;
     use crate::session::store::listing::ProjectScope;
-    use crate::session::store::local_testing::test_session_file;
+    use crate::session::store::local_testing::{saved_entries, saved_titles, test_session_file};
     use crate::session::store::testing::{
         TEST_PROJECT, isolated_store, seed_test_session, test_project_dir, test_store,
     };
@@ -577,11 +577,19 @@ mod tests {
             handle.finish(Vec::new()).await;
             drop(handle);
 
-            let content = std::fs::read_to_string(test_session_file(dir.path(), &sid)).unwrap();
-            let lines: Vec<&str> = content.lines().collect();
-            assert!(lines[0].contains(r#""type":"header""#));
-            assert!(lines[1].contains(r#""type":"title""#));
-            assert!(lines[2].contains(r#""type":"message""#));
+            let entries = saved_entries(dir.path(), &sid);
+            assert!(
+                matches!(
+                    entries[..],
+                    [
+                        Entry::Header(_),
+                        Entry::Title { .. },
+                        Entry::Message { .. },
+                        ..
+                    ]
+                ),
+                "{entries:?}",
+            );
         }
 
         #[tokio::test]
@@ -778,10 +786,12 @@ mod tests {
             drop(handle);
 
             assert!(outcome.failure.is_none());
-            let content = std::fs::read_to_string(test_session_file(dir.path(), &sid)).unwrap();
+            let entries = saved_entries(dir.path(), &sid);
             assert!(
-                !content.contains(r#""type":"tool_result_metadata""#),
-                "all-default batch writes nothing: {content}",
+                !entries
+                    .iter()
+                    .any(|entry| matches!(entry, Entry::ToolResultMetadata { .. })),
+                "all-default batch writes nothing: {entries:?}",
             );
         }
 
@@ -1095,14 +1105,14 @@ mod tests {
             handle.finish(Vec::new()).await;
             drop(handle);
 
-            let content = std::fs::read_to_string(test_session_file(dir.path(), &sid)).unwrap();
+            let entries = saved_entries(dir.path(), &sid);
             assert!(
-                content.contains(r#""type":"compact""#),
-                "boundary line on disk: {content}",
-            );
-            assert!(
-                content.contains(r#""summary":"synth summary""#),
-                "summary text on disk: {content}",
+                entries.iter().any(|entry| matches!(
+                    entry,
+                    Entry::Compact { summary, instructions, .. }
+                        if summary == "synth summary" && instructions.as_deref() == Some("focus")
+                )),
+                "boundary with its summary on disk: {entries:?}",
             );
         }
 
@@ -1241,11 +1251,10 @@ mod tests {
             resumed.finish(Vec::new()).await;
             drop(resumed);
 
-            let content =
-                std::fs::read_to_string(test_session_file(dir.path(), &session_id)).unwrap();
-            let summary_count = content
-                .lines()
-                .filter(|l| l.contains(r#""type":"summary""#))
+            let entries = saved_entries(dir.path(), &session_id);
+            let summary_count = entries
+                .iter()
+                .filter(|entry| matches!(entry, Entry::Summary { .. }))
                 .count();
             assert_eq!(summary_count, 1);
         }
@@ -1287,15 +1296,14 @@ mod tests {
             handle.finish(tracker.snapshot_all()).await;
             drop(handle);
 
-            let content = std::fs::read_to_string(test_session_file(dir.path(), &sid)).unwrap();
-            let snapshot_paths: std::collections::HashSet<std::path::PathBuf> = content
-                .lines()
-                .filter(|l| l.contains(r#""type":"file_snapshot""#))
-                .map(|l| {
-                    let v: serde_json::Value = serde_json::from_str(l).unwrap();
-                    std::path::PathBuf::from(v["path"].as_str().unwrap())
-                })
-                .collect();
+            let snapshot_paths: std::collections::HashSet<std::path::PathBuf> =
+                saved_entries(dir.path(), &sid)
+                    .into_iter()
+                    .filter_map(|entry| match entry {
+                        Entry::FileSnapshot { snapshot } => Some(snapshot.path),
+                        _ => None,
+                    })
+                    .collect();
             assert_eq!(
                 snapshot_paths, expected_paths,
                 "every tracked file lands as its own FileSnapshot",
@@ -1317,10 +1325,16 @@ mod tests {
             let failure = handle.finalize(Vec::new()).await;
 
             assert!(failure.is_none(), "healthy finalize reports no failure");
-            let content = std::fs::read_to_string(test_session_file(dir.path(), &sid)).unwrap();
+            let entries = saved_entries(dir.path(), &sid);
             assert!(
-                content.contains(r#""type":"summary""#),
-                "summary lands on disk: {content}",
+                matches!(
+                    entries.last(),
+                    Some(Entry::Summary {
+                        message_count: 1,
+                        ..
+                    })
+                ),
+                "summary lands on disk: {entries:?}",
             );
         }
 
@@ -1367,10 +1381,16 @@ mod tests {
             let failure = handle.finalize(Vec::new()).await;
 
             assert_eq!(failure, None);
-            let content = std::fs::read_to_string(test_session_file(dir.path(), &sid)).unwrap();
+            let entries = saved_entries(dir.path(), &sid);
             assert!(
-                content.contains(r#""type":"summary""#),
-                "summary lands on disk: {content}",
+                matches!(
+                    entries.last(),
+                    Some(Entry::Summary {
+                        message_count: 1,
+                        ..
+                    })
+                ),
+                "summary lands on disk: {entries:?}",
             );
         }
     }
@@ -1388,11 +1408,12 @@ mod tests {
             handle.record_message(Message::user("hello")).await;
             handle.shutdown().await;
 
-            let path = test_session_file(dir.path(), &sid);
-            let content = std::fs::read_to_string(path).unwrap();
+            let entries = saved_entries(dir.path(), &sid);
             assert!(
-                content.contains(r#""type":"message""#),
-                "actor must have flushed before shutdown returned: {content}",
+                entries
+                    .iter()
+                    .any(|entry| matches!(entry, Entry::Message { .. })),
+                "actor must have flushed before shutdown returned: {entries:?}",
             );
         }
 
@@ -1491,24 +1512,20 @@ mod tests {
                 "healthy roll reports no failure",
             );
 
-            let old_jsonl = std::fs::read_to_string(test_session_file(dir.path(), &original_id))
-                .expect("old session file lands on disk");
+            let old = saved_entries(dir.path(), &original_id);
             assert!(
-                old_jsonl.contains(r#""type":"summary""#),
-                "old JSONL gets a summary entry: {old_jsonl}",
-            );
-            assert!(
-                old_jsonl.contains(&original_id),
-                "old JSONL header carries the original id: {old_jsonl}",
+                matches!(&old[..], [Entry::Header(header), .., Entry::Summary { .. }]
+                    if header.session_id == original_id),
+                "old JSONL keeps its header and gets a summary entry: {old:?}",
             );
 
             session.record_message(Message::user("rolled")).await;
             session.finish(Vec::new()).await;
-            let new_jsonl = std::fs::read_to_string(test_session_file(dir.path(), &outcome.new_id))
-                .expect("new session file lands on disk");
+            let new = saved_entries(dir.path(), &outcome.new_id);
             assert!(
-                new_jsonl.contains(r#""git_branch":"feat/x""#),
-                "new JSONL header records the branch: {new_jsonl}",
+                matches!(new.first(), Some(Entry::Header(header))
+                    if header.git_branch.as_deref() == Some("feat/x")),
+                "new JSONL header records the branch: {new:?}",
             );
         }
 
@@ -1584,11 +1601,10 @@ mod tests {
                 "healthy roll_into reports no finalize failure",
             );
 
-            let live_jsonl = std::fs::read_to_string(test_session_file(dir.path(), &original_id))
-                .expect("old (live) session file lands on disk");
+            let entries = saved_entries(dir.path(), &original_id);
             assert!(
-                live_jsonl.contains(r#""type":"summary""#),
-                "old JSONL gets a summary: {live_jsonl}",
+                matches!(entries.last(), Some(Entry::Summary { .. })),
+                "old JSONL gets a summary: {entries:?}",
             );
         }
 
@@ -1757,30 +1773,17 @@ mod tests {
             resumed.handle.finish(Vec::new()).await;
             resumed.handle.shutdown().await;
 
-            let content =
-                std::fs::read_to_string(test_session_file(dir.path(), session_id)).unwrap();
-            let title_lines: Vec<&str> = content
-                .lines()
-                .filter(|l| l.contains(r#""type":"title""#))
-                .collect();
+            let entries = saved_entries(dir.path(), session_id);
             assert_eq!(
-                title_lines.len(),
-                1,
-                "next message must NOT add a FirstPrompt title \
-                 alongside the existing one: {content}",
+                saved_titles(&entries),
+                [("User-named", TitleSource::UserProvided)],
+                "next message must not add a FirstPrompt title alongside the existing one",
             );
-            assert!(
-                title_lines[0].contains("user_provided") && title_lines[0].contains("User-named"),
-                "the lone title is the original UserProvided one: {content}",
-            );
-            let message_count = content
-                .lines()
-                .filter(|l| l.contains(r#""type":"message""#))
+            let message_count = entries
+                .iter()
+                .filter(|entry| matches!(entry, Entry::Message { .. }))
                 .count();
-            assert_eq!(
-                message_count, 1,
-                "the resumed message must reach disk: {content}",
-            );
+            assert_eq!(message_count, 1, "the resumed message must reach disk");
         }
 
         #[tokio::test]
