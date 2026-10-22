@@ -41,6 +41,7 @@ flippable
 fpats
 fprint
 fprintf
+fsmonitor
 getpgid
 Ghostty
 gitui
