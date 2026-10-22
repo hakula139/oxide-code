@@ -3,12 +3,11 @@
 //! errors, and the subscription rate-limit headers.
 
 use std::fmt;
-use std::sync::{Arc, LazyLock};
+use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Result, anyhow};
 use bytes::Bytes;
-use regex::Regex;
 use reqwest::StatusCode;
 use reqwest::header::HeaderMap;
 use tokio_util::task::TaskTracker;
@@ -18,7 +17,8 @@ use super::Client;
 use super::wire::{ApiError, ErrorResponse};
 use crate::client::{PromptTooLong, RateLimitWindow, RateLimits};
 use crate::config::auth::{self, Auth, AuthSource, Credential};
-use crate::util::text::{join_sentences, truncate_to_width};
+use crate::util::response::{self, condense, http_status};
+use crate::util::text::join_sentences;
 use crate::util::tls::Trust;
 
 // ── Constants ──
@@ -39,13 +39,6 @@ const OVERLOADED: &str = "Anthropic API overloaded";
 const SERVER_ERROR: &str = "Anthropic API server error";
 /// Advice for an overload or a server failure, both of which usually pass.
 const TRANSIENT_ADVICE: &str = "Retry in a few seconds.";
-
-/// Most terminal columns [`condense`] keeps, so a verbose body cannot bury the advice.
-const MAX_DETAILS_WIDTH: usize = 300;
-
-static HTML_TITLE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"(?is)<title[^>]*>(.*?)</title>").expect("the title pattern is a valid regex")
-});
 
 // ── Request ──
 
@@ -348,14 +341,6 @@ fn status_cause(status: StatusCode, error: Option<&ApiError>) -> String {
     }
 }
 
-/// `HTTP 502 Bad Gateway`, or `HTTP 529` for a code without a standard reason phrase.
-fn http_status(status: StatusCode) -> String {
-    match status.canonical_reason() {
-        Some(reason) => format!("HTTP {} {reason}", status.as_u16()),
-        None => format!("HTTP {}", status.as_u16()),
-    }
-}
-
 /// Accepts the delay-seconds form. An HTTP-date falls back to the computed backoff.
 fn parse_retry_after(value: &str) -> Option<Duration> {
     value.trim().parse().ok().map(Duration::from_secs)
@@ -392,6 +377,21 @@ fn format_api_error(
         401 => (
             "Anthropic API rejected credentials (HTTP 401)".to_owned(),
             Some(auth.rejection_hint().to_owned()),
+        ),
+        403 => (
+            "Anthropic API refused the request (HTTP 403)".to_owned(),
+            Some(format!(
+                "Check that the credential can use this model and endpoint. {}",
+                auth.rejection_hint()
+            )),
+        ),
+        404 => (
+            "Anthropic API found no such endpoint or model (HTTP 404)".to_owned(),
+            Some(
+                "Check that the base URL is right and that this server serves the model. \
+                 `/config` shows where each is set."
+                    .to_owned(),
+            ),
         ),
         429 => (
             "Anthropic API rate limited (HTTP 429)".to_owned(),
@@ -443,23 +443,13 @@ fn with_details(headline: &str, details: Option<&str>, advice: Option<&str>) -> 
     }
 }
 
-/// What a non-2xx `body` says, [condensed](condense): the message of an API `error`, the title of
-/// a markup page such as a gateway's HTML error, or else the text itself. `None` when that is
-/// blank or a page has no title.
+/// What a non-2xx `body` says, [condensed](condense): the message of an API `error`, or else
+/// [`response::body_details`].
 fn body_details(body: &str, error: Option<&ApiError>) -> Option<String> {
-    let text = match error {
-        Some(error) => &error.message,
-        None if body.trim_start().starts_with('<') => HTML_TITLE.captures(body)?.get(1)?.as_str(),
-        None => body,
-    };
-    condense(text)
-}
-
-/// Server text on one line of at most [`MAX_DETAILS_WIDTH`] columns, with its punctuation as sent.
-/// `None` when the text is blank.
-fn condense(text: &str) -> Option<String> {
-    let text = text.split_whitespace().collect::<Vec<_>>().join(" ");
-    (!text.is_empty()).then(|| truncate_to_width(&text, MAX_DETAILS_WIDTH))
+    match error {
+        Some(error) => condense(&error.message),
+        None => response::body_details(body),
+    }
 }
 
 // ── Rate Limits ──
@@ -1073,6 +1063,21 @@ mod tests {
                      Generate a new one with `claude setup-token`.",
                 ),
                 (
+                    403,
+                    None,
+                    "Anthropic API refused the request (HTTP 403): boom. \
+                     Check that the credential can use this model and endpoint. \
+                     CLAUDE_CODE_OAUTH_TOKEN may be expired or revoked. \
+                     Generate a new one with `claude setup-token`.",
+                ),
+                (
+                    404,
+                    None,
+                    "Anthropic API found no such endpoint or model (HTTP 404): boom. \
+                     Check that the base URL is right and that this server serves the model. \
+                     `/config` shows where each is set.",
+                ),
+                (
                     429,
                     secs,
                     "Anthropic API rate limited (HTTP 429): boom. Retry after 42 s.",
@@ -1139,7 +1144,6 @@ mod tests {
 
         #[test]
         fn keeps_the_details_as_sent_and_ends_each_sentence_once() {
-            let truncated = body_details(&"x".repeat(MAX_DETAILS_WIDTH + 1), None).unwrap();
             for (status, details, expected) in [
                 (
                     StatusCode::BAD_GATEWAY,
@@ -1150,12 +1154,10 @@ mod tests {
                 ),
                 (
                     StatusCode::BAD_GATEWAY,
-                    truncated.as_str(),
-                    format!(
-                        "Anthropic API server error (HTTP 502 Bad Gateway): {}... \
-                         Retry in a few seconds.",
-                        "x".repeat(MAX_DETAILS_WIDTH - 3),
-                    ),
+                    "Upstream is down...",
+                    "Anthropic API server error (HTTP 502 Bad Gateway): Upstream is down... \
+                     Retry in a few seconds."
+                        .to_owned(),
                 ),
                 (
                     StatusCode::BAD_GATEWAY,
@@ -1257,38 +1259,11 @@ mod tests {
         }
 
         #[test]
-        fn shows_the_title_of_a_markup_page() {
-            let nginx = indoc! {"
-                <html>
-                <head><title>502 Bad Gateway</title></head>
-                <body><center><h1>502 Bad Gateway</h1></center></body>
-                </html>
-            "};
-
+        fn shows_what_any_other_body_says() {
             assert_eq!(
-                body_details(nginx, None).as_deref(),
+                body_details("<html><title>502 Bad Gateway</title></html>", None).as_deref(),
                 Some("502 Bad Gateway")
             );
-
-            assert_eq!(body_details("<html><body>busy</body></html>", None), None);
-        }
-
-        #[test]
-        fn shows_plain_text_on_one_capped_line() {
-            let long = "x".repeat(MAX_DETAILS_WIDTH + 1);
-            for (body, expected) in [
-                (
-                    "\n  upstream connect error\r\n\treset reason: overflow\n",
-                    Some("upstream connect error reset reason: overflow".to_owned()),
-                ),
-                (
-                    long.as_str(),
-                    Some(format!("{}...", "x".repeat(MAX_DETAILS_WIDTH - 3))),
-                ),
-                (" \r\n", None),
-            ] {
-                assert_eq!(body_details(body, None), expected, "{body:?}");
-            }
         }
     }
 
