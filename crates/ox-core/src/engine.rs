@@ -249,6 +249,11 @@ impl Engine {
         self.workspace.cwd()
     }
 
+    /// The project the session store is scoped to, where `/init` writes instruction files.
+    pub fn project_root(&self) -> &Path {
+        self.store.project_root()
+    }
+
     /// Projects the loaded transcript for a frontend to show. Takes the compaction boundary and
     /// tool metadata it loaded with, so a later call projects without them.
     pub fn take_history(&mut self) -> Vec<Interaction> {

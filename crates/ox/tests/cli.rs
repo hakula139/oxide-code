@@ -206,7 +206,7 @@ fn resume_in_the_repl_unarchives_the_session_with_a_note() {
 }
 
 #[test]
-fn resume_with_an_unmatched_prefix_fails_with_a_scope_hint() {
+fn resume_with_an_unmatched_prefix_fails() {
     let dir = tempfile::tempdir().unwrap();
     let output = ox(dir.path())
         .args(["--no-tui", "--resume", "deadbeef"])
@@ -222,8 +222,7 @@ fn resume_with_an_unmatched_prefix_fails_with_a_scope_hint() {
     let stderr = String::from_utf8(output.stderr).unwrap();
     assert_eq!(
         stderr.lines().next().unwrap(),
-        "Error: no session matching `deadbeef` in this project \
-         (use --all to search every project)",
+        "Error: no session matching `deadbeef`",
     );
 }
 

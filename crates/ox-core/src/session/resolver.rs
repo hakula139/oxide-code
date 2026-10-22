@@ -31,8 +31,11 @@ enum ResumeMode<'a> {
     Path(&'a Path),
 }
 
-/// Starts a new session, or resumes the one `target` names. A fresh session records `git_branch`,
-/// and `all` widens prefix / latest lookup from the current project to every project subdir.
+/// Starts a new session, or resumes the one `target` names.
+/// A fresh session records `git_branch`.
+/// A prefix matches in the current project first and then in every project,
+/// as `/resume <prefix>` does, while `all` searches every project at once
+/// for both a prefix and the latest session.
 pub fn resolve_session(
     store: &SessionStore,
     model: &str,
@@ -40,12 +43,6 @@ pub fn resolve_session(
     target: Option<SessionTarget<'_>>,
     all: bool,
 ) -> Result<ResumedSession> {
-    let scope_hint = if all {
-        ""
-    } else {
-        " in this project (use --all to search every project)"
-    };
-
     let path = match normalize_target(target)? {
         ResumeMode::Fresh => {
             return Ok(ResumedSession {
@@ -57,15 +54,26 @@ pub fn resolve_session(
         }
         ResumeMode::Path(path) => path.to_owned(),
         ResumeMode::Latest => {
+            let scope_hint = if all {
+                ""
+            } else {
+                " in this project (use --all to search every project)"
+            };
             store
                 .latest(all)?
                 .with_context(|| format!("no sessions to resume{scope_hint}"))?
                 .path
         }
         ResumeMode::Prefix(prefix) => {
-            match_in_scope(store, prefix, None, all)?
-                .with_context(|| format!("no session matching `{prefix}`{scope_hint}"))?
-                .path
+            let info = if all {
+                match_in_scope(store, prefix, None, true)?
+            } else {
+                resolve_prefix_to_info(store, prefix, None)?
+            };
+            info.ok_or_else(|| ResolveError::NoMatch {
+                prefix: prefix.to_owned(),
+            })?
+            .path
         }
     };
 
@@ -136,12 +144,12 @@ pub enum ResolveError {
 pub(crate) fn resolve_prefix_to_info(
     store: &SessionStore,
     prefix: &str,
-    live_id: &str,
+    live_id: Option<&str>,
 ) -> Result<Option<SessionInfo>, ResolveError> {
-    if let Some(info) = match_in_scope(store, prefix, Some(live_id), false)? {
+    if let Some(info) = match_in_scope(store, prefix, live_id, false)? {
         return Ok(Some(info));
     }
-    match_in_scope(store, prefix, Some(live_id), true)
+    match_in_scope(store, prefix, live_id, true)
 }
 
 /// [`resolve_prefix_to_info`] for commands that act on a saved session, telling a prefix that
@@ -151,7 +159,7 @@ pub fn resolve_saved_prefix(
     prefix: &str,
     live_id: &str,
 ) -> Result<SessionInfo, ResolveError> {
-    if let Some(info) = resolve_prefix_to_info(store, prefix, live_id)? {
+    if let Some(info) = resolve_prefix_to_info(store, prefix, Some(live_id))? {
         return Ok(info);
     }
     let prefix = prefix.to_owned();
@@ -275,50 +283,24 @@ mod tests {
         }
 
         #[tokio::test]
-        async fn all_widens_scope_to_every_project() {
+        async fn prefix_matches_the_current_project_first_then_every_project() {
             let dir = tempfile::tempdir().unwrap();
             let store = test_store(dir.path());
             let other = SessionStore::open_at(dir.path().to_path_buf(), "other-project").unwrap();
-            let original = handle::start(&other, "m", None);
-            let full_id = original.session_id().to_owned();
-            original.record_message(Message::user("all scope")).await;
-            original.finish(Vec::new()).await;
-            drop(original);
-            let arg = full_id[..10].to_owned();
+            let at = time::macros::datetime!(2026-04-18 09:00:00 UTC);
+            seed_test_session(&store, "abcd-local", Some("Local"), Some(1), at);
+            seed_test_session(&other, "abcd-other", Some("Other"), Some(1), at);
+            let resume = |prefix: &str, all: bool| {
+                resolve_session(&store, "m", None, Some(SessionTarget::Named(prefix)), all)
+                    .map(|resumed| resumed.title)
+            };
 
-            let err = resolve_session(&store, "m", None, Some(SessionTarget::Named(&arg)), false)
-                .err()
-                .unwrap()
-                .to_string();
+            assert_eq!(resume("abcd", false).unwrap().as_deref(), Some("Local"));
+            assert_eq!(resume("abcd-o", false).unwrap().as_deref(), Some("Other"));
             assert_eq!(
-                err,
-                format!(
-                    "no session matching `{}` in this project \
-                     (use --all to search every project)",
-                    &full_id[..10],
-                ),
-            );
-
-            let resumed =
-                resolve_session(&store, "m", None, Some(SessionTarget::Named(&arg)), true).unwrap();
-            assert_eq!(resumed.handle.session_id(), full_id);
-            assert_eq!(resumed.transcript.messages.len(), 1);
-            assert_eq!(resumed.title.as_deref(), Some("all scope"));
-
-            let missing = "zzzz".to_owned();
-            let err = resolve_session(
-                &store,
-                "m",
-                None,
-                Some(SessionTarget::Named(&missing)),
-                true,
-            )
-            .err()
-            .unwrap()
-            .to_string();
-            assert_eq!(
-                err, "no session matching `zzzz`",
-                "the hint drops --all once it is set",
+                resume("abcd", true).err().unwrap().to_string(),
+                "ambiguous prefix `abcd` matches 2 sessions: abcd-oth, abcd-loc",
+                "--all weighs every project at once",
             );
         }
 
@@ -392,14 +374,18 @@ mod tests {
         async fn continue_errors_without_sessions() {
             let dir = tempfile::tempdir().unwrap();
             let store = test_store(dir.path());
-            let err = resolve_session(&store, "m", None, Some(SessionTarget::Latest), false)
-                .err()
-                .unwrap()
-                .to_string();
+            let latest = |all: bool| {
+                resolve_session(&store, "m", None, Some(SessionTarget::Latest), all)
+                    .err()
+                    .unwrap()
+                    .to_string()
+            };
+
             assert_eq!(
-                err,
+                latest(false),
                 "no sessions to resume in this project (use --all to search every project)",
             );
+            assert_eq!(latest(true), "no sessions to resume");
         }
 
         #[tokio::test]
@@ -422,11 +408,7 @@ mod tests {
             .err()
             .unwrap()
             .to_string();
-            assert_eq!(
-                err,
-                "no session matching `zzzz` in this project \
-                 (use --all to search every project)",
-            );
+            assert_eq!(err, "no session matching `zzzz`");
         }
 
         #[tokio::test]
@@ -584,7 +566,7 @@ mod tests {
             );
 
             let current = test_store(dir.path());
-            let info = resolve_prefix_to_info(&current, &target[..6], "live")
+            let info = resolve_prefix_to_info(&current, &target[..6], Some("live"))
                 .unwrap()
                 .expect("widening pass must surface the foreign session");
             assert_eq!(info.session_id, target);
@@ -595,7 +577,7 @@ mod tests {
             let dir = tempfile::tempdir().unwrap();
             let store = test_store(dir.path());
             assert!(
-                resolve_prefix_to_info(&store, "zzz", "live")
+                resolve_prefix_to_info(&store, "zzz", Some("live"))
                     .unwrap()
                     .is_none(),
                 "missing prefix is Ok(None) so callers can layer their own error",
@@ -616,7 +598,7 @@ mod tests {
             );
 
             assert!(
-                resolve_prefix_to_info(&store, &live_id[..6], live_id)
+                resolve_prefix_to_info(&store, &live_id[..6], Some(live_id))
                     .unwrap()
                     .is_none(),
                 "live-id-only matches don't surface to the caller",
@@ -640,7 +622,7 @@ mod tests {
                 seed_test_session(&store, id, Some("dup"), Some(1), created_at);
             }
 
-            let err = resolve_prefix_to_info(&store, "abcd", "live").unwrap_err();
+            let err = resolve_prefix_to_info(&store, "abcd", Some("live")).unwrap_err();
 
             assert!(
                 matches!(

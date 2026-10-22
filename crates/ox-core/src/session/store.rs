@@ -18,7 +18,7 @@ use uuid::Uuid;
 
 use super::chain::{Chain, ChainBuilder};
 use super::entry::{CURRENT_VERSION, CompactInfo, Entry, TitleInfo, UsageRecord};
-use super::path::sanitize_cwd;
+use super::path::project_dir_name;
 use crate::file_tracker::FileSnapshot;
 use crate::message::Message;
 use crate::prompt::SessionContext;
@@ -30,26 +30,51 @@ const SESSIONS_DIR: &str = "sessions";
 
 // ── SessionStore ──
 
-/// Low-level session file operations scoped to a project subdirectory.
+/// Low-level session file operations scoped to one project, the Git repository root of the
+/// launch directory or the launch directory itself outside a repository.
 #[derive(Clone)]
 pub struct SessionStore {
     sessions_dir: PathBuf,
+    /// Where new sessions go, named for the project root.
     project_dir: PathBuf,
-    cwd: PathBuf,
+    /// Where releases up to 0.1.0-alpha.5 put sessions started in the launch directory, named
+    /// for it, when that differs from `project_dir`.
+    cwd_dir: Option<PathBuf>,
+    project_root: PathBuf,
+    project: Project,
+}
+
+/// A launch directory and its project root, as session headers record them.
+#[derive(Clone)]
+pub(super) struct Project {
+    pub(super) cwd: String,
+    pub(super) root: String,
+}
+
+impl Project {
+    /// Returns whether a session whose header records `cwd` and `project_root` belongs here: one
+    /// recorded in this project, one started in this launch directory, or an older session that
+    /// records no project and started at the project root.
+    fn owns(&self, cwd: &str, project_root: Option<&str>) -> bool {
+        cwd == self.cwd || project_root.map_or(cwd == self.root, |root| root == self.root)
+    }
 }
 
 impl SessionStore {
-    /// Opens the store scoped to the project at `cwd`, which new session headers record.
-    pub fn open(cwd: &Path) -> Result<Self> {
+    /// Opens the store for the project at `project_root`, launched in `cwd`. New session headers
+    /// record both.
+    pub fn open(cwd: &Path, project_root: &Path) -> Result<Self> {
         let sessions_dir = app_dir(XdgBase::Data)
             .map(|dir| dir.join(SESSIONS_DIR))
             .context("failed to determine the session storage directory")?;
 
         create_private_dir_all(&sessions_dir)?;
 
-        let project_name = sanitize_cwd(cwd);
+        let project_name = project_dir_name(project_root);
         let project_dir = sessions_dir.join(&project_name);
         create_private_dir_all(&project_dir)?;
+        let cwd_dir =
+            Some(sessions_dir.join(project_dir_name(cwd))).filter(|dir| *dir != project_dir);
 
         debug!(
             "session store at {} (project: {project_name})",
@@ -58,12 +83,21 @@ impl SessionStore {
         Ok(Self {
             sessions_dir,
             project_dir,
-            cwd: cwd.to_path_buf(),
+            cwd_dir,
+            project_root: project_root.to_path_buf(),
+            project: Project {
+                cwd: cwd.display().to_string(),
+                root: project_root.display().to_string(),
+            },
         })
     }
 
-    pub(super) fn cwd(&self) -> &Path {
-        &self.cwd
+    pub(crate) fn project_root(&self) -> &Path {
+        &self.project_root
+    }
+
+    pub(super) fn project(&self) -> &Project {
+        &self.project
     }
 
     /// Where [`Self::create`] puts the file of session `session_id` created at `created_at`.
@@ -611,6 +645,7 @@ impl<R: BufRead> JsonlLines<R> {
 struct HeaderInfo {
     session_id: String,
     cwd: String,
+    project_root: Option<String>,
     git_branch: Option<String>,
 }
 
@@ -629,6 +664,7 @@ fn read_header<R: BufRead>(lines: &mut JsonlLines<R>, path: &Path) -> Result<Hea
     let Entry::Header {
         session_id,
         cwd,
+        project_root,
         git_branch,
         ..
     } = serde_json::from_str(line).with_context(no_header)?
@@ -639,6 +675,7 @@ fn read_header<R: BufRead>(lines: &mut JsonlLines<R>, path: &Path) -> Result<Hea
     Ok(HeaderInfo {
         session_id,
         cwd,
+        project_root,
         git_branch,
     })
 }
@@ -671,6 +708,32 @@ mod tests {
         format!("failed to open {}: {cause}", path.display())
     }
 
+    mod project {
+        use super::*;
+
+        mod owns {
+            use super::*;
+
+            #[test]
+            fn keeps_the_recorded_project_the_launch_directory_or_an_older_root_session() {
+                let project = Project {
+                    cwd: "/repo/sub".to_owned(),
+                    root: "/repo".to_owned(),
+                };
+
+                assert!(project.owns("/elsewhere", Some("/repo")));
+                assert!(!project.owns("/repo", Some("/repo-b")));
+                assert!(
+                    project.owns("/repo/sub", Some("/repo/sub")),
+                    "a session recorded before the directory joined a repository",
+                );
+                assert!(project.owns("/repo/sub", None));
+                assert!(project.owns("/repo", None));
+                assert!(!project.owns("/repo/other", None));
+            }
+        }
+    }
+
     mod open {
         use super::*;
 
@@ -681,7 +744,7 @@ mod tests {
                     ("XDG_DATA_HOME", Some(xdg.to_string_lossy().into_owned())),
                     (HOME_VAR, Some(home.path().to_string_lossy().into_owned())),
                 ],
-                async { SessionStore::open(Path::new("/work/proj")) },
+                async { SessionStore::open(Path::new("/work/proj"), Path::new("/work/proj")) },
             )
             .await
             .unwrap()
@@ -695,7 +758,7 @@ mod tests {
             assert_eq!(store.sessions_dir, sessions);
             assert_eq!(
                 store.project_dir,
-                sessions.join(sanitize_cwd(Path::new("/work/proj")))
+                sessions.join(project_dir_name(Path::new("/work/proj")))
             );
             assert!(store.project_dir.is_dir(), "project dir created");
         }
@@ -708,7 +771,7 @@ mod tests {
                     ("XDG_DATA_HOME", None),
                     (HOME_VAR, Some(home.path().to_string_lossy().into_owned())),
                 ],
-                async { SessionStore::open(Path::new("/work/proj")) },
+                async { SessionStore::open(Path::new("/work/proj"), Path::new("/work/proj")) },
             )
             .await
             .unwrap();

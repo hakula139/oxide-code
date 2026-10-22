@@ -8,19 +8,19 @@ Every session is a single append-only `.jsonl` file with one JSON object per lin
 
 ### Entry Types
 
-| Type                   | Position       | Purpose                                                                           |
-| ---------------------- | -------------- | --------------------------------------------------------------------------------- |
-| `header`               | First line     | Session metadata: ID, working directory, model, created timestamp, format version |
-| `message`              | Middle lines   | Conversation message with `uuid`, optional `parent_uuid`, timestamp               |
-| `rewind`               | After messages | Moves the active branch's tip back to an earlier message, or before the first one |
-| `title`                | Re-appended    | Session title + source. Latest wins                                               |
-| `tool_result_metadata` | Sidecar        | Display metadata for replaying tool results                                       |
-| `file_snapshot`        | Sidecar        | File-tracker state restored on resume when disk state still matches               |
-| `usage`                | After request  | One billed request's token usage, model, and prompt-cache TTL                     |
-| `context`              | Before message | Prompt context of that message. Latest on the resolved chain wins                 |
-| `compact`              | Boundary       | Summary, pre-compact count, and optional instructions and tasks                   |
-| `archive`              | Re-appended    | Archive state: `archived` + `at`. Latest wins                                     |
-| `summary`              | Last line      | Exit marker: `message_count` + `updated_at`. Latest wins                          |
+| Type                   | Position       | Purpose                                                                                                     |
+| ---------------------- | -------------- | ----------------------------------------------------------------------------------------------------------- |
+| `header`               | First line     | Session metadata: ID, working directory, project root, Git branch, model, created timestamp, format version |
+| `message`              | Middle lines   | Conversation message with `uuid`, optional `parent_uuid`, timestamp                                         |
+| `rewind`               | After messages | Moves the active branch's tip back to an earlier message, or before the first one                           |
+| `title`                | Re-appended    | Session title + source. Latest wins                                                                         |
+| `tool_result_metadata` | Sidecar        | Display metadata for replaying tool results                                                                 |
+| `file_snapshot`        | Sidecar        | File-tracker state restored on resume when disk state still matches                                         |
+| `usage`                | After request  | One billed request's token usage, model, and prompt-cache TTL                                               |
+| `context`              | Before message | Prompt context of that message. Latest on the resolved chain wins                                           |
+| `compact`              | Boundary       | Summary, pre-compact count, and optional instructions and tasks                                             |
+| `archive`              | Re-appended    | Archive state: `archived` + `at`. Latest wins                                                               |
+| `summary`              | Last line      | Exit marker: `message_count` + `updated_at`. Latest wins                                                    |
 
 ### Schema Invariants
 
@@ -54,7 +54,9 @@ Tests in `session/handle.rs` enforce this guarantee for stable releases, using o
 
 ## Storage Layout
 
-Sessions live in `$XDG_DATA_HOME/ox/sessions/{project}/`. `{project}` is a filesystem-safe subdirectory name derived from the working directory (path separators become `-`, long paths truncated with xxh64 hash suffix).
+Sessions live in `$XDG_DATA_HOME/ox/sessions/{project}/`. `{project}` is a filesystem-safe name derived by `project_dir_name` from the project root, which is the Git repository containing the working directory, or the working directory itself outside a repository. Characters other than ASCII letters, digits, `.`, `_`, and `-` become `-`, and a name longer than 80 characters is cut and given an xxh64 suffix over the raw path bytes.
+
+Distinct paths can share a name, such as `/work/a b` and `/work/a-b`, so the header records `project_root`, and a project-scoped listing keeps only the files whose header names its project. Headers written by 0.1.0-alpha.5 and earlier have no `project_root`, and those files sit under the name of the directory the session started in. A project-scoped listing also reads the working directory's subdirectory, and keeps a file when its header records the project's root, when its `cwd` is the working directory, or when it records no root and its `cwd` is the project root. Files are never moved, so older binaries keep reading the sessions they wrote.
 
 File naming: `{unix_timestamp}-{session_id}.jsonl`. Timestamp prefix gives chronological listings, while lookup by session ID uses the suffix.
 
@@ -138,8 +140,8 @@ Write failures surface through the session handle:
 
 Session listing separates file discovery from metadata parsing:
 
-- **Scope.** `ox --list` walks the current project subdirectory by default, and `--all` widens to every project.
-- **Discovery.** The walk only stats files, so `ox -c` parses files only until it finds the newest readable unarchived one, and a prefix lookup parses only files whose name carries a matching ID.
+- **Scope.** `ox --list`, bare `ox -c`, and the `/resume` picker walk the current project's subdirectory, plus the working directory's subdirectory for older files, and `--all` widens to every project. A prefix lookup that matches nothing in the current project searches every project.
+- **Discovery.** The walk only stats files, so bare `ox -c` parses files only until it finds the newest readable unarchived one, and a prefix lookup parses only files whose name carries a matching ID.
 - **Metadata.** A parsed file yields its header, the latest `Entry::Title` and `Entry::Summary`, and the archive state. A prefix pre-filter on the `"type"` discriminator keeps message lines off the full-parse hot path.
 - **Archive view.** `--list` and the `/resume` picker show unarchived sessions, or only archived ones with `--list --archived` and the picker's Ctrl+A.
 - **Page budget.** Archive state is stored in each file, so a listing parses sessions in order until it finds one beyond the page, then reports only whether more sessions follow. When few sessions are archived, the archived view parses further.
@@ -149,14 +151,14 @@ Listings sort rows and render them as follows:
 - Sessions without a title are shown as `(untitled)`.
 - Sessions without a summary still list (`Msgs` displays `-`).
 - Sort by file mtime, with the file name breaking ties.
-- Under `--all`, a `Project` column shows the tildified stored `cwd`.
+- Under `--all`, a `Project` column shows the tildified project root, or the stored `cwd` for a header that records none.
 - Titles truncated to terminal width with trailing `...`.
 - Control characters in titles and project paths, line breaks included, are escaped, so a row stays on one line and cannot change the terminal's state.
 
 ## Design Decisions
 
 1. **JSONL, append-only, one file per session.** A process crash loses at most the batch in progress, and readers can stream the file line by line.
-2. **Per-project subdirectory.** Listings stay scoped, and `--all` opts into cross-project view.
+2. **Per-project subdirectory keyed by the project root.** Listings stay scoped, `--all` opts into cross-project view, and the header's `project_root` keeps a colliding directory name from mixing projects. Older files stay where they are, since a listing reads both subdirectories.
 3. **`{epoch}-{uuid}.jsonl` naming.** Timestamp prefix for `ls` order, UUID suffix for lookup.
 4. **Explicit entry schema.** A tagged union of entries, a `parent_uuid` DAG, and a header `version`.
 5. **Lazy file creation.** Empty sessions leave no artifact.

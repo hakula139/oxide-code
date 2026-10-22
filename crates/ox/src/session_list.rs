@@ -76,7 +76,7 @@ fn render(
     let projects: Vec<String> = if all {
         sessions
             .iter()
-            .map(|s| escape_line(&tildify(Path::new(&s.cwd))))
+            .map(|s| escape_line(&tildify(Path::new(s.project()))))
             .collect()
     } else {
         Vec::new()
@@ -241,6 +241,7 @@ mod tests {
                 session_id: session_id.to_owned(),
                 path: std::path::PathBuf::new(),
                 cwd: "/work/project".to_owned(),
+                project_root: None,
                 last_active_at,
                 title: None,
                 exit: None,
@@ -396,6 +397,24 @@ mod tests {
                 row.ends_with(&format!("{long_cwd} (untitled)")),
                 "an overlong cwd overflows its column in full: {row:?}",
             );
+        }
+
+        #[test]
+        fn shows_the_recorded_project_root_over_the_launch_directory() {
+            let mut recorded = session("eeeeeeeeeeee", datetime!(2026-04-18 09:00:00 UTC));
+            recorded.cwd = "/work/repo/crates/core".to_owned();
+            recorded.project_root = Some("/work/repo".to_owned());
+            let mut older = session("ffffffffffff", datetime!(2026-04-18 08:00:00 UTC));
+            older.cwd = "/work/legacy".to_owned();
+
+            let out = rendered(&[recorded, older], true, None);
+
+            let projects: Vec<_> = out
+                .lines()
+                .skip(1)
+                .filter_map(|row| row.split_whitespace().nth(4))
+                .collect();
+            assert_eq!(projects, ["/work/repo", "/work/legacy"], "{out}");
         }
 
         #[test]
