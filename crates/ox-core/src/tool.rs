@@ -846,7 +846,7 @@ mod tests {
                 for (path, pinned) in [
                     ("~/notes.md", home.join("notes.md")),
                     ("~", home.clone()),
-                    ("~user/x", cwd.join("~user/x")),
+                    ("~user/x", cwd.join("~user").join("x")),
                 ] {
                     assert_eq!(
                         prepare(path).input,
