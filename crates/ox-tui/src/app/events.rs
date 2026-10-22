@@ -214,7 +214,7 @@ impl App {
 
     /// Drops the prompts queued for the previous session, saying how many.
     fn discard_queue(&mut self) {
-        let dropped = self.queue.discard();
+        let dropped = self.queue.discard_left_behind();
         if dropped > 0 {
             self.chat.push_system_message(format!(
                 "Discarded {dropped} queued {} from the previous session",
@@ -262,12 +262,13 @@ impl App {
         self.clear_modals();
     }
 
-    /// Ends a `/compact`, `/resume`, or `/archive` once the new transcript has reported its state.
-    /// A cancel that lost the race to the swap leaves the queue to the user, and `/clear` never
-    /// leaves idle, so its `SessionReady` changes nothing.
+    /// Ends a `/compact`, `/clear`, `/resume`, or `/archive` once the new transcript has reported
+    /// its state. A cancel that lost the race to the swap leaves the queue to the user.
     fn apply_session_ready(&mut self) {
         match &self.status {
-            Status::Compacting | Status::Resuming | Status::Archiving => self.finalize_idle(),
+            Status::Compacting | Status::Clearing | Status::Resuming | Status::Archiving => {
+                self.finalize_idle();
+            }
             Status::Cancelling => self.enter_idle(),
             _ => {}
         }

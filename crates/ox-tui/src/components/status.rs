@@ -52,6 +52,7 @@ pub(crate) enum Status {
     Compacting,
     SigningIn,
     SigningOut,
+    Clearing,
     Resuming,
     Archiving,
     Cancelling,
@@ -73,6 +74,7 @@ impl Status {
                 | Self::Compacting
                 | Self::SigningIn
                 | Self::SigningOut
+                | Self::Clearing
                 | Self::Resuming
                 | Self::Archiving
                 | Self::Cancelling,
@@ -87,6 +89,7 @@ impl Status {
             Self::Compacting => "Compacting · Esc to interrupt".into(),
             Self::SigningIn => "Signing in · Esc to cancel".into(),
             Self::SigningOut => "Signing out".into(),
+            Self::Clearing => "Clearing".into(),
             Self::Resuming => "Resuming".into(),
             Self::Archiving => "Archiving".into(),
             Self::Cancelling => "Cancelling".into(),
@@ -1126,6 +1129,7 @@ mod tests {
                 (Status::Compacting, "Compacting · Esc to interrupt"),
                 (Status::SigningIn, "Signing in · Esc to cancel"),
                 (Status::SigningOut, "Signing out"),
+                (Status::Clearing, "Clearing"),
                 (Status::Resuming, "Resuming"),
                 (Status::Archiving, "Archiving"),
                 (Status::Cancelling, "Cancelling"),
