@@ -461,7 +461,6 @@ mod tests {
 
     use base64::Engine as _;
     use crossterm::event::KeyModifiers;
-    use ratatui::buffer::CellWidth;
     use ratatui::layout::Rect;
     use ratatui::style::Color;
     use tokio::sync::mpsc::error::TryRecvError;
@@ -471,13 +470,15 @@ mod tests {
     use ox_core::model::ResolvedModelId;
     use ox_core::permission::defaults::Shipped;
     use ox_core::permission::{Basis, Mode};
-    use ox_core::protocol::{ConfigPick, Decision, Event, ResumeTarget, ToolResult};
-    use ox_core::tool::view::{ApprovalBody, ApprovalPreview, ToolResultView};
+    use ox_core::protocol::testing::text_result;
+    use ox_core::protocol::{ConfigPick, Decision, Event, ResumeTarget};
+    use ox_core::tool::view::{ApprovalBody, ApprovalPreview};
 
     use super::*;
     use crate::app::testing::{
-        FakeModal, KeyLogModal, OP_CHANNEL_CAPACITY, long_chat_block, push_answerable_approval,
-        render_app, rendered_text, test_app, test_app_with, test_session_info,
+        FakeModal, KeyLogModal, OP_CHANNEL_CAPACITY, cell_of, long_chat_block,
+        push_answerable_approval, render_app, rendered_text, test_app, test_app_with,
+        test_session_info,
     };
     use crate::components::status::StatusHyperlink;
     use crate::modal::testing::ScriptedModal;
@@ -508,19 +509,9 @@ mod tests {
     mod handle_crossterm_event {
         use super::*;
 
-        /// Screen cell where `needle` first shows in a 60x10 frame.
-        fn cell_of(app: &mut App, needle: &str) -> (u16, u16) {
-            let text = rendered_text(app, 60, 10);
-            let (row, x) = (0..)
-                .zip(text.lines())
-                .find_map(|(row, line)| Some((row, line[..line.find(needle)?].cell_width())))
-                .unwrap();
-            (x, row)
-        }
-
         /// Double-clicks the word `needle`, which selects and copies it.
         async fn select_word(app: &mut App, needle: &str) {
-            let (x, y) = cell_of(app, needle);
+            let (x, y) = cell_of(render_app(app, 60, 10).buffer(), needle);
             for kind in [
                 MouseEventKind::Down(MouseButton::Left),
                 MouseEventKind::Up(MouseButton::Left),
@@ -533,7 +524,7 @@ mod tests {
         }
 
         #[test]
-        fn key_release_is_ignored() {
+        fn ignores_a_key_release() {
             let (mut app, mut rx, _event_tx) = test_app(None);
             app.input.set_text("hi");
             app.dirty = false;
@@ -586,7 +577,7 @@ mod tests {
         }
 
         #[tokio::test]
-        async fn modal_gate_intercepts_keys_before_input_sees_them() {
+        async fn a_modal_takes_keys_before_the_input() {
             let (mut app, mut rx, _event_tx) = test_app(None);
             app.push_modal(Box::new(ScriptedModal::new(ModalAction::Dispatch(
                 Action::Op(Op::Interrupt),
@@ -610,7 +601,7 @@ mod tests {
         }
 
         #[tokio::test]
-        async fn modal_gate_routes_pastes_to_the_top_modal() {
+        async fn the_top_modal_takes_pastes() {
             let (mut app, mut rx, _event_tx) = test_app(None);
             app.dispatch_action(Action::Submit("/rename".to_owned()));
 
@@ -628,7 +619,7 @@ mod tests {
         }
 
         #[test]
-        fn modal_gate_paste_never_answers_an_approval() {
+        fn a_paste_never_answers_an_approval() {
             let (mut app, mut rx, _event_tx) = test_app(None);
             push_answerable_approval(&mut app, "rm -rf build");
             _ = render_app(&mut app, 60, 20);
@@ -645,7 +636,7 @@ mod tests {
         }
 
         #[test]
-        fn modal_gate_steps_the_modal_with_the_wheel_instead_of_chat() {
+        fn the_wheel_steps_a_modal_and_leaves_the_chat() {
             let keys = Arc::new(Mutex::new(Vec::new()));
             let (mut app, _rx, _event_tx) = test_app(None);
             app.chat.push_system_message(long_chat_block());
@@ -666,7 +657,7 @@ mod tests {
         }
 
         #[test]
-        fn modal_gate_cancel_closes_modal_without_dispatching() {
+        fn cancelling_a_modal_closes_it_without_dispatching() {
             let (mut app, mut rx, _event_tx) = test_app(None);
             app.push_modal(Box::new(ScriptedModal::new(ModalAction::Cancelled)));
             app.handle_crossterm_event(&key_event(KeyCode::Char('c'), KeyModifiers::NONE));
@@ -681,33 +672,34 @@ mod tests {
             assert_eq!(app.input.lines(), vec!["y".to_owned()]);
         }
 
-        #[tokio::test]
-        async fn key_esc_busy_forwards_interrupt() {
-            let (mut app, mut rx, _event_tx) = test_app(None);
-            app.handle_engine_event(Event::StreamToken("partial".to_owned()));
+        #[test]
+        fn ctrl_o_toggles_the_expanded_view_before_the_input_sees_it() {
+            let (mut app, _rx, _event_tx) = test_app(None);
+            let output = (0..8)
+                .map(|i| format!("line {i}"))
+                .collect::<Vec<_>>()
+                .join("\n");
+            app.chat
+                .push_tool_result(text_result("ls", &output, false, Some("Listed files")));
+            app.input.set_text("draft");
+            let compact = rendered_text(&mut app, 80, 20);
+            app.dirty = false;
 
-            app.handle_crossterm_event(&key_event(KeyCode::Esc, KeyModifiers::NONE));
-            assert!(!app.should_quit);
-            let forwarded = rx.try_recv().expect("Interrupt forwarded to the engine");
-            assert!(matches!(forwarded, Op::Interrupt));
-        }
-
-        #[tokio::test]
-        async fn key_submit_forwards_through_input_to_dispatch() {
-            let (mut app, mut rx, _event_tx) = test_app(None);
-            app.handle_crossterm_event(&key_event(KeyCode::Char('h'), KeyModifiers::NONE));
-            app.handle_crossterm_event(&key_event(KeyCode::Char('i'), KeyModifiers::NONE));
-            app.handle_crossterm_event(&key_event(KeyCode::Enter, KeyModifiers::NONE));
-
+            app.handle_crossterm_event(&key_event(KeyCode::Char('o'), KeyModifiers::CONTROL));
             assert!(app.dirty);
-            assert_eq!(app.chat.entry_count(), 1);
-            assert_eq!(app.status, Status::Streaming);
-            let forwarded = rx.try_recv().ok().unwrap();
-            assert!(matches!(forwarded, Op::Prompt(s) if s == "hi"));
+
+            let expanded = rendered_text(&mut app, 80, 20);
+            assert!(
+                compact.contains("... +3 lines · Ctrl+O to expand"),
+                "{compact}"
+            );
+            assert!(!compact.contains("line 7"), "{compact}");
+            assert!(expanded.contains("line 7"), "{expanded}");
+            assert_eq!(app.input.lines(), vec!["draft".to_owned()]);
         }
 
         #[tokio::test(start_paused = true)]
-        async fn key_ctrl_c_idle_arms_exit_then_confirms() {
+        async fn ctrl_c_while_idle_arms_exit_then_confirms() {
             let (mut app, _rx, _event_tx) = test_app(None);
             app.handle_crossterm_event(&key_event(KeyCode::Char('c'), KeyModifiers::CONTROL));
             assert!(!app.should_quit, "first press only arms");
@@ -724,7 +716,7 @@ mod tests {
         }
 
         #[tokio::test(start_paused = true)]
-        async fn key_ctrl_c_after_the_exit_window_arms_it_again() {
+        async fn ctrl_c_after_the_exit_window_arms_it_again() {
             let (mut app, _rx, _event_tx) = test_app(None);
             app.handle_crossterm_event(&key_event(KeyCode::Char('c'), KeyModifiers::CONTROL));
 
@@ -741,7 +733,7 @@ mod tests {
         }
 
         #[tokio::test]
-        async fn key_ctrl_c_busy_forwards_interrupt_without_quitting() {
+        async fn ctrl_c_while_busy_interrupts_without_quitting() {
             let (mut app, mut rx, _event_tx) = test_app(None);
             app.handle_engine_event(Event::StreamToken("partial".to_owned()));
             assert!(!app.status.is_idle());
@@ -753,7 +745,7 @@ mod tests {
         }
 
         #[test]
-        fn key_ctrl_d_on_an_empty_input_quits_only_while_idle() {
+        fn ctrl_d_on_an_empty_input_quits_only_while_idle() {
             for (status, quits) in [
                 (Status::Idle, true),
                 (
@@ -777,7 +769,7 @@ mod tests {
         }
 
         #[test]
-        fn key_ctrl_d_keeps_typed_text() {
+        fn ctrl_d_keeps_typed_text() {
             let (mut app, mut rx, _event_tx) = test_app(None);
             app.input.set_text("draft");
 
@@ -788,35 +780,29 @@ mod tests {
             assert_eq!(app.input.lines(), ["draft"]);
         }
 
-        #[test]
-        fn ctrl_o_toggles_the_expanded_view_before_the_input_sees_it() {
-            let (mut app, _rx, _event_tx) = test_app(None);
-            let output = (0..8)
-                .map(|i| format!("line {i}"))
-                .collect::<Vec<_>>()
-                .join("\n");
-            app.chat.push_tool_result(ToolResult {
-                id: "ls".to_owned(),
-                content: output.clone(),
-                is_error: false,
-                title: Some("Listed files".to_owned()),
-                view: ToolResultView::Text { content: output },
-            });
-            app.input.set_text("draft");
-            let compact = rendered_text(&mut app, 80, 20);
-            app.dirty = false;
+        #[tokio::test]
+        async fn esc_while_busy_interrupts() {
+            let (mut app, mut rx, _event_tx) = test_app(None);
+            app.handle_engine_event(Event::StreamToken("partial".to_owned()));
 
-            app.handle_crossterm_event(&key_event(KeyCode::Char('o'), KeyModifiers::CONTROL));
+            app.handle_crossterm_event(&key_event(KeyCode::Esc, KeyModifiers::NONE));
+            assert!(!app.should_quit);
+            let forwarded = rx.try_recv().expect("Interrupt forwarded to the engine");
+            assert!(matches!(forwarded, Op::Interrupt));
+        }
+
+        #[tokio::test]
+        async fn enter_submits_through_the_input() {
+            let (mut app, mut rx, _event_tx) = test_app(None);
+            app.handle_crossterm_event(&key_event(KeyCode::Char('h'), KeyModifiers::NONE));
+            app.handle_crossterm_event(&key_event(KeyCode::Char('i'), KeyModifiers::NONE));
+            app.handle_crossterm_event(&key_event(KeyCode::Enter, KeyModifiers::NONE));
+
             assert!(app.dirty);
-
-            let expanded = rendered_text(&mut app, 80, 20);
-            assert!(
-                compact.contains("... +3 lines · Ctrl+O to expand"),
-                "{compact}"
-            );
-            assert!(!compact.contains("line 7"), "{compact}");
-            assert!(expanded.contains("line 7"), "{expanded}");
-            assert_eq!(app.input.lines(), vec!["draft".to_owned()]);
+            assert_eq!(app.chat.entry_count(), 1);
+            assert_eq!(app.status, Status::Streaming);
+            let forwarded = rx.try_recv().ok().unwrap();
+            assert!(matches!(forwarded, Op::Prompt(s) if s == "hi"));
         }
 
         #[test]
@@ -1017,7 +1003,7 @@ mod tests {
         async fn drag_release_copies_the_selection() {
             let (mut app, _rx, _event_tx) = test_app(None);
             app.chat.push_system_message("copy this word");
-            let (x, y) = cell_of(&mut app, "this");
+            let (x, y) = cell_of(render_app(&mut app, 60, 10).buffer(), "this");
 
             for (kind, column) in [
                 (MouseEventKind::Down(MouseButton::Left), x),
@@ -1939,7 +1925,7 @@ mod tests {
         use super::*;
 
         #[test]
-        fn submit_slash_theme_pushes_picker_onto_modal_stack() {
+        fn slash_theme_opens_the_picker() {
             // Bare `/theme` is the ReadOnly modal-opening branch, so its `SlashOutcome::Modal` must
             // land on `App::modals`.
             let (mut app, _rx, _event_tx) = test_app(None);
@@ -1993,7 +1979,7 @@ mod tests {
         }
 
         #[test]
-        fn submit_after_a_cancel_runs_the_held_queue_before_the_new_prompt() {
+        fn after_a_cancel_runs_the_held_queue_before_the_new_prompt() {
             let (mut app, mut rx, _event_tx) = test_app(None);
             app.dispatch_action(Action::Submit("active".to_owned()));
             app.dispatch_action(Action::Submit("held".to_owned()));
@@ -2019,7 +2005,7 @@ mod tests {
         }
 
         #[test]
-        fn submit_busy_double_slash_queues_the_literal_and_keeps_the_escape() {
+        fn double_slash_while_busy_queues_the_literal_and_keeps_the_escape() {
             let (mut app, mut rx, _event_tx) = test_app(None);
             app.dispatch_action(Action::Submit("active".to_owned()));
             app.dispatch_action(Action::Submit("//etc/hosts".to_owned()));
