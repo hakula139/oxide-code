@@ -105,7 +105,8 @@ A command is opaque if the parse cannot show everything it runs or writes:
 - It runs `shopt`, which can turn on `dotglob`, `extglob`, or `globstar` and change what a glob matches.
 - A redirection target is not a literal path or contains a glob.
 - It sets a variable bash reads to find or expand commands, such as `PATH`, `IFS`, `BASH_ENV`, or `BASH_CMDS`, its command hash table. That covers plain, `+=`, and subscript assignments, a leading or `env` assignment, a `for` loop, `${NAME:=...}`, an arithmetic assignment, a builtin such as `read`, `printf -v`, or `unset` that names the variable, and any `declare -n` name reference. Such a command also asks, even in `yolo`. It is also opaque if it declares or exports a variable outside the short list above, because later commands can see that variable.
-- A `cd`, `pushd`, `popd`, `env -C`, `sudo -D`, `pkexec`, or `find -execdir` runs alongside a redirection or a reader of a relative path, or a program spelled with a relative path such as `./build.sh`, which may then name another file.
+- A `cd`, `pushd`, `popd`, `env -C`, `sudo -D` or `-R`, `pkexec`, or `find -execdir` or `-okdir` runs alongside a redirection or a reader of a relative path, or a program spelled with a relative path such as `./build.sh`, which may then name another file.
+- A directory change may leave the workspace and the command runs anything besides directory changes, as in `cd /tmp/evil && cargo build`, which runs that directory's `build.rs`. Only a first `cd` or `pushd` to one literal directory inside a workspace root, such as `cd crates/ox-core`, stays inside, while a later directory change or any of the other changers above may leave.
 
 The literal script in `sh -c` and the joined arguments to `eval` are parsed too, so deny and ask rules still see the simple commands inside them.
 
